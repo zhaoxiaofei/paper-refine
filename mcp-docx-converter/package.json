@@ -1,0 +1,21 @@
+{
+  "name": "mcp-docx-converter",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "zod": "^4.6.5"
+  },
+  "description": "",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  }
+}

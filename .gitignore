@@ -1,0 +1,21 @@
+cnb-v03z/
+cnb-v04z/
+cnb-v05c/
+cnb-v06c/
+*/*.aux
+*/*.bbl
+*/*.bcf
+*/*.blg
+*/*.log
+*/*.out
+*/*.pdf
+*/*.run.xml
+*/*.synctex.gz
+
+# Python bytecode from running the .nbt_test/ and nbt-skills/tests/ harnesses
+__pycache__/
+*.pyc
+
+# Node dependencies of mcp-docx-converter/: installed from its package-lock.json
+# (`npm ci` inside mcp-docx-converter/), never vendored into the repository.
+node_modules/
