@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""The integration stage's diagnostics: the donor index, the ledger reader, the repair guard.
+"""The integration stage's rules and two reader/guard fixes.
 
 Run:  python3 .nbt_test/test_integrate_diagnostics.py
 
-Three defects of one real run (r1_i3, 2026-09-22) are pinned here:
-
-  1. the prompt told the session to read FOUR complete corpora in full and not to
-     use any diff tool. Two attempts ended after 366k / 204k tokens without one
-     bookkeeping file. The orchestrator now seeds the mechanical difference index
-     (`integrated/work/DIFF_MATRIX.md` + `integrated/work/diffs/<donor>_vs_self.md`)
-     and the prompt starts the session there (`donor_diff_pack`).
+Pinned here:
+  1. the integration prompt demands a FULL-CORPUS read of every donor and forbids
+     diff-driven porting ("read self/ and EVERY others/<id>/ IN FULL YOURSELF ...
+     do NOT rely on a shell `diff`"). An earlier experiment replaced that with a
+     mechanically generated difference index; it was reverted (operator decision,
+     2026-09-23) because the content context is what decides whether one version
+     is better, and the index is no longer generated or used anywhere.
   2. the ledger READER took the FIRST table of DIFF_LEDGER.md. A session that
      opened the file with an orientation table (`| version | payload files | ... |`)
      had those four rows parsed AS the ledger and failed with "4 ledger row(s)
@@ -55,23 +55,6 @@ def scratch(prefix: str) -> Path:
 def cleanup():
     for tmp in TMPDIRS:
         shutil.rmtree(tmp, ignore_errors=True)
-
-
-def docx_bytes(paragraphs: list) -> bytes:
-    """A minimal but REAL .docx whose word/document.xml carries these paragraphs."""
-    ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-    body = "".join(f'<w:p><w:r><w:t xml:space="preserve">{p}</w:t></w:r></w:p>'
-                   for p in paragraphs)
-    doc = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-           f'<w:document xmlns:w="{ns}"><w:body>{body}</w:body></w:document>')
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as z:
-        z.writestr("word/document.xml", doc)
-    return buf.getvalue()
-
-
-def matrix_of(sb: Path) -> str:
-    return (sb / "integrated" / "work" / "DIFF_MATRIX.md").read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -147,105 +130,54 @@ def test_repair_guard_ignores_bytecode():
 
 
 # ---------------------------------------------------------------------------
-# 3. the orchestrator's mechanical donor index
+# 3. the integration prompt: full corpora, no diff-driven porting
 # ---------------------------------------------------------------------------
-def test_donor_diff_pack():
+def test_integrate_prompt_reads_the_corpora():
     print()
-    print("== donor_diff_pack: the difference index the session starts from ==")
-    sb = scratch("nbt_int_pack_")
-    self_d, other_d = sb / "self", sb / "others" / "a1"
-    self_d.mkdir(parents=True)
-    other_d.mkdir(parents=True)
-    (self_d / "manuscript.md").write_text("Abstract\n\nwe used 3 cells.\n", encoding="utf-8")
-    (other_d / "manuscript.md").write_text("Abstract\n\nwe used 4 cells.\n", encoding="utf-8")
-    (self_d / "mainText.docx").write_bytes(docx_bytes(["Results", "we used 3 cells.", "Done."]))
-    (other_d / "mainText.docx").write_bytes(docx_bytes(["Results", "we used 4 cells.", "Done.",
-                                                        "A new limitation."]))
-    (self_d / "fig1.png").write_bytes(b"\x89PNG-identical")
-    (other_d / "fig1.png").write_bytes(b"\x89PNG-identical")
-    (other_d / "only-in-donor.tex").write_text("\\documentclass{article}\n", encoding="utf-8")
-    # Every arm names its documents with ITS OWN 7-hex token, so the comparison
-    # must be name-insensitive: path-for-path these two would look like two
-    # unrelated corpora ("only in donor" / "only in self") instead of one changed
-    # document.
-    (self_d / "cover-aaaaaaa.docx").write_bytes(docx_bytes(["the base's cover"]))
-    (other_d / "cover-bbbbbbb.docx").write_bytes(docx_bytes(["the donor's cover"]))
-    (self_d / "work").mkdir()                      # scratch is not payload
-    (self_d / "work" / "junk.txt").write_text("x", encoding="utf-8")
-    summary = nb.donor_diff_pack(sb, "w2", ["a1"])
-    check("the per-donor summary counts differ / identical / only-in-donor",
-          summary.get("a1") == {"identical": 1, "differing": 3, "only_in_donor": 1,
-                                "only_in_self": 0}, str(summary))
-    check("differently named documents are matched by their TOKEN-STRIPPED name",
-          "`cover-aaaaaaa.docx`" in matrix_of(sb) and "`cover-bbbbbbb.docx`" in matrix_of(sb)
-          and "cover-bbbbbbb.docx" in (sb / "integrated" / "work" / "diffs"
-                                       / "a1_vs_self.md").read_text(encoding="utf-8"),
-          matrix_of(sb)[:120])
-    check("`work/` scratch is not compared as payload",
-          "junk.txt" not in (sb / "integrated" / "work" / "diffs" / "a1_vs_self.md").read_text(),
-          "work/junk.txt leaked into the index")
-    matrix = (sb / "integrated" / "work" / "DIFF_MATRIX.md").read_text(encoding="utf-8")
-    detail = (sb / "integrated" / "work" / "diffs" / "a1_vs_self.md").read_text(encoding="utf-8")
-    check("the index names the differing files, the donor-only file and the detail path",
-          "`manuscript.md`" in matrix and "`mainText.docx`" in matrix
-          and "only in donor `a1`: `only-in-donor.tex`" in matrix
-          and "integrated/work/diffs/a1_vs_self.md" in matrix,
-          matrix[:160])
-    check("the detail carries a text diff AND an aligned paragraph diff of the .docx",
-          "```diff" in detail and "we used 3 cells" in detail and "we used 4 cells" in detail
-          and "paragraphs: self 3 · donor 4" in detail and "A new limitation" in detail,
-          detail[-240:])
-    check("both files are inside the package (`artifact` cells can cite them)",
-          (sb / "integrated" / "work" / "DIFF_MATRIX.md").is_file()
-          and (sb / "work" / "DONOR_DIFFS.md").is_file())
-
-
-# ---------------------------------------------------------------------------
-# 4. the integration prompt starts from the index
-# ---------------------------------------------------------------------------
-def test_integrate_prompt_points_at_the_index():
-    print()
-    print("== the integration prompt: start from the index, adjudicate on the material ==")
+    print("== the integration prompt: read every donor in full, decide on the material ==")
     p = nb.integrate_prompt(Path("/tmp/nbt_sb"), "r1_i3", 1, "w2", ["a1", "w1", "a2"],
                             caption_limit=0, zotero="edit")
+    flat = " ".join(p.split())
     check("no unresolved placeholder is left in the prompt",
           not __import__("re").search(r"@@[A-Z_]+@@", p))
-    check("the prompt names the difference index and the per-donor detail files",
-          "integrated/work/DIFF_MATRIX.md" in p and "integrated/work/diffs/<donor>_vs_self.md" in p)
-    check("the prompt no longer demands reading every donor corpus IN FULL",
-          "IN FULL YOURSELF" not in p and "Do NOT\nrely on a shell `diff`" not in p)
-    check("every difference is still adjudicated on the REAL material",
-          "adjudicated on the REAL material" in p and "Never decide a row from the diff text alone" in p)
+    check("the prompt demands a FULL read of the base and every donor",
+          "Read self/ and EVERY others/<id>/ IN FULL YOURSELF" in flat
+          and "enumerate their differences yourself" in flat)
+    check("a diff-driven port is explicitly forbidden (figures/layout are invisible to it)",
+          "Do NOT rely on a shell `diff`" in flat and "a diff-driven port silently drops" in flat)
+    check("the ledger rule asks for the whole donor, not a sampled one",
+          "read each donor whole (no sampling)" in flat)
+    check("no trace of the (reverted) difference index is left in the prompt",
+          "DIFF_MATRIX" not in p and "difference index" not in flat.lower()
+          and "donor_diff" not in p)
     check("the prompt does NOT promise a repair for an unfinished session",
           "WRITE THE BOOKKEEPING AS YOU GO" not in p
-          and "scoped repair session\n    can finish" not in p
-          and "the orchestrator's scoped repair session can finish" not in " ".join(p.split()))
+          and "the orchestrator's scoped repair session can finish" not in flat)
     check("the completion marker is still the session's own LAST step",
           "very last step" in p)
-    rep = nb.repair_prompt(type("C", (), {"sandbox_of": lambda self, rec: Path("/tmp")})(), 
+    rep = nb.repair_prompt(type("C", (), {"sandbox_of": lambda self, rec: Path("/tmp")})(),
                            {"id": "r1_i3", "kind": "integrate", "round": 1},
-                           ["integrated/DIFF_LEDGER.md is missing: x"])
-    check("the repair prompt states the ledger columns and the artifact rule",
-          "`donor` and `artifact` above all" in rep and "DIFF_MATRIX.md" in rep)
+                           ["integrate: 4 ledger row(s) carry no `artifact` -- x"])
+    check("the repair prompt states the ledger columns and variant B",
+          "`donor` and `artifact` above all" in rep
+          and "a missing ledger is a failed attempt, not a repair job" in " ".join(rep.split()))
 
 
 # ---------------------------------------------------------------------------
-# 5. the seeded index must not look like agent work
+# 4. a freshly materialized integration sandbox is clean/unstarted
 # ---------------------------------------------------------------------------
-def test_seeded_index_is_not_agent_work():
+def test_fresh_integration_sandbox_is_clean():
     print()
-    print("== a sandbox materialized with the index is still clean/unstarted ==")
+    print("== the leftover guard: an untouched integration sandbox is not 'already worked in' ==")
     root = scratch("nbt_int_left_")
     sb = root / "runs" / "r1_i1"
-    (sb / "integrated" / "work" / "diffs").mkdir(parents=True)
-    (sb / "integrated" / "work" / "DIFF_MATRIX.md").write_text("index", encoding="utf-8")
-    (sb / "integrated" / "work" / "diffs" / "a2_vs_self.md").write_text("detail", encoding="utf-8")
+    (sb / "integrated").mkdir(parents=True)          # materialize_integrate creates it empty
     ctx = nb.Ctx(root)
     rec = {"kind": "integrate", "sandbox": "runs/r1_i1"}
-    check("a freshly materialized integration sandbox is NOT 'already worked in'",
+    check("an EMPTY integrated/ is not agent work",
           nb.leftovers_present(ctx, rec) is False)
     (sb / "integrated" / "DIFF_LEDGER.md").write_text("a real ledger", encoding="utf-8")
-    check("an agent's ledger next to the package DOES count as work already done",
+    check("anything the session writes in the package DOES count as work already done",
           nb.leftovers_present(ctx, rec) is True)
     (sb / "integrated" / "DIFF_LEDGER.md").unlink()
     (sb / "code").mkdir()
@@ -258,9 +190,8 @@ def main() -> int:
     try:
         test_ledger_table_selection()
         test_repair_guard_ignores_bytecode()
-        test_donor_diff_pack()
-        test_integrate_prompt_points_at_the_index()
-        test_seeded_index_is_not_agent_work()
+        test_integrate_prompt_reads_the_corpora()
+        test_fresh_integration_sandbox_is_clean()
     finally:
         cleanup()
     print()
