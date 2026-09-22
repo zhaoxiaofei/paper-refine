@@ -104,6 +104,15 @@ def test_session_id_capture():
     check("the latest session id is captured",
           nb.capture_agent_session_id(ctx, rec) == SID,
           nb.capture_agent_session_id(ctx, rec))
+    # A claude run configured with `--output-format json` reports the id in its
+    # result object instead of the codex banner: recognized the same way, so the
+    # continuation can target `--resume <id>` instead of the directory-scoped
+    # `--continue`.
+    (sb / "_agent.log").write_text(
+        '{"type":"result","session_id":"%s","result":"done"}\n' % SID, encoding="utf-8")
+    check("the JSON `session_id` form (claude --output-format json) is captured too",
+          nb.capture_agent_session_id(ctx, rec) == SID,
+          nb.capture_agent_session_id(ctx, rec))
     (sb / "_agent.log").write_text("no id in here\n", encoding="utf-8")
     check("a transcript without a banner yields no id (and therefore no continuation)",
           nb.capture_agent_session_id(ctx, rec) == "")

@@ -13101,10 +13101,11 @@ RESUME_ATTEMPT_LIMIT = 2
 # A continuation finishes a stage that is already 80% done: cap it well below
 # the stage timeout (which defaults to 4h).
 RESUME_TIMEOUT_MAX = 5400
-# The CLI prints its session id in the banner, which `_execute_attempt_in` tees
-# into `_agent.log`; that id is what `codex exec resume` (and, when the CLI
-# prints one, `claude --resume`) consumes.
-SESSION_ID_RE = re.compile(r"session[_ ]id[:\s]+([0-9a-fA-F-]{36})")
+# The CLI prints its session id in the banner (`session id: <uuid>`), or -- for a
+# `claude` run configured with `--output-format json` -- in the result object
+# (`"session_id": "<uuid>"`); `_execute_attempt_in` tees both into `_agent.log`,
+# and that id is what `codex exec resume` / `claude --resume` consumes.
+SESSION_ID_RE = re.compile(r'(?:session[_ ]id[:\s]+|"session_id"\s*:\s*")([0-9a-fA-F-]{36})')
 # Every artifact-quality message starts with this prefix (see
 # `check_artifact_quality`): it is how a repairable review failure is told apart
 # from every other kind without a second bookkeeping channel.
