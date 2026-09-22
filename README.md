@@ -183,10 +183,21 @@ The selection items are comma-separated and combine as a **union**:
   `j` (plurals work too);
 * **`ROUND:STAGE`** — one stage of one round (`2:merge`, `3:judge`;
   `.`/`/` separate as well, and `all` stands for every stage, e.g. `2:all`);
+* **one agent SESSION** — the session, not its whole stage: `rewriter2` (only
+  `w2`), `integrator1` (only `i1`), `reviser1` (only `a2`, the first revise arm
+  — the pipeline numbers its revise arms from `a2`, because `a1` is the round's
+  base copy), `reviewer` (review session A; `review_b` is session B under
+  `--review-split`) and `audit`. A round-qualified `r1_w2` / `2:w2` (also
+  `2:rewriter2`) restricts it to that round; a bare `w2` applies to every round
+  that has it. Only that session is materialized — no other stage, and no judge
+  wave, starts in that invocation. `a1` and `orig` cannot be selected: `a1` is
+  the orchestrator's copy of the previous champion, `orig` the pristine
+  submission, and neither is an agent session;
 * **one judge SESSION** — `r1_judge_w2_j1` (round 1, version `w2`, judge 1), also
   written `1:judge_w2_j1`; `r1_judge_w2` is every judge of that version, and a
   version without a round (`w2_j1`, `i1_j2`, `orig_j1`) applies to every round
-  that has it. Only the listed sessions get a sandbox/session/sheet; each
+  that has it (a bare index, `judge1`/`j1`, is judge 1 of every version). Only
+  the listed sessions get a sandbox/session/sheet; each
   version's panel expectation is recomputed from the sessions that remain
   (`J(V)*(|field|-1) + Σ J(other versions)`), so a pilot panel still decides the
   round, the selector is recorded on the round's plan (so `decide` recomputes the
@@ -204,6 +215,10 @@ python nbt_pipeline.py run --root ./nbt_rounds --only merge      # = integrate
 python nbt_pipeline.py run --root ./nbt_rounds --only judge
 python nbt_pipeline.py run --root ./nbt_rounds --only review,revise
 python nbt_pipeline.py run --root ./nbt_rounds --only 1,2:merge,3:judge
+python nbt_pipeline.py run --root ./nbt_rounds --only rewriter2   # ONLY w2 (not w1)
+python nbt_pipeline.py run --root ./nbt_rounds --only integrator1 # ONLY the i1 arm
+python nbt_pipeline.py run --root ./nbt_rounds --only r1_w2       # round 1's w2 only
+python nbt_pipeline.py run --root ./nbt_rounds --only w2,r2_a2    # w2 everywhere + round 2's a2
 python nbt_pipeline.py run --root ./nbt_rounds --only r1_judge_w2_j1   # ONE judge session
 python nbt_pipeline.py run --root ./nbt_rounds --only r1_judge_w2_j1,r2_judge_i1_j1
 ```
@@ -213,7 +228,35 @@ python nbt_pipeline.py run --root ./nbt_rounds --only r1_judge_w2_j1,r2_judge_i1
 whose predecessor is not finished (round 2 consumes round 1's pinned champion)
 is reported as the unmet dependency it is, and nothing is started. A plain
 `run` continues whatever is still pending; `run-decide` accepts the same flag
-and then decides.
+and then decides. A session item the round's plan cannot satisfy (a typo like
+`integrator9`, or an arm a round's `--integrators` mask leaves out) is refused
+before anything starts, naming the sessions that round does plan.
+
+### Listing the agent sessions before a run
+
+`agents --root <dir>` prints the session names every round will run, without
+starting anything (a dry plan: no sandbox is materialized, no agent is launched,
+no document is hashed — it costs a few sha256 calls over the plan, well under a
+second on any root):
+
+```bash
+python nbt_pipeline.py agents --root ./nbt_rounds                 # every planned session
+python nbt_pipeline.py agents --root ./nbt_rounds --pending       # only what may still run
+python nbt_pipeline.py agents --root ./nbt_rounds --only rewriter2    # preview a filtered run
+python nbt_pipeline.py agents --root ./nbt_rounds --json          # machine-readable
+```
+
+Per round it lists the base copy `a1` (no agent), each `w<k>`, the review
+(`review`, plus `review_b` with `--review-split`), the `audit`, each revise arm
+`a<k>` and each integration arm `i<k>` the round's mask selected, then every
+judge session `judge_<token>_j<k>` with the version it judges. The producing
+names are exact. The judge id is the **salted per-version token** (so it carries
+no provenance) derived from `(round, version id)`; the judge FIELD, however, is
+deduplicated by document CONTENT once every arm exists, so a pending round's
+judge ids are the *candidates*: a member whose package is content-identical to
+another member's is dropped before judging and its sessions never start (the
+command says so). Once the round has run, the same command lists exactly the
+sessions that ran — which is also how you get a judge id for `retry --run <ID>`.
 
 ### Running only some judge sessions
 
@@ -234,6 +277,12 @@ of that round, and a missing round every round that has the version (`w2_j2`,
 `j1`). A version name is any judgeable id — `orig`, `a1`, `w1`…, `a2`…, or an
 integration arm `i1`… — and an unknown round/version/index is refused before
 anything starts, with the values that exist.
+
+The same session may be spelled with the version id alone plus the judge suffix
+(`r1_w2_j1`, `r2_i1_j2`, `w2_j2`) — the round-qualified form keeps its round
+even when the rounds have different `--judges` counts — and the friendly
+class+index spellings work here too (`r1_rewriter2_j1`, `r2_integrator1_j2`).
+`agents --root <dir> --only <selector>` shows the ids before anything starts.
 
 Only the selected sessions get a sandbox, a session and a sheet, and each
 version's panel expectation is adjusted to the sessions that remain
