@@ -44,7 +44,10 @@ python nbt_pipeline.py run-decide --root ./nbt_rounds
 #   ./nbt_rounds/final_clean_version/      the champion, renamed for the next run
 ```
 
-Useful flags: `--rounds N`, `--judges N[,N…]`, `--rewrites M[,M…]`,
+Useful flags: `--rounds N`, `--judges N[,N…]`, `--judges-enabled SPEC` (which judge
+sessions actually run: `all` by default, or a whitelist such as
+`r1_judge_w2_j1,r2_judge_i1_j1` — see *Per-round judges and integrators*),
+`--rewrites M[,M…]`,
 `--revises N[,N…]`, `--integrators MASK[,MASK…]`,
 `--jobs N`, `--agent {codex,claude,manual}`, `--agent-cmd JSON`, `--retries N`,
 `--poll S` (manual mode), `--no-redline`, `run --only 1,2` (only rounds 1 and
@@ -201,6 +204,34 @@ whose predecessor is not finished (round 2 consumes round 1's pinned champion)
 is reported as the unmet dependency it is, and nothing is started. A plain
 `run` continues whatever is still pending; `run-decide` accepts the same flag
 and then decides.
+
+### `--judges-enabled`: run only some judge sessions
+
+`--judges` says HOW MANY judges each version gets; `--judges-enabled` says WHICH
+of those sessions run at all — a cheap pilot of the panel before paying for it:
+
+```bash
+setup --judges 3 --judges-enabled r1_judge_w2_j1          # one session, round 1, w2, judge 1
+setup --judges 3 --judges-enabled r2_judge_i1_j1          # round 2's first integration arm
+setup --judges 3 --judges-enabled r1_judge_w2_j1,r1_judge_w2_j2   # two of w2's three judges
+```
+
+The selector is a **whitelist** (`all` is the default and keeps every session):
+`r<round>[_judge_<version>[_j<index>]]`, also accepted as `r1:w2:j1`. A missing
+index means every judge of that version, a missing version every version of that
+round, and a missing round every round that has the version (`w2_j2`, `j1`). A
+version name is any judgeable id — `orig`, `a1`, `w1`…, `a2`…, or an integration
+arm `i1`… — and an unknown round/version/index is refused at `setup` with the
+values that exist.
+
+Only the selected sessions get a sandbox, a session and a sheet, and each
+version's panel expectation is adjusted to the sessions that remain
+(`expected = J(version)*(|field|-1) + Σ J(other versions)`), so the round still
+decides on the smaller panel rather than reporting a gap; a sheet for a session
+the selector does not enable is ignored with a diagnostic (also when the config
+was edited after some sheets were written). The selector is recorded on the
+round's plan, so `decide` recomputes the panel the round was actually judged
+with, and `status`/`DECISION_REPORT.md` show it (`judges/version=3, enabled=…`).
 
 ## Per-round judges and integrators
 

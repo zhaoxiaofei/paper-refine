@@ -511,7 +511,8 @@ USAGE
 -----
     python nbt_pipeline.py setup --source /path/to/non-revised \\
         --root ./nbt_rounds --rounds 2 --judges 3 [--rewrites 2,1] [--revises 1]
-        [--integrators 0xFFFFFFFF] [--caption-limit N] [--strict-artifacts {on,fix,off}]
+        [--integrators 0xFFFFFFFF] [--judges-enabled r1_judge_w2_j1,...] [--caption-limit N]
+        [--strict-artifacts {on,fix,off}]
     python nbt_pipeline.py run    --root ./nbt_rounds --jobs 255
     python nbt_pipeline.py run    --root ./nbt_rounds --only 1,2      # only rounds 1 and 2
     python nbt_pipeline.py run    --root ./nbt_rounds --only 2:review,2:merge
@@ -1288,7 +1289,11 @@ def brief_list(values, fmt=str) -> str:
 
 def judges_config_note(ctx) -> str:
     """The configured judges-per-round list, for config summary lines."""
-    return brief_list(counts_of(getattr(ctx, "cfg", None), "judges", ctx.rounds_count()))
+    note = brief_list(counts_of(getattr(ctx, "cfg", None), "judges", ctx.rounds_count()))
+    spec = str((getattr(ctx, "cfg", None) or {}).get("judges_enabled") or "").strip()
+    if spec and spec.lower() != JUDGES_ENABLED_ALL:
+        note += f", enabled={spec}"
+    return note
 
 
 def integrators_config_note(ctx) -> str:
@@ -1319,6 +1324,137 @@ def round_counts(ctx, r: int) -> tuple:
     m = counts_of(getattr(ctx, "cfg", None), "rewrites", rounds)[idx]
     n = counts_of(getattr(ctx, "cfg", None), "revises", rounds)[idx]
     return int(m), int(n)
+
+
+# --- WHICH JUDGE SESSIONS RUN (`setup --judges-enabled`) --------------------
+# `--judges` sets HOW MANY judges a version gets; this selector says WHICH of them
+# run at all (a debugging/pilot lever: one cheap judge session instead of a panel).
+# Default `all` = every configured session (today's behaviour). A list is a
+# WHITELIST of sessions, e.g.
+#     --judges-enabled r1_judge_w2_j1,r2_judge_i1_j1
+# (`r<round>[_judge_<version>[_j<index>]]`, also accepted as `r1:w2:j1`; a missing
+#  version means every version of that round, a missing index every judge of that
+#  version, and a missing round every round that has the version). Unknown rounds,
+#  versions or judge indices are REFUSED at setup, with the values that exist.
+JUDGES_ENABLED_ALL = "all"
+
+
+def judgeable_ids(ctx, r: int) -> list:
+    """The version ids a judge session in round `r` may target, in field order.
+
+    The judge field is the pristine original, the round's pool (a1, w1.., a2..)
+    and the integration arms the round's `--integrators` mask selected -- not just
+    the pool, which is why `r2_judge_i1_j1` is a valid selector.
+    """
+    m, n = round_counts(ctx, r)
+    return [ORIGINAL_ID] + list(round_pool_ids(m, n)) \
+        + [integrate_vid(k) for k in integrator_arms(m, n, round_integrators(ctx, r))]
+
+
+def judges_enabled_spec(ctx, r: int) -> str:
+    """The selector string in force for round `r` ("" when every judge runs).
+
+    A DECIDED round's recorded plan wins, exactly like round_judges(): `decide`
+    must recompute the stored panel's expectation from the plan that produced it.
+    """
+    try:
+        plan = (ctx.round_get(int(r)) or {}).get("plan") or {}
+    except Exception:                                        # noqa: BLE001
+        plan = {}
+    if plan.get("judges_enabled") is not None:
+        spec = str(plan["judges_enabled"])
+    else:
+        spec = str((getattr(ctx, "cfg", None) or {}).get("judges_enabled") or "")
+    spec = spec.strip()
+    return "" if spec.lower() in ("", JUDGES_ENABLED_ALL) else spec
+
+
+def parse_judges_enabled(spec: str, rounds: int, pool_of, judges_of) -> set:
+    """Expand a selector into {(round, version, judge index)}; empty set = all.
+
+    `pool_of(r)` and `judges_of(r)` describe the plan the selector is validated
+    against (see `setup`, which builds it from --rewrites/--revises/--judges).
+    Raises ValueError with an actionable message on an unknown round/version/index.
+    """
+    spec = str(spec or "").strip()
+    if not spec or spec.lower() == JUDGES_ENABLED_ALL:
+        return set()
+    out = set()
+    for item in [i for i in re.split(r"[,\s]+", spec) if i]:
+        toks = [t for t in re.split(r"[_:\-]+", item.lower()) if t]
+        r = k = None
+        vid = None
+        for tok in toks:
+            if tok == "judge":
+                continue
+            if re.fullmatch(r"r?\d+", tok):
+                r = int(tok.lstrip("r"))
+            elif re.fullmatch(r"j\d+", tok):
+                k = int(tok[1:])
+            else:
+                vid = tok
+        rs = [r] if r else list(range(1, int(rounds) + 1))
+        matched = False
+        for rr in rs:
+            if not (1 <= rr <= int(rounds)):
+                raise ValueError(f"{item!r}: round {rr} is outside 1..{int(rounds)}")
+            pool = list(pool_of(rr))
+            js = int(judges_of(rr))
+            if vid is not None and vid not in pool:
+                if r:                       # an EXPLICIT round must have the version
+                    raise ValueError(f"{item!r}: version {vid!r} is not in round {rr}'s pool "
+                                     f"({', '.join(pool)})")
+                continue                    # no round named: it applies where it exists
+            if k is not None and not (1 <= k <= js):
+                raise ValueError(f"{item!r}: judge index {k} is outside 1..{js} for round {rr} "
+                                 f"(--judges)")
+            matched = True
+            for v in ([vid] if vid else pool):
+                for j in ([k] if k else range(1, js + 1)):
+                    out.add((rr, v, j))
+        if not matched:
+            raise ValueError(f"{item!r}: no round of this plan has version {vid!r} "
+                             f"(round 1: {', '.join(pool_of(1))})")
+    return out
+
+
+def judge_selection(ctx, r: int) -> set:
+    """{(version, judge index)} enabled in round `r`; an empty set = every session."""
+    spec = judges_enabled_spec(ctx, r)
+    if not spec:
+        return set()
+    try:
+        triples = parse_judges_enabled(spec, config_rounds(ctx),
+                                       lambda rr: judgeable_ids(ctx, rr),
+                                       lambda rr: round_judges(ctx, rr))
+    except ValueError as e:                                     # a hand-edited config
+        print(f"[judges-enabled] WARNING: ignoring the selector for round {r} ({e}); every "
+              f"configured judge session will run")
+        return set()
+    return {(str(v), int(k)) for rr, v, k in triples if int(rr) == int(r)}
+
+
+def judge_enabled(ctx, r: int, vid: str, judge_index: int) -> bool:
+    """Does judge session (round, version, index) run under `--judges-enabled`?"""
+    sel = judge_selection(ctx, r)
+    return not sel or (str(vid), int(judge_index)) in sel
+
+
+def enabled_judges(ctx, r: int, vid: str) -> int:
+    """How many judge sessions are enabled for one version (an int, never < 0)."""
+    sel = judge_selection(ctx, r)
+    if not sel:
+        return int(round_judges(ctx, r))
+    return len({k for v, k in sel if v == str(vid)})
+
+
+def judges_enabled_note(ctx, r: int) -> str:
+    """A short, printable description of the selector in force for round `r`."""
+    spec = judges_enabled_spec(ctx, r)
+    if not spec:
+        return JUDGES_ENABLED_ALL
+    sel = judge_selection(ctx, r)
+    return f"{spec} ({len(sel)} session(s) enabled)" if sel else spec
 
 
 def round_judges(ctx, r: int) -> int:
@@ -2130,6 +2266,12 @@ DECISION-ARTIFACT MANDATE — one disposition per seeded row, about THAT ROW's o
     repair session (which may fill cells from the rows' own evidence, and nothing else), and `off`
     only records the report. Real example this rule exists for: 96 scan rows closed with one
     identical sentence, with the operator's own complaints inside that pile.
+  * The `disposition` cell is NEVER the row's own `tier` (`finding` / `report` / `advisory`), a
+    bare `OK` or a bare `clean`: those are unfilled cells, and when many rows carry the same one
+    the postcheck fails the attempt on the boilerplate rule. Write the rule id the row itself
+    carries plus why THIS instance is inside its bar (e.g. `FMT-T9c: Methods enumeration, bar 61
+    words, this row is 47`), or -- when the row IS a defect -- file the finding and put its
+    `F-…` id (or a `finding id` reference) in the cell.
   * OUTLINE.md is the same kind of artifact: a `summary` copied back from `first sentence`, an empty
     summary cell, or one verdict on every row is unfilled, not audited.
   * A `searchable` hand-off placeholder (`[AUTHOR TO COMPLETE: ... ]`) that
@@ -10287,6 +10429,11 @@ def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
         # a judge cannot order the packages by "when the file was written".
         view_stamp = time.time()
         for j in range(1, judges + 1):
+            if not judge_enabled(ctx, r, vid, j):
+                # `setup --judges-enabled` selected other sessions: this one is not
+                # planned at all (no sandbox, no session, no sheet), and the
+                # aggregation's per-version expectation is adjusted to match.
+                continue
             rid = rid_judge(r, token, j)
             sb = ctx.runs_dir / rid
             existing = ctx.run(rid)
@@ -14639,9 +14786,17 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
     """
     field_ids = list(field_ids)
     judges = round_judges(ctx, r)
-    diags = {"sheets_used": 0, "sheets_expected": judges * len(field_ids),
+    selection = judge_selection(ctx, r)          # empty = every session runs
+    # Which judges run for each version (`--judges-enabled` may select only some).
+    per_judges = {vid: (int(round_judges(ctx, r)) if not selection
+                        else len({k for v, k in selection if v == str(vid)}))
+                  for vid in field_ids}
+    diags = {"sheets_used": 0, "sheets_expected": sum(per_judges.values()),
              "scores_collected": 0, "unresolved": [], "incomplete_sheets": [],
              "superseded_sheets": [], "out_of_range_sheets": []}
+    if selection:
+        diags["judges_enabled"] = judges_enabled_spec(ctx, r)
+        diags["judges_per_version"] = dict(per_judges)
     per = {vid: {"judges": 0, "own": {}, "received": {}} for vid in field_ids}
     # ---- one sheet per (target, judge index) -------------------------------
     # A judge session is identified by its target AND its judge index, not by
@@ -14660,6 +14815,15 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
         if rec.get("status") != "done":
             continue
         j = rec.get("judge_index")
+        if selection and (str(rec.get("target_id") or ""), int(j) if is_int(j) else 0) \
+                not in selection:
+            # A sheet for a session this round does not run (a leftover from an
+            # earlier selector, or a stale sandbox): counting it would look like an
+            # over-full panel and make every version "incomplete".
+            diags.setdefault("disabled_sheets", []).append(
+                f"{rec.get('id')}: judge {(rec.get('target_id'), j)} is not enabled by "
+                f"--judges-enabled {judges_enabled_spec(ctx, r)} (the sheet is ignored)")
+            continue
         if not is_int(j) or not (1 <= j <= judges):
             diags["out_of_range_sheets"].append(
                 f"{rec.get('id')}: judge_index={j!r} for {rec.get('target_id')!r} is outside "
@@ -14714,6 +14878,13 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
     # At the default 3 judges that is the documented 6*(|field|-1) (36 at
     # |field| = 7); the formula is written generically so a setup with a
     # different --judges value is not reported as an incomplete panel.
+    # `--judges-enabled` may give each version a different panel size, so the
+    # expectation is built from the ENABLED sessions: own J(V)*(k-1) plus one
+    # negated received score for every other version's enabled sessions.
+    enabled_total = sum(per_judges.values())
+    expected_for = {vid: per_judges.get(vid, 0) * (k - 1)
+                    + (enabled_total - per_judges.get(vid, 0))
+                    for vid in field_ids}
     expected = 2 * judges * (k - 1)
     # The round's base A1_r is content-identical to one of the field members
     # (the pristine original in round 1, the previous round's pin later on) and is
@@ -14766,15 +14937,20 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
             # arm on every perfect tie).
             "digest": recorded_version_digest(ctx, r, vid),
             "n": len(flat),
-            "expected_n": expected,
-            "complete": len(flat) == expected,
+            "expected_n": expected_for.get(vid, expected),
+            "complete": len(flat) == expected_for.get(vid, expected),
             "median": float(statistics.median(flat)) if flat else None,
             "mean": float(statistics.fmean(flat)) if flat else None,
             "iqr": iqr_of(flat) if flat else None,
             "vs_original": vs,
             "vs_original_n": len(vs_vals),
-            "vs_original_expected": 2 * judges,
-            "vs_original_complete": len(vs_vals) == 2 * judges,
+            # vs_original mixes this version's own judges (V vs the pristine
+            # original) with the original's own judges (negated into this frame),
+            # so its expectation is J(V) + J(orig) -- 2*judges when every judge runs.
+            "vs_original_expected": (per_judges.get(vid, judges)
+                                     + per_judges.get(ORIGINAL_ID, judges)),
+            "vs_original_complete": len(vs_vals) == (per_judges.get(vid, judges)
+                                                     + per_judges.get(ORIGINAL_ID, judges)),
             # The pair's own sign evidence (wins = scores above the tolerance,
             # losses = below it) and the exact one-sided p: reported with every
             # row, and the rule that consumes them is explicit.
@@ -15289,7 +15465,8 @@ def finalize_round(ctx: Ctx, r: int, field: list, dropped: list, agg: dict,
         "status": "done", "completed": utcnow(),
         "plan": {"rewrites": m, "revises": n, "pool": round_pool_ids(m, n),
                  "integrated": integrated, "integrators": mask,
-                 "judges": round_judges(ctx, r)},
+                 "judges": round_judges(ctx, r),
+                 "judges_enabled": judges_enabled_spec(ctx, r) or JUDGES_ENABLED_ALL},
         "field": [e["id"] for e in field],
         "field_entries": field, "field_dropped": dropped,
         "field_size": agg["field_size"], "scores_per_version": agg["scores_per_version"],
@@ -16370,8 +16547,11 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
         print(f"[run] r{r} field has a single member after content deduplication; "
               f"skipping the judge wave (no opponents to judge)")
     ctx.save_state()
+    _enabled_note = judges_enabled_spec(ctx, r)
     print(f"[run] r{r} final stage: {len(judge_ids)} judge session(s) "
-          f"({round_judges(ctx, r)} per version), run in parallel")
+          + (f"[--judges-enabled {judges_enabled_note(ctx, r)}]"
+             if _enabled_note else f"({round_judges(ctx, r)} per version)")
+          + ", run in parallel")
     ok, paused = run_phase(ctx, judge_ids, label=f"r{r} judge", **ph_judge)
     if not ok:
         return False, paused
@@ -16499,6 +16679,8 @@ def cmd_setup(args) -> None:
         die(f"--judges must be >= 1 per round, got {judges_list}")
     integrators = parse_round_masks(getattr(args, "integrators", None) or DEFAULTS["integrators"],
                                     rounds, "--integrators")
+    judges_enabled = str(getattr(args, "judges_enabled", None) or JUDGES_ENABLED_ALL).strip() \
+        or JUDGES_ENABLED_ALL
     if caption_limit < 0:
         die("--caption-limit must be >= 0 (0 = no caption suggestion at all, the default)")
     if zotero not in ZOTERO_MODES:
@@ -16519,6 +16701,27 @@ def cmd_setup(args) -> None:
         if m + n < 1:
             die(f"round {i} would have no candidate at all: --rewrites and --revises must not "
                 f"both be 0 for a round (round {i}: rewrites={m}, revises={n})")
+    for _r in range(1, rounds + 1):
+        _m, _n = rewrites[_r - 1], revises[_r - 1]
+        if _m + _n < 1:
+            die(f"round {_r} would have no candidate at all: --rewrites and --revises must not "
+                f"both be 0 for a round (round {_r}: rewrites={_m}, revises={_n})")
+    # `--judges-enabled` selects WHICH judge sessions run (a whitelist); it is
+    # validated against the plan the operator just gave, so an unknown round,
+    # version or judge index is refused here rather than at judge time.
+    try:
+        _enabled = parse_judges_enabled(
+            judges_enabled, rounds,
+            lambda rr: [ORIGINAL_ID] + list(round_pool_ids(rewrites[rr - 1], revises[rr - 1]))
+                       + [integrate_vid(k) for k in integrator_arms(rewrites[rr - 1],
+                                                                    revises[rr - 1],
+                                                                    integrators[rr - 1])],
+            lambda rr: judges_list[rr - 1])
+    except ValueError as e:
+        die(f"--judges-enabled: {e}")
+    if judges_enabled.lower() != JUDGES_ENABLED_ALL and not _enabled:
+        die(f"--judges-enabled {judges_enabled!r} enables no judge session at all "
+            f"(use `all`, or name sessions such as r1_judge_w2_j1)")
     source = Path(args.source).resolve()
     if not source.is_dir():
         die(f"--source directory not found: {source}")
@@ -16594,6 +16797,7 @@ def cmd_setup(args) -> None:
                "strict_artifacts": artifact_policy != "off",
                "format_policy": format_policy, "format_fix": format_fix,
                "rewrites": rewrites, "revises": revises, "integrators": integrators,
+               "judges_enabled": judges_enabled,
                "created": utcnow(), "version": VERSION}
     format_fix_report = None
     if format_fix != "off":
@@ -16725,6 +16929,10 @@ def cmd_setup(args) -> None:
         "off": "the detector still runs and is recorded, but never fails an attempt",
     }[artifact_policy]
     print(f"[setup] artifact policy:         {artifact_policy}: {_art_note}")
+    if judges_enabled.lower() != JUDGES_ENABLED_ALL:
+        print(f"[setup] judge sessions enabled:  {judges_enabled}  (a WHITELIST: only these "
+              f"sessions run; a version without an enabled judge is scored only by the other "
+              f"versions' sheets, and the round's panel expectation is adjusted to match)")
     print(f"[setup] per-round winners:       {root}/round<r>_winner/  (digest-verified against "
           f"the content-addressed pins)")
     print(f"[setup] next: python {root / script.name} run --root {root}")
@@ -19505,6 +19713,16 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--rounds", type=int, default=DEFAULTS["rounds"],
                     help=f"number of fixed rounds (default: {DEFAULTS['rounds']}); the round-R "
                          f"champion is the answer")
+    ps.add_argument("--judges-enabled", dest="judges_enabled", default=None,
+                    metavar="SPEC",
+                    help="WHICH judge sessions run (default `all`). A comma-separated whitelist of "
+                         "sessions: `r1_judge_w2_j1` (round 1, version w2, judge 1), "
+                         "`r2_judge_i1_j1`, `r1:w2:j1`; a missing judge index means every judge "
+                         "of that version, a missing version every version of that round, and a "
+                         "missing round every round that has the version. Only the listed "
+                         "sessions get a sandbox/session/sheet, and each version's panel "
+                         "expectation is adjusted to the sessions that remain. Useful to pilot "
+                         "one cheap judge session before paying for the whole panel")
     ps.add_argument("--judges", default=None,
                     help=f"independent judge sessions per version: an integer (--judges 3 "
                          f"applies it to every round) or a comma-separated list with one entry "

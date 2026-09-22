@@ -279,12 +279,97 @@ def test_plan_survives_a_config_edit():
           and "recomputed champion" not in out, out[-300:])
 
 
+
+def test_judges_enabled():
+    print()
+    print("== --judges-enabled selects WHICH judge sessions run (a whitelist) ==")
+    # --- the parser: the operator's syntax, the `:` variant, missing axes ----
+    # Round 1 (M=2,N=1): orig + a1,w1,w2,a2 + i1,i2; round 2 (M=1,N=1): orig + a1,w1,a2 + i1.
+    pool_of = lambda r: (["orig", "a1", "w1", "w2", "a2", "i1", "i2"] if r == 1
+                         else ["orig", "a1", "w1", "a2", "i1"])
+    judges_of = lambda r: 3
+    cases = {
+        "all": set(),
+        "": set(),
+        "r1_judge_w2_j1": {(1, "w2", 1)},
+        "r1_judge_w2_j1,r2_judge_i1_j1": {(1, "w2", 1)},       # r2 has no i1 -> handled below
+        "r1:w2:j1": {(1, "w2", 1)},
+        "r1_judge_w2": {(1, "w2", 1), (1, "w2", 2), (1, "w2", 3)},
+        "r1": {(1, v, j) for v in pool_of(1) for j in (1, 2, 3)},
+        # A missing round means every round that HAS the version; a bare `j1`
+        # means judge 1 of every round.
+        "w2_j2": {(1, "w2", 2)},
+        "j1": {(r, v, 1) for r in (1, 2) for v in pool_of(r)},
+    }
+    for spec, want in cases.items():
+        if spec == "r1_judge_w2_j1,r2_judge_i1_j1":
+            continue                      # covered by the dedicated check below
+        got = nb.parse_judges_enabled(spec, 2, pool_of, judges_of)
+        check(f"J1 {spec!r} expands as expected", got == want, f"{sorted(got)[:4]} vs {sorted(want)[:4]}")
+    got = nb.parse_judges_enabled("r1_judge_w2_j1,r1_judge_w2_j2", 1, pool_of, judges_of)
+    check("J2 two selectors for the same version accumulate", got == {(1, "w2", 1), (1, "w2", 2)},
+          str(sorted(got)))
+    for bad, why in (("r3_judge_w1_j1", "round"), ("r1_judge_zz_j1", "version"),
+                     ("r1_judge_w1_j9", "judge index")):
+        try:
+            nb.parse_judges_enabled(bad, 2, pool_of, judges_of)
+            check(f"J3 {bad!r} is refused ({why})", False, "no error")
+        except ValueError as e:
+            check(f"J3 {bad!r} is refused and names the {why}", why in str(e), str(e)[:110])
+
+    # --- a real round with ONE enabled judge session -------------------------
+    tmp = scratch("nbt_judges_enabled_")
+    root = make_root(tmp, rounds=1, rewrites=1, revises=0, integrators="0x0",
+                     judges=3, judges_enabled="r1_judge_w1_j1")
+    p = run(root)
+    st = state_of(root)
+    judge_ids = kinds_of(st, 1, "judge")
+    rrec = st["rounds"]["1"]
+    check("J4 only the selected judge session is materialized and run",
+          len(judge_ids) == 1 and st["runs"][judge_ids[0]]["status"] == "done",
+          f"{judge_ids}")
+    check("J5 the selector is recorded on the round plan and in the run log",
+          (rrec.get("plan") or {}).get("judges_enabled") == "r1_judge_w1_j1"
+          and "--judges-enabled" in (p.stdout + p.stderr),
+          str((rrec.get("plan") or {}).get("judges_enabled")))
+    stats = rrec.get("stats") or {}
+    ctx = nb.Ctx(root)
+    ctx.load()
+    enabled = {v: nb.enabled_judges(ctx, 1, v) for v in stats}
+    k = len(stats)
+    want_expected = {v: enabled[v] * (k - 1) + (sum(enabled.values()) - enabled[v])
+                     for v in stats}
+    check("J6 each version's panel expectation follows the ENABLED sessions",
+          stats and all(s.get("complete") for s in stats.values())
+          and all(stats[v]["expected_n"] == want_expected[v] for v in stats)
+          and enabled.get("w1") == 1 and enabled.get("orig", 0) == 0,
+          f"enabled={enabled} got={ {v: (s.get('n'), s.get('expected_n')) for v, s in stats.items()} }")
+    check("J7 the round is decided on that smaller panel",
+          rrec.get("status") == "done" and rrec.get("champion") == "w1",
+          f"{rrec.get('status')} {rrec.get('champion')}")
+
+    # --- a sheet for a session the selector does NOT enable is ignored -------
+    field_ids = [e["id"] for e in (rrec.get("field_entries") or [])] or ["orig", "w1"]
+    state_path = root / "state.json"
+    st["runs"]["judge_disabled_j2"] = {"id": "judge_disabled_j2", "kind": "judge", "round": 1,
+                                       "status": "done", "judge_index": 2, "target_id": "w1",
+                                       "sandbox": "runs/judge_disabled_j2", "attempts": 1}
+    state_path.write_text(json.dumps(st), encoding="utf-8")
+    ctx = nb.Ctx(root)
+    ctx.load()
+    agg = nb.aggregate_round(ctx, 1, field_ids)
+    check("J8 a done sheet for a DISABLED session is ignored, not counted as a panel gap",
+          any("judge_disabled_j2" in line for line in (agg["diagnostics"].get("disabled_sheets") or []))
+          and all(s.get("complete") for s in agg["stats"].values()),
+          str(agg["diagnostics"].get("disabled_sheets"))[:160])
+
 def main() -> int:
     try:
         test_only_rounds()
         test_integrator_mask()
         test_judges_per_round()
         test_plan_survives_a_config_edit()
+        test_judges_enabled()
     finally:
         cleanup()
     print()
