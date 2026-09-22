@@ -10874,10 +10874,15 @@ DONOR_DIFF_BLOCK_CAP = 24        # changed paragraph blocks kept per document
 DONOR_DIFF_EXCERPT = 120         # characters of a paragraph quoted in a block row
 
 
-def _donor_diff_detail(base: Path, donor_dir: Path, rel: str) -> list:
-    """The detail block for ONE differing file (text diff / paragraph blocks)."""
-    b, d = base / rel, donor_dir / rel
-    head = [f"### `{rel}`", "",
+def _donor_diff_detail(base: Path, donor_dir: Path, srel: str, drel: str = None) -> list:
+    """The detail block for ONE differing file (text diff / paragraph blocks).
+
+    `srel` and `drel` differ when the two arms name the same document with
+    different 7-hex version tokens -- the normal case (see donor_diff_key).
+    """
+    drel = srel if drel is None else drel
+    b, d = base / srel, donor_dir / drel
+    head = [f"### `{srel}`" + ("" if srel == drel else f"  (donor: `{drel}`)"), "",
             f"- self: {b.stat().st_size} bytes · donor: {d.stat().st_size} bytes"]
     if b.suffix.lower() == ".docx" or d.suffix.lower() == ".docx":
         bp, dp = _docx_paragraphs(b), _docx_paragraphs(d)
@@ -10922,6 +10927,18 @@ def _donor_diff_detail(base: Path, donor_dir: Path, rel: str) -> list:
     return head + ["- binary or asset file: compare the bytes/asset itself before you decide", ""]
 
 
+def donor_diff_key(rel: str) -> str:
+    """The NAME-INSENSITIVE identity of a payload file.
+
+    Every arm names its documents with ITS OWN 7-hex content token
+    (`cnb-12-2-mainText-aaaff0f.docx` in one arm, `…-d19f2ce.docx` in the next), so
+    a path-for-path comparison would see two complete corpora of "only-in-donor"
+    files instead of the handful of documents that actually differ. The key strips
+    the token exactly like the revision-token machinery does.
+    """
+    return _doc_key(str(rel))
+
+
 def donor_diff_pack(sb: Path, self_id: str, other_ids: list) -> dict:
     """Seed the mechanical `self/` vs every-donor comparison into the sandbox.
 
@@ -10933,6 +10950,7 @@ def donor_diff_pack(sb: Path, self_id: str, other_ids: list) -> dict:
     """
     base = sb / "self"
     base_files = {p.relative_to(base).as_posix(): p for p in _payload_files_of_dir(base)}
+    base_keys = {donor_diff_key(rel): rel for rel in base_files}
     art_dir = sb / INTEGRATED_DIR / "work" / DONOR_DIFF_DIRNAME
     art_dir.mkdir(parents=True, exist_ok=True)
     (sb / "work").mkdir(parents=True, exist_ok=True)
@@ -10950,17 +10968,20 @@ def donor_diff_pack(sb: Path, self_id: str, other_ids: list) -> dict:
     for donor in [str(x) for x in other_ids]:
         ddir = sb / "others" / donor
         dfiles = {p.relative_to(ddir).as_posix(): p for p in _payload_files_of_dir(ddir)}
+        dkeys = {donor_diff_key(rel): rel for rel in dfiles}
         same, differ, only_d, only_s = [], [], [], []
-        for rel in sorted(set(base_files) | set(dfiles)):
-            b, d = base_files.get(rel), dfiles.get(rel)
-            if b is None:
-                only_d.append(rel)
-            elif d is None:
-                only_s.append(rel)
-            elif sha256_file(b) == sha256_file(d):
-                same.append(rel)
+        # Compare by NAME-INSENSITIVE key, and keep BOTH sides' names: the arms
+        # carry different version tokens in their file names (see donor_diff_key).
+        for key in sorted(set(base_keys) | set(dkeys)):
+            srel, drel = base_keys.get(key), dkeys.get(key)
+            if srel is None:
+                only_d.append((drel, ""))
+            elif drel is None:
+                only_s.append((srel, ""))
+            elif sha256_file(base_files[srel]) == sha256_file(dfiles[drel]):
+                same.append((srel, drel))
             else:
-                differ.append(rel)
+                differ.append((srel, drel))
         idx = [f"## donor `{donor}`", "",
                f"- byte-identical: **{len(same)}** file(s)",
                f"- **differing: {len(differ)}** file(s)",
@@ -10968,18 +10989,21 @@ def donor_diff_pack(sb: Path, self_id: str, other_ids: list) -> dict:
                f"- only in self: **{len(only_s)}** file(s)",
                f"- detail: `{INTEGRATED_DIR}/work/{DONOR_DIFF_DIRNAME}/{donor}_vs_self.md`", ""]
         if differ:
-            idx += ["| differing file | self bytes | donor bytes |", "|---|---|---|"]
-            idx += [f"| `{rel}` | {base_files[rel].stat().st_size} | "
-                    f"{dfiles[rel].stat().st_size} |" for rel in differ]
+            idx += ["| differing file (self name · donor name) | self bytes | donor bytes |",
+                    "|---|---|---|"]
+            idx += [f"| `{srel}`" + ("" if srel == drel else f" · `{drel}`")
+                    + f" | {base_files[srel].stat().st_size} | {dfiles[drel].stat().st_size} |"
+                    for srel, drel in differ]
             idx.append("")
         if only_d:
-            idx += [f"- only in donor `{donor}`: `{rel}`" for rel in only_d] + [""]
+            idx += [f"- only in donor `{donor}`: `{drel}`" for drel, _ in only_d] + [""]
         if only_s:
-            idx += [f"- only in self (the donor does not ship it): `{rel}`" for rel in only_s] + [""]
+            idx += [f"- only in self (the donor does not ship it): `{srel}`"
+                    for srel, _ in only_s] + [""]
         detail = [f"# `{self_id}` (self) vs donor `{donor}` — per-file differences", ""]
         detail += idx[2:]
-        for rel in differ[:DONOR_DIFF_FILE_CAP]:
-            detail += _donor_diff_detail(base, ddir, rel)
+        for srel, drel in differ[:DONOR_DIFF_FILE_CAP]:
+            detail += _donor_diff_detail(base, ddir, srel, drel)
         if len(differ) > DONOR_DIFF_FILE_CAP:
             detail += [f"… {len(differ) - DONOR_DIFF_FILE_CAP} further differing file(s) are "
                        f"listed in the index only", ""]

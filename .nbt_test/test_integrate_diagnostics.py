@@ -70,6 +70,10 @@ def docx_bytes(paragraphs: list) -> bytes:
     return buf.getvalue()
 
 
+def matrix_of(sb: Path) -> str:
+    return (sb / "integrated" / "work" / "DIFF_MATRIX.md").read_text(encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # 1. the ledger reader picks the LEDGER table, not the session's summary table
 # ---------------------------------------------------------------------------
@@ -160,12 +164,23 @@ def test_donor_diff_pack():
     (self_d / "fig1.png").write_bytes(b"\x89PNG-identical")
     (other_d / "fig1.png").write_bytes(b"\x89PNG-identical")
     (other_d / "only-in-donor.tex").write_text("\\documentclass{article}\n", encoding="utf-8")
+    # Every arm names its documents with ITS OWN 7-hex token, so the comparison
+    # must be name-insensitive: path-for-path these two would look like two
+    # unrelated corpora ("only in donor" / "only in self") instead of one changed
+    # document.
+    (self_d / "cover-aaaaaaa.docx").write_bytes(docx_bytes(["the base's cover"]))
+    (other_d / "cover-bbbbbbb.docx").write_bytes(docx_bytes(["the donor's cover"]))
     (self_d / "work").mkdir()                      # scratch is not payload
     (self_d / "work" / "junk.txt").write_text("x", encoding="utf-8")
     summary = nb.donor_diff_pack(sb, "w2", ["a1"])
     check("the per-donor summary counts differ / identical / only-in-donor",
-          summary.get("a1") == {"identical": 1, "differing": 2, "only_in_donor": 1,
+          summary.get("a1") == {"identical": 1, "differing": 3, "only_in_donor": 1,
                                 "only_in_self": 0}, str(summary))
+    check("differently named documents are matched by their TOKEN-STRIPPED name",
+          "`cover-aaaaaaa.docx`" in matrix_of(sb) and "`cover-bbbbbbb.docx`" in matrix_of(sb)
+          and "cover-bbbbbbb.docx" in (sb / "integrated" / "work" / "diffs"
+                                       / "a1_vs_self.md").read_text(encoding="utf-8"),
+          matrix_of(sb)[:120])
     check("`work/` scratch is not compared as payload",
           "junk.txt" not in (sb / "integrated" / "work" / "diffs" / "a1_vs_self.md").read_text(),
           "work/junk.txt leaked into the index")
