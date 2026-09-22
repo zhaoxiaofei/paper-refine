@@ -1361,8 +1361,18 @@ def judges_enabled_spec(ctx, r: int) -> str:
         plan = (ctx.round_get(int(r)) or {}).get("plan") or {}
     except Exception:                                        # noqa: BLE001
         plan = {}
+    rrec = {}
+    try:
+        rrec = ctx.round_get(int(r)) or {}
+    except Exception:                                        # noqa: BLE001
+        rrec = {}
     if plan.get("judges_enabled") is not None:
         spec = str(plan["judges_enabled"])
+    elif rrec.get("judges_enabled") is not None:
+        # A `run --only r1_judge_w2_j1` invocation records its selection here, so
+        # a LATER invocation of the same (still pending) round keeps the smaller
+        # panel instead of reading a full-panel gap out of the sheets it finds.
+        spec = str(rrec["judges_enabled"])
     else:
         spec = str((getattr(ctx, "cfg", None) or {}).get("judges_enabled") or "")
     spec = spec.strip()
@@ -8111,6 +8121,10 @@ class OnlySpec:
         self.pairs = {}          # round -> set of stages (empty set = all stages)
         self.stages = set()      # stages named without a round (all rounds)
         self.all_stages = False  # an `all`/`everything`/`*` item was given
+        # round -> [session selector items] from `r1_judge_w2_j1` / `2:judge_i1_j1`:
+        # WHICH judge sessions of that round run (a whitelist; see
+        # `judges_enabled_spec`, which the judge wave and the aggregation read).
+        self.judge_selectors = {}
 
     def validate(self, rounds_count: int) -> "OnlySpec":
         """Reject round ordinals the pipeline does not have."""
@@ -8128,7 +8142,17 @@ class OnlySpec:
         """True when the selection restricts nothing (so `run` behaves as a
         plain `run` and prints no `--only` notes)."""
         return bool(self.all_stages) or (not self.rounds and not self.pairs
-                                         and not self.stages)
+                                         and not self.stages and not self.judge_selectors)
+
+    def judge_spec_for(self, r: int) -> str:
+        """The judge-session selector this invocation gives round `r` ("" = none).
+
+        Roundless items (`w2_j1`) apply to every round; a round that has no such
+        version simply expands to nothing (see parse_judges_enabled).
+        """
+        items = list(self.judge_selectors.get(None) or []) \
+            + list(self.judge_selectors.get(int(r)) or [])
+        return ",".join(items) if items else ""
 
     def stages_for(self, r: int) -> set:
         """The stage names selected in round `r`; an empty set means every stage."""
@@ -8156,11 +8180,13 @@ class OnlySpec:
             bits.append("stage(s) " + ",".join(sorted(self.stages)) + " in every round")
         for r in sorted(self.pairs):
             st = ",".join(sorted(self.pairs[r])) if self.pairs[r] else "all stages"
-            bits.append(f"round {r}: {st}")
+            sel = self.judge_spec_for(r)
+            bits.append(f"round {r}: {st}" + (f" (judge sessions: {sel})" if sel else ""))
         return " | ".join(bits) if bits else "all rounds, all stages"
 
     def __bool__(self) -> bool:
-        return bool(self.rounds or self.pairs or self.stages or self.all_stages)
+        return bool(self.rounds or self.pairs or self.stages or self.all_stages
+                    or self.judge_selectors)
 
 
 def parse_only_spec(raw) -> OnlySpec:
@@ -8185,11 +8211,23 @@ def parse_only_spec(raw) -> OnlySpec:
         if token in ("all", "everything", "*"):
             spec.all_stages = True
             continue
+        # `r1_judge_w2_j1` / `1_judge_w2` / `r1:judge:w2:j1`: WHICH judge sessions
+        # of one round run (see OnlySpec.judge_selectors).
+        sel = re.fullmatch(r"r?(\d+)\s*[_:/.-]\s*judge\s*[_:/.-]\s*(.+)", token)
+        if sel:
+            _add_judge_selector(spec, int(sel.group(1)), sel.group(2), part)
+            continue
         m = re.fullmatch(r"([0-9][0-9,\-\s]*)\s*[:/.]\s*(.+?)\s*", token)
         if m and re.match(r"^\s*\d", m.group(1)):
-            # `ROUND[:.]STAGE` (or `ROUND:all`): a per-round stage selection.
+            # `ROUND[:.]STAGE` (or `ROUND:all`): a per-round stage selection; the
+            # stage side may itself carry judge sessions (`2:judge_i1_j1`).
             rounds = parse_only_rounds(m.group(1), part)
             stage_token = m.group(2).strip()
+            st = re.fullmatch(r"judge\s*[_:/.-]\s*(.+)", stage_token)
+            if st:
+                for r in rounds:
+                    _add_judge_selector(spec, r, st.group(1), part)
+                continue
             if stage_token in ("all", "everything", "*"):
                 stages = set()
             else:
@@ -8201,8 +8239,30 @@ def parse_only_spec(raw) -> OnlySpec:
         if re.fullmatch(r"[0-9][0-9,\-\s]*", token):
             spec.rounds |= parse_only_rounds(token, part)
             continue
+        # `w2_j1` / `orig_j2`: a judge session named WITHOUT a round applies to
+        # every round that has that version (the round filter stays "all rounds").
+        # `a2` alone is the documented revise ALIAS, so the un-suffixed form is
+        # only read as a version when it cannot be a stage (`a2_j1` is unambiguous).
+        if re.fullmatch(r"(?:a\d+|w\d+|i\d+|orig)[_:/.-]j\d+", token) \
+                or re.fullmatch(r"(?:a1|w\d+|i\d+|orig)", token):
+            _add_judge_selector(spec, None, token, part)
+            continue
         spec.stages.add(parse_only_stage(token, part))
     return spec if spec else None
+
+
+def _add_judge_selector(spec: "OnlySpec", r, session: str, part: str) -> None:
+    """Record a judge-session selector on an OnlySpec (`r` None = every round)."""
+    if r is not None and int(r) < 1:
+        die(f"--only: {part!r} names round {r}; rounds are 1-based")
+    session = str(session).strip().strip("_:/.-")
+    if not session:
+        die(f"--only: {part!r} names the judge stage but no session (use `judge` for the whole "
+            f"stage, or `r1_judge_w2_j1` for one session)")
+    if r is not None:
+        spec.rounds.add(int(r))
+        spec.pairs.setdefault(int(r), set()).add("judge")
+    spec.judge_selectors.setdefault(None if r is None else int(r), []).append(session)
 
 
 def parse_only_stages(raw) -> set:
@@ -16467,6 +16527,18 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
     rrec = ctx.round_rec(r)
     rrec["status"] = "active"
     rrec["started"] = rrec.get("started") or utcnow()
+    # `run --only r1_judge_w2_j1` (and its roundless form `w2_j1`) selects WHICH
+    # judge sessions of this round run: record it on the round so the judge wave,
+    # the aggregation and a LATER invocation of the same pending round all agree
+    # on the smaller panel. An explicit `--only judge` (no session) clears it.
+    if only is not None:
+        _sel = only.judge_spec_for(r)
+        if _sel:
+            rrec["judges_enabled"] = _sel
+        elif stages_only and "judge" in stages_only:
+            # A bare `--only judge` (or `2:judge`) asks for the WHOLE judge stage:
+            # drop a smaller panel remembered from an earlier selector run.
+            rrec.pop("judges_enabled", None)
     ctx.save_state()
     ph = {"cmd": cmd, "timeout": timeout, "jobs": jobs, "retries": retries,
           "manual": manual, "nowait": nowait, "poll": poll,
@@ -16940,6 +17012,28 @@ def cmd_setup(args) -> None:
           f"prompt appears only after its review marker)")
 
 
+def validate_only_judge_selectors(ctx: Ctx, only) -> None:
+    """Refuse an `--only r1_judge_<version>_j<k>` item this plan cannot satisfy.
+
+    The selector is validated against the JUDGEABLE ids (the original, the round's
+    pool and the integration arms the round's mask selected) and the round's
+    `--judges` count, so a typo dies here with the values that exist instead of
+    quietly running a different panel later.
+    """
+    if only is None:
+        return
+    for r in sorted(set(list(only.judge_selectors.get(None) or [])
+                        + [k for k in only.judge_selectors if k is not None])):
+        spec = only.judge_spec_for(r)
+        if not spec:
+            continue
+        try:
+            parse_judges_enabled(spec, ctx.rounds_count(), lambda rr: judgeable_ids(ctx, rr),
+                                 lambda rr: round_judges(ctx, rr))
+        except ValueError as e:
+            die(f"--only: {e}")
+
+
 def cmd_run(args) -> None:
     """`run` entry point: take the root lock, then drive the rounds."""
     ctx = Ctx(Path(args.root).resolve())
@@ -16980,6 +17074,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         only = None                     # `--only all`: exactly a plain `run`
     if only is not None:
         only.validate(ctx.rounds_count())
+        validate_only_judge_selectors(ctx, only)
         print(f"[run] --only {getattr(args, 'only', None)!r}: {only.describe()}; this invocation "
               f"drives only the selected round(s) and stage type(s); a round whose other "
               f"stages are still pending stays incomplete (resume with `run`, `--only …`, or "

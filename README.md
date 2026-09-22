@@ -185,7 +185,20 @@ The selection items are comma-separated and combine as a **union**:
   `revise`, `integrate`, `judge`, plus the aliases `w`, `a`/`a2`, `i`, `merge`,
   `j` (plurals work too);
 * **`ROUND:STAGE`** — one stage of one round (`2:merge`, `3:judge`;
-  `.`/`/` separate as well, and `all` stands for every stage, e.g. `2:all`).
+  `.`/`/` separate as well, and `all` stands for every stage, e.g. `2:all`);
+* **one judge SESSION** — `r1_judge_w2_j1` (round 1, version `w2`, judge 1), also
+  written `1:judge_w2_j1`; `r1_judge_w2` is every judge of that version, and a
+  version without a round (`w2_j1`, `i1_j2`, `orig_j1`) applies to every round
+  that has it. Only the listed sessions get a sandbox/session/sheet; each
+  version's panel expectation is recomputed from the sessions that remain
+  (`J(V)*(|field|-1) + Σ J(other versions)`), so a pilot panel still decides the
+  round, the selector is recorded on the round's plan (so `decide` recomputes the
+  panel the round was actually judged with), and a later invocation of the same
+  pending round remembers it — an explicit bare `--only judge` clears it and runs
+  the whole panel. An unknown round, version or judge index is refused before
+  anything starts, with the values that exist. (The same selector can be set as a
+  persistent default with `setup --judges-enabled SPEC`; the `--only` form wins
+  for the invocation that gives it.)
 
 ```bash
 python nbt_pipeline.py run --root ./nbt_rounds --only 1,2        # only rounds 1 and 2
@@ -196,6 +209,8 @@ python nbt_pipeline.py run --root ./nbt_rounds --only merge      # = integrate
 python nbt_pipeline.py run --root ./nbt_rounds --only judge
 python nbt_pipeline.py run --root ./nbt_rounds --only review,revise
 python nbt_pipeline.py run --root ./nbt_rounds --only 1,2:merge,3:judge
+python nbt_pipeline.py run --root ./nbt_rounds --only r1_judge_w2_j1   # ONE judge session
+python nbt_pipeline.py run --root ./nbt_rounds --only r1_judge_w2_j1,r2_judge_i1_j1
 ```
 
 `all` (the default) means every round and every stage. An out-of-range round
@@ -205,10 +220,13 @@ is reported as the unmet dependency it is, and nothing is started. A plain
 `run` continues whatever is still pending; `run-decide` accepts the same flag
 and then decides.
 
-### `--judges-enabled`: run only some judge sessions
+### Running only some judge sessions
 
-`--judges` says HOW MANY judges each version gets; `--judges-enabled` says WHICH
-of those sessions run at all — a cheap pilot of the panel before paying for it:
+`--judges` says HOW MANY judges each version gets; `run --only` (see *Running only
+some of the steps*) and `setup --judges-enabled` say WHICH of those sessions run
+at all — a cheap pilot of the panel before paying for it. The `--only` form is the
+per-invocation one (`run --only r1_judge_w2_j1`); `--judges-enabled` is the
+persistent default for every invocation of the root:
 
 ```bash
 setup --judges 3 --judges-enabled r1_judge_w2_j1          # one session, round 1, w2, judge 1
