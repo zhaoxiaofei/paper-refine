@@ -12749,9 +12749,9 @@ Everything else must stay BYTE-IDENTICAL, above all:
     if kind == "audit":
         return common_head + """
 --- WHAT TO FILL (and the one direction you may not move) ---
-  * audit/audit.json: every frozen finding id gets exactly one disposition. You may ONLY add a
-    `confirm` row for an id the sheet left silent (use the finding's own evidence/location text
-    from the frozen review in this sandbox, and name the finding's own check id in the reason).
+  * audit/audit.json: every frozen finding id gets exactly one disposition. You may ONLY add a `confirm` row
+    for an id the sheet left silent (use the finding's own evidence/location text from the frozen review
+    in this sandbox, and name the finding's own check id in the reason).
   * You may NOT create, widen or "complete" a `drop`: a drop hides a finding from the revisers
     and needs the auditor's own evidence. An existing drop stays exactly as the auditor wrote it.
   * You may NOT add `AU-` findings, only complete the disposition of ids that are already there.

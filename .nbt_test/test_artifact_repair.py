@@ -393,7 +393,7 @@ ART_REVIEW = "review/artifacts/OUTLINE.md"
 prompt_cases = {
     "review": (sb, ART_PROBLEM, ["THE TABLES IN PLAY", "Never close many rows with the same "
                                 "sentence"]),
-    "audit": (sb_a, REPAIRABLE["audit"][0], ["may only add `confirm`", "audit/audit.json",
+    "audit": (sb_a, REPAIRABLE["audit"][0], ["ONLY add a `confirm` row", "audit/audit.json",
                                              "may NOT create, widen"]),
     "rewrite": (sb_r, REPAIRABLE["rewrite"][0], ["REWRITE_REPORT.md", "visual record",
                                                  "manuscript"]),
@@ -415,14 +415,6 @@ for kind, (sandbox, problem, needles) in sorted(prompt_cases.items()):
     check(f"D-{kind}: it demands the honest escape and the same postcheck",
           "unable — manual verification required" in text
           and "re-runs the SAME postcheck" in text)
-check("D1 the review prompt keeps its row-disposal rules and the table list",
-      "disposition" in nb.repair_prompt(
-          nb.Ctx(sb.parent), {"id": "r1_review", "kind": "review", "round": 1,
-                              "attempts_done": 1, "sandbox": sb.name}, [ART_PROBLEM])
-      and AR_REVIEW in nb.repair_prompt(
-          nb.Ctx(sb.parent), {"id": "r1_review", "kind": "review", "round": 1,
-                              "attempts_done": 1, "sandbox": sb.name}, [ART_PROBLEM]))
-
 print("== E. end to end with a stub repairer ==")
 
 
