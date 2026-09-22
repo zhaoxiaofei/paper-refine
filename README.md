@@ -189,15 +189,18 @@ The selection items are comma-separated and combine as a **union**:
   base copy), `reviewer` (review session A; `review_b` is session B under
   `--review-split`) and `audit`. A round-qualified `r1_w2` / `2:w2` (also
   `2:rewriter2`) restricts it to that round; a bare `w2` applies to every round
-  that has it. Only that session is materialized — no other stage, and no judge
-  wave, starts in that invocation. `a1` and `orig` cannot be selected: `a1` is
-  the orchestrator's copy of the previous champion, `orig` the pristine
-  submission, and neither is an agent session;
+  that has it. A round-qualified arm is read as the pipeline's OWN id, so
+  `r1_a2` and the printed run id `r1_a2_revise` both mean the a2 arm (`r1_reviser2`
+  keeps the friendly count and means `a3`). Only that session is materialized —
+  no other stage, and no judge wave, starts in that invocation. `a1` and `orig`
+  cannot be selected: `a1` is the orchestrator's copy of the previous champion,
+  `orig` the pristine submission, and neither is an agent session;
 * **one judge SESSION** — `r1_judge_w2_j1` (round 1, version `w2`, judge 1), also
   written `1:judge_w2_j1`; `r1_judge_w2` is every judge of that version, and a
   version without a round (`w2_j1`, `i1_j2`, `orig_j1`) applies to every round
-  that has it (a bare index, `judge1`/`j1`, is judge 1 of every version). Only
-  the listed sessions get a sandbox/session/sheet; each
+  that has it (a bare index, `judge1`/`j1`, is judge 1 of every version, and the
+  exact run id `agents` prints — `judge_t497f106d_j1` — works as it stands).
+  Only the listed sessions get a sandbox/session/sheet; each
   version's panel expectation is recomputed from the sessions that remain
   (`J(V)*(|field|-1) + Σ J(other versions)`), so a pilot panel still decides the
   round, the selector is recorded on the round's plan (so `decide` recomputes the
@@ -219,7 +222,9 @@ python nbt_pipeline.py run --root ./nbt_rounds --only rewriter2   # ONLY w2 (not
 python nbt_pipeline.py run --root ./nbt_rounds --only integrator1 # ONLY the i1 arm
 python nbt_pipeline.py run --root ./nbt_rounds --only r1_w2       # round 1's w2 only
 python nbt_pipeline.py run --root ./nbt_rounds --only w2,r2_a2    # w2 everywhere + round 2's a2
+python nbt_pipeline.py run --root ./nbt_rounds --only r1_a2_revise   # = r1_a2 (the printed run id)
 python nbt_pipeline.py run --root ./nbt_rounds --only r1_judge_w2_j1   # ONE judge session
+python nbt_pipeline.py run --root ./nbt_rounds --only judge_t497f106d_j1  # the id `agents` prints
 python nbt_pipeline.py run --root ./nbt_rounds --only r1_judge_w2_j1,r2_judge_i1_j1
 ```
 
@@ -250,13 +255,23 @@ Per round it lists the base copy `a1` (no agent), each `w<k>`, the review
 (`review`, plus `review_b` with `--review-split`), the `audit`, each revise arm
 `a<k>` and each integration arm `i<k>` the round's mask selected, then every
 judge session `judge_<token>_j<k>` with the version it judges. The producing
-names are exact. The judge id is the **salted per-version token** (so it carries
+names are exact; for round 2 and later the base candidate is the earlier round's
+pin (`r1_w2`), the member the judge wave actually scores, next to the fresh `a1`
+copy that the field deduplication drops. The judge id is the **salted
+per-version token** (so it carries
 no provenance) derived from `(round, version id)`; the judge FIELD, however, is
 deduplicated by document CONTENT once every arm exists, so a pending round's
 judge ids are the *candidates*: a member whose package is content-identical to
 another member's is dropped before judging and its sessions never start (the
 command says so). Once the round has run, the same command lists exactly the
 sessions that ran — which is also how you get a judge id for `retry --run <ID>`.
+
+Every id it prints can be fed back to `run --only` as it stands: the producing
+ids (`--only r1_a2_revise`, `--only r1_w1`) and the judge ids
+(`--only judge_t497f106d_j1`, or `--only judge_1` for judge 1 of every version —
+the judge token is salted and carries no round, so it is resolved against this
+root's plan when the command runs). The one exception is the base copy's `a1`
+line, which is not an agent session, and `run --only` says so if you try it.
 
 ### Running only some judge sessions
 
@@ -277,6 +292,13 @@ of that round, and a missing round every round that has the version (`w2_j2`,
 `j1`). A version name is any judgeable id — `orig`, `a1`, `w1`…, `a2`…, or an
 integration arm `i1`… — and an unknown round/version/index is refused before
 anything starts, with the values that exist.
+
+In round 2 and later the round's BASE member is the **pin of an earlier round**,
+so its id is that pin (`r1_w2`), not the fresh `a1` copy of it (which the field's
+content deduplication drops): `--only r2_judge_r1_w2_j1` is the session that
+judges the base of round 2, exactly as `agents` prints it. Asking for a judge
+session of a round whose own arms have not run yet is refused with the list of
+what is still missing, and nothing is started.
 
 The same session may be spelled with the version id alone plus the judge suffix
 (`r1_w2_j1`, `r2_i1_j2`, `w2_j2`) — the round-qualified form keeps its round

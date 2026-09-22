@@ -93,9 +93,22 @@ def state_of(root: Path) -> dict:
     return json.loads((root / "state.json").read_text(encoding="utf-8"))
 
 
+def ctx_of(root: Path):
+    """A loaded Ctx for the in-process checks (see `--only` selector resolution)."""
+    ctx = nb.Ctx(root)
+    ctx.load()
+    return ctx
+
+
 def kinds_of(state: dict, round_no: int, kind: str) -> list:
     return [rid for rid, rec in (state.get("runs") or {}).items()
             if rec.get("round") == round_no and rec.get("kind") == kind]
+
+
+def kind_of(state: dict, rid: str) -> tuple:
+    """(kind, target_id, judge_index) of one run record, for the judge checks."""
+    rec = (state.get("runs") or {}).get(rid) or {}
+    return rec.get("kind"), rec.get("target_id"), rec.get("judge_index")
 
 
 def test_only_rounds():
@@ -409,6 +422,13 @@ def test_only_agent_sessions():
           and nb.parse_only_spec("r1_judge_w2_j1").judge_spec_for(2) == ""
           and nb.parse_only_spec("r1_w2_j1").judge_spec_for(1) == "r1_w2_j1"
           and nb.parse_only_spec("w2_j1").judge_spec_for(1) == "w2_j1")
+    check("A4b the items are a UNION: a roundless item keeps its rounds in play",
+          nb.parse_only_spec("review,2:merge").covers_round(1)
+          and nb.parse_only_spec("review,2:merge").covers_round(2)
+          and nb.parse_only_spec("rewrite,judge_t497f106d_j1").covers_round(1)
+          and not nb.parse_only_spec("2:merge").covers_round(1)
+          and nb.parse_only_spec("1").covers_round(1)
+          and not nb.parse_only_spec("1").covers_round(2))
     for bad in ("a1", "orig"):
         try:
             nb.parse_only_spec(bad)
@@ -488,6 +508,118 @@ def test_only_agent_sessions():
                for rid in ("r1_i1", "r1_i2", "r1_i3")}))
 
 
+def test_only_accepts_the_printed_ids():
+    print()
+    print("== every id `agents` prints is a valid `--only` item ==")
+    # --- the grammar of the printed forms --------------------------------
+    check("H1 the printed producing run ids are accepted (arm ids are not re-indexed)",
+          nb.parse_only_spec("r1_a2_revise").session_tokens_for(1) == ["a2"]
+          and nb.parse_only_spec("r2_a3_revise").session_tokens_for(2) == ["a3"]
+          and nb.parse_only_spec("r1_a2").session_tokens_for(1) == ["a2"]
+          and nb.parse_only_spec("2:a3").session_tokens_for(2) == ["a3"]
+          and nb.parse_only_spec("r1_reviser2").session_tokens_for(1) == ["a3"]
+          and nb.parse_only_spec("r1_w1").session_tokens_for(1) == ["w1"]
+          and nb.parse_only_spec("r1_review").session_tokens_for(1) == ["review"])
+    check("H2 `judge_<k>` and the round-qualified index forms parse",
+          nb.parse_only_spec("judge_1").judge_spec_for(1) == "j1"
+          and nb.parse_only_spec("j_2").judge_spec_for(1) == "j2"
+          and nb.parse_only_spec("r1_judge_1").judge_spec_for(1) == "r1_j1"
+          and nb.parse_only_spec("r1_judge1").judge_spec_for(1) == "r1_j1"
+          and nb.parse_only_spec("2:judge_2").judge_spec_for(2) == "r2_j2"
+          and nb.parse_only_spec("2:a2").classes_for(2) == {"revise"})
+    check("H3 a printed judge run id stays PENDING until a root resolves it",
+          nb.parse_only_spec("judge_t497f106d_j1").judge_run_ids
+          == [("judge_t497f106d_j1", "judge_t497f106d_j1")]
+          and nb.parse_only_spec("judge_t497f106d_j1").judge_selectors == {})
+
+    # --- a real round trip: the id `agents` printed, fed back to `run` -----
+    tmp = scratch("nbt_only_runids_")
+    root = make_root(tmp, rounds=1, rewrites=1, revises=0, integrators="0x0", judges=3)
+    run(root, "--only", "rewrite")
+    j = json.loads(cli("agents", "--root", str(root), "--json").stdout)
+    w1_ids = [s["id"] for row in j["rounds"] for s in row["judge"] if s["target"] == "w1"]
+    check("H4 `agents` prints the judge ids with their targets", len(w1_ids) == 3, str(w1_ids))
+    ctx = nb.Ctx(root)
+    ctx.load()
+    check("H4 the printed token is the resolved (round, version) token",
+          w1_ids[0] == nb.rid_judge(1, nb.judge_token_for(ctx, 1, "w1"), 1)
+          and w1_ids[2] == nb.rid_judge(1, nb.judge_token_for(ctx, 1, "w1"), 3),
+          str(w1_ids))
+    p = run(root, "--only", w1_ids[1])
+    st = state_of(root)
+    judges = kinds_of(st, 1, "judge")
+    check("H5 `run --only judge_<token>_j2` runs exactly that judge session",
+          judges == [w1_ids[1]] and st["runs"][w1_ids[1]]["status"] == "done"
+          and kind_of(st, w1_ids[1]) == ("judge", "w1", 2)
+          and "judge run id -> round 1, version w1, judge 2" in (p.stdout + p.stderr),
+          str({rid: (st["runs"][rid]["status"], st["runs"][rid].get("target_id"),
+                     st["runs"][rid].get("judge_index")) for rid in judges}))
+    check("H5 the round decides on that pilot panel and records the resolved selector",
+          st["rounds"]["1"].get("status") == "done"
+          and (st["rounds"]["1"].get("plan") or {}).get("judges_enabled") == "r1_w1_j2",
+          str((st["rounds"]["1"].get("plan") or {}).get("judges_enabled")))
+
+    # --- a wrong run id, and the `--only` preview of a run id --------------
+    bad = run(root, "--only", "judge_tdeadbeef_j1")
+    check("H6 an unknown judge run id is refused with the `agents` hint, before anything starts",
+          bad.returncode != 0
+          and "is not a judge session of this root" in (bad.stdout + bad.stderr)
+          and "agents" in (bad.stdout + bad.stderr),
+          (bad.stdout + bad.stderr).strip().splitlines()[-1][:150])
+    j2 = json.loads(cli("agents", "--root", str(root), "--only", w1_ids[2],
+                        "--json").stdout)
+    check("H7 `agents --only <judge run id>` previews the very same session",
+          [(s["id"], s["target"]) for s in j2["rounds"][0]["judge"]] == [(w1_ids[2], "w1")]
+          and j2["rounds"][0]["judge"][0]["status"] == "planned",
+          json.dumps(j2["rounds"][0]["judge"]))
+
+
+def test_only_judge_the_pinned_base():
+    print()
+    print("== a round-2 judge session on the PINNED base (`r1_w2`) ==")
+    tmp = scratch("nbt_only_pin_")
+    root = make_root(tmp, rounds=2, rewrites="2,1", revises="1,1",
+                     integrators="0x5", judges="2,1")
+    run(root, "--only", "1")
+    st = state_of(root)
+    pin = str((st.get("pinned") or [{}])[0].get("id") or "")
+    check("P1 round 1 pinned a champion", bool(pin), str(st.get("pinned")))
+    j = json.loads(cli("agents", "--root", str(root), "--json").stdout)
+    r2 = [row for row in j["rounds"] if row["round"] == 2][0]
+    targets = [s["target"] for s in r2["judge"]]
+    check("P2 a pending round 2 lists the PIN as the base candidate (besides its fresh a1)",
+          pin in targets and "a1" in targets and targets.index(pin) < targets.index("a1")
+          and len({s["id"] for s in r2["judge"]}) == len(r2["judge"]),
+          str(targets))
+    pin_id = [s["id"] for s in r2["judge"] if s["target"] == pin][0]
+    # Asking for it before the round's own arms exist must EXPLAIN, not traceback.
+    blocked = run(root, "--only", pin_id)
+    out = blocked.stdout + blocked.stderr
+    check("P3 an early judge-only selection explains what is still missing",
+          blocked.returncode != 0 and "needs the WHOLE field" in out
+          and "Traceback" not in out and not kinds_of(state_of(root), 2, "judge"),
+          out[-200:])
+    run(root, "--only", "2:rewrite,2:review,2:audit,2:revise,2:merge")
+    p = run(root, "--only", pin_id)
+    st2 = state_of(root)
+    judges = kinds_of(st2, 2, "judge")
+    stats = (st2["rounds"]["2"].get("stats") or {})
+    n_field = len(st2["rounds"]["2"].get("field") or [])
+    check("P4 the printed id then runs exactly that judge session",
+          judges == [pin_id] and kind_of(st2, pin_id) == ("judge", pin, 1)
+          and "judge run id -> round 2, version " + pin in (p.stdout + p.stderr),
+          str({rid: kind_of(st2, rid) for rid in judges}))
+    check("P5 the round decides on that panel and records the resolved selector",
+          (st2["rounds"]["2"].get("plan") or {}).get("judges_enabled") == f"r2_{pin}_j1"
+          and st2["rounds"]["2"].get("status") == "done",
+          str((st2["rounds"]["2"].get("plan") or {}).get("judges_enabled")))
+    check("P6 the panel expectation counts the PIN as the field's base member",
+          all(s.get("complete") for s in stats.values())
+          and stats.get(pin, {}).get("expected_n") == n_field - 1
+          and stats.get("orig", {}).get("expected_n") == 1,
+          str({v: (s.get("n"), s.get("expected_n")) for v, s in stats.items()}))
+
+
 def test_agents_command():
     print()
     print("== `agents`: the session names every round will run ==")
@@ -536,6 +668,30 @@ def test_agents_command():
                            if rec.get("kind") != "judge"}
           and all(s["status"] == "done" for row in q["rounds"] for s in row["producing"]),
           str(sorted(planned_prod)))
+    # Every printed id must be usable as an `--only` item (the base copy's a1
+    # line is the documented exception: it is not an agent session).
+    bad = []
+    for rid in sorted(planned_prod):
+        if rid.endswith("_a1"):
+            continue
+        try:
+            spec = nb.parse_only_spec(rid)
+            nb.resolve_judge_run_ids(ctx_of(root), spec, label="[test]")
+            spec.validate(2)
+            nb.validate_only_selectors(ctx_of(root), spec)
+        except SystemExit:
+            bad.append(rid)
+    check("G7 every producing id `agents` prints is a valid `--only` item", not bad, str(bad))
+    bad = []
+    for rid in sorted({s["id"] for row in q["rounds"] for s in row["judge"]}):
+        try:
+            spec = nb.parse_only_spec(rid)
+            nb.resolve_judge_run_ids(ctx_of(root), spec, label="[test]")
+            spec.validate(2)
+            nb.validate_only_selectors(ctx_of(root), spec)
+        except SystemExit:
+            bad.append(rid)
+    check("G8 every judge id `agents` prints is a valid `--only` item", not bad, str(bad))
 
 def main() -> int:
     try:
@@ -545,6 +701,8 @@ def main() -> int:
         test_plan_survives_a_config_edit()
         test_only_judge_sessions()
         test_only_agent_sessions()
+        test_only_accepts_the_printed_ids()
+        test_only_judge_the_pinned_base()
         test_agents_command()
     finally:
         cleanup()

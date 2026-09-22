@@ -1335,13 +1335,31 @@ JUDGES_ENABLED_ALL = "all"
 def judgeable_ids(ctx, r: int) -> list:
     """The version ids a judge session in round `r` may target, in field order.
 
-    The judge field is the pristine original, the round's pool (a1, w1.., a2..)
-    and the integration arms the round's `--integrators` mask selected -- not just
-    the pool, which is why `r2_judge_i1_j1` is a valid selector.
+    The judge field is the pristine original, every EARLIER ROUND's pin (its id is
+    the pinned run id, e.g. `r1_w2` -- in round 2 the base member IS that pin; the
+    fresh `a1` copy of it is always content-identical and dropped by the field's
+    deduplication), the round's pool (a1, w1.., a2..) and the integration arms the
+    round's `--integrators` mask selected -- not just the pool, which is why
+    `r2_judge_i1_j1` is a valid selector.
     """
     m, n = round_counts(ctx, r)
-    return [ORIGINAL_ID] + list(round_pool_ids(m, n)) \
+    return [ORIGINAL_ID] + round_pin_ids(ctx, r) + list(round_pool_ids(m, n)) \
         + [integrate_vid(k) for k in integrator_arms(m, n, round_integrators(ctx, r))]
+
+
+def round_pin_ids(ctx, r: int) -> list:
+    """The ids of the pins earlier rounds contributed to round `r`'s field.
+
+    A pin's id is the run id of the version that won its round (`r1_w2`), and the
+    field's deduplication keeps it as the round's base member: the fresh `a1` copy
+    of that same content is dropped. So `r1_w2` -- not `a1` -- is the version a
+    round-2 judge session on the base actually targets.
+    """
+    out = []
+    for pin in sorted(ctx.state.get("pinned") or [], key=lambda p: int(p.get("round") or 0)):
+        if int(pin.get("round") or 0) < int(r) and pin.get("id"):
+            out.append(str(pin["id"]))
+    return out
 
 
 def judges_enabled_spec(ctx, r: int) -> str:
@@ -1372,30 +1390,57 @@ def judges_enabled_spec(ctx, r: int) -> str:
     return "" if spec.lower() in ("", JUDGES_ENABLED_ALL) else spec
 
 
+def judge_item_parts(item: str):
+    """(round|None, version|None, judge index|None) for ONE judge-selector item.
+
+    Every spelling the operator or `agents` can produce is accepted:
+
+        r1_judge_w2_j1 / 2:judge_i1_j1   the keyword form (and the oldest spelling)
+        r1_w2_j1 / 2:i1_j1               `agents`-friendly: ROUND_version_index
+        w2_j1 / orig_j2 / a2_j1          no round: every round that has the version
+        w2 / r1_judge_w2                 that version's whole panel
+        j1 / judge_1 / r1_j1 / r1_judge  one judge index, of every version (of a round)
+        r2_r1_w2_j1                      a PIN id as the version: the base of round 2 is
+                                         the pin `r1_w2` (its fresh `a1` copy is
+                                         content-identical and dropped by the field)
+
+    A version may itself start with `r<digits>_`, which is why the leading round is
+    read ONCE, from the front (a last-token-wins scan would read `r2_r1_w2_j1` as
+    round 1 and silently drop the selector).
+    """
+    tok = str(item).strip().lower().replace(" ", "")
+    r = None
+    m = re.fullmatch(r"r?(\d+)(?:[_:/.-](.*))?", tok)
+    if m:
+        r, tok = int(m.group(1)), (m.group(2) or "")
+    tok = re.sub(r"^judge[_:/.-]?", "", tok)
+    if not tok or tok in ("judge", "j"):
+        return r, None, None
+    if re.fullmatch(r"\d+", tok):            # `judge_1` -> index 1
+        return r, None, int(tok)
+    k = None
+    m = re.fullmatch(r"(.+?)[_:/.-]?j(\d+)", tok)
+    if m:
+        tok, k = m.group(1), int(m.group(2))
+    elif re.fullmatch(r"j[_:/.-]?\d+", tok):  # a bare `j1`
+        return r, None, int(re.sub(r"\D", "", tok))
+    return r, (tok or None), k
+
+
 def parse_judges_enabled(spec: str, rounds: int, pool_of, judges_of) -> set:
     """Expand a selector into {(round, version, judge index)}; empty set = all.
 
     `pool_of(r)` and `judges_of(r)` describe the plan the selector is validated
     against (see `setup`, which builds it from --rewrites/--revises/--judges).
     Raises ValueError with an actionable message on an unknown round/version/index.
+    The grammar is documented on judge_item_parts().
     """
     spec = str(spec or "").strip()
     if not spec or spec.lower() == JUDGES_ENABLED_ALL:
         return set()
     out = set()
     for item in [i for i in re.split(r"[,\s]+", spec) if i]:
-        toks = [t for t in re.split(r"[_:\-]+", item.lower()) if t]
-        r = k = None
-        vid = None
-        for tok in toks:
-            if tok == "judge":
-                continue
-            if re.fullmatch(r"r?\d+", tok):
-                r = int(tok.lstrip("r"))
-            elif re.fullmatch(r"j\d+", tok):
-                k = int(tok[1:])
-            else:
-                vid = tok
+        r, vid, k = judge_item_parts(item)
         rs = [r] if r else list(range(1, int(rounds) + 1))
         matched = False
         for rr in rs:
@@ -1405,8 +1450,8 @@ def parse_judges_enabled(spec: str, rounds: int, pool_of, judges_of) -> set:
             js = int(judges_of(rr))
             if vid is not None and vid not in pool:
                 if r:                       # an EXPLICIT round must have the version
-                    raise ValueError(f"{item!r}: version {vid!r} is not in round {rr}'s pool "
-                                     f"({', '.join(pool)})")
+                    raise ValueError(f"{item!r}: version {vid!r} is not in round {rr}'s judge "
+                                     f"field ({', '.join(pool)})")
                 continue                    # no round named: it applies where it exists
             if k is not None and not (1 <= k <= js):
                 raise ValueError(f"{item!r}: judge index {k} is outside 1..{js} for round {rr} "
@@ -8132,6 +8177,11 @@ class OnlySpec:
         # sessions run (see judge_spec_for(), which expands them through
         # judges_enabled_spec/parse_judges_enabled).
         self.judge_selectors = {}
+        # [(run id, item as typed)] for a judge RUN ID (`judge_<token>_j<k>`, the
+        # id `agents` prints). The token is salted and round-free, so these are
+        # resolved against the root's plan by resolve_judge_run_ids() (which needs
+        # a Ctx) and then folded into judge_selectors.
+        self.judge_run_ids = []
         self.raw = ""            # the item text as typed, for the run log
 
     def validate(self, rounds_count: int) -> "OnlySpec":
@@ -8144,14 +8194,25 @@ class OnlySpec:
         return self
 
     def covers_round(self, r: int) -> bool:
-        return bool(self.all_stages) or not self.rounds or int(r) in self.rounds
+        """Can this selection touch round `r` at all (the run loop's round filter)?
+
+        The items are a UNION, so a ROUNDLESS item (a stage name, or a session
+        without a round) keeps every round in play even when another item named
+        only some rounds: `--only review,2:judge` is round 1's review plus round
+        2's review and judge, not "round 2 only".
+        """
+        if self.all_stages or not self.rounds or int(r) in self.rounds:
+            return True
+        return bool(self.stages or self.sessions.get(None)
+                    or self.judge_selectors.get(None))
 
     def is_everything(self) -> bool:
         """True when the selection restricts nothing (so `run` behaves as a
         plain `run` and prints no `--only` notes)."""
         return bool(self.all_stages) or (not self.rounds and not self.pairs
                                          and not self.stages and not self.sessions
-                                         and not self.judge_selectors)
+                                         and not self.judge_selectors
+                                         and not self.judge_run_ids)
 
     def session_tokens_for(self, r: int) -> list:
         """The session tokens this invocation gives round `r` (roundless + its own)."""
@@ -8300,11 +8361,13 @@ class OnlySpec:
         if self.judge_selectors.get(None):
             bits.append("judge session(s) " + ",".join(self.judge_selectors[None])
                         + " in every round that has them")
+        for tok, _part in self.judge_run_ids:
+            bits.append(f"judge run id {tok}")
         return " | ".join(bits) if bits else "all rounds, all stages"
 
     def __bool__(self) -> bool:
         return bool(self.rounds or self.pairs or self.stages or self.all_stages
-                    or self.sessions or self.judge_selectors)
+                    or self.sessions or self.judge_selectors or self.judge_run_ids)
 
 
 def parse_only_spec(raw) -> OnlySpec:
@@ -8342,6 +8405,11 @@ def parse_only_spec(raw) -> OnlySpec:
         if sel:
             _add_judge_selector(spec, int(sel.group(1)), sel.group(2), part)
             continue
+        # `r1_judge1` / `1_judge2`: judge index k of every version of one round.
+        sel = re.fullmatch(r"r?(\d+)\s*[_:/.-]\s*judge\s*(\d+)\s*$", token)
+        if sel:
+            _add_judge_selector(spec, int(sel.group(1)), f"j{int(sel.group(2))}", part)
+            continue
         # `r1_w2` / `r1_a2` / `r1_i1` / `r1_review` / `r1_review_b` / `r1_audit`:
         # ONE session of one round. A `_j<k>` tail makes it a judge session
         # (`r1_w2_j1`), the same selection as `r1_judge_w2_j1`.
@@ -8352,8 +8420,19 @@ def parse_only_spec(raw) -> OnlySpec:
             session = sel.group(2) + sel.group(3)
             if re.fullmatch(r"[_:/.-]j\d+", sel.group(3)):
                 _add_judge_selector(spec, int(sel.group(1)), session, part)
+            elif re.fullmatch(r"a\d+", session):
+                # `r1_a2` names the round's a2 ARM (the id the round plan and
+                # `agents` use), while `r1_reviser2` keeps the friendly count.
+                _add_session_id(spec, int(sel.group(1)), session, part)
             else:
                 _add_session_token(spec, int(sel.group(1)), session, part)
+            continue
+        # `r1_a2_revise`: the exact RUN ID `agents` prints for a revise arm (the
+        # others -- `r1_w1`, `r1_i1`, `r1_review`, `r1_audit` -- are already
+        # session ids, so only the revise arm needs the suffix).
+        sel = re.fullmatch(r"r(\d+)\s*[_:/.-]\s*(a\d+)[_:/.-]revise", token)
+        if sel:
+            _add_session_id(spec, int(sel.group(1)), sel.group(2), part)
             continue
         m = re.fullmatch(r"([0-9][0-9,\-\s]*)\s*[:/.]\s*(.+?)\s*", token)
         if m and re.match(r"^\s*\d", m.group(1)):
@@ -8380,9 +8459,12 @@ def parse_only_spec(raw) -> OnlySpec:
             elif re.fullmatch(r"(?:w\d+|a\d+|i\d+|rewriter\d+|reviser\d+|revise\d+|"
                               r"integrator\d+|integrate\d+)(?:[_:/.-]j\d+)?", stage_token):
                 is_judge = re.fullmatch(r".+?[_:/.-]j\d+", stage_token)
+                is_arm = re.fullmatch(r"a\d+", stage_token)     # `2:a3` = the a3 ARM
                 for r in rounds:
                     if is_judge:
                         _add_judge_selector(spec, r, stage_token, part)
+                    elif is_arm:
+                        _add_session_id(spec, r, stage_token, part)
                     else:
                         _add_session_token(spec, r, stage_token, part)
                 continue
@@ -8395,9 +8477,17 @@ def parse_only_spec(raw) -> OnlySpec:
         if re.fullmatch(r"[0-9][0-9,\-\s]*", token):
             spec.rounds |= parse_only_rounds(token, part)
             continue
-        # `judge1` / `j1`: judge index 1 of every version of every round that has it.
-        if re.fullmatch(r"(?:judge|j)\d+", token):
+        # `judge1` / `j1` / `judge_1`: judge index 1 of every version of every
+        # round that has it.
+        if re.fullmatch(r"(?:judge|j)[_:/.-]?\d+", token):
             _add_judge_selector(spec, None, token, part)
+            continue
+        # The exact RUN ID `agents` prints for a judge session
+        # (`judge_t497f106d_j1`): the token is salted and carries no round by
+        # design, so the round/version it names is resolved against this root's
+        # plan right after parsing (see resolve_judge_run_ids()).
+        if re.fullmatch(r"judge_[0-9a-z]+(?:_j\d+)?", token):
+            _add_judge_run_id(spec, token, part)
             continue
         # `w2_j1` / `i1_j2` / `a2_j1` / `orig_j2`: a judge session named WITHOUT a
         # round applies to every round that has that version.
@@ -8431,6 +8521,56 @@ def _add_judge_selector(spec: "OnlySpec", r, session: str, part: str) -> None:
     spec.judge_selectors.setdefault(None if r is None else int(r), []).append(sel)
 
 
+def _add_judge_run_id(spec: "OnlySpec", run_id: str, part: str) -> None:
+    """Record a judge RUN ID (`judge_<token>_j<k>`, the id `agents` prints).
+
+    The token is the salted per-version token, so it names a (round, version,
+    judge index) only together with the root's plan and salt: the pair stays
+    pending here and is resolved by resolve_judge_run_ids() once a Ctx exists.
+    """
+    spec.judge_run_ids.append((str(run_id), part))
+
+
+def resolve_judge_run_ids(ctx: Ctx, only, label: str = "[run]", sink=None) -> None:
+    """Turn `--only judge_<token>_j<k>` items into the selectors they name.
+
+    `agents` prints each judge session as its run id, and the token in it is
+    salted and round-free ON PURPOSE (a judge's sandbox must not reveal which
+    version or round it scores). Resolving it costs one sha256 per (round,
+    version) of the plan -- no document hash -- so the printed id can be fed
+    straight back into `--only`. With `sink` (a list) the resolution notes are
+    collected instead of printed, so `agents --json` stays parseable.
+    """
+    if only is None or not getattr(only, "judge_run_ids", None):
+        return
+    index = {}
+    for r in range(1, ctx.rounds_count() + 1):
+        for vid in judgeable_ids(ctx, r):
+            key = judge_token_for(ctx, r, vid)
+            if key not in index:
+                index[key] = (int(r), str(vid))
+    for tok, part in list(only.judge_run_ids):
+        m = re.fullmatch(r"judge_([0-9a-z]+?)(?:_j(\d+))?", str(tok))
+        hit = index.get(m.group(1)) if m else None
+        if hit is None:
+            die(f"--only: {part!r} is not a judge session of this root. The ids `agents` prints "
+                f"are accepted (e.g. `judge_{JUDGE_TOKEN_PREFIX}1a2b3c4d_j1`); run `agents --root "
+                f"{ctx.root}` to see the ones that exist here.")
+        r, vid = hit
+        # the round stays in the KEY: judge_spec_for() re-adds `r<round>_` to a
+        # round-qualified token, so the token itself carries only the version
+        sel = f"{vid}" + (f"_j{m.group(2)}" if m.group(2) else "")
+        only.judge_selectors.setdefault(r, []).append(sel)
+        only.rounds.add(int(r))
+        line = (f"{label} --only {part!r}: judge run id -> round {r}, version {vid}"
+                + (f", judge {m.group(2)}" if m.group(2) else " (that version's whole panel)"))
+        if sink is None:
+            print(line)
+        else:
+            sink.append(line)
+    only.judge_run_ids = []
+
+
 def _add_session_token(spec: "OnlySpec", r, session: str, part: str) -> None:
     """Record one session selector on an OnlySpec (`r` None = every round that has it).
 
@@ -8446,6 +8586,26 @@ def _add_session_token(spec: "OnlySpec", r, session: str, part: str) -> None:
     spec.sessions.setdefault(None if r is None else int(r), []).append(session)
 
 
+def _add_session_id(spec: "OnlySpec", r, session_id: str, part: str) -> None:
+    """Record one session by its EXACT pipeline id (`a2`, `w1`, `i3`, `review`...).
+
+    This is the spelling the round plan, the run ids and `agents` use, so nothing
+    is re-indexed here: `a2` is the a2 ARM (the friendly "reviser 2" spelling,
+    which maps onto a3, goes through _session_token() instead).
+    """
+    sid = str(session_id).strip("_:/.-").lower()
+    if sid == "a1":
+        die(f"--only: {part!r} names a1, the round base COPY -- it has no agent session "
+            f"(use `reviser1` for the first reviser, which edits a1 into a2)")
+    if not re.fullmatch(r"(?:w\d+|a\d+|i\d+|review|review_b|audit)", sid):
+        die(f"--only: {part!r} is not a session this pipeline knows (use a stage name, or a "
+            f"session such as `rewriter1`, `reviser1`, `integrator1`, `review`, `audit`, `w2`, "
+            f"`w2_j1`, `r1_w2`, `r1_judge_w2_j1`)")
+    if r is not None:
+        spec.rounds.add(int(r))
+    spec.sessions.setdefault(None if r is None else int(r), []).append(sid)
+
+
 def _judge_selector_token(raw: str, part: str) -> str:
     """Normalize one JUDGE-session selector (`integrator2_j1` -> `i2_j1`).
 
@@ -8456,9 +8616,11 @@ def _judge_selector_token(raw: str, part: str) -> str:
     first reviser -> a2).
     """
     tok = str(raw).strip().strip("_:/.-").lower().replace(" ", "")
-    m = re.fullmatch(r"(judge|j)(\d+)", tok)
+    m = re.fullmatch(r"(judge|j)[_:/.-]?(\d+)", tok)
     if m:
         return f"j{int(m.group(2))}"
+    if re.fullmatch(r"\d+", tok):        # `r1_judge_1` / `2:judge_2` -> `j<k>`
+        return f"j{int(tok)}"
     m = re.fullmatch(r"(rewriter|writer|w|reviser|revise|a|integrator|integrate|i)"
                      r"(\d+)(?:[_:/.-]j(\d+))?", tok)
     if m:
@@ -16874,6 +17036,23 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
         ctx.save_state()
         return False, False
     if len(field) >= 2:
+        # A selection can name a JUDGE session of a round whose own arms have not
+        # run yet (`--only judge_t497f106d_j1`, or `--only r2_judge_w1_j1`): the
+        # panel needs the WHOLE field, so say exactly what is missing instead of
+        # raising from inside the materializer.
+        missing = [rid_for_fresh(r, v) for v in round_produced_ids(ctx, r)
+                   if (ctx.run(rid_for_fresh(r, v)) or {}).get("status") != "done"]
+        if missing:
+            print(f"[run] r{r}: the judge wave needs the WHOLE field of round {r} (the base, "
+                  f"every rewrite, every revise arm and every integration run its mask "
+                  f"selected); still missing: {', '.join(missing[:6])}"
+                  + (" ..." if len(missing) > 6 else ""))
+            print(f"[run] r{r}: nothing was judged in this invocation. Start the round's stages "
+                  f"first -- a plain `run`, or `--only "
+                  f"{','.join(sorted({plan_stage_of(e) for e in round_run_plan(ctx, r)}))}` -- "
+                  f"then re-run this selection (`--only judge` or the same judge run id).")
+            ctx.save_state()
+            return False, False
         judge_ids = materialize_judges(ctx, r, field)
     else:
         # Every fresh arm produced documents content-identical to the round's
@@ -17347,6 +17526,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     if only is not None and only.is_everything():
         only = None                     # `--only all`: exactly a plain `run`
     if only is not None:
+        resolve_judge_run_ids(ctx, only)    # `--only judge_t497f106d_j1`
         only.validate(ctx.rounds_count())
         validate_only_selectors(ctx, only)
         print(f"[run] --only {getattr(args, 'only', None)!r}: {only.describe()}; this invocation "
@@ -18672,7 +18852,9 @@ def agent_session_plan(ctx: Ctx, only=None) -> list:
                 "deps": [str(d) for d in (e.get("deps") or [])],
             })
         field = [str(v) for v in (rec.get("field") or [])]
-        candidates = field or [ORIGINAL_ID] + list(round_produced_ids(ctx, r))
+        # A pending round's candidates are the judgeable ids (see judgeable_ids):
+        # the original, the earlier rounds' pins and the fresh arms.
+        candidates = field or judgeable_ids(ctx, r)
         judge_selected = only is None or only.stage_selected(r, "judge")
         # WHICH judge sessions of the round run: the selector the `--only` items
         # give (a preview of `run --only`), else the panel recorded by an earlier
@@ -18736,6 +18918,7 @@ def cmd_agents(args) -> None:
     if only is not None and only.is_everything():
         only = None
     if only is not None:
+        resolve_judge_run_ids(ctx, only, label="[agents]", sink=notes)
         only.validate(ctx.rounds_count())
         validate_only_selectors(ctx, only)
     rows = agent_session_plan(ctx, only)
@@ -18790,6 +18973,10 @@ def cmd_agents(args) -> None:
         print()
         print("[agents] every id above is exact: the rounds' fields are already deduplicated, so "
               "no session here is a candidate whose membership can still change.")
+    print("[agents] every id above can be fed back to `run --only` as printed: the producing ids "
+          "(`--only r1_a2_revise`, `--only r1_w1`) and the judge ids (`--only "
+          "judge_t497f106d_j1`, or `--only judge_1` for judge 1 of every version). The base copy's "
+          "`a1` line is the only exception: it is not an agent session.")
 
 
 def cmd_decide(args) -> None:
@@ -20104,10 +20291,12 @@ USAGE_EXAMPLES = """usage:
           stage), or ONE AGENT SESSION instead of its whole stage: --only
           rewriter2 (only w2), --only integrator1 (only i1), --only reviser1
           (only a2, the first revise arm), --only r1_w2 / 2:rewriter2 (that
-          round), --only w2 (every round that has it); one judge session is
-          --only r1_judge_w2_j1, --only w2_j1 or --only judge1. Nothing else is
-          started in that invocation, and a round whose other stages are still
-          pending stays incomplete for a later `run`.
+          round), --only w2 (every round that has it), --only r1_a2_revise (the
+          exact run id `agents` prints); one judge session is --only
+          r1_judge_w2_j1, --only w2_j1, --only judge1 or the printed run id
+          --only judge_t497f106d_j1. Nothing else is started in that invocation,
+          and a round whose other stages are still pending stays incomplete for a
+          later `run`.
   run-decide --root <dir> [same options as `run`] [same options as `decide`]
           run the pending rounds and then decide, in series: the `run` phase
           holds the root lock and finishes first, then `decide` recomputes the
@@ -20126,7 +20315,10 @@ USAGE_EXAMPLES = """usage:
           token). `--only` prints exactly the sessions the equivalent `run
           --only` invocation would drive, so `agents --only r1_w2` and `agents
           --only integrator2` double as a dry-run of a filtered run. Producing
-          session names are exact. Judge ids are exact too, EXCEPT that a
+          session names are exact, and every id it prints can be fed back to
+          `run --only` as printed (`--only r1_a2_revise`, `--only
+          judge_t497f106d_j1`; the base copy's `a1` line is not a session).
+          Judge ids are exact too, EXCEPT that a
           pending round's judge field is deduplicated by DOCUMENT CONTENT once
           every arm exists: the listing marks the candidates, and `run` prints
           the members a content-identical package drops. Computing the list
