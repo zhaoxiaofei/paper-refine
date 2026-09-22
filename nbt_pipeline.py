@@ -8185,6 +8185,11 @@ class OnlySpec:
 
     def __init__(self):
         self.rounds = set()      # rounds named by any item
+        # rounds named by a BARE ordinal (`--only 1`, `--only 1-3`): a round in
+        # FULL, every step of its DAG including the judge step's downstream
+        # (the round decision). A round that appears in `rounds` only because a
+        # session item resolved to it is NOT in here.
+        self.rounds_in_full = set()
         self.pairs = {}          # round -> set of stages (empty set = all stages)
         self.stages = set()      # stages named without a round (all rounds)
         self.all_stages = False  # an `all`/`everything`/`*` item was given
@@ -8275,6 +8280,33 @@ class OnlySpec:
         if self.all_stages:
             return True
         return "judge" in (set(self.stages) | set(self.pairs.get(int(r)) or ()))
+
+    def judge_step_in_full(self, r: int) -> bool:
+        """Was the WHOLE judge STEP asked for in round `r` (panel AND its downstream)?
+
+        The round's DAG has steps, and the judge step's downstream is the round
+        DECISION (select the champion, pin it) and, through that pin, the next
+        round. `--only` runs the steps the operator asked for and stops there:
+
+          * `all`, a bare round in full (`--only 1`, `1:all`) and the judge stage
+            class (`judge`, `2:judge`) select the whole step -- its panel is the
+            CONFIGURED panel (`round_judges` per version) and the decision may run
+            once that panel is complete;
+          * a judge SESSION selector (`r1_judge_w2_j1`, `judge1`, `w2_j1`, a
+            version without an index) runs exactly those sessions and NOTHING
+            downstream: no winner is selected, nothing is pinned and the next
+            round is not entered, even if the sessions it ran happen to complete
+            the panel. A later `--only judge` (or a plain `run`) finishes the
+            panel and decides.
+        """
+        if self.all_stages:
+            return True
+        if "judge" in (set(self.stages) | set(self.pairs.get(int(r)) or ())):
+            return True
+        if int(r) in self.rounds_in_full:
+            return True
+        # `2:all` names every stage of round 2 without listing a stage
+        return int(r) in self.pairs and not self.pairs[int(r)]
 
     @staticmethod
     def _token_stage(tok: str) -> str:
@@ -8496,7 +8528,9 @@ def parse_only_spec(raw) -> OnlySpec:
                 spec.pairs.setdefault(r, set()).update(stages)
             continue
         if re.fullmatch(r"[0-9][0-9,\-\s]*", token):
-            spec.rounds |= parse_only_rounds(token, part)
+            bare = parse_only_rounds(token, part)
+            spec.rounds |= bare
+            spec.rounds_in_full |= bare      # a round in FULL (every step of its DAG)
             continue
         # `judge1` / `j1` / `judge_1`: judge index 1 of every version of every
         # round that has it.
@@ -17405,25 +17439,31 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
     run schedule to those sessions (see OnlySpec.entry_selected).
     """
     R = ctx.rounds_count()
-    judge_class = only is not None and only.judge_class_named(r)
-    judge_selected = only is not None and only.stage_selected(r, "judge")
+    # The judge WAVE runs when the judge step or a judge session was selected; the
+    # round DECISION (and therefore the next round) runs only when the whole judge
+    # STEP was asked for (see OnlySpec.judge_step_in_full).
+    judge_step = only is None or only.judge_step_in_full(r)
+    judge_selected = only is None or only.stage_selected(r, "judge")
     print()
     print(f"[run] ==================== ROUND {r}/{R} ====================")
     rrec = ctx.round_rec(r)
     rrec["status"] = "active"
     rrec["started"] = rrec.get("started") or utcnow()
     # `run --only r1_judge_w2_j1` (and its roundless form `w2_j1`) selects WHICH
-    # judge sessions of this round run: record it on the round so the judge wave,
-    # the aggregation and a LATER invocation of the same pending round all agree
-    # on the smaller panel. An explicit `--only judge` (no session) clears it.
+    # judge sessions this invocation RUNS. Asking for the whole judge step (a bare
+    # `judge`, a round in full, `all`, or a plain `run`) drops any such selection
+    # remembered from an earlier invocation, because then the round's panel is the
+    # CONFIGURED panel -- a session list never redefines it, it only says what to
+    # start now.
     if only is not None:
         _sel = only.judge_spec_for(r)
-        if _sel:
+        if judge_step:
+            if rrec.pop("judges_enabled", None) is not None:
+                print(f"[run] r{r}: this invocation asks for the WHOLE judge step; dropping the "
+                      f"judge-session selection remembered from an earlier invocation (the "
+                      f"round's panel is the configured {round_judges(ctx, r)} per version)")
+        elif _sel:
             rrec["judges_enabled"] = _sel
-        elif judge_class:
-            # A bare `--only judge` (or `2:judge`) asks for the WHOLE judge stage:
-            # drop a smaller panel remembered from an earlier selector run.
-            rrec.pop("judges_enabled", None)
     ctx.save_state()
     ph = {"cmd": cmd, "timeout": timeout, "jobs": jobs, "retries": retries,
           "manual": manual, "nowait": nowait, "poll": poll,
@@ -17529,6 +17569,20 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
     ok, paused = run_phase(ctx, judge_ids, label=f"r{r} judge", **ph_judge)
     if not ok:
         return False, paused
+
+    if not judge_step:
+        # A judge SESSION selection ran its sessions; the round DECISION (select +
+        # pin the champion) and, through the pin, the NEXT ROUND are steps the
+        # operator did not ask for. `--only` never continues into them: the round
+        # stays pending and the invocation exits non-zero.
+        print(f"[run] r{r} --only {only.label()}: the selected judge session(s) ran, but the "
+              f"ROUND DECISION is NOT started -- this selection does not ask for the judge STEP, "
+              f"so no winner is selected, nothing is pinned and round {r + 1} is not entered.")
+        print(f"[run] r{r}: finish the judge step when you want the round decided: "
+              f"`run --only judge` runs the remaining panel (the sessions already done are kept) "
+              f"and pins the champion, or use a plain `run`.")
+        ctx.save_state()
+        return False, False
 
     agg = aggregate_round(ctx, r, [e["id"] for e in field])
     # A shrunk panel must never produce a champion: if any field member is
@@ -20750,9 +20804,13 @@ USAGE_EXAMPLES = """usage:
           round), --only w2 (every round that has it), --only r1_a2_revise (the
           exact run id `agents` prints); one judge session is --only
           r1_judge_w2_j1, --only w2_j1, --only judge1 or the printed run id
-          --only judge_t497f106d_j1. Nothing else is started in that invocation,
-          and a round whose other stages are still pending stays incomplete for a
-          later `run`.
+          --only judge_t497f106d_j1. A session item runs ONLY that step: a judge
+          SESSION therefore leaves the round UNDECIDED (no winner, no pin, the
+          next round is not entered) -- the judge STEP (`--only judge`, a bare
+          round, `all`) also selects the round decision, running the remaining
+          panel (sessions already done are kept) before pinning. Nothing else is
+          started in that invocation, and a round whose other stages are still
+          pending stays incomplete for a later `run`.
   run-decide --root <dir> [same options as `run`] [same options as `decide`]
           run the pending rounds and then decide, in series: the `run` phase
           holds the root lock and finishes first, then `decide` recomputes the
@@ -21138,6 +21196,12 @@ def build_parser() -> argparse.ArgumentParser:
                          "audit session. One JUDGE session is --only r1_judge_w2_j1 (round 1's w2, "
                          "judge 1), --only w2_j1 (no round) or --only judge1 (judge 1 of every "
                          "version). "
+                         "A session item runs ONLY that step and then stops: it never continues into "
+                         "a step it did not select, so a judge SESSION runs its sessions and leaves "
+                         "the round UNDECIDED (no winner, no pin, the next round is not entered) -- "
+                         "the judge STEP (`--only judge`, a bare round, `all`) is what also selects "
+                         "the round decision, and it runs the remaining panel (sessions already done "
+                         "are kept) before pinning. "
                          "Nothing else is started in this invocation; a round whose other stages are "
                          "still pending stays incomplete and is resumed by a later `run` (or "
                          "another `--only`). Use `retry --run <ID>` first when you want a "

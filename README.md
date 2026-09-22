@@ -200,14 +200,20 @@ The selection items are comma-separated and combine as a **union**:
   version without a round (`w2_j1`, `i1_j2`, `orig_j1`) applies to every round
   that has it (a bare index, `judge1`/`j1`, is judge 1 of every version, and the
   exact run id `agents` prints — `judge_t497f106d_j1` — works as it stands).
-  Only the listed sessions get a sandbox/session/sheet; each
-  version's panel expectation is recomputed from the sessions that remain
-  (`J(V)*(|field|-1) + Σ J(other versions)`), so a pilot panel still decides the
-  round, the selector is recorded on the round's plan (so `decide` recomputes the
-  panel the round was actually judged with), and a later invocation of the same
-  pending round remembers it — an explicit bare `--only judge` clears it and runs
-  the whole panel. An unknown round, version or judge index is refused before
-  anything starts, with the values that exist.
+  Only the listed sessions get a sandbox/session/sheet. **A judge session is a
+  STEP, not the judge step**: it runs exactly those sessions and the invocation
+  then STOPS — the round decision (select + pin the champion, and through the pin
+  the next round) is a step of the round's DAG that the operator did not ask for,
+  so no winner is selected, nothing is pinned and the next round is not entered,
+  even if the sessions that ran happen to complete the panel. The round stays
+  pending and the invocation exits non-zero, saying how to finish: `--only judge`
+  runs the remaining panel (the sessions already done are kept) and decides, and
+  a plain `run` does the same. The panel a round is judged with is always the
+  CONFIGURED one (`--judges` per version), never a selected subset; a selection
+  remembered on a pending round only says which sessions to start next (a bare
+  `--only judge`, a round in full or a plain `run` drops it). An unknown round,
+  version or judge index is refused before anything starts, with the values that
+  exist.
 
 ```bash
 python nbt_pipeline.py run --root ./nbt_rounds --only 1,2        # only rounds 1 and 2
@@ -276,8 +282,9 @@ line, which is not an agent session, and `run --only` says so if you try it.
 ### Running only some judge sessions
 
 `--judges` says HOW MANY judges each version gets; `run --only` says WHICH of
-those sessions run in that invocation (see *Running only some of the steps*) — a
-cheap pilot of the panel before paying for the whole thing:
+those sessions run in that invocation (see *Running only some of the steps*) —
+useful to split a big panel over several invocations, or to spend the panel
+one session at a time:
 
 ```bash
 run --only r1_judge_w2_j1                    # one session: round 1, w2, judge 1
@@ -307,15 +314,31 @@ class+index spellings work here too (`r1_rewriter2_j1`, `r2_integrator1_j2`).
 `agents --root <dir> --only <selector>` shows the ids before anything starts.
 
 Only the selected sessions get a sandbox, a session and a sheet, and each
-version's panel expectation is adjusted to the sessions that remain
-(`expected = J(version)*(|field|-1) + Σ J(other versions)`), so the round still
-decides on the smaller panel rather than reporting a gap; a sheet for a session
-the selector does not enable is ignored with a diagnostic (also when the config
-was edited after some sheets were written). The selector is recorded on the
-round's plan, so `decide` recomputes the panel the round was actually judged
-with, and `status`/`DECISION_REPORT.md` show it (`judges/version=3, enabled=…`);
-a later invocation of the same pending round remembers it, while a bare
-`--only judge` clears it and runs the whole panel.
+session's panel expectation is the **configured** one
+(`expected = J(version)*(|field|-1) + Σ J(other versions)`, `J` = `--judges`):
+a session selection never redefines the panel, so a partially-run panel is
+simply incomplete and cannot decide the round.
+
+**A judge-session `--only` therefore stops before the round decision.** With
+`--only review,audit,revise,rewrite,merge,judge_<id>_j1` the producing stages and
+exactly that one judge session run, and then the invocation ends: the round stays
+pending, nothing is pinned, round 2 is not entered and the exit code is non-zero,
+with the message
+
+```
+[run] r1 --only …: the selected judge session(s) ran, but the ROUND DECISION is NOT started --
+this selection does not ask for the judge STEP, so no winner is selected, nothing is pinned and
+round 2 is not entered.
+[run] r1: finish the judge step when you want the round decided: `run --only judge` runs the
+remaining panel (the sessions already done are kept) and pins the champion, or use a plain `run`.
+```
+
+Asking for the judge STEP — `--only judge` (`2:judge` for one round), a bare
+round (`--only 1`), `all`, or no `--only` at all — is what selects the decision
+too: the remaining sessions of the configured panel are run (those already done
+are kept, not re-judged), and the round is decided and pinned once that panel is
+complete. The same rule applies to every step: `--only` runs what you asked for
+and never continues into a step you did not.
 
 ## Per-round judges and integrators
 

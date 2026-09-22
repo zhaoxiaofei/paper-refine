@@ -339,16 +339,35 @@ def test_only_judge_sessions():
           and st["runs"][judges[0]].get("judge_index") == 1,
           str([(j, st["runs"][j].get("target_id"), st["runs"][j].get("judge_index"))
                for j in judges]))
-    stats = rrec.get("stats") or {}
-    check("O8 the panel expectation follows the one enabled session",
-          stats and all(s.get("complete") for s in stats.values())
-          and stats["w1"]["expected_n"] == 1 and stats["orig"]["expected_n"] == 1,
-          str({v: (s.get("n"), s.get("expected_n")) for v, s in stats.items()}))
-    check("O9 the round decides on that pilot panel and records the selector",
-          rrec.get("status") == "done"
-          and (rrec.get("plan") or {}).get("judges_enabled") == "r1_w1_j1"
-          and "--only 'r1_judge_w1_j1'" in (p1.stdout + p1.stderr),
-          f"{rrec.get('status')} {(rrec.get('plan') or {}).get('judges_enabled')}")
+    # A judge SESSION selection runs exactly those sessions and NOTHING
+    # downstream: the round decision (select + pin) is a step of the round's DAG
+    # and `--only` never continues into a step the operator did not ask for. The
+    # panel expectation is the CONFIGURED one (3 per version here), never the
+    # selected subset.
+    check("O8 a session selection leaves the round UNDECIDED (no champion, no plan, exit != 0)",
+          p1.returncode != 0 and rrec.get("status") == "pending"
+          and not rrec.get("champion") and not rrec.get("plan") and not st.get("pinned"),
+          f"rc={p1.returncode} status={rrec.get('status')} champion={rrec.get('champion')}")
+    check("O8b the round says the decision was not started, and how to get it",
+          "the ROUND DECISION is NOT started" in (p1.stdout + p1.stderr)
+          and "run --only judge" in (p1.stdout + p1.stderr))
+    check("O9 the round's panel is still the CONFIGURED one, not the selected subset",
+          not (rrec.get("stats") or {})                       # nothing was aggregated/decided
+          and nb.round_judges(ctx_of(root), 1) == 3,
+          str(list((rrec.get("stats") or {}).items())[:1]))
+    # ... and finishing the judge step decides: the already-done session is kept.
+    p1b = run(root, "--only", "judge")
+    st = state_of(root)
+    rrec = st["rounds"]["1"]
+    n_field1 = len(rrec.get("field") or [])
+    check("O9b `--only judge` completes the panel (the done session is NOT re-run) and pins",
+          rrec.get("status") == "done" and rrec.get("champion")
+          and len(kinds_of(st, 1, "judge")) == n_field1 * 3         # configured 3 per version
+          and st["runs"][judges[0]]["attempts"] == 1                # the kept session ran once
+          and (rrec.get("plan") or {}).get("judges_enabled") == "all",
+          f"status={rrec.get('status')} champ={rrec.get('champion')} "
+          f"judges={len(kinds_of(st, 1, 'judge'))} field={n_field1} "
+          f"plan={(rrec.get('plan') or {}).get('judges_enabled')}")
 
     # --- a wrong session name is refused before any session starts --------
     tmp2 = scratch("nbt_only_judge_bad_")
@@ -376,21 +395,26 @@ def test_only_judge_sessions():
           st3["rounds"]["1"].get("judges_enabled") is None,
           str(st3["rounds"]["1"].get("judges_enabled")))
 
-    # --- a sheet for a session the selection does NOT include is ignored -----
+    # --- a sheet OUTSIDE the configured panel is ignored, never a gap --------
+    # (The old "a sheet for a session the selection excluded" case cannot arise
+    # any more: asking for the judge STEP clears the session selection, so the
+    # round's panel is always the configured one. A sheet beyond the configured
+    # 1..--judges range is still recorded and skipped.)
     ctx_o = nb.Ctx(root)
     ctx_o.load()
     field_ids = [e["id"] for e in ((st.get("rounds", {}).get("1") or {}).get("field_entries")
                                    or [])] or ["orig", "w1"]
-    ctx_o.state["runs"]["judge_disabled_j3"] = {
-        "id": "judge_disabled_j3", "kind": "judge", "round": 1, "status": "done",
-        "judge_index": 3, "target_id": "w1", "sandbox": "runs/judge_disabled_j3", "attempts": 1}
+    ctx_o.state["runs"]["judge_out_of_range_j9"] = {
+        "id": "judge_out_of_range_j9", "kind": "judge", "round": 1, "status": "done",
+        "judge_index": 9, "target_id": "w1", "sandbox": "runs/judge_out_of_range_j9",
+        "attempts": 1}
     ctx_o.save_state()
     agg = nb.aggregate_round(ctx_o, 1, field_ids)
-    check("O13 a done sheet for a NON-selected session is ignored, not a panel gap",
-          any("judge_disabled_j3" in line
-              for line in (agg["diagnostics"].get("disabled_sheets") or []))
+    check("O13 a sheet outside the configured panel range is ignored, not a panel gap",
+          any("judge_out_of_range_j9" in line
+              for line in (agg["diagnostics"].get("out_of_range_sheets") or []))
           and all(s.get("complete") for s in agg["stats"].values()),
-          str(agg["diagnostics"].get("disabled_sheets"))[:160])
+          str(agg["diagnostics"].get("out_of_range_sheets"))[:160])
 
 
 def test_only_agent_sessions():
@@ -554,10 +578,10 @@ def test_only_accepts_the_printed_ids():
           and "judge run id -> round 1, version w1, judge 2" in (p.stdout + p.stderr),
           str({rid: (st["runs"][rid]["status"], st["runs"][rid].get("target_id"),
                      st["runs"][rid].get("judge_index")) for rid in judges}))
-    check("H5 the round decides on that pilot panel and records the resolved selector",
-          st["rounds"]["1"].get("status") == "done"
-          and (st["rounds"]["1"].get("plan") or {}).get("judges_enabled") == "r1_w1_j2",
-          str((st["rounds"]["1"].get("plan") or {}).get("judges_enabled")))
+    check("H5b the round stays UNDECIDED: a judge session is a step, not the judge step",
+          p.returncode != 0 and st["rounds"]["1"].get("status") == "pending"
+          and not st["rounds"]["1"].get("plan") and not st.get("pinned"),
+          f"rc={p.returncode} status={st['rounds']['1'].get('status')}")
 
     # --- a wrong run id, and the `--only` preview of a run id --------------
     bad = run(root, "--only", "judge_tdeadbeef_j1")
@@ -604,20 +628,29 @@ def test_only_judge_the_pinned_base():
     st2 = state_of(root)
     judges = kinds_of(st2, 2, "judge")
     stats = (st2["rounds"]["2"].get("stats") or {})
-    n_field = len(st2["rounds"]["2"].get("field") or [])
     check("P4 the printed id then runs exactly that judge session",
           judges == [pin_id] and kind_of(st2, pin_id) == ("judge", pin, 1)
           and "judge run id -> round 2, version " + pin in (p.stdout + p.stderr),
           str({rid: kind_of(st2, rid) for rid in judges}))
-    check("P5 the round decides on that panel and records the resolved selector",
-          (st2["rounds"]["2"].get("plan") or {}).get("judges_enabled") == f"r2_{pin}_j1"
-          and st2["rounds"]["2"].get("status") == "done",
-          str((st2["rounds"]["2"].get("plan") or {}).get("judges_enabled")))
-    check("P6 the panel expectation counts the PIN as the field's base member",
-          all(s.get("complete") for s in stats.values())
-          and stats.get(pin, {}).get("expected_n") == n_field - 1
-          and stats.get("orig", {}).get("expected_n") == 1,
-          str({v: (s.get("n"), s.get("expected_n")) for v, s in stats.items()}))
+    check("P5 that session does NOT decide round 2 (the judge step was not asked for)",
+          p.returncode != 0 and st2["rounds"]["2"].get("status") == "pending"
+          and not st2["rounds"]["2"].get("plan") and not stats
+          and "the ROUND DECISION is NOT started" in (p.stdout + p.stderr),
+          f"rc={p.returncode} status={st2['rounds']['2'].get('status')} stats={bool(stats)}")
+    p5 = run(root, "--only", "judge")
+    st3 = state_of(root)
+    rr2 = st3["rounds"]["2"]
+    stats3 = rr2.get("stats") or {}
+    n_field = len(rr2.get("field") or [])
+    check("P6 `--only judge` then completes the panel (keeping the session already done) "
+          "and decides round 2 with the CONFIGURED panel",
+          rr2.get("status") == "done" and rr2.get("champion")
+          and len(kinds_of(st3, 2, "judge")) == n_field          # 1 judge x every field member
+          and (rr2.get("plan") or {}).get("judges_enabled") == "all"
+          and all(s.get("complete") for s in stats3.values())
+          and all(s.get("expected_n") == 2 * (n_field - 1) for s in stats3.values()),
+          f"status={rr2.get('status')} judges={len(kinds_of(st3, 2, 'judge'))} "
+          f"expected={ {v: s.get('expected_n') for v, s in list(stats3.items())[:3]} }")
 
 
 def test_agents_command():
