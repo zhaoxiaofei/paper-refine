@@ -513,39 +513,51 @@ so an operator (or a repair session) can act on it without opening the artifact.
 
 ### `--strict-artifacts fix`: one scoped repair session instead of a full re-run
 
-The artifact-quality layer fails attempts whose seeded decision tables are
-unfilled or closed with one blanket sentence — but re-running the whole stage to
-fix a disposition column costs 25 minutes and re-samples everything the stage
-produced (the 2026-09-22 root got a different 102-finding review out of the
-retry). `--strict-artifacts fix` (alias `--fix-artifacts`) spends ONE bounded
-session on the failed attempt's own sandbox first:
+Some failures are BOOKKEEPING: the stage did the work, but the report/ledger/
+sheet the postcheck reads is unfilled, inconsistent or unfinished. Re-running
+such a stage costs its whole session again and re-samples everything it produced
+(the 2026-09-22 root got a different 102-finding review out of a retry that was
+only fixing a disposition column). `--strict-artifacts fix` (alias
+`--fix-artifacts`) spends ONE bounded session on the failed attempt's own sandbox
+first. Every stage has a PROFILE — which problems are repairable bookkeeping,
+which files may change, and which evidence is pinned:
 
-* It runs only for a **review** whose postcheck failed on **nothing but**
-  artifact-quality problems. A missing deliverable, a coverage/contract
-  violation, the M1b vanishing-residue gate, the visual-inspection record or the
-  pristine copy stay plain failures: those encode judgement the reviewing
-  session has to supply, and a repair that satisfied them would launder a
-  missing review into a finished one.
-* It may write only in `review/artifacts/` (the listed decision tables) and
-  `review/work/` (scratch). It may **fill or replace the judged cells**
-  (`disposition`, `resolution`, `summary`, `decision`, …) and nothing else: rows
-  are identity — no row may be added, deleted, reordered or re-worded — and a
-  row whose evidence is not enough must be written
-  `unable — manual verification required: <what the author must check>`, never
-  invented. `review/findings.json`, `review/findings.md`, `review/round2/`, the
-  other artifact files (`M1_acronyms.md` above all), the prompt and the marker
-  must stay byte-identical.
-* The orchestrator verifies all of that on disk, then re-runs the **identical
-  postcheck**. A repair that clears nothing, or that went out of scope, is a
-  failed attempt like any other: the normal retry policy decides what happens
-  next, and the run's history says exactly which attempt was a repair, what it
-  changed, and where its transcript is. Each failed attempt gets at most one
-  repair session.
+| stage | repairable (examples) | may write | pinned evidence |
+|---|---|---|---|
+| `review` | the decision-artifact quality problems (empty cells, boilerplate closures, echoed OUTLINE summaries) | `review/artifacts/` (the seeded tables), `review/work/` | every table's row identity; `findings.json`/`md`, `round2/`, the other artifact files (`M1_acronyms.md` above all) |
+| `audit` | `audit.json` missing/unparseable/duplicated/missing dispositions | `audit/` | every existing disposition and every `adds` row; **new dispositions must be `confirm`** (a drop hides a finding from the revisers and needs the auditor's own evidence) |
+| `rewrite` / `revise` / `integrate` | a missing/empty/thin report or ledger (`REWRITE_REPORT.md`, `revision_report.json`, `DIFF_LEDGER.md`), the language-pass coverage rows, the visual record, the marker | the package's bookkeeping files (by name) and its `work/` scratch | every manuscript file of the package; the frozen review; the corpus inputs |
+| `judge` | a missing `checks` coverage map, `score`/`basis` that contradict the sheet's own ledger, bookkeeping ids, a missing grounding record | `scores.json`, `judge_review/` | `resolved`/`introduced` (the ledger IS the judgement), the comparison set, existing coverage entries; new coverage entries must be `unable` |
+
+A repair may **fill, never re-judge**: it must write
+`unable — manual verification required: <what the author must check>` where the
+sandbox's own evidence is not enough, and it may never touch a submission
+document, a citation, a number or another stage's deliverable. The orchestrator
+verifies the scope byte-for-byte (plus the per-stage structural rules above) and
+then re-runs the **identical postcheck**; anything else — a missing deliverable, a
+validation failure, the M1b vanishing-residue gate, residuals, the pristine copy —
+stays a plain failure. A repair that clears nothing, or that went out of scope, is
+a failed attempt like any other (the normal retry policy decides next), and each
+failed attempt gets at most one repair session.
 
 The prompt is written by the pipeline (`REPAIR_PROMPT.md` in the sandbox, deleted
 once the session ends), so the repair is a pipeline-defined, auditable step
 rather than a second opinion: `status` and `DECISION_REPORT.md` list it under the
 attempt history.
+
+### Every attempt's errors and warnings are kept
+
+`state.json` → `runs.<id>.attempts_log` holds one entry per attempt with its
+**complete** error and warning lists (no message-count cap; only a 512 KiB total
+guard, whose note says how many messages were left out), the true counts
+(`n_errors`/`n_warnings`), its timing, its `source` (postcheck / process /
+adopted / recheck / re-verify / manual / artifact-repair), the decision-artifact
+quality report, the marker's summary and where its archive and transcript live.
+The console prints every problem of a failed attempt in full, and the commands
+that drive or mutate a root also keep their whole console in
+`reports/<cmd>-<stamp>.log` (listed in `state.json` → `run_logs`), so the
+retry/backoff decisions, the judge advisories and the `[repair] …` decisions of
+an old invocation stay readable next to the reports they produced.
 
 ## Repository layout
 

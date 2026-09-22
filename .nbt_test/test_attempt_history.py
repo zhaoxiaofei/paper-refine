@@ -172,9 +172,20 @@ check("B5 the history is capped so a retry loop cannot grow state.json without b
       and proc["attempts_log"][-1]["attempt"] > nb.ATTEMPTS_LOG_LIMIT,
       f"{len(proc['attempts_log'])} entries, last attempt "
       f"{proc['attempts_log'][-1]['attempt']}")
-capped = nb._attempt_messages([f"m{i}" for i in range(nb.ATTEMPT_MESSAGES_PER_ATTEMPT + 3)])
-check("B6 a huge message list is capped with an explicit note",
-      len(capped) == nb.ATTEMPT_MESSAGES_PER_ATTEMPT + 1 and "not copied" in capped[-1])
+# EVERY message of an attempt is kept (no count cap -- that is how attempt 1's two
+# other problems disappeared on the 2026-09-22 root); the only guard left is a
+# total-size cap, and it says exactly how many messages it left out.
+many = [f"m{i}" for i in range(2000)]
+kept = nb._attempt_messages(many)
+check("B6 every message is kept, however many an attempt produced",
+      len(kept) == len(many) and kept[0] == "m0" and kept[-1] == "m1999",
+      f"{len(kept)} of {len(many)}")
+huge = ["x" * nb.ATTEMPT_MESSAGE_LIMIT for _ in range(
+    nb.ATTEMPT_LIST_BYTES_LIMIT // nb.ATTEMPT_MESSAGE_LIMIT + 5)]
+capped = nb._attempt_messages(huge)
+check("B7 a pathological total size is cut, and the note says how much was left out",
+      len(capped) < len(huge) and "NOT copied into" in capped[-1],
+      f"{len(capped)} of {len(huge)}")
 
 print()
 print("== C. a failed attempt's artifacts survive the rebuild ==")
@@ -299,6 +310,37 @@ check("G3 the history's attempt carries that same start time and duration",
       rec3["attempts_log"][1]["started"] == header.split("start ")[1].rstrip(" =")
       and rec3["attempts_log"][1]["duration"] == round(res["dur"], 1),
       f"{rec3['attempts_log'][1]['started']} vs {header}")
+
+print()
+print("== H. the invocation log (reports/<cmd>-<stamp>.log) ==")
+root_h = scratch("nbt_hist_h_")
+log_path = nb.start_run_log("run", root_h, ["nbt_pipeline.py", "run", "--root", str(root_h)])
+check("H1 start_run_log opens reports/<cmd>-<stamp>.log with a header",
+      log_path.is_file() and log_path.parent.name == "reports"
+      and "nbt_pipeline run" in log_path.read_text(encoding="utf-8")
+      and "--root" in log_path.read_text(encoding="utf-8"), str(log_path))
+_stdout, _stderr = sys.stdout, sys.stderr
+nb.install_run_log(log_path)
+print("hello from the run log")
+sys.stdout, sys.stderr = _stdout, _stderr
+check("H2 the installed tee mirrors both console streams into the file",
+      "hello from the run log" in log_path.read_text(encoding="utf-8"))
+ctx_h = build_root(scratch("nbt_hist_h2_"))
+nb.CURRENT_RUN_LOG = log_path
+ctx_h.save_state()
+saved = json.loads(ctx_h.state_path.read_text(encoding="utf-8"))
+nb.CURRENT_RUN_LOG = None
+check("H3 a saved root records the invocation's log under `run_logs`",
+      (saved.get("run_logs") or []) and str(saved["run_logs"][-1]).endswith(log_path.name),
+      str(saved.get("run_logs")))
+inner = nb.start_run_log("retry", ctx_h.root, ["nbt_pipeline.py", "retry"])
+nb.CURRENT_RUN_LOG = inner
+ctx_h.save_state()
+saved = json.loads(ctx_h.state_path.read_text(encoding="utf-8"))
+nb.CURRENT_RUN_LOG = None
+check("H4 a log inside the root is recorded as a root-relative path",
+      saved["run_logs"][-1] == f"reports/{inner.name}",
+      f"{saved['run_logs'][-1]!r} vs {f'reports/{inner.name}'!r}")
 
 for d in TMPDIRS:
     shutil.rmtree(d, ignore_errors=True)

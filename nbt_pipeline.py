@@ -802,7 +802,14 @@ ATTEMPTS_DIRNAME = "_attempts"
 # the full evidence, and `prune` reclaims it with the round it belongs to.
 ATTEMPTS_LOG_LIMIT = 25
 ATTEMPT_MESSAGE_LIMIT = 4000
-ATTEMPT_MESSAGES_PER_ATTEMPT = 60
+# EVERY message of an attempt is kept: the operator asked for the complete
+# errors/warnings of the first attempt, the first retry, the second retry, ...
+# and a capped list is exactly how attempt 1's two other problems disappeared on
+# the 2026-09-22 root. The only guard left is a total BYTES cap per attempt (a
+# runaway postcheck could otherwise write megabytes into state.json): when it
+# triggers, the note says how many messages were left out, and the attempt's
+# archived `record.json`, its transcript and the run log still carry them.
+ATTEMPT_LIST_BYTES_LIMIT = 512 * 1024
 # The archive excludes the re-derivable INPUT corpora: every materialization
 # rewrites them from hash-verified sources, and copying them would multiply a
 # 180 MB sandbox by every retry. What is preserved is what the ATTEMPT produced,
@@ -4729,6 +4736,113 @@ def install_timestamped_streams() -> None:
             pass
 
 
+class RunLogStream:
+    """Tee everything the pipeline prints into the root's per-invocation run log.
+
+    The attempt history (`state.json` -> `attempts_log`, `runs/_attempts/`) keeps
+    each ATTEMPT's diagnostics; this keeps the INVOCATION's console, line for
+    line, next to the reports it produced -- including the retry/backoff lines,
+    the judge-panel advisories and the `[repair] ...` decisions that belong to no
+    single attempt. Installed OUTSIDE `TimestampedStream`, so the file carries the
+    same stamped lines the operator saw.
+    """
+
+    def __init__(self, stream, path: Path):
+        self._stream = stream
+        self.path = path
+        self._fh = open(path, "a", encoding="utf-8")
+
+    def write(self, text) -> int:
+        if not isinstance(text, str):
+            text = str(text)
+        try:
+            self._fh.write(text)
+            self._fh.flush()
+        except (OSError, ValueError):
+            pass
+        return self._stream.write(text)
+
+    def flush(self) -> None:
+        try:
+            self._fh.flush()
+        except (OSError, ValueError):
+            pass
+        try:
+            self._stream.flush()
+        except OSError:
+            pass
+
+    def close(self) -> None:
+        try:
+            self._fh.close()
+        except (OSError, ValueError):
+            pass
+
+    def isatty(self) -> bool:
+        try:
+            return bool(self._stream.isatty())
+        except (AttributeError, OSError):
+            return False
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+LOGGING_COMMANDS = ("setup", "run", "run-decide", "decide", "retry", "prune", "redline")
+# The path of the invocation's run log (set by `main`, recorded by
+# `save_state`): a root accumulates the console of its invocations, so the
+# retry/backoff lines and the judge advisories of an old run are still readable.
+CURRENT_RUN_LOG = None
+
+
+def start_run_log(cmd: str, root, argv=None) -> Path:
+    """Open `reports/<cmd>-<stamp>.log` and mirror stdout/stderr into it.
+
+    Returns the path (None-ish empty Path on failure). Called by `main()` for the
+    commands that drive or mutate a root: `status`/`--help` stay quiet. The file
+    is also recorded on the root as `run_logs` so a later inspection can find the
+    console of any invocation, and `setup` writes into the root it is creating.
+    """
+    try:
+        reports = Path(root) / "reports"
+        reports.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        path = reports / f"{cmd}-{stamp}.log"
+        header = (f"# nbt_pipeline {cmd} -- {utcnow()}\n"
+                  f"# root: {Path(root).resolve()}\n"
+                  f"# argv: {' '.join(str(a) for a in (argv or []))}\n")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(header)
+        return path
+    except OSError:
+        return Path()
+
+
+def install_run_log(path: Path) -> None:
+    """Mirror both console streams into `path` (see `RunLogStream`)."""
+    if not path or not str(path):
+        return
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if isinstance(stream, RunLogStream):
+            continue
+        try:
+            setattr(sys, name, RunLogStream(stream, path))
+        except Exception:                                        # noqa: BLE001
+            pass
+
+
+def begin_run_log(cmd: str, root, argv=None) -> Path:
+    """Start the invocation's run log, mirror the console into it, say where it is."""
+    global CURRENT_RUN_LOG
+    path = start_run_log(cmd, root, argv or sys.argv)
+    if path and str(path):
+        CURRENT_RUN_LOG = path
+        install_run_log(path)
+        print(f"[{cmd}] run log: {path}")
+    return path
+
+
 def nat_key(s: str):
     return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", str(s))]
 
@@ -8157,6 +8271,15 @@ class Ctx:
 
     def save_state(self) -> None:
         self.state["updated"] = utcnow()
+        if CURRENT_RUN_LOG:
+            try:
+                rel = str(Path(CURRENT_RUN_LOG).resolve().relative_to(self.root.resolve()))
+            except (ValueError, OSError):
+                rel = str(CURRENT_RUN_LOG)
+            logs = self.state.setdefault("run_logs", [])
+            if rel not in logs:
+                logs.append(rel)
+                del logs[:-20]
         write_json_atomic(self.state_path, self.state)
 
     # ---- cross-process exclusion ----
@@ -9449,14 +9572,27 @@ def attempt_archive_dir(ctx: Ctx, rec: dict, attempt: int = None) -> Path:
 
 
 def _attempt_messages(msgs) -> list:
-    """A bounded copy of a postcheck's message list for state.json."""
-    msgs = list(msgs or [])
-    out = [str(m)[:ATTEMPT_MESSAGE_LIMIT] for m in msgs[:ATTEMPT_MESSAGES_PER_ATTEMPT]]
-    extra = len(msgs) - len(out)
-    if extra > 0:
-        out.append(f"... {extra} further message(s) were not copied into state.json; the full "
-                   f"list is in this attempt's archived sandbox (record.json and its postcheck "
-                   f"were written from the same run)")
+    """The COMPLETE message list of one attempt, for the run record.
+
+    No message-count cap: every error and every warning of every attempt (the
+    first one, the first retry, the second retry, ...) is recorded, because a
+    truncated list is how two of attempt 1's three problems disappeared on the
+    2026-09-22 root. Only a pathological total size is cut (512 KB per list), and
+    then the note says exactly how many messages were left out -- they are still
+    in the attempt's archive and in the run log.
+    """
+    msgs = [str(m) for m in list(msgs or [])]
+    out, used = [], 0
+    for i, m in enumerate(msgs):
+        text = m[:ATTEMPT_MESSAGE_LIMIT]
+        if used + len(text) > ATTEMPT_LIST_BYTES_LIMIT:
+            out.append(f"... {len(msgs) - i} further message(s) were NOT copied into "
+                       f"state.json (this attempt's list exceeds "
+                       f"{ATTEMPT_LIST_BYTES_LIMIT // 1024} KiB); the complete list is in the "
+                       f"attempt's archived record.json and in the run log under reports/")
+            break
+        out.append(text)
+        used += len(text)
     return out
 
 
@@ -9481,10 +9617,18 @@ def record_attempt(ctx: Ctx, rec: dict, ok: bool, errors=None, warnings=None,
         "duration": rec.get("last_duration"),
         "status": rec.get("status"),
         "ok": bool(ok),
+        # The TRUE totals, next to the (complete, but size-capped) lists: an
+        # operator can see at a glance how many problems an attempt carried even
+        # if a pathological list was cut.
+        "n_errors": len(list(errors or [])),
+        "n_warnings": len(list(warnings or [])),
         "errors": _attempt_messages(errors),
         "warnings": _attempt_messages(warnings),
         "artifact_quality": rec.get("artifact_quality") or None,
         "summary": rec.get("summary") or None,
+        "sandbox": rec.get("sandbox"),
+        "prompt": PROMPT_FILE,
+        "checked_at": (rec.get("postcheck") or {}).get("checked_at"),
         "archive": str(attempt_archive_dir(ctx, rec).relative_to(ctx.root)),
         "agent_log": None,
     }
@@ -12791,20 +12935,17 @@ short: which files you completed, and which rows you left `unable` (with the rea
 """
 
 
-def start_repair_session(ctx: Ctx, ex, running: dict, flight: dict, rec: dict, problems: list,
-                         cmd: list, timeout: int) -> bool:
-    """Submit the scoped repair session for one repairable failure.
+def prepare_repair_session(ctx: Ctx, rec: dict, problems: list):
+    """Write the repair prompt, pin the scope, record the attempt. None if impossible.
 
     The session runs in the FAILED ATTEMPT'S OWN sandbox (nothing is rebuilt, so
     it sees exactly what the postcheck judged) and counts as an attempt of the
     same run: `runs/_attempts/<run>/attempt-<n>/`, its transcript under
     `runs/_logs/`, and its outcome in `attempts_log` (source `artifact-repair`).
-    Returns False when it cannot start (no sandbox), so the caller falls through
-    to the normal retry.
     """
     sb = ctx.sandbox_of(rec)
     if not sb.is_dir():
-        return False
+        return None
     n = next_attempt_number(rec)
     (sb / REPAIR_PROMPT_FILE).write_text(repair_prompt(ctx, rec, problems), encoding="utf-8")
     guard = snapshot_repair_guard(sb, rec)
@@ -12814,17 +12955,43 @@ def start_repair_session(ctx: Ctx, ex, running: dict, flight: dict, rec: dict, p
     # The repair appends to the same transcript file as the stage session it
     # repairs (each session writes its own header naming the attempt), so the
     # archive keeps one timeline for that sandbox.
-    log_name = "_agent.log"
-    fut = ex.submit(_execute_attempt_in, sb, rec, cmd,
-                    min(int(timeout or REPAIR_TIMEOUT_MAX), REPAIR_TIMEOUT_MAX),
-                    REPAIR_PROMPT_FILE, log_name, False)
-    running[fut] = rec["id"]
-    flight[fut] = {"rid": rec["id"], "attempt": n, "problems": list(problems), "guard": guard,
-                   "log": str(sb.relative_to(ctx.root) / log_name)}
-    ctx.save_state()
+    flight = {"rid": rec["id"], "attempt": n, "problems": list(problems), "guard": guard,
+              "log": str(sb.relative_to(ctx.root) / "_agent.log")}
     scope = str((repair_profile(rec) or {}).get("scope") or "").split(" plus ")[0]
     print(f"  [repair] {rec['id']}: {len(problems)} repairable bookkeeping problem(s) -> one "
           f"scoped repair session (attempt {n}; it may write {scope} and nothing else)")
+    return flight
+
+
+def start_repair_session(ctx: Ctx, ex, running: dict, flight: dict, rec: dict, problems: list,
+                         cmd: list, timeout: int) -> bool:
+    """Submit a prepared repair session to the round's executor (production stages)."""
+    prepared = prepare_repair_session(ctx, rec, problems)
+    if prepared is None:
+        return False
+    fut = ex.submit(_execute_attempt_in, ctx.sandbox_of(rec), rec, cmd,
+                    min(int(timeout or REPAIR_TIMEOUT_MAX), REPAIR_TIMEOUT_MAX),
+                    REPAIR_PROMPT_FILE, "_agent.log", False)
+    running[fut] = rec["id"]
+    flight[fut] = prepared
+    ctx.save_state()
+    return True
+
+
+def run_repair_session_now(ctx: Ctx, rec: dict, problems: list, cmd: list, timeout: int) -> bool:
+    """Run a repair session synchronously (the round-based `run_phase` driver).
+
+    Returns True when the repair ran (whatever its outcome); the caller then looks
+    at `rec["status"]` exactly as it would after any other attempt.
+    """
+    prepared = prepare_repair_session(ctx, rec, problems)
+    if prepared is None:
+        return False
+    ctx.save_state()
+    res = _execute_attempt_in(ctx.sandbox_of(rec), rec, cmd,
+                              min(int(timeout or REPAIR_TIMEOUT_MAX), REPAIR_TIMEOUT_MAX),
+                              REPAIR_PROMPT_FILE, "_agent.log", False)
+    finish_repair_session(ctx, rec, prepared, res)
     return True
 
 
@@ -15298,21 +15465,19 @@ def apply_results(ctx: Ctx, results: dict) -> None:
 
 
 def print_failure(rid: str, errors, note: str = "") -> None:
-    """Every problem of one failed attempt, one per line.
+    """EVERY problem of one failed attempt, one per line, in full.
 
     The old line joined the postcheck's messages and cut the result at 140
     characters, so an attempt that failed on three artifacts reported one of them
-    and half a sentence of it -- the other two were only in state.json. The full
-    list stays available (state.json `attempts_log`, the archived sandbox, and the
-    next session's prior-failure block); this prints the first few IN FULL.
+    and half a sentence of it -- the other two were only in state.json. Nothing
+    is cut now: the console (and therefore the run log under reports/) carries the
+    complete list, which is also what state.json `attempts_log` and the attempt's
+    archive hold.
     """
     msgs = [str(e) for e in (errors or [])]
     print(f"  [FAIL] {rid}: {len(msgs)} problem(s)" + (f" -- {note}" if note else ""))
-    for m in msgs[:8]:
+    for m in msgs:
         print(f"        - {m}")
-    if len(msgs) > 8:
-        print(f"        ... {len(msgs) - 8} more (full list: state.json attempts_log / "
-              f"runs/{ATTEMPTS_DIRNAME}/{rid}/)")
 
 
 def manual_run_one(ctx: Ctx, rec: dict, poll: int, timeout: int) -> None:
@@ -15544,8 +15709,19 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
             results = execute_wave(ctx, to_execute, cmd, timeout, jobs)
             apply_results(ctx, results)
             for rid in to_execute:
-                if ctx.run(rid)["status"] != "done":
-                    failures_in_phase[rid] = failures_in_phase.get(rid, 0) + 1
+                rec = ctx.run(rid)
+                if rec["status"] == "done":
+                    continue
+                # Before spending the next retry (and rebuilding the sandbox the
+                # repair needs), give a repairable bookkeeping failure its ONE
+                # scoped repair session -- the judge wave and the other
+                # round-driven stages come through here, not through the
+                # dependency scheduler.
+                problems = repairable_artifact_failure(ctx, rec)
+                if problems and run_repair_session_now(ctx, rec, problems, cmd, timeout):
+                    if ctx.run(rid)["status"] == "done":
+                        continue
+                failures_in_phase[rid] = failures_in_phase.get(rid, 0) + 1
     remaining = [rid for rid in ids if ctx.run(rid)["status"] != "done"]
     if remaining:
         paused = [rid for rid in remaining if ctx.run(rid)["status"] == "pending"
@@ -16196,6 +16372,9 @@ def cmd_setup(args) -> None:
     ctx = Ctx(root)
     ctx.runs_dir.mkdir(parents=True, exist_ok=True)
     ctx.reports_dir.mkdir(parents=True, exist_ok=True)
+    # From here on the root exists: keep this invocation's console in it (the
+    # run log the operator asked for, next to the reports it produces).
+    begin_run_log("setup", root, sys.argv)
     print(f"[setup] copying {len(files)} file(s) from {source} -> {ctx.pristine}")
     shutil.copytree(source, ctx.pristine)
     # Copy the script that is RUNNING, not its basename resolved against the CWD:
@@ -19405,6 +19584,15 @@ def main() -> None:
     install_timestamped_streams()
     parser = build_parser()
     args = parser.parse_args()
+    # The commands that drive or mutate a root keep their console in the root
+    # (`reports/<cmd>-<stamp>.log`, and `state.json` -> `run_logs`): the attempt
+    # history holds each attempt's diagnostics, this holds the INVOCATION --
+    # retry/backoff decisions, judge advisories, repair decisions, panel news.
+    # (`setup` starts its own log once the root exists -- see cmd_setup: writing
+    # into a not-yet-created root would make it non-empty and fail its own check.)
+    if getattr(args, "cmd", "") in LOGGING_COMMANDS \
+            and getattr(args, "cmd", "") != "setup" and getattr(args, "root", None):
+        begin_run_log(args.cmd, args.root, sys.argv)
     # The digest cache is enabled only for a quiescent READ-ONLY audit (and only
     # when no other pipeline process holds the root lock); see the block comment
     # above sha256_file(). The emitted note warns when a live run forced it off.

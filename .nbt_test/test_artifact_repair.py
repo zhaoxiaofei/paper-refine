@@ -109,15 +109,21 @@ check("A5 an old root's boolean config is read as on/off",
       and nb.artifact_policy_of(empty) == "on")
 
 
-def setup_root(tmp: Path, policy: str = None) -> Path:
+def setup_root(tmp: Path, policy: str = None, *, rounds: int = 1, judges: str = "1",
+               rewrites: str = "1", revises: str = "1", audit: str = None,
+               integrators: str = None) -> Path:
     source = tmp / "source"
     (source / "raw_figs").mkdir(parents=True)
     write(source / "manuscript-b.md", "title\n")
     write(source / "raw_figs" / "data.tsv", "a\tb\n")
     root = tmp / "root"
     cmd = [sys.executable, str(WS / "nbt_pipeline.py"), "setup", "--source", str(source),
-           "--root", str(root), "--rounds", "1", "--judges", "1", "--rewrites", "1",
-           "--revises", "1"]
+           "--root", str(root), "--rounds", str(rounds), "--judges", str(judges),
+           "--rewrites", str(rewrites), "--revises", str(revises)]
+    if audit is not None:
+        cmd += ["--audit", audit]
+    if integrators is not None:
+        cmd += ["--integrators", integrators]
     if policy:
         cmd += ["--strict-artifacts", policy]
     subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -494,6 +500,139 @@ check("E11 policy `off` records the report as warnings and completes",
 
 for d in TMPDIRS:
     shutil.rmtree(d, ignore_errors=True)
+
+print()
+print("== F. end to end: one repair session per stage (audit/rewrite/revise/integrate/judge) ==")
+
+
+def run_stages(tmp: Path, policy: str, *, stages: str, bad: str = None, rewrites: str = "1",
+               revises: str = "0", judges: str = "1", audit: str = None,
+               integrators: str = None, env_extra: dict = None, retries: str = "0"):
+    """Drive the real CLI for a subset of stages, with the stub as every agent."""
+    root = setup_root(tmp, policy, judges=judges, rewrites=rewrites, revises=revises,
+                      audit=audit, integrators=integrators)
+    env = dict(os.environ)
+    if bad:
+        env["NBT_REPAIR_STUB_BAD"] = bad
+    env.update(env_extra or {})
+    proc = subprocess.run([sys.executable, str(root / "nbt_pipeline.py"), "run",
+                           "--root", str(root), "--only", stages, "--retries", retries,
+                           "--retry-backoff", "0",
+                           "--agent-cmd", json.dumps([sys.executable, str(STUB_REPAIR)]),
+                           "--judge-agent-cmd", json.dumps([sys.executable, str(STUB_REPAIR)])],
+                          capture_output=True, text=True, timeout=900, env=env)
+    state = json.loads((root / "state.json").read_text(encoding="utf-8"))
+    return root, proc, state
+
+
+def repaired(state: dict, rid: str) -> bool:
+    """The run is done and its one repair session cleared the problems."""
+    rec = state["runs"].get(rid) or {}
+    reps = rec.get("repairs") or []
+    return (rec.get("status") == "done" and len(reps) == 1 and reps[0].get("ok") is True
+            and [(e["attempt"], e["source"], e["ok"]) for e in rec.get("attempts_log") or []]
+            == [(1, "postcheck", False), (2, "artifact-repair", True)])
+
+
+# --- audit: the repair may only ADD `confirm` dispositions ------------------
+root_a, proc_a, state_a = run_stages(scratch("nbt_rep_f_audit_"), "fix", stages="review,audit",
+                                     bad="r1_audit", revises="1", audit="on")
+check("F1 audit: a broken disposition sheet is repaired and the run is done",
+      repaired(state_a, "r1_audit"),
+      str([(r["id"], r["status"], len(r.get("repairs") or []))
+           for r in state_a["runs"].values()]))
+audit_doc = json.loads((root_a / "runs" / "r1_audit" / "audit" / "audit.json")
+                       .read_text(encoding="utf-8"))
+frozen = json.loads((root_a / "runs" / "r1_audit" / "review" / "findings.json")
+                    .read_text(encoding="utf-8"))["findings"]
+ids = {str(r.get("id")) for r in audit_doc["dispositions"]}
+check("F2 audit: every frozen id is disposed again, and no verdict was invented as a drop",
+      {str(f["id"]) for f in frozen} <= ids
+      and all(str(r.get("verdict")).lower() == "confirm" for r in audit_doc["dispositions"]),
+      f"{len(ids)} ids")
+
+# --- rewrite: the repair rewrites the missing report ------------------------
+root_w, proc_w, state_w = run_stages(scratch("nbt_rep_f_rewrite_"), "fix", stages="rewrite",
+                                     bad="r1_w1")
+report = root_w / "runs" / "r1_w1" / "rewritten" / "REWRITE_REPORT.md"
+check("F3 rewrite: the deleted REWRITE_REPORT.md is written again and the run is done",
+      repaired(state_w, "r1_w1") and report.is_file()
+      and "Organization map" in report.read_text(encoding="utf-8"),
+      report.read_text(encoding="utf-8")[:120] if report.is_file() else "missing")
+
+# --- revise: the repair completes the revision ledger -----------------------
+root_r, proc_r, state_r = run_stages(scratch("nbt_rep_f_revise_"), "fix", stages="review,revise",
+                                     bad="r1_a2_revise", revises="1", audit="off")
+ledger = json.loads((root_r / "runs" / "r1_a2_revise" / "revised" / "revision_report.json")
+                    .read_text(encoding="utf-8"))
+frozen_r = json.loads((root_r / "runs" / "r1_a2_revise" / "review" / "findings.json")
+                      .read_text(encoding="utf-8"))["findings"]
+named = {str((row or {}).get("id")) for row in ledger if isinstance(row, dict)}
+check("F4 revise: the ledger names every frozen id again and the run is done",
+      repaired(state_r, "r1_a2_revise")
+      and {str(f["id"]) for f in frozen_r} <= named
+      and any(str(r.get("verdict")) == "unable" for r in ledger),
+      f"named={sorted(named)}")
+
+# --- integrate: the repair writes the donor ledger --------------------------
+root_i, proc_i, state_i = run_stages(scratch("nbt_rep_f_integrate_"), "fix",
+                                     stages="rewrite,integrate", bad="r1_i1", rewrites="2",
+                                     integrators="0x1")
+diff = root_i / "runs" / "r1_i1" / "integrated" / "DIFF_LEDGER.md"
+donors = sorted(p.name for p in (root_i / "runs" / "r1_i1" / "others").iterdir() if p.is_dir())
+check("F5 integrate: the deleted DIFF_LEDGER.md is written again (one row per donor)",
+      repaired(state_i, "r1_i1") and diff.is_file()
+      and all(d in diff.read_text(encoding="utf-8") for d in donors) and donors,
+      f"donors={donors}")
+
+# --- judge: the repair completes the coverage map, never the ledger ---------
+root_j, proc_j, state_j = run_stages(scratch("nbt_rep_f_judge_"), "fix", stages="rewrite,judge",
+                                     bad="judge_", rewrites="2", integrators="0x0")
+judges = {rid: rec for rid, rec in state_j["runs"].items()
+          if "_judge_" in rid or rid.startswith("judge_")}
+check("F6 judge: every broken sheet is repaired and every judge run is done",
+      bool(judges) and all(rec["status"] == "done" for rec in judges.values())
+      and all(rec.get("repairs") for rec in judges.values()),
+      str([(rid, rec["status"], len(rec.get("repairs") or [])) for rid, rec in judges.items()]))
+sheet = json.loads((root_j / "runs" / sorted(judges)[0] / "scores.json").read_text(encoding="utf-8"))
+covered = {c.get("opponent_label"): set((c.get("checks") or {})) for c in sheet["comparisons"]}
+check("F7 judge: the repaired sheet covers every frozen check id with `unable` rows",
+      all(covered and all(cid in ids for cid in
+                          [f"M{i}" for i in range(1, 18)] + ["M18", "M19", "M20", "M21", "M22",
+                                                            "M23", "M24"] + ["J1", "J2", "J3", "J4"])
+          for ids in covered.values()),
+      str({k: len(v) for k, v in covered.items()}))
+
+# --- the guard, end to end, for a package stage -----------------------------
+root_e, proc_e, state_e = run_stages(scratch("nbt_rep_f_evil_"), "fix", stages="review,revise",
+                                     bad="r1_a2_revise", revises="1", audit="off",
+                                     env_extra={"NBT_REPAIR_STUB_EVIL": "1"})
+rec_e = state_e["runs"]["r1_a2_revise"]
+rep_e = (rec_e.get("repairs") or [{}])[0]
+check("F8 a repair that edits the package is rejected before its postcheck",
+      rec_e["status"] == "failed" and rep_e.get("ok") is False
+      and rep_e.get("postcheck_errors") is None
+      and any("MODIFIED revised/" in p for p in (rep_e.get("out_of_scope") or [])),
+      str(rep_e.get("out_of_scope"))[:200])
+
+# --- the attempt record and the run log hold EVERY error --------------------
+rec_f = state_e["runs"]["r1_a2_revise"]
+first = (rec_f.get("attempts_log") or [{}])[0]
+postcheck = [l for l in (proc_e.stdout + proc_e.stderr).splitlines()]
+check("F9 the attempt record keeps every error, with the true count",
+      first.get("n_errors") == len(first.get("errors") or []) >= 1
+      and not any("NOT copied into state.json" in e for e in first.get("errors") or []),
+      f"n_errors={first.get('n_errors')}")
+check("F10 the console prints every error of a failed attempt",
+      all(e in "\n".join(postcheck) for e in first.get("errors") or []),
+      str(first.get("errors"))[:160])
+run_logs = sorted((root_e / "reports").glob("run-*.log"))
+log_text = run_logs[-1].read_text(encoding="utf-8") if run_logs else ""
+check("F11 the invocation's console is kept in reports/run-*.log (attempts included)",
+      bool(run_logs) and all(e in log_text for e in first.get("errors") or [])
+      and str(run_logs[-1].relative_to(root_e)) in (state_e.get("run_logs") or []),
+      str([p.name for p in run_logs]))
+
 
 print()
 if FAILS:
