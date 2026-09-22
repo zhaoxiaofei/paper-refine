@@ -82,6 +82,12 @@ programmatically in R0 so no finding can be dropped.
 
 Columns: `id | category | severity | location | evidence | verdict | rationale | edit IDs | final status`
 
+- `category` keeps the review's category number. The defect CLASS it maps to is the judge panel's
+  vocabulary (highest priority first: `correctness > consistency > preservation > completeness >
+  formatting`; the mapping table is in `nbt-review/references/sweeps.md` → CLASSIFICATION). State
+  the class in the rationale whenever a row is disputed or resolved by a wording-only edit: an edit
+  the panel cannot name in that vocabulary reads as cosmetic, and the reviewer's finding then never
+  becomes an improvement a judge can see.
 - **verdict** (from R1): `confirmed` / `false-positive` / `clarification` / `manual-required` / `not-found-in-source`
 - **final status** (after edits): `fixed` / `fixed-with-caveat` / `clarification` / `placeholder-inserted` / `discarded` / `manual-required`
 
@@ -144,6 +150,18 @@ edit ID. **An unmapped hunk is a violation: revert it or record an explicit
 justification.** This is the locality proof — "only the intended sentences
 changed".
 
+**Improvement rows (`I-xxx`).** An edit that repairs a defect the frozen review
+did NOT name is legal when it is recorded, not hidden: give it an `I-xxx` id, the
+check id it belongs to (M1–M24 / J1–J4), the tier
+(`correctness|consistency|preservation|completeness|formatting|writing`), a
+severity (`critical|major|minor`), one line of evidence with a location, and the
+diff hunk that carries it. E6 still governs *claims* (see edit_rules.md: rigor
+repairs are legal; claims, interpretations and conclusion strength are not).
+Record ONE row per instance: five fixed instances are five `I-` rows, never one
+summary row, because the panel scores per instance. `I-` rows are not a
+substitute for the frozen findings — every `F-*`/`X-*` id still needs its own
+row.
+
 ## A8 — RESCAN ARTIFACTS + RESCAN FINDINGS
 
 V3 output: the M-sweep artifacts re-run over the ENTIRE revised corpus (using
@@ -180,7 +198,6 @@ A finding ID without a coverage row, or a row without evidence, means the
 task is not finished.
 
 ## APPENDIX: Edit rules E1–E6, P1, C (references/edit_rules.md)
-
 # Edit Rules E1–E6, Propagation P1, Code C — nbt-revise
 
 Applied during Step E (one edit at a time, in A4 plan order). Each rule
@@ -496,3 +513,4 @@ cannot be sourced. A number in the abstract, a legend or the cover letter may
 not stay unsourced — it is proved, cited, a declared parameter, or removed as
 decoration (never silently, and never by changing a scientific claim). Removing
 a number is a `preservation`-tier change: record it in CHANGELOG.md.
+

@@ -508,6 +508,18 @@ def test_scan():
             ("FMT-T7b", "mixed URL/email treatment"),
             ("FMT-P1", "em-dash density")):
         check(f"scan detects {label} ({rule})", rule in got, f"got {sorted(got)}")
+    # sweeps.md's M20 sweep lists the dash/quote family as `→ finding`
+    # ("mixed straight/curly quotation marks, a spaced hyphen used as a dash, or
+    # em-dash density above the user's cap → finding"), and the pipeline's own
+    # M20 seed text calls the em-dash density an editorial row that is a finding
+    # for the revision/integration arms. The tier column must say so, or a
+    # reviewer can close the row as "advisory -- editorial preference only" and
+    # the auditor (which attacks finding-tier rows) never sees it.
+    check("the M20 dash/quote rows the skill calls `→ finding` carry the finding tier",
+          fmt.tier_of("FMT-P1") == "finding" and fmt.tier_of("FMT-P2") == "finding"
+          and fmt.tier_of("FMT-T1") == "finding",
+          f"FMT-P1={fmt.tier_of('FMT-P1')} FMT-P2={fmt.tier_of('FMT-P2')} "
+          f"FMT-T1={fmt.tier_of('FMT-T1')}")
     protected = [r for r in info["rows"] if r["rule"] == "FMT-T6b"]
     check("the italic 'et al.' inside the Zotero field is field-protected",
           protected and all(r["protected"] and r["fix"] == "style-field" for r in protected),

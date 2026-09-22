@@ -1,4 +1,4 @@
-# Sweeps M1–M20 and Judgment Passes J1–J4 — nbt-review
+# Sweeps M1–M24 and Judgment Passes J1–J4 — nbt-review
 
 This file is the single source of truth for Phase 2. Follow it exactly.
 Every sweep entry specifies: purpose · scope · enumeration procedure (script
@@ -10,8 +10,8 @@ Two appendices are defined at the end of the mechanical-sweep list: **M18**
 **M19** (abstract/main-text length plus the user's cover-letter preference;
 always runs). **M20** (OOXML style/formatting uniformity; always runs, and its
 enumeration is supplied by the pipeline's code-side OOXML scan) follows them.
-New sweeps validated from the discovery round are appended after M20 as
-**M21, M22…** in the same format — do not insert into the middle (IDs are
+New sweeps validated from the discovery round are appended after the adopted
+M21–M24 as **M25, M26…** in the same format — do not insert into the middle (IDs are
 stable).
 
 ---
@@ -64,7 +64,7 @@ Every finding is ONE instance, formatted:
 
 ```
 F-NNN | location: <doc>/<section>/<paragraph|line|figure|table> | category: <0–5>
-check: <M1–M20|J1–J4> | severity: <Critical|Major|Minor> | status: <...>
+check: <M1–M24|J1–J4> | severity: <Critical|Major|Minor> | status: <...>
 evidence: "<short verbatim quote of the exact word/number/phrase>"
 problem: <1–2 sentence explanation>
 ```

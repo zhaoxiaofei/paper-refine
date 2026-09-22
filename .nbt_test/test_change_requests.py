@@ -102,6 +102,21 @@ def test_plan_and_ids():
           [nb.arm_of_vid(v) for v in ("a1", "w3", "a2", "a7", "i5")] ==
           ["base", "rewrite", "revise", "revise", "integrate"],
           str([nb.arm_of_vid(v) for v in ("a1", "w3", "a2", "a7", "i5")]))
+    # The module docstring's panel arithmetic must match the plan the default
+    # configuration builds: a1 deduplicates into the original, so round 1 has
+    # {original, w1, w2, a2, i1..i4} = 8 members and 2*3*(8-1) = 42 directed
+    # scores per version -- not "7 members" / 36 (D14 of the design audit).
+    default_field = (["orig"] + [v for v in nb.round_pool_ids(2, 1) if v != "a1"]
+                     + nb.round_integrated_ids(2, 1))
+    n_field, n_scores = len(default_field), 2 * nb.DEFAULTS["judges"][0] * (len(default_field) - 1)
+    doc = nb.__doc__ or ""
+    check("CR1a the module docstring's default round-1 field arithmetic matches the plan",
+          f"gives {n_field} members in round 1" in doc
+          and f"field of {n_field} gives {n_scores}" in doc
+          and f"{n_scores} with the {n_field}-member round-1" in doc,
+          f"plan={n_field} members / {n_scores} scores; "
+          f"docstring claims present: "
+          f"{[s for s in ('gives 7 members in round 1', 'field of 7 gives 36') if s in doc]}")
     check("CR1a there is no pairwise 'b*' arm any more",
           not nb.is_fresh_vid("b1") and not nb.is_fresh_vid("b2")
           and nb.arm_of_vid("b1") == "pinned",

@@ -44,9 +44,11 @@ python nbt_pipeline.py run-decide --root ./nbt_rounds
 #   ./nbt_rounds/final_clean_version/      the champion, renamed for the next run
 ```
 
-Useful flags: `--rounds N`, `--judges N`, `--rewrites M[,M…]`, `--revises N[,N…]`,
+Useful flags: `--rounds N`, `--judges N[,N…]`, `--rewrites M[,M…]`,
+`--revises N[,N…]`, `--integrators MASK[,MASK…]`,
 `--jobs N`, `--agent {codex,claude,manual}`, `--agent-cmd JSON`, `--retries N`,
-`--poll S` (manual mode), `--no-redline`. Setup-time policy flags:
+`--poll S` (manual mode), `--no-redline`, `run --only 1,2` (only rounds 1 and
+2; see *Running only some of the steps*). Setup-time policy flags:
 `--audit {off,on}` (the auditor stage), `--placeholder-lookup {off,online}`
 (resolve searchable hand-off markers before the sessions run),
 `--strict-artifacts` (fail a run whose decision tables are boilerplate or
@@ -154,7 +156,7 @@ K = 1+M+N integrations + the judge panel`:
 | `review` | `r<r>_review` | ONE frozen identification pass (`$nbt-review`) that feeds every revise session |
 | `audit` | `r<r>_audit` | **optional** (`setup --audit on`): an INDEPENDENT AUDITOR between the reviewer and the revisers — it disposes every frozen finding (confirm, or drop WITH evidence), promotes the reviewer's boilerplate `OK` closures of finding-tier rows into real `AU-*` findings, and hands the AUDITED list to the revision arms |
 | `revise` | `r<r>_a2…a{1+N}` | reviewed-and-revised versions that consume the frozen review (or the audited list, when the auditor ran) |
-| `integrate` | `r<r>_i1…iK` | "merge from the other versions": each pool member reworked with the WHOLE pool as donors |
+| `integrate` | `r<r>_i1…iK` | "merge from the other versions": every pool member SELECTED by the round's `--integrators` mask reworked with the WHOLE pool as donors (the default mask 0xFFFFFFFF selects all K = 1+M+N members) |
 | `judge` | `judge_t…_j…` | blind pairwise panels over the round's field (the id is an opaque token: it carries no round and no arm) |
 
 Each run keeps its sandbox under `runs/<id>/` (`base/`, `review/`, the stage's
@@ -164,23 +166,68 @@ is verified against the digest of the corpus the judges actually scored.
 
 ## Running only some of the steps
 
-`run --only <stages>` starts (or adopts) only the listed stage types in that
-invocation; everything else is left pending, and the round stays incomplete
-until it runs. Resume at any time with a later `run`, another `--only`, or
-`retry --run <ID>` (which resets one run so a COMPLETED stage can run again).
+`run --only <selection>` drives only the selected part of the pipeline in that
+invocation; everything else is left pending, and a round whose other stages have
+not run stays incomplete until they do. Resume at any time with a later `run`,
+another `--only`, or `retry --run <ID>` (which resets one run so a COMPLETED
+stage can run again).
+
+The selection items are comma-separated and combine as a **union**:
+
+* a **round ordinal** or range — `--only 1,2` runs only the first and second
+  rounds, every stage; `--only 1-3` is the same for rounds 1..3;
+* a **stage name** — the stage in every round: `rewrite`, `review`, `audit`,
+  `revise`, `integrate`, `judge`, plus the aliases `w`, `a`/`a2`, `i`, `merge`,
+  `j` (plurals work too);
+* **`ROUND:STAGE`** — one stage of one round (`2:merge`, `3:judge`;
+  `.`/`/` separate as well, and `all` stands for every stage, e.g. `2:all`).
 
 ```bash
+python nbt_pipeline.py run --root ./nbt_rounds --only 1,2        # only rounds 1 and 2
+python nbt_pipeline.py run --root ./nbt_rounds --only 2:review   # round 2's review only
 python nbt_pipeline.py run --root ./nbt_rounds --only review
 python nbt_pipeline.py run --root ./nbt_rounds --only revise
 python nbt_pipeline.py run --root ./nbt_rounds --only merge      # = integrate
 python nbt_pipeline.py run --root ./nbt_rounds --only judge
 python nbt_pipeline.py run --root ./nbt_rounds --only review,revise
+python nbt_pipeline.py run --root ./nbt_rounds --only 1,2:merge,3:judge
 ```
 
-Accepted names: `rewrite`, `review`, `revise`, `integrate`, `judge`, plus the
-aliases `w`, `a`/`a2`, `i`, `merge`, `j` (plurals work too); `all` (the default)
-means every stage. A plain `run` continues whatever is still pending;
-`run-decide` accepts the same flag and then decides.
+`all` (the default) means every round and every stage. An out-of-range round
+(`--only 7` in a 2-round pipeline) is refused immediately. Asking for a round
+whose predecessor is not finished (round 2 consumes round 1's pinned champion)
+is reported as the unmet dependency it is, and nothing is started. A plain
+`run` continues whatever is still pending; `run-decide` accepts the same flag
+and then decides.
+
+## Per-round judges and integrators
+
+Both are per-round command-line parameters with the same list rules as
+`--rewrites`/`--revises` (one integer applies to every round; a shorter list is
+extended by repeating its last element; a longer one is truncated):
+
+* `setup --judges 3,1` runs **3 judge sessions per version in round 1 and 1 in
+  round 2**. Each round's panel is complete only when every field member
+  carries its own round's `2*judges*(|field|-1)` directed scores, and the
+  decision report prints the per-round counts. Bump the final round when the
+  earlier rounds are for triage, or lower it to make a long run affordable.
+* `setup --integrators 0x5,0xFFFFFFFF` is a **32-bit mask per round** selecting
+  which agents run an integration session. Bit `k-1` belongs to the k-th member
+  of the round's pool `[a1, w1..wM, a2..a{1+N}]`, so in a round with M=2, N=1
+  (`pool = a1, w1, w2, a2`): `0x5` = bits 0 and 2 = only `i1` (a1 reworked) and
+  `i3` (w2 reworked) run; `0x0` runs no integration at all and the round's
+  field is the pool alone; the default `0xFFFFFFFF` means **every applicable
+  agent** (bits beyond the pool size are ignored, so the default keeps selecting
+  the whole pool whatever M and N are). A skipped arm costs no session, is never
+  judged and can never win — the round's recorded plan, the run log and
+  `DECISION_REPORT.md` all name the arms the mask left out.
+
+Masks accept decimal (`5`), hex (`0x5`, the documented default form) and the
+other Python integer-literal forms. A pool wider than 32 members cannot be
+addressed by the mask and is refused at setup. Like `--rewrites`/`--revises`,
+all four are `setup` parameters recorded in `pipeline_config.json` (and mirrored
+into `state.json`); edit the file to change a not-yet-finished round's plan, and
+note that a round already decided keeps the plan it was decided with.
 
 ## Style/formatting checks and repairs
 
@@ -462,6 +509,9 @@ Highlights: `test_pipeline.py` (prompts, gates, ranking), `test_length_limits.py
 setup/stage normalization, the seeded M20 artifact and its contract, plus a real
 LibreOffice render proving the blank page is gone), `test_stage_subset.py`
 (`--only` review/revise/merge/judge end-to-end with the stub agent),
+`test_only_rounds_integrators_judges.py` (`--only 1,2` / `--only 2:review` round
+filtering, the per-round `--integrators` mask including 0x0 and the arms it
+skips, and the per-round `--judges` panel expectation),
 `test_evidence_pack.py` (the pack is written for all five session layouts, the
 seeded files count as inputs not agent work, every prompt carries its block, the
 judge sandbox is proved to hold NO orchestrator artifact (blinding) while the

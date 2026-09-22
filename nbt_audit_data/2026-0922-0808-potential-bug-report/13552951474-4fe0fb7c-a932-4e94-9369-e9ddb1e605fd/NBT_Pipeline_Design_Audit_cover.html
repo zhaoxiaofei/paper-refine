@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;900&family=Noto+Sans+SC:wght@300;400;500;700;900&display=swap" rel="stylesheet">
+  <style>
+    @page { size: 794px 1123px; margin: 0; }
+    :root {
+      --page-bg: #f1f0ef;
+      --card-bg: #e8e7e4;
+      --header-fill: #504933;
+      --border: #cfcab8;
+      --icon: #8c7e52;
+      --accent: #87702a;
+      --text-primary: #1c1c1a;
+      --text-muted: #78766f;
+      --c-bg: #f1f0ef;
+      --c-accent: #87702a;
+      --c-text: #1c1c1a;
+      --c-muted: #78766f;
+      --c-mid: #504933;
+      --c-surface: #e8e7e4;
+    }
+    html, body {
+      margin: 0; padding: 0;
+      width: 794px; height: 1123px;
+      background: var(--c-bg);
+      font-family: 'Inter', 'Noto Sans SC', sans-serif;
+      color: var(--c-text);
+    }
+    @media screen {
+      html { height: auto; display: flex; justify-content: center; min-height: 100vh; background: var(--c-bg); }
+      body { transform-origin: top center; scale: min(1, calc(100vw / 794), calc(100vh / 1123)); margin: 0 auto; box-shadow: 0 0 60px rgba(0,0,0,0.18); }
+    }
+    .cover { width: 794px; height: 1123px; position: relative;
+             border: none; outline: none; box-shadow: none; }
+
+    /* Layer 1 - background grid (clipped) */
+    .layer1 { position: absolute; inset: 0; overflow: hidden; z-index: 1; }
+    .grid {
+      position: absolute; inset: 0;
+      background-image:
+        repeating-linear-gradient(0deg, rgba(80,73,51,0.05) 0 0.5px, transparent 0.5px 50px),
+        repeating-linear-gradient(90deg, rgba(80,73,51,0.05) 0 0.5px, transparent 0.5px 50px);
+    }
+
+    /* Layer 2 - structure: ultra-thick left anchor line */
+    .layer2 { position: absolute; inset: 0; z-index: 2; }
+    .anchor-line {
+      position: absolute;
+      left: 95px; top: 112px; bottom: 112px;
+      width: 8px;
+      background: var(--c-accent);
+    }
+
+    /* Layer 3 - content (left edge = line + 2U gap) */
+    .layer3 { position: absolute; inset: 0; z-index: 3; }
+    .kicker {
+      position: absolute; left: 178px; top: 168px;
+      font-size: 16pt; font-weight: 400; letter-spacing: 3pt;
+      text-transform: uppercase; color: var(--c-mid); opacity: 0.6;
+      max-width: 540px;
+    }
+    .hero {
+      position: absolute; left: 178px; top: 300px;
+      font-size: 54pt; font-weight: 900; line-height: 1.15;
+      color: var(--c-text); max-width: 560px;
+    }
+    .hero2 {
+      position: absolute; left: 178px; top: 478px;
+      font-size: 54pt; font-weight: 900; line-height: 1.15;
+      color: var(--c-accent); max-width: 560px;
+    }
+    .summary {
+      position: absolute; left: 178px; top: 588px;
+      font-size: 16pt; font-weight: 400; line-height: 1.6;
+      color: var(--c-text); opacity: 0.85; max-width: 476px;
+    }
+    .meta {
+      position: absolute; left: 178px; top: 852px;
+      font-size: 17pt; font-weight: 300; line-height: 1.5;
+      color: var(--c-muted);
+    }
+    .meta b { font-weight: 600; color: var(--c-mid); }
+    .footer {
+      position: absolute; left: 178px; bottom: 92px;
+      font-size: 16px; font-weight: 400; letter-spacing: 3px;
+      text-transform: uppercase; color: var(--c-muted); opacity: 0.6;
+    }
+  </style>
+</head>
+<body>
+  <div class="cover">
+    <div class="layer1"><div class="grid"></div></div>
+    <div class="layer2"><div class="anchor-line"></div></div>
+    <div class="layer3">
+      <div class="kicker">Design Audit &mdash; Multi-Agent Revision Pipeline</div>
+      <div class="hero">NBT Round<br>Pipeline</div>
+      <div class="hero2">Design Audit</div>
+      <div class="summary">A static, deep-dive review of the scoring, judging and convergence
+        design: cross-agent criteria conflicts, score non-convergence, judge cost
+        structure, and the pricing of grammar and semantic defects.</div>
+      <div class="meta">
+        <b>Static analysis</b> &middot; commit 7d19d80 (2026-09-22)<br>
+        Evidence cited as file:line &middot; 15 findings, 15 fixes
+      </div>
+      <div class="footer">Prepared for the pipeline operator &middot; Sept 2026</div>
+    </div>
+  </div>
+</body>
+</html>

@@ -79,6 +79,44 @@ def write_docx(p: Path, text: str) -> None:
         z.writestr("word/document.xml", doc)
 
 
+def split_table_cells(text: str) -> list:
+    """Split one table line on its UNESCAPED pipes, KEEPING `\\|` inside a cell.
+
+    The pipeline escapes a literal pipe in a cell as `\\|` (figure captions carry
+    them: "Figure 1 \\| A legend here."), so a plain `str.split("|")` shifts every
+    later cell. That is exactly how the stub used to leave a seeded row
+    undisposed: the shift made the row look filled at the disposition index.
+    Escapes are kept verbatim (this reads for read-modify-write).
+    """
+    cells, cur, i = [], [], 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\" and i + 1 < len(text):
+            cur.append(ch)
+            cur.append(text[i + 1])
+            i += 2
+            continue
+        if ch == "|":
+            cells.append("".join(cur))
+            cur = []
+            i += 1
+            continue
+        cur.append(ch)
+        i += 1
+    cells.append("".join(cur))
+    return [c.strip() for c in cells]
+
+
+def table_cells(line: str) -> list:
+    """The cells of one `| ... |` line, without its two delimiter pipes."""
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|") and not s.endswith("\\|"):
+        s = s[:-1]
+    return split_table_cells(s)
+
+
 def fill_seeded_tables(dirp: Path) -> None:
     """Fill the seeded decision tables the way the strict policy expects.
 
@@ -100,7 +138,7 @@ def fill_seeded_tables(dirp: Path) -> None:
         head_i = next((i for i, l in enumerate(lines) if l.strip().startswith("|")), None)
         if head_i is None:
             continue
-        header = [c.strip().lower() for c in lines[head_i].strip("|").split("|")]
+        header = [c.lower() for c in table_cells(lines[head_i])]
 
         def cell(cells, key, default=""):
             i = header.index(key) if key in header else None
@@ -111,11 +149,18 @@ def fill_seeded_tables(dirp: Path) -> None:
             line = lines[j]
             if not line.strip().startswith("|"):
                 continue
-            cells = [c.strip() for c in line.strip("|").split("|")]
-            if all(set(c) <= set("-: ") for c in cells):
+            cells = table_cells(line)
+            if all("-" in c and set(c) <= set("-: ") for c in cells):
                 continue
             if len(cells) < len(header):
                 cells += [""] * (len(header) - len(cells))
+            elif len(cells) > len(header):
+                # A wider row would shift the disposition index: trim stray empty
+                # cells first, then read positionally like the pipeline does.
+                while len(cells) > len(header) and not cells[0]:
+                    cells = cells[1:]
+                while len(cells) > len(header) and not cells[-1]:
+                    cells = cells[:-1]
             row_no = j - head_i
             rule = cell(cells, "rule")
             reason = (f"OK — {rule or 'row ' + str(row_no)}: reviewed against its own bar "

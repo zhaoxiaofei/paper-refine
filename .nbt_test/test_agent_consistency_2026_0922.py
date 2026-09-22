@@ -198,11 +198,76 @@ def test_check_id_coverage():
           set(stub_judge.JUDGE_CHECK_IDS) == set(expected)
           and set(stub_agent.JUDGE_CHECK_IDS) == set(expected),
           f"{len(stub_judge.JUDGE_CHECK_IDS)} vs {len(expected)}")
-    check("the review coverage contract requires M21-M24 too",
-          "M21" in nb.__dict__.get("__doc__", "") or True)  # constant check below
+    # The review postcheck requires M18-M24 coverage, so the SKILL the reviewer
+    # actually reads must list the same ids: a coverage table built from the
+    # skill's own list (M1-M17, J1-J4, M18-M20) fails the run with "coverage
+    # table is missing check id(s) ['M21', 'M22', 'M23', 'M24']". This check is
+    # the runtime proof of the contract (the old one was `... or True`, which
+    # could never fail).
+    tmp = scratch("nbt_cov_")
+    sb = tmp / "r1_review"
+    (sb / "base").mkdir(parents=True)
+    skill_ids = ([f"M{i}" for i in range(1, 18)] + ["M18", "M19", "M20"]
+                 + [f"J{i}" for i in range(1, 5)])
+    fj = {"submission_dir": "base",
+          "coverage": [{"check": c, "disposition": "clean -- basis: x"} for c in skill_ids]}
+    errs, warns = [], []
+    nb.check_review_contract(None, sb, fj, errs, warns)
+    check("the review postcheck really requires M21-M24",
+          any(all(c in e for c in ("M21", "M22", "M23", "M24")) for e in errs),
+          str(errs)[:160])
+    skill = (WS / "nbt-skills" / "nbt-review" / "SKILL.md").read_text(encoding="utf-8")
+    sweeps = (WS / "nbt-skills" / "nbt-review" / "references" / "sweeps.md").read_text(
+        encoding="utf-8")
+    coverage_line = next((l for l in skill.splitlines() if l.startswith("5. Coverage table")), "")
+    acceptance_line = next((l for l in skill.splitlines() if "coverage table lists every" in l), "")
+    format_line = next((l for l in sweeps.splitlines() if l.startswith("check:")), "")
+    check("SKILL.md's coverage table lists the adopted M21-M24",
+          "M21–M24" in coverage_line or all(c in coverage_line
+                                            for c in ("M21", "M22", "M23", "M24")),
+          coverage_line[:160])
+    check("SKILL.md's acceptance list no longer calls M21+ 'once adopted'",
+          ("M21–M24" in acceptance_line
+           or all(c in acceptance_line for c in ("M21", "M22", "M23", "M24")))
+          and "once proposals are adopted" not in acceptance_line, acceptance_line[:160])
+    check("sweeps.md's FINDING FORMAT admits M21-M24 finding ids",
+          "M1–M24" in format_line and "M1–M20|J1–J4" not in format_line,
+          format_line[:160])
     src = (WS / "nbt_pipeline.py").read_text(encoding="utf-8")
     check("the review postcheck's required-coverage list names M21-M24",
           'wanted += ["M21", "M22", "M23", "M24"]' in src)
+
+
+def test_judge_tier_and_sweep_scope():
+    """The comparison session's own directives must carry its own contract.
+
+    Contract v3 requires a disposition for every frozen check id M1-M17,
+    M18-M24, J1-J4, and the graded basis has six tiers -- but the directive's
+    task-1 sentence stopped the frozen set at M1-M17 (+M18-M20) "ONLY", and its
+    PRIORITY ORDER listed five tiers (no `writing`, the tier the WRITING RUBRIC
+    in the same prompt scores). A judge that obeys the sentence cannot honestly
+    fill the M21-M24 dispositions, and one that obeys the priority order has no
+    place for the writing rows.
+    """
+    print()
+    print("== the judge's scope sentence and priority order match its own contract ==")
+    jp = prompts()["judge"]
+    jl = jp.splitlines()
+    start = next((i for i, l in enumerate(jl) if "FROZEN SWEEP SET" in l), None)
+    # The sentence wraps across lines, and the ids may be written as a range
+    # ("M18-M24"), exactly like the skill's own "M1-M17".
+    frozen = " ".join(jl[start:start + 4]) if start is not None else ""
+    check("the frozen-set sentence names the adopted M21-M24",
+          "M18-M24" in frozen or "M21-M24" in frozen
+          or all(f"M{i}" in frozen for i in range(21, 25)), frozen[:200])
+    priority = next((l for l in jp.splitlines() if "correctness  >" in l), "")
+    positions = [priority.find(t) for t in nb.BASIS_TIERS]
+    check("the priority order lists every graded-basis tier, in order",
+          all(p >= 0 for p in positions) and positions == sorted(positions),
+          f"{priority.strip()[:120]} vs BASIS_TIERS={nb.BASIS_TIERS}")
+    check("the prior-round sweep rule names the adopted M18-M24 too",
+          all(c in nb.PRIOR_ROUND_RULE for c in ("M18", "M24")),
+          nb.PRIOR_ROUND_RULE[:160])
 
 
 def test_judge_blind_exception():
@@ -303,6 +368,7 @@ def main() -> int:
         test_role_applicable_blocks()
         test_cosmetic_rule_is_one_rule()
         test_check_id_coverage()
+        test_judge_tier_and_sweep_scope()
         test_judge_blind_exception()
         test_defaults_and_flags()
         test_residual_gating_split()

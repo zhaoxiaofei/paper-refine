@@ -160,6 +160,38 @@ def test_seeding_layouts():
               f"{sorted(str(p.relative_to(sb)) for p in written - seeded)}")
 
 
+def test_seeded_tables_survive_a_re_materialization():
+    """Re-materializing a sandbox must not overwrite what the session wrote.
+
+    `run` re-materializes a failed (or dirty) run whose completion marker still
+    exists so its postcheck can be re-evaluated -- that is how a FIXED gate
+    adopts a finished session instead of paying for it again. The seeded tables
+    are the files the session disposes IN PLACE, so re-seeding them wiped the
+    verdicts: on the real 2026-09-22 root a complete 212-row M20 sweep came back
+    as 212 empty cells and the session could never be adopted.
+    """
+    print()
+    print("== a session's disposed artifacts survive a re-materialization ==")
+    tmp = scratch("nbt_ev_reseed_")
+    corpus = tmp / "corpus"
+    make_text_corpus(corpus)
+    ctx = type("C", (), {"cfg": {"placeholder_lookup": "off"}})()
+    sb = tmp / "run_review"
+    sb.mkdir()
+    nb.seed_evidence_pack(ctx, sb, corpus, "review")
+    m20 = sb / "review" / "artifacts" / "M20_formatting.md"
+    m20.write_text("# M20\n\n| # | rule | disposition |\n|---|---|---|\n"
+                   "| 1 | FMT-T1 | OK — disposed by the session |\n", encoding="utf-8")
+    deleted = sb / "review" / "artifacts" / "M18_caption_words.md"
+    deleted.unlink()
+    nb.seed_evidence_pack(ctx, sb, corpus, "review")
+    check("the session's edited table is NOT overwritten",
+          "disposed by the session" in m20.read_text(encoding="utf-8"),
+          m20.read_text(encoding="utf-8")[:120])
+    check("a missing seeded table is still (re)created",
+          deleted.is_file() and "| disposition |" in deleted.read_text(encoding="utf-8"))
+
+
 def test_prompts():
     print()
     print("== every prompt carries the evidence-pack block ==")
@@ -344,6 +376,7 @@ def test_stub_round_sessions():
 def main() -> int:
     try:
         test_seeding_layouts()
+        test_seeded_tables_survive_a_re_materialization()
         test_prompts()
         test_pack_scans_the_corpus_not_the_scratch()
         test_stub_round_sessions()

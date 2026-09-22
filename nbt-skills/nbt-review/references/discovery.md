@@ -26,7 +26,7 @@ over attention.
 ## D0 — Dedup base
 
 From PRIOR build two indexes (`OUT2/known_index.md`):
-- **KNOWN-CLASSES**: the 24 check IDs (M1–M20, J1–J4) with one-line descriptions.
+- **KNOWN-CLASSES**: the 28 check IDs (M1–M24, J1–J4) with one-line descriptions.
 - **KNOWN-INSTANCES**: every prior finding as `id | class | location | evidence quote`.
 
 Anything matching a KNOWN-INSTANCE (same class + same location + same
@@ -106,10 +106,10 @@ enumeration procedure · artifact columns · finding rules) so the next review
 run catches it mechanically:
 
 ```
-## M21 — <name> (proposed)
+## M25 — <name> (proposed)
 **Purpose:** ...
 **Enumeration:** <script or manual procedure — must be enumerable>
-**Artifact:** M21_<slug>.md: <columns>
+**Artifact:** M25_<slug>.md: <columns>
 **Finding rules:** one per instance, listed
 ```
 
@@ -117,7 +117,8 @@ Number proposals continuing from the highest existing sweep number. M18
 (figure-legend length, always enumerated with an optional proxy cap), M19
 (abstract/main-text length plus the user's cover-letter preference) and M20
 (OOXML style/formatting uniformity, enumerated by the pipeline's code-side scan)
-are reserved and defined in `sweeps.md`, so proposals start at M21.
+are reserved and defined in `sweeps.md`, and M21–M24 were adopted from earlier
+discovery rounds there, so proposals start at M25.
 These are PROPOSALS: the user validates them; only validated ones get
 appended to `references/sweeps.md`. This is the feedback loop — no static
 checklist can be complete, but each discovered miss converts into a permanent

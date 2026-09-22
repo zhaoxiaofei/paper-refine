@@ -314,8 +314,8 @@ def test_fallback_prompt_contract():
     check("D7 SKILL.md's coverage table requires M18/M19/M20 in every state",
           "plus M19 — and M18 when the caption suggestion is active" not in skill
           and "M18 (legend counts), M19 (abstract/main-text/cover-letter lengths) and M20" in skill)
-    check("D8 the sweeps FINDING FORMAT admits M18/M19/M20 findings",
-          "check: <M1–M20|J1–J4>" in sweeps)
+    check("D8 the sweeps FINDING FORMAT admits M18-M24 findings",
+          "check: <M1–M24|J1–J4>" in sweeps and "check: <M1–M20|J1–J4>" not in sweeps)
 
 
 # =====================================================================

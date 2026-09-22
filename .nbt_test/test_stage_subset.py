@@ -99,6 +99,32 @@ def test_parser():
         check("an unknown stage is rejected", False, "no SystemExit")
     except SystemExit as e:
         check("an unknown stage is rejected with a helpful message", e.code == 1, str(e.code))
+    # Round ordinals are part of the same selection language (`--only 1,2`).
+    spec = nb.parse_only_spec("1,2")
+    check("--only 1,2 selects rounds 1 and 2 in full",
+          spec is not None and spec.rounds == {1, 2} and spec.stages_for(1) == set(), str(spec))
+    spec = nb.parse_only_spec("2:merge,3:judge")
+    check("ROUND:STAGE items select one stage of one round",
+          spec is not None and spec.rounds == {2, 3}
+          and spec.stages_for(2) == {"integrate"} and spec.stages_for(3) == {"judge"},
+          str(spec))
+    spec = nb.parse_only_spec("1-3:review")
+    check("round ranges expand", spec is not None and spec.rounds == {1, 2, 3}
+          and spec.stages_for(2) == {"review"}, str(spec))
+    check("`all` still means every round and stage",
+          nb.parse_only_spec("all") is not None and nb.parse_only_spec("all").is_everything())
+    for bad in ("0", "bogus", "1:bogus", "3-1"):
+        try:
+            nb.parse_only_spec(bad)
+            check(f"--only {bad!r} is rejected", False, "no SystemExit")
+        except SystemExit as e:
+            check(f"--only {bad!r} is rejected", e.code == 1, str(e.code))
+    spec = nb.parse_only_spec("3")
+    try:
+        spec.validate(2)
+        check("an out-of-range round is rejected against --rounds", False, "no SystemExit")
+    except SystemExit as e:
+        check("an out-of-range round is rejected against --rounds", e.code == 1, str(e.code))
 
 
 def test_end_to_end():
@@ -176,8 +202,10 @@ def test_multiple_stages_and_errors():
           bad.returncode != 0 and "unknown stage" in (bad.stdout + bad.stderr)
           and "integrate" in (bad.stdout + bad.stderr), (bad.stdout + bad.stderr)[-200:])
     help_out = cli("run", "--help")
-    check("`run --help` documents --only and the merge alias",
-          "--only STAGES" in help_out.stdout and "merge" in help_out.stdout)
+    check("`run --help` documents --only, its round items and the merge alias",
+          "--only SELECTION" in help_out.stdout and "merge" in help_out.stdout
+          and "--only 1,2" in help_out.stdout and "ROUND:STAGE" in help_out.stdout,
+          help_out.stdout[-200:])
 
 
 def main() -> int:

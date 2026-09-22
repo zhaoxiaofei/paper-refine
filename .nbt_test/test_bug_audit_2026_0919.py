@@ -678,7 +678,12 @@ def test_l02_l04_l05_l09_l11():
     check("L4 a missing command binary is not 'configured'", fake is False and real is True,
           f"fake={fake} real={real}")
 
-    # L5 -- a materializer RuntimeError is a clean failure, not a traceback
+    # L5 -- a round whose base cannot be materialized is a clean, NAMED failure,
+    # never a traceback. Two situations are distinguishable now: an earlier
+    # round that is simply not done yet (which `run --only R` can produce, so
+    # the message names the missing dependency and `drive_round` returns
+    # incomplete instead of dying), and an earlier round marked done whose pin
+    # record is gone (a corrupt root, which still dies with the plain message).
     tmp = scratch("nbt_audit_l5_")
     src = tmp / "source"
     src.mkdir()
@@ -691,13 +696,15 @@ def test_l02_l04_l05_l09_l11():
     ctx.load()
     nb.materialize_a1(ctx, 1)
     ctx.save_state()
-    err = io.StringIO()
+    out, err = io.StringIO(), io.StringIO()
     try:
-        with contextlib.redirect_stderr(err):
-            nb.drive_round(ctx, 2, cmd=[sys.executable, "-c", "pass"], timeout=5, jobs=1,
-                           retries=0, manual=False, nowait=True, poll=1, redline=False)
-        clean = False
-        detail = "drive_round returned without error"
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            ok, _paused = nb.drive_round(ctx, 2, cmd=[sys.executable, "-c", "pass"],
+                                         timeout=5, jobs=1, retries=0, manual=False,
+                                         nowait=True, poll=1, redline=False)
+        clean = (ok is False and "round 2 base is not ready yet" in out.getvalue()
+                 and "round 1 is pending" in out.getvalue())
+        detail = (out.getvalue() + err.getvalue()).strip()[:160]
     except SystemExit as exc:
         clean = "cannot materialize the round 2 base" in err.getvalue()
         detail = err.getvalue().strip()[:100]

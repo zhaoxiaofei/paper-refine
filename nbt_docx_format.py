@@ -597,6 +597,16 @@ FINDING_TIER_RULES = {
     "FMT-S3",    # running head on the title page
     "FMT-S4",    # tracked changes in a final package
     "FMT-T1",    # mixed quotation marks
+    # The M20 sweep's dash/quote family: sweeps.md lists "mixed straight/curly
+    # quotation marks, a spaced hyphen used as a dash, or em-dash density above
+    # the user's cap -> finding (editorial: the revision arm rewrites)", and the
+    # pipeline's own M20 seed text calls the em-dash density a findings row for
+    # the revision/integration arms. Leaving FMT-P1/FMT-P2 advisory let a
+    # reviewer close them as "editorial preference only" -- a disposition the
+    # finding-tier bar forbids -- and the auditor, which attacks finding-tier
+    # rows only, never saw them.
+    "FMT-P1",    # em-dash density above the policy cap
+    "FMT-P2",    # a spaced hyphen used as a dash
     "FMT-T8b",   # nested parentheses
     "FMT-T8c",   # a distinctive term repeated inside one short passage
     "FMT-T9c",   # long sentence / long list-paragraph (tiered by section)

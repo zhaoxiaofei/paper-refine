@@ -81,7 +81,7 @@ changed".
 
 **Improvement rows (`I-xxx`).** An edit that repairs a defect the frozen review
 did NOT name is legal when it is recorded, not hidden: give it an `I-xxx` id, the
-check id it belongs to (M1–M20 / J1–J4), the tier
+check id it belongs to (M1–M24 / J1–J4), the tier
 (`correctness|consistency|preservation|completeness|formatting|writing`), a
 severity (`critical|major|minor`), one line of evidence with a location, and the
 diff hunk that carries it. E6 still governs *claims* (see edit_rules.md: rigor

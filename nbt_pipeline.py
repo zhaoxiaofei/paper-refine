@@ -5,7 +5,7 @@ nbt_pipeline.py -- ROUND-BASED iterative revision pipeline for a Nature
 Biotechnology manuscript: R fixed rounds (R is configurable at setup and
 defaults to 2), a relative-judgment panel that produces 2*judges*(|field|-1)
 directed scores per version (at the default judges=3 that is 6*(|field|-1); the
-default plan's round-1 field of 7 gives 36), content-addressed pinning of every
+default plan's round-1 field of 8 gives 42), content-addressed pinning of every
 round's champion, and a deterministic selection layer that ranks only
 candidates whose panel is COMPLETE (a partial panel can never decide a round).
 Python 3.9+, standard library only for the pipeline itself; tracked-changes
@@ -63,11 +63,18 @@ ROUND MODEL
     in the ranking; each may win the round, become the next round's base and
     replace any other version under the published ranking key. Nothing in the
     selection layer privileges or penalises an arm beyond that key.
-    M AND N ARE PER-ROUND COMMAND-LINE PARAMETERS: `setup --rewrites` and
-    `setup --revises` each take either one integer (the same count every round)
-    or a comma-separated list with one entry per round; a list shorter than
-    --rounds is extended by repeating its last element. The defaults are
-    M = [2, 1] and N = [1, 1].
+    M AND N ARE PER-ROUND COMMAND-LINE PARAMETERS: `setup --rewrites`,
+    `setup --revises` and `setup --judges` each take either one integer (the
+    same count every round) or a comma-separated list with one entry per round;
+    a list shorter than --rounds is extended by repeating its last element. The
+    defaults are M = [2, 1], N = [1, 1] and `--judges 3` everywhere. WHICH
+    integrations run is a per-round 32-bit mask (`setup --integrators`,
+    default 0xFFFFFFFF = every applicable agent): bit (k-1) belongs to the k-th
+    member of the round's pool [a1, w1..wM, a2..a{1+N}], and a clear bit means
+    that member's integration arm does not exist at all (no session, no judge
+    panel row, no chance to win). `run --only` selects a subset per invocation,
+    by round (`--only 1,2`), by stage (`--only judge`) or both
+    (`--only 2:merge,3:judge`).
 
     The loop is FIXED-LENGTH: there is no convergence test, no "stop when
     unchanged", and no early exit on a round whose score did not improve. A
@@ -133,16 +140,17 @@ AND 36 AT |field| = 7 WITH THE DEFAULT 3 JUDGES)
       + ((|field|-1) opponents x 3 judges x 1)      [others-vs-V, negated]
       = 2 * judges * (|field| - 1)                  [= 6 * (|field| - 1) and 18 at
                                                      the default 3 judges, |field| = 4;
-                                                     36 with the 7-member round-1
+                                                     42 with the 8-member round-1
                                                      field the default plan builds]
 
     The field is deduplicated by CONTENT digest, so its size is whatever the
     pinning history and the per-round plan yield (never hardcoded): round r has
     at most r + 1 + 2*(M_r + N_r) members -- {original}, {pins from earlier
     rounds}, the round's fresh arms (base, M rewrites, N revisions) and the
-    K = 1 + M + N integrated candidates, minus everything that deduplicates
+    K = 1 + M + N integrated candidates (of which the round's per-round
+    --integrators mask may select only some), minus everything that deduplicates
     (the base always merges into the pin or the original). The default plan
-    gives 7 members in round 1 ({original, w1, w2, a2, i1..i4}) and 7 in round
+    gives 8 members in round 1 ({original, w1, w2, a2, i1..i4}) and 7 in round
     2 ({original, the round-1 pin, w1, a2, i1..i3}). V-vs-W and W-vs-V are
     independent judgments from independent sessions, which is why the ranking
     statistic is the median of the FLAT score list, not a two-level median, with
@@ -172,10 +180,11 @@ STAGING DEPENDENCY ORDER (a DAG: every run starts as soon as its inputs exist)
           review/, so a revise session starts as soon as the review marker
           exists -- it does NOT wait for the rewrites (or for its sibling
           revise sessions).
-    (iv)  runs/r<R>_i1..iK/     the K = 1+M+N integration runs (self/ = one pool
-          member, others/<id>/ = every other member). They start once the WHOLE
-          pool (a1, every rewrite, every revision) is done, and run in parallel
-          with each other.
+    (iv)  runs/r<R>_i1..iK/     the integration runs selected by the round's
+          --integrators mask (default: all K = 1+M+N; self/ = one pool member,
+          others/<id>/ = every other member). They start once the WHOLE pool
+          (a1, every rewrite, every revision) is done, and run in parallel with
+          each other.
     (v)   build field_r, materialize `judges` judge sandboxes per field member,
           execute them in parallel, aggregate in code, select, pin, mark the
           round done.
@@ -502,8 +511,10 @@ USAGE
 -----
     python nbt_pipeline.py setup --source /path/to/non-revised \\
         --root ./nbt_rounds --rounds 2 --judges 3 [--rewrites 2,1] [--revises 1]
-        [--caption-limit N]
+        [--integrators 0xFFFFFFFF] [--caption-limit N]
     python nbt_pipeline.py run    --root ./nbt_rounds --jobs 255
+    python nbt_pipeline.py run    --root ./nbt_rounds --only 1,2      # only rounds 1 and 2
+    python nbt_pipeline.py run    --root ./nbt_rounds --only 2:review,2:merge
     python nbt_pipeline.py run-decide --root ./nbt_rounds   # run, then decide in series
     python nbt_pipeline.py status --root ./nbt_rounds
     python nbt_pipeline.py redline --root ./nbt_rounds [--round R] [--tool auto]
@@ -730,14 +741,28 @@ STATE_VERSION = 3
 ZOTERO_MODES = ("off", "read", "edit", "apply")
 DEFAULT_ZOTERO_MODE = "edit"
 
+# `setup --integrators`: a per-round 32-BIT bitmask that selects which agents of
+# the round run an INTEGRATION session. Bit (k-1) belongs to the k-th member of
+# the round's pool [a1, w1..wM, a2..a{1+N}]: with the bit set, that member's
+# integration arm i<k> runs ("this agent integrates what the other members do
+# better"); with the bit clear, the arm is not planned at all, so the round pays
+# no session for it and, because the arm never exists, it cannot enter the field
+# the judges score or the ranking that crowns the round's champion. The default
+# 0xFFFFFFFF means "every applicable agent runs its integration" (bits beyond
+# the pool size are ignored, so the default keeps selecting the whole pool
+# whatever M and N are). Bit 0x0 is legal and means "no integration at all".
+INTEGRATOR_ALL = 0xFFFFFFFF
+INTEGRATOR_BITS = 32
+
 DEFAULTS = {
     "root": "./nbt_rounds",
     "rounds": 2,            # fixed-length pipeline; the round-R champion wins
-    "judges": 3,            # independent judge sessions per version per round
+    "judges": [3],          # independent judge sessions per version, per round list
     "jobs": 255,            # concurrent agent sessions
     "zotero": DEFAULT_ZOTERO_MODE,   # Zotero tooling policy: off|read|edit|apply
     "rewrites": [2, 1],     # M per round: rewritten candidates (list or one int)
     "revises": [1, 1],      # N per round: reviewed-and-then-revised candidates
+    "integrators": [INTEGRATOR_ALL],  # bitmask per round: which pool members integrate
     "timeout": 4 * 3600,    # per-run timeout (manual mode: none)
     "retries": 2,           # automatic retries per failed run (2 = three attempts)
     "retry_backoff": 30,    # base seconds for the exponential retry backoff (0 = no wait)
@@ -1129,6 +1154,44 @@ def parse_round_counts(values, rounds: int, flag: str) -> list:
     return counts[:rounds]
 
 
+def parse_round_masks(values, rounds: int, flag: str) -> list:
+    """Normalize a per-round integrator bitmask list to exactly `rounds` entries.
+
+    Same shape rules as parse_round_counts (one value or a comma-separated list;
+    a shorter list is extended by repeating its last element, a longer one is
+    truncated), but each entry is an unsigned 32-bit mask written in any Python
+    integer literal form: decimal ("5"), hexadecimal ("0xFFFFFFFF", the default),
+    octal or binary. The mask addresses the round's pool in canonical order
+    [a1, w1..wM, a2..a{1+N}]: bit (k-1) selects the integration arm i<k> of the
+    k-th member (see INTEGRATOR_ALL).
+    """
+    vals = []
+    for v in (values if isinstance(values, (list, tuple)) else [values]):
+        if v is None:
+            continue
+        # A command-line value arrives as ONE string ("5", "0xFF,3"); a config
+        # value may already be a list of ints. Both shapes are accepted.
+        parts = re.split(r"[,;\s]+", str(v).strip()) if isinstance(v, str) else [v]
+        vals.extend(p for p in parts if str(p).strip() != "")
+    masks = []
+    for v in vals:
+        try:
+            mask = int(str(v).strip(), 0)
+        except (TypeError, ValueError):
+            die(f"{flag} takes an integer bitmask or a comma-separated list of them "
+                f"(e.g. '{flag} 0xFFFFFFFF' or '{flag} 0x5,3'), got {v!r}")
+        if mask < 0 or mask > INTEGRATOR_ALL:
+            die(f"{flag} values must be unsigned {INTEGRATOR_BITS}-bit masks in "
+                f"0..0x{INTEGRATOR_ALL:X}, got {v!r}")
+        masks.append(mask)
+    if not masks:
+        die(f"{flag} needs at least one bitmask")
+    rounds = max(1, int(rounds))
+    if len(masks) < rounds:
+        masks = masks + [masks[-1]] * (rounds - len(masks))
+    return masks[:rounds]
+
+
 def counts_of(cfg, key: str, rounds: int) -> list:
     """The configured per-round counts, falling back to the documented defaults."""
     raw = (cfg or {}).get(key)
@@ -1137,6 +1200,52 @@ def counts_of(cfg, key: str, rounds: int) -> list:
     elif not isinstance(raw, (list, tuple)):
         raw = [raw]
     return parse_round_counts(raw, rounds, "--" + key)
+
+
+def masks_of(cfg, key: str, rounds: int) -> list:
+    """The configured per-round masks, falling back to the documented defaults.
+
+    Accepts both the list written by a current `setup` and the plain integer an
+    older root (or a hand-built test context) carries, so per-round integrator
+    masks degrade to "the same mask every round" instead of crashing.
+    """
+    raw = (cfg or {}).get(key)
+    if raw is None:
+        raw = list(DEFAULTS[key])
+    elif not isinstance(raw, (list, tuple)):
+        raw = [raw]
+    return parse_round_masks(raw, rounds, "--" + key)
+
+
+def config_rounds(ctx=None, cfg=None) -> int:
+    """The configured round count (never 0, so a hand-built test context works)."""
+    cfg = (cfg if cfg is not None else getattr(ctx, "cfg", None)) or {}
+    try:
+        rounds = int(cfg.get("rounds") or 0)
+    except (TypeError, ValueError):
+        rounds = 0
+    return max(1, rounds or len(DEFAULTS["rewrites"]))
+
+
+def round_index(r: int, rounds: int) -> int:
+    """The 0-based list index of round `r`, clamped into the configured range."""
+    return max(0, min(int(r) - 1, max(1, int(rounds)) - 1))
+
+
+def brief_list(values, fmt=str) -> str:
+    """'3,3' / '0xffffffff,0x1' -- a one-line rendering of a per-round list."""
+    return ",".join(fmt(v) for v in (values or []))
+
+
+def judges_config_note(ctx) -> str:
+    """The configured judges-per-round list, for config summary lines."""
+    return brief_list(counts_of(getattr(ctx, "cfg", None), "judges", ctx.rounds_count()))
+
+
+def integrators_config_note(ctx) -> str:
+    """The configured integrators-per-round list, in hex."""
+    return brief_list(masks_of(getattr(ctx, "cfg", None), "integrators", ctx.rounds_count()),
+                      lambda v: f"0x{int(v):X}")
 
 
 def round_counts(ctx, r: int) -> tuple:
@@ -1156,15 +1265,43 @@ def round_counts(ctx, r: int) -> tuple:
         plan = {}
     if isinstance(plan.get("rewrites"), int) and isinstance(plan.get("revises"), int):
         return max(0, int(plan["rewrites"])), max(0, int(plan["revises"]))
-    try:
-        rounds = int((getattr(ctx, "cfg", None) or {}).get("rounds") or 0)
-    except (TypeError, ValueError):
-        rounds = 0
-    rounds = max(1, rounds or len(DEFAULTS["rewrites"]))
-    idx = max(0, min(int(r) - 1, rounds - 1))
+    rounds = config_rounds(ctx)
+    idx = round_index(r, rounds)
     m = counts_of(getattr(ctx, "cfg", None), "rewrites", rounds)[idx]
     n = counts_of(getattr(ctx, "cfg", None), "revises", rounds)[idx]
     return int(m), int(n)
+
+
+def round_judges(ctx, r: int) -> int:
+    """Judge sessions per version for round `r` (`--judges` is a per-round list).
+
+    A decided round's RECORDED plan wins, exactly like round_counts(): `decide`
+    must recompute the stored panel's expectation from the plan that produced it,
+    so a later edit of the config can never turn a complete panel into a
+    "stale --judges value" gap.
+    """
+    try:
+        plan = (ctx.round_get(int(r)) or {}).get("plan") or {}
+    except Exception:                                        # noqa: BLE001
+        plan = {}
+    if is_int(plan.get("judges")):
+        return max(0, int(plan["judges"]))
+    rounds = config_rounds(ctx)
+    return int(counts_of(getattr(ctx, "cfg", None), "judges",
+                         rounds)[round_index(r, rounds)])
+
+
+def round_integrators(ctx, r: int) -> int:
+    """The integrator bitmask of round `r` (the recorded plan wins; see INTEGRATOR_ALL)."""
+    try:
+        plan = (ctx.round_get(int(r)) or {}).get("plan") or {}
+    except Exception:                                        # noqa: BLE001
+        plan = {}
+    if is_int(plan.get("integrators")):
+        return max(0, int(plan["integrators"]))
+    rounds = config_rounds(ctx)
+    return int(masks_of(getattr(ctx, "cfg", None), "integrators",
+                        rounds)[round_index(r, rounds)])
 
 
 def round_pool_ids(m: int, n: int) -> list:
@@ -1180,12 +1317,64 @@ def round_candidate_ids(m: int, n: int) -> list:
 
 
 def round_integrated_ids(m: int, n: int) -> list:
-    """The round's integrated candidates i1..iK (K = 1 + M + N)."""
+    """EVERY integrated candidate the pool could produce: i1..iK (K = 1 + M + N).
+
+    This is the full-arm list (used where the pool's shape alone matters, e.g.
+    validating a version id). Which of those arms a round actually RUNS is
+    decided by its integrator mask -- see round_integrated_run_ids().
+    """
     return [integrate_vid(k) for k in range(1, len(round_pool_ids(m, n)) + 1)]
 
 
+def integrator_arms(m: int, n: int, mask: int) -> list:
+    """The 1-based pool positions whose integration arm the mask selects.
+
+    Bit (k-1) of `mask` belongs to the k-th pool member; bits beyond the pool
+    size are ignored (so the default 0xFFFFFFFF always means "every applicable
+    agent", whatever the round's M and N are).
+    """
+    pool = round_pool_ids(m, n)
+    return [k for k in range(1, len(pool) + 1) if (int(mask) >> (k - 1)) & 1]
+
+
+def round_integrated_run_ids(ctx, r: int, m: int = None, n: int = None) -> list:
+    """The integrated candidates round `r` really produces, in pool order.
+
+    A decided round's own plan wins ("integrated" was frozen when the round was
+    decided); otherwise the configured per-round integrator mask decides. An
+    empty list means the round runs no integration at all (mask 0, or every
+    applicable bit clear).
+    """
+    try:
+        plan = (ctx.round_get(int(r)) or {}).get("plan") or {}
+    except Exception:                                        # noqa: BLE001
+        plan = {}
+    recorded = plan.get("integrated")
+    if isinstance(recorded, (list, tuple)):
+        # An EMPTY recorded list is meaningful: the round ran no integration at
+        # all (integrators 0x0), and a later config edit must not resurrect arms
+        # the round never produced.
+        return [str(v) for v in recorded]
+    if m is None or n is None:
+        m, n = round_counts(ctx, r)
+    return [integrate_vid(k) for k in integrator_arms(m, n, round_integrators(ctx, r))]
+
+
+def round_produced_ids(ctx, r: int) -> list:
+    """Every round-local version round `r` produces: pool + selected integrations."""
+    m, n = round_counts(ctx, r)
+    return round_pool_ids(m, n) + round_integrated_run_ids(ctx, r, m, n)
+
+
+def round_candidate_ids_run(ctx, r: int) -> list:
+    """Every fresh arm of round `r` that can WIN: the pool minus the base, plus
+    the integrated candidates the round actually ran."""
+    m, n = round_counts(ctx, r)
+    return round_pool_ids(m, n)[1:] + round_integrated_run_ids(ctx, r, m, n)
+
+
 def round_fresh_ids(m: int, n: int) -> list:
-    """Every round-local version the round produces: pool + integrated."""
+    """Every round-local version the pool can produce: pool + every integration."""
     return round_pool_ids(m, n) + round_integrated_ids(m, n)
 
 SCORE_MIN = -4
@@ -3579,7 +3768,7 @@ absolute ratings re-compress into noise and the comparison this design exists to
 
 1. Ground your judgment in evidence: read the skill's SKILL.md and references/sweeps.md, then run the
    $nbt-review workflow on target/ RESTRICTED TO THE FROZEN SWEEP SET -- mechanical sweeps M1-M17 and
-   judgment passes J1-J4 ONLY, @@M18_JUDGE_SWEEP@@
+   judgment passes J1-J4, plus the adopted M18-M24 checks, @@M18_JUDGE_SWEEP@@
    @@M19_JUDGE_SWEEP@@
    @@M20_JUDGE_SWEEP@@
 
@@ -3709,13 +3898,13 @@ scoring such a difference as merely stylistic.
 
 === PRIORITY ORDER (use it to decide every comparison) ===
 
-  correctness  >  consistency  >  preservation  >  completeness  >  formatting
+  correctness  >  consistency  >  preservation  >  completeness  >  formatting  >  writing
 
 An error of fact/DOI/citation/number/premise outranks a cross-document conflict, which outranks a
 regression against the original (deleted claims, softened limitations, broken cross-references or
-numbering), which outranks missing or unneeded information, which outranks formatting and
-micro-formatting. When sources in a package disagree, the higher-priority source wins, in this
-order:
+numbering), which outranks missing or unneeded information, which outranks formatting and writing
+(micro-formatting and wording rows, each capped at one point). When sources in a package disagree,
+the higher-priority source wins, in this order:
   @@SOURCE_HIERARCHY@@
 
 === PRESERVATION SIGNAL (the orchestrator's anti-regression gate) ===
@@ -6150,6 +6339,43 @@ def _format_fix_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, warns: list,
     return rec["format_fix"]
 
 
+def _seed_write(path: Path, text: str) -> bool:
+    """Write a seeded file UNLESS it already exists (atomic when it does write).
+
+    The seeded evidence tables are INPUTS the session disposes IN PLACE, and the
+    materializers run again on every invocation: `run` re-materializes a failed
+    run whose completion marker exists so its postcheck can be re-evaluated, and
+    it re-materializes a dirty sandbox without launching a second agent. Blindly
+    rewriting the seed there HASHED THE SESSION'S VERDICTS AWAY (the M20/M18/M19/
+    OUTLINE tables came back empty and undisposed), which turned every such
+    re-postcheck into a guaranteed failure and made a completed review
+    unrecoverable. Writes are atomic so an existing file is never a truncated
+    seed, and a genuinely missing one is still created.
+    """
+    if path.exists():
+        return False
+    # tmp + rename (NOT write_text_atomic's extra fsync): the content is complete
+    # before the rename, so an interrupted write can never leave a truncated
+    # seed, while the fsync would cost one disk sync per seeded file on every
+    # materialization -- ~20 files per session, measured as ~0.7s per sandbox on
+    # the operator's mount, which is exactly the latency the scheduling tests
+    # (and the real run) pay for a pure input.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = tmp_path_for(path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    return True
+
+
 def _seed_review_format_artifact(ctx: Ctx, sb: Path) -> dict:
     """Seed the M20 sweep for a review run: the code-side scan IS the enumeration.
 
@@ -6204,7 +6430,7 @@ def _seed_review_format_artifact(ctx: Ctx, sb: Path) -> dict:
         lines.append("| - | — | — | — | — | no code-side formatting finding | — |  |")
     art = sb / REVIEW_DIR / "artifacts"
     art.mkdir(parents=True, exist_ok=True)
-    (art / "M20_formatting.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _seed_write(art / "M20_formatting.md", "\n".join(lines) + "\n")
     return info
 
 
@@ -6629,9 +6855,9 @@ def seed_provenance_pack(ctx: Ctx, sb: Path, sources: list, ev: dict,
 
     def write_both(stem: str, header: str, columns: list, rows: list, empty: str) -> None:
         text = ("# " + header + "\n\n" + _evidence_artifact_table(rows, columns, empty) + "\n")
-        (work / stem).write_text(text, encoding="utf-8")
+        _seed_write(work / stem, text)
         if art is not None:
-            (art / stem).write_text(text, encoding="utf-8")
+            _seed_write(art / stem, text)
 
     write_both(
         "NUMBERS_LEDGER.md",
@@ -6817,27 +7043,25 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
         cap_rows = [{"document": c.get("document"), "caption": c.get("caption"),
                      "words": c.get("words"), "over_limit": c.get("over_limit"),
                      "excerpt": c.get("excerpt")} for c in (cap.get("captions") or [])]
-        (art / "M18_caption_words.md").write_text(
-            "# M18 — figure-legend word counts (code-side enumeration)\n\n"
+        _seed_write(art / "M18_caption_words.md", "# M18 — figure-legend word counts (code-side enumeration)\n\n"
             f"Proxy cap: {cap.get('limit') or 'none configured'}. Dispose every row "
             "(finding id / OK — reason / unable — reason).\n\n"
             + _evidence_artifact_table(cap_rows,
                                        ["document", "caption", "words", "over_limit", "excerpt"],
                                        "no caption found by the code-side scan")
-            + "\n", encoding="utf-8")
+            + "\n")
         lng = ev.get("lengths") or {}
         len_rows = [{"document": r.get("document"), "section": r.get("section"),
                      "words": r.get("words"), "cap": r.get("cap"),
                      "note": r.get("note")} for r in (lng.get("rows") or [])]
-        (art / "M19_length.md").write_text(
-            "# M19 — abstract/main-text length (code-side enumeration)\n\n"
+        _seed_write(art / "M19_length.md", "# M19 — abstract/main-text length (code-side enumeration)\n\n"
             f"Caps: {json.dumps((lng.get('limits') or {}).get('abstract', {}))} / "
             f"{json.dumps((lng.get('limits') or {}).get('main text', {}))}. "
             "Dispose every row.\n\n"
             + _evidence_artifact_table(len_rows,
                                        ["document", "section", "words", "cap", "note"],
                                        "no manuscript-shaped document found")
-            + "\n", encoding="utf-8")
+            + "\n")
         # M4 numbers: the "verify the source of each number" ledger. The agent
         # fills `source` (data file / table / figure / formula) or removes the
         # claim; an empty source cell is an unfinished row.
@@ -6847,8 +7071,7 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
                      "thousands": "yes" if r.get("thousands_separated") else "",
                      "sentence": (r.get("sentence") or "")[:90], "source": ""}
                     for r in (num.get("rows") or [])]
-        (art / "M4_numbers.md").write_text(
-            "# M4 — number ledger (code-side enumeration; one row per numeric literal)\n\n"
+        _seed_write(art / "M4_numbers.md", "# M4 — number ledger (code-side enumeration; one row per numeric literal)\n\n"
             "Fill `source` for every row (the data file, table, figure or formula the number "
             "comes from), or remove the claim from the text. A number with no verifiable source "
             "must not stay.\n\n"
@@ -6856,15 +7079,14 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
                                        ["document", "paragraph", "number", "unit", "thousands",
                                         "sentence", "source"],
                                        "no numeric literal found")
-            + "\n", encoding="utf-8")
+            + "\n")
         # M8 terms: occurrence ledger + the confusable pairs the style rules found.
         ter = ev.get("terms") or {}
         term_rows = [{"document": r.get("document"), "term": r.get("term"),
                       "count": r.get("count"), "first paragraph": r.get("first_paragraph"),
                       "first context": (r.get("first_context") or "")[:80],
                       "decision": ""} for r in (ter.get("rows") or [])]
-        (art / "M8_terms.md").write_text(
-            "# M8 — key-term occurrence ledger (code-side enumeration)\n\n"
+        _seed_write(art / "M8_terms.md", "# M8 — key-term occurrence ledger (code-side enumeration)\n\n"
             "For every term: confirm it is used with ONE precise meaning, note the chosen "
             "term in `decision` (and the definition site if the manuscript needs one). Rows "
             "for confusable pairs (emulate/simulate, accuracy/precision, ...) are the "
@@ -6873,7 +7095,7 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
                                        ["document", "term", "count", "first paragraph",
                                         "first context", "decision"],
                                        "no key term found")
-            + "\n", encoding="utf-8")
+            + "\n")
         # Hierarchy scaffold for the summary/coherence pass (suggestion: summarize
         # each level, then check sibling/parent/child coherence).
         outl = ev.get("outline") or {}
@@ -6882,8 +7104,7 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
                          "lists": r.get("list_markers") or "", "refs": r.get("refs") or "",
                          "first sentence": (r.get("first_sentence") or "")[:70],
                          "summary": ""} for r in (outl.get("rows") or [])]
-        (art / "OUTLINE.md").write_text(
-            "# OUTLINE — hierarchy scaffold for the summary/coherence pass\n\n"
+        _seed_write(art / "OUTLINE.md", "# OUTLINE — hierarchy scaffold for the summary/coherence pass\n\n"
             "Write a GENERATED one-line summary in `summary` for every row: what the paragraph "
             "CLAIMS (its own words, not the first sentence copied back — a row whose summary is "
             "a prefix of `first sentence` counts as unfilled). Then check each summary against "
@@ -6900,14 +7121,13 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
                                        ["document", "heading", "paragraph", "words", "lists",
                                         "refs", "first sentence", "summary"],
                                        "no paragraph found")
-            + "\n", encoding="utf-8")
+            + "\n")
         # Hand-off placeholders, classified searchable vs author-only.
         phl = ev.get("placeholder_ledger") or {}
         ph_rows = [{"document": r.get("document"), "paragraph": r.get("document_paragraph"),
                     "class": r.get("class"), "payload": (r.get("payload") or "")[:100],
                     "resolution": ""} for r in (phl.get("rows") or [])]
-        (art / "PLACEHOLDERS.md").write_text(
-            "# PLACEHOLDERS — hand-off markers, classified\n\n"
+        _seed_write(art / "PLACEHOLDERS.md", "# PLACEHOLDERS — hand-off markers, classified\n\n"
             "`searchable` rows ask for a findable fact (preprint, DOI, accession, database ID, "
             "version): search for it (or use reports/PLACEHOLDER_LOOKUP.json when the "
             "operator enabled the lookup) and fill the placeholder with the answer, or with "
@@ -6917,7 +7137,7 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
                                        ["document", "paragraph", "class", "payload",
                                         "resolution"],
                                        "no hand-off placeholder found")
-            + "\n", encoding="utf-8")
+            + "\n")
     if where == "review":
         # Keep the M20 skeleton the review contract points at.
         _seed_review_format_artifact(ctx, sb)
@@ -6926,14 +7146,13 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
         fmt_rows = [{"rule": r.get("rule"), "severity": r.get("severity"),
                      "location": r.get("location"), "evidence": r.get("evidence"),
                      "fix": r.get("fix")} for r in (fmt.get("rows") or [])]
-        (art / "M20_formatting.md").write_text(
-            "# M20 — OOXML style/formatting (code-side enumeration of this judge's target)\n\n"
+        _seed_write(art / "M20_formatting.md", "# M20 — OOXML style/formatting (code-side enumeration of this judge's target)\n\n"
             "Audit every row; mechanical rows were already normalized by the orchestrator "
             "before this view was built.\n\n"
             + _evidence_artifact_table(fmt_rows,
                                        ["rule", "severity", "location", "evidence", "fix"],
                                        "no code-side formatting finding")
-            + "\n", encoding="utf-8")
+            + "\n")
     plc = ev.get("placeholders") or {}
     lines += ["## Hand-off placeholders", "",
               f"- count: {plc.get('count', '?')}",
@@ -7424,32 +7643,176 @@ def die(msg: str, code: int = 1):
     sys.exit(code)
 
 
-def parse_only_stages(raw) -> set:
-    """Parse `run --only rewrite,review,merge` into a set of stage names.
+def parse_only_rounds(text: str, item: str) -> set:
+    """Parse the round side of an `--only` item: "2", "1-3" or "1,2,4" -> set.
 
-    None/empty/`all` selects every stage (the default). Accepted names are
-    rewrite, review, revise, integrate and judge, plus the aliases people use in
-    the round plan (w, a/a2, i, merge, j) and the plural spellings.
+    `text` is the raw (un-normalized) round side, `item` the whole item for the
+    error message. Round ordinals are 1-based and are range-checked against the
+    pipeline's `--rounds` later, when the config is known.
+    """
+    rounds = set()
+    for chunk in re.split(r"[,\s]+", text.strip()):
+        if not chunk:
+            continue
+        m = re.fullmatch(r"(\d+)\s*-\s*(\d+)", chunk)
+        if m:
+            lo, hi = int(m.group(1)), int(m.group(2))
+            if lo < 1 or hi < 1:
+                die(f"--only: round ordinals are 1-based, got {item!r}")
+            if hi < lo:
+                die(f"--only: empty round range {chunk!r} in {item!r}")
+            rounds.update(range(lo, hi + 1))
+            continue
+        if not chunk.isdigit():
+            die(f"--only: {chunk!r} in {item!r} is not a round ordinal (1, 2, ... "
+                f"or a range like 1-3)")
+        if int(chunk) < 1:
+            die(f"--only: round ordinals are 1-based, got {item!r}")
+        rounds.add(int(chunk))
+    if not rounds:
+        die(f"--only: {item!r} names no round")
+    return rounds
+
+
+def parse_only_stage(token: str, item: str) -> str:
+    """Resolve one stage name or alias, or die with the accepted list."""
+    name = ONLY_ALIASES.get(token, token)
+    if name not in ONLY_STAGES:
+        die(f"--only: unknown stage {item!r}; choose from {', '.join(ONLY_STAGES)} "
+            f"(aliases: merge=integrate, w=rewrite, a/a2=revise, j=judge)")
+    return name
+
+
+class OnlySpec:
+    """The parsed `run --only` selection: which ROUNDS and which STAGES run.
+
+    Every accepted item selects something, and the items are a UNION:
+
+        1,2          rounds 1 and 2 in full (every stage of those rounds)
+        1-3          rounds 1..3 in full
+        review       the review stage of every round
+        2:review     round 2's review only  (`2.review`, `2/review` also work)
+        1,3:merge    the union of "round 1 in full", "round 3 in full" and
+                     "round 3's integrate"
+        all          everything (the default)
+
+    Items on the right of a `:` are stage names (or `all`); items without a
+    `:` are either a round ordinal (with optional ranges/lists) or a stage name.
+    A round named by a bare ordinal runs ALL its stages; a round named only by
+    `ROUND:STAGE` items runs only those stages. `parse_only_spec` rejects an
+    out-of-range round only when the pipeline's round count is known -- see
+    validate().
+    """
+
+    def __init__(self):
+        self.rounds = set()      # rounds named by any item
+        self.pairs = {}          # round -> set of stages (empty set = all stages)
+        self.stages = set()      # stages named without a round (all rounds)
+        self.all_stages = False  # an `all`/`everything`/`*` item was given
+
+    def validate(self, rounds_count: int) -> "OnlySpec":
+        """Reject round ordinals the pipeline does not have."""
+        R = max(1, int(rounds_count))
+        unknown = sorted(r for r in self.rounds if r > R or r < 1)
+        if unknown:
+            die(f"--only: round(s) {', '.join(str(r) for r in unknown)} do not exist: this "
+                f"pipeline is configured with --rounds {R} (rounds are 1-based)")
+        return self
+
+    def covers_round(self, r: int) -> bool:
+        return bool(self.all_stages) or not self.rounds or int(r) in self.rounds
+
+    def is_everything(self) -> bool:
+        """True when the selection restricts nothing (so `run` behaves as a
+        plain `run` and prints no `--only` notes)."""
+        return bool(self.all_stages) or (not self.rounds and not self.pairs
+                                         and not self.stages)
+
+    def stages_for(self, r: int) -> set:
+        """The stage names selected in round `r`; an empty set means every stage."""
+        if self.all_stages:
+            return set()
+        allowed = set(self.stages) | set(self.pairs.get(int(r)) or ())
+        return allowed
+
+    def stage_filter(self) -> set:
+        """The stage filter when it is the same for every round, else an empty
+        set (= every stage, the filter is per-round -- see stages_for())."""
+        if self.pairs or self.all_stages:
+            return set()
+        return set(self.stages)
+
+    def describe(self) -> str:
+        """A one-line human description of the selection (for the run log)."""
+        if self.is_everything():
+            return "all rounds, all stages"
+        bits = []
+        bare = sorted(r for r in self.rounds if r not in self.pairs)
+        if bare:
+            bits.append("round(s) " + ",".join(str(r) for r in bare) + " in full")
+        if self.stages:
+            bits.append("stage(s) " + ",".join(sorted(self.stages)) + " in every round")
+        for r in sorted(self.pairs):
+            st = ",".join(sorted(self.pairs[r])) if self.pairs[r] else "all stages"
+            bits.append(f"round {r}: {st}")
+        return " | ".join(bits) if bits else "all rounds, all stages"
+
+    def __bool__(self) -> bool:
+        return bool(self.rounds or self.pairs or self.stages or self.all_stages)
+
+
+def parse_only_spec(raw) -> OnlySpec:
+    """Parse `run --only` into an OnlySpec (None/empty/`all` = everything).
+
+    Round ordinals and stage names combine as described on OnlySpec. Accepted
+    stage names are rewrite, review, audit, revise, integrate and judge, plus the
+    aliases people use in the round plan (w, a/a2, i, merge, j) and the plural
+    spellings.
     """
     if raw is None:
-        return set()
+        return None
     if isinstance(raw, (list, tuple, set)):
         parts = [str(x) for x in raw]
     else:
         parts = re.split(r"[,\s]+", str(raw))
-    out = set()
+    spec = OnlySpec()
     for part in parts:
         token = part.strip().lower()
         if not token:
             continue
         if token in ("all", "everything", "*"):
-            return set()
-        token = ONLY_ALIASES.get(token, token)
-        if token not in ONLY_STAGES:
-            die(f"--only: unknown stage {part!r}; choose from {', '.join(ONLY_STAGES)} "
-                f"(aliases: merge=integrate, w=rewrite, a/a2=revise, j=judge)")
-        out.add(token)
-    return out
+            spec.all_stages = True
+            continue
+        m = re.fullmatch(r"([0-9][0-9,\-\s]*)\s*[:/.]\s*(.+?)\s*", token)
+        if m and re.match(r"^\s*\d", m.group(1)):
+            # `ROUND[:.]STAGE` (or `ROUND:all`): a per-round stage selection.
+            rounds = parse_only_rounds(m.group(1), part)
+            stage_token = m.group(2).strip()
+            if stage_token in ("all", "everything", "*"):
+                stages = set()
+            else:
+                stages = {parse_only_stage(stage_token, part)}
+            spec.rounds |= rounds
+            for r in rounds:
+                spec.pairs.setdefault(r, set()).update(stages)
+            continue
+        if re.fullmatch(r"[0-9][0-9,\-\s]*", token):
+            spec.rounds |= parse_only_rounds(token, part)
+            continue
+        spec.stages.add(parse_only_stage(token, part))
+    return spec if spec else None
+
+
+def parse_only_stages(raw) -> set:
+    """The STAGE side of `--only` (`run --only rewrite,review,merge`).
+
+    Kept for the stage-only callers and tests: None/empty/`all` selects every
+    stage (the default). A round-qualified item (`2:review`) contributes its
+    stage; the round filter itself lives in parse_only_spec(), which is what the
+    `run` command uses.
+    """
+    spec = parse_only_spec(raw)
+    return spec.stage_filter() if spec else set()
 
 
 def plan_stage_of(entry: dict) -> str:
@@ -7844,8 +8207,17 @@ class Ctx:
     def rounds_count(self) -> int:
         return int(self.cfg.get("rounds", DEFAULTS["rounds"]) or 0)
 
-    def judges_count(self) -> int:
-        return int(self.cfg.get("judges", DEFAULTS["judges"]) or 0)
+    def judges_count(self, r: int = None) -> int:
+        """Judge sessions per version.
+
+        With `r`, the round's own count (`--judges` is a per-round list; a
+        decided round's recorded plan wins -- see round_judges()). Without it,
+        the count of the first configured round, which is what a caller that has
+        no round at hand (a config summary) should print.
+        """
+        if r is None:
+            return int(counts_of(self.cfg, "judges", self.rounds_count())[0])
+        return int(round_judges(self, r))
 
     # ---- run records ----
     def run(self, rid: str):
@@ -8982,10 +9354,21 @@ def materialize_a1(ctx: Ctx, r: int) -> dict:
     base, nr = sb / "base", sb / "non-revised"
     src_id, src_dir = ORIGINAL_ID, ctx.pristine
     if r > 1:
-        pin = find_pin(ctx, ctx.round_rec(r - 1).get("pin_id"))
+        prev = ctx.round_rec(r - 1)
+        pin = find_pin(ctx, prev.get("pin_id"))
         if pin is None:
+            if prev.get("status") != "done":
+                # `run --only R` can ask for a later round while an EARLIER round
+                # is still pending. That is an unsatisfied dependency, not a
+                # corrupt root: report it as such so the operator is told to run
+                # the earlier round instead of "repair the upstream output".
+                raise DepsNotMet(
+                    f"round {r} needs round {r - 1}'s pinned champion, but round {r - 1} is "
+                    f"{prev.get('status', 'pending')}; finish it first "
+                    f"(e.g. `run --only {r - 1}`, or a plain `run`)")
             raise RuntimeError(f"cannot materialize round {r} base: round {r - 1} has no pinned "
-                               f"champion yet")
+                               f"champion though it is marked done (the pin record is missing; "
+                               f"restore it from a state.json backup)")
         src_id, src_dir = pin["id"], pinned_docs_dir(ctx, pin)
     want = (ctx.state.get("original_digest") if src_id == ORIGINAL_ID
             else (find_pin(ctx, src_id) or {}).get("digest"))
@@ -9303,15 +9686,15 @@ def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
     The label -> version map is written to the run record only; the sandbox
     gets the labels and nothing else about them.
     """
-    judges = ctx.judges_count()
+    judges = round_judges(ctx, r)
     k_opp = len(field) - 1
     if k_opp < 1:
         raise RuntimeError(f"round {r}: field has {len(field)} member(s); no opponents to judge")
-    m, n = round_counts(ctx, r)
-    for vid in round_fresh_ids(m, n):
+    for vid in round_produced_ids(ctx, r):
         _require_done(ctx, rid_for_fresh(r, vid),
                       "a judge field needs every arm of the round (the base, every rewrite, every "
-                      "reviewed-and-revised candidate and every integration run)")
+                      "reviewed-and-revised candidate and every integration run the round's "
+                      "integrator mask selected)")
     # The token names the run AND its sandbox directory, so two versions that
     # hashed to the same token would silently share one sandbox (the second
     # materialization would reuse the first's target/ and prompt): the panel
@@ -9444,7 +9827,9 @@ def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
 
 def build_field(ctx: Ctx, r: int) -> tuple:
     """field_r = {original} U {pins from rounds < r} U the round's fresh arms
-    (base, M rewrites, N revisions, K integrated candidates),
+    (base, M rewrites, N revisions, and the integrated candidates the round's
+    integrator mask selected -- every pool member when the mask is the default
+    0xFFFFFFFF),
     deduplicated by the DOCUMENT content fingerprint (first occurrence wins; see
     corpus_content_set_fingerprint for why the name/bookkeeping-sensitive
     integrity digest is not used here). Returns (entries, dropped) where each
@@ -9455,8 +9840,7 @@ def build_field(ctx: Ctx, r: int) -> tuple:
         if int(pin.get("round") or 0) < int(r):
             entries.append({"id": pin["id"], "digest": pin.get("digest"), "kind": "pinned",
                             "from_round": pin.get("round"), "source_id": pin.get("source_id")})
-    m, n = round_counts(ctx, r)
-    for vid in round_fresh_ids(m, n):
+    for vid in round_produced_ids(ctx, r):
         rec = ctx.run(rid_for_fresh(r, vid)) or {}
         entries.append({"id": vid, "digest": rec.get("corpus_digest"), "kind": "fresh",
                         "run": rid_for_fresh(r, vid), "arm": arm_of_vid(vid)})
@@ -9672,7 +10056,7 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
     pool = round_pool_ids(m, n)
     rewrite_ids = [rid_for_fresh(r, v) for v in pool if arm_of_vid(v) == "rewrite"]
     revise_ids = [rid_for_fresh(r, v) for v in pool if arm_of_vid(v) == "revise"]
-    integrate_ids = [rid_for_fresh(r, v) for v in round_integrated_ids(m, n)]
+    integrate_ids = [rid_for_fresh(r, v) for v in round_integrated_run_ids(ctx, r, m, n)]
     order = rewrite_ids + ([rid_review(r)] if n else []) + revise_ids + integrate_ids
     if n and review_split_of(ctx) != "off":
         order = (rewrite_ids + [rid_review(r), rid_review_b(r)] + revise_ids
@@ -10398,7 +10782,8 @@ PRIOR_ROUND_RULE = """PRIOR-ROUND FINDINGS (read-only; round @@ROUND@@ reviews t
   * The orchestrator refuses the review if any prior finding id appears in NEITHER
     findings.json nor findings.md, so complete this reconciliation first.
   * Carrying findings forward does NOT replace the sweeps: run the complete M1-M17 + J1-J4 set
-    (plus the pipeline caption check when it is active) and report your own new findings as usual."""
+    plus the pipeline-mandated M18-M24 checks (the caption check among them) and report your own
+    new findings as usual."""
 
 
 # ---------------------------------------------------------------------
@@ -10986,27 +11371,153 @@ DISPOSITION_STRUCTURAL_EXEMPT_RE = re.compile(
     r"\brunning head\b|\bmetadata\b|\bnot applicable\b|\bn/a\b)", re.I)
 
 
-def parse_markdown_table(path: Path) -> list:
-    """Rows of a seeded artifact table as {lowercased header: cell} ([] if absent)."""
+# The columns whose cells carry a disposition. `resolution` is the same
+# contract under the placeholder/ledger layouts' own name.
+DISPOSITION_COLUMNS = ("disposition", "resolution")
+
+
+def _split_table_cells(text: str) -> list:
+    """Split one table line on its UNESCAPED pipes (a `\\|` is cell content).
+
+    The seeded tables escape a literal pipe inside a cell as `\\|` (figure
+    captions are full of them: "Fig. 1 \\| Strategies ..."), and splitting on
+    every pipe made those rows longer than their header -- which shifted every
+    later cell, so the disposition was read from the wrong column.
+    """
+    cells, cur, i = [], [], 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\" and i + 1 < len(text):
+            cur.append(ch)
+            cur.append(text[i + 1])
+            i += 2
+            continue
+        if ch == "|":
+            cells.append("".join(cur))
+            cur = []
+            i += 1
+            continue
+        cur.append(ch)
+        i += 1
+    cells.append("".join(cur))
+    return [c.strip().replace("\\|", "|") for c in cells]
+
+
+def _table_line_cells(line: str) -> list:
+    """The cells of one `| ... |` line, without its two delimiter pipes."""
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|") and not s.endswith("\\|"):
+        s = s[:-1]
+    return _split_table_cells(s)
+
+
+def _is_separator_row(cells: list) -> bool:
+    """`|---|---|` / `|:--:|` -- the table's header/body divider."""
+    return bool(cells) and all("-" in c and set(c) <= set("-: ") for c in cells)
+
+
+def _table_row(header: list, cells: list) -> tuple:
+    """({column: cell}, note) for one data row; note is "", "trimmed" or "ragged".
+
+    The tables real sessions deliver are not always exactly as wide as their
+    header, and each deviation has ONE unambiguous reading:
+
+      1. stray LEADING empty cells (a script that writes `"| " + row` for a row
+         that already starts with its own pipe) are dropped;
+      2. ONE more cell than the header when the last column is a disposition
+         column and its own cell is EMPTY means the verdict was APPENDED after
+         the seeded empty cell instead of replacing it -- rendered markdown shows
+         that verdict, so it is read (the old positional zip() dropped it and
+         reported every row of a fully disposed 212-row M20 sweep as EMPTY,
+         failing three 30-minute attempts in a row on a real root);
+      3. stray TRAILING empty cells are dropped.
+
+    Notes: "appended" is worth warning about (the table's column count is off),
+    "trimmed" is not (only empty stray cells were removed), and "ragged" means
+    the row's real cells still do not match the header -- it is read
+    positionally and the operator is warned, because a shifted row would put the
+    verdict in the wrong column.
+    """
+    n = len(header)
+    note = ""
+    while len(cells) > n and not str(cells[0]).strip():
+        cells = cells[1:]
+        note = "trimmed"
+    if (len(cells) == n + 1 and header and header[-1] in DISPOSITION_COLUMNS
+            and not str(cells[n - 1]).strip()):
+        cells = cells[:n - 1] + [cells[-1]]
+        note = "appended"
+    while len(cells) > n and not str(cells[-1]).strip():
+        cells = cells[:-1]
+        note = note or "trimmed"
+    if len(cells) < n:
+        cells = cells + [""] * (n - len(cells))
+        note = note or "ragged"
+    elif len(cells) > n:
+        cells = cells[:n]
+        note = "ragged"
+    return {h: v for h, v in zip(header, cells)}, note
+
+
+def parse_markdown_blocks(path: Path) -> list:
+    """Every markdown table block of one artifact, each against ITS OWN header.
+
+    Returns [{"header": [...], "rows": [{column: cell}], "appended": n,
+    "ragged": n}, ...] in file order. A block is a run of consecutive `|` lines:
+    the first is the header, a separator row is skipped, the rest are data rows.
+
+    Blocks must be parsed separately because the artifacts legitimately contain
+    MORE THAN ONE table: the M20 sweep requires the review to add the classes the
+    code-side scan cannot see ("rows added from the visual pass"), and the
+    coverage/summary tables are appended the same way. Parsing the whole file
+    against the FIRST header turned those rows' own cells into empty
+    `disposition` cells of the seeded table.
+    """
     try:
         text = path.read_text("utf-8", "replace")
     except OSError:
         return []
-    rows, header = [], None
+    raw_blocks, cur = [], []
     for line in text.splitlines():
-        line = line.strip()
-        if not line.startswith("|"):
-            continue
-        cells = [c.strip() for c in line.strip("|").split("|")]
-        if header is None:
-            header = [c.lower() for c in cells]
-            continue
-        if all(set(c) <= set("-: ") for c in cells):
-            continue
-        if len(cells) < len(header):
-            cells += [""] * (len(header) - len(cells))
-        rows.append({h: v for h, v in zip(header, cells)})
-    return rows
+        if line.strip().startswith("|"):
+            cur.append(line.strip())
+        elif cur:
+            raw_blocks.append(cur)
+            cur = []
+    if cur:
+        raw_blocks.append(cur)
+    blocks = []
+    for raw in raw_blocks:
+        header = [c.lower() for c in _table_line_cells(raw[0])]
+        rows, appended, ragged = [], 0, 0
+        for line in raw[1:]:
+            cells = _table_line_cells(line)
+            if _is_separator_row(cells):
+                continue
+            row, note = _table_row(header, cells)
+            appended += 1 if note == "appended" else 0
+            ragged += 1 if note == "ragged" else 0
+            rows.append(row)
+        blocks.append({"header": header, "rows": rows,
+                       "appended": appended, "ragged": ragged})
+    return blocks
+
+
+def parse_markdown_table(path: Path) -> list:
+    """Rows of a seeded artifact table as {lowercased header: cell} ([] if absent).
+
+    A file that repeats the FIRST table's header (a long ledger split by an
+    interpolated paragraph) contributes every block; a table with different
+    columns (the session's own added-rows/coverage table) is NOT read as more
+    rows of the first table -- see parse_markdown_blocks() for why that matters.
+    """
+    blocks = parse_markdown_blocks(path)
+    if not blocks:
+        return []
+    head = blocks[0]["header"]
+    return [row for b in blocks if b["header"] == head for row in b["rows"]]
 
 
 def _names_check_or_finding(cell: str) -> bool:
@@ -11024,7 +11535,7 @@ def disposition_artifact_problems(rows: list) -> list:
     rows = [r for r in rows if r]
     if not rows:
         return problems
-    key = next((k for k in ("disposition", "resolution") if k in rows[0]), None)
+    key = next((k for k in DISPOSITION_COLUMNS if k in rows[0]), None)
     if key is None:
         return problems
     filled = [r for r in rows if str(r.get(key) or "").strip()]
@@ -11082,18 +11593,53 @@ DECISION_ARTIFACTS = ("artifacts/M20_formatting.md", "artifacts/M18_caption_word
 
 
 def artifact_quality_report(review_dir: Path) -> dict:
-    """{artifact: [problems]} for every seeded decision table under review/."""
+    """{artifact: [problems]} for every decision table under review/.
+
+    EVERY table block of the artifact is checked, each against its own header:
+    the seeded table and the rows the session adds itself (the M20 "classes the
+    scan cannot see", a coverage table) are all rows the session had to dispose.
+    """
     report = {}
     for rel in DECISION_ARTIFACTS:
-        rows = parse_markdown_table(review_dir / rel)
-        if not rows:
-            continue
-        problems = disposition_artifact_problems(rows)
-        if rel.endswith("OUTLINE.md"):
-            problems += outline_artifact_problems(rows)
-        if problems:
-            report[rel] = problems
+        for block in parse_markdown_blocks(review_dir / rel):
+            rows = block["rows"]
+            if not rows:
+                continue
+            problems = disposition_artifact_problems(rows)
+            if rel.endswith("OUTLINE.md"):
+                problems += outline_artifact_problems(rows)
+            if problems:
+                report.setdefault(rel, []).extend(problems)
     return report
+
+
+def artifact_quality_notes(review_dir: Path) -> dict:
+    """{artifact: [notes]} for tables the parser had to read tolerantly.
+
+    These are WARNINGS, never failures: a row with one cell more than its header
+    whose verdict was appended after the seeded empty cell is read anyway (see
+    _table_row), but the operator should still know the table's column count is
+    off, because a row that shifted cells rather than appending one would be
+    read positionally.
+    """
+    notes = {}
+    for rel in DECISION_ARTIFACTS:
+        appended = ragged = 0
+        for block in parse_markdown_blocks(review_dir / rel):
+            appended += block["appended"]
+            ragged += block["ragged"]
+        msgs = []
+        if appended:
+            msgs.append(f"{appended} row(s) carry one more cell than their header; the appended "
+                        f"trailing cell was read as the "
+                        f"{'/'.join(DISPOSITION_COLUMNS)} value -- write the verdict IN the "
+                        f"seeded cell instead of after it")
+        if ragged:
+            msgs.append(f"{ragged} row(s) do not match their table's column count and were read "
+                        f"positionally; check the table")
+        if msgs:
+            notes[rel] = msgs
+    return notes
 
 
 def check_artifact_quality(ctx: Ctx, rec: dict, sb: Path, errs: list, warns: list) -> dict:
@@ -11104,6 +11650,9 @@ def check_artifact_quality(ctx: Ctx, rec: dict, sb: Path, errs: list, warns: lis
         for p in problems:
             msg = f"decision artifact {rel}: {p}"
             (errs if strict_dispositions(ctx) else warns).append(msg)
+    for rel, notes in sorted(artifact_quality_notes(sb / REVIEW_DIR).items()):
+        for n in notes:
+            warns.append(f"decision artifact {rel}: {n}")
     return report
 
 
@@ -12491,7 +13040,7 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
         version it started from.
     """
     field_ids = list(field_ids)
-    judges = ctx.judges_count()
+    judges = round_judges(ctx, r)
     diags = {"sheets_used": 0, "sheets_expected": judges * len(field_ids),
              "scores_collected": 0, "unresolved": [], "incomplete_sheets": [],
              "superseded_sheets": [], "out_of_range_sheets": []}
@@ -12850,8 +13399,7 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
     stats = agg["stats"]
     trace = []
     base_rep = agg.get("base_rep")
-    m, n = round_counts(ctx, r)
-    candidates = round_candidate_ids(m, n)
+    candidates = round_candidate_ids_run(ctx, r)
     missing = [c for c in candidates if c not in stats]
     if missing:
         trace.append(f"candidate(s) {missing} are not field members this round (their content was "
@@ -13133,10 +13681,17 @@ def finalize_round(ctx: Ctx, r: int, field: list, dropped: list, agg: dict,
     # report claim the round was never decided.
     rrec.pop("panel_gaps", None)
     m, n = round_counts(ctx, r)
+    # Freeze the WHOLE plan, not only the rewrite/revise counts: the integrator
+    # mask decides which integration arms exist, and the judge count decides the
+    # panel every row must complete. `decide` recomputes both, so a later config
+    # edit must not look like a missing arm / a stale panel.
+    mask = round_integrators(ctx, r)
+    integrated = round_integrated_run_ids(ctx, r, m, n)
     rrec.update({
         "status": "done", "completed": utcnow(),
         "plan": {"rewrites": m, "revises": n, "pool": round_pool_ids(m, n),
-                 "integrated": round_integrated_ids(m, n)},
+                 "integrated": integrated, "integrators": mask,
+                 "judges": round_judges(ctx, r)},
         "field": [e["id"] for e in field],
         "field_entries": field, "field_dropped": dropped,
         "field_size": agg["field_size"], "scores_per_version": agg["scores_per_version"],
@@ -13723,7 +14278,8 @@ def round_run_plan(ctx: Ctx, r: int) -> list:
         +-- a2..a{1+N}  revisions       (depend on a1 + review) -> as soon as the
                                                                   review is done
         pool = {a1, w1..wM, a2..a{1+N}}
-        +-- i1..iK      integrations    (depend on the WHOLE pool)
+        +-- i<k>        integrations    (depend on the WHOLE pool); only the arms
+                        selected by the round's per-round `--integrators` mask run
         the judge wave is materialized separately once the field is deduplicated.
     """
     m, n = round_counts(ctx, r)
@@ -13764,7 +14320,9 @@ def round_run_plan(ctx: Ctx, r: int) -> list:
                             "deps": [rid_a1(r)] + review_deps,
                             "stage": f"revise {j}/{n}",
                             "materialize": (lambda c, v=vid: materialize_revise(c, r, v))})
-    for k in range(1, len(pool) + 1):
+    mask = round_integrators(ctx, r)
+    arms = integrator_arms(m, n, mask)
+    for k in arms:
         vid = integrate_vid(k)
         entries.append({"id": rid_for_fresh(r, vid), "kind": "integrate", "vid": vid,
                         "deps": [rid_for_fresh(r, v) for v in pool],
@@ -14034,7 +14592,14 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
                 judge_cmd=None, judge_manual: bool = None, judge_timeout=None,
                 retry_backoff: int = 0, retry_backoff_max: int = 0,
                 redline: bool = True, only=None) -> tuple:
+    """Drive ONE round.
+
+    `only` is an OnlySpec (or None): the round's stage filter is the union of
+    the bare stage items and the `ROUND:STAGE` items that name this round, so
+    `--only 1:review,2:judge` gives round 1 the review and round 2 the judge.
+    """
     R = ctx.rounds_count()
+    stages_only = only.stages_for(r) if only is not None else None
     print()
     print(f"[run] ==================== ROUND {r}/{R} ====================")
     rrec = ctx.round_rec(r)
@@ -14059,6 +14624,8 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
     # no stage waits for an unrelated stage any more.
     m, n = round_counts(ctx, r)
     pool = round_pool_ids(m, n)
+    mask = round_integrators(ctx, r)
+    arms = integrator_arms(m, n, mask)
     try:
         materialize_a1(ctx, r)
     except DepsNotMet as exc:
@@ -14074,15 +14641,20 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
     # longer contains (see revalidate_round_inputs).
     revalidate_round_inputs(ctx, r)
     ctx.save_state()
+    _int_note = (f"{len(arms)} integration run(s) over the whole pool "
+                 f"[integrators 0x{mask:X}]"
+                 if arms else
+                 f"NO integration run (integrators 0x{mask:X}: every applicable bit is clear)")
     print(f"[run] r{r} plan: M={m} rewrite(s) + {'1 review + ' if n else ''}"
           f"N={n} revise(s) -> pool {{{', '.join(pool)}}}; then "
-          f"{len(pool)} integration run(s) over the whole pool, then the judge panel. "
+          f"{_int_note}, then the judge panel ({round_judges(ctx, r)} judge(s) per version). "
           f"Sessions start as soon as their inputs exist (jobs={jobs}).")
     if n:
         for k, src in enumerate(pool, 1):
+            mark = "" if k in arms else "  [SKIPPED: integrators bit clear]"
             print(f"[run] r{r}   {integrate_vid(k)} = {src} <- "
-                  f"({', '.join(v for v in pool if v != src)})")
-    ok, paused = run_round_runs(ctx, r, label=f"r{r}", only=only, **ph)
+                  f"({', '.join(v for v in pool if v != src)}){mark}")
+    ok, paused = run_round_runs(ctx, r, label=f"r{r}", only=stages_only, **ph)
     if not ok:
         return False, paused
 
@@ -14092,9 +14664,9 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
         print(f"[run] r{r} field dedup: {d['id']} dropped — {d['reason']}")
     print(f"[run] r{r} field: {len(field)} member(s) "
           f"({', '.join(e['id'] for e in field)}) -> "
-          f"{2 * ctx.judges_count() * (len(field) - 1)} directed scores per version")
-    if only and "judge" not in only:
-        print(f"[run] r{r} --only {','.join(sorted(only))}: the judge wave and the round "
+          f"{2 * round_judges(ctx, r) * (len(field) - 1)} directed scores per version")
+    if stages_only and "judge" not in stages_only:
+        print(f"[run] r{r} --only {','.join(sorted(stages_only))}: the judge wave and the round "
               f"decision are NOT started in this invocation; run `--only judge` (or a plain "
               f"`run`) to score the field and pin the champion")
         ctx.save_state()
@@ -14114,7 +14686,7 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
               f"skipping the judge wave (no opponents to judge)")
     ctx.save_state()
     print(f"[run] r{r} final stage: {len(judge_ids)} judge session(s) "
-          f"({ctx.judges_count()} per version), run in parallel")
+          f"({round_judges(ctx, r)} per version), run in parallel")
     ok, paused = run_phase(ctx, judge_ids, label=f"r{r} judge", **ph_judge)
     if not ok:
         return False, paused
@@ -14211,7 +14783,7 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
 # =====================================================================
 
 def cmd_setup(args) -> None:
-    rounds, judges = int(args.rounds), int(args.judges)
+    rounds = int(args.rounds)
     caption_limit = int(getattr(args, "caption_limit", DEFAULT_CAPTION_LIMIT))
     format_policy = {}
     if getattr(args, "format_policy", None):
@@ -14229,8 +14801,12 @@ def cmd_setup(args) -> None:
     zotero = str(getattr(args, "zotero", DEFAULT_ZOTERO_MODE) or DEFAULT_ZOTERO_MODE).strip().lower()
     if rounds < 1:
         die("--rounds must be >= 1")
-    if judges < 1:
-        die("--judges must be >= 1")
+    judges_list = parse_round_counts(getattr(args, "judges", None) or DEFAULTS["judges"],
+                                     rounds, "--judges")
+    if any(j < 1 for j in judges_list):
+        die(f"--judges must be >= 1 per round, got {judges_list}")
+    integrators = parse_round_masks(getattr(args, "integrators", None) or DEFAULTS["integrators"],
+                                    rounds, "--integrators")
     if caption_limit < 0:
         die("--caption-limit must be >= 0 (0 = no caption suggestion at all, the default)")
     if zotero not in ZOTERO_MODES:
@@ -14239,6 +14815,14 @@ def cmd_setup(args) -> None:
                                   rounds, "--rewrites")
     revises = parse_round_counts(getattr(args, "revises", None) or DEFAULTS["revises"],
                                  rounds, "--revises")
+    # The integrator mask addresses the pool with one bit per member; a pool that
+    # outgrew the 32-bit mask cannot be expressed, and silently dropping the
+    # higher members' integrations would change the field without saying so.
+    for i, (m, n) in enumerate(zip(rewrites, revises), 1):
+        if len(round_pool_ids(m, n)) > INTEGRATOR_BITS:
+            die(f"round {i} has {len(round_pool_ids(m, n))} pool member(s) (a1 + M={m} rewrites "
+                f"+ N={n} revisions), more than the {INTEGRATOR_BITS} bits of --integrators; "
+                f"lower --rewrites/--revises for that round")
     for i, (m, n) in enumerate(zip(rewrites, revises), 1):
         if m + n < 1:
             die(f"round {i} would have no candidate at all: --rewrites and --revises must not "
@@ -14294,7 +14878,7 @@ def cmd_setup(args) -> None:
     # refer to the SAME repaired text. This is the formatting analogue of the
     # document-recovery repair: the operator's --source directory is never
     # touched, and `--format-fix off` keeps the copy byte-identical instead.
-    ctx.cfg = {"rounds": rounds, "judges": judges, "source": str(source),
+    ctx.cfg = {"rounds": rounds, "judges": judges_list, "source": str(source),
                "caption_limit": caption_limit, "zotero": zotero,
                "vs_original_rule": str(getattr(args, "vs_original_rule", VS_ORIGINAL_RULE)),
                "stop_after_no_progress": int(getattr(args, "stop_after_no_progress", 0) or 0),
@@ -14305,7 +14889,7 @@ def cmd_setup(args) -> None:
                                          or DEFAULT_PLACEHOLDER_LOOKUP),
                "strict_artifacts": bool(getattr(args, "strict_artifacts", False)),
                "format_policy": format_policy, "format_fix": format_fix,
-               "rewrites": rewrites, "revises": revises,
+               "rewrites": rewrites, "revises": revises, "integrators": integrators,
                "created": utcnow(), "version": VERSION}
     format_fix_report = None
     if format_fix != "off":
@@ -14334,8 +14918,9 @@ def cmd_setup(args) -> None:
     # the state file is self-describing, as the run-record contract requires).
     ctx.state["config"] = ctx.cfg
     write_json_atomic(ctx.cfg_path, ctx.cfg)
-    ctx.log("setup", detail=f"rounds={rounds} judges={judges} rewrites={rewrites} "
-                            f"revises={revises} files={len(files)} "
+    ctx.log("setup", detail=f"rounds={rounds} judges={judges_list} rewrites={rewrites} "
+                            f"revises={revises} integrators={[hex(x) for x in integrators]} "
+                            f"files={len(files)} "
                             f"caption_limit={caption_limit} "
                             f"zotero={zotero} "
                             f"placeholders={ctx.state['original_placeholders']['count']}")
@@ -14347,30 +14932,39 @@ def cmd_setup(args) -> None:
     except OSError:
         pass
     # Round r's field is {original} + {pins from earlier rounds} + the round's
-    # fresh arms (a1, M rewrites, N revisions, K = 1+M+N integrations); a1
-    # always deduplicates against the previous pin (or the original), so an
-    # upper bound on the field size is r + 1 + 2*(M_r + N_r). Judge sessions are
-    # `judges` per member.
-    field_bound = [r + 1 + 2 * (rewrites[r - 1] + revises[r - 1]) for r in range(1, rounds + 1)]
-    est_sessions = judges * sum(field_bound)
+    # fresh arms (a1, M rewrites, N revisions and the integrated candidates the
+    # round's integrator mask selects); a1 always deduplicates against the
+    # previous pin (or the original), so an upper bound on the field size is
+    # 1 + (r-1) + (1+M+N) + <selected integrations>. Judge sessions are the
+    # round's own `--judges` count per member.
+    round_arms = [integrator_arms(rewrites[r - 1], revises[r - 1], integrators[r - 1])
+                  for r in range(1, rounds + 1)]
+    field_bound = [r + len(round_pool_ids(rewrites[r - 1], revises[r - 1]))
+                   + len(round_arms[r - 1]) for r in range(1, rounds + 1)]
+    est_sessions = sum(judges_list[r - 1] * field_bound[r - 1] for r in range(1, rounds + 1))
     print()
     print(f"[setup] pipeline root:          {root}")
     print(f"[setup] rounds:                 {rounds} (FIXED length; the round-{rounds} champion "
           f"is the final answer)")
-    print(f"[setup] judges per version:     {judges}")
+    print(f"[setup] judges per round:       {judges_list}  (independent judge sessions PER "
+          f"VERSION per round)")
     print(f"[setup] rewrites per round (M): {rewrites}  (rewritten candidates w1..wM per round)")
     print(f"[setup] revises per round (N):  {revises}  (reviewed-and-then-revised candidates "
           f"a2..a{{1+N}} per round; ONE $nbt-review pass per round feeds all of them)")
+    print(f"[setup] integrators per round:  {[hex(x) for x in integrators]}  (bit k-1 selects the "
+          f"k-th pool member's integration arm; 0x{INTEGRATOR_ALL:X} = every applicable agent)")
     for r in range(1, rounds + 1):
         m, n_ = rewrites[r - 1], revises[r - 1]
         pool = round_pool_ids(m, n_)
-        print(f"[setup]   round {r}: pool = {', '.join(pool)}  ->  "
-              + "; ".join(f"{integrate_vid(k + 1)} = {src} <- "
-                          f"({', '.join(v for v in pool if v != src)})"
-                          for k, src in enumerate(pool)))
+        arms = set(round_arms[r - 1])
+        plan = "; ".join(
+            f"{integrate_vid(k + 1)} = {src} <- ({', '.join(v for v in pool if v != src)})"
+            + ("" if k + 1 in arms else "  [SKIPPED: integrators bit clear]")
+            for k, src in enumerate(pool))
+        print(f"[setup]   round {r}: pool = {', '.join(pool)}  ->  {plan}")
     print(f"[setup] directed scores/version: 2*judges*(|field|-1) per round "
-          f"({2 * judges * (field_bound[0] - 1)} in round 1 at its upper-bound field of "
-          f"{field_bound[0]}; 6*(|field|-1) when judges=3)")
+          f"({2 * judges_list[0] * (field_bound[0] - 1)} in round 1 at its upper-bound field of "
+          f"{field_bound[0]}, {judges_list[0]} judges; 6*(|field|-1) when judges=3)")
     print(f"[setup] expected judge sessions: ~{est_sessions} over {rounds} round(s) "
           f"(upper bounds {field_bound}; content-identical field members dedup away)")
     if caption_limit:
@@ -14462,11 +15056,15 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
               f"{', '.join(adopted)}")
 
     manual = args.agent == "manual"
-    only = parse_only_stages(getattr(args, "only", None))
-    if only:
-        print(f"[run] --only {','.join(sorted(only))}: this invocation starts/adopts only the "
-              f"selected stage type(s); a round whose other stages are still pending stays "
-              f"incomplete (resume with `run`, `--only <stage>`, or `retry --run <ID>`)")
+    only = parse_only_spec(getattr(args, "only", None))
+    if only is not None and only.is_everything():
+        only = None                     # `--only all`: exactly a plain `run`
+    if only is not None:
+        only.validate(ctx.rounds_count())
+        print(f"[run] --only {getattr(args, 'only', None)!r}: {only.describe()}; this invocation "
+              f"drives only the selected round(s) and stage type(s); a round whose other "
+              f"stages are still pending stays incomplete (resume with `run`, `--only …`, or "
+              f"`retry --run <ID>`)")
     cmd = None if manual else resolve_agent_cmd(args.agent, args.agent_cmd)
     if not manual and shutil.which(cmd[0]) is None:
         die(f"agent executable not found on PATH: {cmd[0]!r}\n"
@@ -14538,7 +15136,8 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                   if retries else "no automatic retry (--retries 0)")
     print(f"[run] jobs={args.jobs} timeout={timeout or 'none'}s "
           f"judge-timeout={judge_timeout or 'none'}s {retry_note} "
-          f"rounds={ctx.rounds_count()} judges/version={ctx.judges_count()} "
+          f"rounds={ctx.rounds_count()} judges/version={judges_config_note(ctx)} "
+          f"integrators={integrators_config_note(ctx)} "
           f"agent={args.agent}")
     # The optional `docx` CLI is offered to every agent in every stage (see
     # DOCX_CLI_RULE). It is never required, but the operator should be able to
@@ -14593,6 +15192,10 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     if R < 1:
         die("pipeline_config.json records no rounds; re-run `setup` with --rounds >= 1")
     for r in range(1, R + 1):
+        if only is not None and not only.covers_round(r):
+            print(f"[run] round {r}/{R} NOT selected by --only ({getattr(args, 'only', None)!r}): "
+                  f"nothing of its plan is started in this invocation")
+            continue
         rrec = ctx.round_rec(r)
         if rrec.get("status") == "done":
             print(f"[run] round {r}/{R} already complete: champion {rrec.get('champion')} "
@@ -14635,7 +15238,9 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             else:
                 break
         stop_k = int((ctx.cfg or {}).get("stop_after_no_progress") or 0)
-        if stop_k and streak >= stop_k and r < R:
+        more_rounds = any(rr > r and (only is None or only.covers_round(rr))
+                          for rr in range(1, R + 1))
+        if stop_k and streak >= stop_k and more_rounds:
             ctx.state["stopped_early"] = {
                 "after_round": int(r), "planned_rounds": int(R),
                 "no_progress_streak": streak,
@@ -14660,8 +15265,16 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
               f"field={len(rrec.get('field') or [])}  "
               f"{rrec.get('scores_per_version')} scores/version  "
               f"winner={rrec.get('winner_dir') or rrec.get('pin_path')}")
-    print(f"[run] round {R} champion is the final answer. "
-          f"Next: python {Path(sys.argv[0]).name} decide --root {ctx.root}")
+    selected = ([r for r in range(1, R + 1) if only.covers_round(r)]
+                if only is not None else list(range(1, R + 1)))
+    if only is not None and len(selected) < R:
+        print(f"[run] --only ran round(s) {', '.join(str(r) for r in selected)} of {R}; round "
+              f"{R} champion is the final answer once every configured round is complete. "
+              f"Next: python {Path(sys.argv[0]).name} run --root {ctx.root} "
+              f"(or `decide` when all rounds are done)")
+    else:
+        print(f"[run] round {R} champion is the final answer. "
+              f"Next: python {Path(sys.argv[0]).name} decide --root {ctx.root}")
 
 
 def summarize(ctx: Ctx) -> None:
@@ -15082,7 +15695,8 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
     L.append("# NBT Round Pipeline — Decision Report")
     L.append("")
     L.append(f"Generated: {utcnow()}  |  pipeline root: `{ctx.root}`  |  orchestrator v{VERSION}")
-    L.append(f"Config: rounds={ctx.rounds_count()} judges/version={ctx.judges_count()} "
+    L.append(f"Config: rounds={ctx.rounds_count()} judges/version={judges_config_note(ctx)} "
+             f"integrators/round={integrators_config_note(ctx)} "
              f"| source: `{ctx.cfg.get('source')}`")
     L.append("")
     L.append("## 0. Integrity")
@@ -15229,8 +15843,8 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
         L.append(f"- field: {agg['field_size']} member(s) — "
                  f"`{', '.join(agg['field'])}`")
         L.append(f"- score set: {agg['scores_per_version']} directed scores per version "
-                 f"= 2 * {ctx.judges_count()} * ({agg['field_size']} - 1)")
-        L.append(f"- judges per version: {ctx.judges_count()} "
+                 f"= 2 * {round_judges(ctx, r)} * ({agg['field_size']} - 1)")
+        L.append(f"- judges per version: {round_judges(ctx, r)} "
                  f"({agg['diagnostics']['sheets_used']}/{agg['diagnostics']['sheets_expected']} "
                  f"sheets usable)")
         L.append(f"- champion: **{stored.get('champion')}**"
@@ -15393,10 +16007,10 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
     L.append("**Directed scores.** Each judge session scores the target against every opponent in "
              "the target's own direction only, one integer in -4..+4. V-vs-W comes from V's "
              "judges; W-vs-V comes from W's judges and is negated into V's frame, so a version's "
-             f"score list is `{ctx.judges_count()}*(|field|-1)` own scores plus "
-             f"`(|field|-1)*{ctx.judges_count()}` negated received scores = "
+             f"score list is `{round_judges(ctx, r)}*(|field|-1)` own scores plus "
+             f"`(|field|-1)*{round_judges(ctx, r)}` negated received scores = "
              f"`2*judges*(|field|-1)` values (here: {agg['scores_per_version']} at "
-             f"judges={ctx.judges_count()}, |field|={agg['field_size']}). A version is only "
+             f"judges={round_judges(ctx, r)}, |field|={agg['field_size']}). A version is only "
              f"ELIGIBLE to win when its own panel is complete (all "
              f"{agg['scores_per_version']} scores collected); a FRESH arm additionally needs both "
              f"directions against the original (the anti-regression gate below), while the round's "
@@ -15433,18 +16047,29 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
              f"contradict the fallback.")
     L.append("")
     plan = stored.get("plan") or {}
+    pool = list(plan.get("pool") or [])
+    int_recorded = plan.get("integrated") is not None
+    ran_int = [v for v in (plan.get("integrated") or []) if is_integrated_vid(v)]
+    _mask_note = (f" 0x{int(plan['integrators']):X}" if is_int(plan.get("integrators")) else "")
+    if int_recorded and len(ran_int) < len(pool):
+        _int_text = (f", plus only {len(ran_int)} of the {len(pool)} possible integration arm(s) "
+                     f"(K = 1 + M + N = {len(pool)}); this round's integrator mask{_mask_note} "
+                     f"left {len(pool) - len(ran_int)} arm(s) out -- they were not run, not "
+                     f"judged and could not be crowned")
+    else:
+        _int_text = f", plus one integration run per pool member (K = 1 + M + N = {len(pool)})"
     L.append(f"**Candidate pool.** This round ran with M={plan.get('rewrites', '?')} rewritten "
              f"candidate(s) and N={plan.get('revises', '?')} reviewed-and-then-revised "
-             f"candidate(s), plus one integration run per pool member "
-             f"(K = 1 + M + N = {len(plan.get('pool') or [])}). Every one of them is a candidate "
+             f"candidate(s){_int_text}. Every one of them is a candidate "
              f"on the same terms: none is excluded from scoring, selection or replacement, and "
              f"each wins whenever the published ranking key puts it first.")
-    if plan.get("pool"):
-        pool = list(plan["pool"])
+    if pool:
         for k, src in enumerate(pool, 1):
             donors = ", ".join(v for v in pool if v != src)
+            mark = ("  (NOT RUN: the integrator mask left this arm out)"
+                    if int_recorded and integrate_vid(k) not in ran_int else "")
             L.append(f"  - `{integrate_vid(k)}` = integration of `{src}` with the donors "
-                     f"`({donors})`")
+                     f"`({donors})`{mark}")
     L.append("")
     L.append("**Champion.** The ranked rows are the round's fresh arms (every rewrite, every "
              "reviewed-and-revised candidate and every integrated candidate) plus the round's own "
@@ -15598,7 +16223,9 @@ def cmd_status(args) -> None:
           f"({len(ctx.state.get('pinned') or [])} pinned version(s))")
     for e in perrs:
         print(f"  - {e}")
-    print(f"config:        rounds={ctx.rounds_count()} judges/version={ctx.judges_count()}")
+    print(f"config:        rounds={ctx.rounds_count()} "
+          f"judges/version={judges_config_note(ctx)} "
+          f"integrators/round={integrators_config_note(ctx)}")
     # Filesystem-level numbers only: walking an 11 GB sandbox tree here would make
     # `status` take minutes. Exact per-sandbox sizes are what `prune` reports.
     try:
@@ -16616,8 +17243,11 @@ def run_redlines(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
                                  f"the setup --source directory {str(src_setup)!r} is unusable; "
                                  f"'from-setup-source' used the pristine copy")
     for r in rounds:
-        m, n = round_counts(ctx, r)
-        round_versions = versions if versions is not None else round_candidate_ids(m, n)
+        # `all` means every candidate the round REALLY produced: the pool minus
+        # the base, plus the integration arms its integrator mask selected (a
+        # skipped arm has no corpus, so listing it would only add "not
+        # materialized" noise to the manifest).
+        round_versions = versions if versions is not None else round_candidate_ids_run(ctx, r)
         for vid in round_versions:
             if not is_fresh_vid(vid):
                 continue
@@ -16875,7 +17505,8 @@ def _cmd_retry_locked(ctx: Ctx, args) -> None:
 
 USAGE_EXAMPLES = """usage:
   setup   --source <dir> [--root <dir>] [--rounds 2] [--judges 3]
-          [--rewrites M] [--revises N] [--caption-limit N]
+          [--rewrites M] [--revises N] [--integrators 0xFFFFFFFF]
+          [--caption-limit N]
           [--zotero off|read|edit|apply]
           copy the pristine corpus read-only, record its SHA-256 manifest, and
           create pipeline_config.json + state.json (no sandboxes are built yet).
@@ -16888,6 +17519,17 @@ USAGE_EXAMPLES = """usage:
           last element. Defaults: --rewrites 2,1 and --revises 1,1. Every pool
           member (base, rewrites, revisions) is then reworked once by an
           INTEGRATION run that sees the WHOLE pool as donors.
+          --judges is a per-round list too (--judges 3,1): the number of
+          independent judge sessions per version in each round, >= 1 per round
+          (default 3 everywhere).
+          --integrators is a per-round 32-BIT MASK (decimal or 0x…; --integrators
+          0xF,0x5) selecting which agents of the round run that integration:
+          bit (k-1) belongs to the k-th member of the round's pool
+          [a1, w1..wM, a2..a{1+N}], a set bit runs that member's integration arm
+          i<k>, a clear bit skips it (no session, no judge panel row, no chance
+          to win). The default 0xFFFFFFFF selects every applicable agent, so a
+          round's integrations are only restricted when you say so; 0x0 runs no
+          integration at all.
           --caption-limit sets the pipeline's PROXY cap for figure-legend
           length (check id M18; e.g. 300; default 0 = no cap). The journal
           requires that a legend not exceed the word limit of the article type
@@ -16934,6 +17576,14 @@ USAGE_EXAMPLES = """usage:
           --judge-agent/--judge-agent-cmd override the backend for the judge
           panel only (it is the largest wave), e.g. to run judges on a cheaper
           CLI than the production stages.
+          --only SELECTION runs a subset in this invocation; items are a UNION:
+          a round ordinal or range (--only 1,2 = only rounds 1 and 2, every
+          stage; --only 1-3), a stage name (--only review = that stage in every
+          round; rewrite, review, audit, revise, integrate, judge and the
+          aliases w, a/a2, i, merge, j), or ROUND:STAGE (--only 2:merge,3:judge
+          = round 2's integration and round 3's judge; 'all' stands for every
+          stage). Nothing else is started in that invocation, and a round whose
+          other stages are still pending stays incomplete for a later `run`.
   run-decide --root <dir> [same options as `run`] [same options as `decide`]
           run the pending rounds and then decide, in series: the `run` phase
           holds the root lock and finishes first, then `decide` recomputes the
@@ -17089,8 +17739,28 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--rounds", type=int, default=DEFAULTS["rounds"],
                     help=f"number of fixed rounds (default: {DEFAULTS['rounds']}); the round-R "
                          f"champion is the answer")
-    ps.add_argument("--judges", type=int, default=DEFAULTS["judges"],
-                    help="independent judge sessions per version per round (default: 3)")
+    ps.add_argument("--judges", default=None,
+                    help=f"independent judge sessions per version: an integer (--judges 3 "
+                         f"applies it to every round) or a comma-separated list with one entry "
+                         f"per round (--judges 3,1; default: "
+                         f"{brief_list(DEFAULTS['judges'])}). A shorter list is extended by "
+                         f"repeating its last element, a longer one is truncated to --rounds "
+                         f"entries; every entry must be >= 1. The panel of a round is complete "
+                         f"only when every field member carries its own round's 2*judges*(|field|"
+                         f"-1) directed scores")
+    ps.add_argument("--integrators", default=None, metavar="MASK[,MASK…]",
+                    help=f"which agents of each round run an INTEGRATION session, as a bitmask "
+                         f"per round: an integer (--integrators 0x5 applies it to every round) "
+                         f"or a comma-separated list with one entry per round (--integrators "
+                         f"0xF,0x5; decimal, 0x…/0o…/0b… all accepted; default: "
+                         f"0x{INTEGRATOR_ALL:X}, i.e. every applicable agent). Bit (k-1) belongs "
+                         f"to the k-th member of the round's pool [a1, w1..wM, a2..a{{1+N}}]: "
+                         f"set = that member's integration arm i<k> runs (the base arm i1 with "
+                         f"bit 0, w1 with bit 1, …); clear = the arm is not planned, never "
+                         f"judged and can never win. Bits beyond the pool size are ignored, so "
+                         f"0x{INTEGRATOR_ALL:X} always selects the whole pool; 0x0 runs no "
+                         f"integration at all. A shorter list is extended by repeating its last "
+                         f"element")
     ps.add_argument("--rewrites", default=None,
                     help=f"the number M of REWRITTEN candidates per round: an integer "
                          f"(--rewrites 2 applies it to every round) or a comma-separated list "
@@ -17255,14 +17925,19 @@ def build_parser() -> argparse.ArgumentParser:
                     help="JSON argv list for judge sessions only (default: --agent-cmd)")
     run_opts.add_argument("--poll", type=int, default=DEFAULTS["poll"],
                     help="manual-mode completion poll interval seconds (default: 10)")
-    run_opts.add_argument("--only", metavar="STAGES",
-                    help="run only a subset of the round's stages in this invocation: a "
-                         "comma-separated list of rewrite, review, revise, integrate, judge "
-                         "(aliases: w, a/a2, i, merge, j; 'all' = default). Nothing else is "
-                         "started; a round whose other stages are still pending stays incomplete "
-                         "and is resumed by a later `run` (or `--only <stage>`). Use "
-                         "`retry --run <ID>` first when you want a completed stage to run "
-                         "again. Example: --only review,revise  |  --only merge  |  --only judge")
+    run_opts.add_argument("--only", metavar="SELECTION",
+                    help="run only a subset of the pipeline in this invocation. Items are "
+                         "comma-separated and combine as a UNION: a ROUND ordinal or range "
+                         "(--only 1,2 = only rounds 1 and 2, every stage; --only 1-3), a STAGE "
+                         "name (--only review = that stage in every round; rewrite, review, "
+                         "audit, revise, integrate, judge; aliases w, a/a2, i, merge, j), or "
+                         "ROUND:STAGE (--only 2:merge,3:judge = round 2's integration and round "
+                         "3's judge; '.' and '/' also separate, 'all' stands for every stage). "
+                         "Nothing else is started in this invocation; a round whose other stages are "
+                         "still pending stays incomplete and is resumed by a later `run` (or "
+                         "another `--only`). Use `retry --run <ID>` first when you want a "
+                         "completed stage to run again. Examples: --only 1,2  |  --only review  |  "
+                         "--only review,revise  |  --only 2:merge  |  --only merge  |  --only judge")
     run_opts.add_argument("--no-redline", action="store_true",
                     help="skip the automatic tracked-changes generation after each round "
                          "(the `redline` command still works)")

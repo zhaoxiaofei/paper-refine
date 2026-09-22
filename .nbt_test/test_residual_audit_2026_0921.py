@@ -327,6 +327,72 @@ def test_markdown_table_roundtrip():
           len(probs) == 1 and "EMPTY" in probs[0], str(probs))
 
 
+def test_delivered_table_shapes():
+    """The table shapes real review sessions deliver (2026-09-22 real root).
+
+    A complete 2-round review failed three 30-minute attempts in a row on
+    "EMPTY disposition cell" messages that were the PARSER's fault: a session
+    that appends its verdict after the seeded empty cell, a session that adds a
+    second table (the M20 "classes the scan cannot see"), an escaped `\\|` inside
+    a caption, and a stray leading empty cell each made the row wider than its
+    header, and the positional zip() then read the disposition from the wrong
+    column (or read the second table's rows against the first table's header).
+    """
+    print()
+    print("== delivered table shapes: appended verdicts, added tables, escaped pipes ==")
+    tmp = scratch("nbt_shapes_")
+    art = tmp / "artifacts"
+    art.mkdir()
+    # (a) verdict APPENDED after the seeded empty disposition cell
+    (art / "M20_formatting.md").write_text(
+        "| # | rule | severity | disposition |\n|---|---|---|---|\n"
+        "| 1 | FMT-T1 | medium |  | OK — FMT-T1: covered by finding F-001 |\n"
+        "| 2 | FMT-T9c | low |  | unable — no rule recorded for this row |\n",
+        encoding="utf-8")
+    # (b) a SECOND table with its own columns (the added "classes the scan cannot see")
+    (art / "M19_length.md").write_text(
+        "| # | section | words | disposition |\n|---|---|---|---|\n"
+        "| 1 | abstract | 150 | OK — inside the 172-word cap |\n\n"
+        "## Rows added from the manual pass\n\n"
+        "| # | check | disposition |\n|---|---|---|\n"
+        "| A1 | cover letter | OK — 400 words, inside the 300-500 preference |\n",
+        encoding="utf-8")
+    # (c) an escaped pipe inside a caption cell + a stray leading empty cell
+    (art / "M18_caption_words.md").write_text(
+        "| # | document | caption | disposition |\n|---|---|---|---|\n"
+        "| | 1 | main.docx | Fig. 1 \\| Benchmarking | OK — 134 words, recorded |\n",
+        encoding="utf-8")
+    rows = nb.parse_markdown_table(art / "M20_formatting.md")
+    check("an appended verdict is read as the disposition (not dropped by zip)",
+          [r.get("disposition") for r in rows]
+          == ["OK — FMT-T1: covered by finding F-001",
+              "unable — no rule recorded for this row"], str(rows))
+    check("dispositioned appended rows are no longer an EMPTY problem",
+          not nb.disposition_artifact_problems(rows))
+    notes = nb.artifact_quality_notes(tmp)
+    check("the appended-cell shape is reported as a WARNING, never a failed run",
+          "one more cell" in (notes.get("artifacts/M20_formatting.md") or [""])[0],
+          str(notes))
+    check("a second table is parsed against ITS OWN header",
+          [r.get("disposition") for r in
+           nb.parse_markdown_table(art / "M19_length.md")] == ["OK — inside the 172-word cap"],
+          str(nb.parse_markdown_table(art / "M19_length.md")))
+    check("both tables of a file are checked for dispositions",
+          nb.artifact_quality_report(tmp) == {}, str(nb.artifact_quality_report(tmp)))
+    m18 = nb.parse_markdown_table(art / "M18_caption_words.md")
+    check("an escaped pipe stays inside its cell and the stray empty cell is dropped",
+          m18[0]["caption"] == "Fig. 1 | Benchmarking"
+          and m18[0]["disposition"] == "OK — 134 words, recorded", str(m18))
+    # (d) the gate still fails what it is FOR: an undisposed row and a shifted row
+    (art / "OUTLINE.md").write_text(
+        "| # | heading | summary | disposition |\n|---|---|---|---|\n"
+        "| 1 | Introduction | Four-step benchmark workflow |  |\n",
+        encoding="utf-8")
+    report = nb.artifact_quality_report(tmp)
+    check("a genuinely empty disposition cell is still a problem",
+          any("EMPTY" in p for p in report.get("artifacts/OUTLINE.md") or []), str(report))
+
+
 # ---------------------------------------------------------------------------
 # 4. the auditor stage: artifact contract, drop/add split, plan wiring
 # ---------------------------------------------------------------------------
@@ -531,6 +597,7 @@ def main() -> int:
         test_gene_symbol_ledger()
         test_disposition_detectors()
         test_markdown_table_roundtrip()
+        test_delivered_table_shapes()
         test_audit_contract()
         test_audit_plan_wiring()
         test_collect_residuals()

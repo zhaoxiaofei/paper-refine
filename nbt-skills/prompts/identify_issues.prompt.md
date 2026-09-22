@@ -34,7 +34,7 @@ A plain "review my manuscript" prompt reliably misses low-salience mechanical is
 1. **Identification only** — findings, never edits. Never modify any file in SUBMISSION_DIR.
 2. **Never invent.** Unresolvable value → status `unresolvable — manual verification required`. Guideline rule you cannot verify → `guideline-dependent`. Missing data → note a placeholder may be needed; never fabricate.
 3. **No silent skips.** Every check ID must end up in the coverage table with a real disposition (`N findings` / `clean — basis: <artifact/locations>` / `unable — <reason>`). "Not checked" is not an allowed value.
-4. **Mechanical sweeps M1–M17 are EXHAUSTIVE and MANDATORY, and M18 (figure-legend lengths), M19 (abstract/main-text length plus the cover-letter preference) and M20 (OOXML style/formatting uniformity, enumerated by the pipeline's code-side scan) always run with them.** M18's optional proxy cap only changes whether an over-count legend is reported as an over-cap item. Only judgment passes J1–J4 may be prioritized. The word "non-exhaustive" never applies to a mechanical sweep.
+4. **Mechanical sweeps M1–M17 are EXHAUSTIVE and MANDATORY, and M18 (figure-legend lengths), M19 (abstract/main-text length plus the cover-letter preference) and M20 (OOXML style/formatting uniformity, enumerated by the pipeline's code-side scan) always run with them, together with the adopted sweeps M21–M24 (correspondence policy, data/code-availability integrity, supplementary parity, concept/term families).** M18's optional proxy cap only changes whether an over-count legend is reported as an over-cap item. Only judgment passes J1–J4 may be prioritized. The word "non-exhaustive" never applies to a mechanical sweep.
 5. **One finding per instance.** "Several acronyms are undefined" is not a finding; each undefined acronym is its own finding with its own ID, quote, and location.
 6. **Sweep pattern for every mechanical check:** ENUMERATE (script preferred; scripts live in `WORK/`) → ARTIFACT (`OUT/artifacts/<ID>.md` for the M1/M2/M4–M17 tables; term/value occurrence enumerations are written to `WORK/occurrences_<slug>.md`, which is M8's artifact — pass `--out OUT/artifacts` if you prefer them alongside the others; every instance gets a row, including rows later judged OK; the artifact spans the whole corpus, not one file) → AUDIT (each row gets: a finding ID, `OK`, or `unable — <reason>`) → REPORT (findings derived only from artifact rows, never from general impression).
 7. **A sweep with zero findings is INVALID unless its artifact exists and every row is disposed.**
@@ -58,7 +58,7 @@ If a script misses a case class (e.g., a citation style it can't parse), **exten
 
 **Phase 1 — Setup.** Run `convert_corpus.py` on SUBMISSION_DIR. Review the inventory: role classification, editable vs read-only, conversion status. Every conversion failure is recorded, never skipped. Images are marked `visually unverifiable` unless OCR/VLM is available; when a renderer exists, render and LOOK. Zotero live fields: the converter marks them `[[FIELD: ...]]`; check the rendered text; an unreadable or incomplete field goes to the manual-verification list (tell the user to verify it in Word). Resolve citations READ-ONLY with `ZOT_CLI` / `$ZOTERO_SKILL` (parent bibliographic item keys, never attachment keys; confirm title, creators, year, DOI) and never write to the library: a suspected metadata error becomes a finding with the proposed correction.
 
-**Phase 2 — Sweeps.** Mechanical sweeps M1–M17 plus M18 (legend lengths, always enumerated), M19 (abstract/main-text length plus the cover-letter preference) and M20 (OOXML style/formatting uniformity; the pipeline seeds `review/work/FORMAT_SCAN.json` and `review/artifacts/M20_formatting.md`, and every row must be disposed) and judgment passes J1–J4: procedures, artifact columns, finding rules, classification, and the finding format are specified in the appendix below — follow it exactly. One sweep at a time; finish one artifact before starting the next. For long documents, sweep file by file, then merge so every artifact spans the whole corpus.
+**Phase 2 — Sweeps.** Mechanical sweeps M1–M17 plus M18 (legend lengths, always enumerated), M19 (abstract/main-text length plus the cover-letter preference) and M20 (OOXML style/formatting uniformity; the pipeline seeds `review/work/FORMAT_SCAN.json` and `review/artifacts/M20_formatting.md`, and every row must be disposed), the adopted sweeps M21–M24 (correspondence policy, data/code-availability integrity, supplementary parity, concept/term families) and judgment passes J1–J4: procedures, artifact columns, finding rules, classification, and the finding format are specified in the appendix below — follow it exactly. One sweep at a time; finish one artifact before starting the next. For long documents, sweep file by file, then merge so every artifact spans the whole corpus.
 
 **Phase 3 — Discovery round.** D0–D5 per `references/discovery.md`: hunt issue classes OUTSIDE the checklist; outputs `OUT/round2/findings_extra.{md,json}` and `OUT/round2/new_sweeps.md`. If the user passes `discover` as the argument, run ONLY this phase against existing findings and stop.
 
@@ -69,9 +69,9 @@ Truncation silently drops exactly the tail-end mechanical findings, so append ea
 `OUT/findings.md`:
 1. File inventory (from Phase 1).
 2. All sweep artifacts as titled appendix tables (or pointers to `OUT/artifacts/`).
-3. Findings grouped by category 0–5, each entry: ID (`F-001`…), location (document/section/paragraph/line/figure/table), category, check ID (M1–M19, J1–J4), severity, short verbatim evidence quote, concise explanation, status (`resolvable` / `unresolvable` / `guideline-dependent`).
+3. Findings grouped by category 0–5, each entry: ID (`F-001`…), location (document/section/paragraph/line/figure/table), category, check ID (M1–M24, J1–J4), severity, short verbatim evidence quote, concise explanation, status (`resolvable` / `unresolvable` / `guideline-dependent`).
 4. Per-document index of finding IDs.
-5. Coverage table: every check ID (M1–M17, J1–J4, M18 (legend counts), M19 (abstract/main-text/cover-letter lengths) and M20 (OOXML style/formatting rows from the pipeline's scan)) → `N findings` / `clean — basis` / `unable — <reason>`.
+5. Coverage table: every check ID (M1–M17, J1–J4, M18 (legend counts), M19 (abstract/main-text/cover-letter lengths), M20 (OOXML style/formatting rows from the pipeline's scan) and M21–M24 (the adopted sweeps)) → `N findings` / `clean — basis` / `unable — <reason>`.
 6. Summary note: counts by category/severity; unresolved gaps; missing-citation issues; ambiguous context; unresolvable contradictions; the manual-verification list (incl. Zotero fields); guidelines source/version; items to re-check against the current author guide.
 
 `OUT/findings.json` (machine-readable, consumed by nbt-revise):
@@ -95,15 +95,14 @@ Truncation silently drops exactly the tail-end mechanical findings, so append ea
 
 ## Acceptance checks (for the human, after the run)
 
-1. `findings.md` coverage table lists every defined check ID: M1–M17, J1–J4, M18 (legend counts), M19 (abstract/main-text/cover-letter lengths) and M20 (OOXML style/formatting rows), plus M21+ once proposals are adopted.
+1. `findings.md` coverage table lists every defined check ID: M1–M17, J1–J4, M18 (legend counts), M19 (abstract/main-text/cover-letter lengths), M20 (OOXML style/formatting rows) and M21–M24 (the adopted sweeps).
 2. Every sweep with findings has a matching artifact file in `review/artifacts/` (M8's occurrence enumerations live in `review/work/occurrences_*.md`). A sweep with findings but no artifact means it worked from impression — re-run that sweep.
 3. Each finding points to a specific word/number/phrase with a verbatim quote, not a whole passage.
 4. `findings.json` exists and every finding has all eight fields.
 
 
-## APPENDIX: Sweeps M1–M20 and judgment passes J1–J4 (references/sweeps.md)
-
-# Sweeps M1–M20 and Judgment Passes J1–J4 — nbt-review
+## APPENDIX: Sweeps M1–M24 and judgment passes J1–J4 (references/sweeps.md)
+# Sweeps M1–M24 and Judgment Passes J1–J4 — nbt-review
 
 This file is the single source of truth for Phase 2. Follow it exactly.
 Every sweep entry specifies: purpose · scope · enumeration procedure (script
@@ -115,8 +114,8 @@ Two appendices are defined at the end of the mechanical-sweep list: **M18**
 **M19** (abstract/main-text length plus the user's cover-letter preference;
 always runs). **M20** (OOXML style/formatting uniformity; always runs, and its
 enumeration is supplied by the pipeline's code-side OOXML scan) follows them.
-New sweeps validated from the discovery round are appended after M20 as
-**M21, M22…** in the same format — do not insert into the middle (IDs are
+New sweeps validated from the discovery round are appended after the adopted
+M21–M24 as **M25, M26…** in the same format — do not insert into the middle (IDs are
 stable).
 
 ---
@@ -169,7 +168,7 @@ Every finding is ONE instance, formatted:
 
 ```
 F-NNN | location: <doc>/<section>/<paragraph|line|figure|table> | category: <0–5>
-check: <M1–M20|J1–J4> | severity: <Critical|Major|Minor> | status: <...>
+check: <M1–M24|J1–J4> | severity: <Critical|Major|Minor> | status: <...>
 evidence: "<short verbatim quote of the exact word/number/phrase>"
 problem: <1–2 sentence explanation>
 ```
@@ -984,7 +983,7 @@ over attention.
 ## D0 — Dedup base
 
 From PRIOR build two indexes (`OUT2/known_index.md`):
-- **KNOWN-CLASSES**: the 21 check IDs (M1–M17, J1–J4) with one-line descriptions.
+- **KNOWN-CLASSES**: the 28 check IDs (M1–M24, J1–J4) with one-line descriptions.
 - **KNOWN-INSTANCES**: every prior finding as `id | class | location | evidence quote`.
 
 Anything matching a KNOWN-INSTANCE (same class + same location + same
@@ -1064,17 +1063,19 @@ enumeration procedure · artifact columns · finding rules) so the next review
 run catches it mechanically:
 
 ```
-## M20 — <name> (proposed)
+## M25 — <name> (proposed)
 **Purpose:** ...
 **Enumeration:** <script or manual procedure — must be enumerable>
-**Artifact:** M20_<slug>.md: <columns>
+**Artifact:** M25_<slug>.md: <columns>
 **Finding rules:** one per instance, listed
 ```
 
 Number proposals continuing from the highest existing sweep number. M18
-(figure-legend length, always enumerated with an optional proxy cap) and M19
-(abstract/main-text length plus the user's cover-letter preference) are reserved
-and defined in `sweeps.md`, so proposals start at M20.
+(figure-legend length, always enumerated with an optional proxy cap), M19
+(abstract/main-text length plus the user's cover-letter preference) and M20
+(OOXML style/formatting uniformity, enumerated by the pipeline's code-side scan)
+are reserved and defined in `sweeps.md`, and M21–M24 were adopted from earlier
+discovery rounds there, so proposals start at M25.
 These are PROPOSALS: the user validates them; only validated ones get
 appended to `references/sweeps.md`. This is the feedback loop — no static
 checklist can be complete, but each discovered miss converts into a permanent
@@ -1086,3 +1087,4 @@ runs instead of pretending completeness on day one.
 Counts: gap rows (covered/uncovered), probes (executed/clean/findings/unable),
 X-findings by category/severity, proposed sweeps. Manual-verification list.
 Statement of what this round could NOT check (honest limits).
+
