@@ -643,6 +643,38 @@ already carries its completion marker (`sweep_artifacts`), the same postcheck ru
 — and if it fails on repairable bookkeeping, the scoped repair session runs right
 there, so a finished 45-minute review is not thrown away for two unfilled tables.
 
+### A STOPPED session is continued, not restarted
+
+A session can end before its deliverables exist — a model that stops mid-turn, a
+CLI timeout, a killed process. The 2026-09-22 root lost an integration arm twice
+that way (366k / 204k tokens, `task_complete` with no final message, nothing
+written), and a fresh attempt would have re-read four corpora to redo work the
+session had already done. The CLI keeps such sessions, so the pipeline CONTINUES
+one instead:
+
+* the id the CLI prints in its banner (`session id: <uuid>`) is already in the
+  attempt's `_agent.log`, so no extra channel is needed; it is captured into
+  `runs.<id>.agent_session_id` and shown in the attempt history;
+* an attempt that looks **unfinished** — a process-level failure (timeout/kill),
+  or a postcheck error naming a deliverable that does not EXIST — is continued:
+  `codex exec resume <session-id> <same overrides> -` (or, for the `claude`
+  preset, `… --print --resume <session-id>`, falling back to `--continue`, which
+  resumes the most recent session of that sandbox's own directory). A custom
+  `--agent-cmd` has no known resume form and gets a fresh attempt as before; an
+  attempt that *finished* and was rejected on content is not continued either —
+  that is the retry/repair path's business;
+* the continuation prompt names what stopped and what the postcheck said, and
+  tells the session to finish from where it is, marker last. A continuation that
+  clears the postcheck is recorded as the attempt that finished the stage
+  (`source: "continuation"`); one that does not is a failed attempt like any
+  other and the retry policy takes over;
+* the budget is **at most 2 continuations per session id** (`resume_attempts`),
+  counted across attempts, and the console says so when it is spent (`no
+  continuation -- 2 continuation(s) already spent on this session (limit 2)`).
+  `RESUME_PROMPT.md` is written into the sandbox for the session and removed
+  afterwards; the continuation never replaces the scoped artifact repair, it runs
+  before it.
+
 ### `--strict-artifacts fix`: one scoped repair session instead of a full re-run
 
 Some failures are BOOKKEEPING: the stage did the work, but the report/ledger/

@@ -10374,6 +10374,8 @@ def record_attempt(ctx: Ctx, rec: dict, ok: bool, errors=None, warnings=None,
         "summary": rec.get("summary") or None,
         "sandbox": rec.get("sandbox"),
         "prompt": PROMPT_FILE,
+        # Which CLI session produced this attempt (used by the CONTINUATION).
+        "agent_session_id": rec.get("agent_session_id"),
         "checked_at": (rec.get("postcheck") or {}).get("checked_at"),
         # Filled in when the failed sandbox is actually kept (moved): the attempt
         # record must not claim a path that does not exist yet (`sandbox_attempts`
@@ -13085,6 +13087,24 @@ REPAIR_PROMPT_FILE = "REPAIR_PROMPT.md"
 # when the stage timeout is generous (an LLM that runs for an hour on this is
 # not doing the bounded job the mode promises).
 REPAIR_TIMEOUT_MAX = 3600
+# --- CONTINUATION of a STOPPED session (`codex exec resume <id>`) -----------
+# A session that ends before its deliverables exist (a stalled turn, a CLI
+# timeout, a killed process) leaves a resumable transcript: `codex exec resume
+# <session-id>` continues it with the whole context -- the corpus it read, the
+# donors it compared, the plan it made -- instead of paying for a fresh attempt
+# that reads everything again. That is a CONTINUATION of the stage's own work,
+# never paperwork (the scoped artifact repair is the paperwork tool), so it is
+# tried FIRST when an attempt ends unfinished, and at most
+# RESUME_ATTEMPT_LIMIT times per session id.
+RESUME_PROMPT_FILE = "RESUME_PROMPT.md"
+RESUME_ATTEMPT_LIMIT = 2
+# A continuation finishes a stage that is already 80% done: cap it well below
+# the stage timeout (which defaults to 4h).
+RESUME_TIMEOUT_MAX = 5400
+# The CLI prints its session id in the banner, which `_execute_attempt_in` tees
+# into `_agent.log`; that id is what `codex exec resume` (and, when the CLI
+# prints one, `claude --resume`) consumes.
+SESSION_ID_RE = re.compile(r"session[_ ]id[:\s]+([0-9a-fA-F-]{36})")
 # Every artifact-quality message starts with this prefix (see
 # `check_artifact_quality`): it is how a repairable review failure is told apart
 # from every other kind without a second bookkeeping channel.
@@ -13215,6 +13235,140 @@ REPAIR_PROFILES = {
 def repair_profile(rec: dict) -> dict:
     """The repair profile of a run's kind ({} when the stage has none)."""
     return REPAIR_PROFILES.get(str(rec.get("kind") or "")) or {}
+
+
+# =====================================================================
+# CONTINUATION OF A STOPPED SESSION (`codex exec resume <session-id>`)
+# =====================================================================
+def capture_agent_session_id(ctx: Ctx, rec: dict) -> str:
+    """The CLI session id of the attempt whose transcript is in this sandbox.
+
+    The agents print `session id: <uuid>` in their banner (codex does; a claude
+    build that prints one is picked up the same way) and `_execute_attempt_in`
+    tees the whole session into `_agent.log`, so the id a CONTINUATION needs is
+    already on disk -- no extra channel and no guessing from timestamps. The LAST
+    id in the file wins (the transcript is appended per attempt).
+    """
+    try:
+        sb = ctx.sandbox_of(rec)
+    except Exception:                                            # noqa: BLE001
+        return ""
+    log = sb / "_agent.log"
+    try:
+        if not log.is_file() or log.stat().st_size > 64 * 1024 * 1024:
+            return ""
+        text = log.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    hits = SESSION_ID_RE.findall(text)
+    return str(hits[-1]) if hits else ""
+
+
+def resume_argv_for(cmd: list, session_id: str) -> list:
+    """The argv that CONTINUES `session_id` with the same backend ([] if none).
+
+    codex:  `codex exec <overrides> -`  ->  `codex exec resume <id> <overrides> -`
+            (the prompt still arrives on stdin; note that `resume` accepts no
+            `-s/--sandbox` -- it reuses the policy recorded in the session)
+    claude: `claude --permission-mode ... --print` -> the same argv plus
+            `--resume <id>` (or `--continue`, which resumes the most recent
+            conversation of THIS directory -- every run has its own sandbox, so
+            that is this run's session -- when no id was captured)
+    Anything else (a custom --agent-cmd/NBT_AGENT_CMD) has no known resume form
+    and is left alone: the retry policy then runs a fresh attempt as before.
+    """
+    argv = [str(x) for x in (cmd or [])]
+    if not argv:
+        return []
+    name = Path(argv[0]).name.lower()
+    if name.startswith("codex") and len(argv) > 1 and argv[1] == "exec":
+        if not session_id:
+            return []                    # `resume --last` is GLOBAL: too risky in parallel
+        return [argv[0], "exec", "resume", session_id, *argv[2:]]
+    if name.startswith("claude"):
+        return [*argv, *(["--resume", session_id] if session_id else ["--continue"])]
+    return []
+
+
+def resume_unfinished_reason(ctx: Ctx, rec: dict) -> str:
+    """Why this failed attempt looks UNFINISHED ("" = it finished and was rejected).
+
+    Only an unfinished attempt is a continuation candidate: a stage that wrote
+    its deliverables and was rejected on their content is the retry/repair path's
+    business. The signature is (a) a process-level failure (timeout, killed CLI)
+    or (b) a postcheck error that names a deliverable which does NOT exist.
+    """
+    if rec.get("status") != "failed":
+        return ""
+    errors = [str(e) for e in ((rec.get("postcheck") or {}).get("errors") or [])]
+    if not errors:
+        if rec.get("last_error"):
+            return ("the agent process failed before the attempt could be judged: "
+                    + str(rec["last_error"])[:120])
+        return ""
+    missing = repair_missing_deliverable(ctx, rec, errors)
+    if missing:
+        return f"the stage stopped before writing {missing}"
+    return ""
+
+
+def resume_gate(ctx: Ctx, rec: dict, cmd: list) -> tuple:
+    """(argv, key, reason): the continuation to run, or ([], key, "").
+
+    A failed attempt that looks UNFINISHED but cannot be continued says so on the
+    console (the same way `repairable_artifact_failure` reports a refused repair):
+    the operator has to be able to tell "no resume form for this backend" and
+    "the 2-continuation limit is spent" from "the attempt finished and was
+    rejected on its content".
+    """
+    sid = str(rec.get("agent_session_id") or "")
+    key = sid or "__continue__"
+    reason = resume_unfinished_reason(ctx, rec)
+    if not reason:
+        return [], key, ""
+    argv = resume_argv_for(cmd, sid)
+    if not argv:
+        why = ("this backend has no resume form (only the codex/claude presets do), or no "
+               "session id was captured")
+        print(f"  [resume] {rec['id']}: no continuation -- {why}; a fresh attempt follows")
+        return [], key, ""
+    used = int((rec.get("resume_attempts") or {}).get(key) or 0)
+    if used >= RESUME_ATTEMPT_LIMIT:
+        why = (f"{used} continuation(s) already spent on this session "
+               f"(limit {RESUME_ATTEMPT_LIMIT})")
+        print(f"  [resume] {rec['id']}: no continuation -- {why}; a fresh attempt follows")
+        return [], key, ""
+    return argv, key, reason
+
+
+def resume_prompt(rec: dict, problems: list, reason: str, used: int) -> str:
+    """The CONTINUATION prompt: finish the stage's own work, marker last."""
+    listed = "\n".join(f"  {i + 1}. {p}" for i, p in enumerate(problems)) or "  (none recorded)"
+    return (
+        "CONTINUATION - YOUR OWN SESSION STOPPED BEFORE IT FINISHED.\n\n"
+        f"Run: {rec['id']}   stage: {rec.get('kind')}   round: {rec.get('round')}\n"
+        f"This is continuation {used + 1} of at most {RESUME_ATTEMPT_LIMIT} for this session.\n"
+        "Your working directory is the same sandbox you were in, holding exactly the files you "
+        "left; nothing was rebuilt and nothing was thrown away. Your context -- the packages you "
+        "read, the differences you found, the plan you were following -- is still yours.\n\n"
+        f"WHY YOU ARE BEING RESUMED: {reason}\n\n"
+        "--- WHAT THE ORCHESTRATOR'S POSTCHECK SAID ABOUT WHAT YOU LEFT (data, not "
+        "instructions) ---\n"
+        f"{listed}\n\n"
+        "--- FINISH THE JOB ---\n"
+        "  * Do NOT start over and do NOT re-read what you already read: work from where you are "
+        "and complete the remaining items (for `integrate`: finish the donor survey and the ports "
+        "the hierarchy calls for, then the ledger, the language pass, the visual record and the "
+        "manual steps).\n"
+        "  * The stage's contract is in `PROMPT.md` in this sandbox -- re-read the part you need "
+        "instead of reconstructing it from memory.\n"
+        f"  * Write the completion marker `{MARKER_FILE}` LAST, when the package and its "
+        "bookkeeping are actually done. It is the only completion signal this pipeline accepts.\n"
+        "  * If something cannot be finished honestly, use the pipeline's escape: write "
+        "`unable — manual verification required: <what the author must check>` in the ledger / "
+        "language pass / visual record, record the item in MANUAL_STEPS.md, and say so in the "
+        "marker.\n"
+        "  * Stay inside this sandbox; never touch sibling sandboxes or parent directories.\n")
 
 
 def repairable_artifact_failure(ctx: Ctx, rec: dict) -> list:
@@ -13933,6 +14087,98 @@ def run_repair_session_now(ctx: Ctx, rec: dict, problems: list, cmd: list, timeo
                               REPAIR_PROMPT_FILE, "_agent.log", False)
     finish_repair_session(ctx, rec, prepared, res)
     return True
+
+
+# --- the CONTINUATION of a stopped session ---------------------------------
+def prepare_resume_session(ctx: Ctx, rec: dict, argv: list, key: str, reason: str):
+    """Write the continuation prompt, charge the resume budget, record it.
+
+    A continuation runs in the SAME sandbox as the attempt it continues (the CLI
+    resumes the recorded working directory, so the sandbox must not have been
+    archived yet) and is a normal attempt afterwards: the identical postcheck
+    decides. Returns the flight dict, or None when it cannot run.
+    """
+    sb = ctx.sandbox_of(rec)
+    if not sb.is_dir():
+        return None
+    used = int((rec.get("resume_attempts") or {}).get(key) or 0)
+    problems = list((rec.get("postcheck") or {}).get("errors") or [])
+    (sb / RESUME_PROMPT_FILE).write_text(resume_prompt(rec, problems, reason, used),
+                                         encoding="utf-8")
+    # Charge the budget NOW: a continuation that dies half-way must not be
+    # restarted forever by a later invocation.
+    rec["resume_attempts"] = dict(rec.get("resume_attempts") or {}, **{key: used + 1})
+    rec["last_resume"] = {"session": key, "attempt": used + 1, "reason": reason,
+                          "started": utcnow(), "prompt": RESUME_PROMPT_FILE,
+                          "argv": [*argv[:3], "..."][:3]}
+    return {"rid": rec["id"], "session": key, "reason": reason, "argv": list(argv),
+            "problems": problems, "prompt": RESUME_PROMPT_FILE}
+
+
+def start_resume_session(ctx: Ctx, ex, running: dict, flight_map: dict, rec: dict,
+                         argv: list, key: str, reason: str, timeout: int) -> bool:
+    """Submit a PREPARED continuation to the round's executor (the scheduler path)."""
+    prepared = prepare_resume_session(ctx, rec, argv, key, reason)
+    if prepared is None:
+        return False
+    print(f"  [resume] {rec['id']}: continuing session {key[:8]} — {reason} "
+          f"(continuation {rec['resume_attempts'][key]}/{RESUME_ATTEMPT_LIMIT})")
+    fut = ex.submit(_execute_attempt_in, ctx.sandbox_of(rec), rec, prepared["argv"],
+                    min(int(timeout or RESUME_TIMEOUT_MAX), RESUME_TIMEOUT_MAX),
+                    RESUME_PROMPT_FILE, "_agent.log", True)
+    running[fut] = rec["id"]
+    flight_map[fut] = prepared
+    ctx.save_state()
+    return True
+
+
+def run_resume_session_now(ctx: Ctx, rec: dict, argv: list, key: str, reason: str,
+                           timeout: int) -> bool:
+    """Run a continuation synchronously (the `run_phase` driver)."""
+    prepared = prepare_resume_session(ctx, rec, argv, key, reason)
+    if prepared is None:
+        return False
+    print(f"  [resume] {rec['id']}: continuing session {key[:8]} — {reason} "
+          f"(continuation {rec['resume_attempts'][key]}/{RESUME_ATTEMPT_LIMIT})")
+    ctx.save_state()
+    res = _execute_attempt_in(ctx.sandbox_of(rec), rec, prepared["argv"],
+                              min(int(timeout or RESUME_TIMEOUT_MAX), RESUME_TIMEOUT_MAX),
+                              RESUME_PROMPT_FILE, "_agent.log", True)
+    finish_resume_session(ctx, rec, prepared, res)
+    return True
+
+
+def finish_resume_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
+    """Judge a continuation with the SAME postcheck and record the attempt."""
+    sb = ctx.sandbox_of(rec)
+    bump_attempt(rec)
+    rec["last_duration"] = round(res.get("dur") or 0.0, 1)
+    sid = capture_agent_session_id(ctx, rec)
+    if sid:
+        rec["agent_session_id"] = sid
+    (sb / RESUME_PROMPT_FILE).unlink(missing_ok=True)
+    if res.get("error") or res.get("rc") not in (0,):
+        rec["status"] = "failed"
+        rec["last_error"] = (res.get("error") or f"agent exited rc={res.get('rc')}")[:600]
+        record_attempt(ctx, rec, False, [rec["last_error"]], [],
+                       source="continuation (process failed)")
+        print_failure(rec["id"], [rec["last_error"]],
+                      note=f"after continuation {flight['session'][:8]}")
+    else:
+        postcheck(ctx, rec, source="continuation")
+        if rec["status"] == "done":
+            print(f"  [ok]   {rec['id']}: the CONTINUATION finished the stage "
+                  f"({fmt_dur(res.get('dur'))})")
+        else:
+            print_failure(rec["id"], (rec.get("postcheck") or {}).get("errors", []),
+                          note="after the continuation")
+    rec["last_resume"].update({"finished": utcnow(), "ok": rec["status"] == "done",
+                               "duration": round(res.get("dur") or 0.0, 1)})
+    ctx.log("continuation", rec["id"],
+            f"continuation {rec['resume_attempts'][flight['session']]}/"
+            f"{RESUME_ATTEMPT_LIMIT}: {'ok' if rec['status'] == 'done' else 'failed'}")
+    ctx.save_state()
+    return rec
 
 
 def finish_repair_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
@@ -15377,6 +15623,14 @@ def postcheck(ctx: Ctx, rec: dict, source: str = "postcheck") -> bool:
                 f"(treated as a failed attempt; the sandbox is rebuilt on retry)"], []
     rec["postcheck"] = {"ok": ok, "errors": errs, "warnings": warns, "checked_at": utcnow()}
     rec["status"] = "done" if ok else "failed"
+    # A STOPPED session is resumable if its CLI printed a session id (see
+    # resume_gate): capture it here, at the single place every attempt's verdict
+    # passes through. A repair session's id is deliberately NOT captured -- it is
+    # the repair's session, not the stage's.
+    if kind != "a1" and not str(source).startswith("artifact-repair"):
+        sid = capture_agent_session_id(ctx, rec)
+        if sid:
+            rec["agent_session_id"] = sid
     # EVERY attempt is recorded, not only the last one: `postcheck`/`last_error`
     # are overwritten by the next attempt, so without this history a run that
     # failed twice reported one failure (see `attempt_history_lines`).
@@ -16460,6 +16714,11 @@ def apply_results(ctx: Ctx, results: dict) -> None:
         if res.get("error") or res.get("rc") not in (0,):
             rec["status"] = "failed"
             rec["last_error"] = (res.get("error") or f"agent exited rc={res.get('rc')}")[:600]
+            # The process died mid-session: its CLI session id is still in the
+            # transcript, and a continuation may finish the work it started.
+            sid = capture_agent_session_id(ctx, rec)
+            if sid:
+                rec["agent_session_id"] = sid
             # A PROCESS-level failure never reaches a postcheck, but it is an
             # attempt exactly like a failed one: record it, so the operator can
             # still see why it ended and where its artifacts/transcript went.
@@ -16724,7 +16983,14 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
                 rec = ctx.run(rid)
                 if rec["status"] == "done":
                     continue
-                # Before spending the next retry (and rebuilding the sandbox the
+                # 1) A STOPPED session (a stalled turn, a CLI timeout) is CONTINUED
+                # with its own context -- real work, not paperwork -- before
+                # anything else is tried.
+                argv, key, why = resume_gate(ctx, rec, cmd)
+                if argv and run_resume_session_now(ctx, rec, argv, key, why, timeout):
+                    if ctx.run(rid)["status"] == "done":
+                        continue
+                # 2) Before spending the next retry (and rebuilding the sandbox the
                 # repair needs), give a repairable bookkeeping failure its ONE
                 # scoped repair session -- the judge wave and the other
                 # round-driven stages come through here, not through the
@@ -16938,6 +17204,7 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
     not_before = {e["id"]: 0.0 for e in plan}
     running = {}                      # future -> run id
     repair_flight = {}                # future -> the repair session it belongs to
+    resume_flight = {}                # future -> the CONTINUATION it belongs to
     blocked_dirty, failed_hard = [], []
 
     def register_failure(rid: str, rec: dict) -> None:
@@ -17042,6 +17309,7 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
             for fut in done_futs:
                 rid = running.pop(fut)
                 repair = repair_flight.pop(fut, None)
+                resume = resume_flight.pop(fut, None)
                 try:
                     res = fut.result()
                 except Exception as exc:                        # noqa: BLE001
@@ -17052,6 +17320,15 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                     # postcheck; a repair that does not clear the table is a failed
                     # attempt, exactly like one the agent produced itself.
                     finish_repair_session(ctx, ctx.run(rid), repair, res)
+                    rec = ctx.run(rid)
+                    if rec["status"] != "done":
+                        register_failure(rid, rec)
+                    continue
+                if resume is not None:
+                    # A CONTINUATION is judged by the identical postcheck: a
+                    # continuation that does not finish the stage is a failed
+                    # attempt like any other, and the retry policy decides next.
+                    finish_resume_session(ctx, ctx.run(rid), resume, res)
                     rec = ctx.run(rid)
                     if rec["status"] != "done":
                         register_failure(rid, rec)
@@ -17071,6 +17348,11 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                         continue
                 # ... then a repairable artifact-quality failure before the retry
                 # burns the attempt and rebuilds the sandbox it would repair.
+                argv, key, why = resume_gate(ctx, rec, cmd)
+                if argv and len(running) < max(1, int(jobs)) \
+                        and start_resume_session(ctx, ex, running, resume_flight, rec,
+                                                 argv, key, why, timeout):
+                    continue
                 problems = repairable_artifact_failure(ctx, rec)
                 if problems and len(running) < max(1, int(jobs)) \
                         and start_repair_session(ctx, ex, running, repair_flight, rec, problems,
