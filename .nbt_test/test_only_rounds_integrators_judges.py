@@ -363,6 +363,122 @@ def test_only_judge_sessions():
           st3["rounds"]["1"].get("judges_enabled") is None,
           str(st3["rounds"]["1"].get("judges_enabled")))
 
+    # --- a sheet for a session the selection does NOT include is ignored -----
+    ctx_o = nb.Ctx(root)
+    ctx_o.load()
+    field_ids = [e["id"] for e in ((st.get("rounds", {}).get("1") or {}).get("field_entries")
+                                   or [])] or ["orig", "w1"]
+    ctx_o.state["runs"]["judge_disabled_j3"] = {
+        "id": "judge_disabled_j3", "kind": "judge", "round": 1, "status": "done",
+        "judge_index": 3, "target_id": "w1", "sandbox": "runs/judge_disabled_j3", "attempts": 1}
+    ctx_o.save_state()
+    agg = nb.aggregate_round(ctx_o, 1, field_ids)
+    check("O13 a done sheet for a NON-selected session is ignored, not a panel gap",
+          any("judge_disabled_j3" in line
+              for line in (agg["diagnostics"].get("disabled_sheets") or []))
+          and all(s.get("complete") for s in agg["stats"].values()),
+          str(agg["diagnostics"].get("disabled_sheets"))[:160])
+
+
+def test_only_judge_sessions():
+    print()
+    print("== `run --only r1_judge_w2_j1` runs ONE judge session ==")
+    # --- the grammar --------------------------------------------------------
+    o = nb.parse_only_spec("r1_judge_w2_j1")
+    check("O1 `r1_judge_w2_j1` = round 1, judge stage, session w2_j1",
+          sorted(o.rounds) == [1] and o.pairs.get(1) == {"judge"}
+          and o.judge_spec_for(1) == "w2_j1" and o.judge_spec_for(2) == ""
+          and not o.is_everything() and "judge sessions: w2_j1" in o.describe(),
+          o.describe())
+    o2 = nb.parse_only_spec("2:judge_i1_j1,r1_judge_w2")
+    check("O2 the `ROUND:judge_…` form and several selectors combine",
+          sorted(o2.rounds) == [1, 2] and o2.pairs.get(2) == {"judge"}
+          and o2.judge_spec_for(1) == "w2" and o2.judge_spec_for(2) == "i1_j1",
+          f"{o2.judge_spec_for(1)} / {o2.judge_spec_for(2)}")
+    o3 = nb.parse_only_spec("w2_j1")
+    check("O3 a roundless session name applies to every round that has it",
+          o3.judge_spec_for(1) == "w2_j1" and o3.judge_spec_for(2) == "w2_j1"
+          and not o3.rounds, o3.describe())
+    check("O4 plain stage, round and `all` items are unchanged",
+          nb.parse_only_spec("judge").judge_spec_for(1) == ""
+          and nb.parse_only_spec("judge").stages == {"judge"}
+          and sorted(nb.parse_only_spec("1").rounds) == [1]
+          and nb.parse_only_spec("all").is_everything()
+          and nb.parse_only_spec(None) is None)
+    check("O5 `run --only judge` still means the WHOLE judge stage",
+          nb.parse_only_spec("judge").stages_for(1) == {"judge"}
+          and nb.parse_only_spec("judge").judge_spec_for(1) == "")
+
+    # --- a real pilot: run the pool, then one judge session ----------------
+    tmp = scratch("nbt_only_judge_")
+    root = make_root(tmp, rounds=1, rewrites=1, revises=0, integrators="0x0", judges=3)
+    run(root, "--only", "rewrite")
+    st = state_of(root)
+    check("O6 the pool ran without any judge session",
+          not kinds_of(st, 1, "judge") and st["runs"]["r1_w1"]["status"] == "done",
+          str(kinds_of(st, 1, "judge")))
+    p1 = run(root, "--only", "r1_judge_w1_j1")
+    st = state_of(root)
+    judges = kinds_of(st, 1, "judge")
+    rrec = st["rounds"]["1"]
+    check("O7 only the selected session ran, and it judged w1",
+          len(judges) == 1 and st["runs"][judges[0]].get("target_id") == "w1"
+          and st["runs"][judges[0]].get("judge_index") == 1,
+          str([(j, st["runs"][j].get("target_id"), st["runs"][j].get("judge_index"))
+               for j in judges]))
+    stats = rrec.get("stats") or {}
+    check("O8 the panel expectation follows the one enabled session",
+          stats and all(s.get("complete") for s in stats.values())
+          and stats["w1"]["expected_n"] == 1 and stats["orig"]["expected_n"] == 1,
+          str({v: (s.get("n"), s.get("expected_n")) for v, s in stats.items()}))
+    check("O9 the round decides on that pilot panel and records the selector",
+          rrec.get("status") == "done"
+          and (rrec.get("plan") or {}).get("judges_enabled") == "w1_j1"
+          and "--only 'r1_judge_w1_j1'" in (p1.stdout + p1.stderr),
+          f"{rrec.get('status')} {(rrec.get('plan') or {}).get('judges_enabled')}")
+
+    # --- a wrong session name is refused before any session starts --------
+    tmp2 = scratch("nbt_only_judge_bad_")
+    root2 = make_root(tmp2, rounds=1, rewrites=1, revises=0, integrators="0x0", judges=2)
+    bad = run(root2, "--only", "r1_judge_w1_j7")
+    st2 = state_of(root2)
+    check("O10 an unknown judge index dies with the valid range, before any session",
+          bad.returncode != 0 and "judge index 7 is outside 1..2" in (bad.stdout + bad.stderr)
+          and not kinds_of(st2, 1, "judge"),
+          (bad.stdout + bad.stderr).strip().splitlines()[-1][:140])
+
+    # --- a remembered selection survives a later invocation, `judge` clears it
+    ctx2 = nb.Ctx(root2)
+    ctx2.load()
+    ctx2.round_rec(1)["judges_enabled"] = "w1_j1"      # as a selector run records it
+    ctx2.save_state()
+    check("O11 a pending round remembers the selector recorded by a previous invocation",
+          nb.judges_enabled_spec(ctx2, 1) == "w1_j1"
+          and nb.enabled_judges(ctx2, 1, "w1") == 1
+          and nb.enabled_judges(ctx2, 1, "a1") == 0,
+          f"{nb.judges_enabled_spec(ctx2, 1)}")
+    run(root2, "--only", "judge")
+    st3 = state_of(root2)
+    check("O12 a bare `--only judge` asks for the whole panel and clears it",
+          st3["rounds"]["1"].get("judges_enabled") is None,
+          str(st3["rounds"]["1"].get("judges_enabled")))
+
+    # --- a sheet for a session the selection does NOT include is ignored -----
+    ctx_o = nb.Ctx(root)
+    ctx_o.load()
+    field_ids = [e["id"] for e in ((st.get("rounds", {}).get("1") or {}).get("field_entries")
+                                   or [])] or ["orig", "w1"]
+    ctx_o.state["runs"]["judge_disabled_j3"] = {
+        "id": "judge_disabled_j3", "kind": "judge", "round": 1, "status": "done",
+        "judge_index": 3, "target_id": "w1", "sandbox": "runs/judge_disabled_j3", "attempts": 1}
+    ctx_o.save_state()
+    agg = nb.aggregate_round(ctx_o, 1, field_ids)
+    check("O13 a done sheet for a NON-selected session is ignored, not a panel gap",
+          any("judge_disabled_j3" in line
+              for line in (agg["diagnostics"].get("disabled_sheets") or []))
+          and all(s.get("complete") for s in agg["stats"].values()),
+          str(agg["diagnostics"].get("disabled_sheets"))[:160])
+
 
 def test_judges_enabled():
     print()
@@ -453,7 +569,6 @@ def main() -> int:
         test_integrator_mask()
         test_judges_per_round()
         test_plan_survives_a_config_edit()
-        test_judges_enabled()
         test_only_judge_sessions()
     finally:
         cleanup()
