@@ -511,7 +511,7 @@ USAGE
 -----
     python nbt_pipeline.py setup --source /path/to/non-revised \\
         --root ./nbt_rounds --rounds 2 --judges 3 [--rewrites 2,1] [--revises 1]
-        [--integrators 0xFFFFFFFF] [--caption-limit N]
+        [--integrators 0xFFFFFFFF] [--caption-limit N] [--strict-artifacts {on,fix,off}]
     python nbt_pipeline.py run    --root ./nbt_rounds --jobs 255
     python nbt_pipeline.py run    --root ./nbt_rounds --only 1,2      # only rounds 1 and 2
     python nbt_pipeline.py run    --root ./nbt_rounds --only 2:review,2:merge
@@ -782,9 +782,34 @@ AGENT_PRESETS = {
 
 MARKER_FILE = "_pipeline_done.json"
 SCORES_FILE = "scores.json"
+PROMPT_FILE = "PROMPT.md"
 PIN_DIRNAME = "pinned"
 LOCK_FILE = "_pipeline.lock"
 LOGS_DIRNAME = "_logs"
+# EVERY attempt is kept, not just the last one. The run record's `postcheck`
+# and `last_error` always describe the FINAL attempt (a retry overwrites them),
+# so a run that failed twice used to leave the operator with one failure and no
+# way back to the first one's diagnostics or artifacts -- the 2026-09-22 root
+# showed "attempt 2" failing on the M1b gate while attempt 1's real problems
+# (101 OUTLINE rows with no summary) existed only inside attempt 2's PROMPT.md.
+# `attempts_log` in state.json is the machine-readable history;
+# `runs/_attempts/<run>/attempt-<n>/` keeps that attempt's own sandbox (hardlinked
+# where the filesystem allows it, so it costs nothing until the sandbox is
+# removed), and its transcript is stashed under `runs/_logs/`.
+ATTEMPTS_DIRNAME = "_attempts"
+# A pathological retry loop must not grow state.json without bound: the log keeps
+# the last N attempts, each with its messages capped. The archived sandbox keeps
+# the full evidence, and `prune` reclaims it with the round it belongs to.
+ATTEMPTS_LOG_LIMIT = 25
+ATTEMPT_MESSAGE_LIMIT = 4000
+ATTEMPT_MESSAGES_PER_ATTEMPT = 60
+# The archive excludes the re-derivable INPUT corpora: every materialization
+# rewrites them from hash-verified sources, and copying them would multiply a
+# 180 MB sandbox by every retry. What is preserved is what the ATTEMPT produced,
+# plus the prompt it answered and the bookkeeping the postcheck read.
+ATTEMPT_ARCHIVE_SKIP_DIRS = ("base", "non-revised", "self", "others", "target", "field",
+                             "original")
+ATTEMPT_ARCHIVE_SKIP_SUBTREES = (("work", "corpus"),)
 SUPERSEDED_DIRNAME = "_superseded"
 # `setup` writes this into the root it is building and removes it once
 # state.json exists, so a setup that died part-way (a transient I/O error while
@@ -848,6 +873,19 @@ DEFAULT_PLACEHOLDER_LOOKUP = "online"
 # for operators who want the older advisory behaviour (and for the pipeline's
 # own regression fixtures).
 DEFAULT_STRICT_ARTIFACTS = True
+# `--strict-artifacts` takes three values (bare = `on`):
+#   on   an unfilled/boilerplate decision artifact FAILS the attempt (default)
+#   fix  ... but first spend ONE scoped repair session on that attempt's decision
+#        tables (see `artifact_policy_of`); the same postcheck judges the repair
+#   off  record the detector's report as a warning, never fail on it
+# `fix` exists because the alternative -- re-running the whole review for a
+# disposition column -- costs a full re-sample of the stage (the 2026-09-22 root
+# paid 26 minutes and produced a different finding set to fix one column), while
+# the repair is bounded: fill cells, never touch findings, never touch a row's
+# identity, then pass the identical postcheck or fail like any other attempt.
+ARTIFACT_POLICY_FIX = "fix"
+ARTIFACT_POLICIES = ("on", ARTIFACT_POLICY_FIX, "off")
+DEFAULT_ARTIFACT_POLICY = "on"
 DEFAULT_RESIDUAL_GATE = True
 # How many identifier lookups one stage may spend. Each is a single request to a
 # public API with a 20-second cap; `off`/an unreachable network degrades to
@@ -1524,18 +1562,56 @@ def audit_enabled(ctx) -> bool:
     return (v if v in AUDIT_MODES else DEFAULT_AUDIT) == "on"
 
 
-def strict_dispositions(ctx) -> bool:
-    """Fail a stage attempt whose decision artifacts are boilerplate/unfilled?
+def artifact_policy_of(ctx) -> str:
+    """`on` | `fix` | `off` -- what a decision-artifact problem does to an attempt.
 
-    ON by default: a decision table closed with one blanket sentence is how the
-    pipeline lost 96 rows in a real run. `setup --non-strict-artifacts` (or a
-    `strict_artifacts: false` in the config) restores the advisory behaviour, in
-    which case the detector still RUNS, is recorded on the run, and
-    `decide --residual-gate` can still refuse to certify the result.
+      on  (default) the attempt FAILS: a decision table closed with one blanket
+          sentence, or left with empty cells, is an unfilled artifact (the
+          pipeline lost 96 rows to exactly that in a real run).
+      fix the orchestrator spends ONE scoped repair session on the failed
+          attempt's decision tables -- it may only fill cells, from evidence
+          already in the rows -- and then re-runs the SAME postcheck. A repair
+          that does not clear the problem is still a failed attempt and the
+          normal retry policy takes over. Nothing outside `review/artifacts/`
+          and `review/work/` may change, and no row may be added, removed,
+          reordered or re-worded (verified byte-for-byte afterwards).
+      off recorded as a warning (advisory), never a failure.
+
+    Roots written before the three-valued policy carry the boolean
+    `strict_artifacts`/`strict_dispositions` only, and are read as on/off.
     """
     cfg = getattr(ctx, "cfg", None) or {}
-    return bool(cfg.get("strict_artifacts",
-                        cfg.get("strict_dispositions", DEFAULT_STRICT_ARTIFACTS)))
+    raw = str(cfg.get("artifact_policy") or "").strip().lower()
+    if raw in ARTIFACT_POLICIES:
+        return raw
+    if raw in ("fail", "strict", "true", "yes"):
+        return "on"
+    if raw in ("repair", "auto"):
+        return ARTIFACT_POLICY_FIX
+    if raw in ("warn", "advisory", "false", "no", "non-strict"):
+        return "off"
+    for key in ("strict_artifacts", "strict_dispositions"):
+        if key in cfg:
+            return "on" if cfg.get(key) else "off"
+    return DEFAULT_ARTIFACT_POLICY
+
+
+def strict_dispositions(ctx) -> bool:
+    """Does a decision-artifact problem FAIL the attempt (unless repaired)?
+
+    Both `on` and `fix` fail an attempt that leaves the tables unfilled -- under
+    `fix` the failure first goes to one scoped repair session, whose own
+    postcheck is judged by this same rule, so a repair cannot wave a table
+    through. `off` records the detector's report as a warning instead (the
+    report is recorded either way, and `decide --residual-gate` can still refuse
+    to certify the result).
+    """
+    return artifact_policy_of(ctx) != "off"
+
+
+def artifact_repair_enabled(ctx) -> bool:
+    """May a repairable artifact-quality failure go to a scoped repair session?"""
+    return artifact_policy_of(ctx) == ARTIFACT_POLICY_FIX
 
 # The user replaced the master prompt's blanket abstract/main-text exemption
 # with the journal's own limits relaxed by fixed margins (see the constants
@@ -2038,9 +2114,11 @@ DECISION-ARTIFACT MANDATE — one disposition per seeded row, about THAT ROW's o
     Methods enumeration; the Methods bar is 61 words" is a disposition; "no journal rule" is not).
   * Never close many rows with the SAME sentence. The postcheck counts repeated dispositions: a
     blanket rationale shared by many finding-tier rows is recorded as an UNFILLED artifact, and
-    `decide --residual-gate` refuses to certify the run on it (`setup --strict-artifacts on` makes
-    it a failed attempt). Real example this rule exists for: 96 scan rows closed with one identical
-    sentence, with the operator's own complaints inside that pile.
+    `decide --residual-gate` refuses to certify the run on it. The `--strict-artifacts` policy
+    decides what happens to the attempt: `on` fails it, `fix` first offers these tables ONE scoped
+    repair session (which may fill cells from the rows' own evidence, and nothing else), and `off`
+    only records the report. Real example this rule exists for: 96 scan rows closed with one
+    identical sentence, with the operator's own complaints inside that pile.
   * OUTLINE.md is the same kind of artifact: a `summary` copied back from `first sentence`, an empty
     summary cell, or one verdict on every row is unfilled, not audited.
   * A `searchable` hand-off placeholder (`[AUTHOR TO COMPLETE: ... ]`) that
@@ -2754,9 +2832,12 @@ Skill discipline that the orchestrator will check for:
   * One finding per instance, never aggregated ("several acronyms are undefined" is not a finding).
   * The M1 artifact's M1b instance table (un-abbreviated long forms used again after the acronym's
     first use) is NOT optional reading: each of its rows is either an M1(k) finding or a row
-    disposed OK with a recorded reason in the M1 coverage detail. The orchestrator checks this --
-    a review whose M1b table has rows while findings.json raises no M1 finding and the coverage row
-    ignores M1b fails its postcheck.
+    disposed OK with a recorded reason -- in the row's own `disposition` cell and/or in the M1
+    coverage row, which then names M1b and says why the rows are not findings (the coverage row's
+    `detail` cell is read too, so the note belongs there). The orchestrator checks this -- a review
+    whose M1b table has rows while findings.json raises no M1 finding, the M1 coverage row never
+    mentions M1b in either cell, and the table's own rows carry no recorded reason fails its
+    postcheck.
   * No silent skips: every check ID M1-M17, M18-M24 and J1-J4 appears in the coverage table with a real
      disposition (N findings / clean — basis: <artifact> / unable — <reason>); M19 (the pipeline's
      abstract/main-text length sweep) ALWAYS appears there too, and M18 (the pipeline's caption
@@ -9306,8 +9387,15 @@ def _vid_from_run_id(run_id) -> str:
 # SANDBOX MATERIALIZATION (staged + idempotent)
 # =====================================================================
 
-def stash_logs(sb: Path, logs_dir: Path, rid: str) -> None:
-    """Preserve agent logs before a sandbox is removed (rebuild/retry)."""
+def stash_logs(sb: Path, logs_dir: Path, rid: str, attempt: int = None) -> list:
+    """Preserve agent logs before a sandbox is removed (rebuild/retry).
+
+    Returns the archived paths, so the attempt record can POINT at the
+    transcript of the attempt it belongs to: a bare `<run>._agent.log` is unique
+    but does not say which attempt wrote it (the 2026-09-22 root kept attempt 1's
+    15 MB transcript as `r1_review._agent.log` with nothing referring to it).
+    """
+    moved = []
     if sb.is_dir():
         logs_dir.mkdir(parents=True, exist_ok=True)
         for f in sorted(sb.glob("_agent.log*")):
@@ -9315,10 +9403,238 @@ def stash_logs(sb: Path, logs_dir: Path, rid: str) -> None:
                 # A run can be retried several times per second-resolution stamp;
                 # a fixed name would overwrite the earlier attempt's log, which is
                 # the only evidence of what that attempt actually did.
-                dest = unique_path(logs_dir / f"{rid}.{f.name}")
+                name = (f"{rid}.attempt-{int(attempt)}.{f.name}" if attempt
+                        else f"{rid}.{f.name}")
+                dest = unique_path(logs_dir / name)
                 shutil.move(str(f), str(dest))
+                moved.append(dest)
             except OSError:
                 pass
+    return moved
+
+
+def bump_attempt(rec: dict) -> int:
+    """Count one attempt: the per-invocation counter AND the monotone total.
+
+    `attempts` is what the retry policy and the status table's ATT column use,
+    and `retry` resets it to 0; `attempts_done` never goes back, so the attempt
+    that wrote a sandbox keeps its number (and therefore its archive directory
+    and its log name) across a reset.
+    """
+    rec["attempts"] = int(rec.get("attempts") or 0) + 1
+    rec["attempts_done"] = int(rec.get("attempts_done") or 0) + 1
+    return rec["attempts_done"]
+
+
+def attempt_number(rec: dict) -> int:
+    """The 1-based number of the attempt the record's live sandbox belongs to."""
+    try:
+        return max(1, int(rec.get("attempts_done") or 0))
+    except (TypeError, ValueError):
+        return 1
+
+
+def next_attempt_number(rec: dict) -> int:
+    """The number the NEXT attempt of this run will carry (see `attempt_number`)."""
+    try:
+        return max(1, int(rec.get("attempts_done") or 0) + 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def attempt_archive_dir(ctx: Ctx, rec: dict, attempt: int = None) -> Path:
+    """`runs/_attempts/<run>/attempt-<n>` -- where one attempt's sandbox is kept."""
+    n = int(attempt or attempt_number(rec))
+    return ctx.runs_dir / ATTEMPTS_DIRNAME / str(rec.get("id")) / f"attempt-{n}"
+
+
+def _attempt_messages(msgs) -> list:
+    """A bounded copy of a postcheck's message list for state.json."""
+    msgs = list(msgs or [])
+    out = [str(m)[:ATTEMPT_MESSAGE_LIMIT] for m in msgs[:ATTEMPT_MESSAGES_PER_ATTEMPT]]
+    extra = len(msgs) - len(out)
+    if extra > 0:
+        out.append(f"... {extra} further message(s) were not copied into state.json; the full "
+                   f"list is in this attempt's archived sandbox (record.json and its postcheck "
+                   f"were written from the same run)")
+    return out
+
+
+def record_attempt(ctx: Ctx, rec: dict, ok: bool, errors=None, warnings=None,
+                   source: str = "postcheck") -> dict:
+    """Append ONE attempt's diagnostics to the run record (never overwritten).
+
+    `postcheck`/`last_error` describe the LAST attempt only, so a run that failed
+    twice reported one failure and lost the other. This is the history: which
+    gates fired in which attempt, in order, with the timing, the decision-artifact
+    quality report, the marker's own summary, and where that attempt's artifacts
+    and transcript were kept.
+    """
+    entry = {
+        "attempt": attempt_number(rec),
+        "source": source,
+        # The ATTEMPT's own start, not the run's first one: `rec["started"]` is
+        # set once and kept, so a run retried an hour later used to report the
+        # original start for every attempt.
+        "started": rec.get("last_attempt_started") or rec.get("started"),
+        "finished": utcnow(),
+        "duration": rec.get("last_duration"),
+        "status": rec.get("status"),
+        "ok": bool(ok),
+        "errors": _attempt_messages(errors),
+        "warnings": _attempt_messages(warnings),
+        "artifact_quality": rec.get("artifact_quality") or None,
+        "summary": rec.get("summary") or None,
+        "archive": str(attempt_archive_dir(ctx, rec).relative_to(ctx.root)),
+        "agent_log": None,
+    }
+    history = rec.setdefault("attempts_log", [])
+    if history and history[-1].get("attempt") == entry["attempt"]:
+        history[-1] = entry                  # the same attempt, re-postchecked
+    else:
+        history.append(entry)
+    if len(history) > ATTEMPTS_LOG_LIMIT:
+        del history[:-ATTEMPTS_LOG_LIMIT]
+    return entry
+
+
+def _attempt_archive_skip(rel: Path) -> bool:
+    """Is this sandbox-relative path an input corpus / derived corpus scratch?"""
+    parts = tuple(p for p in rel.parts if p)
+    if parts and parts[0] in ATTEMPT_ARCHIVE_SKIP_DIRS:
+        return True
+    return any(parts[:len(sub)] == sub for sub in ATTEMPT_ARCHIVE_SKIP_SUBTREES)
+
+
+def _mirror_attempt_tree(src: Path, dst: Path) -> tuple:
+    """Mirror a sandbox into the attempt archive; hardlink files where possible.
+
+    Hardlinks make the archive cost nothing while the sandbox is still there and
+    keep the evidence alive after `shutil.rmtree()` unlinks it -- without paying a
+    second copy of a package that is tens of megabytes per attempt. Filesystems
+    that refuse a link (a Windows/drvfs run root, a cross-device target) fall back
+    to `copy2`.
+    """
+    linked = copied = 0
+    for root, dirs, files in os.walk(src):
+        rel = Path(root).relative_to(src)
+        dirs[:] = [d for d in dirs if not _attempt_archive_skip(rel / d)]
+        if _attempt_archive_skip(rel):
+            continue
+        (dst / rel).mkdir(parents=True, exist_ok=True)
+        for name in files:
+            if name.startswith("_agent.log"):
+                continue                     # stashed under runs/_logs/, see agent_log
+            source, target = Path(root) / name, dst / rel / name
+            try:
+                os.link(source, target)
+                linked += 1
+            except OSError:
+                try:
+                    shutil.copy2(source, target)
+                    copied += 1
+                except OSError:
+                    pass
+    return linked, copied
+
+
+def archive_attempt(ctx: Ctx, rec: dict, log_paths=()) -> Path:
+    """Preserve ONE attempt's sandbox before a rebuild wipes it.
+
+    Called by `rebuild_sandbox` (and therefore by `retry`) BEFORE the sandbox is
+    removed, so a failed attempt's artifacts survive as evidence instead of being
+    destroyed by the very retry that follows them. `record.json` inside the
+    archive is the attempt's own record, so the directory is self-describing even
+    after state.json is restored from a backup.
+    """
+    n = attempt_number(rec)
+    dest = attempt_archive_dir(ctx, rec, n)
+    sb = ctx.sandbox_of(rec)
+    history = rec.get("attempts_log") or []
+    entry = next((e for e in reversed(history) if e.get("attempt") == n), None)
+    record = dict(entry or {"attempt": n, "ok": False, "errors": [], "warnings": []})
+    record.update({
+        "run_id": rec.get("id"),
+        "kind": rec.get("kind"),
+        "round": rec.get("round"),
+        "sandbox": str(sb.relative_to(ctx.root)) if sb.is_dir() else None,
+        "archived_at": utcnow(),
+        "agent_log": [str(p.relative_to(ctx.root)) for p in (log_paths or []) if p],
+    })
+    if dest.exists():
+        shutil.rmtree(dest, ignore_errors=True)   # a re-archive replaces a stale copy
+    dest.mkdir(parents=True, exist_ok=True)
+    linked = copied = 0
+    if sb.is_dir():
+        linked, copied = _mirror_attempt_tree(sb, dest / "sandbox")
+    record["linked_files"] = linked
+    record["copied_files"] = copied
+    write_json_atomic(dest / "record.json", record)
+    if entry is not None:
+        entry["archived"] = True
+        entry["archive"] = str(dest.relative_to(ctx.root))
+        if record["agent_log"]:
+            entry["agent_log"] = record["agent_log"]
+    else:
+        rec.setdefault("attempts_log", []).append(record)
+    ctx.log("attempt-archived", rec.get("id"), f"attempt {n}: {dest.relative_to(ctx.root)}")
+    return dest
+
+
+def attempt_history_lines(ctx: Ctx, indent: str = "  ", limit: int = 40) -> list:
+    """One line per retained FAILED attempt, for `status` and DECISION_REPORT.md.
+
+    The run table can only show the last attempt (that is what the run record's
+    `postcheck`/`last_error` describe); this is the part that says what the other
+    attempts died of and where their evidence is.
+    """
+    out = []
+    for rec in ctx.runs():
+        history = rec.get("attempts_log") or []
+        failed = [h for h in history if not h.get("ok")]
+        repairs = rec.get("repairs") or []
+        if not failed and not repairs:
+            continue
+        out.append(f"{indent}{rec['id']} ({rec.get('kind')}, round {rec.get('round')}): "
+                   f"{len(history)} attempt(s), {len(failed)} failed"
+                   + (f", {len(repairs)} artifact repair(s)" if repairs else ""))
+        for h in failed[:limit]:
+            first = ((h.get("errors") or [None])[0]
+                     or f"agent process failed: {h.get('last_error') or 'no message'}")
+            # `source` already names a reconstruction when there is one; the flag is
+            # only for records written by hand (see backfill_attempts-style repairs).
+            origin = (" (reconstructed)" if h.get("reconstructed")
+                      and "reconstruct" not in str(h.get("source") or "").lower() else "")
+            out.append(f"{indent}  attempt {h.get('attempt')} "
+                       f"({fmt_dur(h.get('duration'))}, "
+                       f"{len(h.get('errors') or [])} problem(s), "
+                       f"{h.get('source', 'postcheck')}{origin}): {first[:240]}")
+            kept = h.get("archive") or ""
+            if h.get("archive_pruned"):
+                out.append(f"{indent}    kept: {kept} (archive pruned; the attempt's record "
+                           f"stays in state.json)")
+            elif h.get("artifacts_lost"):
+                log = (h.get("agent_log") or [None])[0]
+                out.append(f"{indent}    artifacts: NOT preserved (the attempt's sandbox was "
+                           f"rebuilt before the pipeline archived attempts)"
+                           + (f" | transcript: {log}" if log else ""))
+            elif kept and (ctx.root / kept).is_dir():
+                log = (h.get("agent_log") or [None])[0]
+                out.append(f"{indent}    kept: {kept}" + (f" | transcript: {log}" if log else ""))
+            elif kept:
+                out.append(f"{indent}    archive pending: {kept} (written when the retry "
+                           f"rebuilds the sandbox)")
+        for rep in repairs[:limit]:
+            out.append(f"{indent}  artifact repair (attempt {rep.get('attempt')}, "
+                       f"{fmt_dur(rep.get('duration'))}): {len(rep.get('problems') or [])} "
+                       f"decision-artifact problem(s) -> "
+                       f"{'cleared' if rep.get('ok') else 'NOT cleared'}; changed: "
+                       f"{', '.join(rep.get('changed') or []) or 'nothing'}")
+            if rep.get("error"):
+                out.append(f"{indent}    {str(rep['error'])[:240]}")
+            if rep.get("transcript"):
+                out.append(f"{indent}    transcript: {rep['transcript']}")
+    return out
 
 
 def archive_stale_marker(sb: Path, rid: str) -> None:
@@ -9877,7 +10193,17 @@ def rebuild_sandbox(ctx: Ctx, rec: dict) -> None:
                          f"{', '.join(blocked)}")
     sb = ctx.sandbox_of(rec)
     if sb.exists():
-        stash_logs(sb, ctx.runs_dir / LOGS_DIRNAME, rec["id"])
+        # Keep BOTH halves of the doomed attempt: its transcript (moved, so a
+        # later attempt cannot inherit it) and its own sandbox (hardlinked, so the
+        # artifacts that failed the postcheck survive the rebuild).
+        logs = stash_logs(sb, ctx.runs_dir / LOGS_DIRNAME, rec["id"],
+                          attempt=attempt_number(rec))
+        try:
+            archive_attempt(ctx, rec, logs)
+        except OSError as e:                                    # noqa: BLE001
+            print(f"  [warn] {rec['id']}: could not archive attempt {attempt_number(rec)}'s "
+                  f"artifacts before the rebuild ({e}); the attempt stays in state.json's "
+                  f"attempts_log")
         shutil.rmtree(sb)
     kind, r = rec["kind"], int(rec["round"])
     if kind == "a1":
@@ -10091,7 +10417,7 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
         reset_ids.append(rid)
         sb = ctx.sandbox_of(rec)
         if sb.is_dir():
-            stash_logs(sb, ctx.runs_dir / LOGS_DIRNAME, rid)
+            stash_logs(sb, ctx.runs_dir / LOGS_DIRNAME, rid, attempt=attempt_number(rec))
             shutil.rmtree(sb, ignore_errors=True)
         reset_run_record(rec)
         rec["status"] = "stale"
@@ -10594,7 +10920,7 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list) -> No
         # Adopted from the discovery rounds (sweeps.md M21-M24): the review runs
         # them, so their coverage rows are required exactly like the older ones.
         wanted += ["M21", "M22", "M23", "M24"]
-        seen_ids, bad = {}, []
+        seen_ids, seen_rows, bad = {}, {}, []
         for row in coverage:
             if not isinstance(row, dict):
                 continue
@@ -10602,6 +10928,7 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list) -> No
             disp = str(row.get("disposition") or "").strip()
             if cid:
                 seen_ids[cid] = disp
+                seen_rows[cid] = row
             if cid and (not disp or disp.lower().startswith("not checked")):
                 bad.append(cid)
         missing = [c for c in wanted if c not in seen_ids]
@@ -10658,9 +10985,14 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list) -> No
     # 6. the M1b long-form table must be audited, not skipped. The inventory
     #    alone reads healthy for exactly this defect (an acronym defined at
     #    first use while the long form carries the prose), so residue rows may
-    #    neither be absent from findings.json nor silently unaccounted for in
-    #    the M1 coverage row: either raises M1 findings, or says in the M1
-    #    coverage detail why every M1b row was disposed OK.
+    #    neither be absent from findings.json nor silently unaccounted for: the
+    #    session either raises M1 findings, or records -- in the M1 coverage
+    #    ROW (its `disposition` or its `detail` cell; the prompt names the
+    #    detail cell) or in the table's own per-row `disposition` cell -- why
+    #    every M1b row is disposed OK. Reading only the coverage row's
+    #    `disposition` cell failed a session whose detail cell read "377 token
+    #    rows + 25 M1b rows" (2026-09-22 root, second attempt), which is exactly
+    #    the record the prompt asks for.
     m1_art = art_dir / "M1_acronyms.md"
     if m1_art.is_file():
         try:
@@ -10672,35 +11004,162 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list) -> No
             m1_findings = [f for f in (findings or [])
                            if isinstance(f, dict)
                            and str(f.get("check") or "").strip().upper() == "M1"]
-            m1_disp = str(seen_ids.get("M1") or "")
-            if not m1_findings and "m1b" not in m1_disp.lower():
+            m1_row_text = coverage_row_text(seen_rows.get("M1"))
+            if not m1_findings and "m1b" not in m1_row_text \
+                    and not m1b_rows_disposed(m1_md):
                 errs.append(
                     f"{ARTIFACTS_REL}/M1_acronyms.md lists {n_m1b} M1b long-form row(s) "
                     f"(un-abbreviated long forms used again after the acronym's first use), "
-                    f"but {FINDINGS_REL} raises no M1 finding and the M1 coverage row neither "
-                    f"mentions M1b nor disposes those rows. Every M1b row is either an M1(k) "
-                    f"finding (one per instance) or a row disposed OK with a recorded reason "
-                    f"in the coverage detail -- the defect must not vanish between the "
-                    f"artifact and the findings.")
+                    f"but {FINDINGS_REL} raises no M1 finding, the M1 coverage row (its "
+                    f"disposition and its detail cell) neither mentions M1b nor disposes those "
+                    f"rows, and the table's own rows carry no recorded reason. Every M1b row is "
+                    f"either an M1(k) finding (one per instance) or a row disposed OK with a "
+                    f"recorded reason -- in the row's own `disposition` cell and/or in the M1 "
+                    f"coverage row, which then names M1b and says why -- the defect must not "
+                    f"vanish between the artifact and the findings.")
+
+
+# The M1b table's own column names and row-number headers. A session that
+# re-writes the seeded table (adding `#` and a `disposition` column) must not
+# have its header counted as one more residue: the old counter read the header
+# row as an instance, so a 25-row table was reported (and re-prompted) as 26.
+M1B_HEADER_CELLS = {"#", "n", "no", "no.", "row", "acronym", "term", "context", "file",
+                    "location", "file:line", "file : line", "long form as written", "long form",
+                    "variant", "excerpt", "evidence", "disposition", "resolution", "verdict",
+                    "note", "notes", "why", "—", "-"}
+# The script's own "nothing to report" row (`| — | — | — | — | no long-form re-use
+# detected |`) is a placeholder, not an instance: counting it would demand an M1
+# finding for an empty table.
+M1B_EMPTY_CELLS = {"—", "-", "–", "--", "n/a", "n.a.", "none", ""}
+M1B_EMPTY_ROW_MARKER = "no long-form re-use detected"
+# The disposition columns of the artifact tables (`resolution` is the same
+# contract under the placeholder/ledger layouts' own name).
+M1B_DISPOSITION_COLUMNS = ("disposition", "resolution", "verdict")
+
+
+def _m1b_table(m1_md: str):
+    """(header, data rows) of the M1 artifact's M1b instance table.
+
+    ([], []) when the section/table is absent. The table's first `|` line is its
+    header and is never a data row; a repeated header (a long table split by an
+    interpolated note) is recognized by its own words and dropped too; a
+    non-table line AFTER the first data row ends the table, so a later section's
+    rows are not counted as M1b instances.
+
+    The cell splitter is local to this block on purpose: the gate must behave
+    identically when the block is lifted into an older PINNED copy of the
+    pipeline (a run root keeps the script it was set up with), and those copies
+    carry the same parsing under other helper names.
+    """
+    lines = str(m1_md or "").splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.strip().startswith("## M1b")), None)
+    if start is None:
+        return [], []
+    header, rows = [], []
+    for ln in lines[start + 1:]:
+        s = ln.strip()
+        if s.startswith("## "):                 # the next section starts here
+            break
+        if not s.startswith("|"):
+            if rows:                            # the table is over
+                break
+            continue
+        cells = _m1b_cells(s)
+        if not cells or _m1b_separator(cells):
+            continue
+        if not header:
+            header = cells
+            continue
+        if len(cells) == len(header) and all(c.lower() in M1B_HEADER_CELLS for c in cells):
+            continue                            # a repeated header, not an instance
+        if cells[0].lower() in M1B_EMPTY_CELLS \
+                or M1B_EMPTY_ROW_MARKER in " ".join(cells).lower():
+            continue                            # the script's empty-table placeholder
+        rows.append(cells)
+    return header, rows
+
+
+def _m1b_cells(line: str) -> list:
+    """The cells of one `| … |` line; a `\\|` inside a cell stays content."""
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|") and not s.endswith("\\|"):
+        s = s[:-1]
+    cells, cur, i = [], [], 0
+    while i < len(s):
+        ch = s[i]
+        if ch == "\\" and i + 1 < len(s):
+            cur.append(ch)
+            cur.append(s[i + 1])
+            i += 2
+            continue
+        if ch == "|":
+            cells.append("".join(cur))
+            cur = []
+            i += 1
+            continue
+        cur.append(ch)
+        i += 1
+    cells.append("".join(cur))
+    return [c.strip().replace("\\|", "|") for c in cells]
+
+
+def _m1b_separator(cells: list) -> bool:
+    """`|---|---|` / `|:--:|` -- the table's header/body divider."""
+    return bool(cells) and all("-" in c and set(c) <= set("-: ") for c in cells)
 
 
 def m1b_row_count(m1_md: str) -> int:
     """Data rows in the M1 artifact's M1b instance table (0 when absent/empty)."""
-    lines = str(m1_md or "").splitlines()
-    start = next((i for i, ln in enumerate(lines) if ln.strip().startswith("## M1b")), None)
-    if start is None:
-        return 0
-    n = 0
-    for ln in lines[start:]:
-        s = ln.strip()
-        if not s.startswith("|"):
-            continue
-        cells = [c.strip() for c in s.strip("|").split("|")]
-        if not cells or not cells[0] or cells[0] in ("acronym", "—") \
-                or set(cells[0]) <= set("-: "):
-            continue
-        n += 1
-    return n
+    return len(_m1b_table(m1_md)[1])
+
+
+def _is_recorded_reason(cell: str) -> bool:
+    """Is this disposition cell a reason rather than a bare verdict word?"""
+    text = re.sub(r"\s+", " ", str(cell or "")).strip()
+    return len(text) >= 12 and re.search(r"[A-Za-z]{3}", text) is not None
+
+
+def m1b_rows_disposed(m1_md: str) -> bool:
+    """Does the M1b table dispose every one of its own rows with a reason?
+
+    The skill's rule (k) lets a residue row be closed in the ARTIFACT ("dispose
+    a row OK ONLY with a recorded reason: a quoted title ..., a phrase that is
+    genuinely a different term of art, or a generated rendering ..."), while the
+    orchestrator's prompt asks for that reason in the M1 coverage row. Either
+    evidence surface answers the gate; this helper is the artifact-side one.
+    It cannot accept an un-disposed table: a table without a disposition column,
+    or with an empty / `-` / bare-`OK` cell anywhere, returns False.
+    """
+    header, rows = _m1b_table(m1_md)
+    if not rows:
+        return False
+    key = next((i for i, h in enumerate(header)
+                if str(h).strip().lower() in M1B_DISPOSITION_COLUMNS), None)
+    if key is None:
+        return False
+    for cells in rows:
+        # A row too short to carry the disposition cell has no recorded reason.
+        if not _is_recorded_reason(cells[key] if key < len(cells) else ""):
+            return False
+    return True
+
+
+def coverage_row_text(row) -> str:
+    """A coverage row's own words, lowercased (its `disposition` + `detail`).
+
+    Several gates ask whether the session ACCOUNTED for something in the
+    coverage table, and the master prompt sends the specifics to the row's
+    `detail` cell ("a row disposed OK with a recorded reason in the M1 coverage
+    detail"). Reading only the `disposition` cell re-failed a session for
+    following the prompt, so the gate reads the whole row.
+    """
+    if not isinstance(row, dict):
+        return ""
+    parts = [str(v) for k, v in row.items()
+             if k != "check" and isinstance(v, (str, int, float))]
+    return " ".join(parts).lower()
 
 
 def _finding_id_mentioned(pid: str, blob: str) -> bool:
@@ -11543,17 +12002,49 @@ def disposition_artifact_problems(rows: list) -> list:
     if empty:
         problems.append(f"{empty} of {len(rows)} row(s) have an EMPTY {key} cell "
                         f"(every seeded row must be disposed or reconciled)")
-    counts = Counter(re.sub(r"\s+", " ", str(r.get(key)).strip().lower()) for r in filled)
-    for text, n in counts.most_common(2):
+    by_text = {}
+    for r in filled:
+        text = re.sub(r"\s+", " ", str(r.get(key)).strip().lower())
+        by_text.setdefault(text, []).append(r)
+    for text, same in sorted(by_text.items(), key=lambda kv: -len(kv[1]))[:2]:
+        n = len(same)
         if (n >= DISPOSITION_BOILERPLATE_HARD_ROWS
             or (n >= DISPOSITION_BOILERPLATE_MIN_ROWS
                 and n / max(1, len(rows)) >= DISPOSITION_BOILERPLATE_SHARE)) \
                 and not _names_check_or_finding(text) \
                 and not DISPOSITION_STRUCTURAL_EXEMPT_RE.search(text):
+            # The message is the operator's ONLY handle on the defect, so it names
+            # the rows it is about and quotes the sentence in full: a 70-character
+            # cut of a repeated rationale once hid the fact that the SAME attempt
+            # had also left 101 OUTLINE summaries empty.
+            where = [l for l in (row_label(r) for r in same) if l][:4]
             problems.append(f"{n} of {len(rows)} dispositions repeat the SAME sentence "
-                            f"({text[:70]!r}) and it names neither a rule id nor a finding id: "
-                            f"that is a boilerplate closure, not a disposition")
+                            f"({_quote(text, 160)}) and it names neither a rule id nor a finding "
+                            f"id: that is a boilerplate closure, not a disposition"
+                            + (f" -- rows: {', '.join(where)}" if where else "")
+                            + (f" (and {n - len(where)} more)" if where and n > len(where) else ""))
     return problems
+
+
+def row_label(row: dict) -> str:
+    """A short, human-usable identifier for one artifact-table row."""
+    doc = str(row.get("document") or "").strip()
+    head = str(row.get("heading") or "").strip()
+    para = str(row.get("paragraph") or "").strip()
+    if doc or head or para:
+        bits = [b for b in (doc, head, (f"para {para}" if para else "")) if b]
+        return " / ".join(bits)[:80]
+    for k in ("acronym", "term", "figure", "caption", "item", "field", "check", "kind", "id"):
+        v = str(row.get(k) or "").strip()
+        if v:
+            return f"{k}={v}"[:80]
+    return ""
+
+
+def _quote(text: str, limit: int) -> str:
+    """`repr()` of a message excerpt, with an explicit marker when it is cut."""
+    text = str(text or "")
+    return repr(text[:limit]) + (" (truncated)" if len(text) > limit else "")
 
 
 def outline_artifact_problems(rows: list) -> list:
@@ -11570,8 +12061,11 @@ def outline_artifact_problems(rows: list) -> list:
         if s and f and len(s) > 12 and (f.startswith(s) or s.startswith(f[:len(s)])):
             echoed += 1
     if empty > max(2, int(len(rows) * 0.2)):
+        where = [l for l in (row_label(r) for r in rows
+                             if not str(r.get("summary") or "").strip()) if l][:4]
         problems.append(f"{empty} of {len(rows)} OUTLINE rows carry no summary "
-                        f"(the hierarchy pass cannot be audited)")
+                        f"(the hierarchy pass cannot be audited)"
+                        + (f" -- e.g. {', '.join(where)}" if where else ""))
     if echoed > int(len(rows) * 0.5):
         problems.append(f"{echoed} of {len(rows)} summaries are copies of the row's first "
                         f"sentence -- write what the paragraph CLAIMS")
@@ -11580,8 +12074,12 @@ def outline_artifact_problems(rows: list) -> list:
     if verdicts:
         text, n = Counter(verdicts).most_common(1)[0]
         if n >= 10 and n / len(rows) >= 0.8 and not _names_check_or_finding(text):
+            same = [r for r in rows
+                    if str(r.get("disposition") or "").strip().lower() == text]
+            where = [l for l in (row_label(r) for r in same) if l][:4]
             problems.append(f"{n} of {len(rows)} OUTLINE rows carry the same verdict "
-                            f"({text[:50]!r}) -- dispose each row against its own heading")
+                            f"({_quote(text, 120)}) -- dispose each row against its own heading"
+                            + (f" -- rows: {', '.join(where)}" if where else ""))
     return problems
 
 
@@ -11655,6 +12153,759 @@ def check_artifact_quality(ctx: Ctx, rec: dict, sb: Path, errs: list, warns: lis
             warns.append(f"decision artifact {rel}: {n}")
     return report
 
+
+# =====================================================================
+# SCOPED ARTIFACT REPAIR (`--strict-artifacts fix`) -- ONE PROFILE PER STAGE
+#
+# A mode whose contract is "make the postcheck pass" is the failure mode the
+# decision-artifact layer exists for (a session once closed 96 rows with one
+# sentence), so the repair session is defined by what it may NOT do. Every stage
+# has a PROFILE that says (a) which postcheck problems are repairable at all,
+# (b) which files it may write, and (c) which parts of those files are pinned
+# evidence. The rules are the same everywhere:
+#
+#   * Only BOOKKEEPING is repairable: the reports, ledgers and sheets the
+#     postcheck reads. A manuscript document, a code file, a corpus input, a
+#     missing deliverable, a validation failure, a coverage/contract violation,
+#     the M1b vanishing-residue gate or the pristine copy stay PLAIN FAILURES --
+#     they encode judgement or content the session had to supply, and a repair
+#     that "satisfied" them would launder a missing stage into a finished one.
+#   * Inside a bookkeeping file the repair may FILL what the sandbox's own
+#     evidence proves, and must write the pipeline's honest escape
+#     (`unable — manual verification required: ...`) where it cannot. Rows of
+#     evidence -- a decision-table row's document/counts, a judge's ledger, an
+#     auditor's drop -- are IDENTITY: they may not be added, deleted, reordered
+#     or re-worded.
+#   * The orchestrator verifies (b) and (c) byte-for-byte / structurally on disk
+#     BEFORE it re-runs the identical postcheck. A repair that went outside its
+#     scope is a failed attempt, and everything it did stays in the archive.
+# =====================================================================
+
+REPAIR_PROMPT_FILE = "REPAIR_PROMPT.md"
+# A repair is a few hundred lines of editing, not a review session: cap it even
+# when the stage timeout is generous (an LLM that runs for an hour on this is
+# not doing the bounded job the mode promises).
+REPAIR_TIMEOUT_MAX = 3600
+# Every artifact-quality message starts with this prefix (see
+# `check_artifact_quality`): it is how a repairable review failure is told apart
+# from every other kind without a second bookkeeping channel.
+ARTIFACT_PROBLEM_PREFIX = "decision artifact "
+REL_ARTIFACT_PREFIX = f"{REVIEW_DIR}/"
+# The cells a repair may rewrite: the ones the detectors judge. Everything else
+# in a seeded row -- the document, the location, the counts, the excerpt, the
+# first sentence -- is the row's IDENTITY: deleting a row or re-wording its
+# evidence would "fix" a table by removing what it has to dispose.
+REPAIR_EDITABLE_CELLS = ("disposition", "resolution", "verdict", "summary", "decision",
+                         "note", "notes", "why", "reason", "authoritative term")
+# The skip list of the attempt archive is the same one: re-derivable input
+# corpora are verified by the postcheck's own input manifests, not here.
+REPAIR_GUARD_SKIP_DIRS = ATTEMPT_ARCHIVE_SKIP_DIRS
+
+
+# --- which postcheck problems each stage may repair ------------------------
+# The messages are generated by the postchecks below this module section, so
+# prefix/regex matching is stable and testable. Two families are shared:
+REPAIR_MARKER_PATTERNS = (r"^completion marker _pipeline_done\.json missing ",
+                          r"^marker stage mismatch: ", r"^marker run_id mismatch: ",
+                          r"^marker round mismatch: ")
+# A machine-readable deliverable the repair may rewrite from the sandbox's own
+# evidence (a marker, a ledger, a sheet): "EMPTY/unfinished", "could not be
+# read", over the size limit, or unparseable.
+REPAIR_STRUCTURED_PATTERNS = (r" is EMPTY/unfinished \(structured output\)",
+                              r" could not be read \(",
+                              r" is \d+ bytes \(over the ",
+                              r" does not parse as ")
+REPAIR_VISUAL_PATTERN = r"^the visual-inspection record \S+ is missing: "
+REPAIR_LANGUAGE_PATTERNS = tuple(
+    rf"^{label}: no work/R6_language\.md " for label in ("rewrite", "revise", "integrate")) \
+    + tuple(rf"^{label}: the language pass covers " for label in ("rewrite", "revise", "integrate"))
+
+REPAIR_PROFILES = {
+    # The reviewer's decision tables: the only stage where the postcheck itself
+    # is the artifact-quality layer.
+    "review": {
+        "errors": (r"^decision artifact ",),
+        "scope": "the seeded decision tables under review/artifacts/ (fill their judged "
+                 "cells) plus review/work/ scratch",
+        "guard": "the row identity of every decision table",
+    },
+    # The auditor's deliverable is a disposition sheet, not a manuscript: the
+    # repair may complete it with the CONSERVATIVE verdict (confirm) only.
+    "audit": {
+        "errors": (REPAIR_MARKER_PATTERNS + REPAIR_STRUCTURED_PATTERNS
+                   + (r"^audit/audit\.json ",
+                      r"^\d+ frozen finding id\(s\) are neither confirmed nor dropped ",
+                      r"^\S+ appears twice in dispositions$",
+                      r"^dispositions\[\d+\] ",
+                      r"^dispositions name \d+ id\(s\) that are not in the frozen review: ")),
+        "scope": "audit/audit.json and audit/AUDIT.md",
+        "guard": "every disposition already in the sheet, and the `adds` rows",
+    },
+    # The rewrite/revise/integrate arms: the PACKAGE is pinned, the pipeline's
+    # bookkeeping inside it (reports, ledgers, work/ scratch) is repairable.
+    "rewrite": {
+        "errors": (REPAIR_MARKER_PATTERNS + REPAIR_STRUCTURED_PATTERNS
+                   + (REPAIR_VISUAL_PATTERN,) + REPAIR_LANGUAGE_PATTERNS
+                   + (r"^rewritten/REWRITE_REPORT\.md is missing: ",
+                      r"^rewritten/REWRITE_REPORT\.md is EMPTY \(structured output\): ",
+                      r"^rewrite: REWRITE_REPORT\.md declares level ")),
+        "scope": "the bookkeeping files inside rewritten/ (REWRITE_REPORT.md, CHANGELOG.md, "
+                 "MANUAL_STEPS.md, VISUAL_CHECK.md) plus rewritten/work/ scratch",
+        "guard": "every manuscript file of the package, and the package's layout",
+    },
+    "revise": {
+        "errors": (REPAIR_MARKER_PATTERNS + REPAIR_STRUCTURED_PATTERNS
+                   + (REPAIR_VISUAL_PATTERN,) + REPAIR_LANGUAGE_PATTERNS
+                   + (r"^revised/revision_report\.json is missing: ",
+                      r"^revised/revision_report\.json does not carry the revision ledger ",
+                      r"^revised/revision_report\.json is EMPTY/unfinished \(structured output\): ",
+                      r"^revised/revision_report\.json does not name ")),
+        "scope": "the bookkeeping files inside revised/ (revision_report.json, "
+                 "REVISION_REPORT.md, CHANGELOG.md, MANUAL_STEPS.md, VISUAL_CHECK.md, "
+                 "DIFF_LEDGER.md) plus revised/work/ scratch",
+        "guard": "every manuscript file of the package, and the package's layout",
+    },
+    "integrate": {
+        "errors": (REPAIR_MARKER_PATTERNS + REPAIR_STRUCTURED_PATTERNS
+                   + (REPAIR_VISUAL_PATTERN,) + REPAIR_LANGUAGE_PATTERNS
+                   + (r"^integrated/DIFF_LEDGER\.md is missing: ",
+                      r"^integrate: \d+ ledger row\(s\) carry no `artifact` ")),
+        "scope": "the bookkeeping files inside integrated/ (DIFF_LEDGER.md, "
+                 "revision_report.json, REVISION_REPORT.md, CHANGELOG.md, MANUAL_STEPS.md, "
+                 "VISUAL_CHECK.md) plus integrated/work/ scratch",
+        "guard": "every manuscript file of the package, and the package's layout",
+    },
+    # The judge's sheet: the repair may make it CONSISTENT WITH ITSELF (the
+    # integer is a function of the ledger) and complete its coverage record with
+    # `unable` rows -- never move a judgement.
+    "judge": {
+        "errors": (REPAIR_MARKER_PATTERNS + REPAIR_STRUCTURED_PATTERNS
+                   + (r"^run_id mismatch: ", r"^target_id mismatch: ",
+                      r"^comparisons\[\d+\] is not an object$",
+                      r"^comparisons\[\d+\]\.score must be an integer ",
+                      r"^comparisons\[\d+\] has no `basis`",
+                      r"^comparisons\[\d+\]\.basis = ",
+                      r"^comparisons\[\d+\]\.basis ",
+                      r"^comparisons\[\d+\] has no `checks` coverage map",
+                      r"^comparisons\[\d+\]\.checks\[",
+                      r"^comparisons\[\d+\]\.checks omits ",
+                      r"^comparisons\[\d+\]\.checks names ",
+                      r"^comparisons\[\d+\]: ",
+                      r"^scores\.json is missing or unparseable although the marker claims "
+                      r"completion")),
+        "scope": "scores.json and judge_review/ (the frozen-sweep grounding record) plus "
+                 "judge_review/artifacts/ scratch",
+        "guard": "every ledger row (resolved/introduced), every comparison's identity and the "
+                 "existing coverage entries",
+    },
+}
+
+
+def repair_profile(rec: dict) -> dict:
+    """The repair profile of a run's kind ({} when the stage has none)."""
+    return REPAIR_PROFILES.get(str(rec.get("kind") or "")) or {}
+
+
+def repairable_artifact_failure(ctx: Ctx, rec: dict) -> list:
+    """The problems ONE scoped repair session may fix for this attempt ([] if none).
+
+    Repairable means: the policy is `fix`, the run's stage has a repair profile,
+    EVERY problem in the postcheck matches that profile's bookkeeping patterns,
+    and this attempt has not already been sent to a repair session (one repair
+    per failed attempt -- a repair that does not clear the problem is a failed
+    attempt like any other, and the normal retry policy decides what happens
+    next).
+    """
+    if not artifact_repair_enabled(ctx):
+        return []
+    profile = repair_profile(rec)
+    if not profile:
+        return []
+    if attempt_number(rec) in (rec.get("repair_attempts") or []):
+        return []
+    pc = rec.get("postcheck") or {}
+    errors = [str(e) for e in (pc.get("errors") or [])]
+    if not errors:
+        return []
+    patterns = [re.compile(p) for p in profile.get("errors") or ()]
+    if not all(any(p.search(e) for p in patterns) for e in errors):
+        return []
+    return errors
+
+
+# --- what a repair may write, per stage ------------------------------------
+def _repair_path_writable(rel: Path, kind: str) -> bool:
+    """May the repair overwrite this sandbox-relative FILE (or create it)?"""
+    parts = tuple(p for p in rel.parts if p)
+    if not parts:
+        return False
+    name = parts[-1].lower()
+    if name in (MARKER_FILE.lower(), REPAIR_PROMPT_FILE.lower()) or name.startswith("_agent.log"):
+        return True                          # the completion marker / our own transcript
+    if name == "manual_steps.md" and kind in ("rewrite", "revise", "integrate"):
+        return True                          # the stage's manual-item list (reported only)
+    if kind == "review":
+        # The seeded decision tables (cell-editable) and the session's scratch.
+        if parts[:2] == (REVIEW_DIR, "work"):
+            return True
+        return rel.as_posix() in {f"{REVIEW_DIR}/{r}" for r in DECISION_ARTIFACTS}
+    if kind == "audit":
+        return parts[0] == "audit"
+    if kind == "judge":
+        return parts[0] == "judge_review" or rel.as_posix() == SCORES_FILE
+    if kind in ("rewrite", "revise", "integrate"):
+        pkg = output_dir_for_kind(kind)
+        if parts[0] != pkg:
+            return False
+        return (len(parts) > 1 and parts[1] == "work") or is_bookkeeping_name(name)
+    return False
+
+
+def _repair_path_creatable(rel: Path, kind: str) -> bool:
+    """May the repair CREATE this file?
+
+    Only inside the stage's own writable DIRECTORY: a new helper file or a
+    rendered page next to the tables/sheets it belongs to is harmless (nothing
+    reads it), while a new file anywhere else -- beside findings.json, inside the
+    package root, in the corpus -- is out of scope.
+    """
+    if _repair_path_writable(rel, kind):
+        return True
+    parts = tuple(p for p in rel.parts if p)
+    if kind == "review":
+        return parts[:2] in ((REVIEW_DIR, "artifacts"), (REVIEW_DIR, "work"))
+    if kind == "audit":
+        return parts[0] == "audit"
+    if kind == "judge":
+        return parts[0] == "judge_review"
+    if kind in ("rewrite", "revise", "integrate"):
+        pkg = output_dir_for_kind(kind)
+        return len(parts) > 1 and parts[0] == pkg and parts[1] == "work"
+    return False
+
+
+def _repair_scope_of(rel: Path, kind: str) -> str:
+    """`scratch` (write freely) | `cells` (a decision table: fill cells only) |
+    `protected` (byte-identical).
+
+    The three-way split is the whole contract of the repair mode: the seated
+    decision tables are cell-editable (their ROW identity is checked separately),
+    every other writable file is the session's own scratch or a bookkeeping file
+    it may rewrite, and everything else -- findings, the manuscript documents,
+    the corpus inputs, the other stages' artifacts -- may not change at all.
+    """
+    if not _repair_path_writable(rel, kind):
+        return "protected"
+    parts = tuple(p for p in rel.parts if p)
+    if parts and parts[-1].lower() == MARKER_FILE.lower():
+        return "file"                        # rewritten from evidence, not cell-edited
+    if kind == "review" and rel.as_posix() in {f"{REVIEW_DIR}/{r}"
+                                               for r in DECISION_ARTIFACTS}:
+        return "cells"
+    if len(parts) > 1 and parts[1] == "work":
+        return "scratch"
+    if parts and parts[0] == REVIEW_DIR and len(parts) > 1 and parts[1] == "work":
+        return "scratch"
+    return "file"
+
+
+def decision_artifact_rel_paths(sb: Path) -> list:
+    """The decision artifacts this sandbox actually has (as review/-relative paths)."""
+    return [rel for rel in DECISION_ARTIFACTS if (sb / REVIEW_DIR / rel).is_file()]
+
+
+def _repair_table_rows(md_text: str) -> list:
+    """The row IDENTITY of every table in one decision artifact, in order.
+
+    Each row contributes its cells for the columns a repair may NOT rewrite, and
+    rows/columns are compared in order -- so a repair that deletes a row,
+    reorders the table, rewrites a row's evidence, or adds a row fails the guard
+    even though the artifact still parses.
+    """
+    out, header = [], None
+    for line in str(md_text or "").splitlines():
+        s = line.strip()
+        if not s.startswith("|"):
+            continue
+        cells = _m1b_cells(s)
+        if not cells or _m1b_separator(cells):
+            continue
+        if header is None:
+            header = [c.strip().lower() for c in cells]
+            continue
+        if len(cells) == len(header) and all(c.strip().lower() == header[i]
+                                             for i, c in enumerate(cells)):
+            continue                          # a repeated header, not a row
+        keep = [i for i, h in enumerate(header) if h not in REPAIR_EDITABLE_CELLS]
+        out.append(tuple((cells[i].strip() if i < len(cells) else "") for i in keep))
+    return out
+
+
+def _repair_guard_files(sb: Path, kind: str) -> dict:
+    """{rel path: sha256} for every file a repair may NOT touch.
+
+    The input corpora (`base/`, `non-revised/`, a judge's views, the donor
+    packages) are left out: the postcheck's own input manifests verify them, and
+    hashing 180 MB twice per repair would cost more than the repair. Everything
+    else the sandbox carries -- the manuscript files of the package, the finding
+    list, the other stages' artifacts, the prompt -- is covered, except the files
+    this stage's profile may rewrite.
+    """
+    out = {}
+    for p in sorted(sb.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(sb)
+        parts = tuple(x for x in rel.parts if x)
+        if not parts or parts[0] in REPAIR_GUARD_SKIP_DIRS:
+            continue
+        if any(parts[:len(sub)] == sub for sub in ATTEMPT_ARCHIVE_SKIP_SUBTREES):
+            continue
+        if _repair_path_writable(rel, kind):
+            continue                          # inside the repair's own scope
+        if p.name.startswith("_agent.log"):
+            continue                          # the session's transcript
+        try:
+            out[rel.as_posix()] = sha256_file(p)
+        except OSError:
+            continue
+    return out
+
+
+def _repair_read_json(path: Path):
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return None
+
+
+def _repair_audit_rows(sb: Path) -> dict:
+    """{frozen id: (verdict, reason, evidence)} of an audit sheet, plus its add ids."""
+    audit = _repair_read_json(sb / "audit" / "audit.json")
+    rows = {}
+    if isinstance(audit, dict) and isinstance(audit.get("dispositions"), list):
+        for row in audit["dispositions"]:
+            if isinstance(row, dict) and str(row.get("id") or "").strip():
+                rows[str(row["id"]).strip()] = (str(row.get("verdict") or "").strip().lower(),
+                                                str(row.get("reason") or "").strip(),
+                                                str(row.get("evidence") or "").strip())
+    out = {"dispositions": rows, "adds": []}
+    if isinstance(audit, dict) and isinstance(audit.get("adds"), list):
+        out["adds"] = sorted({str((r or {}).get("id") or "").strip() for r in audit["adds"]
+                              if isinstance(r, dict)})
+    return out
+
+
+def _repair_judge_rows(sb: Path) -> dict:
+    """{label: {ledger, checks, score}} of a judge sheet: what may not move."""
+    sj = _repair_read_json(sb / SCORES_FILE)
+    out = {}
+    if isinstance(sj, dict) and isinstance(sj.get("comparisons"), list):
+        for c in sj["comparisons"]:
+            if not isinstance(c, dict):
+                continue
+            label = _norm_opponent_label(c.get("opponent_label"))
+            if not label:
+                continue
+            checks = {}
+            if isinstance(c.get("checks"), dict):
+                checks = {str(k): str(v or "") for k, v in c["checks"].items()}
+            out[label] = {"ledger": json.dumps([c.get("resolved") or [],
+                                                c.get("introduced") or []], sort_keys=True),
+                          "checks": checks, "score": c.get("score"),
+                          "basis": str(c.get("basis") or "").strip().lower()}
+    return out
+
+
+def snapshot_repair_guard(sb: Path, rec: dict) -> dict:
+    """What the repair must leave alone: protected bytes + pinned structure.
+
+    The structural half is per stage: a review's decision-table ROWS, an
+    auditor's existing dispositions (and its `adds`), a judge's ledger rows and
+    existing coverage entries. Those are the evidence; the cells around them are
+    what the repair may fill.
+    """
+    kind = str(rec.get("kind") or "")
+    tables, digests = {}, {}
+    for rel in decision_artifact_rel_paths(sb):
+        path = sb / REVIEW_DIR / rel
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        tables[rel] = _repair_table_rows(text)
+        try:
+            digests[rel] = sha256_file(path)          # the repair's own diff, for the record
+        except OSError:
+            digests[rel] = ""
+    return {"kind": kind, "files": _repair_guard_files(sb, kind), "tables": tables,
+            "artifacts": digests, "audit": _repair_audit_rows(sb),
+            "judge": _repair_judge_rows(sb)}
+
+
+def _repair_row_identity_problems(sb: Path, guard: dict) -> list:
+    """The review profile's structural guard: every table's row identity."""
+    problems = []
+    for rel, rows in sorted((guard.get("tables") or {}).items()):
+        path = sb / REVIEW_DIR / rel
+        if not path.is_file():
+            problems.append(f"it DELETED the decision artifact {REL_ARTIFACT_PREFIX}{rel}")
+            continue
+        now = _repair_table_rows(path.read_text(encoding="utf-8", errors="replace"))
+        if now != rows:
+            # Name the FIRST divergence: the operator (and the next session) can
+            # see whether a row vanished or its evidence was re-worded.
+            why = "a row was deleted, added or reordered"
+            if len(now) == len(rows):
+                for i, (a, b) in enumerate(zip(rows, now)):
+                    if a != b:
+                        why = (f"row {i + 1}'s identity cells changed "
+                               f"({a[:3]!r} -> {b[:3]!r})")
+                        break
+            problems.append(f"it rewrote the seeded rows of {REL_ARTIFACT_PREFIX}{rel}: {why} "
+                            f"(a repair may fill cells, never add, delete, reorder or re-word a "
+                            f"row's own evidence)")
+        if len(problems) >= 6:
+            break
+    return problems
+
+
+def _repair_audit_problems(sb: Path, guard: dict) -> list:
+    """The audit profile's guard: existing verdicts stand; only confirms may be added.
+
+    A `drop` hides a finding from the revisers, so a repair may never create,
+    widen or justify one: it may only dispose the ids the sheet left silent, and
+    only as `confirm`.
+    """
+    problems = []
+    before = guard.get("audit") or {}
+    now = _repair_audit_rows(sb)
+    for fid, row in sorted((before.get("dispositions") or {}).items()):
+        if fid not in now["dispositions"]:
+            problems.append(f"it DELETED the disposition of {fid} (an existing disposition is "
+                            f"evidence and may not be removed)")
+        elif tuple(now["dispositions"][fid]) != tuple(row):
+            problems.append(f"it rewrote the existing disposition of {fid} "
+                            f"({row[0] or 'no verdict'!r} -> "
+                            f"{now['dispositions'][fid][0] or 'no verdict'!r}); a repair may only "
+                            f"ADD dispositions, and only `confirm`")
+    for fid, row in sorted((now.get("dispositions") or {}).items()):
+        if fid not in (before.get("dispositions") or {}) and row[0] != "confirm":
+            problems.append(f"it added a {row[0] or 'blank'!r} disposition for {fid}; a repair "
+                            f"may only add `confirm` (dropping a finding is the auditor's own "
+                            f"judgement and must keep its own reason and evidence)")
+    added = set(now.get("adds") or []) - set(before.get("adds") or [])
+    if added:
+        problems.append(f"it invented finding(s) {', '.join(sorted(added)[:4])} in `adds`; a "
+                        f"repair may complete the sheet's dispositions, never add findings")
+    return problems[:6]
+
+
+def _repair_judge_problems(sb: Path, guard: dict) -> list:
+    """The judge profile's guard: the ledger is the judgement and stays untouched.
+
+    The integer `score` is a FUNCTION of the ledger (minor 1 / major 2 /
+    critical 3, capped per tier) and `basis` names the ledger's highest tier, so
+    the repair may recompute both. Everything the judge actually decided --
+    resolved/introduced rows, the comparison set, existing coverage entries --
+    may not move, and new coverage entries must be the honest `unable`.
+    """
+    problems = []
+    before = guard.get("judge") or {}
+    now = _repair_judge_rows(sb)
+    gone = sorted(set(before) - set(now))
+    if gone:
+        problems.append(f"it removed the comparison(s) {', '.join(gone[:4])} (every issued label "
+                        f"needs its comparison)")
+    new = sorted(set(now) - set(before))
+    if new:
+        problems.append(f"it added comparison(s) {', '.join(new[:4])}; a repair may not judge an "
+                        f"opponent the session never did")
+    for label in sorted(set(before) & set(now)):
+        b, n = before[label], now[label]
+        if b["ledger"] != n["ledger"]:
+            problems.append(f"it rewrote {label}'s resolved/introduced ledger; the ledger IS the "
+                            f"judgement -- the repair may only make `score`/`basis` agree with it")
+        for cid, text in sorted((b.get("checks") or {}).items()):
+            if (n.get("checks") or {}).get(cid) != text:
+                problems.append(f"it rewrote {label}'s existing `checks[{cid}]` coverage entry")
+        for cid, text in sorted((n.get("checks") or {}).items()):
+            if cid not in (b.get("checks") or {}) and not text.strip().lower().startswith("unable"):
+                problems.append(f"it added {label}'s `checks[{cid}]` = {text[:40]!r}; a repair may "
+                                f"only add `unable` coverage for a check it did not perform")
+        if len(problems) >= 6:
+            break
+    return problems[:6]
+
+
+def repair_guard_problems(sb: Path, guard: dict, rec: dict = None) -> list:
+    """Out-of-scope changes made by a repair session ([] means in scope)."""
+    kind = str((rec or {}).get("kind") or guard.get("kind") or "")
+    problems = []
+    before = dict(guard.get("files") or {})
+    after = _repair_guard_files(sb, kind)
+    for rel in sorted(set(before) | set(after)):
+        if rel not in after:
+            problems.append(f"it DELETED {rel}, which is outside the repair's scope")
+        elif rel not in before:
+            # A new file is fine only where the session may write at all; a new
+            # file beside the finding list or in the corpus is not.
+            if not _repair_path_creatable(Path(rel), kind):
+                problems.append(f"it CREATED {rel}, which is outside the repair's scope")
+        elif before[rel] != after[rel]:
+            problems.append(f"it MODIFIED {rel}, which is outside the repair's scope")
+        if len(problems) >= 6:
+            break
+    if len(problems) < 6 and kind == "review":
+        problems.extend(_repair_row_identity_problems(sb, guard))
+    if len(problems) < 6 and kind == "audit":
+        problems.extend(_repair_audit_problems(sb, guard))
+    if len(problems) < 6 and kind == "judge":
+        problems.extend(_repair_judge_problems(sb, guard))
+    return problems[:6]
+def repair_prompt(ctx: Ctx, rec: dict, problems: list) -> str:
+    """The scoped repair session's prompt: the problems, the rules, the limits.
+
+    One prompt per stage, built from that stage's profile: what it may write, what
+    it must not touch, and what "true" means for its bookkeeping. The review's
+    variant is the long one (its tables carry the row-disposal rules); the other
+    stages get the rules of their own ledger/sheet/report.
+    """
+    kind = str(rec.get("kind") or "")
+    profile = repair_profile(rec)
+    listed = "\n".join(f"  {i + 1}. {p}" for i, p in enumerate(problems))
+    header = (f"ARTIFACT REPAIR — SCOPED SESSION (run {rec['id']}, stage {kind}, "
+              f"round {rec['round']})")
+    common_head = f"""{header}
+
+You are NOT the {kind} session. That stage finished, and the orchestrator rejected its
+BOOKKEEPING -- the report/ledger/sheet files the postcheck reads -- as unfilled, inconsistent or
+unfinished. Your single job: repair exactly the problems below, from evidence that is ALREADY in
+this sandbox. The manuscript/package itself is NOT yours to touch.
+
+--- WHAT THE ORCHESTRATOR REJECTED ({len(problems)} problem(s)) ---
+{listed}
+
+--- WHERE YOU MAY WRITE (verified byte-for-byte / structurally afterwards) ---
+  * {profile.get('scope')}
+  * /tmp  -- scratch outside the sandbox
+Everything else must stay BYTE-IDENTICAL, above all:
+  * the manuscript files/package contents (documents, code, figures) -- a repair never edits
+    submission content, and never "fixes" a document, a citation or a number
+  * the corpus inputs (base/, non-revised/, self/, others/, target/, field/, original/) and the
+    other stages' deliverables (review/, audit/, scores.json as far as they are not yours)
+  * the records this stage's own postcheck reads from the PACKAGE (a delivered document, a
+    validation result) -- if one of those is broken, no repair can clear it and the attempt fails
+"""
+    if kind == "review":
+        sb = ctx.sandbox_of(rec)
+        arts = decision_artifact_rel_paths(sb)
+        files = "\n".join(f"  * {REL_ARTIFACT_PREFIX}{rel}" for rel in arts)
+        return common_head + f"""
+--- THE TABLES IN PLAY ---
+{files}
+
+--- HOW TO DISPOSE A ROW (the rule the postcheck applies) ---
+  * One disposition per row and it must be about THAT row's own bar, not a blanket judgement:
+    either a finding id (`F-004`), or `OK — <the bar this instance is inside, and why>`.
+    "No journal rule", "editorial preference only", "not an error" are NOT dispositions for a
+    row the scan put in the finding tier.
+  * Never close many rows with the same sentence: the postcheck counts repeated dispositions and
+    fails the table. Vary the reason with the row (its document, its heading, its rule id, the
+    number the row carries).
+  * An OUTLINE row's `summary` must state what the paragraph CLAIMS in your own words; copying
+    the row's `first sentence` (or a prefix of it) counts as unfilled.
+  * You may FILL and REPLACE the judgement cells ({', '.join(REPAIR_EDITABLE_CELLS)}), and
+    nothing else: every row's own evidence (document, heading, paragraph, location, counts,
+    excerpts, `first sentence`, identifiers) is IDENTITY -- no row may be added, deleted,
+    reordered or re-worded.
+  * Only the files listed under THE TABLES IN PLAY may change at all; every other file under
+    {ARTIFACTS_REL}/ is READ-ONLY (the later stages read them -- `M1_acronyms.md` above all).
+""" + REPAIR_TAIL
+    if kind in ("rewrite", "revise", "integrate"):
+        pkg = output_dir_for_kind(kind)
+        return common_head + f"""
+--- WHAT TO FILL (from what this package actually contains) ---
+  * The ledger/report rows must describe THIS package: cite its file names, sections and line
+    references, and the ids the frozen review in this sandbox carries. Never invent a finding
+    id, a number, a donor or a change that the package does not show.
+  * {pkg}/revision_report.json (where this stage has one): one row per id the frozen review
+    lists -- `fixed` / `not_applicable` / `unable` with the rationale and the evidence (the
+    package location that proves it). Do not renumber or drop an id the review carries.
+  * {pkg}/DIFF_LEDGER.md (integration): one row per ported or deliberately skipped difference,
+    naming the donor, the size class, the finding effect and a before/after artifact reference
+    (a file:line pair, or an outline diff) so the row can be re-checked.
+  * The language pass ({pkg}/work/R6_language.md): one row per change PLUS one coverage row for
+    each of the steps that changed nothing -- every step needs a row.
+  * The visual record ({pkg}/VISUAL_CHECK.md): render the package and LOOK at the pages (write
+    the renders under {pkg}/work/), then record what you saw. If you cannot render here, write
+    the honest negative -- "the pages were NOT visually verified" plus the exact manual step --
+    and never claim an inspection you did not perform.
+  * A missing completion marker may be written ONLY if the problems above name it, with this
+    run's own id, stage and round.
+""" + REPAIR_TAIL
+    if kind == "audit":
+        return common_head + """
+--- WHAT TO FILL (and the one direction you may not move) ---
+  * audit/audit.json: every frozen finding id gets exactly one disposition. You may ONLY add a
+    `confirm` row for an id the sheet left silent (use the finding's own evidence/location text
+    from the frozen review in this sandbox, and name the finding's own check id in the reason).
+  * You may NOT create, widen or "complete" a `drop`: a drop hides a finding from the revisers
+    and needs the auditor's own evidence. An existing drop stays exactly as the auditor wrote it.
+  * You may NOT add `AU-` findings, only complete the disposition of ids that are already there.
+  * audit/AUDIT.md is the human-readable record of the same sheet; keep it consistent with it.
+""" + REPAIR_TAIL
+    if kind == "judge":
+        return common_head + f"""
+--- WHAT TO FILL (the sheet must be consistent WITH ITSELF) ---
+  * The integer `score` is a FUNCTION of the sheet's own resolved/introduced ledger (minor 1 /
+    major 2 / critical 3, capped per tier; a clean 0), and `basis` names that ledger's
+    highest-priority tier. If they disagree, recompute them from the ledger -- that is the only
+    arithmetic you may do. Never change a ledger row, and never re-judge: if the ledger itself
+    cannot support a score, that is not repairable and this attempt will fail.
+  * `checks`: every comparison needs one disposition per frozen check id. You may add an entry
+    ONLY as `unable — <why>` for a check this session did not perform, and you may not touch an
+    entry that is already there. Never write `clean` or `findings` for a check you did not do.
+  * `run_id`, `target_id` and `judge_index` are bookkeeping: they must name THIS run, the target
+    token this sandbox was issued and this judge's index. Never invent provenance for another
+    session, and never add a comparison for an opponent the sheet does not carry.
+  * judge_review/ is the judge's frozen-sweep grounding record: if the problems above name it,
+    write the inventory and the sweep rows the prompt requires from the blinded corpus here --
+    reading and measuring, never guessing.
+""" + REPAIR_TAIL
+    return common_head + REPAIR_TAIL
+
+
+REPAIR_TAIL = """
+--- IF YOU CANNOT DO IT HONESTLY ---
+Write the pipeline's escape instead of a claim: `unable — manual verification required: <what the
+author must check>`. An unfilled row that says so is accepted; an invented one is a defect the
+orchestrator (and the human gate) will attribute to this repair.
+
+--- WHEN YOU ARE DONE ---
+The orchestrator re-runs the SAME postcheck over this same sandbox; a repair that does not clear
+every problem above is recorded as a failed attempt like any other. Keep your final message
+short: which files you completed, and which rows you left `unable` (with the reason).
+"""
+
+
+def start_repair_session(ctx: Ctx, ex, running: dict, flight: dict, rec: dict, problems: list,
+                         cmd: list, timeout: int) -> bool:
+    """Submit the scoped repair session for one repairable failure.
+
+    The session runs in the FAILED ATTEMPT'S OWN sandbox (nothing is rebuilt, so
+    it sees exactly what the postcheck judged) and counts as an attempt of the
+    same run: `runs/_attempts/<run>/attempt-<n>/`, its transcript under
+    `runs/_logs/`, and its outcome in `attempts_log` (source `artifact-repair`).
+    Returns False when it cannot start (no sandbox), so the caller falls through
+    to the normal retry.
+    """
+    sb = ctx.sandbox_of(rec)
+    if not sb.is_dir():
+        return False
+    n = next_attempt_number(rec)
+    (sb / REPAIR_PROMPT_FILE).write_text(repair_prompt(ctx, rec, problems), encoding="utf-8")
+    guard = snapshot_repair_guard(sb, rec)
+    rec["repair_attempts"] = list(rec.get("repair_attempts") or []) + [n]
+    rec["artifact_repair"] = {"attempt": n, "problems": list(problems), "status": "running",
+                              "started": utcnow(), "prompt": REPAIR_PROMPT_FILE}
+    # The repair appends to the same transcript file as the stage session it
+    # repairs (each session writes its own header naming the attempt), so the
+    # archive keeps one timeline for that sandbox.
+    log_name = "_agent.log"
+    fut = ex.submit(_execute_attempt_in, sb, rec, cmd,
+                    min(int(timeout or REPAIR_TIMEOUT_MAX), REPAIR_TIMEOUT_MAX),
+                    REPAIR_PROMPT_FILE, log_name, False)
+    running[fut] = rec["id"]
+    flight[fut] = {"rid": rec["id"], "attempt": n, "problems": list(problems), "guard": guard,
+                   "log": str(sb.relative_to(ctx.root) / log_name)}
+    ctx.save_state()
+    scope = str((repair_profile(rec) or {}).get("scope") or "").split(" plus ")[0]
+    print(f"  [repair] {rec['id']}: {len(problems)} repairable bookkeeping problem(s) -> one "
+          f"scoped repair session (attempt {n}; it may write {scope} and nothing else)")
+    return True
+
+
+def finish_repair_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
+    """Verify one repair session's scope, re-postcheck the sandbox, record it.
+
+    A session that edited anything outside its stage's bookkeeping scope, or that
+    rewrote pinned evidence (a decision-table row, an auditor's drop, a judge's
+    ledger), is rejected on the spot: its postcheck is never consulted, because a
+    record "fixed" by deleting the rows it had to account for is exactly the
+    failure the repair mode must not launder.
+    """
+    sb = ctx.sandbox_of(rec)
+    bump_attempt(rec)
+    record = {"attempt": attempt_number(rec), "problems": list(flight["problems"]),
+              "started": rec.get("last_attempt_started"), "finished": utcnow(),
+              "duration": round(res.get("dur") or 0.0, 1), "prompt": REPAIR_PROMPT_FILE,
+              "transcript": flight["log"]}
+    problems = repair_guard_problems(sb, flight["guard"], rec)
+    record["out_of_scope"] = problems
+    changed = sorted(rel for rel in (guard_changed_paths(sb, flight["guard"])))
+    record["changed"] = changed
+    (sb / REPAIR_PROMPT_FILE).unlink(missing_ok=True)
+    if res.get("error") or res.get("rc") not in (0,):
+        record["ok"] = False
+        record["error"] = res.get("error") or f"repair session exited rc={res.get('rc')}"
+        record_attempt(ctx, rec, False, [record["error"]], [],
+                       source="artifact-repair (process failed)")
+    elif problems:
+        record["ok"] = False
+        record["error"] = ("the repair session went outside its scope: "
+                           + "; ".join(problems))
+        record_attempt(ctx, rec, False, [record["error"]], [],
+                       source="artifact-repair (out of scope)")
+    else:
+        postcheck(ctx, rec, source="artifact-repair")
+        record["ok"] = rec["status"] == "done"
+        record["postcheck_errors"] = list((rec.get("postcheck") or {}).get("errors") or [])
+    rec.setdefault("repairs", []).append(record)
+    rec["artifact_repair"] = {"attempt": record["attempt"], "problems": record["problems"],
+                              "status": "done" if record["ok"] else "failed",
+                              "started": record["started"], "finished": record["finished"],
+                              "changed": record["changed"], "transcript": record["transcript"],
+                              "prompt": REPAIR_PROMPT_FILE}
+    ctx.log("artifact-repair", rec["id"],
+            f"attempt {record['attempt']}: {'ok' if record['ok'] else 'failed'}"
+            + (f" ({len(problems)} out-of-scope change(s))" if problems else ""))
+    ctx.save_state()
+    if record["ok"]:
+        print(f"  [repair] {rec['id']}: the scoped repair cleared every problem "
+              f"({', '.join(record['changed']) or 'no artifact changed'}) -- the attempt is "
+              f"recorded as repaired, not as a fresh review")
+    else:
+        print_failure(rec["id"], [record["error"]] if record.get("error")
+                      else record["postcheck_errors"],
+                      note=f"after the scoped repair (attempt {record['attempt']})")
+    return record
+
+
+def guard_changed_paths(sb: Path, guard: dict) -> list:
+    """The artifact files the repair actually rewrote (its diff, for the record)."""
+    before = dict(guard.get("files") or {})
+    changed = []
+    for rel, digest in sorted((guard.get("artifacts") or {}).items()):
+        path = sb / REVIEW_DIR / rel
+        if not path.is_file():
+            changed.append(f"{REL_ARTIFACT_PREFIX}{rel} (deleted)")
+            continue
+        try:
+            if sha256_file(path) != digest:
+                changed.append(f"{REL_ARTIFACT_PREFIX}{rel}")
+        except OSError:
+            changed.append(f"{REL_ARTIFACT_PREFIX}{rel}")
+    for rel, digest in sorted(before.items()):
+        path = sb / rel
+        try:
+            if path.is_file() and sha256_file(path) != digest:
+                changed.append(rel)
+        except OSError:
+            continue
+    return changed
 
 def _lookup_answers(sb: Path) -> dict:
     """{kind: [lookup row]} for lookups with a conclusive verdict."""
@@ -12957,7 +14208,14 @@ def postcheck_judge(ctx: Ctx, rec: dict):
     return (not errs), errs, warns, None
 
 
-def postcheck(ctx: Ctx, rec: dict) -> bool:
+def postcheck(ctx: Ctx, rec: dict, source: str = "postcheck") -> bool:
+    """Re-verify one attempt's deliverables and record its outcome.
+
+    `source` names HOW the attempt was evaluated (an agent session, a re-check of
+    a marker that was already on disk, an adoption, a manual paste) and travels
+    into the attempt history, because "attempt 2" means something different when
+    no second agent ran.
+    """
     kind = rec["kind"]
     handlers = {"a1": postcheck_a1, "rewrite": postcheck_rewrite, "review": postcheck_review,
                 "audit": postcheck_audit,
@@ -12979,6 +14237,11 @@ def postcheck(ctx: Ctx, rec: dict) -> bool:
                 f"(treated as a failed attempt; the sandbox is rebuilt on retry)"], []
     rec["postcheck"] = {"ok": ok, "errors": errs, "warnings": warns, "checked_at": utcnow()}
     rec["status"] = "done" if ok else "failed"
+    # EVERY attempt is recorded, not only the last one: `postcheck`/`last_error`
+    # are overwritten by the next attempt, so without this history a run that
+    # failed twice reported one failure (see `attempt_history_lines`).
+    if kind != "a1":
+        record_attempt(ctx, rec, ok, errs, warns, source=source)
     if ok:
         vid = freshness_vid(rec)
         if vid:
@@ -13741,8 +15004,8 @@ def sweep_artifacts(ctx: Ctx) -> list:
             continue
         if not completion_signal_exists(ctx, rec):
             continue
-        rec["attempts"] += 1
-        postcheck(ctx, rec)
+        bump_attempt(rec)
+        postcheck(ctx, rec, source="adopted (completion signal already on disk)")
         adopted.append(rec["id"])
         print(f"[sweep] {rec['id']}: {'done' if rec['status'] == 'done' else 'FAILED'} "
               f"({'; '.join((rec.get('postcheck') or {}).get('errors', []))[:160] or 'ok'})")
@@ -13946,12 +15209,28 @@ def _coerce_text(s) -> str:
     return str(s)
 
 
-def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int) -> dict:
-    prompt = (sb / "PROMPT.md").read_text(encoding="utf-8")
-    logf = sb / "_agent.log"
-    # A previous attempt's marker must never be mistaken for this attempt's result.
-    archive_stale_marker(sb, rec["id"])
+def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
+                        prompt_name: str = PROMPT_FILE, log_name: str = "_agent.log",
+                        archive_marker: bool = True) -> dict:
+    """Run one agent session in `sb` and return {rc, dur, error, log}.
+
+    `prompt_name`/`log_name` let the scoped ARTIFACT-REPAIR session use its own
+    prompt and its own transcript, and `archive_marker=False` keeps it from
+    moving the stage attempt's completion marker aside: the repair edits the
+    deliverables the postcheck reads, and that marker is one of them.
+    """
+    prompt = (sb / prompt_name).read_text(encoding="utf-8")
+    logf = sb / log_name
+    if archive_marker:
+        # A previous attempt's marker must never be mistaken for this attempt's result.
+        archive_stale_marker(sb, rec["id"])
     t0 = time.time()
+    # The header is WRITTEN after the agent returns (the log is appended once), so
+    # it must carry the time the attempt actually started -- it used to print
+    # `utcnow()` at the end and call it "start", which made a 20-minute attempt
+    # look like it began when it finished.
+    started_at = utcnow()
+    rec["last_attempt_started"] = started_at
     rc, out, err, exc = None, "", "", None
     try:
         proc = subprocess.run(cmd, input=prompt, cwd=str(sb), capture_output=True,
@@ -13967,7 +15246,7 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int) -> dict:
     dur = time.time() - t0
     try:
         with open(logf, "a", encoding="utf-8") as f:
-            f.write(f"\n===== attempt {rec['attempts'] + 1} start {utcnow()} =====\n")
+            f.write(f"\n===== attempt {next_attempt_number(rec)} start {started_at} =====\n")
             f.write(f"cmd: {' '.join(cmd)}\n--- stdout ---\n{out}\n--- stderr ---\n{err}\n")
             f.write(f"===== rc={rc} dur={dur:.1f}s error={exc} =====\n")
     except OSError:
@@ -13996,22 +15275,44 @@ def apply_results(ctx: Ctx, results: dict) -> None:
     for rid in sorted(results, key=nat_key):
         res = results[rid]
         rec = ctx.run(rid)
-        rec["attempts"] += 1
+        bump_attempt(rec)
         rec["started"] = rec["started"] or utcnow()
         rec["last_duration"] = round(res.get("dur") or 0.0, 1)
         if res.get("error") or res.get("rc") not in (0,):
             rec["status"] = "failed"
             rec["last_error"] = (res.get("error") or f"agent exited rc={res.get('rc')}")[:600]
-            print(f"  [FAIL] {rid}: {rec['last_error'][:140]}")
+            # A PROCESS-level failure never reaches a postcheck, but it is an
+            # attempt exactly like a failed one: record it, so the operator can
+            # still see why it ended and where its artifacts/transcript went.
+            record_attempt(ctx, rec, False, [rec["last_error"]], [], source="process")
+            print_failure(rid, [rec["last_error"]], note="the agent process failed")
         else:
             postcheck(ctx, rec)
             if rec["status"] == "done":
                 print(f"  [ok]   {rid} done ({fmt_dur(res.get('dur'))})"
-                      + (f"  warnings: {'; '.join(rec['postcheck']['warnings'])[:120]}"
-                         if rec["postcheck"]["warnings"] else ""))
+                       + (f"  warnings: {'; '.join(rec['postcheck']['warnings'])[:120]}"
+                          if rec["postcheck"]["warnings"] else ""))
             else:
-                print(f"  [FAIL] {rid}: {'; '.join(rec['postcheck']['errors'])[:140]}")
+                print_failure(rid, rec["postcheck"]["errors"])
         ctx.save_state()
+
+
+def print_failure(rid: str, errors, note: str = "") -> None:
+    """Every problem of one failed attempt, one per line.
+
+    The old line joined the postcheck's messages and cut the result at 140
+    characters, so an attempt that failed on three artifacts reported one of them
+    and half a sentence of it -- the other two were only in state.json. The full
+    list stays available (state.json `attempts_log`, the archived sandbox, and the
+    next session's prior-failure block); this prints the first few IN FULL.
+    """
+    msgs = [str(e) for e in (errors or [])]
+    print(f"  [FAIL] {rid}: {len(msgs)} problem(s)" + (f" -- {note}" if note else ""))
+    for m in msgs[:8]:
+        print(f"        - {m}")
+    if len(msgs) > 8:
+        print(f"        ... {len(msgs) - 8} more (full list: state.json attempts_log / "
+              f"runs/{ATTEMPTS_DIRNAME}/{rid}/)")
 
 
 def manual_run_one(ctx: Ctx, rec: dict, poll: int, timeout: int) -> None:
@@ -14039,9 +15340,10 @@ def manual_run_one(ctx: Ctx, rec: dict, poll: int, timeout: int) -> None:
     try:
         while not completion_signal_exists(ctx, rec):
             if timeout and (time.time() - t0) > timeout:
-                rec["attempts"] += 1
+                bump_attempt(rec)
                 rec["status"] = "failed"
                 rec["last_error"] = f"manual wait exceeded {timeout}s"
+                record_attempt(ctx, rec, False, [rec["last_error"]], [], source="manual-timeout")
                 ctx.save_state()
                 print(f"  [FAIL] {rec['id']}: manual timeout")
                 return
@@ -14060,6 +15362,7 @@ def manual_run_one(ctx: Ctx, rec: dict, poll: int, timeout: int) -> None:
                     rec["last_error"] = "malformed structured output: " + "; ".join(bad)[:400]
                     rec["postcheck"] = {"ok": False, "errors": bad, "warnings": [],
                                         "checked_at": utcnow()}
+                    record_attempt(ctx, rec, False, bad, [], source="malformed-output")
                     ctx.log("malformed-output", rec["id"], "; ".join(bad)[:300])
                     ctx.save_state()
                     print(f"  [FAIL] {rec['id']}: malformed structured output (unchanged for one "
@@ -14076,8 +15379,8 @@ def manual_run_one(ctx: Ctx, rec: dict, poll: int, timeout: int) -> None:
         print("\n[manual] interrupted; state saved. Re-run `run --agent manual` to continue "
               "(staging is respected: prompts are only printed once their dependencies exist).")
         sys.exit(130)
-    rec["attempts"] += 1
-    postcheck(ctx, rec)
+    bump_attempt(rec)
+    postcheck(ctx, rec, source="manual (operator-supplied completion signal)")
     ctx.save_state()
     print(f"  [{'ok' if rec['status'] == 'done' else 'FAIL'}] {rec['id']}: "
           f"{'; '.join((rec.get('postcheck') or {}).get('errors', []))[:160] or 'postcheck ok'}")
@@ -14140,8 +15443,8 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
                 if not pc_failed and likely_complete_artifacts(ctx, rec):
                     print(f"  [info] {rid}: process-level failure but artifacts exist -> "
                           f"re-verifying")
-                    rec["attempts"] += 1
-                    postcheck(ctx, rec)
+                    bump_attempt(rec)
+                    postcheck(ctx, rec, source="re-verify (process failed, artifacts complete)")
                     ctx.save_state()
                 elif manual:
                     # In manual mode the operator owns the sandbox: never delete
@@ -14412,8 +15715,9 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
             if state == "blocked":
                 continue
             if state == "signal":
-                ctx.run(e["id"])["attempts"] += 1
-                postcheck(ctx, ctx.run(e["id"]))
+                signal_rec = ctx.run(e["id"])
+                bump_attempt(signal_rec)
+                postcheck(ctx, signal_rec, source="recheck (marker already on disk)")
                 ctx.save_state()
                 continue
             if state == "dirty":
@@ -14444,6 +15748,7 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
     failures = {e["id"]: 0 for e in plan}
     not_before = {e["id"]: 0.0 for e in plan}
     running = {}                      # future -> run id
+    repair_flight = {}                # future -> the repair session it belongs to
     blocked_dirty, failed_hard = [], []
 
     def register_failure(rid: str, rec: dict) -> None:
@@ -14466,9 +15771,14 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                  "retrying immediately"))
         if delay:
             not_before[rid] = time.time() + delay
+        kept = attempt_archive_dir(ctx, rec)
         try:
             rebuild_sandbox(ctx, rec)
             rec["status"] = "pending"
+            if kept.is_dir():
+                print(f"  [retry] {rid}: attempt {attempt_number(rec)} kept in "
+                      f"{kept.relative_to(ctx.root)} (its transcript is under "
+                      f"{Path(LOGS_DIRNAME)}/)")
         except DepsNotMet as exc:
             print(f"  [info] {rid}: {exc}")
         except Exception as exc:                            # noqa: BLE001
@@ -14490,12 +15800,17 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                     continue
                 if state == "signal":
                     rec = ctx.run(rid)
-                    rec["attempts"] += 1
-                    postcheck(ctx, rec)
+                    bump_attempt(rec)
+                    postcheck(ctx, rec, source="recheck (marker already on disk)")
                     ctx.save_state()
                     if rec["status"] != "done":
-                        _errs = (rec.get("postcheck") or {}).get("errors", [])
-                        print(f"  [FAIL] {rid}: {'; '.join(_errs)[:140]}")
+                        problems = repairable_artifact_failure(ctx, rec)
+                        if problems and len(running) < max(1, int(jobs)) \
+                                and start_repair_session(ctx, ex, running, repair_flight, rec,
+                                                         problems, cmd, timeout):
+                            continue
+                        print_failure(rid, (rec.get("postcheck") or {}).get("errors", []),
+                                      note="the completion signal was already on disk")
                         register_failure(rid, rec)
                     continue
                 if state == "dirty":
@@ -14537,11 +15852,21 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
             done_futs, _pending = wait_futures(running, timeout=0.5)
             for fut in done_futs:
                 rid = running.pop(fut)
+                repair = repair_flight.pop(fut, None)
                 try:
                     res = fut.result()
                 except Exception as exc:                        # noqa: BLE001
                     res = {"rc": None, "dur": 0.0, "error": f"executor error: {exc}",
                            "log": None}
+                if repair is not None:
+                    # A repair session is judged by the guard and then by the SAME
+                    # postcheck; a repair that does not clear the table is a failed
+                    # attempt, exactly like one the agent produced itself.
+                    finish_repair_session(ctx, ctx.run(rid), repair, res)
+                    rec = ctx.run(rid)
+                    if rec["status"] != "done":
+                        register_failure(rid, rec)
+                    continue
                 apply_results(ctx, {rid: res})
                 rec = ctx.run(rid)
                 if rec["status"] == "done":
@@ -14549,12 +15874,19 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                 # a process-level failure with VALID artifacts is re-verified first
                 if rec["status"] == "failed" and not (rec.get("postcheck") or {}).get("errors") \
                         and likely_complete_artifacts(ctx, rec):
-                    rec["attempts"] += 1
-                    postcheck(ctx, rec)
+                    bump_attempt(rec)
+                    postcheck(ctx, rec, source="re-verify (process failed, artifacts complete)")
                     ctx.save_state()
                     if rec["status"] == "done":
                         print(f"  [ok]   {rid} re-verified after a process-level failure")
                         continue
+                # ... then a repairable artifact-quality failure before the retry
+                # burns the attempt and rebuilds the sandbox it would repair.
+                problems = repairable_artifact_failure(ctx, rec)
+                if problems and len(running) < max(1, int(jobs)) \
+                        and start_repair_session(ctx, ex, running, repair_flight, rec, problems,
+                                                 cmd, timeout):
+                    continue
                 register_failure(rid, rec)
     remaining = [e["id"] for e in plan if not is_done(e["id"])]
     if remaining:
@@ -14796,6 +16128,13 @@ def cmd_setup(args) -> None:
                 f"e.g. {{\"url_style\": \"plain\"}} (got {type(format_policy).__name__})")
     format_fix = str(getattr(args, "format_fix", DEFAULT_FORMAT_FIX) or
                      DEFAULT_FORMAT_FIX).strip().lower()
+    # `--strict-artifacts [on|fix|off]` (absent = the default policy); the config
+    # carries it as a three-valued policy plus the legacy boolean, so a root is
+    # readable by older tools and by `artifact_policy_of` alike.
+    artifact_policy = str(getattr(args, "artifact_policy", None) or DEFAULT_ARTIFACT_POLICY)
+    if artifact_policy not in ARTIFACT_POLICIES:
+        die(f"unknown --strict-artifacts value: {artifact_policy!r} "
+            f"(choose one of {', '.join(ARTIFACT_POLICIES)})")
     if format_fix not in FORMAT_FIX_MODES:
         die(f"--format-fix must be one of {', '.join(FORMAT_FIX_MODES)} (got {format_fix!r})")
     zotero = str(getattr(args, "zotero", DEFAULT_ZOTERO_MODE) or DEFAULT_ZOTERO_MODE).strip().lower()
@@ -14887,7 +16226,11 @@ def cmd_setup(args) -> None:
                "placeholder_lookup": str(getattr(args, "placeholder_lookup",
                                                  DEFAULT_PLACEHOLDER_LOOKUP)
                                          or DEFAULT_PLACEHOLDER_LOOKUP),
-               "strict_artifacts": bool(getattr(args, "strict_artifacts", False)),
+               # `artifact_policy` is the three-valued policy; the boolean is kept
+               # for roots/tools written before it existed ("on" and "fix" both
+               # fail an unfilled table -- `fix` first offers it one repair).
+               "artifact_policy": artifact_policy,
+               "strict_artifacts": artifact_policy != "off",
                "format_policy": format_policy, "format_fix": format_fix,
                "rewrites": rewrites, "revises": revises, "integrators": integrators,
                "created": utcnow(), "version": VERSION}
@@ -15009,6 +16352,15 @@ def cmd_setup(args) -> None:
     print(f"[setup] corpus rule:             \"*.tracked.docx\" auxiliaries are excluded from "
           f"every judged/pinned corpus (the pipeline writes its own copies under "
           f"{REDLINE_DIRNAME}/)")
+    _art_note = {
+        "on": "an unfilled/boilerplate decision artifact FAILS the attempt",
+        "fix": "an unfilled/boilerplate decision artifact first gets ONE scoped repair session "
+               "(it may only fill cells of the seeded tables, from the rows' own evidence); the "
+               "same postcheck then judges it, and a repair that does not clear it fails the "
+               "attempt like any other",
+        "off": "the detector still runs and is recorded, but never fails an attempt",
+    }[artifact_policy]
+    print(f"[setup] artifact policy:         {artifact_policy}: {_art_note}")
     print(f"[setup] per-round winners:       {root}/round<r>_winner/  (digest-verified against "
           f"the content-addressed pins)")
     print(f"[setup] next: python {root / script.name} run --root {root}")
@@ -16185,6 +17537,19 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
             for r in ctx.runs()]
     L.append(_tbl(rows, ["run", "kind", "round", "status", "att", "dur", "post", "note"]))
     L.append("")
+    history = attempt_history_lines(ctx, indent="", limit=10)
+    if history:
+        L.append(f"**Failed attempts ({len(history)} recorded).** Every attempt is kept: the "
+                 f"run table above shows the LAST one only, so a run that failed twice would "
+                 f"otherwise report a single failure. The full history is in state.json "
+                 f"(`attempts_log`, one entry per attempt: errors, warnings, the decision-artifact "
+                 f"quality report, the marker's own summary, timing, and where the attempt's "
+                 f"artifacts and transcript were kept), and each failed attempt's sandbox is "
+                 f"preserved under `runs/{ATTEMPTS_DIRNAME}/<run>/attempt-<n>/` (with its own "
+                 f"`record.json`) until `prune` reclaims that round.")
+        L.append("")
+        L.extend(history)
+        L.append("")
     L.append("## 5. Human gate (nothing is auto-submitted)")
     L.append("")
     rl_dir = ctx.root / REDLINE_DIRNAME
@@ -16271,6 +17636,13 @@ def cmd_status(args) -> None:
               f"{rec['status']:<9}{rec.get('attempts', 0):<4}"
               f"{fmt_dur(rec.get('last_duration')):<9}{post:<7}{note[:60]}")
     print()
+    history = attempt_history_lines(ctx)
+    if history:
+        print("ATTEMPT HISTORY -- every attempt is kept (diagnostics: state.json `attempts_log`; "
+              f"artifacts: runs/{ATTEMPTS_DIRNAME}/; transcripts: runs/{LOGS_DIRNAME}/)")
+        for line in history:
+            print(line)
+        print()
     summarize(ctx)
     pend = [r for r in ctx.runs() if r["status"] in ("pending", "failed", "stale")]
     gapped = []
@@ -17379,8 +18751,10 @@ def cmd_prune(args) -> None:
     Every judge session copies the whole field plus the original into its sandbox;
     a three-round run is easily >10 GB. `decide` re-derives a decision from
     state.json (the judge sheets are stored there), so the sandboxes are scratch
-    once their round is complete -- this command is the supported way to reclaim
-    that space, and it is dry-run unless --yes is given.
+    once their round is complete. The per-attempt archives of those rounds
+    (`runs/_attempts/`) go with them -- their RECORDS stay in state.json, so the
+    attempt history remains readable -- and this command is dry-run unless
+    `--yes` is given.
     """
     ctx = Ctx(Path(args.root).resolve())
     ctx.load()
@@ -17391,7 +18765,7 @@ def cmd_prune(args) -> None:
 def _cmd_prune_locked(ctx: Ctx, args) -> None:
     R = ctx.rounds_count()
     keep_from = max(1, R - max(0, int(args.keep_latest)) + 1)
-    targets, skipped_open = [], []
+    targets, skipped_open, archives = [], [], []
     for rec in ctx.runs():
         r = int(rec.get("round") or 0)
         if r >= keep_from:
@@ -17402,7 +18776,12 @@ def _cmd_prune_locked(ctx: Ctx, args) -> None:
         sb = ctx.sandbox_of(rec)
         if sb.is_dir():
             targets.append((rec["id"], r, sb, dir_size(sb)))
-    total = sum(t[3] for t in targets)
+        # The per-attempt archives of the same rounds are scratch too -- the
+        # attempt RECORDS stay in state.json, so `status` keeps the history.
+        arch = ctx.runs_dir / ATTEMPTS_DIRNAME / rec["id"]
+        if arch.is_dir():
+            archives.append((rec["id"], r, arch, dir_size(arch)))
+    total = sum(t[3] for t in targets) + sum(t[3] for t in archives)
     print(f"[prune] root: {ctx.root}")
     print(f"[prune] keeping sandboxes of the last {args.keep_latest} round(s) "
           f"(rounds {keep_from}..{R}); pins, published winners, reports and state.json are "
@@ -17411,23 +18790,40 @@ def _cmd_prune_locked(ctx: Ctx, args) -> None:
         print(f"[prune] {len(skipped_open)} run(s) belong to rounds that are not complete and "
               f"are never pruned: {', '.join(skipped_open[:6])}"
               + ("..." if len(skipped_open) > 6 else ""))
-    if not targets:
+    if not targets and not archives:
         print("[prune] nothing to prune.")
         return
-    print(f"[prune] {len(targets)} sandbox(es), {total / 1e9:.2f} GB:")
+    print(f"[prune] {len(targets)} sandbox(es) + {len(archives)} attempt archive(s), "
+          f"{total / 1e9:.2f} GB:")
     for rid, r, sb, size in sorted(targets, key=lambda t: nat_key(t[0]))[:40]:
         print(f"  round {r}  {rid:<26} {size / 1e6:8.1f} MB  {sb}")
     if len(targets) > 40:
         print(f"  ... and {len(targets) - 40} more")
+    for rid, r, arch, size in sorted(archives, key=lambda t: nat_key(t[0]))[:20]:
+        print(f"  round {r}  {rid:<26} {size / 1e6:8.1f} MB  {arch}  (failed attempts)")
+    if len(archives) > 20:
+        print(f"  ... and {len(archives) - 20} more attempt archives")
     if not args.yes:
         print("[prune] DRY RUN: nothing was deleted. Re-run with --yes to reclaim the space "
-              "above. (`decide` keeps working: judge sheets live in state.json.)")
+              "above. (`decide` keeps working: judge sheets live in state.json; the attempt "
+              "history stays readable from state.json's attempts_log.)")
         return
     freed = 0
     for rid, _r, sb, size in targets:
         freed += size
         shutil.rmtree(sb, ignore_errors=True)
         print(f"[prune] removed {sb} ({rid})")
+    for rid, _r, arch, size in archives:
+        freed += size
+        shutil.rmtree(arch, ignore_errors=True)
+        print(f"[prune] removed {arch} ({rid}, attempt archives)")
+    pruned_runs = {rid for rid, _r, _arch, _size in archives}
+    for rec in ctx.runs():
+        if rec.get("id") not in pruned_runs:
+            continue
+        for entry in rec.get("attempts_log") or []:
+            if entry.get("archived"):
+                entry["archive_pruned"] = True
     ctx.log("pruned", detail=f"{len(targets)} sandbox(es), {freed / 1e9:.2f} GB")
     ctx.save_state()
     print(f"[prune] reclaimed ~{freed / 1e9:.2f} GB")
@@ -17615,7 +19011,10 @@ USAGE_EXAMPLES = """usage:
           5 broken evidence / recomputed champion differs from the stored one /
           an incomplete judge panel (never certified).
   retry   --root <dir> --run <ID> [--all-failed]
-          reset one run (logs are stashed under runs/_logs/). Resetting a run
+          reset one run (the failed attempt's artifacts are archived under
+          runs/_attempts/<run>/attempt-<n>/ and its transcript under
+          runs/_logs/<run>.attempt-<n>._agent.log; the attempt's record stays in
+          state.json). Resetting a run
           inside a completed round invalidates that round and every later round,
           persists the invalidation, and rebuilds sandboxes IN DEPENDENCY ORDER:
           a run whose upstream output is gone is left stale for the staging loop
@@ -17857,14 +19256,20 @@ def build_parser() -> argparse.ArgumentParser:
                     action="store_const", const="off",
                     help="turn the identifier/placeholder lookups off (same as "
                          "--placeholder-lookup off)")
-    ps.add_argument("--strict-artifacts", dest="strict_artifacts", action="store_true",
-                    default=DEFAULT_STRICT_ARTIFACTS,
-                    help="fail a run whose seeded decision artifacts are boilerplate or unfilled "
-                         "(one disposition sentence repeated across most rows, summaries copied "
-                         "from the first sentence, undisposed rows). The detectors always RUN and "
-                         "are recorded; ON by default, so they are hard failures")
-    ps.add_argument("--non-strict-artifacts", dest="strict_artifacts", action="store_false",
-                    help="record the artifact-quality findings instead of failing the run")
+    ps.add_argument("--strict-artifacts", dest="artifact_policy", nargs="?", const="on",
+                    choices=list(ARTIFACT_POLICIES), default=None,
+                    help="what a boilerplate/unfilled decision artifact does to a stage attempt: "
+                         "`on` (default) fails it; `fix` first spends ONE scoped repair session "
+                         "on the failed attempt's decision tables -- it may only fill cells, from "
+                         "evidence already in the rows, and the SAME postcheck then judges it -- "
+                         "and a repair that does not clear the problem is a failed attempt like "
+                         "any other; `off` records the detector's report as a warning. The "
+                         "detectors always RUN and are recorded either way. Bare "
+                         "`--strict-artifacts` means `on`")
+    ps.add_argument("--fix-artifacts", dest="artifact_policy", action="store_const", const="fix",
+                    help="same as --strict-artifacts fix")
+    ps.add_argument("--non-strict-artifacts", dest="artifact_policy", action="store_const",
+                    const="off", help="same as --strict-artifacts off")
 
     decide_opts = argparse.ArgumentParser(add_help=False)  # shared by decide / run-decide
     decide_opts.add_argument("--package-winner", action="store_true",

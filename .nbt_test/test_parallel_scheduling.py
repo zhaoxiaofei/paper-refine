@@ -132,12 +132,19 @@ def test_dag_scheduling():
     # 2026-09-22: the revise now waits for review + AUDIT, so the rewrite arms are
     # given more headroom: the case must still show "no barrier on the rewrites",
     # not measure how fast this machine can postcheck an extra session.
-    sleeps = {"NBT_TIMING_SLEEP_W": 3.0,     # rewrites: the slowest production arm
-              "NBT_TIMING_SLEEP_R": 0.3,     # review: finishes long before them
-              "NBT_TIMING_SLEEP_AU": 0.2,    # auditor: between the review and the revise
-              "NBT_TIMING_SLEEP_V": 0.3,     # revise
-              "NBT_TIMING_SLEEP_I": 0.3,     # integrations
-              "NBT_TIMING_SLEEP_J": 0.2}     # judges
+    # The windows the assertions depend on must survive a LOADED box: with
+    # `.nbt_test/run_all.py` running 8 suites at once, a 0.3 s session could start
+    # after its sibling had already finished (overlap assertion) or the revise's
+    # own chain (review + audit + two postchecks) could outlast a 3 s rewrite --
+    # both failed for the machine's load, not for a scheduling barrier. The slow
+    # rewrites are therefore 6 s and the phases whose PARALLELISM is asserted are
+    # 1.5 s / 1.0 s, so the suite measures the graph, not the CPU.
+    sleeps = {"NBT_TIMING_SLEEP_W": 6.0,     # rewrites: the slowest production arm
+              "NBT_TIMING_SLEEP_R": 0.6,     # review: finishes long before them
+              "NBT_TIMING_SLEEP_AU": 0.4,    # auditor: between the review and the revise
+              "NBT_TIMING_SLEEP_V": 0.5,     # revise
+              "NBT_TIMING_SLEEP_I": 1.5,     # integrations (parallelism is asserted)
+              "NBT_TIMING_SLEEP_J": 1.0}     # judges (parallelism is asserted)
     root, proc, spans = run_round(tmp, rewrites="2", revises="1", jobs=8, sleeps=sleeps)
     out = proc.stdout + proc.stderr
     check("the round completes", proc.returncode == 0, out[-300:])

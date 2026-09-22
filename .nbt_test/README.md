@@ -5,6 +5,38 @@ Self-contained repro/regression suites for `nbt_pipeline.py`,
 Python 3 (standard library) and take a few seconds each; every suite prints one
 `[ok ]`/`[FAIL]` line per check and exits non-zero if any check fails.
 
+## Running them
+
+The suites are independent (each builds its own root under `tempfile.mkdtemp`,
+and the fixed `/tmp` paths are per-suite), so run them in parallel:
+
+```bash
+python3 .nbt_test/run_all.py             # GNU parallel, 8 jobs: ~110 s (sequential: ~5.5 min)
+python3 .nbt_test/run_all.py -j 4        # cap the parallelism
+python3 .nbt_test/run_all.py -j 1        # exactly the old sequential loop
+python3 .nbt_test/run_all.py --only test_pipeline test_docx_format
+python3 .nbt_test/run_all.py --engine python   # no GNU parallel on this box
+python3 .nbt_test/run_all.py --logs /tmp/nbt-logs   # keep logs/status/timing
+```
+
+`run_all.py` drives every suite through `run_one.sh`, which gives it a private
+`TMPDIR`, captures its output to `<logs>/<suite>.log`, and records its exit
+status and wall time under `<logs>/status/`. A suite that fails is re-run ALONE
+once: a timing-sensitive suite that only failed because eight others were
+competing is reported as `flaky` (and named), while a suite that fails alone too
+is a real failure whose `[FAIL]` lines are quoted. Exit status is 0 when nothing
+really failed, 1 otherwise.
+
+The runner is a convenience, not a wrapper: the same evidence comes from GNU
+parallel directly, and every suite still runs standalone with `python3
+.nbt_test/<suite>.py`.
+
+```bash
+mkdir -p /tmp/nbt-logs && export NBT_TEST_RUNDIR=/tmp/nbt-logs
+ls .nbt_test/test_*.py | sed 's|.*/||' \
+  | parallel -j 8 --joblog /tmp/nbt-logs/joblog '.nbt_test/run_one.sh {}'
+```
+
 | Suite | Covers |
 |---|---|
 | `test_pipeline.py` | The design-fix suite: prompts (render-then-look, visual artifacts), caption/placeholder gates, corpus rules, ranking and champion reporting. |
@@ -26,6 +58,8 @@ Python 3 (standard library) and take a few seconds each; every suite prints one
 | `test_final_clean_version.py` | `decide`/`run-decide` publishes `<root>/final_clean_version/` with the user's generation counter INCREMENTED by one (`int(filename.split("-")[1]) + 1`: `cnb-11-*` -> `cnb-12-*`; a missing or non-numeric second field keeps the name), the references inside the text files repointed to the new names, decision.json carrying the renamed count plus the pre-rename pin digest and the final digest, byte-stable repeat runs (no `.tmp`/`_superseded` churn) and a direct `setup --source` of the incremented package. |
 | `test_parallel_scheduling.py` | The round's dependency graph: the M rewrites and the round's review run CONCURRENTLY, each revise starts when the review marker exists (without waiting for the rewrites), the integrations start when the whole pool is done, the judge wave when the field is complete -- measured with a timestamping stub (`stub_timed.py`), plus the `--jobs` cap, the per-run retry budget and the "permanent failure leaves the round undecided" rule. |
 | `test_audit_bugs.py` | The follow-up bug audit: judge-view timestamps (one mtime across `target/`, `field/*` and `original/`), self-healing repair of partially copied inputs, the atomic-write and multi-process-lock races, `decide` reproducibility against a config edit, negative tie-break counts, judge-token collisions, same-second archive names, the oversized-agent-JSON cap and damaged-`state.json` validation. |
+| `test_attempt_history.py` | The attempt-history layer: EVERY attempt is kept, not just the last one. Attempts are numbered monotonically across `retry` (`attempts_done`), every postcheck AND every process-level failure appends an entry (errors, warnings, artifact quality, marker summary, timing, source) to the run record, a re-postcheck of the same attempt replaces its entry, and the log is capped. A failed attempt's sandbox is archived before the rebuild (`runs/_attempts/<run>/attempt-<n>/`, hardlinked, input corpora and `work/corpus` skipped, self-describing `record.json`) with its transcript moved to `runs/_logs/<run>.attempt-<n>._agent.log` and referenced from the record; the console prints every problem one per line instead of one 140-character cut; `status`/DECISION_REPORT.md list the history; `prune` reclaims the archives while state.json keeps the records; and a repeated boilerplate disposition is quoted in full with the rows it is about. |
+| `test_artifact_repair.py` | `--strict-artifacts fix` (the scoped ARTIFACT-REPAIR session): the three-valued policy (`on`/`fix`/`off`, bare `--strict-artifacts`, `--fix-artifacts`, `--non-strict-artifacts`, and an old root's boolean config), the repairability rule (ONLY a review whose every postcheck error is an artifact-quality message; one other gate, the wrong policy/stage or an attempt already repaired is not), the prompt (problems verbatim, writable scope, the disposition rule, `unable — manual verification required`, no unresolved token), the three scope classes (`review/work/` scratch free, decision tables cell-editable but row-identity immutable, everything else — `findings.json`/`md`, `round2/`, `M1_acronyms.md`, the prompt, the marker — byte-identical), and the end-to-end behaviour with `stub_repair_agent.py`: a repaired review completes and is recorded (`repairs[]`, `attempts_log` source `artifact-repair`, attempt history), while a repair that clears nothing, edits `findings.json`, drops a seeded row or rewrites a non-decision artifact fails — and `on`/`off` never and always repair, respectively. |
 | `test_zotero_integration.py` | The `zot` CLI (pyzotero-cli) wiring: `setup --zotero {off,read,edit,apply}` (default `edit`) and its persistence in `pipeline_config.json`; the Zotero block in every prompt with the availability line filled in and no unresolved `@@TOKEN@@`; policy propagation (off never names the CLI, read resolves without field edits, edit adds the citation-edit clause, only `apply` reaches the propose-then-verify library-update protocol); the write path is unreachable from review/rewrite/judge even under `--zotero apply`; unknown stored values fall back to the default, never to a more permissive mode; the live-field guardrails (the $zotero-use DOCX reference + bundled validator, parent keys, unique citationIDs, preserved baseline, snapshot-then-prove, no automatic Zotero Refresh) and the apply-mode hard limits (one field on one item, no create/delete, no bulk edit, `--last-modified auto`); plus one real stub round asserting the on-disk PROMPT.md files. |
 | `test_length_limits.py` | The abstract/main-text length rule (M19): the Nature Biotechnology Article base limits (abstract <= 150 words; main text <= 3,000 words excluding abstract, Methods, references and figure legends) relaxed by +15%/+25% (caps 172 and 3,750, floored so the margin is never exceeded); the counting definition (maximal runs of non-space characters, newline = space; `state-of-the-art` and `2026` are one word each); the rule and its stage mandate in every prompt (review sweep + mandatory M19 coverage row, revise compression, integration porting, rewrite surfacing, judge formatting tier) with the blanket exemption gone and discovery proposals starting at M20; the code-side proxy scan (abstract/body split, Keywords and blank-line boundaries, Methods/References exclusion, caption subtraction, supplementary/renderings skipped, legacy .doc unparsed, non-manuscript files never counted); and `setup` recording the source scan. |
 | `test_docx_format.py` | The OOXML style/formatting audit and normalizer (`nbt_docx_format.py`, wired into `setup`/`decide`): a fixture DOCX carries a break-only paragraph (the blank page), a running head on the title page, tracked changes/proofing markers/literal tabs, per-figure legend spacing, heading style drift without keepNext, an italic correspondence block, an italic `et al.` inside a Zotero bibliography field (field-protected: style/unlink, never a silent run edit), a reference without an italic journal, the same URL hyperlinked and plain, mixed straight/curly quotes and an em-dash flood. Asserts detection, the byte-level fixer (all other parts byte-identical, document text unchanged, `mc:Ignorable` namespaces preserved, `docx validate` clean, mechanical findings 0, idempotent), the extended policy (unlink Zotero fields, align heading sizes, curly quotes), the CLI (`scan --strict`, `fix` refusing to overwrite its input) and - when soffice/pdftotext exist - a real render showing the blank page before and none after. `test_journal_emphasis` adds the 2026-09-21 real-world class: italics that live in Word's `Emphasis` CHARACTER STYLE (invisible to a direct-rPr check), the same journal name italic in one sentence and roman in the next, an emphasis span running on over "other leading journals", and a roman reference-list journal title - plus the false-positive guards (`Cell-line`, `(Single-Cell)`, a URL, an abbreviated `Cell Syst.` title, a legitimate `de novo` italic) and the font/paragraph-`style_survey` artifact. `test_text_consistency_rules` covers FMT-T8a-e (mixed citation formats with the fix that deletes the redundant journal segment across runs, nested parentheses, repetition of a proper name, US/UK spelling, attributive hyphenation) with the guards (reference titles untouched, `T(·,·)` not a nesting, URL/github text ignored) and the `text_diff_only_recorded_edits` proof; `test_deliverable_validation` covers the `validate` command (valid/malformed DOCX, `\input` fragment SKIP, compiling vs failing `.tex`). |

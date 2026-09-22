@@ -51,9 +51,11 @@ Useful flags: `--rounds N`, `--judges N[,N…]`, `--rewrites M[,M…]`,
 2; see *Running only some of the steps*). Setup-time policy flags:
 `--audit {off,on}` (the auditor stage), `--placeholder-lookup {off,online}`
 (resolve searchable hand-off markers before the sessions run),
-`--strict-artifacts` (fail a run whose decision tables are boilerplate or
-unfilled); `decide --residual-gate` refuses to certify a champion that still
-carries a residual the pipeline can see.
+`--strict-artifacts [on|fix|off]` (what a boilerplate or unfilled decision table
+does to an attempt: `on` fails it, `fix` first spends one scoped repair session
+on it, `off` only records the report -- see *Attempt history* below);
+`decide --residual-gate` refuses to certify a champion that still carries a
+residual the pipeline can see.
 
 ## The auditor (`setup --audit on`): review → **audit** → revise
 
@@ -482,6 +484,69 @@ them. `manual_steps`, caption lengths and hand-off placeholders are reported in
 `DECISION_REPORT.md` / `decision.json` (the table has `critical` and `writing`
 columns) but never ranked on.
 
+## Attempt history: every attempt is kept, not just the last one
+
+A run can be attempted several times (`--retries`, a fresh invocation, a
+`retry`). Before this layer existed, the run record's `postcheck`/`last_error`
+described only the FINAL attempt — the 2026-09-22 root showed a review failing on
+the M1b gate while attempt 1's three real problems survived nowhere except the
+text of attempt 2's prompt, and attempt 1's artifacts had already been destroyed
+by the retry.
+
+Now every attempt is recorded and its evidence is preserved:
+
+| where | what it holds |
+|---|---|
+| `state.json` → `runs.<id>.attempts_log` | one entry per attempt: number, source (`postcheck` / `process` / `adopted` / `recheck` / `re-verify` / `manual`), timestamps, duration, status, the postcheck's errors and warnings, the decision-artifact quality report, the marker's own summary, and the paths of the attempt's archive and transcript (capped at 25 attempts per run, 60 messages each, 4 KB per message) |
+| `runs/_attempts/<run>/attempt-<n>/` | the attempt's own sandbox as it was when the postcheck judged it — hardlinked where the filesystem allows (the input corpora and `work/corpus` are left out because every materialization rewrites them), with a self-describing `record.json` |
+| `runs/_logs/<run>.attempt-<n>._agent.log` | the attempt's agent transcript (moved aside before a retry can reuse the sandbox) |
+
+The console prints all of an attempt's problems (one per line, not a single
+140-character cut), `status` and `DECISION_REPORT.md` list every failed attempt
+with its first problem and the paths above, and `prune` reclaims the archives of
+the rounds it prunes — the attempt RECORDS stay in `state.json`, so the history
+remains readable and says that the archive is gone.
+
+A defect message is part of this record: a repeated disposition is now quoted in
+full and names the rows it is about (`-- rows: <document> / <heading> / para n`),
+so an operator (or a repair session) can act on it without opening the artifact.
+
+### `--strict-artifacts fix`: one scoped repair session instead of a full re-run
+
+The artifact-quality layer fails attempts whose seeded decision tables are
+unfilled or closed with one blanket sentence — but re-running the whole stage to
+fix a disposition column costs 25 minutes and re-samples everything the stage
+produced (the 2026-09-22 root got a different 102-finding review out of the
+retry). `--strict-artifacts fix` (alias `--fix-artifacts`) spends ONE bounded
+session on the failed attempt's own sandbox first:
+
+* It runs only for a **review** whose postcheck failed on **nothing but**
+  artifact-quality problems. A missing deliverable, a coverage/contract
+  violation, the M1b vanishing-residue gate, the visual-inspection record or the
+  pristine copy stay plain failures: those encode judgement the reviewing
+  session has to supply, and a repair that satisfied them would launder a
+  missing review into a finished one.
+* It may write only in `review/artifacts/` (the listed decision tables) and
+  `review/work/` (scratch). It may **fill or replace the judged cells**
+  (`disposition`, `resolution`, `summary`, `decision`, …) and nothing else: rows
+  are identity — no row may be added, deleted, reordered or re-worded — and a
+  row whose evidence is not enough must be written
+  `unable — manual verification required: <what the author must check>`, never
+  invented. `review/findings.json`, `review/findings.md`, `review/round2/`, the
+  other artifact files (`M1_acronyms.md` above all), the prompt and the marker
+  must stay byte-identical.
+* The orchestrator verifies all of that on disk, then re-runs the **identical
+  postcheck**. A repair that clears nothing, or that went out of scope, is a
+  failed attempt like any other: the normal retry policy decides what happens
+  next, and the run's history says exactly which attempt was a repair, what it
+  changed, and where its transcript is. Each failed attempt gets at most one
+  repair session.
+
+The prompt is written by the pipeline (`REPAIR_PROMPT.md` in the sandbox, deleted
+once the session ends), so the repair is a pipeline-defined, auditable step
+rather than a second opinion: `status` and `DECISION_REPORT.md` list it under the
+attempt history.
+
 ## Repository layout
 
 | path | purpose |
@@ -498,10 +563,26 @@ columns) but never ranked on.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. Run them all:
+any failure. They are independent, so run them in parallel — 33 suites in ~110 s
+on a 20-core box, against ~5.5 min sequentially:
 
 ```bash
-for t in .nbt_test/test_*.py; do python3 "$t" || echo "FAILED: $t"; done
+python3 .nbt_test/run_all.py          # GNU parallel (8 jobs by default); falls back
+                                      # to a thread pool when `parallel` is missing
+python3 .nbt_test/run_all.py -j 16    # more sessions (measured: no faster, more load)
+python3 .nbt_test/run_all.py -j 1     # the old sequential loop, for a bisect
+python3 .nbt_test/run_all.py --only test_pipeline test_docx_format   # a subset
+```
+
+Each suite runs in its own `TMPDIR` and writes `<logs>/<suite>.log`; a suite that
+fails is re-run alone once, so a timing-sensitive suite that merely lost a race
+with seven siblings is reported as `flaky` (named, exit 0) while a real failure
+keeps its `[FAIL]` lines and exit 1. The raw one-liner, if you prefer GNU parallel
+directly (`mkdir -p /tmp/nbt-logs && export NBT_TEST_RUNDIR=/tmp/nbt-logs`):
+
+```bash
+ls .nbt_test/test_*.py | sed 's|.*/||' \
+  | parallel -j 8 --joblog /tmp/nbt-logs/joblog '.nbt_test/run_one.sh {}'
 ```
 
 Highlights: `test_pipeline.py` (prompts, gates, ranking), `test_length_limits.py`

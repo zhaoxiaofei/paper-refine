@@ -15,6 +15,8 @@ cnb-v06c/
 # Python bytecode from running the .nbt_test/ and nbt-skills/tests/ harnesses
 __pycache__/
 *.pyc
+# `.nbt_test/run_all.py --logs` may keep its per-suite logs inside the tree
+.nbt_test/logs/
 
 # Node dependencies of mcp-docx-converter/: installed from its package-lock.json
 # (`npm ci` inside mcp-docx-converter/), never vendored into the repository.

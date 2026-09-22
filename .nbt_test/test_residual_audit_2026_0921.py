@@ -268,10 +268,21 @@ def test_gene_symbol_ledger():
           not any(s in syms for s in ("V2", "HG19", "KB")), str(syms))
     check("the ranking puts the letters-only gene-language symbol first",
           rows and rows[0]["symbol"] == "KRAS", str([(r["symbol"], r["score"]) for r in rows[:3]]))
-    check("the HGNC lookup classifies a real symbol and a nonsense one",
-          fmt.lookup_kind("gene", "NOPE9")["verdict"] == "absent"
-          or fmt.lookup_kind("gene", "NOPE9")["verdict"] == "error",
-          str(fmt.lookup_kind("gene", "NOPE9")["verdict"]))
+    # ONE call per query, and each verdict judged on its own: the old check asked
+    # three times and accepted `absent` only from the FIRST call (else `error` from
+    # the second), so a flaky HGNC -- timeout, then a good answer -- read as a
+    # failure even though both verdicts are documented outcomes. The live API is
+    # allowed to be unreachable here (`error` is the offline verdict), but a real
+    # symbol that DOES resolve must come back with its accession.
+    nonsense = fmt.lookup_kind("gene", "NOPE9", timeout=10)
+    real = fmt.lookup_kind("gene", "KRAS", timeout=10)
+    check("the HGNC lookup classifies a nonsense symbol as absent (offline: error)",
+          nonsense["verdict"] in ("absent", "error"), str(nonsense["verdict"]))
+    check("the HGNC lookup resolves a real symbol when the API answers",
+          real["verdict"] in ("found", "error")
+          and (real["verdict"] != "found"
+               or [h.get("hgnc_id") for h in real["hits"]] == ["HGNC:6407"]),
+          f"{real['verdict']} {[h.get('hgnc_id') for h in real['hits']]}")
 
 
 # ---------------------------------------------------------------------------

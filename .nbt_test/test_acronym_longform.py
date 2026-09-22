@@ -388,6 +388,83 @@ check("E10 orchestrator gate ignores an M1 artifact without M1b rows",
       and getattr(np, "m1b_row_count", lambda _t: -1)("# M1\n\n| acronym |\n|---|\n| CN |\n") == 0,
       f"errs={str(errs4)[:120]}")
 
+
+def coverage_m1(disposition="clean -- basis: x", detail=""):
+    """The E-suite coverage table with M1's own two cells under test."""
+    out = []
+    for r in full_coverage():
+        if r["check"] == "M1":
+            r = {"check": "M1", "disposition": disposition, "detail": detail}
+        out.append(r)
+    return out
+
+
+# The 2026-09-22 root (round 1, second attempt): the session rewrote the seeded
+# table with a `#` numbering column and a `disposition` column, disposed all 25
+# rows with their own reasons, and recorded the table + the count in the M1
+# coverage row's DETAIL cell. The gate read only the `disposition` cell and
+# failed a session that had followed the prompt ("a recorded reason in the M1
+# coverage detail"); it also counted the `#` header row as a 26th instance.
+M1B_DISPOSED_MD = (
+    "## M1b — un-abbreviated long forms used again after the acronym's first use\n\n"
+    "| # | acronym | context | location | long form as written | disposition |\n"
+    "|---|---|---|---|---|---|\n"
+    "| 1 | CN | cover letter | letter.txt:4 | copy-number | OK — M1(k) does not apply: the "
+    "cover letter never defines the short form. |\n"
+    "| 2 | CN | supplementary | supp.tex.txt:109 | copy-number | OK — the match is the "
+    "manuscript TITLE inside \\title{}, which must stay verbatim. |\n")
+M1B_BARE_OK_MD = (
+    "## M1b — long-form residues\n\n"
+    "| acronym | context | file:line | long form as written | disposition |\n"
+    "|---|---|---|---|---|\n"
+    "| CN | main text | ms.txt:12 | copy-number | OK |\n")
+
+tmp5 = scratch("nbt_gate5_")
+errs5 = []
+np.check_review_contract(ctx, *fake_review_sandbox(
+    tmp5, M1B_DISPOSED_MD, [],
+    coverage_m1("clean — basis: the artifact's rows are all disposed",
+                "artifact M1_acronyms.md, 377 token rows + 25 M1b rows; script over the "
+                "field-stripped corpus")), errs5, [])
+check("E11 orchestrator gate reads the M1 coverage row's detail cell (the run's own shape)",
+      not errs5, f"errs={str(errs5)[:200]}")
+
+tmp6 = scratch("nbt_gate6_")
+errs6 = []
+np.check_review_contract(ctx, *fake_review_sandbox(
+    tmp6, M1B_DISPOSED_MD, [], coverage_m1()), errs6, [])
+check("E12 orchestrator gate accepts the skill's own route: every table row disposes itself",
+      not errs6, f"errs={str(errs6)[:200]}")
+
+tmp7 = scratch("nbt_gate7_")
+errs7 = []
+np.check_review_contract(ctx, *fake_review_sandbox(
+    tmp7, M1B_BARE_OK_MD, [], coverage_m1()), errs7, [])
+check("E13 a '#' header is not an instance and a bare OK is not a recorded reason",
+      getattr(np, "m1b_row_count", lambda _t: -1)(M1B_DISPOSED_MD) == 2
+      and getattr(np, "m1b_rows_disposed", lambda _t: True)(M1B_DISPOSED_MD)
+      and not getattr(np, "m1b_rows_disposed", lambda _t: True)(M1B_BARE_OK_MD)
+      and np.m1b_row_count(M1B_BARE_OK_MD) == 1
+      and any("M1b long-form row" in e for e in errs7),
+      f"errs={str(errs7)[:160]}")
+
+# The sweep script's own empty-table row (`| — | — | — | — | no long-form re-use
+# detected |`) is a placeholder, never an instance: counting it made the gate
+# demand an M1 finding for a clean table.
+M1B_EMPTY_MD = (
+    "## M1b — LONG FORMS RE-USED AFTER THEIR FIRST USE (rule M1(k))\n\n"
+    "| acronym | context | file:line | long form as written | excerpt |\n"
+    "|---|---|---|---|---|\n"
+    "| — | — | — | — | no long-form re-use detected |\n")
+
+tmp8 = scratch("nbt_gate8_")
+errs8 = []
+np.check_review_contract(ctx, *fake_review_sandbox(tmp8, M1B_EMPTY_MD, [], coverage_m1()),
+                         errs8, [])
+check("E14 the sweep's 'no long-form re-use detected' row is not an instance",
+      getattr(np, "m1b_row_count", lambda _t: -1)(M1B_EMPTY_MD) == 0 and not errs8,
+      f"errs={str(errs8)[:160]}")
+
 print()
 if FAILS:
     print(f"{len(FAILS)} FAILURE(S): " + "; ".join(FAILS))
