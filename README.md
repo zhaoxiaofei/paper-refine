@@ -658,8 +658,22 @@ which files may change, and which evidence is pinned:
 |---|---|---|---|
 | `review` | the decision-artifact quality problems (empty cells, boilerplate closures, echoed OUTLINE summaries), the M1b long-form gate (undisposed residue rows — the class that failed the 2026-09-22 roots), a missing visual record | `review/artifacts/` (the seeded tables **including `M1_acronyms.md`**), `review/work/` | every table's row identity, all headers and column orders; `findings.json`/`md`, `round2/`, the other artifact files |
 | `audit` | `audit.json` missing/unparseable/duplicated/missing dispositions | `audit/` | every existing disposition and every `adds` row; **new dispositions must be `confirm`** (a drop hides a finding from the revisers and needs the auditor's own evidence) |
-| `rewrite` / `revise` / `integrate` | a missing/empty/thin report or ledger (`REWRITE_REPORT.md`, `revision_report.json`, `DIFF_LEDGER.md`), the language-pass coverage rows, the visual record, the marker | the package's bookkeeping files (by name) and its `work/` scratch | every manuscript file of the package; the frozen review; the corpus inputs |
+| `rewrite` / `revise` / `integrate` | an EMPTY/thin report or ledger the stage wrote (`REWRITE_REPORT.md`, `revision_report.json`, `DIFF_LEDGER.md`: blank cells, wrong level, missing `artifact` rows), the language-pass coverage rows, the visual record, the marker | the package's bookkeeping files the stage wrote (by name) and its existing `work/` files | every manuscript file of the package; the frozen review; the corpus inputs |
 | `judge` | a missing `checks` coverage map, `score`/`basis` that contradict the sheet's own ledger, bookkeeping ids, a missing grounding record | `scores.json`, `judge_review/` | `resolved`/`introduced` (the ledger IS the judgement), the comparison set, existing coverage entries; new coverage entries must be `unable` |
+
+**Variant B — a repair finishes the paperwork of work that happened, it never
+substitutes for the work.** A repair may only CHANGE files the stage itself
+wrote: it completes them (fills cells, finishes the rows, corrects the marker's
+ids). A deliverable the stage never wrote — a missing ledger, report, language
+pass, visual record or completion marker — is **not repairable**: that attempt
+fails, the run stays incomplete, and the stage is re-run (or its stopped session
+resumed). The gate refuses such a repair before spending the session, the prompt
+says so, and the guard enforces it mechanically (a file created anywhere inside
+the repair's writable scope is out of scope, `/tmp` is the repair's scratch).
+This is deliberate: the alternative was a repair that manufactured a "completed"
+stage out of nothing — the 2026-09-22 `r1_i3` run read that way, where a stalled
+session's paperwork was completed while the package stayed byte-identical to its
+base (the sessions that ran to completion changed 8/8/5 documents).
 
 A repair may **fill, never re-judge**: it must write
 `unable — manual verification required: <what the author must check>` where the

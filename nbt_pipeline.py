@@ -902,6 +902,14 @@ DEFAULT_STRICT_ARTIFACTS = True
 #   fix  ... but first spend ONE scoped repair session on that attempt's decision
 #        tables (see `artifact_policy_of`); the same postcheck judges the repair
 #   off  record the detector's report as a warning, never fail on it
+# VARIANT B (operator decision, 2026-09-23): a repair finishes the paperwork of
+# work that HAPPENED; it never substitutes for the work. So a repair may only
+# CHANGE files the stage itself wrote (fill cells, complete a ledger/report it
+# left behind). A deliverable the stage never wrote -- a missing ledger, report,
+# language pass, visual record or completion marker -- is NOT repairable: the
+# stage stopped before finishing, the attempt fails, and the stage is re-run.
+# The guard enforces it mechanically (any file created inside the writable scope
+# is out of scope), so not even a well-meaning repair can author one.
 # `fix` exists because the alternative -- re-running the whole review for a
 # disposition column -- costs a full re-sample of the stage (the 2026-09-22 root
 # paid 26 minutes and produced a different finding set to fix one column), while
@@ -4025,12 +4033,6 @@ DIFF_LEDGER_RULE = """INTEGRATION DIFFERENCE LEDGER — one row per difference, 
   * This round's pool contains BOTH rewrite levels (a structural arm and a sentence-level arm, when
     more than one rewrite was staged), so the ledger must contain BOTH `size` classes: the
     integration stage exists to weigh a reorganization against a prose improvement.
-  * WRITE THE BOOKKEEPING AS YOU GO. Open `integrated/DIFF_LEDGER.md` with one `unable` row per
-    donor as soon as you start, then replace rows with verdicts as you adjudicate them (the same
-    for `integrated/work/R6_language.md`). A session that ends early -- context, timeout, a tool
-    loop -- then leaves a readable, honest ledger that the orchestrator's scoped repair session
-    can finish, instead of leaving nothing and costing a fresh 20-minute attempt. The completion
-    marker still comes LAST, only when the package and its bookkeeping are actually done.
   The orchestrator checks that every donor appears, that the row count is at least the number of
   files that differ from your package, that both size classes are present when the pool has both
   levels, and that the `artifact` and `finding effect` columns are filled."""
@@ -13430,10 +13432,12 @@ def repairable_artifact_failure(ctx: Ctx, rec: dict) -> list:
 
     Repairable means: the policy is `fix`, the run's stage has a repair profile,
     EVERY problem in the postcheck matches that profile's bookkeeping patterns,
-    and this attempt has not already been sent to a repair session (one repair
-    per failed attempt -- a repair that does not clear the problem is a failed
-    attempt like any other, and the normal retry policy decides what happens
-    next).
+    the files the problems live in EXIST (variant B: a repair completes the
+    bookkeeping of a stage that ran; it never authors a deliverable the stage
+    never wrote), and this attempt has not already been sent to a repair session
+    (one repair per failed attempt -- a repair that does not clear the problem is
+    a failed attempt like any other, and the normal retry policy decides what
+    happens next).
     """
     if not artifact_repair_enabled(ctx):
         return []
@@ -13449,7 +13453,71 @@ def repairable_artifact_failure(ctx: Ctx, rec: dict) -> list:
     patterns = [re.compile(p) for p in profile.get("errors") or ()]
     if not all(any(p.search(e) for p in patterns) for e in errors):
         return []
+    absent = repair_missing_deliverable(ctx, rec, errors)
+    if absent:
+        print(f"  [repair] {rec['id']}: NO repair -- the stage never wrote {absent}. A repair "
+              f"completes the bookkeeping of a stage that ran; it never authors a deliverable. "
+              f"This attempt FAILS: re-run the stage (a plain `run`, or `--only "
+              f"{rec.get('kind')}`), or `retry --run {rec['id']}` first to reset it.")
+        return []
     return errors
+
+
+# --- variant B: a repair completes files, it never creates them -------------
+# A problem of the "… is missing" family names a file the STAGE failed to write.
+# The repair may touch it only if it actually exists (present but empty/malformed
+# -- its CONTENT is then the repair's business); otherwise the stage never
+# finished its work and the attempt must fail.
+# The "… is missing" family, in the exact wordings the postchecks use:
+# "… _pipeline_done.json missing (it is prompted as the very last step…",
+# "integrated/DIFF_LEDGER.md is missing: …", "no work/R6_language.md -- …",
+# "scores.json is missing or unparseable although the marker claims completion".
+# A marker FIELD that "is missing/not an integer" does not match: it names no
+# file, so it stays a content problem of a file that exists.
+REPAIR_MISSING_RE = re.compile(r"\bis missing\b|\bmissing\b\s*[:(]|no work/r6_language\.md",
+                               re.I)
+REPAIR_FILE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:md|json|docx|tex)")
+
+
+def _resolve_in_sandbox(sb: Path, rec: dict, cand: str) -> Path:
+    """Resolve a file name from a postcheck message inside this sandbox."""
+    rel = str(cand).strip("`'\"(),;:")
+    kind = str(rec.get("kind") or "")
+    roots = [sb, sb / output_dir_for_kind(kind), sb / REVIEW_DIR, sb / "audit",
+             sb / "judge_review", sb / output_dir_for_kind(kind) / "work"]
+    for root in roots:
+        p = root / rel
+        if p.is_file():
+            return p
+    return sb / rel
+
+
+def repair_missing_deliverable(ctx: Ctx, rec: dict, problems: list) -> str:
+    """The file an "… is missing" problem names, when a repair may NOT supply it ("" if none).
+
+    Variant B (operator decision, 2026-09-23): "a repair finishes the paperwork of
+    work that happened; it never substitutes for the work". So a missing-family
+    problem is repairable only when the file it names EXISTS -- a present but
+    empty/malformed marker or ledger is content the repair may fix. Otherwise the
+    stage stopped before doing (or reporting) its work and the attempt must fail.
+    """
+    try:
+        sb = ctx.sandbox_of(rec)
+    except Exception:                                            # noqa: BLE001
+        sb = None
+    for err in problems:
+        if not REPAIR_MISSING_RE.search(str(err)):
+            continue
+        cands = REPAIR_FILE_RE.findall(str(err))
+        if not cands:
+            # a content-level "… is missing" (a marker FIELD, say): the file
+            # itself exists, so its content stays the repair's business
+            continue
+        if sb is not None and sb.is_dir() and cands \
+                and any(_resolve_in_sandbox(sb, rec, c).is_file() for c in cands):
+            continue                       # present: its CONTENT is what the repair fixes
+        return cands[0]
+    return ""
 
 
 # --- what a repair may write, per stage ------------------------------------
@@ -13465,9 +13533,9 @@ def _repair_path_writable(rel: Path, kind: str) -> bool:
         return True                          # the stage's manual-item list (reported only)
     if kind == "review":
         # The seeded decision tables (cell-editable; M1's long-form table included)
-        # and the session's scratch. The visual record is created/rewritten too:
-        # a missing render-then-look record is bookkeeping the repair can supply
-        # (honestly -- it may render and look, or state the negative).
+        # and the session's scratch. The visual record and the marker may be
+        # CORRECTED when the reviewer wrote them; a review that never produced one
+        # has not finished, and variant B never lets a repair author it.
         if parts[:2] == (REVIEW_DIR, "work"):
             return True
         if rel.as_posix() == VISUAL_ARTIFACT_REVIEW:
@@ -13693,7 +13761,8 @@ def snapshot_repair_guard(sb: Path, rec: dict) -> dict:
     The structural half is per stage: a review's decision-table ROWS, an
     auditor's existing dispositions (and its `adds`), a judge's ledger rows and
     existing coverage entries. Those are the evidence; the cells around them are
-    what the repair may fill.
+    what the repair may fill. `editable` pins WHICH files exist: variant B lets a
+    repair complete them, never create a deliverable the stage did not write.
     """
     kind = str(rec.get("kind") or "")
     tables, digests = {}, {}
@@ -13709,8 +13778,28 @@ def snapshot_repair_guard(sb: Path, rec: dict) -> dict:
         except OSError:
             digests[rel] = ""
     return {"kind": kind, "files": _repair_guard_files(sb, kind), "tables": tables,
+            "editable": sorted(p.relative_to(sb).as_posix()
+                               for p in _repair_writable_files(sb, kind)),
             "artifacts": digests, "audit": _repair_audit_rows(sb),
             "judge": _repair_judge_rows(sb)}
+
+
+def _repair_writable_files(sb: Path, kind: str) -> list:
+    """Every file that exists inside the repair's own writable scope."""
+    out = []
+    for p in sorted(sb.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(sb)
+        if _repair_path_writable(rel, kind):
+            out.append(p)
+    return out
+
+
+def _is_repair_plumbing(rel) -> bool:
+    """The orchestrator's own repair-session files (never 'the stage's writing')."""
+    name = Path(str(rel)).name
+    return name == REPAIR_PROMPT_FILE or name.startswith("_agent.log")
 
 
 def _repair_row_identity_problems(sb: Path, guard: dict) -> list:
@@ -13833,6 +13922,20 @@ def repair_guard_problems(sb: Path, guard: dict, rec: dict = None) -> list:
             problems.append(f"it MODIFIED {rel}, which is outside the repair's scope")
         if len(problems) >= 6:
             break
+    if len(problems) < 6 and "editable" in guard:
+        # Variant B: within its WRITABLE scope the repair may only change files
+        # that already existed (complete the stage's bookkeeping). A file it
+        # brings into existence -- a ledger, a report, a marker, a visual record
+        # -- is a deliverable it authored for a stage that never wrote one.
+        before = set(guard.get("editable") or ())
+        for p in _repair_writable_files(sb, kind):
+            rel = p.relative_to(sb).as_posix()
+            if rel in before or _is_repair_plumbing(rel) or is_bytecode_cache(rel):
+                continue
+            problems.append(f"it CREATED {rel}, which the stage never wrote (a repair completes "
+                            f"the stage's own bookkeeping; it never authors a deliverable)")
+            if len(problems) >= 6:
+                break
     if len(problems) < 6 and kind == "review":
         problems.extend(_repair_row_identity_problems(sb, guard))
     if len(problems) < 6 and kind == "audit":
@@ -13866,6 +13969,10 @@ this sandbox. The manuscript/package itself is NOT yours to touch.
 --- WHERE YOU MAY WRITE (verified byte-for-byte / structurally afterwards) ---
   * {profile.get('scope')}
   * /tmp  -- scratch outside the sandbox
+  * VARIANTS: you may only CHANGE files that already exist in this sandbox. You never CREATE a
+    deliverable -- no ledger, no report, no language pass, no visual record, no completion
+    marker. A stage that stopped before writing its files never finished its work, and the
+    orchestrator re-runs it instead of fabricating its record.
 Everything else must stay BYTE-IDENTICAL, above all:
   * the manuscript files/package contents (documents, code, figures) -- a repair never edits
     submission content, and never "fixes" a document, a citation or a number
@@ -13913,22 +14020,25 @@ Everything else must stay BYTE-IDENTICAL, above all:
   * {pkg}/DIFF_LEDGER.md (integration): one row per ported or deliberately skipped difference,
     naming the donor, the size class, the finding effect and a before/after artifact reference
     (a file:line pair, or an outline diff) so the row can be re-checked.
-    The table MUST carry the ledger's own columns -- `donor` and `artifact` above all, plus
-    `size` (small|large) and `finding effect` -- because the orchestrator reads THAT table: a
-    separate orientation/summary table elsewhere in the file is welcome, but the ledger is the
-    table with those columns. `artifact` names a REAL file under {pkg}/work/ that carries the
-    row's before/after evidence; the orchestrator's own mechanical comparison is already there
-    ({pkg}/work/{DONOR_DIFF_INDEX}, {pkg}/work/diffs/<donor>_vs_self.md), so cite those files or
-    write your own evidence file beside them -- a row whose artifact does not exist cannot be
-    re-checked and fails the attempt.
+    COMPLETE the ledger the stage wrote -- never author one it did not. Its table carries the
+    ledger's own columns -- `donor` and `artifact` above all, plus `size` (small|large) and
+    `finding effect` -- because the orchestrator reads THAT table: a separate orientation/summary
+    table elsewhere in the file is welcome, but the ledger is the table with those columns.
+    `artifact` names a REAL file that carries the row's before/after evidence: the orchestrator's
+    own mechanical comparison ({pkg}/work/{DONOR_DIFF_INDEX}, {pkg}/work/diffs/<donor>_vs_self.md)
+    or a file the stage itself wrote. A row whose artifact does not exist cannot be re-checked,
+    and a missing ledger is a failed attempt, not a repair job.
   * The language pass ({pkg}/work/R6_language.md): one row per change PLUS one coverage row for
-    each of the steps that changed nothing -- every step needs a row.
-  * The visual record ({pkg}/VISUAL_CHECK.md): render the package and LOOK at the pages (write
-    the renders under {pkg}/work/), then record what you saw. If you cannot render here, write
-    the honest negative -- "the pages were NOT visually verified" plus the exact manual step --
-    and never claim an inspection you did not perform.
-  * A missing completion marker may be written ONLY if the problems above name it, with this
-    run's own id, stage and round.
+    each of the steps that changed nothing -- every step needs a row. Complete the pass the stage
+    wrote; a stage that never wrote one has not finished and is re-run, not repaired.
+  * The visual record ({pkg}/VISUAL_CHECK.md): if the stage left one, render the package and LOOK
+    at the pages (write the renders under {pkg}/work/), then record what you saw -- or write the
+    honest negative ("the pages were NOT visually verified" plus the exact manual step). Never
+    claim an inspection you did not perform, and never create the file yourself.
+  * The completion marker can only be CORRECTED, never created: if it exists, its `run_id`,
+    `stage`, `round` and summary fields must name THIS run (and clear whatever the problems
+    above name). A marker the stage never wrote means the run never finished -- that attempt
+    fails and the orchestrator re-runs the stage.
 """ + REPAIR_TAIL
     if kind == "audit":
         return common_head + """
@@ -17695,9 +17805,10 @@ def cmd_setup(args) -> None:
     _art_note = {
         "on": "an unfilled/boilerplate decision artifact FAILS the attempt",
         "fix": "an unfilled/boilerplate decision artifact first gets ONE scoped repair session "
-               "(it may only fill cells of the seeded tables, from the rows' own evidence); the "
-               "same postcheck then judges it, and a repair that does not clear it fails the "
-               "attempt like any other",
+               "(it may only fill cells of the seeded tables, from the rows' own evidence, and "
+               "it may only CHANGE files that stage wrote -- a deliverable the stage never wrote "
+               "is not repairable, and the stage is re-run instead); the same postcheck then "
+               "judges it, and a repair that does not clear it fails the attempt like any other",
         "off": "the detector still runs and is recorded, but never fails an attempt",
     }[artifact_policy]
     print(f"[setup] artifact policy:         {artifact_policy}: {_art_note}")
@@ -20868,7 +20979,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="what a boilerplate/unfilled decision artifact does to a stage attempt: "
                          "`on` (default) fails it; `fix` first spends ONE scoped repair session "
                          "on the failed attempt's decision tables -- it may only fill cells, from "
-                         "evidence already in the rows, and the SAME postcheck then judges it -- "
+                         "evidence already in the rows, and may only CHANGE files the stage wrote "
+                         "(a missing ledger/report/marker is never authored: that attempt fails "
+                         "and the stage is re-run) -- and the SAME postcheck then judges it -- "
                          "and a repair that does not clear the problem is a failed attempt like "
                          "any other; `off` records the detector's report as a warning. The "
                          "detectors always RUN and are recorded either way. Bare "

@@ -40,6 +40,12 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+MODE = os.environ.get("NBT_REPAIR_STUB_BAD_MODE", "content")
+# `content` (default): the stub writes every deliverable and then breaks the
+#   CONTENT of one bookkeeping file -- the class a scoped repair may complete
+#   (variant B: a repair finishes files the stage wrote).
+# `missing`: the stub deletes the file instead, simulating a stage that stopped
+#   before writing it. Variant B refuses to repair that: the run must fail.
 spec = importlib.util.spec_from_file_location("stub_agent", HERE / "stub_agent.py")
 stub = importlib.util.module_from_spec(spec)
 sys.modules["stub_agent"] = stub
@@ -264,9 +270,18 @@ def break_stage(sb: Path, stage: str) -> str:
         return f"dropped {len(rows) - len(data['dispositions'])} audit disposition(s)"
     if stage == "rewrite":
         rep = package_dir(sb, stage) / "REWRITE_REPORT.md"
-        if rep.is_file():
-            rep.unlink()
-        return "deleted rewritten/REWRITE_REPORT.md"
+        if MODE == "missing":
+            if rep.is_file():
+                rep.unlink()
+            return "deleted rewritten/REWRITE_REPORT.md (a file the stage never wrote)"
+        # CONTENT break: the report exists but declares the wrong arm level --
+        # the class a repair may fix (variant B: it completes existing files).
+        text = rep.read_text(encoding="utf-8") if rep.is_file() else ""
+        text = re.sub(r"(?im)^Level:\s*(structural|sentence)",
+                      lambda m: "Level: " + ("sentence" if m.group(1).lower() == "structural"
+                                             else "structural"), text)
+        rep.write_text(text or "Level: sentence\n", encoding="utf-8")
+        return "flipped the declared LEVEL in rewritten/REWRITE_REPORT.md"
     if stage == "revise":
         p = package_dir(sb, stage) / "revision_report.json"
         rows = json.loads(p.read_text(encoding="utf-8"))
@@ -276,9 +291,24 @@ def break_stage(sb: Path, stage: str) -> str:
         return "dropped one revision-ledger row"
     if stage == "integrate":
         led = package_dir(sb, stage) / "DIFF_LEDGER.md"
-        if led.is_file():
-            led.unlink()
-        return "deleted integrated/DIFF_LEDGER.md"
+        if MODE == "missing":
+            if led.is_file():
+                led.unlink()
+            return "deleted integrated/DIFF_LEDGER.md (a file the stage never wrote)"
+        # CONTENT break: the ledger exists with its rows, but its `artifact`
+        # cells are blank -- the class a repair may complete from evidence that
+        # is already in the sandbox.
+        lines, blanked = [], 0
+        for line in (led.read_text(encoding="utf-8").splitlines() if led.is_file() else []):
+            if line.startswith("| D-"):
+                cells = line.split("|")
+                if len(cells) > 11 and cells[10].strip():
+                    cells[10] = " "
+                    blanked += 1
+                line = "|".join(cells)
+            lines.append(line)
+        led.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return f"blanked the `artifact` cell of {blanked} ledger row(s)"
     if stage == "judge":
         p = sb / "scores.json"
         data = json.loads(p.read_text(encoding="utf-8"))

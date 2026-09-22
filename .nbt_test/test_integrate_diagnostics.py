@@ -131,7 +131,7 @@ def test_repair_guard_ignores_bytecode():
     (sb / "integrated" / "work").mkdir(parents=True)
     (sb / "integrated" / "DIFF_LEDGER.md").write_text("| donor | artifact |\n|---|---|\n", encoding="utf-8")
     (sb / "nbt_docx_format.py").write_text("# the seeded tool\n", encoding="utf-8")
-    guard = {"kind": "integrate", "files": nb._repair_guard_files(sb, "integrate")}
+    guard = nb.snapshot_repair_guard(sb, {"kind": "integrate", "id": "r1_i3", "round": 1})
     # what the session's own tool runs produce, plus one REAL violation
     (sb / "__pycache__").mkdir()
     (sb / "__pycache__" / "nbt_docx_format.cpython-312.pyc").write_bytes(b"pyc")
@@ -216,9 +216,12 @@ def test_integrate_prompt_points_at_the_index():
           "IN FULL YOURSELF" not in p and "Do NOT\nrely on a shell `diff`" not in p)
     check("every difference is still adjudicated on the REAL material",
           "adjudicated on the REAL material" in p and "Never decide a row from the diff text alone" in p)
-    check("the ledger is written as the session goes (an early end leaves a readable ledger)",
-          "WRITE THE BOOKKEEPING AS YOU GO" in p
-          and "one `unable` row per donor" in " ".join(p.split()))
+    check("the prompt does NOT promise a repair for an unfinished session",
+          "WRITE THE BOOKKEEPING AS YOU GO" not in p
+          and "scoped repair session\n    can finish" not in p
+          and "the orchestrator's scoped repair session can finish" not in " ".join(p.split()))
+    check("the completion marker is still the session's own LAST step",
+          "very last step" in p)
     rep = nb.repair_prompt(type("C", (), {"sandbox_of": lambda self, rec: Path("/tmp")})(), 
                            {"id": "r1_i3", "kind": "integrate", "round": 1},
                            ["integrated/DIFF_LEDGER.md is missing: x"])

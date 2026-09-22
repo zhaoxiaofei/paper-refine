@@ -168,17 +168,15 @@ REPAIRABLE = {
                "reason."],
     "audit": ["3 frozen finding id(s) are neither confirmed nor dropped (silence is not a "
               "disposition): F-004, F-005, F-006"],
-    "rewrite": ["rewritten/REWRITE_REPORT.md is missing: it is this stage's ledger (the "
-                "organization map, what was deliberately left unchanged, and the problems the "
-                "rewrite surfaced -- the feedback/reference deliverable for later stages and "
-                "the author)"],
+    "rewrite": ["rewrite: REWRITE_REPORT.md declares level 'sentence' but this arm is "
+                "'structural' -- the round stages one structural and one sentence-level arm so "
+                "the pool has both kinds of difference"],
     "revise": ["revised/revision_report.json does not name 2 of the frozen review's 5 finding "
                "id(s): F-002, F-004 -- the ledger is one row per finding id (the deliverable "
                "that proves no finding was silently dropped); an id must appear as structured "
                "data (a row's id field, a mapping key or an id list), not only in prose"],
-    "integrate": ["integrated/DIFF_LEDGER.md is missing: it is this stage's ledger (one row per "
-                  "ported or deliberately skipped difference, with the hierarchy-based "
-                  "justification, covering EVERY donor)"],
+    "integrate": ["integrate: 4 ledger row(s) carry no `artifact` (a before/after pair for a "
+                  "small row, an outline diff for a large row) -- the row cannot be re-checked"],
     "judge": ["comparisons[0] has no `checks` coverage map; contract v3 requires one "
               "disposition per frozen check id for EVERY opponent (M1, M2, ...)"],
 }
@@ -218,6 +216,37 @@ check("B5 a clean attempt has nothing to repair",
       nb.repairable_artifact_failure(fake_ctx("fix"),
                                      rec_of("judge", [], postcheck={"ok": True, "errors": []}))
       == [])
+
+# --- variant B: a repair COMPLETES files, it never AUTHORS them -------------
+# Operator decision (2026-09-23): "a repair finishes the paperwork of work that
+# happened; it never substitutes for the work". A problem that says a deliverable
+# is MISSING is therefore never repairable -- the stage stopped before writing it
+# (or before doing the work), and the attempt must fail so the stage is re-run.
+MISSING_DELIVERABLES = {
+    "review": "the visual-inspection record review/artifacts/VISUAL_CHECK.md is missing: the "
+              "prompts require a visual-inspection record (convert the Word documents to PDF, "
+              "render the pages to images and LOOK at them)",
+    "audit": "audit/audit.json is missing: the auditor's disposition sheet is the deliverable "
+             "the revisers consume",
+    "rewrite": "rewritten/REWRITE_REPORT.md is missing: it is this stage's ledger (the "
+               "organization map, what was deliberately left unchanged, and the problems the "
+               "rewrite surfaced)",
+    "revise": "revised/revision_report.json is missing: it is this stage's ledger (one row per "
+              "frozen finding id)",
+    "integrate": "integrated/DIFF_LEDGER.md is missing: it is this stage's ledger (one row per "
+                 "ported or deliberately skipped difference, covering EVERY donor)",
+    "judge": "scores.json is missing or unparseable although the marker claims completion",
+}
+for kind, err in sorted(MISSING_DELIVERABLES.items()):
+    got = nb.repairable_artifact_failure(fake_ctx("fix"), rec_of(kind, [err]))
+    check(f"V1-{kind}: a MISSING deliverable is never repaired (variant B)", got == [],
+          str(got)[:120])
+check("V1 the marker is never authored either (its own message is in every profile)",
+      nb.repairable_artifact_failure(
+          fake_ctx("fix"),
+          rec_of("review", ["completion marker _pipeline_done.json missing (it is prompted as "
+                            "the very last step; a non-empty output directory is NOT "
+                            "completion)"])) == [])
 
 print()
 print("== C. the guard: byte-identical outside the scope, evidence pinned inside ==")
@@ -259,11 +288,19 @@ write(sb / "review" / "artifacts" / "OUTLINE.md",
             .replace("| claim two |  |",
                      "| the introduction | unable — manual verification required: the author "
                      "must confirm the second claim |"))
-write(sb / "review" / "work" / "fill.py", "print('scratch')\n")
-write(sb / "review" / "artifacts" / "REPAIR_NOTES.md", "what I filled\n")
-check("C2 filling judged cells (summary + disposition), scratch and a NEW artifact file are in scope",
+write(sb / "review" / "work" / "notes.md", "more scratch in a file the stage wrote\n")
+check("C2 filling judged cells and completing EXISTING scratch are in scope",
       nb.repair_guard_problems(sb, guard, rec_review) == [],
       str(nb.repair_guard_problems(sb, guard, rec_review)))
+write(sb / "review" / "work" / "fill.py", "print('scratch')\n")
+write(sb / "review" / "artifacts" / "REPAIR_NOTES.md", "what I filled\n")
+problems = nb.repair_guard_problems(sb, guard, rec_review)
+check("C2b a NEW file is out of scope, even in work/ (variant B: /tmp is the scratch)",
+      any("CREATED review/work/fill.py" in p for p in problems)
+      and any("which the stage never wrote" in p for p in problems),
+      str(problems)[:240])
+(sb / "review" / "work" / "fill.py").unlink()
+(sb / "review" / "artifacts" / "REPAIR_NOTES.md").unlink()
 
 write(sb / "review" / "artifacts" / "OUTLINE.md", OUTLINE.replace("Intro", "Introduction"))
 problems = nb.repair_guard_problems(sb, guard, rec_review)
@@ -380,14 +417,21 @@ sb_r = scratch("nbt_rep_revise_") / "r1_a2_revise"
 write(sb_r / "revised" / "manuscript-b.docx", "PK-docx-bytes")
 write(sb_r / "revised" / "REVISION_REPORT.md", "# report\n")
 write(sb_r / "revised" / "work" / "R6_language.md", "| step |\n|---|\n")
+write(sb_r / "revised" / "revision_report.json", json.dumps([{"id": "F-001"}]))
 write(sb_r / "review" / "findings.json", json.dumps({"findings": []}))
 rec_rev = fake_rec("revise")
 guard_r = nb.snapshot_repair_guard(sb_r, rec_rev)
-write(sb_r / "revised" / "revision_report.json", json.dumps([{"id": "F-001"}]))
-write(sb_r / "revised" / "work" / "notes.md", "scratch\n")
-check("C14 the package's bookkeeping + work/ scratch are in scope",
+write(sb_r / "revised" / "revision_report.json", json.dumps([{"id": "F-001"}, {"id": "F-002"}]))
+write(sb_r / "revised" / "work" / "R6_language.md",
+      "| step |\n|---|\n| L1 | completed\n")
+check("C14 COMPLETING the files the stage wrote (bookkeeping + work/) is in scope",
       nb.repair_guard_problems(sb_r, guard_r, rec_rev) == [],
       str(nb.repair_guard_problems(sb_r, guard_r, rec_rev)))
+write(sb_r / "revised" / "CHANGELOG.md", "# a bookkeeping file the stage never wrote\n")
+problems = nb.repair_guard_problems(sb_r, guard_r, rec_rev)
+check("C14b a bookkeeping file the stage never wrote is out of scope (variant B)",
+      any("CREATED revised/CHANGELOG.md" in p for p in problems), str(problems)[:200])
+(sb_r / "revised" / "CHANGELOG.md").unlink()
 write(sb_r / "revised" / "manuscript-b.docx", "EDITED manuscript bytes")
 problems = nb.repair_guard_problems(sb_r, guard_r, rec_rev)
 check("C15 editing a manuscript file inside the package is rejected",
@@ -427,6 +471,9 @@ for kind, (sandbox, problem, needles) in sorted(prompt_cases.items()):
     check(f"D-{kind}: it demands the honest escape and the same postcheck",
           "unable — manual verification required" in text
           and "re-runs the SAME postcheck" in text)
+    check(f"D-{kind}: variant B is stated (complete the stage's files, never create a deliverable)",
+          "you may only CHANGE files that already exist" in text
+          and "You never CREATE" in text)
 print("== E. end to end with a stub repairer ==")
 
 
@@ -559,14 +606,26 @@ check("F2 audit: every frozen id is disposed again, and no verdict was invented 
       and all(str(r.get("verdict")).lower() == "confirm" for r in audit_doc["dispositions"]),
       f"{len(ids)} ids")
 
-# --- rewrite: the repair rewrites the missing report ------------------------
+# --- rewrite: the repair completes the report the stage wrote ---------------
 root_w, proc_w, state_w = run_stages(scratch("nbt_rep_f_rewrite_"), "fix", stages="rewrite",
                                      bad="r1_w1")
 report = root_w / "runs" / "r1_w1" / "rewritten" / "REWRITE_REPORT.md"
-check("F3 rewrite: the deleted REWRITE_REPORT.md is written again and the run is done",
+check("F3 rewrite: a report with the WRONG declared level is completed and the run is done",
       repaired(state_w, "r1_w1") and report.is_file()
-      and "Organization map" in report.read_text(encoding="utf-8"),
+      and nb.REWRITE_LEVELS[0] in report.read_text(encoding="utf-8").lower(),
       report.read_text(encoding="utf-8")[:120] if report.is_file() else "missing")
+
+# --- rewrite: a report the stage NEVER wrote is not repaired (variant B) -----
+root_wm, proc_wm, state_wm = run_stages(scratch("nbt_rep_f_rewrite_missing_"), "fix",
+                                        stages="rewrite", bad="r1_w1",
+                                        env_extra={"NBT_REPAIR_STUB_BAD_MODE": "missing"})
+rec_wm = state_wm["runs"]["r1_w1"]
+out_wm = proc_wm.stdout + proc_wm.stderr
+check("F3b rewrite: a DELETED report FAILS the attempt -- no repair manufactures it",
+      rec_wm["status"] == "failed" and not rec_wm.get("repairs")
+      and "NO repair" in out_wm and "REWRITE_REPORT.md" in out_wm
+      and (rec_wm.get("attempts_log") or [{}])[0].get("n_errors", 0) >= 1,
+      str([(e.get("attempt"), e.get("source")) for e in rec_wm.get("attempts_log") or []]))
 
 # --- revise: the repair completes the revision ledger -----------------------
 root_r, proc_r, state_r = run_stages(scratch("nbt_rep_f_revise_"), "fix", stages="review,revise",
@@ -582,16 +641,30 @@ check("F4 revise: the ledger names every frozen id again and the run is done",
       and any(str(r.get("verdict")) == "unable" for r in ledger),
       f"named={sorted(named)}")
 
-# --- integrate: the repair writes the donor ledger --------------------------
+# --- integrate: the repair completes the ledger the stage wrote --------------
 root_i, proc_i, state_i = run_stages(scratch("nbt_rep_f_integrate_"), "fix",
                                      stages="rewrite,integrate", bad="r1_i1", rewrites="2",
                                      integrators="0x1")
 diff = root_i / "runs" / "r1_i1" / "integrated" / "DIFF_LEDGER.md"
 donors = sorted(p.name for p in (root_i / "runs" / "r1_i1" / "others").iterdir() if p.is_dir())
-check("F5 integrate: the deleted DIFF_LEDGER.md is written again (one row per donor)",
+led_rep = nb.integration_ledger_report(root_i / "runs" / "r1_i1" / "integrated", donors, False)
+check("F5 integrate: the ledger's blank `artifact` cells are filled again (one row per donor)",
       repaired(state_i, "r1_i1") and diff.is_file()
-      and all(d in diff.read_text(encoding="utf-8") for d in donors) and donors,
-      f"donors={donors}")
+      and all(d in diff.read_text(encoding="utf-8") for d in donors) and donors
+      and led_rep["missing_artifact"] == [],
+      f"donors={donors} missing_artifact={led_rep['missing_artifact']}")
+
+# --- integrate: a ledger the stage NEVER wrote is not repaired (variant B) ---
+root_im, proc_im, state_im = run_stages(scratch("nbt_rep_f_integrate_missing_"), "fix",
+                                        stages="rewrite,integrate", bad="r1_i1", rewrites="2",
+                                        integrators="0x1",
+                                        env_extra={"NBT_REPAIR_STUB_BAD_MODE": "missing"})
+rec_im = state_im["runs"]["r1_i1"]
+out_im = proc_im.stdout + proc_im.stderr
+check("F5b integrate: a DELETED ledger FAILS the attempt -- the stage must be re-run",
+      rec_im["status"] == "failed" and not rec_im.get("repairs")
+      and "NO repair" in out_im and "DIFF_LEDGER.md" in out_im,
+      str([(e.get("attempt"), e.get("source")) for e in rec_im.get("attempts_log") or []]))
 
 # --- judge: the repair completes the coverage map, never the ledger ---------
 root_j, proc_j, state_j = run_stages(scratch("nbt_rep_f_judge_"), "fix", stages="rewrite,judge",
