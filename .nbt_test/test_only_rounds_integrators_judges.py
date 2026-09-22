@@ -140,6 +140,18 @@ def test_only_rounds():
           (p.stdout + p.stderr)[-200:])
     check("--only 1 reports which rounds it ran",
           "--only ran round(s) 1 of 2" in (p.stdout + p.stderr), (p.stdout + p.stderr)[-200:])
+    # Re-running a selection whose rounds are ALREADY complete is a successful
+    # no-op (exit 0): it must not be reported as "selected nothing" and must not
+    # claim the last round's champion. `--only 1:judge` here covers round 1 (done)
+    # and not the still-pending round 2.
+    p_again = run(root, "--only", "1:judge")
+    out_again = p_again.stdout + p_again.stderr
+    check("re-running a completed `--only` selection exits 0 as a no-op",
+          p_again.returncode == 0
+          and "already complete -- nothing to do in this invocation" in out_again
+          and "ran round(s) 1 of 2" in out_again
+          and "selected no session of the round(s) that still need work" not in out_again,
+          out_again[-260:])
 
     p = run(root, "--only", "2:review")
     st = state_of(root)

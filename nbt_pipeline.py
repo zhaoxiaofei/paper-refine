@@ -18262,15 +18262,27 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     selected = ([r for r in range(1, R + 1) if only.covers_round(r)]
                 if only is not None else list(range(1, R + 1)))
     if only is not None and not driven:
-        # Nothing was driven (every named round was already complete, or the
-        # session items name sessions only in rounds that are done). Say so
-        # instead of claiming the last round's champion is the final answer.
-        pending = [r for r in range(1, R + 1) if ctx.round_rec(r).get("status") != "done"]
-        if pending:
+        # Nothing was driven. Two very different situations hide behind that:
+        #
+        #   * every round the selection COVERS is already complete -- re-running a
+        #     finished `--only` selection (`--only 1:judge` after round 1 was
+        #     decided) is a successful NO-OP: it reports what is complete and what
+        #     is still pending, and exits 0, exactly like a plain `run` on a
+        #     finished root;
+        #   * the selection covers a round that still needs work but could not
+        #     start anything in it (a roundless `--only w2` on a root where no
+        #     pending round has w2): that is an incomplete invocation, so it says
+        #     so and exits non-zero.
+        covered_pending = [r for r in range(1, R + 1)
+                           if only.covers_round(r) and ctx.round_rec(r).get("status") != "done"]
+        if covered_pending:
             print(f"[run] --only {getattr(args, 'only', None)!r} selected no session of the "
-                  f"round(s) that still need work ({', '.join(str(r) for r in pending)}): "
+                  f"round(s) that still need work ({', '.join(str(r) for r in covered_pending)}): "
                   f"nothing was started in this invocation.")
             sys.exit(3)
+        print(f"[run] --only {getattr(args, 'only', None)!r}: round(s) "
+              f"{', '.join(str(r) for r in selected) or '(none)'} of {R} are already complete -- "
+              f"nothing to do in this invocation")
     if only is not None and len(selected) < R:
         print(f"[run] --only ran round(s) {', '.join(str(r) for r in selected)} of {R}; round "
               f"{R} champion is the final answer once every configured round is complete. "

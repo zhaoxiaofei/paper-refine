@@ -340,6 +340,15 @@ are kept, not re-judged), and the round is decided and pinned once that panel is
 complete. The same rule applies to every step: `--only` runs what you asked for
 and never continues into a step you did not.
 
+Re-running a selection whose rounds are already complete is a **successful
+no-op** (exit 0): `run --only 1:judge` after round 1 was decided prints
+`round(s) 1 of 2 are already complete -- nothing to do in this invocation` and the
+usual "ran round(s) 1 of 2 … Next: run …" tail. Only a selection that COVERS a
+round which still needs work but could not start anything in it (a roundless
+`--only w2` on a root where no pending round has `w2`) is an incomplete
+invocation: it says `selected no session of the round(s) that still need work (…)`
+and exits non-zero.
+
 ## Per-round judges and integrators
 
 Both are per-round command-line parameters with the same list rules as
