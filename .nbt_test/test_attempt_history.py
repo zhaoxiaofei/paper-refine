@@ -40,6 +40,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -148,10 +149,11 @@ check("B1 the failed attempt is appended with its errors and artifact quality",
       and len(rec["attempts_log"][0]["errors"]) >= 3
       and rec["attempts_log"][0]["status"] == "failed",
       str(rec["attempts_log"][0]["errors"])[:120])
-check("B2 the record points at the attempt's own archive path",
-      rec["attempts_log"][0]["archive"] ==
-      str(Path("runs") / nb.ATTEMPTS_DIRNAME / rec["id"] / "attempt-1"),
-      rec["attempts_log"][0]["archive"])
+check("B2 a fresh attempt claims no kept path yet (it is set when the sandbox is kept)",
+      rec["attempts_log"][0]["archive"] is None
+      and rec["attempts_log"][0]["sandbox_moved_to"] is None
+      and nb.sandbox_attempts(rec) == [1],
+      f"archive={rec['attempts_log'][0]['archive']!r} live={nb.sandbox_attempts(rec)}")
 before = len(rec["attempts_log"])
 nb.postcheck(ctx, rec)                       # same attempt, re-postchecked
 check("B3 a re-postcheck of the SAME attempt replaces its entry",
@@ -188,29 +190,29 @@ check("B7 a pathological total size is cut, and the note says how much was left 
       f"{len(capped)} of {len(huge)}")
 
 print()
-print("== C. a failed attempt's artifacts survive the rebuild ==")
+print("== C. a failed attempt's sandbox is kept as <run>_try<N>_failed ==")
 write(sb / "_agent.log", "attempt 1 transcript\n")
 failed_attempt = nb.attempt_number(rec)
 nb.rebuild_sandbox(ctx, rec)
-arch = nb.attempt_archive_dir(ctx, rec, failed_attempt)
-kept_outline = arch / "sandbox" / nb.REVIEW_DIR / "artifacts" / "OUTLINE.md"
-check("C1 the artifacts that failed the postcheck are preserved",
-      kept_outline.is_file() and BOILERPLATE in kept_outline.read_text(encoding="utf-8"))
-check("C2 the re-derivable input corpora are NOT archived",
-      not (arch / "sandbox" / "base").exists()
-      and not (arch / "sandbox" / "non-revised").exists())
-check("C3 the transcript is stashed with the attempt number and referenced",
-      (ctx.runs_dir / nb.LOGS_DIRNAME / f"{rec['id']}.attempt-1._agent.log").is_file()
-      and rec["attempts_log"][0]["agent_log"] ==
-      [str(Path("runs") / nb.LOGS_DIRNAME / f"{rec['id']}.attempt-1._agent.log")],
-      str(rec["attempts_log"][0].get("agent_log")))
+arch = nb.failed_sandbox_dir(ctx, rec, 1)
+kept_outline = arch / nb.REVIEW_DIR / "artifacts" / "OUTLINE.md"
+check("C1 the WHOLE sandbox is kept under runs/<run>_try1_failed (deliverables included)",
+      arch.is_dir() and arch.name == f"{rec['id']}_try1_failed"
+      and kept_outline.is_file() and BOILERPLATE in kept_outline.read_text(encoding="utf-8"),
+      f"{arch.name}: {sorted(p.name for p in arch.iterdir())[:8] if arch.is_dir() else '-'}")
+check("C2 the kept sandbox is the whole attempt (inputs and transcript survive)",
+      (arch / "base").is_dir() and (arch / "non-revised").is_dir()
+      and (arch / "_agent.log").read_text(encoding="utf-8").startswith("attempt 1 transcript"),
+      str(sorted(p.name for p in arch.iterdir()))[:160])
+check("C3 the record names the kept sandbox and the live sandbox holds no attempts",
+      rec["attempts_log"][0]["sandbox_moved_to"] == f"runs/{arch.name}"
+      and nb.sandbox_attempts(rec) == [],
+      str(rec["attempts_log"][0].get("sandbox_moved_to")))
 record = json.loads((arch / "record.json").read_text(encoding="utf-8"))
-check("C4 the archive is self-describing (record.json carries the attempt's record)",
+check("C4 the kept sandbox is self-describing (record.json carries the attempt's record)",
       record["attempt"] == 1 and record["ok"] is False and record["run_id"] == rec["id"]
-      and record["errors"], str(sorted(record))[:120])
-linked = record.get("linked_files", 0)
-check("C5 the archive hardlinks where it can (copies as the fallback)",
-      linked + record.get("copied_files", 0) > 0, f"linked={linked} copied={record['copied_files']}")
+      and record["errors"] and record["attempts_in_sandbox"] == [1],
+      str(sorted(record))[:140])
 rebuilt = ctx.sandbox_of(rec) / nb.REVIEW_DIR / "artifacts" / "OUTLINE.md"
 check("C6 the sandbox itself was rebuilt fresh (no marker, no stale deliverable)",
       not (ctx.sandbox_of(rec) / nb.MARKER_FILE).exists()
@@ -224,9 +226,10 @@ lines = "\n".join(nb.attempt_history_lines(ctx))
 check("D1 the history names the run, the attempt and its first problem",
       f"{rec['id']} (review, round 1): 1 attempt(s), 1 failed" in lines
       and "attempt 1" in lines and "problem(s)" in lines, lines[:160])
-check("D2 the history points at the kept artifacts and transcript",
-      f"kept: runs/{nb.ATTEMPTS_DIRNAME}/{rec['id']}/attempt-1" in lines
-      and f"transcript: runs/{nb.LOGS_DIRNAME}/{rec['id']}.attempt-1._agent.log" in lines)
+check("D2 the history points at the kept sandbox and the transcript it carries",
+      f"kept: runs/{rec['id']}_try1_failed/" in lines
+      and f"transcript: runs/{rec['id']}_try1_failed/_agent.log" in lines,
+      lines[-200:])
 buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
     nb.print_failure(rec["id"], rec["attempts_log"][0]["errors"])
@@ -275,15 +278,16 @@ nb.postcheck(ctx2, rec2)
 nb.rebuild_sandbox(ctx2, rec2)
 ctx2.round_rec(1).update({"status": "done"})
 ctx2.save_state()
-arch2 = nb.attempt_archive_dir(ctx2, rec2, 1)
-check("F1 the archive exists before prune", arch2.is_dir())
+arch2 = nb.failed_sandbox_dir(ctx2, rec2, 1)
+check("F1 the kept failed sandbox exists before prune",
+      arch2.is_dir() and arch2.name == f"{rec2['id']}_try1_failed", arch2.name)
 args = type("A", (), {"keep_latest": 0, "yes": True})()
 buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
     nb._cmd_prune_locked(ctx2, args)
-check("F2 prune removes the attempt archive of the pruned round", not arch2.is_dir(),
+check("F2 prune removes the kept failed sandbox of the pruned round", not arch2.is_dir(),
       buf.getvalue()[:160])
-check("F3 the attempt record survives in state.json and says the archive is gone",
+check("F3 the attempt record survives in state.json and says the kept sandbox is gone",
       rec2["attempts_log"][0].get("archive_pruned") is True
       and "archive pruned" in "\n".join(nb.attempt_history_lines(ctx2)))
 
@@ -341,6 +345,53 @@ nb.CURRENT_RUN_LOG = None
 check("H4 a log inside the root is recorded as a root-relative path",
       saved["run_logs"][-1] == f"reports/{inner.name}",
       f"{saved['run_logs'][-1]!r} vs {f'reports/{inner.name}'!r}")
+
+print()
+print("== I. the retry prompt is told EVERY failure of the previous attempt ==")
+many_errors = [f"decision artifact artifacts/T{i}.md: {i} of {i} row(s) have an EMPTY "
+               f"disposition cell (every seeded row must be disposed or reconciled)"
+               for i in range(1, 7)]
+rec_i = {"id": "r1_review", "kind": "review", "round": 1, "attempts": 1, "attempts_done": 1,
+         "postcheck": {"ok": False, "errors": many_errors[:1], "warnings": ["w1", "w2"]},
+         "attempts_log": [{"attempt": 1, "ok": False, "n_errors": len(many_errors),
+                           "n_warnings": 2, "errors": many_errors, "warnings": ["w1", "w2"],
+                           "sandbox_moved_to": "runs/r1_review_try1_failed"}]}
+nb.CURRENT_RUN_LOG = None
+text = nb.prior_failure_text(rec_i)
+check("I1 EVERY error of the previous attempt reaches the next session (no 4/1200-char cut)",
+      all(e in text for e in many_errors) and "fix ALL of them" in text,
+      text[:160])
+check("I2 the attempt's warnings and its kept sandbox are named too",
+      "w1" in text and "w2" in text and "runs/r1_review_try1_failed" in text)
+check("I3 the block is built from the complete attempts_log entry, not `last_error`",
+      nb.prior_failure_text({"attempts": 1, "last_error": "x" * 4000,
+                             "attempts_log": rec_i["attempts_log"]}) == text)
+check("I4 a first attempt still gets the FIRST-ATTEMPT block",
+      nb.prior_failure_block({}).startswith("=== FIRST ATTEMPT ==="))
+
+print()
+print("== J. which pipeline is running is recorded and checked ==")
+root_j2 = scratch("nbt_hist_j_")
+src_j = root_j2 / "source"
+write(src_j / "manuscript-b.md", "title\n")
+subprocess.run([sys.executable, str(WS / "nbt_pipeline.py"), "setup", "--source", str(src_j),
+                "--root", str(root_j2 / "root"), "--rounds", "1", "--judges", "1",
+                "--rewrites", "1", "--revises", "0"], capture_output=True, check=True)
+state_j = json.loads((root_j2 / "root" / "state.json").read_text(encoding="utf-8"))
+ident = state_j.get("pipeline") or {}
+own = nb.pipeline_identity()
+check("J1 setup records the running script's path, version and digest",
+      bool(ident.get("sha256")) and ident["sha256"] == own["sha256"]
+      and Path(ident["path"]).name == Path(own["path"]).name, str(ident)[:140])
+ctx_j = nb.Ctx(root_j2 / "root")
+ctx_j.state = state_j
+check("J2 the recorded copy prints no note", nb.pipeline_identity_note(ctx_j) == "")
+state_j2 = dict(state_j, pipeline=dict(ident, sha256="0" * 64, path="/somewhere/else.py"))
+ctx_j.state = state_j2
+note = nb.pipeline_identity_note(ctx_j)
+check("J3 a patched / different copy says so, naming both digests",
+      "NOT the copy recorded at setup" in note and "0" * 16 in note and "/somewhere/else.py" in note,
+      note[:160])
 
 for d in TMPDIRS:
     shutil.rmtree(d, ignore_errors=True)

@@ -124,12 +124,133 @@ def rewrite_cells(path: Path, *, blank: bool, drop_row: bool = False) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def m1b_row_lines(path: Path) -> list:
+    """The M1b instance-table row indices of `M1_acronyms.md` ([] when absent)."""
+    if not path.is_file():
+        return []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.strip().startswith("## M1b")), None)
+    if start is None:
+        return []
+    out, seen_header = [], False
+    for i in range(start + 1, len(lines)):
+        s = lines[i].strip()
+        if s.startswith("## "):
+            break
+        if not s.startswith("|") or all("-" in c and set(c) <= set("-: ")
+                                       for c in stub.table_cells(s)):
+            continue
+        if not seen_header:                 # the table's own header line
+            seen_header = True
+            continue
+        out.append(i)
+    return out
+
+
+def m1b_columns(path: Path, rows: list) -> tuple:
+    """(header names, the header's line index) for the M1b table."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+
+    def is_separator(line: str) -> bool:
+        return all("-" in c and set(c) <= set("-: ") for c in stub.table_cells(line))
+
+    header_i = next(i for i in range(rows[0] - 1, -1, -1)
+                    if lines[i].strip().startswith("|") and not is_separator(lines[i]))
+    return [c.lower() for c in stub.table_cells(lines[header_i])], header_i
+
+
+def blank_m1b_dispositions(sb: Path) -> int:
+    """Empty the M1b table's `disposition` cells (its own gate then fires)."""
+    path = sb / "review" / "artifacts" / "M1_acronyms.md"
+    if not m1b_row_lines(path):
+        # The stub's review writes only a placeholder M1 artifact; an M1b table
+        # with real rows is what the gate (and the repair) is about.
+        path.write_text(
+            "# M1 (stub)\n\n"
+            "| acronym | expansion | n | defined at first use? |\n|---|---|---|---|\n"
+            "| CN | copy number | 12 | Y |\n\n"
+            "## M1b — LONG FORMS RE-USED AFTER THEIR FIRST USE (rule M1(k); one row = one "
+            "finding)\n\n"
+            "| id | acronym | context | file:line | long form as written | excerpt | "
+            "disposition |\n"
+            "|---|---|---|---|---|---|---|\n"
+            "| M1b-001 | CN | abstract | base/manuscript-b.md.txt:3 | copy number | "
+            "the copy number profiles of 41 datasets |  |\n"
+            "| M1b-002 | CN | Methods | base/manuscript-b.md.txt:9 | copy numbers | "
+            "we compared copy numbers across callers |  |\n",
+            encoding="utf-8")
+        # The stub's review also reports one M1 finding; the gate (and the real
+        # 2026-09-22 failure) is about a review that filed NO M1 finding and still
+        # left long-form residues undisposed, so move that finding to another check.
+        fj = sb / "review" / "findings.json"
+        if fj.is_file():
+            doc = json.loads(fj.read_text(encoding="utf-8"))
+            for f in doc.get("findings") or []:
+                if isinstance(f, dict) and str(f.get("check") or "").upper() == "M1":
+                    f["check"] = "M2"
+            fj.write_text(json.dumps(doc), encoding="utf-8")
+    rows = m1b_row_lines(path)
+    if not rows:
+        return 0
+    header, header_i = m1b_columns(path, rows)
+    if "disposition" not in header:
+        return 0
+    key = header.index("disposition")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    n = 0
+    for i in rows:
+        if i == header_i:
+            continue
+        cells = stub.table_cells(lines[i])
+        if len(cells) <= key:
+            continue
+        cells[key] = ""
+        lines[i] = "| " + " | ".join(cells) + " |"
+        n += 1
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return n
+
+
+def fill_m1b_dispositions(sb: Path) -> int:
+    """Dispose every M1b row with its OWN recorded reason (the repair's job)."""
+    path = sb / "review" / "artifacts" / "M1_acronyms.md"
+    rows = m1b_row_lines(path)
+    if not rows:
+        return 0
+    header, header_i = m1b_columns(path, rows)
+    if "disposition" not in header:
+        return 0
+    key = header.index("disposition")
+    idk = header.index("id") if "id" in header else 0
+    ctxk = header.index("context") if "context" in header else None
+    lines = path.read_text(encoding="utf-8").splitlines()
+    n = 0
+    for i in rows:
+        if i == header_i:
+            continue
+        cells = stub.table_cells(lines[i])
+        if len(cells) <= key or str(cells[key]).strip():
+            continue
+        rid = str(cells[idk]).strip() if len(cells) > idk else f"row {i}"
+        context = str(cells[ctxk]).strip() if ctxk is not None and len(cells) > ctxk else "the text"
+        cells[key] = (f"OK — {rid}: the un-abbreviated long form in {context} was checked against "
+                      f"this row's own location by the scoped repair session; it is a definition "
+                      f"site, a generated rendering or a quoted title, so M1(k) files no finding")
+        lines[i] = "| " + " | ".join(cells) + " |"
+        n += 1
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return n
+
+
 # ---------------------------------------------------------------------------
 # breaking a stage's bookkeeping (the failure the repair mode exists for)
 # ---------------------------------------------------------------------------
 def break_stage(sb: Path, stage: str) -> str:
     """Break ONE bookkeeping file of `stage`; return a note for the log."""
     if stage == "review":
+        if os.environ.get("NBT_REPAIR_STUB_M1B"):
+            n = blank_m1b_dispositions(sb)
+            return f"left {n} M1b long-form row(s) undisposed (its own gate must fire)"
         for table in decision_tables(sb):
             rewrite_cells(table, blank=True)
         return f"left {len(decision_tables(sb))} decision table(s) unfilled"
@@ -305,7 +426,9 @@ def do_repair(sb: Path, name: str) -> str:
     stage = stage_of(name)
     if stage == "review":
         fill_decision_tables(sb)
-        return "filled the seeded decision tables"
+        n_m1b = fill_m1b_dispositions(sb)
+        return ("filled the seeded decision tables"
+                + (f" and disposed {n_m1b} M1b row(s)" if n_m1b else ""))
     if stage == "audit":
         return repair_audit(sb)
     if stage == "rewrite":

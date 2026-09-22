@@ -793,10 +793,14 @@ LOGS_DIRNAME = "_logs"
 # showed "attempt 2" failing on the M1b gate while attempt 1's real problems
 # (101 OUTLINE rows with no summary) existed only inside attempt 2's PROMPT.md.
 # `attempts_log` in state.json is the machine-readable history;
-# `runs/_attempts/<run>/attempt-<n>/` keeps that attempt's own sandbox (hardlinked
-# where the filesystem allows it, so it costs nothing until the sandbox is
-# removed), and its transcript is stashed under `runs/_logs/`.
-ATTEMPTS_DIRNAME = "_attempts"
+# `runs/<run>_try<N>_failed/` keeps that attempt's own sandbox (renamed before the
+# retry builds a fresh one -- deliverables, transcript and a record.json).
+# A failed attempt's WHOLE sandbox is renamed to `runs/<run>_try<N>_failed/` before
+# the retry builds a fresh one at `runs/<run>/` -- the operator asked for exactly
+# that shape, and it keeps everything (deliverables as the postcheck judged them,
+# the transcript, the seeded tables, the corpus copies and a record.json) without
+# a second copy of the artifacts.
+FAILED_SUFFIX_FMT = "_try{n}_failed"
 # A pathological retry loop must not grow state.json without bound: the log keeps
 # the last N attempts, each with its messages capped. The archived sandbox keeps
 # the full evidence, and `prune` reclaims it with the round it belongs to.
@@ -4290,24 +4294,53 @@ PRIOR_FAILURE_NONE = """=== FIRST ATTEMPT ===
 (No previous attempt of this run failed; there is no earlier failure to avoid.)"""
 
 
-def prior_failure_text(rec: dict, limit: int = 1200) -> str:
-    """The previous attempt's failure, for the regenerated prompt ("" if none).
+def prior_failure_text(rec: dict, limit: int = 16000) -> str:
+    """EVERY failure of the previous attempt, verbatim, for the regenerated prompt.
 
     A retry re-runs a full agent session, so the one thing the new session must
-    know is WHY the last one failed: the retried prompt used to be byte-identical
-    to the first attempt, which repeats a deterministic mistake at full cost.
-    The text is truncated and fenced so a long error cannot swamp the contract.
+    know is WHAT failed -- all of it. The old block joined the first four errors
+    with "; " and cut the result at 1200 characters, so a session whose attempt
+    had three problems was told one of them and half a sentence of it (the
+    2026-09-22 root: the M1b message arrived cut mid-sentence, and the next
+    attempt could not fix what it was never told). Every message is listed here
+    now, one per line, together with the attempt's warnings and a pointer to the
+    attempt's own preserved sandbox.
     """
-    note = ""
+    log = rec.get("attempts_log") or []
+    last = next((e for e in reversed(log) if not e.get("ok")), None) or {}
     pc = rec.get("postcheck") or {}
-    errs = [e for e in (pc.get("errors") or []) if isinstance(e, str)]
+    errs = [str(e) for e in (last.get("errors") or pc.get("errors") or [])]
+    warns = [str(w) for w in (last.get("warnings") or pc.get("warnings") or [])]
+    parts = []
     if errs:
-        note = "previous postcheck error(s): " + "; ".join(errs[:4])
+        n = last.get("n_errors") or len(errs)
+        attempt = last.get("attempt") or rec.get("attempts")
+        parts.append(f"previous attempt {attempt} FAILED with {n} problem(s) -- fix ALL of them in "
+                     f"this attempt:")
+        parts += [f"  {i}. {e}" for i, e in enumerate(errs, 1)]
     elif rec.get("last_error"):
-        note = f"previous failure: {rec['last_error']}"
-    if not note:
+        parts.append(f"previous failure: {rec['last_error']}")
+    if warns:
+        parts.append(f"the same attempt also carried {last.get('n_warnings') or len(warns)} "
+                     f"warning(s) (recorded, not fatal -- check that none of them turned into a "
+                     f"problem in this attempt):")
+        parts += [f"  - {w}" for w in warns[:15]]
+        if len(warns) > 15:
+            parts.append(f"  ... and {len(warns) - 15} more warning(s) in state.json -> "
+                         f"attempts_log")
+    if not parts:
         return ""
-    return note[:limit] + (" ... [truncated]" if len(note) > limit else "")
+    kept = last.get("sandbox_moved_to") or last.get("archive")
+    if kept:
+        parts.append(f"The failed attempt's own sandbox is preserved at {kept} -- its deliverables "
+                     f"as the postcheck judged them, its transcript and a record.json. Read it "
+                     f"before repeating an approach.")
+    note = "\n".join(parts)
+    if len(note) > limit:
+        return (note[:limit] + "\n... [truncated HERE only: the complete list is in state.json -> "
+                               "attempts_log, in the run log under reports/ and in the attempt's "
+                               "preserved sandbox]")
+    return note
 
 
 def prior_failure_block(rec: dict) -> str:
@@ -4739,7 +4772,7 @@ def install_timestamped_streams() -> None:
 class RunLogStream:
     """Tee everything the pipeline prints into the root's per-invocation run log.
 
-    The attempt history (`state.json` -> `attempts_log`, `runs/_attempts/`) keeps
+    The attempt history (`state.json` -> `attempts_log`, `runs/<run>_try<N>_failed/`) keeps
     each ATTEMPT's diagnostics; this keeps the INVOCATION's console, line for
     line, next to the reports it produced -- including the retry/backoff lines,
     the judge-panel advisories and the `[repair] ...` decisions that belong to no
@@ -4841,6 +4874,38 @@ def begin_run_log(cmd: str, root, argv=None) -> Path:
         install_run_log(path)
         print(f"[{cmd}] run log: {path}")
     return path
+
+
+def pipeline_identity() -> dict:
+    """{path, sha256, version} of the script that is RUNNING right now.
+
+    `setup` records it on the root, so a later invocation can say whether the copy
+    it is executing is the one the root was created with. The 2026-09-22 roots made
+    this worth printing: `setup` had been run from a stale checkout, so the root
+    contained a pipeline WITHOUT the scoped-repair code, silently -- five hours of
+    retries later the operator asked why `--strict-artifacts fix` never fired.
+    """
+    p = Path(__file__).resolve()
+    try:
+        digest = sha256_file(p)
+    except OSError:
+        digest = ""
+    return {"path": str(p), "sha256": digest, "version": VERSION}
+
+
+def pipeline_identity_note(ctx: Ctx) -> str:
+    """A one-paragraph warning when the running script is not the recorded one."""
+    recorded = (ctx.state or {}).get("pipeline") or {}
+    now = pipeline_identity()
+    old = str(recorded.get("sha256") or "")
+    if not old or not now["sha256"] or old == now["sha256"]:
+        return ""
+    return (f"[pipeline] NOTE: the script running now is NOT the copy recorded at setup "
+            f"(sha256 {now['sha256'][:16]}... vs {old[:16]}..., recorded v"
+            f"{recorded.get('version') or '?'} from {recorded.get('path')}). The root is being "
+            f"driven by a PATCHED or different pipeline; if that is not what you intended, "
+            f"re-run `setup` from the tree you mean to use (the root keeps the copy it was "
+            f"created with).")
 
 
 def nat_key(s: str):
@@ -8258,6 +8323,9 @@ class Ctx:
             st.setdefault("log", [])
             st["version"] = STATE_VERSION
             self.state = st
+            note = pipeline_identity_note(self)
+            if note:
+                print(note)
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         if not self.state["runs"] and self.runs_dir.is_dir():
@@ -9565,10 +9633,39 @@ def next_attempt_number(rec: dict) -> int:
         return 1
 
 
+def sandbox_attempts(rec: dict) -> list:
+    """The attempt numbers whose work lives in the CURRENT sandbox of `rec`.
+
+    Every entry whose sandbox was already kept starts a new group, so with the
+    scoped repair in play a kept sandbox may hold a stage attempt AND the repair
+    session that followed it in the same directory (both are attempts of the run).
+    """
+    out = []
+    for e in rec.get("attempts_log") or []:
+        if e.get("sandbox_moved_to") or (e.get("archive") and e.get("archived")):
+            out = []
+            continue
+        if e.get("attempt"):
+            out.append(int(e["attempt"]))
+    return out
+
+
+def failed_sandbox_dir(ctx: Ctx, rec: dict, attempt: int = None) -> Path:
+    """`runs/<run>_try<N>_failed/` -- `N` counts the run's FAILED TRIES (1-based).
+
+    The number is the failure ordinal, not the attempt ordinal: the operator's
+    handle on the evidence is "the sandbox of try 1 / try 2", and the attempts
+    inside a kept sandbox (a stage attempt plus the repair session that ran in it)
+    are recorded in its `record.json` and in `attempts_log`.
+    """
+    rid = str(rec.get("id"))
+    n = int(attempt or 0) or (len(list(ctx.runs_dir.glob(f"{rid}_try*_failed"))) + 1)
+    return ctx.runs_dir / (rid + FAILED_SUFFIX_FMT.format(n=n))
+
+
 def attempt_archive_dir(ctx: Ctx, rec: dict, attempt: int = None) -> Path:
-    """`runs/_attempts/<run>/attempt-<n>` -- where one attempt's sandbox is kept."""
-    n = int(attempt or attempt_number(rec))
-    return ctx.runs_dir / ATTEMPTS_DIRNAME / str(rec.get("id")) / f"attempt-{n}"
+    """Back-compat alias for `failed_sandbox_dir` (the record field is `archive`)."""
+    return failed_sandbox_dir(ctx, rec, attempt)
 
 
 def _attempt_messages(msgs) -> list:
@@ -9629,7 +9726,11 @@ def record_attempt(ctx: Ctx, rec: dict, ok: bool, errors=None, warnings=None,
         "sandbox": rec.get("sandbox"),
         "prompt": PROMPT_FILE,
         "checked_at": (rec.get("postcheck") or {}).get("checked_at"),
-        "archive": str(attempt_archive_dir(ctx, rec).relative_to(ctx.root)),
+        # Filled in when the failed sandbox is actually kept (moved): the attempt
+        # record must not claim a path that does not exist yet (`sandbox_attempts`
+        # reads this field to tell which attempts share the live sandbox).
+        "archive": None,
+        "sandbox_moved_to": None,
         "agent_log": None,
     }
     history = rec.setdefault("attempts_log", [])
@@ -9642,87 +9743,87 @@ def record_attempt(ctx: Ctx, rec: dict, ok: bool, errors=None, warnings=None,
     return entry
 
 
-def _attempt_archive_skip(rel: Path) -> bool:
-    """Is this sandbox-relative path an input corpus / derived corpus scratch?"""
-    parts = tuple(p for p in rel.parts if p)
-    if parts and parts[0] in ATTEMPT_ARCHIVE_SKIP_DIRS:
-        return True
-    return any(parts[:len(sub)] == sub for sub in ATTEMPT_ARCHIVE_SKIP_SUBTREES)
+def move_failed_sandbox(ctx: Ctx, rec: dict) -> Path:
+    """Rename a failed attempt's WHOLE sandbox to `runs/<run>_try<N>_failed/`.
 
-
-def _mirror_attempt_tree(src: Path, dst: Path) -> tuple:
-    """Mirror a sandbox into the attempt archive; hardlink files where possible.
-
-    Hardlinks make the archive cost nothing while the sandbox is still there and
-    keep the evidence alive after `shutil.rmtree()` unlinks it -- without paying a
-    second copy of a package that is tens of megabytes per attempt. Filesystems
-    that refuse a link (a Windows/drvfs run root, a cross-device target) fall back
-    to `copy2`.
-    """
-    linked = copied = 0
-    for root, dirs, files in os.walk(src):
-        rel = Path(root).relative_to(src)
-        dirs[:] = [d for d in dirs if not _attempt_archive_skip(rel / d)]
-        if _attempt_archive_skip(rel):
-            continue
-        (dst / rel).mkdir(parents=True, exist_ok=True)
-        for name in files:
-            if name.startswith("_agent.log"):
-                continue                     # stashed under runs/_logs/, see agent_log
-            source, target = Path(root) / name, dst / rel / name
-            try:
-                os.link(source, target)
-                linked += 1
-            except OSError:
-                try:
-                    shutil.copy2(source, target)
-                    copied += 1
-                except OSError:
-                    pass
-    return linked, copied
-
-
-def archive_attempt(ctx: Ctx, rec: dict, log_paths=()) -> Path:
-    """Preserve ONE attempt's sandbox before a rebuild wipes it.
-
-    Called by `rebuild_sandbox` (and therefore by `retry`) BEFORE the sandbox is
-    removed, so a failed attempt's artifacts survive as evidence instead of being
-    destroyed by the very retry that follows them. `record.json` inside the
-    archive is the attempt's own record, so the directory is self-describing even
-    after state.json is restored from a backup.
+    Called before a retry (and when a run fails for good): the retry then builds a
+    fresh `runs/<run>/`, and the failed attempt keeps everything it produced --
+    the deliverables exactly as the postcheck judged them, the seeded tables, the
+    corpus copies, the transcript and a self-describing `record.json`. A rename is
+    O(1) on one filesystem and costs no second copy; a cross-device or busy target
+    falls back to a copy, and any failure is reported as a warning (never fatal --
+    the attempt's diagnostics live in state.json -> attempts_log regardless).
     """
     n = attempt_number(rec)
-    dest = attempt_archive_dir(ctx, rec, n)
     sb = ctx.sandbox_of(rec)
+    inside = sandbox_attempts(rec) or [n]
+    dest = failed_sandbox_dir(ctx, rec)
     history = rec.get("attempts_log") or []
     entry = next((e for e in reversed(history) if e.get("attempt") == n), None)
     record = dict(entry or {"attempt": n, "ok": False, "errors": [], "warnings": []})
-    record.update({
-        "run_id": rec.get("id"),
-        "kind": rec.get("kind"),
-        "round": rec.get("round"),
-        "sandbox": str(sb.relative_to(ctx.root)) if sb.is_dir() else None,
-        "archived_at": utcnow(),
-        "agent_log": [str(p.relative_to(ctx.root)) for p in (log_paths or []) if p],
-    })
-    if dest.exists():
-        shutil.rmtree(dest, ignore_errors=True)   # a re-archive replaces a stale copy
-    dest.mkdir(parents=True, exist_ok=True)
-    linked = copied = 0
-    if sb.is_dir():
-        linked, copied = _mirror_attempt_tree(sb, dest / "sandbox")
-    record["linked_files"] = linked
-    record["copied_files"] = copied
-    write_json_atomic(dest / "record.json", record)
+    record.update({"run_id": rec.get("id"), "kind": rec.get("kind"), "round": rec.get("round"),
+                   "sandbox": str(sb.relative_to(ctx.root)) if sb.is_dir() else None,
+                   "attempts_in_sandbox": inside,
+                   "moved_at": utcnow(), "moved_to": str(dest.relative_to(ctx.root))})
+    if not sb.is_dir():
+        dest.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(dest / "record.json", record)
+    else:
+        if dest.exists():
+            dest = unique_path(dest)
+        try:
+            sb.rename(dest)
+        except OSError:
+            shutil.copytree(sb, dest)
+            shutil.rmtree(sb, ignore_errors=True)
+        write_json_atomic(dest / "record.json", record)
+        record["moved_to"] = str(dest.relative_to(ctx.root))
     if entry is not None:
         entry["archived"] = True
         entry["archive"] = str(dest.relative_to(ctx.root))
-        if record["agent_log"]:
-            entry["agent_log"] = record["agent_log"]
+        entry["sandbox_moved_to"] = str(dest.relative_to(ctx.root))
+        log = dest / "_agent.log"
+        if log.is_file():
+            entry["agent_log"] = str(log.relative_to(ctx.root))
     else:
         rec.setdefault("attempts_log", []).append(record)
-    ctx.log("attempt-archived", rec.get("id"), f"attempt {n}: {dest.relative_to(ctx.root)}")
+    ctx.log("failed-sandbox-moved", rec.get("id"),
+            f"attempt {n}: {dest.relative_to(ctx.root)}")
+    print(f"  [keep] {rec['id']}: failed try {dest.name.rsplit('_try', 1)[-1].split('_')[0]}'s "
+          f"sandbox (attempt(s) {', '.join(str(a) for a in inside)}) is kept at "
+          f"{dest.relative_to(ctx.root)}/ -- deliverables, transcript and record.json")
     return dest
+
+
+def keep_failed_sandboxes(ctx: Ctx, manual: bool = False) -> list:
+    """Rename every still-failed run's sandbox to `runs/<run>_try<N>_failed/`.
+
+    Called when an invocation ends with failures: the retry path already keeps the
+    sandbox it is about to rebuild (`move_failed_sandbox`), and this covers the
+    run that failed for good -- so `runs/<run>/` never lingers as an
+    indistinguishable mix of attempts, and `runs/<run>_try<N>_failed/` always
+    carries the deliverables exactly as the postcheck judged them.
+
+    Manual mode is exempt: the operator owns that sandbox, the flow re-issues its
+    prompt, and `move_failed_sandbox` would take the prompt away.
+    """
+    if manual:
+        return []
+    kept = []
+    for rec in ctx.runs():
+        if rec.get("status") != "failed":
+            continue
+        sb = ctx.sandbox_of(rec)
+        if not sb.is_dir():
+            continue
+        try:
+            kept.append(move_failed_sandbox(ctx, rec))
+        except OSError as e:                                        # noqa: BLE001
+            print(f"  [warn] {rec['id']}: could not keep the failed sandbox ({e}); its "
+                  f"diagnostics stay in state.json's attempts_log")
+    if kept:
+        ctx.save_state()
+    return kept
 
 
 def attempt_history_lines(ctx: Ctx, indent: str = "  ", limit: int = 40) -> list:
@@ -9753,7 +9854,7 @@ def attempt_history_lines(ctx: Ctx, indent: str = "  ", limit: int = 40) -> list
                        f"({fmt_dur(h.get('duration'))}, "
                        f"{len(h.get('errors') or [])} problem(s), "
                        f"{h.get('source', 'postcheck')}{origin}): {first[:240]}")
-            kept = h.get("archive") or ""
+            kept = h.get("sandbox_moved_to") or h.get("archive") or ""
             if h.get("archive_pruned"):
                 out.append(f"{indent}    kept: {kept} (archive pruned; the attempt's record "
                            f"stays in state.json)")
@@ -9763,11 +9864,13 @@ def attempt_history_lines(ctx: Ctx, indent: str = "  ", limit: int = 40) -> list
                            f"rebuilt before the pipeline archived attempts)"
                            + (f" | transcript: {log}" if log else ""))
             elif kept and (ctx.root / kept).is_dir():
-                log = (h.get("agent_log") or [None])[0]
-                out.append(f"{indent}    kept: {kept}" + (f" | transcript: {log}" if log else ""))
-            elif kept:
-                out.append(f"{indent}    archive pending: {kept} (written when the retry "
-                           f"rebuilds the sandbox)")
+                log = h.get("agent_log")
+                if isinstance(log, list):        # older records stored a list
+                    log = log[0] if log else None
+                out.append(f"{indent}    kept: {kept}/" + (f" | transcript: {log}" if log else ""))
+            elif h.get("ok") is False:
+                out.append(f"{indent}    the failed sandbox is renamed to "
+                           f"runs/{rec.get('id')}_try<N>_failed/ when the retry rebuilds it")
         for rep in repairs[:limit]:
             out.append(f"{indent}  artifact repair (attempt {rep.get('attempt')}, "
                        f"{fmt_dur(rep.get('duration'))}): {len(rep.get('problems') or [])} "
@@ -10337,18 +10440,16 @@ def rebuild_sandbox(ctx: Ctx, rec: dict) -> None:
                          f"{', '.join(blocked)}")
     sb = ctx.sandbox_of(rec)
     if sb.exists():
-        # Keep BOTH halves of the doomed attempt: its transcript (moved, so a
-        # later attempt cannot inherit it) and its own sandbox (hardlinked, so the
-        # artifacts that failed the postcheck survive the rebuild).
-        logs = stash_logs(sb, ctx.runs_dir / LOGS_DIRNAME, rec["id"],
-                          attempt=attempt_number(rec))
+        # The failed attempt's WHOLE sandbox is renamed to
+        # `runs/<run>_try<N>_failed/` (it keeps the deliverables the postcheck
+        # judged, its transcript and a record.json); the materializer below then
+        # builds a fresh sandbox at the original path.
         try:
-            archive_attempt(ctx, rec, logs)
+            move_failed_sandbox(ctx, rec)
         except OSError as e:                                    # noqa: BLE001
-            print(f"  [warn] {rec['id']}: could not archive attempt {attempt_number(rec)}'s "
-                  f"artifacts before the rebuild ({e}); the attempt stays in state.json's "
-                  f"attempts_log")
-        shutil.rmtree(sb)
+            print(f"  [warn] {rec['id']}: could not keep attempt {attempt_number(rec)}'s sandbox "
+                  f"({e}); its diagnostics stay in state.json's attempts_log")
+            shutil.rmtree(sb, ignore_errors=True)
     kind, r = rec["kind"], int(rec["round"])
     if kind == "a1":
         materialize_a1(ctx, r)
@@ -11167,7 +11268,7 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list) -> No
 # re-writes the seeded table (adding `#` and a `disposition` column) must not
 # have its header counted as one more residue: the old counter read the header
 # row as an instance, so a 25-row table was reported (and re-prompted) as 26.
-M1B_HEADER_CELLS = {"#", "n", "no", "no.", "row", "acronym", "term", "context", "file",
+M1B_HEADER_CELLS = {"#", "n", "no", "no.", "row", "id", "acronym", "term", "context", "file",
                     "location", "file:line", "file : line", "long form as written", "long form",
                     "variant", "excerpt", "evidence", "disposition", "resolution", "verdict",
                     "note", "notes", "why", "—", "-"}
@@ -12341,6 +12442,11 @@ REL_ARTIFACT_PREFIX = f"{REVIEW_DIR}/"
 # evidence would "fix" a table by removing what it has to dispose.
 REPAIR_EDITABLE_CELLS = ("disposition", "resolution", "verdict", "summary", "decision",
                          "note", "notes", "why", "reason", "authoritative term")
+# The tables a review repair may fill cell by cell. `DECISION_ARTIFACTS` is what
+# the artifact-quality layer judges; `M1_acronyms.md` carries the M1b long-form
+# table, whose per-row disposition is what its own gate reads. Everything else
+# under review/artifacts/ stays byte-identical.
+REVIEW_REPAIR_TABLES = tuple(DECISION_ARTIFACTS) + ("artifacts/M1_acronyms.md",)
 # The skip list of the attempt archive is the same one: re-derivable input
 # corpora are verified by the postcheck's own input manifests, not here.
 REPAIR_GUARD_SKIP_DIRS = ATTEMPT_ARCHIVE_SKIP_DIRS
@@ -12363,14 +12469,21 @@ REPAIR_VISUAL_PATTERN = r"^the visual-inspection record \S+ is missing: "
 REPAIR_LANGUAGE_PATTERNS = tuple(
     rf"^{label}: no work/R6_language\.md " for label in ("rewrite", "revise", "integrate")) \
     + tuple(rf"^{label}: the language pass covers " for label in ("rewrite", "revise", "integrate"))
+# The M1b long-form table (`review/artifacts/M1_acronyms.md`) is a decision table
+# too: its rows are residue occurrences the reviewer must dispose one by one (a
+# finding, or OK with the row's own reason). The gate fires when the rows carry
+# no reason AND the coverage row stays silent -- exactly the state a scoped repair
+# can finish from the rows' own context/location columns.
+REPAIR_M1B_PATTERNS = (r"^review/artifacts/M1_acronyms\.md lists \d+ M1b long-form row\(s\)",)
 
 REPAIR_PROFILES = {
     # The reviewer's decision tables: the only stage where the postcheck itself
     # is the artifact-quality layer.
     "review": {
-        "errors": (r"^decision artifact ",),
-        "scope": "the seeded decision tables under review/artifacts/ (fill their judged "
-                 "cells) plus review/work/ scratch",
+        "errors": (r"^decision artifact ",) + REPAIR_M1B_PATTERNS + (REPAIR_VISUAL_PATTERN,),
+        "scope": "the seeded decision tables under review/artifacts/ (including the M1b "
+                 "long-form table; fill their judged cells), the visual record and review/work/ "
+                 "scratch",
         "guard": "the row identity of every decision table",
     },
     # The auditor's deliverable is a disposition sheet, not a manuscript: the
@@ -12489,10 +12602,15 @@ def _repair_path_writable(rel: Path, kind: str) -> bool:
     if name == "manual_steps.md" and kind in ("rewrite", "revise", "integrate"):
         return True                          # the stage's manual-item list (reported only)
     if kind == "review":
-        # The seeded decision tables (cell-editable) and the session's scratch.
+        # The seeded decision tables (cell-editable; M1's long-form table included)
+        # and the session's scratch. The visual record is created/rewritten too:
+        # a missing render-then-look record is bookkeeping the repair can supply
+        # (honestly -- it may render and look, or state the negative).
         if parts[:2] == (REVIEW_DIR, "work"):
             return True
-        return rel.as_posix() in {f"{REVIEW_DIR}/{r}" for r in DECISION_ARTIFACTS}
+        if rel.as_posix() == VISUAL_ARTIFACT_REVIEW:
+            return True
+        return rel.as_posix() in {f"{REVIEW_DIR}/{r}" for r in REVIEW_REPAIR_TABLES}
     if kind == "audit":
         return parts[0] == "audit"
     if kind == "judge":
@@ -12544,7 +12662,7 @@ def _repair_scope_of(rel: Path, kind: str) -> str:
     if parts and parts[-1].lower() == MARKER_FILE.lower():
         return "file"                        # rewritten from evidence, not cell-edited
     if kind == "review" and rel.as_posix() in {f"{REVIEW_DIR}/{r}"
-                                               for r in DECISION_ARTIFACTS}:
+                                               for r in REVIEW_REPAIR_TABLES}:
         return "cells"
     if len(parts) > 1 and parts[1] == "work":
         return "scratch"
@@ -12556,6 +12674,11 @@ def _repair_scope_of(rel: Path, kind: str) -> str:
 def decision_artifact_rel_paths(sb: Path) -> list:
     """The decision artifacts this sandbox actually has (as review/-relative paths)."""
     return [rel for rel in DECISION_ARTIFACTS if (sb / REVIEW_DIR / rel).is_file()]
+
+
+def review_repair_table_rel_paths(sb: Path) -> list:
+    """The review tables a repair may fill (decision artifacts + the M1b table)."""
+    return [rel for rel in REVIEW_REPAIR_TABLES if (sb / REVIEW_DIR / rel).is_file()]
 
 
 def _repair_table_rows(md_text: str) -> list:
@@ -12583,6 +12706,43 @@ def _repair_table_rows(md_text: str) -> list:
         keep = [i for i, h in enumerate(header) if h not in REPAIR_EDITABLE_CELLS]
         out.append(tuple((cells[i].strip() if i < len(cells) else "") for i in keep))
     return out
+
+
+def _repair_table_skeleton(md_text: str) -> str:
+    """The artifact's text with every repair-editable CELL blanked.
+
+    The row-identity check pins the rows; this pins everything else a repair must
+    not touch -- the table's header and column order, the separator, the prose
+    around the table, the escape characters -- by comparing the file with the
+    judged cells removed. Only cells a repair may fill can differ between two
+    files with the same skeleton.
+    """
+    out, header = [], None
+    for line in str(md_text or "").splitlines():
+        s = line.strip()
+        if not s.startswith("|"):
+            out.append(line)
+            # A blank line or a heading ends the table block: the next `|` line is
+            # a NEW table's header, with its own column names (the M1 artifact
+            # carries an inventory table and the M1b table side by side).
+            if not s or s.startswith("#"):
+                header = None
+            continue
+        cells = _m1b_cells(s)
+        if not cells or _m1b_separator(cells):
+            out.append(line)
+            continue
+        # A different column count means a new table (or a ragged row): take it as
+        # the block's header rather than blanking cells against the wrong columns.
+        if header is None or len(cells) != len(header):
+            header = [c.strip().lower() for c in cells]
+            out.append(line)
+            continue
+        blanked = [("" if header[i] in REPAIR_EDITABLE_CELLS else cells[i])
+                   for i in range(min(len(cells), len(header)))]
+        blanked += cells[len(header):]
+        out.append("| " + " | ".join(blanked) + " |")
+    return "\n".join(out)
 
 
 def _repair_guard_files(sb: Path, kind: str) -> dict:
@@ -12673,13 +12833,13 @@ def snapshot_repair_guard(sb: Path, rec: dict) -> dict:
     """
     kind = str(rec.get("kind") or "")
     tables, digests = {}, {}
-    for rel in decision_artifact_rel_paths(sb):
+    for rel in review_repair_table_rel_paths(sb):
         path = sb / REVIEW_DIR / rel
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             text = ""
-        tables[rel] = _repair_table_rows(text)
+        tables[rel] = {"rows": _repair_table_rows(text), "skeleton": _repair_table_skeleton(text)}
         try:
             digests[rel] = sha256_file(path)          # the repair's own diff, for the record
         except OSError:
@@ -12692,12 +12852,15 @@ def snapshot_repair_guard(sb: Path, rec: dict) -> dict:
 def _repair_row_identity_problems(sb: Path, guard: dict) -> list:
     """The review profile's structural guard: every table's row identity."""
     problems = []
-    for rel, rows in sorted((guard.get("tables") or {}).items()):
+    for rel, pinned in sorted((guard.get("tables") or {}).items()):
+        pinned = pinned if isinstance(pinned, dict) else {"rows": pinned, "skeleton": None}
+        rows, skeleton = pinned.get("rows") or [], pinned.get("skeleton")
         path = sb / REVIEW_DIR / rel
         if not path.is_file():
             problems.append(f"it DELETED the decision artifact {REL_ARTIFACT_PREFIX}{rel}")
             continue
-        now = _repair_table_rows(path.read_text(encoding="utf-8", errors="replace"))
+        text = path.read_text(encoding="utf-8", errors="replace")
+        now = _repair_table_rows(text)
         if now != rows:
             # Name the FIRST divergence: the operator (and the next session) can
             # see whether a row vanished or its evidence was re-worded.
@@ -12711,6 +12874,10 @@ def _repair_row_identity_problems(sb: Path, guard: dict) -> list:
             problems.append(f"it rewrote the seeded rows of {REL_ARTIFACT_PREFIX}{rel}: {why} "
                             f"(a repair may fill cells, never add, delete, reorder or re-word a "
                             f"row's own evidence)")
+        elif skeleton is not None and _repair_table_skeleton(text) != skeleton:
+            problems.append(f"it rewrote the header, the prose or a non-editable column of "
+                            f"{REL_ARTIFACT_PREFIX}{rel} (only the judged cells may change: keep "
+                            f"every column, the table's header and the text around it as they are)")
         if len(problems) >= 6:
             break
     return problems
@@ -12864,7 +13031,8 @@ Everything else must stay BYTE-IDENTICAL, above all:
   * You may FILL and REPLACE the judgement cells ({', '.join(REPAIR_EDITABLE_CELLS)}), and
     nothing else: every row's own evidence (document, heading, paragraph, location, counts,
     excerpts, `first sentence`, identifiers) is IDENTITY -- no row may be added, deleted,
-    reordered or re-worded.
+    reordered or re-worded. The table's HEADER, its column order and the prose around it are
+    pinned as well: never add, remove or rename a column.
   * Only the files listed under THE TABLES IN PLAY may change at all; every other file under
     {ARTIFACTS_REL}/ is READ-ONLY (the later stages read them -- `M1_acronyms.md` above all).
 """ + REPAIR_TAIL
@@ -12940,8 +13108,8 @@ def prepare_repair_session(ctx: Ctx, rec: dict, problems: list):
 
     The session runs in the FAILED ATTEMPT'S OWN sandbox (nothing is rebuilt, so
     it sees exactly what the postcheck judged) and counts as an attempt of the
-    same run: `runs/_attempts/<run>/attempt-<n>/`, its transcript under
-    `runs/_logs/`, and its outcome in `attempts_log` (source `artifact-repair`).
+    same run: `runs/<run>_try<N>_failed/`, and its outcome in `attempts_log`
+    (source `artifact-repair`).
     """
     sb = ctx.sandbox_of(rec)
     if not sb.is_dir():
@@ -15158,12 +15326,17 @@ def round_is_done(ctx: Ctx, r: int) -> bool:
     return ctx.round_rec(r).get("status") == "done"
 
 
-def sweep_artifacts(ctx: Ctx) -> list:
+def sweep_artifacts(ctx: Ctx, cmd: list = None, timeout: int = 0) -> list:
     """Adopt runs left pending whose completion signal already exists (manual-mode
     completions, or a previous crashed orchestrator).
 
     The signal is the agent-written marker (rewrite/review/revise/integrate) or a parseable
     scores.json (judge) -- never a bare non-empty output directory.
+
+    An adopted run whose postcheck fails on REPAIRABLE bookkeeping gets the same one
+    scoped repair session any other attempt gets (`cmd` is the round's agent
+    command): a finished 45-minute review must not be discarded because two seeded
+    tables were left undisposed, which is exactly what the 2026-09-22 roots did.
     """
     adopted = []
     for rec in ctx.runs():
@@ -15173,6 +15346,10 @@ def sweep_artifacts(ctx: Ctx) -> list:
             continue
         bump_attempt(rec)
         postcheck(ctx, rec, source="adopted (completion signal already on disk)")
+        if rec["status"] != "done" and cmd:
+            problems = repairable_artifact_failure(ctx, rec)
+            if problems:
+                run_repair_session_now(ctx, rec, problems, cmd, timeout)
         adopted.append(rec["id"])
         print(f"[sweep] {rec['id']}: {'done' if rec['status'] == 'done' else 'FAILED'} "
               f"({'; '.join((rec.get('postcheck') or {}).get('errors', []))[:160] or 'ok'})")
@@ -16375,6 +16552,11 @@ def cmd_setup(args) -> None:
     # From here on the root exists: keep this invocation's console in it (the
     # run log the operator asked for, next to the reports it produces).
     begin_run_log("setup", root, sys.argv)
+    _ident = pipeline_identity()
+    ctx.state["pipeline"] = _ident
+    print(f"[setup] pipeline:                {Path(_ident['path']).name} v{_ident['version']} "
+          f"sha256 {_ident['sha256'][:16]}... from {Path(_ident['path']).parent}  (THIS copy is "
+          f"frozen into the root and is what every later `run` executes)")
     print(f"[setup] copying {len(files)} file(s) from {source} -> {ctx.pristine}")
     shutil.copytree(source, ctx.pristine)
     # Copy the script that is RUNNING, not its basename resolved against the CWD:
@@ -16428,6 +16610,9 @@ def cmd_setup(args) -> None:
                      corpus_content_set_fingerprint([(ctx.pristine, "", ())]),
                  "original_format_fix": format_fix_report,
                  "judge_salt": os.urandom(8).hex(),
+                 # WHICH PIPELINE created this root (see pipeline_identity_note):
+                 # every later invocation compares its own digest with this one.
+                 "pipeline": _ident,
                  "source": str(source)}
     ctx.state["original_captions"] = scan_captions_in_sources([(ctx.pristine, "", ())],
                                                               limit=caption_limit)
@@ -16581,11 +16766,6 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     if stale:
         print(f"[run] {len(stale)} run(s) marked stale by the content check: {', '.join(stale)}")
         ctx.save_state()
-    adopted = sweep_artifacts(ctx)
-    if adopted:
-        print(f"[run] adopted {len(adopted)} run(s) whose completion signal already existed: "
-              f"{', '.join(adopted)}")
-
     manual = args.agent == "manual"
     only = parse_only_spec(getattr(args, "only", None))
     if only is not None and only.is_everything():
@@ -16640,6 +16820,13 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
               f"({Path(str(cmd[0])).name}); this is recorded in decision.json "
               "(judge_provider) -- the panel is not an independent measure")
     timeout = args.timeout if args.timeout is not None else (0 if manual else DEFAULTS["timeout"])
+    # ADOPTION comes after the command/timeout are known: an adopted run whose
+    # postcheck fails on repairable bookkeeping gets its scoped repair session
+    # (see sweep_artifacts), instead of being re-run from scratch.
+    _adopted = sweep_artifacts(ctx, cmd=cmd, timeout=timeout)
+    if _adopted:
+        print(f"[run] adopted {len(_adopted)} run(s) whose completion signal already existed: "
+              f"{', '.join(_adopted)}")
     # Automated sessions always get the default timeout, even when the
     # production stages run in manual mode (timeout=0 means "no timeout").
     judge_timeout = timeout
@@ -16750,6 +16937,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             # Honest state: the round is waiting again, not "active".
             ctx.round_rec(r)["status"] = "pending"
             ctx.save_state()
+            keep_failed_sandboxes(ctx, manual=manual)
             print(f"[run] round {r} is incomplete; progress is saved. Resume with "
                   f"`run --root {ctx.root}` (a fresh invocation grants every failed run a "
                   f"fresh retry budget) or reset a single run with `retry --run <ID>`.")
@@ -17724,7 +17912,7 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
                  f"(`attempts_log`, one entry per attempt: errors, warnings, the decision-artifact "
                  f"quality report, the marker's own summary, timing, and where the attempt's "
                  f"artifacts and transcript were kept), and each failed attempt's sandbox is "
-                 f"preserved under `runs/{ATTEMPTS_DIRNAME}/<run>/attempt-<n>/` (with its own "
+                 f"preserved as `runs/<run>_try<n>_failed/` (with its own "
                  f"`record.json`) until `prune` reclaims that round.")
         L.append("")
         L.extend(history)
@@ -17818,7 +18006,7 @@ def cmd_status(args) -> None:
     history = attempt_history_lines(ctx)
     if history:
         print("ATTEMPT HISTORY -- every attempt is kept (diagnostics: state.json `attempts_log`; "
-              f"artifacts: runs/{ATTEMPTS_DIRNAME}/; transcripts: runs/{LOGS_DIRNAME}/)")
+              f"artifacts: runs/<run>_try<N>_failed/)")
         for line in history:
             print(line)
         print()
@@ -18931,7 +19119,7 @@ def cmd_prune(args) -> None:
     a three-round run is easily >10 GB. `decide` re-derives a decision from
     state.json (the judge sheets are stored there), so the sandboxes are scratch
     once their round is complete. The per-attempt archives of those rounds
-    (`runs/_attempts/`) go with them -- their RECORDS stay in state.json, so the
+    (`runs/<run>_try<N>_failed/`) go with them -- their RECORDS stay in state.json, so the
     attempt history remains readable -- and this command is dry-run unless
     `--yes` is given.
     """
@@ -18955,11 +19143,11 @@ def _cmd_prune_locked(ctx: Ctx, args) -> None:
         sb = ctx.sandbox_of(rec)
         if sb.is_dir():
             targets.append((rec["id"], r, sb, dir_size(sb)))
-        # The per-attempt archives of the same rounds are scratch too -- the
+        # The renamed failed sandboxes of the same rounds are scratch too -- the
         # attempt RECORDS stay in state.json, so `status` keeps the history.
-        arch = ctx.runs_dir / ATTEMPTS_DIRNAME / rec["id"]
-        if arch.is_dir():
-            archives.append((rec["id"], r, arch, dir_size(arch)))
+        for arch in sorted(ctx.runs_dir.glob(f"{rec['id']}_try*_failed")):
+            if arch.is_dir():
+                archives.append((rec["id"], r, arch, dir_size(arch)))
     total = sum(t[3] for t in targets) + sum(t[3] for t in archives)
     print(f"[prune] root: {ctx.root}")
     print(f"[prune] keeping sandboxes of the last {args.keep_latest} round(s) "
@@ -19191,8 +19379,8 @@ USAGE_EXAMPLES = """usage:
           an incomplete judge panel (never certified).
   retry   --root <dir> --run <ID> [--all-failed]
           reset one run (the failed attempt's artifacts are archived under
-          runs/_attempts/<run>/attempt-<n>/ and its transcript under
-          runs/_logs/<run>.attempt-<n>._agent.log; the attempt's record stays in
+          runs/<run>_try<N>_failed/ keeps its whole sandbox -- deliverables,
+          transcript and record.json -- and the attempt's record stays in
           state.json). Resetting a run
           inside a completed round invalidates that round and every later round,
           persists the invalidation, and rebuilds sandboxes IN DEPENDENCY ORDER:

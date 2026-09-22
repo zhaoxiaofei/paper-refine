@@ -498,18 +498,35 @@ Now every attempt is recorded and its evidence is preserved:
 | where | what it holds |
 |---|---|
 | `state.json` → `runs.<id>.attempts_log` | one entry per attempt: number, source (`postcheck` / `process` / `adopted` / `recheck` / `re-verify` / `manual`), timestamps, duration, status, the postcheck's errors and warnings, the decision-artifact quality report, the marker's own summary, and the paths of the attempt's archive and transcript (capped at 25 attempts per run, 60 messages each, 4 KB per message) |
-| `runs/_attempts/<run>/attempt-<n>/` | the attempt's own sandbox as it was when the postcheck judged it — hardlinked where the filesystem allows (the input corpora and `work/corpus` are left out because every materialization rewrites them), with a self-describing `record.json` |
-| `runs/_logs/<run>.attempt-<n>._agent.log` | the attempt's agent transcript (moved aside before a retry can reuse the sandbox) |
+| `runs/<run>_try<N>_failed/` | the FAILED TRY's whole sandbox, renamed there before the retry builds a fresh `runs/<run>/`: the deliverables exactly as the postcheck judged them, the corpus copies, the agent transcript and a self-describing `record.json` (which names the attempts whose work it holds — a stage attempt and, when the scoped repair ran in it, the repair session too). `prune` reclaims these with the round they belong to |
+| `runs/_logs/<run>.<attempt…>.log` | transcripts of attempts whose sandbox was reset by a `retry` or a revalidation (a sandbox kept as `_try<N>_failed` keeps its own `_agent.log` inside) |
 
-The console prints all of an attempt's problems (one per line, not a single
-140-character cut), `status` and `DECISION_REPORT.md` list every failed attempt
-with its first problem and the paths above, and `prune` reclaims the archives of
-the rounds it prunes — the attempt RECORDS stay in `state.json`, so the history
-remains readable and says that the archive is gone.
+The console prints **all** of an attempt's problems (one per line, not a single
+140-character cut) and the same complete list is handed to the NEXT attempt: the
+retry prompt's `=== PREVIOUS ATTEMPT FAILED ===` block now names every error (no
+four-message, 1200-character cut), the attempt's warnings, and where its kept
+sandbox is — so one retry can fix all of them instead of rediscovering them one
+per session. `status` and `DECISION_REPORT.md` list every failed attempt with its
+first problem and the paths above, and `prune` reclaims the kept sandboxes of the
+rounds it prunes — the attempt RECORDS stay in `state.json`, so the history
+remains readable and says that the kept sandbox is gone.
 
 A defect message is part of this record: a repeated disposition is now quoted in
 full and names the rows it is about (`-- rows: <document> / <heading> / para n`),
 so an operator (or a repair session) can act on it without opening the artifact.
+
+**Which pipeline created the root is recorded.** `setup` prints and stores the
+running script's path, version and SHA-256 (`state.json` → `pipeline`), and every
+later invocation says so when the script it is executing is NOT that copy
+(patched, replaced, or a different checkout). The 2026-09-22 roots needed this:
+`setup` had been run from a stale checkout, so the root silently contained a
+pipeline without the scoped-repair code and hours were spent asking why
+`--strict-artifacts fix` never fired.
+
+**An adopted run is repaired too.** When a resume finds a run whose sandbox
+already carries its completion marker (`sweep_artifacts`), the same postcheck runs
+— and if it fails on repairable bookkeeping, the scoped repair session runs right
+there, so a finished 45-minute review is not thrown away for two unfilled tables.
 
 ### `--strict-artifacts fix`: one scoped repair session instead of a full re-run
 
@@ -524,7 +541,7 @@ which files may change, and which evidence is pinned:
 
 | stage | repairable (examples) | may write | pinned evidence |
 |---|---|---|---|
-| `review` | the decision-artifact quality problems (empty cells, boilerplate closures, echoed OUTLINE summaries) | `review/artifacts/` (the seeded tables), `review/work/` | every table's row identity; `findings.json`/`md`, `round2/`, the other artifact files (`M1_acronyms.md` above all) |
+| `review` | the decision-artifact quality problems (empty cells, boilerplate closures, echoed OUTLINE summaries), the M1b long-form gate (undisposed residue rows — the class that failed the 2026-09-22 roots), a missing visual record | `review/artifacts/` (the seeded tables **including `M1_acronyms.md`**), `review/work/` | every table's row identity, all headers and column orders; `findings.json`/`md`, `round2/`, the other artifact files |
 | `audit` | `audit.json` missing/unparseable/duplicated/missing dispositions | `audit/` | every existing disposition and every `adds` row; **new dispositions must be `confirm`** (a drop hides a finding from the revisers and needs the auditor's own evidence) |
 | `rewrite` / `revise` / `integrate` | a missing/empty/thin report or ledger (`REWRITE_REPORT.md`, `revision_report.json`, `DIFF_LEDGER.md`), the language-pass coverage rows, the visual record, the marker | the package's bookkeeping files (by name) and its `work/` scratch | every manuscript file of the package; the frozen review; the corpus inputs |
 | `judge` | a missing `checks` coverage map, `score`/`basis` that contradict the sheet's own ledger, bookkeeping ids, a missing grounding record | `scores.json`, `judge_review/` | `resolved`/`introduced` (the ledger IS the judgement), the comparison set, existing coverage entries; new coverage entries must be `unable` |
