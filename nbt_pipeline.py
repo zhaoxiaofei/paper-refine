@@ -822,6 +822,19 @@ ATTEMPT_ARCHIVE_SKIP_DIRS = ("base", "non-revised", "self", "others", "target", 
                              "original")
 ATTEMPT_ARCHIVE_SKIP_SUBTREES = (("work", "corpus"),)
 SUPERSEDED_DIRNAME = "_superseded"
+# Python bytecode caches (`__pycache__/*.pyc`) are a side effect of RUNNING the
+# helper scripts the pipeline seeds into a sandbox -- never a deliverable. The
+# repair-scope guard reads them as "the session wrote outside its scope" unless
+# they are filtered out (r1_i3, 2026-09-22: a repair that had cleared every
+# problem it was given was failed for `__pycache__/nbt_docx_format.*.pyc`).
+BYTECODE_DIRNAME = "__pycache__"
+BYTECODE_SUFFIXES = (".pyc", ".pyo")
+
+
+def is_bytecode_cache(rel) -> bool:
+    """Is this sandbox-relative path a Python bytecode cache (never a deliverable)?"""
+    parts = tuple(x for x in Path(str(rel)).parts if x and x != ".")
+    return BYTECODE_DIRNAME in parts or str(rel).endswith(BYTECODE_SUFFIXES)
 # `setup` writes this into the root it is building and removes it once
 # state.json exists, so a setup that died part-way (a transient I/O error while
 # hashing or scanning the fresh copy) can be re-run on the SAME root instead of
@@ -3512,10 +3525,18 @@ output goes to ./integrated, not back into self/ or any donor.
 
 === THIS IS NOT A FREE-FOR-ALL MERGE — YOUR MEMBER STAYS THE BASE ===
 
-Read self/ and EVERY others/<id>/ IN FULL YOURSELF and enumerate their differences yourself. Do NOT
-rely on a shell `diff` (or any textual diff tool) to find them: figures and layout changes are
-invisible to text diff, and a diff-driven port silently drops exactly the changes this stage exists
-to catch. Read the documents, the figure/table assets, the legends, and the code.
+EVERY donor must be read and considered — but the orchestrator has already computed WHERE the
+differences are, and reading four complete corpora to FIND them is what ends real sessions without
+one bookkeeping file (two recorded attempts died at 366k / 204k tokens that way). Start from the
+mechanical comparison and work out from it:
+
+  @@DIFF_PACK_RULE@@
+
+The rule that does NOT change: a difference is adjudicated on the REAL material, never on the diff
+text alone. Figures and layout changes are invisible to a text diff, so open every figure, table,
+legend, code file and passage a row sends you to, in the package itself, before you record a
+verdict — the index says what changed, you decide whether the change is an improvement by reading
+the affected material and the source hierarchy.
 
 Work through the donors ONE AT A TIME with a single ledger across all of them, and classify every
 difference you find into exactly one class:
@@ -3965,6 +3986,22 @@ LANGUAGE_PASS_RULE = """LANGUAGE PASS — a bounded, iterative pass over every e
   environment intact (validate afterwards); a sentence you cannot improve without changing
   meaning goes to the manual-steps list instead of being rewritten."""
 
+DIFF_PACK_RULE = """THE DIFFERENCE INDEX IS ALREADY IN THIS SANDBOX — START THERE:
+  * `integrated/work/DIFF_MATRIX.md` (a copy sits in `work/DONOR_DIFFS.md`): the file-level
+    matrix per donor -- every payload file that differs (with both sizes), every file only the
+    donor ships, every file only your base ships, and how many are byte-identical -- plus the
+    paths of the per-donor detail files.
+  * `integrated/work/diffs/<donor>_vs_self.md`: for each differing file, a unified diff of the
+    text sources (LaTeX, .bib, tables, code, reports) and an ALIGNED PARAGRAPH diff of every Word
+    document (which paragraphs changed, with word counts and the changed text).
+  It was computed from THIS sandbox's bytes and covers every payload file, so it is your
+  worklist, donor by donor, and its paths are valid `artifact` cells for the ledger.
+  Then adjudicate on the REAL material: open the passage, figure, table, legend or code file a
+  row points at (in `self/` or `others/<donor>/`) before you record `port`, `keep-self`,
+  `synthesize` or `ignore-cosmetic`. A non-text asset that only one side ships is a difference
+  like any other: compare the asset itself. Never decide a row from the diff text alone."""
+
+
 DIFF_LEDGER_RULE = """INTEGRATION DIFFERENCE LEDGER — one row per difference, at BOTH levels:
   When you merge the donors into your copy, record EVERY difference you considered in
   integrated/DIFF_LEDGER.md as a row:
@@ -3972,8 +4009,9 @@ DIFF_LEDGER_RULE = """INTEGRATION DIFFERENCE LEDGER — one row per difference, 
     donor says | self says | verdict (port / keep-self / synthesize / ignore-cosmetic) | why |
      effect on a claim/number/figure (or "none") | artifact (a path under integrated/work/) |
      finding effect (preserves <id> / undoes <id> / none)`
-  Rules: read each donor whole (no sampling); a donor file with no useful difference still gets
-  an explicit no-difference row; small and large differences BOTH get rows -- the row's own
+  Rules: read every difference you adjudicate whole (the index above names them, and no row may
+  be decided from the diff text alone); a donor file with no useful
+  difference still gets an explicit no-difference row; small and large differences BOTH get rows -- the row's own
   verdict decides, neither sentence-level edits nor re-organizations are privileged; a ported
   number/figure follows the source-hierarchy rule; a difference you cannot evaluate without the
   author goes to the manual-steps list.
@@ -3987,6 +4025,12 @@ DIFF_LEDGER_RULE = """INTEGRATION DIFFERENCE LEDGER — one row per difference, 
   * This round's pool contains BOTH rewrite levels (a structural arm and a sentence-level arm, when
     more than one rewrite was staged), so the ledger must contain BOTH `size` classes: the
     integration stage exists to weigh a reorganization against a prose improvement.
+  * WRITE THE BOOKKEEPING AS YOU GO. Open `integrated/DIFF_LEDGER.md` with one `unable` row per
+    donor as soon as you start, then replace rows with verdicts as you adjudicate them (the same
+    for `integrated/work/R6_language.md`). A session that ends early -- context, timeout, a tool
+    loop -- then leaves a readable, honest ledger that the orchestrator's scoped repair session
+    can finish, instead of leaving nothing and costing a fresh 20-minute attempt. The completion
+    marker still comes LAST, only when the package and its bookkeeping are actually done.
   The orchestrator checks that every donor appears, that the row count is at least the number of
   files that differ from your package, that both size classes are present when the pool has both
   levels, and that the `artifact` and `finding effect` columns are filled."""
@@ -4773,6 +4817,7 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@ZOTERO_CLI_RULE@@",
                      zotero_cli_block("edit", zotero, ZOTERO_LEDGER_INTEGRATED))
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit))
+            .replace("@@DIFF_PACK_RULE@@", DIFF_PACK_RULE)
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE))
     text = apply_m19(text)
     text = apply_m20(text)
@@ -7646,6 +7691,10 @@ def seeded_evidence_paths(sb: Path) -> set:
                   "GLOSSARY.md")
     rels += [f"work/{s}" for s in prov_stems]
     rels += [f"{REVIEW_DIR}/work/{s}" for s in prov_stems]
+    # The integration sandbox is materialized WITH the orchestrator's mechanical
+    # donor comparison (see donor_diff_pack): it lands inside the output package's
+    # work/ directory, so it is an input, not agent work.
+    rels += [f"{INTEGRATED_DIR}/work/{DONOR_DIFF_INDEX}", "work/DONOR_DIFFS.md"]
     # Judge sandboxes are deliberately absent: nothing is seeded there (blinding).
     rels += [f"{REVIEW_DIR}/EVIDENCE_PACK.md", f"{REVIEW_DIR}/work/CODE_SCANS.json",
              f"{REVIEW_DIR}/work/FORMAT_SCAN.json", f"{REVIEW_DIR}/work/EVIDENCE_PACK.md",
@@ -10803,6 +10852,147 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     return rec
 
 
+# --- the orchestrator's mechanical donor comparison ------------------------
+# The integration stage must adjudicate EVERY difference between its base and
+# every donor. Reading four complete packages to FIND those differences is what
+# killed real sessions: two r1_i3 attempts on 2026-09-22 ran 366k / 204k tokens
+# and ended without writing one bookkeeping file, because the prompt mandated
+# "read self/ and EVERY others/<id>/ IN FULL YOURSELF" (4 corpora, 180 MB).
+# The pipeline therefore computes the difference INDEX itself -- sha256 per
+# payload file, `difflib` per text source, an aligned paragraph diff per Word
+# document -- and seeds it into the package's own work/ directory, where the
+# ledger's `artifact` cells can cite it. Nothing here is a verdict: the session
+# still reads the passage, figure or table a row sends it to, and decides.
+DONOR_DIFF_DIRNAME = "diffs"
+DONOR_DIFF_INDEX = "DIFF_MATRIX.md"
+DONOR_DIFF_TEXT_SUFFIXES = (".tex", ".ltx", ".md", ".txt", ".bib", ".csv", ".tsv", ".py",
+                            ".json", ".yaml", ".yml", ".r", ".sh", ".xml", ".html", ".cfg",
+                            ".toml", ".ini", ".tex~")
+DONOR_DIFF_LINE_CAP = 160        # unified-diff lines kept per file
+DONOR_DIFF_FILE_CAP = 40         # differing files detailed per donor
+DONOR_DIFF_BLOCK_CAP = 24        # changed paragraph blocks kept per document
+DONOR_DIFF_EXCERPT = 120         # characters of a paragraph quoted in a block row
+
+
+def _donor_diff_detail(base: Path, donor_dir: Path, rel: str) -> list:
+    """The detail block for ONE differing file (text diff / paragraph blocks)."""
+    b, d = base / rel, donor_dir / rel
+    head = [f"### `{rel}`", "",
+            f"- self: {b.stat().st_size} bytes · donor: {d.stat().st_size} bytes"]
+    if b.suffix.lower() == ".docx" or d.suffix.lower() == ".docx":
+        bp, dp = _docx_paragraphs(b), _docx_paragraphs(d)
+        if bp is None or dp is None:
+            return head + ["- one side does not parse as a Word document; inspect it directly", ""]
+        rows, hidden = [], 0
+        sm = difflib.SequenceMatcher(None, bp, dp, autojunk=False)
+        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+            if tag == "equal":
+                continue
+            if len(rows) >= DONOR_DIFF_BLOCK_CAP:
+                hidden += 1
+                continue
+            rows.append((tag, i1, i2, j1, j2))
+        head += [f"- paragraphs: self {len(bp)} · donor {len(dp)} · changed BLOCK(s): "
+                 f"{len(rows) + hidden}"]
+        for tag, i1, i2, j1, j2 in rows:
+            head.append("")
+            head.append(f"- **{tag}** self p{i1}–p{max(i1, i2 - 1)} → donor p{j1}–p{max(j1, j2 - 1)}")
+            for label, paras, lo, hi in (("self", bp, i1, i2), ("donor", dp, j1, j2)):
+                for k in range(lo, min(hi, lo + 3)):
+                    text = re.sub(r"\s+", " ", str(paras[k] or "")).strip()
+                    head.append(f"    - {label} p{k} ({len(str(paras[k] or '').split())}w): "
+                                f"{text[:DONOR_DIFF_EXCERPT]}")
+                if hi - lo > 3:
+                    head.append(f"    - {label}: … {hi - lo - 3} more paragraph(s)")
+        if hidden:
+            head += ["", f"- … {hidden} further changed block(s) are not listed here"]
+        return head + [""]
+    if b.suffix.lower() in DONOR_DIFF_TEXT_SUFFIXES:
+        try:
+            a_lines = b.read_text(encoding="utf-8", errors="replace").splitlines()
+            d_lines = d.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return head + ["- unreadable as text; inspect it directly", ""]
+        diff = list(difflib.unified_diff(a_lines, d_lines, fromfile="self", tofile="donor",
+                                         lineterm="", n=1))
+        kept = diff[:DONOR_DIFF_LINE_CAP]
+        head += [f"- text diff: {len(diff)} line(s)" + (" (truncated)" if len(diff) > len(kept) else "")]
+        head += ["", "```diff"] + kept + (["…"] if len(diff) > len(kept) else []) + ["```", ""]
+        return head
+    return head + ["- binary or asset file: compare the bytes/asset itself before you decide", ""]
+
+
+def donor_diff_pack(sb: Path, self_id: str, other_ids: list) -> dict:
+    """Seed the mechanical `self/` vs every-donor comparison into the sandbox.
+
+    Writes `integrated/work/DIFF_MATRIX.md` (the index: per donor, the files that
+    differ, only exist on one side, or are byte-identical, with sizes) plus
+    `integrated/work/diffs/<donor>_vs_self.md` (the per-file detail) and a copy of
+    the index in the orchestrator's own `work/DONOR_DIFFS.md`. Cost: sha256 over
+    the payload files once, no model tokens. Returns a per-donor summary.
+    """
+    base = sb / "self"
+    base_files = {p.relative_to(base).as_posix(): p for p in _payload_files_of_dir(base)}
+    art_dir = sb / INTEGRATED_DIR / "work" / DONOR_DIFF_DIRNAME
+    art_dir.mkdir(parents=True, exist_ok=True)
+    (sb / "work").mkdir(parents=True, exist_ok=True)
+    index = [f"# Mechanical donor comparison — base `{self_id}` vs every donor", "",
+             "The orchestrator generated this BEFORE the session started: one sha256 per payload",
+             "file, `difflib` for the text sources and an aligned paragraph diff for every Word",
+             "document. It is the INDEX OF DIFFERENCES your ledger enumerates — not a verdict.",
+             "A row is still decided by opening the passage, figure, table or asset it names:",
+             "figures and layout appear here only as file-level differences.",
+             "",
+             f"Per-donor detail: `{INTEGRATED_DIR}/work/{DONOR_DIFF_DIRNAME}/<donor>_vs_self.md`.",
+             "Cite those files (they are under `integrated/work/`) as a row's `artifact`.",
+             ""]
+    summary = {}
+    for donor in [str(x) for x in other_ids]:
+        ddir = sb / "others" / donor
+        dfiles = {p.relative_to(ddir).as_posix(): p for p in _payload_files_of_dir(ddir)}
+        same, differ, only_d, only_s = [], [], [], []
+        for rel in sorted(set(base_files) | set(dfiles)):
+            b, d = base_files.get(rel), dfiles.get(rel)
+            if b is None:
+                only_d.append(rel)
+            elif d is None:
+                only_s.append(rel)
+            elif sha256_file(b) == sha256_file(d):
+                same.append(rel)
+            else:
+                differ.append(rel)
+        idx = [f"## donor `{donor}`", "",
+               f"- byte-identical: **{len(same)}** file(s)",
+               f"- **differing: {len(differ)}** file(s)",
+               f"- only in the donor: **{len(only_d)}** file(s)",
+               f"- only in self: **{len(only_s)}** file(s)",
+               f"- detail: `{INTEGRATED_DIR}/work/{DONOR_DIFF_DIRNAME}/{donor}_vs_self.md`", ""]
+        if differ:
+            idx += ["| differing file | self bytes | donor bytes |", "|---|---|---|"]
+            idx += [f"| `{rel}` | {base_files[rel].stat().st_size} | "
+                    f"{dfiles[rel].stat().st_size} |" for rel in differ]
+            idx.append("")
+        if only_d:
+            idx += [f"- only in donor `{donor}`: `{rel}`" for rel in only_d] + [""]
+        if only_s:
+            idx += [f"- only in self (the donor does not ship it): `{rel}`" for rel in only_s] + [""]
+        detail = [f"# `{self_id}` (self) vs donor `{donor}` — per-file differences", ""]
+        detail += idx[2:]
+        for rel in differ[:DONOR_DIFF_FILE_CAP]:
+            detail += _donor_diff_detail(base, ddir, rel)
+        if len(differ) > DONOR_DIFF_FILE_CAP:
+            detail += [f"… {len(differ) - DONOR_DIFF_FILE_CAP} further differing file(s) are "
+                       f"listed in the index only", ""]
+        (art_dir / f"{donor}_vs_self.md").write_text("\n".join(detail), encoding="utf-8")
+        index += idx
+        summary[donor] = {"identical": len(same), "differing": len(differ),
+                          "only_in_donor": len(only_d), "only_in_self": len(only_s)}
+    index_text = "\n".join(index)
+    (sb / INTEGRATED_DIR / "work" / DONOR_DIFF_INDEX).write_text(index_text, encoding="utf-8")
+    (sb / "work" / "DONOR_DIFFS.md").write_text(index_text, encoding="utf-8")
+    return summary
+
+
 def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
     """The k-th INTEGRATION sandbox: self/ = one pool member, others/<id>/ = ALL
     the other members of the round's pool.
@@ -10846,6 +11036,9 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
     ensure_copy(ctx.pristine, sb / "non-revised")
     (sb / INTEGRATED_DIR).mkdir(exist_ok=True)
     seed_evidence_pack(ctx, sb, sb / "self", "stage")
+    # The difference INDEX the session starts from (see donor_diff_pack): it costs
+    # no model tokens and keeps a 4-corpus read out of the session's context.
+    donor_diff_pack(sb, self_id, other_ids)
     note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / "PROMPT.md"
     if not prompt.is_file():
@@ -11426,7 +11619,19 @@ def leftovers_present(ctx: Ctx, rec: dict) -> bool:
     # rewrite / revise / integrate: the output package and code/ are the agent's.
     for rel in (output_dir_of(rec), CODE_DIR):
         d = sb / rel
-        if d.is_dir() and any(d.iterdir()):
+        if not (d.is_dir() and any(d.iterdir())):
+            continue
+        if rec.get("kind") == "integrate":
+            # An integration sandbox is materialized WITH the orchestrator's
+            # difference index inside the package's own `work/` directory (see
+            # donor_diff_pack), and `work/` is scratch by definition: the files
+            # that decide whether an agent has already been here are the PACKAGE
+            # ones (documents, ledgers next to them) and `code/`.
+            scratch = d / "work"
+            if any(p.is_file() and scratch not in p.parents for p in d.rglob("*")):
+                return True
+            continue
+        if any(p.is_file() for p in d.rglob("*")):
             return True
     return False
 
@@ -13396,6 +13601,8 @@ def _repair_guard_files(sb: Path, kind: str) -> dict:
         parts = tuple(x for x in rel.parts if x)
         if not parts or parts[0] in REPAIR_GUARD_SKIP_DIRS:
             continue
+        if is_bytecode_cache(rel):
+            continue                          # a cache of RUNNING a tool, not an edit
         if any(parts[:len(sub)] == sub for sub in ATTEMPT_ARCHIVE_SKIP_SUBTREES):
             continue
         if _repair_path_writable(rel, kind):
@@ -13682,6 +13889,14 @@ Everything else must stay BYTE-IDENTICAL, above all:
   * {pkg}/DIFF_LEDGER.md (integration): one row per ported or deliberately skipped difference,
     naming the donor, the size class, the finding effect and a before/after artifact reference
     (a file:line pair, or an outline diff) so the row can be re-checked.
+    The table MUST carry the ledger's own columns -- `donor` and `artifact` above all, plus
+    `size` (small|large) and `finding effect` -- because the orchestrator reads THAT table: a
+    separate orientation/summary table elsewhere in the file is welcome, but the ledger is the
+    table with those columns. `artifact` names a REAL file under {pkg}/work/ that carries the
+    row's before/after evidence; the orchestrator's own mechanical comparison is already there
+    ({pkg}/work/{DONOR_DIFF_INDEX}, {pkg}/work/diffs/<donor>_vs_self.md), so cite those files or
+    write your own evidence file beside them -- a row whose artifact does not exist cannot be
+    re-checked and fails the attempt.
   * The language pass ({pkg}/work/R6_language.md): one row per change PLUS one coverage row for
     each of the steps that changed nothing -- every step needs a row.
   * The visual record ({pkg}/VISUAL_CHECK.md): render the package and LOOK at the pages (write
@@ -14075,9 +14290,42 @@ def scan_regression_problems(ctx: Ctx, before_sources: list, after_sources: list
     return errs, warns
 
 
+# The columns that MAKE a table the integration ledger (rather than the session's
+# own orientation/summary table, which is welcome documentation but carries none
+# of the per-difference fields the postcheck has to read).
+INTEGRATION_LEDGER_COLUMNS = ("donor", "artifact", "size", "finding effect", "verdict")
+
+
+def integration_ledger_rows(path: Path) -> list:
+    """The LEDGER rows of DIFF_LEDGER.md, not the session's other tables.
+
+    A ledger file legitimately carries more than one table -- an orientation or
+    "state of the package" summary first, the ledger below it. parse_markdown_table()
+    reads the FIRST table's header (and every block that repeats it), so a session
+    that opened the file with `| version | payload files | ... |` had that four-row
+    summary parsed AS the ledger and failed with "4 ledger row(s) carry no
+    `artifact`" although the ledger itself was complete and correct (r1_i3,
+    2026-09-22 -- that failure cost the whole repair session). Pick the table that
+    carries the ledger's own columns; fall back to the first table when the file
+    has no such table, so a truly column-less ledger still reports what it lacked.
+    """
+    blocks = parse_markdown_blocks(path)
+    if not blocks:
+        return []
+    def score(block) -> int:
+        head = [str(c).strip().lower() for c in (block.get("header") or [])]
+        return sum(1 for c in INTEGRATION_LEDGER_COLUMNS if c in head)
+    best = max(range(len(blocks)), key=lambda i: score(blocks[i]))
+    if score(blocks[best]) >= 2:
+        head = blocks[best]["header"]
+        return [row for b in blocks if b["header"] == head for row in b["rows"]]
+    head = blocks[0]["header"]
+    return [row for b in blocks if b["header"] == head for row in b["rows"]]
+
+
 def integration_ledger_report(out: Path, donors: list, expect_both_levels: bool) -> dict:
     """Parse integrated/DIFF_LEDGER.md: size classes, artifacts, finding effects."""
-    rows = parse_markdown_table(out / "DIFF_LEDGER.md")
+    rows = integration_ledger_rows(out / "DIFF_LEDGER.md")
     sizes, missing_artifact, missing_finding, undoes, seen_donors = Counter(), [], [], [], set()
     for r in rows:
         size = str(r.get("size") or "").strip().lower()
