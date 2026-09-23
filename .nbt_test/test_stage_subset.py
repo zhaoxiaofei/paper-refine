@@ -14,10 +14,12 @@ assertions are about actual run records, not about the parser alone.
 """
 from __future__ import annotations
 
+import csv
 import importlib.util
 import json
 import os
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -183,6 +185,27 @@ def test_end_to_end():
           (dec.stdout + dec.stderr)[-260:])
     check("the decision report notes the formatting scan",
           "formatting" in (root / "reports" / "DECISION_REPORT.md").read_text(encoding="utf-8").lower())
+    # 5) the round's OWN raw scores: the flat `credited` list the printed median
+    #    and mean were computed from, one row per directed score (own + received).
+    with open(root / "reports" / "round1_raw_scores.csv", newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    stats = (state.get("rounds", {}).get("1") or {}).get("stats") or {}
+    check("round 1 wrote reports/round1_raw_scores.csv", bool(rows) and bool(stats),
+          f"{len(rows)} row(s) for {len(stats)} member(s)")
+    check("every field member appears, in both directions",
+          {r["member"] for r in rows} == set(stats)
+          and {r["direction"] for r in rows} == {"own", "received"},
+          f"members={sorted({r['member'] for r in rows})} "
+          f"directions={sorted({r['direction'] for r in rows})}")
+    reproduced = True
+    for vid, st in stats.items():
+        credited = [int(r["credited"]) for r in rows if r["member"] == vid]
+        reproduced = reproduced and len(credited) == st["n"] \
+            and statistics.median(credited) == st["median"] \
+            and abs(statistics.fmean(credited) - float(st["mean"])) < 1e-9
+    check("the recorded n/median/mean reproduce from the `credited` column", reproduced,
+          str({vid: (st.get("n"), st.get("median"), st.get("mean"))
+               for vid, st in list(stats.items())[:2]}))
 
 
 def test_multiple_stages_and_errors():

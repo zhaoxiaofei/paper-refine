@@ -15795,6 +15795,11 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
     diags = {"sheets_used": 0, "sheets_expected": sum(per_judges.values()),
              "scores_collected": 0, "unresolved": [], "incomplete_sheets": [],
              "superseded_sheets": [], "out_of_range_sheets": []}
+    # Provenance of every FLAT-LIST entry, so reports/round<r>_raw_scores.csv can
+    # show the exact numbers the median and the mean were computed from (one row
+    # per frame entry: the target's own score, and the SAME integer negated into
+    # the opponent's received list).
+    score_rows = []
     if selection:
         diags["judges_enabled"] = judges_enabled_spec(ctx, r)
         diags["judges_per_version"] = dict(per_judges)
@@ -15872,6 +15877,20 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
                 continue
             per[vid]["own"].setdefault(opp, []).append(int(score))
             per[opp]["received"].setdefault(vid, []).append(-int(score))
+            for member, direction, credited, other in ((vid, "own", int(score), opp),
+                                                       (opp, "received", -int(score), vid)):
+                score_rows.append({
+                    "round": int(r), "member": member, "direction": direction,
+                    "credited": credited, "opponent_id": other,
+                    "opponent_label": label, "sheet_target": vid,
+                    "source_judge_run": rec.get("id"),
+                    "source_judge_index": rec.get("judge_index"),
+                    "score_as_written": int(score),
+                    "basis": comp.get("basis"),
+                    "resolved": _ledger_cell(comp.get("resolved")),
+                    "introduced": _ledger_cell(comp.get("introduced")),
+                    "reason": (str(comp.get("reason")) if comp.get("reason") else "")[:200],
+                })
             diags["scores_collected"] += 1
     k = len(field_ids)
     # Directed scores per version = judges * (|field|-1) own scores plus
@@ -16063,6 +16082,7 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
     diags["panel_quality"] = pq
     return {"round": int(r), "field": field_ids, "field_size": k,
             "scores_per_version": expected, "stats": stats, "diagnostics": diags,
+            "score_rows": score_rows,
             "base_id": A1_ID, "base_rep": base_rep,
             "generated": utcnow()}
 
@@ -17639,6 +17659,18 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
         return False, False
 
     agg = aggregate_round(ctx, r, [e["id"] for e in field])
+    # The exact numbers behind the ranking (and behind the median/mean the table
+    # below prints): ONE row per directed score in the member's own frame. Written
+    # BEFORE the panel-gap check, so an undecided round's scores are just as
+    # inspectable -- "why do the median and the mean disagree?" is answered by the
+    # `credited` column, not by re-deriving the frame by hand.
+    try:
+        _rs = write_round_raw_scores(ctx, r, agg)
+        print(f"[run] r{r} raw scores: {_rs.relative_to(ctx.root).as_posix()} "
+              f"({len(agg.get('score_rows') or [])} directed score row(s); the member's "
+              f"median/mean are computed from its `credited` column)")
+    except OSError as e:
+        print(f"[run] r{r} WARNING: could not write the round's raw scores: {e}")
     # A shrunk panel must never produce a champion: if any field member is
     # missing directed scores (a judge sheet that silently dropped a comparison,
     # a stale judge run, a whole version's sheets), stop BEFORE selecting and
@@ -18085,6 +18117,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     if stale:
         print(f"[run] {len(stale)} run(s) marked stale by the content check: {', '.join(stale)}")
         ctx.save_state()
+    backfill_round_raw_scores(ctx)
     manual = args.agent == "manual"
     only = parse_only_spec(getattr(args, "only", None))
     if only is not None and only.is_everything():
@@ -18433,6 +18466,91 @@ def write_raw_scores(ctx: Ctx, rounds_data: list) -> Path:
         w.writerows(rows)
     os.replace(tmp, p)
     return p
+
+
+# The columns of a round's own raw-score file. The first block is the FLAT LIST
+# every statistic is computed from (`member` + `credited`), the second the sheet
+# the entry came from (the same provenance the whole-pipeline raw_scores.csv
+# keeps), so a reader can recompute the median/mean AND see which session moved
+# them.
+ROUND_RAW_SCORE_FIELDS = ("round", "member", "credited", "direction", "opponent_id",
+                          "opponent_label", "source_judge_run", "source_judge_index",
+                          "sheet_target", "score_as_written", "basis", "resolved",
+                          "introduced", "reason", "member_n", "member_median",
+                          "member_mean")
+
+
+def write_round_raw_scores(ctx: Ctx, r: int, agg: dict = None) -> Path:
+    """`reports/round<r>_raw_scores.csv`: the exact flat lists behind median/mean.
+
+    ONE row per directed score in the member's own frame:
+
+      * `direction = own`      the member's own judge session scored it against
+                               `opponent_id`; `credited` is that integer;
+      * `direction = received` another member's session scored THAT member against
+                               this one; the entry in this member's list is the
+                               negation, so `credited = -score_as_written`.
+
+    `member_n` / `member_median` / `member_mean` repeat the RECORDED statistic for
+    the member on every one of its rows, so the file answers "why do the median
+    and the mean disagree?" without a join: the two statistics are computed from
+    exactly the `credited` column of the rows below them. `run` writes this as soon
+    as a round is aggregated (decided or not -- an incomplete panel's scores are
+    just as inspectable) and `decide` back-fills any round that predates the file.
+    """
+    r = int(r)
+    if agg is None:
+        field = [str(v) for v in (ctx.round_rec(r).get("field") or [])]
+        agg = aggregate_round(ctx, r, field) if field else {"score_rows": [], "stats": {},
+                                                            "field": []}
+    stats = agg.get("stats") or {}
+    order = {str(v): i for i, v in enumerate(agg.get("field") or [])}
+    rows = []
+    for row in agg.get("score_rows") or []:
+        st = stats.get(row["member"]) or {}
+        out = dict(row)
+        out["member_n"] = st.get("n")
+        out["member_median"] = st.get("median")
+        out["member_mean"] = (round(float(st["mean"]), 6)
+                              if isinstance(st.get("mean"), (int, float)) else None)
+        rows.append(out)
+    rows.sort(key=lambda x: (order.get(str(x["member"]), 10 ** 6), str(x["member"]),
+                             str(x["direction"]) != "own", str(x["source_judge_run"] or ""),
+                             str(x["opponent_id"] or "")))
+    p = ctx.reports_dir / f"round{r}_raw_scores.csv"
+    tmp = p.with_suffix(".csv.tmp")
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(ROUND_RAW_SCORE_FIELDS))
+        w.writeheader()
+        w.writerows(rows)
+    os.replace(tmp, p)
+    return p
+
+
+def backfill_round_raw_scores(ctx: Ctx) -> list:
+    """Write `reports/round<r>_raw_scores.csv` for DECIDED rounds that lack it.
+
+    A round decided before this report existed (or by an older copy of the
+    pipeline) still has its judge sheets in state, so re-aggregating it costs one
+    re-read and hands the operator the same file every later round gets
+    automatically. Only MISSING files are written -- the run-time writer owns the
+    content of the rest.
+    """
+    out = []
+    for r in range(1, ctx.rounds_count() + 1):
+        rec = ctx.round_rec(r)
+        if rec.get("status") != "done" or not (rec.get("field") or []):
+            continue
+        if (ctx.reports_dir / f"round{r}_raw_scores.csv").is_file():
+            continue
+        try:
+            out.append(write_round_raw_scores(ctx, r))
+        except Exception as e:                                   # noqa: BLE001
+            print(f"[run] r{r} WARNING: could not write its raw scores: {e}")
+    if out:
+        print("[run] raw scores written for round(s) decided before this report existed: "
+              + ", ".join(f"reports/{p.name}" for p in out))
+    return out
 
 
 def score_model_doc() -> dict:
@@ -19583,6 +19701,14 @@ def cmd_decide(args) -> None:
             continue
         field = rrec.get("field") or []
         agg = aggregate_round(ctx, r, field)
+        # Keep every decided round's own raw-score file present and current, even
+        # for roots whose round predates it (the same file `run` writes at
+        # aggregation time).
+        try:
+            _rp = write_round_raw_scores(ctx, r, agg)
+            print(f"[decide] round {r} raw scores -> {_rp.relative_to(ctx.root)}")
+        except OSError as e:
+            print(f"[decide] round {r} WARNING: could not write its raw scores: {e}")
         # The same guard `run` applies before deciding a round: a shrunk panel must
         # never be certified. `run` refuses to decide; `decide` must refuse to sign.
         gaps = [vid for vid in agg["field"]

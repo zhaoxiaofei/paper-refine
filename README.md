@@ -647,6 +647,19 @@ them. `manual_steps`, caption lengths and hand-off placeholders are reported in
 `DECISION_REPORT.md` / `decision.json` (the table has `critical` and `writing`
 columns) but never ranked on.
 
+The numbers behind that table are inspectable per round: `run` writes
+`reports/round<r>_raw_scores.csv` as soon as the round is aggregated (decided or
+not -- an incomplete panel's scores are just as readable), and `decide` refreshes
+it and back-fills any decided round from a root that predates the file. It holds
+ONE row per directed score: `credited` is the flat list the member's `median` and
+`mean` are computed from (`direction = own` is the member's own judge session's
+integer; `direction = received` is another member's session scoring THAT member
+against this one, stored negated), with the sheet it came from
+(`source_judge_run`, `source_judge_index`, `sheet_target`, `opponent_id`,
+`score_as_written`, `basis`, `resolved`, `introduced`) and the recorded
+`member_n`/`member_median`/`member_mean` repeated on every row -- so "why do the
+median and the mean disagree?" is answered from the file alone.
+
 ## Attempt history: every attempt is kept, not just the last one
 
 A run can be attempted several times (`--retries`, a fresh invocation, a
