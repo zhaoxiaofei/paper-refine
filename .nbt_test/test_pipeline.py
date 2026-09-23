@@ -340,6 +340,20 @@ def test_structured_output_exemption():
           not any("revised/weird.xml" in p for p in probs), str(probs))
     check("the agent's own empty structured file still fails",
           any("revised/brand_new.json" in p for p in probs), str(probs))
+    # A JUDGE's own scratch is not a deliverable: the 2026-09-23 round-1 panel
+    # failed two sessions on truncated .docx files the agent had written while
+    # normalizing the blinded views into `judge_review/work/`, although their
+    # scores.json and their frozen views were intact.
+    jsb = ctx.root / "runs/judge_tok_j1"
+    write(jsb / "judge_review" / "work" / "norm_target" / "f0001.docx", b"NOT A ZIP")
+    write(jsb / "judge_review" / "artifacts" / "broken.docx", b"NOT A ZIP")
+    jrec = {"kind": "judge", "id": "judge_tok_j1", "round": 1, "sandbox": "runs/judge_tok_j1",
+            "target_id": "w1", "judge_index": 1, "inputs_manifest": {}}
+    jprobs = np.structured_output_problems(ctx, jrec)
+    check("a truncated .docx in the judge's own work/ scratch is ignored",
+          not any("judge_review/work/" in p for p in jprobs), str(jprobs)[:160])
+    check("a truncated .docx OUTSIDE the scratch still fails the run",
+          any("judge_review/artifacts/broken.docx" in p for p in jprobs), str(jprobs)[:160])
     shutil.rmtree(tmp, ignore_errors=True)
 
 

@@ -61,10 +61,23 @@ def test_contract_v3():
     e2, _w2 = np.judge_basis_problems(comp(1, [row("formatting", "critical")]), "c[0]",
                                       strict=True)
     check("a formatting CRITICAL row fails its run", bool(e2), str(e2[:1]))
-    # proportional, capped derivation
+    # proportional, capped derivation, BOUNDED BY THE RUNG the rows can back
+    # (2026-09-23: the caps alone could demand a number the rung rule forbids --
+    # three minor consistency rows sum to 3 with no MAJOR row, two MAJOR
+    # correctness rows sum to 4 with no CRITICAL row -- and two judge sessions of
+    # a real panel failed on that contradiction whichever number they wrote).
     five = [row("consistency", "minor") for _ in range(5)]
-    check("five minor consistency rows derive +3 (tier cap)",
-          np.derived_comparison_score(comp(3, five)) == 3)
+    check("five minor consistency rows derive +2 (MINOR rows reach 'better', never 'clearly')",
+          np.derived_comparison_score(comp(2, five)) == 2)
+    three_major = [row("correctness", "major"), row("correctness", "major")]
+    check("two MAJOR correctness rows derive +3 ('clearly better' needs a MAJOR, not a CRITICAL)",
+          np.derived_comparison_score(comp(3, three_major, basis="correctness")) == 3)
+    for rows, want in ((five, 2), (three_major, 3)):
+        errs, _ = np.judge_basis_problems(comp(want, rows,
+                                              basis="correctness" if want == 3 else "consistency"),
+                                          "c[0]", strict=True)
+        check(f"the arithmetic and the rung rules AGREE on a {want:+d} sheet",
+              not any("rung" in x or "DERIVED" in x for x in errs), str(errs[:1]))
     fmt3 = [row("formatting", "minor") for _ in range(3)]
     check("three formatting rows still derive +1 (class cap)",
           np.derived_comparison_score(comp(1, fmt3)) == 1)
@@ -73,6 +86,19 @@ def test_contract_v3():
     crit = [row("correctness", "critical"), row("consistency", "minor")]
     check("critical correctness + minor derives +4",
           np.derived_comparison_score(comp(4, crit, basis="correctness")) == 4)
+    # the sweep's RULE ids are accepted as the check that owns them (M20)
+    fmt_rule = [row("formatting", "minor", check_id="FMT-T9C")]
+    check("a formatting-sweep rule id (`FMT-T9C`) is read as its check (M20)",
+          np._norm_check_id("FMT-T9C") == "M20" and np._norm_check_id("fmt-s4") == "M20"
+          and np._norm_check_id("M20") == "M20")
+    e_fmt, _wf = np.judge_basis_problems(comp(1, fmt_rule, basis="formatting"), "c[0]",
+                                         strict=True)
+    check("a ledger row citing `FMT-T9C` no longer fails the frozen-check-id gate",
+          not any("frozen check id" in x for x in e_fmt), str(e_fmt[:1]))
+    e_q, _wq = np.judge_basis_problems(comp(1, [row("writing", "minor", check_id="Q11")]),
+                                       "c[0]", strict=True)
+    check("an id the pipeline does not know (Q11) is still refused",
+          any("frozen check id" in x for x in e_q), str(e_q[:1]))
     # a sheet whose integer contradicts its rows
     e3, _ = np.judge_basis_problems(comp(4, wr, basis="writing"), "c[0]", strict=True)
     check("an integer that contradicts its own rows fails its run",

@@ -4168,7 +4168,9 @@ never guess a number to fill a row):
 
 Each item is {"check": "M8", "tier": <one of the six tiers>, "severity": "critical"|"major"|"minor",
 "evidence": "<=25 words, with a location, e.g. 'Fig. 2 legend: five vs six metrics'"}. The optional
-`check` names the frozen check the row belongs to. List EVERY difference instance you found on each
+`check` names the frozen check the row belongs to; a formatting-sweep RULE id is read as the
+check that owns it (`FMT-*` -> M20), so citing the rule you actually read is fine. List EVERY
+difference instance you found on each
 side (there is no 1-3 cap: five fixed minor consistency instances are five rows); an empty list is
 a legitimate answer ("no difference of that kind"), and two empty lists mean the comparison is
 exactly 0. `basis` must not claim a lower-priority tier than the items you list.
@@ -4177,8 +4179,10 @@ THE INTEGER IS DERIVED FROM THOSE ROWS (contract v3). Weights: minor 1, major 2,
 row. Net contribution caps per tier: correctness +-4, consistency +-3, preservation +-3,
 completeness +-2, formatting +-1, writing +-1; the capped sum is the score. `formatting` and
 `writing` rows are MINOR-ONLY (grammar/prose and formatting are each worth at most one point and
-can never decide a comparison). Write the integer the rows support -- a sheet whose number
-disagrees with its own ledger fails its run.
+can never decide a comparison). The capped sum is then bounded by the rung the rows can BACK: a run
+of MINOR rows is a real net advantage (+-2 at most), |3| ("clearly better/worse") needs at least one
+MAJOR row outside formatting/writing, and |4| ("decisive") needs a CRITICAL one. Write the
+integer the rows support -- a sheet whose number disagrees with its own ledger fails its run.
 
 The orchestrator enforces all of it: a non-zero score needs at least one item on its own side
 (resolved for a positive score, introduced for a negative one); |score| >= 3 ("clearly
@@ -4283,7 +4287,9 @@ CONTRACT v3 -- two additions, both ENFORCED:
     never examined an opponent must say so rather than let code infer it.
   * the integer is DERIVED from the rows: each row weighs minor 1 / major 2 / critical 3, the net
     per tier is capped (correctness +-4, consistency +-3, preservation +-3, completeness +-2,
-    formatting +-1, writing +-1) and the capped sum is the score. `formatting` and `writing` rows
+    formatting +-1, writing +-1) and the capped sum -- BOUNDED BY THE RUNG THE ROWS CAN BACK (MINOR
+    rows reach +-2 at most; |3| needs a MAJOR row outside formatting/writing; |4| needs a CRITICAL
+    one) -- is the score. `formatting` and `writing` rows
     are MINOR-ONLY: each class is worth at most one point and can never decide a comparison.
 The graded-basis arithmetic above is ENFORCED: a sheet
 whose number contradicts its own ledger is discarded and its run retried. Do NOT add an "overall",
@@ -12265,6 +12271,15 @@ def structured_output_files(sb: Path, rec: dict) -> list:
                     or p.suffix.lower() not in (".json", ".xml", ".docx"):
                 continue
             rel = p.relative_to(sb).as_posix()
+            if "work" in Path(rel).parts:
+                # Scratch, never a deliverable. A judge reorganizes the blinded
+                # views into `judge_review/work/` (normalized copies, renders,
+                # sweeps) and one of those intermediate .docx can be truncated
+                # mid-write without saying anything about the panel: the 2026-09-23
+                # round-1 panel failed two sessions on
+                # `judge_review/work/norm_*/f000N.docx is malformed DOCX` even
+                # though their scores.json and their frozen views were intact.
+                continue
             if rel not in seen:
                 seen.add(rel)
                 out.append((rel, p))
@@ -14034,7 +14049,9 @@ Everything else must stay BYTE-IDENTICAL, above all:
         return common_head + f"""
 --- WHAT TO FILL (the sheet must be consistent WITH ITSELF) ---
   * The integer `score` is a FUNCTION of the sheet's own resolved/introduced ledger (minor 1 /
-    major 2 / critical 3, capped per tier; a clean 0), and `basis` names that ledger's
+    major 2 / critical 3, capped per tier AND bounded by the rung the rows can back: MINOR rows
+    reach +-2 at most, |3| needs a MAJOR row outside formatting/writing, |4| needs a CRITICAL
+    one; a clean 0), and `basis` names that ledger's
     highest-priority tier. If they disagree, recompute them from the ledger -- that is the only
     arithmetic you may do. Never change a ledger row, and never re-judge: if the ledger itself
     cannot support a score, that is not repairable and this attempt will fail.
@@ -15275,10 +15292,22 @@ def derived_comparison_score(comp: dict):
     fixed minor consistency rows are worth five points, capped at the tier cap),
     so an instance-level repair is proportional instead of collapsing into a
     1-3 item sample.
+
+    The capped sum is then bounded by the SCALE's own rungs, which the judge
+    prompt states in the same breath: a run of MINOR rows is a real net advantage
+    (+-2), |3| ("clearly better/worse") needs at least one MAJOR row outside the
+    minor-only tiers, and |4| ("decisive") needs a CRITICAL one. Without that
+    bound the two rules CONTRADICT each other -- three minor consistency rows sum
+    to 3 while the rung rule demands a MAJOR row, and two MAJOR correctness rows
+    sum to 4 while |4| demands a CRITICAL one -- which is exactly how two judge
+    sessions of the 2026-09-23 round-1 panel failed: writing the number the rows
+    supported was rejected by the rung check, and the rung-clean number was
+    rejected by the arithmetic check, so no sheet could satisfy both.
     """
     if not isinstance(comp, dict):
         return None
     totals = {}
+    supporting = []                     # (tier, severity) on the side the sign favours
     for side in ("resolved", "introduced"):
         raw = comp.get(side)
         if not isinstance(raw, list):
@@ -15292,15 +15321,40 @@ def derived_comparison_score(comp: dict):
             if weight is None:
                 return None
             totals[tier] = totals.get(tier, 0) + (weight if side == "resolved" else -weight)
+            supporting.append((side, tier, severity))
     score = 0
     for tier, net in totals.items():
         cap = TIER_CAPS.get(tier, 0)
         score += max(-cap, min(cap, net))
+    if score:
+        side = "resolved" if score > 0 else "introduced"
+        rows = [(tier, sev) for row_side, tier, sev in supporting if row_side == side]
+        if any(sev == "critical" and tier not in MINOR_ONLY_TIERS for tier, sev in rows):
+            rung = 4
+        elif any(sev == "major" and tier not in MINOR_ONLY_TIERS for tier, sev in rows):
+            rung = 3
+        else:
+            rung = 2                     # MINOR rows (and the minor-only classes) reach "better"
+        score = (1 if score > 0 else -1) * min(abs(score), rung)
     return max(SCORE_MIN, min(SCORE_MAX, score))
 
 
 def _norm_check_id(raw) -> str:
-    return str(raw or "").strip().upper().replace(" ", "")
+    """Normalize one check id, including the pipeline's OWN rule-id spellings.
+
+    The formatting sweep's rows are named `FMT-*` (FMT-P1, FMT-S4, FMT-T9c, ...)
+    and the check that owns them is **M20** ("OOXML formatting uniformity (check
+    id M20; see the formatting sweep)"): a judge that read such a row and cites
+    the rule it saw is naming M20. Normalizing here keeps one spelling for the
+    coverage map AND for a ledger row's `check`, so a sheet is not failed for
+    citing the finer-grained id the pipeline itself prints (2026-09-23: one
+    round-1 judge session failed twice for `check 'FMT-T9C'`, and its sibling
+    once for the uppercase spelling).
+    """
+    cid = str(raw or "").strip().upper().replace(" ", "")
+    if cid.startswith("FMT-"):
+        return "M20"
+    return cid
 
 
 def judge_coverage_problems(comp: dict, where: str, strict: bool) -> tuple:
@@ -18406,7 +18460,8 @@ def score_model_doc() -> dict:
                       "formatting and writing rows are MINOR-only",
                       "the integer is DERIVED from the rows: minor 1 / major 2 / critical 3, "
                       "capped per tier (correctness +-4, consistency/preservation +-3, "
-                      "completeness +-2, formatting/writing +-1)",
+                      "completeness +-2, formatting/writing +-1) and bounded by the rung the rows "
+                      "can back (MINOR <= 2, |3| needs a MAJOR, |4| a CRITICAL)",
                       "every comparison carries a `checks` disposition for every frozen check id",
                       "the integer is checked against its own ledger, and a contradicting sheet "
                       "fails its run"],

@@ -601,6 +601,22 @@ findings and never scores, a comparison session scores one target against one
 opponent and never ranks, and a package-producing session resolves findings in
 its own copy and keeps one ledger row per finding.
 
+**The judge's integer is derived from its own ledger, and the rules that derive it
+are consistent by construction** (fixed 2026-09-23). Each row weighs minor 1 /
+major 2 / critical 3, the per-tier nets are capped (correctness ±4,
+consistency/preservation ±3, completeness ±2, formatting/writing ±1), and the
+capped sum is then bounded by the rung the rows can BACK: MINOR rows reach ±2 at
+most, |3| ("clearly better/worse") needs a MAJOR row outside formatting/writing,
+|4| ("decisive") needs a CRITICAL one. Before that bound existed the caps alone
+could DEMAND a number the rung check then forbade (three minor consistency rows
+summed to 3 with no MAJOR row; two MAJOR correctness rows summed to 4 with no
+CRITICAL row), so no sheet could satisfy both and real panel sessions failed
+whichever number they wrote. Two spellings/placements are tolerated for the same
+reason: a sweep RULE id in a row's `check` is read as the check that owns it
+(`FMT-*` → M20, e.g. `FMT-T9c`), and the judge's own `judge_review/work/` scratch
+(normalized copies, renders, sweeps) is never validated as a deliverable -- a
+truncated intermediate `.docx` there says nothing about the panel.
+
 The artifact *process* is shared as well; the differences are deliberate:
 
 | artifacts | sessions | why this shape |
