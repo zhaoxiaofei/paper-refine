@@ -727,7 +727,34 @@ from pathlib import Path
 #   * `decide`/`status` hash each unchanged byte once (parallel, content-cached,
 #     enabled only when no pipeline process holds the lock), keeping the
 #     decision certificate byte-identical while cutting the audit's runtime.
-VERSION = "3.4.0"
+# 3.4.1 -- the 2026-09-23 root's three paperwork failures (no behaviour change
+# for a run that never failed a stage):
+#   * EVERY run kind the plan can produce is now postcheckable AND rebuildable
+#     (REBUILD_HANDLERS/POSTCHECK_HANDLERS, checked before a round launches):
+#     the audit stage had no rebuilder, so a single failed audit attempt could
+#     not be retried at all and took its round's revise and integration runs
+#     with it;
+#   * the completion signal is looked for in the run's OWN output directory as
+#     well as the sandbox root, and an unambiguous one (same stage, same run id)
+#     is ADOPTED there instead of failing the attempt -- every prompt now also
+#     states the root explicitly, and a stray signal that names another
+#     run/stage is reported with its path;
+#   * the decision-table detectors measure each row against its own header, so
+#     a row re-emitted one cell short (verdict in the neighbouring column) is
+#     reported as a SHIFTED row rather than as an undisposed one, and every
+#     session can run `nbt_pipeline.py selfcheck --sandbox . --stage <kind>`
+#     before it writes the marker to get the postcheck's own verdict early.
+#   * the same treatment for EVERY stage's own paperwork: a REQUIRED bookkeeping
+#     deliverable written one directory up (a reviser's `revision_report.json`
+#     in the sandbox root instead of `revised/`) is adopted into place exactly
+#     like a misplaced marker; `selfcheck` now also previews the review
+#     contract, the revision ledger's finding coverage (against the AUDITED
+#     list the sandbox carries), the integration ledger's `artifact` rows, the
+#     rewrite arm's declared level, the L1-L11 language pass, the visual record
+#     and a judge sheet's ledger arithmetic and check-coverage map; an audit
+#     sandbox whose process died after writing its sheet is re-verified instead
+#     of re-run, and `audit/audit.json` joins the structured-output parse gate.
+VERSION = "3.4.1"
 STATE_VERSION = 3
 
 # The Zotero tooling policy carried in pipeline_config.json (`setup --zotero`):
@@ -1055,7 +1082,16 @@ CAPTION_UNPARSED_EXTS = (".doc", ".pdf", ".ppt", ".pptx")
 # target remain byte-identical.
 BOOKKEEPING_FILES = ("changelog.md", "manual_steps.md", "revision_report.md",
                      "revision_report.json", "diff_ledger.md", "rewrite_report.md",
-                     "visual_check.md")
+                     "visual_check.md",
+                     # The pipeline's own completion signals. They belong at the
+                     # sandbox ROOT (see SIGNAL_ALT_DIRS); this list is the second
+                     # fence: a signal that ends up INSIDE a package directory
+                     # (a misplaced `_pipeline_done.json`, a judge sheet dropped
+                     # into `revised/`) must never travel into the judged corpus,
+                     # the champion pin or the content fingerprint -- a stray
+                     # bookkeeping file would otherwise date a package or make
+                     # two copies of the same content look different.
+                     "_pipeline_done.json", "scores.json")
 
 # Bookkeeping the pipeline (or the skills it drives) mandates inside the
 # submission directory. The agent that writes a version also writes these files,
@@ -2408,6 +2444,13 @@ DECISION-ARTIFACT MANDATE — one disposition per seeded row, about THAT ROW's o
     M4/NUMBERS_LEDGER numbers, M8 terms, M24 concepts, GLOSSARY, IDENTIFIERS, PLACEHOLDERS,
     PLACEHOLDER_LOOKUP, OUTLINE) must end with exactly one row per instance and a disposition per
     row: a finding id, or `OK — <the bar this instance is inside, and why>`.
+  * ROW SHAPE IS PART OF THAT CONTRACT: keep the seeded columns exactly as they are and write
+    exactly one cell per column, in order, with your verdict IN the `disposition`/`resolution`
+    cell (the LAST column of the row). A row that is one cell SHORT is read POSITIONALLY: the
+    verdict lands in the column before the disposition cell and the postcheck reports the row as
+    undisposed -- a real review rewrote OUTLINE.md's 185 rows that way and the whole session was
+    re-run. If you rewrite a table with a script, build every row from the header's own column
+    list and print the column count of the first and last row before you finish.
   * A row whose `tier` column says `finding` is a defect an editor or a copyeditor would raise.
     "No journal rule", "editorial preference only", "not an error", "cosmetic" are NOT dispositions
     for such a row: a writing-quality defect does not need a journal rule to exist. Either file the
@@ -3092,6 +3135,49 @@ ATTACHED_FULL = ATTACHED_HEAD + "\n" + ATTACHED_PHASE1 + "\n" + ATTACHED_PHASE2
 # braces inside the prompts and inside the master prose stay literal.
 # =====================================================================
 
+
+def pipeline_self_path() -> str:
+    """The absolute path of THIS pipeline module (for the session pre-flight)."""
+    try:
+        return str(Path(__file__).resolve())
+    except (NameError, OSError):                                 # pragma: no cover
+        return "nbt_pipeline.py"
+
+
+def marker_root_rule(out_dir: str = "") -> str:
+    """WHERE the completion marker goes, stated the same way in every prompt.
+
+    The location is part of the contract (the postcheck reads the sandbox root),
+    and a real audit session wrote the marker one directory down because its own
+    directives said "write everything inside `audit/`" one sentence before the
+    marker instruction -- see SIGNAL_ALT_DIRS.
+    """
+    inside = f" (not inside `{out_dir}/`, and not anywhere else)" if out_dir else ""
+    return (f"LOCATION, and it is part of the contract: `{MARKER_FILE}` goes in the SANDBOX ROOT "
+            f"-- the directory that holds `PROMPT.md` and `base/`{inside}.")
+
+
+def selfcheck_block(kind: str, run_id: str, r: int) -> str:
+    """The pre-marker pre-flight command for one stage's prompt.
+
+    The session can run the orchestrator's OWN paperwork detectors inside the
+    sandbox before it declares completion (`cmd_selfcheck`), so a table row, an
+    audit sheet or a misplaced marker that the postcheck would reject is fixed
+    while the session's context is still live, instead of costing a rebuilt
+    20-minute attempt. It is a pre-flight, not a second verdict: the content
+    checks that need the root's state stay in the postcheck.
+    """
+    return (f"""
+SELF-CHECK BEFORE THE MARKER (run this BEFORE you write `{MARKER_FILE}`, from the sandbox root):
+    python "{pipeline_self_path()}" selfcheck --sandbox . --stage {kind} --run-id {run_id} --round {int(r)}
+It applies the postcheck's OWN detectors to this sandbox -- the marker and its location, every
+required deliverable, the seeded decision tables' dispositions, the audit sheet -- and prints
+exactly what the postcheck would reject. Fix everything it reports, run it again until it says OK,
+and only THEN write the completion marker. An attempt that ends with its problems still in the
+files does not get repaired: it FAILS and the whole stage is re-run in a rebuilt sandbox.
+""")
+
+
 REVIEW_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
 
 You are REVIEW run @@RUN_ID@@ — round @@ROUND@@, PHASE 1 OF 2 — inside an isolated orchestration
@@ -3236,8 +3322,9 @@ needed -- read-only.)
 
 === COMPLETION MARKER — WRITE IT AS THE VERY LAST STEP ===
 
-After the skill's verification pass, write _pipeline_done.json in the sandbox root with exactly this
-structure:
+@@MARKER_ROOT@@
+After the skill's verification pass AND the self-check below, write _pipeline_done.json in the
+sandbox root with exactly this structure:
   {"stage": "review", "run_id": "@@RUN_ID@@", "round": @@ROUND@@,
    "status": "complete" | "failed", "error": null | "<short reason>",
    "summary": {"findings_total": <int>, "critical_found": <int>,
@@ -3247,6 +3334,7 @@ reason in "error" -- never leave the sandbox without a marker. The marker is the
 completion signal: a non-empty review/ without it is treated as unfinished, and the orchestrator
 will not launch a second agent into this sandbox (it waits, or the operator resets it with
 `retry --run <ID>`; a reset archives this sandbox's logs first).
+@@SELFCHECK@@
 
 === MASTER PROMPT (HEAD + PHASE 1 excerpt; it governs this run except for the overrides above) ===
 
@@ -3461,8 +3549,9 @@ Explicit requirements that override skill defaults where they conflict:
 
 === COMPLETION MARKER — WRITE IT AS THE VERY LAST STEP ===
 
-After the last validation step (V5), write _pipeline_done.json in the sandbox root with exactly this
-structure:
+@@MARKER_ROOT@@
+After the last validation step (V5) AND the self-check below, write _pipeline_done.json in the
+sandbox root with exactly this structure:
   {"stage": "revise", "run_id": "@@RUN_ID@@", "round": @@ROUND@@,
    "status": "complete" | "failed", "error": null | "<short reason>",
    "summary": {"findings_total": <int>, "fixed": <int>,
@@ -3487,6 +3576,7 @@ to do, not how good the package is, so a bigger honest list cannot cost you the 
 If you cannot finish, still write the marker with "status": "failed" and a short reason in "error".
 The marker is the orchestrator's ONLY completion signal: a non-empty revised/ without it is treated
 as unfinished, and no second agent will be launched into this sandbox.
+@@SELFCHECK@@
 
 === MASTER PROMPT (HEAD + PHASE 2 excerpt; it governs this run except for the overrides above) ===
 
@@ -3587,11 +3677,23 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
    promoted. A run that examined none must say so explicitly (that is a legitimate, auditable
    outcome when the reviewer's reasons are specific).
 
+=== COMPLETION MARKER — WRITE IT AS THE VERY LAST STEP ===
+
+@@MARKER_ROOT@@
+Write `_pipeline_done.json` there as the very last step, after the self-check below, carrying
+`{"findings_total": N, "confirmed": N, "dropped": N, "added": N, "finding_tier_rows_examined": N,
+  "promoted": N}`. Your deliverables (`audit.json`, `AUDIT.md`, `DISPOSITION_AUDIT.md`, `work/`)
+live in `audit/`; the MARKER does not -- it is the orchestrator's completion signal, not one of
+your records, and a marker inside `audit/` is invisible to the orchestrator (the stage is then
+treated as unfinished).
+@@SELFCHECK@@
+
 === RULES ===
 @@DEFECT_CLASS_RULE@@@@STANDING_EXEMPTIONS@@@@PLACEHOLDER_RULE@@@@AUX_FILES_RULE@@
 @@DERIVED_OUTPUTS_RULE@@@@VALIDATION_RULE@@@@VISUAL_INSPECTION_RULE@@@@DOCX_CLI_RULE@@@@ZOTERO_CLI_RULE@@
-* You never edit the corpus, the review, or a candidate package; you only read them and write in
-  `audit/`. The orchestrator verifies base/, non_revised/ and review/ are byte-identical after you.
+* You never edit the corpus, the review, or a candidate package; you only read them and write your
+  records in `audit/` (the completion marker goes in the sandbox ROOT, not in `audit/`). The
+  orchestrator verifies base/, non_revised/ and review/ are byte-identical after you.
 * An added finding is a NORMAL finding: one instance, a verbatim quote, a category, a check id, a
   severity, and a 1-2 sentence problem statement. Never aggregate ("several sentences are long" is
   not a finding).
@@ -3610,8 +3712,9 @@ AUDIT_TAIL = """
 
 You are the auditor, not the reviewer and not the reviser: dispose every frozen finding (confirm or
 drop-with-evidence), promote the reviewer's boilerplate closures into real findings with `AU-` ids
-when they are defects, keep base/, non_revised/ and review/ byte-identical, write everything inside
-`audit/`, and finish with `_pipeline_done.json` (stage="audit") carrying
+when they are defects, keep base/, non_revised/ and review/ byte-identical, write every record
+inside `audit/`, and finish with `_pipeline_done.json` (stage="audit") IN THE SANDBOX ROOT --
+next to PROMPT.md, NOT inside `audit/` -- carrying
 `{"findings_total": N, "confirmed": N, "dropped": N, "added": N, "finding_tier_rows_examined": N,
   "promoted": N}`.
 """
@@ -3790,8 +3893,9 @@ integrated/CHANGELOG.md, because downstream judges and the human gate receive on
 
 === COMPLETION MARKER — WRITE IT AS THE VERY LAST STEP ===
 
-After the final validation step, write _pipeline_done.json in the sandbox root with exactly this
-structure:
+@@MARKER_ROOT@@
+After the final validation step AND the self-check below, write _pipeline_done.json in the sandbox
+root with exactly this structure:
   {"stage": "integrate", "run_id": "@@RUN_ID@@", "round": @@ROUND@@,
    "status": "complete" | "failed", "error": null | "<short reason>",
    "summary": {"ported": <int>, "kept_base": <int>, "ignored_cosmetic": <int>,
@@ -3811,6 +3915,7 @@ for the audit (it must equal @@OTHER_COUNT@@). Report ALL of them honestly.
 If you cannot finish, still write the marker with "status": "failed" and a short reason. The marker
 is the orchestrator's ONLY completion signal: a non-empty integrated/ without it is unfinished, and
 no second agent will be launched into this sandbox.
+@@SELFCHECK@@
 
 === GOVERNING EXCERPTS (from the master revision prompt; they define "correct" — follow exactly) ===
 
@@ -4009,8 +4114,10 @@ needed -- read-only.)
 
 === COMPLETION MARKER — WRITE IT AS THE VERY LAST STEP ===
 
-After you have re-checked the package against base/ (every document present, every claim intact),
-write _pipeline_done.json in the sandbox root with exactly this structure:
+@@MARKER_ROOT@@
+After you have re-checked the package against base/ (every document present, every claim intact)
+AND run the self-check below, write _pipeline_done.json in the sandbox root with exactly this
+structure:
   {"stage": "rewrite", "run_id": "@@RUN_ID@@", "round": @@ROUND@@,
    "status": "complete" | "failed", "error": null | "<short reason>",
    "summary": {"reorganized_sections": <int>, "problems_surfaced": <int>,
@@ -4026,6 +4133,7 @@ package is, so a bigger honest list cannot cost you the round. Report BOTH hones
 If you cannot finish, still write the marker with "status": "failed" and a short reason in "error".
 The marker is the orchestrator's ONLY completion signal: a non-empty rewritten/ without it is
 treated as unfinished, and no second agent will be launched into this sandbox.
+@@SELFCHECK@@
 
 === GOVERNING EXCERPTS (from the master revision prompt; they define "correct" — follow exactly) ===
 
@@ -4814,6 +4922,8 @@ This round runs TWO review sessions on the SAME corpus and merges their findings
     text += DISPOSITION_MANDATE
     text = text.replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("review"))
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
+    text = text.replace("@@MARKER_ROOT@@", marker_root_rule(REVIEW_DIR))
+    text = text.replace("@@SELFCHECK@@", selfcheck_block("review", run_id, r))
     return (text + shared_blocks() + split_block + ATTACHED_HEAD + "\n" + ATTACHED_PHASE1
             + REVIEW_TAIL)
 
@@ -4857,6 +4967,8 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
     text = text.replace("@@LANGUAGE_PASS_RULE@@",
                         LANGUAGE_PASS_RULE.replace("@@R6_PATH@@", "revised/work/R6_language.md"))
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
+    text = text.replace("@@MARKER_ROOT@@", marker_root_rule(REVISED_DIR))
+    text = text.replace("@@SELFCHECK@@", selfcheck_block("revise", run_id, r))
     return text + shared_blocks() + ATTACHED_HEAD + "\n" + ATTACHED_PHASE2 + REVISE_TAIL
 
 
@@ -4887,6 +4999,8 @@ def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
             .replace("@@DOCX_CLI_RULE@@", docx_cli_block())
             .replace("@@ZOTERO_CLI_RULE@@", zotero_cli_block("review", zotero))
             .replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("audit")))
+    text = text.replace("@@MARKER_ROOT@@", marker_root_rule("audit"))
+    text = text.replace("@@SELFCHECK@@", selfcheck_block("audit", run_id, r))
     return text + shared_blocks() + AUDIT_TAIL
 
 
@@ -4926,6 +5040,8 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
     text = text.replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("stage"))
     text = text.replace("@@DIFF_LEDGER_RULE@@", DIFF_LEDGER_RULE)
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
+    text = text.replace("@@MARKER_ROOT@@", marker_root_rule(INTEGRATED_DIR))
+    text = text.replace("@@SELFCHECK@@", selfcheck_block("integrate", run_id, r))
     return text + shared_blocks() + ATTACHED_PHASE1 + "\n" + ATTACHED_PHASE2 + INTEGRATE_TAIL
 
 
@@ -4966,6 +5082,8 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
                         LANGUAGE_PASS_RULE.replace("@@R6_PATH@@", "rewritten/work/R6_language.md"))
     text = text.replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("stage"))
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
+    text = text.replace("@@MARKER_ROOT@@", marker_root_rule(REWRITTEN_DIR))
+    text = text.replace("@@SELFCHECK@@", selfcheck_block("rewrite", run_id, r))
     return (text + shared_blocks() + ATTACHED_HEAD + "\n" + ATTACHED_PHASE1 + "\n"
             + ATTACHED_PHASE2 + REWRITE_TAIL)
 
@@ -7213,6 +7331,15 @@ def _evidence_artifact_table(rows: list, columns: list, empty_note: str) -> str:
         out.append(f"| {i} | {cells} |  |")
     if not rows:
         out.append("| - | " + " | ".join("—" for _ in columns) + f" | {empty_note} |")
+    # The reminder sits AFTER the table (and outside it: the block ends at the
+    # last `|` line), where a session that rewrites the rows by script will see
+    # it. A row that is one cell short is read positionally and its verdict is
+    # counted as an UNDISPOSED row -- see disposition_artifact_problems.
+    out.append("")
+    out.append("_One cell per seeded column, in order: write your verdict IN the last "
+               "(`disposition` / `resolution`) cell. A row that is one cell short is read "
+               "positionally, so a verdict written after the seeded cells counts as an "
+               "undisposed row._")
     return "\n".join(out)
 
 
@@ -11281,6 +11408,42 @@ def build_field(ctx: Ctx, r: int) -> tuple:
     return out, dropped
 
 
+# --- the rebuild dispatch ---------------------------------------------------
+# `postcheck()` has one handler per run kind (POSTCHECK_HANDLERS) and this table
+# carries the materializer that re-creates that kind's sandbox. The two tables
+# are the pipeline's contract with itself, and they had drifted: the AUDIT stage
+# was added to the plan and to the postchecks but NOT to `rebuild_sandbox`'s
+# if/elif chain, so the FIRST retry of an audit attempt died with "cannot
+# rebuild unknown run kind 'audit'" and the run was abandoned after 1 of its 3
+# attempts -- which also took that round's `a2` revision and all four
+# integration runs down with it (root cnb-13to14-0923-1040-2482bdf, 2026-09-23).
+# A dict keyed by kind removes the silent-drift failure mode: a kind that is in
+# the plan but in neither table is refused BEFORE any agent is launched
+# (see `run_kind_support_problems`).
+def _rebuild_review(ctx: Ctx, rec: dict) -> None:
+    """Rebuild session A or B of a split review (the run id names the part)."""
+    r = int(rec["round"])
+    part = "b" if str(rec.get("id")) == rid_review_b(r) else "a"
+    materialize_review(ctx, r, part)
+
+
+def _rebuild_judge(ctx: Ctx, rec: dict) -> None:
+    r = int(rec["round"])
+    field, _dropped = build_field(ctx, r)
+    materialize_judges(ctx, r, field)
+
+
+REBUILD_HANDLERS = {
+    "a1": lambda ctx, rec: materialize_a1(ctx, int(rec["round"])),
+    "rewrite": lambda ctx, rec: materialize_rewrite(ctx, int(rec["round"]), _vid_index(rec)),
+    "review": _rebuild_review,
+    "audit": lambda ctx, rec: materialize_audit(ctx, int(rec["round"])),
+    "revise": lambda ctx, rec: materialize_revise(ctx, int(rec["round"]), _rec_vid(rec)),
+    "integrate": lambda ctx, rec: materialize_integrate(ctx, int(rec["round"]), _vid_index(rec)),
+    "judge": _rebuild_judge,
+}
+
+
 def rebuild_sandbox(ctx: Ctx, rec: dict) -> None:
     """Remove and re-materialize one sandbox (logs are stashed first).
 
@@ -11306,22 +11469,19 @@ def rebuild_sandbox(ctx: Ctx, rec: dict) -> None:
             print(f"  [warn] {rec['id']}: could not keep attempt {attempt_number(rec)}'s sandbox "
                   f"({e}); its diagnostics stay in state.json's attempts_log")
             shutil.rmtree(sb, ignore_errors=True)
-    kind, r = rec["kind"], int(rec["round"])
-    if kind == "a1":
-        materialize_a1(ctx, r)
-    elif kind == "rewrite":
-        materialize_rewrite(ctx, r, _vid_index(rec))
-    elif kind == "review":
-        materialize_review(ctx, r)
-    elif kind == "revise":
-        materialize_revise(ctx, r, _rec_vid(rec))
-    elif kind == "integrate":
-        materialize_integrate(ctx, r, _vid_index(rec))
-    elif kind == "judge":
-        field, _ = build_field(ctx, r)
-        materialize_judges(ctx, r, field)
-    else:
-        raise RuntimeError(f"cannot rebuild unknown run kind {kind!r}")
+    kind = rec["kind"]
+    handler = REBUILD_HANDLERS.get(kind)
+    if handler is None:
+        # A PIPELINE BUG, not a property of this run: the operator's only way
+        # out is a fixed pipeline, so the message says exactly that (and names
+        # the archive that holds the attempt, which is already safely renamed).
+        raise RuntimeError(
+            f"cannot rebuild unknown run kind {kind!r} (this build knows "
+            f"{', '.join(sorted(REBUILD_HANDLERS))}) -- PIPELINE BUG: no materializer is "
+            f"registered for that kind, so `retry --run {rec.get('id')}` cannot work either "
+            f"until it is fixed; the attempt's sandbox is preserved under "
+            f"runs/{rec.get('id')}_try<N>_failed/")
+    handler(ctx, rec)
     rec["postcheck"] = None
     rec["last_error"] = None
 
@@ -11423,6 +11583,22 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
         else:
             probs.append(mismatch("review",
                                   hash_manifest(ctx.sandbox_of(rev_rec) / REVIEW_DIR)))
+    elif kind == "audit":
+        # The auditor consumes the round's base AND the frozen review, and its
+        # whole product is a disposition OF that review. If the review (or the
+        # base) is retried while an audit sandbox already exists, the sandbox
+        # would be judged against -- and re-hash -- a review the revisers will
+        # never see; both areas are re-derived here like the revise arm's.
+        if a1 is not None and a1.get("status") == "done":
+            probs.append(mismatch("base", hash_manifest(ctx.sandbox_of(a1) / "base")))
+        if src_ok:
+            probs.append(mismatch(pristine_dirname(sb), ctx.source_manifest))
+        merge_rid = rid_review_b(r) if review_split_of(ctx) != "off" else rid_review(r)
+        rv = ctx.run(merge_rid)
+        if rv is None or rv.get("status") != "done":
+            probs.append("upstream review run is not done")
+        else:
+            probs.append(mismatch(REVIEW_DIR, hash_manifest(ctx.sandbox_of(rv) / REVIEW_DIR)))
     elif kind == "integrate":
         self_id = rec.get("self_id")
         others = list(rec.get("other_ids") or [])
@@ -11549,13 +11725,145 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
 # COMPLETION SIGNALS
 # =====================================================================
 
-def marker_json(sb: Path):
-    m = read_json(sb / MARKER_FILE, revive=False, lenient=True)   # agent-written
+# --- where a completion signal may legitimately be found ---------------------
+# The prompts ask for `_pipeline_done.json` (and, for a judge, `scores.json`)
+# in the sandbox ROOT, next to PROMPT.md, and the postcheck reads it there.
+# Two real 2026-09-23 failures came from a signal that was written ONE
+# DIRECTORY DOWN instead: the auditor wrote `audit/_pipeline_done.json` (the
+# audit prompt's own "write everything inside `audit/`" invited exactly that)
+# while its audit.json/AUDIT.md were complete and its own summary said
+# `"status": "complete"`, and the run then cost 20 minutes of agent time plus a
+# full sandbox rebuild. The layers below are independent of each other:
+#
+#   1. every prompt states the marker's exact location (see marker_root_rule),
+#   2. every session can run the orchestrator's own pre-flight check before it
+#      writes the marker (see `sandbox_selfcheck` / `selfcheck_block`),
+#   3. `relocate_stray_signal()` ADOPTS a signal that names THIS run and stage
+#      from the run's own output directory -- the work is the same work, and
+#      only its address is wrong -- while a signal naming another run or stage
+#      is reported (never adopted, never silently ignored), and
+#   4. the failure message names the stray file, so an operator reading
+#      `[FAIL]` sees where the signal actually is.
+SIGNAL_ALT_DIRS = {
+    "audit": ("audit",),
+    "judge": ("judge_review",),
+    "review": (REVIEW_DIR,),
+    "rewrite": (REWRITTEN_DIR,),
+    "revise": (REVISED_DIR,),
+    "integrate": (INTEGRATED_DIR,),
+}
+
+
+def signal_names_of(kind: str) -> tuple:
+    """The completion-signal file names this run may deliver (root-relative)."""
+    return (SCORES_FILE, MARKER_FILE) if kind == "judge" else (MARKER_FILE,)
+
+
+def signal_search_dirs(sb: Path, kind: str) -> list:
+    """The directories this stage's OWN signal may sit in (the root first)."""
+    return [sb] + [sb / d for d in SIGNAL_ALT_DIRS.get(str(kind or ""), ())]
+
+
+def stray_signal_path(sb: Path, kind: str, name: str):
+    """The signal file when it sits in the stage's own directory, else None."""
+    for d in signal_search_dirs(sb, kind)[1:]:
+        p = d / name
+        try:
+            if p.is_file():
+                return p
+        except OSError:                                          # noqa: BLE001
+            continue
+    return None
+
+
+def _signal_names_this_run(data, rec: dict, name: str) -> bool:
+    """Does this candidate signal name THIS run (and stage) and nothing else?
+
+    Deliberately strict: the stage is what makes a stray file unambiguous (a
+    revise sandbox carries the auditor's `audit/` copy, so a marker that names
+    `audit` must never be adopted as the reviser's own), and a `run_id` that
+    names another run is another session's property. A file that does not parse
+    is never adopted.
+    """
+    if not isinstance(data, dict):
+        return False
+    if name == SCORES_FILE:
+        if rec.get("target_id") and data.get("target_id") not in (None, rec["target_id"]):
+            return False
+    elif data.get("stage") != rec.get("kind"):
+        return False
+    return data.get("run_id") in (None, rec.get("id"))
+
+
+def stray_signal_note(sb: Path, rec: dict, name: str) -> str:
+    """One sentence naming a stray signal file, or "" when there is none."""
+    p = stray_signal_path(sb, rec.get("kind"), name)
+    if p is None:
+        return ""
+    rel = p.relative_to(sb).as_posix()
+    data = read_json(p, revive=False, lenient=True)              # agent-written
+    if isinstance(data, dict) and name == MARKER_FILE:
+        what = f"it names stage {data.get('stage')!r} / run {data.get('run_id')!r}"
+    elif isinstance(data, dict):
+        what = f"it names run {data.get('run_id')!r} / target {data.get('target_id')!r}"
+    else:
+        what = "it does not parse as a JSON object"
+    return (f"a `{name}` exists at `{rel}` instead of the sandbox root -- {what}, this run is "
+            f"{rec.get('id')!r} / stage {rec.get('kind')!r}; write `{name}` in the sandbox ROOT")
+
+
+def relocate_stray_signal(ctx: Ctx, rec: dict) -> list:
+    """Adopt this run's OWN completion signal when it was written one level down.
+
+    Returns the notes to record as warnings. Nothing is adopted unless the
+    signal names this run and this stage (see `_signal_names_this_run`), and a
+    signal that is NOT adoptable is left exactly where it is -- the postcheck's
+    "missing marker" error then names its location (see `stray_signal_note`).
+    """
+    if rec.get("kind") == "a1":
+        return []
+    sb = ctx.sandbox_of(rec)
+    notes = []
+    for name in signal_names_of(rec.get("kind")):
+        if not sb.is_dir() or (sb / name).is_file():
+            continue
+        found = stray_signal_path(sb, rec.get("kind"), name)
+        if found is None:
+            continue
+        rel = found.relative_to(sb).as_posix()
+        if not _signal_names_this_run(read_json(found, revive=False, lenient=True), rec, name):
+            continue
+        try:
+            shutil.move(str(found), str(sb / name))
+        except OSError as e:                                     # noqa: BLE001
+            notes.append(f"the `{name}` written to `{rel}` could not be moved to the sandbox "
+                         f"root ({type(e).__name__}: {e}); it will not be read from there")
+            continue
+        notes.append(f"the completion signal `{name}` was written to `{rel}` instead of the "
+                     f"sandbox root; it is ADOPTED (moved to `{name}` in the root). The prompt "
+                     f"asks for `{name}` in the sandbox root, next to PROMPT.md")
+        print(f"  [warn] {rec.get('id')}: {notes[-1]}")
+    return notes
+
+
+def find_signal_path(sb: Path, kind: str, name: str) -> Path:
+    """The path a stage's signal was found at, root-first, falling back to the root."""
+    for d in signal_search_dirs(sb, kind):
+        p = d / name
+        if p.is_file():
+            return p
+    return sb / name
+
+
+def marker_json(sb: Path, kind: str = ""):
+    m = read_json(find_signal_path(sb, kind, MARKER_FILE),
+                  revive=False, lenient=True)                    # agent-written
     return m if isinstance(m, dict) else None
 
 
-def scores_json_of(sb: Path):
-    sj = read_json(sb / SCORES_FILE, revive=False, lenient=True)  # agent-written
+def scores_json_of(sb: Path, kind: str = ""):
+    sj = read_json(find_signal_path(sb, kind, SCORES_FILE),
+                   revive=False, lenient=True)                   # agent-written
     return sj if isinstance(sj, dict) else None
 
 
@@ -11565,8 +11873,9 @@ def completion_signal_exists(ctx: Ctx, rec: dict) -> bool:
         return True
     sb = ctx.sandbox_of(rec)
     if rec["kind"] == "judge":
-        return scores_json_of(sb) is not None or marker_json(sb) is not None
-    return marker_json(sb) is not None
+        return (scores_json_of(sb, rec["kind"]) is not None
+                or marker_json(sb, rec["kind"]) is not None)
+    return marker_json(sb, rec["kind"]) is not None
 
 
 def likely_complete_artifacts(ctx: Ctx, rec: dict) -> bool:
@@ -11582,7 +11891,15 @@ def likely_complete_artifacts(ctx: Ctx, rec: dict) -> bool:
     if rec["kind"] == "judge":
         # A partial sheet from a crashed attempt must not be adopted silently:
         # require the full comparison set for this session's labels.
-        return judge_sheet_complete(scores_json_of(sb), rec)
+        return judge_sheet_complete(scores_json_of(sb, rec["kind"]), rec)
+    if rec["kind"] == "audit":
+        # The auditor's whole product is `audit/audit.json` (its dispositions are
+        # what the revisers consume). Without this branch the "process died after
+        # the agent finished" path never fired for the audit stage, so a session
+        # whose CLI exited non-zero with a complete, valid sheet was re-run
+        # instead of re-verified.
+        aj = read_json(sb / "audit" / "audit.json", revive=False, lenient=True)
+        return isinstance(aj, dict)
     return False
 
 
@@ -11646,6 +11963,19 @@ def leftovers_present(ctx: Ctx, rec: dict) -> bool:
         # review sandbox holding only them is still clean/unstarted.
         seeded = seeded_evidence_paths(sb)
         return any(p.is_file() and p not in seeded for p in d.rglob("*"))
+    if rec["kind"] == "audit":
+        # The auditor's deliverable IS `audit/` (materialization creates it
+        # empty; the seeded evidence pack goes to `work/`), so anything in it is
+        # the agent's own work. Without this branch the guard fell through to
+        # the package-dir probe below (`output_dir_of` returns `revised/` for
+        # every non-package kind), which an audit sandbox never has -- so a
+        # crashed auditor's half-written sheet looked like an untouched sandbox
+        # and a second agent was launched straight into it.
+        d = sb / "audit"
+        if not d.is_dir():
+            return False
+        seeded = seeded_evidence_paths(sb)
+        return any(p.is_file() and p not in seeded for p in d.rglob("*"))
     # rewrite / revise / integrate: the output package and code/ are the agent's.
     for rel in (output_dir_of(rec), CODE_DIR):
         d = sb / rel
@@ -11658,17 +11988,39 @@ def leftovers_present(ctx: Ctx, rec: dict) -> bool:
 # POST-RUN CHECKS
 # =====================================================================
 
-def _marker_checks(rec: dict, marker, stage: str, errs: list, warns: list) -> None:
+def _marker_checks(rec: dict, marker, stage: str, errs: list, warns: list,
+                   sb: Path = None) -> None:
+    """The marker's LOCATION and fields.
+
+    `sb` is optional only for callers that hold no sandbox (the prompt fixtures
+    of the test suites); the postchecks pass it, because the failure message
+    must name a stray marker's real path (see `stray_signal_note`) instead of
+    sending an operator hunting for a file that exists one directory down.
+    """
+    # The address is checked FIRST and separately from the content: a marker that
+    # exists but is not in the sandbox root has not been found by the pipeline
+    # (the postcheck adopts an unambiguous one before this runs, so reaching here
+    # with `where` set means it was NOT adoptable -- another run's or another
+    # stage's file -- or could not be moved). The message names the path and the
+    # provenance it really carries.
+    where = ""
+    if sb is not None and not (sb / MARKER_FILE).is_file():
+        where = stray_signal_note(sb, rec, MARKER_FILE)
     if not isinstance(marker, dict):
         errs.append(f"completion marker {MARKER_FILE} missing (it is prompted as the very last "
-                    f"step; a non-empty output directory is NOT completion)")
+                    f"step; a non-empty output directory is NOT completion)"
+                    + (f" -- {where}" if where else
+                       (f" -- write `{MARKER_FILE}` in the sandbox ROOT, next to PROMPT.md")))
         return
+    if where:
+        errs.append(f"the completion marker is NOT in the sandbox root: {where}")
     if marker.get("stage") != stage:
         errs.append(f"marker stage mismatch: expected {stage!r}, got {marker.get('stage')!r}")
     if marker.get("run_id") not in (None, rec["id"]):
         errs.append(f"marker run_id mismatch: expected {rec['id']!r}, "
                     f"got {marker.get('run_id')!r}")
-    if marker.get("round") is not None and marker.get("round") != rec["round"]:
+    if marker.get("round") is not None and rec.get("round") is not None \
+            and marker.get("round") != rec["round"]:
         # Same rule as the judge sheet (see validate_judge_sheet): a judge is
         # never told the round, so an invented value there is a note, not a
         # failure. The other stages ARE told their round and stay strict.
@@ -11738,6 +12090,37 @@ def audit_record_of(ctx: Ctx, r) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def findings_from_sandbox(sb: Path, audit=None) -> list:
+    """The frozen review's finding rows as THIS sandbox carries them.
+
+    `sb/review/findings.json` (+ `review/round2/findings_extra.json`), with the
+    AUDITED list applied when `audit` (an `audit/audit.json` payload) is given:
+    the auditor's drops removed, its `AU-` additions appended.
+
+    Pure and sandbox-local on purpose: the revise sandbox holds its OWN copy of
+    both the frozen review and the auditor's record, so this is the list the
+    SESSION must resolve -- and the same function backs the postcheck
+    (`consumed_findings`) and the session's own pre-flight, which therefore
+    cannot disagree about which ids a ledger has to name.
+    """
+    out = []
+    for rel in (FINDINGS_REL, "review/round2/findings_extra.json"):
+        fj = read_json(sb / rel, revive=False, lenient=True)   # agent-written
+        if not isinstance(fj, dict):
+            continue
+        for f in fj.get("findings") or []:
+            if isinstance(f, dict):
+                out.append(f)
+    if not audit:
+        return out
+    drops = {str(d.get("id") or "").strip()
+             for d in (audit.get("dispositions") or []) if isinstance(d, dict)
+             and str(d.get("verdict") or "").strip().lower() == "drop"}
+    kept = [f for f in out if str(f.get("id") or "").strip() not in drops]
+    kept += [f for f in (audit.get("adds") or []) if isinstance(f, dict)]
+    return kept
+
+
 def consumed_findings(ctx: Ctx, rec: dict) -> list:
     """The finding list a stage must resolve: the frozen review, AUDITED.
 
@@ -11748,24 +12131,20 @@ def consumed_findings(ctx: Ctx, rec: dict) -> list:
     independent session produced, and every drop remains visible in
     `audit/audit.json` for the human.
     """
-    sb = ctx.sandbox_of(rec)
-    out = []
-    for rel in (FINDINGS_REL, "review/round2/findings_extra.json"):
-        fj = read_json(sb / rel, revive=False, lenient=True)   # agent-written
-        if not isinstance(fj, dict):
-            continue
-        for f in fj.get("findings") or []:
-            if isinstance(f, dict):
-                out.append(f)
-    audit = audit_record_of(ctx, rec.get("round") or 0)
-    if not audit:
-        return out
-    drops = {str(d.get("id") or "").strip()
-             for d in (audit.get("dispositions") or []) if isinstance(d, dict)
-             and str(d.get("verdict") or "").strip().lower() == "drop"}
-    kept = [f for f in out if str(f.get("id") or "").strip() not in drops]
-    kept += [f for f in (audit.get("adds") or []) if isinstance(f, dict)]
-    return kept
+    return findings_from_sandbox(ctx.sandbox_of(rec),
+                                 audit_record_of(ctx, rec.get("round") or 0))
+
+
+def sandbox_audit_record(sb: Path) -> dict:
+    """The auditor's `audit/audit.json` as a package sandbox carries it ({} if none).
+
+    `audit_record_of()` reads the audit RUN's record; a revise/integration
+    sandbox has the same file copied into its own `audit/` (that is the
+    authoritative list the revisers act on), and the session's pre-flight must
+    read what the session can see.
+    """
+    data = read_json(sb / "audit" / "audit.json", revive=False, lenient=True)
+    return data if isinstance(data, dict) else {}
 
 
 def critical_findings_input(ctx: Ctx, rec: dict):
@@ -11825,6 +12204,62 @@ def frozen_finding_ids(ctx: Ctx, rec: dict) -> list:
         if isinstance(fid, str) and fid.strip() and fid.strip() not in ids:
             ids.append(fid.strip())
     return ids
+
+
+def revision_ledger_problems(pkg: Path, frozen_ids: list, frozen_total, rel: str = None) -> tuple:
+    """(errors, warnings) for one package stage's machine-readable revision ledger.
+
+    The contract this enforces (`revision_report.json`, the deliverable that
+    proves no finding was silently dropped): the file exists, it IS a ledger
+    (a list of finding rows -- bare or under ANY key, a mapping keyed by finding
+    id, or a report object naming the ids; the prompts fix the path and the row
+    contract, not the key names), and it NAMES every finding id the stage had to
+    resolve. An empty-but-typed ledger is accepted (with a warning) only when the
+    review carried no findings at all.
+
+    Shared verbatim by the revise postcheck and by the session's own pre-flight
+    (`sandbox_selfcheck`): a reviser that omits an id finds out before it writes
+    the marker instead of after a rebuilt 30-minute attempt.
+    """
+    pkg_rel = rel or f"{pkg.name}/revision_report.json"
+    errs, warns = [], []
+    path = pkg / "revision_report.json"
+    if not path.is_file():
+        errs.append(f"{pkg_rel} is missing: it is the revision ledger (one row per finding id, "
+                    f"with verdict, rationale and evidence) that proves no finding was silently "
+                    f"dropped")
+        return errs, warns
+    ledger = read_json(path, revive=False, lenient=True)          # agent-written
+    if not isinstance(ledger, (list, dict)):
+        errs.append(f"{pkg_rel} does not carry the revision ledger (expected a list of finding "
+                    f"rows, an object whose rows live under any key, a mapping keyed by finding "
+                    f"id, or an id list): it is the deliverable that proves no finding was "
+                    f"silently dropped, so the run is retried rather than reported as complete")
+        return errs, warns
+    if not ledger:
+        if frozen_total == 0:
+            warns.append(f"{pkg_rel} lists no rows (the frozen review carried no findings); "
+                         f"accepted as an all-clean ledger")
+        else:
+            errs.append(f"{pkg_rel} is EMPTY/unfinished (structured output): it lists no "
+                        f"revision row at all -- write the ledger per finding id (verdict, "
+                        f"rationale, evidence)")
+        return errs, warns
+    # A ledger that omits a finding is the "silently dropped" case the
+    # deliverable exists to prevent: the row count alone says nothing about
+    # WHICH findings were addressed.
+    if frozen_ids:
+        named = ledger_named_ids(ledger, frozen_ids)
+        missing = [i for i in frozen_ids if i not in named]
+        if missing:
+            errs.append(
+                f"{pkg_rel} does not name {len(missing)} of the frozen review's "
+                f"{len(frozen_ids)} finding id(s): {', '.join(missing[:6])}"
+                + (" ..." if len(missing) > 6 else "")
+                + " -- the ledger is one row per finding id (the deliverable that proves no "
+                  "finding was silently dropped); an id must appear as structured data (a row's "
+                  "id field, a mapping key or an id list), not only in prose")
+    return errs, warns
 
 
 # How deep `ledger_named_ids` walks a machine-readable ledger. Real reports are
@@ -12357,6 +12792,11 @@ PRIOR_ROUND_RULE = """PRIOR-ROUND FINDINGS (read-only; round @@ROUND@@ reviews t
 STRUCTURED_OUTPUT_JSON = {
     "review": ("_pipeline_done.json", "review/findings.json",
                "review/round2/findings_extra.json"),
+    # The audit's sheet is validated in full by `audit_artifact_problems`, but the
+    # PARSE gate belongs here too: a truncated audit.json must be caught by the
+    # same structured-output scan as every other stage's (and by manual mode's
+    # "the output stopped changing" detector).
+    "audit": ("_pipeline_done.json", "audit/audit.json"),
     "rewrite": ("_pipeline_done.json",),
     "revise": ("_pipeline_done.json", "revised/revision_report.json"),
     "integrate": ("_pipeline_done.json", "integrated/revision_report.json"),
@@ -13311,16 +13751,23 @@ def parse_markdown_blocks(path: Path) -> list:
     blocks = []
     for raw in raw_blocks:
         header = [c.lower() for c in _table_line_cells(raw[0])]
-        rows, appended, ragged = [], 0, 0
+        rows, widths, appended, ragged = [], [], 0, 0
         for line in raw[1:]:
             cells = _table_line_cells(line)
             if _is_separator_row(cells):
                 continue
+            # The row's OWN cell count is kept: a row that is one cell short of
+            # its header reads positionally, so its last written cell lands in
+            # the column BEFORE the disposition column and the disposition cell
+            # is reported EMPTY (see disposition_artifact_problems). The count
+            # is what lets the message say that instead of sending the operator
+            # to a cell the session never wrote.
+            widths.append(len(cells))
             row, note = _table_row(header, cells)
             appended += 1 if note == "appended" else 0
             ragged += 1 if note == "ragged" else 0
             rows.append(row)
-        blocks.append({"header": header, "rows": rows,
+        blocks.append({"header": header, "rows": rows, "widths": widths,
                        "appended": appended, "ragged": ragged})
     return blocks
 
@@ -13349,9 +13796,34 @@ def _names_check_or_finding(cell: str) -> bool:
                           str(cell or ""), re.I))
 
 
-def disposition_artifact_problems(rows: list) -> list:
-    """Empty disposition cells and boilerplate closures in one seeded table."""
+def short_row_indexes(rows: list, widths, header_width: int) -> list:
+    """1-based positions of the rows that are NARROWER than their own header.
+
+    A short row is not a cosmetic detail: the reader pads it positionally, so
+    the session's verdict sits in the column before the disposition cell and
+    that cell reads EMPTY. `widths` is the per-row cell count from
+    `parse_markdown_blocks` (None/absent -> no row is reported as short).
+    """
+    if not widths or not header_width:
+        return []
+    return [i + 1 for i, _row in enumerate(rows)
+            if i < len(widths) and widths[i] < header_width]
+
+
+def disposition_artifact_problems(rows: list, widths=None, header_width: int = 0) -> list:
+    """Empty disposition cells and boilerplate closures in one seeded table.
+
+    `widths`/`header_width` are optional (the pure-fixture callers pass rows
+    only); when they are given, an EMPTY disposition cell that belongs to a row
+    which is NARROWER than the header is reported as exactly that -- a shifted
+    row -- because the fix is different: the session must re-emit the row with
+    one cell per seeded column and the verdict IN the last one, not "fill the
+    cell" (it is not there). A real review attempt rewrote OUTLINE.md's 185 rows
+    one cell short, which read as "185 of 185 EMPTY disposition cells".
+    """
     problems = []
+    # Measured against the UNFILTERED rows: `widths` is aligned with them.
+    short = short_row_indexes(rows, widths, header_width)
     rows = [r for r in rows if r]
     if not rows:
         return problems
@@ -13361,8 +13833,16 @@ def disposition_artifact_problems(rows: list) -> list:
     filled = [r for r in rows if str(r.get(key) or "").strip()]
     empty = len(rows) - len(filled)
     if empty:
-        problems.append(f"{empty} of {len(rows)} row(s) have an EMPTY {key} cell "
-                        f"(every seeded row must be disposed or reconciled)")
+        msg = (f"{empty} of {len(rows)} row(s) have an EMPTY {key} cell "
+               f"(every seeded row must be disposed or reconciled)")
+        if short:
+            msg += (f"; {len(short)} of those row(s) are NARROWER than the table's "
+                    f"{header_width}-column header (row {short[0]} has {widths[short[0] - 1]} "
+                    f"cell(s)) -- a short row is read POSITIONALLY, so anything written after the "
+                    f"seeded cells lands in the column before `{key}` and `{key}` itself reads "
+                    f"empty. Re-emit every row with exactly one cell per seeded column and put "
+                    f"the verdict IN the `{key}` cell (the last column)")
+        problems.append(msg)
     by_text = {}
     for r in filled:
         text = re.sub(r"\s+", " ", str(r.get(key)).strip().lower())
@@ -13464,7 +13944,8 @@ def artifact_quality_report(review_dir: Path) -> dict:
             rows = block["rows"]
             if not rows:
                 continue
-            problems = disposition_artifact_problems(rows)
+            problems = disposition_artifact_problems(rows, block.get("widths"),
+                                                      len(block["header"]))
             if rel.endswith("OUTLINE.md"):
                 problems += outline_artifact_problems(rows)
             if problems:
@@ -13483,16 +13964,27 @@ def artifact_quality_notes(review_dir: Path) -> dict:
     """
     notes = {}
     for rel in DECISION_ARTIFACTS:
-        appended = ragged = 0
+        appended = ragged = short = 0
+        first_short = ""
         for block in parse_markdown_blocks(review_dir / rel):
             appended += block["appended"]
             ragged += block["ragged"]
+            n_head = len(block["header"])
+            for i, w in enumerate(block.get("widths") or []):
+                if w < n_head:
+                    short += 1
+                    first_short = first_short or f"row {i + 1} has {w} cell(s), the header {n_head}"
         msgs = []
         if appended:
             msgs.append(f"{appended} row(s) carry one more cell than their header; the appended "
                         f"trailing cell was read as the "
                         f"{'/'.join(DISPOSITION_COLUMNS)} value -- write the verdict IN the "
                         f"seeded cell instead of after it")
+        if short:
+            msgs.append(f"{short} row(s) are NARROWER than their own header ({first_short}); a "
+                        f"short row is read positionally, so a verdict written after the seeded "
+                        f"cells lands one column early and the disposition cell reads EMPTY -- "
+                        f"re-emit those rows with one cell per column")
         if ragged:
             msgs.append(f"{ragged} row(s) do not match their table's column count and were read "
                         f"positionally; check the table")
@@ -15117,8 +15609,8 @@ def postcheck_audit(ctx: Ctx, rec: dict):
     """The auditor's deliverable: a complete, evidenced disposition of the review."""
     sb = ctx.sandbox_of(rec)
     errs, warns = [], []
-    marker = marker_json(sb)
-    _marker_checks(rec, marker, "audit", errs, warns)
+    marker = marker_json(sb, rec["kind"])
+    _marker_checks(rec, marker, "audit", errs, warns, sb=sb)
     errs.extend(structured_output_problems(ctx, rec))
     warns.extend(inherited_structured_output_notes(ctx, rec))
     frozen = _frozen_review_findings(sb)
@@ -15164,8 +15656,8 @@ def postcheck_audit(ctx: Ctx, rec: dict):
 def postcheck_review(ctx: Ctx, rec: dict):
     sb = ctx.sandbox_of(rec)
     errs, warns = [], []
-    marker = marker_json(sb)
-    _marker_checks(rec, marker, "review", errs, warns)
+    marker = marker_json(sb, rec["kind"])
+    _marker_checks(rec, marker, "review", errs, warns, sb=sb)
     errs.extend(structured_output_problems(ctx, rec))
     warns.extend(inherited_structured_output_notes(ctx, rec))
     fp = sb / FINDINGS_REL
@@ -15203,8 +15695,8 @@ def postcheck_review(ctx: Ctx, rec: dict):
 def postcheck_revise(ctx: Ctx, rec: dict):
     sb = ctx.sandbox_of(rec)
     errs, warns = [], []
-    marker = marker_json(sb)
-    _marker_checks(rec, marker, "revise", errs, warns)
+    marker = marker_json(sb, rec["kind"])
+    _marker_checks(rec, marker, "revise", errs, warns, sb=sb)
     errs.extend(structured_output_problems(ctx, rec))
     warns.extend(inherited_structured_output_notes(ctx, rec))
     rev = sb / REVISED_DIR
@@ -15219,56 +15711,10 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     # The revision ledger is the deliverable that proves "no finding silently
     # dropped": require the machine-readable one, and ask for a human-readable
     # counterpart.
-    if not (rev / "revision_report.json").is_file():
-        errs.append("revised/revision_report.json is missing: it is the revision ledger "
-                    "(one row per finding id, with verdict, rationale and evidence) that proves "
-                    "no finding was silently dropped")
-    else:
-        # Exists and parses is not enough: a model that writes `null`, a bare list
-        # or a one-line string satisfies structured_output_problems() while giving
-        # the author nothing to audit. The ledger is a list of finding rows (bare,
-        # or under ANY key -- the prompts fix the path and the row contract, not
-        # the key names; see ledger_named_ids), a mapping keyed by finding id, or
-        # a report object naming the ids. Only a payload that CANNOT be a ledger
-        # is a failure; an empty-but-typed ledger stays accepted (a genuine
-        # all-clean run has nothing to list) and is reported as a warning so the
-        # author can see it.
-        ledger = read_json(rev / "revision_report.json", revive=False, lenient=True)
-        if not isinstance(ledger, (list, dict)):
-            errs.append("revised/revision_report.json does not carry the revision ledger (expected "
-                        "a list of finding rows, an object whose rows live under any key, a "
-                        "mapping keyed by finding id, or an id list): it is the deliverable that "
-                        "proves no finding was silently dropped, so the run is retried rather "
-                        "than reported as complete")
-        elif not ledger:
-            _total = frozen_findings_total(ctx, rec)
-            if _total == 0:
-                # The contract above: a genuine all-clean review has nothing to
-                # list, so an empty-but-typed ledger is accepted with a warning.
-                warns.append("revised/revision_report.json lists no rows (the frozen review "
-                             "carried no findings); accepted as an all-clean ledger")
-            else:
-                errs.append("revised/revision_report.json is EMPTY/unfinished (structured output): "
-                            "it lists no revision row at all -- re-run so the ledger is written "
-                            "per finding id (verdict, rationale, evidence)")
-        else:
-            # A ledger that omits a finding is the "silently dropped" case the
-            # deliverable exists to prevent: the row count alone says nothing
-            # about WHICH findings were addressed.
-            _frozen_ids = frozen_finding_ids(ctx, rec)
-            if _frozen_ids:
-                _named = ledger_named_ids(ledger, _frozen_ids)
-                _missing = [i for i in _frozen_ids if i not in _named]
-                if _missing:
-                    errs.append(
-                        "revised/revision_report.json does not name "
-                        f"{len(_missing)} of the frozen review's "
-                        f"{len(_frozen_ids)} finding id(s): {', '.join(_missing[:6])}"
-                        + (" ..." if len(_missing) > 6 else "")
-                        + " -- the ledger is one row per finding id (the deliverable that proves "
-                          "no finding was silently dropped); an id must appear as structured "
-                          "data (a row's id field, a mapping key or an id list), not only in "
-                          "prose")
+    lerrs, lwarns = revision_ledger_problems(rev, frozen_finding_ids(ctx, rec),
+                                             frozen_findings_total(ctx, rec))
+    errs.extend(lerrs)
+    warns.extend(lwarns)
     if not (rev / "CHANGELOG.md").is_file() and not (rev / "REVISION_REPORT.md").is_file():
         warns.append("neither revised/CHANGELOG.md nor revised/REVISION_REPORT.md was found "
                      "(the human-readable ledger/change log)")
@@ -15464,8 +15910,8 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
     """
     sb = ctx.sandbox_of(rec)
     errs, warns = [], []
-    marker = marker_json(sb)
-    _marker_checks(rec, marker, "integrate", errs, warns)
+    marker = marker_json(sb, rec["kind"])
+    _marker_checks(rec, marker, "integrate", errs, warns, sb=sb)
     errs.extend(structured_output_problems(ctx, rec))
     warns.extend(inherited_structured_output_notes(ctx, rec))
     out = sb / INTEGRATED_DIR
@@ -15594,8 +16040,8 @@ def postcheck_rewrite(ctx: Ctx, rec: dict):
     """
     sb = ctx.sandbox_of(rec)
     errs, warns = [], []
-    marker = marker_json(sb)
-    _marker_checks(rec, marker, "rewrite", errs, warns)
+    marker = marker_json(sb, rec["kind"])
+    _marker_checks(rec, marker, "rewrite", errs, warns, sb=sb)
     errs.extend(structured_output_problems(ctx, rec))
     warns.extend(inherited_structured_output_notes(ctx, rec))
     out = sb / REWRITTEN_DIR
@@ -16049,8 +16495,8 @@ def postcheck_judge(ctx: Ctx, rec: dict):
     except Exception as e:                                            # noqa: BLE001
         warns.append(f"BLIND JUDGE GROUNDING: the code-side scan of the blinded target failed "
                      f"({type(e).__name__}: {e})")
-    sj = scores_json_of(sb)
-    marker = marker_json(sb)
+    sj = scores_json_of(sb, rec["kind"])
+    marker = marker_json(sb, rec["kind"])
     errs.extend(structured_output_problems(ctx, rec))
     warns.extend(inherited_structured_output_notes(ctx, rec))
     if sj is not None:
@@ -16065,8 +16511,12 @@ def postcheck_judge(ctx: Ctx, rec: dict):
             errs.append("scores.json is missing or unparseable although the marker claims "
                         "completion")
         else:
+            stray = (stray_signal_note(sb, rec, SCORES_FILE)
+                     or stray_signal_note(sb, rec, MARKER_FILE))
             errs.append("no completion signal: scores.json is missing/unparseable and no judge "
-                        "marker exists")
+                        "marker exists"
+                        + (f" -- {stray}" if stray else
+                           " -- both belong in the sandbox ROOT, next to PROMPT.md"))
     if isinstance(marker, dict):
         if marker.get("stage") not in (None, "judge"):
             errs.append(f"marker stage mismatch: expected 'judge', got {marker.get('stage')!r}")
@@ -16101,6 +16551,49 @@ def postcheck_judge(ctx: Ctx, rec: dict):
     return (not errs), errs, warns, None
 
 
+# One handler per run kind. `check_run_kind_support`/`run_kind_support_problems`
+# compare this table with REBUILD_HANDLERS and with the round's own plan, so a
+# stage that is planned but cannot be judged (or cannot be rebuilt after a
+# failed attempt) is reported before its agents are launched.
+POSTCHECK_HANDLERS = {
+    "a1": postcheck_a1,
+    "rewrite": postcheck_rewrite,
+    "review": postcheck_review,
+    "audit": postcheck_audit,
+    "revise": postcheck_revise,
+    "integrate": postcheck_integrate,
+    "judge": postcheck_judge,
+}
+
+
+def run_kind_support_problems(ctx: Ctx) -> list:
+    """Kinds this root's plan can produce that some dispatch table cannot handle.
+
+    Pure and cheap; returns one sentence per broken kind ([] when every planned
+    kind is postcheckable AND rebuildable). Called before a round launches its
+    agents: a missing REBUILDER is invisible until a run fails, and then it
+    costs the whole round (see REBUILD_HANDLERS).
+    """
+    problems = []
+    try:
+        rounds = max(1, int(ctx.rounds_count()))
+    except Exception:                                            # noqa: BLE001
+        rounds = 1
+    kinds = set()
+    for r in range(1, rounds + 1):
+        try:
+            kinds.update(str(e.get("kind") or "") for e in round_run_plan(ctx, r))
+        except Exception:                                        # noqa: BLE001
+            continue                    # an unplannable round is reported elsewhere
+    for kind in sorted(k for k in kinds if k):
+        missing = [table for table, reg in (("postcheck", POSTCHECK_HANDLERS),
+                                            ("rebuild", REBUILD_HANDLERS))
+                   if kind not in reg]
+        if missing:
+            problems.append(f"run kind {kind!r} has no {' and no '.join(missing)} handler")
+    return problems
+
+
 def postcheck(ctx: Ctx, rec: dict, source: str = "postcheck") -> bool:
     """Re-verify one attempt's deliverables and record its outcome.
 
@@ -16110,11 +16603,18 @@ def postcheck(ctx: Ctx, rec: dict, source: str = "postcheck") -> bool:
     no second agent ran.
     """
     kind = rec["kind"]
-    handlers = {"a1": postcheck_a1, "rewrite": postcheck_rewrite, "review": postcheck_review,
-                "audit": postcheck_audit,
-                "revise": postcheck_revise, "integrate": postcheck_integrate,
-                "judge": postcheck_judge}
-    handler = handlers.get(kind)
+    # ADOPT a completion signal that names this run but was written one
+    # directory down (an `audit/_pipeline_done.json`, a judge sheet inside
+    # `judge_review/`), BEFORE the handler reads it: the alternative is failing
+    # an attempt whose work is complete on the file's ADDRESS, and paying a
+    # whole rebuilt session for it. A stray signal that names another run or
+    # stage is not touched -- the handler's own error names it instead.
+    #
+    # The same rule covers the stage's REQUIRED bookkeeping deliverables (a
+    # reviser's `revision_report.json` written into the sandbox root instead of
+    # `revised/`): adopt the file the session actually wrote, never author one.
+    stray_notes = rescue_misplaced_deliverable(ctx, rec) + relocate_stray_signal(ctx, rec)
+    handler = POSTCHECK_HANDLERS.get(kind)
     if handler is None:
         ok, errs, warns = False, [f"unknown run kind {kind!r}"], []
     else:
@@ -16128,6 +16628,7 @@ def postcheck(ctx: Ctx, rec: dict, source: str = "postcheck") -> bool:
             ok, errs, warns = False, [
                 f"postcheck raised {type(e).__name__}: {e} "
                 f"(treated as a failed attempt; the sandbox is rebuilt on retry)"], []
+    warns = list(warns) + stray_notes
     rec["postcheck"] = {"ok": ok, "errors": errs, "warnings": warns, "checked_at": utcnow()}
     rec["status"] = "done" if ok else "failed"
     # A STOPPED session is resumable if its CLI printed a session id (see
@@ -16172,6 +16673,339 @@ def postcheck(ctx: Ctx, rec: dict, source: str = "postcheck") -> bool:
         rec["last_error"] = "; ".join(errs)[:600]
     ctx.log("postcheck", rec["id"], "ok" if ok else "failed")
     return ok
+
+
+# =====================================================================
+# THE SANDBOX SELF-CHECK (`selfcheck --sandbox <dir> --stage <kind>`)
+#
+# The prompts tell every session to run this BEFORE it writes the completion
+# marker (see `selfcheck_block`): it applies the postcheck's OWN detectors to
+# the sandbox and prints what the postcheck would reject, while the session's
+# context is still live. It exists because the two failure families below cost a
+# whole rebuilt attempt each on the 2026-09-23 root -- a review that rewrote
+# OUTLINE.md's 185 rows one cell short (its dispositions landed in the `summary`
+# column, so every row "had an EMPTY disposition cell") and an audit that wrote
+# its marker into `audit/`. Both are paperwork problems a session can fix in a
+# minute and neither was visible to the session that produced it.
+#
+# It is a PRE-FLIGHT, deliberately not a second verdict: the checks that need
+# the root's own state (the pristine-copy digests, the input manifests, the
+# judge's label set, the package's corpus rules) stay in the postcheck, and the
+# self-check says so. Everything it prints comes from the same function the
+# postcheck calls, so the two can never disagree.
+# =====================================================================
+
+SELFCHECK_STAGES = ("rewrite", "review", "audit", "revise", "integrate", "judge")
+
+# --- the stage's own bookkeeping deliverables --------------------------------
+# `required` FAILS an attempt when it is missing (the postcheck errors on it);
+# `expected` is recorded as a warning. Two layers read this table: the rescue
+# below (which moves a required file the session wrote one directory up into
+# place) and the pre-flight, so a session learns about a missing or mis-filed
+# deliverable while its context is still live. Manuscript documents are never in
+# either list -- a rescue moves BOOKKEEPING only.
+STAGE_DELIVERABLES = {
+    "review": {"required": (FINDINGS_REL,),
+               "expected": (FINDINGS_MD_REL, "review/round2/findings_extra.json",
+                            VISUAL_ARTIFACT_REVIEW)},
+    "audit": {"required": ("audit/audit.json",),
+              "expected": ("audit/AUDIT.md", "audit/DISPOSITION_AUDIT.md")},
+    "rewrite": {"required": (REWRITE_REPORT_REL,),
+                "expected": (f"{REWRITTEN_DIR}/VISUAL_CHECK.md",
+                             f"{REWRITTEN_DIR}/MANUAL_STEPS.md")},
+    "revise": {"required": ("revised/revision_report.json",),
+               "expected": (f"{REVISED_DIR}/REVISION_REPORT.md", f"{REVISED_DIR}/CHANGELOG.md",
+                            f"{REVISED_DIR}/DIFF_LEDGER.md", f"{REVISED_DIR}/MANUAL_STEPS.md",
+                            VISUAL_ARTIFACT_REVISED)},
+    "integrate": {"required": (INTEGRATION_LEDGER_REL,),
+                  "expected": (f"{INTEGRATED_DIR}/revision_report.json",
+                               f"{INTEGRATED_DIR}/REVISION_REPORT.md",
+                               f"{INTEGRATED_DIR}/CHANGELOG.md",
+                               f"{INTEGRATED_DIR}/MANUAL_STEPS.md",
+                               VISUAL_ARTIFACT_INTEGRATED)},
+# A judge's sheet IS its completion signal, so it belongs to
+    # `signal_search_dirs` (judge_review/) rather than to this rescue.
+    "judge": {"required": (), "expected": ("judge_review/artifacts/VIS_visual.md",)},
+}
+
+
+def _prompt_rewrite_level(sb: Path) -> str:
+    """The rewrite level THIS sandbox's prompt declares ("" when unreadable).
+
+    The arm's level lives in the run record, not in the sandbox -- but the prompt
+    states it verbatim ("=== THIS ARM'S LEVEL: STRUCTURAL ... ===" and "state the
+    level on its own line, literally `Level: structural`"), so the session and
+    its pre-flight can read it back and check the report against it.
+    """
+    try:
+        text = (sb / PROMPT_FILE).read_text("utf-8", "replace")[:20000]
+    except OSError:
+        return ""
+    m = re.search(r"THIS ARM'S LEVEL:\s*(structural|sentence)", text, re.IGNORECASE)
+    return m.group(1).lower() if m else ""
+
+
+def _usable_deliverable(p: Path) -> bool:
+    """Is this file worth ADOPTING into its canonical path?
+
+    Non-empty, and (for JSON) parseable: a truncated file moved into place would
+    only turn a "missing" failure into a "malformed" one, and the rescue exists
+    to preserve work, not to shuffle garbage.
+    """
+    try:
+        if not p.is_file() or p.stat().st_size == 0:
+            return False
+    except OSError:
+        return False
+    if p.suffix.lower() == ".json":
+        return read_json(p, revive=False, lenient=True) is not None
+    return True
+
+
+def rescue_misplaced_deliverable(ctx: Ctx, rec: dict) -> list:
+    """Move a REQUIRED bookkeeping deliverable the session wrote one level up.
+
+    The exact analogue of `relocate_stray_signal`, for the same failure family
+    that cost the 2026-09-23 root a whole session: work that happened, filed at
+    the wrong address. A reviser whose `revision_report.json` sits in the sandbox
+    root (or in its own `work/` scratch) instead of `revised/` used to FAIL the
+    attempt -- and a rebuilt attempt re-reads the whole corpus to write the file
+    again.
+
+    Deliberately narrow: only the names in `STAGE_DELIVERABLES[...]["required"]`,
+    only from the sandbox root or the session's OWN `work/` scratch (never from a
+    read-only input area: `base/`, `non_revised/`, `review/` for non-review
+    stages, `audit/`, `self/`, `others/`, `target/`, `field/`, `original/`), and
+    never for a manuscript document -- a document belongs to the package's
+    document set and is handled by the recovery layer, which knows the corpus.
+    """
+    kind = rec.get("kind")
+    table = STAGE_DELIVERABLES.get(str(kind)) or {}
+    sb = ctx.sandbox_of(rec)
+    if not sb.is_dir():
+        return []
+    notes = []
+    for rel in table.get("required", ()):
+        target = sb / rel
+        if str(rel) == SCORES_FILE or target.is_file():
+            continue
+        pkg = Path(rel).parent
+        name = Path(rel).name
+        # Where a session plausibly writes the file: the root, its own package's
+        # work/ scratch, or the sandbox-level work/ (the rewrite/revise/integrate
+        # layout's evidence directory).
+        cands = [sb / name]
+        if pkg != Path("."):
+            cands.append(sb / pkg / "work" / name)
+        cands.append(sb / "work" / name)
+        src = next((c for c in cands if _usable_deliverable(c)), None)
+        if src is None:
+            continue
+        src_rel = src.relative_to(sb).as_posix()
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(target))
+        except OSError as e:                                     # noqa: BLE001
+            notes.append(f"the `{name}` written to `{src_rel}` could not be moved to `{rel}` "
+                         f"({type(e).__name__}: {e}); it will not be read from there")
+            continue
+        notes.append(f"the required `{rel}` was written to `{src_rel}` instead of `{rel}`; it is "
+                     f"ADOPTED (moved into place) -- the prompts pin the deliverable's path")
+        print(f"  [warn] {rec.get('id')}: {notes[-1]}")
+    return notes
+
+
+def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tuple:
+    """(ok, errors, warnings) for the paperwork of one sandbox (read-only).
+
+    `kind` is the run's stage; `run_id`/`r` are only used to CHECK the marker.
+    Every check below is the postcheck's OWN detector (called, not re-implemented),
+    so the pre-flight can never disagree with the verdict it previews.
+    """
+    kind = str(kind or "")
+    errs, warns = [], []
+    if kind not in SELFCHECK_STAGES:
+        return False, [f"unknown stage {kind!r} (known: {', '.join(SELFCHECK_STAGES)})"], []
+    # `round` stays None when the caller did not supply one: the marker's own
+    # round is then not checked (a wrong ROUND is a detail the operator can see
+    # in the marker, and reporting a mismatch against a round nobody claimed
+    # would be noise).
+    rec = {"id": run_id, "kind": kind, "round": (int(r) if r else None)}
+    if not sb.is_dir():
+        return False, [f"the sandbox {sb} does not exist"], []
+    # 1. the completion signal: it must be at the ROOT and it must name THIS run
+    marker = marker_json(sb, kind)
+    _marker_checks(rec, marker, kind, errs, warns, sb=sb)
+    # 2. the stage's own deliverables: the REQUIRED ones fail an attempt in the
+    #    postcheck, the EXPECTED ones are warnings there too.
+    table = STAGE_DELIVERABLES.get(kind) or {}
+    for rel in table.get("required", ()):
+        if not (sb / rel).is_file():
+            errs.append(f"{rel} is missing (the postcheck fails an attempt without it)")
+    for rel in table.get("expected", ()):
+        if not (sb / rel).is_file():
+            warns.append(f"{rel} is missing (reported by the postcheck as a warning)")
+    # 3. any structured output that EXISTS must parse (the postcheck's own parse
+    #    gate: a truncated sheet must never be reported as complete).
+    for rel, p in structured_output_files(sb, {"kind": kind}):
+        problem = _structured_problem_for(rel, p)
+        if problem:
+            errs.append(problem)
+    # 4. the stage-specific contracts, each through the postcheck's own helper
+    if kind == "review":
+        fj = read_json(sb / FINDINGS_REL, revive=False, lenient=True)
+        if not isinstance(fj, dict):
+            errs.append(f"{FINDINGS_REL} is missing or does not parse as a JSON object "
+                        f"(it is the deliverable Phase 2 consumes)")
+        elif not isinstance(fj.get("findings"), list):
+            errs.append(f"{FINDINGS_REL} has no 'findings' list")
+        else:
+            # `check_review_contract` needs no pipeline state (it verifies the
+            # corpus pointer, the coverage table and the M1b long-form gate), so
+            # the session gets the whole contract, not a summary of it.
+            check_review_contract(None, sb, fj, errs, warns)
+        report = artifact_quality_report(sb / REVIEW_DIR)
+        for rel, problems in sorted(report.items()):
+            for p in problems:
+                errs.append(f"decision artifact {rel}: {p}")
+        for rel, notes in sorted(artifact_quality_notes(sb / REVIEW_DIR).items()):
+            for n in notes:
+                warns.append(f"decision artifact {rel}: {n}")
+        if word_docs_present([sb / "base"]):
+            check_visual_artifact(sb / VISUAL_ARTIFACT_REVIEW,
+                                  f"the visual-inspection record {VISUAL_ARTIFACT_REVIEW}",
+                                  errs, warns, render_roots=[sb / REVIEW_DIR])
+    elif kind == "audit":
+        aj = sb / "audit" / "audit.json"
+        if not aj.is_file():
+            errs.append("audit/audit.json is missing: the auditor's dispositions are the "
+                        "deliverable the revisers consume")
+        else:
+            errs.extend(audit_artifact_problems(
+                read_json(aj, revive=False, lenient=True),
+                [str(f.get("id") or "").strip() for f in _frozen_review_findings(sb)
+                 if str(f.get("id") or "").strip()]))
+        if not (sb / "audit" / "AUDIT.md").is_file():
+            warns.append("audit/AUDIT.md (the human-readable disposition record) is missing")
+    elif kind in ("rewrite", "revise", "integrate"):
+        pkg = output_dir_of(rec)
+        d = sb / pkg
+        if not (d.is_dir() and any(d.iterdir())):
+            errs.append(f"{pkg}/ is empty: this stage's deliverable is the candidate package it "
+                        f"writes there")
+        if kind == "revise":
+            # The ledger contract: one row per finding id the reviser had to
+            # resolve. This is the check that failed every attempt of two real
+            # revise sessions (their rows lived under a key the reader did not
+            # know); it now runs BEFORE the marker too.
+            frozen = findings_from_sandbox(sb, sandbox_audit_record(sb))
+            ids = [str(f.get("id")).strip() for f in frozen
+                   if isinstance(f.get("id"), str) and str(f.get("id")).strip()]
+            total = len(ids) if (sb / FINDINGS_REL).exists() else None
+            lerrs, lwarns = revision_ledger_problems(d, ids, total,
+                                                     "revised/revision_report.json")
+            errs.extend(lerrs)
+            warns.extend(lwarns)
+        if kind == "integrate":
+            donors = [p.name for p in sorted((sb / "others").iterdir()) if p.is_dir()] \
+                if (sb / "others").is_dir() else []
+            led = integration_ledger_report(d, donors, expect_both_levels=False)
+            if led["rows"] and led["missing_artifact"]:
+                errs.append(f"integrate: {len(led['missing_artifact'])} ledger row(s) carry no "
+                            f"`artifact` (a before/after pair for a small row, an outline diff "
+                            f"for a large row) -- the row cannot be re-checked")
+            if not led["rows"]:
+                warns.append(f"{INTEGRATION_LEDGER_REL} could not be parsed as a table (the "
+                             f"per-difference artifacts, the size classes and the finding-effect "
+                             f"column cannot be checked)")
+        if kind == "rewrite":
+            level = _prompt_rewrite_level(sb)
+            if level and (sb / REWRITE_REPORT_REL).is_file():
+                declared = None
+                try:
+                    declared = re.search(r"(?im)^\s*(?:[-*]\s*)?LEVEL\s*[:=]\s*"
+                                         r"(structural|sentence)\b",
+                                         (sb / REWRITE_REPORT_REL).read_text("utf-8",
+                                                                              "replace")[:4000])
+                except OSError:
+                    declared = None
+                if declared is None:
+                    warns.append(f"rewrite: REWRITE_REPORT.md does not state the arm's level "
+                                 f"({level!r}) on its own line (`Level: {level}`)")
+                elif declared.group(1).lower() != level:
+                    errs.append(f"rewrite: REWRITE_REPORT.md declares level "
+                                f"{declared.group(1).lower()!r} but this arm is {level!r} -- the "
+                                f"round stages one structural and one sentence-level arm so the "
+                                f"pool has both kinds of difference")
+        # W-12's language pass: one row per change plus one coverage row per step.
+        lp = language_pass_report(d)
+        if not lp["present"]:
+            errs.append(f"{kind}: no work/R6_language.md -- the L1-L11 language pass is a "
+                        f"required artifact of every package-producing stage: one row per change "
+                        f"plus one coverage row per step (including the steps that changed "
+                        f"nothing)")
+        elif lp["missing"]:
+            errs.append(f"{kind}: the language pass covers {11 - len(lp['missing'])}/11 steps; no "
+                        f"coverage row for {', '.join(lp['missing'])} (a step with no row is an "
+                        f"unaudited step)")
+        visual = {REWRITTEN_DIR: VISUAL_ARTIFACT_REWRITTEN,
+                  REVISED_DIR: VISUAL_ARTIFACT_REVISED,
+                  INTEGRATED_DIR: VISUAL_ARTIFACT_INTEGRATED}.get(pkg)
+        if visual and d.is_dir() and word_docs_present([d]):
+            check_visual_artifact(sb / visual, f"the visual-inspection record {visual}",
+                                  errs, warns, render_roots=[d])
+    elif kind == "judge":
+        sj = scores_json_of(sb, kind)
+        jr = sb / "judge_review"
+        if not (jr.is_dir() and any(p.is_file() for p in jr.rglob("*"))):
+            errs.append("judge_review/ is missing or empty: the corpus inventory and the sweep "
+                        "artifacts are required there")
+        if sj is None:
+            errs.append("scores.json is missing from the sandbox root or does not parse as a "
+                        "JSON object")
+        else:
+            # The sheet's own schema, ledger arithmetic and coverage map, through
+            # the postcheck's validator. The issued labels ARE the sandbox's
+            # `field/` directories, and the session's opaque token is the sheet's
+            # own target_id (the postcheck holds the real value); what this
+            # reproduces exactly is everything the session can get wrong.
+            labels = {p.name: p.name for p in sorted((sb / "field").iterdir())
+                      if p.is_dir()} if (sb / "field").is_dir() else {}
+            token = sj.get("target_id")
+            jrec = {"id": run_id or sb.name, "kind": "judge",
+                    "round": (int(r) if r else None), "label_map": labels,
+                    "judge_target_token": token, "target_id": token,
+                    "judge_index": sj.get("judge_index"),
+                    "contract": JUDGE_CONTRACT_VERSION}
+            verrs, vwarns = validate_judge_sheet(sj, jrec)
+            errs.extend(verrs)
+            warns.extend(vwarns)
+        if word_docs_present([sb / "target", sb / "field", sb / "original"]):
+            check_visual_artifact(jr / "artifacts" / "VIS_visual.md",
+                                  f"the visual-inspection record {VISUAL_ARTIFACT_JUDGE}",
+                                  errs, warns, render_roots=[jr])
+    return (not errs), errs, warns
+
+
+def cmd_selfcheck(args) -> None:
+    """`selfcheck`: print the postcheck's paperwork verdict for one sandbox."""
+    sb = Path(args.sandbox).expanduser().resolve()
+    ok, errs, warns = sandbox_selfcheck(sb, args.stage, args.run_id or sb.name,
+                                        args.round or 0)
+    print(f"SELF-CHECK  stage={args.stage}  sandbox={sb}")
+    for w in warns:
+        print(f"  [warn] {w}")
+    for e in errs:
+        print(f"  [FAIL] {e}")
+    if ok:
+        print(f"  [ok]   the paperwork checks passed: the postcheck's own detectors found "
+              f"nothing to reject"
+              + (" (content checks that need the pipeline root still run at postcheck time)"
+                 if not warns else ""))
+        raise SystemExit(0)
+    print(f"  {len(errs)} problem(s): fix them, re-run this check, and write the completion "
+          f"marker LAST (the postcheck reads the same files)")
+    raise SystemExit(1)
 
 
 # =====================================================================
@@ -17536,7 +18370,11 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
             print(f"  [{label}] PAUSED (not failed): {paused} already contain agent output but "
                   f"no completion marker.")
         if hard:
-            print(f"  [{label}] FAILED after {max_rounds} attempt(s): {hard}")
+            # Same rule as the round scheduler: name each run's OWN attempt
+            # count, because a run can stop for a reason outside its budget.
+            print(f"  [{label}] FAILED: " + ", ".join(
+                f"{rid} ({int(ctx.run(rid).get('attempts') or 0)} attempt(s), "
+                f"budget {max_rounds})" for rid in hard))
             for rid in hard[:6]:
                 err = (ctx.run(rid).get("last_error") or "")[:200]
                 if err:
@@ -17635,6 +18473,18 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
     Returns (all_done, paused_for_manual) exactly like `run_phase`.
     """
     plan = round_run_plan(ctx, r)
+    # FAIL FAST on a plan this build cannot finish. A run kind with no
+    # postcheck handler or no sandbox rebuilder only shows itself when a run
+    # fails -- and then it blocks the round (the 2026-09-23 audit stage: no
+    # rebuilder, so the first retry of a 20-minute session gave up after one of
+    # three attempts and took `a2` and i1-i4 with it). Nothing is launched yet,
+    # so this is the cheapest possible place to refuse.
+    support = run_kind_support_problems(ctx)
+    if support:
+        die(f"this pipeline build cannot drive the round {r} plan: " + "; ".join(support)
+            + ". Every kind the plan can produce needs a postcheck handler AND a sandbox "
+              "rebuilder (POSTCHECK_HANDLERS / REBUILD_HANDLERS); nothing was launched, so no "
+              "state was changed.")
     if only:
         full = list(plan)
         keep = [only.entry_selected(r, e) for e in full]
@@ -17766,6 +18616,13 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
             print(f"  [info] {rid}: {exc}")
         except Exception as exc:                            # noqa: BLE001
             print(f"  [warn] {rid}: sandbox rebuild failed ({exc}); leaving it failed")
+            # The reason must survive the invocation: the console line is the
+            # only other place it appears, and this is an OPERATOR-level blocker
+            # (nothing about the next attempt can fix it) while the run record
+            # still said only what the postcheck had found.
+            rec["last_error"] = (str(rec.get("last_error") or "")
+                                 + f" | sandbox rebuild failed: {exc}")[:600].lstrip(" |")
+            ctx.log("rebuild-failed", rid, str(exc)[:300])
             failed_hard.append(rid)
 
     with ThreadPoolExecutor(max_workers=max(1, int(jobs))) as ex:
@@ -17897,7 +18754,15 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
             never_started = [rid for rid in hard if not (ctx.run(rid) or {}).get("attempts")]
             tried = [rid for rid in hard if rid not in never_started]
             if tried:
-                print(f"  [{label}] FAILED after {max_attempts} attempt(s): " + ", ".join(tried))
+                # Each run's OWN attempt count, never the invocation's budget: a
+                # run that failed for a reason OUTSIDE its retry budget (a
+                # sandbox that could not be rebuilt, an internal error) never
+                # spent it, and reporting "FAILED after 3 attempt(s)" for a run
+                # with one attempt sends the operator hunting for two attempts
+                # that never happened (2026-09-23: r1_audit).
+                print(f"  [{label}] FAILED: " + ", ".join(
+                    f"{rid} ({int((ctx.run(rid) or {}).get('attempts') or 0)} attempt(s), "
+                    f"budget {max_attempts})" for rid in tried))
             if never_started:
                 print(f"  [{label}] never started (an upstream run is not done): "
                       + ", ".join(never_started))
@@ -21861,6 +22726,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     pst = sub.add_parser("status", parents=[common], help="show round/run status")
     pst.set_defaults(func=cmd_status)
+
+    # The sessions' own pre-flight (see `sandbox_selfcheck`): the stage prompts
+    # tell every session to run it in the sandbox BEFORE it writes the marker.
+    # Deliberately root-free and read-only, so a session (or the operator) can
+    # ask "what would the postcheck say about this sandbox?" at any time.
+    psc = sub.add_parser("selfcheck",
+                         help="print the postcheck's own paperwork verdict for one sandbox "
+                              "(the marker and its location, the deliverables, the decision "
+                              "tables, the audit sheet); read-only, needs no --root")
+    psc.add_argument("--sandbox", required=True,
+                     help="the run's sandbox (the directory holding PROMPT.md)")
+    psc.add_argument("--stage", required=True, choices=list(SELFCHECK_STAGES),
+                     help="the run's stage/kind")
+    psc.add_argument("--run-id", default=None,
+                     help="the run id the marker must name (default: the sandbox's own name)")
+    psc.add_argument("--round", type=int, default=0,
+                     help="the round the marker must name (0 = do not check the round)")
+    psc.set_defaults(func=cmd_selfcheck)
 
     pag = sub.add_parser("agents", parents=[common], aliases=["sessions"],
                          help="list the agent session names each round will run (a dry plan)")

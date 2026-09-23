@@ -845,11 +845,76 @@ that drive or mutate a root also keep their whole console in
 retry/backoff decisions, the judge advisories and the `[repair] …` decisions of
 an old invocation stay readable next to the reports they produced.
 
+### The completion signal's location, and the session's own self-check
+
+`_pipeline_done.json` (a judge's `scores.json`) is the orchestrator's ONLY
+completion signal and it belongs to the **sandbox root** — the directory that
+holds `PROMPT.md`, `base/` and the stage's output directory. Every prompt now
+says so in the same words (`marker_root_rule`), because the 2026-09-23 root lost
+a 20-minute audit session to a marker written into `audit/`: the audit
+directives' own "write everything inside `audit/`" invited it, the postcheck read
+the root, and the attempt failed on the file's ADDRESS.
+
+Three independent layers now cover that class:
+
+| layer | what it does |
+|---|---|
+| the prompts | state the exact location (`SANDBOX ROOT … not inside <stage dir>/`) in every stage, next to the marker's fields |
+| the postcheck | ADOPTS a signal that names this run and stage from the stage's own directory (moves it to the root, records a warning naming the stray path) — nothing about the work changed, only its address. A file that names ANOTHER run or stage is never adopted: the failure message names where it is and what it really says |
+| `selfcheck` | `python nbt_pipeline.py selfcheck --sandbox <dir> --stage <kind> [--run-id <id>] [--round <r>]` — the postcheck's own detectors applied to one sandbox, read-only, no `--root` needed. Every stage prompt tells the session to run it from the sandbox root BEFORE it writes the marker, so a session fixes its own paperwork while its context is still live instead of paying a rebuilt attempt |
+
+`selfcheck` is a pre-flight, not a second verdict: it reports the marker and its
+location, the stage's deliverables (present, parseable), the seeded decision
+tables' dispositions and the audit sheet — the checks the postcheck performs
+itself. The checks that need the root's state (the pristine-copy digests, the
+input manifests, a judge's label set, the package's corpus rules) stay in the
+postcheck and still run there.
+
+**A row that is one cell short is not an undisposed row, it is a SHIFTED one.**
+The decision tables are read positionally, so a row re-emitted with one cell
+fewer than its header puts the verdict in the column before the disposition
+cell: the 2026-09-23 review rewrote OUTLINE.md's 185 rows that way and every row
+read as `EMPTY disposition cell`, at the cost of the whole 25-minute session.
+The detector now measures each row against its own header and says so (`N of N
+row(s) … are NARROWER than the table's 10-column header (row 1 has 9 cell(s))`),
+the decision-artifact mandate forbids changing a seeded row's shape, and the
+seeded tables carry the reminder next to the data.
+
+**The same layers cover every other stage's paperwork.** The failure family is
+"the work happened, the file's ADDRESS is wrong", and it is not specific to the
+marker or to the review:
+
+| stage | what is adopted / caught before the marker |
+|---|---|
+| `rewrite` | `rewritten/REWRITE_REPORT.md` written into the sandbox root (adopted); the report's declared `Level:` checked against the arm the prompt states; the L1-L11 language pass and the visual record |
+| `review` | `review/findings.json` in the wrong place (adopted); the whole review contract (the corpus pointer, every check id's coverage row, the M1b long-form gate) and the decision tables |
+| `audit` | `audit/audit.json` / `audit/AUDIT.md` in the wrong place (adopted); the disposition sheet's own contract; `audit/audit.json` joins the structured-output PARSE gate; a crashed process with a complete sheet is re-verified instead of re-run |
+| `revise` | `revised/revision_report.json` written into the root or into `revised/work/` (adopted); the ledger's finding coverage measured against the AUDITED list the sandbox itself carries; the language pass and the visual record |
+| `integrate` | `integrated/DIFF_LEDGER.md` in the wrong place (adopted); every ledger row's `artifact` cell (the strict rule) and the language pass |
+| `judge` | `scores.json` inside `judge_review/` (adopted); the sheet's schema, its score-vs-ledger arithmetic, its per-opponent `checks` map and its coverage of every issued label |
+
+Nothing in either list is a manuscript document: the rescue moves BOOKKEEPING
+only, never a `.docx`/`.tex`/`.bib`/figure, and never a file out of a read-only
+input area (`base/`, `non_revised/`, `review/`, `audit/`, `self/`, `others/`,
+`target/`, `field/`, `original/`) -- a document belongs to the package's document
+set and stays the recovery layer's business. The pre-flight is read-only: it
+never moves the file, it tells the session to.
+
+**Every run kind the plan can produce is postcheckable AND rebuildable.** The
+materializer of each kind lives in one table (`REBUILD_HANDLERS`) next to the
+postcheck's (`POSTCHECK_HANDLERS`); a round refuses to launch when a planned kind
+is missing from either table, and a rebuild that still fails for an internal
+reason records the reason on the run (`last_error` + the run log) instead of
+only printing it once. That is what the 2026-09-23 `r1_audit` failure needed:
+the audit stage had no rebuilder, so the retry died before doing anything, the
+run was abandoned after 1 of its 3 attempts, and the round's `a2` revision and
+its four integration runs never started.
+
 ## Repository layout
 
 | path | purpose |
 |---|---|
-| `nbt_pipeline.py` | the orchestrator (setup / run / run-decide / decide / retry / status / prune / redline) |
+| `nbt_pipeline.py` | the orchestrator (setup / run / run-decide / decide / retry / status / selfcheck / prune / redline) |
 | `nbt_docx_format.py` | OOXML style/formatting scanner, fixer and blank-page checker |
 | `nbt_redlines_adapter.py` | tracked-changes bridge (`python-redlines[docxodus]`) |
 | `docx2pdf.sh` | Word→PDF conversion via PowerShell (WSL/Git Bash) |
@@ -861,7 +926,7 @@ an old invocation stay readable next to the reports they produced.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 33 suites in ~110 s
+any failure. They are independent, so run them in parallel — 37 suites in ~110 s
 on a 20-core box, against ~5.5 min sequentially:
 
 ```bash
