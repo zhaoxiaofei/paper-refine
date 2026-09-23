@@ -30,7 +30,7 @@ The repository also carries the two companion tools the pipeline uses:
 
 ```bash
 # 1. create a pipeline root from the pristine submission directory
-python nbt_pipeline.py setup --source /path/to/non-revised --root ./nbt_rounds
+python nbt_pipeline.py setup --source /path/to/non_revised --root ./nbt_rounds
 
 # 2. run all rounds and decide (or run + decide as separate steps)
 python nbt_pipeline.py run-decide --root ./nbt_rounds
@@ -165,6 +165,53 @@ Each run keeps its sandbox under `runs/<id>/` (`base/`, `review/`, the stage's
 own output directory, `PROMPT.md`, `_pipeline_done.json`). Completion is a
 marker file, never "the directory is non-empty"; every published winner and pin
 is verified against the digest of the corpus the judges actually scored.
+
+### The two input areas, and the read-only `raw_data/` directory
+
+Every corpus the pipeline handles carries two areas that are **inputs**, never
+revision content:
+
+| area | what it is | rule |
+|---|---|---|
+| `non_revised/` (in the root) | the pristine copy of `--source` | read-only: re-hashed at the start of every `run`/`decide`, byte-verified in every sandbox, never written (the operator's `--source` is never touched at all) |
+| `raw_data/` (inside each corpus) | the raw data — figure and table sources, data tables, the analysis snapshot the author's own scripts regenerate | read-only: a package CARRIES it, and the pipeline puts the untouched original's copy back after every package-producing stage |
+
+Both names are this repo's snake_case spellings of older ones — `non-revised/`
+and `raw_figs/` — and **both spellings of each name stay resolved**: a sandbox
+area is found under either spelling (`area_dir`, `pristine_dirname`,
+`raw_data_dirname`) and the raw-data manifest keys are normalised, so renaming
+one of the directories never reads as a modification of the corpus.
+
+Nothing in the pipeline MOVES an existing directory: a root or a corpus set up
+under the older spellings keeps them (`runs` and `pinned/` keep their recorded
+manifests either way, and `ctx.pristine` resolves whichever spelling is on
+disk). Only a root created by `setup` gets the canonical names. Inside a
+package, the raw-data directory is materialized under its canonical name: a
+corpus whose directory is still `raw_figs/` appears in the package as
+`raw_data/`, with every reference to it (`\input{raw_figs/...}`,
+`\includegraphics{raw_figs/...}`, build scripts) repointed — the directory's
+file names and bytes are untouched. Rename an existing root by hand if you want
+the new spelling there too; every check accepts either.
+
+The raw-data rule is enforced, not merely requested:
+
+* the version-token rule never renames anything inside it, and a token found on
+  such a file name is not read as this package's naming evidence;
+* after every rewrite / revise / integrate session the directory is compared,
+  file by file, against the untouched original: an edited file is restored, a
+  dropped one is copied back, one the original does not have is removed, and a
+  directory squatting on an original file's path is left alone (the recovery
+  layer refuses to delete real work and fails that attempt) — each case is named
+  in a `READ-ONLY raw data:` warning and counted in the run record
+  (`runs.<id>.raw_data`);
+* a pinned champion or published winner that carries raw-data edits from before
+  the rule existed is REPORTED (never rewritten) when `run`/`decide` start; the
+  next stage materializes the original's copy, so the deviation cannot reach a
+  new package. The pin/winner comparison leaves the raw-data area out of both
+  sides for the same reason.
+
+Nothing in the area is ever a scored difference: a version is not rewarded for
+changing raw data and none is penalized for leaving it exactly as it is.
 
 ## Running only some of the steps
 
@@ -867,6 +914,8 @@ its before/after delta),
 
 * `--root` and `--source` must not be nested; `setup` refuses a non-empty root.
 * The pipeline never edits the operator's `--source`; every copy it makes
-  (`non-revised/`, `base/`, pins, winners) is digest-verified.
+  (`non_revised/`, `base/`, pins, winners) is digest-verified, and the
+  corpus's read-only `raw_data/` directory (see "The two input areas") is
+  restored from that pristine copy whenever a stage touches it.
 * On WSL, `/mnt/c` occasionally returns transient `EIO` errors under a synced
   folder; re-running the affected command is safe (the pipeline is resumable).

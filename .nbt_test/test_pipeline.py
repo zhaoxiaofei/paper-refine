@@ -87,7 +87,7 @@ def test_prompts():
     check("integration prompt forbids shipping stale derived build outputs",
           "DERIVED BUILD OUTPUTS" in builders["integrate"])
     check("revise prompt overrides 'copy unchanged from non-revised/'",
-          "never from\n     non-revised/" in rev and "REVERT" in rev)
+          "never from\n     non_revised/" in rev and "REVERT" in rev)
     # parser default
     parser = np.build_parser()
     args = parser.parse_args(["setup", "--source", "/tmp"])

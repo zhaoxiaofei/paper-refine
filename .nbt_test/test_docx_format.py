@@ -751,7 +751,7 @@ def test_setup_normalization():
     check("setup reports the FORMAT-FIX", "FORMAT-FIX" in out, out[-300:])
     check("the operator's --source file is byte-identical afterwards",
           _sha(src / "manuscript.docx") == before)
-    pristine = root / "non-revised" / "manuscript.docx"
+    pristine = root / "non_revised" / "manuscript.docx"
     check("the root's pristine copy has no break-only paragraph left",
           "FMT-S1" not in rules(fmt.scan_paths([pristine], fmt.load_policy(None))["rows"]))
     state = json.loads((root / "state.json").read_text(encoding="utf-8"))
@@ -769,7 +769,7 @@ def test_setup_normalization():
                            capture_output=True, text=True, timeout=600)
     check("--format-fix off succeeds", proc2.returncode == 0, (proc2.stdout + proc2.stderr)[-200:])
     check("--format-fix off keeps the pristine copy byte-identical",
-          _sha(root2 / "non-revised" / "manuscript.docx") == before)
+          _sha(root2 / "non_revised" / "manuscript.docx") == before)
     check("--format-fix off records no fix",
           (json.loads((root2 / "state.json").read_text(encoding="utf-8"))
            .get("original_format_fix") or {}).get("skipped") == "format_fix=off"

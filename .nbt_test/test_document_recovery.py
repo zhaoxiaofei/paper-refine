@@ -162,7 +162,7 @@ def main() -> int:
     check("D1 run is not FAILED (was: hard error, 3 attempts, round lost)", ok,
           str(pc["errors"]))
     check("D1 dropped file restored into revised/",
-          (sb / "revised" / "raw_figs" / "entire_pipeline.git-snapshot.txt").is_file())
+          (sb / "revised" / "raw_data" / "entire_pipeline.git-snapshot.txt").is_file())
     check("D1 RECOVERY warning names the file",
           "RECOVERY" in warn_text and "entire_pipeline.git-snapshot.txt" in warn_text)
     check("D1 no missing-document error remains", not pc["errors"])
@@ -246,7 +246,7 @@ def main() -> int:
     ctx = build_root(tmp)
     rec, sb = build_revise_sandbox(ctx, empty=("raw_figs/entire_pipeline.git-snapshot.txt",))
     ok = nb.postcheck(ctx, rec)
-    f = sb / "revised" / "raw_figs" / "entire_pipeline.git-snapshot.txt"
+    f = sb / "revised" / "raw_data" / "entire_pipeline.git-snapshot.txt"
     check("D6 run ok", ok, str(rec["postcheck"]["errors"]))
     check("D6 truncation restored non-empty", f.is_file() and f.stat().st_size > 0)
 
@@ -282,7 +282,7 @@ def main() -> int:
                                "non-revised": nb.hash_manifest(sb17 / "non-revised")}
     ok = nb.postcheck(ctx, recb)
     check("D7 integration run ok, git snapshot restored from self/",
-          ok and (rev17 / "raw_figs" / "entire_pipeline.git-snapshot.txt").is_file(),
+          ok and (rev17 / "raw_data" / "entire_pipeline.git-snapshot.txt").is_file(),
           str(recb["postcheck"]["errors"]))
 
     # ---- D8: the file name survives console truncation ----------------

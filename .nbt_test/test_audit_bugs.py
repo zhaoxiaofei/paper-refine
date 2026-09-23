@@ -176,7 +176,7 @@ def test_partial_copies_are_repaired():
     print()
     print("== B. materialization repairs a partial (crash-truncated) copy ==")
 
-    # --- materialize_revise: base/, non-revised/ and review/ -----------------
+    # --- materialize_revise: base/, non_revised/ and review/ -------------------
     tmp = scratch("nbt_bug_b1_")
     ctx = build_root(tmp)
     rev = nb.materialize_review(ctx, 1)
@@ -186,17 +186,17 @@ def test_partial_copies_are_repaired():
     sb = ctx.runs_dir / rid
     # simulate "killed in the middle of the copy": only ONE file made it
     write(sb / "base" / "manuscript-b.md", "title\n")
-    write(sb / "non-revised" / "manuscript-b.md", "title\n")
+    write(sb / "non_revised" / "manuscript-b.md", "title\n")
     write(sb / "review" / "findings.json", "{}")
     rec = nb.materialize_revise(ctx, 1, "a2")
     base_ok = nb.dir_matches(sb / "base",
                              nb.hash_manifest(ctx.sandbox_of(ctx.run("r1_a1")) / "base")["files"])
-    nr_ok = nb.dir_matches(sb / "non-revised", ctx.source_manifest["files"])
+    nr_ok = nb.dir_matches(sb / "non_revised", ctx.source_manifest["files"])
     review_ok = nb.dir_matches(sb / "review",
                                nb.hash_manifest(ctx.sandbox_of(rev) / "review")["files"])
     check("B a truncated revise base/ is rebuilt from the round's base", base_ok,
           str(sorted((rec["inputs_manifest"]["base"]["files"]))))
-    check("B a truncated revise non-revised/ is rebuilt from the pristine original", nr_ok)
+    check("B a truncated revise non_revised/ is rebuilt from the pristine original", nr_ok)
     check("B a truncated frozen review/ is rebuilt from the review run", review_ok)
     check("B the recorded inputs_manifest is the FULL upstream corpus",
           set(rec["inputs_manifest"]["base"]["files"]) ==

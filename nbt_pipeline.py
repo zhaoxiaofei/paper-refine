@@ -171,7 +171,7 @@ STAGING DEPENDENCY ORDER (a DAG: every run starts as soon as its inputs exist)
 -----------------------------------------------------------------------------
     (i)   runs/r<R>_a1/         base copy only, no agent run. Everything else
           depends on it.
-    (ii)  the WRITES: runs/r<R>_w1..wM/ (M rewrites: base/ + non-revised/ +
+    (ii)  the WRITES: runs/r<R>_w1..wM/ (M rewrites: base/ + non_revised/ +
           rewritten/) and runs/r<R>_review/ (ONE review pass; skipped when
           --revises is 0) both depend only on a1, so they START TOGETHER. Each
           run's sandbox is materialized the moment its dependencies are done.
@@ -323,7 +323,7 @@ RULES CARRIED INTO EVERY PROMPT (AND WHERE THEY COME FROM)
       via WSL/PowerShell interop, the highest-fidelity renderer available. The
       prompts also insist that the conversion target is a COPY inside the
       stage's writable work directory, never a hash-verified read-only view
-      (`target/`, `field/*`, `base/`, `non-revised/`, `original/`), because
+      (`target/`, `field/*`, `base/`, `non_revised/`, `original/`), because
       every converter writes its output next to the file it is handed.
       A prompt to call the tool is not by itself enough: `codex exec` is
       non-interactive and therefore runs with approval policy `never`, which
@@ -509,7 +509,7 @@ CONTENTS OF THIS FILE
 
 USAGE
 -----
-    python nbt_pipeline.py setup --source /path/to/non-revised \\
+    python nbt_pipeline.py setup --source /path/to/non_revised \\
         --root ./nbt_rounds --rounds 2 --judges 3 [--rewrites 2,1] [--revises 1]
         [--integrators 0xFFFFFFFF] [--caption-limit N] [--strict-artifacts {on,fix,off}]
     python nbt_pipeline.py run    --root ./nbt_rounds --jobs 255
@@ -598,19 +598,19 @@ COMPLETION CONTRACT / INTEGRITY
 
 DIRECTORY LAYOUT CREATED UNDER --root
 -------------------------------------
-    non-revised/                    pristine copy of --source, never written
+    non_revised/                    pristine copy of --source, never written
     runs/r<R>_a1/base               the round's base A1_r (copy)
-    runs/r<R>_w<k>/                 base/, non-revised/, rewritten/, PROMPT.md:
+    runs/r<R>_w<k>/                 base/, non_revised/, rewritten/, PROMPT.md:
                                     the k-th rewritten candidate (k = 1..M),
                                     staged FIRST in every round
-    runs/r<R>_review/               base/, non-revised/, prior_round/ (r>1),
+    runs/r<R>_review/               base/, non_revised/, prior_round/ (r>1),
                                     review/, PROMPT.md: the round's ONE review
                                     pass (skipped when --revises is 0)
-    runs/r<R>_a<j>_revise/          base/, non-revised/, review/ (read-only),
+    runs/r<R>_a<j>_revise/          base/, non_revised/, review/ (read-only),
                                     revised/, PROMPT.md: the j-th reviewed-and-
                                     revised candidate (j = 2..1+N)
     runs/r<R>_i<k>/                 self/, others/<version-id>/ (EVERY other
-                                    pool member), non-revised/, integrated/,
+                                    pool member), non_revised/, integrated/,
                                     PROMPT.md: the k-th integration run, i.e.
                                     the k-th pool member reworked with the whole
                                     pool as donors
@@ -814,12 +814,97 @@ ATTEMPT_MESSAGE_LIMIT = 4000
 # triggers, the note says how many messages were left out, and the attempt's
 # archived `record.json`, its transcript and the run log still carry them.
 ATTEMPT_LIST_BYTES_LIMIT = 512 * 1024
+
+# ---- the two INPUT areas, under their canonical names -----------------------
+# Both were renamed to this repo's snake_case convention, for meaning as much as
+# for style:
+#   * `non_revised/` is the root's pristine copy of `--source` (the old spelling
+#     `non-revised/` reads like a pipeline OUTPUT -- it is not, it is the
+#     untouched original);
+#   * `raw_data/` is the corpus's raw-data directory: figure/table sources, data
+#     tables and the analysis snapshot that the author's own build scripts
+#     regenerate (the old spelling `raw_figs/` suggested figures only).
+# Only the canonical name is ever CREATED; the legacy spellings stay RESOLVED
+# (manifest keys are normalised, so a root or a corpus set up before the rename
+# keeps working, and a plain rename of either directory is invisible to every
+# hash comparison).
+PRISTINE_DIR = "non_revised"
+PRISTINE_DIR_LEGACY = "non-revised"
+PRISTINE_DIRNAMES = (PRISTINE_DIR, PRISTINE_DIR_LEGACY)
+RAW_DATA_DIR = "raw_data"
+RAW_DATA_DIR_LEGACY = "raw_figs"
+RAW_DATA_DIRNAMES = (RAW_DATA_DIR, RAW_DATA_DIR_LEGACY)
+
+
+def existing_dirname(parent: Path, canonical: str, legacy: str) -> str:
+    """`canonical` when it exists (or when neither does), else the legacy name."""
+    if (parent / canonical).is_dir() or not (parent / legacy).is_dir():
+        return canonical
+    return legacy
+
+
+def pristine_dirname(dirp: Path) -> str:
+    """The name `dirp` uses for its pristine copy of the original submission."""
+    return existing_dirname(dirp, PRISTINE_DIR, PRISTINE_DIR_LEGACY)
+
+
+def raw_data_dirname(dirp: Path) -> str:
+    """The name `dirp` uses for the corpus's read-only raw-data directory."""
+    return existing_dirname(dirp, RAW_DATA_DIR, RAW_DATA_DIR_LEGACY)
+
+
+def area_dir(sb: Path, area: str) -> Path:
+    """The directory a recorded input-area key names inside a sandbox.
+
+    Older records name an area by its legacy spelling (`non-revised/`); a
+    sandbox rebuilt since the rename has the canonical one. Resolving both here
+    keeps every already-recorded manifest valid.
+    """
+    if area in PRISTINE_DIRNAMES and not (sb / area).is_dir():
+        other = PRISTINE_DIR if area == PRISTINE_DIR_LEGACY else PRISTINE_DIR_LEGACY
+        if (sb / other).is_dir():
+            return sb / other
+    return sb / area
+
+
+def is_raw_data_rel(rel: str) -> bool:
+    """True for a corpus-relative path inside (or at) the raw-data directory."""
+    return any(part in RAW_DATA_DIRNAMES for part in rel.replace("\\", "/").split("/")[:-1])
+
+
+def norm_raw_data_name(rel: str) -> str:
+    """A corpus-relative path with the raw-data directory's name canonicalised."""
+    return "/".join(RAW_DATA_DIR if part == RAW_DATA_DIR_LEGACY else part
+                    for part in rel.replace("\\", "/").split("/"))
+
+
+def norm_manifest(m: dict) -> dict:
+    """A manifest with the renamed input directories canonicalised.
+
+    The two spellings of each input area mean the same directory, so a rename
+    must never look like a modification of the corpus.
+    """
+    files = {norm_raw_data_name(k): v for k, v in (m or {}).get("files", {}).items()}
+    return {"files": files, "count": len(files)}
+
+
+def without_raw_data(m: dict) -> dict:
+    """A corpus manifest with the READ-ONLY raw-data area left out.
+
+    Used to compare a published winner with its pin: the raw-data area is an
+    INPUT (byte-verified against the pristine copy), not content the stage wrote,
+    so a normalised copy of it must not read as "the champion changed".
+    """
+    files = {k: v for k, v in (m or {}).get("files", {}).items() if not is_raw_data_rel(k)}
+    return {"files": files, "count": len(files)}
+
+
 # The archive excludes the re-derivable INPUT corpora: every materialization
 # rewrites them from hash-verified sources, and copying them would multiply a
 # 180 MB sandbox by every retry. What is preserved is what the ATTEMPT produced,
 # plus the prompt it answered and the bookkeeping the postcheck read.
-ATTEMPT_ARCHIVE_SKIP_DIRS = ("base", "non-revised", "self", "others", "target", "field",
-                             "original")
+ATTEMPT_ARCHIVE_SKIP_DIRS = ("base", "self", "others", "target", "field", "original",
+                             *PRISTINE_DIRNAMES)
 ATTEMPT_ARCHIVE_SKIP_SUBTREES = (("work", "corpus"),)
 SUPERSEDED_DIRNAME = "_superseded"
 # Python bytecode caches (`__pycache__/*.pyc`) are a side effect of RUNNING the
@@ -2412,7 +2497,36 @@ def shared_blocks() -> str:
     it was never told about. The comparison session receives the same two blocks
     (they carry no provenance); its extra blindness rule is added separately.
     """
-    return SHARED_DECISION_BLOCK + ADOPTED_SWEEPS_BLOCK
+    return SHARED_DECISION_BLOCK + ADOPTED_SWEEPS_BLOCK + RAW_DATA_READONLY_RULE
+
+
+# The corpus's raw-data directory is an INPUT (see enforce_readonly_raw_data):
+# this block is what makes a session leave it alone in the first place, and what
+# keeps the rule from being read as a scoring criterion by the comparison
+# session. It names both spellings, because a corpus set up before the rename
+# still carries `raw_figs/`.
+RAW_DATA_READONLY_RULE = """
+
+=== THE RAW-DATA DIRECTORY IS READ-ONLY (a rule about CONTENT, and a hard one) ===
+  * The corpus's raw data -- figure and table sources, the data tables, the analysis snapshot --
+    is the AUTHOR's input, and it lives in `raw_data/`. An older corpus spells that directory
+    `raw_figs/`; the two spellings mean the SAME directory, and one version corpus carries one of
+    them.
+  * Nothing inside it may be edited, regenerated, rewritten, renamed, deleted or added to: not a
+    number, not a column, not a caption, not a plot, not a compiled figure, not a build artifact.
+    A package carries it BYTE-FOR-BYTE, and a document that points into it
+    (`\\input{raw_data/...}`, `\\includegraphics{raw_data/...}`) names the file that is there.
+  * The ONE permitted change is the DIRECTORY's own name: if the package (or its base) still
+    spells it `raw_figs/`, rename the directory to `raw_data/` and repoint every reference to it
+    -- `raw_figs/x` becomes `raw_data/x` -- leaving every file inside untouched, names included.
+    Record that one rename in the package's own report.
+  * It is CHECKED, not merely requested: the orchestrator compares the directory against the
+    untouched original after every package-producing session and restores the original's copy,
+    file by file. A change inside it therefore never reaches the submission -- it only costs the
+    work.
+  * It is never a SCORED difference: no version is rewarded for changing raw data and none is
+    penalized for leaving it exactly as it is. A "fixed" data table is not a `resolved` item, and a
+    figure that regenerates identically is not an `added` one."""
 
 
 def validation_block(role: str) -> str:
@@ -2720,8 +2834,9 @@ def m18_blocks(limit: int) -> dict:
         "@@M18_INTEGRATE_RULE@@": M18_INTEGRATE_RULE_ON if on else M18_INTEGRATE_RULE_REPORT,
     }
 
-SOURCE_HIERARCHY = ("github code > data in raw_figs/ > main figures > supplementary figures "
-                    "> main tables > supplementary tables > main text > supplementary text")
+SOURCE_HIERARCHY = ("github code > data in raw_data/ (an older corpus spells that directory "
+                    "raw_figs/) > main figures > supplementary figures > main tables "
+                    "> supplementary tables > main text > supplementary text")
 
 # Artifact locations the prompts pin down and the postchecks verify.
 REVIEW_DIR = "review"
@@ -2823,7 +2938,7 @@ NEEDED (do not hurry up, think deeply about each instruction, infer the rest fro
 validate the inferred instructions, and follow both non-inferred and validated instructions
 CAREFULLY), using two skills in sequence: $nbt-review (Phase 1 – identify issues) and $nbt-revise
 (Phase 2 – automatically apply fixes after the identification, without asking for any approval or
-confirmation). The documents to process are inside the "non-revised" directory.
+confirmation). The documents to process are inside the "non_revised" directory.
 
 IMPORTANT — The checklists below are NON-EXHAUSTIVE summaries of what the two skills cover. Each
 skill implements a complete, far more detailed workflow than any summary can convey. Before
@@ -2836,7 +2951,7 @@ procedure governs. Do not treat the following lists as the whole job — they ar
 coverage you must guarantee on top of the full workflow.
 """
 
-ATTACHED_PHASE1 = """## Phase 1 — $nbt-review (identification only; never modify any file in "non-revised/")
+ATTACHED_PHASE1 = """## Phase 1 — $nbt-review (identification only; never modify any file in "non_revised/")
 
 Run the complete review workflow as specified by the skill: Phase 0 setup (corpus conversion and
 inventory via convert_corpus.py), the EXHAUSTIVE MANDATORY mechanical sweeps M1–M17, the judgment
@@ -2861,9 +2976,10 @@ At minimum — and not limited to — the review must surface:
    quantity reported differently in different figures; figures vs. their corresponding tables;
    figures vs. main text; and different paragraphs providing conflicting information. When
    resolving conflicts, apply the following source hierarchy from highest to lowest priority:
-   github code; data in raw_figs/; main figures; supplementary figures; main tables; supplementary
-   tables; main text; supplementary text. Report any inconsistencies found and, where possible,
-   identify which source takes precedence under this hierarchy.
+   github code; data in raw_data/ (an older corpus spells that directory raw_figs/); main figures;
+   supplementary figures; main tables; supplementary tables; main text; supplementary text. Report
+   any inconsistencies found and, where possible, identify which source takes precedence under this
+   hierarchy.
 5. Missing or unneeded information — judged against the Nature Biotechnology author guidelines
    and submission requirements.
 6. Formatting that violates best practice for manuscript preparation — including but not limited
@@ -2915,7 +3031,7 @@ final reports). Run the skill's acceptance checks before declaring completion.
 
 Explicit requirements that override skill defaults where they conflict:
 
-1. Originals are read-only. Never edit anything in "non-revised/" directly; verify byte-identity
+1. Originals are read-only. Never edit anything in "non_revised/" directly; verify byte-identity
    of the originals after all edits.
    2. Working copies: for every editable document that needs revision (doc/docx/tex/bib; never
       pdf/png), create a copy inside a new folder named revised/ (create it if missing). Naming
@@ -2962,7 +3078,7 @@ needed.)
 Final deliverables of Phase 2: the revised/ package (CHANGELOG.md, MANUAL_STEPS.md,
 REVISION_REPORT.md and any other artifacts the skill specifies), the code/ directory and rerun
 instructions if applicable, and a summary of what was fixed, what was left for manual action, and
-why. Files that remain unchanged should be copied from "non-revised/" to "revised/".
+why. Files that remain unchanged should be copied from "non_revised/" to "revised/".
 """
 
 ATTACHED_FULL = ATTACHED_HEAD + "\n" + ATTACHED_PHASE1 + "\n" + ATTACHED_PHASE2
@@ -2994,7 +3110,7 @@ Layout (paths relative to the sandbox root):
   base/         — the round's base revision A1_@@ROUND@@. READ-ONLY: the orchestrator hashes it
                   before you start and re-hashes it when you finish; ANY modification fails this
                   run. This directory is your SUBMISSION_DIR.
-  non-revised/  — the pristine original submission. READ-ONLY, hash-verified the same way. It is
+  non_revised/  — the pristine original submission. READ-ONLY, hash-verified the same way. It is
                   present only as the regression reference: do NOT review it, do NOT edit it, and do
                   not copy its content into review/.
                   PIPELINE BOOKKEEPING: if base/ contains the pipeline's own report files
@@ -3008,14 +3124,14 @@ Layout (paths relative to the sandbox root):
                   discovery round under review/round2/ (findings_extra.md, findings_extra.json,
                   new_sweeps.md). Do NOT write anything of yours outside review/.
 
-Path mapping for the skill (its defaults assume ./non-revised as input):
+Path mapping for the skill (its defaults assume ./non_revised as input):
   SUBMISSION_DIR = ./base        OUT = ./review        WORK = ./review/work
 
 === PHASE 1 ONLY — SEPARATE-SESSION HANDOFF (this overrides the master prompt) ===
 
 PHASE 1 ONLY. A separate session will consume your findings and run Phase 2. Do NOT begin revision.
 Do NOT ask for confirmation. Do NOT produce any revised/ directory and do not edit any file under
-base/ or non-revised/.
+base/ or non_revised/.
 
 The master prompt appended at the end of this file says "automatically begin the revision (do not
 stop for my confirmation)". That instruction governs a BUNDLED single-session run. Here the handoff
@@ -3144,7 +3260,7 @@ The master excerpt's closing instruction -- "automatically begin the revision (d
 confirmation)" -- does NOT apply to this session. This is PHASE 1 ONLY: produce the review artifacts
 under review/ and then write _pipeline_done.json with stage="review" as the very last step. The
 orchestrator chains Phase 2 itself, in a separate sandbox, as soon as that marker is detected. Do
-not create revised/, do not edit base/ or non-revised/, and do not ask the user anything.
+not create revised/, do not edit base/ or non_revised/, and do not ask the user anything.
 """
 
 
@@ -3170,7 +3286,7 @@ Layout (paths relative to the sandbox root):
   base/         — the round's base revision A1_@@ROUND@@. READ-ONLY (hash-verified after your run).
                   THIS is your BASE for editing, and it is also the directory recorded as
                   submission_dir inside the findings file.
-  non-revised/  — the pristine original submission. READ-ONLY (hash-verified). It is the ORIGINAL
+  non_revised/  — the pristine original submission. READ-ONLY (hash-verified). It is the ORIGINAL
                   regression reference: nothing in revised/ may be worse than this, ever. Do not
                   edit it and do not copy it over revised/ wholesale.
   review/       — a READ-ONLY copy of the Phase 1 sandbox's review/ directory, containing the frozen
@@ -3190,7 +3306,7 @@ Layout (paths relative to the sandbox root):
 Path mapping for the skills:
   FINDINGS_JSON = ./review/findings.json      FINDINGS_MD = ./review/findings.md
   EXTRA_JSON    = ./review/round2/findings_extra.json (merge it if present)
-  BASE / ORIGINALS = ./base (edit a copy of this) and ./non-revised (READ-ONLY original)
+  BASE / ORIGINALS = ./base (edit a copy of this) and ./non_revised (READ-ONLY original)
   REVISED = ./revised      WORK = ./revised/work      CODE = ./code
 
 === PHASE 2 ONLY — CONSUME THE FROZEN FINDINGS (this overrides the master prompt) ===
@@ -3201,8 +3317,8 @@ review; do NOT modify anything under review/; start at R0 and proceed through V5
 may record an absolute submission_dir from the Phase 1 sandbox -- that path does not exist here;
 ignore it and use ./base.
 
-The master prompt appended at the end says the originals live in "non-revised/" and that you should
-review-and-revise in one session. Both points are overridden here: BASE = base/ (not non-revised/),
+The master prompt appended at the end says the originals live in "non_revised/" and that you should
+review-and-revise in one session. Both points are overridden here: BASE = base/ (not non_revised/),
 the review already happened in a different session, and the pristine original is present only as the
 regression reference. The user is never prompted: this session was started automatically because
 Phase 1's marker exists.
@@ -3233,8 +3349,9 @@ the artifacts landing in ./revised. Read the skill's SKILL.md and its references
       hunks, full mechanical rescan of the revised corpus, checksum re-verification, final reports).
       The propagation order above only decides which OCCURRENCES you update first; when two sources
       disagree about a VALUE, the master prompt's source hierarchy decides which value is
-      authoritative (github code > data in raw_figs/ > main figures > supplementary figures > main
-      tables > supplementary tables > main text > supplementary text).
+      authoritative (github code > data in raw_data/ > main figures > supplementary figures > main
+      tables > supplementary tables > main text > supplementary text; the raw-data directory is
+      spelled raw_figs/ in an older corpus).
 
 Explicit requirements that override skill defaults where they conflict:
   1. Naming — ONE content-hash version token per package (read this whole rule before renaming):
@@ -3280,14 +3397,14 @@ Explicit requirements that override skill defaults where they conflict:
      placement; NEVER reflow or "improve" untouched text. Files that need no change are copied from
      base/ into revised/ unchanged.
      OVERRIDE, stated explicitly because the master excerpt reads differently for a bundled run:
-     the master Phase-2 excerpt's "files that remain unchanged should be copied from 'non-revised/'
+     the master Phase-2 excerpt's "files that remain unchanged should be copied from 'non_revised/'
      to 'revised/'" was written for a single-session run whose base IS the pristine original. Here
      your base is base/, and in round 2 and later base/ is the previous round's champion, so it is
-     NOT the same content as non-revised/. Copy every unchanged file from base/ (never from
-     non-revised/): copying the pristine file would silently REVERT every fix an earlier round made
-     in it, which is the one thing this round must not do. non-revised/ is present only as the
+     NOT the same content as non_revised/. Copy every unchanged file from base/ (never from
+     non_revised/): copying the pristine file would silently REVERT every fix an earlier round made
+     in it, which is the one thing this round must not do. non_revised/ is present only as the
      read-only regression reference you compare against, never as a source of files for revised/.
-  3. Nothing may worsen relative to the pristine original in non-revised/: do not delete claims,
+  3. Nothing may worsen relative to the pristine original in non_revised/: do not delete claims,
      soften limitations, or break cross-references/numbering. Confirm this in the final report.
   4. Never invent content, citations, data, results, or accession numbers. Missing mandatory items
      are scaffolded only with clearly marked "[AUTHOR TO COMPLETE: ...]" placeholders, every one
@@ -3381,10 +3498,10 @@ REVISE_TAIL = """
 
 This is PHASE 2 ONLY and it is a separate session from the review: act on the frozen
 review/findings.json you were given, never re-run the review, never modify review/, keep base/ and
-non-revised/ read-only, put every deliverable inside revised/ (plus code/ when in scope), and write
+non_revised/ read-only, put every deliverable inside revised/ (plus code/ when in scope), and write
 _pipeline_done.json with stage="revise" as the very last step. The master excerpt's instruction to
-treat "non-revised/" as the directory to revise is overridden: your BASE is base/, and every file
-that needs no change is copied into revised/ from base/ (never from non-revised/, which is only the
+treat "non_revised/" as the directory to revise is overridden: your BASE is base/, and every file
+that needs no change is copied into revised/ from base/ (never from non_revised/, which is only the
 read-only regression reference -- copying it would silently revert an earlier round's fixes). A
 missing mandatory item is scaffolded ONLY with the literal "[AUTHOR TO COMPLETE: ...]" marker and
 listed for the author: that marker is a hand-off item, never content to invent and never something
@@ -3405,7 +3522,7 @@ their references and bundled scripts). Keep your working directory at the sandbo
 
 Layout (paths relative to the sandbox root):
   base/         — the round's base revision A1_@@ROUND@@. READ-ONLY (hash-verified after your run).
-  non-revised/  — the pristine original submission. READ-ONLY (hash-verified). Regression reference.
+  non_revised/  — the pristine original submission. READ-ONLY (hash-verified). Regression reference.
   review/       — the FROZEN review of this round: findings.json/findings.md (the authoritative
                   finding list, ids F-*/X-*), artifacts/ (the seeded, disposed sweep tables) and
                   work/ (the code-side scans the reviewer was given). READ-ONLY, byte-verified: you
@@ -3474,7 +3591,7 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
 @@DEFECT_CLASS_RULE@@@@STANDING_EXEMPTIONS@@@@PLACEHOLDER_RULE@@@@AUX_FILES_RULE@@
 @@DERIVED_OUTPUTS_RULE@@@@VALIDATION_RULE@@@@VISUAL_INSPECTION_RULE@@@@DOCX_CLI_RULE@@@@ZOTERO_CLI_RULE@@
 * You never edit the corpus, the review, or a candidate package; you only read them and write in
-  `audit/`. The orchestrator verifies base/, non-revised/ and review/ are byte-identical after you.
+  `audit/`. The orchestrator verifies base/, non_revised/ and review/ are byte-identical after you.
 * An added finding is a NORMAL finding: one instance, a verbatim quote, a category, a check id, a
   severity, and a 1-2 sentence problem statement. Never aggregate ("several sentences are long" is
   not a finding).
@@ -3493,7 +3610,7 @@ AUDIT_TAIL = """
 
 You are the auditor, not the reviewer and not the reviser: dispose every frozen finding (confirm or
 drop-with-evidence), promote the reviewer's boilerplate closures into real findings with `AU-` ids
-when they are defects, keep base/, non-revised/ and review/ byte-identical, write everything inside
+when they are defects, keep base/, non_revised/ and review/ byte-identical, write everything inside
 `audit/`, and finish with `_pipeline_done.json` (stage="audit") carrying
 `{"findings_total": N, "confirmed": N, "dropped": N, "added": N, "finding_tier_rows_examined": N,
   "promoted": N}`.
@@ -3522,7 +3639,7 @@ Layout (paths relative to the sandbox root):
                   candidate and every reviewed-and-revised candidate). EVERY donor must be read and
                   considered: this stage exists to incorporate the strengths of ALL the other
                   versions, not to compare two packages.
-  non-revised/  — the pristine original submission. READ-ONLY (hash-verified). The regression
+  non_revised/  — the pristine original submission. READ-ONLY (hash-verified). The regression
                   reference: nothing in integrated/ may be worse than this.
   integrated/   — YOU create this; YOUR INTEGRATED PACKAGE goes here.
   code/         — revised analysis code + rerun instructions, if the imported fixes require them.
@@ -3634,8 +3751,8 @@ integrated/CHANGELOG.md, because downstream judges and the human gate receive on
   * Do NOT run a pre-port review phase. The only review-shaped step here is the POST-port V3 rescan
     in section 2 below; the master Phase-1 excerpt's "run the complete review workflow including the
     discovery round D0-D5 and then present the findings list" is NEUTRALISED for this sandbox.
-  * The master excerpt's "the documents to process are inside the non-revised directory" is
-    NEUTRALISED: your base is self/, the donors are others/<id>/, non-revised/ is only the
+  * The master excerpt's "the documents to process are inside the non_revised directory" is
+    NEUTRALISED: your base is self/, the donors are others/<id>/, non_revised/ is only the
     regression reference, and the result goes to integrated/.
   * Pipeline bookkeeping files inside the packages -- CHANGELOG.md, MANUAL_STEPS.md,
     REVISION_REPORT.md, revision_report.json, DIFF_LEDGER.md -- are NOT submission content. Never
@@ -3648,19 +3765,20 @@ integrated/CHANGELOG.md, because downstream judges and the human gate receive on
      hyphenated variants), cross-references, figure/table numbering, and every corrected value
      propagated to every occurrence. When two sources in the package disagree about a VALUE, the
      master prompt's source hierarchy decides which one is authoritative (github code > data in
-     raw_figs/ > main figures > supplementary figures > main tables > supplementary tables > main
-     text > supplementary text); the propagation order used by the revision skill
+     raw_data/ > main figures > supplementary figures > main tables > supplementary tables > main
+     text > supplementary text; the raw-data directory is spelled raw_figs/ in an older corpus);
+     the propagation order used by the revision skill
      (supplementary tables > ... > main text > abstract > cover letter) only decides which
      occurrences you update first, never which value wins.
   2. V1-V5 validation: round-trip integrity, diff locality with no unmapped hunks, a full mechanical
      rescan of the integrated corpus (the M1-M17 + J1-J4 sweeps of $nbt-review, as the revision
-     skill's V3 requires), checksum verification that self/, every others/<id>/ and non-revised/
+     skill's V3 requires), checksum verification that self/, every others/<id>/ and non_revised/
      are untouched, and the final reports.
      NOTE: this sandbox intentionally has no review/ directory, so the revision skill's V3 pointer to
      "./review/round2/new_sweeps.md" is vacuous here. Rescan with the standard frozen set
      (M1-M17 + J1-J4)@@M18_INTEGRATE_CLAUSE@@; if some other sweep file is genuinely absent, record
      that instead of inventing results.
-  3. Confirm explicitly that nothing in integrated/ is worse than non-revised/ (no deleted claims,
+  3. Confirm explicitly that nothing in integrated/ is worse than non_revised/ (no deleted claims,
      softened limitations, or broken cross-references), and that EVERY donor directory was opened
      and read (list them in the ledger).
 
@@ -3707,7 +3825,7 @@ free-for-all merge and not a re-review: self/ is your base and stays the base, E
 package is a donor that must be read and considered, only fixes that are demonstrably better are
 imported, shared defects are left untouched, every (a)/(b) port and every skipped difference is
 recorded in integrated/DIFF_LEDGER.md (with the donor it came from), every file you do not port is
-copied into integrated/ from self/ unchanged (never from a donor, never from non-revised/), the
+copied into integrated/ from self/ unchanged (never from a donor, never from non_revised/), the
 result is re-validated (P1 propagation + V1-V5), and _pipeline_done.json with stage="integrate" is
 written as the very last step. Hand-off markers ("[AUTHOR TO COMPLETE: ...]") are manual items for
 the author: preserve the base's markers, never invent the missing content, and never treat a marker
@@ -3739,7 +3857,7 @@ Layout (paths relative to the sandbox root):
                   round 2+: the previous round's champion). READ-ONLY: the orchestrator hashes it
                   before you start and re-hashes it when you finish; ANY modification fails this
                   run. This is the manuscript you REWRITE.
-  non-revised/  — the pristine original submission. READ-ONLY, hash-verified the same way. It is
+  non_revised/  — the pristine original submission. READ-ONLY, hash-verified the same way. It is
                   the regression reference: nothing in rewritten/ may be worse than this, ever.
   rewritten/    — YOU create this; THE OUTPUT DIRECTORY. Your complete rewritten candidate goes
                   here (documents at its top level, process scratch under rewritten/work/).
@@ -5308,7 +5426,16 @@ def hash_manifest(dirp: Path) -> dict:
 
 
 def manifests_equal(a, b) -> bool:
-    return a == b
+    """Manifest equality, with the renamed input directories canonicalised.
+
+    `raw_figs/` and `raw_data/` are the SAME input area under two spellings, so
+    renaming that directory must not read as "the corpus was modified" -- that
+    is what makes the one-time rename of an existing corpus safe. (A sandbox
+    area's own name, `non_revised/` vs the legacy `non-revised/`, is not part of
+    a file manifest at all: it is resolved with `area_dir` and
+    `pristine_dirname`, never compared.)
+    """
+    return norm_manifest(a) == norm_manifest(b)
 
 
 def manifest_digest(m) -> str:
@@ -8942,7 +9069,11 @@ class Ctx:
 
     def __init__(self, root: Path):
         self.root = root
-        self.pristine = root / "non-revised"
+        # The pristine copy of `--source`: `non_revised/` in a root created since
+        # the rename, the legacy `non-revised/` in an older one. BOTH spellings
+        # are resolved and the pipeline never moves the directory itself: an
+        # existing root keeps the name it was created with.
+        self.pristine = root / pristine_dirname(root)
         self.runs_dir = root / "runs"
         self.reports_dir = root / "reports"
         self.pins_dir = root / PIN_DIRNAME
@@ -9294,11 +9425,28 @@ def pinned_integrity(ctx: Ctx) -> list:
             errs.append(f"{name}/ is missing (every completed round publishes its winner under "
                         f"--root)")
             continue
-        want = (find_pin(ctx, rrec.get("pin_id")) or {}).get("digest")
-        cur = corpus_tree_digest(d)
-        if want and cur != want:
+        pin_id = rrec.get("pin_id")
+        pin = find_pin(ctx, pin_id) if pin_id else None
+        pin_docs = pinned_docs_dir(ctx, pin) if pin else None
+        if pin is None:
+            # A round record without a pin (a minimal/legacy root) has nothing to
+            # compare against; a RECORDED pin that is gone is a real error.
+            if pin_id:
+                errs.append(f"{name}/ cannot be verified: its pin {pin_id!r} is missing")
+            continue
+        if pin_docs is None or not pin_docs.is_dir():
+            errs.append(f"{name}/ cannot be verified: pinned/{pin_id}/documents is missing")
+            continue
+        # Compared against the PIN rather than against a stored digest, so the
+        # READ-ONLY raw-data area can be left out of both sides: that directory
+        # is an INPUT whose content is verified against the pristine original
+        # (see enforce_readonly_raw_data), not something the round produced, and
+        # a normalised copy of it must not read as "the champion changed".
+        want = manifest_digest(without_raw_data(corpus_tree_manifest(pin_docs)))
+        cur = manifest_digest(without_raw_data(corpus_tree_manifest(d)))
+        if cur != want:
             errs.append(f"{name}/ no longer matches its pinned champion "
-                        f"(digest {cur[:12]} != {str(want)[:12]})")
+                        f"(digest {cur[:12]} != {want[:12]})")
     return errs
 
 
@@ -9308,7 +9456,7 @@ def input_mismatches(ctx: Ctx, rec: dict) -> list:
     im = rec.get("inputs_manifest") or {}
     errs = []
     for area in sorted(im):
-        p = sb / area
+        p = area_dir(sb, area)
         if not p.is_dir():
             errs.append(f"{area}/ is missing from the sandbox")
             continue
@@ -9524,10 +9672,14 @@ def revision_token_for_dir(dirp: Path) -> dict:
     """{'token','files','tokens_seen','consistent','notes'} for one package dir."""
     files = _payload_files_of_dir(dirp)
     tokens = []
+    named = []                                  # (rel path, filename token or None)
     for p in files:
+        rel = p.relative_to(dirp).as_posix()
         m = DOC_TOKEN_RE.search(p.stem)
-        if m:
-            tokens.append(m.group(0)[1:])
+        token = m.group(0)[1:] if m else None
+        if token:
+            tokens.append(token)
+        named.append((rel, token))
     digs = []
     for p in files:
         try:
@@ -9538,7 +9690,14 @@ def revision_token_for_dir(dirp: Path) -> dict:
         return {"token": "", "files": 0, "tokens_seen": [], "consistent": False,
                 "notes": ["no payload file could be read"]}
     token = hashlib.sha256("\n".join(sorted(digs)).encode("utf-8")).hexdigest()[:7]
-    hex_tokens = sorted({t for t in tokens if DOCHASH_HEX7_RE.match(t)})
+    # The READ-ONLY raw-data directory keeps the ORIGINAL file names: any version
+    # token a name inside it carries belongs to the run that produced the source
+    # corpus, never to this package, so it is not this package's naming evidence.
+    # The token VALUE above is deliberately still computed over every payload
+    # file (the raw data included), so it stays equal to what the agents compute
+    # with nbt-revise/scripts/revision_token.py.
+    hex_tokens = sorted({t for rel, t in named
+                         if t and DOCHASH_HEX7_RE.match(t) and not is_raw_data_rel(rel)})
     consistent = bool(hex_tokens) and all(t == token for t in hex_tokens)
     notes = []
     if not hex_tokens:
@@ -9546,7 +9705,8 @@ def revision_token_for_dir(dirp: Path) -> dict:
     elif not consistent:
         notes.append(f"filename token(s) {hex_tokens} do not match the content-derived token "
                      f"{token}")
-    return {"token": token, "files": len(files), "tokens_seen": sorted(set(tokens)),
+    return {"token": token, "files": len(files),
+            "tokens_seen": sorted({t for rel, t in named if t and not is_raw_data_rel(rel)}),
             "hex_tokens": hex_tokens, "consistent": consistent, "notes": notes}
 
 
@@ -10605,7 +10765,7 @@ def materialize_a1(ctx: Ctx, r: int) -> dict:
     rid = rid_a1(r)
     sb = ctx.runs_dir / rid
     sb.mkdir(parents=True, exist_ok=True)
-    base, nr = sb / "base", sb / "non-revised"
+    base, nr = sb / "base", sb / PRISTINE_DIR
     src_id, src_dir = ORIGINAL_ID, ctx.pristine
     if r > 1:
         prev = ctx.round_rec(r - 1)
@@ -10639,7 +10799,7 @@ def materialize_a1(ctx: Ctx, r: int) -> dict:
     if not nr.exists():
         copy_into(ctx.pristine, nr)
     rec = ctx.register(rid, "a1", r, f"runs/{rid}", source_id=src_id)
-    rec["inputs_manifest"] = {"base": hash_manifest(base), "non-revised": hash_manifest(nr)}
+    rec["inputs_manifest"] = {"base": hash_manifest(base), PRISTINE_DIR: hash_manifest(nr)}
     rec["corpus_digest"] = recompute_corpus_digest(ctx, r, A1_ID)
     rec["content_fingerprint"] = corpus_content_fingerprint(ctx, r, A1_ID)
     rec["base_source_digest"] = want
@@ -10666,7 +10826,7 @@ def _require_done(ctx: Ctx, rid: str, why: str) -> dict:
 
 
 def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
-    """The k-th REWRITTEN candidate W<k>_r: base + non-revised/ + rewritten/.
+    """The k-th REWRITTEN candidate W<k>_r: base + non_revised/ + rewritten/.
 
     All M rewrites are staged FIRST in the round -- before the review -- because
     the order the round asks for is "create the rewritten candidates, add them
@@ -10685,7 +10845,7 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
                            f"{(a1 or {}).get('status', 'missing')}")
     sb.mkdir(parents=True, exist_ok=True)
     ensure_copy(ctx.sandbox_of(a1) / "base", sb / "base")
-    ensure_copy(ctx.pristine, sb / "non-revised")
+    ensure_copy(ctx.pristine, sb / PRISTINE_DIR)
     (sb / REWRITTEN_DIR).mkdir(exist_ok=True)
     seed_evidence_pack(ctx, sb, sb / "base", "stage")
     note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
@@ -10702,12 +10862,12 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
                        source_id=A1_ID, produces=vid)
     rec["rewrite_level"] = rewrite_level_of(k, m)
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
-                              "non-revised": hash_manifest(sb / "non-revised")}
+                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR)}
     return rec
 
 
 def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
-    """(ii) Phase-1 sandbox: base/ + non-revised/ + prior_round/ (r>1) + review/ (OUT)."""
+    """(ii) Phase-1 sandbox: base/ + non_revised/ + prior_round/ (r>1) + review/ (OUT)."""
     rid = rid_review(r) if part == "a" else rid_review_b(r)
     sb = ctx.runs_dir / rid
     a1 = ctx.run(rid_a1(r))
@@ -10715,10 +10875,10 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
         raise RuntimeError(f"cannot materialize {rid}: {rid_a1(r)} does not exist")
     sb.mkdir(parents=True, exist_ok=True)
     ensure_copy(ctx.sandbox_of(a1) / "base", sb / "base")
-    ensure_copy(ctx.pristine, sb / "non-revised")
+    ensure_copy(ctx.pristine, sb / PRISTINE_DIR)
     prior = prior_review_dir(ctx, r)
     inputs = {"base": hash_manifest(sb / "base"),
-              "non-revised": hash_manifest(sb / "non-revised")}
+              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR)}
     if prior is not None:
         want_prior = {name: sha256_file(prior / name) for name in PRIOR_ROUND_FILES
                       if (prior / name).is_file()}
@@ -10766,7 +10926,7 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
 
 
 def materialize_audit(ctx: Ctx, r: int) -> dict:
-    """The AUDITOR sandbox: base/ + non-revised/ + the FROZEN review/, read-only.
+    """The AUDITOR sandbox: base/ + non_revised/ + the FROZEN review/, read-only.
 
     The audit stage only exists when `setup --audit on` was given. It is a
     decision session, not an editing session: it writes `audit/` and nothing
@@ -10783,7 +10943,7 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
                             "the auditor consumes the round's frozen review/ output")
     sb.mkdir(parents=True, exist_ok=True)
     ensure_copy(ctx.sandbox_of(a1) / "base", sb / "base")
-    ensure_copy(ctx.pristine, sb / "non-revised")
+    ensure_copy(ctx.pristine, sb / PRISTINE_DIR)
     ensure_copy(ctx.sandbox_of(rev_rec) / REVIEW_DIR, sb / REVIEW_DIR)
     (sb / "audit").mkdir(exist_ok=True)
     seed_evidence_pack(ctx, sb, sb / "base", "audit")
@@ -10796,7 +10956,7 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
     rec = ctx.register(rid, "audit", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=a1.get("source_id"))
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
-                              "non-revised": hash_manifest(sb / "non-revised"),
+                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR),
                               "review": hash_manifest(sb / REVIEW_DIR)}
     return rec
 
@@ -10833,7 +10993,7 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     src_sb = ctx.sandbox_of(rev_rec)
     sb.mkdir(parents=True, exist_ok=True)
     ensure_copy(ctx.sandbox_of(ctx.run(rid_a1(r))) / "base", sb / "base")
-    ensure_copy(ctx.pristine, sb / "non-revised")
+    ensure_copy(ctx.pristine, sb / PRISTINE_DIR)
     # The frozen review/ is the authoritative finding list: a partial copy must
     # never be trusted (the revision ledger keys on every finding id).
     ensure_copy(src_sb / REVIEW_DIR, sb / REVIEW_DIR)
@@ -10859,7 +11019,7 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     rec = ctx.register(rid, "revise", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=A1_ID, produces=vid)
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
-                              "non-revised": hash_manifest(sb / "non-revised"),
+                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR),
                               "review": hash_manifest(sb / REVIEW_DIR)}
     if aud_manifest is not None:
         rec["inputs_manifest"]["audit"] = aud_manifest
@@ -10906,7 +11066,7 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
         for stale in [p for p in others_dir.iterdir()
                       if p.is_dir() and p.name not in other_ids]:
             shutil.rmtree(stale, ignore_errors=True)
-    ensure_copy(ctx.pristine, sb / "non-revised")
+    ensure_copy(ctx.pristine, sb / PRISTINE_DIR)
     (sb / INTEGRATED_DIR).mkdir(exist_ok=True)
     seed_evidence_pack(ctx, sb, sb / "self", "stage")
     note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
@@ -10921,7 +11081,7 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
                        other_ids=other_ids, pool_ids=pool, produces=vid,
                        field_ids=other_ids)
     rec["inputs_manifest"] = {"self": hash_manifest(sb / "self"),
-                              "non-revised": hash_manifest(sb / "non-revised"),
+                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR),
                               "others": hash_manifest(sb / "others")}
     return rec
 
@@ -11227,7 +11387,7 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
     src_ok = bool(ctx.source_manifest)
 
     def mismatch(area: str, expected: dict):
-        p = sb / area
+        p = area_dir(sb, area)
         if not p.is_dir():
             return f"{area}/ is missing (upstream content changed)"
         if not manifests_equal(hash_manifest(p), expected):
@@ -11240,12 +11400,12 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
         if a1 is not None and a1.get("status") == "done":
             probs.append(mismatch("base", hash_manifest(ctx.sandbox_of(a1) / "base")))
         if src_ok:
-            probs.append(mismatch("non-revised", ctx.source_manifest))
+            probs.append(mismatch(pristine_dirname(sb), ctx.source_manifest))
     elif kind == "review":
         if a1 is not None and a1.get("status") == "done":
             probs.append(mismatch("base", hash_manifest(ctx.sandbox_of(a1) / "base")))
         if src_ok:
-            probs.append(mismatch("non-revised", ctx.source_manifest))
+            probs.append(mismatch(pristine_dirname(sb), ctx.source_manifest))
         prior = prior_review_dir(ctx, r)
         if prior is not None and (sb / "prior_round").is_dir():
             expected = {name: sha256_file(prior / name) for name in PRIOR_ROUND_FILES
@@ -11256,7 +11416,7 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
         if a1 is not None and a1.get("status") == "done":
             probs.append(mismatch("base", hash_manifest(ctx.sandbox_of(a1) / "base")))
         if src_ok:
-            probs.append(mismatch("non-revised", ctx.source_manifest))
+            probs.append(mismatch(pristine_dirname(sb), ctx.source_manifest))
         rev_rec = ctx.run(rid_review(r))
         if rev_rec is None or rev_rec.get("status") != "done":
             probs.append("upstream review run is not done")
@@ -11272,7 +11432,7 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
             return [p for p in probs if p]
         probs.append(mismatch("self", corpus_manifest(ctx, r, self_id)))
         if src_ok:
-            probs.append(mismatch("non-revised", ctx.source_manifest))
+            probs.append(mismatch(pristine_dirname(sb), ctx.source_manifest))
         others_dir = sb / "others"
         if not others_dir.is_dir():
             probs.append("others/ is missing (upstream content changed)")
@@ -11542,7 +11702,7 @@ def _check_pristine_copy(ctx: Ctx, rec: dict, area: str, errs: list,
     CONTENTS matches the expected TRANSFORMED view (`expected`, computed with
     the session's view seed: rewritten references, sanitized metadata).
     """
-    p = ctx.sandbox_of(rec) / area
+    p = area_dir(ctx.sandbox_of(rec), area)
     if not p.is_dir():
         errs.append(f"{area}/ copy is missing from the sandbox")
         return
@@ -11827,7 +11987,7 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list) -> No
     if not isinstance(fj, dict):
         return
     seen_ids = {}
-    # 1. the review must be about base/, not about non-revised/ or anything else.
+    # 1. the review must be about base/, not about non_revised/ or anything else.
     raw = fj.get("submission_dir")
     if isinstance(raw, str) and raw.strip():
         try:
@@ -11838,7 +11998,7 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list) -> No
         if resolved is not None and resolved != base:
             errs.append(f"{FINDINGS_REL} records submission_dir={raw!r}, which does not resolve "
                         f"to this sandbox's base/ ({base}); the review analysed the WRONG corpus "
-                        f"-- in round 2+ non-revised/ is the pristine original, not the champion. "
+                        f"-- in round 2+ non_revised/ is the pristine original, not the champion. "
                         f"Re-run the review with SUBMISSION_DIR=./base")
     else:
         # A missing/empty field used to be a warning only, so an agent could
@@ -12433,6 +12593,257 @@ def _candidate_dest(sb: Path, rel: str, out_dir: str = REVISED_DIR):
 _PDF_TWIN_EXTS = (".doc", ".docx", ".tex", ".ltx", ".rtf", ".md", ".txt")
 
 
+# =====================================================================
+# THE READ-ONLY RAW-DATA DIRECTORY
+#
+# The corpus carries the author's raw data -- figure and table sources, the data
+# tables, and the analysis snapshot the author's own scripts regenerate -- in
+# `raw_data/` (an older corpus spells the directory `raw_figs/`; both spellings
+# name ONE directory, see RAW_DATA_DIRNAMES). It is an INPUT, not revision
+# content: a package may CARRY it and never change it.
+#
+# No code path writes there: the version-token rule leaves the directory alone
+# (revision_token_for_dir), and a package that edited, added, renamed or dropped
+# a file inside it is put back byte-for-byte from the untouched original with a
+# warning that names every file the stage touched. That is the same
+# "deterministic repair, visible in the record" shape as backfill_missing_files:
+# a rules-following stage is never punished for it, and a stage that rewrote a
+# data table cannot ship the rewrite.
+# =====================================================================
+
+def _raw_data_key(rel: str) -> str:
+    """The read-only identity of a raw-data file: its path, with any trailing
+    version token stripped from the basename.
+
+    A package carries the raw data under the file names its BASE used -- which,
+    in a root set up from an earlier run's output corpus, are that run's token
+    names (`dataset_summary-4f3a9c1.tsv`), and the documents in the package
+    reference exactly those names. Matching by this key therefore restores the
+    BYTES without ever renaming a file out from under a LaTeX \\input.
+    """
+    parts = norm_raw_data_name(rel).split("/")
+    stem, dot, ext = parts[-1].rpartition(".")
+    if dot:
+        parts[-1] = DOC_TOKEN_RE.sub("", stem) + dot + ext
+    return "/".join(parts)
+
+
+def raw_data_entries(dirp: Path) -> dict:
+    """{read-only key: (relative path, sha256)} for `dirp`'s raw-data directory."""
+    area = dirp / raw_data_dirname(dirp)
+    return _entries_in(area, dirp)
+
+
+def _entries_in(area: Path, base: Path) -> dict:
+    """{read-only key: (relative path, sha256)} for ONE raw-data area directory."""
+    out = {}
+    if not area.is_dir():
+        return out
+    try:
+        files = [p for p in sorted(area.rglob("*")) if p.is_file()]
+    except OSError:
+        return out                      # an unreadable tree is reported by the caller
+    for p in files:
+        rel = p.relative_to(base).as_posix()
+        try:
+            out[_raw_data_key(rel)] = (rel, sha256_file(p))
+        except OSError:
+            continue
+    return out
+
+
+# Text-ish files whose REFERENCES to the raw-data directory are repointed when
+# the directory is materialized under its canonical name. Anything else (a
+# .docx, a .pdf, an image) is left byte-identical: a compressed container cannot
+# be string-substituted safely, and the prompts ask the session for the docx
+# side.
+_TEXT_REF_EXTS = (".tex", ".ltx", ".sty", ".cls", ".bib", ".md", ".txt", ".tsv", ".csv",
+                  ".json", ".yml", ".yaml", ".toml", ".ini", ".cfg", ".py", ".r", ".sh",
+                  ".rmd", ".qmd", ".html", ".xml", ".pl", ".jl", ".m")
+
+
+def canonicalize_raw_data_dir(cand_dir: Path, warns: list) -> dict:
+    """Materialize the package's raw-data directory under its CANONICAL name.
+
+    A corpus set up before the rename spells it `raw_figs/`; a package built
+    from that corpus inherits the spelling, and its own LaTeX sources reference
+    it (`\\input{raw_figs/...}`). Renaming the directory and repointing those
+    references keeps the package buildable AND makes every version corpus,
+    winner and `final_clean_version/` carry the name the author uses now.
+    Content is untouched here -- enforce_readonly_raw_data owns that.
+    """
+    legacy, canonical = cand_dir / RAW_DATA_DIR_LEGACY, cand_dir / RAW_DATA_DIR
+    if not legacy.is_dir() or canonical.exists():
+        return {"renamed": False, "repointed": []}
+    try:
+        os.rename(legacy, canonical)
+    except OSError as e:
+        warns.append(f"READ-ONLY raw data: could not rename {RAW_DATA_DIR_LEGACY}/ to "
+                     f"{RAW_DATA_DIR}/: {e}")
+        return {"renamed": False, "repointed": []}
+    old, new = (RAW_DATA_DIR_LEGACY + "/").encode(), (RAW_DATA_DIR + "/").encode()
+    repointed = []
+    for p in sorted(cand_dir.rglob("*")):
+        if not p.is_file() or p.suffix.lower() not in _TEXT_REF_EXTS:
+            continue
+        try:
+            data = p.read_bytes()
+        except OSError:
+            continue
+        if old not in data:
+            continue
+        try:
+            p.write_bytes(data.replace(old, new))
+        except OSError as e:
+            warns.append(f"READ-ONLY raw data: {p.name} still references "
+                         f"{RAW_DATA_DIR_LEGACY}/ and could not be repointed: {e}")
+            continue
+        repointed.append(p.relative_to(cand_dir).as_posix())
+    warns.append(
+        f"READ-ONLY raw data: the package carried the legacy directory name "
+        f"{RAW_DATA_DIR_LEGACY}/; it was renamed to {RAW_DATA_DIR}/ and "
+        f"{len(repointed)} reference(s) were repointed"
+        + (f" ({', '.join(repointed[:4])})" if repointed else "")
+        + " -- the directory's content, file names and READ-ONLY rule are unchanged")
+    return {"renamed": True, "repointed": repointed}
+
+
+def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
+    """Put a package's raw-data directory back to the untouched original.
+
+    Returns {'present', 'files', 'restored', 'dropped'} and appends ONE warning
+    naming every deviation. A package without the directory gets the original
+    one; a package whose copy differs anywhere is overwritten IN PLACE (its own
+    file names are kept, so references stay valid); a file the original does not
+    have is removed; and when the package carries both spellings of the
+    directory name and the legacy one merely duplicates the canonical one, the
+    duplicate is removed.
+    """
+    src = ctx.pristine / raw_data_dirname(ctx.pristine)
+    if not src.is_dir():
+        return {"present": False, "files": 0, "restored": [], "dropped": []}
+    want = raw_data_entries(ctx.pristine)
+    if not want:
+        return {"present": False, "files": 0, "restored": [], "dropped": []}
+    name = raw_data_dirname(cand_dir)
+    area = cand_dir / name
+    other = cand_dir / (RAW_DATA_DIR if name == RAW_DATA_DIR_LEGACY else RAW_DATA_DIR_LEGACY)
+    if other.is_dir() and area.is_dir():
+        # Both spellings present: a duplicate of the SAME directory is collapsed,
+        # anything else is reported and left for the operator.
+        legacy_ok = all(want.get(k, (None, None))[1] == d
+                        for k, (_rel, d) in _entries_in(other, cand_dir).items())
+        if legacy_ok:
+            shutil.rmtree(other, ignore_errors=True)
+            warns.append(f"READ-ONLY raw data: {other.relative_to(cand_dir).as_posix()}/ was a "
+                         f"duplicate of {name}/ and was removed (one directory, one spelling)")
+        else:
+            warns.append(f"READ-ONLY raw data: the package carries BOTH "
+                         f"{RAW_DATA_DIR}/ and {RAW_DATA_DIR_LEGACY}/; the legacy directory was "
+                         f"left alone -- keep one of them")
+    got = raw_data_entries(cand_dir)
+    # A DIRECTORY squatting on one of the original's file paths (agent scratch at
+    # the wrong path) is the recovery layer's case: it refuses to delete real work
+    # and fails the attempt. This layer must not delete inside it either.
+    squat = sorted({norm_raw_data_name(rel) for rel, _dig in want.values()
+                    if (cand_dir / norm_raw_data_name(rel)).is_dir()})
+
+    def inside_squat(rel: str) -> bool:
+        return any(rel == s or rel.startswith(s + "/") for s in squat)
+
+    restored, dropped = [], []
+    for key, (rel, dig) in want.items():
+        cur = got.get(key)
+        if cur is not None and cur[1] == dig:
+            continue
+        # The candidate's OWN spelling of the directory wins (it is what its
+        # documents reference); a file the original does not have yet is written
+        # under the canonical name.
+        dest_rel = cur[0] if cur is not None else norm_raw_data_name(rel)
+        if (cand_dir / dest_rel).is_dir():
+            continue                    # squatted: reported as a warning below
+        dest = cand_dir / dest_rel
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ctx.pristine / rel, dest)
+        except OSError as e:
+            warns.append(f"READ-ONLY raw data: could not restore {dest.name}: {e}")
+            continue
+        restored.append(dest.relative_to(cand_dir).as_posix())
+    for key, (rel, _dig) in got.items():
+        if key not in want and not inside_squat(rel):
+            try:
+                (cand_dir / rel).unlink()
+            except OSError:
+                continue
+            dropped.append(rel)
+    for s in squat:
+        warns.append(f"READ-ONLY raw data: {s} is a directory where the pristine original has a "
+                     f"file; its content was left alone (the recovery layer refuses to delete "
+                     f"real work) and the attempt fails")
+    for d in sorted([p for p in area.rglob("*") if p.is_dir()],
+                    key=lambda p: len(p.parts), reverse=True):
+        try:
+            d.rmdir()                      # only empty directories disappear
+        except OSError:
+            pass
+    if restored or dropped:
+        changed = ", ".join(sorted(restored + dropped)[:6])
+        more = f" (+{len(restored) + len(dropped) - 6} more)" \
+            if len(restored) + len(dropped) > 6 else ""
+        warns.append(
+            f"READ-ONLY raw data: {len(restored) + len(dropped)} file(s) under {name}/ were put "
+            f"back to the pristine original ({changed}{more}). The raw-data directory is an "
+            f"INPUT: never edit, rename, add or drop anything inside it -- it is copied from the "
+            f"original, so a document that points into it must use the name that is there")
+    return {"present": True, "files": len(want), "restored": restored, "dropped": dropped}
+
+
+def verify_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
+    """The whole READ-ONLY raw-data contract for one package: canonical name +
+    the original's bytes. Called after the missing-file recovery, so an inherited
+    deviation is healed exactly once and a stage that follows the rule is a
+    no-op."""
+    info = canonicalize_raw_data_dir(cand_dir, warns)
+    info.update(enforce_readonly_raw_data(ctx, cand_dir, warns))
+    return info
+
+
+def raw_data_advisories(ctx: Ctx) -> list:
+    """Pins/winners whose READ-ONLY raw data differs from the pristine original.
+
+    Reported, never repaired: a pin and its published winner are the frozen
+    evidence a decided round rests on, so the pipeline does not rewrite them --
+    but the operator has to know that the corpus a champion was built from
+    carries raw-data edits from before the rule existed. Every stage from now on
+    materializes the original's copy, so the deviation cannot reach a new
+    package.
+    """
+    want = raw_data_entries(ctx.pristine)
+    if not want:
+        return []
+    out, seen = [], set()
+    areas = [(f"pinned/{pin['id']}", pinned_docs_dir(ctx, pin))
+             for pin in (ctx.state.get("pinned") or [])]
+    for r in range(1, ctx.rounds_count() + 1):
+        rrec = ctx.state.get("rounds", {}).get(str(int(r))) or {}
+        if rrec.get("status") == "done" and rrec.get("winner_dir"):
+            areas.append((rrec["winner_dir"], ctx.root / rrec["winner_dir"]))
+    for label, d in areas:
+        if label in seen or not d.is_dir():
+            continue
+        seen.add(label)
+        got = raw_data_entries(d)
+        bad = sorted(rel for key, (rel, dig) in want.items()
+                     if (got.get(key) or (None, None))[1] != dig)
+        if bad:
+            out.append(f"{label}/ carries {len(bad)} raw-data file(s) that differ from the "
+                       f"pristine original ({', '.join(bad[:3])}"
+                       f"{f' +{len(bad) - 3} more' if len(bad) > 3 else ''}); every stage "
+                       f"materializes the original's copy, so this cannot reach a new package")
+    return out
+
+
 def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list) -> dict:
     """RECOVERY LAYER: restore base files the candidate lost, or say why it cannot.
 
@@ -12448,8 +12859,8 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
     retrying (at ~1h of agent time per attempt) can never fix it.
 
     Coverage is wider than the document-set check on purpose: the check only
-    protects EDITABLE_DOC_EXTS, which left raw_figs/ PDFs (source-hierarchy
-    tier 2: "data in raw_figs/"), .tsv tables and .pptx figure sources with
+    protects EDITABLE_DOC_EXTS, which left raw-data PDFs (source-hierarchy
+    tier 2: "data in raw_data/"), .tsv tables and .pptx figure sources with
     NO protection at all. The backfill restores every missing base file, so a
     dropped figure asset is repaired too -- and reported.
 
@@ -13672,7 +14083,7 @@ def _repair_table_skeleton(md_text: str) -> str:
 def _repair_guard_files(sb: Path, kind: str) -> dict:
     """{rel path: sha256} for every file a repair may NOT touch.
 
-    The input corpora (`base/`, `non-revised/`, a judge's views, the donor
+    The input corpora (`base/`, `non_revised/`, a judge's views, the donor
     packages) are left out: the postcheck's own input manifests verify them, and
     hashing 180 MB twice per repair would cost more than the repair. Everything
     else the sandbox carries -- the manuscript files of the package, the finding
@@ -13970,7 +14381,7 @@ this sandbox. The manuscript/package itself is NOT yours to touch.
 Everything else must stay BYTE-IDENTICAL, above all:
   * the manuscript files/package contents (documents, code, figures) -- a repair never edits
     submission content, and never "fixes" a document, a citation or a number
-  * the corpus inputs (base/, non-revised/, self/, others/, target/, field/, original/) and the
+  * the corpus inputs (base/, non_revised/, self/, others/, target/, field/, original/) and the
     other stages' deliverables (review/, audit/, scores.json as far as they are not yours)
   * the records this stage's own postcheck reads from the PACKAGE (a delivered document, a
     validation result) -- if one of those is broken, no repair can clear it and the attempt fails
@@ -14784,7 +15195,7 @@ def postcheck_review(ctx: Ctx, rec: dict):
     if not any((sb / rel).exists() for rel in DISCOVERY_RELS):
         warns.append("no discovery-round artifact under review/round2/ -- the D0-D5 phase cannot "
                      "be verified")
-    _check_pristine_copy(ctx, rec, "non-revised", errs)
+    _check_pristine_copy(ctx, rec, pristine_dirname(ctx.sandbox_of(rec)), errs)
     errs.extend(input_mismatches(ctx, rec))
     return (not errs), errs, warns, None
 
@@ -14798,7 +15209,6 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     warns.extend(inherited_structured_output_notes(ctx, rec))
     rev = sb / REVISED_DIR
     _format_fix_stage_package(ctx, rec, rev, warns, errs)
-    _record_revision_token(rec, rev, warns)
     if not (rev.is_dir() and any(rev.iterdir())):
         errs.append("revised/ is missing or empty (a non-empty revised/ is required, though it is "
                     "not by itself a completion signal)")
@@ -14893,6 +15303,12 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     # drop is reported instead of costing another agent session.
     rec["backfill"] = backfill_missing_files(ctx, rec, [(sb / "base", "", ())], warns)
     errs.extend(f"document recovery failed: {e}" for e in rec["backfill"]["unresolved"])
+    # AFTER the recovery, so the READ-ONLY raw-data directory ends up exactly as
+    # the untouched original has it -- never as the base (or a donor) left it.
+    rec["raw_data"] = verify_readonly_raw_data(ctx, rev, warns)
+    # AFTER the read-only repair: the recorded token describes the package that
+    # ships, not the one the agent left before the repair.
+    _record_revision_token(rec, rev, warns)
     _caption_and_document_checks(ctx, rec, _rec_vid(rec), [(sb / "base", "", ())], errs, warns)
     if word_docs_present([rev]):
         check_visual_artifact(rev / "VISUAL_CHECK.md",
@@ -14928,7 +15344,7 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     add_stage_quality_checks(ctx, rec, [(sb / "base", "", ())], [(rev, "", ())],
                              rev, "revise", errs, warns)
     # HARD check: Phase 2 must not touch the frozen review/ copy.
-    _check_pristine_copy(ctx, rec, "non-revised", errs)
+    _check_pristine_copy(ctx, rec, pristine_dirname(ctx.sandbox_of(rec)), errs)
     errs.extend(input_mismatches(ctx, rec))
     # SPLIT REVIEW: this is part B, so the two sessions' findings are merged into
     # ONE frozen list here (A's ids must survive; the union must dispose every
@@ -15054,7 +15470,6 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
     warns.extend(inherited_structured_output_notes(ctx, rec))
     out = sb / INTEGRATED_DIR
     _format_fix_stage_package(ctx, rec, out, warns, errs)
-    _record_revision_token(rec, out, warns)
     if not (out.is_dir() and any(out.iterdir())):
         errs.append(f"{INTEGRATED_DIR}/ is missing or empty (the integrated package is this "
                     f"stage's deliverable)")
@@ -15105,6 +15520,8 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
     # Same recovery as the revise stage, measured against this run's SELF copy.
     rec["backfill"] = backfill_missing_files(ctx, rec, [(sb / "self", "", ())], warns)
     errs.extend(f"document recovery failed: {e}" for e in rec["backfill"]["unresolved"])
+    rec["raw_data"] = verify_readonly_raw_data(ctx, out, warns)
+    _record_revision_token(rec, out, warns)
     _caption_and_document_checks(ctx, rec, freshness_vid(rec), [(sb / "self", "", ())],
                                  errs, warns)
     if word_docs_present([out]):
@@ -15157,7 +15574,7 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
                      "artifacts, the size classes and the finding-effect column cannot be checked)")
     add_stage_quality_checks(ctx, rec, [(sb / "self", "", ())], [(out, "", ())],
                              out, "integrate", errs, warns)
-    _check_pristine_copy(ctx, rec, "non-revised", errs)
+    _check_pristine_copy(ctx, rec, pristine_dirname(ctx.sandbox_of(rec)), errs)
     errs.extend(input_mismatches(ctx, rec))
     return (not errs), errs, warns, None
 
@@ -15183,7 +15600,6 @@ def postcheck_rewrite(ctx: Ctx, rec: dict):
     warns.extend(inherited_structured_output_notes(ctx, rec))
     out = sb / REWRITTEN_DIR
     _format_fix_stage_package(ctx, rec, out, warns, errs)
-    _record_revision_token(rec, out, warns)
     if not (out.is_dir() and any(out.iterdir())):
         errs.append(f"{REWRITTEN_DIR}/ is missing or empty (the full rewritten candidate is this "
                     f"stage's deliverable; a non-empty {REWRITTEN_DIR}/ is required, though it is "
@@ -15218,6 +15634,8 @@ def postcheck_rewrite(ctx: Ctx, rec: dict):
     # The rewrite must not lose base content: same recovery as revise/integration.
     rec["backfill"] = backfill_missing_files(ctx, rec, [(sb / "base", "", ())], warns)
     errs.extend(f"document recovery failed: {e}" for e in rec["backfill"]["unresolved"])
+    rec["raw_data"] = verify_readonly_raw_data(ctx, sb / REWRITTEN_DIR, warns)
+    _record_revision_token(rec, sb / REWRITTEN_DIR, warns)
     _caption_and_document_checks(ctx, rec, freshness_vid(rec) or A1_ID,
                                  [(sb / "base", "", ())], errs, warns)
     if word_docs_present([out]):
@@ -15247,7 +15665,7 @@ def postcheck_rewrite(ctx: Ctx, rec: dict):
                         f"kinds of difference")
     add_stage_quality_checks(ctx, rec, [(sb / "base", "", ())], [(out, "", ())],
                              out, "rewrite", errs, warns)
-    _check_pristine_copy(ctx, rec, "non-revised", errs)
+    _check_pristine_copy(ctx, rec, pristine_dirname(ctx.sandbox_of(rec)), errs)
     errs.extend(input_mismatches(ctx, rec))
     return (not errs), errs, warns, None
 
@@ -17826,7 +18244,7 @@ def cmd_setup(args) -> None:
         die(f"--source directory is empty: {source}")
     if any(p.is_dir() and p.name == REVISED_DIR for p in source.rglob("*")):
         print("WARNING: --source contains a 'revised' directory already; the source should be the "
-              "pristine 'non-revised' corpus. Continuing anyway.")
+              "pristine 'non_revised' corpus. Continuing anyway.")
     root = Path(args.root).resolve()
     marker = root / SETUP_MARKER
     if root.exists() and any(root.iterdir()):
@@ -18092,6 +18510,10 @@ def cmd_run(args) -> None:
 
 
 def _cmd_run_locked(ctx: Ctx, args) -> None:
+    # Input-area names are RESOLVED, never rewritten: a root (and a corpus) set up
+    # under the older spellings `non-revised/` / `raw_figs/` keeps them, and both
+    # spellings mean the same directory everywhere (manifests_equal normalises, so
+    # a rename by hand stays invisible too). Nothing in the pipeline moves them.
     # The pristine original is the reference every sandbox and judge copy comes
     # from; if it no longer matches the setup-time manifest, refuse to proceed.
     ok, detail = pristine_integrity(ctx)
@@ -18107,6 +18529,8 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             + "\n  - ".join(perrs)
             + "\n       The content-addressed chain is broken; restore the pinned/ tree (or the "
               "state.json backup) before continuing, or start a fresh --root.")
+    for note in raw_data_advisories(ctx):
+        print(f"[run] WARNING: {note}")
 
     stale, blocking = reconcile_inputs(ctx)
     if blocking:
@@ -19690,6 +20114,8 @@ def cmd_decide(args) -> None:
         problems.append(f"integrity: the pristine original CHANGED ({pdetail}); every judge's "
                         f"regression reference is no longer what is on disk")
     problems.extend(f"integrity: {e}" for e in perrs)
+    for note in raw_data_advisories(ctx):
+        print(f"[decide] WARNING: {note}")
     chain_ok = bool(pok and not perrs and not evid_changed)
     for e in evid_missing:
         print(f"[decide] note: {e}")
@@ -20092,9 +20518,9 @@ def cmd_run_decide(args) -> None:
 #
 # Every candidate version gets a tracked-changes .docx for each of its sources:
 #   from-base          the round's own starting document (runs/r<R>_a1/base/)
-#   from-original      the pristine original (non-revised/)
+#   from-original      the pristine original (non_revised/)
 #   from-setup-source  the directory passed to `setup --source` (when it still
-#                      exists; otherwise non-revised/ and the manifest says so)
+#                      exists; otherwise non_revised/ and the manifest says so)
 # Pairs are matched like the document-set check (version-token-insensitive name
 # plus content), so "manuscript-o.docx" -> "manuscript-p.docx" is one document.
 # Tool chain: python-redlines[docxodus] (via nbt_redlines_adapter.py) ->
@@ -20618,9 +21044,9 @@ def run_redlines(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
     manifest = {"generated": utcnow(), "pipeline_root": str(ctx.root), "tool": tool,
                 "redline_cmd": redline_cmd,
                 "sources": {"from-base": "the round's own base (runs/r<R>_a1/base/)",
-                            "from-original": "the pristine original (non-revised/)",
+                            "from-original": "the pristine original (non_revised/)",
                             "from-setup-source": (str(src_setup) if source_sources else
-                                                  "MISSING/UNVERIFIED -- used non-revised/ "
+                                                  "MISSING/UNVERIFIED -- used non_revised/ "
                                                   "instead (see notes)")},
                 "versions": [], "notes": []}
     if not source_sources:
@@ -20647,7 +21073,7 @@ def run_redlines(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
             sources = [("from-base", corpus_sources(ctx, r, A1_ID), None),
                        ("from-original", [(ctx.pristine, "", ())], None),
                        ("from-setup-source", source_sources or [(ctx.pristine, "", ())],
-                        None if source_sources else "setup source path missing; used non-revised")]
+                        None if source_sources else "setup source path missing; used non_revised")]
             for label, base_sources, note in sources:
                 if not any(s.is_dir() for s, _p, _e in base_sources):
                     entry["skipped"].append({"source": label, "reason": "no base corpus"})
@@ -21069,7 +21495,7 @@ USAGE_EXAMPLES = """usage:
           state.json. Dry-run unless --yes is given.
   redline --root <dir> [--round R] [--version w1,a2,i1|all] [--tool TOOL]
           write tracked-changes .docx files for every candidate version, once per
-          source: non-revised/<doc>.docx -> revised/<doc>.docx AND the setup
+          source: non_revised/<doc>.docx -> revised/<doc>.docx AND the setup
           --source copy -> revised/<doc>.docx. TOOL is auto (default) and tries
           python-redlines[docxodus], then docx-trackdiff, then the built-in
           OOXML diff; use --redline-cmd '<json argv with {base} {revised} {out}>'
@@ -21083,7 +21509,7 @@ WORKED EXAMPLE — a complete pipeline with TWO revision iterations (--rounds 2)
 ------------------------------------------------------------------------------
   # 0. once: create the round root. Two rounds; 3 judge sessions per version.
   #    SOURCE is your pristine submission; --root must be new or empty.
-  python nbt_pipeline.py setup --source ./non-revised --root ./nbt_rounds \\
+  python nbt_pipeline.py setup --source ./non_revised --root ./nbt_rounds \\
       --rounds 2 --judges 3
 
   # 1. run BOTH rounds end to end. Each round is the same dependency graph; the
@@ -21110,7 +21536,7 @@ WORKED EXAMPLE — a complete pipeline with TWO revision iterations (--rounds 2)
   python nbt_pipeline.py status --root ./nbt_rounds
 
   # 3. tracked-changes .docx for every round-2 candidate, one per source:
-  #    non-revised/<doc>.docx -> revised/<doc>.docx and
+  #    non_revised/<doc>.docx -> revised/<doc>.docx and
   #    <setup --source>/<doc>.docx -> revised/<doc>.docx
   python nbt_pipeline.py redline --root ./nbt_rounds --round 2
 
@@ -21125,7 +21551,7 @@ WORKED EXAMPLE — a complete pipeline with TWO revision iterations (--rounds 2)
   python nbt_pipeline.py run   --root ./nbt_rounds
 
   What the example produces:
-    ./nbt_rounds/non-revised/          pristine copy (never written)
+    ./nbt_rounds/non_revised/          pristine copy (never written)
     ./nbt_rounds/round1_winner/        round-1 champion (documents at top level)
     ./nbt_rounds/round2_winner/        round-2 champion = the final answer
     ./nbt_rounds/pinned/               content-addressed pins of both champions
@@ -21176,7 +21602,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ps = sub.add_parser("setup", parents=[common], help="initialize the pipeline root")
     ps.add_argument("--source", required=True,
-                    help="path to your pristine 'non-revised' manuscript directory")
+                    help="path to your pristine 'non_revised' manuscript directory")
     ps.add_argument("--rounds", type=int, default=DEFAULTS["rounds"],
                     help=f"number of fixed rounds (default: {DEFAULTS['rounds']}); the round-R "
                          f"champion is the answer")
@@ -21417,7 +21843,7 @@ def build_parser() -> argparse.ArgumentParser:
     prd.set_defaults(func=cmd_run_decide)
 
     prl = sub.add_parser("redline", parents=[common],
-                         help="write tracked-changes .docx (non-revised -> revised and "
+                         help="write tracked-changes .docx (non_revised -> revised and "
                               "setup --source -> revised) for every candidate")
     prl.add_argument("--round", type=int, default=None, help="only this round (default: all)")
     prl.add_argument("--version", default="all",

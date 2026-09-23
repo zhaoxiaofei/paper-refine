@@ -377,8 +377,8 @@ def test_c2b_interrupted_setup_can_be_restarted():
     out = proc.stdout + proc.stderr
     check("C2b a setup interrupted before state.json is restarted, not refused",
           proc.returncode == 0 and (root / "state.json").is_file()
-          and (root / "non-revised" / "manuscript-o.md").is_file()
-          and not (root / "non-revised" / "junk.md").exists(),
+          and (root / "non_revised" / "manuscript-o.md").is_file()
+          and not (root / "non_revised" / "junk.md").exists(),
           f"rc={proc.returncode} tail={out.strip()[-200:]!r}")
     check("C2b the marker is gone once the root is usable",
           not (root / np.SETUP_MARKER).exists())

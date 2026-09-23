@@ -201,7 +201,7 @@ check("C1 the WHOLE sandbox is kept under runs/<run>_try1_failed (deliverables i
       and kept_outline.is_file() and BOILERPLATE in kept_outline.read_text(encoding="utf-8"),
       f"{arch.name}: {sorted(p.name for p in arch.iterdir())[:8] if arch.is_dir() else '-'}")
 check("C2 the kept sandbox is the whole attempt (inputs and transcript survive)",
-      (arch / "base").is_dir() and (arch / "non-revised").is_dir()
+      (arch / "base").is_dir() and (arch / "non_revised").is_dir()
       and (arch / "_agent.log").read_text(encoding="utf-8").startswith("attempt 1 transcript"),
       str(sorted(p.name for p in arch.iterdir()))[:160])
 check("C3 the record names the kept sandbox and the live sandbox holds no attempts",

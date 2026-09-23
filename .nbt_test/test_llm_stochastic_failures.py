@@ -260,11 +260,15 @@ def main() -> int:
     # B1: base document replaced by a symlink to the base copy (a plausible
     # "save space" trick or a bad `cp -s`) -> repaired, run proceeds
     tmp, ctx, rec, sb = new_case()
+    # the package is materialized under the corpus's own spelling (`raw_figs/`);
+    # the postcheck canonicalises it to `raw_data/`, which is where the check
+    # looks afterwards.
     doc = sb / "revised" / "raw_figs" / "entire_pipeline.git-snapshot.txt"
     tgt = sb / "base" / "raw_figs" / "entire_pipeline.git-snapshot.txt"
     doc.unlink()
     doc.symlink_to(tgt)
     ok, errs, warns, crash = run_postcheck(ctx, rec)
+    doc = sb / "revised" / "raw_data" / "entire_pipeline.git-snapshot.txt"
     check("B1 symlinked document does not crash", crash is None, str(crash))
     check("B1 symlinked document is replaced by a regular file",
           doc.is_file() and not doc.is_symlink(), f"is_symlink={doc.is_symlink()}")
@@ -278,6 +282,7 @@ def main() -> int:
     doc.unlink()
     doc.symlink_to("/nonexistent/target")
     ok, errs, warns, crash = run_postcheck(ctx, rec)
+    doc = sb / "revised" / "raw_data" / "entire_pipeline.git-snapshot.txt"
     check("B2 broken symlink does not crash", crash is None, str(crash))
     check("B2 broken symlink is repaired from the base",
           doc.is_file() and not doc.is_symlink(), f"is_file={doc.is_file()}")
@@ -290,6 +295,7 @@ def main() -> int:
     doc.unlink()
     doc.mkdir()
     ok, errs, warns, crash = run_postcheck(ctx, rec)
+    doc = sb / "revised" / "raw_data" / "entire_pipeline.git-snapshot.txt"
     check("B3 empty-directory placeholder does not crash", crash is None, str(crash))
     check("B3 empty-directory placeholder is repaired",
           doc.is_file() and not doc.is_dir(), f"is_dir={doc.is_dir()}")
@@ -307,6 +313,7 @@ def main() -> int:
     doc.mkdir()
     (doc / "notes.md").write_text("agent scratch that must not be deleted\n")
     ok, errs, warns, crash = run_postcheck(ctx, rec)
+    doc = sb / "revised" / "raw_data" / "entire_pipeline.git-snapshot.txt"
     check("B4 non-empty directory is refused, not deleted",
           crash is None and (doc / "notes.md").is_file(), f"ok={ok}")
     check("B4 the refusal is an error naming the path",
