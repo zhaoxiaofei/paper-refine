@@ -850,6 +850,124 @@ def test_judge_selfcheck_catches_a_bad_sheet():
           any("contradicts its own ledger" in e for e in errs2), str(errs2)[:200])
 
 
+def test_registry_reader_backup_and_compaction():
+    print()
+    print("== G. the registry: its own size limit, a backup, and compaction ==")
+    if not hasattr(nb, "load_state_file") or not hasattr(nb, "compact_state"):
+        check("the registry layer exists (load_state_file/compact_state)", False,
+              "this build reads state.json with the AGENT-output cap and keeps no backup")
+        return
+    tmp = scratch("nbt_sig_g1_")
+    root = make_root(tmp)
+    ctx = nb.Ctx(root)
+    ctx.load()
+    state_path = root / "state.json"
+    check("a fresh registry is written and readable",
+          state_path.is_file() and nb.load_state_file(state_path)[0] is not None)
+
+    # 1. the AGENT-output cap must not apply to the pipeline's own state: the
+    #    2026-09-24 root's VALID 78 MiB registry was refused as "corrupt".
+    #    Reproduce the shape faithfully: a registry bigger than the agent cap,
+    #    written the way the OLD pipeline wrote it (bulk still inside), while the
+    #    config stays readable.
+    bulk = {"version": nb.STATE_VERSION, "runs": {
+        "r1_judge_zz": {"id": "r1_judge_zz", "kind": "judge", "round": 1,
+                        "sandbox": "runs/r1_judge_zz", "status": "done",
+                        "judge_evidence": {"format": {"rows": [{"i": i} for i in range(40000)]}}}},
+        "rounds": {}, "pinned": [], "log": []}
+    state_path.write_text(json.dumps(bulk), encoding="utf-8")
+    saved_cap = nb.MAX_JSON_BYTES
+    nb.MAX_JSON_BYTES = 64 * 1024
+    try:
+        check("the fabricated registry is over the agent cap but the config is not",
+              state_path.stat().st_size > nb.MAX_JSON_BYTES
+              > (root / "pipeline_config.json").stat().st_size)
+        check("read_json (the agent reader) refuses a registry over its cap",
+              nb.read_json(state_path) is None)
+        st2, why2 = nb.load_state_file(state_path)
+        check("load_state_file reads it anyway (the state has its OWN cap)",
+              st2 is not None and why2 == "", why2)
+        ctx2 = nb.Ctx(root)
+        try:
+            ctx2.load()
+            loaded = True
+        except SystemExit as e:                                  # pragma: no cover
+            loaded = False
+            print("  load() died:", e)
+        check("Ctx.load() works while the agent cap is smaller than the state", loaded)
+    finally:
+        nb.MAX_JSON_BYTES = saved_cap
+
+    # 2. a state over the STATE cap fails as "over the registry limit", naming
+    #    the way out -- never as "corrupt or has no run registry".
+    saved_state_cap = nb.MAX_STATE_BYTES
+    nb.MAX_STATE_BYTES = 64
+    try:
+        st3, why3 = nb.load_state_file(state_path)
+        check("a registry over the state limit is reported as over the limit",
+              st3 is None and "over this pipeline's" in why3 and "registry limit" in why3, why3)
+    finally:
+        nb.MAX_STATE_BYTES = saved_state_cap
+
+    # 3. compaction: the redundant evidence copies become counts + the path of
+    #    the full file, the registry shrinks, and the previous one is kept.
+    rec = ctx.register("r1_judge_zz", "judge", 1, "runs/r1_judge_zz")
+    rows = [{"rule": "FMT-T9c", "location": f"p{i}", "evidence": "x" * 40} for i in range(20000)]
+    rec["judge_evidence"] = {"label": "r1_judge_zz", "generated_at": "t",
+                             "corpus_identity": {"digest": "abc", "files": 39},
+                             "format": {"rows": rows, "high": 3}}
+    rec["evidence_after"] = {"label": "r1_i1", "corpus_identity": {"digest": "def"},
+                             "format": {"rows": rows}}
+    rec["format_fix"] = {"label": "r1_judge_zz", "fixed": 2, "changes": 5,
+                         "documents": [{"file": f"d{i}.docx", "changes": ["a", "b"]}
+                                       for i in range(2000)]}
+    rec["scores"] = {"run_id": "r1_judge_zz", "comparisons": [{"opponent_label": "v1",
+                                                               "score": 0}]}
+    big_before = len(json.dumps(rec))
+    ctx.save_state()
+    st = json.loads(state_path.read_text(encoding="utf-8"))
+    got = st["runs"]["r1_judge_zz"]
+    check("the full evidence payloads are replaced by summaries",
+          got["judge_evidence"].get("compacted") is True
+          and got["evidence_after"].get("compacted") is True
+          and got["format_fix"].get("compacted") is True)
+    check("... keeping the counts, the corpus digest and the path of the full file",
+          got["judge_evidence"]["counts"]["format_rows"] == 20000
+          and got["judge_evidence"]["counts"]["high_format_rows"] == 3
+          and got["judge_evidence"]["corpus_identity"]["digest"] == "abc"
+          and got["judge_evidence"]["full"] == "reports/judge_evidence_r1_judge_zz.json"
+          and got["evidence_after"]["full"] == "runs/r1_judge_zz/CODE_SCANS_after.json"
+          and got["format_fix"]["fixed"] == 2 and got["format_fix"]["documents"] == 2000,
+          str(got["judge_evidence"])[:180])
+    check("nothing a postcheck CONSUMES was touched",
+          got["scores"]["comparisons"][0]["score"] == 0 and got["status"] == "pending")
+    check("the registry on disk is small again",
+          state_path.stat().st_size < 200000,
+          f"{state_path.stat().st_size} bytes (was {big_before} in memory)")
+    check("the compaction is recorded in the run log",
+          any(e.get("event") == "state-compacted" for e in (st.get("log") or [])))
+    prev = nb.state_prev_path(state_path)
+    prev_text = prev.read_text(encoding="utf-8") if prev.is_file() else ""
+    check("the PREVIOUS registry is kept as state.json.prev (the pre-compaction file, "
+          "not a copy of the new one)",
+          prev.is_file() and '"compacted"' not in prev_text
+          and prev.stat().st_size > state_path.stat().st_size * 5,
+          f"{prev.stat().st_size if prev.is_file() else 0} vs {state_path.stat().st_size} bytes")
+    check("a second save keeps working and stays compact",
+          (ctx.save_state() or True) and state_path.stat().st_size < 200000)
+
+    # 4. a genuinely unreadable registry names the backup instead of dying blind
+    state_path.write_text("{ this is not JSON", encoding="utf-8")
+    proc = cli("status", "--root", str(root))
+    out = proc.stdout + proc.stderr
+    check("a corrupt registry is reported as invalid JSON, not as 'no run registry'",
+          "is not valid JSON" in out, out[-200:])
+    check("... and the message names state.json.prev and how to restore it",
+          "state.json.prev" in out and "mv state.json.prev state.json" in out, out[-260:])
+    check("the command exits non-zero instead of continuing",
+          proc.returncode != 0, str(proc.returncode))
+
+
 def test_process_died_after_the_audit_finished():
     print()
     print("== E. a crashed process with a complete audit sandbox is re-verified ==")
@@ -886,6 +1004,7 @@ def main() -> int:
     test_judge_check_ids_the_prompt_names_are_accepted()
     test_judge_prompt_gets_a_blinding_safe_preflight()
     test_judge_selfcheck_catches_a_bad_sheet()
+    test_registry_reader_backup_and_compaction()
     test_process_died_after_the_audit_finished()
     cleanup()
     print()

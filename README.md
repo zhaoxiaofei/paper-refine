@@ -916,6 +916,22 @@ check id. Judges also get the pre-marker pre-flight now, in wording that leaks n
 provenance, so a sheet whose integer contradicts its own ledger is fixed
 in-session rather than re-judged from scratch.
 
+**The registry keeps itself small, and a failure to read it is diagnosable.**
+`state.json` is the pipeline's own file, so it is read with its own (much larger)
+limit rather than the 64 MiB cap that protects the machine from a runaway
+AGENT file — the 2026-09-24 root's valid 78 MiB registry was refused as "corrupt
+or has no run registry" and every command died after a complete 2.5-hour run.
+Two layers keep it from growing like that: `compact_state()` replaces the
+redundant bulk with the counts, the corpus digest and the path of the full file
+before every save (`runs.<judge>.judge_evidence` -> `reports/judge_evidence_<id>.json`,
+`runs.<id>.evidence_after` -> `runs/<id>/CODE_SCANS_after.json`, `runs.<id>.format_fix`
+-> `runs/<id>/FORMAT_FIX.json`; those copies were 56 MB of that registry, and the
+root's registry drops to ~6 MB on its next save), and every save keeps the
+previous registry as `state.json.prev` — a hard link, so it costs no bytes or
+I/O. When a registry really cannot be read, the message says WHICH way it is
+broken (over the state cap / not valid JSON / no run registry) and names the
+backup and the one command that restores it.
+
 **Every run kind the plan can produce is postcheckable AND rebuildable.** The
 materializer of each kind lives in one table (`REBUILD_HANDLERS`) next to the
 postcheck's (`POSTCHECK_HANDLERS`); a round refuses to launch when a planned kind

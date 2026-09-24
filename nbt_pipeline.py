@@ -771,7 +771,24 @@ from pathlib import Path
 #     that leaks no provenance (`judge_selfcheck_block`), so a sheet whose
 #     integer contradicts its own ledger is fixed in-session instead of costing
 #     a re-judge.
-VERSION = "3.4.2"
+# 3.4.3 -- the registry can no longer refuse the pipeline's own state:
+#   * `load()` read state.json through `read_json`, which applies the 64 MiB
+#     AGENT-OUTPUT cap: the 2026-09-24 root's VALID 78 MiB registry (both rounds
+#     done, the champion pinned and published) was refused as "corrupt or has no
+#     run registry" and every command died. The pipeline's own state is read with
+#     its OWN cap (`load_state_file`, MAX_STATE_BYTES) and its own message, so
+#     "over the limit" is never reported as "corrupt";
+#   * `compact_state()` drops the redundant BULK before every save: the full
+#     evidence packs stay where they are written (reports/judge_evidence_<id>.json,
+#     runs/<id>/CODE_SCANS_after.json, runs/<id>/FORMAT_FIX.json -- 56 MB of the
+#     offending registry was copies of those) while the record keeps the counts,
+#     the corpus digest and the path; the registry of that root becomes ~6 MB on
+#     its next save;
+#   * every save keeps the previous registry as `state.json.prev` (a hard link:
+#     no copy, no extra I/O), which is the backup the error message has always
+#     told operators to restore from, and a registry over the state cap names the
+#     way out (`prune --yes` / a fresh root) instead of the wrong diagnosis.
+VERSION = "3.4.3"
 STATE_VERSION = 3
 
 # The Zotero tooling policy carried in pipeline_config.json (`setup --zotero`):
@@ -9232,6 +9249,137 @@ def superseded_dir_of(ctx: Ctx) -> Path:
 # CONTEXT / STATE
 # =====================================================================
 
+# --- the registry (state.json): read it with its OWN limits ----------------
+# `read_json` applies the AGENT-OUTPUT cap (MAX_JSON_BYTES), which exists so a
+# runaway session cannot OOM the machine with a 2 GiB scores.json. Applying that
+# cap to `state.json` turned a VALID 78 MiB registry into "state file is corrupt
+# or has no run registry" and refused EVERY command on the 2026-09-24 root after
+# a 2.5-hour run (both rounds had finished, the champion was pinned and
+# published, and only the final decision was left). The file was valid JSON and
+# 56 MiB of it was redundant copies of evidence packs that already live on disk:
+#   * runs.<judge>.judge_evidence  -> reports/judge_evidence_<run>.json
+#   * runs.<id>.evidence_after     -> runs/<id>/CODE_SCANS_after.json
+#   * runs.<id>.format_fix         -> runs/<id>/FORMAT_FIX.json
+# `judge_evidence` alone was 41.6 MiB across 45 judge sessions, 33 MiB of that
+# the M4 number ledger of the judge's blinded target, replicated once per
+# session. Three layers keep the registry small and its failures diagnosable:
+#   1. the pipeline's own state is read with its own cap (MAX_STATE_BYTES) and
+#      its own message, so "too big" is never reported as "corrupt";
+#   2. `compact_state()` replaces that redundant bulk with the counts, the
+#      digest and the path of the full file before every save;
+#   3. every save keeps the previous registry as `state.json.prev` (a hard link,
+#      so it costs no copy), which is the "backup" the error message has always
+#      told operators to restore from.
+MAX_STATE_BYTES = 256 * 1024 * 1024
+# Above this the registry is reported (console + run log) with its biggest
+# run-record fields, so a new bulk field cannot grow unnoticed.
+STATE_SOFT_BYTES = 16 * 1024 * 1024
+STATE_PREV_SUFFIX = ".prev"
+
+
+def state_prev_path(path: Path) -> Path:
+    """The rolling backup of a state file (same directory, same volume)."""
+    return path.with_name(path.name + STATE_PREV_SUFFIX)
+
+
+def load_state_file(path: Path) -> tuple:
+    """(state, problem) for the pipeline's OWN registry (problem == "" when fine).
+
+    Never uses the agent-output cap: `state.json` is written by this program.
+    The problem string is what the caller prints, so "over the limit", "not
+    valid JSON" and "not the expected shape" stay distinguishable.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError as e:                                          # noqa: BLE001
+        return None, f"could not be read ({type(e).__name__}: {e})"
+    if size > MAX_STATE_BYTES:
+        def _mib(n):
+            return (f"{n / (1024 * 1024):.1f} MiB" if n >= 1024 * 1024
+                    else f"{n / 1024:.1f} KiB")
+        return None, (f"is {_mib(size)}, over this pipeline's {_mib(MAX_STATE_BYTES)} registry "
+                      f"limit -- prune the rounds (`prune --yes`) or start a fresh root")
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            text = f.read()
+    except OSError as e:                                          # noqa: BLE001
+        return None, f"could not be read ({type(e).__name__}: {e})"
+    try:
+        return json.loads(text), ""
+    except ValueError as e:                                       # noqa: BLE001
+        return None, f"is not valid JSON ({e})"
+
+
+def _evidence_counts(ev: dict) -> dict:
+    """The small numeric face of one code-side evidence pack."""
+    def n(*path):
+        cur = ev
+        for key in path:
+            if not isinstance(cur, dict):
+                return 0
+            cur = cur.get(key)
+        if isinstance(cur, (list, dict)):
+            return len(cur)
+        return cur if isinstance(cur, int) else 0
+    return {"numbers": n("numbers", "rows"), "format_rows": n("format", "rows"),
+            "high_format_rows": n("format", "high"), "captions": n("captions", "captions"),
+            "lengths": n("lengths", "rows"), "terms": n("terms", "rows"),
+            "outline": n("outline", "rows"), "placeholders": n("placeholders", "count")}
+
+
+def _evidence_summary(ev: dict, path_rel: str) -> dict:
+    return {"compacted": True, "label": ev.get("label"),
+            "generated_at": ev.get("generated_at"),
+            "corpus_identity": ev.get("corpus_identity"),
+            "counts": _evidence_counts(ev), "full": path_rel}
+
+
+def _format_fix_summary(rep: dict, path_rel: str) -> dict:
+    out = {k: v for k, v in rep.items() if k != "documents"}
+    out["compacted"] = True
+    out["documents"] = len(rep.get("documents") or [])
+    out["full"] = path_rel
+    return out
+
+
+def compact_state(st: dict) -> int:
+    """Replace the registry's redundant BULK with summaries; return bytes freed.
+
+    Only write-only fields whose full payload is already on disk are touched, and
+    each keeps the values the reports read (counts, corpus digest, the normalizer's
+    summary numbers) plus the path of the full file. Nothing a postcheck CONSUMES
+    is compacted: `inputs_manifest`, `scores`, `evidence_delta`, `residual`,
+    `attempts_log` and every verdict stay exactly as they were.
+    """
+    freed = 0
+    for rid, rec in sorted((st.get("runs") or {}).items()):
+        if not isinstance(rec, dict):
+            continue
+        sb = str(rec.get("sandbox") or f"runs/{rid}")
+        for field, path_rel, summarize in (
+                ("judge_evidence", f"reports/judge_evidence_{rid}.json", _evidence_summary),
+                ("evidence_after", f"{sb}/CODE_SCANS_after.json", _evidence_summary),
+                ("format_fix", f"{sb}/FORMAT_FIX.json", _format_fix_summary)):
+            payload = rec.get(field)
+            if not isinstance(payload, dict) or payload.get("compacted"):
+                continue
+            freed += len(json.dumps(payload, default=str))
+            rec[field] = summarize(payload, path_rel)
+    return freed
+
+
+def biggest_run_fields(st: dict, limit: int = 5) -> list:
+    """[(bytes, run id, field)] of the biggest run-record fields (for reports)."""
+    out = []
+    for rid, rec in (st.get("runs") or {}).items():
+        if not isinstance(rec, dict):
+            continue
+        for field, value in rec.items():
+            if isinstance(value, (dict, list)) and len(value) > 8:
+                out.append((len(json.dumps(value, default=str)), rid, field))
+    return sorted(out, reverse=True)[:limit]
+
+
 class Ctx:
     """Pipeline root + crash-safe state.
 
@@ -9265,9 +9413,25 @@ class Ctx:
             die(f"missing/corrupt {self.cfg_path}  (run `setup` first)")
         self.cfg = cfg or {}
         if self.state_path.exists():
-            st = read_json(self.state_path)
+            st, problem = load_state_file(self.state_path)
+            if st is None:
+                prev = state_prev_path(self.state_path)
+                hint = "\n       No previous registry is on disk yet (state.json.prev is written " \
+                       "by every save)."
+                if prev.is_file():
+                    try:
+                        when = time.strftime("%Y-%m-%d %H:%M:%S",
+                                             time.localtime(prev.stat().st_mtime))
+                    except OSError:
+                        when = "an unknown time"
+                    hint = (f"\n       The previous registry is on disk as {prev.name} (written "
+                            f"{when}): check it, then `mv {prev.name} {self.state_path.name}` "
+                            f"restores it.")
+                die(f"state file {problem}: {self.state_path}{hint}\n"
+                    f"       Deleting it and re-running `setup` requires a fresh --root: existing "
+                    f"sandboxes are not auto-adopted.")
             if not isinstance(st, dict) or not isinstance(st.get("runs"), dict):
-                die(f"state file is corrupt or has no run registry: {self.state_path}\n"
+                die(f"state file carries no run registry: {self.state_path}\n"
                     f"       Restore it from a backup. Deleting it and re-running `setup` "
                     f"requires a fresh --root: existing sandboxes are not auto-adopted.")
             try:
@@ -9316,6 +9480,18 @@ class Ctx:
             st.setdefault("log", [])
             st["version"] = STATE_VERSION
             self.state = st
+            try:
+                size = self.state_path.stat().st_size
+            except OSError:
+                size = 0
+            if size > STATE_SOFT_BYTES:
+                heavy = ", ".join(f"{rid}.{field} ({n / 1e6:.1f} MB)"
+                                  for n, rid, field in biggest_run_fields(st, 3))
+                print(f"[warn] {self.state_path.name} is {size / (1024 * 1024):.1f} MiB"
+                      + (f" (largest: {heavy})" if heavy else "")
+                      + "; the deprecated evidence copies inside it are compacted to their "
+                        "counts/paths on the next save, and the previous registry is kept as "
+                        f"{state_prev_path(self.state_path).name}")
             note = pipeline_identity_note(self)
             if note:
                 print(note)
@@ -9341,7 +9517,39 @@ class Ctx:
             if rel not in logs:
                 logs.append(rel)
                 del logs[:-20]
+        # COMPACT before writing: the fields `compact_state` drops are copies of
+        # files that live on disk anyway, and keeping them here is what turned
+        # the 2026-09-24 registry into 78 MiB (and then into a refused root).
+        freed = compact_state(self.state)
+        if freed:
+            self.state.setdefault("log", []).append(
+                {"ts": utcnow(), "event": "state-compacted", "run_id": None,
+                 "detail": f"replaced {freed / 1e6:.1f} MB of redundant evidence copies "
+                           f"(judge_evidence/evidence_after/format_fix) with their counts and "
+                           f"the path of the full file"})
+        # Keep the PREVIOUS registry as a hard link before the atomic replace: a
+        # pointer, not a copy, so an 80 MB state costs no extra bytes and no I/O.
+        prev = state_prev_path(self.state_path)
+        try:
+            if self.state_path.is_file():
+                if prev.exists():
+                    prev.unlink()
+                os.link(self.state_path, prev)
+        except OSError:
+            pass                        # no hardlinks (drvfs) or a concurrent save: best effort
         write_json_atomic(self.state_path, self.state)
+        try:
+            size = self.state_path.stat().st_size
+        except OSError:
+            size = 0
+        if size > STATE_SOFT_BYTES and not self.state.get("state_size_warned"):
+            self.state["state_size_warned"] = utcnow()
+            heavy = ", ".join(f"{rid}.{field} ({n / 1e6:.1f} MB)"
+                              for n, rid, field in biggest_run_fields(self.state, 3))
+            print(f"[warn] {self.state_path.name} is {size / (1024 * 1024):.1f} MiB"
+                  + (f" (largest: {heavy})" if heavy else "")
+                  + "; a growing registry slows every command -- report it, and `prune --yes` "
+                    "reclaims the records' sandboxes when the run is decided")
 
     # ---- cross-process exclusion ----
     @contextlib.contextmanager
