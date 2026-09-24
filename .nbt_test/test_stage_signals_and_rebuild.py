@@ -513,8 +513,10 @@ def test_prompts_state_the_marker_location():
     judge = nb.judge_prompt(sb, "judge_tok9_j1", 1, "tok9", 1, 1, ["v1", "v2"])
     check("judge: the sheet's location is stated",
           "sandbox root" in judge and "scores.json IS the completion signal" in judge)
-    check("judge: the pre-flight block is NOT in the blinded prompt",
-          "selfcheck" not in judge)
+    check("judge: the pre-flight block is present but writes no provenance into the prompt",
+          "selfcheck --sandbox . --stage judge" in judge
+          and hasattr(nb, "judge_selfcheck_block")
+          and nb.judge_selfcheck_block("judge_tok9_j1").count("--round") == 0)
 
 
 # =====================================================================
@@ -739,6 +741,115 @@ def test_misplaced_revision_ledger_is_adopted_end_to_end():
           and not (sb / "revised" / nb.MARKER_FILE).exists(), str(sorted(pkg_files)[:6]))
 
 
+def judge_rec(rid="judge_tok9_j1"):
+    return {"id": rid, "kind": "judge", "round": 1, "label_map": {"v1": "w1"},
+            "judge_target_token": "tok9", "target_id": "w1", "judge_index": 1,
+            "contract": nb.JUDGE_CONTRACT_VERSION}
+
+
+def judge_sheet(check_id, score=1, tier="writing", severity="minor"):
+    return {"run_id": "judge_tok9_j1", "target_id": "tok9", "judge_index": 1,
+            "comparisons": [{"opponent_label": "v1", "score": score, "basis": tier,
+                             "reason": "one comparison for the stub",
+                             "resolved": [{"tier": tier, "severity": severity,
+                                           "evidence": "the sentence repeats itself",
+                                           "check": check_id}],
+                             "introduced": [],
+                             "checks": {c: "clean" for c in nb.JUDGE_COVERAGE_CHECKS}}]}
+
+
+def test_judge_check_ids_the_prompt_names_are_accepted():
+    print()
+    print("== F. the ids the JUDGE PROMPT names are not rejected by the validator ==")
+    if not hasattr(nb, "WRITING_RUBRIC_CHECK"):
+        check("the writing rubric's items map onto the check that owns them (J3)", False,
+              "this build has no WRITING_RUBRIC_CHECK / Q-item mapping")
+        return
+    check("the writing rubric's items are normalized to the check that owns them (J3)",
+          all(nb._norm_check_id(q) == nb.WRITING_RUBRIC_CHECK
+              for q in ("Q1", "Q6", "Q7", "Q11", "Q12", "q6", " Q 7 ")),
+          str([nb._norm_check_id(q) for q in ("Q1", "Q6", "Q7", "Q11", "Q12")]))
+    check("a sweep rule id still normalizes to M20, and a frozen id is untouched",
+          nb._norm_check_id("FMT-T9C") == "M20" and nb._norm_check_id("fmt-p1") == "M20"
+          and nb._norm_check_id("J3") == "J3" and nb._norm_check_id("M21") == "M21")
+    check("anything else is left exactly as written",
+          nb._norm_check_id("ZZ9") == "ZZ9" and nb._norm_check_id(None) == "")
+    for cid in ("Q1", "Q6", "Q7", "Q11", "Q12", "J3", "FMT-T9c"):
+        errs, warns = nb.validate_judge_sheet(judge_sheet(cid), judge_rec())
+        check(f"a ledger row citing {cid!r} is ACCEPTED (no error, no warning)",
+              errs == [] and warns == [], f"errs={errs[:1]} warns={warns[:1]}")
+    # an id nobody recognizes may not cost a 20-40 minute session: the row still
+    # counts for the arithmetic, and the id is reported for the human.
+    errs, warns = nb.validate_judge_sheet(judge_sheet("ZZ9"), judge_rec())
+    check("an unrecognized id is a WARNING that names what to cite, never a failure",
+          errs == [] and any("ZZ9" in w and "not a frozen check id" in w for w in warns),
+          f"errs={errs[:1]} warns={warns[:1]}")
+    sheet = judge_sheet("ZZ9", score=2, tier="consistency", severity="major")
+    errs, warns = nb.validate_judge_sheet(sheet, judge_rec())
+    check("... and the row still counts for the derived score",
+          errs == [] and nb.derived_comparison_score(sheet["comparisons"][0]) == 2,
+          str(nb.derived_comparison_score(sheet["comparisons"][0])))
+
+
+def test_judge_prompt_gets_a_blinding_safe_preflight():
+    print()
+    print("== F. the judge prompt carries a pre-flight without leaking provenance ==")
+    prompt = nb.judge_prompt(Path("/tmp/x"), "judge_tok9_j1", 1, "tok9", 1, 3, ["v1", "v2"])
+    check("the pre-flight block is in the judge prompt",
+          "PRE-FLIGHT CHECK" in prompt
+          and "selfcheck --sandbox . --stage judge" in prompt)
+    check("no unresolved prompt token is left",
+          "@@JUDGE_SELFCHECK@@" not in prompt and "@@WRITING_RUBRIC@@" not in prompt)
+    check("the rubric still says what to cite AND what the check cell carries",
+          "Q7" in prompt and getattr(nb, "WRITING_RUBRIC_CHECK", "J3") in prompt
+          and "Q1-Q11 correspond one-to-one to the" in prompt)
+    # The blinding rule is the reason this block was withheld from the judge
+    # prompt before: keep the same forbidden vocabulary as test_judge_blinding.
+    forbidden = {
+        r"\bround\b": "the word 'round'", r"\barm\b": "the word 'arm'",
+        r"\brewrite\b": "the word 'rewrite'", r"\brevised\b": "the word 'revised'",
+        r"\brevision\b": "the word 'revision'", r"\bintegration\b": "the word 'integration'",
+        r"\bmerge\b": "the word 'merge'", r"\bchampion\b": "the word 'champion'",
+        r"\b(?:a1|a2|w1|i1)\b": "an arm id", r"\br\d+_judge": "a round-prefixed run id",
+        r"CHANGELOG": "a bookkeeping name", r"MANUAL_STEPS": "a bookkeeping name",
+        r"REVISION_REPORT": "a bookkeeping name", r"DIFF_LEDGER": "a bookkeeping name",
+        r"AUTHOR TO COMPLETE": "the pipeline's own marker token",
+    }
+    hits = {label: re.findall(pat, prompt, re.I)
+            for pat, label in forbidden.items() if re.findall(pat, prompt, re.I)}
+    check("the judge prompt still carries NO provenance vocabulary", hits == {}, str(hits))
+
+
+def test_judge_selfcheck_catches_a_bad_sheet():
+    print()
+    print("== F. the judge's own pre-flight reproduces the postcheck's verdict ==")
+    if not hasattr(nb, "sandbox_selfcheck"):
+        check("sandbox_selfcheck() exists", False, "this build has no sandbox_selfcheck")
+        return
+    tmp = scratch("nbt_sig_f_")
+
+    def build(sheet):
+        jsb = tmp / f"judge_tok9_j1_{len(list(tmp.iterdir()))}"
+        (jsb / "field" / "v1").mkdir(parents=True)
+        write(jsb / "judge_review" / "inventory.md", "# inventory\n")
+        write(jsb / "scores.json", sheet)
+        write(jsb / nb.MARKER_FILE, {"stage": "judge", "run_id": sheet["run_id"],
+                                     "status": "complete"})
+        return jsb
+
+    # the real failure shape: Q-rubric ids in the ledger rows
+    sb = build(judge_sheet("Q11"))
+    ok, errs, warns = nb.sandbox_selfcheck(sb, "judge", "judge_tok9_j1", 0)
+    check("a sheet citing Q11 passes the pre-flight (the 2026-09-23 false failure)",
+          ok and not errs, str(errs)[:200])
+    # plus the second problem of that panel: an integer the rows cannot back
+    bad = judge_sheet("Q11", score=3, tier="writing", severity="minor")
+    sb2 = build(bad)
+    errs2 = nb.sandbox_selfcheck(sb2, "judge", "judge_tok9_j1", 0)[1]
+    check("a score its own rows cannot back is caught before the marker",
+          any("contradicts its own ledger" in e for e in errs2), str(errs2)[:200])
+
+
 def test_process_died_after_the_audit_finished():
     print()
     print("== E. a crashed process with a complete audit sandbox is re-verified ==")
@@ -772,6 +883,9 @@ def main() -> int:
     test_selfcheck_covers_the_other_stages()
     test_other_stages_recover_from_a_failed_attempt()
     test_misplaced_revision_ledger_is_adopted_end_to_end()
+    test_judge_check_ids_the_prompt_names_are_accepted()
+    test_judge_prompt_gets_a_blinding_safe_preflight()
+    test_judge_selfcheck_catches_a_bad_sheet()
     test_process_died_after_the_audit_finished()
     cleanup()
     print()

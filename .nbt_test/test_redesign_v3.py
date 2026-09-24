@@ -95,10 +95,27 @@ def test_contract_v3():
                                          strict=True)
     check("a ledger row citing `FMT-T9C` no longer fails the frozen-check-id gate",
           not any("frozen check id" in x for x in e_fmt), str(e_fmt[:1]))
-    e_q, _wq = np.judge_basis_problems(comp(1, [row("writing", "minor", check_id="Q11")]),
+    # 2026-09-24: the writing rubric names its own items and tells the judge to
+    # cite one ("a row names its rubric item (`Q7`)"), so Q1-Q12 are the twelve
+    # faces OF the frozen check J3, exactly as FMT-* rules belong to M20. The
+    # 2026-09-23 round-1 panel shows what the missing mapping cost: 8 of the 24
+    # sessions failed on nothing but `check 'Q11' is not a frozen check id`, three
+    # of them twice and one on all three attempts, and the round needed 3h20m and
+    # still finished incomplete.
+    q_row = [row("writing", "minor", check_id="Q11")]
+    e_q, w_q = np.judge_basis_problems(comp(1, q_row, basis="writing"), "c[0]", strict=True)
+    check("the rubric's items are read as the check that owns them (Q11 -> J3)",
+          np._norm_check_id("Q11") == np.WRITING_RUBRIC_CHECK == "J3"
+          and np._norm_check_id("q6") == "J3" and not e_q
+          and not any("frozen check id" in x for x in w_q), f"{e_q[:1]} {w_q[:1]}")
+    # An id nobody recognizes may not cost a 20-40 minute judge session either:
+    # a ledger row's `check` cell is descriptive (the arithmetic reads
+    # tier/severity/evidence only), so it is reported and the row still counts.
+    e_u, w_u = np.judge_basis_problems(comp(1, [row("writing", "minor", check_id="ZZ9")]),
                                        "c[0]", strict=True)
-    check("an id the pipeline does not know (Q11) is still refused",
-          any("frozen check id" in x for x in e_q), str(e_q[:1]))
+    check("an unknown id is a warning that names what to cite, not a failed run",
+          not e_u and any("ZZ9" in x and "not a frozen check id" in x for x in w_u),
+          f"{e_u[:1]} {w_u[:1]}")
     # a sheet whose integer contradicts its rows
     e3, _ = np.judge_basis_problems(comp(4, wr, basis="writing"), "c[0]", strict=True)
     check("an integer that contradicts its own rows fails its run",

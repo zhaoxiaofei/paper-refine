@@ -754,7 +754,24 @@ from pathlib import Path
 #     and a judge sheet's ledger arithmetic and check-coverage map; an audit
 #     sandbox whose process died after writing its sheet is re-verified instead
 #     of re-run, and `audit/audit.json` joins the structured-output parse gate.
-VERSION = "3.4.1"
+# 3.4.2 -- the judge panel's own contract no longer contradicts itself (the
+# 2026-09-23 round-1 panel burned 3h20m and still finished incomplete):
+#   * `WRITING_RUBRIC` told every judge "a row names its rubric item (Q7)" while
+#     the validator REJECTED any ledger row whose `check` was not a frozen id:
+#     8 of the 24 sessions failed on nothing but `check 'Q11' is not a frozen
+#     check id`, three of them twice and one on all three attempts.
+#     `_norm_check_id()` now maps the rubric's Q1-Q12 items onto J3 -- the check
+#     that OWNS the rubric, exactly as the sweep's FMT-* ids map onto M20 -- and
+#     the prompt says which cell carries the rubric item and which the frozen id;
+#   * a ledger row's `check` cell is DESCRIPTIVE (the arithmetic reads
+#     tier/severity/evidence only), so an id nobody recognizes is a WARNING that
+#     names what to cite, never a failed 20-40 minute session; the coverage map
+#     ("one disposition per frozen check id") stays the hard contract;
+#   * judges get the same pre-marker pre-flight as every other stage, in wording
+#     that leaks no provenance (`judge_selfcheck_block`), so a sheet whose
+#     integer contradicts its own ledger is fixed in-session instead of costing
+#     a re-judge.
+VERSION = "3.4.2"
 STATE_VERSION = 3
 
 # The Zotero tooling policy carried in pipeline_config.json (`setup --zotero`):
@@ -3178,6 +3195,32 @@ files does not get repaired: it FAILS and the whole stage is re-run in a rebuilt
 """)
 
 
+def judge_selfcheck_block(run_id: str) -> str:
+    """The judge session's pre-flight (blinding-safe wording).
+
+    A judge's sheet is the most expensive paperwork in the pipeline: a rejected
+    sheet costs a rebuilt 20-40 minute session AND shrinks the panel, and the
+    2026-09-23 round-1 panel lost 3h20m that way (8 sessions failed on check ids
+    the prompt itself had shown them, and one session's score contradicted its
+    own ledger). The pre-flight is therefore given to judges too -- in wording
+    that names NOTHING about how either package was produced, which is what the
+    blinding rule forbids (see test_judge_blinding.py): no round, no arm, no
+    stage name, no bookkeeping file name, no marker token.
+    """
+    return (f"""
+=== PRE-FLIGHT CHECK — RUN IT BEFORE THE MARKER ===
+
+From the sandbox root, before you write `{MARKER_FILE}`:
+    python "{pipeline_self_path()}" selfcheck --sandbox . --stage judge
+It applies the orchestrator's OWN detectors to this sandbox -- scores.json, its schema, the integer
+against the rows that back it, your `checks` map and your coverage of every issued opponent label --
+and prints exactly what the post-check would reject, quoting the same messages. Fix everything it
+reports, run it again until it says OK, and only THEN write the completion marker: a sheet that ends
+with those problems is discarded and judged again from scratch, which wastes the whole session and
+leaves the panel incomplete.
+""")
+
+
 REVIEW_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
 
 You are REVIEW run @@RUN_ID@@ — round @@ROUND@@, PHASE 1 OF 2 — inside an isolated orchestration
@@ -4535,6 +4578,8 @@ valid, write _pipeline_done.json in the sandbox root:
   {"stage": "judge", "run_id": "@@RUN_ID@@", "status": "complete", "error": null}
 If you cannot complete, write it with "status": "failed" and a short "error". A sheet whose
 run_id/target_id do not match, or whose scores fall outside -4..+4, is discarded by the panel.
+
+@@JUDGE_SELFCHECK@@
 """
 
 
@@ -5133,6 +5178,7 @@ def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index
     text = apply_m20(text)
     text = text.replace("@@WRITING_RUBRIC@@", WRITING_RUBRIC)
     text = text.replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("judge"))
+    text = text.replace("@@JUDGE_SELFCHECK@@", judge_selfcheck_block(run_id))
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
     return text + shared_blocks()
 
@@ -15317,8 +15363,11 @@ WRITING_RUBRIC = """WRITING RUBRIC — use it to justify every `writing`-tier ro
       hundreds separators used inconsistently, a quantity whose unit typography hides its value)
   Q12 segmentation (one sentence carrying two ideas; one paragraph carrying two messages; an
       enumeration buried inside prose instead of being itemised)
-  A row cites the check (`Q7`), quotes the offending words and says what the sentence should read
-  as. The tier is minor-only, so it can separate two otherwise equal packages by at most one point
+  A row names its rubric item (`Q7` -- the row's `check` cell carries the FROZEN check id this
+  rubric belongs to, `J3`: the Q1-Q12 items are the twelve faces OF J3, not check ids of their
+  own, and a ledger row's `check` cell is always one of M1-M24/J1-J4), quotes the offending words
+  and says what the sentence should read as. The tier is minor-only, so it can separate two
+  otherwise equal packages by at most one point
   -- but every row counts, and ten unfixed rows are ten rows. Q1-Q11 correspond one-to-one to the
   eleven checks of the language pass every package-producing session runs from the same list
   (premise, logic slip, logic jump, coherence, unexplained prerequisite, redundancy, non-academic
@@ -16203,21 +16252,36 @@ def derived_comparison_score(comp: dict):
     return max(SCORE_MIN, min(SCORE_MAX, score))
 
 
+# The judge prompt's OWN sub-identifiers, mapped onto the frozen check that owns
+# them. Both entries exist because the prompt names the finer-grained id and the
+# panel then cites it back:
+#   * `FMT-*` is a formatting-sweep RULE id (FMT-P1, FMT-S4, FMT-T9c, ...) and the
+#     check that owns the sweep is M20 (2026-09-23: one session failed twice for
+#     `check 'FMT-T9C'`, its sibling once for the uppercase spelling);
+#   * `Q1`-`Q12` are the WRITING RUBRIC's items, and the frozen check that owns
+#     that rubric is J3 ("writing quality, logic, and overclaiming (the Q1-Q12
+#     rubric)"). The prompt says "a row names its rubric item (Q7)", so the panel
+#     cites Q6/Q7/Q11/Q12 -- and the 2026-09-23 round-1 panel shows what the
+#     missing mapping costs: 8 of 24 sessions failed, three of them twice and one
+#     (judge_t1a4cb6e6_j2) on all three attempts, on nothing but
+#     `check 'Q11' is not a frozen check id`; the round burned 3h20m and still
+#     finished incomplete.
+WRITING_RUBRIC_CHECK = "J3"
+_WRITING_RUBRIC_RE = re.compile(r"^Q(?:[1-9]|1[0-2])$")
+
+
 def _norm_check_id(raw) -> str:
     """Normalize one check id, including the pipeline's OWN rule-id spellings.
 
-    The formatting sweep's rows are named `FMT-*` (FMT-P1, FMT-S4, FMT-T9c, ...)
-    and the check that owns them is **M20** ("OOXML formatting uniformity (check
-    id M20; see the formatting sweep)"): a judge that read such a row and cites
-    the rule it saw is naming M20. Normalizing here keeps one spelling for the
-    coverage map AND for a ledger row's `check`, so a sheet is not failed for
-    citing the finer-grained id the pipeline itself prints (2026-09-23: one
-    round-1 judge session failed twice for `check 'FMT-T9C'`, and its sibling
-    once for the uppercase spelling).
+    Normalizing here keeps one spelling for the coverage map AND for a ledger
+    row's `check`, so a sheet is never failed for citing the finer-grained id the
+    pipeline's own prompt prints (see `_WRITING_RUBRIC_RE`).
     """
     cid = str(raw or "").strip().upper().replace(" ", "")
     if cid.startswith("FMT-"):
         return "M20"
+    if _WRITING_RUBRIC_RE.match(cid):
+        return WRITING_RUBRIC_CHECK
     return cid
 
 
@@ -16332,8 +16396,20 @@ def judge_basis_problems(comp: dict, where: str, strict: bool) -> tuple:
                      f"comparison); got severity {norm[1]!r}")
             cid = _norm_check_id(item.get("check")) if isinstance(item, dict) else ""
             if cid and cid not in JUDGE_COVERAGE_CHECKS:
-                emit(f"{prefix}{where}.{side}[{k}].check {cid!r} is not a frozen check id of "
-                     f"this round ({', '.join(JUDGE_COVERAGE_CHECKS)})")
+                # A ledger row's `check` cell is DESCRIPTIVE: nothing is looked up
+                # by it (the arithmetic reads tier/severity/evidence only), and
+                # the row has to be re-checkable, not perfectly labelled. So an id
+                # nobody recognizes is REPORTED with what to cite and otherwise
+                # ignored -- never a failed 20-40 minute session. The hard
+                # contract is the coverage map above ("one disposition per frozen
+                # check id"), where a missing id still fails the run, and the
+                # FMT-*/Q1-Q12 spellings the prompt itself uses are normalized
+                # before this point.
+                out_w.append(f"{prefix}{where}.{side}[{k}].check {cid!r} is not a frozen check id; "
+                             f"the row still counts for the arithmetic and the id is kept as "
+                             f"written -- cite M1-M24/J1-J4 (the writing rubric's Q1-Q12 items "
+                             f"belong to {WRITING_RUBRIC_CHECK}, and an FMT-* sweep rule belongs "
+                             f"to M20)")
             items.append((side, norm[0], norm[1], norm[2]))
     if bad:
         emit(f"{prefix}{where} has malformed ledger item(s) {bad}: each needs a valid tier "

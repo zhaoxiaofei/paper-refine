@@ -900,6 +900,22 @@ input area (`base/`, `non_revised/`, `review/`, `audit/`, `self/`, `others/`,
 set and stays the recovery layer's business. The pre-flight is read-only: it
 never moves the file, it tells the session to.
 
+**A prompt may not name an id the validator rejects.** The 2026-09-23 round-1
+panel lost 3h20m to exactly that: the writing rubric told every judge that "a row
+names its rubric item (`Q7`)", and the validator then refused any ledger row
+whose `check` was not a frozen check id -- so 8 of 24 sessions failed on nothing
+but `check 'Q11' is not a frozen check id`, three of them twice and one
+(`judge_t1a4cb6e6_j2`) on all three attempts, leaving the round incomplete. Two
+independent rules now prevent it: the ids the PROMPT names are normalized onto
+the check that owns them (`Q1`-`Q12` -> `J3`, the rubric's own check, exactly as
+the sweep's `FMT-*` rules -> `M20`), and a ledger row's `check` cell -- which is
+descriptive and never feeds the arithmetic -- is at most a warning naming what to
+cite, never a failed 20-40 minute session. The hard contract stays where it
+belongs: the per-opponent `checks` map still requires one disposition per frozen
+check id. Judges also get the pre-marker pre-flight now, in wording that leaks no
+provenance, so a sheet whose integer contradicts its own ledger is fixed
+in-session rather than re-judged from scratch.
+
 **Every run kind the plan can produce is postcheckable AND rebuildable.** The
 materializer of each kind lives in one table (`REBUILD_HANDLERS`) next to the
 postcheck's (`POSTCHECK_HANDLERS`); a round refuses to launch when a planned kind
