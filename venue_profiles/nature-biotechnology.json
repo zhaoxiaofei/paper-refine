@@ -1,0 +1,56 @@
+{
+  "id": "nature-biotechnology",
+  "label": "Nature Biotechnology",
+  "short": "NBT",
+  "description": "Nature Biotechnology (Nature Portfolio): the pipeline's original, pre-venue requirement set. Its Article limits are the ones the M19 length rule relaxes.",
+  "article_type": "Article",
+  "journals": [
+    "Nature Biotechnology"
+  ],
+  "journal_aliases": [
+    "NBT",
+    "Nat. Biotechnol.",
+    "Nature Biotech",
+    "Nature Biotechnology (NBT)"
+  ],
+  "journal_patterns": [],
+  "accepts_any_journal": false,
+  "default_journal": "Nature Biotechnology",
+  "length_limits": {
+    "source": "Nature Biotechnology content-types table (Article: abstract <= 150 words; main text <= 3,000 words excluding abstract, Methods, references and figure legends)",
+    "abstract": {
+      "base": 150,
+      "relaxation": 1.15
+    },
+    "main_text": {
+      "base": 3000,
+      "relaxation": 1.25
+    },
+    "cover_letter": {
+      "min": 300,
+      "max": 500,
+      "source": "master-prompt preference (300-500 words in the persuading part); Nature Biotechnology's official guidance states no cover-letter word limit (checked 2026-09-19)"
+    }
+  },
+  "captions": {
+    "published_limit": null,
+    "default_cap": 0,
+    "source": "Nature Biotechnology requires that a legend \"does not exceed the word limit of the article type\" but does not publish that number on its public pages (checked 2026-09-19)"
+  },
+  "submission": {
+    "pdf_accepted": true,
+    "formats": [
+      "PDF",
+      "Word",
+      "TeX/LaTeX"
+    ],
+    "pdf_note": "Nature Biotechnology accepts a PDF as the initial submission file (\"We accept initial submissions in PDF, Word or TeX/LaTeX formats\" -- submission guidelines, checked 2026-09-19), and a reader/editor may open exactly that PDF"
+  },
+  "prompt": {
+    "subject": "a Nature Biotechnology (NBT) manuscript submission",
+    "editor": "a Nature Biotechnology editor or reviewer",
+    "requirements": "the Nature Biotechnology author guidelines and submission requirements",
+    "requirement_authority": "Nature Biotechnology",
+    "guidelines_source": "the current Nature Biotechnology author guidelines"
+  }
+}

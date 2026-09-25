@@ -1,0 +1,45 @@
+{
+  "id": "generic",
+  "label": "generic venue (no venue-specific rules)",
+  "short": "VENUE",
+  "description": "A venue-agnostic profile: it sets no word limits, no legend cap and no submission-format rule of its own. Every stage still enumerates the counts, and the artifact must name the limit the target journal's own guidelines state, with its source. Use it when the venue publishes no rule the pipeline can carry, or as the starting point for a custom profile (`set-venue <id> --profile FILE`).",
+  "article_type": "Article",
+  "journals": [],
+  "journal_aliases": [],
+  "journal_patterns": [],
+  "accepts_any_journal": true,
+  "default_journal": "",
+  "length_limits": {
+    "source": "the target journal's own author guidelines (this venue profile publishes no number; the stage names the limit and its source in its artifact)",
+    "abstract": {
+      "base": null,
+      "relaxation": null
+    },
+    "main_text": {
+      "base": null,
+      "relaxation": null
+    },
+    "cover_letter": {
+      "min": 300,
+      "max": 500,
+      "source": "master-prompt preference (300-500 words in the persuading part); the venue profile states no venue cover-letter limit"
+    }
+  },
+  "captions": {
+    "published_limit": null,
+    "default_cap": 0,
+    "source": "this venue profile states no figure-legend length rule; every legend's word count is recorded and compared with the target journal's own guidelines by the author"
+  },
+  "submission": {
+    "pdf_accepted": null,
+    "formats": [],
+    "pdf_note": "this venue profile does not state which formats the venue accepts, and a reader or editor may still open the PDF shipped beside the editable source"
+  },
+  "prompt": {
+    "subject": "a manuscript submission for the target journal",
+    "editor": "an editor or reviewer at the target journal",
+    "requirements": "the target journal's author guidelines and submission requirements",
+    "requirement_authority": "the target journal",
+    "guidelines_source": "the target journal's author guidelines (prefer a local copy in the corpus)"
+  }
+}

@@ -1,6 +1,6 @@
-# nbt-review + nbt-revise — Codex Skills for Nature Biotechnology Submissions
+# nbt-review + nbt-revise — Codex Skills for Manuscript Submissions (any venue or journal)
 
-**Package version:** 0.7 (content-hash version tokens, 2026-09-19) — distributed as the directory
+**Package version:** 0.8 (any venue or journal, 2026-09-25; see CHANGELOG.md) — distributed as the directory
 `nbt-skills-v03`. The version lives here, not in the skill frontmatter. If more
 than one copy of this package is installed, check this line and retire the
 older copies (`nbt-skills-v01/`, `nbt-skills-v02/`): Codex registers skills by
@@ -165,7 +165,7 @@ mechanical rescan of the revised corpus.
 
 ## Validation (iteration-1, seeded-defect benchmark)
 
-Tested on a synthetic NBT-style submission with ~24 planted defects
+Tested on a synthetic, Nature-Biotechnology-style submission with ~24 planted defects
 (corresponding-author mismatch, orphan citation, irreconcilable cell-count
 total, n = 15 vs 12-patient cohort, undefined acronyms, TODO/XXX
 placeholders, duplicated sentence, cover-letter title mismatch, docx
@@ -218,10 +218,14 @@ nbt-skills/
 
 ## Tuning
 
-- **Journal**: hardcoded Nature Biotechnology / Nature Portfolio (initial
-  submission: format-flexible, Reporting Summary required at acceptance
-  stage; revise the guideline-specific items in `references/sweeps.md` M5/M13
-  to target another journal).
+- **Venue and journal**: selectable at run time — `set-venue <id>` and
+  `set-journal <name>` (or `setup --venue/--journal`), with the rule set in
+  `venue_profiles/<id>.json` (`venue_profiles/README.md` documents the
+  schema). The default profile is Nature Biotechnology / Nature Portfolio
+  (initial submission: format-flexible, Reporting Summary required at
+  acceptance stage), so the guideline-specific items in
+  `references/sweeps.md` M5/M13 are that profile's; a custom profile replaces
+  the numbers the pipeline enforces without editing the skill.
 - **Zotero**: `ZOTERO_SKILL` / `ZOT_CLI` paths in both SKILL.md files, plus the
   operator's policy (`nbt_pipeline.py setup --zotero off|read|edit|apply`).
   Both skills resolve references read-only by default. nbt-revise may edit a
@@ -229,20 +233,21 @@ nbt-skills/
   library writes happen only in `apply` mode, one field of one existing item,
   under rule E2's propose-then-verify protocol. No mode creates or deletes
   library items, and nbt-review never writes.
-- **Length rule** (M19, always on): the journal's Article limits apply relaxed
-  by the user's margins — abstract ≤ 150 words +15% (≤ 172) and main text
-  ≤ 3,000 words +25% (≤ 3,750, excluding abstract, Methods, references and
-  figure legends). Words are maximal runs of non-space characters with a
-  newline treated as space (`scripts/count_words.py`); over-cap sections are
+- **Length rule** (M19, always on): the venue profile's limits apply relaxed
+  by the profile's own margins — the default nature-biotechnology profile:
+  abstract ≤ 150 words +15% (≤ 172) and main text ≤ 3,000 words +25% (≤ 3,750,
+  excluding abstract, Methods, references and figure legends). Words are
+  maximal runs of non-space characters with a newline treated as space
+  (`scripts/count_words.py`); over-cap sections are
   reported and compressed by removing redundancy only — content is never cut,
   under-length text is never flagged, and length never gates a version.
   The cover letter's persuading part is measured against the master prompt's
-  own 300-500-word preference; NBT's official guidance states no cover-letter
-  word limit (checked 2026-09-19), so it is a Minor formatting item, never a
-  journal requirement. **M18** always enumerates figure-legend word counts (the
-  journal requires them to respect the article type's limit but publishes no
-  number); an optional `--caption-limit` proxy cap only changes whether an
-  over-count legend is reported as an over-cap item.
+  own 300-500-word preference; the default profile's venue states no
+  cover-letter word limit (checked 2026-09-19), so it is a Minor formatting
+  item, never a journal requirement. **M18** always enumerates figure-legend
+  word counts (the venue profile requires them to respect the article type's
+  limit but publishes no number); an optional `--caption-limit` proxy cap only
+  changes whether an over-count legend is reported as an over-cap item.
 - New sweeps you validate from `round2/new_sweeps.md` append as M20+ at the
   end of `references/sweeps.md` of the loaded copy (M18 and M19 are reserved);
   IDs are stable, never renumbered.

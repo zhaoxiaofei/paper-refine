@@ -1,0 +1,58 @@
+{
+  "_readme": "TEMPLATE, NOT A REAL VENUE'S RULES. Copy this file, rename it, replace the numbers with the ones YOUR venue's own guidelines state (and cite them in `source`), then run `set-venue <id> --profile <file>`. The numbers below are illustrative placeholders.",
+  "id": "example-journal",
+  "label": "Example Journal",
+  "short": "EJ",
+  "description": "Illustrative venue profile used by the documentation and the test suite. It exercises the fields the two shipped profiles do not: a published figure-legend limit, no cover-letter preference, and an explicit journal list. The numbers are placeholders, not a real journal's requirements.",
+  "article_type": "Research Article",
+  "journals": [
+    "Example Journal",
+    "Example Journal X"
+  ],
+  "journal_aliases": [
+    "EJ",
+    "Examples"
+  ],
+  "journal_patterns": [
+    "^example journals?\\b"
+  ],
+  "accepts_any_journal": false,
+  "default_journal": "Example Journal",
+  "length_limits": {
+    "source": "Example Journal guidelines for Research Articles (illustrative placeholder: abstract <= 250 words; main text <= 5,000 words excluding abstract, references and figure legends)",
+    "abstract": {
+      "base": 250,
+      "relaxation": 1.1
+    },
+    "main_text": {
+      "base": 5000,
+      "relaxation": 1.2
+    },
+    "cover_letter": {
+      "min": null,
+      "max": null,
+      "source": "the Example Journal guidelines state no cover-letter word limit and this profile configures no preference"
+    }
+  },
+  "captions": {
+    "published_limit": 250,
+    "default_cap": 250,
+    "source": "Example Journal guidelines (illustrative placeholder: each figure legend is limited to 250 words)"
+  },
+  "submission": {
+    "pdf_accepted": true,
+    "formats": [
+      "PDF",
+      "DOCX",
+      "LaTeX"
+    ],
+    "pdf_note": "Example Journal accepts PDF initial submissions (illustrative placeholder), and a reader or editor may open exactly that PDF"
+  },
+  "prompt": {
+    "subject": "an Example Journal research-article submission",
+    "editor": "an Example Journal editor or reviewer",
+    "requirements": "the Example Journal author guidelines and submission requirements",
+    "requirement_authority": "the Example Journal guidelines",
+    "guidelines_source": "the Example Journal author guidelines (illustrative placeholder -- replace with your venue's own)"
+  }
+}

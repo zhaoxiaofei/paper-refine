@@ -1,11 +1,15 @@
-# NBT round-based revision pipeline
+# Round-based revision pipeline (any venue or journal)
 
 `nbt_pipeline.py` drives a **round-based, content-addressed revision loop** for a
-Nature Biotechnology manuscript package. Each round produces several candidate
-versions (rewrites, a reviewed-and-revised version, integrations that merge the
-whole pool), judges them blindly against each other, pins the champion by
-content digest, and feeds that champion into the next round. `decide` publishes
-the final decision report and a clean, ready-to-use package.
+manuscript package submitted to **any venue or journal**. The submission rules
+the stages enforce come from a configurable **venue profile** (`set-venue`,
+`setup --venue`), and the target journal is the free-text `set-journal` value —
+Nature Biotechnology is only the default profile (the behaviour of earlier
+versions). Each round produces several candidate versions (rewrites, a
+reviewed-and-revised version, integrations that merge the whole pool), judges
+them blindly against each other, pins the champion by content digest, and feeds
+that champion into the next round. `decide` publishes the final decision report
+and a clean, ready-to-use package.
 
 The repository also carries the two companion tools the pipeline uses:
 
@@ -31,6 +35,9 @@ The repository also carries the two companion tools the pipeline uses:
 ```bash
 # 1. create a pipeline root from the pristine submission directory
 python nbt_pipeline.py setup --source /path/to/non_revised --root ./nbt_rounds
+#    ... for another venue/journal:
+python nbt_pipeline.py setup --source /path/to/non_revised --root ./nbt_rounds \
+        --venue generic --journal "Journal Name"
 
 # 2. run all rounds and decide (or run + decide as separate steps)
 python nbt_pipeline.py run-decide --root ./nbt_rounds
@@ -44,8 +51,114 @@ python nbt_pipeline.py run-decide --root ./nbt_rounds
 #   ./nbt_rounds/final_clean_version/      the champion, renamed for the next run
 ```
 
-Useful flags: `--rounds N`, `--judges N[,N…]`, `--rewrites M[,M…]`,
+## Venues and journals
+
+The pipeline is not tied to Nature Biotechnology. Two values, both recorded in
+the root's `pipeline_config.json`, decide what it enforces and what it calls the
+submission:
+
+* the **venue** is the rule set every stage reads — the abstract/main-text
+  limits and their margins, the figure-legend policy, the cover-letter
+  preference, the submission-format note, and the phrases the prompts use
+  ("a *X* manuscript submission", "an editor at *X*"). A venue is selected by
+  **id** and realised by a **venue profile**: a JSON document under
+  `venue_profiles/`, shipped with the repository or installed into the root.
+* the **journal** is the publication the manuscript is going to: free text
+  ("Nature Biotechnology", "Cell", "eLife"). The prompts name it, and the
+  selected venue profile is checked against it. It selects no rule set by
+  itself.
+
+```bash
+python nbt_pipeline.py set-venue --list                # venues this pipeline can see
+python nbt_pipeline.py set-venue generic               # switch the rule set (needs an existing root)
+python nbt_pipeline.py set-venue --journal "Cell"      # ... and the journal, atomically
+python nbt_pipeline.py set-venue my-journal --profile my-journal.json   # install a profile of your own
+python nbt_pipeline.py set-journal "Cell"              # change only the journal
+python nbt_pipeline.py set-venue --show                # current venue, journal, resolved limits
+python nbt_pipeline.py set-venue --show --json         # the same, machine-readable
+python nbt_pipeline.py status --root ./nbt_rounds      # prints venue, journal and limits too
+```
+
+**Storage and precedence.** `setup` writes `venue`, `journal` and a snapshot of
+the resolved profile (`venue_profile`) into `<root>/pipeline_config.json` and
+mirrors them into `state.json`. `set-venue`/`set-journal` update the same file.
+Resolution order, highest first:
+
+1. the flags of the command being run (`setup --venue/--journal`);
+2. `<root>/pipeline_config.json` (the authoritative record for the root);
+3. `<root>/venue_profiles/<id>.json`, then the profiles shipped next to the
+   script, then the built-in fallback inside `nbt_pipeline.py` — for a root that
+   has not recorded a snapshot yet;
+4. the profile's `default_journal` when no journal is recorded;
+5. the built-in default venue `nature-biotechnology` when no venue is recorded
+   at all (the pre-venue behaviour, so an old root keeps working unchanged).
+
+The **snapshot wins over the files**: editing a profile never silently changes
+the rules of an existing root — re-run `set-venue <id>` to re-record it. The
+config file wins over the `state.json` mirror, and the two are re-synchronised
+by `set-venue`/`set-journal`.
+
+The keys those commands write (abridged — `venue_profile` is the full resolved
+profile):
+
+```json
+{
+  "venue": "custom-clin-journal",
+  "journal": "Custom Clinical Journal",
+  "journal_source": "operator",
+  "caption_limit": 200,
+  "caption_limit_source": "profile-default",
+  "venue_profile": {"id": "custom-clin-journal", "label": "Custom Clinical Journal",
+                    "length_limits": {"abstract": {"base": 250, "relaxation": 1.1},
+                                      "main_text": {"base": 4000, "relaxation": 1.1}}}
+}
+```
+
+`journal_source` and `caption_limit_source` record where each value came from:
+`"operator"` when you set it yourself (`setup --journal`, `set-journal`,
+`setup --caption-limit`), and `"profile-default"`/`"unset"` when the venue
+profile supplied it. `set-venue` therefore moves a profile default to the new
+profile's default and keeps an operator-chosen value — the reason
+`set-venue generic` can drop a journal (no default) while `set-journal` never
+does.
+
+**Defaults, validation, error handling.**
+
+| situation | what happens |
+|---|---|
+| no `venue` recorded (a root from before this feature) | the default venue `nature-biotechnology` is used and a note says so; `set-venue <id>` makes it explicit. |
+| no `journal` recorded | the venue profile's `default_journal` is used (`nature-biotechnology` → "Nature Biotechnology"); with `generic` there is none, so the prompts say "the target journal" and `setup`/`status`/the decision report print a note suggesting `set-journal`. |
+| unknown venue id | `setup`/`set-venue` fail with the list of available ids; a root already recording one reports it (`status` still runs) and every command that must render a prompt refuses to start. |
+| journal that does not match the venue profile's `journals`/`journal_aliases`/`journal_patterns` | warned by `set-venue`, `set-journal`, `setup` and `status`; the venue's rules still apply. `--strict-venue` turns it into an error. |
+| `venue` and the recorded snapshot disagree, or config and `state.json` disagree | reported; the config file wins. |
+| invalid profile file | `set-venue --profile` fails before writing anything, listing every schema error; an invalid file already in `venue_profiles/` shows as `INVALID` in `set-venue --list`. |
+| venue change on a root that already has runs | refused unless `--force` (the rounds were planned, prompted and judged under the previous rule set). |
+
+`--strict-venue` (accepted by every subcommand that works on a root: `setup`,
+`run`, `run-decide`, `decide`, `status`, `agents`, `set-venue`, `set-journal`,
+`retry`, `prune`, `redline`) makes a missing journal, a journal/venue mismatch
+and a config/snapshot disagreement fatal instead of advisory.
+
+**Adding a venue.** Copy `venue_profiles/example-journal.json`, replace the
+numbers with the ones your venue's own guidelines state, quote the source in
+`length_limits.source`/`captions.source`, and install it:
+
+```bash
+python nbt_pipeline.py set-venue custom-clin-journal --profile custom-clin-journal.json
+python nbt_pipeline.py set-journal "Custom Clinical Journal"
+```
+
+Leaving a limit `null` is supported and meaningful: the stages then count the
+section and require the artifact to name the limit the target journal's own
+guidelines state. `venue_profiles/README.md` documents the full schema and walks
+through **two complete configurations** — the shipped nature-biotechnology
+Article profile and a custom journal with its own abstract/main-text/legend
+numbers — and shows what the promoted numbers become.
+
+Useful flags: `--venue ID`, `--journal NAME` (see *Venues and journals*),
+`--rounds N`, `--judges N[,N…]`, `--rewrites M[,M…]`,
 `--revises N[,N…]`, `--integrators MASK[,MASK…]`,
+`--caption-limit N` (default: the venue profile's own),
 `--jobs N`, `--agent {codex,claude,manual}`, `--agent-cmd JSON`, `--retries N`,
 `--poll S` (manual mode), `--no-redline`, `run --only 1,2` (only rounds 1 and
 2; see *Running only some of the steps*). Setup-time policy flags:
@@ -952,13 +1065,14 @@ its four integration runs never started.
 | `docx2pdf.sh` | Word→PDF conversion via PowerShell (WSL/Git Bash) |
 | `mcp-docx-converter/` | the `docx-converter` MCP tool used as the first-choice renderer |
 | `nbt-skills/` | the bundled review (`nbt-review`) and revision (`nbt-revise`) skills + prompts |
+| `venue_profiles/` | the venue profiles (the submission rule sets) + their schema documentation |
 | `.nbt_test/` | the offline regression suites (stub agents; no network) |
 | `nbt_audit_data/`, `NBT_TRIAGE_LEDGER.md`, `NBT_DESIGN_TRIAGE_LEDGER.md` | the audit inputs and the triage ledgers for the fixes they drove |
 
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 37 suites in ~110 s
+any failure. They are independent, so run them in parallel — 38 suites in ~115 s
 on a 20-core box, against ~5.5 min sequentially:
 
 ```bash
@@ -996,6 +1110,11 @@ its before/after delta),
 `test_hash_cache.py`, `test_final_clean_version.py`, `test_grading_scheme.py`,
 `test_anonymized_judging.py`, `test_zotero_integration.py`. See
 `.nbt_test/README.md` for the full table.
+`test_venue_config.py` covers the venue/journal configuration itself: the
+shipped profiles, `set-venue`/`set-journal` persistence (config + `state.json`
+mirror), the precedence rules, the missing/invalid/inconsistent cases,
+`--strict-venue`, custom-profile installation, the prompts of a non-default
+venue, and backward compatibility for a root with no `venue` key.
 
 ## Exit codes
 

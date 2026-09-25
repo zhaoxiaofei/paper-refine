@@ -1,9 +1,16 @@
 ---
 name: nbt-review
-description: Pre-submission diagnostic review of a manuscript package (Nature Biotechnology by default). Identifies and reports problems ONLY — never fixes them. Three phases — exhaustive mechanical sweeps (M1–M17), judgment passes (J1–J4), and a discovery round that hunts issue classes the checklist itself misses. Use this skill whenever the user asks to review, audit, check, proof, pre-screen, or diagnose a manuscript/submission/paper draft, mentions identify_issues, wants "find issues before submission", or asks to hunt for issues the standard checklist missed (discover mode). Even a casual "look over my paper before I submit" should trigger this skill.
+description: Pre-submission diagnostic review of a manuscript package for ANY venue or journal. The rules come from the pipeline's VENUE PROFILE (Nature Biotechnology is the default profile); the target JOURNAL is free text. Identifies and reports problems ONLY — never fixes them. Three phases — exhaustive mechanical sweeps (M1–M17), judgment passes (J1–J4), and a discovery round that hunts issue classes the checklist itself misses. Use this skill whenever the user asks to review, audit, check, proof, pre-screen, or diagnose a manuscript/submission/paper draft, mentions identify_issues, wants "find issues before submission", or asks to hunt for issues the standard checklist missed (discover mode). Even a casual "look over my paper before I submit" should trigger this skill.
 ---
 
-# NBT Pre-Submission Review — identify_issues
+# Pre-Submission Review — identify_issues
+
+**Target venue and journal (configurable).** This skill is venue-agnostic: the pipeline that runs
+it selects a VENUE PROFILE (`set-venue <id>`, `setup --venue`) and a JOURNAL (`set-journal`), and
+records both in `pipeline_config.json`. Wherever this file quotes a number, a name or a
+submission requirement, it is the **default** profile's (Nature Biotechnology); the profile the
+run was configured with is authoritative, and the prompt states it. Run standalone, use the
+target journal's own author guide and say which source you used.
 
 ## Paths
 
@@ -22,9 +29,12 @@ say where they went.
 
 ## Mission
 
-Diagnose, do not fix. Produce a findings report + artifacts that the revision skill (`nbt-revise`) can consume mechanically. Length rule (user-set, replaces the former blanket exemption): **the journal's abstract/main-text limits apply, relaxed by fixed margins** — for an NBT Article, abstract ≤ 150 words +15% (≤ 172) and main text ≤ 3,000 words +25% (≤ 3,750, excluding abstract, Methods, references and figure legends); another content type uses its own base numbers with the same margins. Words are maximal runs of non-space characters with a newline treated as space. Sweep **M19** reports over-cap sections as formatting findings; never cut content to meet a limit and never flag under-length text. Sweep **M18** always enumerates every figure legend's word count (the journal requires legends to respect the article type's limit but publishes no number; an optional proxy cap only changes the disposition). The cover letter's persuading part is measured against the master prompt's own **300-500-word preference** — NBT's official guidance states no cover-letter word limit (checked 2026-09-19) — and is a Minor formatting item, never a journal requirement. All output in English.
+Diagnose, do not fix. Produce a findings report + artifacts that the revision skill (`nbt-revise`) can consume mechanically. Length rule (replaces the former blanket exemption): **the venue profile's abstract/main-text limits apply, relaxed by the profile's own margins** — for the default Nature Biotechnology Article profile, abstract ≤ 150 words +15% (≤ 172) and main text ≤ 3,000 words +25% (≤ 3,750, excluding abstract, Methods, references and figure legends); another content type uses its own base numbers with the same margins. Words are maximal runs of non-space characters with a newline treated as space. Sweep **M19** reports over-cap sections as formatting findings; never cut content to meet a limit and never flag under-length text. Sweep **M18** always enumerates every figure legend's word count (the venue profile requires legends to respect the article type's limit but publishes no number; an optional proxy cap only changes the disposition). The cover letter's persuading part is measured against the user's **300-500-word preference** — the default profile's venue states no cover-letter word limit (checked 2026-09-19) — and is a Minor formatting item, never a journal requirement. All output in English.
 
-Guidelines source: prefer a local copy of the author guidelines if present in the directory; otherwise the current Nature Biotechnology "Information for Authors" / Nature Portfolio author guide; **name the source/version you relied on in the summary.** Label every guideline-dependent finding `[required at initial submission]`, `[required at revised-submission stage — prepare now]`, or `[recommended]`. Nature Portfolio initial submissions are format-flexible: never present convenience conventions as blocking requirements.
+Guidelines source: prefer a local copy of the author guidelines if present in the directory; otherwise the TARGET VENUE's own author guide -- the pipeline's venue profile names it
+(`venue_profiles/<id>.json`; the default profile's source is Nature Biotechnology's
+"Information for Authors" / Nature Portfolio author guide); **name the source/version you relied on in the summary.** Label every guideline-dependent finding `[required at initial submission]`, `[required at revised-submission stage — prepare now]`, or `[recommended]`. Never present convenience conventions as blocking requirements: when the venue's guide says
+initial submissions are format-flexible (Nature Portfolio's do), say so explicitly.
 
 ## Why this skill is built this way (read once)
 

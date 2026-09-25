@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run every `.nbt_test/test_*.py` suite, in parallel.
 
-Sequential, the 32 suites take about five and a half minutes and most of that is
+Sequential, the suites take about five and a half minutes and most of that is
 waiting on stub agents, LibreOffice, pdflatex and sleeps. They are independent
 (each builds its own root under `tempfile.mkdtemp`, and the fixed paths they use
 are per-suite), so they can run at once:

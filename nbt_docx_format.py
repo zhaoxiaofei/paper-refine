@@ -1658,8 +1658,9 @@ def term_repetition_rows(paras: list, is_ref: list) -> list:
     Deliberately narrow: a technical noun repeating three times in a methods
     paragraph is normal writing, so only (a) a repeated PROPER NAME (2-3
     capitalized words with no document-structure word, used at least four times
-    in the document -- "Nature Biotechnology" four times in one cover-letter
-    paragraph) and (b) a single long content word used five times or more inside
+    in the document -- a journal name such as "Nature Biotechnology" four times
+    in one cover-letter paragraph, whichever venue the pipeline is configured
+    for) and (b) a single long content word used five times or more inside
     one paragraph qualify. URLs/e-mails are masked out, the reference list is
     skipped (it repeats names by design), and nothing is ever auto-edited.
     """

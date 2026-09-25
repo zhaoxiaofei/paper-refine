@@ -365,7 +365,14 @@ def test_pipeline_lock_excludes_concurrent_writers():
     holder = subprocess.Popen([sys.executable, "-c", holder_src, str(ctx.root)],
                               stdout=subprocess.PIPE, text=True)
     try:
-        line = holder.stdout.readline().strip()
+        # The holder's first line may be a `[venue]` note from ctx.load() (a
+        # root without a recorded venue says so once per command): read until
+        # the handshake line.
+        line = ""
+        for _ in range(6):
+            line = holder.stdout.readline().strip()
+            if line == "locked" or not line:
+                break
         check("C the helper process holds the lock", line == "locked", line)
         proc = subprocess.run([sys.executable, str(WS / "nbt_pipeline.py"), "retry",
                                "--root", str(ctx.root), "--run", "r1_a1"],

@@ -2,7 +2,14 @@
 Paste this entire file as the prompt for a manuscript review task when you cannot install Codex skills. Replace the placeholder paths (SUBMISSION_DIR, ZOTERO_SKILL) with your own at the top of the PROMPT BODY. The bundled scripts referenced in the prompt are optional but strongly recommended — copy them from nbt-review/scripts/ next to your working directory.
 ---
 ## PROMPT BODY (SKILL.md)
-# NBT Pre-Submission Review — identify_issues
+# Pre-Submission Review — identify_issues
+
+**Target venue and journal (configurable).** This skill is venue-agnostic: the pipeline that runs
+it selects a VENUE PROFILE (`set-venue <id>`, `setup --venue`) and a JOURNAL (`set-journal`), and
+records both in `pipeline_config.json`. Wherever this file quotes a number, a name or a
+submission requirement, it is the **default** profile's (Nature Biotechnology); the profile the
+run was configured with is authoritative, and the prompt states it. Run standalone, use the
+target journal's own author guide and say which source you used.
 
 ## Paths
 
@@ -21,9 +28,12 @@ say where they went.
 
 ## Mission
 
-Diagnose, do not fix. Produce a findings report + artifacts that the revision skill (`nbt-revise`) can consume mechanically. Length rule (user-set, replaces the former blanket exemption): **the journal's abstract/main-text limits apply, relaxed by fixed margins** — for an NBT Article, abstract ≤ 150 words +15% (≤ 172) and main text ≤ 3,000 words +25% (≤ 3,750, excluding abstract, Methods, references and figure legends); another content type uses its own base numbers with the same margins. Words are maximal runs of non-space characters with a newline treated as space. Sweep **M19** reports over-cap sections as formatting findings; never cut content to meet a limit and never flag under-length text. Sweep **M18** always enumerates every figure legend's word count (the journal requires legends to respect the article type's limit but publishes no number; an optional proxy cap only changes the disposition). Sweep **M20** always audits the OOXML style/formatting rows the pipeline's code-side scan seeds (break-only paragraph/blank page, running head on the title page, legend spacing, heading style drift, unintended italics incl. field-protected Zotero rows, mixed URL/email treatments, mixed quotation marks, em-dash density). The cover letter's persuading part is measured against the master prompt's own **300-500-word preference** — NBT's official guidance states no cover-letter word limit (checked 2026-09-19) — and is a Minor formatting item, never a journal requirement. All output in English.
+Diagnose, do not fix. Produce a findings report + artifacts that the revision skill (`nbt-revise`) can consume mechanically. Length rule (replaces the former blanket exemption): **the venue profile's abstract/main-text limits apply, relaxed by the profile's own margins** — for the default Nature Biotechnology Article profile, abstract ≤ 150 words +15% (≤ 172) and main text ≤ 3,000 words +25% (≤ 3,750, excluding abstract, Methods, references and figure legends); another content type uses its own base numbers with the same margins. Words are maximal runs of non-space characters with a newline treated as space. Sweep **M19** reports over-cap sections as formatting findings; never cut content to meet a limit and never flag under-length text. Sweep **M18** always enumerates every figure legend's word count (the venue profile requires legends to respect the article type's limit but publishes no number; an optional proxy cap only changes the disposition). Sweep **M20** always audits the OOXML style/formatting rows the pipeline's code-side scan seeds (break-only paragraph/blank page, running head on the title page, legend spacing, heading style drift, unintended italics incl. field-protected Zotero rows, mixed URL/email treatments, mixed quotation marks, em-dash density). The cover letter's persuading part is measured against the user's **300-500-word preference** — the default profile's venue states no cover-letter word limit (checked 2026-09-19) — and is a Minor formatting item, never a journal requirement. All output in English.
 
-Guidelines source: prefer a local copy of the author guidelines if present in the directory; otherwise the current Nature Biotechnology "Information for Authors" / Nature Portfolio author guide; **name the source/version you relied on in the summary.** Label every guideline-dependent finding `[required at initial submission]`, `[required at revised-submission stage — prepare now]`, or `[recommended]`. Nature Portfolio initial submissions are format-flexible: never present convenience conventions as blocking requirements.
+Guidelines source: prefer a local copy of the author guidelines if present in the directory; otherwise the TARGET VENUE's own author guide -- the pipeline's venue profile names it
+(`venue_profiles/<id>.json`; the default profile's source is Nature Biotechnology's
+"Information for Authors" / Nature Portfolio author guide); **name the source/version you relied on in the summary.** Label every guideline-dependent finding `[required at initial submission]`, `[required at revised-submission stage — prepare now]`, or `[recommended]`. Never present convenience conventions as blocking requirements: when the venue's guide says
+initial submissions are format-flexible (Nature Portfolio's do), say so explicitly.
 
 ## Why this skill is built this way (read once)
 
@@ -123,7 +133,7 @@ stable).
 ## CLASSIFICATION
 
 Categories (stable labels, used in findings):
-- **0 — Editor/Reviewer Concerns**: scope fit, rigor, overclaiming, ethics, data availability, figure quality (anything an NBT editor/reviewer could raise).
+- **0 — Editor/Reviewer Concerns**: scope fit, rigor, overclaiming, ethics, data availability, figure quality (anything an editor or reviewer at the target venue could raise).
 - **1 — Completeness & Factual Integrity**: mandatory items missing; factual errors; reference integrity; cross-document inconsistencies.
 - **2 — Writing Quality, Logic, and Repetition**: grammar, narrative flow, one-message-per-paragraph, redundant phrasing, terminology conventions, document hygiene.
 - **3 — Plagiarism and AI-Generated Content**: uncited related work, duplication, unattributed copying, evidence-based AI-content suspicion (always "possible", never an accusation), Springer Nature genative-AI policy compliance.
@@ -252,7 +262,7 @@ form as written | excerpt) -- audit each of those rows individually.
 - (e) two or more different acronyms for the same entity
 - (f) redefined in main text after first definition
 - (g) non-standard acronym used in a figure legend or table footnote without a local definition
-- (h) non-exempt acronym in the title, or in the abstract that is not defined at first use within the abstract. Label these `[recommended]` (Minor) unless the current author guide makes them mandatory; NBT asks titles to avoid abbreviations, but never present a convenience convention as a blocking requirement, and respect the standing exemption on length-driven cuts.
+- (h) non-exempt acronym in the title, or in the abstract that is not defined at first use within the abstract. Label these `[recommended]` (Minor) unless the current author guide makes them mandatory; the target venue may ask titles to avoid abbreviations (Nature Biotechnology does), but never present a convenience convention as a blocking requirement, and respect the standing exemption on length-driven cuts.
 - (i) inconsistent formatting (scRNAseq vs scRNA-seq; HSP vs HSPs; hyphenation; case)
 - (j) acronym coined for a term used fewer than 3 times in total
 - (k) the un-abbreviated long form is used again after that context's own first
@@ -382,8 +392,8 @@ ENTIRE directory regardless of editability.
 cover letter (addressed to editor; significance; plain formatting) · title
 page (title, authors, affiliations, corresponding author + email, ORCID) ·
 abstract · main text · Methods · references · figures with legends · tables ·
-combined Supplementary Information (where required) · Nature Portfolio
-Reporting Summary · data availability statement · code availability
+combined Supplementary Information (where required) · the venue's
+own reporting summary (the Nature Portfolio Reporting Summary when that is the venue) · data availability statement · code availability
 statement · author contributions · competing interests declaration ·
 funding/acknowledgements · ethics/consent statements (IRB/animal approval
 where applicable) · permissions for reused material · accession numbers ·
@@ -628,9 +638,10 @@ Fig. 1 legend, study has no spike-in) and F-046 (TODO note in Methods).
 
 ## M18 — Figure-legend length (always enumerated; the cap is optional)
 
-**Purpose:** Nature Biotechnology's formatting guide requires a figure legend
-not to exceed "the word limit of the article type" but publishes no number
-(checked against the submission guidelines, 2026-09-19). M18 therefore ALWAYS
+**Purpose:** the target venue's formatting guide requires a figure legend
+not to exceed "the word limit of the article type" but publishes no number (the
+default Nature Biotechnology profile: checked against its submission
+guidelines, 2026-09-19). M18 therefore ALWAYS
 enumerates every legend's word count; the orchestration pipeline may add a proxy
 cap (`--caption-limit N`, default 0 = no cap) to turn a count into a reportable
 over-cap item.
@@ -644,7 +655,7 @@ into `M18_caption_words.md`: document | caption id | word count | disposition.
   and, only where redundancy can be removed, compressed — never by deleting
   scientific content, claims, limitations or needed methodological detail
 - no cap configured → the count is recorded with the disposition "recorded —
-  the journal's per-type limit is not published; author to compare"; the word
+  the venue's per-type limit is not published; author to compare"; the word
   count alone is neither a defect nor a scoring difference
 - a legend that is defective for an independent reason (method detail, unclear
   panel description, missing error-bar definition) → the normal
@@ -655,24 +666,27 @@ on its own.
 
 ## M19 — Abstract/main-text length (always runs)
 
-**Purpose:** the journal's own length limits apply, relaxed by the user's fixed
-margins — this replaces the former blanket "abstract/main-text length is
-exempt" standing exemption. For a Nature Biotechnology **Article** the base
+**Purpose:** the venue profile's own length limits apply, relaxed by the
+profile's own margins — this replaces the former blanket "abstract/main-text
+length is exempt" standing exemption. For the default Nature Biotechnology **Article** profile the base
 limits are abstract ≤ 150 words and main text ≤ 3,000 words, with the main text
 EXCLUDING the abstract, Methods, references and figure legends; this pipeline
 allows **abstract +15% (≤ 172 words)** and **main text +25% (≤ 3,750 words)**.
 Another content type takes that type's own base numbers from the journal's
 content-types table with the same two margins, and the artifact must name the
-base and its source.
+base and its source. A venue profile that declares different numbers (or none)
+replaces all of them: read the limits from the profile of the run you are in
+(`venue_profiles/README.md` documents the schema).
 
 **Counting rule (all word counts):** a word is a maximal run of NON-SPACE
 characters, with a newline treated as space — `state-of-the-art` is ONE word and
 `2026` is ONE word. `scripts/count_words.py` implements this exactly (`--json`
 for machine output); use it for the counts instead of estimating.
 
-**Cover letter (user preference, NOT a journal rule).** Nature Biotechnology's
-official "Preparing your material" page states what the cover letter must
-explain and disclose but states no cover-letter word limit (checked 2026-09-19).
+**Cover letter (user preference, NOT a journal rule).** The default Nature
+Biotechnology profile's official "Preparing your material" page states what the
+cover letter must explain and disclose but states no cover-letter word limit
+(checked 2026-09-19); a venue profile may configure its own range instead.
 The master prompt's own preference is therefore carried as a USER
 PREFERENCE: the PERSUADING part (the body explaining importance and
 suitability; excluding the salutation, the signature block and required
@@ -695,7 +709,7 @@ skip.
 - abstract over the cap → CATEGORY-4 (technical formatting) finding
 - main text over the cap → CATEGORY-4 (technical formatting) finding
 - cover letter's persuading part outside the user's 300-500-word preference →
-  MINOR formatting finding (labelled as the user's preference, not an NBT rule)
+  MINOR formatting finding (labelled as the user's preference, not a venue rule)
 - a section that cannot be brought within the cap without losing content →
   `unable — needs the author's judgement`, listed for manual action
 
@@ -761,8 +775,8 @@ exhaustive-by-enumeration.
 
 ## J1 — Scope fit & significance
 
-Breadth of interest, novelty/technical advance, suitability for NBT
-specifically; whether the cover letter articulates the significance in plain
+Breadth of interest, novelty/technical advance, suitability for the
+target journal specifically; whether the cover letter articulates the significance in plain
 terms for editors; whether claims of broad interest are supported.
 
 ## J2 — Scientific & statistical rigor

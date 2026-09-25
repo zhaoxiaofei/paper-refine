@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-nbt_pipeline.py -- ROUND-BASED iterative revision pipeline for a Nature
-Biotechnology manuscript: R fixed rounds (R is configurable at setup and
+nbt_pipeline.py -- ROUND-BASED iterative revision pipeline for a manuscript
+submitted to ANY venue or journal (the submission rules come from a configurable
+VENUE PROFILE, the target journal from `set-journal`; Nature Biotechnology is the
+default profile and the pipeline's pre-venue behaviour): R fixed rounds (R is
+configurable at setup and
 defaults to 2), a relative-judgment panel that produces 2*judges*(|field|-1)
 directed scores per version (at the default judges=3 that is 6*(|field|-1); the
 default plan's round-1 field of 8 gives 42), content-addressed pinning of every
@@ -197,14 +200,16 @@ STAGING DEPENDENCY ORDER (a DAG: every run starts as soon as its inputs exist)
 RULES CARRIED INTO EVERY PROMPT (AND WHERE THEY COME FROM)
 ----------------------------------------------------------
     * FIGURE LEGENDS -- ALWAYS ENUMERATED, NEVER A GATE (check id M18): the
-      journal requires that a legend "does not exceed the word limit of the
-      article type" but publishes no number, and the master prompt and both
-      skills state none either. Every stage therefore COUNTS every legend's
-      words: `setup --caption-limit N` lets the operator configure the
-      pipeline's proxy cap (e.g. 300; the DEFAULT IS 0 = counts only, no cap),
-      an over-cap legend is REPORTED and compressed only by removing
-      redundancy, never by deleting scientific content, and with no cap the
-      counts are recorded for the author to compare with the journal's limit.
+      VENUE PROFILE's legend policy applies (the default nature-biotechnology
+      profile: a legend may not exceed the article type's word limit, but the
+      venue publishes no number, and the master prompt and both skills state
+      none either). Every stage therefore COUNTS every legend's words:
+      `setup --caption-limit N` lets the operator configure a proxy cap; without
+      one the venue profile's own default applies (0 for the default profile =
+      counts only, no cap). An over-cap legend is REPORTED and compressed only
+      by removing redundancy, never by deleting scientific content, and with no
+      cap the counts are recorded for the author to compare with the venue's
+      own limit.
       Nothing is ever enforced on a word count: legend length cannot make a
       version ineligible, cannot reorder a ranking, and cannot fail a decision.
       The orchestrator also scans the corpora itself (code-side proxy over .docx
@@ -217,12 +222,15 @@ RULES CARRIED INTO EVERY PROMPT (AND WHERE THEY COME FROM)
       PIPELINE (check id M19): the master prompt's blanket exemption ("never
       flag abstract or main-text word limits") is REPLACED here, because an
       abstract or main text over the journal's own limit is something the
-      editor will raise even though no pipeline rule ever mentioned it. For a
-      Nature Biotechnology Article the base limits are abstract <= 150 words
-      and main text <= 3,000 words (excluding abstract, Methods, references and
-      figure legends); this pipeline allows +15% on the abstract (<= 172 words)
-      and +25% on the main text (<= 3,750 words), and another content type uses
-      that type's own numbers with the same two margins. Words are counted as
+      editor will raise even though no pipeline rule ever mentioned it. The
+      numbers come from the configured VENUE PROFILE (`set-venue`; see the
+      VENUES AND JOURNALS section below): for the DEFAULT nature-biotechnology
+      Article profile the base limits are abstract <= 150 words and main text
+      <= 3,000 words (excluding abstract, Methods, references and figure
+      legends), relaxed by the profile's own margins -- +15% on the abstract
+      (<= 172 words) and +25% on the main text (<= 3,750 words). A profile may
+      carry different numbers, or none at all (the stages then count and name
+      the limit the target journal's guidelines state). Words are counted as
       maximal runs of NON-SPACE characters with a newline treated as space
       (so "state-of-the-art" is one word and "2026" is one word). An over-limit
       section is a formatting-tier item (M19): reported by the review,
@@ -369,8 +377,10 @@ CODE-SIDE CHECKS (in addition to what the prompts ask the agents to do)
                           operator's definition (runs of non-space characters,
                           newline = space) at setup over the source corpus and
                           at `decide` over the pinned winner, and compared with
-                          the journal's Article limits relaxed by +15%/+25%
-                          (172 / 3,750 words). Reported next to the caption
+                          the VENUE PROFILE's own limits relaxed by the profile's
+                          margins (the default nature-biotechnology Article:
+                          +15%/+25% -> 172 / 3,750 words; a profile with no
+                          limits records counts only). Reported next to the caption
                           check, advisory in exactly the same way: the agents'
                           M19 sweep is authoritative, an over-cap section is a
                           formatting-tier item, and no version is ever made
@@ -815,11 +825,20 @@ DEFAULT_ZOTERO_MODE = "edit"
 INTEGRATOR_ALL = 0xFFFFFFFF
 INTEGRATOR_BITS = 32
 
+# The venue/journal default (see the VENUES AND JOURNALS section). `setup`
+# records both in pipeline_config.json; a root created before this feature
+# carries neither key and keeps behaving exactly as it did, because the default
+# venue is the requirement set this pipeline was originally written for.
+DEFAULT_VENUE = "nature-biotechnology"
+GENERIC_VENUE = "generic"
+
 DEFAULTS = {
     "root": "./nbt_rounds",
     "rounds": 2,            # fixed-length pipeline; the round-R champion wins
     "judges": [3],          # independent judge sessions per version, per round list
     "jobs": 255,            # concurrent agent sessions
+    "venue": DEFAULT_VENUE, # the submission-requirement set the stages enforce
+    "journal": "",          # the target journal (free text; "" = profile default)
     "zotero": DEFAULT_ZOTERO_MODE,   # Zotero tooling policy: off|read|edit|apply
     "rewrites": [2, 1],     # M per round: rewritten candidates (list or one int)
     "revises": [1, 1],      # N per round: reviewed-and-then-revised candidates
@@ -831,6 +850,732 @@ DEFAULTS = {
     "agent": "codex",
     "poll": 10,             # manual-mode completion poll interval
 }
+
+
+# =====================================================================
+# VENUES AND JOURNALS
+# =====================================================================
+# A VENUE and a JOURNAL are two different things, and the pipeline keeps them
+# apart:
+#
+#   * the VENUE is the requirement set a stage enforces: the submission rules
+#     of a publishing venue (article-type word limits, figure-legend policy,
+#     accepted submission formats, and so on). It is selected by ID and
+#     realised by a venue PROFILE -- a JSON document, shipped under
+#     `venue_profiles/` or written into the root by the operator. One profile
+#     may cover a single journal ("nature-biotechnology"), a journal family
+#     ("nature-portfolio") or no journal at all ("generic").
+#   * the JOURNAL is the publication the manuscript is going to: free text
+#     ("Nature Biotechnology", "Cell", "eLife"), used by the prompts to say
+#     what the submission is for and to check it against the venue's rules.
+#     On its own it selects nothing.
+#
+# Both live in `<root>/pipeline_config.json` (`venue`, `journal`) with a
+# snapshot of the resolved profile (`venue_profile`), so a root keeps enforcing
+# the rules it was set up with even if the shipped profiles change later. The
+# precedence, highest first, is:
+#
+#   1. the flags of the command being run (`setup --venue/--journal`);
+#   2. the root's pipeline_config.json (written by `setup`, `set-venue`,
+#      `set-journal`);
+#   3. the venue profile's `default_journal` (when no journal is recorded);
+#   4. the built-in defaults: venue `nature-biotechnology` (this pipeline's
+#      pre-venue behaviour) with no journal beyond that profile's default.
+#
+# A root whose venue is missing keeps working on the default venue (backward
+# compatibility); a root whose venue ID resolves to nothing is reported by
+# `status` and refused by the commands that must render prompts (see
+# venue_profile_of / venue_config_findings). `--strict-venue` turns the
+# MISSING or INCONSISTENT cases into hard errors, for a run that must not start
+# on a guess (an unresolvable venue is refused either way, by every command that
+# has to render a prompt).
+VENUE_PROFILES_DIRNAME = "venue_profiles"
+VENUE_PROFILE_SUFFIX = ".json"
+VENUE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+JOURNAL_ALIAS_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+
+
+class VenueProfileError(ValueError):
+    """A venue profile that cannot be used as written (or does not exist)."""
+
+    def __init__(self, message: str, *, unknown: bool = False):
+        super().__init__(message)
+        self.unknown = unknown
+
+
+def _journal_key(text) -> str:
+    """A journal name reduced to letters/digits, for alias comparison."""
+    return JOURNAL_ALIAS_SPLIT_RE.sub("", str(text or "").lower())
+
+
+# The profiles shipped with this file, so a copy of nbt_pipeline.py without the
+# `venue_profiles/` directory (a stripped single-file copy, a root created
+# before the profiles were copied into it) still runs with a known rule set.
+# `venue_profiles/nature-biotechnology.json` and `venue_profiles/generic.json`
+# carry the same data; the files are the editable copy, this is the fallback.
+_NBT_VENUE_PROFILE = {
+    "id": "nature-biotechnology",
+    "label": "Nature Biotechnology",
+    "short": "NBT",
+    "description": "Nature Biotechnology (Nature Portfolio): the pipeline's original, "
+                   "pre-venue requirement set. Its Article limits are the ones the M19 "
+                   "length rule relaxes.",
+    "article_type": "Article",
+    "journals": ["Nature Biotechnology"],
+    "journal_aliases": ["NBT", "Nat. Biotechnol.", "Nature Biotech",
+                        "Nature Biotechnology (NBT)"],
+    "default_journal": "Nature Biotechnology",
+    "length_limits": {
+        "source": "Nature Biotechnology content-types table (Article: abstract <= 150 "
+                  "words; main text <= 3,000 words excluding abstract, Methods, "
+                  "references and figure legends)",
+        "abstract": {"base": 150, "relaxation": 1.15},
+        "main_text": {"base": 3000, "relaxation": 1.25},
+        "cover_letter": {
+            "min": 300, "max": 500,
+            "source": "master-prompt preference (300-500 words in the persuading part); "
+                      "Nature Biotechnology's official guidance states no cover-letter "
+                      "word limit (checked 2026-09-19)",
+        },
+    },
+    "captions": {
+        "published_limit": None,
+        "default_cap": 0,
+        "source": "Nature Biotechnology requires that a legend \"does not exceed the word "
+                  "limit of the article type\" but does not publish that number on its "
+                  "public pages (checked 2026-09-19)",
+    },
+    "submission": {
+        "pdf_accepted": True,
+        "formats": ["PDF", "Word", "TeX/LaTeX"],
+        "pdf_note": "Nature Biotechnology accepts a PDF as the initial submission file "
+                    "(\"We accept initial submissions in PDF, Word or TeX/LaTeX formats\" "
+                    "-- submission guidelines, checked 2026-09-19), and a reader/editor "
+                    "may open exactly that PDF",
+    },
+    "prompt": {
+        "subject": "a Nature Biotechnology (NBT) manuscript submission",
+        "editor": "a Nature Biotechnology editor or reviewer",
+        "requirements": "the Nature Biotechnology author guidelines and submission "
+                        "requirements",
+        "requirement_authority": "Nature Biotechnology",
+        "guidelines_source": "the current Nature Biotechnology author guidelines",
+    },
+}
+
+_GENERIC_VENUE_PROFILE = {
+    "id": "generic",
+    "label": "generic venue (no venue-specific rules)",
+    # "short" is the noun the prompts drop into phrases like "not a <short>
+    # rule"; for a venue with no brand, the honest noun is the venue itself.
+    "short": "VENUE",
+    "description": "A venue-agnostic profile: it sets no word limits, no legend cap and no "
+                   "submission-format rule of its own. Every stage still enumerates the "
+                   "counts, and the artifact must name the limit the target journal's own "
+                   "guidelines state, with its source. Use it when the venue publishes no "
+                   "rule the pipeline can carry, or as the starting point for a custom "
+                   "profile (`set-venue <id> --profile FILE`).",
+    "article_type": "Article",
+    "journals": [],
+    "journal_aliases": [],
+    "accepts_any_journal": True,
+    "default_journal": "",
+    "length_limits": {
+        "source": "the target journal's own author guidelines (this venue profile publishes "
+                  "no number; the stage names the limit and its source in its artifact)",
+        "abstract": {"base": None, "relaxation": None},
+        "main_text": {"base": None, "relaxation": None},
+        "cover_letter": {
+            "min": 300, "max": 500,
+            "source": "master-prompt preference (300-500 words in the persuading part); the "
+                      "venue profile states no venue cover-letter limit",
+        },
+    },
+    "captions": {
+        "published_limit": None,
+        "default_cap": 0,
+        "source": "this venue profile states no figure-legend length rule; every legend's "
+                  "word count is recorded and compared with the target journal's own "
+                  "guidelines by the author",
+    },
+    "submission": {
+        "pdf_accepted": None,
+        "formats": [],
+        "pdf_note": "this venue profile does not state which formats the venue accepts, and a "
+                    "reader or editor may still open the PDF shipped beside the editable "
+                    "source",
+    },
+    "prompt": {
+        "subject": "a manuscript submission for the target journal",
+        "editor": "an editor or reviewer at the target journal",
+        "requirements": "the target journal's author guidelines and submission requirements",
+        "requirement_authority": "the target journal",
+        "guidelines_source": "the target journal's author guidelines (prefer a local copy "
+                             "in the corpus)",
+    },
+}
+
+BUILTIN_VENUE_PROFILES = {
+    _NBT_VENUE_PROFILE["id"]: _NBT_VENUE_PROFILE,
+    _GENERIC_VENUE_PROFILE["id"]: _GENERIC_VENUE_PROFILE,
+}
+
+
+def _profile_int(value, field: str, problems: list, *, minimum=None, allow_none=True):
+    """An optional non-negative integer profile field."""
+    if value is None:
+        if allow_none:
+            return None
+        problems.append(f"{field} is required")
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        problems.append(f"{field} must be an integer (got {value!r})")
+        return None
+    if minimum is not None and value < minimum:
+        problems.append(f"{field} must be >= {minimum} (got {value})")
+        return None
+    return value
+
+
+def _profile_str_list(value, field: str, problems: list) -> list:
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        problems.append(f"{field} must be a list of strings")
+        return []
+    out = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            problems.append(f"{field} must hold non-empty strings (got {item!r})")
+            continue
+        out.append(item.strip())
+    return out
+
+
+def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
+    """Validate a venue profile and fill its defaults, or raise VenueProfileError.
+
+    The schema is documented in `venue_profiles/README.md`. Everything the
+    pipeline reads is validated here, once, at the boundary: a profile that
+    passes is safe for every stage to consume, and a profile that does not is
+    reported with every problem it has (not just the first one).
+    """
+    if not isinstance(data, dict):
+        raise VenueProfileError(f"{origin}: a venue profile must be a JSON object "
+                                f"(got {type(data).__name__})")
+    problems: list = []
+    out = copy.deepcopy(data)
+
+    venue_id = str(out.get("id") or "").strip().lower()
+    if not venue_id:
+        problems.append("'id' is required (a short slug, e.g. \"nature-biotechnology\")")
+    elif not VENUE_ID_RE.match(venue_id):
+        problems.append(f"'id' {venue_id!r} is not a slug: letters, digits, '.', '_', '+', "
+                        f"'-' only")
+    label = str(out.get("label") or "").strip()
+    if not label:
+        label = venue_id or "(unnamed venue)"
+    short = str(out.get("short") or "").strip() or label
+    article_type = str(out.get("article_type") or "").strip() or "Article"
+
+    limits = out.get("length_limits") or {}
+    if not isinstance(limits, dict):
+        problems.append("'length_limits' must be an object")
+        limits = {}
+    clean_limits = {"source": str(limits.get("source") or "").strip()}
+    for key, label_ in (("abstract", "abstract"), ("main_text", "main text")):
+        spec = limits.get(key)
+        if spec is None:
+            spec = {}
+        if isinstance(spec, (int, float)) and not isinstance(spec, bool):
+            spec = {"base": spec}          # a bare number = base words, no relaxation
+        if not isinstance(spec, dict):
+            problems.append(f"length_limits.{key} must be an object with 'base' and "
+                            f"'relaxation' (or null for both)")
+            spec = {}
+        base = spec.get("base")
+        relaxation = spec.get("relaxation")
+        if base is None and relaxation is None:
+            clean_limits[key] = {"base": None, "relaxation": None}
+            continue
+        pairing_error = (base is None) != (relaxation is None)
+        base = _profile_int(base, f"length_limits.{key}.base", problems, minimum=1)
+        try:
+            relaxation = float(relaxation) if relaxation is not None else None
+        except (TypeError, ValueError):
+            problems.append(f"length_limits.{key}.relaxation must be a number >= 1.0 "
+                            f"(got {relaxation!r})")
+            relaxation = None
+        if relaxation is not None and relaxation < 1.0:
+            problems.append(f"length_limits.{key}.relaxation must be >= 1.0 (got "
+                            f"{relaxation:g}); the pipeline only relaxes a limit, never "
+                            f"tightens it")
+            relaxation = None
+        if pairing_error:
+            problems.append(f"length_limits.{key}: 'base' and 'relaxation' must be given "
+                            f"together (or both null)")
+        if base is None or relaxation is None:
+            clean_limits[key] = {"base": base, "relaxation": relaxation}
+        else:
+            clean_limits[key] = {"base": base, "relaxation": relaxation}
+    cover = limits.get("cover_letter") or {}
+    if not isinstance(cover, dict):
+        problems.append("length_limits.cover_letter must be an object with 'min' and 'max' "
+                        "(or null for both)")
+        cover = {}
+    cover_min = _profile_int(cover.get("min"), "length_limits.cover_letter.min", problems,
+                             minimum=0)
+    cover_max = _profile_int(cover.get("max"), "length_limits.cover_letter.max", problems,
+                             minimum=0)
+    if (cover_min is None) != (cover_max is None):
+        problems.append("length_limits.cover_letter: 'min' and 'max' must be given together "
+                        "(or both null)")
+    elif cover_min is not None and cover_min > cover_max:
+        problems.append(f"length_limits.cover_letter.min ({cover_min}) must not exceed "
+                        f"max ({cover_max})")
+    clean_limits["cover_letter"] = {"min": cover_min, "max": cover_max,
+                                    "source": str(cover.get("source") or "").strip()}
+
+    captions = out.get("captions") or {}
+    if not isinstance(captions, dict):
+        problems.append("'captions' must be an object")
+        captions = {}
+    clean_captions = {
+        "published_limit": _profile_int(captions.get("published_limit"),
+                                        "captions.published_limit", problems, minimum=0),
+        "default_cap": _profile_int(captions.get("default_cap", 0), "captions.default_cap",
+                                    problems, minimum=0, allow_none=False) or 0,
+        "source": str(captions.get("source") or "").strip(),
+    }
+    if clean_captions["published_limit"] is not None and clean_captions["default_cap"] == 0:
+        clean_captions["default_cap"] = clean_captions["published_limit"]
+
+    journals = _profile_str_list(out.get("journals"), "journals", problems)
+    aliases = _profile_str_list(out.get("journal_aliases"), "journal_aliases", problems)
+    patterns = _profile_str_list(out.get("journal_patterns"), "journal_patterns", problems)
+    for pat in patterns:
+        try:
+            re.compile(pat)
+        except re.error as e:
+            problems.append(f"journal_patterns entry {pat!r} is not a regular expression: {e}")
+    prompt = out.get("prompt") or {}
+    if not isinstance(prompt, dict):
+        problems.append("'prompt' must be an object")
+        prompt = {}
+    submission = out.get("submission") or {}
+    if not isinstance(submission, dict):
+        problems.append("'submission' must be an object")
+        submission = {}
+    pdf_accepted = submission.get("pdf_accepted")
+    if pdf_accepted is not None and not isinstance(pdf_accepted, bool):
+        problems.append(f"submission.pdf_accepted must be true, false or null (got "
+                        f"{pdf_accepted!r})")
+        pdf_accepted = None
+
+    if problems:
+        raise VenueProfileError(f"{origin}: " + "; ".join(problems))
+
+    clean_prompt = {
+        "subject": str(prompt.get("subject") or f"a {label} manuscript submission").strip(),
+        "editor": str(prompt.get("editor") or f"a {label} editor or reviewer").strip(),
+        "requirements": str(prompt.get("requirements")
+                            or f"the {label} author guidelines and submission requirements").strip(),
+        "requirement_authority": str(prompt.get("requirement_authority") or label).strip(),
+        "guidelines_source": str(prompt.get("guidelines_source")
+                                 or f"the current {label} author guidelines").strip(),
+    }
+    return {
+        "id": venue_id,
+        "label": label,
+        "short": short,
+        "description": str(out.get("description") or "").strip(),
+        "article_type": article_type,
+        "journals": journals,
+        "journal_aliases": aliases,
+        "journal_patterns": patterns,
+        "accepts_any_journal": bool(out.get("accepts_any_journal")),
+        "default_journal": str(out.get("default_journal") or "").strip(),
+        "length_limits": clean_limits,
+        "captions": clean_captions,
+        "submission": {
+            "pdf_accepted": pdf_accepted,
+            "formats": _profile_str_list(submission.get("formats"), "submission.formats",
+                                         problems) or [],
+            "pdf_note": str(submission.get("pdf_note") or "").strip(),
+        },
+        "prompt": clean_prompt,
+    }
+
+
+class VenueProfile:
+    """A validated venue profile plus where it came from.
+
+    Every stage reads the venue through this object: the prompt text, the
+    length limits and the caption policy are all derived from the profile's own
+    fields, so adding a venue means adding a JSON document, not a branch in the
+    pipeline.
+    """
+
+    def __init__(self, data, origin: str = "<builtin>", path=None):
+        self.data = normalize_venue_profile(data, origin)
+        self.origin = origin
+        self.path = Path(path) if path is not None else None
+
+    # ---- identity ----
+    @property
+    def id(self) -> str:
+        return self.data["id"]
+
+    @property
+    def label(self) -> str:
+        return self.data["label"]
+
+    @property
+    def short(self) -> str:
+        return self.data["short"]
+
+    @property
+    def description(self) -> str:
+        return self.data["description"]
+
+    @property
+    def article_type(self) -> str:
+        return self.data["article_type"]
+
+    @property
+    def default_journal(self) -> str:
+        return self.data["default_journal"]
+
+    @property
+    def prompt(self) -> dict:
+        return self.data["prompt"]
+
+    @property
+    def captions(self) -> dict:
+        return self.data["captions"]
+
+    @property
+    def caption_default(self) -> int:
+        return int(self.data["captions"].get("default_cap") or 0)
+
+    @property
+    def length_limits_source(self) -> str:
+        return self.data["length_limits"].get("source") or f"{self.label} submission rules"
+
+    def to_dict(self) -> dict:
+        return copy.deepcopy(self.data)
+
+    def length_limits(self) -> dict:
+        """The M19 caps, in the shape the code-side scan and the prompts use."""
+        raw = self.data["length_limits"]
+
+        def spec(key: str) -> dict:
+            base = (raw.get(key) or {}).get("base")
+            relaxation = (raw.get(key) or {}).get("relaxation")
+            cap = (lenient_word_limit(base, relaxation)
+                   if base is not None and relaxation is not None else None)
+            return {"base": base, "relaxation": relaxation, "cap": cap}
+
+        cover = raw.get("cover_letter") or {}
+        return {"abstract": spec("abstract"),
+                "main text": spec("main_text"),
+                "cover letter": {"min": cover.get("min"), "max": cover.get("max"),
+                                 "source": cover.get("source") or ""}}
+
+    def known_journals(self) -> list:
+        return list(self.data["journals"]) + list(self.data["journal_aliases"])
+
+    def journal_matches(self, journal: str) -> bool:
+        """Does `journal` name a journal this profile claims to describe?
+
+        A profile that accepts any journal, or declares no journal names and no
+        patterns, never fails this test (it makes no claim to check).
+        """
+        name = str(journal or "").strip()
+        if not name or self.data["accepts_any_journal"]:
+            return True
+        if not self.known_journals() and not self.data["journal_patterns"]:
+            return True
+        key = _journal_key(name)
+        if key and key in {_journal_key(j) for j in self.known_journals()}:
+            return True
+        for pat in self.data["journal_patterns"]:
+            try:
+                if re.search(pat, name, re.IGNORECASE):
+                    return True
+            except re.error:            # pragma: no cover -- validated on load
+                continue
+        return False
+
+    def describe_origin(self) -> str:
+        return f"{self.origin}" + (f" ({self.path})" if self.path is not None else "")
+
+
+def venue_profile_search_dirs(root=None) -> list:
+    """Where venue profiles are looked up, in precedence order.
+
+    A root-local profile (written by `set-venue --profile`, or edited by hand)
+    wins over the copy shipped with the script that is running.
+    """
+    dirs = []
+    if root is not None:
+        dirs.append(Path(root) / VENUE_PROFILES_DIRNAME)
+    try:
+        script_dir = Path(__file__).resolve().parent
+    except (NameError, OSError):        # pragma: no cover -- __file__ always set here
+        script_dir = None
+    if script_dir is not None and script_dir / VENUE_PROFILES_DIRNAME not in dirs:
+        dirs.append(script_dir / VENUE_PROFILES_DIRNAME)
+    return dirs
+
+
+def available_venue_profiles(root=None) -> dict:
+    """Every venue profile this pipeline can see: id -> descriptor.
+
+    Root-local files win over shipped files of the same id, and both win over
+    the built-in copies. A file that does not parse or does not validate is
+    listed with its `error` instead of being silently ignored, because
+    `set-venue --list` is where the operator finds out why an id is missing.
+    """
+    found: dict = {}
+    for d in venue_profile_search_dirs(root):
+        if not d.is_dir():
+            continue
+        for path in sorted(d.glob(f"*{VENUE_PROFILE_SUFFIX}")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as e:
+                found.setdefault(path.stem, {"id": path.stem, "label": path.stem,
+                                             "error": f"{path}: not readable JSON: {e}",
+                                             "origin": str(d), "path": str(path)})
+                continue
+            origin = f"root: {d}" if root is not None and \
+                Path(d) == Path(root) / VENUE_PROFILES_DIRNAME else f"shipped: {d}"
+            try:
+                profile = VenueProfile(data, origin=origin, path=path)
+            except VenueProfileError as e:
+                found.setdefault(path.stem, {"id": path.stem, "label": path.stem,
+                                             "error": str(e), "origin": origin,
+                                             "path": str(path)})
+                continue
+            found.setdefault(profile.id, {"id": profile.id, "label": profile.label,
+                                          "description": profile.description,
+                                          "origin": origin, "path": str(path),
+                                          "default_journal": profile.default_journal})
+    for vid, data in BUILTIN_VENUE_PROFILES.items():
+        found.setdefault(vid, {"id": vid, "label": data["label"],
+                               "description": data["description"],
+                               "origin": "built-in", "path": None,
+                               "default_journal": data["default_journal"]})
+    return found
+
+
+def load_venue_profile(venue_id, root=None) -> VenueProfile:
+    """Resolve one venue id to a profile, or raise VenueProfileError/Unknown."""
+    vid = str(venue_id or "").strip().lower()
+    if not vid:
+        raise VenueProfileError("no venue id given", unknown=True)
+    if not VENUE_ID_RE.match(vid):
+        raise VenueProfileError(f"invalid venue id {venue_id!r}: letters, digits, '.', '_', "
+                                f"'+', '-' only", unknown=True)
+    for d in venue_profile_search_dirs(root):
+        path = Path(d) / f"{vid}{VENUE_PROFILE_SUFFIX}"
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            raise VenueProfileError(f"{path}: not readable JSON: {e}")
+        origin = "root-local profile" if root is not None and \
+            Path(d) == Path(root) / VENUE_PROFILES_DIRNAME else "shipped profile"
+        return VenueProfile(data, origin=origin, path=path)
+    if vid in BUILTIN_VENUE_PROFILES:
+        return VenueProfile(BUILTIN_VENUE_PROFILES[vid], origin="built-in")
+    raise VenueProfileError(f"unknown venue {venue_id!r}", unknown=True)
+
+
+def unknown_venue_message(venue_id, root=None) -> str:
+    """The one message an operator needs when a venue id resolves to nothing."""
+    known = ", ".join(sorted(available_venue_profiles(root)))
+    try:
+        prog = Path(__file__).name
+    except NameError:                   # pragma: no cover -- __file__ always set here
+        prog = "nbt_pipeline.py"
+    return (f"unknown venue {venue_id!r}: no venue profile named "
+            f"{str(venue_id or '').strip().lower()!r} was found.\n"
+            f"       Available venues: {known or '(none)'}\n"
+            f"       List them with `{prog} set-venue --list`; add one by "
+            f"writing {VENUE_PROFILES_DIRNAME}/<id>{VENUE_PROFILE_SUFFIX} and passing it to "
+            f"`set-venue <id> --profile <file>`.")
+
+
+def default_venue_profile() -> VenueProfile:
+    """The profile a call that has no root at hand uses (the built-in default)."""
+    return VenueProfile(BUILTIN_VENUE_PROFILES[DEFAULT_VENUE], origin="built-in")
+
+
+def _ctx_cfg(ctx) -> dict:
+    cfg = getattr(ctx, "cfg", None)
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def venue_id_of(ctx=None) -> str:
+    """The venue id a root (or a config dict) records, or the default venue."""
+    cfg = _ctx_cfg(ctx)
+    vid = str(cfg.get("venue") or "").strip().lower()
+    return vid or DEFAULT_VENUE
+
+
+def _snapshot_profile(cfg: dict, venue_id: str):
+    """The profile snapshot recorded in the config, when it matches the id."""
+    snapshot = cfg.get("venue_profile")
+    if not isinstance(snapshot, dict):
+        return None
+    try:
+        prof = VenueProfile(snapshot, origin="recorded snapshot")
+    except VenueProfileError:
+        return None
+    return prof if prof.id == venue_id else None
+
+
+def venue_profile_of(ctx=None, required: bool = True):
+    """The root's venue profile.
+
+    The snapshot recorded at setup/set-venue time WINS over the files on disk:
+    a root keeps enforcing the rules it was configured with even if the shipped
+    profiles are edited or the profile file is deleted later. With `required`
+    false the caller gets None instead of an exception, which is what `status`
+    needs to report a broken configuration.
+    """
+    cfg = _ctx_cfg(ctx)
+    venue_id = venue_id_of(ctx)
+    root = getattr(ctx, "root", None)
+    prof = _snapshot_profile(cfg, venue_id)
+    if prof is not None:
+        return prof
+    try:
+        return load_venue_profile(venue_id, root=root)
+    except VenueProfileError:
+        if required:
+            raise
+        return None
+
+
+def journal_of(ctx=None) -> str:
+    """The configured journal: the config's, else the profile's default, else ""."""
+    cfg = _ctx_cfg(ctx)
+    name = str(cfg.get("journal") or "").strip()
+    if name:
+        return name
+    prof = venue_profile_of(ctx, required=False)
+    return prof.default_journal if prof is not None else ""
+
+
+def venue_summary(ctx) -> str:
+    """One line naming the venue, the journal and where the profile came from."""
+    prof = venue_profile_of(ctx, required=False)
+    venue = venue_id_of(ctx)
+    journal = journal_of(ctx) or "(not set)"
+    if prof is None:
+        return (f"venue={venue or '(missing)'} (UNRESOLVED), "
+                f"journal={journal}")
+    return (f"venue={prof.id} (\"{prof.label}\", {prof.describe_origin()}), "
+            f"journal={journal}")
+
+
+def venue_status_lines(ctx) -> list:
+    """The venue/journal lines `status`, `setup` and the decision report print."""
+    prof = venue_profile_of(ctx, required=False)
+    venue = venue_id_of(ctx)
+    journal = journal_of(ctx)
+    lines = []
+    if prof is None:
+        lines.append(f"venue:         {venue or '(missing)'}  -- UNRESOLVED "
+                     f"(run `set-venue <id>`; `set-venue --list` shows the ids)")
+    else:
+        lines.append(f"venue:         {prof.id} (\"{prof.label}\", {prof.describe_origin()})")
+        limits = prof.length_limits()
+        if limits["abstract"].get("cap") is None and limits["main text"].get("cap") is None:
+            lines.append("limits (M19):  no abstract/main-text cap in this venue profile "
+                         "(counts are recorded; the target journal's own guidelines are the bar)")
+        else:
+            lines.append(f"limits (M19):  abstract <= {limits['abstract'].get('cap')}, "
+                         f"main text <= {limits['main text'].get('cap')} "
+                         f"({prof.length_limits_source})")
+    missing = 'not set -- the prompts say "the target journal"; run `set-journal <name>`'
+    lines.append(f"journal:       {journal or '(' + missing + ')'}")
+    return lines
+
+
+def venue_block(ctx) -> dict:
+    """The venue/journal block decision.json and the report carry."""
+    prof = venue_profile_of(ctx, required=False)
+    return {"venue": venue_id_of(ctx),
+            "journal": journal_of(ctx),
+            "label": prof.label if prof is not None else None,
+            "origin": prof.describe_origin() if prof is not None else None,
+            "length_limits": prof.length_limits() if prof is not None else None,
+            "caption_limit": caption_limit_of(ctx),
+            "notes": list(getattr(ctx, "venue_notes", []) or []),
+            "problems": list(getattr(ctx, "venue_problems", []) or []),
+            "profile": prof.to_dict() if prof is not None else None}
+
+
+def venue_config_findings(ctx) -> tuple:
+    """(notes, problems) for a root's venue/journal configuration.
+
+    Notes are informational and always printed; problems are fatal only under
+    `--strict-venue`, except for an unresolvable venue, which the commands that
+    must render a prompt refuse outright (see venue_profile_of).
+    """
+    notes, problems = [], []
+    cfg = _ctx_cfg(ctx)
+    recorded = str(cfg.get("venue") or "").strip().lower()
+    if not recorded:
+        notes.append(f"no venue recorded in {Path(getattr(ctx, 'cfg_path', 'pipeline_config.json')).name}: "
+                     f"using the default venue {DEFAULT_VENUE!r} (the pipeline's pre-venue "
+                     f"behaviour). Run `set-venue <venue>` to make it explicit.")
+    prof = venue_profile_of(ctx, required=False)
+    if prof is None:
+        # Distinguish "no profile by that name" from "the file is there but it
+        # cannot be used": the operator's next step is different.
+        try:
+            venue_profile_of(ctx, required=True)
+        except VenueProfileError as e:
+            if e.unknown:
+                problems.append(unknown_venue_message(recorded or DEFAULT_VENUE,
+                                                      getattr(ctx, "root", None)))
+            else:
+                problems.append(f"the venue profile selected by this root cannot be used: {e}\n"
+                                f"       Fix the file, or select another venue with "
+                                f"`set-venue <id>` (`set-venue --list` shows the ids).")
+        else:                           # pragma: no cover -- prof is None above
+            problems.append(unknown_venue_message(recorded or DEFAULT_VENUE,
+                                                  getattr(ctx, "root", None)))
+        return notes, problems
+    snapshot = cfg.get("venue_profile")
+    if isinstance(snapshot, dict) and str(snapshot.get("id") or "").strip().lower() != prof.id:
+        problems.append(f"the recorded profile snapshot names venue "
+                        f"{str(snapshot.get('id'))!r} but the config selects {prof.id!r}; "
+                        f"re-run `set-venue {prof.id}` to re-record it.")
+    journal = str(cfg.get("journal") or "").strip()
+    if not journal:
+        journal = prof.default_journal
+    if not journal:
+        problems.append("no journal configured: the prompts say \"the target journal\" and the "
+                        "venue's rule set still applies. Run `set-journal <name>` to name it.")
+    elif not prof.journal_matches(journal):
+        known = ", ".join(prof.known_journals()) or "no names, but a pattern is declared"
+        problems.append(f"the journal {journal!r} is not one of the journals venue profile "
+                        f"{prof.id!r} describes ({known}). Set the venue that matches the journal "
+                        f"(`set-venue <id>`) or the journal the venue describes "
+                        f"(`set-journal <name>`).")
+    state_cfg = ((getattr(ctx, "state", None) or {}).get("config") or {})
+    mirrored = str(state_cfg.get("venue") or "").strip().lower()
+    if mirrored and mirrored != recorded:
+        notes.append(f"state.json records venue {mirrored!r} but pipeline_config.json selects "
+                     f"{recorded!r}: the config file wins (`set-venue` re-mirrors it).")
+    return notes, problems
 
 AGENT_PRESETS = {
     "claude": ["claude", "--permission-mode", "bypassPermissions", "--print"],
@@ -1843,36 +2588,31 @@ FIGURE_CAPTION_WORD_LIMIT = 300
 DEFAULT_CAPTION_LIMIT = 0
 
 
-# ---- The journal's own length limits, relaxed by this pipeline (check id M19)
+# ---- The venue's own length limits, relaxed by this pipeline (check id M19)
 #
-# Nature Biotechnology's content-types table states, for an ARTICLE:
+# The numbers come from the configured venue profile (`length_limits` in
+# venue_profiles/<id>.json), not from this file. The shipped
+# `nature-biotechnology` profile carries the limits this pipeline originally
+# hard-coded -- its content-types table states, for an ARTICLE:
 #   * abstract  -- up to 150 words, unreferenced;
 #   * main text -- up to 3,000 words, EXCLUDING abstract, Methods, references
 #                  and figure legends.
-# The user replaced the old blanket exemption with these limits relaxed by
-# fixed margins: +15% on the abstract, +25% on the main text. The cap is the
-# largest INTEGER word count that stays inside the relaxation (floor of
-# base*factor): 150*1.15 = 172.5 -> 172 and 3000*1.25 -> exactly 3,750.
-# A submission of another content type (Resource, Brief Communication, ...)
-# takes THAT type's numbers from the same table with the same two margins; the
-# prompts require the base and its source to be named in the artifact.
-NBT_ARTICLE_ABSTRACT_WORDS = 150
-NBT_ARTICLE_MAIN_TEXT_WORDS = 3000
-ABSTRACT_RELAXATION = 1.15
-MAIN_TEXT_RELAXATION = 1.25
-NBT_LENGTH_LIMITS_SOURCE = ("Nature Biotechnology content-types table (Article: abstract <= 150 "
-                            "words; main text <= 3,000 words excluding abstract, Methods, "
-                            "references and figure legends)")
-# The cover letter: NBT's official "Preparing your material" page says what the
-# cover letter must explain/disclose but states NO word recommendation or limit
-# (checked 2026-09-19). The 300-500 range is the master prompt's own preference,
-# so it is carried as a USER PREFERENCE with its own provenance string -- never
-# as a journal requirement, and never a gate.
-COVER_LETTER_MIN_WORDS = 300
-COVER_LETTER_MAX_WORDS = 500
-COVER_LETTER_SOURCE = ("master-prompt preference (300-500 words in the persuading part); Nature "
-                       "Biotechnology's official guidance states no cover-letter word limit "
-                       "(checked 2026-09-19)")
+# They are applied RELAXED by the profile's own margins (NBT: +15% on the
+# abstract, +25% on the main text). The cap is the largest INTEGER word count
+# that stays inside the relaxation (floor of base*factor): 150*1.15 = 172.5 ->
+# 172 and 3000*1.25 -> exactly 3,750. A submission of another content type
+# (Resource, Brief Communication, ...) takes THAT type's numbers from the same
+# venue table with the same two margins; the prompts require the base and its
+# source to be named in the artifact.
+#
+# A profile may also set NO limits (base and relaxation null, as the shipped
+# `generic` profile does): the counts are still enumerated and the stage names
+# the limit the target journal's own guidelines state, but this pipeline has no
+# cap to compare against, so nothing can be "over the cap" here.
+#
+# The constants below are the shipped nature-biotechnology profile in its old
+# module-level spelling, kept for tools and tests that import them; every stage
+# reads `length_limits(venue_profile)` instead.
 
 
 def lenient_word_limit(base: int, factor: float) -> int:
@@ -1880,27 +2620,69 @@ def lenient_word_limit(base: int, factor: float) -> int:
     return int(float(base) * float(factor))
 
 
-NBT_ARTICLE_ABSTRACT_CAP = lenient_word_limit(NBT_ARTICLE_ABSTRACT_WORDS, ABSTRACT_RELAXATION)
-NBT_ARTICLE_MAIN_TEXT_CAP = lenient_word_limit(NBT_ARTICLE_MAIN_TEXT_WORDS, MAIN_TEXT_RELAXATION)
+_NBT_LIMITS = VenueProfile(BUILTIN_VENUE_PROFILES[DEFAULT_VENUE],
+                           origin="built-in").length_limits()
+NBT_ARTICLE_ABSTRACT_WORDS = _NBT_LIMITS["abstract"]["base"]
+NBT_ARTICLE_MAIN_TEXT_WORDS = _NBT_LIMITS["main text"]["base"]
+ABSTRACT_RELAXATION = _NBT_LIMITS["abstract"]["relaxation"]
+MAIN_TEXT_RELAXATION = _NBT_LIMITS["main text"]["relaxation"]
+NBT_ARTICLE_ABSTRACT_CAP = _NBT_LIMITS["abstract"]["cap"]
+NBT_ARTICLE_MAIN_TEXT_CAP = _NBT_LIMITS["main text"]["cap"]
+NBT_LENGTH_LIMITS_SOURCE = BUILTIN_VENUE_PROFILES[DEFAULT_VENUE]["length_limits"]["source"]
+COVER_LETTER_MIN_WORDS = _NBT_LIMITS["cover letter"]["min"]
+COVER_LETTER_MAX_WORDS = _NBT_LIMITS["cover letter"]["max"]
+COVER_LETTER_SOURCE = _NBT_LIMITS["cover letter"]["source"]
 
 
-def length_limits() -> dict:
-    """The pipeline's lenient caps for the abstract and the main text."""
-    return {"abstract": {"base": NBT_ARTICLE_ABSTRACT_WORDS, "relaxation": ABSTRACT_RELAXATION,
-                         "cap": NBT_ARTICLE_ABSTRACT_CAP},
-            "main text": {"base": NBT_ARTICLE_MAIN_TEXT_WORDS,
-                          "relaxation": MAIN_TEXT_RELAXATION,
-                          "cap": NBT_ARTICLE_MAIN_TEXT_CAP},
-            "cover letter": {"min": COVER_LETTER_MIN_WORDS,
-                             "max": COVER_LETTER_MAX_WORDS,
-                             "source": COVER_LETTER_SOURCE}}
+def length_limits(profile=None) -> dict:
+    """The pipeline's lenient caps for the abstract and the main text.
+
+    Without an argument this is the DEFAULT venue's rule set (the behaviour of
+    every call site written before venues existed); a stage passes its root's
+    `VenueProfile` instead, so a venue change moves the numbers with it.
+    """
+    prof = profile if isinstance(profile, VenueProfile) else default_venue_profile()
+    return prof.length_limits()
+
+
+def length_limits_source(profile=None) -> str:
+    """The provenance string the M19 artifact and the scans carry."""
+    prof = profile if isinstance(profile, VenueProfile) else default_venue_profile()
+    return prof.length_limits_source
+
+
+def relaxation_note(profile=None) -> str:
+    """One clause describing how the venue's own limits are relaxed here."""
+    limits = length_limits(profile)
+    parts = []
+    for key, label in (("abstract", "abstract"), ("main text", "main text")):
+        spec = limits[key]
+        if spec.get("base") is None:
+            continue
+        margin = int(round((float(spec["relaxation"]) - 1.0) * 100))
+        parts.append(f"+{margin}% on the {label} (<= {spec['cap']} words)")
+    if not parts:
+        return ("This venue profile sets no abstract/main-text cap: the counts are recorded "
+                "for the author to compare with the target journal's own guidelines")
+    return "The venue's own limits are relaxed by this pipeline (" + "; ".join(parts) + ")"
 
 
 def caption_limit_of(ctx) -> int:
-    """The configured (suggested) caption cap; 0 = no caption rule at all."""
+    """The configured (suggested) caption cap; 0 = no caption rule at all.
+
+    A cap the OPERATOR chose (`setup --caption-limit N`, recorded with
+    `caption_limit_source: "operator"`) wins; otherwise the VENUE PROFILE's own
+    default applies, so a venue that publishes a legend limit carries it into
+    the run and a venue change moves the cap with it.
+    """
+    cfg = getattr(ctx, "cfg", None) or {}
+    raw = cfg.get("caption_limit", None)
+    source = str(cfg.get("caption_limit_source") or "operator").strip().lower()
+    if raw is None or source != "operator":
+        prof = venue_profile_of(ctx, required=False)
+        return prof.caption_default if prof is not None else DEFAULT_CAPTION_LIMIT
     try:
-        v = int((getattr(ctx, "cfg", None) or {}).get("caption_limit",
-                                                      DEFAULT_CAPTION_LIMIT))
+        v = int(raw)
     except (TypeError, ValueError):
         return DEFAULT_CAPTION_LIMIT
     return max(0, v)
@@ -1990,18 +2772,135 @@ def artifact_repair_enabled(ctx) -> bool:
 # the M19 mandates below give each stage its concrete job (sweep, compress,
 # port, surface, judge). Like the caption suggestion and the cover-letter rule
 # it is a flaggable FORMATTING item, never a gate.
-LENGTH_RULE = f"""ABSTRACT / MAIN-TEXT LENGTH — THE JOURNAL'S LIMITS, RELAXED BY THIS PIPELINE:
+def _as_profile(profile=None) -> VenueProfile:
+    """Accept a VenueProfile, a pipeline root context, or nothing (the default)."""
+    if isinstance(profile, VenueProfile):
+        return profile
+    if profile is not None and hasattr(profile, "cfg"):
+        prof = venue_profile_of(profile, required=False)
+        if prof is not None:
+            return prof
+    return default_venue_profile()
+
+
+def _indefinite(noun: str) -> str:
+    """"a X" / "an X" for the venue short names the prompts interpolate."""
+    text = str(noun or "venue").strip()
+    # An initialism takes the article its SPOKEN letters start with ("an NBT",
+    # "an F1000", but "a GET"), a word takes the ordinary vowel test.
+    initialism = len(text) > 1 and text[0].isupper() and text[1:].isupper()
+    vowel = (text[0] in "AEFHILMNORSX") if initialism else (text[:1].lower() in "aeiou")
+    return ("an " if vowel else "a ") + text
+
+
+def _article_phrase(profile: VenueProfile) -> str:
+    """`an NBT Article`-style phrase: the profile's label + its article type."""
+    prof = _as_profile(profile)
+    art = str(prof.article_type or "Article").strip()
+    label = prof.label
+    return f"{'an' if label[:1].lower() in 'aeiou' else 'a'} {label} {art}"
+
+
+def _caps_clause(profile: VenueProfile, *, article: bool = False) -> str:
+    """The M19 mandate's cap clause, from the venue profile's own numbers.
+
+    A profile without limits (the shipped `generic` one) gets a sentence that
+    says so and hands the comparison to the target journal's own guidelines --
+    never a number this pipeline invented.
+    """
+    limits = _as_profile(profile).length_limits()
+    abstract, main = limits["abstract"], limits["main text"]
+    if abstract["cap"] is None and main["cap"] is None:
+        return ("this venue profile sets no abstract or main-text cap, so state the limit the "
+                "target journal's own guidelines give and its source in the artifact")
+    parts = []
+    if abstract["cap"] is not None:
+        parts.append(f"abstract <= {abstract['cap']} words")
+    if main["cap"] is not None:
+        parts.append(f"main text <= {main['cap']} words")
+    clause = "; ".join(parts)
+    if article:
+        clause += (f" for {_article_phrase(profile)}, excluding abstract, Methods, references "
+                   f"and figure legends")
+    return clause
+
+
+def _cover_preference_clause(profile: VenueProfile) -> str:
+    """The cover-letter range as `300-500 words`, or "" when none is configured."""
+    cover = _as_profile(profile).length_limits()["cover letter"]
+    if cover.get("min") is None:
+        return ""
+    return f"{cover['min']}-{cover['max']} words"
+
+
+def length_rule_text(profile=None) -> str:
+    """The M19 length rule, rendered from the venue profile (see M19 below).
+
+    The pipeline's own rule is venue-agnostic; the NUMBERS and their provenance
+    come from the profile, so a venue change moves the caps with it.
+    """
+    prof = _as_profile(profile)
+    limits = prof.length_limits()
+    abstract, main = limits["abstract"], limits["main text"]
+    source = prof.length_limits_source
+    if abstract["cap"] is None and main["cap"] is None:
+        limits_para = (
+            f"      carries): this venue profile publishes no abstract or main-text number of its\n"
+            f"      own, so there is no relaxed cap to apply here. The limits that DO apply are the\n"
+            f"      target journal's own: every stage COUNTS the abstract and the main text, and each\n"
+            f"      artifact names the limit it applied and the source it came from ({source}).")
+    else:
+        base_bits = []
+        if abstract["base"] is not None:
+            base_bits.append(f"abstract <= {abstract['base']:,} words")
+        if main["base"] is not None:
+            base_bits.append(f"main text <= {main['base']:,} words")
+        relaxed_bits = []
+        if abstract["cap"] is not None:
+            margin = int(round((float(abstract["relaxation"]) - 1.0) * 100))
+            relaxed_bits.append(f"the abstract +{margin}% (<= {abstract['cap']} words)")
+        if main["cap"] is not None:
+            margin = int(round((float(main["relaxation"]) - 1.0) * 100))
+            relaxed_bits.append(f"the main text +{margin}% (<= {main['cap']} words)")
+        limits_para = (
+            f"      carries): the limits below DO apply, in their relaxed form. For "
+            f"{_article_phrase(prof)} the base limits\n"
+            f"      are {' and '.join(base_bits)},\n"
+            f"      counted with the abstract, Methods, references and figure legends EXCLUDED "
+            f"from the main text ({source}). This pipeline allows\n"
+            f"      {' and '.join(relaxed_bits)}. A submission of another content\n"
+            f"      type takes that type's own base numbers from the same venue table with the "
+            f"same margins, and the artifact\n"
+            f"      must name the base limit and the source it came from.")
+    cover_clause = _cover_preference_clause(prof)
+    if cover_clause:
+        cover_para = (
+            f"    * THE COVER LETTER — A USER PREFERENCE, NOT {_indefinite(prof.short).upper()} "
+            f"RULE. Provenance, stated honestly:\n"
+            f"      {limits['cover letter'].get('source') or 'the venue profile states no official cover-letter limit.'}\n"
+            f"      The master prompt's own preference is therefore applied as written: the "
+            f"PERSUADING part (the body explaining the\n"
+            f"      work's importance and its suitability for the journal -- excluding the "
+            f"salutation, the\n"
+            f"      signature block, and required disclosures such as related manuscripts, prior "
+            f"editor\n"
+            f"      discussions, double-anonymized author details and reviewer suggestions) should "
+            f"be\n"
+            f"      {cover_clause}. A persuading part outside that\n"
+            f"      range is a MINOR formatting item (check id M19), reported and never gated; it "
+            f"is never\n"
+            f"      presented as a journal requirement, and it is never \"fixed\" by deleting "
+            f"content. Count it\n"
+            f"      with the pipeline's word rule.")
+    else:
+        cover_para = (
+            f"    * THE COVER LETTER — NO COVER-LETTER PREFERENCE IS CONFIGURED: this venue\n"
+            f"      profile states no cover-letter word limit or preference, so the letter's length\n"
+            f"      is counted and recorded but never flagged, scored or cut for length.")
+    return f"""ABSTRACT / MAIN-TEXT LENGTH — THE JOURNAL'S LIMITS, RELAXED BY THIS PIPELINE:
     * This REPLACES the blanket "abstract/main-text length is exempt" standing exemption (the same
       exemption the skills inherit, and the wording the attached master-prompt excerpt below still
-      carries): the limits below DO apply, in their relaxed form. For a Nature
-      Biotechnology ARTICLE the base limits are abstract <= {NBT_ARTICLE_ABSTRACT_WORDS} words and
-      main text <= {NBT_ARTICLE_MAIN_TEXT_WORDS} words, counted with the abstract, Methods,
-      references and figure legends EXCLUDED from the main text ({NBT_LENGTH_LIMITS_SOURCE}). This
-      pipeline allows the abstract +15%
-      (<= {lenient_word_limit(NBT_ARTICLE_ABSTRACT_WORDS, ABSTRACT_RELAXATION)} words) and the main text +25%
-      (<= {lenient_word_limit(NBT_ARTICLE_MAIN_TEXT_WORDS, MAIN_TEXT_RELAXATION)} words). A submission of another content type takes that type's
-      own base numbers from the same journal table with the same two margins, and the artifact
-      must name the base limit and the source it came from.
+{limits_para}
     * COUNTING RULE, for every word count in this pipeline: a word is a maximal run of NON-SPACE
       characters, with a newline treated as space. "state-of-the-art" is ONE word, "2026" is ONE
       word, and an abbreviation with an inner space ("et al.") is two. Do not split hyphenated
@@ -2011,17 +2910,7 @@ LENGTH_RULE = f"""ABSTRACT / MAIN-TEXT LENGTH — THE JOURNAL'S LIMITS, RELAXED 
       scientific content, claims, limitations, data, accession numbers or needed methodological
       detail. Never flag UNDER-length text (the pipeline relaxes upper limits only and invents no
       minimum), and never make a length-driven cut to text that is within the cap.
-    * THE COVER LETTER — A USER PREFERENCE, NOT AN NBT RULE: Nature Biotechnology's official
-      "Preparing your material" page states what the cover letter must explain and disclose but
-      gives no word recommendation or limit (checked 2026-09-19). The master prompt's own
-      preference is therefore applied as written: the PERSUADING part (the body explaining the
-      work's importance and its suitability for the journal -- excluding the salutation, the
-      signature block, and required disclosures such as related manuscripts, prior editor
-      discussions, double-anonymized author details and reviewer suggestions) should be
-      {COVER_LETTER_MIN_WORDS}-{COVER_LETTER_MAX_WORDS} words. A persuading part outside that
-      range is a MINOR formatting item (check id M19), reported and never gated; it is never
-      presented as a journal requirement, and it is never "fixed" by deleting content. Count it
-      with the pipeline's word rule.
+{cover_para}
     * LENGTH IS NEVER A GATE: no version is made ineligible, failed, rejected, de-ranked or
       re-ordered as a whole because of a word count, and length may only ever enter a comparison
       through the FORMATTING tier (a version within the cap may be preferred to one that is over it
@@ -2030,35 +2919,61 @@ LENGTH_RULE = f"""ABSTRACT / MAIN-TEXT LENGTH — THE JOURNAL'S LIMITS, RELAXED 
     * A section that cannot be brought within the cap without losing content is left as it is and
       handed to the author as a manual item, exactly like an incompressible caption."""
 
-STANDING_EXEMPTIONS = """Standing exemptions and explicit limits (apply to every mode, always):
+
+def standing_exemptions_text(profile=None) -> str:
+    """The standing exemptions block, with this venue's length and legend rules."""
+    prof = _as_profile(profile)
+    cover_clause = _cover_preference_clause(prof)
+    cover_bullet = (
+        f"  * The master prompt's COVER-LETTER rule (the persuading part must be {cover_clause})\n"
+        f"    stays a flaggable formatting item: report it, never gate on it."
+        if cover_clause else
+        "  * This venue profile states no COVER-LETTER word rule: the letter's length is recorded\n"
+        "    and reported, never gated and never cut.")
+    caption_source = (prof.captions.get("source")
+                      or "this venue profile states no figure-legend length rule")
+    return f"""Standing exemptions and explicit limits (apply to every mode, always):
   * @@LENGTH_RULE@@
-  * The master prompt's COVER-LETTER rule (the persuading part must be 300-500
-    words) stays a flaggable formatting item: report it, never gate on it.
-  * FIGURE-LEGEND LENGTH (check id M18) is ALWAYS enumerated: the journal
-    requires that a legend not exceed the word limit of the article type, but
-    its public pages state no number (checked against the NBT submission
-    guidelines, 2026-09-19). Every stage therefore counts every legend's words;
+{cover_bullet}
+  * FIGURE-LEGEND LENGTH (check id M18) is ALWAYS enumerated: {caption_source}.
+    Every stage therefore counts every legend's words;
     when the operator configured a cap (`--caption-limit N`) that cap is used as
-    the pipeline's proxy for the journal's limit and an over-cap legend is a
+    the pipeline's proxy for the venue's limit and an over-cap legend is a
     reportable formatting item; without a cap the counts are recorded and the
-    comparison with the journal's limit is handed to the author as a manual
+    comparison with the venue's limit is handed to the author as a manual
     item. Nothing is ever made ineligible, ranked down, failed or rejected
     because of a legend's word count, and length is never "fixed" by deleting
     scientific content.
   * Speculative "possible AI-generated" content may be flagged ONLY with
     concrete evidence, always labeled "possible", never as a definitive
     accusation, and it can never decide a comparison on its own.""".replace(
-    "@@LENGTH_RULE@@", LENGTH_RULE)
+    "@@LENGTH_RULE@@", length_rule_text(prof))
+
 
 # Inserted (with the limit substituted) into every prompt that produces or
 # judges content, next to the standing exemptions.
-CAPTION_RULE = """FIGURE-LEGEND LENGTH (check id M18; applies in every mode, including judging):
-  * Origin, stated honestly: Nature Biotechnology requires that a figure legend "does not exceed
-    the word limit of the article type" but does not publish that number on its public pages
-    (checked 2026-09-19). @@CAPTION_LIMIT@@ words is therefore the ORCHESTRATION PIPELINE's proxy
-    for the journal's limit, chosen by the operator at setup (`--caption-limit N`); the master
-    prompt and both skills do not state a number. Apply the proxy exactly as written here and
-    never claim the journal itself set it.
+def caption_rule_template(profile=None) -> str:
+    """The M18 caption rule, with @@CAPTION_LIMIT@@ left for the caller to fill."""
+    prof = _as_profile(profile)
+    captions = prof.captions
+    published = captions.get("published_limit")
+    if published:
+        origin = (f"Origin, stated honestly: {prof.label} publishes a figure-legend limit of "
+                  f"{published} words ({captions.get('source') or 'venue profile'}). "
+                  f"@@CAPTION_LIMIT@@ words is therefore the venue's own limit as carried by this "
+                  f"pipeline's profile; the master prompt and both skills do not state a number. "
+                  f"Apply it exactly as written here and never claim the venue set a number it "
+                  f"did not.")
+    else:
+        origin = (f"Origin, stated honestly: {captions.get('source') or 'this venue profile states no figure-legend length rule'}. "
+                  f"@@CAPTION_LIMIT@@ words is therefore the ORCHESTRATION PIPELINE's proxy\n"
+                  f"    for the venue's limit, chosen by the operator at setup (`--caption-limit N`); "
+                  f"the master\n"
+                  f"    prompt and both skills do not state a number. Apply the proxy exactly as "
+                  f"written here and\n"
+                  f"    never claim the venue itself set it.")
+    return f"""FIGURE-LEGEND LENGTH (check id M18; applies in every mode, including judging):
+  * {origin}
   * IT IS NEVER A GATE. An over-cap legend is reported (check id M18) and,
     where it can be done by removing redundancy only, compressed -- and that is all. It must
     NEVER make a version ineligible for a round, never lower a ranking, never fail a run or a
@@ -2092,16 +3007,21 @@ CAPTION_RULE = """FIGURE-LEGEND LENGTH (check id M18; applies in every mode, inc
     eligible to win the round."""
 
 # Used instead of CAPTION_RULE when no cap is configured (`--caption-limit 0`,
-# the default). The journal's requirement still holds, so the legends are
-# STILL enumerated; only the proxy cap and any length-based compression/scoring
-# are absent.
-CAPTION_RULE_REPORT = """FIGURE-LEGEND LENGTH — ENUMERATED, NO CAP CONFIGURED (check id M18):
-  * Nature Biotechnology requires that a figure legend "does not exceed the word limit of the
-    article type" but does not publish that number (checked 2026-09-19), and no proxy cap is
+# the default for a venue that publishes no number). The venue's requirement
+# still holds, so the legends are STILL enumerated; only the proxy cap and any
+# length-based compression/scoring are absent.
+def caption_report_text(profile=None) -> str:
+    """The no-cap M18 rule: enumerate every legend, compress and score none."""
+    prof = _as_profile(profile)
+    captions = prof.captions
+    origin = (captions.get("source")
+              or "this venue profile states no figure-legend length rule")
+    return f"""FIGURE-LEGEND LENGTH — ENUMERATED, NO CAP CONFIGURED (check id M18):
+  * {origin}, and no proxy cap is
     configured (`--caption-limit 0`). Therefore: COUNT every legend's words and
     record them in your own artifact (`judge_review/artifacts/M18_caption_words.md` for a judge
     session), with the disposition
-    "recorded — the journal's per-type limit is not published; the author compares it in Word".
+    "recorded — the venue's per-type limit is not published; the author compares it in Word".
     A legend whose length is obviously inconsistent with its display-item budget still gets a
     normal clarity/formatting finding if it is otherwise defective, but its WORD COUNT alone is
     not a defect here.
@@ -2110,6 +3030,15 @@ CAPTION_RULE_REPORT = """FIGURE-LEGEND LENGTH — ENUMERATED, NO CAP CONFIGURED 
     length-driven cuts in either direction" applies in full. Two versions whose legends are
     both long (or both short) are indistinguishable on M18, and a version is never ineligible,
     de-ranked or failed because of a legend's word count."""
+
+
+# Compatibility constants: the DEFAULT venue's rendering of each block, for the
+# skills, tools and tests that import them by name. Every prompt is built with
+# the root's own profile (see apply_m19 / apply_m18 / standing_exemptions_text).
+LENGTH_RULE = length_rule_text()
+STANDING_EXEMPTIONS = standing_exemptions_text()
+CAPTION_RULE = caption_rule_template()
+CAPTION_RULE_REPORT = caption_report_text()
 
 # The M18 mandate sentences live in the stage directives. There are two states:
 # a proxy cap configured by the operator (`--caption-limit N`) and the no-cap
@@ -2132,8 +3061,8 @@ M18_REVIEW_SWEEP_ON = """3. The PIPELINE-MANDATED caption sweep M18 (see the cap
 M18_REVIEW_SWEEP_REPORT = """3. The PIPELINE-MANDATED legend-length sweep M18 (see the legend rule below; NO cap is
    configured this run): enumerate EVERY figure legend in the corpus into
    review/artifacts/M18_caption_words.md, one row per legend with its document, legend id and
-   word count, and the disposition "recorded — the journal's per-type limit is not published;
-   author to compare" (or a finding id when the legend is defective for an independent reason,
+   word count, and the disposition "recorded — the venue profile publishes no per-type legend
+   limit; author to compare" (or a finding id when the legend is defective for an independent reason,
    for example it explains methods or is unclear). Give M18 its own coverage row, exactly like
    the skill's sweeps. This check is mandatory in every run (the skill's references/sweeps.md
    defines the same sweep), and it never makes a version ineligible: with no cap configured the
@@ -2153,7 +3082,7 @@ M18_REVISE_RULE_REPORT = """Figure legends (check id M18): no proxy cap is confi
      count in CHANGELOG.md and, when a legend is defective for an independent reason (method
      detail, unclear panel description, missing error-bar definition), fix that as the normal
      clarity/formatting finding it is — the word count itself stays a recorded fact for the
-     author, who compares it with the journal's per-type limit."""
+     author, who compares it with the venue's own per-type legend limit."""
 M18_JUDGE_SWEEP_ON = """PLUS the pipeline-mandated caption sweep M18 (count every figure
    caption's words and record the rows in judge_review/artifacts/M18_caption_words.md). M18 is part
    of the frozen set for every judge session, so do not skip it and do not treat it as optional.
@@ -2196,73 +3125,108 @@ on content and correctness only."""
 # surfaces without cutting, the judges treat length as formatting-tier evidence.
 # Nothing here gates a version: an over-cap section is a CATEGORY-4 formatting
 # item, exactly like an over-limit caption.
-M19_CAPS = length_limits()
-M19_REVIEW_SWEEP = f"""3b. The PIPELINE-MANDATED length sweep M19 (see the length rule in the standing
+def m19_blocks(profile=None) -> dict:
+    """The five M19 mandate sentences, rendered from the venue profile.
+
+    With a cap (the shipped nature-biotechnology profile) the mandates compress
+    over-cap sections by redundancy only; with a profile that states no cap
+    (the shipped generic one) they enumerate and report against the target
+    journal's own guidelines instead, and forbid length-driven cuts entirely.
+    Either way M19 is always active and never a gate.
+    """
+    prof = _as_profile(profile)
+    caps = _caps_clause(prof)
+    caps_article = _caps_clause(prof, article=True)
+    cover_clause = _cover_preference_clause(prof)
+    has_caps = not caps.startswith("this venue profile sets no")
+    cover_note = (f"the cover letter's persuading part is the USER PREFERENCE {cover_clause}"
+                  if cover_clause else
+                  "this venue profile states no cover-letter word preference")
+    cover_tail = (f"this is the user's preference, not an {prof.short} requirement, and the venue "
+                  f"profile publishes no cover-letter limit"
+                  if cover_clause else "no cover-letter preference is configured")
+    review = f"""3b. The PIPELINE-MANDATED length sweep M19 (see the length rule in the standing
    exemptions): enumerate the ABSTRACT and the MAIN TEXT of every submission document that carries
    one -- and the PERSUADING PART of the cover letter -- into review/artifacts/M19_length.md, one
    row per section: document | section
    (abstract / main text / cover letter) | word count | the base limit you applied and its source | the allowed
-   cap (abstract <= {M19_CAPS['abstract']['cap']} words; main text <= {M19_CAPS['main text']['cap']} words for an NBT Article -- another
-   content type uses that type's own base numbers with the same +15%/+25% margins; the cover
-   letter's persuading part is the USER PREFERENCE {M19_CAPS['cover letter']['min']}-{M19_CAPS['cover letter']['max']} words, and NBT's official guidance states no
-   cover-letter limit) | disposition
+   cap ({caps_article}; {cover_note}) | disposition
    (OK / over cap -> finding id / over cap but not compressible without losing content -> manual
    verification item). Count with the pipeline's definition (maximal runs of NON-SPACE characters;
    a newline is a space) and say in the artifact which text you counted as the main text (the
-   abstract, Methods, references and figure legends are excluded, exactly as the journal excludes
+   abstract, Methods, references and figure legends are excluded, exactly as the venue excludes
    them). Give M19 its own coverage row, exactly like the skill's sweeps, and report every
    over-cap section as a CATEGORY-4 (technical formatting) finding. M19 is mandatory (the skill's
    references/sweeps.md defines the same sweep as always-on) and it is NEVER a gate: an over-cap
    section never makes a version ineligible. The cover-letter row adds a MINOR formatting finding
-   only when the persuading part falls outside the
-   {M19_CAPS['cover letter']['min']}-{M19_CAPS['cover letter']['max']}-word user preference -- never as a journal
-   requirement, and never a reason to delete content."""
-M19_REVISE_RULE = f"""Abstract/main-text length (check id M19; see the length rule): bring EVERY over-cap abstract
-     or main text within the cap (abstract <= {M19_CAPS['abstract']['cap']} words; main text <= {M19_CAPS['main text']['cap']} words for an NBT
-     Article, excluding abstract, Methods, references and figure legends) by removing redundancy,
+   only when the persuading part falls outside the {cover_clause + '-word ' if cover_clause else ''}user preference -- never as a
+   journal requirement, and never a reason to delete content."""
+    if has_caps:
+        revise = f"""Abstract/main-text length (check id M19; see the length rule): bring EVERY over-cap abstract
+     or main text within the cap ({caps_article}) by removing redundancy,
      hedging and repeated statistics only -- NEVER by deleting scientific content, claims,
      limitations, data, accession numbers or needed methodological detail, and never by touching
      text that is already within the cap. Count with the pipeline's definition (maximal runs of
      NON-SPACE characters; a newline is a space) and record every compression in CHANGELOG.md
      under M19. A section that cannot be brought within the cap without losing content is left as
      it is and handed to revised/MANUAL_STEPS.md instead of guessing. Cover letter: when the
-     persuading part is outside the user's {M19_CAPS['cover letter']['min']}-{M19_CAPS['cover letter']['max']}-word preference, bring it into the range by removing
-     redundancy only (never content); this is the user's preference, not an NBT requirement, and
-     NBT publishes no cover-letter limit."""
-M19_JUDGE_SWEEP = f"""PLUS the pipeline-mandated length sweep M19 (count the abstract and the main
+     persuading part is outside the user's {cover_clause or 'configured'} preference, bring it into the range by removing
+     redundancy only (never content); {cover_tail}."""
+        integrate = f"""Abstract/main-text length (check id M19) is a FORMATTING-tier difference class: port a donor's
+version when it is within the cap and the base's is not, or when the donor removed redundancy from
+an over-cap section without losing content. Otherwise compress the base yourself under the length
+rule, and if a section cannot be brought within the cap ({caps_article}) without
+losing content, leave it and record it for manual action. Never reach a cap by deleting scientific
+content, and never port a purely shorter version that gives up correctness, consistency or
+preservation to get there."""
+        rewrite = f"""Abstract/main-text length (check id M19) is REPORTED here, not fixed: a rewrite must not push
+an abstract or main text over the pipeline's caps ({caps_article}) and must never cut scientific
+content to meet one. If the base is ALREADY over a cap, surface it in rewritten/REWRITE_REPORT.md
+under "PROBLEMS SURFACED" -- the revision and integration stages own the compression, and this
+stage must not change content to achieve it."""
+    else:
+        revise = f"""Abstract/main-text length (check id M19; see the length rule): this venue profile sets no
+     abstract or main-text cap, so do NOT compress, reword or cut a section for length: count the
+     abstract and the main text, name the limit the target journal's own guidelines give (and its
+     source) in CHANGELOG.md, and change that text only for the non-length findings you were
+     handed. Count with the pipeline's definition (maximal runs of NON-SPACE characters; a newline
+     is a space), and hand any length question you cannot answer from the guidelines to
+     revised/MANUAL_STEPS.md instead of guessing. Cover letter: {cover_note}."""
+        integrate = """Abstract/main-text length (check id M19) is a REPORTED difference class, not a compression one:
+this venue profile sets no cap, so enumerate and diff the counts, never port or cut text because
+one version is shorter or longer, and never let a word count decide a comparison."""
+        rewrite = """Abstract/main-text length (check id M19) is REPORTED here, not fixed: this venue profile sets
+no cap, so count the abstract and the main text and surface the counts (with the limit the target
+journal's guidelines state, and its source) in rewritten/REWRITE_REPORT.md under "PROBLEMS
+SURFACED". Never change content to reach a word count."""
+    judge = f"""PLUS the pipeline-mandated length sweep M19 (count the abstract and the main
    text -- and the cover letter's persuading part -- with the pipeline's word definition and record the rows in
-   judge_review/artifacts/M19_length.md; the caps are abstract <= {M19_CAPS['abstract']['cap']} and main text <= {M19_CAPS['main text']['cap']}
-   words for an NBT Article, and another content type uses its own base numbers with the same
-   +15%/+25% margins; the cover letter's user preference is {M19_CAPS['cover letter']['min']}-{M19_CAPS['cover letter']['max']} words in the persuading part, and NBT
-   states no cover-letter limit). Length is FORMATTING-tier evidence: a version within the cap may be
+   judge_review/artifacts/M19_length.md; {caps_article}; {cover_note}). Length is FORMATTING-tier evidence: a version within the cap may be
    preferred to one that is over it by at most +/-1, two versions that are both over (or both
    within) are indistinguishable and score 0, and length never decides a comparison on its own.
    An over-cap section never makes a version ineligible, and the cover-letter preference is
    user-set: it is at most a +/-1 formatting-tier difference, never a journal requirement."""
-M19_INTEGRATE_RULE = f"""Abstract/main-text length (check id M19) is a FORMATTING-tier difference class: port a donor's
-version when it is within the cap and the base's is not, or when the donor removed redundancy from
-an over-cap section without losing content. Otherwise compress the base yourself under the length
-rule, and if a section cannot be brought within the cap (abstract <= {M19_CAPS['abstract']['cap']} words; main text <= {M19_CAPS['main text']['cap']}
-words for an NBT Article, excluding abstract, Methods, references and figure legends) without
-losing content, leave it and record it for manual action. Never reach a cap by deleting scientific
-content, and never port a purely shorter version that gives up correctness, consistency or
-preservation to get there."""
-M19_REWRITE_RULE = f"""Abstract/main-text length (check id M19) is REPORTED here, not fixed: a rewrite must not push
-an abstract or main text over the pipeline's caps (abstract <= {M19_CAPS['abstract']['cap']}; main text <= {M19_CAPS['main text']['cap']} words for an NBT
-Article, excluding abstract, Methods, references and figure legends) and must never cut scientific
-content to meet one. If the base is ALREADY over a cap, surface it in rewritten/REWRITE_REPORT.md
-under "PROBLEMS SURFACED" -- the revision and integration stages own the compression, and this
-stage must not change content to achieve it."""
+    return {"review": review, "revise": revise, "integrate": integrate, "rewrite": rewrite,
+            "judge": judge}
 
 
-def apply_m19(text: str) -> str:
+M19_CAPS = length_limits()
+M19_REVIEW_SWEEP = m19_blocks()["review"]
+M19_REVISE_RULE = m19_blocks()["revise"]
+M19_JUDGE_SWEEP = m19_blocks()["judge"]
+M19_INTEGRATE_RULE = m19_blocks()["integrate"]
+M19_REWRITE_RULE = m19_blocks()["rewrite"]
+
+
+def apply_m19(text: str, profile=None) -> str:
     """Substitute the M19 mandate sentences (always active, unlike M18)."""
-    for token, block in (("@@M19_REVIEW_SWEEP@@", M19_REVIEW_SWEEP),
-                         ("@@M19_REVISE_RULE@@", M19_REVISE_RULE),
-                         ("@@M19_JUDGE_SWEEP@@", M19_JUDGE_SWEEP),
-                         ("@@M19_INTEGRATE_RULE@@", M19_INTEGRATE_RULE),
-                         ("@@M19_REWRITE_RULE@@", M19_REWRITE_RULE)):
-        text = text.replace(token, block)
+    blocks = m19_blocks(profile)
+    for token, key in (("@@M19_REVIEW_SWEEP@@", "review"),
+                       ("@@M19_REVISE_RULE@@", "revise"),
+                       ("@@M19_JUDGE_SWEEP@@", "judge"),
+                       ("@@M19_INTEGRATE_RULE@@", "integrate"),
+                       ("@@M19_REWRITE_RULE@@", "rewrite")):
+        text = text.replace(token, blocks[key])
     return text
 
 
@@ -2646,7 +3610,18 @@ AUX_FILES_RULE = """PIPELINE AUXILIARY FILES — "*.tracked.docx" and "*.before-
     hygiene defect ("residual tracked changes"), or as a difference between versions. If you find
     one inside a directory you were told to read, it is pipeline bookkeeping: skip it."""
 
-DERIVED_OUTPUTS_RULE = """DERIVED BUILD OUTPUTS — never the authoritative content:
+def derived_outputs_rule(profile=None) -> str:
+    """The derived-build-outputs rule, with the venue's own PDF stance.
+
+    The first two bullets are venue-independent; the third states what the
+    configured venue does with a submitted PDF, from the profile's
+    `submission` block (a profile may say it accepts PDFs, or that it does not
+    state a format -- the rule then keeps its packaging conclusion either way).
+    """
+    prof = _as_profile(profile)
+    pdf_note = (prof.data["submission"].get("pdf_note")
+                or f"{prof.label} does not state which submission formats it accepts")
+    return """DERIVED BUILD OUTPUTS — never the authoritative content:
   * ".aux", ".blg", ".bcf", ".log", ".out", ".synctex.gz", ".run.xml", ".fls", ".fdb_latexmk" and a
     compiled PDF of an editable source are BY-PRODUCTS of a build, not manuscript content. Judge
     the editable SOURCES; this pipeline explicitly allows a package to leave a derived output out
@@ -2662,9 +3637,7 @@ DERIVED_OUTPUTS_RULE = """DERIVED BUILD OUTPUTS — never the authoritative cont
     file, a .log from an earlier build) is a packaging note: report it in your reason, never score
     it as a correctness/consistency/preservation/completeness defect, and never let it decide a
     comparison.
-  * A STALE SUBMITTED PDF IS NOT JUST A BY-PRODUCT. Nature Biotechnology accepts a PDF as the
-    initial submission file ("We accept initial submissions in PDF, Word or TeX/LaTeX formats" --
-    submission guidelines, checked 2026-09-19), and a reader/editor may open exactly that PDF. So
+  * A STALE SUBMITTED PDF IS NOT JUST A BY-PRODUCT. @@VENUE_PDF_NOTE@@. So
     when a TOP-LEVEL manuscript, cover-letter or supplementary PDF no longer matches the editable
     source shipped beside it (older text, pre-edit numbers, a pre-rename title), record it as a
     REPORTABLE packaging/consistency item (category 4; Major only when it is the only human-
@@ -2672,7 +3645,7 @@ DERIVED_OUTPUTS_RULE = """DERIVED BUILD OUTPUTS — never the authoritative cont
     pair in your reason, and require the package to either recompile it or leave it out with a
     recompile instruction in its manual-steps list. Never let it decide a comparison on its own: the
     editable sources remain the judged content, and two versions with the same stale PDF are
-    indistinguishable on this point."""
+    indistinguishable on this point.""".replace("@@VENUE_PDF_NOTE@@", pdf_note)
 
 # The visual-inspection rule. The master prompt demands "VISUALLY inspect the entire document
 # to check for visual defects" -- but a .docx is an OOXML package: an LLM asked to look at it
@@ -3010,7 +3983,7 @@ MISSING_TIEBREAK = float("inf")
 # placeholders only, so JSON braces inside the prose stay literal).
 # =====================================================================
 
-ATTACHED_HEAD = """Review and revise a Nature Biotechnology (NBT) manuscript submission, by taking AS MUCH TIME AS
+ATTACHED_HEAD = """Review and revise @@VENUE_SUBJECT@@, by taking AS MUCH TIME AS
 NEEDED (do not hurry up, think deeply about each instruction, infer the rest from one instruction,
 validate the inferred instructions, and follow both non-inferred and validated instructions
 CAREFULLY), using two skills in sequence: $nbt-review (Phase 1 – identify issues) and $nbt-revise
@@ -3044,7 +4017,7 @@ run the skill's acceptance checks before finalizing.
 
 At minimum — and not limited to — the review must surface:
 
-1. Editor/reviewer concerns — anything a Nature Biotechnology editor or reviewer could raise.
+1. Editor/reviewer concerns — anything @@VENUE_EDITOR@@ could raise.
 2. Factual, semantic, syntax, and grammar errors — including but not limited to wrong DOIs, wrong
    citations, wrong premises, wrong inferences, and any factual inconsistency.
 3. Plagiarism and AI-generated content — flag possible AI-generated text only with concrete
@@ -3057,13 +4030,12 @@ At minimum — and not limited to — the review must surface:
    supplementary figures; main tables; supplementary tables; main text; supplementary text. Report
    any inconsistencies found and, where possible, identify which source takes precedence under this
    hierarchy.
-5. Missing or unneeded information — judged against the Nature Biotechnology author guidelines
-   and submission requirements.
+5. Missing or unneeded information — judged against @@VENUE_REQUIREMENTS@@.
 6. Formatting that violates best practice for manuscript preparation — including but not limited
    to justified alignment of main text (use left alignment), fonts that are too small or too
    large for their part of the manuscript, fancy styles in the cover letter, and the persuading
    part of the cover letter less than 300 or more than 500 words — unless such formatting is
-   required or recommended by Nature Biotechnology.
+   required or recommended by @@VENUE_REQUIREMENT_AUTHORITY@@.
 7. Micro-formatting and consistency defects, including but not limited to: acronym-related errors
    (including but not limited to: repeating fully expanded long-forms after their first use;
    presenting short-forms without their corresponding long-forms at initial mention; failing to
@@ -3158,7 +4130,40 @@ instructions if applicable, and a summary of what was fixed, what was left for m
 why. Files that remain unchanged should be copied from "non_revised/" to "revised/".
 """
 
+# The three ATTACHED_* blocks are TEMPLATES (they carry @@VENUE_*@@ tokens);
+# the masters below are the renderings a caller appends to a prompt.
 ATTACHED_FULL = ATTACHED_HEAD + "\n" + ATTACHED_PHASE1 + "\n" + ATTACHED_PHASE2
+
+
+def render_venue_tokens(text: str, profile=None) -> str:
+    """Fill the @@VENUE_*@@ tokens of the master-prompt prose.
+
+    Only the identifying phrases are substituted -- the venue's subject, its
+    editor, its guidelines and its requirement authority -- so the governing
+    prose stays verbatim and one venue profile can retarget it without editing
+    the prose itself.
+    """
+    prof = _as_profile(profile)
+    prompt = prof.prompt
+    return (text
+            .replace("@@VENUE_SUBJECT@@", prompt["subject"])
+            .replace("@@VENUE_EDITOR@@", prompt["editor"])
+            .replace("@@VENUE_REQUIREMENTS@@", prompt["requirements"])
+            .replace("@@VENUE_REQUIREMENT_AUTHORITY@@", prompt["requirement_authority"])
+            .replace("@@VENUE_GUIDELINES_SOURCE@@", prompt["guidelines_source"])
+            .replace("@@VENUE_LABEL@@", prof.label)
+            .replace("@@VENUE_ID@@", prof.id)
+            .replace("@@VENUE_SHORT@@", prof.short))
+
+
+def attached_head(profile=None) -> str:
+    """ATTACHED_HEAD with the venue's subject filled in."""
+    return render_venue_tokens(ATTACHED_HEAD, profile)
+
+
+def attached_phase1(profile=None) -> str:
+    """ATTACHED_PHASE1 with the venue's editor/guidelines filled in."""
+    return render_venue_tokens(ATTACHED_PHASE1, profile)
 
 
 # =====================================================================
@@ -3294,7 +4299,7 @@ of its references first (references/sweeps.md, references/discovery.md), then ex
 
 1. Phase 1 of the skill — corpus conversion + inventory (convert_corpus.py), every conversion
    failure recorded, never skipped. Guidance source: prefer a local copy of the author guidelines
-   if one is present in the corpus; otherwise the current Nature Biotechnology author guidelines;
+   if one is present in the corpus; otherwise @@VENUE_GUIDELINES_SOURCE@@;
    name the source/version you relied on in the summary.
 2. The EXHAUSTIVE MANDATORY mechanical sweeps M1-M17, the pipeline-mandated M18-M24 and the
    judgment passes J1-J4, one sweep at a
@@ -4600,11 +5605,16 @@ run_id/target_id do not match, or whose scores fall outside -4..+4, is discarded
 """
 
 
-def caption_rule_text(limit: int) -> str:
-    """The legend-length block for a prompt (no-cap report variant when limit <= 0)."""
+def caption_rule_text(limit: int, profile=None) -> str:
+    """The legend-length block for a prompt (no-cap report variant when limit <= 0).
+
+    The venue enters through the profile: its legend policy is what the block
+    states, and a profile that publishes its own legend limit says so instead of
+    calling the configured cap the pipeline's proxy.
+    """
     if int(limit) <= 0:
-        return CAPTION_RULE_REPORT
-    return CAPTION_RULE.replace("@@CAPTION_LIMIT@@", str(int(limit)))
+        return caption_report_text(profile)
+    return caption_rule_template(profile).replace("@@CAPTION_LIMIT@@", str(int(limit)))
 
 
 def apply_m18(text: str, limit: int) -> str:
@@ -4941,8 +5951,10 @@ def review_prompt(sandbox: Path, run_id: str, r: int,
                   caption_limit: int = DEFAULT_CAPTION_LIMIT,
                   zotero: str = DEFAULT_ZOTERO_MODE,
                   prior_round: bool = False, prior_failure: str = "",
-                  split: str = None, split_mode: str = "phases") -> str:
+                  split: str = None, split_mode: str = "phases",
+                  venue=None) -> str:
     """Phase 1 prompt: $nbt-review only, writing review/* (Section C1)."""
+    prof = _as_profile(venue)
     prior = (PRIOR_ROUND_RULE.replace("@@ROUND@@", str(int(r)))
              .replace("@@PREV@@", str(int(r) - 1))) if prior_round else PRIOR_ROUND_RULE_NONE
     split_block = ""
@@ -4969,24 +5981,25 @@ This round runs TWO review sessions on the SAME corpus and merges their findings
             .replace("@@PRIOR_ROUND@@", prior)
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE)
             .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule())
-            .replace("@@STANDING_EXEMPTIONS@@", STANDING_EXEMPTIONS)
+            .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
             .replace("@@PLACEHOLDER_RULE@@", PLACEHOLDER_RULE)
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
-            .replace("@@DERIVED_OUTPUTS_RULE@@", DERIVED_OUTPUTS_RULE)
+            .replace("@@DERIVED_OUTPUTS_RULE@@", derived_outputs_rule(prof))
             .replace("@@VALIDATION_RULE@@", validation_block("review"))
             .replace("@@VISUAL_INSPECTION_RULE@@",
                      visual_inspection_block(VISUAL_ARTIFACT_REVIEW))
             .replace("@@DOCX_CLI_RULE@@", docx_cli_block())
             .replace("@@ZOTERO_CLI_RULE@@", zotero_cli_block("review", zotero))
-            .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit)))
-    text = apply_m19(text)
+            .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof)))
+    text = render_venue_tokens(text, prof)
+    text = apply_m19(text, prof)
     text = apply_m20(text)
     text += DISPOSITION_MANDATE
     text = text.replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("review"))
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(REVIEW_DIR))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("review", run_id, r))
-    return (text + shared_blocks() + split_block + ATTACHED_HEAD + "\n" + ATTACHED_PHASE1
+    return (text + shared_blocks() + split_block + attached_head(prof) + "\n" + attached_phase1(prof)
             + REVIEW_TAIL)
 
 
@@ -4994,8 +6007,9 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
                   index: int = 1, total: int = 1,
                   caption_limit: int = DEFAULT_CAPTION_LIMIT,
                   zotero: str = DEFAULT_ZOTERO_MODE,
-                  prior_failure: str = "", audit: bool = False) -> str:
+                  prior_failure: str = "", audit: bool = False, venue=None) -> str:
     """Phase 2 prompt: $nbt-revise, consuming the round's frozen review/ copy."""
+    prof = _as_profile(venue)
     audit_block = ("""
   audit/        — the AUDITOR's record for this round (present because the operator enabled
                   `--audit on`): audit/audit.json disposes every frozen finding (confirm, or drop
@@ -5011,7 +6025,7 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@REVISE_INDEX@@", str(int(index)))
             .replace("@@REVISE_TOTAL@@", str(int(total)))
             .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule())
-            .replace("@@STANDING_EXEMPTIONS@@", STANDING_EXEMPTIONS)
+            .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
             .replace("@@PLACEHOLDER_RULE@@", PLACEHOLDER_RULE)
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
             .replace("@@VISUAL_INSPECTION_RULE@@",
@@ -5020,10 +6034,11 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@DOCX_CLI_RULE@@", docx_cli_block())
             .replace("@@ZOTERO_CLI_RULE@@",
                      zotero_cli_block("edit", zotero, ZOTERO_LEDGER_REVISED))
-            .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit))
+            .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof))
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE))
     text = text.replace("@@AUDIT_BLOCK@@", audit_block)
-    text = apply_m19(text)
+    text = render_venue_tokens(text, prof)
+    text = apply_m19(text, prof)
     text = apply_m20(text)
     text = text.replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("stage"))
     text = text.replace("@@LANGUAGE_PASS_RULE@@",
@@ -5031,12 +6046,12 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(REVISED_DIR))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("revise", run_id, r))
-    return text + shared_blocks() + ATTACHED_HEAD + "\n" + ATTACHED_PHASE2 + REVISE_TAIL
+    return text + shared_blocks() + attached_head(prof) + "\n" + ATTACHED_PHASE2 + REVISE_TAIL
 
 
 
 def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
-                 zotero: str = DEFAULT_ZOTERO_MODE) -> str:
+                 zotero: str = DEFAULT_ZOTERO_MODE, venue=None) -> str:
     """The AUDITOR prompt: review -> AUDIT -> revise.
 
     The auditor consumes the round's FROZEN review (read-only) and produces the
@@ -5045,22 +6060,24 @@ def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
     finding-tier rows are promoted to real `AU-` findings. It never edits a
     package, so its only product is the decision record.
     """
+    prof = _as_profile(venue)
     text = (AUDIT_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
             .replace("@@SANDBOX@@", str(sandbox.resolve()))
             .replace("@@ROUND@@", str(int(r)))
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE)
             .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule())
-            .replace("@@STANDING_EXEMPTIONS@@", STANDING_EXEMPTIONS)
+            .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
             .replace("@@PLACEHOLDER_RULE@@", PLACEHOLDER_RULE)
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
-            .replace("@@DERIVED_OUTPUTS_RULE@@", DERIVED_OUTPUTS_RULE)
+            .replace("@@DERIVED_OUTPUTS_RULE@@", derived_outputs_rule(prof))
             .replace("@@VALIDATION_RULE@@", VALIDATION_RULE)
             .replace("@@VISUAL_INSPECTION_RULE@@",
                      visual_inspection_block(VISUAL_ARTIFACT_AUDIT))
             .replace("@@DOCX_CLI_RULE@@", docx_cli_block())
             .replace("@@ZOTERO_CLI_RULE@@", zotero_cli_block("review", zotero))
             .replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("audit")))
+    text = render_venue_tokens(text, prof)
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule("audit"))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("audit", run_id, r))
     return text + shared_blocks() + AUDIT_TAIL
@@ -5070,12 +6087,13 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
                      self_id: str, other_ids: list,
                      caption_limit: int = DEFAULT_CAPTION_LIMIT,
                      zotero: str = DEFAULT_ZOTERO_MODE,
-                     prior_failure: str = "") -> str:
+                     prior_failure: str = "", venue=None) -> str:
     """Integration prompt: self/ reworked with ALL the other pool members.
 
     One run per pool member (there are no pairwise arms): the base stays the
     base and every other candidate of the round is a donor.
     """
+    prof = _as_profile(venue)
     text = (INTEGRATE_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
             .replace("@@SANDBOX@@", str(sandbox.resolve()))
@@ -5084,7 +6102,7 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@OTHER_IDS@@", ", ".join(other_ids))
             .replace("@@OTHER_COUNT@@", str(len(other_ids)))
             .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule())
-            .replace("@@STANDING_EXEMPTIONS@@", STANDING_EXEMPTIONS)
+            .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
             .replace("@@PLACEHOLDER_RULE@@", PLACEHOLDER_RULE)
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
             .replace("@@VISUAL_INSPECTION_RULE@@",
@@ -5093,9 +6111,10 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@DOCX_CLI_RULE@@", docx_cli_block())
             .replace("@@ZOTERO_CLI_RULE@@",
                      zotero_cli_block("edit", zotero, ZOTERO_LEDGER_INTEGRATED))
-            .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit))
+            .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof))
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE))
-    text = apply_m19(text)
+    text = render_venue_tokens(text, prof)
+    text = apply_m19(text, prof)
     text = apply_m20(text)
     text = text.replace("@@LANGUAGE_PASS_RULE@@",
                         LANGUAGE_PASS_RULE.replace("@@R6_PATH@@", "integrated/work/R6_language.md"))
@@ -5104,19 +6123,21 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(INTEGRATED_DIR))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("integrate", run_id, r))
-    return text + shared_blocks() + ATTACHED_PHASE1 + "\n" + ATTACHED_PHASE2 + INTEGRATE_TAIL
+    return (text + shared_blocks() + attached_phase1(prof) + "\n" + ATTACHED_PHASE2
+            + INTEGRATE_TAIL)
 
 
 def rewrite_prompt(sandbox: Path, run_id: str, r: int,
                    index: int = 1, total: int = 1,
                    caption_limit: int = DEFAULT_CAPTION_LIMIT,
                    zotero: str = DEFAULT_ZOTERO_MODE,
-                   prior_failure: str = "", level: str = "") -> str:
+                   prior_failure: str = "", level: str = "", venue=None) -> str:
     """The rewrite prompt: one of the round's M rewritten candidates.
 
     Staged FIRST in the round (before the review), and it is a CANDIDATE like
     every other arm: see REWRITE_DIRECTIVES for the contract.
     """
+    prof = _as_profile(venue)
     level = level if level in REWRITE_LEVELS else rewrite_level_of(index, total)
     text = (REWRITE_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
@@ -5127,18 +6148,19 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@REWRITE_LEVEL_BLOCK@@", REWRITE_LEVEL_BLOCKS[level])
             .replace("@@SOURCE_HIERARCHY@@", SOURCE_HIERARCHY)
             .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule())
-            .replace("@@STANDING_EXEMPTIONS@@", STANDING_EXEMPTIONS)
+            .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
             .replace("@@PLACEHOLDER_RULE@@", PLACEHOLDER_RULE)
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
-            .replace("@@DERIVED_OUTPUTS_RULE@@", DERIVED_OUTPUTS_RULE)
+            .replace("@@DERIVED_OUTPUTS_RULE@@", derived_outputs_rule(prof))
             .replace("@@VISUAL_INSPECTION_RULE@@",
                      visual_inspection_block(VISUAL_ARTIFACT_REWRITTEN))
             .replace("@@VALIDATION_RULE@@", VALIDATION_RULE)
             .replace("@@DOCX_CLI_RULE@@", docx_cli_block())
             .replace("@@ZOTERO_CLI_RULE@@", zotero_cli_block("rewrite", zotero))
-            .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit))
+            .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof))
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE))
-    text = apply_m19(text)
+    text = render_venue_tokens(text, prof)
+    text = apply_m19(text, prof)
     text = apply_m20(text)
     text = text.replace("@@LANGUAGE_PASS_RULE@@",
                         LANGUAGE_PASS_RULE.replace("@@R6_PATH@@", "rewritten/work/R6_language.md"))
@@ -5146,7 +6168,7 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(REWRITTEN_DIR))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("rewrite", run_id, r))
-    return (text + shared_blocks() + ATTACHED_HEAD + "\n" + ATTACHED_PHASE1 + "\n"
+    return (text + shared_blocks() + attached_head(prof) + "\n" + attached_phase1(prof) + "\n"
             + ATTACHED_PHASE2 + REWRITE_TAIL)
 
 
@@ -5154,8 +6176,9 @@ def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index
                  judge_total: int, opponent_labels: list,
                  caption_limit: int = DEFAULT_CAPTION_LIMIT,
                  zotero: str = DEFAULT_ZOTERO_MODE,
-                 field_first: bool = False) -> str:
+                 field_first: bool = False, venue=None) -> str:
     """Relative-judgment prompt, one per (version, judge) session (Section C4)."""
+    prof = _as_profile(venue)
     labels = ", ".join(opponent_labels)
     text = (JUDGE_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
@@ -5168,16 +6191,16 @@ def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index
             .replace("@@OPPONENT_LABELS@@", labels)
             .replace("@@SOURCE_HIERARCHY@@", SOURCE_HIERARCHY)
             .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule())
-            .replace("@@STANDING_EXEMPTIONS@@", STANDING_EXEMPTIONS)
+            .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
             .replace("@@PLACEHOLDER_RULE@@", PLACEHOLDER_RULE_JUDGE)
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
-            .replace("@@DERIVED_OUTPUTS_RULE@@", DERIVED_OUTPUTS_RULE)
+            .replace("@@DERIVED_OUTPUTS_RULE@@", derived_outputs_rule(prof))
             .replace("@@VALIDATION_RULE@@", validation_block("judge"))
             .replace("@@VISUAL_INSPECTION_RULE@@",
                      visual_inspection_block(VISUAL_ARTIFACT_JUDGE))
             .replace("@@DOCX_CLI_RULE@@", docx_cli_block())
             .replace("@@ZOTERO_CLI_RULE@@", zotero_cli_block("judge", zotero))
-            .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit)))
+            .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof)))
     if field_first:
         # C26: a designed counterbalance, not a provenance signal. Half of the
         # panel reads every opponent BEFORE sweeping the target, so a first-read
@@ -5191,7 +6214,8 @@ def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index
             "frozen-sweep workflow on `target/`. This order is a designed balance across the "
             "panel's sessions, nothing else; your scores are the same target-vs-opponent "
             "comparisons the sheet asks for.\n", 1)
-    text = apply_m19(text)
+    text = render_venue_tokens(text, prof)
+    text = apply_m19(text, prof)
     text = apply_m20(text)
     text = text.replace("@@WRITING_RUBRIC@@", WRITING_RUBRIC)
     text = text.replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("judge"))
@@ -6230,8 +7254,8 @@ def caption_gate(info) -> tuple:
     limit = int(info.get("limit", DEFAULT_CAPTION_LIMIT) or 0)
     if not info.get("rule_enabled", bool(limit)):
         n = int(info.get("count") or 0)
-        note = (f"legend lengths: {n} legend(s) counted; no proxy cap configured -- the journal's "
-                f"per-type legend limit is not published, so the author compares the counts")
+        note = (f"legend lengths: {n} legend(s) counted; no proxy cap configured -- the venue "
+                f"profile publishes no per-type legend number, so the author compares the counts")
         if info.get("unparsed"):
             note += (f"; {len(info['unparsed'])} file(s) could not be parsed (legend length not "
                      f"verified there -- manual item)")
@@ -6239,8 +7263,8 @@ def caption_gate(info) -> tuple:
     n_over = len(info.get("over_limit") or [])
     if n_over:
         note = (f"captions: {n_over} caption(s) over the suggested {limit} words "
-                f"(the proxy cap is the pipeline's, not the journal's -- advisory only, never a "
-                f"gate; report/compress by removing redundancy only)")
+                f"(advisory only -- a reporting rule of this pipeline, never a gate; "
+                f"report/compress by removing redundancy only)")
         return False, note
     elif not info.get("checked"):
         note = "captions: no extractable captions found"
@@ -6480,7 +7504,7 @@ def _tex_length_lines(text: str) -> list:
 
 
 def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
-                           abstract_end: int = None) -> list:
+                           abstract_end: int = None, limits: dict = None) -> list:
     """M19 rows (abstract and/or main text) for one document's text lines.
 
     ``caption_spans`` are (start, end) line spans of the document's captions and
@@ -6488,7 +7512,7 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
     the captions inside the main-text span are subtracted, because only those
     words are inside the text this row counts.
     """
-    limits = length_limits()
+    limits = limits or length_limits()
     n = len(lines)
 
     def clean(s):
@@ -6525,15 +7549,16 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
     rows = []
     if abs_start is not None:
         words = count_words(" ".join(lines[abs_start:abs_end]))
+        abs_cap = limits["abstract"].get("cap")
         rows.append({"document": doc, "section": "abstract", "words": words,
-                     "base": limits["abstract"]["base"],
-                     "relaxation": ABSTRACT_RELAXATION,
-                     "cap": limits["abstract"]["cap"],
-                     "over_limit": words > limits["abstract"]["cap"], "note": ""})
+                     "base": limits["abstract"].get("base"),
+                     "relaxation": limits["abstract"].get("relaxation"),
+                     "cap": abs_cap,
+                     "over_limit": abs_cap is not None and words > abs_cap, "note": ""})
     start = abs_end if abs_end is not None else main_start
-    # The abstract block ends ON the next heading line ("Introduction" in an NBT
-    # Article, which is written without a heading in the final layout): drop that
-    # heading line itself from the main-text count.
+    # The abstract block ends ON the next heading line ("Introduction" in most
+    # venues' Articles, which is written without a heading in the final layout):
+    # drop that heading line itself from the main-text count.
     if start is not None and start < n and LENGTH_SECTION_BOUND_RE.match(clean(lines[start])):
         start += 1
     end, end_found = n, False
@@ -6559,11 +7584,12 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
                      "the document")
     if caption_words:
         notes.append(f"{int(caption_words)} word(s) of figure captions subtracted")
+    main_cap = limits["main text"].get("cap")
     rows.append({"document": doc, "section": "main text", "words": words,
-                 "base": limits["main text"]["base"],
-                 "relaxation": MAIN_TEXT_RELAXATION,
-                 "cap": limits["main text"]["cap"],
-                 "over_limit": words > limits["main text"]["cap"],
+                 "base": limits["main text"].get("base"),
+                 "relaxation": limits["main text"].get("relaxation"),
+                 "cap": main_cap,
+                 "over_limit": main_cap is not None and words > main_cap,
                  "note": "; ".join(notes)})
     return rows
 
@@ -6578,15 +7604,19 @@ def _is_cover_letter_lines(lines: list, name: str = "") -> bool:
     return False
 
 
-def _cover_letter_row(lines: list, doc: str) -> dict:
+def _cover_letter_row(lines: list, doc: str, limits: dict = None, profile=None) -> dict:
     """One M19 row for a cover letter's PERSUADING part (a user preference).
 
-    NBT's official guidance states no cover-letter word limit (checked
-    2026-09-19), so the 300-500 range is the master prompt's own preference and
-    is reported as such. The persuading part excludes the salutation, the
-    signature block and the required disclosure lines (manuscript metadata,
-    related manuscripts, reviewer suggestions, ...).
+    The configured venue profile states no official cover-letter word limit, so
+    the profile's range is the master prompt's own preference and is reported as
+    such. The persuading part excludes the salutation, the signature block and
+    the required disclosure lines (manuscript metadata, related manuscripts,
+    reviewer suggestions, ...).
     """
+    limits = limits or length_limits()
+    prof = _as_profile(profile)
+    cover = limits["cover letter"]
+    pref_min, pref_max = cover.get("min"), cover.get("max")
     start = 0
     for i, raw in enumerate(lines[:12]):
         if LENGTH_COVER_SALUTATION_RE.match((raw or "").strip()):
@@ -6600,29 +7630,38 @@ def _cover_letter_row(lines: list, doc: str) -> dict:
     body = [ln for ln in lines[start:end]
             if not LENGTH_COVER_DISCLOSURE_RE.match((ln or "").strip())]
     words = count_words(" ".join(body))
+    within = True if pref_min is None or pref_max is None else (pref_min <= words <= pref_max)
     return {"document": doc, "section": "cover letter", "words": words,
             "base": None, "relaxation": None, "cap": None,
-            "min": COVER_LETTER_MIN_WORDS, "max": COVER_LETTER_MAX_WORDS,
-            "within_preference": COVER_LETTER_MIN_WORDS <= words <= COVER_LETTER_MAX_WORDS,
-            # NOT over_limit: the 300-500-word range is the user's preference,
-            # not a journal cap. Marking it over_limit put cover letters into
+            "min": pref_min, "max": pref_max,
+            "within_preference": within,
+            # NOT over_limit: the configured range is the user's preference,
+            # not a venue cap. Marking it over_limit put cover letters into
             # the scan's cap-violation list and made `decide` warn about a
             # "relaxed caps (cap None)" breach for a merely long letter.
             "over_limit": False,
-            "over_preference": words > COVER_LETTER_MAX_WORDS,
-            "under_preference": words < COVER_LETTER_MIN_WORDS,
-            "source": COVER_LETTER_SOURCE,
+            "over_preference": pref_max is not None and words > pref_max,
+            "under_preference": pref_min is not None and words < pref_min,
+            "source": cover.get("source") or "",
             "note": (f"persuading part only (salutation, signature and required disclosures "
-                     f"excluded); the {COVER_LETTER_MIN_WORDS}-{COVER_LETTER_MAX_WORDS} range is "
-                     f"the user's preference, not an NBT limit")}
+                     f"excluded)"
+                     + (f"; the {pref_min}-{pref_max} range is the user's preference, not "
+                        f"{_indefinite(prof.short)} limit" if pref_min is not None else
+                        "; this venue profile configures no cover-letter preference"))}
 
 
-def scan_lengths_in_sources(sources: list) -> dict:
+def scan_lengths_in_sources(sources: list, profile=None) -> dict:
     """Abstract/main-text word counts over [(dir, prefix, excluded_top)] sources.
 
     A code-side PROXY for the agents' M19 sweep: it reports what it can measure
     and says "not verified"/"skipped" where it cannot, and never gates anything.
+    The caps and their provenance come from the venue profile: a profile without
+    caps (the shipped `generic` one) yields counts with `cap: null` and
+    `over_limit: false`, which is what the note and the decision report print.
     """
+    prof = _as_profile(profile)
+    limits = prof.length_limits()
+    source = prof.length_limits_source
     overrides = corpus_source_overrides(sources)
     rows, unparsed, skipped, rendered, docs = [], [], [], [], set()
     for i, (src, prefix, excluded) in enumerate(sources):
@@ -6675,17 +7714,17 @@ def scan_lengths_in_sources(sources: list) -> dict:
                 continue
             if _is_cover_letter_lines(lines, p.name):
                 docs.add(doc)
-                rows.append(_cover_letter_row(lines, doc))
+                rows.append(_cover_letter_row(lines, doc, limits=limits, profile=prof))
                 continue
             found = _length_rows_for_lines(lines, doc, caption_spans=caption_spans,
-                                           abstract_end=abstract_end)
+                                           abstract_end=abstract_end, limits=limits)
             if not found:
                 skipped.append(doc)
                 continue
             docs.add(doc)
             rows.extend(found)
     over = [r for r in rows if r["over_limit"]]
-    return {"limits": length_limits(), "source": NBT_LENGTH_LIMITS_SOURCE,
+    return {"limits": limits, "source": source, "venue": prof.id,
             "rows": rows, "count": len(rows), "over_limit": over,
             "unparsed": sorted(set(unparsed)), "skipped": sorted(set(skipped)),
             "rendered": sorted(set(rendered)),
@@ -6694,7 +7733,12 @@ def scan_lengths_in_sources(sources: list) -> dict:
 
 
 def length_note(info) -> str:
-    """One line describing an M19 scan (advisory; never a gate)."""
+    """One line describing an M19 scan (advisory; never a gate).
+
+    A venue profile with no caps prints the counts and says so instead of
+    naming a cap: the comparison is then the target journal's own guidelines'
+    job, exactly as the M19 mandates say.
+    """
     if not info:
         return "not verified (no scan recorded)"
     rows = info.get("rows") or []
@@ -6717,14 +7761,33 @@ def length_note(info) -> str:
     over_n = len([r for r in rows if r.get("over_limit") and r["section"] != "cover letter"])
     pref_n = len([r for r in rows if r["section"] == "cover letter"
                   and not r.get("within_preference")])
-    tail = (f"; {over_n} over the cap (advisory only -- never a gate; compress by removing "
-            f"redundancy only)" if over_n else "; all within the relaxed caps")
+    abs_cap, main_cap = limits["abstract"].get("cap"), limits["main text"].get("cap")
+    if abs_cap is None and main_cap is None:
+        caps_text = ("no venue cap configured: the counts are recorded for the author to compare "
+                     "with the target journal's own guidelines")
+        tail = ""
+    else:
+        caps_text = (f"caps: abstract {abs_cap if abs_cap is not None else 'none'}, "
+                     f"main text {main_cap if main_cap is not None else 'none'}")
+        tail = (f"; {over_n} over the cap (advisory only -- never a gate; compress by removing "
+                f"redundancy only)" if over_n else "; all within the relaxed caps")
+    cover_min = limits["cover letter"].get("min")
+    cover_max = limits["cover letter"].get("max")
     if pref_n:
-        tail += (f"; {pref_n} cover letter(s) outside the user's {COVER_LETTER_MIN_WORDS}-"
-                 f"{COVER_LETTER_MAX_WORDS}-word preference (not an NBT limit, never a gate)")
+        # Name the venue the preference is NOT: "not an NBT limit" for the
+        # default profile, the generic noun when the profile has no brand.
+        preference_owner = "a venue limit"
+        venue_id = str(info.get("venue") or "").strip()
+        if venue_id:
+            try:
+                preference_owner = f"{_indefinite(load_venue_profile(venue_id).short)} limit"
+            except VenueProfileError:
+                pass
+        tail += (f"; {pref_n} cover letter(s) outside the user's {cover_min}-"
+                 f"{cover_max}-word preference (the user's preference, not {preference_owner}, "
+                 f"never a gate)")
     return (f"{len(rows)} section(s) "
-            f"[{', '.join(parts[:6])}] (caps: abstract {limits['abstract']['cap']}, "
-            f"main text {limits['main text']['cap']}{tail})")
+            f"[{', '.join(parts[:6])}] ({caps_text}{tail})")
 
 
 # ---------------------------------------------------------------------
@@ -7260,7 +8323,8 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
     except Exception as e:                                            # noqa: BLE001
         evidence["captions"] = {"error": f"{type(e).__name__}: {e}"}
     try:
-        evidence["lengths"] = scan_lengths_in_sources(sources)
+        evidence["lengths"] = scan_lengths_in_sources(sources,
+                                                       profile=venue_profile_of(ctx, required=False))
     except Exception as e:                                            # noqa: BLE001
         evidence["lengths"] = {"error": f"{type(e).__name__}: {e}"}
     try:
@@ -9388,8 +10452,13 @@ class Ctx:
       rounds{r: record}, pinned[{id, round, source_id, digest, ...}], log[].
     """
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, strict_venue: bool = False):
         self.root = root
+        # `--strict-venue`: refuse to run on a missing/inconsistent
+        # venue-journal configuration instead of only reporting it (see load).
+        self.strict_venue = bool(strict_venue)
+        self.venue_notes: list = []
+        self.venue_problems: list = []
         # The pristine copy of `--source`: `non_revised/` in a root created since
         # the rename, the legacy `non-revised/` in an older one. BOTH spellings
         # are resolved and the pipeline never moves the directory itself: an
@@ -9495,6 +10564,21 @@ class Ctx:
             note = pipeline_identity_note(self)
             if note:
                 print(note)
+        # The venue and the journal are configuration, not content: a root whose
+        # venue id resolves to nothing, whose recorded profile snapshot
+        # disagrees with the config, or whose journal does not belong to the
+        # selected venue is reported HERE, once, for every command that loads
+        # the root. `status` and `agents` still work (they need no prompt);
+        # every command that renders a prompt resolves the profile strictly and
+        # refuses to run (see venue_profile_of).
+        self.venue_notes, self.venue_problems = venue_config_findings(self)
+        for note in self.venue_notes:
+            print(f"[venue] {note}")
+        for problem in self.venue_problems:
+            print(f"[{'ERROR' if self.strict_venue else 'warn'}] venue: {problem}")
+        if self.strict_venue and self.venue_problems:
+            die("--strict-venue: fix the venue/journal configuration above (set-venue / "
+                "set-journal) or drop the flag to run with warnings only.")
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         if not self.state["runs"] and self.runs_dir.is_dir():
@@ -11237,7 +12321,8 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
                                          caption_limit=caption_limit_of(ctx),
                                          zotero=zotero_mode_of(ctx),
                                          prior_failure=note,
-                                         level=rewrite_level_of(k, m)),
+                                         level=rewrite_level_of(k, m),
+                                         venue=venue_profile_of(ctx)),
                           encoding="utf-8")
     rec = ctx.register(rid, "rewrite", r, f"runs/{rid}", upstream_run_id=rid_a1(r),
                        source_id=A1_ID, produces=vid)
@@ -11298,7 +12383,8 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
                                         prior_round=(sb / "prior_round").is_dir(),
                                         prior_failure=note,
                                         split=(part if split_mode != "off" else None),
-                                        split_mode=split_mode),
+                                        split_mode=split_mode,
+                                        venue=venue_profile_of(ctx)),
                           encoding="utf-8")
     rec = ctx.register(rid, "review", r, f"runs/{rid}",
                        upstream_run_id=rid_a1(r), source_id=a1.get("source_id"))
@@ -11333,7 +12419,8 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
     if not prompt.is_file():
         _copy_session_tools(sb)
         prompt.write_text(audit_prompt(sb, rid, r, prior_failure=note,
-                                       zotero=zotero_mode_of(ctx)), encoding="utf-8")
+                                       zotero=zotero_mode_of(ctx),
+                                       venue=venue_profile_of(ctx)), encoding="utf-8")
     rec = ctx.register(rid, "audit", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=a1.get("source_id"))
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
@@ -11395,7 +12482,8 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
         prompt.write_text(revise_prompt(sb, rid, r, index=int(str(vid)[1:]) - 1, total=n,
                                         caption_limit=caption_limit_of(ctx),
                                         zotero=zotero_mode_of(ctx),
-                                        prior_failure=note, audit=audit_enabled(ctx)),
+                                        prior_failure=note, audit=audit_enabled(ctx),
+                                        venue=venue_profile_of(ctx)),
                           encoding="utf-8")
     rec = ctx.register(rid, "revise", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=A1_ID, produces=vid)
@@ -11457,7 +12545,8 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
         prompt.write_text(integrate_prompt(sb, rid, r, self_id, other_ids,
                                            caption_limit=caption_limit_of(ctx),
                                            zotero=zotero_mode_of(ctx),
-                                           prior_failure=note), encoding="utf-8")
+                                           prior_failure=note,
+                                           venue=venue_profile_of(ctx)), encoding="utf-8")
     rec = ctx.register(rid, "integrate", r, f"runs/{rid}", self_id=self_id,
                        other_ids=other_ids, pool_ids=pool, produces=vid,
                        field_ids=other_ids)
@@ -11596,7 +12685,8 @@ def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
                                            # judge keeps the target-first order.
                                            field_first=(judges > 1 and j % 2 == 0),
                                            caption_limit=caption_limit_of(ctx),
-                                           zotero=zotero_mode_of(ctx)),
+                                           zotero=zotero_mode_of(ctx),
+                                           venue=venue_profile_of(ctx)),
                                   encoding="utf-8")
             # One timestamp for the WHOLE judge sandbox (views, prompt and the
             # public tool alike): a listing must not be able to order the
@@ -19330,7 +20420,43 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
 
 def cmd_setup(args) -> None:
     rounds = int(args.rounds)
-    caption_limit = int(getattr(args, "caption_limit", DEFAULT_CAPTION_LIMIT))
+    # The venue is resolved BEFORE anything is created, so an unknown venue id
+    # fails without leaving a half-built root behind. `--caption-limit` is
+    # optional here: without it the venue profile's own default applies (0 for
+    # a venue that publishes no legend number), and the resolved value is what
+    # the config records.
+    venue_arg = str(getattr(args, "venue", None) or "").strip()
+    journal_arg = str(getattr(args, "journal", None) or "").strip()
+    strict_venue = bool(getattr(args, "strict_venue", False))
+    try:
+        venue_profile = load_venue_profile(venue_arg or DEFAULT_VENUE)
+    except VenueProfileError as e:
+        if e.unknown:
+            die(unknown_venue_message(venue_arg or DEFAULT_VENUE), code=2)
+        die(str(e), code=2)
+    journal = journal_arg or venue_profile.default_journal
+    journal_source = ("operator" if journal_arg
+                      else ("profile-default" if venue_profile.default_journal else "unset"))
+    caption_limit_source = ("operator" if getattr(args, "caption_limit", None) is not None
+                            else "profile-default")
+    if not journal:
+        note = ("no journal configured: the prompts will say \"the target journal\" and the "
+                f"venue's rule set ({venue_profile.id}) applies. Run "
+                f"`set-journal <name>` at any time before or during a run to name it.")
+        if strict_venue:
+            die("--strict-venue: " + note)
+        print(f"[setup] venue note: {note}")
+    elif not venue_profile.journal_matches(journal):
+        note = (f"the journal {journal!r} is not one of the journals venue profile "
+                f"{venue_profile.id!r} describes ({', '.join(venue_profile.known_journals())}); "
+                f"the venue's rules still apply. Use `set-venue <id>` for another rule set or "
+                f"`set-journal <name>` to change the journal.")
+        if strict_venue:
+            die("--strict-venue: " + note)
+        print(f"[setup] venue warning: {note}")
+    caption_limit = int(getattr(args, "caption_limit", None)
+                        if getattr(args, "caption_limit", None) is not None
+                        else venue_profile.caption_default)
     format_policy = {}
     if getattr(args, "format_policy", None):
         try:
@@ -19439,12 +20565,37 @@ def cmd_setup(args) -> None:
     _fmt_mod = script.with_name(DOCX_FORMAT_MODULE)
     if _fmt_mod.is_file():
         shutil.copy(_fmt_mod, root / DOCX_FORMAT_MODULE)
+    # The venue profiles travel with the root too: the root stays
+    # self-contained, `set-venue --profile` has a directory to install into,
+    # and a root-local edit overrides the shipped copy. The config's snapshot is
+    # what the pipeline actually enforces; the files are what `--list` shows.
+    _venue_dir = script.with_name(VENUE_PROFILES_DIRNAME)
+    if _venue_dir.is_dir():
+        try:
+            shutil.copytree(_venue_dir, root / VENUE_PROFILES_DIRNAME)
+            print(f"[setup] venue profiles:          copied {VENUE_PROFILES_DIRNAME}/ "
+                  f"({len(list((root / VENUE_PROFILES_DIRNAME).glob('*.json')))} profile(s)) "
+                  f"into the root")
+        except OSError as e:
+            print(f"[setup] venue profiles:          could not copy {VENUE_PROFILES_DIRNAME}/ "
+                  f"({e}); the profile recorded in pipeline_config.json is still authoritative")
     # Normalize the pristine copy BEFORE the manifests/digests are recorded, so
     # the byte-identity checks, the round-1 base (a1) and every later pin all
     # refer to the SAME repaired text. This is the formatting analogue of the
     # document-recovery repair: the operator's --source directory is never
     # touched, and `--format-fix off` keeps the copy byte-identical instead.
+    _venue_snapshot = venue_profile.to_dict()
+    _venue_snapshot["origin"] = venue_profile.describe_origin()
+    _venue_snapshot["recorded"] = utcnow()
     ctx.cfg = {"rounds": rounds, "judges": judges_list, "source": str(source),
+               # WHICH venue's rules this root enforces, which journal it is
+               # going to, and the profile as it looked when it was selected:
+               # every later stage reads these (see venue_profile_of), so a
+               # root cannot silently drift to another venue's numbers.
+               "venue": venue_profile.id, "journal": journal,
+               "journal_source": journal_source,
+               "caption_limit_source": caption_limit_source,
+               "venue_profile": _venue_snapshot,
                "caption_limit": caption_limit, "zotero": zotero,
                "vs_original_rule": str(getattr(args, "vs_original_rule", VS_ORIGINAL_RULE)),
                "stop_after_no_progress": int(getattr(args, "stop_after_no_progress", 0) or 0),
@@ -19482,7 +20633,8 @@ def cmd_setup(args) -> None:
                  "source": str(source)}
     ctx.state["original_captions"] = scan_captions_in_sources([(ctx.pristine, "", ())],
                                                               limit=caption_limit)
-    ctx.state["original_lengths"] = scan_lengths_in_sources([(ctx.pristine, "", ())])
+    ctx.state["original_lengths"] = scan_lengths_in_sources([(ctx.pristine, "", ())],
+                                                            profile=venue_profile)
     ctx.state["original_placeholders"] = scan_placeholders_in_sources(
         [(ctx.pristine, "", ())])
     ctx.state["original_format"] = scan_format_in_sources(
@@ -19493,6 +20645,7 @@ def cmd_setup(args) -> None:
     write_json_atomic(ctx.cfg_path, ctx.cfg)
     ctx.log("setup", detail=f"rounds={rounds} judges={judges_list} rewrites={rewrites} "
                             f"revises={revises} integrators={[hex(x) for x in integrators]} "
+                            f"venue={venue_profile.id} journal={journal or '(unset)'} "
                             f"files={len(files)} "
                             f"caption_limit={caption_limit} "
                             f"zotero={zotero} "
@@ -19517,6 +20670,18 @@ def cmd_setup(args) -> None:
     est_sessions = sum(judges_list[r - 1] * field_bound[r - 1] for r in range(1, rounds + 1))
     print()
     print(f"[setup] pipeline root:          {root}")
+    print(f"[setup] venue:                  {venue_profile.id} (\"{venue_profile.label}\"; "
+          f"{venue_profile.describe_origin()})")
+    print(f"[setup] journal:                {journal or '(not set -- run `set-journal <name>`)'}"
+          + ("" if journal else "  (the prompts say \"the target journal\")"))
+    _lim = venue_profile.length_limits()
+    if _lim["abstract"].get("cap") is None and _lim["main text"].get("cap") is None:
+        print(f"[setup] length limits (M19):     none configured by this venue profile -- the "
+              f"counts are recorded and compared with the target journal's own guidelines")
+    else:
+        print(f"[setup] length limits (M19):     abstract <= {_lim['abstract'].get('cap')}, "
+              f"main text <= {_lim['main text'].get('cap')} "
+              f"({venue_profile.length_limits_source})")
     print(f"[setup] rounds:                 {rounds} (FIXED length; the round-{rounds} champion "
           f"is the final answer)")
     print(f"[setup] judges per round:       {judges_list}  (independent judge sessions PER "
@@ -19541,21 +20706,26 @@ def cmd_setup(args) -> None:
     print(f"[setup] expected judge sessions: ~{est_sessions} over {rounds} round(s) "
           f"(upper bounds {field_bound}; content-identical field members dedup away)")
     if caption_limit:
+        _cap_origin = ("the venue's own published legend limit, carried by its profile"
+                       if venue_profile.captions.get("published_limit")
+                       else "proposed by the PIPELINE, not by the master prompt or the skills")
         print(f"[setup] figure captions:         <= {caption_limit} words SUGGESTED (pipeline "
               f"check id M18; reported by the rewrite, review, revise, integration and judge "
               f"prompts). "
-              f"This length is proposed by the PIPELINE, not by the master prompt or the skills, "
-              f"and it is ADVISORY: an over-limit caption is reported, never enforced -- it cannot "
-              f"make a version ineligible or fail a decision. Use --caption-limit 0 for no "
-              f"caption suggestion at all.")
+              f"This length is {_cap_origin}, and it is ADVISORY: an over-limit caption is "
+              f"reported, never enforced -- it cannot make a version ineligible or fail a "
+              f"decision. Use --caption-limit 0 for no caption suggestion at all.")
     else:
-        print("[setup] figure captions:         NO caption suggestion (--caption-limit 0, the "
-              "default): caption length is never flagged, scored or judged. (Caption length was "
-              "never enforced in any case -- the suggestion is opt-in and advisory.)")
+        print("[setup] figure captions:         NO caption suggestion (--caption-limit 0"
+              + ("" if venue_profile.captions.get("published_limit") else ", the profile default")
+              + "): caption length is never flagged, scored or judged. (Caption length was never "
+                "enforced in any case -- the suggestion is opt-in and advisory; "
+              + (venue_profile.captions.get("source") or "no venue legend rule is carried")
+              + ".)")
     cap = ctx.state["original_captions"]
     _cap_mode = (f"{len(cap['over_limit'])} over the proxy cap of {cap['limit']} words"
                  if cap["limit"] else "no proxy cap configured; counts recorded for the author "
-                                      "(the journal publishes no per-type legend number)")
+                                      "(compare them with the venue's own per-type legend rule)")
     print(f"[setup] legend scan (source):    {cap['count']} legend(s) found, {_cap_mode}"
           + (f", {len(cap['unparsed'])} file(s) not parseable" if cap["unparsed"] else ""))
     print("[setup] abstract/main-text length: "
@@ -19597,6 +20767,281 @@ def cmd_setup(args) -> None:
     print(f"[setup] next: python {root / script.name} run --root {root}")
     print(f"[setup] manual mode: add --agent manual (staging is respected; each round's revise "
           f"prompt appears only after its review marker)")
+
+
+def _venue_command_root(args, cmd: str) -> Path:
+    """The root a `set-venue` / `set-journal` invocation may write to.
+
+    Both commands change a root's CONFIG, so the root must already exist (its
+    pipeline_config.json is the file they edit). Before `setup` there is
+    nothing to configure: `setup --venue/--journal` is the way to choose the
+    rule set a new root starts with.
+    """
+    root = Path(args.root).resolve()
+    if not (root / "pipeline_config.json").is_file():
+        die(f"{root} is not a pipeline root yet (no pipeline_config.json): "
+            f"run `setup --source <dir> --root {root} --venue <venue>` first, or point "
+            f"--root at an existing root. `{cmd}` edits an existing root's configuration.",
+            code=2)
+    return root
+
+
+def _print_venue_list(root, as_json: bool) -> None:
+    profiles = available_venue_profiles(root)
+    if as_json:
+        # print_raw: machine-readable output must not carry the datetime prefix.
+        print_raw(json.dumps({"venues": [{"id": v["id"], "label": v.get("label"),
+                                          "origin": v.get("origin"),
+                                          "path": v.get("path"),
+                                          "default_journal": v.get("default_journal"),
+                                          "description": v.get("description"),
+                                          "error": v.get("error")}
+                                         for v in sorted(profiles.values(),
+                                                         key=lambda x: x["id"])]},
+                             indent=2, sort_keys=False))
+        return
+    print("Available venues (a venue is a requirement set, not a journal):")
+    for v in sorted(profiles.values(), key=lambda x: x["id"]):
+        if v.get("error"):
+            print(f"  {v['id']:<24} INVALID: {v['error']}")
+            continue
+        default = f"; default journal {v['default_journal']!r}" if v.get("default_journal") else ""
+        print(f"  {v['id']:<24} {v.get('label')} [{v.get('origin')}]{default}")
+        if v.get("description"):
+            print(f"  {'':<24} {v['description']}")
+    print()
+    print("Select one with `set-venue <id>`; add your own with")
+    print(f"  set-venue <id> --profile /path/to/<id>{VENUE_PROFILE_SUFFIX} "
+          f"(installed into <root>/{VENUE_PROFILES_DIRNAME}/).")
+    print("See README.md -> \"Venues and journals\" for the profile schema.")
+
+
+def _print_venue_show(ctx, as_json: bool, notes=()) -> None:
+    prof = venue_profile_of(ctx, required=False)
+    data = {"root": str(ctx.root),
+            "notes": [str(n) for n in notes] + list(getattr(ctx, "venue_notes", []) or []),
+            "venue": venue_id_of(ctx),
+            "venue_label": prof.label if prof else None,
+            "venue_origin": prof.describe_origin() if prof else None,
+            "venue_description": prof.description if prof else None,
+            "journal": journal_of(ctx),
+            "journal_configured": str(ctx.cfg.get("journal") or ""),
+            "length_limits": (prof.length_limits() if prof else None),
+            "caption_limit": caption_limit_of(ctx),
+            "available": sorted(available_venue_profiles(ctx.root))}
+    if as_json:
+        print_raw(json.dumps(data, indent=2, sort_keys=False))
+        return
+    print(f"root:    {ctx.root}")
+    print(f"venue:   {venue_id_of(ctx)}" + (f" (\"{prof.label}\", {prof.describe_origin()})"
+                                            if prof else "  -- UNRESOLVED"))
+    unset_journal = 'not set -- the prompts say "the target journal"'
+    print(f"journal: {journal_of(ctx) or '(' + unset_journal + ')'}")
+    if prof is not None:
+        limits = prof.length_limits()
+        print("limits:  abstract "
+              f"{limits['abstract'].get('cap') if limits['abstract'].get('cap') is not None else 'none'}, "
+              f"main text "
+              f"{limits['main text'].get('cap') if limits['main text'].get('cap') is not None else 'none'}, "
+              f"caption suggestion {caption_limit_of(ctx)}")
+        print(f"         provenance: {prof.length_limits_source}")
+    if ctx.venue_problems:
+        print("problems:")
+        for p in ctx.venue_problems:
+            print(f"  - {p}")
+
+
+def _validate_journal_name(name: str) -> str:
+    """A journal name is free text, but it must be one clean line."""
+    text = str(name or "").strip()
+    if not text:
+        die("the journal name must not be empty (`set-journal \"Journal Name\"`)", code=2)
+    if any(ch in text for ch in "\r\n\t") or len(text) > 160:
+        die(f"the journal name must be one line of at most 160 characters (got {text!r})", code=2)
+    return text
+
+
+def cmd_set_venue(args) -> None:
+    """Select the venue profile a root enforces, and optionally its journal."""
+    root = Path(args.root).resolve()
+    if getattr(args, "list", False):
+        _print_venue_list(root, bool(getattr(args, "json", False)))
+        return
+    venue_arg = str(getattr(args, "venue", None) or "").strip()
+    profile_file = str(getattr(args, "profile", None) or "").strip()
+    show = bool(getattr(args, "show", False))
+    if show and not venue_arg:
+        ctx = Ctx(_venue_command_root(args, "set-venue"),
+                  strict_venue=bool(getattr(args, "strict_venue", False)))
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            ctx.load()
+        notes = [ln for ln in captured.getvalue().splitlines() if ln.strip()]
+        _print_venue_show(ctx, bool(getattr(args, "json", False)), notes)
+        return
+    ctx = Ctx(_venue_command_root(args, "set-venue"),
+              strict_venue=bool(getattr(args, "strict_venue", False)))
+    ctx.load()
+    begin_run_log("set-venue", ctx.root, sys.argv)
+    if not venue_arg:
+        if getattr(args, "journal", None) is not None:
+            # `set-venue --journal NAME` (no venue id) changes only the journal:
+            # the same operation as `set-journal NAME`, so the documented
+            # one-liner works instead of dying on a missing positional.
+            return cmd_set_journal(args)
+        die("set-venue needs a venue id, e.g. `set-venue generic` "
+            "(see `set-venue --list`), or `set-venue --show` to print the current one.\n"
+            "       To install a profile of your own: `set-venue <id> --profile FILE`.",
+            code=2)
+    if not VENUE_ID_RE.match(venue_arg.lower()):
+        die(f"invalid venue id {venue_arg!r}: letters, digits, '.', '_', '+', '-' only", code=2)
+    venue_arg = venue_arg.lower()
+    old_profile = venue_profile_of(ctx, required=False)
+    old_default_journal = old_profile.default_journal if old_profile is not None else ""
+    installed = None
+    if profile_file:
+        src = Path(profile_file).expanduser()
+        if not src.is_file():
+            die(f"--profile {profile_file!r} is not a readable file", code=2)
+        try:
+            data = json.loads(src.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            die(f"--profile {profile_file!r} is not readable JSON: {e}", code=2)
+        declared = str((data or {}).get("id") or "").strip().lower() \
+            if isinstance(data, dict) else ""
+        if declared and declared != venue_arg:
+            die(f"--profile {profile_file!r} declares id {declared!r} but the command selects "
+                f"{venue_arg!r}; make them agree (the file name in "
+                f"{VENUE_PROFILES_DIRNAME}/ is what `--venue` resolves, so the id must match).",
+                code=2)
+        if isinstance(data, dict) and not declared:
+            data = dict(data, id=venue_arg)
+        try:
+            installed = VenueProfile(data, origin=f"installed from {src}")
+        except VenueProfileError as e:
+            die(f"--profile {profile_file!r} is not a valid venue profile: {e}", code=2)
+        venue_arg = installed.id
+    try:
+        profile = installed or load_venue_profile(venue_arg, root=ctx.root)
+    except VenueProfileError as e:
+        die(unknown_venue_message(venue_arg, ctx.root) if e.unknown else str(e), code=2)
+    if ctx.state.get("runs") and not getattr(args, "force", False):
+        done = len([r for r in ctx.state["runs"].values()
+                    if r.get("status") in ("done", "running")])
+        die(f"this root already has {len(ctx.state['runs'])} run record(s) ({done} done/running): "
+            f"the rounds were planned and judged under venue {venue_id_of(ctx)!r}.\n"
+            f"       Re-run `set-venue {profile.id} --force` if the change is intended (the "
+            f"decision report records the venue of every round, and a new venue makes the "
+            f"recorded judgments a mix of two rule sets).")
+    journal_arg = getattr(args, "journal", None)
+    if journal_arg is not None:
+        journal = _validate_journal_name(journal_arg)
+        journal_source = "operator"
+    else:
+        current = str(ctx.cfg.get("journal") or "").strip()
+        current_source = str(ctx.cfg.get("journal_source") or "").strip().lower()
+        # A journal the OPERATOR typed is kept; a journal that only came from
+        # the old profile's default moves with the venue. A root that predates
+        # `journal_source` is inferred from the value itself (a journal equal to
+        # the old profile's default is treated as inherited).
+        kept = current and (current_source == "operator"
+                            or (not current_source and current != old_default_journal))
+        if kept:
+            journal, journal_source = current, "operator"
+        elif profile.default_journal:
+            journal, journal_source = profile.default_journal, "profile-default"
+        else:
+            journal, journal_source = "", "unset"
+    caption_source = str(ctx.cfg.get("caption_limit_source") or "").strip().lower()
+    caption_limit = int(ctx.cfg.get("caption_limit")
+                        if caption_source == "operator" and ctx.cfg.get("caption_limit") is not None
+                        else profile.caption_default)
+    with ctx.lock("set-venue"):
+        if installed is not None:
+            dest_dir = ctx.root / VENUE_PROFILES_DIRNAME
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = dest_dir / f"{profile.id}{VENUE_PROFILE_SUFFIX}"
+            write_json_atomic(dest, profile.to_dict())
+            print(f"[set-venue] installed profile -> {dest}")
+            profile = VenueProfile(profile.to_dict(), origin=f"root-local profile: {dest}",
+                                   path=dest)
+        snapshot = profile.to_dict()
+        snapshot["origin"] = profile.describe_origin()
+        snapshot["recorded"] = utcnow()
+        ctx.cfg["venue"] = profile.id
+        ctx.cfg["journal"] = journal
+        ctx.cfg["journal_source"] = journal_source
+        ctx.cfg["caption_limit"] = caption_limit
+        ctx.cfg["caption_limit_source"] = ("operator" if caption_source == "operator"
+                                           else "profile-default")
+        ctx.cfg["venue_profile"] = snapshot
+        ctx.state["config"] = ctx.cfg
+        write_json_atomic(ctx.cfg_path, ctx.cfg)
+        ctx.log("set-venue", detail=f"venue={profile.id} journal={journal or '(unset)'}")
+        ctx.save_state()
+    print(f"[set-venue] venue:   {profile.id} (\"{profile.label}\", {profile.describe_origin()})")
+    print(f"[set-venue] journal: {journal or '(not set -- run `set-journal <name>`)'}")
+    print(f"[set-venue] caption suggestion: {caption_limit} "
+          f"({'operator-set' if caption_source == 'operator' else 'the venue profile default'})")
+    if not journal:
+        print("[set-venue] note:    no journal configured; the prompts will say "
+              "\"the target journal\".")
+    elif not profile.journal_matches(journal):
+        print(f"[set-venue] warning: the journal {journal!r} is not one of the journals venue "
+              f"{profile.id!r} describes ({', '.join(profile.known_journals())}); the venue's "
+              f"rules still apply. Run `set-journal <name>` to change the journal, or "
+              f"`set-venue <id>` for another rule set.")
+    limits = profile.length_limits()
+    if limits["abstract"].get("cap") is None and limits["main text"].get("cap") is None:
+        print("[set-venue] limits:  this venue profile sets no abstract/main-text cap; the "
+              "stages record the counts and compare them with the target journal's guidelines.")
+    else:
+        print(f"[set-venue] limits:  abstract <= {limits['abstract'].get('cap')}, main text <= "
+              f"{limits['main text'].get('cap')} ({profile.length_limits_source})")
+    print(f"[set-venue] next:    python {Path(__file__).name} run --root {ctx.root}  "
+          f"(existing roots keep their completed rounds; `retry`/`run` re-stage the rest)")
+
+
+def cmd_set_journal(args) -> None:
+    """Set the target journal (free text; selects no rule set by itself)."""
+    show = bool(getattr(args, "show", False))
+    name = str(getattr(args, "journal", None) or "").strip()
+    if show and not name:
+        ctx = Ctx(_venue_command_root(args, "set-journal"),
+                  strict_venue=bool(getattr(args, "strict_venue", False)))
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            ctx.load()
+        notes = [ln for ln in captured.getvalue().splitlines() if ln.strip()]
+        _print_venue_show(ctx, bool(getattr(args, "json", False)), notes)
+        return
+    if not name:
+        die("set-journal needs a journal name, e.g. `set-journal \"Nature Biotechnology\"` "
+            "(or `set-journal --show` to print the current one)", code=2)
+    ctx = Ctx(_venue_command_root(args, "set-journal"),
+              strict_venue=bool(getattr(args, "strict_venue", False)))
+    ctx.load()
+    begin_run_log("set-journal", ctx.root, sys.argv)
+    journal = _validate_journal_name(name)
+    profile = venue_profile_of(ctx, required=False)
+    if ctx.state.get("runs") and not getattr(args, "force", False):
+        die(f"this root already has {len(ctx.state['runs'])} run record(s): every prompt names "
+            f"the journal it was written for.\n"
+            f"       Re-run `set-journal {journal!r} --force` if the change is intended.")
+    with ctx.lock("set-journal"):
+        ctx.cfg["journal"] = journal
+        ctx.cfg["journal_source"] = "operator"
+        ctx.state["config"] = ctx.cfg
+        write_json_atomic(ctx.cfg_path, ctx.cfg)
+        ctx.log("set-journal", detail=journal)
+        ctx.save_state()
+    print(f"[set-journal] journal: {journal} (venue {venue_id_of(ctx)})")
+    if profile is not None and not profile.journal_matches(journal):
+        print(f"[set-journal] warning: {journal!r} is not one of the journals venue profile "
+              f"{profile.id!r} describes ({', '.join(profile.known_journals())}); the venue's "
+              f"rules still apply. Use `set-venue <id>` for another rule set." + (
+                  "" if not getattr(args, "strict_venue", False) else
+                  " (--strict-venue requested: re-run with the flag to make this an error.)"))
 
 
 def validate_only_selectors(ctx: Ctx, only) -> None:
@@ -19652,8 +21097,12 @@ def validate_only_selectors(ctx: Ctx, only) -> None:
 
 def cmd_run(args) -> None:
     """`run` entry point: take the root lock, then drive the rounds."""
-    ctx = Ctx(Path(args.root).resolve())
+    ctx = Ctx(Path(args.root).resolve(),
+              strict_venue=bool(getattr(args, "strict_venue", False)))
     ctx.load()
+    # The stages render prompts from the venue profile: refuse to start on a
+    # venue that does not resolve, whatever --strict-venue says.
+    venue_profile_of(ctx)
     with ctx.lock("run"):
         _cmd_run_locked(ctx, args)
 
@@ -20346,7 +21795,8 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     # .aux/.log/... and an EMPTY .bbl) are dropped -- a compile regenerates them.
     # A non-empty .bbl and the compiled PDFs stay: the .bbl is the reference list
     # when no editable bibliography can regenerate it, and a PDF is a submission
-    # deliverable (Nature Biotechnology accepts PDF submissions).
+    # deliverable when the configured venue accepts one (see the venue profile's
+    # `submission` block and derived_outputs_rule()).
     hygiene = {"removed": [], "kept_bbl": []}
     for q in sorted(tmp.rglob("*")):
         if not q.is_file():
@@ -20454,12 +21904,14 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
                           final_clean=None, revision_token=None, win_format=None,
                           format_gate: bool = False, format_problems=None) -> str:
     L = []
-    L.append("# NBT Round Pipeline — Decision Report")
+    L.append("# Round Pipeline — Decision Report")
     L.append("")
     L.append(f"Generated: {utcnow()}  |  pipeline root: `{ctx.root}`  |  orchestrator v{VERSION}")
     L.append(f"Config: rounds={ctx.rounds_count()} judges/version={judges_config_note(ctx)} "
              f"integrators/round={integrators_config_note(ctx)} "
              f"| source: `{ctx.cfg.get('source')}`")
+    for line in venue_status_lines(ctx):
+        L.append(f"- {line}")
     L.append("")
     L.append("## 0. Integrity")
     L.append("")
@@ -20552,8 +22004,9 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
                  "knows about.")
     L.append("")
     L.append("**Abstract/main-text length check (M19, code-side proxy over the pinned winner; "
-             f"advisory).** {length_note(win_lengths)} The journal's own limits are relaxed by "
-             f"this pipeline (+15% on the abstract, +25% on the main text), words are counted as "
+             f"advisory).** {length_note(win_lengths)} "
+             f"{relaxation_note(venue_profile_of(ctx, required=False))}. "
+             "Words are counted as "
              "maximal runs of non-space characters with a newline treated as space, and the "
              "agents' M19 sweep (not this proxy) is authoritative. An over-cap section is a "
              "formatting-tier item: the winner keeps its place in the ranking, is never made "
@@ -20987,10 +22440,13 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
 
 
 def cmd_status(args) -> None:
-    ctx = Ctx(Path(args.root).resolve())
+    ctx = Ctx(Path(args.root).resolve(),
+              strict_venue=bool(getattr(args, "strict_venue", False)))
     ctx.load()
     print(f"pipeline root: {ctx.root}")
     print(f"source:        {ctx.cfg.get('source')}")
+    for line in venue_status_lines(ctx):
+        print(line)
     pok, pdetail = pristine_integrity(ctx)
     print(f"pristine:      {'ok' if pok else 'CHANGED'} ({pdetail})")
     perrs = pinned_integrity(ctx)
@@ -21175,7 +22631,8 @@ def cmd_agents(args) -> None:
     hashed (see agent_session_plan). `--only` previews exactly the sessions the
     equivalent `run --only` invocation would drive.
     """
-    ctx = Ctx(Path(args.root).resolve())
+    ctx = Ctx(Path(args.root).resolve(),
+              strict_venue=bool(getattr(args, "strict_venue", False)))
     # `--json` must stay parseable: keep everything `load()` prints (the
     # pipeline-identity note) out of the JSON body and hand it back as a field.
     captured = io.StringIO()
@@ -21248,8 +22705,10 @@ def cmd_agents(args) -> None:
 
 
 def cmd_decide(args) -> None:
-    ctx = Ctx(Path(args.root).resolve())
+    ctx = Ctx(Path(args.root).resolve(),
+              strict_venue=bool(getattr(args, "strict_venue", False)))
     ctx.load()
+    venue_profile_of(ctx)          # the report names the venue and quotes its limits
     R = ctx.rounds_count()
     if R < 1:
         die("pipeline_config.json records no rounds")
@@ -21345,7 +22804,8 @@ def cmd_decide(args) -> None:
     win_dir = ctx.root / (final["stored"].get("winner_dir") or "")
     win_captions = (scan_captions_in_sources([(win_dir, "", ())], limit=caption_limit_of(ctx))
                     if final["stored"].get("winner_dir") and win_dir.is_dir() else None)
-    win_lengths = (scan_lengths_in_sources([(win_dir, "", ())])
+    win_lengths = (scan_lengths_in_sources([(win_dir, "", ())],
+                                           profile=venue_profile_of(ctx, required=False))
                    if final["stored"].get("winner_dir") and win_dir.is_dir() else None)
     win_format = (scan_format_in_sources([(win_dir, "", ())], policy=format_policy_of(ctx))
                   if final["stored"].get("winner_dir") and win_dir.is_dir() else None)
@@ -21432,6 +22892,10 @@ def cmd_decide(args) -> None:
         "generated": utcnow(),
         "pipeline_root": str(ctx.root),
         "version": VERSION,
+        # The rule set this decision was produced under: the venue profile (and
+        # the journal the prompts named), recorded next to the numbers it
+        # produced so a reader never has to guess which limits applied.
+        "venue": venue_block(ctx),
         "config": ctx.cfg,
         "integrity": integrity,
         "problems": problems,
@@ -22274,7 +23738,8 @@ def run_redlines(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
 
 
 def cmd_redline(args) -> None:
-    ctx = Ctx(Path(args.root).resolve())
+    ctx = Ctx(Path(args.root).resolve(),
+              strict_venue=bool(getattr(args, "strict_venue", False)))
     ctx.load(need_cfg=False)
     with ctx.lock("redline"):
         _cmd_redline_locked(ctx, args)
@@ -22344,7 +23809,8 @@ def cmd_prune(args) -> None:
     attempt history remains readable -- and this command is dry-run unless
     `--yes` is given.
     """
-    ctx = Ctx(Path(args.root).resolve())
+    ctx = Ctx(Path(args.root).resolve(),
+              strict_venue=bool(getattr(args, "strict_venue", False)))
     ctx.load()
     with ctx.lock("prune"):
         _cmd_prune_locked(ctx, args)
@@ -22418,7 +23884,8 @@ def _cmd_prune_locked(ctx: Ctx, args) -> None:
 
 
 def cmd_retry(args) -> None:
-    ctx = Ctx(Path(args.root).resolve())
+    ctx = Ctx(Path(args.root).resolve(),
+              strict_venue=bool(getattr(args, "strict_venue", False)))
     ctx.load()
     with ctx.lock("retry"):
         _cmd_retry_locked(ctx, args)
@@ -22490,10 +23957,24 @@ def _cmd_retry_locked(ctx: Ctx, args) -> None:
 USAGE_EXAMPLES = """usage:
   setup   --source <dir> [--root <dir>] [--rounds 2] [--judges 3]
           [--rewrites M] [--revises N] [--integrators 0xFFFFFFFF]
-          [--caption-limit N]
+          [--caption-limit N] [--venue ID] [--journal NAME] [--strict-venue]
           [--zotero off|read|edit|apply]
           copy the pristine corpus read-only, record its SHA-256 manifest, and
           create pipeline_config.json + state.json (no sandboxes are built yet).
+          --venue selects the VENUE PROFILE whose submission rules every stage
+          enforces (default: nature-biotechnology, this pipeline's pre-venue
+          behaviour). A venue is a RULE SET, not a journal: `--journal NAME`
+          names the publication the manuscript goes to, as free text. Both are
+          recorded in pipeline_config.json (with a snapshot of the resolved
+          profile), can be changed later with `set-venue <id>` /
+          `set-journal <name>`, and are reported by `status`. `set-venue
+          --list` lists the profiles this pipeline can see; a profile is a JSON
+          document under <root>/venue_profiles/ (or venue_profiles/ next to
+          the script), installed with `set-venue <id> --profile FILE`. A root
+          created before this feature keeps working: no `venue` key means the
+          default venue, with a note. `--strict-venue` refuses to start when
+          the venue is unknown, the journal is missing, or the journal does not
+          belong to the selected venue.
           --rewrites M and --revises N plan each round's candidate pool: M
           REWRITTEN candidates (staged first, from the round's base) and N
           REVIEWED-AND-THEN-REVISED candidates (one $nbt-review pass per round
@@ -22515,13 +23996,13 @@ USAGE_EXAMPLES = """usage:
           round's integrations are only restricted when you say so; 0x0 runs no
           integration at all.
           --caption-limit sets the pipeline's PROXY cap for figure-legend
-          length (check id M18; e.g. 300; default 0 = no cap). The journal
-          requires that a legend not exceed the word limit of the article type
-          but publishes no number, so every legend's word count is ALWAYS
-          enumerated: with a cap an over-cap legend is a reported (never
-          enforced) formatting item; with 0 the counts are recorded for you to
-          compare with the journal's limit. Legend length never makes a
-          version ineligible, reorders a ranking or fails a decision.
+          length (check id M18; e.g. 300; default: the venue profile's own
+          default, 0 for a venue that publishes no legend number). Every
+          legend's word count is ALWAYS enumerated: with a cap an over-cap
+          legend is a reported (never enforced) formatting item; with 0 the
+          counts are recorded for you to compare with the venue's own limit.
+          Legend length never makes a version ineligible, reorders a ranking or
+          fails a decision.
           --zotero is the reference-tooling policy for every agent session
           (off|read|edit|apply; default edit). off never runs the `zot` CLI
           (pyzotero-cli); read resolves and verifies references only; edit also
@@ -22532,15 +24013,18 @@ USAGE_EXAMPLES = """usage:
           writes to your remote Zotero account and is never the default. No
           mode creates or deletes library items, and the review, rewrite and
           judge sessions can never write.
-          Abstract and main-text length are NOT exempt: the journal's Article
-          limits (abstract <= 150 words; main text <= 3,000 words excluding
-          abstract, Methods, references and figure legends) apply in their
-          relaxed form (+15% -> <= 172 words; +25% -> <= 3,750 words), with
-          words counted as runs of non-space characters and a newline treated
-          as space. Check id M19 is always active: the review enumerates and
+          Abstract and main-text length are NOT exempt: the VENUE PROFILE's
+          own limits apply in their relaxed form (for the default
+          nature-biotechnology Article: abstract <= 150 words and main text
+          <= 3,000 words excluding abstract, Methods, references and figure
+          legends, relaxed by +15% -> <= 172 and +25% -> <= 3,750), with words
+          counted as runs of non-space characters and a newline treated as
+          space. Check id M19 is always active: the review enumerates and
           reports, the revision/integration stages compress by removing
           redundancy only, and length is a formatting-tier item that never
-          gates a version.
+          gates a version. A venue profile that states no limit (the shipped
+          `generic` one) still enumerates the counts and names the limit the
+          target journal's own guidelines give.
   run     --root <dir> [--jobs N] [--timeout S] [--retries 2]
           [--retry-backoff 30] [--retry-backoff-max 600]
           [--agent codex|claude|manual] [--agent-cmd '<json argv>']
@@ -22588,6 +24072,22 @@ USAGE_EXAMPLES = """usage:
           `nbt_pipeline.py setup --source <root>/final_clean_version`.
   status  --root <dir>
           integrity, per-round progress and the per-run table.
+          It also prints the venue, the journal and the resolved length limits.
+  set-venue --root <dir> <venue-id> [--journal NAME] [--force]
+          select the venue profile this root enforces (a RULE SET, not a
+          journal) and, optionally, the journal: both are written to
+          pipeline_config.json and mirrored into state.json. `set-venue --list`
+          lists the venues this pipeline can see; `set-venue --profile FILE`
+          installs a profile of your own into <root>/venue_profiles/ and
+          selects it; `set-venue --show` prints the current setting. Changing
+          the venue of a root that already has run records needs --force,
+          because the recorded rounds were judged under the previous rule set.
+  set-journal --root <dir> <name> [--force]
+          set the target journal (free text, e.g. "Nature Biotechnology" or
+          "Cell"). The journal names the submission the prompts work on and is
+          checked against the venue profile's own journal list; it selects no
+          rule set by itself. `setup --venue/--journal` sets both at creation
+          time.
   agents  --root <dir> [--only SELECTION] [--pending] [--json]
           list the AGENT SESSION NAMES every round will run, without starting
           anything: the base copy, each rewrite, the review (A and, with
@@ -22733,7 +24233,10 @@ completion signals (never a bare non-empty output directory):
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="nbt_pipeline.py",
-        description="Round-based iterative revision pipeline for an NBT manuscript: R fixed "
+        description="Round-based iterative revision pipeline for a manuscript submitted to ANY "
+                    "venue or journal: the rule set comes from a configurable VENUE PROFILE "
+                    "(`set-venue`, `setup --venue`), the target journal is the free-text "
+                    "`set-journal` value, and no stage hard-codes Nature Biotechnology. R fixed "
                     "rounds (default 2), M REWRITTEN candidates staged first in every round, N "
                     "reviewed-and-then-revised candidates from one shared review pass, one "
                     "INTEGRATION run per pool member (each reworking it with the whole pool as "
@@ -22748,10 +24251,27 @@ def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--root", default=DEFAULTS["root"],
                         help=f"pipeline root directory (default: {DEFAULTS['root']})")
+    common.add_argument("--strict-venue", action="store_true",
+                        help="refuse to run when the root's venue/journal configuration is "
+                             "missing or inconsistent (default: report it and continue). An "
+                             "unknown venue id is always an error")
 
     ps = sub.add_parser("setup", parents=[common], help="initialize the pipeline root")
     ps.add_argument("--source", required=True,
                     help="path to your pristine 'non_revised' manuscript directory")
+    ps.add_argument("--venue", default=None, metavar="ID",
+                    help=f"the venue profile whose submission rules every stage enforces "
+                         f"(`set-venue --list` shows the shipped and installed ids; "
+                         f"{', '.join(sorted(BUILTIN_VENUE_PROFILES))} are always available). "
+                         f"Default: "
+                         f"{DEFAULTS['venue']} -- this pipeline's pre-venue behaviour, kept as "
+                         f"the default for backward compatibility. A venue is a RULE SET, not a "
+                         f"journal: `--journal` names the publication the manuscript goes to")
+    ps.add_argument("--journal", default=None, metavar="NAME",
+                    help="the target journal as free text (e.g. \"Nature Biotechnology\", "
+                         "\"Cell\"); the prompts name it and the venue profile is checked "
+                         "against it. Default: the venue profile's own default journal, or "
+                         "unset (the prompts then say \"the target journal\")")
     ps.add_argument("--rounds", type=int, default=DEFAULTS["rounds"],
                     help=f"number of fixed rounds (default: {DEFAULTS['rounds']}); the round-R "
                          f"champion is the answer")
@@ -22790,16 +24310,16 @@ def build_parser() -> argparse.ArgumentParser:
                          f"integer or a comma-separated list, with the same rules as --rewrites "
                          f"(default: {','.join(str(x) for x in DEFAULTS['revises'])}). One "
                          f"$nbt-review pass per round feeds all N $nbt-revise sessions")
-    ps.add_argument("--caption-limit", type=int, default=DEFAULT_CAPTION_LIMIT,
+    ps.add_argument("--caption-limit", type=int, default=None,
                     help=f"the pipeline's PROXY cap for figure-legend length (check id M18; "
-                         f"default {DEFAULT_CAPTION_LIMIT} = no cap, e.g. "
-                         f"{FIGURE_CAPTION_WORD_LIMIT}). Nature Biotechnology requires that a "
-                         f"legend not exceed the word limit of the article type but publishes no "
-                         f"number, so every legend's word count is ALWAYS enumerated; with a cap "
-                         f"an over-cap legend is a reported (never enforced) formatting item, and "
-                         f"with 0 the counts are recorded for you to compare with the journal's "
-                         f"limit. Legend length can never make a version ineligible or fail a "
-                         f"decision")
+                         f"default: the venue profile's own default -- {DEFAULT_CAPTION_LIMIT} = "
+                         f"no cap for a venue that publishes no legend number, or the venue's "
+                         f"published limit when its profile carries one; e.g. "
+                         f"{FIGURE_CAPTION_WORD_LIMIT}). Every legend's word count is ALWAYS "
+                         f"enumerated; with a cap an over-cap legend is a reported (never "
+                         f"enforced) formatting item, and with 0 the counts are recorded for "
+                         f"you to compare with the venue's own limit. Legend length can never "
+                         f"make a version ineligible or fail a decision")
     ps.add_argument("--vs-original-rule", choices=("median", "sign"), default=VS_ORIGINAL_RULE,
                     help="the anti-regression gate's decision rule: 'median' (default) makes a "
                          "fresh arm with a negative vs_original median ineligible; 'sign' fails "
@@ -23046,6 +24566,42 @@ def build_parser() -> argparse.ArgumentParser:
                         help="recompute rounds, verify pins, write the decision report and "
                              "publish <root>/final_clean_version/")
     pd.set_defaults(func=cmd_decide)
+
+    psv = sub.add_parser("set-venue", parents=[common],
+                         help="select the venue profile this root enforces (a rule set, not a "
+                              "journal) and optionally the journal")
+    psv.add_argument("venue", nargs="?", default=None, metavar="VENUE",
+                     help="venue profile id, e.g. nature-biotechnology, generic, or an id you "
+                          "installed with --profile (`set-venue --list` shows them)")
+    psv.add_argument("--journal", default=None, metavar="NAME",
+                     help="also set the target journal, atomically with the venue change")
+    psv.add_argument("--profile", default=None, metavar="FILE",
+                     help=f"install a venue profile JSON into "
+                          f"<root>/{VENUE_PROFILES_DIRNAME}/<id>{VENUE_PROFILE_SUFFIX} and select "
+                          f"it; the profile's own 'id' must match <VENUE>")
+    psv.add_argument("--list", action="store_true",
+                     help="list every venue this pipeline can see (root-local, shipped, "
+                          "built-in) and exit")
+    psv.add_argument("--show", action="store_true",
+                     help="print the root's current venue, journal and resolved limits and exit")
+    psv.add_argument("--json", action="store_true",
+                     help="with --list/--show: machine-readable output")
+    psv.add_argument("--force", action="store_true",
+                     help="change the venue although this root already has run records (the "
+                          "recorded rounds were judged under the previous rule set)")
+    psv.set_defaults(func=cmd_set_venue)
+
+    psj = sub.add_parser("set-journal", parents=[common],
+                         help="set the target journal (free text; selects no rule set by itself)")
+    psj.add_argument("journal", nargs="?", default=None, metavar="NAME",
+                     help="the target journal, e.g. \"Nature Biotechnology\" or \"Cell\"")
+    psj.add_argument("--show", action="store_true",
+                     help="print the root's current venue, journal and resolved limits and exit")
+    psj.add_argument("--json", action="store_true",
+                     help="with --show: machine-readable output")
+    psj.add_argument("--force", action="store_true",
+                     help="change the journal although this root already has run records")
+    psj.set_defaults(func=cmd_set_journal)
 
     prt = sub.add_parser("retry", parents=[common],
                          help="rebuild a failed/stale run's sandbox and reset it")

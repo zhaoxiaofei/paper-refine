@@ -3,7 +3,12 @@ name: nbt-revise
 description: Apply validated review findings to a manuscript package — targeted revisions in a revised/ copy while originals stay read-only. Re-verifies every finding against the source, plans and applies precise edits with cross-document consistency propagation, validates by diff and a full mechanical rescan, and reports precise manual steps for whatever cannot be safely automated. Use this skill whenever the user asks to fix, revise, address, apply, or correct the findings/issues/problems from a review — especially after the nbt-review skill (identify_issues) produced findings.md / findings.json. Also trigger on "address the issues you found", "apply the findings", "make the revisions", "adress_issues".
 ---
 
-# NBT Targeted Revision — adress_issues
+# Targeted Revision — adress_issues
+
+**Target venue and journal (configurable).** The venv-independent rule set comes from the
+pipeline's venue profile (`venue_profiles/<id>.json`, selected with `set-venue`) and the journal
+from `set-journal`; Nature Biotechnology is only the default profile. Numbers quoted below are
+that default's -- use the profile of the run you are in.
 
 ## Paths
 
@@ -15,7 +20,7 @@ description: Apply validated review findings to a manuscript package — targete
 - `ZOTERO_SKILL` = `/mnt/d/software/plugins/plugins/zotero/skills/zotero/scripts/zotero.py` (override or absent → manual instructions)
 - `ZOT_CLI` = `zot` (pyzotero-cli) and the `$zotero-use` skill — reference resolution and, under the operator's Zotero policy, guarded citation-field edits (rule E2)
 
-If both findings files are missing AND no findings are in the current conversation: **STOP and ask the user to run nbt-review (identify_issues) first.** Explicit paths the user gives override defaults. All output in English. Length rules inherited from the review (check id M19): the journal's limits apply relaxed by fixed margins — for an NBT Article, abstract ≤ 172 words (150 +15%) and main text ≤ 3,750 words (3,000 +25%, excluding abstract, Methods, references and figure legends); an over-cap section is brought within the cap by removing redundancy, hedging and repeated statistics ONLY, never by deleting scientific content, and text within the cap is never cut for length. An incompressible section goes to MANUAL_STEPS.md. The cover letter's persuading part is measured against the master prompt's own 300-500-word preference (NBT publishes no cover-letter limit) and is a Minor formatting item; figure-legend word counts (M18) are recorded but never cut when no proxy cap is configured.
+If both findings files are missing AND no findings are in the current conversation: **STOP and ask the user to run nbt-review (identify_issues) first.** Explicit paths the user gives override defaults. All output in English. Length rules inherited from the review (check id M19): the VENUE PROFILE's limits apply relaxed by the profile's own margins — for the default nature-biotechnology Article profile, abstract ≤ 172 words (150 +15%) and main text ≤ 3,750 words (3,000 +25%, excluding abstract, Methods, references and figure legends); another profile replaces these numbers (they are stated in the prompt of the run, and in `venue_profiles/<id>.json`): an over-cap section is brought within the cap by removing redundancy, hedging and repeated statistics ONLY, never by deleting scientific content, and text within the cap is never cut for length. An incompressible section goes to MANUAL_STEPS.md. The cover letter's persuading part is measured against the user's configured 300-500-word preference (the default profile's venue publishes no cover-letter limit) and is a Minor formatting item; figure-legend word counts (M18) are recorded but never cut when no proxy cap is configured.
 
 ## Mission
 

@@ -14,8 +14,9 @@ untouched text. The A7 diff log must show this — unmapped hunks get reverted.
 **Scoped exception — M19 length compression.** An abstract or main text over
 the pipeline's relaxed caps (abstract ≤ 172 words = 150 +15%; main text ≤ 3,750
 words = 3,000 +25%, excluding abstract, Methods, references and figure legends,
-for an NBT Article; another content type uses its own base numbers with the
-same margins) is brought within the cap by removing redundancy, hedging and
+for the default Nature Biotechnology Article profile; another content type uses
+its own base numbers with the same margins, and another venue profile carries
+the numbers its own guidelines state) is brought within the cap by removing redundancy, hedging and
 repeated statistics ONLY. Never delete scientific content, claims, limitations,
 data, accession numbers or needed methodological detail, and never cut text
 that is already within the cap for length reasons. Words are maximal runs of
@@ -24,8 +25,8 @@ non-space characters with a newline treated as space; count with
 compression in the A7 diff log and in CHANGELOG.md under check id M19. A
 section that cannot be brought within the cap without losing content is left as
 it is and handed to MANUAL_STEPS.md. The cover letter's PERSUADING part follows
-the master prompt's own 300-500-word preference (NBT's official guidance states
-no cover-letter word limit, checked 2026-09-19): bring it into the range by
+the user's configured 300-500-word preference (the default profile's venue
+states no cover-letter word limit, checked 2026-09-19): bring it into the range by
 removing redundancy only, label it as the user's preference rather than a
 journal requirement, and never delete content to reach it. Figure legends
 (check id M18) are always counted: with no proxy cap configured, record the

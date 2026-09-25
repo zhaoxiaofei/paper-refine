@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.8 — any venue, any journal (2026-09-25)
+
+The skills no longer assume Nature Biotechnology. `nbt_pipeline.py` gained a
+configured VENUE (a rule set, selected with `set-venue <id>` / `setup --venue`)
+and JOURNAL (`set-journal <name>`), both recorded in the root's
+`pipeline_config.json` and mirrored into `state.json`; the venue's numbers live
+in `venue_profiles/<id>.json` (schema and worked examples in
+`venue_profiles/README.md`). Nature Biotechnology stays the DEFAULT profile, so
+every number quoted in these skills is still the default's.
+
+What changed here:
+
+- both SKILL.md files and both standalone prompts state the venue/journal rule
+  up front and read their limits, provenance and guidelines source from the
+  profile of the run instead of asserting Nature Biotechnology;
+- `references/sweeps.md` M18/M19 now say "the target venue's" rule, with the
+  Nature Biotechnology numbers marked as the default profile's, and M5/M13 stay
+  the default profile's requirement list (a custom profile is authoritative
+  when the pipeline runs the skill);
+- `nbt-review/scripts/count_words.py` gained `--venue-profile FILE`: the caps,
+  the margins and the cover-letter preference come from the profile, and a
+  profile that declares no limit yields counts with `cap: null` (never "over
+  the cap");
+- the journal hits that remain in these files are examples or the default
+  profile's own provenance, and the pipeline's prompts name the configured
+  journal/venue instead.
+
 ## 0.7 — content-hash version tokens (2026-09-19)
 
 The operator replaced the letter/digit version-token increment with a

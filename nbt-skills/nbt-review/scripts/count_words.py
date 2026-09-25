@@ -7,6 +7,7 @@ treated as space, so `state-of-the-art` is ONE word and `2026` is ONE word.
 
     python3 count_words.py FILE [FILE ...] [--section whole|abstract|main-text|cover-letter|auto]
                                 [--json] [--base-abstract N] [--base-main-text N]
+                                [--venue-profile venue_profiles/<id>.json]
 
 `auto` (the default) reports the abstract and the main text when the document
 has a manuscript shape (an "Abstract" heading, or an Introduction/Main-text
@@ -18,9 +19,14 @@ sources are read as LaTeX: the abstract environment's own `\end{abstract}` ends
 the abstract (paragraph breaks inside it do not), and `\caption`/`\captionof`
 text is a legend even though its "Figure N" label is added at typesetting time.
 
-The default caps are the pipeline's relaxed NBT Article caps: abstract <= 172
-words (150 +15%) and main text <= 3,750 words (3,000 +25%). Use --base-abstract
-/ --base-main-text with another content type's numbers; the margins stay.
+The default caps are the relaxed limits of the pipeline's DEFAULT venue profile
+(nature-biotechnology Article): abstract <= 172 words (150 +15%) and main text
+<= 3,750 words (3,000 +25%). Pass `--venue-profile venue_profiles/<id>.json`
+to read the base, the margins and the cover-letter preference from the profile
+the run is configured with (the pipeline's prompts state the same numbers), or
+`--base-abstract` / `--base-main-text` for another content type's numbers with
+the default margins. A profile that declares no limit produces counts with no
+cap (`cap: null`, never "over the cap").
 """
 from __future__ import annotations
 
@@ -345,10 +351,43 @@ def main(argv=None) -> int:
                     default="auto")
     ap.add_argument("--base-abstract", type=int, default=150)
     ap.add_argument("--base-main-text", type=int, default=3000)
+    ap.add_argument("--venue-profile", metavar="FILE",
+                    help="venue profile JSON (venue_profiles/<id>.json): take the abstract/"
+                         "main-text base and margins and the cover-letter preference from it")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
-    caps = {"abstract": lenient_cap(args.base_abstract, ABSTRACT_RELAXATION),
-            "main text": lenient_cap(args.base_main_text, MAIN_TEXT_RELAXATION)}
+    base_abstract, base_main = args.base_abstract, args.base_main_text
+    rel_abstract, rel_main = ABSTRACT_RELAXATION, MAIN_TEXT_RELAXATION
+    cover_min, cover_max = COVER_LETTER_MIN, COVER_LETTER_MAX
+    venue = "nature-biotechnology (the default profile)"
+    if args.venue_profile:
+        try:
+            profile = json.loads(Path(args.venue_profile).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            print(f"error: cannot read --venue-profile {args.venue_profile}: {e}",
+                  file=sys.stderr)
+            return 2
+        limits = (profile or {}).get("length_limits") or {}
+        venue = str((profile or {}).get("id") or args.venue_profile)
+
+        def _limit(key, default_base, default_relaxation):
+            spec = limits.get(key) or {}
+            base = spec.get("base", default_base)
+            relaxation = spec.get("relaxation", default_relaxation)
+            return base, (None if relaxation is None else float(relaxation))
+
+        base_abstract, rel_abstract = _limit("abstract", base_abstract, rel_abstract)
+        base_main, rel_main = _limit("main_text", base_main, rel_main)
+        cover = limits.get("cover_letter") or {}
+        cover_min = cover.get("min", cover_min)
+        cover_max = cover.get("max", cover_max)
+        if len((profile or {}).get("length_limits") or {}) == 0 and "description" in (profile or {}):
+            print(f"note: {args.venue_profile} carries no length_limits; using the default caps",
+                  file=sys.stderr)
+    caps = {"abstract": (lenient_cap(base_abstract, rel_abstract)
+                         if base_abstract is not None and rel_abstract is not None else None),
+            "main text": (lenient_cap(base_main, rel_main)
+                          if base_main is not None and rel_main is not None else None)}
     out, failed = [], False
     for name in args.files:
         p = Path(name)
@@ -372,8 +411,10 @@ def main(argv=None) -> int:
                     if args.section == "whole" else sections(text))
         if (args.section in ("auto", "cover-letter")) and is_cover_letter(text, p.name):
             rows = [("cover letter", cover_letter_words(text),
-                     f"persuading part only; the {COVER_LETTER_MIN}-{COVER_LETTER_MAX}-word range "
-                     f"is the user's preference, not an NBT limit")]
+                     (f"persuading part only; the {cover_min}-{cover_max}-word range is the "
+                      f"user's preference, not a venue limit" if cover_min is not None else
+                      "persuading part only; this venue profile configures no cover-letter "
+                      "preference"))]
         elif args.section == "cover-letter":
             # Never answer a cover-letter request with silence: an empty rows
             # list is indistinguishable from a crashed/ignored run.
@@ -392,19 +433,23 @@ def main(argv=None) -> int:
             row = {"file": str(p), "section": section, "words": words, "cap": cap,
                    "over_limit": bool(cap and words > cap), "note": note}
             if section == "cover letter":
-                row["min"] = COVER_LETTER_MIN
-                row["max"] = COVER_LETTER_MAX
-                row["within_preference"] = COVER_LETTER_MIN <= words <= COVER_LETTER_MAX
+                row["min"] = cover_min
+                row["max"] = cover_max
+                row["within_preference"] = (cover_min is None or cover_max is None
+                                            or cover_min <= words <= cover_max)
                 row["over_limit"] = False                 # the preference is not a cap
             keep.append(row)
         out.extend(keep)
     if args.json:
         print(json.dumps({"caps": caps, "rows": out}, indent=2))
     else:
-        print(f"caps: abstract <= {caps['abstract']} words, main text <= {caps['main text']} "
-              f"words; cover letter {COVER_LETTER_MIN}-{COVER_LETTER_MAX} words in the persuading "
-              f"part (user preference; NBT states no cover-letter limit) -- words = non-space "
-              f"runs, newline = space")
+        cap_text = (f"abstract <= {caps['abstract']} words, main text <= {caps['main text']} "
+                    f"words" if caps["abstract"] is not None and caps["main text"] is not None
+                    else "no abstract/main-text cap configured (counts recorded)")
+        print(f"venue: {venue}; caps: {cap_text}; cover letter "
+              + (f"{cover_min}-{cover_max} words in the persuading part (user preference)"
+                 if cover_min is not None else "no preference configured")
+              + " -- words = non-space runs, newline = space")
         for r in out:
             mark = ("OUTSIDE-PREFERENCE" if r["section"] == "cover letter"
                     and not r.get("within_preference") else

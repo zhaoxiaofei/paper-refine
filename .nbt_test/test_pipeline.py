@@ -91,7 +91,14 @@ def test_prompts():
     # parser default
     parser = np.build_parser()
     args = parser.parse_args(["setup", "--source", "/tmp"])
-    check("setup --caption-limit defaults to 0", args.caption_limit == 0, str(args.caption_limit))
+    # The cap now comes from the VENUE PROFILE when the operator does not choose
+    # one: unset on the command line, 0 for the default profile (a venue whose
+    # profile publishes a legend limit would get that number instead).
+    check("setup --caption-limit is unset by default (the venue profile decides)",
+          args.caption_limit is None, str(args.caption_limit))
+    check("... and the default venue profile's own default is still 'no cap'",
+          np.default_venue_profile().caption_default == np.DEFAULT_CAPTION_LIMIT == 0,
+          str(np.default_venue_profile().caption_default))
     # SPLIT REVIEW: two scoped sessions, distinct id namespaces, one merged list
     a = np.review_prompt(sb, "r1_review", 1, split="a", split_mode="phases")
     b = np.review_prompt(sb, "r1_review_b", 1, split="b", split_mode="phases")
