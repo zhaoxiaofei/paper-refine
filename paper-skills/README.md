@@ -20,6 +20,12 @@ SUBMISSION_DIR ──► review/findings.{md,json} ──► revised/ package
                 (checklist growth loop)          + REVISION_REPORT.md
 ```
 
+Run inside this repository's round-based pipeline (`paper_pipeline.py`), those
+two steps are arms of a larger round — the round base, M rewrites, ONE review,
+N revises, K integrations and a blind judge panel that pins the champion. That
+round is drawn in `media/paper-refine-one-revision-round.png`, which `README.md`
+embeds.
+
 ## Installation (Codex CLI)
 
 ```bash

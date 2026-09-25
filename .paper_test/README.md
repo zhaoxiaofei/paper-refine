@@ -5,6 +5,10 @@ Self-contained repro/regression suites for `paper_pipeline.py`,
 Python 3 (standard library) and take a few seconds each; every suite prints one
 `[ok ]`/`[FAIL]` line per check and exits non-zero if any check fails.
 
+The round the suites exercise — base, rewrites, review, revises, integrations,
+judging, pinning — is diagrammed in
+[`../media/paper-refine-one-revision-round.png`](../media/paper-refine-one-revision-round.png).
+
 ## Running them
 
 The suites are independent (each builds its own root under `tempfile.mkdtemp`,

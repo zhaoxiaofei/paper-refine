@@ -3,7 +3,11 @@
 This repository is a **venue-agnostic** round-based manuscript revision
 pipeline. Read this before changing anything; it is the short version of
 `README.md` for an agent (or a human) editing the code, plus the rules that keep
-the pipeline from drifting back to a single journal.
+the pipeline from drifting back to a single journal. One revision round —
+the read-only manuscript, the round base, the two arms, the integration and the
+blind judge panel — is drawn in `media/paper-refine-one-revision-round.png`
+(`README.md` embeds the image; the `.pdf` render and the `.pptx` source beside
+it are local artefacts, not committed).
 
 ## What the pieces are
 
@@ -14,6 +18,7 @@ the pipeline from drifting back to a single journal.
 | `paper_redlines_adapter.py` | optional tracked-changes `.docx` bridge. |
 | `venue_profiles/` | the venue profiles (the submission rule sets) **and their schema documentation** — start at `venue_profiles/README.md`. |
 | `paper-skills/` | the bundled `paper-review` / `paper-revise` skill packages and the two master prompts. |
+| `media/` | the figures the docs embed: `paper-refine-one-revision-round.png`, one revision round. |
 | `.paper_test/` | the offline regression suites (stub agents; no network). |
 
 ## Venue vs journal — the rule that matters here

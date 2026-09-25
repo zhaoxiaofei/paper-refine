@@ -1,5 +1,12 @@
 # Round-based revision pipeline (any venue or journal)
 
+[![One revision round: the read-only manuscript, the round base, the directed-evolution and large-scale-mutation arms, the cross-over integration and the blind judge panel](media/paper-refine-one-revision-round.png)](media/paper-refine-one-revision-round.png)
+
+*One revision round — the read-only manuscript, the round's base `a1`, the
+directed-evolution (review/audit/revise) and large-scale-mutation (rewrite) arms,
+the cross-over integration, and the blind judge panel that pins the champion by
+digest ([PNG](media/paper-refine-one-revision-round.png)).*
+
 `paper_pipeline.py` drives a **round-based, content-addressed revision loop** for a
 manuscript package submitted to **any venue or journal**. The submission rules
 the stages enforce come from a configurable **venue profile** (`set-venue`,
@@ -304,6 +311,11 @@ still recorded in `decision.json` and printed — never silently dropped.
 
 For every round `r` the plan is `A1_r + M rewrites + 1 review + N revises +
 K = 1+M+N integrations + the judge panel`:
+
+The round is also drawn as a diagram —
+[`media/paper-refine-one-revision-round.png`](media/paper-refine-one-revision-round.png)
+(shown at the top of this README); the table below is the text version of its
+boxes.
 
 | stage | id(s) | what it does |
 |---|---|---|
@@ -1107,6 +1119,7 @@ its four integration runs never started.
 | `mcp-docx-converter/` | the `docx-converter` MCP tool used as the first-choice renderer |
 | `paper-skills/` | the bundled review (`paper-review`) and revision (`paper-revise`) skills + prompts |
 | `venue_profiles/` | the venue profiles (the submission rule sets) + their schema documentation |
+| `media/` | the figures the docs embed — `paper-refine-one-revision-round.png` (shown above) |
 | `.paper_test/` | the offline regression suites (stub agents; no network) |
 
 ## Tests

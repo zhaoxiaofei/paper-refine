@@ -12,6 +12,12 @@ cnb-v06c/
 */*.run.xml
 */*.synctex.gz
 
+# `media/` commits the PNG figures the docs embed (README.md, AGENT.md, ...); a
+# local `.pdf` render beside them stays ignored by the rule above.
+
+# Windows/WSL "downloaded from the internet" marker files (`name:Zone.Identifier`)
+*:Zone.Identifier
+
 # Python bytecode from running the .paper_test/ and paper-skills/tests/ harnesses
 __pycache__/
 *.pyc
