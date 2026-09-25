@@ -44,7 +44,7 @@ In this order, first match wins:
 2. `<script dir>/venue_profiles/<id>.json` — shipped with the pipeline copy
    that is running (`setup` copies this directory into the root, so a
    self-contained root has both);
-3. the built-in fallback inside `nbt_pipeline.py` (`nature-biotechnology` and
+3. the built-in fallback inside `paper_pipeline.py` (`nature-biotechnology` and
    `generic`), so a single-file copy of the script still runs.
 
 The **snapshot in `pipeline_config.json` wins over all three** for a root that
@@ -153,9 +153,9 @@ pipeline needs is data:
 Install the second one with:
 
 ```bash
-python nbt_pipeline.py set-venue custom-clin-journal --profile custom-clin-journal.json
-python nbt_pipeline.py set-journal "Custom Clinical Journal"
-python nbt_pipeline.py status   # venue, journal and the resolved limits
+python paper_pipeline.py set-venue custom-clin-journal --profile custom-clin-journal.json
+python paper_pipeline.py set-journal "Custom Clinical Journal"
+python paper_pipeline.py status   # venue, journal and the resolved limits
 ```
 
 The promoted numbers become the M19 caps (250 * 1.1 = 275; 4000 * 1.1 = 4400)
@@ -175,12 +175,12 @@ is set. The M18/M19 artifacts and the decision report quote
 4. Install and select it:
 
    ```bash
-   python nbt_pipeline.py set-venue <id> --profile <your-id>.json
+   python paper_pipeline.py set-venue <id> --profile <your-id>.json
    ```
 
    (This writes it into `<root>/venue_profiles/`, where it wins over the
    shipped copy and travels with the root.)
-5. `python nbt_pipeline.py set-venue --show` prints the resolved venue,
+5. `python paper_pipeline.py set-venue --show` prints the resolved venue,
    journal, limits and any configuration problem.
 
 ## What the pipeline does when something is missing or inconsistent

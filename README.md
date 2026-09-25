@@ -1,6 +1,6 @@
 # Round-based revision pipeline (any venue or journal)
 
-`nbt_pipeline.py` drives a **round-based, content-addressed revision loop** for a
+`paper_pipeline.py` drives a **round-based, content-addressed revision loop** for a
 manuscript package submitted to **any venue or journal**. The submission rules
 the stages enforce come from a configurable **venue profile** (`set-venue`,
 `setup --venue`), and the target journal is the free-text `set-journal` value —
@@ -13,11 +13,11 @@ and a clean, ready-to-use package.
 
 The repository also carries the two companion tools the pipeline uses:
 
-* **`nbt_docx_format.py`** — the code-side OOXML style/formatting scanner and
+* **`paper_docx_format.py`** — the code-side OOXML style/formatting scanner and
   normalizer (blank pages, running head on the title page, legend spacing,
   heading style drift, unintended italics, URL/email treatment, quotation
   marks, em-dash density).
-* **`nbt_redlines_adapter.py`** — the tracked-changes bridge to
+* **`paper_redlines_adapter.py`** — the tracked-changes bridge to
   `python-redlines[docxodus]` (or `docx-trackdiff`).
 
 ## Requirements
@@ -34,21 +34,21 @@ The repository also carries the two companion tools the pipeline uses:
 
 ```bash
 # 1. create a pipeline root from the pristine submission directory
-python nbt_pipeline.py setup --source /path/to/non_revised --root ./nbt_rounds
+python paper_pipeline.py setup --source /path/to/non_revised --root ./paper_rounds
 #    ... for another venue/journal:
-python nbt_pipeline.py setup --source /path/to/non_revised --root ./nbt_rounds \
+python paper_pipeline.py setup --source /path/to/non_revised --root ./paper_rounds \
         --venue generic --journal "Journal Name"
 
 # 2. run all rounds and decide (or run + decide as separate steps)
-python nbt_pipeline.py run-decide --root ./nbt_rounds
-#   python nbt_pipeline.py run    --root ./nbt_rounds
-#   python nbt_pipeline.py decide --root ./nbt_rounds
+python paper_pipeline.py run-decide --root ./paper_rounds
+#   python paper_pipeline.py run    --root ./paper_rounds
+#   python paper_pipeline.py decide --root ./paper_rounds
 
 # 3. inspect
-#   ./nbt_rounds/reports/DECISION_REPORT.md
-#   ./nbt_rounds/reports/decision.json
-#   ./nbt_rounds/round<r>_winner/          the champion of each round
-#   ./nbt_rounds/final_clean_version/      the champion, renamed for the next run
+#   ./paper_rounds/reports/DECISION_REPORT.md
+#   ./paper_rounds/reports/decision.json
+#   ./paper_rounds/round<r>_winner/          the champion of each round
+#   ./paper_rounds/final_clean_version/      the champion, renamed for the next run
 ```
 
 ## Venues and journals
@@ -69,14 +69,14 @@ submission:
   itself.
 
 ```bash
-python nbt_pipeline.py set-venue --list                # venues this pipeline can see
-python nbt_pipeline.py set-venue generic               # switch the rule set (needs an existing root)
-python nbt_pipeline.py set-venue --journal "Cell"      # ... and the journal, atomically
-python nbt_pipeline.py set-venue my-journal --profile my-journal.json   # install a profile of your own
-python nbt_pipeline.py set-journal "Cell"              # change only the journal
-python nbt_pipeline.py set-venue --show                # current venue, journal, resolved limits
-python nbt_pipeline.py set-venue --show --json         # the same, machine-readable
-python nbt_pipeline.py status --root ./nbt_rounds      # prints venue, journal and limits too
+python paper_pipeline.py set-venue --list                # venues this pipeline can see
+python paper_pipeline.py set-venue generic               # switch the rule set (needs an existing root)
+python paper_pipeline.py set-venue --journal "Cell"      # ... and the journal, atomically
+python paper_pipeline.py set-venue my-journal --profile my-journal.json   # install a profile of your own
+python paper_pipeline.py set-journal "Cell"              # change only the journal
+python paper_pipeline.py set-venue --show                # current venue, journal, resolved limits
+python paper_pipeline.py set-venue --show --json         # the same, machine-readable
+python paper_pipeline.py status --root ./paper_rounds      # prints venue, journal and limits too
 ```
 
 **Storage and precedence.** `setup` writes `venue`, `journal` and a snapshot of
@@ -87,7 +87,7 @@ Resolution order, highest first:
 1. the flags of the command being run (`setup --venue/--journal`);
 2. `<root>/pipeline_config.json` (the authoritative record for the root);
 3. `<root>/venue_profiles/<id>.json`, then the profiles shipped next to the
-   script, then the built-in fallback inside `nbt_pipeline.py` — for a root that
+   script, then the built-in fallback inside `paper_pipeline.py` — for a root that
    has not recorded a snapshot yet;
 4. the profile's `default_journal` when no journal is recorded;
 5. the built-in default venue `nature-biotechnology` when no venue is recorded
@@ -144,8 +144,8 @@ numbers with the ones your venue's own guidelines state, quote the source in
 `length_limits.source`/`captions.source`, and install it:
 
 ```bash
-python nbt_pipeline.py set-venue custom-clin-journal --profile custom-clin-journal.json
-python nbt_pipeline.py set-journal "Custom Clinical Journal"
+python paper_pipeline.py set-venue custom-clin-journal --profile custom-clin-journal.json
+python paper_pipeline.py set-journal "Custom Clinical Journal"
 ```
 
 Leaving a limit `null` is supported and meaningful: the stages then count the
@@ -268,7 +268,7 @@ K = 1+M+N integrations + the judge panel`:
 |---|---|---|
 | `a1` | `r<r>_a1` | the round's base: round 1 is the pristine copy, later rounds the previous champion (no agent) |
 | `rewrite` | `r<r>_w1…wM` | full alternative versions with a **declared level**: odd arms are `structural` (organization-level, reported in `## ORGANIZATION MAP`), even arms are `sentence` (same organization, prose-level). With M≥2 the round therefore carries BOTH kinds of difference for the integration stage to weigh |
-| `review` | `r<r>_review` | ONE frozen identification pass (`$nbt-review`) that feeds every revise session |
+| `review` | `r<r>_review` | ONE frozen identification pass (`$paper-review`) that feeds every revise session |
 | `audit` | `r<r>_audit` | **optional** (`setup --audit on`): an INDEPENDENT AUDITOR between the reviewer and the revisers — it disposes every frozen finding (confirm, or drop WITH evidence), promotes the reviewer's boilerplate `OK` closures of finding-tier rows into real `AU-*` findings, and hands the AUDITED list to the revision arms |
 | `revise` | `r<r>_a2…a{1+N}` | reviewed-and-revised versions that consume the frozen review (or the audited list, when the auditor ran) |
 | `integrate` | `r<r>_i1…iK` | "merge from the other versions": every pool member SELECTED by the round's `--integrators` mask reworked with the WHOLE pool as donors (the default mask 0xFFFFFFFF selects all K = 1+M+N members) |
@@ -376,22 +376,22 @@ The selection items are comma-separated and combine as a **union**:
   exist.
 
 ```bash
-python nbt_pipeline.py run --root ./nbt_rounds --only 1,2        # only rounds 1 and 2
-python nbt_pipeline.py run --root ./nbt_rounds --only 2:review   # round 2's review only
-python nbt_pipeline.py run --root ./nbt_rounds --only review
-python nbt_pipeline.py run --root ./nbt_rounds --only revise
-python nbt_pipeline.py run --root ./nbt_rounds --only merge      # = integrate
-python nbt_pipeline.py run --root ./nbt_rounds --only judge
-python nbt_pipeline.py run --root ./nbt_rounds --only review,revise
-python nbt_pipeline.py run --root ./nbt_rounds --only 1,2:merge,3:judge
-python nbt_pipeline.py run --root ./nbt_rounds --only rewriter2   # ONLY w2 (not w1)
-python nbt_pipeline.py run --root ./nbt_rounds --only integrator1 # ONLY the i1 arm
-python nbt_pipeline.py run --root ./nbt_rounds --only r1_w2       # round 1's w2 only
-python nbt_pipeline.py run --root ./nbt_rounds --only w2,r2_a2    # w2 everywhere + round 2's a2
-python nbt_pipeline.py run --root ./nbt_rounds --only r1_a2_revise   # = r1_a2 (the printed run id)
-python nbt_pipeline.py run --root ./nbt_rounds --only r1_judge_w2_j1   # ONE judge session
-python nbt_pipeline.py run --root ./nbt_rounds --only judge_t497f106d_j1  # the id `agents` prints
-python nbt_pipeline.py run --root ./nbt_rounds --only r1_judge_w2_j1,r2_judge_i1_j1
+python paper_pipeline.py run --root ./paper_rounds --only 1,2        # only rounds 1 and 2
+python paper_pipeline.py run --root ./paper_rounds --only 2:review   # round 2's review only
+python paper_pipeline.py run --root ./paper_rounds --only review
+python paper_pipeline.py run --root ./paper_rounds --only revise
+python paper_pipeline.py run --root ./paper_rounds --only merge      # = integrate
+python paper_pipeline.py run --root ./paper_rounds --only judge
+python paper_pipeline.py run --root ./paper_rounds --only review,revise
+python paper_pipeline.py run --root ./paper_rounds --only 1,2:merge,3:judge
+python paper_pipeline.py run --root ./paper_rounds --only rewriter2   # ONLY w2 (not w1)
+python paper_pipeline.py run --root ./paper_rounds --only integrator1 # ONLY the i1 arm
+python paper_pipeline.py run --root ./paper_rounds --only r1_w2       # round 1's w2 only
+python paper_pipeline.py run --root ./paper_rounds --only w2,r2_a2    # w2 everywhere + round 2's a2
+python paper_pipeline.py run --root ./paper_rounds --only r1_a2_revise   # = r1_a2 (the printed run id)
+python paper_pipeline.py run --root ./paper_rounds --only r1_judge_w2_j1   # ONE judge session
+python paper_pipeline.py run --root ./paper_rounds --only judge_t497f106d_j1  # the id `agents` prints
+python paper_pipeline.py run --root ./paper_rounds --only r1_judge_w2_j1,r2_judge_i1_j1
 ```
 
 `all` (the default) means every round and every stage. An out-of-range round
@@ -411,10 +411,10 @@ no document is hashed — it costs a few sha256 calls over the plan, well under 
 second on any root):
 
 ```bash
-python nbt_pipeline.py agents --root ./nbt_rounds                 # every planned session
-python nbt_pipeline.py agents --root ./nbt_rounds --pending       # only what may still run
-python nbt_pipeline.py agents --root ./nbt_rounds --only rewriter2    # preview a filtered run
-python nbt_pipeline.py agents --root ./nbt_rounds --json          # machine-readable
+python paper_pipeline.py agents --root ./paper_rounds                 # every planned session
+python paper_pipeline.py agents --root ./paper_rounds --pending       # only what may still run
+python paper_pipeline.py agents --root ./paper_rounds --only rewriter2    # preview a filtered run
+python paper_pipeline.py agents --root ./paper_rounds --json          # machine-readable
 ```
 
 Per round it lists the base copy `a1` (no agent), each `w<k>`, the review
@@ -544,7 +544,7 @@ The corpus converters read DOCX **text only**, so layout and character
 formatting used to be invisible to every stage. The pipeline now handles it:
 
 * `setup` scans the source (`state.original_format`, printed as
-  `[setup] OOXML formatting scan:`), copies `nbt_docx_format.py` into the root,
+  `[setup] OOXML formatting scan:`), copies `paper_docx_format.py` into the root,
   and — unless `--format-fix off` is given — **normalizes the pristine copy**
   before anything is fingerprinted (text identity verified by the fixer; the
   operator's `--source` directory is never modified).
@@ -571,9 +571,9 @@ Policy overrides (`setup --format-policy policy.json`): `journal_italics`,
 Stand-alone use (never edits in place unless you pass `--out` yourself):
 
 ```bash
-python nbt_docx_format.py scan  <dir> --pdf <rendered.pdf> --json out.json
-python nbt_docx_format.py fix   file.docx --out file.fixed.docx
-python nbt_docx_format.py check-pdf rendered.pdf
+python paper_docx_format.py scan  <dir> --pdf <rendered.pdf> --json out.json
+python paper_docx_format.py fix   file.docx --out file.fixed.docx
+python paper_docx_format.py check-pdf rendered.pdf
 ```
 
 Findings inside Zotero fields (the bibliography, citation fields) are reported
@@ -651,7 +651,7 @@ An invalid file is not a deliverable, so every EDITING session (rewrite, revise,
 integrate) has to validate what it produced:
 
 ```bash
-python nbt_docx_format.py validate <package dir>   # module sits next to PROMPT.md
+python paper_docx_format.py validate <package dir>   # module sits next to PROMPT.md
 ```
 
 It checks every `.docx` (readable zip, EVERY XML/`.rels` part parses, `docx
@@ -701,7 +701,7 @@ revision token, no pre-computed M18/M19/M20 rows. Even a scan computed from the
 judge's *own* target would be a pre-digested view (and a digest it could
 correlate), so the judge prompt instead carries a BLINDING RULE: derive every
 measurement yourself from the packages in front of you with the same public
-tool (`python nbt_docx_format.py scan target/`) and record the rows in
+tool (`python paper_docx_format.py scan target/`) and record the rows in
 `judge_review/artifacts/`. Consistency is then checked from the orchestrator's
 side: after a judge run, `postcheck_judge` re-scans that blinded target itself,
 records it in `reports/judge_evidence_<run>.json` and the run record, and warns
@@ -740,9 +740,9 @@ Every session classifies a defect the same way, so an improvement one session
 sees is an improvement the panel can score. The block is generated from
 `BASIS_TIERS` and inserted verbatim into all five prompts (review, rewrite,
 revise, integrate, judge); the same table lives in the review skill
-(`nbt-skills/nbt-review/references/sweeps.md`, mirrored in
-`nbt-skills/prompts/identify_issues.prompt.md`) and in the revision ledger's
-definition (`nbt-skills/nbt-revise/references/ledger.md`):
+(`paper-skills/paper-review/references/sweeps.md`, mirrored in
+`paper-skills/prompts/identify_issues.prompt.md`) and in the revision ledger's
+definition (`paper-skills/paper-revise/references/ledger.md`):
 
 | review category | scored class (`correctness > consistency > preservation > completeness > formatting`) |
 |---|---|
@@ -974,7 +974,7 @@ Three independent layers now cover that class:
 |---|---|
 | the prompts | state the exact location (`SANDBOX ROOT … not inside <stage dir>/`) in every stage, next to the marker's fields |
 | the postcheck | ADOPTS a signal that names this run and stage from the stage's own directory (moves it to the root, records a warning naming the stray path) — nothing about the work changed, only its address. A file that names ANOTHER run or stage is never adopted: the failure message names where it is and what it really says |
-| `selfcheck` | `python nbt_pipeline.py selfcheck --sandbox <dir> --stage <kind> [--run-id <id>] [--round <r>]` — the postcheck's own detectors applied to one sandbox, read-only, no `--root` needed. Every stage prompt tells the session to run it from the sandbox root BEFORE it writes the marker, so a session fixes its own paperwork while its context is still live instead of paying a rebuilt attempt |
+| `selfcheck` | `python paper_pipeline.py selfcheck --sandbox <dir> --stage <kind> [--run-id <id>] [--round <r>]` — the postcheck's own detectors applied to one sandbox, read-only, no `--root` needed. Every stage prompt tells the session to run it from the sandbox root BEFORE it writes the marker, so a session fixes its own paperwork while its context is still live instead of paying a rebuilt attempt |
 
 `selfcheck` is a pre-flight, not a second verdict: it reports the marker and its
 location, the stage's deliverables (present, parseable), the seeded decision
@@ -1059,15 +1059,14 @@ its four integration runs never started.
 
 | path | purpose |
 |---|---|
-| `nbt_pipeline.py` | the orchestrator (setup / run / run-decide / decide / retry / status / selfcheck / prune / redline) |
-| `nbt_docx_format.py` | OOXML style/formatting scanner, fixer and blank-page checker |
-| `nbt_redlines_adapter.py` | tracked-changes bridge (`python-redlines[docxodus]`) |
+| `paper_pipeline.py` | the orchestrator (setup / run / run-decide / decide / retry / status / selfcheck / prune / redline) |
+| `paper_docx_format.py` | OOXML style/formatting scanner, fixer and blank-page checker |
+| `paper_redlines_adapter.py` | tracked-changes bridge (`python-redlines[docxodus]`) |
 | `docx2pdf.sh` | Word→PDF conversion via PowerShell (WSL/Git Bash) |
 | `mcp-docx-converter/` | the `docx-converter` MCP tool used as the first-choice renderer |
-| `nbt-skills/` | the bundled review (`nbt-review`) and revision (`nbt-revise`) skills + prompts |
+| `paper-skills/` | the bundled review (`paper-review`) and revision (`paper-revise`) skills + prompts |
 | `venue_profiles/` | the venue profiles (the submission rule sets) + their schema documentation |
-| `.nbt_test/` | the offline regression suites (stub agents; no network) |
-| `nbt_audit_data/`, `NBT_TRIAGE_LEDGER.md`, `NBT_DESIGN_TRIAGE_LEDGER.md` | the audit inputs and the triage ledgers for the fixes they drove |
+| `.paper_test/` | the offline regression suites (stub agents; no network) |
 
 ## Tests
 
@@ -1076,22 +1075,22 @@ any failure. They are independent, so run them in parallel — 38 suites in ~115
 on a 20-core box, against ~5.5 min sequentially:
 
 ```bash
-python3 .nbt_test/run_all.py          # GNU parallel (8 jobs by default); falls back
+python3 .paper_test/run_all.py          # GNU parallel (8 jobs by default); falls back
                                       # to a thread pool when `parallel` is missing
-python3 .nbt_test/run_all.py -j 16    # more sessions (measured: no faster, more load)
-python3 .nbt_test/run_all.py -j 1     # the old sequential loop, for a bisect
-python3 .nbt_test/run_all.py --only test_pipeline test_docx_format   # a subset
+python3 .paper_test/run_all.py -j 16    # more sessions (measured: no faster, more load)
+python3 .paper_test/run_all.py -j 1     # the old sequential loop, for a bisect
+python3 .paper_test/run_all.py --only test_pipeline test_docx_format   # a subset
 ```
 
 Each suite runs in its own `TMPDIR` and writes `<logs>/<suite>.log`; a suite that
 fails is re-run alone once, so a timing-sensitive suite that merely lost a race
 with seven siblings is reported as `flaky` (named, exit 0) while a real failure
 keeps its `[FAIL]` lines and exit 1. The raw one-liner, if you prefer GNU parallel
-directly (`mkdir -p /tmp/nbt-logs && export NBT_TEST_RUNDIR=/tmp/nbt-logs`):
+directly (`mkdir -p /tmp/paper-logs && export PAPER_TEST_RUNDIR=/tmp/paper-logs`):
 
 ```bash
-ls .nbt_test/test_*.py | sed 's|.*/||' \
-  | parallel -j 8 --joblog /tmp/nbt-logs/joblog '.nbt_test/run_one.sh {}'
+ls .paper_test/test_*.py | sed 's|.*/||' \
+  | parallel -j 8 --joblog /tmp/paper-logs/joblog '.paper_test/run_one.sh {}'
 ```
 
 Highlights: `test_pipeline.py` (prompts, gates, ranking), `test_length_limits.py`
@@ -1109,7 +1108,7 @@ orchestrator verifies the judge's target from its own side, and a stage records
 its before/after delta),
 `test_hash_cache.py`, `test_final_clean_version.py`, `test_grading_scheme.py`,
 `test_anonymized_judging.py`, `test_zotero_integration.py`. See
-`.nbt_test/README.md` for the full table.
+`.paper_test/README.md` for the full table.
 `test_venue_config.py` covers the venue/journal configuration itself: the
 shipped profiles, `set-venue`/`set-journal` persistence (config + `state.json`
 mirror), the precedence rules, the missing/invalid/inconsistent cases,

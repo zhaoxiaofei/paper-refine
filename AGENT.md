@@ -9,12 +9,12 @@ the pipeline from drifting back to a single journal.
 
 | path | what it is |
 |---|---|
-| `nbt_pipeline.py` | the orchestrator (single file, stdlib only). CLI: `setup`, `run`, `run-decide`, `decide`, `status`, `agents`/`sessions`, `selfcheck`, `set-venue`, `set-journal`, `retry`, `prune`, `redline`. |
-| `nbt_docx_format.py` | the optional companion: code-side OOXML style/formatting scan/fix (`scan`/`fix`/`check-pdf`). |
-| `nbt_redlines_adapter.py` | optional tracked-changes `.docx` bridge. |
+| `paper_pipeline.py` | the orchestrator (single file, stdlib only). CLI: `setup`, `run`, `run-decide`, `decide`, `status`, `agents`/`sessions`, `selfcheck`, `set-venue`, `set-journal`, `retry`, `prune`, `redline`. |
+| `paper_docx_format.py` | the optional companion: code-side OOXML style/formatting scan/fix (`scan`/`fix`/`check-pdf`). |
+| `paper_redlines_adapter.py` | optional tracked-changes `.docx` bridge. |
 | `venue_profiles/` | the venue profiles (the submission rule sets) **and their schema documentation** — start at `venue_profiles/README.md`. |
-| `nbt-skills/` | the bundled `nbt-review` / `nbt-revise` skill packages and the two master prompts. |
-| `.nbt_test/` | the offline regression suites (stub agents; no network). |
+| `paper-skills/` | the bundled `paper-review` / `paper-revise` skill packages and the two master prompts. |
+| `.paper_test/` | the offline regression suites (stub agents; no network). |
 
 ## Venue vs journal — the rule that matters here
 
@@ -36,7 +36,7 @@ byte-for-byte.
 Resolution order: the current command's flags → `pipeline_config.json` (and its
 snapshot, which wins over profile *files*) → `<root>/venue_profiles/<id>.json` →
 the profiles shipped next to the script → the built-in fallback inside
-`nbt_pipeline.py` → the profile's `default_journal` → the default venue.
+`paper_pipeline.py` → the profile's `default_journal` → the default venue.
 
 ## Rules for changing the pipeline
 
@@ -61,7 +61,7 @@ the profiles shipped next to the script → the built-in fallback inside
    root has run records.
 5. **Backward compatibility is a test.** `test_venue_config.py` asserts that a
    config without `venue`/`journal` behaves exactly like the old default.
-6. The skill ids `$nbt-review` / `$nbt-revise` and the file names `nbt_*.py` are
+6. The skill ids `$paper-review` / `$paper-revise` and the file names `paper_*.py` are
    **historical identifiers**, not venue assumptions: they are the stable names
    of the installed skill packages and of this repository's entry points. Do not
    rename them in prompt text; do keep their *prose* venue-neutral.
@@ -70,21 +70,21 @@ the profiles shipped next to the script → the built-in fallback inside
 
 ```bash
 # configure / inspect the venue and journal of an existing root
-python nbt_pipeline.py set-venue --list
-python nbt_pipeline.py set-venue example-journal --profile venue_profiles/example-journal.json
-python nbt_pipeline.py set-venue --journal "Example Journal"
-python nbt_pipeline.py set-journal "Example Journal"
-python nbt_pipeline.py set-venue --show [--json]
-python nbt_pipeline.py status --root ./nbt_rounds      # venue + journal + limits
+python paper_pipeline.py set-venue --list
+python paper_pipeline.py set-venue example-journal --profile venue_profiles/example-journal.json
+python paper_pipeline.py set-venue --journal "Example Journal"
+python paper_pipeline.py set-journal "Example Journal"
+python paper_pipeline.py set-venue --show [--json]
+python paper_pipeline.py status --root ./paper_rounds      # venue + journal + limits
 
 # create a root for a specific venue in one step
-python nbt_pipeline.py setup --source ./non_revised --root ./nbt_rounds \
+python paper_pipeline.py setup --source ./non_revised --root ./paper_rounds \
     --venue generic --journal "Journal Name"
 
 # validation (see README.md -> Tests for the full list)
-python3 -m py_compile nbt_pipeline.py nbt_docx_format.py
-python3 .nbt_test/run_all.py -j 8            # every suite, offline
-python3 .nbt_test/run_one.sh test_venue_config.py
+python3 -m py_compile paper_pipeline.py paper_docx_format.py
+python3 .paper_test/run_all.py -j 8            # every suite, offline
+python3 .paper_test/run_one.sh test_venue_config.py
 ```
 
 ## When a stage prompt is written
@@ -105,12 +105,12 @@ default-venue text.
 
 ## Known, deliberate limits
 
-* The **skill packages** (`nbt-skills/`) are standalone: their own prose still
+* The **skill packages** (`paper-skills/`) are standalone: their own prose still
   quotes the default profile's numbers as examples, and their
   `references/sweeps.md` M5/M13 carry the Nature Portfolio requirement list. A
   custom venue profile is authoritative when the pipeline runs them; a
   standalone run must follow the target journal's own guide. Extending those
   reference lists into per-venue data is future work, not a code path here.
-* The **triage ledgers** (`NBT_*_LEDGER.md`) are historical records of past
-  runs. They are not edited to match a new venue, and their name is part of that
-  record.
+* The historical **triage ledgers** (`NBT_*_LEDGER.md`) were removed from this
+  repository on request; they remain in the git history if an old decision needs
+  its evidence (the per-run audit reports a stage writes are unaffected).
