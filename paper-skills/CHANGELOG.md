@@ -4,11 +4,16 @@
 
 The skills no longer assume Nature Biotechnology. `paper_pipeline.py` gained a
 configured VENUE (a rule set, selected with `set-venue <id>` / `setup --venue`)
-and JOURNAL (`set-journal <name>`), both recorded in the root's
-`pipeline_config.json` and mirrored into `state.json`; the venue's numbers live
-in `venue_profiles/<id>.json` (schema and worked examples in
-`venue_profiles/README.md`). Nature Biotechnology stays the DEFAULT profile, so
-every number quoted in these skills is still the default's.
+ARTICLE TYPE (the venue's content type -- `set-article-type <id>` /
+`setup --article-type`, since a venue's word limits belong to the type: Article,
+Brief Communication, Review, Resource, ...) and JOURNAL (`set-journal <name>`),
+all recorded in the root's `pipeline_config.json` and mirrored into
+`state.json`; the venue's content types and numbers live in
+`venue_profiles/<id>.json` (schema and worked examples in
+`venue_profiles/README.md`), and a type the profile carries no numbers for is
+counted and named from the venue's own table instead of inheriting another
+type's caps. Nature Biotechnology stays the DEFAULT profile, so every number
+quoted in these skills is still the default Article's.
 
 What changed here:
 

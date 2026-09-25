@@ -579,6 +579,163 @@ def test_skill_script():
           example["caps"] == {"abstract": 275, "main text": 6000}, str(example["caps"]))
 
 
+# =====================================================================
+# VC8 — the article type drives the caps, the prompts and the config
+# =====================================================================
+
+def test_article_types():
+    print()
+    print("== VC8: article types (Article, Brief Communication, ...) ==")
+    nbt = nb.load_venue_profile("nature-biotechnology")
+    ids = nbt.article_type_ids()
+    check("VC8 the shipped profile carries the venue's content types",
+          {"article", "brief-communication", "review", "resource", "analysis",
+           "matters-arising"} <= set(ids), str(ids))
+    check("VC8 only the Article type carries numbers in the shipped profile",
+          [t[0] for t in nbt.article_types() if t[2]] == ["article"],
+          str(nbt.article_types()))
+    check("VC8 the default type keeps the pipeline's old Article numbers",
+          nbt.article_type_id == "article" and nbt.length_limits()["abstract"]["cap"] == 172
+          and nbt.length_limits()["main text"]["cap"] == 3750 and nbt.article_type == "Article")
+    brief = nbt.with_article_type("brief-communication")
+    check("VC8 another type does not borrow the Article caps",
+          brief.length_limits()["abstract"]["cap"] is None
+          and brief.length_limits()["main text"]["cap"] is None
+          and brief.caption_default == 0, str(brief.length_limits()))
+    check("VC8 the venue-wide cover-letter preference is inherited by the type",
+          brief.length_limits()["cover letter"]["min"] == 300
+          and brief.length_limits()["cover letter"]["max"] == 500)
+    check("VC8 the prompt names the selected type",
+          "a Nature Biotechnology Brief Communication" in nb.length_rule_text(brief)
+          and "no abstract or main-text number" in nb.length_rule_text(brief)
+          and "a Nature Biotechnology Article" in nb.length_rule_text(nbt))
+    try:
+        nbt.with_article_type("no-such-type")
+        check("VC8 an unknown type is refused", False, "no VenueProfileError")
+    except nb.VenueProfileError as e:
+        check("VC8 an unknown type is refused with the available ids",
+              "unknown article type" in str(e) and "brief-communication" in str(e), str(e))
+
+    tmp = scratch("paper_venue_types_")
+    root = setup_root(tmp, "--venue", "nature-biotechnology", "--journal", "Nature Biotechnology",
+                      "--article-type", "brief-communication")
+    cfg = cfg_of(root)
+    check("VC8 setup records the article type and its source",
+          cfg.get("article_type") == "brief-communication"
+          and cfg.get("article_type_source") == "operator", str(cfg.get("article_type")))
+    check("VC8 the state mirror carries it too",
+          (state_of(root).get("config") or {}).get("article_type") == "brief-communication")
+    check("VC8 the snapshot keeps the whole type table",
+          len((cfg.get("venue_profile") or {}).get("article_types") or []) >= 6)
+    ctx = nb.Ctx(root)
+    ctx.load()
+    check("VC8 the resolved profile has no caps for that type",
+          nb.caption_limit_of(ctx) == 0
+          and nb.venue_profile_of(ctx).length_limits()["abstract"]["cap"] is None)
+    check("VC8 ... and says so instead of reporting a violation", not ctx.venue_problems
+          and any("no word limits" in n for n in ctx.venue_notes), str(ctx.venue_notes))
+    prompts = all_prompts(nb.venue_profile_of(ctx))
+    check("VC8 the prompts carry the type, not the Article caps",
+          all("Brief Communication" in t for t in prompts.values())
+          and all("172" not in t for k, t in prompts.items() if k != "audit"))
+
+    listed = run_cli("set-article-type", "--root", root, "--list")
+    check("VC8 `set-article-type --list` shows every type with its caps",
+          listed.returncode == 0 and "brief-communication" in listed.stdout
+          and "resource" in listed.stdout and "no numbers carried" in listed.stdout
+          and "abstract <= 172" in listed.stdout, listed.stdout[-300:])
+    shown = run_cli("set-article-type", "--root", root, "--show", "--json")
+    try:
+        data = json.loads(shown.stdout)
+    except ValueError:
+        data = {}
+    check("VC8 `set-article-type --show --json` reports the selection",
+          data.get("article_type_id") == "brief-communication"
+          and data.get("article_type") == "Brief Communication"
+          and len(data.get("article_types") or []) >= 6, str(data)[:200])
+
+    proc = run_cli("set-article-type", "--root", root, "article")
+    check("VC8 switching back to the Article type restores the caps",
+          proc.returncode == 0 and cfg_of(root).get("article_type") == "article",
+          (proc.stdout + proc.stderr)[-200:])
+    ctx2 = nb.Ctx(root)
+    ctx2.load()
+    check("VC8 ... and the resolved caps are the Article's again",
+          nb.venue_profile_of(ctx2).length_limits()["abstract"]["cap"] == 172)
+    bad = run_cli("set-article-type", "--root", root, "letter-to-the-editor")
+    check("VC8 a type this profile does not carry is refused (exit 2)",
+          bad.returncode == 2 and "unknown article type" in (bad.stdout + bad.stderr)
+          and "available" in (bad.stdout + bad.stderr), (bad.stdout + bad.stderr)[-200:])
+    check("VC8 `setup --article-type` refuses an unknown type before creating a root",
+          not (tmp / "never").exists()
+          and run_cli("setup", "--source", tmp / "src", "--root", tmp / "never",
+                      "--article-type", "nope", "--format-fix", "off").returncode == 2)
+
+    # A type the OPERATOR chose survives a venue change when the new profile has
+    # it, and falls back to the new profile's default (with a note) when it does
+    # not; a change on a root with runs needs --force.
+    st = state_of(root)
+    st.setdefault("runs", {})["r1_w1"] = {"id": "r1_w1", "kind": "rewrite", "round": 1,
+                                          "status": "done", "sandbox": "runs/r1_w1"}
+    write(root / "state.json", json.dumps(st))
+    locked = run_cli("set-article-type", "--root", root, "brief-communication")
+    check("VC8 a type change on a root with runs needs --force",
+          locked.returncode != 0 and "--force" in (locked.stdout + locked.stderr)
+          and cfg_of(root).get("article_type") == "article",
+          (locked.stdout + locked.stderr)[-160:])
+    check("VC8 --force applies it",
+          run_cli("set-article-type", "--root", root, "brief-communication",
+                  "--force").returncode == 0
+          and cfg_of(root).get("article_type") == "brief-communication")
+    switched = run_cli("set-venue", "--root", root, "example-journal", "--force")
+    check("VC8 a venue that lacks the chosen type falls back to its default, with a note",
+          switched.returncode == 0 and "falling back" in switched.stdout
+          and cfg_of(root).get("article_type") == "research-article"
+          and cfg_of(root).get("article_type_source") == "profile-default",
+          switched.stdout[-220:])
+    kept = run_cli("set-article-type", "--root", root, "review", "--force")
+    check("VC8 ... and a type the new profile has is kept across the next venue change",
+          kept.returncode == 0
+          and run_cli("set-venue", "--root", root, "example-journal",
+                      "--force").returncode == 0
+          and cfg_of(root).get("article_type") == "review"
+          and cfg_of(root).get("article_type_source") == "operator")
+    atomic = run_cli("set-venue", "--root", root, "example-journal", "--force",
+                     "--article-type", "letter-to-the-editor")
+    check("VC8 set-venue --article-type sets both atomically",
+          atomic.returncode == 0
+          and cfg_of(root).get("article_type") == "letter-to-the-editor"
+          and cfg_of(root).get("article_type_source") == "operator",
+          (atomic.stdout + atomic.stderr)[-200:])
+    check("VC8 set-venue --article-type refuses a type the profile does not carry",
+          run_cli("set-venue", "--root", root, "example-journal", "--force",
+                  "--article-type", "nope").returncode == 2
+          and cfg_of(root).get("article_type") == "letter-to-the-editor")
+    switched_away = run_cli("set-venue", "--root", root, "generic", "--force")
+    check("VC8 ... and dropped (with a note) when the next profile lacks it",
+          switched_away.returncode == 0 and "falling back" in switched_away.stdout
+          and cfg_of(root).get("article_type") == "article")
+
+    # A profile with no table at all (the older single-type shape) still works:
+    # it is read as a one-entry table named after its `article_type`.
+    legacy = tmp / "legacy-single-type.json"
+    write(legacy, json.dumps({"id": "legacy-single-type", "label": "Legacy Journal",
+                              "article_type": "Original Research",
+                              "length_limits": {"source": "legacy profile",
+                                                "abstract": {"base": 200, "relaxation": 1.1},
+                                                "main_text": {"base": 4000, "relaxation": 1.1}}}))
+    legacy_root = setup_root(tmp, "--venue", "generic", name="legacy-root")
+    proc = run_cli("set-venue", "--root", legacy_root, "--profile", legacy, "legacy-single-type")
+    check("VC8 a profile written in the older single-type shape still loads",
+          proc.returncode == 0 and cfg_of(legacy_root).get("article_type") == "original-research",
+          (proc.stdout + proc.stderr)[-200:])
+    ctx3 = nb.Ctx(legacy_root)
+    ctx3.load()
+    check("VC8 ... as a one-entry table with its old numbers",
+          [t[0] for t in nb.venue_profile_of(ctx3).article_types()] == ["original-research"]
+          and nb.venue_profile_of(ctx3).length_limits()["abstract"]["cap"] == 220)
+
+
 def main() -> int:
     try:
         test_profiles()
@@ -588,6 +745,7 @@ def main() -> int:
         test_force_and_snapshot_precedence()
         test_scans_and_prompts()
         test_skill_script()
+        test_article_types()
     finally:
         cleanup()
     print()

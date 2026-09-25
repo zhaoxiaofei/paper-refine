@@ -4,6 +4,36 @@
   "short": "VENUE",
   "description": "A venue-agnostic profile: it sets no word limits, no legend cap and no submission-format rule of its own. Every stage still enumerates the counts, and the artifact must name the limit the target journal's own guidelines state, with its source. Use it when the venue publishes no rule the pipeline can carry, or as the starting point for a custom profile (`set-venue <id> --profile FILE`).",
   "article_type": "Article",
+  "article_type_id": "article",
+  "default_article_type": "article",
+  "article_types": [
+    {
+      "id": "article",
+      "label": "Article",
+      "source": "the target journal's own author guidelines",
+      "length_limits": {
+        "source": "the target journal's own author guidelines (this venue profile publishes no number; the stage names the limit and its source in its artifact)",
+        "abstract": {
+          "base": null,
+          "relaxation": null
+        },
+        "main_text": {
+          "base": null,
+          "relaxation": null
+        },
+        "cover_letter": {
+          "min": 300,
+          "max": 500,
+          "source": "master-prompt preference (300-500 words in the persuading part); the venue profile states no venue cover-letter limit"
+        }
+      },
+      "captions": {
+        "published_limit": null,
+        "default_cap": 0,
+        "source": "this venue profile states no figure-legend length rule; every legend's word count is recorded and compared with the target journal's own guidelines by the author"
+      }
+    }
+  ],
   "journals": [],
   "journal_aliases": [],
   "journal_patterns": [],

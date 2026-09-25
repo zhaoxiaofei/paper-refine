@@ -53,7 +53,7 @@ python paper_pipeline.py run-decide --root ./paper_rounds
 
 ## Venues and journals
 
-The pipeline is not tied to Nature Biotechnology. Two values, both recorded in
+The pipeline is not tied to Nature Biotechnology. Three values, all recorded in
 the root's `pipeline_config.json`, decide what it enforces and what it calls the
 submission:
 
@@ -67,6 +67,12 @@ submission:
   ("Nature Biotechnology", "Cell", "eLife"). The prompts name it, and the
   selected venue profile is checked against it. It selects no rule set by
   itself.
+* the **article type** is *which* of the venue's content types this submission
+  is — Article, Brief Communication, Review, Resource, Analysis, Matters
+  Arising, Letter to the Editor, … — because a venue's word limits belong to the
+  type, not to the venue as a whole. The profile carries the venue's table; the
+  root records the selected type, and the prompts, the M19 caps and the
+  decision report follow it.
 
 ```bash
 python paper_pipeline.py set-venue --list                # venues this pipeline can see
@@ -74,29 +80,44 @@ python paper_pipeline.py set-venue generic               # switch the rule set (
 python paper_pipeline.py set-venue --journal "Cell"      # ... and the journal, atomically
 python paper_pipeline.py set-venue my-journal --profile my-journal.json   # install a profile of your own
 python paper_pipeline.py set-journal "Cell"              # change only the journal
+python paper_pipeline.py set-article-type --list         # the venue's content types + their caps
+python paper_pipeline.py set-article-type brief-communication   # select the article type
+python paper_pipeline.py set-article-type --show         # current venue / type / journal / limits
 python paper_pipeline.py set-venue --show                # current venue, journal, resolved limits
 python paper_pipeline.py set-venue --show --json         # the same, machine-readable
 python paper_pipeline.py status --root ./paper_rounds      # prints venue, journal and limits too
 ```
 
-**Storage and precedence.** `setup` writes `venue`, `journal` and a snapshot of
-the resolved profile (`venue_profile`) into `<root>/pipeline_config.json` and
-mirrors them into `state.json`. `set-venue`/`set-journal` update the same file.
-Resolution order, highest first:
+`setup --article-type <id>` selects the type at creation time, and
+`set-venue --article-type <id>` does it atomically with a venue change. The
+shipped `nature-biotechnology` profile carries the venue's content types but
+states word limits for its **Article** type only: choosing Brief Communication
+(or Review, Perspective, Analysis, Resource, Correspondence, Matters Arising)
+never borrows the Article caps — the stages count the sections and name the
+limit the venue's own content-types table gives. Fill a type's numbers into a
+copy of the profile (see `venue_profiles/README.md`) and install it with
+`set-venue <id> --profile <file>` to have the pipeline enforce them.
+
+**Storage and precedence.** `setup` writes `venue`, `journal`, `article_type`
+and a snapshot of the resolved profile (`venue_profile`) into
+`<root>/pipeline_config.json` and mirrors them into `state.json`. `set-venue`,
+`set-journal` and `set-article-type` update the same file. Resolution order,
+highest first:
 
 1. the flags of the command being run (`setup --venue/--journal`);
 2. `<root>/pipeline_config.json` (the authoritative record for the root);
 3. `<root>/venue_profiles/<id>.json`, then the profiles shipped next to the
    script, then the built-in fallback inside `paper_pipeline.py` — for a root that
    has not recorded a snapshot yet;
-4. the profile's `default_journal` when no journal is recorded;
+4. the profile's `default_journal` when no journal is recorded, and the
+   profile's `default_article_type` when no article type is recorded;
 5. the built-in default venue `nature-biotechnology` when no venue is recorded
    at all (the pre-venue behaviour, so an old root keeps working unchanged).
 
 The **snapshot wins over the files**: editing a profile never silently changes
 the rules of an existing root — re-run `set-venue <id>` to re-record it. The
 config file wins over the `state.json` mirror, and the two are re-synchronised
-by `set-venue`/`set-journal`.
+by the three `set-*` commands.
 
 The keys those commands write (abridged — `venue_profile` is the full resolved
 profile):
@@ -106,21 +127,32 @@ profile):
   "venue": "custom-clin-journal",
   "journal": "Custom Clinical Journal",
   "journal_source": "operator",
+  "article_type": "research-article",
+  "article_type_source": "profile-default",
   "caption_limit": 200,
   "caption_limit_source": "profile-default",
   "venue_profile": {"id": "custom-clin-journal", "label": "Custom Clinical Journal",
-                    "length_limits": {"abstract": {"base": 250, "relaxation": 1.1},
-                                      "main_text": {"base": 4000, "relaxation": 1.1}}}
+                    "default_article_type": "research-article",
+                    "article_types": [
+                      {"id": "research-article", "label": "Research Article",
+                       "length_limits": {"abstract": {"base": 250, "relaxation": 1.1},
+                                         "main_text": {"base": 4000, "relaxation": 1.1}}},
+                      {"id": "review", "label": "Review",
+                       "length_limits": {"abstract": {"base": 200, "relaxation": 1.1},
+                                         "main_text": {"base": 8000, "relaxation": 1.2}}}]}
 }
 ```
 
-`journal_source` and `caption_limit_source` record where each value came from:
-`"operator"` when you set it yourself (`setup --journal`, `set-journal`,
+`journal_source`, `article_type_source` and `caption_limit_source` record where
+each value came from: `"operator"` when you set it yourself (`setup --journal`,
+`setup --article-type`, `set-journal`, `set-article-type`,
 `setup --caption-limit`), and `"profile-default"`/`"unset"` when the venue
 profile supplied it. `set-venue` therefore moves a profile default to the new
 profile's default and keeps an operator-chosen value — the reason
 `set-venue generic` can drop a journal (no default) while `set-journal` never
-does.
+does, and the reason switching venue keeps your Brief Communication selection
+when the new profile carries that type (and falls back to its default type,
+with a note, when it does not).
 
 **Defaults, validation, error handling.**
 
@@ -133,29 +165,38 @@ does.
 | `venue` and the recorded snapshot disagree, or config and `state.json` disagree | reported; the config file wins. |
 | invalid profile file | `set-venue --profile` fails before writing anything, listing every schema error; an invalid file already in `venue_profiles/` shows as `INVALID` in `set-venue --list`. |
 | venue change on a root that already has runs | refused unless `--force` (the rounds were planned, prompted and judged under the previous rule set). |
+| unknown article type | `setup --article-type`/`set-article-type`/`set-venue --article-type` fail with the type ids and labels the profile carries; a root recording one reports it, and every command that must render a prompt refuses to run. |
+| article type the profile states no numbers for (e.g. Brief Communication in the shipped Nature Biotechnology profile) | reported as a note; the stages count the abstract/main text and name the limit the venue's own content-types table gives — the Article caps are never borrowed. |
+| article type change on a root that already has runs | refused unless `--force`, like a venue change (the recorded prompts, caps and judgments belong to the previous type). |
 
 `--strict-venue` (accepted by every subcommand that works on a root: `setup`,
 `run`, `run-decide`, `decide`, `status`, `agents`, `set-venue`, `set-journal`,
-`retry`, `prune`, `redline`) makes a missing journal, a journal/venue mismatch
-and a config/snapshot disagreement fatal instead of advisory.
+`set-article-type`, `retry`, `prune`, `redline`) makes a missing journal, a
+journal/venue mismatch, a config/snapshot disagreement and an unresolvable
+article type fatal instead of advisory.
 
 **Adding a venue.** Copy `venue_profiles/example-journal.json`, replace the
 numbers with the ones your venue's own guidelines state, quote the source in
-`length_limits.source`/`captions.source`, and install it:
+`length_limits.source`/`captions.source`, list your venue's **article types**
+(each with its own numbers, or with no numbers where the venue's table gives
+none), and install it:
 
 ```bash
-python paper_pipeline.py set-venue custom-clin-journal --profile custom-clin-journal.json
+python paper_pipeline.py set-venue custom-clin-journal --profile custom-clin-journal.json \
+        --article-type research-article
 python paper_pipeline.py set-journal "Custom Clinical Journal"
 ```
 
 Leaving a limit `null` is supported and meaningful: the stages then count the
-section and require the artifact to name the limit the target journal's own
-guidelines state. `venue_profiles/README.md` documents the full schema and walks
-through **two complete configurations** — the shipped nature-biotechnology
-Article profile and a custom journal with its own abstract/main-text/legend
-numbers — and shows what the promoted numbers become.
+section and require the artifact to name the limit the venue's own table states.
+`venue_profiles/README.md` documents the full schema (including
+`article_types`) and walks through **two complete configurations** — the shipped
+nature-biotechnology profile with its content-type table and a custom journal
+with per-type abstract/main-text/legend numbers — and shows what the promoted
+numbers become.
 
-Useful flags: `--venue ID`, `--journal NAME` (see *Venues and journals*),
+Useful flags: `--venue ID`, `--journal NAME`, `--article-type ID`
+(see *Venues and journals*),
 `--rounds N`, `--judges N[,N…]`, `--rewrites M[,M…]`,
 `--revises N[,N…]`, `--integrators MASK[,MASK…]`,
 `--caption-limit N` (default: the venue profile's own),
@@ -1071,7 +1112,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 38 suites in ~115 s
+any failure. They are independent, so run them in parallel — 39 suites in ~120 s
 on a 20-core box, against ~5.5 min sequentially:
 
 ```bash
@@ -1109,11 +1150,17 @@ its before/after delta),
 `test_hash_cache.py`, `test_final_clean_version.py`, `test_grading_scheme.py`,
 `test_anonymized_judging.py`, `test_zotero_integration.py`. See
 `.paper_test/README.md` for the full table.
+`test_raw_data_readonly.py` covers the read-only `raw_data/` contract
+(a `chmod -R a-w` corpus still sets up, runs, decides, retries and prunes,
+and never needs — or loses — a mode inside raw_data).
+
 `test_venue_config.py` covers the venue/journal configuration itself: the
 shipped profiles, `set-venue`/`set-journal` persistence (config + `state.json`
 mirror), the precedence rules, the missing/invalid/inconsistent cases,
 `--strict-venue`, custom-profile installation, the prompts of a non-default
-venue, and backward compatibility for a root with no `venue` key.
+venue, the article-type table (`set-article-type`, per-type caps, a type the
+profile carries no numbers for, unknown/mid-flight changes), and backward
+compatibility for a root with no `venue`/`article_type` key.
 
 ## Exit codes
 
@@ -1132,5 +1179,12 @@ venue, and backward compatibility for a root with no `venue` key.
   (`non_revised/`, `base/`, pins, winners) is digest-verified, and the
   corpus's read-only `raw_data/` directory (see "The two input areas") is
   restored from that pristine copy whenever a stage touches it.
+* That read-only contract is taken literally: `raw_data/` (and everything
+  inside it) may be `chmod -R a-w`, so the pipeline never needs write
+  permission there — `setup`, publication of `final_clean_version/`, pruning,
+  retries and the restore-from-pristine step all work on a read-only tree, and
+  the modes the author set are preserved in every copy. The restore step is the
+  only thing that writes there, and it puts the modes back exactly as it found
+  them; the generation-counter rename never reaches inside `raw_data/`.
 * On WSL, `/mnt/c` occasionally returns transient `EIO` errors under a synced
   folder; re-running the affected command is safe (the pipeline is resumable).

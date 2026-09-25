@@ -18,27 +18,67 @@
   ],
   "accepts_any_journal": false,
   "default_journal": "Example Journal",
-  "length_limits": {
-    "source": "Example Journal guidelines for Research Articles (illustrative placeholder: abstract <= 250 words; main text <= 5,000 words excluding abstract, references and figure legends)",
-    "abstract": {
-      "base": 250,
-      "relaxation": 1.1
+  "default_article_type": "research-article",
+  "article_types": [
+    {
+      "id": "research-article",
+      "label": "Research Article",
+      "source": "Example Journal guidelines for Research Articles (illustrative placeholder)",
+      "length_limits": {
+        "source": "Example Journal guidelines for Research Articles (illustrative placeholder: abstract <= 250 words; main text <= 5,000 words excluding abstract, references and figure legends)",
+        "abstract": {
+          "base": 250,
+          "relaxation": 1.1
+        },
+        "main_text": {
+          "base": 5000,
+          "relaxation": 1.2
+        },
+        "cover_letter": {
+          "min": null,
+          "max": null,
+          "source": "the Example Journal guidelines state no cover-letter word limit and this profile configures no preference"
+        }
+      },
+      "captions": {
+        "published_limit": 250,
+        "default_cap": 250,
+        "source": "Example Journal guidelines (illustrative placeholder: each figure legend is limited to 250 words)"
+      }
     },
-    "main_text": {
-      "base": 5000,
-      "relaxation": 1.2
+    {
+      "id": "review",
+      "label": "Review",
+      "source": "Example Journal guidelines for Reviews (illustrative placeholder)",
+      "length_limits": {
+        "source": "Example Journal guidelines for Reviews (illustrative placeholder: abstract <= 200 words; main text <= 8,000 words)",
+        "abstract": {
+          "base": 200,
+          "relaxation": 1.1
+        },
+        "main_text": {
+          "base": 8000,
+          "relaxation": 1.2
+        }
+      }
     },
-    "cover_letter": {
-      "min": null,
-      "max": null,
-      "source": "the Example Journal guidelines state no cover-letter word limit and this profile configures no preference"
+    {
+      "id": "letter-to-the-editor",
+      "label": "Letter to the Editor",
+      "source": "Example Journal guidelines for Letters (illustrative placeholder)",
+      "length_limits": {
+        "source": "Example Journal guidelines for Letters (illustrative placeholder: no abstract; main text <= 800 words)",
+        "abstract": {
+          "base": null,
+          "relaxation": null
+        },
+        "main_text": {
+          "base": 800,
+          "relaxation": 1.1
+        }
+      }
     }
-  },
-  "captions": {
-    "published_limit": 250,
-    "default_cap": 250,
-    "source": "Example Journal guidelines (illustrative placeholder: each figure legend is limited to 250 words)"
-  },
+  ],
   "submission": {
     "pdf_accepted": true,
     "formats": [

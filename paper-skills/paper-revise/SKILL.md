@@ -5,10 +5,12 @@ description: Apply validated review findings to a manuscript package — targete
 
 # Targeted Revision — adress_issues
 
-**Target venue and journal (configurable).** The venv-independent rule set comes from the
-pipeline's venue profile (`venue_profiles/<id>.json`, selected with `set-venue`) and the journal
-from `set-journal`; Nature Biotechnology is only the default profile. Numbers quoted below are
-that default's -- use the profile of the run you are in.
+**Target venue, article type and journal (configurable).** The rule set comes from the pipeline's
+venue profile (`venue_profiles/<id>.json`, selected with `set-venue`), the venue's content type
+from `set-article-type` (each type carries its own limits; a type the profile has no numbers for
+is counted and named from the venue's own table) and the journal from `set-journal`; Nature
+Biotechnology is only the default profile. Numbers quoted below are that default's Article
+type -- use the profile and type of the run you are in.
 
 ## Paths
 

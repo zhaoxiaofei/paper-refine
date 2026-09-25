@@ -8,6 +8,7 @@ treated as space, so `state-of-the-art` is ONE word and `2026` is ONE word.
     python3 count_words.py FILE [FILE ...] [--section whole|abstract|main-text|cover-letter|auto]
                                 [--json] [--base-abstract N] [--base-main-text N]
                                 [--venue-profile venue_profiles/<id>.json]
+                                [--article-type ID]
 
 `auto` (the default) reports the abstract and the main text when the document
 has a manuscript shape (an "Abstract" heading, or an Introduction/Main-text
@@ -20,13 +21,16 @@ the abstract (paragraph breaks inside it do not), and `\caption`/`\captionof`
 text is a legend even though its "Figure N" label is added at typesetting time.
 
 The default caps are the relaxed limits of the pipeline's DEFAULT venue profile
-(nature-biotechnology Article): abstract <= 172 words (150 +15%) and main text
-<= 3,750 words (3,000 +25%). Pass `--venue-profile venue_profiles/<id>.json`
-to read the base, the margins and the cover-letter preference from the profile
-the run is configured with (the pipeline's prompts state the same numbers), or
-`--base-abstract` / `--base-main-text` for another content type's numbers with
-the default margins. A profile that declares no limit produces counts with no
-cap (`cap: null`, never "over the cap").
+and its default article type (nature-biotechnology Article): abstract <= 172
+words (150 +15%) and main text <= 3,750 words (3,000 +25%). Pass
+`--venue-profile venue_profiles/<id>.json` to read the limits from the profile
+the run is configured with (the pipeline's prompts state the same numbers), plus
+`--article-type <id>` to use that type's own entry from the profile's
+`article_types` table (Article, Brief Communication, Review, ...); without it
+the profile's `default_article_type` is used. A type the profile carries no
+numbers for -- and a profile that declares no limit -- produces counts with no
+cap (`cap: null`, never "over the cap"). `--base-abstract` / `--base-main-text`
+override the bases with the default margins.
 """
 from __future__ import annotations
 
@@ -353,7 +357,12 @@ def main(argv=None) -> int:
     ap.add_argument("--base-main-text", type=int, default=3000)
     ap.add_argument("--venue-profile", metavar="FILE",
                     help="venue profile JSON (venue_profiles/<id>.json): take the abstract/"
-                         "main-text base and margins and the cover-letter preference from it")
+                         "main-text base and margins and the cover-letter preference from its "
+                         "article_types table")
+    ap.add_argument("--article-type", default=None, metavar="ID",
+                    help="which of the profile's article types this submission is (default: the "
+                         "profile's default_article_type); a type the profile carries no numbers "
+                         "for is counted with no cap instead of borrowing another type's")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
     base_abstract, base_main = args.base_abstract, args.base_main_text
@@ -367,22 +376,63 @@ def main(argv=None) -> int:
             print(f"error: cannot read --venue-profile {args.venue_profile}: {e}",
                   file=sys.stderr)
             return 2
-        limits = (profile or {}).get("length_limits") or {}
+        # The profile's article_types table is authoritative; a profile written in
+        # the older single-type shape (top-level length_limits) is read as one
+        # entry, and a type that carries no numbers keeps cap: null.
+        types = (profile or {}).get("article_types") or []
+        type_id = str(args.article_type or (profile or {}).get("default_article_type")
+                      or "").strip().lower()
+        entry = None
+        if types:
+            for candidate in types:
+                if not isinstance(candidate, dict):
+                    continue
+                cid = str(candidate.get("id") or "").strip().lower()
+                if cid and (not type_id or cid == type_id):
+                    entry = candidate
+                    if cid == type_id:
+                        break
+            if entry is None:
+                known = ", ".join(str(c.get("id")) for c in types if isinstance(c, dict))
+                print(f"error: --article-type {args.article_type!r} is not one of this venue "
+                      f"profile's types ({known})", file=sys.stderr)
+                return 2
+            type_id = str(entry.get("id") or type_id or "default").strip().lower()
         venue = str((profile or {}).get("id") or args.venue_profile)
+        if types:
+            venue += f" [{entry.get('label') or type_id}]"
+        limits = ((entry or {}).get("length_limits")
+                  if types else (profile or {}).get("length_limits")) or {}
 
         def _limit(key, default_base, default_relaxation):
             spec = limits.get(key) or {}
             base = spec.get("base", default_base)
             relaxation = spec.get("relaxation", default_relaxation)
-            return base, (None if relaxation is None else float(relaxation))
+            if base is None or relaxation is None:
+                return None, None           # the profile carries no number here
+            return base, float(relaxation)
 
-        base_abstract, rel_abstract = _limit("abstract", base_abstract, rel_abstract)
-        base_main, rel_main = _limit("main_text", base_main, rel_main)
+        if limits.get("abstract") is not None or limits.get("main_text") is not None:
+            base_abstract, rel_abstract = _limit("abstract", base_abstract, rel_abstract)
+            base_main, rel_main = _limit("main_text", base_main, rel_main)
+        else:
+            base_abstract = base_main = rel_abstract = rel_main = None
         cover = limits.get("cover_letter") or {}
+        if (cover.get("min") is None and cover.get("max") is None) and types:
+            # The cover-letter preference is venue-wide: a type that states none
+            # inherits the default type's, exactly as the pipeline does.
+            default_id = str((profile or {}).get("default_article_type") or "").strip().lower()
+            for candidate in types:
+                if isinstance(candidate, dict) and \
+                        str(candidate.get("id") or "").strip().lower() == default_id:
+                    cover = ((candidate.get("length_limits") or {}).get("cover_letter")
+                             or cover)
+                    break
         cover_min = cover.get("min", cover_min)
         cover_max = cover.get("max", cover_max)
-        if len((profile or {}).get("length_limits") or {}) == 0 and "description" in (profile or {}):
-            print(f"note: {args.venue_profile} carries no length_limits; using the default caps",
+        if not limits:
+            print(f"note: {args.venue_profile} carries no numbers for "
+                  f"{type_id or 'its default type'}; reporting counts with no cap",
                   file=sys.stderr)
     caps = {"abstract": (lenient_cap(base_abstract, rel_abstract)
                          if base_abstract is not None and rel_abstract is not None else None),

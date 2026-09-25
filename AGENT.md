@@ -26,12 +26,19 @@ the pipeline from drifting back to a single journal.
 * A **journal** is a *name*: the publication the manuscript is going to, free
   text (`set-journal "Cell"`). The prompts use it and the venue profile is
   checked against it. It selects no rules.
+* An **article type** is *which* of the venue's content types the manuscript is
+  (Article, Brief Communication, Review, Resource, Analysis, Matters Arising,
+  Letter to the Editor, …). The limits belong to the type, not to the venue as a
+  whole: the profile carries the table (`article_types`) and the root records
+  the selection (`setup --article-type`, `set-article-type`). A type the profile
+  carries no numbers for is counted and reported against the venue's own
+  content-types table — never measured with another type's caps.
 
-Both live in `<root>/pipeline_config.json` (`venue`, `journal`) plus a snapshot
-of the resolved profile (`venue_profile`), mirrored into `state.json`. The
-defaults are `nature-biotechnology` / "Nature Biotechnology" — the pipeline's
-pre-venue behaviour — so roots created before this feature keep working
-byte-for-byte.
+All three live in `<root>/pipeline_config.json` (`venue`, `journal`,
+`article_type`) plus a snapshot of the resolved profile (`venue_profile`),
+mirrored into `state.json`. The defaults are `nature-biotechnology` /
+"Nature Biotechnology" / `article` — the pipeline's pre-venue behaviour — so
+roots created before these features keep working byte-for-byte.
 
 Resolution order: the current command's flags → `pipeline_config.json` (and its
 snapshot, which wins over profile *files*) → `<root>/venue_profiles/<id>.json` →
@@ -42,7 +49,9 @@ the profiles shipped next to the script → the built-in fallback inside
 
 1. **Never hard-code a journal name, a journal's numbers or a journal's
    submission requirement in the orchestration code.** Venue-specific facts go
-   into a venue profile; the code reads them through `VenueProfile`
+   into a venue profile, and article types are profile data too (one entry per
+   type, each with its own `length_limits`; a type with no numbers stays
+   numbers-free rather than inheriting). The code reads them through `VenueProfile`
    (`venue_profile_of(ctx)`, `length_limits(profile)`,
    `standing_exemptions_text(profile)`, `caption_rule_text(limit, profile)`,
    `m19_blocks(profile)`, `derived_outputs_rule(profile)`,
@@ -75,11 +84,14 @@ python paper_pipeline.py set-venue example-journal --profile venue_profiles/exam
 python paper_pipeline.py set-venue --journal "Example Journal"
 python paper_pipeline.py set-journal "Example Journal"
 python paper_pipeline.py set-venue --show [--json]
+python paper_pipeline.py set-article-type --list
+python paper_pipeline.py set-article-type brief-communication
+python paper_pipeline.py set-article-type --show [--json]
 python paper_pipeline.py status --root ./paper_rounds      # venue + journal + limits
 
 # create a root for a specific venue in one step
 python paper_pipeline.py setup --source ./non_revised --root ./paper_rounds \
-    --venue generic --journal "Journal Name"
+    --venue generic --journal "Journal Name" --article-type article
 
 # validation (see README.md -> Tests for the full list)
 python3 -m py_compile paper_pipeline.py paper_docx_format.py
@@ -92,7 +104,9 @@ python3 .paper_test/run_one.sh test_venue_config.py
 The prompt builders are the only place the venue appears to an agent. They
 render, from the profile:
 
-* the length rule (M19) and its mandates — numbers, margins, provenance;
+* the length rule (M19) and its mandates — the numbers, margins and provenance
+  of the **selected article type** (a type the profile carries no numbers for
+  renders the counts-only wording, never another type's caps);
 * the caption rule (M18) — the venue's own legend policy;
 * the derived-outputs rule — whether the venue accepts a submitted PDF;
 * the master-prompt prose — subject, editor, requirements, guidelines source;

@@ -377,10 +377,12 @@ CODE-SIDE CHECKS (in addition to what the prompts ask the agents to do)
                           operator's definition (runs of non-space characters,
                           newline = space) at setup over the source corpus and
                           at `decide` over the pinned winner, and compared with
-                          the VENUE PROFILE's own limits relaxed by the profile's
-                          margins (the default nature-biotechnology Article:
-                          +15%/+25% -> 172 / 3,750 words; a profile with no
-                          limits records counts only). Reported next to the caption
+                          the SELECTED article type's limits, relaxed by the
+                          profile's margins (the default nature-biotechnology
+                          Article: +15%/+25% -> 172 / 3,750 words; the profile's
+                          other article types, and a profile with no limits,
+                          record counts only -- see `set-article-type`).
+                          Reported next to the caption
                           check, advisory in exactly the same way: the agents'
                           M19 sweep is authoritative, an over-cap section is a
                           formatting-tier item, and no version is ever made
@@ -667,6 +669,7 @@ import posixpath
 import random
 import re
 import shutil
+import stat
 import statistics
 import subprocess
 import sys
@@ -870,10 +873,18 @@ DEFAULTS = {
 #     what the submission is for and to check it against the venue's rules.
 #     On its own it selects nothing.
 #
-# Both live in `<root>/pipeline_config.json` (`venue`, `journal`) with a
-# snapshot of the resolved profile (`venue_profile`), so a root keeps enforcing
-# the rules it was set up with even if the shipped profiles change later. The
-# precedence, highest first, is:
+# A venue publishes several ARTICLE TYPES (Article, Brief Communication,
+# Review, Resource, Analysis, Matters Arising, Letter to the Editor, ...), and
+# the limits belong to the TYPE, not to the venue as a whole. The profile
+# carries the venue's table (`article_types`), the root records which type the
+# submission is (`setup --article-type`, `set-article-type`), and a type whose
+# numbers the profile does not carry is COUNTED and reported against the
+# venue's own content-types table -- never measured against another type's caps.
+#
+# All three live in `<root>/pipeline_config.json` (`venue`, `journal`,
+# `article_type`) with a snapshot of the resolved profile (`venue_profile`), so
+# a root keeps enforcing the rules it was set up with even if the shipped
+# profiles change later. The precedence, highest first, is:
 #
 #   1. the flags of the command being run (`setup --venue/--journal`);
 #   2. the root's pipeline_config.json (written by `setup`, `set-venue`,
@@ -918,33 +929,61 @@ _DEFAULT_VENUE_PROFILE = {
     "label": "Nature Biotechnology",
     "short": "NBT",
     "description": "Nature Biotechnology (Nature Portfolio): the pipeline's original, "
-                   "pre-venue requirement set. Its Article limits are the ones the M19 "
-                   "length rule relaxes.",
-    "article_type": "Article",
+                   "pre-venue requirement set. It carries the venue's content types; the "
+                   "Article limits are the ones this pipeline was originally written for and "
+                   "are the only ones the profile states numbers for (the others are counted "
+                   "and reported against the venue's own content-types table, never against "
+                   "the Article caps).",
     "journals": ["Nature Biotechnology"],
     "journal_aliases": ["NBT", "Nat. Biotechnol.", "Nature Biotech",
                         "Nature Biotechnology (NBT)"],
     "default_journal": "Nature Biotechnology",
-    "length_limits": {
-        "source": "Nature Biotechnology content-types table (Article: abstract <= 150 "
-                  "words; main text <= 3,000 words excluding abstract, Methods, "
-                  "references and figure legends)",
-        "abstract": {"base": 150, "relaxation": 1.15},
-        "main_text": {"base": 3000, "relaxation": 1.25},
-        "cover_letter": {
-            "min": 300, "max": 500,
-            "source": "master-prompt preference (300-500 words in the persuading part); "
-                      "Nature Biotechnology's official guidance states no cover-letter "
-                      "word limit (checked 2026-09-19)",
-        },
-    },
-    "captions": {
-        "published_limit": None,
-        "default_cap": 0,
-        "source": "Nature Biotechnology requires that a legend \"does not exceed the word "
-                  "limit of the article type\" but does not publish that number on its "
-                  "public pages (checked 2026-09-19)",
-    },
+    # The venue's content types. Only `article` carries numbers here (the ones
+    # this pipeline has always used, from the venue's content-types table); the
+    # other entries exist so a submission can DECLARE its type, and a type with
+    # no numbers is counted and reported instead of being measured against the
+    # Article caps. Fill a type's numbers in from the venue's table (in your own
+    # copy of the profile) to have the pipeline enforce them.
+    "default_article_type": "article",
+    "article_types": [
+        {"id": "article", "label": "Article",
+         "source": "Nature Biotechnology content-types table",
+         "length_limits": {
+             "source": "Nature Biotechnology content-types table (Article: abstract <= 150 "
+                       "words; main text <= 3,000 words excluding abstract, Methods, "
+                       "references and figure legends)",
+             "abstract": {"base": 150, "relaxation": 1.15},
+             "main_text": {"base": 3000, "relaxation": 1.25},
+             "cover_letter": {
+                 "min": 300, "max": 500,
+                 "source": "master-prompt preference (300-500 words in the persuading part); "
+                           "Nature Biotechnology's official guidance states no cover-letter "
+                           "word limit (checked 2026-09-19)",
+             },
+         },
+         "captions": {
+             "published_limit": None,
+             "default_cap": 0,
+             "source": "Nature Biotechnology requires that a legend \"does not exceed the word "
+                       "limit of the article type\" but does not publish that number on its "
+                       "public pages (checked 2026-09-19)",
+         }},
+        *[{"id": tid, "label": label, "source": "Nature Biotechnology content-types table",
+           "length_limits": {
+               "source": f"Nature Biotechnology content-types table ({label}: this profile "
+                         f"carries no number for that type -- the stage names the abstract and "
+                         f"main-text limits the table states, with their source)",
+               "abstract": {"base": None, "relaxation": None},
+               "main_text": {"base": None, "relaxation": None},
+           }}
+          for tid, label in (("brief-communication", "Brief Communication"),
+                             ("review", "Review"),
+                             ("perspective", "Perspective"),
+                             ("analysis", "Analysis"),
+                             ("resource", "Resource"),
+                             ("correspondence", "Correspondence"),
+                             ("matters-arising", "Matters Arising"))],
+    ],
     "submission": {
         "pdf_accepted": True,
         "formats": ["PDF", "Word", "TeX/LaTeX"],
@@ -975,29 +1014,33 @@ _GENERIC_VENUE_PROFILE = {
                    "guidelines state, with its source. Use it when the venue publishes no "
                    "rule the pipeline can carry, or as the starting point for a custom "
                    "profile (`set-venue <id> --profile FILE`).",
-    "article_type": "Article",
+    "default_article_type": "article",
+    "article_types": [
+        {"id": "article", "label": "Article",
+         "source": "the target journal's own author guidelines",
+         "length_limits": {
+             "source": "the target journal's own author guidelines (this venue profile publishes "
+                       "no number; the stage names the limit and its source in its artifact)",
+             "abstract": {"base": None, "relaxation": None},
+             "main_text": {"base": None, "relaxation": None},
+             "cover_letter": {
+                 "min": 300, "max": 500,
+                 "source": "master-prompt preference (300-500 words in the persuading part); the "
+                           "venue profile states no venue cover-letter limit",
+             },
+         },
+         "captions": {
+             "published_limit": None,
+             "default_cap": 0,
+             "source": "this venue profile states no figure-legend length rule; every legend's "
+                       "word count is recorded and compared with the target journal's own "
+                       "guidelines by the author",
+         }},
+    ],
     "journals": [],
     "journal_aliases": [],
     "accepts_any_journal": True,
     "default_journal": "",
-    "length_limits": {
-        "source": "the target journal's own author guidelines (this venue profile publishes "
-                  "no number; the stage names the limit and its source in its artifact)",
-        "abstract": {"base": None, "relaxation": None},
-        "main_text": {"base": None, "relaxation": None},
-        "cover_letter": {
-            "min": 300, "max": 500,
-            "source": "master-prompt preference (300-500 words in the persuading part); the "
-                      "venue profile states no venue cover-letter limit",
-        },
-    },
-    "captions": {
-        "published_limit": None,
-        "default_cap": 0,
-        "source": "this venue profile states no figure-legend length rule; every legend's "
-                  "word count is recorded and compared with the target journal's own "
-                  "guidelines by the author",
-    },
     "submission": {
         "pdf_accepted": None,
         "formats": [],
@@ -1052,6 +1095,106 @@ def _profile_str_list(value, field: str, problems: list) -> list:
     return out
 
 
+def _slugify_article_type(label: str) -> str:
+    """`Brief Communication` -> `brief-communication` (an id from a label)."""
+    slug = re.sub(r"[^a-z0-9]+", "-", str(label or "").strip().lower()).strip("-")
+    return slug or "default"
+
+
+def _clean_length_limits(limits, prefix: str, problems: list):
+    """Validate ONE `length_limits` block (the venue's or an article type's).
+
+    `None` means "this profile carries no numbers here". That is deliberately
+    NOT the same as inheriting another article type's numbers: a Brief
+    Communication must never be measured against the Article caps, so a type
+    without numbers is reported as counts-only and the stage names the limit
+    the venue's own table states.
+    """
+    if limits is None:
+        return None
+    if not isinstance(limits, dict):
+        problems.append(f"{prefix} must be an object, or null for \"no numbers carried\" "
+                        f"(got {type(limits).__name__})")
+        return None
+    clean = {"source": str(limits.get("source") or "").strip()}
+    for key in ("abstract", "main_text"):
+        spec = limits.get(key)
+        if spec is None:
+            spec = {}
+        if isinstance(spec, (int, float)) and not isinstance(spec, bool):
+            spec = {"base": spec}          # a bare number = base words, no relaxation
+        if not isinstance(spec, dict):
+            problems.append(f"{prefix}.{key} must be an object with 'base' and "
+                            f"'relaxation' (or null for both)")
+            spec = {}
+        base = spec.get("base")
+        relaxation = spec.get("relaxation")
+        if base is None and relaxation is None:
+            clean[key] = {"base": None, "relaxation": None}
+            continue
+        pairing_error = (base is None) != (relaxation is None)
+        base = _profile_int(base, f"{prefix}.{key}.base", problems, minimum=1)
+        try:
+            relaxation = float(relaxation) if relaxation is not None else None
+        except (TypeError, ValueError):
+            problems.append(f"{prefix}.{key}.relaxation must be a number >= 1.0 "
+                            f"(got {relaxation!r})")
+            relaxation = None
+        if relaxation is not None and relaxation < 1.0:
+            problems.append(f"{prefix}.{key}.relaxation must be >= 1.0 (got "
+                            f"{relaxation:g}); the pipeline only relaxes a limit, never "
+                            f"tightens it")
+            relaxation = None
+        if pairing_error:
+            problems.append(f"{prefix}.{key}: 'base' and 'relaxation' must be given "
+                            f"together (or both null)")
+        clean[key] = {"base": base, "relaxation": relaxation}
+    cover = limits.get("cover_letter") or {}
+    if not isinstance(cover, dict):
+        problems.append(f"{prefix}.cover_letter must be an object with 'min' and 'max' "
+                        f"(or null for both)")
+        cover = {}
+    cover_min = _profile_int(cover.get("min"), f"{prefix}.cover_letter.min", problems,
+                             minimum=0)
+    cover_max = _profile_int(cover.get("max"), f"{prefix}.cover_letter.max", problems,
+                             minimum=0)
+    if (cover_min is None) != (cover_max is None):
+        problems.append(f"{prefix}.cover_letter: 'min' and 'max' must be given together "
+                        f"(or both null)")
+    elif cover_min is not None and cover_min > cover_max:
+        problems.append(f"{prefix}.cover_letter.min ({cover_min}) must not exceed "
+                        f"max ({cover_max})")
+    clean["cover_letter"] = {"min": cover_min, "max": cover_max,
+                             "source": str(cover.get("source") or "").strip()}
+    return clean
+
+
+def _clean_captions(captions, prefix: str, problems: list):
+    """Validate one legend policy block; None means "inherit the venue's"."""
+    if captions is None:
+        return None
+    if not isinstance(captions, dict):
+        problems.append(f"{prefix} must be an object, or null to inherit the venue's legend "
+                        f"policy (got {type(captions).__name__})")
+        return None
+    clean = {
+        "published_limit": _profile_int(captions.get("published_limit"),
+                                        f"{prefix}.published_limit", problems, minimum=0),
+        "default_cap": _profile_int(captions.get("default_cap", 0), f"{prefix}.default_cap",
+                                    problems, minimum=0, allow_none=False) or 0,
+        "source": str(captions.get("source") or "").strip(),
+    }
+    if clean["published_limit"] is not None and clean["default_cap"] == 0:
+        clean["default_cap"] = clean["published_limit"]
+    return clean
+
+
+EMPTY_LENGTH_LIMITS = {"source": "", "abstract": {"base": None, "relaxation": None},
+                       "main_text": {"base": None, "relaxation": None},
+                       "cover_letter": {"min": None, "max": None, "source": ""}}
+EMPTY_CAPTIONS = {"published_limit": None, "default_cap": 0, "source": ""}
+
+
 def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
     """Validate a venue profile and fill its defaults, or raise VenueProfileError.
 
@@ -1078,77 +1221,69 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
     short = str(out.get("short") or "").strip() or label
     article_type = str(out.get("article_type") or "").strip() or "Article"
 
-    limits = out.get("length_limits") or {}
-    if not isinstance(limits, dict):
-        problems.append("'length_limits' must be an object")
-        limits = {}
-    clean_limits = {"source": str(limits.get("source") or "").strip()}
-    for key, label_ in (("abstract", "abstract"), ("main_text", "main text")):
-        spec = limits.get(key)
-        if spec is None:
-            spec = {}
-        if isinstance(spec, (int, float)) and not isinstance(spec, bool):
-            spec = {"base": spec}          # a bare number = base words, no relaxation
-        if not isinstance(spec, dict):
-            problems.append(f"length_limits.{key} must be an object with 'base' and "
-                            f"'relaxation' (or null for both)")
-            spec = {}
-        base = spec.get("base")
-        relaxation = spec.get("relaxation")
-        if base is None and relaxation is None:
-            clean_limits[key] = {"base": None, "relaxation": None}
+    # ---- the venue's ARTICLE TYPES -------------------------------------
+    # A venue publishes several content types, each with its own limits
+    # (Article, Brief Communication, Review, Resource, Analysis, Matters
+    # Arising, ...). The profile carries them as a table; a submission selects
+    # one (`setup --article-type`, `set-article-type`), and a type whose numbers
+    # the profile does not carry is reported as counts-only rather than being
+    # measured against another type's caps. A profile written in the older,
+    # single-type shape (top-level `article_type`/`length_limits`/`captions`)
+    # is read as a one-entry table, so it keeps exactly its old behaviour.
+    types_raw = out.get("article_types")
+    if types_raw is None:
+        types_raw = [{"id": _slugify_article_type(article_type), "label": article_type,
+                      "length_limits": out.get("length_limits"),
+                      "captions": out.get("captions")}]
+    elif not isinstance(types_raw, list) or not types_raw:
+        problems.append("'article_types' must be a non-empty list of objects "
+                        "(or absent for a single-type profile)")
+        types_raw = [{"id": "default", "label": article_type}]
+    clean_types = []
+    seen_types = set()
+    for i, entry in enumerate(types_raw):
+        if not isinstance(entry, dict):
+            problems.append(f"article_types[{i}] must be an object")
             continue
-        pairing_error = (base is None) != (relaxation is None)
-        base = _profile_int(base, f"length_limits.{key}.base", problems, minimum=1)
-        try:
-            relaxation = float(relaxation) if relaxation is not None else None
-        except (TypeError, ValueError):
-            problems.append(f"length_limits.{key}.relaxation must be a number >= 1.0 "
-                            f"(got {relaxation!r})")
-            relaxation = None
-        if relaxation is not None and relaxation < 1.0:
-            problems.append(f"length_limits.{key}.relaxation must be >= 1.0 (got "
-                            f"{relaxation:g}); the pipeline only relaxes a limit, never "
-                            f"tightens it")
-            relaxation = None
-        if pairing_error:
-            problems.append(f"length_limits.{key}: 'base' and 'relaxation' must be given "
-                            f"together (or both null)")
-        if base is None or relaxation is None:
-            clean_limits[key] = {"base": base, "relaxation": relaxation}
-        else:
-            clean_limits[key] = {"base": base, "relaxation": relaxation}
-    cover = limits.get("cover_letter") or {}
-    if not isinstance(cover, dict):
-        problems.append("length_limits.cover_letter must be an object with 'min' and 'max' "
-                        "(or null for both)")
-        cover = {}
-    cover_min = _profile_int(cover.get("min"), "length_limits.cover_letter.min", problems,
-                             minimum=0)
-    cover_max = _profile_int(cover.get("max"), "length_limits.cover_letter.max", problems,
-                             minimum=0)
-    if (cover_min is None) != (cover_max is None):
-        problems.append("length_limits.cover_letter: 'min' and 'max' must be given together "
-                        "(or both null)")
-    elif cover_min is not None and cover_min > cover_max:
-        problems.append(f"length_limits.cover_letter.min ({cover_min}) must not exceed "
-                        f"max ({cover_max})")
-    clean_limits["cover_letter"] = {"min": cover_min, "max": cover_max,
-                                    "source": str(cover.get("source") or "").strip()}
-
-    captions = out.get("captions") or {}
-    if not isinstance(captions, dict):
-        problems.append("'captions' must be an object")
-        captions = {}
-    clean_captions = {
-        "published_limit": _profile_int(captions.get("published_limit"),
-                                        "captions.published_limit", problems, minimum=0),
-        "default_cap": _profile_int(captions.get("default_cap", 0), "captions.default_cap",
-                                    problems, minimum=0, allow_none=False) or 0,
-        "source": str(captions.get("source") or "").strip(),
-    }
-    if clean_captions["published_limit"] is not None and clean_captions["default_cap"] == 0:
-        clean_captions["default_cap"] = clean_captions["published_limit"]
+        entry_label = str(entry.get("label") or "").strip()
+        type_id = (str(entry.get("id") or "").strip().lower()
+                   or _slugify_article_type(entry_label))
+        if not VENUE_ID_RE.match(type_id):
+            problems.append(f"article_types[{i}].id {type_id!r} is not a slug: letters, "
+                            f"digits, '.', '_', '+', '-' only")
+        if type_id in seen_types:
+            problems.append(f"article_types: duplicate id {type_id!r}")
+        seen_types.add(type_id)
+        clean_types.append({
+            "id": type_id,
+            "label": entry_label or type_id,
+            "source": str(entry.get("source") or "").strip(),
+            "length_limits": _clean_length_limits(entry.get("length_limits"),
+                                                  f"article_types[{type_id}].length_limits",
+                                                  problems),
+            "captions": _clean_captions(entry.get("captions"),
+                                        f"article_types[{type_id}].captions", problems),
+        })
+    if not clean_types:
+        clean_types = [{"id": "default", "label": article_type, "source": "",
+                        "length_limits": None, "captions": None}]
+    default_type_id = (str(out.get("default_article_type") or "").strip().lower()
+                       or clean_types[0]["id"])
+    type_ids = [t["id"] for t in clean_types]
+    if default_type_id not in type_ids:
+        problems.append(f"default_article_type {default_type_id!r} is not one of the article "
+                        f"types ({', '.join(type_ids)})")
+        default_type_id = clean_types[0]["id"]
+    default_entry = next(t for t in clean_types if t["id"] == default_type_id)
+    # The top-level fields stay the DEFAULT type's data: a reader that only knows
+    # the pre-article-type shape (an older tool, a hand-written config) sees
+    # exactly what it saw before, and `set-article-type` re-points the accessors.
+    clean_limits = (copy.deepcopy(default_entry["length_limits"])
+                    if default_entry["length_limits"] is not None
+                    else copy.deepcopy(EMPTY_LENGTH_LIMITS))
+    clean_captions = (copy.deepcopy(default_entry["captions"])
+                      if default_entry["captions"] is not None
+                      else copy.deepcopy(EMPTY_CAPTIONS))
 
     journals = _profile_str_list(out.get("journals"), "journals", problems)
     aliases = _profile_str_list(out.get("journal_aliases"), "journal_aliases", problems)
@@ -1189,7 +1324,10 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
         "label": label,
         "short": short,
         "description": str(out.get("description") or "").strip(),
-        "article_type": article_type,
+        "article_type": default_entry["label"],
+        "article_type_id": default_type_id,
+        "default_article_type": default_type_id,
+        "article_types": clean_types,
         "journals": journals,
         "journal_aliases": aliases,
         "journal_patterns": patterns,
@@ -1216,10 +1354,68 @@ class VenueProfile:
     pipeline.
     """
 
-    def __init__(self, data, origin: str = "<builtin>", path=None):
+    def __init__(self, data, origin: str = "<builtin>", path=None,
+                 article_type_id: str = None):
         self.data = normalize_venue_profile(data, origin)
         self.origin = origin
         self.path = Path(path) if path is not None else None
+        self.article_type_id = self._known_type(article_type_id) or \
+            self.data["default_article_type"]
+
+    # ---- article types ----
+    def _type_entry(self, type_id: str = None) -> dict:
+        wanted = str(type_id if type_id is not None else self.article_type_id).strip().lower()
+        for entry in self.data["article_types"]:
+            if entry["id"] == wanted:
+                return entry
+        return self.data["article_types"][0]
+
+    def _default_type_entry(self) -> dict:
+        return self._type_entry(self.data["default_article_type"])
+
+    def _known_type(self, type_id) -> str:
+        """The slug of `type_id` when the profile has it, else ""."""
+        wanted = str(type_id or "").strip().lower()
+        return wanted if any(t["id"] == wanted for t in self.data["article_types"]) else ""
+
+    def article_type_ids(self) -> list:
+        return [t["id"] for t in self.data["article_types"]]
+
+    def article_types(self) -> list:
+        """[(id, label, carries_numbers), ...] in profile order, for --list."""
+        return [(entry["id"], entry["label"], self.carries_article_numbers(entry["id"]))
+                for entry in self.data["article_types"]]
+
+    def carries_article_numbers(self, type_id: str = None) -> bool:
+        """Does the profile state abstract/main-text numbers for `type_id`?
+
+        A type entry that is absent, null, or declares only null bases carries
+        NO numbers: the stages then count and name the venue's own limit instead
+        of being measured against another type's caps.
+        """
+        limits = self._type_entry(type_id).get("length_limits") or {}
+        return any((limits.get(key) or {}).get("base") is not None
+                   or (limits.get(key) or {}).get("relaxation") is not None
+                   for key in ("abstract", "main_text"))
+
+    def with_article_type(self, type_id) -> "VenueProfile":
+        """The same venue with another article type selected.
+
+        The type's own numbers (or its deliberate absence of numbers) drive the
+        M19 caps, the caption policy and the prompt prose from here on; the
+        venue-level cover-letter preference and legend policy still apply.
+        """
+        wanted = self._known_type(type_id) or None
+        if wanted is None:
+            wanted = str(type_id or "").strip().lower()
+            raise VenueProfileError(
+                f"unknown article type {type_id!r} for venue {self.id!r} "
+                f"(available: {', '.join(self.article_type_ids())})")
+        if wanted == self.article_type_id:
+            return self
+        clone = copy.copy(self)
+        clone.article_type_id = wanted
+        return clone
 
     # ---- identity ----
     @property
@@ -1240,7 +1436,11 @@ class VenueProfile:
 
     @property
     def article_type(self) -> str:
-        return self.data["article_type"]
+        return self._type_entry()["label"]
+
+    @property
+    def article_type_source(self) -> str:
+        return self._type_entry().get("source") or ""
 
     @property
     def default_journal(self) -> str:
@@ -1252,22 +1452,40 @@ class VenueProfile:
 
     @property
     def captions(self) -> dict:
-        return self.data["captions"]
+        entry = self._type_entry()
+        if entry.get("captions") is not None:
+            return entry["captions"]
+        default = self._default_type_entry()
+        return default.get("captions") or EMPTY_CAPTIONS
 
     @property
     def caption_default(self) -> int:
-        return int(self.data["captions"].get("default_cap") or 0)
+        return int(self.captions.get("default_cap") or 0)
 
     @property
     def length_limits_source(self) -> str:
-        return self.data["length_limits"].get("source") or f"{self.label} submission rules"
+        entry = self._type_entry()
+        limits = entry.get("length_limits") or {}
+        source = limits.get("source") or entry.get("source")
+        if source:
+            return source
+        if entry["length_limits"] is None:
+            return (f"{self.label} submission rules ({entry['label']}: this profile carries no "
+                    f"numbers for that article type -- the stage names the venue's own limit)")
+        return f"{self.label} submission rules ({entry['label']})"
 
     def to_dict(self) -> dict:
         return copy.deepcopy(self.data)
 
     def length_limits(self) -> dict:
-        """The M19 caps, in the shape the code-side scan and the prompts use."""
-        raw = self.data["length_limits"]
+        """The M19 caps, in the shape the code-side scan and the prompts use.
+
+        Abstract and main text come from the SELECTED article type (a type the
+        profile carries no numbers for has `cap: None`, never another type's
+        cap); the cover-letter preference is venue-level, so a type entry that
+        does not state one inherits the default type's.
+        """
+        raw = self._type_entry().get("length_limits") or {}
 
         def spec(key: str) -> dict:
             base = (raw.get(key) or {}).get("base")
@@ -1277,6 +1495,9 @@ class VenueProfile:
             return {"base": base, "relaxation": relaxation, "cap": cap}
 
         cover = raw.get("cover_letter") or {}
+        if cover.get("min") is None and cover.get("max") is None:
+            cover = ((self._default_type_entry().get("length_limits") or {})
+                     .get("cover_letter") or cover)
         return {"abstract": spec("abstract"),
                 "main text": spec("main_text"),
                 "cover letter": {"min": cover.get("min"), "max": cover.get("max"),
@@ -1446,19 +1667,40 @@ def venue_profile_of(ctx=None, required: bool = True):
     profiles are edited or the profile file is deleted later. With `required`
     false the caller gets None instead of an exception, which is what `status`
     needs to report a broken configuration.
+
+    The ARTICLE TYPE the root records is applied on top: the same venue with
+    `set-article-type brief-communication` reads the Brief Communication limits,
+    not the Article ones. A root that records none keeps the profile's default
+    type (the pre-article-type behaviour).
     """
     cfg = _ctx_cfg(ctx)
     venue_id = venue_id_of(ctx)
     root = getattr(ctx, "root", None)
     prof = _snapshot_profile(cfg, venue_id)
-    if prof is not None:
+    if prof is None:
+        try:
+            prof = load_venue_profile(venue_id, root=root)
+        except VenueProfileError:
+            if required:
+                raise
+            return None
+    wanted = str(cfg.get("article_type") or "").strip().lower()
+    if not wanted or wanted == prof.article_type_id:
         return prof
     try:
-        return load_venue_profile(venue_id, root=root)
+        return prof.with_article_type(wanted)
     except VenueProfileError:
         if required:
             raise
         return None
+
+
+def article_type_of(ctx=None) -> str:
+    """The article-type id a root selects, or the profile's default."""
+    prof = venue_profile_of(ctx, required=False)
+    if prof is not None:
+        return prof.article_type_id
+    return str(_ctx_cfg(ctx).get("article_type") or "").strip().lower()
 
 
 def journal_of(ctx=None) -> str:
@@ -1480,6 +1722,7 @@ def venue_summary(ctx) -> str:
         return (f"venue={venue or '(missing)'} (UNRESOLVED), "
                 f"journal={journal}")
     return (f"venue={prof.id} (\"{prof.label}\", {prof.describe_origin()}), "
+            f"article type={prof.article_type} (`{prof.article_type_id}`), "
             f"journal={journal}")
 
 
@@ -1494,6 +1737,11 @@ def venue_status_lines(ctx) -> list:
                      f"(run `set-venue <id>`; `set-venue --list` shows the ids)")
     else:
         lines.append(f"venue:         {prof.id} (\"{prof.label}\", {prof.describe_origin()})")
+        lines.append(f"article type:  {prof.article_type} (`{prof.article_type_id}`"
+                     + ("" if prof.carries_article_numbers()
+                        else "; the profile carries no word limits for it, so the stages "
+                             "count and name the venue's own numbers")
+                     + ")")
         limits = prof.length_limits()
         if limits["abstract"].get("cap") is None and limits["main text"].get("cap") is None:
             lines.append("limits (M19):  no abstract/main-text cap in this venue profile "
@@ -1512,6 +1760,10 @@ def venue_block(ctx) -> dict:
     prof = venue_profile_of(ctx, required=False)
     return {"venue": venue_id_of(ctx),
             "journal": journal_of(ctx),
+            "article_type": (prof.article_type if prof is not None else None),
+            "article_type_id": (prof.article_type_id if prof is not None else None),
+            "article_carries_numbers": (prof.carries_article_numbers()
+                                        if prof is not None else None),
             "label": prof.label if prof is not None else None,
             "origin": prof.describe_origin() if prof is not None else None,
             "length_limits": prof.length_limits() if prof is not None else None,
@@ -1558,6 +1810,24 @@ def venue_config_findings(ctx) -> tuple:
         problems.append(f"the recorded profile snapshot names venue "
                         f"{str(snapshot.get('id'))!r} but the config selects {prof.id!r}; "
                         f"re-run `set-venue {prof.id}` to re-record it.")
+    # ---- the article type ------------------------------------------------
+    recorded_type = str(cfg.get("article_type") or "").strip().lower()
+    type_ids = prof.article_type_ids()
+    if not recorded_type:
+        notes.append(f"no article type recorded: using the venue profile's default type "
+                     f"{prof.article_type!r} (`{prof.article_type_id}`). Run "
+                     f"`set-article-type <id>` to make it explicit.")
+    elif recorded_type not in type_ids:
+        problems.append(f"unknown article type {recorded_type!r} for venue {prof.id!r}: the "
+                        f"profile carries {', '.join(type_ids)}. Run "
+                        f"`set-article-type <id>` (`set-article-type --list` shows the "
+                        f"labels).")
+    else:
+        if not prof.carries_article_numbers(recorded_type):
+            notes.append(f"the venue profile carries no word limits for the "
+                         f"{prof._type_entry(recorded_type)['label']!r} type: every stage "
+                         f"counts and names the venue's own numbers instead of borrowing "
+                         f"another type's caps.")
     journal = str(cfg.get("journal") or "").strip()
     if not journal:
         journal = prof.default_journal
@@ -2620,15 +2890,15 @@ def lenient_word_limit(base: int, factor: float) -> int:
     return int(float(base) * float(factor))
 
 
-_DEFAULT_LIMITS = VenueProfile(BUILTIN_VENUE_PROFILES[DEFAULT_VENUE],
-                           origin="built-in").length_limits()
+_DEFAULT_VENUE_OBJ = VenueProfile(BUILTIN_VENUE_PROFILES[DEFAULT_VENUE], origin="built-in")
+_DEFAULT_LIMITS = _DEFAULT_VENUE_OBJ.length_limits()
 DEFAULT_ARTICLE_ABSTRACT_WORDS = _DEFAULT_LIMITS["abstract"]["base"]
 DEFAULT_ARTICLE_MAIN_TEXT_WORDS = _DEFAULT_LIMITS["main text"]["base"]
 ABSTRACT_RELAXATION = _DEFAULT_LIMITS["abstract"]["relaxation"]
 MAIN_TEXT_RELAXATION = _DEFAULT_LIMITS["main text"]["relaxation"]
 DEFAULT_ARTICLE_ABSTRACT_CAP = _DEFAULT_LIMITS["abstract"]["cap"]
 DEFAULT_ARTICLE_MAIN_TEXT_CAP = _DEFAULT_LIMITS["main text"]["cap"]
-DEFAULT_LENGTH_LIMITS_SOURCE = BUILTIN_VENUE_PROFILES[DEFAULT_VENUE]["length_limits"]["source"]
+DEFAULT_LENGTH_LIMITS_SOURCE = _DEFAULT_VENUE_OBJ.length_limits_source
 COVER_LETTER_MIN_WORDS = _DEFAULT_LIMITS["cover letter"]["min"]
 COVER_LETTER_MAX_WORDS = _DEFAULT_LIMITS["cover letter"]["max"]
 COVER_LETTER_SOURCE = _DEFAULT_LIMITS["cover letter"]["source"]
@@ -2845,9 +3115,11 @@ def length_rule_text(profile=None) -> str:
     source = prof.length_limits_source
     if abstract["cap"] is None and main["cap"] is None:
         limits_para = (
-            f"      carries): this venue profile publishes no abstract or main-text number of its\n"
-            f"      own, so there is no relaxed cap to apply here. The limits that DO apply are the\n"
-            f"      target journal's own: every stage COUNTS the abstract and the main text, and each\n"
+            f"      carries): this venue profile publishes no abstract or main-text number for\n"
+            f"      {_article_phrase(prof)}, so there is no relaxed cap to apply here. The limits "
+            f"that DO\n"
+            f"      apply are the venue's own: every stage COUNTS the abstract and the main text, "
+            f"and each\n"
             f"      artifact names the limit it applied and the source it came from ({source}).")
     else:
         base_bits = []
@@ -2868,10 +3140,17 @@ def length_rule_text(profile=None) -> str:
             f"      are {' and '.join(base_bits)},\n"
             f"      counted with the abstract, Methods, references and figure legends EXCLUDED "
             f"from the main text ({source}). This pipeline allows\n"
-            f"      {' and '.join(relaxed_bits)}. A submission of another content\n"
-            f"      type takes that type's own base numbers from the same venue table with the "
-            f"same margins, and the artifact\n"
-            f"      must name the base limit and the source it came from.")
+            f"      {' and '.join(relaxed_bits)}. This run is submitted as "
+            f"{_article_phrase(prof)}:\n"
+            f"      the venue profile's article-type table carries every type the venue "
+            f"publishes, and\n"
+            f"      `set-article-type` selects which one this is. A type the profile carries no "
+            f"number for\n"
+            f"      is COUNTED and named from the venue's own table, never measured against "
+            f"these caps; a\n"
+            f"      submission of another content type uses that type's own base numbers and "
+            f"margins from\n"
+            f"      the same venue table.")
     cover_clause = _cover_preference_clause(prof)
     if cover_clause:
         cover_para = (
@@ -7951,6 +8230,12 @@ def _fmt_corpus_files(dirp: Path) -> list:
         if not p.is_file() or p.name.startswith("~$") or _is_aux_doc(p.name):
             continue
         rel = p.relative_to(dirp).as_posix()
+        if is_raw_data_rel(rel):
+            # raw_data/ is READ-ONLY BY CONTRACT (recursively): its files are the
+            # author's inputs, so the formatter never opens one for writing --
+            # and an operator may have removed the write bits, which would make
+            # the attempt fail on a file the pipeline must not touch anyway.
+            continue
         if "work" in rel.split("/")[:-1] or is_bookkeeping_name(p.name):
             continue
         out.append(p)
@@ -7986,7 +8271,24 @@ def fix_docx_in_place(path: Path, policy: dict) -> dict:
         return {"file": path.name, "changes": rep.get("changes") or [], "applied": False,
                 "error": "self-verification failed (the original file was kept)",
                 "verified": rep.get("verified")}
-    os.replace(tmp, path)
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        # The formatter writes the repaired package NEXT TO the original and
+        # swaps it in: replacing an entry needs WRITE on the directory, which an
+        # author may have removed (a read-only corpus directory). The copy is the
+        # pipeline's own (raw_data/ never reaches this function -- see
+        # _fmt_corpus_files), so clearing the blocking mode is safe.
+        make_writable(path.parent, directory=True)
+        try:
+            os.replace(tmp, path)
+        except OSError as e:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            return {"file": path.name, "changes": rep.get("changes") or [],
+                    "applied": False,
+                    "error": f"the repaired file could not replace the original: {e}",
+                    "verified": rep.get("verified")}
     return {"file": path.name, "changes": rep.get("changes") or [], "applied": True,
             "verified": {k: rep["verified"].get(k) for k in
                          ("parts_intact", "text_identical", "text_diff_only_quotes",
@@ -9358,6 +9660,146 @@ def _corpus_ignore(skip_aux: bool, strip_bookkeeping: bool):
     return _ignore
 
 
+# ---- permissions: the raw-data directory is READ-ONLY by contract -----------
+# The corpus's raw-data directory (`raw_data/`, or the legacy `raw_figs/`) is an
+# INPUT: the pipeline never edits its content, and an operator may well have
+# made the whole subtree read-only (`chmod -R a-w`) as their own protection --
+# which is exactly the assumption this section implements. A pipeline-owned copy
+# of a corpus can therefore contain read-only FILES and read-only DIRECTORIES,
+# and that breaks two mechanical operations that have nothing to do with
+# content:
+#   * deleting a tree the pipeline owns (a scratch copy, a pruned sandbox, a
+#     stale final_clean_version.tmp): unlinking an entry needs WRITE on the
+#     directory that holds it;
+#   * rewriting the pipeline's own copy of a package (incrementing the
+#     generation counter in the published package, repointing references,
+#     restoring raw_data from the pristine copy): writing a file needs WRITE on
+#     the file, and replacing an entry needs WRITE on its directory.
+# `make_tree_writable` hands the write bits back and returns a plan that
+# `restore_modes` can put back verbatim; `rmtree_force` clears them only when an
+# ordinary delete fails. Neither ever changes content.
+
+def is_raw_data_rel(rel: str) -> bool:
+    """True when a corpus-relative path lives inside raw_data/ (or raw_figs/)."""
+    top = str(rel or "").replace("\\", "/").lstrip("/").split("/", 1)[0]
+    return top in RAW_DATA_DIRNAMES
+
+
+def make_writable(path: Path, *, directory: bool = None) -> bool:
+    """Give one entry its owner write bit back; True when the mode changed."""
+    if directory is None:
+        try:
+            directory = path.is_dir() and not path.is_symlink()
+        except OSError:
+            directory = False
+    bits = 0o700 if directory else 0o600
+    try:
+        mode = path.lstat().st_mode
+    except OSError:
+        return False
+    if mode & bits == bits:
+        return False
+    try:
+        os.chmod(path, mode | bits)
+    except OSError:
+        return False
+    return True
+
+
+def make_tree_writable(root: Path, skip_top=()) -> list:
+    """Give the pipeline's own copy of a tree back the write bits it needs.
+
+    Returns `[(path, mode_before), ...]` for every entry whose mode changed, so
+    a caller that must leave the tree exactly as it found it (restoring raw_data
+    from the pristine copy) can put the modes back with `restore_modes`.
+    `skip_top` names top-level entries whose modes must not be touched at all:
+    the read-only raw-data directory is the reason this helper exists, so callers
+    that may write anywhere BUT raw_data pass `skip_top=RAW_DATA_DIRNAMES`.
+    """
+    plan: list = []
+    skipped = set(skip_top or ())
+
+    def bump(p: Path, bits: int) -> None:
+        try:
+            mode = p.lstat().st_mode
+        except OSError:
+            return
+        if mode & bits == bits:
+            return
+        try:
+            os.chmod(p, mode | bits)
+        except OSError:
+            return
+        plan.append((p, stat.S_IMODE(mode)))
+
+    def visit(p: Path, is_root: bool) -> None:
+        bump(p, 0o700)                  # directories: rwx (list, descend, unlink)
+        try:
+            entries = sorted(p.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            if is_root and entry.name in skipped:
+                continue
+            try:
+                is_dir = entry.is_dir() and not entry.is_symlink()
+            except OSError:
+                is_dir = False
+            if is_dir:
+                visit(entry, False)
+            else:
+                bump(entry, 0o600)      # files: rw (rewrite, unlink, replace)
+
+    visit(Path(root), True)
+    return plan
+
+
+def restore_modes(plan) -> None:
+    """Put back the modes recorded by `make_tree_writable` (deepest first)."""
+    for path, mode in reversed(list(plan or [])):
+        try:
+            os.chmod(path, mode)
+        except OSError:
+            continue
+
+
+def _rmtree_retry(func, path, _exc=None) -> None:
+    """shutil.rmtree error hook: clear the blocking mode and retry the call."""
+    with contextlib.suppress(OSError):
+        os.chmod(path, 0o700)
+    with contextlib.suppress(OSError):
+        func(path)
+
+
+def rmtree_force(path: Path, ignore_errors: bool = False) -> bool:
+    """Delete a tree the pipeline owns, even when it carries read-only entries.
+
+    `shutil.rmtree` cannot descend into or unlink from a directory without the
+    execute/write bits -- exactly how a copy of a read-only `raw_data/` behaves
+    inside a scratch tree. The ordinary delete is the fast path; only when it
+    fails do we hand the write bits back (to the whole tree, since shutil may
+    stop at the first refusal) and retry. Returns True when the tree is gone.
+    """
+    p = Path(path)
+    if not p.exists() and not p.is_symlink():
+        return True
+    try:
+        shutil.rmtree(p)
+        return True
+    except OSError:
+        pass
+    make_tree_writable(p)
+    retry_kwargs = ({"onexc": _rmtree_retry} if sys.version_info >= (3, 12)
+                    else {"onerror": _rmtree_retry})
+    try:
+        shutil.rmtree(p, **retry_kwargs)
+        return True
+    except OSError:
+        if ignore_errors:
+            return not p.exists()
+        raise
+
+
 def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
               strip_bookkeeping: bool = False, normalize_mtime: bool = False,
               mtime_stamp: float = None) -> None:
@@ -9434,7 +9876,7 @@ def ensure_copy(src: Path, dst: Path, **kw) -> bool:
     if dir_matches(dst, want):
         return False
     if dst.exists():
-        shutil.rmtree(dst, ignore_errors=True)
+        rmtree_force(dst, ignore_errors=True)
     copy_into(src, dst, **kw)
     return True
 
@@ -9446,7 +9888,7 @@ def ensure_corpus_dir(ctx: "Ctx", r: int, vid: str, dst: Path,
     if dir_matches(dst, want):
         return False
     if dst.exists():
-        shutil.rmtree(dst, ignore_errors=True)
+        rmtree_force(dst, ignore_errors=True)
     build_corpus_dir(ctx, r, vid, dst, mtime_stamp=mtime_stamp)
     return True
 
@@ -11826,7 +12268,7 @@ def ensure_judge_view(ctx: Ctx, r: int, vid: str, dst: Path, stamp: float,
     if dst.is_dir() and judge_view_digest(dst) == want:
         return False
     if dst.exists():
-        shutil.rmtree(dst, ignore_errors=True)
+        rmtree_force(dst, ignore_errors=True)
     build_judge_view(ctx, r, vid, dst, stamp, view_seed)
     return True
 
@@ -12091,7 +12533,7 @@ def move_failed_sandbox(ctx: Ctx, rec: dict) -> Path:
             sb.rename(dest)
         except OSError:
             shutil.copytree(sb, dest)
-            shutil.rmtree(sb, ignore_errors=True)
+            rmtree_force(sb, ignore_errors=True)
         write_json_atomic(dest / "record.json", record)
         record["moved_to"] = str(dest.relative_to(ctx.root))
     if entry is not None:
@@ -12255,10 +12697,10 @@ def materialize_a1(ctx: Ctx, r: int) -> dict:
         # An earlier round was re-run and its champion changed: a stale base copy
         # must never silently become this round's base (the digest would say one
         # thing and the documents another).
-        shutil.rmtree(base)
+        rmtree_force(base)
     if nr.exists() and ctx.source_manifest \
             and not manifests_equal(hash_manifest(nr), ctx.source_manifest):
-        shutil.rmtree(nr)
+        rmtree_force(nr)
     if not base.exists():
         copy_into(src_dir, base)
     if not nr.exists():
@@ -12353,7 +12795,7 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
             # reconcile EVERY prior finding, and a silently truncated
             # prior_round/ would make that reconciliation vacuous.
             if (sb / "prior_round").exists():
-                shutil.rmtree(sb / "prior_round", ignore_errors=True)
+                rmtree_force(sb / "prior_round", ignore_errors=True)
             (sb / "prior_round").mkdir(parents=True, exist_ok=True)
             for name in want_prior:
                 shutil.copy2(prior / name, sb / "prior_round" / name)
@@ -12534,7 +12976,7 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
     if others_dir.is_dir():
         for stale in [p for p in others_dir.iterdir()
                       if p.is_dir() and p.name not in other_ids]:
-            shutil.rmtree(stale, ignore_errors=True)
+            rmtree_force(stale, ignore_errors=True)
     ensure_copy(ctx.pristine, sb / PRISTINE_DIR)
     (sb / INTEGRATED_DIR).mkdir(exist_ok=True)
     seed_evidence_pack(ctx, sb, sb / "self", "stage")
@@ -12812,7 +13254,7 @@ def rebuild_sandbox(ctx: Ctx, rec: dict) -> None:
         except OSError as e:                                    # noqa: BLE001
             print(f"  [warn] {rec['id']}: could not keep attempt {attempt_number(rec)}'s sandbox "
                   f"({e}); its diagnostics stay in state.json's attempts_log")
-            shutil.rmtree(sb, ignore_errors=True)
+            rmtree_force(sb, ignore_errors=True)
     kind = rec["kind"]
     handler = REBUILD_HANDLERS.get(kind)
     if handler is None:
@@ -13039,7 +13481,7 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
         sb = ctx.sandbox_of(rec)
         if sb.is_dir():
             stash_logs(sb, ctx.runs_dir / LOGS_DIRNAME, rid, attempt=attempt_number(rec))
-            shutil.rmtree(sb, ignore_errors=True)
+            rmtree_force(sb, ignore_errors=True)
         reset_run_record(rec)
         rec["status"] = "stale"
         rec["stale_reason"] = why
@@ -14518,7 +14960,7 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
         legacy_ok = all(want.get(k, (None, None))[1] == d
                         for k, (_rel, d) in _entries_in(other, cand_dir).items())
         if legacy_ok:
-            shutil.rmtree(other, ignore_errors=True)
+            rmtree_force(other, ignore_errors=True)
             warns.append(f"READ-ONLY raw data: {other.relative_to(cand_dir).as_posix()}/ was a "
                          f"duplicate of {name}/ and was removed (one directory, one spelling)")
         else:
@@ -14535,32 +14977,58 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
     def inside_squat(rel: str) -> bool:
         return any(rel == s or rel.startswith(s + "/") for s in squat)
 
+    # This is the ONE sanctioned write inside raw_data (putting a package's copy
+    # back to the pristine original). The subtree is read-only by contract -- and
+    # by the operator's own chmod -- so clear the write bits for the duration and
+    # put every mode back exactly as it was, whether the copy ends up restored or
+    # unchanged. Without this, a read-only raw_data copy would make the RESTORE
+    # itself fail with EACCES (or, worse, leave half a package repaired).
+    mode_plan = make_tree_writable(area) if area.is_dir() else []
     restored, dropped = [], []
-    for key, (rel, dig) in want.items():
-        cur = got.get(key)
-        if cur is not None and cur[1] == dig:
-            continue
-        # The candidate's OWN spelling of the directory wins (it is what its
-        # documents reference); a file the original does not have yet is written
-        # under the canonical name.
-        dest_rel = cur[0] if cur is not None else norm_raw_data_name(rel)
-        if (cand_dir / dest_rel).is_dir():
-            continue                    # squatted: reported as a warning below
-        dest = cand_dir / dest_rel
-        try:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(ctx.pristine / rel, dest)
-        except OSError as e:
-            warns.append(f"READ-ONLY raw data: could not restore {dest.name}: {e}")
-            continue
-        restored.append(dest.relative_to(cand_dir).as_posix())
-    for key, (rel, _dig) in got.items():
-        if key not in want and not inside_squat(rel):
-            try:
-                (cand_dir / rel).unlink()
-            except OSError:
+    try:
+        for key, (rel, dig) in want.items():
+            cur = got.get(key)
+            if cur is not None and cur[1] == dig:
                 continue
-            dropped.append(rel)
+            # The candidate's OWN spelling of the directory wins (it is what its
+            # documents reference); a file the original does not have yet is written
+            # under the canonical name.
+            dest_rel = cur[0] if cur is not None else norm_raw_data_name(rel)
+            if (cand_dir / dest_rel).is_dir():
+                continue                # squatted: reported as a warning below
+            dest = cand_dir / dest_rel
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(ctx.pristine / rel, dest)
+                # The pristine copy's own mode is the honest one for a file the
+                # package did not have (a read-only source stays read-only); the
+                # finally below then restores the modes of everything that was
+                # already there.
+                with contextlib.suppress(OSError):
+                    shutil.copymode(ctx.pristine / rel, dest)
+            except OSError as e:
+                warns.append(f"READ-ONLY raw data: could not restore {dest.name}: {e}")
+                continue
+            restored.append(dest.relative_to(cand_dir).as_posix())
+        for key, (rel, _dig) in got.items():
+            if key not in want and not inside_squat(rel):
+                try:
+                    (cand_dir / rel).unlink()
+                except OSError:
+                    continue
+                dropped.append(rel)
+        # A directory the package had lost (or made writable) comes back with the
+        # original's modes: the read-only contract is a property of the tree, not
+        # only of its bytes. Entries that were already there keep their own modes
+        # (the finally restores them).
+        for src_dir in [src, *[p for p in sorted(src.rglob("*")) if p.is_dir()]]:
+            rel_dir = "" if src_dir == src else src_dir.relative_to(src).as_posix()
+            dst_dir = area / rel_dir if rel_dir else area
+            if dst_dir.is_dir():
+                with contextlib.suppress(OSError):
+                    shutil.copymode(src_dir, dst_dir)
+    finally:
+        restore_modes(mode_plan)
     for s in squat:
         warns.append(f"READ-ONLY raw data: {s} is a directory where the pristine original has a "
                      f"file; its content was left alone (the recovery layer refuses to delete "
@@ -18990,7 +19458,7 @@ def pin_champion(ctx: Ctx, r: int, champ_id: str, agg: dict) -> dict:
     docs = dst / "documents"
     tmp = dst / "documents.tmp"
     if tmp.exists():
-        shutil.rmtree(tmp)
+        rmtree_force(tmp)
     build_corpus_dir(ctx, r, champ_id, tmp)
     tmp.mkdir(parents=True, exist_ok=True)
     manifest = corpus_dir_manifest(tmp)  # the run digest's rule
@@ -19003,7 +19471,7 @@ def pin_champion(ctx: Ctx, r: int, champ_id: str, agg: dict) -> dict:
         die(f"internal inconsistency: the pinned copy of '{champ_id}' hashes to {digest[:12]} "
             f"but its run recorded {str(recorded)[:12]}")
     if docs.is_dir() and corpus_tree_digest(docs) == digest:
-        shutil.rmtree(tmp)          # idempotent resume: identical already
+        rmtree_force(tmp)          # idempotent resume: identical already
     else:
         if docs.exists():
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -19054,7 +19522,7 @@ def publish_winner(ctx: Ctx, r: int, champ_id: str, pin: dict, agg: dict) -> dic
     dst = winner_dir_of(ctx, r)
     tmp = ctx.root / (WINNER_DIR_FMT.format(r=int(r)) + ".tmp")
     if tmp.exists():
-        shutil.rmtree(tmp)
+        rmtree_force(tmp)
     build_corpus_dir(ctx, r, champ_id, tmp)
     tmp.mkdir(parents=True, exist_ok=True)
     manifest = corpus_dir_manifest(tmp)  # the run digest's rule
@@ -19066,7 +19534,7 @@ def publish_winner(ctx: Ctx, r: int, champ_id: str, pin: dict, agg: dict) -> dic
         die(f"internal inconsistency: the round {r} winner copy hashes to {digest[:12]} but its "
             f"pin recorded {str(pin.get('digest'))[:12]}")
     if dst.is_dir() and corpus_tree_digest(dst) == digest:
-        shutil.rmtree(tmp)                      # idempotent resume: identical already
+        rmtree_force(tmp)                      # idempotent resume: identical already
     else:
         if dst.exists():
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -20427,6 +20895,7 @@ def cmd_setup(args) -> None:
     # the config records.
     venue_arg = str(getattr(args, "venue", None) or "").strip()
     journal_arg = str(getattr(args, "journal", None) or "").strip()
+    article_arg = str(getattr(args, "article_type", None) or "").strip().lower()
     strict_venue = bool(getattr(args, "strict_venue", False))
     try:
         venue_profile = load_venue_profile(venue_arg or DEFAULT_VENUE)
@@ -20434,6 +20903,16 @@ def cmd_setup(args) -> None:
         if e.unknown:
             die(unknown_venue_message(venue_arg or DEFAULT_VENUE), code=2)
         die(str(e), code=2)
+    if article_arg:
+        try:
+            venue_profile = venue_profile.with_article_type(article_arg)
+        except VenueProfileError:
+            die(f"unknown article type {article_arg!r} for venue {venue_profile.id!r} "
+                f"(available: {', '.join(venue_profile.article_type_ids())}). "
+                f"`set-venue --list` shows the venues; `set-article-type --list` the types "
+                f"of an existing root. A profile that does not carry your venue's types can "
+                f"be extended with `set-venue <id> --profile FILE`.", code=2)
+    article_type_source = "operator" if article_arg else "profile-default"
     journal = journal_arg or venue_profile.default_journal
     journal_source = ("operator" if journal_arg
                       else ("profile-default" if venue_profile.default_journal else "unset"))
@@ -20531,7 +21010,7 @@ def cmd_setup(args) -> None:
         if marker.is_file() and not (root / "state.json").is_file():
             print(f"[setup] {root} holds an INTERRUPTED setup (see {SETUP_MARKER}, no "
                   f"state.json yet); starting over from the source")
-            shutil.rmtree(root)
+            rmtree_force(root)
         else:
             die(f"--root exists and is not empty: {root} (choose a fresh --root or delete it)")
     if is_within(root, source) or is_within(source, root):
@@ -20594,6 +21073,8 @@ def cmd_setup(args) -> None:
                # root cannot silently drift to another venue's numbers.
                "venue": venue_profile.id, "journal": journal,
                "journal_source": journal_source,
+               "article_type": venue_profile.article_type_id,
+               "article_type_source": article_type_source,
                "caption_limit_source": caption_limit_source,
                "venue_profile": _venue_snapshot,
                "caption_limit": caption_limit, "zotero": zotero,
@@ -20672,6 +21153,13 @@ def cmd_setup(args) -> None:
     print(f"[setup] pipeline root:          {root}")
     print(f"[setup] venue:                  {venue_profile.id} (\"{venue_profile.label}\"; "
           f"{venue_profile.describe_origin()})")
+    print(f"[setup] article type:           {venue_profile.article_type} "
+          f"(`{venue_profile.article_type_id}`; "
+          f"{len(venue_profile.article_types())} type(s) in the profile"
+          + ("" if venue_profile.carries_article_numbers()
+             else ", which carries no word limits for it: the stages count and name the "
+                  "venue's own numbers")
+          + ")")
     print(f"[setup] journal:                {journal or '(not set -- run `set-journal <name>`)'}"
           + ("" if journal else "  (the prompts say \"the target journal\")"))
     _lim = venue_profile.length_limits()
@@ -20824,6 +21312,11 @@ def _print_venue_show(ctx, as_json: bool, notes=()) -> None:
             "venue_label": prof.label if prof else None,
             "venue_origin": prof.describe_origin() if prof else None,
             "venue_description": prof.description if prof else None,
+            "article_type": (prof.article_type if prof else None),
+            "article_type_id": (prof.article_type_id if prof else None),
+            "article_types": ([{"id": tid, "label": label, "limits_carried": has}
+                               for tid, label, has in prof.article_types()]
+                              if prof else None),
             "journal": journal_of(ctx),
             "journal_configured": str(ctx.cfg.get("journal") or ""),
             "length_limits": (prof.length_limits() if prof else None),
@@ -20835,6 +21328,9 @@ def _print_venue_show(ctx, as_json: bool, notes=()) -> None:
     print(f"root:    {ctx.root}")
     print(f"venue:   {venue_id_of(ctx)}" + (f" (\"{prof.label}\", {prof.describe_origin()})"
                                             if prof else "  -- UNRESOLVED"))
+    if prof is not None:
+        print(f"article: {prof.article_type} (`{prof.article_type_id}` of "
+              f"{len(prof.article_types())} type(s); `set-article-type --list`)")
     unset_journal = 'not set -- the prompts say "the target journal"'
     print(f"journal: {journal_of(ctx) or '(' + unset_journal + ')'}")
     if prof is not None:
@@ -20898,6 +21394,8 @@ def cmd_set_venue(args) -> None:
     venue_arg = venue_arg.lower()
     old_profile = venue_profile_of(ctx, required=False)
     old_default_journal = old_profile.default_journal if old_profile is not None else ""
+    old_default_article = (old_profile.data["default_article_type"]
+                           if old_profile is not None else "")
     installed = None
     if profile_file:
         src = Path(profile_file).expanduser()
@@ -20934,6 +21432,35 @@ def cmd_set_venue(args) -> None:
             f"decision report records the venue of every round, and a new venue makes the "
             f"recorded judgments a mix of two rule sets).")
     journal_arg = getattr(args, "journal", None)
+    # ---- the article type ------------------------------------------------
+    # An article type the operator chose is kept when the new venue has it; a
+    # type that only came from the old profile's default moves with the venue,
+    # and a type the new profile does not know falls back to its default with a
+    # note rather than silently borrowing another type's limits.
+    article_arg = str(getattr(args, "article_type", None) or "").strip().lower()
+    recorded_article = str(ctx.cfg.get("article_type") or "").strip().lower()
+    recorded_source = str(ctx.cfg.get("article_type_source") or "").strip().lower()
+    if article_arg:
+        if article_arg not in profile.article_type_ids():
+            die(f"unknown article type {article_arg!r} for venue {profile.id!r} "
+                f"(available: {', '.join(profile.article_type_ids())})", code=2)
+        article_type_id, article_type_source = article_arg, "operator"
+    else:
+        kept = recorded_article and (recorded_source == "operator"
+                                     or (not recorded_source
+                                         and recorded_article != old_default_article))
+        if kept and recorded_article in profile.article_type_ids():
+            article_type_id, article_type_source = recorded_article, "operator"
+        else:
+            article_type_id = profile.data["default_article_type"]
+            article_type_source = "profile-default"
+            if kept:
+                print(f"[set-venue] note: venue {profile.id!r} carries no "
+                      f"{recorded_article!r} article type; falling back to its default "
+                      f"{profile.article_type!r} (`{article_type_id}`). "
+                      f"Pick another one with `set-article-type <id>`.")
+    profile = profile.with_article_type(article_type_id)
+
     if journal_arg is not None:
         journal = _validate_journal_name(journal_arg)
         journal_source = "operator"
@@ -20971,6 +21498,8 @@ def cmd_set_venue(args) -> None:
         ctx.cfg["venue"] = profile.id
         ctx.cfg["journal"] = journal
         ctx.cfg["journal_source"] = journal_source
+        ctx.cfg["article_type"] = profile.article_type_id
+        ctx.cfg["article_type_source"] = article_type_source
         ctx.cfg["caption_limit"] = caption_limit
         ctx.cfg["caption_limit_source"] = ("operator" if caption_source == "operator"
                                            else "profile-default")
@@ -20980,6 +21509,8 @@ def cmd_set_venue(args) -> None:
         ctx.log("set-venue", detail=f"venue={profile.id} journal={journal or '(unset)'}")
         ctx.save_state()
     print(f"[set-venue] venue:   {profile.id} (\"{profile.label}\", {profile.describe_origin()})")
+    print(f"[set-venue] article: {profile.article_type} (`{profile.article_type_id}`, "
+          f"{'operator-set' if article_type_source == 'operator' else 'the profile default'})")
     print(f"[set-venue] journal: {journal or '(not set -- run `set-journal <name>`)'}")
     print(f"[set-venue] caption suggestion: {caption_limit} "
           f"({'operator-set' if caption_source == 'operator' else 'the venue profile default'})")
@@ -21000,6 +21531,108 @@ def cmd_set_venue(args) -> None:
               f"{limits['main text'].get('cap')} ({profile.length_limits_source})")
     print(f"[set-venue] next:    python {Path(__file__).name} run --root {ctx.root}  "
           f"(existing roots keep their completed rounds; `retry`/`run` re-stage the rest)")
+
+
+def _article_type_list_lines(profile) -> list:
+    """`set-article-type --list` / the refusal message: the type table."""
+    lines = [f"Article types of venue {profile.id!r} (\"{profile.label}\"):"]
+    for tid, label, has_limits in profile.article_types():
+        limits = profile.with_article_type(tid).length_limits()
+        if has_limits:
+            caps = (f"abstract <= {limits['abstract']['cap']}, main text <= "
+                    f"{limits['main text']['cap']}")
+        else:
+            caps = "no numbers carried: the stages count and name the venue's own limit"
+        marker = " (default)" if tid == profile.data["default_article_type"] else ""
+        lines.append(f"  {tid:<24} {label}{marker}\n"
+                     f"  {'':<24} {caps}")
+    lines.append("")
+    lines.append("Select one with `set-article-type <id>` (or `setup --article-type <id>`); "
+                 "the prompts, the M19 caps and the decision report follow it.")
+    return lines
+
+
+def cmd_set_article_type(args) -> None:
+    """Select the venue's ARTICLE TYPE (Article, Brief Communication, ...).
+
+    A venue publishes several content types, each with its own limits; the
+    profile carries the table and this command records which one the submission
+    is. Selecting a type the profile has no numbers for never borrows another
+    type's caps: the stages count and name the venue's own limit instead.
+    """
+    ctx = Ctx(_venue_command_root(args, "set-article-type"),
+              strict_venue=bool(getattr(args, "strict_venue", False)))
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        ctx.load()
+    notes = [ln for ln in captured.getvalue().splitlines() if ln.strip()]
+    profile = venue_profile_of(ctx, required=False)
+    if profile is None:
+        for note in notes:
+            print(note)
+        die("this root's venue does not resolve, so its article types cannot be listed: fix the "
+            "venue first (`set-venue <id> --list`).")
+    wanted = str(getattr(args, "article_type", None) or "").strip().lower()
+    if getattr(args, "list", False) or (getattr(args, "show", False) and not wanted):
+        if getattr(args, "json", False):
+            print_raw(json.dumps({"root": str(ctx.root), "venue": profile.id,
+                                  "article_type": profile.article_type,
+                                  "article_type_id": profile.article_type_id,
+                                  "notes": notes,
+                                  "article_types": [
+                                      {"id": tid, "label": label,
+                                       "limits_carried": has,
+                                       "caps": (lambda lim: {"abstract": lim["abstract"]["cap"],
+                                                             "main_text": lim["main text"]["cap"]})(
+                                           profile.with_article_type(tid).length_limits()),
+                                       "default": tid == profile.data["default_article_type"]}
+                                      for tid, label, has in profile.article_types()]},
+                                 indent=2))
+            return
+        for note in notes:
+            print(note)
+        if getattr(args, "list", False):
+            for line in _article_type_list_lines(profile):
+                print(line)
+        else:
+            _print_venue_show(ctx, False, notes)
+        return
+    if not wanted:
+        die("set-article-type needs an article-type id, e.g. "
+            "`set-article-type brief-communication` (`set-article-type --list` shows the "
+            "types this venue's profile carries), or `set-article-type --show`.", code=2)
+    if wanted not in profile.article_type_ids():
+        die(f"unknown article type {wanted!r} for venue {profile.id!r} "
+            f"(available: {', '.join(profile.article_type_ids())}).\n"
+            f"       A type the profile does not carry can be added to a copy of the profile "
+            f"and installed with `set-venue {profile.id} --profile <file>`.", code=2)
+    begin_run_log("set-article-type", ctx.root, sys.argv)
+    if ctx.state.get("runs") and not getattr(args, "force", False):
+        die(f"this root already has {len(ctx.state['runs'])} run record(s): its prompts, caps "
+            f"and judgments belong to the "
+            f"{profile.article_type!r} type.\n"
+            f"       Re-run `set-article-type {wanted} --force` if the change is intended.")
+    with ctx.lock("set-article-type"):
+        ctx.cfg["article_type"] = wanted
+        ctx.cfg["article_type_source"] = "operator"
+        ctx.state["config"] = ctx.cfg
+        write_json_atomic(ctx.cfg_path, ctx.cfg)
+        ctx.log("set-article-type", detail=wanted)
+        ctx.save_state()
+    chosen = profile.with_article_type(wanted)
+    limits = chosen.length_limits()
+    print(f"[set-article-type] article type: {chosen.article_type} (`{wanted}`) for venue "
+          f"{profile.id} (\"{profile.label}\")")
+    if not chosen.carries_article_numbers():
+        print("[set-article-type] note: this profile carries no word limits for that type; the "
+              "stages count and name the venue's own limit (see "
+              "`venue_profiles/README.md` to add the numbers to a copy of the profile).")
+    else:
+        print(f"[set-article-type] M19 caps: abstract <= {limits['abstract']['cap']}, main text "
+              f"<= {limits['main text']['cap']} ({chosen.length_limits_source[:120]})")
+    other = [tid for tid, _label, _has in profile.article_types() if tid != wanted][:4]
+    if other:
+        print(f"[set-article-type] others: {', '.join(other)}  (`set-article-type --list`)")
 
 
 def cmd_set_journal(args) -> None:
@@ -21691,8 +22324,26 @@ def _increment_final_clean_counters(dirp: Path) -> dict:
     ("cnb-11-x" -> "cnb-12-x" while "cnb-12-x" itself is moving to "cnb-13-x")
     is handled by renaming every source to a unique temporary name first and
     then to its final name.
+
+    `raw_data/` (and its legacy spelling) is EXCLUDED, in both directions: the
+    author's data files keep their names (renaming one inside the read-only tree
+    would both fail and silently change an input), and their text is never
+    rewritten. References INTO raw_data from the manuscript's own files are
+    still repointed, because the callee's file_map carries their relative paths.
     """
-    files = [p for p in sorted(dirp.rglob("*")) if p.is_file()]
+    raw_data_skipped = 0
+    files = []
+    for p in sorted(dirp.rglob("*")):
+        if not p.is_file():
+            continue
+        if is_raw_data_rel(p.relative_to(dirp).as_posix()):
+            raw_data_skipped += 1
+            continue
+        files.append(p)
+    # The counter runs on the pipeline's OWN copy of the package, so it owns the
+    # write bits -- but the copy inherits the source's modes, and the source may
+    # be read-only outside raw_data too. Clear them (never inside raw_data).
+    make_tree_writable(dirp, skip_top=RAW_DATA_DIRNAMES)
     file_map = {}
     for p in files:
         rel = p.relative_to(dirp).as_posix()
@@ -21727,8 +22378,16 @@ def _increment_final_clean_counters(dirp: Path) -> dict:
             raw = p.read_bytes()
             text = raw.decode("utf-8", "surrogateescape")
             text = _rewrite_view_references(text, reverse[new_rel], new_rel, file_map)
-            p.write_bytes(text.encode("utf-8", "surrogateescape"))
-    return {"renamed": len(renamed), "file_map": renamed, "collisions": []}
+            try:
+                p.write_bytes(text.encode("utf-8", "surrogateescape"))
+            except OSError:
+                # A file mode the writer could not clear (an ACL, a Windows lock):
+                # the content pass is best-effort, the rename above already
+                # happened, and the caller records the counter's own result.
+                make_writable(p, directory=False)
+                p.write_bytes(text.encode("utf-8", "surrogateescape"))
+    return {"renamed": len(renamed), "file_map": renamed, "collisions": [],
+            "raw_data_untouched": raw_data_skipped}
 
 
 def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = "") -> dict:
@@ -21772,22 +22431,28 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     dst = ctx.root / FINAL_CLEAN_DIRNAME
     tmp = ctx.root / (FINAL_CLEAN_DIRNAME + ".tmp")
     if tmp.exists():
-        shutil.rmtree(tmp)
+        rmtree_force(tmp)
     copy_into(src, tmp, exclude_top=CORPUS_EXCLUDE_TOP, skip_aux=True, strip_bookkeeping=True)
+    # The staging copy is the pipeline's own, but copy2/copytree preserved the
+    # source's modes: a read-only manuscript file (or a read-only DIRECTORY the
+    # counter has to rename inside) would otherwise make publication fail on
+    # permissions the author set for their own protection. raw_data/ keeps its
+    # modes -- and its content -- untouched; the rest of the tree is ours to write.
+    chmod_plan = make_tree_writable(tmp, skip_top=RAW_DATA_DIRNAMES)
     manifest = corpus_dir_manifest(tmp)
     if not manifest["count"]:
-        shutil.rmtree(tmp, ignore_errors=True)
+        rmtree_force(tmp, ignore_errors=True)
         return {"skipped": "the champion corpus is empty"}
     digest = manifest_digest(manifest)
     if pin.get("digest") and digest != pin["digest"]:
-        shutil.rmtree(tmp, ignore_errors=True)
+        rmtree_force(tmp, ignore_errors=True)
         return {"skipped": f"the clean copy hashes to {digest[:12]} but the pin recorded "
                            f"{str(pin.get('digest'))[:12]}"}
     # The pin digest above is verified BEFORE the counter increment; the
     # published copy carries the incremented names and the repointed references.
     counter = _increment_final_clean_counters(tmp)
     if counter.get("collisions"):
-        shutil.rmtree(tmp, ignore_errors=True)
+        rmtree_force(tmp, ignore_errors=True)
         return {"skipped": "filenames collide after the +1 increment (nothing was published): "
                            + "; ".join(counter["collisions"][:4])}
     # Hygiene: the published package is what the author hands over, so the build
@@ -21797,22 +22462,29 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     # when no editable bibliography can regenerate it, and a PDF is a submission
     # deliverable when the configured venue accepts one (see the venue profile's
     # `submission` block and derived_outputs_rule()).
-    hygiene = {"removed": [], "kept_bbl": []}
+    hygiene = {"removed": [], "kept_bbl": [], "raw_data_untouched": 0}
     for q in sorted(tmp.rglob("*")):
         if not q.is_file():
+            continue
+        rel = q.relative_to(tmp).as_posix()
+        if is_raw_data_rel(rel):
+            # READ-ONLY BY CONTRACT: the published package carries the author's
+            # raw-data files exactly as they are, build by-products included --
+            # the pipeline neither deletes nor renames anything inside it.
+            hygiene["raw_data_untouched"] += 1
             continue
         low = q.name.lower()
         if low.endswith((".blg", ".bcf", ".run.xml", ".synctex.gz", ".aux", ".log", ".out",
                          ".fls", ".fdb_latexmk", ".toc", ".lof", ".lot", ".nav", ".snm",
                          ".vrb", ".idx", ".ilg", ".ind")):
-            hygiene["removed"].append(q.relative_to(tmp).as_posix())
+            hygiene["removed"].append(rel)
             q.unlink()
         elif low.endswith(".bbl"):
             if q.stat().st_size == 0:
-                hygiene["removed"].append(q.relative_to(tmp).as_posix())
+                hygiene["removed"].append(rel)
                 q.unlink()
             else:
-                hygiene["kept_bbl"].append(q.relative_to(tmp).as_posix())
+                hygiene["kept_bbl"].append(rel)
     # Final formatting guarantee: the champion was already normalized in its own
     # stage postcheck, but a package produced before this feature existed (or by
     # an operator who ran the old script) reaches publication unnormalized.
@@ -21827,9 +22499,11 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     manifest = corpus_dir_manifest(tmp)
     final_digest = manifest_digest(manifest)
     if dst.is_dir() and corpus_tree_digest(dst) == final_digest:
-        shutil.rmtree(tmp, ignore_errors=True)
+        rmtree_force(tmp, ignore_errors=True)
         return {"path": str(dst), "digest": final_digest, "pin_digest": digest,
                 "files": manifest["count"], "renamed": counter["renamed"],
+                "raw_data_untouched": counter.get("raw_data_untouched", 0),
+                "modes_cleared": len(chmod_plan),
                 "format_fix": format_fix, "hygiene": hygiene, "action": "unchanged"}
     if dst.exists():
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -21839,6 +22513,8 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     os.replace(tmp, dst)
     return {"path": str(dst), "digest": final_digest, "pin_digest": digest,
             "files": manifest["count"], "renamed": counter["renamed"],
+            "raw_data_untouched": counter.get("raw_data_untouched", 0),
+            "modes_cleared": len(chmod_plan),
             "format_fix": format_fix, "hygiene": hygiene, "action": "created"}
 
 
@@ -23013,7 +23689,7 @@ def cmd_decide(args) -> None:
         else:
             tmp = ctx.root / "final.tmp"
             if tmp.exists():
-                shutil.rmtree(tmp)
+                rmtree_force(tmp)
             copy_into(src, tmp)
             dst = ctx.root / "final"
             if dst.exists():
@@ -23865,11 +24541,11 @@ def _cmd_prune_locked(ctx: Ctx, args) -> None:
     freed = 0
     for rid, _r, sb, size in targets:
         freed += size
-        shutil.rmtree(sb, ignore_errors=True)
+        rmtree_force(sb, ignore_errors=True)
         print(f"[prune] removed {sb} ({rid})")
     for rid, _r, arch, size in archives:
         freed += size
-        shutil.rmtree(arch, ignore_errors=True)
+        rmtree_force(arch, ignore_errors=True)
         print(f"[prune] removed {arch} ({rid}, attempt archives)")
     pruned_runs = {rid for rid, _r, _arch, _size in archives}
     for rec in ctx.runs():
@@ -23957,7 +24633,8 @@ def _cmd_retry_locked(ctx: Ctx, args) -> None:
 USAGE_EXAMPLES = """usage:
   setup   --source <dir> [--root <dir>] [--rounds 2] [--judges 3]
           [--rewrites M] [--revises N] [--integrators 0xFFFFFFFF]
-          [--caption-limit N] [--venue ID] [--journal NAME] [--strict-venue]
+          [--caption-limit N] [--venue ID] [--journal NAME] [--article-type ID]
+          [--strict-venue]
           [--zotero off|read|edit|apply]
           copy the pristine corpus read-only, record its SHA-256 manifest, and
           create pipeline_config.json + state.json (no sandboxes are built yet).
@@ -23975,6 +24652,15 @@ USAGE_EXAMPLES = """usage:
           default venue, with a note. `--strict-venue` refuses to start when
           the venue is unknown, the journal is missing, or the journal does not
           belong to the selected venue.
+          --article-type selects WHICH of the venue's content types this
+          submission is (Article, Brief Communication, Review, Resource,
+          Analysis, Matters Arising, Letter to the Editor, ...), and the venue
+          profile carries the table: each type has its own limits, and a type
+          the profile states no numbers for is COUNTED and reported against the
+          venue's own content-types table -- never measured against another
+          type's caps. `setup` prints the selected type, `set-article-type
+          --list` lists the table with the caps each type carries, and
+          `set-article-type <id>` changes it later.
           --rewrites M and --revises N plan each round's candidate pool: M
           REWRITTEN candidates (staged first, from the round's base) and N
           REVIEWED-AND-THEN-REVISED candidates (one $paper-review pass per round
@@ -24024,7 +24710,10 @@ USAGE_EXAMPLES = """usage:
           redundancy only, and length is a formatting-tier item that never
           gates a version. A venue profile that states no limit (the shipped
           `generic` one) still enumerates the counts and names the limit the
-          target journal's own guidelines give.
+          target journal's own guidelines give, and so does an article type the
+          selected profile carries no numbers for (the shipped
+          nature-biotechnology profile states numbers for its Article type
+          only): declaring the type never borrows another type's caps.
   run     --root <dir> [--jobs N] [--timeout S] [--retries 2]
           [--retry-backoff 30] [--retry-backoff-max 600]
           [--agent codex|claude|manual] [--agent-cmd '<json argv>']
@@ -24073,15 +24762,24 @@ USAGE_EXAMPLES = """usage:
   status  --root <dir>
           integrity, per-round progress and the per-run table.
           It also prints the venue, the journal and the resolved length limits.
-  set-venue --root <dir> <venue-id> [--journal NAME] [--force]
+  set-venue --root <dir> <venue-id> [--journal NAME] [--article-type ID] [--force]
           select the venue profile this root enforces (a RULE SET, not a
-          journal) and, optionally, the journal: both are written to
+          journal) and, optionally, the journal and the article type: all are written to
           pipeline_config.json and mirrored into state.json. `set-venue --list`
           lists the venues this pipeline can see; `set-venue --profile FILE`
           installs a profile of your own into <root>/venue_profiles/ and
           selects it; `set-venue --show` prints the current setting. Changing
           the venue of a root that already has run records needs --force,
           because the recorded rounds were judged under the previous rule set.
+  set-article-type --root <dir> [<id>] [--list] [--show] [--json] [--force]
+          select WHICH of the venue's content types this submission is; the
+          type drives the M19 caps, the caption default and the prompt prose
+          ("a Nature Biotechnology Brief Communication"). `--list` prints the
+          venue profile's table with the caps each type carries (a type whose
+          numbers the profile does not carry is counted and named from the
+          venue's own content-types table instead of inheriting the Article
+          caps); `--show` prints the current selection. A change on a root that
+          already has run records needs --force.
   set-journal --root <dir> <name> [--force]
           set the target journal (free text, e.g. "Nature Biotechnology" or
           "Cell"). The journal names the submission the prompts work on and is
@@ -24272,6 +24970,15 @@ def build_parser() -> argparse.ArgumentParser:
                          "\"Cell\"); the prompts name it and the venue profile is checked "
                          "against it. Default: the venue profile's own default journal, or "
                          "unset (the prompts then say \"the target journal\")")
+    ps.add_argument("--article-type", default=None, metavar="ID",
+                    help="the venue's article type this submission is (e.g. article, "
+                         "brief-communication, review, resource, analysis, matters-arising, "
+                         "letter-to-the-editor -- the ids the selected venue profile carries; "
+                         "`setup` prints them and, on an existing root, "
+                         "`set-article-type --list` shows them with their caps). Each type "
+                         "carries its own M19 limits: a type the profile has no numbers for is "
+                         "counted and reported against the venue's own table, never against "
+                         "another type's caps. Default: the venue profile's default type")
     ps.add_argument("--rounds", type=int, default=DEFAULTS["rounds"],
                     help=f"number of fixed rounds (default: {DEFAULTS['rounds']}); the round-R "
                          f"champion is the answer")
@@ -24575,6 +25282,10 @@ def build_parser() -> argparse.ArgumentParser:
                           "installed with --profile (`set-venue --list` shows them)")
     psv.add_argument("--journal", default=None, metavar="NAME",
                      help="also set the target journal, atomically with the venue change")
+    psv.add_argument("--article-type", default=None, metavar="ID",
+                     help="also select the article type (see `set-article-type`); a type the "
+                          "new venue's profile does not carry falls back to that profile's "
+                          "default with a note")
     psv.add_argument("--profile", default=None, metavar="FILE",
                      help=f"install a venue profile JSON into "
                           f"<root>/{VENUE_PROFILES_DIRNAME}/<id>{VENUE_PROFILE_SUFFIX} and select "
@@ -24602,6 +25313,24 @@ def build_parser() -> argparse.ArgumentParser:
     psj.add_argument("--force", action="store_true",
                      help="change the journal although this root already has run records")
     psj.set_defaults(func=cmd_set_journal)
+
+    pst = sub.add_parser("set-article-type", parents=[common],
+                         help="select the venue's article type (Article, Brief Communication, "
+                              "Review, ...), which drives the M19 caps and the prompts")
+    pst.add_argument("article_type", nargs="?", default=None, metavar="ID",
+                     help="the article-type id the venue profile carries (e.g. article, "
+                          "brief-communication); `set-article-type --list` shows them")
+    pst.add_argument("--list", action="store_true",
+                     help="list the article types of this root's venue, with the caps each "
+                          "one carries, and exit")
+    pst.add_argument("--show", action="store_true",
+                     help="print the root's current venue, article type, journal and limits")
+    pst.add_argument("--json", action="store_true",
+                     help="with --list/--show: machine-readable output")
+    pst.add_argument("--force", action="store_true",
+                     help="change the type although this root already has run records (its "
+                          "prompts, caps and judgments belong to the previous type)")
+    pst.set_defaults(func=cmd_set_article_type)
 
     prt = sub.add_parser("retry", parents=[common],
                          help="rebuild a failed/stale run's sandbox and reset it")

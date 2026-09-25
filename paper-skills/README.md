@@ -218,10 +218,11 @@ paper-skills/
 
 ## Tuning
 
-- **Venue and journal**: selectable at run time — `set-venue <id>` and
-  `set-journal <name>` (or `setup --venue/--journal`), with the rule set in
+- **Venue, article type and journal**: selectable at run time —
+  `set-venue <id>`, `set-article-type <id>` and `set-journal <name>` (or
+  `setup --venue/--journal/--article-type`), with the rule set in
   `venue_profiles/<id>.json` (`venue_profiles/README.md` documents the
-  schema). The default profile is Nature Biotechnology / Nature Portfolio
+  schema, including the `article_types` table). The default profile is Nature Biotechnology / Nature Portfolio
   (initial submission: format-flexible, Reporting Summary required at
   acceptance stage), so the guideline-specific items in
   `references/sweeps.md` M5/M13 are that profile's; a custom profile replaces

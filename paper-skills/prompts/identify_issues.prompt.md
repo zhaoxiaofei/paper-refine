@@ -4,9 +4,11 @@ Paste this entire file as the prompt for a manuscript review task when you canno
 ## PROMPT BODY (SKILL.md)
 # Pre-Submission Review — identify_issues
 
-**Target venue and journal (configurable).** This skill is venue-agnostic: the pipeline that runs
-it selects a VENUE PROFILE (`set-venue <id>`, `setup --venue`) and a JOURNAL (`set-journal`), and
-records both in `pipeline_config.json`. Wherever this file quotes a number, a name or a
+**Target venue, article type and journal (configurable).** This skill is venue-agnostic: the
+pipeline that runs it selects a VENUE PROFILE (`set-venue <id>`, `setup --venue`), the ARTICLE
+TYPE the submission is (`set-article-type`, `setup --article-type` — the profile carries the
+venue's content types and each type's own limits) and a JOURNAL (`set-journal`), and records all
+three in `pipeline_config.json`. Wherever this file quotes a number, a name or a
 submission requirement, it is the **default** profile's (Nature Biotechnology); the profile the
 run was configured with is authoritative, and the prompt states it. Run standalone, use the
 target journal's own author guide and say which source you used.

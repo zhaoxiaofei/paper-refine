@@ -2,8 +2,192 @@
   "id": "nature-biotechnology",
   "label": "Nature Biotechnology",
   "short": "NBT",
-  "description": "Nature Biotechnology (Nature Portfolio): the pipeline's original, pre-venue requirement set. Its Article limits are the ones the M19 length rule relaxes.",
+  "description": "Nature Biotechnology (Nature Portfolio): the pipeline's original, pre-venue requirement set. It carries the venue's content types; the Article limits are the ones this pipeline was originally written for and are the only ones the profile states numbers for (the others are counted and reported against the venue's own content-types table, never against the Article caps).",
   "article_type": "Article",
+  "article_type_id": "article",
+  "default_article_type": "article",
+  "article_types": [
+    {
+      "id": "article",
+      "label": "Article",
+      "source": "Nature Biotechnology content-types table",
+      "length_limits": {
+        "source": "Nature Biotechnology content-types table (Article: abstract <= 150 words; main text <= 3,000 words excluding abstract, Methods, references and figure legends)",
+        "abstract": {
+          "base": 150,
+          "relaxation": 1.15
+        },
+        "main_text": {
+          "base": 3000,
+          "relaxation": 1.25
+        },
+        "cover_letter": {
+          "min": 300,
+          "max": 500,
+          "source": "master-prompt preference (300-500 words in the persuading part); Nature Biotechnology's official guidance states no cover-letter word limit (checked 2026-09-19)"
+        }
+      },
+      "captions": {
+        "published_limit": null,
+        "default_cap": 0,
+        "source": "Nature Biotechnology requires that a legend \"does not exceed the word limit of the article type\" but does not publish that number on its public pages (checked 2026-09-19)"
+      }
+    },
+    {
+      "id": "brief-communication",
+      "label": "Brief Communication",
+      "source": "Nature Biotechnology content-types table",
+      "length_limits": {
+        "source": "Nature Biotechnology content-types table (Brief Communication: this profile carries no number for that type -- the stage names the abstract and main-text limits the table states, with their source)",
+        "abstract": {
+          "base": null,
+          "relaxation": null
+        },
+        "main_text": {
+          "base": null,
+          "relaxation": null
+        },
+        "cover_letter": {
+          "min": null,
+          "max": null,
+          "source": ""
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "review",
+      "label": "Review",
+      "source": "Nature Biotechnology content-types table",
+      "length_limits": {
+        "source": "Nature Biotechnology content-types table (Review: this profile carries no number for that type -- the stage names the abstract and main-text limits the table states, with their source)",
+        "abstract": {
+          "base": null,
+          "relaxation": null
+        },
+        "main_text": {
+          "base": null,
+          "relaxation": null
+        },
+        "cover_letter": {
+          "min": null,
+          "max": null,
+          "source": ""
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "perspective",
+      "label": "Perspective",
+      "source": "Nature Biotechnology content-types table",
+      "length_limits": {
+        "source": "Nature Biotechnology content-types table (Perspective: this profile carries no number for that type -- the stage names the abstract and main-text limits the table states, with their source)",
+        "abstract": {
+          "base": null,
+          "relaxation": null
+        },
+        "main_text": {
+          "base": null,
+          "relaxation": null
+        },
+        "cover_letter": {
+          "min": null,
+          "max": null,
+          "source": ""
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "analysis",
+      "label": "Analysis",
+      "source": "Nature Biotechnology content-types table",
+      "length_limits": {
+        "source": "Nature Biotechnology content-types table (Analysis: this profile carries no number for that type -- the stage names the abstract and main-text limits the table states, with their source)",
+        "abstract": {
+          "base": null,
+          "relaxation": null
+        },
+        "main_text": {
+          "base": null,
+          "relaxation": null
+        },
+        "cover_letter": {
+          "min": null,
+          "max": null,
+          "source": ""
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "resource",
+      "label": "Resource",
+      "source": "Nature Biotechnology content-types table",
+      "length_limits": {
+        "source": "Nature Biotechnology content-types table (Resource: this profile carries no number for that type -- the stage names the abstract and main-text limits the table states, with their source)",
+        "abstract": {
+          "base": null,
+          "relaxation": null
+        },
+        "main_text": {
+          "base": null,
+          "relaxation": null
+        },
+        "cover_letter": {
+          "min": null,
+          "max": null,
+          "source": ""
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "correspondence",
+      "label": "Correspondence",
+      "source": "Nature Biotechnology content-types table",
+      "length_limits": {
+        "source": "Nature Biotechnology content-types table (Correspondence: this profile carries no number for that type -- the stage names the abstract and main-text limits the table states, with their source)",
+        "abstract": {
+          "base": null,
+          "relaxation": null
+        },
+        "main_text": {
+          "base": null,
+          "relaxation": null
+        },
+        "cover_letter": {
+          "min": null,
+          "max": null,
+          "source": ""
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "matters-arising",
+      "label": "Matters Arising",
+      "source": "Nature Biotechnology content-types table",
+      "length_limits": {
+        "source": "Nature Biotechnology content-types table (Matters Arising: this profile carries no number for that type -- the stage names the abstract and main-text limits the table states, with their source)",
+        "abstract": {
+          "base": null,
+          "relaxation": null
+        },
+        "main_text": {
+          "base": null,
+          "relaxation": null
+        },
+        "cover_letter": {
+          "min": null,
+          "max": null,
+          "source": ""
+        }
+      },
+      "captions": null
+    }
+  ],
   "journals": [
     "Nature Biotechnology"
   ],
