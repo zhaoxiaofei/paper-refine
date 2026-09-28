@@ -216,6 +216,77 @@ def test_check_id_coverage():
     check("the review postcheck really requires M21-M24",
           any(all(c in e for c in ("M21", "M22", "M23", "M24")) for e in errs),
           str(errs)[:160])
+    # The rewrite-parity artifacts and the architecture table are part of the
+    # same contract: a review that never enumerated them fails even when the
+    # coverage rows are present.
+    sb2 = tmp / "r2_review"
+    (sb2 / "base").mkdir(parents=True)
+    art2 = sb2 / "review" / "artifacts"
+    art2.mkdir(parents=True)
+    (art2 / "M1_acronyms.md").write_text("| row |\n|---|\n", encoding="utf-8")
+    full_ids = ([f"M{i}" for i in range(1, 18)] + ["M18", "M19", "M20"]
+                + ["M21", "M22", "M23", "M24", "M25", "M26", "M27", "M28", "M29"]
+                + [f"J{i}" for i in range(1, 6)])
+    fj2 = {"submission_dir": "base",
+           "coverage": [{"check": c, "disposition": "clean -- basis: x"} for c in full_ids]}
+    errs3 = []
+    nb.check_review_contract(None, sb2, fj2, errs3, [])
+    check("the review postcheck requires the M25-M29 artifacts",
+          any("M25_artwork_parity.md" in e for e in errs3), str(errs3)[:160])
+    check("the review postcheck requires a disposed ARCHITECTURE.md",
+          any("ARCHITECTURE.md" in e for e in errs3), str(errs3)[:160])
+    # SPLIT REVIEW: session A owns the M25-M29 artifacts, session B owns the J5
+    # architecture table; neither session may be failed for the other's scope.
+    def split_errors(mode, name, parity_artifacts, arch):
+        sbx = tmp / name
+        (sbx / "base").mkdir(parents=True, exist_ok=True)
+        art = sbx / "review" / "artifacts"
+        art.mkdir(parents=True, exist_ok=True)
+        (art / "M1_acronyms.md").write_text("| row |\n|---|\n", encoding="utf-8")
+        if parity_artifacts:
+            for fname in ("M25_artwork_parity.md", "M26_conventions.md",
+                          "M27_evidence_coverage.md", "M28_symmetry.md",
+                          "M29_caption_schema.md"):
+                (art / fname).write_text("| row | disposition |\n|---|---|\n| x | OK |\n",
+                                         encoding="utf-8")
+        if arch:
+            (sbx / "review" / "ARCHITECTURE.md").write_text(
+                "| document | section | paragraphs | current structure | reader cost | "
+                "proposed reorganization | class | severity | disposition |\n"
+                "|---|---|---|---|---|---|---|---|---|\n"
+                "| ms | all | 1 | x | none | none | writing | Minor | OK |\n",
+                encoding="utf-8")
+        fjx = {"submission_dir": "base",
+               "coverage": [{"check": c, "disposition": "clean -- basis: x"} for c in full_ids]}
+        errsx = []
+        nb.check_review_contract(type("C", (), {"cfg": {"review_split": mode}})(),
+                                 sbx, fjx, errsx, [])
+        return errsx
+
+    errs_a = split_errors("phases", "r1_review", True, False)
+    check("split review (phases) A: no missing-M25-M29-artifact error (A owns them)",
+          not any("M25_artwork_parity" in e for e in errs_a), str(errs_a)[:160])
+    check("split review (phases) A: no missing-ARCHITECTURE error (B owns it)",
+          not any("ARCHITECTURE.md" in e for e in errs_a), str(errs_a)[:160])
+    errs_b = split_errors("phases", "r1_review_b", False, True)
+    check("split review (phases) B: no missing-M25-M29-artifact error (A owns them)",
+          not any("M25_artwork_parity" in e for e in errs_b), str(errs_b)[:160])
+    check("split review (phases) B: no missing-ARCHITECTURE error (B owns it)",
+          not any("ARCHITECTURE.md" in e for e in errs_b), str(errs_b)[:160])
+    errs_x = split_errors("aspects", "r1_review", False, False)
+    check("split review (aspects) A: no missing-artifact error for either family",
+          not any("M25_artwork_parity" in e or "ARCHITECTURE.md" in e for e in errs_x),
+          str(errs_x)[:160])
+    errs_y = split_errors("aspects", "r1_review_b", True, True)
+    check("split review (aspects) B: no missing-artifact error for either family",
+          not any("M25_artwork_parity" in e or "ARCHITECTURE.md" in e for e in errs_y),
+          str(errs_y)[:160])
+    errs_a_bad = split_errors("phases", "r2_review", False, False)
+    check("split review (phases) A: a missing M25-M29 artifact still FAILS",
+          any("M25_artwork_parity" in e for e in errs_a_bad), str(errs_a_bad)[:160])
+    errs_b_bad = split_errors("phases", "r2_review_b", False, False)
+    check("split review (phases) B: a missing ARCHITECTURE.md still FAILS",
+          any("ARCHITECTURE.md" in e for e in errs_b_bad), str(errs_b_bad)[:160])
     skill = (WS / "paper-skills" / "paper-review" / "SKILL.md").read_text(encoding="utf-8")
     sweeps = (WS / "paper-skills" / "paper-review" / "references" / "sweeps.md").read_text(
         encoding="utf-8")
@@ -231,11 +302,27 @@ def test_check_id_coverage():
            or all(c in acceptance_line for c in ("M21", "M22", "M23", "M24")))
           and "once proposals are adopted" not in acceptance_line, acceptance_line[:160])
     check("sweeps.md's FINDING FORMAT admits M21-M24 finding ids",
-          "M1–M24" in format_line and "M1–M20|J1–J4" not in format_line,
+          "M1–M29" in format_line and "M1–M24|J1–J4" not in format_line
+          and "M1–M20|J1–J4" not in format_line,
           format_line[:160])
     src = (WS / "paper_pipeline.py").read_text(encoding="utf-8")
     check("the review postcheck's required-coverage list names M21-M24",
           'wanted += ["M21", "M22", "M23", "M24"]' in src)
+    # The rewrite-parity checks exist on the review -> audit -> revise path
+    # (the classes a from-scratch rewrite fixes as it goes); the judge's frozen
+    # coverage map deliberately stays at M1-M24 + J1-J4.
+    for cid in ("M25", "M26", "M27", "M28", "M29", "J5"):
+        check(f"{cid} is named in the review/audit/revise prompts",
+              all(cid in P[s] for s in ("review", "audit", "revise")),
+              str([s for s in ("review", "audit", "revise") if cid not in P[s]]))
+    check("the judge's frozen coverage map is unchanged (M1-M24 + J1-J4)",
+          all(f"M{i}" in expected for i in range(1, 25))
+          and "M25" not in expected and "J5" not in expected)
+    check("the review postcheck's required-coverage list names M25-M29 + J5",
+          'wanted += ["M25", "M26", "M27", "M28", "M29", "J5"]' in src)
+    check("the review postcheck requires the rewrite-parity artifacts",
+          "M25_artwork_parity.md" in src and "ARCHITECTURE.md" in src
+          and "M29_caption_schema.md" in src)
 
 
 def test_judge_tier_and_sweep_scope():

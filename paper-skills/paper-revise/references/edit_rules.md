@@ -11,6 +11,11 @@ cuts — EXCEPT the scoped M19 compression below. Preserve existing styles,
 numbering, equations, table layouts, figure placement. Do not "improve"
 untouched text. The A7 diff log must show this — unmapped hunks get reverted.
 
+Two scoped exceptions lift this rule, and only them: the M19/M18 length
+compression below, and **E11's scoped restructuring** for the review's
+architecture findings (J5) and rewrite-parity findings (M25–M29). Every other
+"it would read better" edit is out of scope for this stage.
+
 **Scoped exception — M19 length compression.** An abstract or main text over
 the pipeline's relaxed caps (abstract ≤ 172 words = 150 +15%; main text ≤ 3,750
 words = 3,000 +25%, excluding abstract, Methods, references and figure legends,
@@ -303,6 +308,77 @@ finding effect (preserves <id> / undoes <id> / none)`
   arm, when more than one rewrite was staged), so the ledger must contain BOTH
   `size` classes — that is what makes the integration stage a weighing of a
   reorganization against a prose improvement rather than a taste contest.
+
+## E11 — Rewrite-parity findings: conventions, parity, coverage, and scoped restructuring
+
+The review's rewrite-parity checks (**M25–M29**) and architecture pass (**J5**)
+report the issue classes a from-scratch rewrite fixes as part of its ordinary
+work. They are normal findings in the R0/R1 ledger — one row per id, a verdict
+with evidence — but their FIX rules differ from E1's precision rule.
+
+**M25–M29 (instance findings): align the EDITABLE surface, one edit per finding
+instance, never one blanket edit.**
+
+* **M25 (artwork/text parity).** The artwork file is usually read-only. Align the
+  editable main text / caption / SI legend with the authoritative form the
+  review recorded, and put the artwork regeneration (the exact label and the
+  code file that prints it) in `MANUAL_STEPS.md` as a follow-up. This is NOT
+  `manual-required`: a finding is manual-required only when NO editable surface
+  can be aligned. Record which side was authoritative and why.
+* **M26 (house-style conventions).** Substitute the authoritative form for every
+  deviating occurrence — never re-word the sentence around it. Copy/extend the
+  review's `STYLE_CONVENTIONS.md` decision into `WORK/STYLE_CONVENTIONS.md`, then
+  re-run `enumerate_conventions.py --work revised/work --corpus revised/work/corpus`
+  and require every edited occurrence to be gone (or to carry a ledger reason).
+  A convention is completed across the WHOLE corpus (main text, SI, legends,
+  cover letter, table notes), exactly as a rewrite would — a fix in one document
+  that leaves the sibling documents mixed is not a resolution.
+* **M27 (claim→evidence coverage).** Add the missing pointer the finding names
+  (citation, figure/table call-out, `(Methods)` pointer, SI note), and nothing
+  else. Never invent a source: a pointer set that cannot be completed without new
+  content is `manual-required` with the exact pointer the author must add.
+* **M28 (sibling symmetry).** Make the list symmetric exactly as the M28 row
+  specifies (expand the unexpanded siblings, or put each sibling's long form
+  before its short form at first use). An expansion that exists nowhere in the
+  corpus is `manual-required`, never invented.
+* **M29 (caption-promise parity).** Align the editable side with what the print
+  actually delivers — the caption wording, or the printed source when that source
+  is in the corpus and editable — one promised item per edit. A generated print's
+  regeneration step is a manual follow-up, not a reason to carry the finding.
+
+**J5 (scope findings): the scoped restructuring licence.** A J5 finding names a
+SCOPE (`document/section/paragraph-range`), not a sentence, so E1's "no reflow"
+prohibition is LIFTED INSIDE THAT SCOPE — the one restructuring exception this
+skill allows. Inside the declared scope you may reorder sentences and paragraphs,
+move a paragraph within its section, split or merge paragraphs, add or rewrite a
+transition sentence, and rewrite a passage for cohesion. All of these guards
+apply without exception:
+
+1. **Content is frozen.** The same claims, numbers, citations, accessions,
+   limitations and conclusions; nothing deleted except a redundancy the finding
+   itself names, nothing invented (E6 still governs). If the "fix" needs a
+   content change, it is `manual-required`, not an edit.
+2. **Stay inside the scope.** Never move content between documents, sections or
+   the scope's paragraph range; a change that needs to cross that boundary is
+   `manual-required` with the proposed move written out.
+3. **Numbering and references stay coherent.** Figure/table numbering, call-outs,
+   equations and cross-references keep pointing at what they pointed at (this is
+   the rewrite's own hard rule 3/8 — a reorganization must not change what
+   "Figure 3b" means).
+4. **One artifact per J5 finding**: `WORK/RESTRUCTURE_<finding-id>.md` with the
+   scope, the BEFORE outline, the AFTER outline, every moved/split/merged
+   paragraph as before → after, the A7 diff hunk ids, and the preservation check
+   (claim by claim: same content, new location).
+5. **Re-run the mechanical scans (V3) after each scope**, then the M1/M8/M24/M26
+   ledgers on the revised corpus; a restructuring that re-introduces a
+   long-form/acronym or term inconsistency is not finished.
+6. **A scope that cannot be restructured without content loss is
+   `manual-required`**, with the proposed reordering written out step by step in
+   `MANUAL_STEPS.md`.
+
+The V2 locality check does not flag hunks inside a J5 scope when the ledger row
+names the finding id and the RESTRUCTURE artifact exists. A reordering hunk
+outside every declared scope is still an unmapped hunk, and it is reverted.
 
 ## E8 — Provenance the code already proved
 

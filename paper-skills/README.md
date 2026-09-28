@@ -154,13 +154,17 @@ Both skills are built on the same countermeasure to LLM attention drift:
    undefined acronym is.
 
 Mechanical sweeps M1–M17 are exhaustive and mandatory, and M18 (figure-legend
-lengths; always enumerated, with an optional proxy cap) and M19
-(abstract/main-text length plus the user's cover-letter preference) always run
-with them. Judgment
-passes J1–J4 (scope fit, statistical rigor, overclaiming, plagiarism/AI policy)
-are deep and prioritized. A discovery round (D0–D5) then hunts issue
+lengths; always enumerated, with an optional proxy cap), M19
+(abstract/main-text length plus the user's cover-letter preference) and M20
+(OOXML style/formatting) always run with them, together with the adopted
+M21–M24 checks and the rewrite-parity checks M25–M29 (figure-artwork/text
+parity, house-style conventions, claim→evidence coverage, sibling-definition
+symmetry, caption-promise parity). Judgment
+passes J1–J5 (scope fit, statistical rigor, overclaiming, plagiarism/AI policy,
+and the J5 architecture/rewrite-class pass) are deep and prioritized. A
+discovery round (D0–D5) then hunts issue
 classes outside the checklist, and its validated proposals grow the
-checklist (M20+) for future runs.
+checklist (M30+) for future runs.
 
 The revision skill mirrors the discipline: an A1 ledger where every finding
 ID must get exactly one row and a status (no silent skips), an edit plan
@@ -207,11 +211,12 @@ with and without the skills, graded by scripted assertions:
 paper-skills/
 ├── paper-review/
 │   ├── SKILL.md                     # phases, hard rules, output spec
-│   ├── references/sweeps.md         # M1–M19 + J1–J4 (source of truth)
+│   ├── references/sweeps.md         # M1–M29 + J1–J5 (source of truth)
 │   ├── references/discovery.md      # D0–D5 discovery round
 │   └── scripts/                     # convert_corpus, extract_{acronyms,
 │                                    #   citations,numbers,occurrences},
-│                                    #   count_words
+│                                    #   count_words,
+│                                    #   enumerate_conventions
 ├── paper-revise/
 │   ├── SKILL.md                     # R0–V pipeline, hard rules
 │   ├── references/ledger.md         # A1–A9 artifact specs

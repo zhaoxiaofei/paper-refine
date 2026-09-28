@@ -107,7 +107,7 @@ def test_prompts():
     check("a split review prompt (A) carries its scope and FA- ids",
           "SPLIT REVIEW" in a and "MECHANICAL sweeps M1-M17" in a and "FA-001" in a)
     check("a split review prompt (B) carries the complementary scope and FB- ids",
-          "SPLIT REVIEW" in b and "JUDGMENT passes J1-J4" in b and "FB-001" in b)
+          "SPLIT REVIEW" in b and "JUDGMENT passes J1-J5" in b and "FB-001" in b)
     check("an unsplit review prompt carries no split block", "SPLIT REVIEW" not in
           np.review_prompt(sb, "r1_review", 1))
     split_ctx = make_ctx(Path("/tmp/paper_validate_split"))

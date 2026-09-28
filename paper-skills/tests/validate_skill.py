@@ -280,6 +280,39 @@ def main():
     after = {f for f in os.listdir(work) if f.startswith("occurrences_")}
     check("C22 two variant runs keep separate artifacts", len(after - before) >= 1,
           "before=%d after=%d" % (len(before), len(after)))
+    # ---- M26: the house-style/orthographic convention ledger ---------------
+    # The rewrite-parity check must enumerate BOTH surfaces of a family the
+    # corpus mixes (the documented "analyzed / re-analysed" class) and emit the
+    # decision table without deciding anything itself.
+    conv_corpus = os.path.join(run_dir, "conv_corpus")
+    os.makedirs(conv_corpus, exist_ok=True)
+    with open(os.path.join(conv_corpus, "ms.txt"), "w", encoding="utf-8") as f:
+        f.write("We analyzed the tumours in this cohort.\n"
+                "The samples were re-analysed twice.\n"
+                "The colour scale and the colorbar agree.\n"
+                "We normalize the signal, then normalise the batch effect.\n"
+                "multi-omics data were merged; the multiomics view is the same.\n")
+    conv_work = os.path.join(run_dir, "conventions")
+    os.makedirs(conv_work, exist_ok=True)
+    conv = subprocess.run([sys.executable, os.path.join(root, "paper-review", "scripts",
+                          "enumerate_conventions.py"), "--work", conv_work,
+                          "--corpus", conv_corpus, "--min-count", "1"],
+                          capture_output=True, text=True)
+    conv_md = read(os.path.join(conv_work, "STYLE_VARIANTS.md"))
+    conv_dec = read(os.path.join(conv_work, "STYLE_CONVENTIONS.md"))
+    check("C23 enumerate_conventions.py enumerates both US/UK surfaces",
+          conv.returncode == 0 and "analyzed" in conv_md and "analysed" in conv_md
+          and "colour" in conv_md and "normalize" in conv_md and "normalise" in conv_md,
+          "rc=%d %s" % (conv.returncode, (conv.stdout + conv.stderr).strip()[:160]))
+    check("C24 ... and derives the hyphenation family (multi-omics/multiomics)",
+          "multiomics" in conv_md and "multi-omics" in conv_md,
+          conv_md[:200])
+    fam_line = next((l for l in conv_dec.splitlines()
+                     if l.startswith("| -yze/-yse verb family |")), "")
+    check("C25 ... and emits the decision table with an EMPTY authority column",
+          "authoritative form" in conv_dec and fam_line.endswith("| | | | |")
+          and "analyzed" in fam_line and "analysed" in fam_line,
+          fam_line[:240] or conv_dec[:240])
     docx_text = corpus_text.get("manuscript.docx.txt", "")
     notes = " ".join(inv_by_path.get("manuscript.docx", {}).get("notes", []))
     check("C14 docx header text extracted (and noted)",
@@ -418,8 +451,8 @@ def main():
     ip = read(os.path.join(root, "prompts", "identify_issues.prompt.md"))
     sw = read(os.path.join(root, "paper-review", "references", "sweeps.md"))
     di = read(os.path.join(root, "paper-review", "references", "discovery.md"))
-    check("D18 M18-M24 are reserved/adopted and discovery proposals start at M25",
-          "## M18 —" in sweeps and "proposals start at M25" in " ".join(di.split()))
+    check("D18 M18-M29 are reserved/adopted and discovery proposals start at M30",
+          "## M18 —" in sweeps and "Proposals therefore start at M30" in " ".join(di.split()))
     sweeps_app = appendix(ip, "## APPENDIX: Sweeps", "## APPENDIX: Discovery")
     disc_app = appendix(ip, "## APPENDIX: Discovery")
     check("D10 identify prompt appendices in sync",

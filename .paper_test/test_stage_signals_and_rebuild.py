@@ -399,11 +399,21 @@ def build_review_sandbox(tmp: Path, short_rows: bool, marker_in_review: bool) ->
     # row for every check id, so the fixture carries them (the pre-flight now
     # checks the real contract, not a subset of it).
     wanted = list(nb.REQUIRED_REVIEW_CHECKS) + ["M18", "M19", "M20",
-                                                "M21", "M22", "M23", "M24"]
+                                                "M21", "M22", "M23", "M24",
+                                                "M25", "M26", "M27", "M28", "M29", "J5"]
     write(sb / "review" / "findings.json",
           {"submission_dir": "./base", "findings": [],
            "coverage": [{"check": c, "disposition": "clean -- basis: stub artifact",
                          "detail": "stub"} for c in wanted]})
+    for fname in ("M25_artwork_parity.md", "M26_conventions.md",
+                  "M27_evidence_coverage.md", "M28_symmetry.md",
+                  "M29_caption_schema.md"):
+        write(art / fname, "| row | disposition |\n|---|---|\n| x | OK |\n")
+    write(sb / "review" / "ARCHITECTURE.md",
+          "| document | section | paragraphs | current structure | reader cost | "
+          "proposed reorganization | class | severity | disposition |\n"
+          "|---|---|---|---|---|---|---|---|---|\n"
+          "| ms | all | 1 | x | none | none | writing | Minor | OK |\n")
     write(art / "OUTLINE.md", "# OUTLINE\n\n" + outline_rows(2 if short_rows else 0,
                                                             0 if short_rows else 2))
     write(art / "VIS_visual.md", "# visual\n\npages reviewed: none\n")

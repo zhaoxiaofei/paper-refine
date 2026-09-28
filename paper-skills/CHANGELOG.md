@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.9 — the rewrite-parity checks (2026-09-28)
+
+The pipeline's judged rounds showed that a from-scratch rewrite (w1/w2) often
+outscored the review-audit-revise arm (a2) on consistency/completeness rows the
+frozen review never filed: US/UK spelling conventions, SI-legend-vs-artwork
+term splits, claim→evidence pointer coverage (S12-only for a two-sample claim),
+sibling definition order (`MALBAC-sequenced (multiple annealing …)`) and
+scope-level organization. Those classes were visible to a rewriting session
+and invisible to the instance-level review, so the revision arm had nothing to
+fix. This release makes the review -> audit -> revise path do the rewrite's
+enumerative work:
+
+- `paper-review/references/sweeps.md` gains **M25–M29** (figure-artwork/text
+  parity · house-style/orthographic conventions · claim→evidence coverage ·
+  sibling-definition symmetry · caption-promise vs printed-schema parity) and
+  **J5** (the architecture/rewrite-class pass, one row per scope in
+  `review/ARCHITECTURE.md`, findings carrying a `scope` key); M1(a) now states
+  that an acronym-first compound is "used before it is defined" and that "it is
+  a proper name" is not a disposition when the sentence itself prints the
+  expansion; J5 findings are the one deliberate exception to the
+  one-verbatim-instance finding shape.
+- New bundled script `paper-review/scripts/enumerate_conventions.py`: the M26
+  occurrence ledger (curated US/UK spelling, hyphenation and preverb families
+  plus data-driven candidate pairs) and the `STYLE_CONVENTIONS.md` decision
+  table it never fills itself.
+- `paper-revise/references/edit_rules.md` gains **E11**: M25–M29 are resolved by
+  aligning the EDITABLE surface corpus-wide (a read-only artwork file does not
+  make a term mismatch manual when the caption/text/SI legend is editable), and
+  J5 licenses SCOPED restructuring (reorder/split/merge/transition edits inside
+  the finding's declared scope) under a content freeze, a numbering check and
+  one `WORK/RESTRUCTURE_<finding-id>.md` artifact per finding.
+- `paper_pipeline.py`'s review/audit/revise prompts carry the new checks, the
+  review's coverage contract requires M25–M29 + J5 with their artifacts (and a
+  disposed `review/ARCHITECTURE.md`), the auditor attacks the dispositions that
+  closed these classes (M1 name-bar rows, "artwork is read-only", per-document
+  convention rows, unfilled architecture tables), and the revise postcheck warns
+  when the convention re-run / restructuring notes are missing. The judge
+  panel's frozen coverage map (M1–M24 + J1–J4) is deliberately unchanged:
+  identical minimum scrutiny across versions is what keeps it calibrated, and
+  the comparison already scores these differences in the
+  consistency/completeness/correctness tiers.
+- Discovery proposals now start at **M30**; both standalone prompts carry the
+  updated check lists, the E11 rule and the resynced appendices.
+
 ## 0.8 — any venue, any journal (2026-09-25)
 
 The skills no longer assume Nature Biotechnology. `paper_pipeline.py` gained a

@@ -304,18 +304,19 @@ def test_fallback_prompt_contract():
           "M1–M17 are EXHAUSTIVE and MANDATORY, and M18" in prompt, "")
     check("D7 the fallback no longer defers M18 to 'when the caption suggestion is active'",
           "M18 only when the pipeline's caption suggestion is active" not in prompt)
-    check("D7 the fallback acceptance check lists the 24 defined check IDs",
+    check("D7 the fallback acceptance check lists the defined check IDs",
           "all 21 check IDs" not in prompt
-          and "M1–M17, J1–J4, M18 (legend counts), M19" in prompt and "M20" in prompt)
-    check("D7 the fallback numbers discovery proposals from M21",
-          "as M18, M19" not in prompt and "M21" in prompt)
+          and "M1–M17, J1–J5, M18 (legend counts), M19" in prompt and "M20" in prompt
+          and "M25–M29" in prompt)
+    check("D7 the fallback numbers discovery proposals from M30",
+          "as M18, M19" not in prompt and "M30" in prompt)
     check("D7 the fallback documents the cover-letter counting mode",
           "--section cover-letter" in prompt)
     check("D7 SKILL.md's coverage table requires M18/M19/M20 in every state",
           "plus M19 — and M18 when the caption suggestion is active" not in skill
           and "M18 (legend counts), M19 (abstract/main-text/cover-letter lengths) and M20" in skill)
-    check("D8 the sweeps FINDING FORMAT admits M18-M24 findings",
-          "check: <M1–M24|J1–J4>" in sweeps and "check: <M1–M20|J1–J4>" not in sweeps)
+    check("D8 the sweeps FINDING FORMAT admits M18-M29/J1-J5 findings",
+          "check: <M1–M29|J1–J5>" in sweeps and "check: <M1–M24|J1–J4>" not in sweeps)
 
 
 # =====================================================================

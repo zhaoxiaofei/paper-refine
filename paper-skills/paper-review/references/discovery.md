@@ -26,7 +26,7 @@ over attention.
 ## D0 — Dedup base
 
 From PRIOR build two indexes (`OUT2/known_index.md`):
-- **KNOWN-CLASSES**: the 28 check IDs (M1–M24, J1–J4) with one-line descriptions.
+- **KNOWN-CLASSES**: the 35 check IDs (M1–M29, J1–J5) with one-line descriptions.
 - **KNOWN-INSTANCES**: every prior finding as `id | class | location | evidence quote`.
 
 Anything matching a KNOWN-INSTANCE (same class + same location + same
@@ -56,6 +56,10 @@ total; if you stall, ask "what else?" twice more before stopping):
 - funding numbers and grant IDs consistent with acknowledgements?
 - reference list cut off mid-entry? Trailing placeholder entries?
 - abbreviation list present if the journal requests one?
+- is a convention applied in one place and not another (spelling, hyphenation,
+  preverb forms, term families) that M26's family list does not name?
+- does any scope's reading order still carry a rewrite-class cost that J5's
+  architecture rows do not name?
 
 The rows are questions about issue CLASSES, not instances — instances come
 from probes.
@@ -117,8 +121,10 @@ Number proposals continuing from the highest existing sweep number. M18
 (figure-legend length, always enumerated with an optional proxy cap), M19
 (abstract/main-text length plus the user's cover-letter preference) and M20
 (OOXML style/formatting uniformity, enumerated by the pipeline's code-side scan)
-are reserved and defined in `sweeps.md`, and M21–M24 were adopted from earlier
-discovery rounds there, so proposals start at M25.
+are reserved and defined in `sweeps.md`; M21–M24 were adopted from earlier
+discovery rounds, and M25–M29 are the rewrite-parity checks (artwork/text
+parity, house-style conventions, claim→evidence coverage, sibling-definition
+symmetry, caption-promise parity). Proposals therefore start at M30.
 These are PROPOSALS: the user validates them; only validated ones get
 appended to `references/sweeps.md`. This is the feedback loop — no static
 checklist can be complete, but each discovered miss converts into a permanent

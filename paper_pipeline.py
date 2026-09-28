@@ -413,8 +413,11 @@ CODE-SIDE CHECKS (in addition to what the prompts ask the agents to do)
                           impossible with a manual step. Reading a .docx is not
                           a visual inspection (text carries no layout).
     * review contract     submission_dir must resolve to base/, every check id
-                          M1-M17/J1-J4 plus M18 and M19 (both always active)
-                          must carry a real coverage disposition,
+                          M1-M17, J1-J5 plus M18-M29 (the always-active length/
+                          caption/formatting checks and the adopted rewrite-
+                          parity checks) must carry a real coverage disposition,
+                          the M25-M29 artifacts and review/ARCHITECTURE.md must
+                          exist with a disposition column,
                           review/artifacts/ must exist, finding ids must be
                           unique, and every prior-round finding must be carried
                           forward or recorded as gone.
@@ -801,7 +804,21 @@ from pathlib import Path
 #     no copy, no extra I/O), which is the backup the error message has always
 #     told operators to restore from, and a registry over the state cap names the
 #     way out (`prune --yes` / a fresh root) instead of the wrong diagnosis.
-VERSION = "3.4.3"
+# 3.5.0 -- the rewrite-parity checks (M25-M29 + J5) on the review -> audit ->
+# revise path. The 2026-09-27 root's panel credited the from-scratch rewrites
+# (w1/w2) with consistency/completeness rows the frozen review never filed
+# (US/UK spelling conventions, SI-legend-vs-artwork term parity, claim->evidence
+# pointer coverage, sibling definition order, scope-level organization), so the
+# revision arm had nothing to fix. The review now enumerates those classes
+# (M25 artwork/text parity, M26 house-style conventions via the new
+# enumerate_conventions.py, M27 claim->evidence coverage, M28 sibling-definition
+# symmetry, M29 caption-promise parity) and the J5 architecture pass writes one
+# scope row per document (review/ARCHITECTURE.md; J5 findings carry a `scope`).
+# The auditor attacks the dispositions that used to close them; the reviser
+# resolves M25-M29 by aligning the editable surface corpus-wide and J5 by E11
+# scoped restructuring (content frozen, one RESTRUCTURE_<id>.md per finding).
+# The judge panel's frozen coverage map stays M1-M24 + J1-J4 on purpose.
+VERSION = "3.5.0"
 STATE_VERSION = 3
 
 # The Zotero tooling policy carried in pipeline_config.json (`setup --zotero`):
@@ -3332,10 +3349,10 @@ M18_REVIEW_SWEEP_ON = """3. The PIPELINE-MANDATED caption sweep M18 (see the cap
    references/sweeps.md defines the same sweep). An M18 row is a formatting-tier item and never
    makes a version ineligible: the orchestrator reports caption lengths, it never gates on them.
    M18 is RESERVED by this pipeline for the caption sweep: if your discovery round proposes new
-   sweeps, number them from M21 upwards in review/round2/new_sweeps.md. (The discovery guide says
+   sweeps, number them from M30 upwards in review/round2/new_sweeps.md. (The discovery guide says
    proposals start at M18, and this pipeline always reserves M18 for its caption sweep and M19 for
    its abstract/main-text length sweep, and M20 for the OOXML formatting sweep, so proposals
-   start at M21. Say so in new_sweeps.md so the
+   start at M30, after the adopted M21-M29. Say so in new_sweeps.md so the
    operator can renumber when adopting them into the skill.)"""
 M18_REVIEW_SWEEP_REPORT = """3. The PIPELINE-MANDATED legend-length sweep M18 (see the legend rule below; NO cap is
    configured this run): enumerate EVERY figure legend in the corpus into
@@ -3347,8 +3364,9 @@ M18_REVIEW_SWEEP_REPORT = """3. The PIPELINE-MANDATED legend-length sweep M18 (s
    defines the same sweep), and it never makes a version ineligible: with no cap configured the
    word count alone is not a defect, is never scored and is never "fixed" by cutting text.
    M18 is RESERVED by this pipeline for the legend sweep: if your discovery round proposes new
-   sweeps, number them from M21 upwards in review/round2/new_sweeps.md (M18, M19 and M20
-   are reserved), and say so there so the operator can renumber when adopting them into the skill."""
+   sweeps, number them from M30 upwards in review/round2/new_sweeps.md (M18, M19 and M20
+   are reserved, and M21-M29 are adopted), and say so there so the operator can renumber when
+   adopting them into the skill."""
 M18_REVISE_RULE_ON = """Figure captions: bring EVERY caption over @@CAPTION_LIMIT@@ words back under the limit by
      removing redundancy, hedging and repeated statistics -- never by deleting scientific content,
      claims, limitations or needed methodological detail. This is a SUGGESTION, not a gate: a
@@ -3581,6 +3599,133 @@ def apply_m20(text: str) -> str:
                          ("@@M20_REWRITE_RULE@@", M20_REWRITE_RULE)):
         text = text.replace(token, block)
     return text
+
+
+# ---- M25-M29 + J5: THE REWRITE-PARITY CHECKS (review/audit/revise) ----------
+# A from-scratch rewrite fixes these classes as a side-effect of rewriting: it
+# re-aligns artwork terms with the text, completes a spelling/hyphenation
+# convention across the whole corpus, completes a claim's evidence pointers,
+# makes sibling definitions symmetric, aligns a caption with what is printed,
+# and reorganizes at the scope level. The 2026-09-27 root measured the cost of
+# the review not seeing them: the judges credited the rewrite (w1/w2) with
+# consistency/completeness rows the frozen review never filed, while the a2 arm
+# had "nothing to fix" and carried them into the field.
+#
+# The panel's frozen sweep set is NOT extended: the judges' coverage map stays
+# M1-M24 + J1-J4 (identical minimum scrutiny across versions is what keeps the
+# panel calibrated, and the comparison already scores these differences under
+# the consistency/completeness/correctness tiers). These checks exist on the
+# review -> audit -> revise path, which is the path that must stop leaving the
+# points on the table.
+REWRITE_PARITY_REVIEW = """3d. The REWRITE-PARITY checks M25-M29 and the ARCHITECTURE pass J5 (the jobs a
+   from-scratch rewrite performs while it rewrites; definitions in the skill's
+   references/sweeps.md, sections M25-M29 and J5). Each of the SIX gets its own artifact under
+   review/artifacts/ AND its own coverage row, exactly like the older sweeps. One finding per
+   instance for M25-M29; J5 is one finding per SCOPE:
+   * M25 figure-artwork/text parity - extract the text layer of every rendered figure/table
+     artefact (`pdftotext` / slide text) and pair every artwork token (method/tool name, year,
+     axis/panel/factor phrase) with the manuscript's own counterpart (the M8 term ledger /
+     review/work/GLOSSARY.md decision, the legend, the Methods sentence). Artifact:
+     review/artifacts/M25_artwork_parity.md. An artwork file is usually read-only; that does NOT
+     make its row `unable` - when the editable caption/main-text/SI-legend surface can be
+     aligned, the finding is resolvable and the artwork regeneration is a manual follow-up.
+   * M26 house-style / orthographic conventions - run the bundled
+     `enumerate_conventions.py --work review/work` over the converted corpus (both surfaces of
+     every US/UK spelling, hyphenation and preverb family, plus data-driven candidates), decide
+     ONE authoritative form per family in review/work/STYLE_CONVENTIONS.md (corpus majority /
+     the manuscript's own first use / a stated venue rule), and file ONE FINDING PER DEVIATING
+     OCCURRENCE - never one per family. Artifact: review/artifacts/M26_conventions.md.
+   * M27 claim-to-evidence coverage - for every plural/aggregate claim (and every number whose
+     sentence states a universe), enumerate the evidence items the claim needs from the shipped
+     data and check the pointer set actually covers them. A resolving citation is NOT coverage
+     (the S12-only pointer for a claim about both haploid samples is the recorded case).
+     Artifact: review/artifacts/M27_evidence_coverage.md.
+   * M28 sibling-definition symmetry - per list/head-noun group, compare each sibling's
+     first-use expansion and definition order (one expanded, two not; long form after short form
+     for one sibling and before it for another). Artifact: review/artifacts/M28_symmetry.md.
+   * M29 caption-promise vs printed-schema parity - pair every promised field/panel/encoding in
+     a caption with the printed table header or the artwork's own text ("eleven columns" for a
+     ten-column TSV is the recorded case). Artifact: review/artifacts/M29_caption_schema.md.
+   * J5 architecture & rewrite-class pass - one row per SCOPE in review/ARCHITECTURE.md
+     (`document | section | paragraphs | current structure | reader cost | proposed
+     reorganization | class | severity | disposition`): claim-first order, one message per
+     paragraph, reading order inside a passage, missing transitions, cross-section redundancy.
+     A row needing work becomes a finding with `check: J5` and its `scope` key set; a scope that
+     is fine gets a row-specific `OK - <why this order serves the reader>`. This is the ONE
+     place where a scope-level (non-instance) finding is legal, and the revision stage has a
+     scoped-restructuring licence for it (E11)."""
+
+REWRITE_PARITY_AUDIT = """4. ATTACK THE REWRITE-PARITY RECORD - the classes a rewrite fixes as it goes, and the
+   dispositions that lost the last root's points. A blanket closure is not a disposition here
+   either; raise every real defect as your own `AU-` finding:
+     * M1 / M1b: a row closed "it is a name / proper noun, not an abbreviation" is NOT a
+       disposition when the sentence itself prints the token's expansion
+       (`MALBAC-sequenced (multiple annealing and looping-based amplification cycles)`,
+       `ground-truth haplotypes (phased single-nucleotide polymorphisms, SNPs)`). That is M1(a)
+       used-before-defined - the long form must precede the first use.
+     * M25-M29: for every row the reviewer disposed, ask whether the reason is about THAT row's
+       own bar (the term ledger's decision, the claim's required evidence set, the printed
+       header) or a blanket sentence. A row closed "the artwork is read-only" while an editable
+       caption/main-text/SI-legend surface still carries the non-authoritative form is an AU-
+       finding, not a manual item. Same for a convention family closed per document while the
+       convention is a corpus-level decision.
+       (M25 artwork/text parity · M26 house-style conventions · M27 claim-to-evidence coverage ·
+       M28 sibling-definition symmetry · M29 caption-promise parity - each artifact must carry a
+       disposition on every row.)
+     * J5 / review/ARCHITECTURE.md: every scope row must carry a row-specific disposition. A
+       document with no rows, or one "OK - reads well" sentence repeated on every row, is an
+       UNFILLED artifact - raise the scopes you can evidence yourself as `AU-` findings
+       (`check: J5`, scope recorded).
+   The reviewer's M25-M29/J5 FINDINGS are disposed like every other frozen id (confirm, or drop
+   with evidence)."""
+
+REWRITE_PARITY_REVISE = """12. REWRITE-PARITY findings (M25-M29) - resolve them the way a rewrite would: one
+    edit per finding instance, applied to EVERY occurrence of the convention, not only the
+    quoted one (rule E11 in the revision skill's edit_rules.md):
+      * M25 (artwork/text parity): align the editable main text / caption / SI legend with the
+        authoritative form the review recorded; the artwork regeneration (exact label + the code
+        file that prints it) goes to MANUAL_STEPS.md as a follow-up. A read-only artwork file
+        does NOT make this finding manual-required while an editable surface exists.
+      * M26 (house-style conventions): substitute the authoritative form everywhere - main
+        text, SI, legends, table notes, cover letter, and the controlled reference text - copy
+        the review's STYLE_CONVENTIONS.md decisions into revised/work/STYLE_CONVENTIONS.md,
+        then re-run `enumerate_conventions.py --work revised/work --corpus revised/work/corpus`
+        over the revised corpus and require every edited occurrence to be gone or to carry a
+        ledger reason. A fix in one document that leaves the sibling documents mixed is NOT a
+        resolution.
+      * M27 (claim-to-evidence coverage): add exactly the missing pointer the finding names
+        (citation, figure/table call-out, `(Methods)` pointer, SI note). Never invent a source:
+        a pointer set that cannot be completed without new content is manual-required with the
+        exact pointer the author must add.
+      * M28 (sibling symmetry): make the list symmetric exactly as the row specifies (expand the
+        unexpanded siblings, or put each sibling's long form before its short form at first
+        use); an expansion that exists nowhere in the corpus is manual-required, never invented.
+      * M29 (caption-promise parity): align the editable side with what the print actually
+        delivers - the caption wording, or the printed source when it is in the corpus and
+        editable - one promised item per edit; a generated print's regeneration step is a
+        manual follow-up, not a reason to carry the finding.
+    These are normal E1 edits (substitutions / pointer additions inside the finding's own
+    sentence); what differs from E1 is the corpus-wide completion of the convention.
+13. ARCHITECTURE findings (J5) - a J5 finding names a SCOPE, and rule E11 LIFTS E1's no-reflow
+    prohibition INSIDE that scope (the one restructuring exception besides M18/M19): reorder
+    sentences/paragraphs, move a paragraph within its section, split or merge paragraphs, add
+    or rewrite a transition sentence, rewrite a passage for cohesion. Guards, all mandatory:
+    the content is frozen (same claims, numbers, citations, accessions, limitations and
+    conclusions; nothing deleted except a redundancy the finding itself names; nothing
+    invented), the edit stays inside the declared scope, figure/table numbering and
+    cross-references stay coherent, ONE revised/work/RESTRUCTURE_<finding-id>.md artifact per
+    finding (scope, BEFORE outline, AFTER outline, every moved paragraph before -> after, the
+    diff hunk ids, the claim-by-claim preservation check), and the mechanical rescan (V3)
+    re-runs after each scope. A J5 finding whose scope cannot be restructured without content
+    loss is manual-required, with the proposed reordering written out in MANUAL_STEPS.md."""
+
+
+def apply_rewrite_parity(text: str, where: str) -> str:
+    """Substitute the rewrite-parity block for the stage that owns it."""
+    block = {"review": REWRITE_PARITY_REVIEW,
+             "audit": REWRITE_PARITY_AUDIT,
+             "revise": REWRITE_PARITY_REVISE}.get(where, "")
+    return text.replace("@@REWRITE_PARITY@@", block)
 
 
 # ---------------------------------------------------------------------
@@ -4580,12 +4725,14 @@ of its references first (references/sweeps.md, references/discovery.md), then ex
    failure recorded, never skipped. Guidance source: prefer a local copy of the author guidelines
    if one is present in the corpus; otherwise @@VENUE_GUIDELINES_SOURCE@@;
    name the source/version you relied on in the summary.
-2. The EXHAUSTIVE MANDATORY mechanical sweeps M1-M17, the pipeline-mandated M18-M24 and the
-   judgment passes J1-J4, one sweep at a
+2. The EXHAUSTIVE MANDATORY mechanical sweeps M1-M17, the pipeline-mandated M18-M20, the
+   adopted sweeps M21-M24, the REWRITE-PARITY checks M25-M29 and the
+   judgment passes J1-J5, one sweep at a
    time, each with its own artifact under review/artifacts/.
 @@M18_REVIEW_SWEEP@@
 @@M19_REVIEW_SWEEP@@
 @@M20_REVIEW_SWEEP@@
+@@REWRITE_PARITY@@
 @@EVIDENCE_PACK_RULE@@
 4. The discovery round D0-D5 (references/discovery.md), including its proposal of new sweeps for
    issue classes the checklist itself misses, written under review/round2/.
@@ -4606,11 +4753,16 @@ Skill discipline that the orchestrator will check for:
     whose M1b table has rows while findings.json raises no M1 finding, the M1 coverage row never
     mentions M1b in either cell, and the table's own rows carry no recorded reason fails its
     postcheck.
-  * No silent skips: every check ID M1-M17, M18-M24 and J1-J4 appears in the coverage table with a real
+  * M1(a) "used before it is defined" INCLUDES the acronym-first compound: a sentence that prints
+    the short form first and the expansion after it (`MALBAC-sequenced (multiple annealing ...)`)
+    has used the token before defining it. When the sentence itself prints the expansion, the
+    token IS an abbreviation being defined, so "it is a tool/proper name" is not a disposition.
+  * No silent skips: every check ID M1-M29 and J1-J5 appears in the coverage table with a real
      disposition (N findings / clean — basis: <artifact> / unable — <reason>); M19 (the pipeline's
      abstract/main-text length sweep) ALWAYS appears there too, and M18 (the pipeline's caption
      sweep) ALWAYS appears as well: legends are always enumerated, and only its proxy cap is
-     optional. Number your discovery proposals from M21 upwards.
+     optional. Number your discovery proposals from M30 upwards (M18-M20 are reserved by the
+     pipeline, M21-M29 are adopted).
   * Never invent content, citations, numbers, or accession IDs. Anything unresolvable becomes
     "unresolvable — manual verification required" and is listed in the manual-verification list.
   * Findings are reported, never fixed: identification only.
@@ -4871,6 +5023,8 @@ Explicit requirements that override skill defaults where they conflict:
   10. @@M20_REVISE_RULE@@
   11. @@EVIDENCE_PACK_RULE@@
 
+@@REWRITE_PARITY@@
+
 @@PLACEHOLDER_RULE@@
 
 @@AUX_FILES_RULE@@
@@ -5002,7 +5156,8 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
    in the abstract or a legend whose `source` cell is empty in work/NUMBERS_LEDGER.md while the
    shipped data files prove it; a term family competing for one concept (work/M24_concepts.md).
    Each becomes an `AU-` finding when it is a defect, not a note.
-4. WRITE, in `audit/`:
+@@REWRITE_PARITY@@
+5. WRITE, in `audit/`:
    * `audit.json` — machine-readable, exactly this shape:
        {"round": @@ROUND@@,
         "dispositions": [{"id": "F-001", "verdict": "confirm|drop", "reason": "...",
@@ -6270,6 +6425,7 @@ This round runs TWO review sessions on the SAME corpus and merges their findings
             .replace("@@DOCX_CLI_RULE@@", docx_cli_block())
             .replace("@@ZOTERO_CLI_RULE@@", zotero_cli_block("review", zotero))
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof)))
+    text = apply_rewrite_parity(text, "review")
     text = render_venue_tokens(text, prof)
     text = apply_m19(text, prof)
     text = apply_m20(text)
@@ -6315,6 +6471,7 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
                      zotero_cli_block("edit", zotero, ZOTERO_LEDGER_REVISED))
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof))
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE))
+    text = apply_rewrite_parity(text, "revise")
     text = text.replace("@@AUDIT_BLOCK@@", audit_block)
     text = render_venue_tokens(text, prof)
     text = apply_m19(text, prof)
@@ -6356,6 +6513,7 @@ def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
             .replace("@@DOCX_CLI_RULE@@", docx_cli_block())
             .replace("@@ZOTERO_CLI_RULE@@", zotero_cli_block("review", zotero))
             .replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("audit")))
+    text = apply_rewrite_parity(text, "audit")
     text = render_venue_tokens(text, prof)
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule("audit"))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("audit", run_id, r))
@@ -10635,11 +10793,11 @@ def rid_audit(r: int) -> str:
 
 REVIEW_SPLIT_MODES = ("off", "phases", "aspects")
 REVIEW_SPLIT_SCOPES = {
-    "phases": ("A: the MECHANICAL sweeps M1-M17 plus the pipeline-mandated M18/M19/M20 "
-               "(enumerate, artifact, audit)",
-               "B: the JUDGMENT passes J1-J4 and the discovery round D0-D5"),
+    "phases": ("A: the MECHANICAL sweeps M1-M17 plus the pipeline-mandated M18/M19/M20 and the "
+               "adopted M21-M29 (rewrite-parity included; enumerate, artifact, audit)",
+               "B: the JUDGMENT passes J1-J5 and the discovery round D0-D5"),
     "aspects": ("A: the CONTENT/scientific checks -- M1-M8, M13-M16 and J1-J3",
-                "B: the PACKAGING/compliance checks -- M9-M12, M17-M20, J4 and the "
+                "B: the PACKAGING/compliance checks -- M9-M12, M17-M20, M21-M29, J4, J5 and the "
                 "discovery round D0-D5"),
 }
 
@@ -14232,8 +14390,8 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list) -> No
     # 2. every check ID must have a real disposition.
     coverage = fj.get("coverage")
     if not isinstance(coverage, list):
-        errs.append(f"{FINDINGS_REL} has no coverage table; every check ID M1-M17, M18-M24 and "
-                    f"J1-J4 must carry a real disposition (the skill's acceptance gate)")
+        errs.append(f"{FINDINGS_REL} has no coverage table; every check ID M1-M17, M18-M29 and "
+                    f"J1-J5 must carry a real disposition (the skill's acceptance gate)")
     else:
         wanted = list(REQUIRED_REVIEW_CHECKS)
         wanted.append("M19")            # always active: the length rule is not opt-in
@@ -14242,6 +14400,10 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list) -> No
         # Adopted from the discovery rounds (sweeps.md M21-M24): the review runs
         # them, so their coverage rows are required exactly like the older ones.
         wanted += ["M21", "M22", "M23", "M24"]
+        # The rewrite-parity checks (sweeps.md M25-M29) and the architecture
+        # pass J5: the classes a from-scratch rewrite fixes as a side-effect.
+        # The panel's frozen set is unchanged, so J5 is review-side only.
+        wanted += ["M25", "M26", "M27", "M28", "M29", "J5"]
         seen_ids, seen_rows, bad = {}, {}, []
         for row in coverage:
             if not isinstance(row, dict):
@@ -14268,6 +14430,70 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list) -> No
                     f"discipline cannot be verified without the per-sweep tables")
     elif not any(p.is_file() for p in art_dir.rglob("*")):
         errs.append(f"{ARTIFACTS_REL}/ is empty: at least one per-sweep artifact table is required")
+    # 3b. the REWRITE-PARITY artifacts (M25-M29) and the architecture table
+    #     (J5) are part of the contract: a sweep with no artifact proves
+    #     nothing, and J5 is the only home of the scope-level (rewrite-class)
+    #     issues. These are the classes a from-scratch rewrite fixes as it
+    #     goes; a review that never enumerated them leaves the revision arm
+    #     with nothing to fix (the documented w1/w2-vs-a2 gap).
+    parity = {"M25_artwork_parity.md": "M25", "M26_conventions.md": "M26",
+              "M27_evidence_coverage.md": "M27", "M28_symmetry.md": "M28",
+              "M29_caption_schema.md": "M29"}
+    # A SPLIT review divides the work: session A owns the mechanical checks
+    # (M25-M29 artifacts), session B owns the J5 architecture pass and the
+    # discovery round. Each session's postcheck must not demand the other's
+    # artifacts -- the merge unions the coverage tables and artifacts.
+    split = "off"
+    if ctx is not None:
+        try:
+            split = review_split_of(ctx)
+        except Exception:                                        # noqa: BLE001
+            split = "off"
+    part_b = bool(split != "off" and str(sb.name).endswith("_review_b"))
+    # phases: A = mechanical (M25-M29 artifacts), B = J1-J5 + discovery (J5
+    # architecture table). aspects: A = content, B = packaging + M21-M29 + J5.
+    want_parity_artifacts = (split == "off"
+                             or (split == "phases" and not part_b)
+                             or (split == "aspects" and part_b))
+    want_architecture = (split == "off" or part_b)
+    if want_parity_artifacts and art_dir.is_dir():
+        for fname, cid in parity.items():
+            p = art_dir / fname
+            if not p.is_file():
+                errs.append(f"{ARTIFACTS_REL}/{fname} is missing: the rewrite-parity check {cid} "
+                            f"enumerates one of the classes a from-scratch rewrite fixes as it "
+                            f"goes; a zero-finding sweep is valid ONLY with a disposed artifact")
+                continue
+            try:
+                body = p.read_text(encoding="utf-8", errors="replace")
+            except OSError as e:                                    # noqa: BLE001
+                errs.append(f"{ARTIFACTS_REL}/{fname} could not be read ({e})")
+                continue
+            if not body.strip():
+                errs.append(f"{ARTIFACTS_REL}/{fname} is EMPTY: {cid} must enumerate its rows "
+                            f"and dispose every one of them")
+            elif "disposition" not in body.lower():
+                errs.append(f"{ARTIFACTS_REL}/{fname} carries no `disposition` column: every "
+                            f"{cid} row must end in a finding id / OK - <reason> / "
+                            f"unable - <reason>")
+    arch = sb / REVIEW_DIR / "ARCHITECTURE.md"
+    if want_architecture and not arch.is_file():
+        errs.append(f"{REVIEW_DIR}/ARCHITECTURE.md is missing: the J5 architecture pass must "
+                    f"record one row per scope (document | section | paragraphs | current "
+                    f"structure | reader cost | proposed reorganization | class | severity | "
+                    f"disposition -- a scope that is fine gets its own OK row), because the "
+                    f"scope-level issues a rewrite fixes have no instance-level home")
+    elif want_architecture:
+        try:
+            body = arch.read_text(encoding="utf-8", errors="replace")
+            if not body.strip():
+                errs.append(f"{REVIEW_DIR}/ARCHITECTURE.md is EMPTY: the J5 pass must examine "
+                            f"every document scope by scope")
+            elif "disposition" not in body.lower():
+                errs.append(f"{REVIEW_DIR}/ARCHITECTURE.md carries no `disposition` column: "
+                            f"every scope row must be disposed against its own reading-order bar")
+        except OSError as e:                                        # noqa: BLE001
+            errs.append(f"{REVIEW_DIR}/ARCHITECTURE.md could not be read ({e})")
     # 4. finding ids must be unique and stable.
     findings = fj.get("findings")
     if isinstance(findings, list):
@@ -14280,6 +14506,14 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list) -> No
                         f"findings)")
         if empty:
             errs.append(f"{FINDINGS_REL} carries {empty} finding(s) without an id")
+        j5_missing = [str(f.get("id") or "?") for f in findings
+                      if isinstance(f, dict)
+                      and str(f.get("check") or "").strip().upper() == "J5"
+                      and not str(f.get("scope") or "").strip()]
+        if j5_missing:
+            errs.append(f"{FINDINGS_REL}: J5 architecture finding(s) {j5_missing} carry no "
+                        f"`scope`; the revision stage's E11 restructuring licence is bounded by "
+                        f"that scope, so it must be recorded (document/section/paragraph-range)")
     # 5. every prior-round finding must be reconciled (carried forward or recorded as gone).
     prior = sb / "prior_round" / "findings.json"
     if prior.is_file():
@@ -14562,9 +14796,9 @@ PRIOR_ROUND_RULE = """PRIOR-ROUND FINDINGS (read-only; round @@ROUND@@ reviews t
     Do not re-file a prior finding that no longer holds, and do not drop one that does.
   * The orchestrator refuses the review if any prior finding id appears in NEITHER
     findings.json nor findings.md, so complete this reconciliation first.
-  * Carrying findings forward does NOT replace the sweeps: run the complete M1-M17 + J1-J4 set
-    plus the pipeline-mandated M18-M24 checks (the caption check among them) and report your own
-    new findings as usual."""
+  * Carrying findings forward does NOT replace the sweeps: run the complete M1-M17 + J1-J5 set
+    plus the pipeline-mandated M18-M24 checks and the rewrite-parity M25-M29 checks (the
+    classes a from-scratch rewrite fixes as it goes) and report your own new findings as usual."""
 
 
 # ---------------------------------------------------------------------
@@ -17390,7 +17624,7 @@ def audit_artifact_problems(audit, frozen_ids) -> list:
         if not isinstance(cat, int) or not 0 <= cat <= 5:
             problems.append(f"{aid}: category must be an integer 0-5")
         if not str(row.get("check") or "").strip():
-            problems.append(f"{aid}: the check id (M1-M24/J1-J4) is missing")
+            problems.append(f"{aid}: the check id (M1-M29/J1-J5) is missing")
     return problems
 
 
@@ -17530,6 +17764,40 @@ def postcheck_revise(ctx: Ctx, rec: dict):
                                              frozen_findings_total(ctx, rec))
     errs.extend(lerrs)
     warns.extend(lwarns)
+    # REWRITE-PARITY EVIDENCE: the frozen review may carry the classes a
+    # from-scratch rewrite fixes as it goes (M25-M29) and the scope-level
+    # architecture findings (J5). Their fixes have their own required
+    # artifacts (E11): the convention re-run for M26, and one RESTRUCTURE note
+    # per J5 scope. Absence is reported here; the ledger and the residue gate
+    # carry the final judgement.
+    frozen_all = _frozen_review_findings(sb)
+    aud = read_json(sb / "audit" / "audit.json", revive=False, lenient=True) \
+        if (sb / "audit" / "audit.json").is_file() else None
+    if isinstance(aud, dict):
+        frozen_all = frozen_all + [f for f in (aud.get("adds") or []) if isinstance(f, dict)]
+    checks_in = {str(f.get("check") or "").strip().upper() for f in frozen_all}
+    if "M26" in checks_in:
+        style = rev / "work"
+        if not any(style.glob("STYLE_VARIANTS.*")) and not (style / "STYLE_CONVENTIONS.md").is_file():
+            warns.append("the frozen review carries M26 house-style convention findings but "
+                         "revised/work/ has no STYLE_VARIANTS.* / STYLE_CONVENTIONS.md with "
+                         "the M26 convention re-run (E11); the corpus-wide completion of a "
+                         "convention must be provable, not asserted")
+    j5_ids = [str(f.get("id") or "").strip() for f in frozen_all
+              if str(f.get("check") or "").strip().upper() == "J5"]
+    if j5_ids:
+        notes = list((rev / "work").glob("RESTRUCTURE_*.md"))
+        if not notes:
+            warns.append(f"the frozen review carries {len(j5_ids)} J5 architecture finding(s) "
+                         f"but revised/work/ has no RESTRUCTURE_<finding-id>.md note: E11 "
+                         f"requires one per scope (BEFORE/AFTER outline, moved paragraphs, "
+                         f"diff hunk ids, preservation check)")
+        else:
+            missing_notes = [fid for fid in j5_ids
+                             if not any(fid in p.name for p in notes)]
+            if missing_notes:
+                warns.append(f"J5 finding(s) {missing_notes} have no RESTRUCTURE_<id>.md note "
+                             f"under revised/work/: every restructuring must be re-checkable")
     if not (rev / "CHANGELOG.md").is_file() and not (rev / "REVISION_REPORT.md").is_file():
         warns.append("neither revised/CHANGELOG.md nor revised/REVISION_REPORT.md was found "
                      "(the human-readable ledger/change log)")

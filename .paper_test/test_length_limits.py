@@ -173,10 +173,10 @@ def test_prompts():
     check("LT3 the caption rule now names both narrowed places",
           "check id M19" in on and "cover letter keeps" in on
           and "blanket rule unchanged" in on)
-    check("LT3 discovery proposals start at M21 with the caption rule on",
-          "M21" in on and "number them from M21 upwards" in on)
-    check("LT3 discovery proposals start at M21 with the caption rule off",
-          "M21" in off and "M18" in off and "M19" in off and "M20" in off)
+    check("LT3 discovery proposals start at M30 with the caption rule on",
+          "M30" in on and "number them from M30 upwards" in on)
+    check("LT3 discovery proposals start at M30 with the caption rule off",
+          "M30" in off and "M18" in off and "M19" in off and "M20" in off)
 
 
 # =====================================================================
@@ -273,6 +273,16 @@ def test_orchestrator_wiring():
     sb = tmp / "runs" / "r1_a2_review"
     write(sb / "base" / "ms.md", "text\n")
     write(sb / "review" / "artifacts" / "M1_acronyms.md", "| row |\n|---|\n")
+    for fname in ("M25_artwork_parity.md", "M26_conventions.md",
+                  "M27_evidence_coverage.md", "M28_symmetry.md",
+                  "M29_caption_schema.md"):
+        write(sb / "review" / "artifacts" / fname,
+              "| row | disposition |\n|---|---|\n| x | OK |\n")
+    write(sb / "review" / "ARCHITECTURE.md",
+          "| document | section | paragraphs | current structure | reader cost | "
+          "proposed reorganization | class | severity | disposition |\n"
+          "|---|---|---|---|---|---|---|---|---|\n"
+          "| ms | all | 1 | x | none | none | writing | Minor | OK |\n")
     ctx = type("C", (), {"cfg": {}})()
 
     def coverage(include_m19=True):
@@ -280,7 +290,8 @@ def test_orchestrator_wiring():
                 [f"M{i}" for i in range(1, 18)] + [f"J{i}" for i in range(1, 5)]]
         rows.append({"check": "M18", "disposition": "legend lengths recorded"})
         rows.append({"check": "M20", "disposition": "formatting rows disposed"})
-        for cid in ("M21", "M22", "M23", "M24"):      # adopted checks (2026-09-22)
+        for cid in ("M21", "M22", "M23", "M24",        # adopted checks (2026-09-22)
+                    "M25", "M26", "M27", "M28", "M29", "J5"):   # rewrite-parity checks
             rows.append({"check": cid, "disposition": f"clean -- basis: fixture {cid}"})
         if include_m19:
             rows.append({"check": "M19", "disposition": "0 findings"})

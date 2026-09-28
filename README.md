@@ -248,6 +248,43 @@ The stage is **off by default** so that existing roots keep their plan shape and
 their arms stay comparable; turn it on when you want the extra decision layer
 (it costs one session per round, not per candidate).
 
+## The rewrite-parity checks (M25–M29 + J5): making review do the rewrite's job
+
+A from-scratch rewrite fixes a family of defects as a side-effect of rewriting:
+it re-aligns figure-artwork and SI-legend terms with the text, completes a
+US/UK spelling or hyphenation convention across the whole corpus, completes a
+claim's evidence pointers (`S12` alone for a claim about both samples), makes
+sibling definitions symmetric (`MALBAC-sequenced (multiple annealing …)` puts
+the explanation after the use), aligns a caption with what the table actually
+prints, and reorganizes at the scope level. In the 2026-09-27 root the judges
+credited the rewrites (w1/w2) with exactly these rows while the
+review→audit→revise arm had nothing to act on — the review's instance-level
+format had either closed them with the wrong bar or never enumerated them.
+
+The review/audit/revise path now carries them explicitly:
+
+* **M25** figure-artwork/text parity · **M26** house-style/orthographic
+  conventions (bundled `enumerate_conventions.py`; one authoritative form per
+  family in `STYLE_CONVENTIONS.md`, one finding per deviating occurrence) ·
+  **M27** claim→evidence coverage · **M28** sibling-definition symmetry ·
+  **M29** caption-promise vs printed-schema parity. Each gets its own artifact
+  under `review/artifacts/` and its own coverage row;
+* **J5** is the architecture pass: one row per scope in
+  `review/ARCHITECTURE.md`, and its findings carry a `scope` key (they are the
+  one legal non-instance finding);
+* the auditor attacks the dispositions that used to close these classes
+  ("it is a proper name", "the artwork is read-only", a convention closed per
+  document, an unfilled architecture table) and promotes them to `AU-*`
+  findings;
+* the reviser resolves M25–M29 by aligning the EDITABLE surface corpus-wide
+  (rule E11), and J5 licenses **scoped restructuring** inside the finding's
+  declared scope under a content freeze, a numbering check and one
+  `work/RESTRUCTURE_<id>.md` artifact per finding;
+* the judge panel's frozen coverage map (M1–M24 + J1–J4) is deliberately
+  unchanged: identical minimum scrutiny across versions is what keeps it
+  calibrated, and the comparison already scores these differences in the
+  consistency/completeness/correctness tiers.
+
 ## Arm levels, the difference ledger, and the language pass (W-11/W-12)
 
 * **Rewrite arms carry a level.** With `--rewrites 2` the round stages one

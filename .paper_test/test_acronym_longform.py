@@ -339,6 +339,18 @@ def fake_review_sandbox(tmp, m1_md, findings, coverage):
     art = sb / "review" / "artifacts"
     art.mkdir(parents=True, exist_ok=True)
     (art / "M1_acronyms.md").write_text(m1_md, encoding="utf-8")
+    # The rewrite-parity artifacts + the architecture table are part of the
+    # review contract (M25-M29 + J5).
+    for fname in ("M25_artwork_parity.md", "M26_conventions.md",
+                  "M27_evidence_coverage.md", "M28_symmetry.md",
+                  "M29_caption_schema.md"):
+        (art / fname).write_text("| row | disposition |\n|---|---|\n| x | OK |\n",
+                                 encoding="utf-8")
+    (sb / "review" / "ARCHITECTURE.md").write_text(
+        "| document | section | paragraphs | current structure | reader cost | "
+        "proposed reorganization | class | severity | disposition |\n"
+        "|---|---|---|---|---|---|---|---|---|\n"
+        "| ms | all | 1 | x | none | none | writing | Minor | OK |\n", encoding="utf-8")
     return sb, {"submission_dir": "./base", "guidelines_source": "x",
                 "findings": findings, "artifacts": {}, "coverage": coverage}
 
@@ -348,7 +360,8 @@ def full_coverage(detail=None):
     return ([{"check": c, "disposition": detail.get(c, "clean -- basis: x")}
              for c in [f"M{i}" for i in range(1, 18)] + [f"J{i}" for i in range(1, 5)]]
             + [{"check": c, "disposition": detail.get(c, "clean -- basis: x")}
-               for c in ("M18", "M19", "M20", "M21", "M22", "M23", "M24")])
+               for c in ("M18", "M19", "M20", "M21", "M22", "M23", "M24",
+                         "M25", "M26", "M27", "M28", "M29", "J5")])
 
 
 M1B_MD = ("# M1\n\n| acronym | ... |\n|---|---|\n\n"

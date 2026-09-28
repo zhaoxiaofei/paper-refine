@@ -46,8 +46,9 @@ A plain "review my manuscript" prompt reliably misses low-salience mechanical is
 1. **Identification only** — findings, never edits. Never modify any file in SUBMISSION_DIR.
 2. **Never invent.** Unresolvable value → status `unresolvable — manual verification required`. Guideline rule you cannot verify → `guideline-dependent`. Missing data → note a placeholder may be needed; never fabricate.
 3. **No silent skips.** Every check ID must end up in the coverage table with a real disposition (`N findings` / `clean — basis: <artifact/locations>` / `unable — <reason>`). "Not checked" is not an allowed value.
-4. **Mechanical sweeps M1–M17 are EXHAUSTIVE and MANDATORY, and M18 (figure-legend lengths), M19 (abstract/main-text length plus the cover-letter preference) and M20 (OOXML style/formatting uniformity, enumerated by the pipeline's code-side scan) always run with them, together with the adopted sweeps M21–M24 (correspondence policy, data/code-availability integrity, supplementary parity, concept/term families).** M18's optional proxy cap only changes whether an over-count legend is reported as an over-cap item. Only judgment passes J1–J4 may be prioritized. The word "non-exhaustive" never applies to a mechanical sweep.
+4. **Mechanical sweeps M1–M17 are EXHAUSTIVE and MANDATORY, and M18 (figure-legend lengths), M19 (abstract/main-text length plus the cover-letter preference) and M20 (OOXML style/formatting uniformity, enumerated by the pipeline's code-side scan) always run with them, together with the adopted sweeps M21–M24 (correspondence policy, data/code-availability integrity, supplementary parity, concept/term families) and the REWRITE-PARITY checks M25–M29 (figure-artwork/text parity, house-style/orthographic conventions, claim→evidence coverage, sibling-definition symmetry, caption-promise vs printed-schema parity).** M18's optional proxy cap only changes whether an over-count legend is reported as an over-cap item. Only judgment passes J1–J5 may be prioritized; J5 (architecture & rewrite-class) produces scope-level rows in `OUT/ARCHITECTURE.md`, not per-sentence findings. The word "non-exhaustive" never applies to a mechanical sweep.
 5. **One finding per instance.** "Several acronyms are undefined" is not a finding; each undefined acronym is its own finding with its own ID, quote, and location.
+   M1(a) "used before it is defined" includes the acronym-first compound: a sentence that prints the short form first and the expansion after it (`MALBAC-sequenced (multiple annealing …)`) has used the token before defining it. When the sentence itself prints the expansion, the token IS an abbreviation being defined, so "it is a tool/proper name" is not a disposition.
 6. **Sweep pattern for every mechanical check:** ENUMERATE (script preferred; scripts live in `WORK/`) → ARTIFACT (`OUT/artifacts/<ID>.md` for the M1/M2/M4–M17 tables; term/value occurrence enumerations are written to `WORK/occurrences_<slug>.md`, which is M8's artifact — pass `--out OUT/artifacts` if you prefer them alongside the others; every instance gets a row, including rows later judged OK; the artifact spans the whole corpus, not one file) → AUDIT (each row gets: a finding ID, `OK`, or `unable — <reason>`) → REPORT (findings derived only from artifact rows, never from general impression).
 7. **A sweep with zero findings is INVALID unless its artifact exists and every row is disposed.**
 
@@ -62,6 +63,7 @@ All stdlib-only Python, runnable anywhere Python 3.8+ exists. Copy them into `WO
 | `scripts/extract_citations.py` | M2: every call-out vs every reference entry; orphans, uncited, duplicates, order |
 | `scripts/extract_numbers.py` | M4: labeled metrics, accessions, versions; auto-flags same-label conflicts |
 | `scripts/extract_occurrences.py` | M8 term variants; also reused by paper-revise for propagation. Writes `WORK/occurrences_<slug>.md` (multi-target runs get a hash suffix so runs cannot overwrite each other). `--term`, `--value` and `--variants-file` are repeatable, so every corrected number can be enumerated in one run: `--value 0.021 --value 0.031` |
+| `scripts/enumerate_conventions.py` | M26 house-style/orthographic convention sweep: every occurrence of a US/UK spelling, hyphenation or preverb variant, from a built-in family list plus data-driven candidate pairs, one row per occurrence. Also reused by paper-revise for the convention propagation pass. |
 | `scripts/count_words.py` | M18/M19: counts a document's abstract, main text and cover letter with the pipeline's word rule (maximal runs of non-space characters, newline = space); reads `.tex`/`.ltx` sources (abstract environment, section headings, `\caption` lines) like the other formats; `--section cover-letter` counts the persuading part (salutation/signature/disclosures excluded) against the user's 300-500-word preference; `--json` for the artifact rows and `--base-abstract`/`--base-main-text` for another content type |
 
 If a script misses a case class (e.g., a citation style it can't parse), **extend it in `WORK/`** rather than falling back to eyeballing.
@@ -70,7 +72,7 @@ If a script misses a case class (e.g., a citation style it can't parse), **exten
 
 **Phase 1 — Setup.** Run `convert_corpus.py` on SUBMISSION_DIR. Review the inventory: role classification, editable vs read-only, conversion status. Every conversion failure is recorded, never skipped. Images are marked `visually unverifiable` unless OCR/VLM is available; when a renderer exists, render and LOOK. Zotero live fields: the converter marks them `[[FIELD: ...]]`; check the rendered text; an unreadable or incomplete field goes to the manual-verification list (tell the user to verify it in Word). Resolve citations READ-ONLY with `ZOT_CLI` / `$ZOTERO_SKILL` (parent bibliographic item keys, never attachment keys; confirm title, creators, year, DOI) and never write to the library: a suspected metadata error becomes a finding with the proposed correction.
 
-**Phase 2 — Sweeps.** Mechanical sweeps M1–M17 plus M18 (legend lengths, always enumerated), M19 (abstract/main-text length plus the cover-letter preference) and M20 (OOXML style/formatting uniformity; the pipeline seeds `review/work/FORMAT_SCAN.json` and `review/artifacts/M20_formatting.md`, and every row must be disposed), the adopted sweeps M21–M24 (correspondence policy, data/code-availability integrity, supplementary parity, concept/term families) and judgment passes J1–J4: procedures, artifact columns, finding rules, classification, and the finding format are specified in the appendix below — follow it exactly. One sweep at a time; finish one artifact before starting the next. For long documents, sweep file by file, then merge so every artifact spans the whole corpus.
+**Phase 2 — Sweeps.** Mechanical sweeps M1–M17 plus M18 (legend lengths, always enumerated), M19 (abstract/main-text length plus the cover-letter preference) and M20 (OOXML style/formatting uniformity; the pipeline seeds `review/work/FORMAT_SCAN.json` and `review/artifacts/M20_formatting.md`, and every row must be disposed), the adopted sweeps M21–M24 (correspondence policy, data/code-availability integrity, supplementary parity, concept/term families), the rewrite-parity checks M25–M29 (artwork/text parity, house-style conventions, claim→evidence coverage, sibling-definition symmetry, caption-promise parity) and judgment passes J1–J5 (J5 writes `OUT/ARCHITECTURE.md`, one row per scope): procedures, artifact columns, finding rules, classification, and the finding format are specified in the appendix below — follow it exactly. One sweep at a time; finish one artifact before starting the next. For long documents, sweep file by file, then merge so every artifact spans the whole corpus.
 
 **Phase 3 — Discovery round.** D0–D5 per `references/discovery.md`: hunt issue classes OUTSIDE the checklist; outputs `OUT/round2/findings_extra.{md,json}` and `OUT/round2/new_sweeps.md`. If the user passes `discover` as the argument, run ONLY this phase against existing findings and stop.
 
@@ -81,9 +83,9 @@ Truncation silently drops exactly the tail-end mechanical findings, so append ea
 `OUT/findings.md`:
 1. File inventory (from Phase 1).
 2. All sweep artifacts as titled appendix tables (or pointers to `OUT/artifacts/`).
-3. Findings grouped by category 0–5, each entry: ID (`F-001`…), location (document/section/paragraph/line/figure/table), category, check ID (M1–M24, J1–J4), severity, short verbatim evidence quote, concise explanation, status (`resolvable` / `unresolvable` / `guideline-dependent`).
+3. Findings grouped by category 0–5, each entry: ID (`F-001`…), location (document/section/paragraph/line/figure/table; a J5 architecture finding names its paragraph-range scope instead), category, check ID (M1–M29, J1–J5), severity, short verbatim evidence quote (J5: the current → proposed outline), concise explanation, status (`resolvable` / `unresolvable` / `guideline-dependent`).
 4. Per-document index of finding IDs.
-5. Coverage table: every check ID (M1–M17, J1–J4, M18 (legend counts), M19 (abstract/main-text/cover-letter lengths), M20 (OOXML style/formatting rows from the pipeline's scan) and M21–M24 (the adopted sweeps)) → `N findings` / `clean — basis` / `unable — <reason>`.
+5. Coverage table: every check ID (M1–M17, J1–J5, M18 (legend counts), M19 (abstract/main-text/cover-letter lengths), M20 (OOXML style/formatting rows from the pipeline's scan), M21–M24 (the earlier adopted sweeps) and M25–M29 (the rewrite-parity checks)) → `N findings` / `clean — basis` / `unable — <reason>`.
 6. Summary note: counts by category/severity; unresolved gaps; missing-citation issues; ambiguous context; unresolvable contradictions; the manual-verification list (incl. Zotero fields); guidelines source/version; items to re-check against the current author guide.
 
 `OUT/findings.json` (machine-readable, consumed by paper-revise):
@@ -103,18 +105,19 @@ Truncation silently drops exactly the tail-end mechanical findings, so append ea
 - One sweep at a time; artifact complete before the next begins.
 - Prefer scripts over attention for all enumeration; judgment only classifies rows.
 - Long sessions: maintain `WORK/STATE.md` (current sweep, pending steps, open questions) so the workflow resumes without loss.
-- Grow the skill: after the discovery round, validate the proposals in `OUT/round2/new_sweeps.md` with the user and append them to `references/sweeps.md` as M21, M22… (M18, M19 and M20 are reserved by the pipeline — see `references/sweeps.md`) — the checklist converges toward exhaustiveness over successive runs instead of pretending to be exhaustive on day one. If the skill directory is read-only (common for an installed skill), do not fight it: keep the accepted text in `OUT/round2/new_sweeps.md` and hand the user the exact block to append.
+- Grow the skill: after the discovery round, validate the proposals in `OUT/round2/new_sweeps.md` with the user and append them to `references/sweeps.md` as M30, M31… (M18–M20 are reserved by the pipeline and M21–M29 are adopted — see `references/sweeps.md`) — the checklist converges toward exhaustiveness over successive runs instead of pretending to be exhaustive on day one. If the skill directory is read-only (common for an installed skill), do not fight it: keep the accepted text in `OUT/round2/new_sweeps.md` and hand the user the exact block to append.
 
 ## Acceptance checks (for the human, after the run)
 
-1. `findings.md` coverage table lists every defined check ID: M1–M17, J1–J4, M18 (legend counts), M19 (abstract/main-text/cover-letter lengths), M20 (OOXML style/formatting rows) and M21–M24 (the adopted sweeps).
+1. `findings.md` coverage table lists every defined check ID: M1–M17, J1–J5, M18 (legend counts), M19 (abstract/main-text/cover-letter lengths), M20 (OOXML style/formatting rows), M21–M24 (the earlier adopted sweeps) and M25–M29 (the rewrite-parity checks).
 2. Every sweep with findings has a matching artifact file in `review/artifacts/` (M8's occurrence enumerations live in `review/work/occurrences_*.md`). A sweep with findings but no artifact means it worked from impression — re-run that sweep.
 3. Each finding points to a specific word/number/phrase with a verbatim quote, not a whole passage.
 4. `findings.json` exists and every finding has all eight fields.
 
 
-## APPENDIX: Sweeps M1–M24 and judgment passes J1–J4 (references/sweeps.md)
-# Sweeps M1–M24 and Judgment Passes J1–J4 — paper-review
+## APPENDIX: Sweeps M1–M29 and judgment passes J1–J5 (references/sweeps.md)
+
+# Sweeps M1–M29 and Judgment Passes J1–J5 — paper-review
 
 This file is the single source of truth for Phase 2. Follow it exactly.
 Every sweep entry specifies: purpose · scope · enumeration procedure (script
@@ -126,9 +129,15 @@ Two appendices are defined at the end of the mechanical-sweep list: **M18**
 **M19** (abstract/main-text length plus the user's cover-letter preference;
 always runs). **M20** (OOXML style/formatting uniformity; always runs, and its
 enumeration is supplied by the pipeline's code-side OOXML scan) follows them.
-New sweeps validated from the discovery round are appended after the adopted
-M21–M24 as **M25, M26…** in the same format — do not insert into the middle (IDs are
-stable).
+**M21–M24** are the earlier adopted sweeps; **M25–M29** are the
+REWRITE-PARITY checks (the issue classes a from-scratch rewrite fixes as part
+of its ordinary work: text/artwork term parity, house-style conventions,
+claim→evidence coverage, sibling-definition symmetry, caption-promise parity),
+and **J5** is the architecture pass that reports the rewrite-class issues no
+instance-level sweep can enumerate (organization, paragraph order, transitions,
+cross-section redundancy). New sweeps validated from the discovery round are
+appended after the adopted block as **M30, M31…** in the same format — do not
+insert into the middle (IDs are stable).
 
 ---
 
@@ -180,7 +189,7 @@ Every finding is ONE instance, formatted:
 
 ```
 F-NNN | location: <doc>/<section>/<paragraph|line|figure|table> | category: <0–5>
-check: <M1–M24|J1–J4> | severity: <Critical|Major|Minor> | status: <...>
+check: <M1–M29|J1–J5> | severity: <Critical|Major|Minor> | status: <...>
 evidence: "<short verbatim quote of the exact word/number/phrase>"
 problem: <1–2 sentence explanation>
 ```
@@ -188,6 +197,17 @@ problem: <1–2 sentence explanation>
 Point to the specific erroneous word, number, or phrase — never the whole
 passage. If a Zotero live field cannot be read properly, ignore that field and
 tell the user to verify it manually.
+
+A **J5 architecture finding** is the one deliberate exception to the
+one-verbatim-instance shape: its `location` is a SCOPE (document + section +
+paragraph range), its `evidence` is the current vs proposed reading order (a
+short before → after outline, not a quote of an erroneous word), and its
+explanation names the reader cost and the class (`consistency` when a
+structural convention is applied unevenly, `writing` when the cost is flow
+only). Everything else — one finding per scope, a real disposition, never
+invented content — still applies. The `scope` is also recorded as its own
+key in `findings.json` (`"scope": "<doc>/<section>/<par-a>–<par-b>"`) so the
+revision stage can check that every reordering edit stays inside it.
 
 ---
 
@@ -253,7 +273,16 @@ table** lists every long-form residue row (acronym | context | location | long
 form as written | excerpt) -- audit each of those rows individually.
 
 **Finding rules — one finding per problem instance, never aggregated:**
-- (a) used before it is defined (within abstract, main text, Methods, or any single legend)
+- (a) used before it is defined (within abstract, main text, Methods, or any single legend).
+  This includes the **acronym-first compound**: a sentence that writes the short form first and
+  the expansion after it (`MALBAC-sequenced (multiple annealing and looping-based amplification
+  cycles)`, `META-CS-sequenced (multiplex end-tagging …)`, `ground-truth haplotypes (phased
+  single-nucleotide polymorphisms, SNPs)`) has used the token before defining it, and every such
+  token is a finding (Minor, resolvable: put the long form before the short form at first use).
+  When the sentence itself prints the expansion, the token IS an abbreviation being defined —
+  "it is a tool/proper name, not an abbreviation" is NOT a disposition for it, and "it is
+  defined in the same sentence" does not cure the order. A long form that follows a short form
+  already in use is also rule (a), not rule (k).
 - (b) never defined anywhere in the submission
 - (c) defined but never used again (orphan definition) -- count the acronym's
   inflectional family before calling a definition orphaned (`CNs` is a use of
@@ -822,6 +851,57 @@ not be authors; generative-AI use (text/images) must be disclosed;
 AI-generated images restricted — flag the ABSENCE of a disclosure statement as
 a guideline finding, not as proof of use.
 
+## J5 — Architecture & rewrite-class pass (scope-level, one row per scope)
+
+The other half of what a from-scratch rewrite does: it reorganizes. Section
+order, paragraph order, the order of statements inside a passage, transitions,
+one-message-per-paragraph, cross-section redundancy and whether the advance
+lands early are properties of a SCOPE, not instances of an erroneous word —
+enumerating them one sentence at a time is what the instance-level sweeps
+cannot do, and pretending otherwise hides them. This pass reports them so the
+revision stage can act on them; it is not a licence to change content.
+
+**Scope:** every document, section by section, paragraph by paragraph. Build on
+`WORK/OUTLINE.md` (the seeded hierarchy scaffold) — its `summary` column is the
+per-paragraph claim map this pass reads.
+
+**What to look for (in this order, per scope):**
+
+1. **Claim-first order.** Does the section lead with the question/advance and
+   then the evidence, or does it make the reader hold unexplained setup until
+   the end? Check the abstract, each Results subsection, the Discussion opening
+   and the cover letter's first paragraph.
+2. **Paragraph architecture (one message per paragraph).** Do sibling
+   paragraphs under one heading each carry one distinct claim, or is one idea
+   split across two paragraphs / two ideas packed into one? OUTLINE summaries
+   that repeat, overlap or need their neighbour to make sense are the evidence.
+3. **Reading order inside a passage.** Within a paragraph or a short run of
+   paragraphs, are statements ordered as claim → evidence → implication, or
+   does a caveat/method detail arrive before the reader knows what it qualifies?
+4. **Transitions and signposting.** Does each section tell the reader why the
+   next one follows (a connective sentence, a forward pointer), or does the
+   manuscript jump? Absent glue is the defect; it has no quote.
+5. **Cross-section redundancy.** The same fact/purpose stated in two places
+   where one would do (Results vs Discussion, main text vs legend vs cover
+   letter) — one row per repeated scope pair, with both locations.
+
+**Artifact.** `review/ARCHITECTURE.md`: one row per scope —
+`document | section | paragraphs | current structure | reader cost | proposed
+reorganization | class | severity | disposition`.
+A scope that is fine gets its own row with a row-specific
+`OK — <why this order serves the reader>`; a scope needing work carries a
+finding id. A document with no rows at all is an unfilled artifact.
+
+**Finding rules (one finding per SCOPE, never per sentence).** `check: J5`,
+category 2, class `consistency` when a structural convention is applied
+unevenly across sibling scopes and `writing` when only flow is at stake;
+severity Major when the reader cannot recover the argument without re-reading,
+Minor otherwise. The explanation must state the reader cost and the proposed
+order; the evidence is a short current → proposed outline. Content is never
+changed: the same claims, numbers, citations, limitations and conclusions, in
+a different order. A scope whose only "fix" would invent or delete content is
+`unable — <reason>`, never a finding.
+
 ---
 
 # COVERAGE TABLE (final acceptance gate)
@@ -835,13 +915,18 @@ a guideline finding, not as proof of use.
 "Not checked" is not an allowed value. "Unable — <reason>" rows repeat in the
 summary note with their reasons.
 
+The coverage table carries every check ID this skill defines: M1–M29 and
+J1–J5 (M18, M19 and M20 are always active). J5's row names
+`review/ARCHITECTURE.md` as its basis.
+
 ---
 
 # THE DISPOSITION BAR (read before you fill any `disposition` cell)
 
 A disposition is a DECISION about the row, not a sentence in its cell. Three
 rules apply to every seeded table (M18, M19, M20, M4/NUMBERS_LEDGER, M8, M24,
-GLOSSARY, IDENTIFIERS, PLACEHOLDERS, PLACEHOLDER_LOOKUP, OUTLINE):
+M25–M29, GLOSSARY, IDENTIFIERS, PLACEHOLDERS, PLACEHOLDER_LOOKUP, OUTLINE,
+ARCHITECTURE):
 
 1. **Name the row's own bar.** `OK — <reason>` must be about HOW that row is
    measured: its rule id, the section it sits in, the bar it is inside, or the
@@ -957,6 +1042,165 @@ standard term or keep the gloss as a RECORDED decision · a family member used
 with the wrong sense after the glossary was fixed (the per-occurrence audit, not
 a first-use-only disambiguation).
 
+---
+
+# M25–M29 — the rewrite-parity checks
+
+These five sweeps exist because a from-scratch rewrite fixes them as a
+side-effect of rewriting, while an instance-level review that does not know
+the class is looking for them files nothing and the targeted reviser then has
+nothing to fix. They are MECHANICAL checks (enumerate → artifact → audit →
+report) and their findings are normal findings; each one is Minor or Major
+`consistency`/`completeness`/`correctness` evidence, and the fix is always an
+edit to an editable surface of THIS corpus.
+
+## M25 — Figure-artwork/text parity
+
+**Purpose.** Figure artwork is generated from plotting code and silently drifts
+from the manuscript's own terms, labels and publication years. No text-only
+sweep reads the artwork's words, so a term split (`Average spot length` in the
+artwork vs `sequencing read length` in the text and the SI legend) or a
+method-year mismatch survives every other check.
+
+**Enumeration.** Extract the text layer of every rendered figure/table artefact
+in the corpus (`pdftotext` for PDFs, `pdftotext -layout` for tables, slide XML
+for PPTX; OCR only when no text layer exists and an OCR tool is available) and
+tokenise it. Pair every artwork token with its manuscript counterpart:
+* a method/tool/protocol name → the M8 term ledger / `GLOSSARY.md` decision;
+* a year printed next to a method name → the reference list's year for it;
+* an axis/legend/panel/factor phrase → the figure legend, the SI legend and the
+  Methods sentence that describes the same step.
+
+**Artifact.** `M25_artwork_parity.md`: artwork token | artwork file + page |
+manuscript counterpart (file + location) | agrees? | fix route (the editable
+text/legend/code file) | disposition.
+
+**Finding rules (one per instance).** An artwork token whose term/year/name
+contradicts the manuscript's own authoritative ledger — `consistency` (a
+`correctness` finding when the artwork attributes the work to the wrong
+method/year). The artwork file itself is usually read-only in this pipeline;
+that does NOT make the finding `manual-required`: when an editable surface
+(main text, caption, SI legend) can be aligned with the authoritative form,
+the finding is resolvable and the fix is that alignment, with the artwork
+regeneration recorded as a follow-up step in MANUAL_STEPS.md. Only when no
+editable surface exists does the row become `unable — <reason>`.
+
+## M26 — House-style / orthographic convention
+
+**Purpose.** A corpus must apply ONE convention for spelling, hyphenation and
+preverb forms. A rewrite normalises the whole corpus as it goes and the judge
+panel credits the completed convention as a `consistency`-tier difference
+(the judge's own M20 note says so); a review that enumerates only "key terms"
+never sees it (`analyzed` in the main text vs `re-analysed` twice in the cover
+letter is the documented case).
+
+**Enumeration.** Run `scripts/enumerate_conventions.py --work WORK` over the
+converted corpus (or `extract_occurrences.py --variants-file` with your own
+map). The script enumerates US/UK spelling pairs (`analyze/analyse`,
+`analyzed/analysed`, `normalize/normalise`, `labeled/labelled`,
+`color/colour`, `behavior/behaviour`, `modeling/modelling`,
+`focused/focussed`, `judgment/judgement`, `artifact/artefact`,
+`center/centre`, `catalog/catalogue`, …), hyphenation families
+(`re-analysis/reanalysis`, `down-sample/downsample`, `multi-omics/multiomics`,
+preverb forms) and — for unlisted families — data-driven candidate pairs whose
+surface forms collapse to the same normalised token. Decide ONE authoritative
+form per family ONCE and write it to `WORK/STYLE_CONVENTIONS.md`
+(`family | authoritative form | basis (corpus majority / the manuscript's own
+first use / a stated venue rule) | forbidden variants`). Every deviating
+occurrence is a row, in every document including the cover letter, legends,
+the SI and the references' own text that the manuscript controls.
+
+**Artifact.** `M26_conventions.md`: family | variant | location
+(document/line) | count | authoritative form (from STYLE_CONVENTIONS.md) |
+excerpt | disposition.
+
+**Finding rules (one finding per deviating occurrence, never per family).**
+The variant that is not the authoritative form is the finding (`consistency`;
+`correctness` when the variant is a different term of art or changes a claim's
+meaning). The family's own first use and quoted titles/proper names are never
+findings. A family with both variants present and no decidable authority is
+`guideline-dependent` (name the venue rule if the profile states one);
+never guess a spelling into a claim. The revision stage resolves the finding
+by substitution (never by re-wording the sentence around it) and re-runs this
+sweep: every edited occurrence must be gone, or carry a recorded reason.
+
+## M27 — Claim→evidence coverage
+
+**Purpose.** A resolving citation proves the pointer EXISTS, not that the
+pointer set COVERS the claim. Plural/aggregate claims ("both haploid genomes",
+"all three subpopulations", "the 34 datasets", "13 caller configurations")
+routinely cite one of the required sources; the judge credits the completed
+pointer set as `completeness` (and as `correctness` when the claim is
+unsupported as written). M2/M7 only check that what IS cited resolves.
+
+**Enumeration.** For every claim with a plural/aggregate scope — and every
+number whose sentence states a universe — enumerate the evidence items the
+claim requires (datasets/panels/tables/figures/Methods statements) from the
+shipped data (`WORK/NUMBERS_LEDGER.md`, the dataset summary tables, the
+figure/table inventory) and pair them with the pointers the sentence actually
+carries (citations, figure/table call-outs, `(Methods)` pointers, SI notes).
+The seeded `WORK/OUTLINE.md` and `WORK/IDENTIFIERS.md` rows are the starting
+set; extend beyond them.
+
+**Artifact.** `M27_evidence_coverage.md`: claim (with location) | required
+evidence item(s) | where each item lives in the corpus | cited pointer(s) |
+covered? | disposition.
+
+**Finding rules (one per claim with at least one uncovered required item).**
+`completeness` (Minor/Major); `correctness` when the missing evidence means
+the sentence claims more than the cited evidence supports. State the exact
+pointer to add (e.g. `Supplementary Fig. S15`, `(Methods)`); never invent a
+source. A claim whose required set cannot be derived from the corpus is
+`unable — <reason>`, not a finding.
+
+## M28 — Sibling-definition symmetry
+
+**Purpose.** M1 disposes tokens ONE AT A TIME, so an asymmetry between items
+listed together is invisible: three protocols in one list where one is
+expanded and two are not, or two compounds whose long forms follow their short
+forms while a third precedes it. A rewrite makes the list symmetric without
+noticing it did.
+
+**Enumeration.** Per sentence/legend, build each sibling set that shares a
+grammatical list or a head noun (protocols, tools, callers, datasets,
+cohorts). From the M1 ledger take each sibling's first-use expansion and
+definition order; compare within the set. Artifact
+`M28_symmetry.md`: location | siblings | expansion (each) | definition order
+(each) | symmetric? | disposition.
+
+**Finding rules (one per list).** A list in which some siblings are expanded
+and others are not, or in which definition order differs across siblings, is
+one finding (`consistency`, Minor) naming every sibling and the symmetric form
+to apply; when a missing expansion exists nowhere in the corpus the row is
+`unresolvable — manual verification required` (never invent an expansion).
+
+## M29 — Caption-promise vs printed-schema parity
+
+**Purpose.** Captions promise fields, panels or encodings the printed table or
+artwork does not deliver ("eleven columns" for a ten-column TSV; a promised
+accession column; an n/error-bar/colour-scale promise absent from the
+artwork). The reader trusts the caption; no sweep compares it with the
+printing.
+
+**Enumeration.** For every table: parse the caption's promised fields and pair
+each with the printed/extracted header (or the shipped table file). For every
+figure: pair each promised panel/encoding (n, error bars, colour scale,
+markers, axis meaning) with the artwork's own text (M25's extraction). The
+seeded `WORK/NUMBERS_LEDGER.md`, the outline rows and the table headers are
+the evidence.
+
+**Artifact.** `M29_caption_schema.md`: caption promise (with location) |
+printed evidence (file + header/artwork token) | satisfied? | fix route |
+disposition.
+
+**Finding rules (one per promised item with no printed counterpart).**
+`completeness` normally; `correctness` when a printed count or field list
+contradicts the caption's own claim. A promise satisfied inside a dataset
+identifier rather than as its own column is recorded as partial satisfaction
+with the fix route. Fixes align the editable side (caption or printed source
+when it is in the corpus); a generated print's regeneration step goes to
+MANUAL_STEPS.md.
+
 ## New code-side rule ids the sweeps now emit
 
 | rule | meaning | tier |
@@ -971,6 +1215,7 @@ Every seeded row carries its `tier` (`finding` / `advisory`); the disposition
 bar above applies hardest to the `finding` tier.
 
 ## APPENDIX: Discovery round D0–D5 (references/discovery.md)
+
 # Discovery Round D0–D5 — paper-review (Phase 3)
 
 Purpose: the standard review runs fixed sweeps M1–M17 and judgment passes
@@ -999,7 +1244,7 @@ over attention.
 ## D0 — Dedup base
 
 From PRIOR build two indexes (`OUT2/known_index.md`):
-- **KNOWN-CLASSES**: the 28 check IDs (M1–M24, J1–J4) with one-line descriptions.
+- **KNOWN-CLASSES**: the 35 check IDs (M1–M29, J1–J5) with one-line descriptions.
 - **KNOWN-INSTANCES**: every prior finding as `id | class | location | evidence quote`.
 
 Anything matching a KNOWN-INSTANCE (same class + same location + same
@@ -1029,6 +1274,10 @@ total; if you stall, ask "what else?" twice more before stopping):
 - funding numbers and grant IDs consistent with acknowledgements?
 - reference list cut off mid-entry? Trailing placeholder entries?
 - abbreviation list present if the journal requests one?
+- is a convention applied in one place and not another (spelling, hyphenation,
+  preverb forms, term families) that M26's family list does not name?
+- does any scope's reading order still carry a rewrite-class cost that J5's
+  architecture rows do not name?
 
 The rows are questions about issue CLASSES, not instances — instances come
 from probes.
@@ -1090,8 +1339,10 @@ Number proposals continuing from the highest existing sweep number. M18
 (figure-legend length, always enumerated with an optional proxy cap), M19
 (abstract/main-text length plus the user's cover-letter preference) and M20
 (OOXML style/formatting uniformity, enumerated by the pipeline's code-side scan)
-are reserved and defined in `sweeps.md`, and M21–M24 were adopted from earlier
-discovery rounds there, so proposals start at M25.
+are reserved and defined in `sweeps.md`; M21–M24 were adopted from earlier
+discovery rounds, and M25–M29 are the rewrite-parity checks (artwork/text
+parity, house-style conventions, claim→evidence coverage, sibling-definition
+symmetry, caption-promise parity). Proposals therefore start at M30.
 These are PROPOSALS: the user validates them; only validated ones get
 appended to `references/sweeps.md`. This is the feedback loop — no static
 checklist can be complete, but each discovered miss converts into a permanent
@@ -1103,4 +1354,3 @@ runs instead of pretending completeness on day one.
 Counts: gap rows (covered/uncovered), probes (executed/clean/findings/unable),
 X-findings by category/severity, proposed sweeps. Manual-verification list.
 Statement of what this round could NOT check (honest limits).
-

@@ -48,7 +48,8 @@ def full_coverage(caption=False):
     rows.append({"check": "M19", "disposition": "0 findings -- within the relaxed caps"})
     rows.append({"check": "M18", "disposition": "0 findings"})
     rows.append({"check": "M20", "disposition": "0 findings -- formatting rows disposed"})
-    for cid in ("M21", "M22", "M23", "M24"):
+    for cid in ("M21", "M22", "M23", "M24",
+                "M25", "M26", "M27", "M28", "M29", "J5"):
         rows.append({"check": cid, "disposition": f"clean -- basis: fixture {cid}"})
     return rows
 
@@ -82,6 +83,17 @@ def review_sandbox(tmp, submission_dir="./base", coverage=None, artifacts=True,
     if artifacts:
         (sb / "review/artifacts").mkdir(parents=True, exist_ok=True)
         (sb / "review/artifacts/M1.md").write_text("|row|\n", encoding="utf-8")
+        for fname in ("M25_artwork_parity.md", "M26_conventions.md",
+                      "M27_evidence_coverage.md", "M28_symmetry.md",
+                      "M29_caption_schema.md"):
+            (sb / "review/artifacts" / fname).write_text(
+                "| row | disposition |\n|---|---|\n| x | OK |\n", encoding="utf-8")
+        (sb / "review/ARCHITECTURE.md").write_text(
+            "| document | section | paragraphs | current structure | reader cost | "
+            "proposed reorganization | class | severity | disposition |\n"
+            "|---|---|---|---|---|---|---|---|---|\n"
+            "| ms | all | 1 | x | none | none | writing | Minor | OK |\n",
+            encoding="utf-8")
         if vis:
             (sb / "review/artifacts/VIS_visual.md").write_text("# vis\n", encoding="utf-8")
     np.write_json_atomic(sb / np.MARKER_FILE, {"stage": "review", "run_id": "r1_a2_review",

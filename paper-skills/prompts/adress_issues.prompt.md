@@ -27,6 +27,8 @@ If both findings files are missing AND no findings are in the current conversati
 
 Apply every validated finding. Originals are never modified; every edit lands in `REVISED/` (documents) or `CODE/` (analysis code). Every failure mode of a revision task is enumerable too — so this skill runs on the same devices as the review: a ledger where every finding ID must get a row (no silent skip), an edit plan where every edit maps to a finding ID, a propagation map for long-range consistency, a diff log proving locality, a rescan proving no new errors, and a coverage table as the acceptance gate.
 
+The review's **rewrite-parity findings (M25–M29)** and **architecture findings (J5)** are part of that list. They report what a from-scratch rewrite fixes as a side-effect (artwork/text term parity, house-style conventions, claim→evidence coverage, sibling-definition symmetry, caption-promise parity, and scope-level organization), so this stage must resolve them the way a rewrite would where the finding allows it: align the editable surface corpus-wide for M25–M29, and use the **E11 scoped-restructuring licence** for J5 (reorder/split/merge/transition edits inside the finding's declared scope, content frozen, one `WORK/RESTRUCTURE_<id>.md` per finding). `manual-required` is the last resort, not the default: it applies only when no editable surface can be aligned without inventing or deleting content.
+
 ## Hard rules
 
 1. **Originals read-only.** Record sha256 of EVERY original file BEFORE any edit (`WORK/checksums_before.txt`); never modify anything outside `REVISED/` and `CODE/`; re-verify byte-identity at the end (V4) and confirm it in the final report.
@@ -34,22 +36,22 @@ Apply every validated finding. Originals are never modified; every edit lands in
 3. **No silent skip.** EVERY finding ID — `F-*` from findings.json and `X-*` from findings_extra.json (kept as separate ID namespaces) — appears exactly once in the REVISION LEDGER with a final status. "Not addressed" is not an allowed status. Every mechanical step must produce its artifact in `WORK/`; a step without its artifact is not done.
 4. **One edit per finding instance.** Never aggregate edits. Every edit maps to a finding ID, or to a rescan ID `R-xxx` for issues introduced or discovered during revision.
 5. **ENUMERATE → ARTIFACT → APPLY → VERIFY for every mechanical step.** Script-enumerate all affected occurrences (the review skill's `extract_occurrences.py` is bundled for this — copy it into `WORK/`), record every occurrence as a row (including rows later judged OK), act row by row, then verify row by row. Propagation by attention alone is forbidden.
-6. **Zotero fields and the library (rule E2).** Reference resolution is read-only by default; a citation field may be edited ONLY in the `REVISED/` copy and only under the live-field rules (parent item keys, unique `citationID`s, preserved baseline, snapshot-then-validate with the bundled validator, no automatic Zotero Refresh). The library itself is never written unless the operator explicitly enabled writes: then ONE field of ONE existing item, after a written proposal and an independent re-fetch (`zot items update ... --last-modified auto`), never a create/delete/bulk edit. Preserve existing styles, numbering, equations, table layouts, and figure placement; no reflow, restyling, or "improving" untouched text.
+6. **Zotero fields and the library (rule E2).** Reference resolution is read-only by default; a citation field may be edited ONLY in the `REVISED/` copy and only under the live-field rules (parent item keys, unique `citationID`s, preserved baseline, snapshot-then-validate with the bundled validator, no automatic Zotero Refresh). The library itself is never written unless the operator explicitly enabled writes: then ONE field of ONE existing item, after a written proposal and an independent re-fetch (`zot items update ... --last-modified auto`), never a create/delete/bulk edit. Preserve existing styles, numbering, equations, table layouts, and figure placement; no reflow, restyling, or "improving" untouched text — except inside a J5 architecture finding's declared scope, where E11 licenses exactly those operations under its content-freeze and artifact guards.
 
 ## Steps (in order; each step's artifacts complete before the next)
 
 - **R0 — Setup/safety.** Inventory + checksums; load both findings files; build the A1 ledger skeleton programmatically so no finding can be dropped; print the findings count as a checkpoint.
-- **R1 — Re-verify every finding** against the sources; assign a verdict with a location-checked rationale (empty rationale = invalid). False positives → discard, but only with a recorded concrete rationale (misreading, correct cross-reference, guideline-version difference) — never silently. Ambiguous wording a reviewer could misread → verdict `clarification`. Unverifiable (unreadable Zotero field, number only inside a read-only figure) → `manual-required`. not-found-in-source → discard, unless the text lives in a read-only/unparseable file → manual-required.
+- **R1 — Re-verify every finding** against the sources; assign a verdict with a location-checked rationale (empty rationale = invalid). False positives → discard, but only with a recorded concrete rationale (misreading, correct cross-reference, guideline-version difference) — never silently. Ambiguous wording a reviewer could misread → verdict `clarification`. Unverifiable (unreadable Zotero field, number only inside a read-only figure) → `manual-required` — UNLESS the finding is an M25–M29 parity/convention finding whose EDITABLE side can be aligned (E11): a read-only artwork file does not make a term mismatch manual when the caption/main text/SI legend is editable. not-found-in-source → discard, unless the text lives in a read-only/unparseable file → manual-required.
 - **R2 — Editable copies into `REVISED/`, ONE content-hash version token per package** (doc/docx/tex/bib/md/txt/xlsx; never pdf/png). Copy every editable document into `REVISED/` and give the whole package **one version token**: the 7-character content-hash printed by the bundled `scripts/revision_token.py REVISED/` (first 7 hex of SHA-256 over the sorted content digests of the payload files; your own reports, the `.tracked.docx` / `.before-after.docx` auxiliaries and `work/` are excluded; file names do not enter the hash, and existing version-token references inside contents are normalized, so applying the token does not change it).
   Apply the token to **every editable document**: REPLACE its trailing version token (`-a.docx` → `-<token>.docx`, `manuscript_v2.tex` → `manuscript_<token>.tex`) or APPEND it when the basename has none (`refs.bib` → `refs-<token>.bib`). The legacy letter/digit **INCREMENT rule is WITHDRAWN**: never turn `-a.docx` into `-b.docx`, and never turn `manuscript_v2.tex` into `manuscript_v3.tex`. A trailing NUMBER that is part of a document's identity (`SI-Table-1.csv`, `Figure-3.xlsx`) is not a version token and never shifts. Never mutate individual characters of a name (`manuscript.md` must not become `manuscripu.md`).
   Run the tool **before** the rename, then re-run it with `--verify <token>` after the rename/repoint pass and require the `OK` line.
   The only other rename allowed is the **collision fallback**: a same-named file already exists in `REVISED/` (re-run or two source versions) → the NEW copy gets `_rev2`, `_rev3`, … before the extension, recorded in A3 as `rename applied = yes`; leave the existing copy's name as it is.
-  If (and only if) a revised path differs from the original basename (the token, the fallback, or a legacy package that already carries an incremented token), run the rename sweep: script-enumerate every reference to the **original (pre-rename) basename** (LaTeX `\input/\include/\includegraphics/\addbibresource/\bibliography`, build files, scripts) and repoint it to the new name; record each in A5. In the pure-collision case nothing needs repointing — the sweep just verifies and records zero repoints. LaTeX compile check (pdflatex + bibtex/biber or the project's Makefile) if a toolchain exists; otherwise syntax/label sanity check, stated explicitly. Legacy `.doc` → convert to `.docx` inside REVISED/ (same basename, new extension; `_rev2` on collision), note the conversion and flag it for user confirmation in the final report — do not block the run on it. Findings whose text lives in read-only files (pdf/png) cannot be edited in this workflow: mark them `manual-required` in the ledger.
+  If (and only if) a revised path differs from the original basename (the token, the fallback, or a legacy package that already carries an incremented token), run the rename sweep: script-enumerate every reference to the **original (pre-rename) basename** (LaTeX `\input/\include/\includegraphics/\addbibresource/\bibliography`, build files, scripts) and repoint it to the new name; record each in A5. In the pure-collision case nothing needs repointing — the sweep just verifies and records zero repoints. LaTeX compile check (pdflatex + bibtex/biber or the project's Makefile) if a toolchain exists; otherwise syntax/label sanity check, stated explicitly. Legacy `.doc` → convert to `.docx` inside REVISED/ (same basename, new extension; `_rev2` on collision), note the conversion and flag it for user confirmation in the final report — do not block the run on it. Findings whose text lives in read-only files (pdf/png) cannot be edited in this workflow: mark them `manual-required` in the ledger — UNLESS the finding is an M25–M29 rewrite-parity finding whose EDITABLE counterpart (caption, main text, SI legend) can be aligned instead (E11); the read-only file then gets a regeneration step in MANUAL_STEPS.md, not the finding.
 - **R3 — Edit plan (A4)**, sequenced: (i) Critical factual/ethical/completeness → (ii) consistency propagation → (iii) logic/clarity/repetition → (iv) grammar/terminology → (v) formatting. If you cannot quote the before-text exactly, return to R1 — you have not located the finding.
-- **E — Apply edits** one at a time in plan order, under rules E1–E6 in `references/edit_rules.md` (precision, Zotero fields, missing items, plagiarism/AI content, tracked-changes auxiliary `.tracked.docx`, scientific-judgement guard).
+- **E — Apply edits** one at a time in plan order, under rules E1–E11 in `references/edit_rules.md` (precision, Zotero fields, missing items, plagiarism/AI content, tracked-changes auxiliary `.tracked.docx`, scientific-judgement guard, and **E11** — rewrite-parity findings: align the editable surface for M25–M29, scoped restructuring for J5 with one `WORK/RESTRUCTURE_<id>.md` per finding).
 - **P — Propagation (A6).** Priority when a mismatched number/label/term/claim is corrected: supplementary tables > supplementary figures/notes > main figures & legends > Methods > main text > abstract > cover letter. For EVERY correction: script-extract all occurrences of the old AND new values across the whole revised corpus; update every occurrence; verify each row. Cross-check A6 against the A2 baseline — a baseline occurrence missing from A6 is a missed propagation; fix it.
 - **C — Code revisions** (only if analysis code is in scope). Scientific integrity rule: never change analysis code merely to make outputs match manuscript numbers — details in `references/edit_rules.md`.
-- **V — Validate.** V1 round-trip integrity (artifact `WORK/roundtrip_check.md`) · V2 locality via diff log (A7) · V3 full mechanical rescan of the revised corpus (A8: the M-sweeps from paper-review PLUS any sweep definitions in `./review/round2/new_sweeps.md`) · V4 checksum re-verification (artifact `WORK/checksums_after.txt`) · V5 final outputs.
+- **V — Validate.** V1 round-trip integrity (artifact `WORK/roundtrip_check.md`) · V2 locality via diff log (A7: hunks inside a J5 scope are mapped through the finding id + `WORK/RESTRUCTURE_<id>.md`; every other hunk must map to a finding id) · V3 full mechanical rescan of the revised corpus (A8: the M1–M29 sweeps from paper-review — including the M26 convention re-run and the J5 scope check — PLUS any sweep definitions in `./review/round2/new_sweeps.md`) · V4 checksum re-verification (artifact `WORK/checksums_after.txt`) · V5 final outputs.
 
 Artifacts A1–A9 column specifications and status vocabularies: `references/ledger.md`.
 
@@ -76,6 +78,7 @@ Artifacts A1–A9 column specifications and status vocabularies: `references/led
 
 
 ## APPENDIX: Ledger A1–A9 specifications (references/ledger.md)
+
 # Revision Ledger & Artifacts A1–A9 — paper-revise
 
 All artifacts live in `WORK/` (i.e. `revised/work/`) unless noted, and are
@@ -159,7 +162,7 @@ changed".
 
 **Improvement rows (`I-xxx`).** An edit that repairs a defect the frozen review
 did NOT name is legal when it is recorded, not hidden: give it an `I-xxx` id, the
-check id it belongs to (M1–M24 / J1–J4), the tier
+check id it belongs to (M1–M29 / J1–J5), the tier
 (`correctness|consistency|preservation|completeness|formatting|writing`), a
 severity (`critical|major|minor`), one line of evidence with a location, and the
 diff hunk that carries it. E6 still governs *claims* (see edit_rules.md: rigor
@@ -204,7 +207,8 @@ One row per finding ID (F-* and X-*) plus each R-xxx:
 A finding ID without a coverage row, or a row without evidence, means the
 task is not finished.
 
-## APPENDIX: Edit rules E1–E6, P1, C (references/edit_rules.md)
+## APPENDIX: Edit rules E1–E11, P1, C (references/edit_rules.md)
+
 # Edit Rules E1–E6, Propagation P1, Code C — paper-revise
 
 Applied during Step E (one edit at a time, in A4 plan order). Each rule
@@ -217,6 +221,11 @@ Edit the exact sentence/field only. No reflow, no restyle, no length-driven
 cuts — EXCEPT the scoped M19 compression below. Preserve existing styles,
 numbering, equations, table layouts, figure placement. Do not "improve"
 untouched text. The A7 diff log must show this — unmapped hunks get reverted.
+
+Two scoped exceptions lift this rule, and only them: the M19/M18 length
+compression below, and **E11's scoped restructuring** for the review's
+architecture findings (J5) and rewrite-parity findings (M25–M29). Every other
+"it would read better" edit is out of scope for this stage.
 
 **Scoped exception — M19 length compression.** An abstract or main text over
 the pipeline's relaxed caps (abstract ≤ 172 words = 150 +15%; main text ≤ 3,750
@@ -511,6 +520,77 @@ finding effect (preserves <id> / undoes <id> / none)`
   `size` classes — that is what makes the integration stage a weighing of a
   reorganization against a prose improvement rather than a taste contest.
 
+## E11 — Rewrite-parity findings: conventions, parity, coverage, and scoped restructuring
+
+The review's rewrite-parity checks (**M25–M29**) and architecture pass (**J5**)
+report the issue classes a from-scratch rewrite fixes as part of its ordinary
+work. They are normal findings in the R0/R1 ledger — one row per id, a verdict
+with evidence — but their FIX rules differ from E1's precision rule.
+
+**M25–M29 (instance findings): align the EDITABLE surface, one edit per finding
+instance, never one blanket edit.**
+
+* **M25 (artwork/text parity).** The artwork file is usually read-only. Align the
+  editable main text / caption / SI legend with the authoritative form the
+  review recorded, and put the artwork regeneration (the exact label and the
+  code file that prints it) in `MANUAL_STEPS.md` as a follow-up. This is NOT
+  `manual-required`: a finding is manual-required only when NO editable surface
+  can be aligned. Record which side was authoritative and why.
+* **M26 (house-style conventions).** Substitute the authoritative form for every
+  deviating occurrence — never re-word the sentence around it. Copy/extend the
+  review's `STYLE_CONVENTIONS.md` decision into `WORK/STYLE_CONVENTIONS.md`, then
+  re-run `enumerate_conventions.py --work revised/work --corpus revised/work/corpus`
+  and require every edited occurrence to be gone (or to carry a ledger reason).
+  A convention is completed across the WHOLE corpus (main text, SI, legends,
+  cover letter, table notes), exactly as a rewrite would — a fix in one document
+  that leaves the sibling documents mixed is not a resolution.
+* **M27 (claim→evidence coverage).** Add the missing pointer the finding names
+  (citation, figure/table call-out, `(Methods)` pointer, SI note), and nothing
+  else. Never invent a source: a pointer set that cannot be completed without new
+  content is `manual-required` with the exact pointer the author must add.
+* **M28 (sibling symmetry).** Make the list symmetric exactly as the M28 row
+  specifies (expand the unexpanded siblings, or put each sibling's long form
+  before its short form at first use). An expansion that exists nowhere in the
+  corpus is `manual-required`, never invented.
+* **M29 (caption-promise parity).** Align the editable side with what the print
+  actually delivers — the caption wording, or the printed source when that source
+  is in the corpus and editable — one promised item per edit. A generated print's
+  regeneration step is a manual follow-up, not a reason to carry the finding.
+
+**J5 (scope findings): the scoped restructuring licence.** A J5 finding names a
+SCOPE (`document/section/paragraph-range`), not a sentence, so E1's "no reflow"
+prohibition is LIFTED INSIDE THAT SCOPE — the one restructuring exception this
+skill allows. Inside the declared scope you may reorder sentences and paragraphs,
+move a paragraph within its section, split or merge paragraphs, add or rewrite a
+transition sentence, and rewrite a passage for cohesion. All of these guards
+apply without exception:
+
+1. **Content is frozen.** The same claims, numbers, citations, accessions,
+   limitations and conclusions; nothing deleted except a redundancy the finding
+   itself names, nothing invented (E6 still governs). If the "fix" needs a
+   content change, it is `manual-required`, not an edit.
+2. **Stay inside the scope.** Never move content between documents, sections or
+   the scope's paragraph range; a change that needs to cross that boundary is
+   `manual-required` with the proposed move written out.
+3. **Numbering and references stay coherent.** Figure/table numbering, call-outs,
+   equations and cross-references keep pointing at what they pointed at (this is
+   the rewrite's own hard rule 3/8 — a reorganization must not change what
+   "Figure 3b" means).
+4. **One artifact per J5 finding**: `WORK/RESTRUCTURE_<finding-id>.md` with the
+   scope, the BEFORE outline, the AFTER outline, every moved/split/merged
+   paragraph as before → after, the A7 diff hunk ids, and the preservation check
+   (claim by claim: same content, new location).
+5. **Re-run the mechanical scans (V3) after each scope**, then the M1/M8/M24/M26
+   ledgers on the revised corpus; a restructuring that re-introduces a
+   long-form/acronym or term inconsistency is not finished.
+6. **A scope that cannot be restructured without content loss is
+   `manual-required`**, with the proposed reordering written out step by step in
+   `MANUAL_STEPS.md`.
+
+The V2 locality check does not flag hunks inside a J5 scope when the ledger row
+names the finding id and the RESTRUCTURE artifact exists. A reordering hunk
+outside every declared scope is still an unmapped hunk, and it is reverted.
+
 ## E8 — Provenance the code already proved
 
 `work/NUMBERS_LEDGER.md` fills the `source` column whenever a shipped data table
@@ -521,4 +601,3 @@ cannot be sourced. A number in the abstract, a legend or the cover letter may
 not stay unsourced — it is proved, cited, a declared parameter, or removed as
 decoration (never silently, and never by changing a scientific claim). Removing
 a number is a `preservation`-tier change: record it in CHANGELOG.md.
-
