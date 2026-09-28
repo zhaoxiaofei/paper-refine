@@ -1611,29 +1611,16 @@ def table_value_index(tables: list) -> dict:
     """
     index = {}
     for name, text in tables or []:
-        lines = [l for l in str(text).splitlines() if l.strip()]
-        if len(lines) < 3:
-            continue
-        delim = ("\t" if "\t" in lines[0] else
-                 ("|" if lines[0].count("|") >= 2 else
-                  ("," if lines[0].count(",") >= 1 else None)))
-        if delim is None:
-            continue
-        header = [c.strip() for c in lines[0].split(delim)]
-        body = [[c.strip() for c in l.split(delim)] for l in lines[1:]]
-        if len(header) < 2 or not body:
+        header, body = _simple_table(text)
+        if header is None:
             continue
         for c in range(min(len(header), max(len(r) for r in body))):
             vals = []
             for r in body:
                 if c >= len(r):
                     continue
-                v = r[c].replace(",", "").replace("$", "").replace("%", "").strip()
-                if v.lower() in ("", "nan", "na", "n/a", "-"):
-                    continue
-                try:
-                    fv = float(v)
-                except ValueError:
+                fv = _cell_number(r[c])
+                if fv is None:
                     continue
                 vals.append(fv)
                 label = r[0].strip() if r else ""
@@ -1649,6 +1636,305 @@ def table_value_index(tables: list) -> dict:
                 for cand in _num_candidates(val):
                     index.setdefault(cand, f"{kind} of column {header[c]!r} in {name}")
     return index
+
+
+# --------------------------------------------------------------------------
+# M30 -- THE SOURCE-HIERARCHY RECONCILIATION SEED.
+#
+# The hierarchy (github code > raw data > main figures > ... > supplementary
+# text) is stated as a RESOLUTION rule: it decides which side wins when two
+# sources already disagree.  Nothing enumerated the DETECTION side -- a written
+# number, parameter, sample size or label that disagrees with the code or the
+# raw data that produced it was found only if a human happened to compare them.
+# The M30 sweep closes that gap in the review; these functions are the part of
+# it the code can prove for itself:
+#   * `table_column_stats` describes every shipped table column (size, min/max/
+#     mean/sum, example values), so a written value has something to be
+#     reconciled AGAINST;
+#   * `hierarchy_seed_rows` pairs every written number the shipped tables do NOT
+#     already prove with its candidate producer column(s), and states the
+#     mechanical check it can make (a cohort-size sentence against the table's
+#     own row count; a value against the column's values and statistics);
+#   * `code_literal_rows` extracts the module-level literals code/config files
+#     declare (`N_SAMPLES = 15`, `"threshold": 0.05`), which is the producer
+#     side of a Methods parameter.
+# None of these decide anything: every row is seeded for the session to dispose
+# (OK with the reconciling reason / finding id / `unable -- producer not in the
+# corpus`).  The code's job is to make the quiet half of the comparison a row,
+# not to guess the answer.
+# --------------------------------------------------------------------------
+
+TABLE_STATS_FILE_LIMIT = 40
+CODE_FILE_BYTES_LIMIT = 400_000
+CODE_SOURCE_EXTS = (".py", ".r", ".jl", ".m", ".sh", ".bash", ".c", ".cc", ".cpp",
+                    ".h", ".hpp", ".java", ".scala", ".nf", ".smk", ".yaml", ".yml",
+                    ".json", ".toml", ".cfg", ".ini", ".ipynb")
+
+# A module-level literal: `NAME = 15`, `NAME: 0.05,`, `export const N = 12;`.
+CODE_LITERAL_RE = re.compile(
+    r"^\s*(?:export\s+|public\s+|static\s+|final\s+|const\s+|let\s+|var\s+)*"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_.]{1,40})\s*[:=]\s*"
+    r"(?P<value>-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|'[^']{1,60}'|\"[^\"]{1,60}\")"
+    r"\s*[,;]?\s*(?:#|//|$)")
+# Names that carry an operational parameter (a Methods-relevant constant).
+CODE_NAME_HINT_RE = re.compile(
+    r"(?i)(n_|num|count|sample|patient|donor|cell|dataset|cohort|subject|param|"
+    r"threshold|cutoff|seed|alpha|beta|rate|size|dim|epoch|iter|fold|limit|window|"
+    r"min|max|version|batch|depth|coverage|resolution|kmer|fdr|pval|qval|tolerance)")
+
+_M30_TOKEN_RE = re.compile(r"[a-z][a-z0-9_]{2,}")
+_M30_STOPWORDS = {
+    "the", "and", "for", "with", "from", "that", "this", "these", "those", "were",
+    "was", "are", "has", "have", "had", "into", "over", "under", "than", "then",
+    "each", "per", "all", "its", "our", "their", "which", "when", "where", "using",
+    "used", "use", "was", "we", "of", "in", "on", "at", "by", "to", "as", "is",
+}
+_M30_ID_HEADER_RE = re.compile(
+    r"(?i)(^|[_\s])(id|sample|patient|donor|cell|barcode|dataset|subject|case|"
+    r"cohort|file|name)([_\s]|$)")
+
+
+def _simple_table(text: str):
+    """(header, body) of one tabular text file, or (None, None).
+
+    ONE parser for `table_value_index` (a value a shipped table proves) and
+    `table_column_stats` (M30: the column a written value is reconciled
+    against), so the two can never read the same table differently.
+    """
+    lines = [l for l in str(text or "").splitlines() if l.strip()]
+    if len(lines) < 3:
+        return None, None
+    head = lines[0]
+    delim = ("\t" if "\t" in head else
+             ("|" if head.count("|") >= 2 else
+              ("," if head.count(",") >= 1 else None)))
+    if delim is None:
+        return None, None
+    header = [c.strip() for c in head.split(delim)]
+    body = [[c.strip() for c in l.split(delim)] for l in lines[1:]]
+    if len(header) < 2 or not body:
+        return None, None
+    return header, body
+
+
+def _cell_number(cell: str):
+    """The float a table cell carries, or None (empty/NaN/non-numeric)."""
+    v = str(cell or "").replace(",", "").replace("$", "").replace("%", "").strip()
+    if v.lower() in ("", "nan", "na", "n/a", "-"):
+        return None
+    try:
+        return float(v)
+    except ValueError:
+        return None
+
+
+def _fmt_number(value: float) -> str:
+    """A human number: thousands separators, no trailing zeros."""
+    out = f"{value:,.6f}".rstrip("0").rstrip(".")
+    return out or "0"
+
+
+def table_column_stats(tables: list) -> list:
+    """One row per (shipped table, column): its size and numeric shape.
+
+    This is the producer-side half of an M30 row: `n rows` is what a
+    cohort-size claim must reconcile against, and min/max/mean/sum are what a
+    rounded or aggregated written value can be checked against. `values` stays
+    on the row for the seed's own exactness test (the artifact table prints the
+    other columns).
+    """
+    stats = []
+    for name, text in (tables or [])[:TABLE_STATS_FILE_LIMIT]:
+        header, body = _simple_table(text)
+        if header is None:
+            continue
+        ncols = min(len(header), max(len(r) for r in body))
+        for c in range(ncols):
+            values, examples = [], []
+            for r in body:
+                if c >= len(r):
+                    continue
+                fv = _cell_number(r[c])
+                if fv is None:
+                    continue
+                values.append(fv)
+                if len(examples) < 3 and str(r[c]).strip():
+                    examples.append(str(r[c]).strip())
+            stats.append({"file": name, "column": header[c],
+                          "n rows": len(body), "numeric n": len(values),
+                          "min": _fmt_number(min(values)) if values else "",
+                          "max": _fmt_number(max(values)) if values else "",
+                          "mean": _fmt_number(sum(values) / len(values)) if values else "",
+                          "sum": _fmt_number(sum(values)) if values else "",
+                          "examples": ", ".join(examples),
+                          "values": values[:200]})
+    return stats
+
+
+def code_literal_rows(sources: list, limit: int = 200, skip_name=None) -> list:
+    """Module-level literals in the corpus's code/config files (M30 producer side).
+
+    A Methods parameter ("we used a threshold of 0.05", "15 samples") has a
+    producer in the analysis code; this extracts the constants the code itself
+    declares, so the session can pair them with the written statements instead
+    of hoping to notice both. Deliberately bounded (extension allow-list, a file
+    size cap, a row cap) and name-filtered (ALL_CAPS or an operational hint) --
+    a code file's every assignment is not a claim.
+
+    `skip_name` is the caller's bookkeeping predicate (the pipeline passes its
+    own `is_bookkeeping_name`, so a `revision_report.json` never reads as an
+    analysis constant); the module always skips revision auxiliaries, editor
+    lock files and process scratch.
+    """
+    rows, seen = [], set()
+    for src, prefix, excluded in sources or []:
+        if not src.is_dir():
+            continue
+        for p in sorted(src.rglob("*")):
+            if not p.is_file() or p.suffix.lower() not in CODE_SOURCE_EXTS:
+                continue
+            try:
+                if p.stat().st_size > CODE_FILE_BYTES_LIMIT:
+                    continue
+            except OSError:
+                continue
+            rel = p.relative_to(src).as_posix()
+            if excluded and rel.split("/", 1)[0] in excluded:
+                continue
+            if "work" in rel.split("/")[:-1] or _is_aux_name(p.name) \
+                    or p.name.startswith("~$") or (skip_name and skip_name(p.name)):
+                continue
+            try:
+                text = p.read_text("utf-8", "replace")
+            except OSError:
+                continue
+            for i, line in enumerate(text.splitlines(), 1):
+                m = CODE_LITERAL_RE.match(line)
+                if not m:
+                    continue
+                name, value = m.group("name").strip(), m.group("value").strip()
+                upper_caps = name.upper() == name and any(c.isalpha() for c in name)
+                if not (upper_caps or CODE_NAME_HINT_RE.search(name)):
+                    continue
+                key = (prefix + rel, name, value)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append({"file": prefix + rel, "line": i, "symbol": name, "value": value,
+                             "context": re.sub(r"\s+", " ", line.strip())[:100]})
+                if len(rows) >= limit:
+                    return rows
+    return rows
+
+
+def _cohort_reference_re(number: str):
+    """The sentence shape that makes a written number a cohort SIZE."""
+    num = re.escape(str(number))
+    return re.compile(
+        r"(?i)(\bn\s*=\s*" + num + r"\b|\b" + num +
+        r"\s+(?:samples?|patients?|donors?|cells?|datasets?|cohorts?|subjects?|cases?|"
+        r"participants?|individuals?|libraries?|replicates?))")
+
+
+def hierarchy_seed_rows(number_rows: list, tables: list, limit: int = 200) -> list:
+    """M30 seed: every un-proved written number paired with candidate producers.
+
+    `number_rows` is the pipeline's numbers ledger (a `source` already filled by
+    `reconcile_number_rows` means a shipped table PROVED the value: it is not a
+    candidate). For each remaining row on a claim-bearing surface, find the
+    table column(s) whose header shares the sentence's own nouns -- plus, for a
+    cohort-size sentence ("n = 12", "15 samples"), every ID-shaped column -- and
+    state the mechanical check the code can make: the written number against the
+    table's OWN row count, and against the column's values/statistics. The
+    verdict column is left empty: the session reconciles, or records that the
+    producer is not in the corpus.
+    """
+    stats = table_column_stats(tables)
+    rows, seen = [], set()
+    for r in number_rows or []:
+        if len(rows) >= limit:
+            break
+        if str(r.get("source") or "").strip():
+            continue
+        kind = str(r.get("kind") or "body")
+        if kind not in ("front", "abstract", "body", "legend"):
+            continue
+        num = str(r.get("number") or "").strip()
+        if not num:
+            continue
+        sentence = re.sub(r"\s+", " ", str(r.get("sentence") or "")).strip()
+        if not sentence:
+            continue
+        # A display-item label is not a claim about a quantity: "Figure 1 | ..."
+        # and "Table 2 shows ..." carry the item's NUMBER, not a value to
+        # reconcile against a producer.
+        if re.search(r"(?i)\b(?:fig(?:ure)?s?|tables?|equations?|sections?|notes?)"
+                     r"\s*\.?\s*" + re.escape(num) + r"\b", sentence):
+            continue
+        tokens = {t for t in _M30_TOKEN_RE.findall(sentence.lower())
+                  if t not in _M30_STOPWORDS}
+        cohort = bool(_cohort_reference_re(num).search(sentence))
+        candidates = []
+        for s in stats:
+            head_tokens = set(_M30_TOKEN_RE.findall(str(s.get("column") or "").lower()))
+            overlap = len(head_tokens & tokens)
+            id_col = bool(_M30_ID_HEADER_RE.search(str(s.get("column") or "")))
+            if overlap or (cohort and id_col):
+                candidates.append((overlap + (2 if cohort and id_col else 0),
+                                   bool(cohort and id_col), s))
+        candidates.sort(key=lambda x: (-x[0], x[2]["file"], x[2]["column"]))
+        picked, seen_cols = [], set()
+        for score, rowcount_hit, s in candidates:
+            key = (s["file"], s["column"])
+            if key in seen_cols:
+                continue
+            seen_cols.add(key)
+            picked.append((rowcount_hit, s))
+            if len(picked) >= 3:
+                break
+        paragraph = r.get("document_paragraph")
+        if paragraph is None:
+            paragraph = r.get("paragraph")
+        key = (str(r.get("document") or ""), str(paragraph), num, sentence[:60])
+        if key in seen:
+            continue
+        seen.add(key)
+        base = {"document": r.get("document"), "paragraph": paragraph, "kind": kind,
+                "number": num,
+                "unit": str(r.get("unit") or ""), "sentence": sentence[:120]}
+        if not picked:
+            rows.append(dict(base, **{
+                "candidate producer": "(no shipped table column matches this sentence)",
+                "producer summary": "",
+                "seed check": "look for the producer in code/ or raw_data/ (the figure or "
+                              "analysis that prints this value); if it is not in the corpus, "
+                              "record `unable -- producer not in the corpus`"}))
+            continue
+        for rowcount_hit, s in picked:
+            if rowcount_hit and s["n rows"]:
+                same = _cell_number(num) == float(s["n rows"])
+                check = (f"the sentence reads {num}; {s['file']} has {s['n rows']} data row(s) "
+                         f"in column {s['column']!r}"
+                         + ("" if same else " -- reconcile (or record the reconciling reason)"))
+            else:
+                col_values = set()
+                for v in s["values"]:
+                    col_values |= _num_candidates(v)
+                if num in col_values or num.replace(",", "") in col_values:
+                    check = (f"the value matches a cell in column {s['column']!r} -- record why "
+                             f"the ledger has no source, or cite this column")
+                else:
+                    seen_txt = s["examples"] or "none"
+                    check = (f"no exact match in column {s['column']!r} (examples: {seen_txt}; "
+                             f"min {s['min'] or '-'} / max {s['max'] or '-'} / mean "
+                             f"{s['mean'] or '-'}) -- compare the written value against it")
+            rows.append(dict(base, **{
+                "candidate producer": f"{s['file']}:{s['column']}",
+                "producer summary": (f"{s['n rows']} row(s); {s['numeric n']} numeric; "
+                                     f"min {s['min'] or '-'} / max {s['max'] or '-'} / mean "
+                                     f"{s['mean'] or '-'} / sum {s['sum'] or '-'}"),
+                "seed check": check}))
+    return rows[:limit]
 
 
 def reconcile_number_rows(rows: list, tables: list) -> dict:

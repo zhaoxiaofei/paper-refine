@@ -413,10 +413,11 @@ CODE-SIDE CHECKS (in addition to what the prompts ask the agents to do)
                           impossible with a manual step. Reading a .docx is not
                           a visual inspection (text carries no layout).
     * review contract     submission_dir must resolve to base/, every check id
-                          M1-M17, J1-J5 plus M18-M29 (the always-active length/
-                          caption/formatting checks and the adopted rewrite-
-                          parity checks) must carry a real coverage disposition,
-                          the M25-M29 artifacts and review/ARCHITECTURE.md must
+                          M1-M17, J1-J5 plus M18-M30 (the always-active length/
+                          caption/formatting checks, the adopted rewrite-parity
+                          checks and the source-hierarchy reconciliation) must
+                          carry a real coverage disposition,
+                          the M25-M30 artifacts and review/ARCHITECTURE.md must
                           exist with a disposition column,
                           review/artifacts/ must exist, finding ids must be
                           unique, and every prior-round finding must be carried
@@ -842,7 +843,32 @@ from pathlib import Path
 #     reverse direction; `document_set_check` reports added documents as well
 #     as lost ones; the revise prompt authorises a calibrated claim edit ONLY
 #     where a calibration finding names it (in either direction).
-VERSION = "3.5.1"
+# 3.6.0 -- M30, the SOURCE-HIERARCHY reconciliation. The hierarchy (github
+# code > data in raw_data/ > main figures > ... > supplementary text) was only
+# a RESOLUTION rule: it decided which side wins once two sources already
+# disagreed, and nothing enumerated the DETECTION side. A written number,
+# Methods parameter, sample set or label that the shipped code or raw data
+# contradicted was found only if a human happened to compare the two. The
+# review -> audit -> revise path now carries M30:
+#   * the review must enumerate the written-vs-producer pairs (the code-side
+#     seed, paper_docx_format.hierarchy_seed_rows + code_literal_rows, pairs
+#     every written number the shipped tables do not PROVE with its candidate
+#     producer column and the check the code could make -- including a
+#     cohort-size sentence against a table's own row count -- and lists the
+#     module-level code/config literals), add the producers the seed cannot see
+#     (figure <-> generating code, protocol step <-> implementation), file one
+#     `M30` finding per incompatible instance with BOTH sides and the
+#     authoritative one named, and record `unable -- the producer is not in the
+#     corpus` instead of a silent clean;
+#   * the auditor attacks the old closures ("the code is out of scope",
+#     "raw_data/ is read-only"); the revision prompt resolves an M30 finding by
+#     rule E12 (align the written side; rule C owns a code fix; raw_data/ is
+#     read-only and stays manual); the rewrite/integrate prompts surface or
+#     resolve the conflict under the hierarchy but never edit the code;
+#   * the judge's frozen coverage map is unchanged; the comparison prompt states
+#     explicitly that a claim the package's own code/data refutes is scoreable
+#     correctness/completeness, never cosmetic.
+VERSION = "3.6.0"
 STATE_VERSION = 3
 
 # The Zotero tooling policy carried in pipeline_config.json (`setup --zotero`):
@@ -3377,10 +3403,10 @@ M18_REVIEW_SWEEP_ON = """3. The PIPELINE-MANDATED caption sweep M18 (see the cap
    references/sweeps.md defines the same sweep). An M18 row is a formatting-tier item and never
    makes a version ineligible: the orchestrator reports caption lengths, it never gates on them.
    M18 is RESERVED by this pipeline for the caption sweep: if your discovery round proposes new
-   sweeps, number them from M30 upwards in review/round2/new_sweeps.md. (The discovery guide says
+   sweeps, number them from M31 upwards in review/round2/new_sweeps.md. (The discovery guide says
    proposals start at M18, and this pipeline always reserves M18 for its caption sweep and M19 for
    its abstract/main-text length sweep, and M20 for the OOXML formatting sweep, so proposals
-   start at M30, after the adopted M21-M29. Say so in new_sweeps.md so the
+   start at M31, after the adopted M21-M30. Say so in new_sweeps.md so the
    operator can renumber when adopting them into the skill.)"""
 M18_REVIEW_SWEEP_REPORT = """3. The PIPELINE-MANDATED legend-length sweep M18 (see the legend rule below; NO cap is
    configured this run): enumerate EVERY figure legend in the corpus into
@@ -3392,8 +3418,8 @@ M18_REVIEW_SWEEP_REPORT = """3. The PIPELINE-MANDATED legend-length sweep M18 (s
    defines the same sweep), and it never makes a version ineligible: with no cap configured the
    word count alone is not a defect, is never scored and is never "fixed" by cutting text.
    M18 is RESERVED by this pipeline for the legend sweep: if your discovery round proposes new
-   sweeps, number them from M30 upwards in review/round2/new_sweeps.md (M18, M19 and M20
-   are reserved, and M21-M29 are adopted), and say so there so the operator can renumber when
+   sweeps, number them from M31 upwards in review/round2/new_sweeps.md (M18, M19 and M20
+   are reserved, and M21-M30 are adopted), and say so there so the operator can renumber when
    adopting them into the skill."""
 M18_REVISE_RULE_ON = """Figure captions: bring EVERY caption over @@CAPTION_LIMIT@@ words back under the limit by
      removing redundancy, repeated statistics and non-meaning-bearing hedging -- never by deleting
@@ -3771,6 +3797,89 @@ def apply_rewrite_parity(text: str, where: str) -> str:
     return text.replace("@@REWRITE_PARITY@@", block)
 
 
+# ---- M30: THE SOURCE-HIERARCHY RECONCILIATION (review/audit/revise) --------
+# The hierarchy (code > raw data > figures > ... > text) has always been the
+# RESOLUTION rule: it decides which side wins when two sources already
+# disagree. Its DETECTION side -- a written number, parameter, sample set or
+# label that disagrees with the code or raw data that produced it -- had no
+# enumerating check, so it was found only when a human happened to compare the
+# two. M30 is that check on the review -> audit -> revise path; the code-side
+# seed (paper_docx_format.hierarchy_seed_rows / code_literal_rows) pairs every
+# un-proved written number with its candidate producer and lists the code's own
+# literals, so the quiet half of each comparison is a row that must be disposed.
+HIERARCHY_RECONCILE_REVIEW = """3e. The SOURCE-HIERARCHY reconciliation (check id M30; the definition is in the
+   skill's references/sweeps.md, section M30). The source hierarchy
+   (@@SOURCE_HIERARCHY@@) is the RESOLUTION rule; M30 is its DETECTION side. For every
+   operational or quantified item in the written parts -- a number, n, a parameter, a
+   tool/protocol step, a sample set, a panel/axis label -- find the artifact that PRODUCED it
+   (a raw_data/ file, a code/config file's constant or the function that prints the value, the
+   figure/table source) and reconcile the two:
+   * the orchestrator seeds review/artifacts/M30_hierarchy_reconciliation.md with the rows the
+     code could pair (every written number no shipped table PROVES, against its candidate
+     table column(s) -- including a cohort-size sentence against the table's own row count --
+     and every module-level code/config literal). Dispose EVERY seeded row, then ADD the rows
+     the seed cannot see: figure/panel <-> the code or raw data that generates it, protocol
+     step <-> the code that implements it, sample/cohort set <-> the data's rows, Methods
+     parameter <-> the code's constant;
+   * one finding per incompatible instance (`check: M30`), naming BOTH sides and the
+     authoritative one per the hierarchy; class `correctness` (a factual error) or
+     `completeness` (a missing producer/pointer);
+   * a producer that is NOT in the corpus (an external GitHub repository, an image-only
+     figure, a binary the text tools cannot read) is a recorded
+     `unable - the producer is not in the corpus` row, never a silent clean; a difference a
+     stated unit, rounding, conversion or Methods-stated run-time override reconciles is `OK`
+     with that reason recorded;
+   * NEVER "fix" the code here: the review reports. A code fix is rule C's job (paper-revise),
+     and a regenerated figure/table goes to the manual list.
+   Artifact: review/artifacts/M30_hierarchy_reconciliation.md, with its own coverage row."""
+
+HIERARCHY_RECONCILE_AUDIT = """     * M30 source-hierarchy reconciliation: a row closed "the code/raw data is out of scope",
+       "raw_data/ is read-only" or "not in the written parts" is NOT a disposition when the
+       corpus ships the producer and the written value disagrees with it -- that is an AU-
+       finding (`check: M30`, both sides cited). "No shipped table matches" is not a disposition
+       either while the code declares the constant or the figure's source is in the corpus, and a
+       row disposed "unable" without saying which producer was searched is unfilled. The authority
+       you cite is the standing hierarchy (@@SOURCE_HIERARCHY@@), and the M30 artifact's rows are
+       disposed like every other sweep's."""
+
+HIERARCHY_RECONCILE_REVISE = """14. SOURCE-HIERARCHY findings (M30) - resolve them by rule E12: align the WRITTEN
+    side with the artifact the hierarchy names as authoritative (github code > data in
+    raw_data/ > main figures > supplementary figures > main tables > supplementary tables >
+    main text > supplementary text). When the authoritative side is the CODE and the code is
+    the wrong side, rule C owns the fix: a minimal code edit, the dependent numbers/figures
+    become manual-required with rerun instructions (never guessed), and the package keeps the
+    code under code/. raw_data/ is READ-ONLY: a finding whose only fix is inside it is
+    manual-required with the exact file and value. Record which side was authoritative and why
+    in the ledger row, and re-run the code-side scan (V3) after the edit."""
+
+HIERARCHY_RECONCILE_REWRITE = """SOURCE-HIERARCHY (check id M30, review-side): where a written statement and its producer
+   (code, raw data, figure/table source) disagree, resolve it only when the hierarchy decides
+   unambiguously; otherwise record the conflict under PROBLEMS SURFACED with BOTH sides and the
+   producer's file:line. Never rewrite a claim to match a figure, and never edit the code: a
+   rewrite that silently "fixes" one side of such a conflict hides the finding the revision
+   stage has to resolve under rule C/E12."""
+
+HIERARCHY_RECONCILE_INTEGRATE = """SOURCE-HIERARCHY (check id M30): an M30 finding -- or an integration difference about a
+   claim its own shipped code or raw data contradicts -- is resolved by aligning the written
+   side with the authoritative artifact, exactly as P1 and rule C prescribe: a code fix travels
+   under code/ with its rerun note, raw_data/ is never edited, and the DIFF_LEDGER row names
+   which side was authoritative and why."""
+
+
+def apply_hierarchy_reconcile(text: str, where: str) -> str:
+    """Substitute the M30 block for the stage that owns it."""
+    block = {"review": HIERARCHY_RECONCILE_REVIEW,
+             "audit": HIERARCHY_RECONCILE_AUDIT,
+             "revise": HIERARCHY_RECONCILE_REVISE,
+             "rewrite": HIERARCHY_RECONCILE_REWRITE,
+             "integrate": HIERARCHY_RECONCILE_INTEGRATE}.get(where, "")
+    # The block spells the hierarchy itself: the review/audit/rewrite builders
+    # fill @@SOURCE_HIERARCHY@@ only inside the attached master prose, so a
+    # token left here would reach the session unresolved.
+    return text.replace("@@HIERARCHY_RECONCILE@@",
+                        block.replace("@@SOURCE_HIERARCHY@@", SOURCE_HIERARCHY))
+
+
 # ---------------------------------------------------------------------
     # The other two pipeline conventions that a stage must not misread as defects
 # of the package it is looking at: the hand-off placeholder the REVISION stages
@@ -3928,8 +4037,16 @@ DISPOSITION_MANDATE = """
 DECISION-ARTIFACT MANDATE — one disposition per seeded row, about THAT ROW's own bar:
   * Every seeded table under `review/artifacts/` (M18 caption words, M19 length, M20 formatting,
     M4/NUMBERS_LEDGER numbers, M8 terms, M24 concepts, GLOSSARY, IDENTIFIERS, PLACEHOLDERS,
-    PLACEHOLDER_LOOKUP, OUTLINE, CLAIM_STRENGTH) must end with exactly one row per instance and a
-    disposition per row: a finding id, or `OK — <the bar this instance is inside, and why>`.
+    PLACEHOLDER_LOOKUP, OUTLINE, CLAIM_STRENGTH, M30_hierarchy_reconciliation) must end with
+    exactly one row per instance and a disposition per row: a finding id, or
+    `OK — <the bar this instance is inside, and why>`.
+    M30_hierarchy_reconciliation is the sweep's seed: table A pairs every written number the
+    shipped data tables do NOT prove with its candidate producer column(s) and the check the code
+    could make; table B lists the code/config literals (the producer side of a Methods parameter).
+    Dispose both tables and ADD the producers the code cannot see (a figure's generating code, a
+    protocol step's implementation, a sample set against the data's own rows); `unable — the
+    producer is not in the corpus` is a RECORDED row, never a silent clean, and the authoritative
+    side is always the standing source hierarchy.
     CLAIM_STRENGTH carries BOTH directions of the J3 calibration check (`under` = a hedge the
     evidence may not require, `over` = a maximal claim the evidence may not support); a session
     that disposes one direction and leaves the other undisposed has not run the check, and a
@@ -4799,13 +4916,15 @@ of its references first (references/sweeps.md, references/discovery.md), then ex
    if one is present in the corpus; otherwise @@VENUE_GUIDELINES_SOURCE@@;
    name the source/version you relied on in the summary.
 2. The EXHAUSTIVE MANDATORY mechanical sweeps M1-M17, the pipeline-mandated M18-M20, the
-   adopted sweeps M21-M24, the REWRITE-PARITY checks M25-M29 and the
+   adopted sweeps M21-M24, the REWRITE-PARITY checks M25-M29, the SOURCE-HIERARCHY
+   reconciliation M30 and the
    judgment passes J1-J5, one sweep at a
    time, each with its own artifact under review/artifacts/.
 @@M18_REVIEW_SWEEP@@
 @@M19_REVIEW_SWEEP@@
 @@M20_REVIEW_SWEEP@@
 @@REWRITE_PARITY@@
+@@HIERARCHY_RECONCILE@@
 @@EVIDENCE_PACK_RULE@@
 4. The discovery round D0-D5 (references/discovery.md), including its proposal of new sweeps for
    issue classes the checklist itself misses, written under review/round2/.
@@ -4830,12 +4949,12 @@ Skill discipline that the orchestrator will check for:
     the short form first and the expansion after it (`MALBAC-sequenced (multiple annealing ...)`)
     has used the token before defining it. When the sentence itself prints the expansion, the
     token IS an abbreviation being defined, so "it is a tool/proper name" is not a disposition.
-  * No silent skips: every check ID M1-M29 and J1-J5 appears in the coverage table with a real
+  * No silent skips: every check ID M1-M30 and J1-J5 appears in the coverage table with a real
      disposition (N findings / clean — basis: <artifact> / unable — <reason>); M19 (the pipeline's
      abstract/main-text length sweep) ALWAYS appears there too, and M18 (the pipeline's caption
      sweep) ALWAYS appears as well: legends are always enumerated, and only its proxy cap is
-     optional. Number your discovery proposals from M30 upwards (M18-M20 are reserved by the
-     pipeline, M21-M29 are adopted).
+     optional. Number your discovery proposals from M31 upwards (M18-M20 are reserved by the
+     pipeline, M21-M30 are adopted).
   * Never invent content, citations, numbers, or accession IDs. Anything unresolvable becomes
     "unresolvable — manual verification required" and is listed in the manual-verification list.
   * Findings are reported, never fixed: identification only.
@@ -5098,6 +5217,8 @@ Explicit requirements that override skill defaults where they conflict:
 
 @@REWRITE_PARITY@@
 
+@@HIERARCHY_RECONCILE@@
+
 @@PLACEHOLDER_RULE@@
 
 @@AUX_FILES_RULE@@
@@ -5237,6 +5358,7 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
    shipped data files prove it; a term family competing for one concept (work/M24_concepts.md).
    Each becomes an `AU-` finding when it is a defect, not a note.
 @@REWRITE_PARITY@@
+@@HIERARCHY_RECONCILE@@
 5. WRITE, in `audit/`:
    * `audit.json` — machine-readable, exactly this shape:
        {"round": @@ROUND@@,
@@ -5336,6 +5458,8 @@ Read self/ and EVERY others/<id>/ IN FULL YOURSELF and enumerate their differenc
 rely on a shell `diff` (or any textual diff tool) to find them: figures and layout changes are
 invisible to text diff, and a diff-driven port silently drops exactly the changes this stage exists
 to catch. Read the documents, the figure/table assets, the legends, and the code.
+
+@@HIERARCHY_RECONCILE@@
 
 Work through the donors ONE AT A TIME with a single ledger across all of them, and classify every
 difference you find into exactly one class:
@@ -5630,6 +5754,7 @@ the original.
      under PROBLEMS SURFACED with the sources it came from. When the hierarchy does not decide it,
      do not invent a resolution -- record the conflict under PROBLEMS SURFACED and leave the base's
      wording (the master prompt's source hierarchy is @@SOURCE_HIERARCHY@@).
+@@HIERARCHY_RECONCILE@@
   8. RENAME-SAFE FIGURES/TABLES: never silently renumber or re-letter a figure, table, panel or
      reference; a reorganization must not change what "Figure 3b" or "Supplementary Table 1"
      points at.
@@ -6021,6 +6146,16 @@ its supported strength where the opponent undersells it has a `resolved` correct
 Enumerate the two directions yourself for each target (a hedge and a maximal claim are both
 visible in the text you are given); judge the substance, and do not treat "more cautious" as
 automatically better or automatically neutral.
+
+SOURCE-HIERARCHY DIFFERENCES ARE SCOREABLE. A written value, label or sample set that its own
+shipped code or raw data contradicts is a REAL difference when one version has aligned the text
+with the authoritative artifact and the other has not (the review's check id for the class is
+M30; in YOUR ledger score it as `correctness` -- or `completeness` when a producer/pointer is
+missing -- and cite the frozen id that owns the class, `M4`/`M15`/`M16`/`M27`/`J2`). Cite the
+producer in the evidence (`file`, symbol or data row) and never treat "the code is out of scope"
+as a reason to call the difference cosmetic: the packages in front of you carry their own code and
+raw data, and a claim the package's own artifacts refute is exactly the kind of defect this panel
+exists to separate.
 
 @@WRITING_RUBRIC@@
 
@@ -6523,6 +6658,7 @@ This round runs TWO review sessions on the SAME corpus and merges their findings
             .replace("@@ZOTERO_CLI_RULE@@", zotero_cli_block("review", zotero))
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof)))
     text = apply_rewrite_parity(text, "review")
+    text = apply_hierarchy_reconcile(text, "review")
     text = render_venue_tokens(text, prof)
     text = apply_m19(text, prof)
     text = apply_m20(text)
@@ -6569,6 +6705,7 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof))
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE))
     text = apply_rewrite_parity(text, "revise")
+    text = apply_hierarchy_reconcile(text, "revise")
     text = text.replace("@@AUDIT_BLOCK@@", audit_block)
     text = render_venue_tokens(text, prof)
     text = apply_m19(text, prof)
@@ -6611,6 +6748,7 @@ def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
             .replace("@@ZOTERO_CLI_RULE@@", zotero_cli_block("review", zotero))
             .replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("audit")))
     text = apply_rewrite_parity(text, "audit")
+    text = apply_hierarchy_reconcile(text, "audit")
     text = render_venue_tokens(text, prof)
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule("audit"))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("audit", run_id, r))
@@ -6657,6 +6795,7 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(INTEGRATED_DIR))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("integrate", run_id, r))
+    text = apply_hierarchy_reconcile(text, "integrate")
     return (text + shared_blocks() + attached_phase1(prof) + "\n" + ATTACHED_PHASE2
             + INTEGRATE_TAIL)
 
@@ -6702,6 +6841,7 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(REWRITTEN_DIR))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("rewrite", run_id, r))
+    text = apply_hierarchy_reconcile(text, "rewrite")
     return (text + shared_blocks() + attached_head(prof) + "\n" + attached_phase1(prof) + "\n"
             + ATTACHED_PHASE2 + REWRITE_TAIL)
 
@@ -8914,8 +9054,16 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
                 paras = [r[0] for r in rows]
                 is_ref = [r[1] for r in rows]
                 headings = [r[2] for r in rows]
-                for r in mod.number_ledger([t for i, t in enumerate(paras) if not is_ref[i]]):
-                    numbers.append(dict(r, document=name))
+                prose = [t for i, t in enumerate(paras) if not is_ref[i]]
+                prose_kinds = mod.section_kinds(
+                    prose, [h for i, h in enumerate(headings) if not is_ref[i]])
+                for r in mod.number_ledger(prose):
+                    # The section kind travels with the number: M30 seeds only
+                    # claim-bearing surfaces (front/abstract/body/legend), the
+                    # same rule the claim-strength ledger uses.
+                    idx = int(r.get("document_paragraph") or 0)
+                    kind = prose_kinds[idx] if idx < len(prose_kinds) else "body"
+                    numbers.append(dict(r, document=name, kind=kind))
                 # J3's two-sided claim-strength ledger: the OVER direction
                 # (maximal claims) and the UNDER direction (hedges) are
                 # enumerated together, so a session cannot report the loud
@@ -8940,8 +9088,20 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
             evidence["outline"] = {"rows": outline, "count": len(outline)}
             evidence["placeholder_ledger"] = {"rows": ph_rows, "count": len(ph_rows)}
             evidence["claims"] = {"rows": claim_rows, "count": len(claim_rows)}
+            # M30's seed: the written values no shipped table PROVES, paired with
+            # their candidate producer columns, and the code/config literals that
+            # are the producer side of a Methods parameter.
+            tables = data_table_texts(sources)
+            seed_rows = mod.hierarchy_seed_rows(numbers, tables)
+            code_rows = mod.code_literal_rows(sources, skip_name=is_bookkeeping_name)
+            evidence["hierarchy"] = {"rows": seed_rows, "count": len(seed_rows),
+                                     "tables_read": len(tables)}
+            evidence["code_literals"] = {"rows": code_rows, "count": len(code_rows)}
         except Exception as e:                                        # noqa: BLE001
             evidence["numbers"] = {"error": f"{type(e).__name__}: {e}"}
+            for key in ("terms", "outline", "placeholder_ledger", "claims",
+                        "hierarchy", "code_literals"):
+                evidence.setdefault(key, {"error": f"{type(e).__name__}: {e}"})
     return evidence
 
 
@@ -9021,6 +9181,9 @@ def evidence_pack_summary(ev: dict) -> str:
               f"({fmt.get('high', 0)} high); placeholders {ph.get('count', '?')}"
             + f"; J3 claim-strength rows "
               f"{(ev.get('claims') or {}).get('count', '?')}"
+            + f"; M30 hierarchy rows "
+              f"{(ev.get('hierarchy') or {}).get('count', '?')}"
+              f" (+{(ev.get('code_literals') or {}).get('count', '?')} literal(s))"
             + f"; digest {str(ident.get('digest'))[:12]}")
 
 
@@ -9613,6 +9776,58 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
     _seed_write(work / "CLAIM_STRENGTH.md", claim_text)
     if art is not None:
         _seed_write(art / "CLAIM_STRENGTH.md", claim_text)
+    # M30 -- the source-hierarchy reconciliation ledger. The hierarchy is the
+    # RESOLUTION rule; this table is its DETECTION side: every written value the
+    # shipped tables do not already PROVE, paired with the candidate producer
+    # column(s) and the mechanical check the code can make, plus the code/config
+    # literals that are the producer side of a Methods parameter. The session
+    # disposes every row and ADDS the producers the code cannot see (a figure's
+    # generating code, a protocol step's implementation, a sample set against
+    # the data's own rows); a producer that is not in the corpus is a recorded
+    # `unable`, never a silent clean.
+    hrows = (ev.get("hierarchy") or {}).get("rows") or []
+    crows = (ev.get("code_literals") or {}).get("rows") or []
+    h_rows = [{"document": r.get("document"), "kind": r.get("kind"),
+               "number": r.get("number"), "unit": r.get("unit") or "",
+               "sentence": (r.get("sentence") or "")[:110],
+               "candidate producer": r.get("candidate producer"),
+               "producer summary": r.get("producer summary"),
+               "seed check": r.get("seed check")} for r in hrows]
+    c_rows = [{"file": r.get("file"), "line": r.get("line"), "symbol": r.get("symbol"),
+               "value": r.get("value"), "context": (r.get("context") or "")[:90]}
+              for r in crows]
+    m30_text = (
+        "# M30 — source-hierarchy reconciliation (code-side seed)\n\n"
+        "The hierarchy `" + SOURCE_HIERARCHY + "` is the RESOLUTION rule; this table is its "
+        "DETECTION side. Table A pairs every written number the shipped data tables do NOT prove "
+        "with the candidate producer column(s) and the check the code could make (a table's own "
+        "row count against a cohort-size sentence; a written value against a column's values and "
+        "statistics). Table B lists the module-level literals the corpus's code/config files "
+        "declare — the producer side of a Methods parameter. Dispose EVERY seeded row "
+        "(`OK — <the reconciling reason>` / `contradiction — <finding id>` / "
+        "`unable — the producer is not in the corpus`), then ADD the rows the code cannot see: "
+        "figure/panel ↔ the code or raw data that generates it, protocol step ↔ the code that "
+        "implements it, sample/cohort set ↔ the data's rows, a Methods parameter ↔ the code's "
+        "constant. One finding per incompatible instance, naming BOTH sides and the authoritative "
+        "one per the hierarchy. A producer that is not in the corpus (an external repository, an "
+        "image-only figure, a binary the text tools cannot read) is a recorded `unable` row, never "
+        "a silent clean; a difference a stated unit, rounding, conversion or Methods-stated "
+        "run-time override reconciles is `OK` with that reason. Never \"fix\" the code here: the "
+        "review reports; rule C owns a code fix and a regenerated figure/table is a manual item.\n\n"
+        "## A. written values with candidate producers\n\n"
+        + _evidence_artifact_table(
+            h_rows,
+            ["document", "kind", "number", "unit", "sentence", "candidate producer",
+             "producer summary", "seed check"],
+            "no claim-surface number the shipped tables fail to prove")
+        + "\n\n## B. code/config literals (producer side)\n\n"
+        + _evidence_artifact_table(
+            c_rows, ["file", "line", "symbol", "value", "context"],
+            "no module-level literal found in the corpus's code/config files")
+        + "\n")
+    _seed_write(work / "M30_hierarchy_reconciliation.md", m30_text)
+    if art is not None:
+        _seed_write(art / "M30_hierarchy_reconciliation.md", m30_text)
     if where == "review":
         # Keep the M20 skeleton the review contract points at.
         _seed_review_format_artifact(ctx, sb)
@@ -9660,7 +9875,7 @@ def seeded_evidence_paths(sb: Path) -> set:
     # materialized review sandbox looks "already worked in" and never starts.
     prov_stems = ("PROVENANCE.json", "NUMBERS_LEDGER.md", "IDENTIFIERS.md",
                   "GENE_LEDGER.md", "PLACEHOLDER_LOOKUP.md", "M24_concepts.md",
-                  "GLOSSARY.md", "CLAIM_STRENGTH.md")
+                  "GLOSSARY.md", "CLAIM_STRENGTH.md", "M30_hierarchy_reconciliation.md")
     rels += [f"work/{s}" for s in prov_stems]
     rels += [f"{REVIEW_DIR}/work/{s}" for s in prov_stems]
     # Judge sandboxes are deliberately absent: nothing is seeded there (blinding).
@@ -9674,6 +9889,7 @@ def seeded_evidence_paths(sb: Path) -> set:
              f"{REVIEW_DIR}/artifacts/OUTLINE.md",
              f"{REVIEW_DIR}/artifacts/PLACEHOLDERS.md",
              f"{REVIEW_DIR}/artifacts/CLAIM_STRENGTH.md",
+             f"{REVIEW_DIR}/artifacts/M30_hierarchy_reconciliation.md",
              f"{REVIEW_DIR}/artifacts/NUMBERS_LEDGER.md",
              f"{REVIEW_DIR}/artifacts/IDENTIFIERS.md",
              f"{REVIEW_DIR}/artifacts/GENE_LEDGER.md",
@@ -9693,14 +9909,19 @@ def evidence_pack_block(where: str) -> str:
                  "`PLACEHOLDERS.md`, `PLACEHOLDER_LOOKUP.md` and `CLAIM_STRENGTH.md` tables; "
                  "CLAIM_STRENGTH enumerates BOTH directions of the J3 claim-strength check, "
                  "`under` (a hedge the evidence may not require) and `over` (a maximal claim the "
-                 "evidence may not support), and every row must be disposed)")
+                 "evidence may not support), and every row must be disposed. "
+                 "`M30_hierarchy_reconciliation.md` is the source-hierarchy seed: table A pairs "
+                 "the written values no shipped data table proves with their candidate producer "
+                 "columns (and the check the code could make), table B lists the code/config "
+                 "literals; dispose both and ADD the producers the code cannot see)")
     elif where == "audit":
         paths = ("`work/CODE_SCANS.json` / `EVIDENCE_PACK.md` next to your PROMPT.md, the "
                  "seeded `work/FORMAT_SCAN.json` rows (each with a `tier`), "
                  "`work/NUMBERS_LEDGER.md`, `work/IDENTIFIERS.md`, `work/PLACEHOLDER_LOOKUP.md`, "
                  "`work/M24_concepts.md`, `work/GLOSSARY.md` and `work/CLAIM_STRENGTH.md` (the "
                  "J3 claim-strength ledger, BOTH directions), and the reviewer's disposed tables "
-                 "under `review/artifacts/`")
+                 "under `review/artifacts/` -- including the reviewer's disposed "
+                 "`review/artifacts/M30_hierarchy_reconciliation.md`")
     elif where == "judge":
         # BLINDING: a judge is handed NOTHING but the blinded packages. It must
         # derive every measurement itself; the orchestrator verifies the judge's
@@ -9730,7 +9951,10 @@ def evidence_pack_block(where: str) -> str:
                  "for one concept), `work/GLOSSARY.md` (the term decisions to conform to) and "
                  "`work/CLAIM_STRENGTH.md` (the J3 claim-strength ledger: `under` = hedges the "
                  "evidence may not require, `over` = maximal claims the evidence may not "
-                 "support -- your own edits must not move a claim in EITHER direction)")
+                 "support -- your own edits must not move a claim in EITHER direction), plus "
+                 "`work/M30_hierarchy_reconciliation.md` (the source-hierarchy seed: a written "
+                 "value its own shipped code/raw data contradicts must be aligned to the "
+                 "authoritative side, never silently changed to match either)")
     return f"""CODE-SIDE EVIDENCE PACK (identical measurements in every session) -- the
    orchestrator has already scanned this corpus with the same functions it uses at setup and at
    `decide`, and seeded the result as {paths}. Treat those numbers as the session's baseline:
@@ -10963,10 +11187,11 @@ def rid_audit(r: int) -> str:
 REVIEW_SPLIT_MODES = ("off", "phases", "aspects")
 REVIEW_SPLIT_SCOPES = {
     "phases": ("A: the MECHANICAL sweeps M1-M17 plus the pipeline-mandated M18/M19/M20 and the "
-               "adopted M21-M29 (rewrite-parity included; enumerate, artifact, audit)",
+               "adopted M21-M30 (rewrite-parity and the source-hierarchy reconciliation included; "
+               "enumerate, artifact, audit)",
                "B: the JUDGMENT passes J1-J5 and the discovery round D0-D5"),
     "aspects": ("A: the CONTENT/scientific checks -- M1-M8, M13-M16 and J1-J3",
-                "B: the PACKAGING/compliance checks -- M9-M12, M17-M20, M21-M29, J4, J5 and the "
+                "B: the PACKAGING/compliance checks -- M9-M12, M17-M20, M21-M30, J4, J5 and the "
                 "discovery round D0-D5"),
 }
 
@@ -14559,7 +14784,7 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list) -> No
     # 2. every check ID must have a real disposition.
     coverage = fj.get("coverage")
     if not isinstance(coverage, list):
-        errs.append(f"{FINDINGS_REL} has no coverage table; every check ID M1-M17, M18-M29 and "
+        errs.append(f"{FINDINGS_REL} has no coverage table; every check ID M1-M17, M18-M30 and "
                     f"J1-J5 must carry a real disposition (the skill's acceptance gate)")
     else:
         wanted = list(REQUIRED_REVIEW_CHECKS)
@@ -14573,6 +14798,9 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list) -> No
         # pass J5: the classes a from-scratch rewrite fixes as a side-effect.
         # The panel's frozen set is unchanged, so J5 is review-side only.
         wanted += ["M25", "M26", "M27", "M28", "M29", "J5"]
+        # The source-hierarchy reconciliation (sweeps.md M30): the detection side
+        # of the hierarchy the prompts already use to RESOLVE a conflict.
+        wanted += ["M30"]
         seen_ids, seen_rows, bad = {}, {}, []
         for row in coverage:
             if not isinstance(row, dict):
@@ -14605,9 +14833,15 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list) -> No
     #     issues. These are the classes a from-scratch rewrite fixes as it
     #     goes; a review that never enumerated them leaves the revision arm
     #     with nothing to fix (the documented w1/w2-vs-a2 gap).
-    parity = {"M25_artwork_parity.md": "M25", "M26_conventions.md": "M26",
-              "M27_evidence_coverage.md": "M27", "M28_symmetry.md": "M28",
-              "M29_caption_schema.md": "M29"}
+    parity = {"M25_artwork_parity.md": ("M25", "the rewrite-parity check"),
+              "M26_conventions.md": ("M26", "the rewrite-parity check"),
+              "M27_evidence_coverage.md": ("M27", "the rewrite-parity check"),
+              "M28_symmetry.md": ("M28", "the rewrite-parity check"),
+              "M29_caption_schema.md": ("M29", "the rewrite-parity check"),
+              # M30 is the DETECTION side of the same hierarchy the prompts use
+              # to RESOLVE a conflict; like M25-M29 it is a mechanical sweep on
+              # this path (the judgment calls stay in the reviewer's rows).
+              "M30_hierarchy_reconciliation.md": ("M30", "the source-hierarchy reconciliation")}
     # A SPLIT review divides the work: session A owns the mechanical checks
     # (M25-M29 artifacts), session B owns the J5 architecture pass and the
     # discovery round. Each session's postcheck must not demand the other's
@@ -14620,18 +14854,18 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list) -> No
             split = "off"
     part_b = bool(split != "off" and str(sb.name).endswith("_review_b"))
     # phases: A = mechanical (M25-M29 artifacts), B = J1-J5 + discovery (J5
-    # architecture table). aspects: A = content, B = packaging + M21-M29 + J5.
+    # architecture table). aspects: A = content, B = packaging + M21-M30 + J5.
     want_parity_artifacts = (split == "off"
                              or (split == "phases" and not part_b)
                              or (split == "aspects" and part_b))
     want_architecture = (split == "off" or part_b)
     if want_parity_artifacts and art_dir.is_dir():
-        for fname, cid in parity.items():
+        for fname, (cid, kind_phrase) in parity.items():
             p = art_dir / fname
             if not p.is_file():
-                errs.append(f"{ARTIFACTS_REL}/{fname} is missing: the rewrite-parity check {cid} "
-                            f"enumerates one of the classes a from-scratch rewrite fixes as it "
-                            f"goes; a zero-finding sweep is valid ONLY with a disposed artifact")
+                errs.append(f"{ARTIFACTS_REL}/{fname} is missing: {kind_phrase} {cid} enumerates "
+                            f"one of the classes a from-scratch rewrite fixes as it goes; a "
+                            f"zero-finding sweep is valid ONLY with a disposed artifact")
                 continue
             try:
                 body = p.read_text(encoding="utf-8", errors="replace")
@@ -14966,7 +15200,8 @@ PRIOR_ROUND_RULE = """PRIOR-ROUND FINDINGS (read-only; round @@ROUND@@ reviews t
   * The orchestrator refuses the review if any prior finding id appears in NEITHER
     findings.json nor findings.md, so complete this reconciliation first.
   * Carrying findings forward does NOT replace the sweeps: run the complete M1-M17 + J1-J5 set
-    plus the pipeline-mandated M18-M24 checks and the rewrite-parity M25-M29 checks (the
+    plus the pipeline-mandated M18-M24 checks, the rewrite-parity M25-M29 checks and the
+    source-hierarchy reconciliation M30 (the
     classes a from-scratch rewrite fixes as it goes) and report your own new findings as usual."""
 
 
@@ -16156,7 +16391,8 @@ DECISION_ARTIFACTS = ("artifacts/M20_formatting.md", "artifacts/M18_caption_word
                       "artifacts/M19_length.md", "artifacts/M8_terms.md",
                       "artifacts/M24_concepts.md", "artifacts/GLOSSARY.md",
                       "artifacts/PLACEHOLDERS.md", "artifacts/PLACEHOLDER_LOOKUP.md",
-                      "artifacts/OUTLINE.md", "artifacts/CLAIM_STRENGTH.md")
+                      "artifacts/OUTLINE.md", "artifacts/CLAIM_STRENGTH.md",
+                      "artifacts/M30_hierarchy_reconciliation.md")
 
 
 def artifact_quality_report(review_dir: Path) -> dict:
@@ -17811,7 +18047,7 @@ def audit_artifact_problems(audit, frozen_ids) -> list:
         if not isinstance(cat, int) or not 0 <= cat <= 5:
             problems.append(f"{aid}: category must be an integer 0-5")
         if not str(row.get("check") or "").strip():
-            problems.append(f"{aid}: the check id (M1-M29/J1-J5) is missing")
+            problems.append(f"{aid}: the check id (M1-M30/J1-J5) is missing")
     return problems
 
 
@@ -17952,7 +18188,7 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     errs.extend(lerrs)
     warns.extend(lwarns)
     # REWRITE-PARITY EVIDENCE: the frozen review may carry the classes a
-    # from-scratch rewrite fixes as it goes (M25-M29) and the scope-level
+    # from-scratch rewrite fixes as it goes (M25-M30) and the scope-level
     # architecture findings (J5). Their fixes have their own required
     # artifacts (E11): the convention re-run for M26, and one RESTRUCTURE note
     # per J5 scope. Absence is reported here; the ledger and the residue gate
@@ -17985,6 +18221,34 @@ def postcheck_revise(ctx: Ctx, rec: dict):
             if missing_notes:
                 warns.append(f"J5 finding(s) {missing_notes} have no RESTRUCTURE_<id>.md note "
                              f"under revised/work/: every restructuring must be re-checkable")
+    # M30 (source-hierarchy reconciliation): the evidence is the stage's own
+    # seeded ledger. Every row disposed means the revision looked at the written
+    # value AND its producer; an empty disposition cell means the comparison the
+    # finding rests on was never recorded (rule E12).
+    m30_ids = [str(f.get("id") or "").strip() for f in frozen_all
+               if str(f.get("check") or "").strip().upper() == "M30"]
+    if m30_ids:
+        ledger = sb / "work" / "M30_hierarchy_reconciliation.md"
+        if not ledger.is_file():
+            warns.append(f"the frozen review carries {len(m30_ids)} M30 source-hierarchy "
+                         f"finding(s) but the sandbox has no work/M30_hierarchy_reconciliation.md: "
+                         f"rule E12 requires the written side to be aligned with the authoritative "
+                         f"producer, with the reconciling reason recorded")
+        else:
+            try:
+                block_problems = []
+                for block in parse_markdown_blocks(ledger):
+                    if block["rows"]:
+                        block_problems += disposition_artifact_problems(
+                            block["rows"], block.get("widths"), len(block["header"]))
+                if block_problems:
+                    warns.append(f"work/M30_hierarchy_reconciliation.md still carries "
+                                 f"{len(block_problems)} undisposed row(s) ({block_problems[0][:80]}): "
+                                 f"an M30 finding's fix must record the producer it reconciled "
+                                 f"against (rule E12)")
+            except Exception as e:                                  # noqa: BLE001
+                warns.append(f"work/M30_hierarchy_reconciliation.md could not be read ({e}); "
+                             f"the M30 rows stay unverified")
     if not (rev / "CHANGELOG.md").is_file() and not (rev / "REVISION_REPORT.md").is_file():
         warns.append("neither revised/CHANGELOG.md nor revised/REVISION_REPORT.md was found "
                      "(the human-readable ledger/change log)")

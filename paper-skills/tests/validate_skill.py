@@ -451,8 +451,9 @@ def main():
     ip = read(os.path.join(root, "prompts", "identify_issues.prompt.md"))
     sw = read(os.path.join(root, "paper-review", "references", "sweeps.md"))
     di = read(os.path.join(root, "paper-review", "references", "discovery.md"))
-    check("D18 M18-M29 are reserved/adopted and discovery proposals start at M30",
-          "## M18 —" in sweeps and "Proposals therefore start at M30" in " ".join(di.split()))
+    check("D18 M18-M30 are reserved/adopted and discovery proposals start at M31",
+          "## M18 —" in sweeps and "## M30 —" in sweeps
+          and "Proposals therefore start at M31" in " ".join(di.split()))
     sweeps_app = appendix(ip, "## APPENDIX: Sweeps", "## APPENDIX: Discovery")
     disc_app = appendix(ip, "## APPENDIX: Discovery")
     check("D10 identify prompt appendices in sync",

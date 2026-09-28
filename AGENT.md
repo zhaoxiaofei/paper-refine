@@ -89,6 +89,18 @@ the profiles shipped next to the script → the built-in fallback inside
    every session, and `paper_docx_format.claim_strength_rows` +
    `CLAIM_STRENGTH.md` are the J3 surface; `.paper_test/test_two_sided_checks.py`
    pins it). Never add or edit only the loud direction.
+8. **The source hierarchy is BOTH a resolution rule and a detection rule.**
+   `SOURCE_HIERARCHY` (`paper_pipeline.py`) decides which side wins when two
+   sources disagree; **M30** is the check that *finds* a written claim its own
+   shipped code/raw data contradicts (`paper_docx_format.hierarchy_seed_rows` +
+   `code_literal_rows` → `M30_hierarchy_reconciliation.md`; the review requires
+   its coverage row and artifact, the auditor attacks the "out of scope"
+   closures, and paper-revise's rule E12 aligns the WRITTEN side — rule C owns a
+   code fix and `raw_data/` is read-only). M30 is review-side like M25–M29; the
+   judge's frozen map stays M1–M24 + J1–J4 and its prompt scores the class under
+   correctness/completeness. `.paper_test/test_hierarchy_reconciliation.py`
+   pins it. Do not let a new producer-bearing artifact (a new code directory, a
+   new data snapshot) enter the corpus without a way to reconcile it.
 
 ## Commands you will use
 

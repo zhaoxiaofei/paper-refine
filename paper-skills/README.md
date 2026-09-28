@@ -1,6 +1,6 @@
 # paper-review + paper-revise — Codex Skills for Manuscript Submissions (any venue or journal)
 
-**Package version:** 0.10 (both directions of every two-sided check, 2026-09-29; see CHANGELOG.md) — distributed as the directory
+**Package version:** 0.11 (M30: the source hierarchy is a detection rule, 2026-09-29; see CHANGELOG.md) — distributed as the directory
 `paper-skills-v03`. The version lives here, not in the skill frontmatter. If more
 than one copy of this package is installed, check this line and retire the
 older copies (`paper-skills-v01/`, `paper-skills-v02/`): Codex registers skills by
@@ -157,9 +157,10 @@ Mechanical sweeps M1–M17 are exhaustive and mandatory, and M18 (figure-legend
 lengths; always enumerated, with an optional proxy cap), M19
 (abstract/main-text length plus the user's cover-letter preference) and M20
 (OOXML style/formatting) always run with them, together with the adopted
-M21–M24 checks and the rewrite-parity checks M25–M29 (figure-artwork/text
+M21–M24 checks, the rewrite-parity checks M25–M29 (figure-artwork/text
 parity, house-style conventions, claim→evidence coverage, sibling-definition
-symmetry, caption-promise parity). Judgment
+symmetry, caption-promise parity) and the source-hierarchy reconciliation M30
+(a written claim against the code/raw data that produced it). Judgment
 passes J1–J5 (scope fit, statistical rigor, overclaiming, plagiarism/AI policy,
 and the J5 architecture/rewrite-class pass) are deep and prioritized: J3 is
 claim CALIBRATION, so an overclaim and an underclaim are both findings, and the
@@ -169,10 +170,14 @@ locator, M27/M29 claims without pointers and printed content without a
 description, a lost document and an added one). The pipeline seeds a
 `CLAIM_STRENGTH.md` ledger that enumerates both directions of the
 claim-strength pair, one row per claim-bearing paragraph, for disposal like any
-other seeded table. A
+other seeded table. `M30_hierarchy_reconciliation.md` is the source-hierarchy
+seed: it pairs every written value the shipped data tables do not prove with
+its candidate producer column and lists the code/config literals, so a
+claim-vs-code/raw-data conflict is a row a session disposes instead of a
+coincidence. A
 discovery round (D0–D5) then hunts issue
 classes outside the checklist, and its validated proposals grow the
-checklist (M30+) for future runs.
+checklist (M31+) for future runs.
 
 The revision skill mirrors the discipline: an A1 ledger where every finding
 ID must get exactly one row and a status (no silent skips), an edit plan
@@ -219,7 +224,7 @@ with and without the skills, graded by scripted assertions:
 paper-skills/
 ├── paper-review/
 │   ├── SKILL.md                     # phases, hard rules, output spec
-│   ├── references/sweeps.md         # M1–M29 + J1–J5 (source of truth)
+│   ├── references/sweeps.md         # M1–M30 + J1–J5 (source of truth)
 │   ├── references/discovery.md      # D0–D5 discovery round
 │   └── scripts/                     # convert_corpus, extract_{acronyms,
 │                                    #   citations,numbers,occurrences},

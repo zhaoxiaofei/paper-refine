@@ -343,7 +343,7 @@ def fake_review_sandbox(tmp, m1_md, findings, coverage):
     # review contract (M25-M29 + J5).
     for fname in ("M25_artwork_parity.md", "M26_conventions.md",
                   "M27_evidence_coverage.md", "M28_symmetry.md",
-                  "M29_caption_schema.md"):
+                  "M29_caption_schema.md", "M30_hierarchy_reconciliation.md"):
         (art / fname).write_text("| row | disposition |\n|---|---|\n| x | OK |\n",
                                  encoding="utf-8")
     (sb / "review" / "ARCHITECTURE.md").write_text(
@@ -361,7 +361,7 @@ def full_coverage(detail=None):
              for c in [f"M{i}" for i in range(1, 18)] + [f"J{i}" for i in range(1, 5)]]
             + [{"check": c, "disposition": detail.get(c, "clean -- basis: x")}
                for c in ("M18", "M19", "M20", "M21", "M22", "M23", "M24",
-                         "M25", "M26", "M27", "M28", "M29", "J5")])
+                         "M25", "M26", "M27", "M28", "M29", "M30", "J5")])
 
 
 M1B_MD = ("# M1\n\n| acronym | ... |\n|---|---|\n\n"

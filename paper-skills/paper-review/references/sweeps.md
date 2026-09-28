@@ -1,4 +1,4 @@
-# Sweeps M1–M29 and Judgment Passes J1–J5 — paper-review
+# Sweeps M1–M30 and Judgment Passes J1–J5 — paper-review
 
 This file is the single source of truth for Phase 2. Follow it exactly.
 Every sweep entry specifies: purpose · scope · enumeration procedure (script
@@ -14,11 +14,14 @@ enumeration is supplied by the pipeline's code-side OOXML scan) follows them.
 REWRITE-PARITY checks (the issue classes a from-scratch rewrite fixes as part
 of its ordinary work: text/artwork term parity, house-style conventions,
 claim→evidence coverage, sibling-definition symmetry, caption-promise parity),
-and **J5** is the architecture pass that reports the rewrite-class issues no
-instance-level sweep can enumerate (organization, paragraph order, transitions,
-cross-section redundancy). New sweeps validated from the discovery round are
-appended after the adopted block as **M30, M31…** in the same format — do not
-insert into the middle (IDs are stable).
+**M30** is the SOURCE-HIERARCHY reconciliation (the DETECTION side of the
+hierarchy the prompts use to resolve a conflict: a written claim against the
+code or raw data that produced it), and **J5** is the architecture pass that
+reports the rewrite-class issues no instance-level sweep can enumerate
+(organization, paragraph order, transitions, cross-section redundancy). New
+sweeps validated from the discovery round are appended after the adopted block
+as **M31, M32…** in the same format — do not insert into the middle (IDs are
+stable).
 
 ---
 
@@ -83,7 +86,7 @@ Every finding is ONE instance, formatted:
 
 ```
 F-NNN | location: <doc>/<section>/<paragraph|line|figure|table> | category: <0–5>
-check: <M1–M29|J1–J5> | severity: <Critical|Major|Minor> | status: <...>
+check: <M1–M30|J1–J5> | severity: <Critical|Major|Minor> | status: <...>
 evidence: "<short verbatim quote of the exact word/number/phrase>"
 problem: <1–2 sentence explanation>
 ```
@@ -861,7 +864,7 @@ a different order. A scope whose only "fix" would invent or delete content is
 "Not checked" is not an allowed value. "Unable — <reason>" rows repeat in the
 summary note with their reasons.
 
-The coverage table carries every check ID this skill defines: M1–M29 and
+The coverage table carries every check ID this skill defines: M1–M30 and
 J1–J5 (M18, M19 and M20 are always active). J5's row names
 `review/ARCHITECTURE.md` as its basis.
 
@@ -1163,6 +1166,59 @@ cannot interpret an undocumented field, and the caption -- not the reader -- own
 the explanation), class `completeness`, with the same fix routes (add the
 description to the editable caption, or regenerate the print). One direction
 without the other is an unfilled artifact.
+
+## M30 — Source-hierarchy reconciliation (submission ↔ code ↔ raw data)
+
+**Purpose.** The hierarchy — **github code > data in raw_data/ (an older
+corpus spells that directory raw_figs/) > main figures > supplementary figures >
+main tables > supplementary tables > main text > supplementary text** — is
+stated as a RESOLUTION rule: it decides which side wins once two sources
+already disagree. Its DETECTION side had no enumerating check, so a written
+number, sample size, parameter, protocol step or label that the shipped code or
+raw data contradicts was found only if a human happened to compare them. The
+reviewed corpus already carries its producers (the analysis code, the raw-data
+snapshot, the figure/table sources), so M30 makes every such comparison a row.
+
+**Enumeration.** For every operational or quantified item on a claim-bearing
+surface (abstract, main text, legend, cover letter; Methods for a parameter or
+step) find the artifact that PRODUCED it: a `raw_data/` file, a code/config
+file's constant or the function that prints the value, the figure/table source.
+The pipeline seeds `review/artifacts/M30_hierarchy_reconciliation.md` with what
+the code can pair for itself — table A: every written number the shipped data
+tables do not already PROVE, against its candidate producer column(s), with the
+mechanical check the code can make (a cohort-size sentence against the table's
+own row count; a written value against the column's values and statistics);
+table B: the module-level literals the corpus's code/config files declare
+(`N_SAMPLES = 15`, `"threshold": 0.05`) — the producer side of a Methods
+parameter. Extend it with the rows no code can see: figure/panel ↔ the code or
+data that generates it, protocol step ↔ the code that implements it,
+sample/cohort set ↔ the data's rows, Methods parameter ↔ the code's constant.
+
+**Artifact.** `review/artifacts/M30_hierarchy_reconciliation.md`:
+`document | kind | number | unit | sentence | candidate producer | producer
+summary | seed check | disposition` for table A and
+`file | line | symbol | value | context | disposition` for table B, plus the
+rows the session adds. Every seeded row and every added row is disposed.
+
+**Finding rules (one finding per incompatible instance).**
+- the producer contradicts the written value/label/sample set (or the written
+  value contradicts a producer the text points at) → `correctness`, naming BOTH
+  sides (`document:location` and `file:symbol/row`), and the authoritative one
+  per the hierarchy;
+- a written claim whose producer is MISSING from the corpus while another
+  sweep's pointer promises it → `completeness`;
+- a producer that is not in the corpus at all (an external GitHub repository, an
+  image-only figure, a binary the text tools cannot read) → a recorded
+  `unable — the producer is not in the corpus` row, never a silent clean, and
+  name which artifact was searched;
+- a difference that a stated unit, rounding, conversion, or a Methods-stated
+  run-time override reconciles → `OK` with that reconciling reason;
+- an M30 row is never fixed here: the review reports, rule C of paper-revise
+  owns a code fix, and a regenerated figure/table goes to the manual list.
+
+Validation: the class exists because the hierarchy was one-directional — a
+resolution rule with no detection sweep leaves every text-vs-code and
+figure-vs-raw-data conflict to luck.
 
 ## New code-side rule ids the sweeps now emit
 

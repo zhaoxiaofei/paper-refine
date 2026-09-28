@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.11 — M30: the source hierarchy becomes a detection rule (2026-09-29)
+
+The hierarchy (github code > data in `raw_data/` > main figures > … >
+supplementary text) was stated only as a RESOLUTION rule: it decided which side
+wins once two sources already disagreed. A written number, sample size,
+parameter or label that the shipped code or raw data contradicted was found
+only when a human happened to compare the two — even though every session's
+corpus already carries its producers (the analysis code, the raw-data
+snapshot, the figure/table sources). The review → audit → revise path now
+carries the DETECTION side as **M30**:
+
+- `paper-review/references/sweeps.md` gains **M30 — source-hierarchy
+  reconciliation** (purpose · enumeration · artifact · finding rules):
+  enumerate every operational or quantified written item, pair it with its
+  producer, file one finding per incompatible instance with BOTH sides and the
+  authoritative one per the hierarchy, and record
+  `unable — the producer is not in the corpus` instead of a silent clean. The
+  coverage table, the finding format and the discovery numbering (proposals now
+  start at **M31**) move with it.
+- `paper_docx_format.py` gains the seed: `table_column_stats` (each shipped
+  table column's own row count and min/max/mean/sum),
+  `hierarchy_seed_rows` (every written number the shipped tables do NOT prove,
+  paired with its candidate producer column and the check the code can make —
+  including a cohort-size sentence against the table's own row count) and
+  `code_literal_rows` (module-level code/config literals such as
+  `N_SAMPLES = 15`), all bounded and only on claim-bearing surfaces. The
+  pipeline seeds them as `review/artifacts/M30_hierarchy_reconciliation.md`
+  (a decision table) and as `work/M30_hierarchy_reconciliation.md` in the other
+  layouts.
+- The auditor attacks the old closures ("the code is out of scope",
+  "`raw_data/` is read-only", "not in the written parts");
+  `paper-revise/references/edit_rules.md` gains **E12** (align the WRITTEN side
+  with the authoritative producer; rule C owns a code fix; `raw_data/` is
+  read-only and stays a manual decision); the rewrite and integration prompts
+  surface/resolve the conflict under the hierarchy without ever editing the
+  code to make the text true.
+- The judge's frozen coverage map is unchanged (M1–M24 + J1–J4); its prompt now
+  states explicitly that a claim the package's own code/data refutes is
+  scoreable `correctness`/`completeness`, never cosmetic.
+
 ## 0.10 — both directions of every two-sided check (2026-09-29)
 
 The checklist was one-sided: J3 filed overclaims (unsupported first/novel

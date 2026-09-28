@@ -46,7 +46,7 @@ A plain "review my manuscript" prompt reliably misses low-salience mechanical is
 1. **Identification only** — findings, never edits. Never modify any file in SUBMISSION_DIR.
 2. **Never invent.** Unresolvable value → status `unresolvable — manual verification required`. Guideline rule you cannot verify → `guideline-dependent`. Missing data → note a placeholder may be needed; never fabricate.
 3. **No silent skips.** Every check ID must end up in the coverage table with a real disposition (`N findings` / `clean — basis: <artifact/locations>` / `unable — <reason>`). "Not checked" is not an allowed value.
-4. **Mechanical sweeps M1–M17 are EXHAUSTIVE and MANDATORY, and M18 (figure-legend lengths), M19 (abstract/main-text length plus the cover-letter preference) and M20 (OOXML style/formatting uniformity, enumerated by the pipeline's code-side scan) always run with them, together with the adopted sweeps M21–M24 (correspondence policy, data/code-availability integrity, supplementary parity, concept/term families) and the REWRITE-PARITY checks M25–M29 (figure-artwork/text parity, house-style/orthographic conventions, claim→evidence coverage, sibling-definition symmetry, caption-promise vs printed-schema parity).** M18's optional proxy cap only changes whether an over-count legend is reported as an over-cap item. Only judgment passes J1–J5 may be prioritized; J5 (architecture & rewrite-class) produces scope-level rows in `OUT/ARCHITECTURE.md`, not per-sentence findings. The word "non-exhaustive" never applies to a mechanical sweep.
+4. **Mechanical sweeps M1–M17 are EXHAUSTIVE and MANDATORY, and M18 (figure-legend lengths), M19 (abstract/main-text length plus the cover-letter preference) and M20 (OOXML style/formatting uniformity, enumerated by the pipeline's code-side scan) always run with them, together with the adopted sweeps M21–M24 (correspondence policy, data/code-availability integrity, supplementary parity, concept/term families), the REWRITE-PARITY checks M25–M29 (figure-artwork/text parity, house-style/orthographic conventions, claim→evidence coverage, sibling-definition symmetry, caption-promise vs printed-schema parity) and the SOURCE-HIERARCHY reconciliation M30 (a written claim against the code/raw data that produced it).** M18's optional proxy cap only changes whether an over-count legend is reported as an over-cap item. Only judgment passes J1–J5 may be prioritized; J5 (architecture & rewrite-class) produces scope-level rows in `OUT/ARCHITECTURE.md`, not per-sentence findings. The word "non-exhaustive" never applies to a mechanical sweep.
 5. **One finding per instance.** "Several acronyms are undefined" is not a finding; each undefined acronym is its own finding with its own ID, quote, and location.
    M1(a) "used before it is defined" includes the acronym-first compound: a sentence that prints the short form first and the expansion after it (`MALBAC-sequenced (multiple annealing …)`) has used the token before defining it. When the sentence itself prints the expansion, the token IS an abbreviation being defined, so "it is a tool/proper name" is not a disposition.
 6. **Sweep pattern for every mechanical check:** ENUMERATE (script preferred; scripts live in `WORK/`) → ARTIFACT (`OUT/artifacts/<ID>.md` for the M1/M2/M4–M17 tables; term/value occurrence enumerations are written to `WORK/occurrences_<slug>.md`, which is M8's artifact — pass `--out OUT/artifacts` if you prefer them alongside the others; every instance gets a row, including rows later judged OK; the artifact spans the whole corpus, not one file) → AUDIT (each row gets: a finding ID, `OK`, or `unable — <reason>`) → REPORT (findings derived only from artifact rows, never from general impression).
@@ -72,7 +72,7 @@ If a script misses a case class (e.g., a citation style it can't parse), **exten
 
 **Phase 1 — Setup.** Run `convert_corpus.py` on SUBMISSION_DIR. Review the inventory: role classification, editable vs read-only, conversion status. Every conversion failure is recorded, never skipped. Images are marked `visually unverifiable` unless OCR/VLM is available; when a renderer exists, render and LOOK. Zotero live fields: the converter marks them `[[FIELD: ...]]`; check the rendered text; an unreadable or incomplete field goes to the manual-verification list (tell the user to verify it in Word). Resolve citations READ-ONLY with `ZOT_CLI` / `$ZOTERO_SKILL` (parent bibliographic item keys, never attachment keys; confirm title, creators, year, DOI) and never write to the library: a suspected metadata error becomes a finding with the proposed correction.
 
-**Phase 2 — Sweeps.** Mechanical sweeps M1–M17 plus M18 (legend lengths, always enumerated), M19 (abstract/main-text length plus the cover-letter preference) and M20 (OOXML style/formatting uniformity; the pipeline seeds `review/work/FORMAT_SCAN.json` and `review/artifacts/M20_formatting.md`, and every row must be disposed), the adopted sweeps M21–M24 (correspondence policy, data/code-availability integrity, supplementary parity, concept/term families), the rewrite-parity checks M25–M29 (artwork/text parity, house-style conventions, claim→evidence coverage, sibling-definition symmetry, caption-promise parity) and judgment passes J1–J5 (J5 writes `OUT/ARCHITECTURE.md`, one row per scope): procedures, artifact columns, finding rules, classification, and the finding format are specified in the appendix below — follow it exactly. One sweep at a time; finish one artifact before starting the next. For long documents, sweep file by file, then merge so every artifact spans the whole corpus.
+**Phase 2 — Sweeps.** Mechanical sweeps M1–M17 plus M18 (legend lengths, always enumerated), M19 (abstract/main-text length plus the cover-letter preference) and M20 (OOXML style/formatting uniformity; the pipeline seeds `review/work/FORMAT_SCAN.json` and `review/artifacts/M20_formatting.md`, and every row must be disposed), the adopted sweeps M21–M24 (correspondence policy, data/code-availability integrity, supplementary parity, concept/term families), the rewrite-parity checks M25–M29 (artwork/text parity, house-style conventions, claim→evidence coverage, sibling-definition symmetry, caption-promise parity), the source-hierarchy reconciliation M30 (the seeded `review/artifacts/M30_hierarchy_reconciliation.md` rows, disposed, plus the producers the code cannot see) and judgment passes J1–J5 (J5 writes `OUT/ARCHITECTURE.md`, one row per scope): procedures, artifact columns, finding rules, classification, and the finding format are specified in the appendix below — follow it exactly. One sweep at a time; finish one artifact before starting the next. For long documents, sweep file by file, then merge so every artifact spans the whole corpus.
 
 **Phase 3 — Discovery round.** D0–D5 per `references/discovery.md`: hunt issue classes OUTSIDE the checklist; outputs `OUT/round2/findings_extra.{md,json}` and `OUT/round2/new_sweeps.md`. If the user passes `discover` as the argument, run ONLY this phase against existing findings and stop.
 
@@ -83,9 +83,9 @@ Truncation silently drops exactly the tail-end mechanical findings, so append ea
 `OUT/findings.md`:
 1. File inventory (from Phase 1).
 2. All sweep artifacts as titled appendix tables (or pointers to `OUT/artifacts/`).
-3. Findings grouped by category 0–5, each entry: ID (`F-001`…), location (document/section/paragraph/line/figure/table; a J5 architecture finding names its paragraph-range scope instead), category, check ID (M1–M29, J1–J5), severity, short verbatim evidence quote (J5: the current → proposed outline), concise explanation, status (`resolvable` / `unresolvable` / `guideline-dependent`).
+3. Findings grouped by category 0–5, each entry: ID (`F-001`…), location (document/section/paragraph/line/figure/table; a J5 architecture finding names its paragraph-range scope instead), category, check ID (M1–M30, J1–J5), severity, short verbatim evidence quote (J5: the current → proposed outline), concise explanation, status (`resolvable` / `unresolvable` / `guideline-dependent`).
 4. Per-document index of finding IDs.
-5. Coverage table: every check ID (M1–M17, J1–J5, M18 (legend counts), M19 (abstract/main-text/cover-letter lengths), M20 (OOXML style/formatting rows from the pipeline's scan), M21–M24 (the earlier adopted sweeps) and M25–M29 (the rewrite-parity checks)) → `N findings` / `clean — basis` / `unable — <reason>`.
+5. Coverage table: every check ID (M1–M17, J1–J5, M18 (legend counts), M19 (abstract/main-text/cover-letter lengths), M20 (OOXML style/formatting rows from the pipeline's scan), M21–M24 (the earlier adopted sweeps), M25–M29 (the rewrite-parity checks) and M30 (the source-hierarchy reconciliation)) → `N findings` / `clean — basis` / `unable — <reason>`.
 6. Summary note: counts by category/severity; unresolved gaps; missing-citation issues; ambiguous context; unresolvable contradictions; the manual-verification list (incl. Zotero fields); guidelines source/version; items to re-check against the current author guide.
 
 `OUT/findings.json` (machine-readable, consumed by paper-revise):
@@ -105,19 +105,19 @@ Truncation silently drops exactly the tail-end mechanical findings, so append ea
 - One sweep at a time; artifact complete before the next begins.
 - Prefer scripts over attention for all enumeration; judgment only classifies rows.
 - Long sessions: maintain `WORK/STATE.md` (current sweep, pending steps, open questions) so the workflow resumes without loss.
-- Grow the skill: after the discovery round, validate the proposals in `OUT/round2/new_sweeps.md` with the user and append them to `references/sweeps.md` as M30, M31… (M18–M20 are reserved by the pipeline and M21–M29 are adopted — see `references/sweeps.md`) — the checklist converges toward exhaustiveness over successive runs instead of pretending to be exhaustive on day one. If the skill directory is read-only (common for an installed skill), do not fight it: keep the accepted text in `OUT/round2/new_sweeps.md` and hand the user the exact block to append.
+- Grow the skill: after the discovery round, validate the proposals in `OUT/round2/new_sweeps.md` with the user and append them to `references/sweeps.md` as M31, M32… (M18–M20 are reserved by the pipeline and M21–M30 are adopted — see `references/sweeps.md`) — the checklist converges toward exhaustiveness over successive runs instead of pretending to be exhaustive on day one. If the skill directory is read-only (common for an installed skill), do not fight it: keep the accepted text in `OUT/round2/new_sweeps.md` and hand the user the exact block to append.
 
 ## Acceptance checks (for the human, after the run)
 
-1. `findings.md` coverage table lists every defined check ID: M1–M17, J1–J5, M18 (legend counts), M19 (abstract/main-text/cover-letter lengths), M20 (OOXML style/formatting rows), M21–M24 (the earlier adopted sweeps) and M25–M29 (the rewrite-parity checks).
+1. `findings.md` coverage table lists every defined check ID: M1–M17, J1–J5, M18 (legend counts), M19 (abstract/main-text/cover-letter lengths), M20 (OOXML style/formatting rows), M21–M24 (the earlier adopted sweeps), M25–M29 (the rewrite-parity checks) and M30 (the source-hierarchy reconciliation).
 2. Every sweep with findings has a matching artifact file in `review/artifacts/` (M8's occurrence enumerations live in `review/work/occurrences_*.md`). A sweep with findings but no artifact means it worked from impression — re-run that sweep.
 3. Each finding points to a specific word/number/phrase with a verbatim quote, not a whole passage.
 4. `findings.json` exists and every finding has all eight fields.
 
 
-## APPENDIX: Sweeps M1–M29 and judgment passes J1–J5 (references/sweeps.md)
+## APPENDIX: Sweeps M1–M30 and judgment passes J1–J5 (references/sweeps.md)
 
-# Sweeps M1–M29 and Judgment Passes J1–J5 — paper-review
+# Sweeps M1–M30 and Judgment Passes J1–J5 — paper-review
 
 This file is the single source of truth for Phase 2. Follow it exactly.
 Every sweep entry specifies: purpose · scope · enumeration procedure (script
@@ -133,11 +133,14 @@ enumeration is supplied by the pipeline's code-side OOXML scan) follows them.
 REWRITE-PARITY checks (the issue classes a from-scratch rewrite fixes as part
 of its ordinary work: text/artwork term parity, house-style conventions,
 claim→evidence coverage, sibling-definition symmetry, caption-promise parity),
-and **J5** is the architecture pass that reports the rewrite-class issues no
-instance-level sweep can enumerate (organization, paragraph order, transitions,
-cross-section redundancy). New sweeps validated from the discovery round are
-appended after the adopted block as **M30, M31…** in the same format — do not
-insert into the middle (IDs are stable).
+**M30** is the SOURCE-HIERARCHY reconciliation (the DETECTION side of the
+hierarchy the prompts use to resolve a conflict: a written claim against the
+code or raw data that produced it), and **J5** is the architecture pass that
+reports the rewrite-class issues no instance-level sweep can enumerate
+(organization, paragraph order, transitions, cross-section redundancy). New
+sweeps validated from the discovery round are appended after the adopted block
+as **M31, M32…** in the same format — do not insert into the middle (IDs are
+stable).
 
 ---
 
@@ -202,7 +205,7 @@ Every finding is ONE instance, formatted:
 
 ```
 F-NNN | location: <doc>/<section>/<paragraph|line|figure|table> | category: <0–5>
-check: <M1–M29|J1–J5> | severity: <Critical|Major|Minor> | status: <...>
+check: <M1–M30|J1–J5> | severity: <Critical|Major|Minor> | status: <...>
 evidence: "<short verbatim quote of the exact word/number/phrase>"
 problem: <1–2 sentence explanation>
 ```
@@ -980,7 +983,7 @@ a different order. A scope whose only "fix" would invent or delete content is
 "Not checked" is not an allowed value. "Unable — <reason>" rows repeat in the
 summary note with their reasons.
 
-The coverage table carries every check ID this skill defines: M1–M29 and
+The coverage table carries every check ID this skill defines: M1–M30 and
 J1–J5 (M18, M19 and M20 are always active). J5's row names
 `review/ARCHITECTURE.md` as its basis.
 
@@ -1283,6 +1286,59 @@ the explanation), class `completeness`, with the same fix routes (add the
 description to the editable caption, or regenerate the print). One direction
 without the other is an unfilled artifact.
 
+## M30 — Source-hierarchy reconciliation (submission ↔ code ↔ raw data)
+
+**Purpose.** The hierarchy — **github code > data in raw_data/ (an older
+corpus spells that directory raw_figs/) > main figures > supplementary figures >
+main tables > supplementary tables > main text > supplementary text** — is
+stated as a RESOLUTION rule: it decides which side wins once two sources
+already disagree. Its DETECTION side had no enumerating check, so a written
+number, sample size, parameter, protocol step or label that the shipped code or
+raw data contradicts was found only if a human happened to compare them. The
+reviewed corpus already carries its producers (the analysis code, the raw-data
+snapshot, the figure/table sources), so M30 makes every such comparison a row.
+
+**Enumeration.** For every operational or quantified item on a claim-bearing
+surface (abstract, main text, legend, cover letter; Methods for a parameter or
+step) find the artifact that PRODUCED it: a `raw_data/` file, a code/config
+file's constant or the function that prints the value, the figure/table source.
+The pipeline seeds `review/artifacts/M30_hierarchy_reconciliation.md` with what
+the code can pair for itself — table A: every written number the shipped data
+tables do not already PROVE, against its candidate producer column(s), with the
+mechanical check the code can make (a cohort-size sentence against the table's
+own row count; a written value against the column's values and statistics);
+table B: the module-level literals the corpus's code/config files declare
+(`N_SAMPLES = 15`, `"threshold": 0.05`) — the producer side of a Methods
+parameter. Extend it with the rows no code can see: figure/panel ↔ the code or
+data that generates it, protocol step ↔ the code that implements it,
+sample/cohort set ↔ the data's rows, Methods parameter ↔ the code's constant.
+
+**Artifact.** `review/artifacts/M30_hierarchy_reconciliation.md`:
+`document | kind | number | unit | sentence | candidate producer | producer
+summary | seed check | disposition` for table A and
+`file | line | symbol | value | context | disposition` for table B, plus the
+rows the session adds. Every seeded row and every added row is disposed.
+
+**Finding rules (one finding per incompatible instance).**
+- the producer contradicts the written value/label/sample set (or the written
+  value contradicts a producer the text points at) → `correctness`, naming BOTH
+  sides (`document:location` and `file:symbol/row`), and the authoritative one
+  per the hierarchy;
+- a written claim whose producer is MISSING from the corpus while another
+  sweep's pointer promises it → `completeness`;
+- a producer that is not in the corpus at all (an external GitHub repository, an
+  image-only figure, a binary the text tools cannot read) → a recorded
+  `unable — the producer is not in the corpus` row, never a silent clean, and
+  name which artifact was searched;
+- a difference that a stated unit, rounding, conversion, or a Methods-stated
+  run-time override reconciles → `OK` with that reconciling reason;
+- an M30 row is never fixed here: the review reports, rule C of paper-revise
+  owns a code fix, and a regenerated figure/table goes to the manual list.
+
+Validation: the class exists because the hierarchy was one-directional — a
+resolution rule with no detection sweep leaves every text-vs-code and
+figure-vs-raw-data conflict to luck.
+
 ## New code-side rule ids the sweeps now emit
 
 | rule | meaning | tier |
@@ -1326,7 +1382,7 @@ over attention.
 ## D0 — Dedup base
 
 From PRIOR build two indexes (`OUT2/known_index.md`):
-- **KNOWN-CLASSES**: the 35 check IDs (M1–M29, J1–J5) with one-line descriptions.
+- **KNOWN-CLASSES**: the 36 check IDs (M1–M30, J1–J5) with one-line descriptions.
 - **KNOWN-INSTANCES**: every prior finding as `id | class | location | evidence quote`.
 
 Anything matching a KNOWN-INSTANCE (same class + same location + same
@@ -1429,9 +1485,11 @@ Number proposals continuing from the highest existing sweep number. M18
 (abstract/main-text length plus the user's cover-letter preference) and M20
 (OOXML style/formatting uniformity, enumerated by the pipeline's code-side scan)
 are reserved and defined in `sweeps.md`; M21–M24 were adopted from earlier
-discovery rounds, and M25–M29 are the rewrite-parity checks (artwork/text
+discovery rounds, M25–M29 are the rewrite-parity checks (artwork/text
 parity, house-style conventions, claim→evidence coverage, sibling-definition
-symmetry, caption-promise parity). Proposals therefore start at M30.
+symmetry, caption-promise parity), and M30 is the source-hierarchy
+reconciliation (a written claim against the code/raw data that produced it).
+Proposals therefore start at M31.
 These are PROPOSALS: the user validates them; only validated ones get
 appended to `references/sweeps.md`. This is the feedback loop — no static
 checklist can be complete, but each discovered miss converts into a permanent

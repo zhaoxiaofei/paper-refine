@@ -287,6 +287,53 @@ The review/audit/revise path now carries them explicitly:
   calibrated, and the comparison already scores these differences in the
   consistency/completeness/correctness tiers.
 
+## M30: the source hierarchy is a detection rule too
+
+The source hierarchy (`github code > data in raw_data/ > main figures >
+supplementary figures > main tables > supplementary tables > main text >
+supplementary text`) was stated only as a **resolution** rule: it decides which
+side wins once two sources already disagree. Nothing enumerated the
+**detection** side, so a written number, sample size, parameter or label that
+the shipped code or raw data contradicted was found only when a human happened
+to compare them — even though every session's corpus already carries the
+producers (the analysis code under `code/`, the byte-identical `raw_data/`
+snapshot, the figure/table sources), and the judge's blinded view carries them
+too (renamed, e.g. `d01/f0001.py` and `d00/f0001.csv`).
+
+**M30 — source-hierarchy reconciliation** closes that gap on the
+review → audit → revise path (`sweeps.md` §M30):
+
+* the review enumerates, for every operational or quantified item on a
+  claim-bearing surface, the artifact that produced it (a `raw_data/` file, a
+  code/config constant, the figure/table source), files one finding per
+  incompatible instance with BOTH sides and the authoritative one per the
+  hierarchy, and records `unable — the producer is not in the corpus` (an
+  external GitHub repository, an image-only figure, a binary the text tools
+  cannot read) instead of a silent clean. A difference a stated unit, rounding,
+  conversion or Methods-stated run-time override reconciles is `OK` with that
+  reason;
+* the seed is code-side and bounded: `table_column_stats` (each shipped table
+  column's own row count and min/max/mean/sum), `hierarchy_seed_rows` (every
+  written number the shipped tables do NOT prove, paired with its candidate
+  producer column and the check the code can make — including a cohort-size
+  sentence against the table's own row count, the "12 samples" vs a 3-row table
+  case) and `code_literal_rows` (module-level literals such as
+  `N_SAMPLES = 15`, the producer side of a Methods parameter). They land in
+  `review/artifacts/M30_hierarchy_reconciliation.md` (two disposed tables,
+  under the strict-artifact policy) and `work/M30_hierarchy_reconciliation.md`
+  in the other layouts;
+* the auditor attacks the closures that used to hide the class ("the code is
+  out of scope", "`raw_data/` is read-only", "not in the written parts"); the
+  reviser resolves an M30 finding by **rule E12** — align the WRITTEN side with
+  the authoritative producer, rule C owns a code fix (minimal edit + rerun
+  note, dependent numbers manual), and `raw_data/` is read-only so a fix that
+  lives inside it is a manual decision with the exact file/value;
+* the rewrite surfaces the conflict under `PROBLEMS SURFACED` and never edits
+  the code; the integration resolves it under the same hierarchy; and the
+  judge prompt states explicitly that a claim the package's own code/data
+  refutes is scoreable `correctness`/`completeness`, never cosmetic — while the
+  frozen coverage map stays M1–M24 + J1–J4, exactly as M25–M29 did.
+
 ## Arm levels, the difference ledger, and the language pass (W-11/W-12)
 
 * **Rewrite arms carry a level.** With `--rewrites 2` the round stages one
@@ -777,6 +824,7 @@ cannot disagree about a number:
 | `EVIDENCE_PACK.md` | the same, human-readable, with the re-scan command |
 | `M18_caption_words.md`, `M19_length.md`, `M20_formatting.md` | seeded tables (one row per code-side finding, empty disposition column) for the review and the judge |
 | `CLAIM_STRENGTH.md` | J3's claim-strength ledger, BOTH directions: one row per claim-bearing paragraph per direction (`under` = a hedge the evidence may not require; `over` = a maximal claim the evidence may not support), each with a disposition column. Seeded under `review/artifacts/` for the review and under `work/` for the package-producing and audit sessions |
+| `M30_hierarchy_reconciliation.md` | M30's source-hierarchy seed: table A pairs every written number the shipped data tables do NOT prove with its candidate producer column and the check the code can make (a cohort-size sentence against the table's own row count; a value against the column's min/max/mean/sum); table B lists the code/config literals (`N_SAMPLES = 15`). Seeded under `review/artifacts/` for the review and under `work/` for the other layouts; a disposed decision table |
 | `CODE_SCANS_before.json` / `CODE_SCANS_after.json` | per stage: the input's and the delivered package's measurements, with an `evidence_delta` (over-cap sections, placeholders, formatting rows) recorded on the run and warned about when it regresses |
 
 Where it lands: `review/work/` + `review/artifacts/` (review) and `work/` at the
@@ -1205,7 +1253,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 40 suites in ~120 s
+any failure. They are independent, so run them in parallel — 41 suites in ~120 s
 on a 20-core box, against ~5.5 min sequentially:
 
 ```bash
@@ -1244,6 +1292,11 @@ its before/after delta),
 claim-strength ledger's `under` and `over` rows, its seeding as
 `CLAIM_STRENGTH.md`, the added-document half of the document-set check, and the
 both-directions rule in all six prompts and both skills),
+`test_hierarchy_reconciliation.py` (M30: the table-column statistics, the
+written-value↔producer seed with its cohort-size row-count check, the
+code-literal producer side, the seeded two-table ledger and its disposition
+enforcement, the review contract's M30 row + artifact, the five prompts'
+blocks, rule E12 and a strict-artifact stub review round),
 `test_hash_cache.py`, `test_final_clean_version.py`, `test_grading_scheme.py`,
 `test_anonymized_judging.py`, `test_zotero_integration.py`. See
 `.paper_test/README.md` for the full table.

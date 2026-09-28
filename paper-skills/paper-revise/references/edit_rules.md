@@ -16,6 +16,11 @@ compression below, and **E11's scoped restructuring** for the review's
 architecture findings (J5) and rewrite-parity findings (M25–M29). Every other
 "it would read better" edit is out of scope for this stage.
 
+**E12's source-hierarchy alignment (M30) is NOT a reflow exception**: it edits a
+value, label or parameter in place, inside the sentence that carries it, so E1
+governs it like any other precision edit; it never licenses restructuring
+around the corrected value.
+
 **Scoped exception — M19 length compression.** An abstract or main text over
 the pipeline's relaxed caps (abstract ≤ 172 words = 150 +15%; main text ≤ 3,750
 words = 3,000 +25%, excluding abstract, Methods, references and figure legends,
@@ -406,6 +411,38 @@ apply without exception:
 The V2 locality check does not flag hunks inside a J5 scope when the ledger row
 names the finding id and the RESTRUCTURE artifact exists. A reordering hunk
 outside every declared scope is still an unmapped hunk, and it is reverted.
+
+## E12 — Source-hierarchy findings (M30): align the WRITTEN side
+
+An **M30** finding (the review's source-hierarchy reconciliation) says a written
+value, label, sample set or parameter disagrees with the artifact that produced
+it — the analysis code, the raw-data snapshot, or the figure/table source. The
+fix is never "make the two look alike": the finding must name the AUTHORITATIVE
+side, and the authority is the standing hierarchy
+(`github code > data in raw_data/ > main figures > supplementary figures > main
+tables > supplementary tables > main text > supplementary text`).
+
+* **The written side is wrong** (the common case): edit the text/legend/table
+  cell to the producer's value, exactly as the hierarchy dictates, and propagate
+  the value to every occurrence (P1). Record the before → after and the producer
+  (`file:symbol/row`) in the ledger row.
+* **The CODE is the wrong side**: rule C owns the fix — a minimal, targeted code
+  edit under `CODE/`, a `CODE/README_RERUN.md`, and the dependent numbers,
+  figures and tables become `manual-required` with the rerun instructions (never
+  guess a new value, never regenerate a figure here). Say so in the ledger row
+  and in `MANUAL_STEPS.md`.
+* **`raw_data/` is READ-ONLY by contract** (enforced code-side): a finding whose
+  only fix is inside it is `manual-required` with the exact file, row and value
+  the author must decide on — never an edit, never a delete, never a "cleanup".
+* **A reconciling difference is not a defect**: a stated unit conversion,
+  rounding convention or run-time override the Methods documents is recorded as
+  `OK — <the reconciling reason>` in the M30 artifact, and the revision changes
+  nothing. Ambiguity about which side is right is a scientific-judgement call
+  under E6 (`manual-required`, with the proposed wordings).
+* **Never** rewrite the text away from an authoritative producer to match a
+  downstream rendering (a figure's label, an abstract's rounded number), and
+  never touch the code to make a number in the text true — both directions of
+  the comparison keep the hierarchy's direction.
 
 ## E8 — Provenance the code already proved
 

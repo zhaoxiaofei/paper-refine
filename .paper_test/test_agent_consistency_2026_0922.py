@@ -225,7 +225,7 @@ def test_check_id_coverage():
     art2.mkdir(parents=True)
     (art2 / "M1_acronyms.md").write_text("| row |\n|---|\n", encoding="utf-8")
     full_ids = ([f"M{i}" for i in range(1, 18)] + ["M18", "M19", "M20"]
-                + ["M21", "M22", "M23", "M24", "M25", "M26", "M27", "M28", "M29"]
+                + ["M21", "M22", "M23", "M24", "M25", "M26", "M27", "M28", "M29", "M30"]
                 + [f"J{i}" for i in range(1, 6)])
     fj2 = {"submission_dir": "base",
            "coverage": [{"check": c, "disposition": "clean -- basis: x"} for c in full_ids]}
@@ -233,6 +233,8 @@ def test_check_id_coverage():
     nb.check_review_contract(None, sb2, fj2, errs3, [])
     check("the review postcheck requires the M25-M29 artifacts",
           any("M25_artwork_parity.md" in e for e in errs3), str(errs3)[:160])
+    check("the review postcheck requires the M30 source-hierarchy artifact",
+          any("M30_hierarchy_reconciliation.md" in e for e in errs3), str(errs3)[:160])
     check("the review postcheck requires a disposed ARCHITECTURE.md",
           any("ARCHITECTURE.md" in e for e in errs3), str(errs3)[:160])
     # SPLIT REVIEW: session A owns the M25-M29 artifacts, session B owns the J5
@@ -246,7 +248,7 @@ def test_check_id_coverage():
         if parity_artifacts:
             for fname in ("M25_artwork_parity.md", "M26_conventions.md",
                           "M27_evidence_coverage.md", "M28_symmetry.md",
-                          "M29_caption_schema.md"):
+                          "M29_caption_schema.md", "M30_hierarchy_reconciliation.md"):
                 (art / fname).write_text("| row | disposition |\n|---|---|\n| x | OK |\n",
                                          encoding="utf-8")
         if arch:
@@ -301,8 +303,9 @@ def test_check_id_coverage():
           ("M21–M24" in acceptance_line
            or all(c in acceptance_line for c in ("M21", "M22", "M23", "M24")))
           and "once proposals are adopted" not in acceptance_line, acceptance_line[:160])
-    check("sweeps.md's FINDING FORMAT admits M21-M24 finding ids",
-          "M1–M29" in format_line and "M1–M24|J1–J4" not in format_line
+    check("sweeps.md's FINDING FORMAT admits M21-M30 finding ids",
+          "M1–M30" in format_line and "M1–M29" not in format_line
+          and "M1–M24|J1–J4" not in format_line
           and "M1–M20|J1–J4" not in format_line,
           format_line[:160])
     src = (WS / "paper_pipeline.py").read_text(encoding="utf-8")
@@ -311,18 +314,21 @@ def test_check_id_coverage():
     # The rewrite-parity checks exist on the review -> audit -> revise path
     # (the classes a from-scratch rewrite fixes as it goes); the judge's frozen
     # coverage map deliberately stays at M1-M24 + J1-J4.
-    for cid in ("M25", "M26", "M27", "M28", "M29", "J5"):
+    for cid in ("M25", "M26", "M27", "M28", "M29", "M30", "J5"):
         check(f"{cid} is named in the review/audit/revise prompts",
               all(cid in P[s] for s in ("review", "audit", "revise")),
               str([s for s in ("review", "audit", "revise") if cid not in P[s]]))
     check("the judge's frozen coverage map is unchanged (M1-M24 + J1-J4)",
           all(f"M{i}" in expected for i in range(1, 25))
-          and "M25" not in expected and "J5" not in expected)
+          and "M25" not in expected and "M30" not in expected and "J5" not in expected)
     check("the review postcheck's required-coverage list names M25-M29 + J5",
           'wanted += ["M25", "M26", "M27", "M28", "M29", "J5"]' in src)
-    check("the review postcheck requires the rewrite-parity artifacts",
+    check("the review postcheck's required-coverage list names M30",
+          'wanted += ["M30"]' in src)
+    check("the review postcheck requires the rewrite-parity and M30 artifacts",
           "M25_artwork_parity.md" in src and "ARCHITECTURE.md" in src
-          and "M29_caption_schema.md" in src)
+          and "M29_caption_schema.md" in src
+          and "M30_hierarchy_reconciliation.md" in src)
 
 
 def test_judge_tier_and_sweep_scope():

@@ -226,16 +226,18 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
                          "disposition": f"clean -- basis: stub {c} artifact",
                          "detail": "stub"}
                         for c in ("M21", "M22", "M23", "M24",
-                                  "M25", "M26", "M27", "M28", "M29", "J5")])})
+                                  "M25", "M26", "M27", "M28", "M29", "M30", "J5")])})
     (out / "findings.md").write_text("# findings (stub)\n\nsummary: stub\n", encoding="utf-8")
     (out / "artifacts" / "M1_acronyms.md").write_text("| row |\n|---|\n", encoding="utf-8")
-    # The rewrite-parity artifacts and the architecture table are part of the
-    # review contract (M25-M29 + J5): a sweep with no artifact proves nothing.
+    # The rewrite-parity artifacts, the source-hierarchy reconciliation and the
+    # architecture table are part of the review contract (M25-M30 + J5): a sweep
+    # with no artifact proves nothing.
     for fname, cid in (("M25_artwork_parity.md", "M25"),
                        ("M26_conventions.md", "M26"),
                        ("M27_evidence_coverage.md", "M27"),
                        ("M28_symmetry.md", "M28"),
-                       ("M29_caption_schema.md", "M29")):
+                       ("M29_caption_schema.md", "M29"),
+                       ("M30_hierarchy_reconciliation.md", "M30")):
         (out / "artifacts" / fname).write_text(
             f"# {cid} (stub)\n\n| row | disposition |\n|---|---|\n"
             f"| stub | OK - stub: nothing found |\n", encoding="utf-8")

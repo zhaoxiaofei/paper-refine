@@ -400,14 +400,14 @@ def build_review_sandbox(tmp: Path, short_rows: bool, marker_in_review: bool) ->
     # checks the real contract, not a subset of it).
     wanted = list(nb.REQUIRED_REVIEW_CHECKS) + ["M18", "M19", "M20",
                                                 "M21", "M22", "M23", "M24",
-                                                "M25", "M26", "M27", "M28", "M29", "J5"]
+                                                "M25", "M26", "M27", "M28", "M29", "M30", "J5"]
     write(sb / "review" / "findings.json",
           {"submission_dir": "./base", "findings": [],
            "coverage": [{"check": c, "disposition": "clean -- basis: stub artifact",
                          "detail": "stub"} for c in wanted]})
     for fname in ("M25_artwork_parity.md", "M26_conventions.md",
                   "M27_evidence_coverage.md", "M28_symmetry.md",
-                  "M29_caption_schema.md"):
+                  "M29_caption_schema.md", "M30_hierarchy_reconciliation.md"):
         write(art / fname, "| row | disposition |\n|---|---|\n| x | OK |\n")
     write(sb / "review" / "ARCHITECTURE.md",
           "| document | section | paragraphs | current structure | reader cost | "

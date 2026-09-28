@@ -26,7 +26,7 @@ over attention.
 ## D0 — Dedup base
 
 From PRIOR build two indexes (`OUT2/known_index.md`):
-- **KNOWN-CLASSES**: the 35 check IDs (M1–M29, J1–J5) with one-line descriptions.
+- **KNOWN-CLASSES**: the 36 check IDs (M1–M30, J1–J5) with one-line descriptions.
 - **KNOWN-INSTANCES**: every prior finding as `id | class | location | evidence quote`.
 
 Anything matching a KNOWN-INSTANCE (same class + same location + same
@@ -129,9 +129,11 @@ Number proposals continuing from the highest existing sweep number. M18
 (abstract/main-text length plus the user's cover-letter preference) and M20
 (OOXML style/formatting uniformity, enumerated by the pipeline's code-side scan)
 are reserved and defined in `sweeps.md`; M21–M24 were adopted from earlier
-discovery rounds, and M25–M29 are the rewrite-parity checks (artwork/text
+discovery rounds, M25–M29 are the rewrite-parity checks (artwork/text
 parity, house-style conventions, claim→evidence coverage, sibling-definition
-symmetry, caption-promise parity). Proposals therefore start at M30.
+symmetry, caption-promise parity), and M30 is the source-hierarchy
+reconciliation (a written claim against the code/raw data that produced it).
+Proposals therefore start at M31.
 These are PROPOSALS: the user validates them; only validated ones get
 appended to `references/sweeps.md`. This is the feedback loop — no static
 checklist can be complete, but each discovered miss converts into a permanent
