@@ -1,6 +1,6 @@
 # paper-review + paper-revise — Codex Skills for Manuscript Submissions (any venue or journal)
 
-**Package version:** 0.8 (any venue or journal, 2026-09-25; see CHANGELOG.md) — distributed as the directory
+**Package version:** 0.10 (both directions of every two-sided check, 2026-09-29; see CHANGELOG.md) — distributed as the directory
 `paper-skills-v03`. The version lives here, not in the skill frontmatter. If more
 than one copy of this package is installed, check this line and retire the
 older copies (`paper-skills-v01/`, `paper-skills-v02/`): Codex registers skills by
@@ -161,7 +161,15 @@ M21–M24 checks and the rewrite-parity checks M25–M29 (figure-artwork/text
 parity, house-style conventions, claim→evidence coverage, sibling-definition
 symmetry, caption-promise parity). Judgment
 passes J1–J5 (scope fit, statistical rigor, overclaiming, plagiarism/AI policy,
-and the J5 architecture/rewrite-class pass) are deep and prioritized. A
+and the J5 architecture/rewrite-class pass) are deep and prioritized: J3 is
+claim CALIBRATION, so an overclaim and an underclaim are both findings, and the
+same both-directions rule runs through the paired classes (M5 items missing or
+unneeded, M21/M22 claims stronger or weaker than the evidence and the verified
+locator, M27/M29 claims without pointers and printed content without a
+description, a lost document and an added one). The pipeline seeds a
+`CLAIM_STRENGTH.md` ledger that enumerates both directions of the
+claim-strength pair, one row per claim-bearing paragraph, for disposal like any
+other seeded table. A
 discovery round (D0–D5) then hunts issue
 classes outside the checklist, and its validated proposals grow the
 checklist (M30+) for future runs.
@@ -251,7 +259,10 @@ paper-skills/
   excluding abstract, Methods, references and figure legends). Words are
   maximal runs of non-space characters with a newline treated as space
   (`scripts/count_words.py`); over-cap sections are
-  reported and compressed by removing redundancy only — content is never cut,
+  reported and compressed by removing redundancy, repeated statistics and
+  non-meaning-bearing hedging only — content is never cut, a hedge that carries
+  the claim's own strength stays (removing it is an overclaim, not a
+  shortening), a claim is never strengthened or weakened to reach a cap,
   under-length text is never flagged, and length never gates a version.
   The cover letter's persuading part is measured against the master prompt's
   own 300-500-word preference; the default profile's venue states no

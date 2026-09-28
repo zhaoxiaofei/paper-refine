@@ -818,7 +818,31 @@ from pathlib import Path
 # resolves M25-M29 by aligning the editable surface corpus-wide and J5 by E11
 # scoped restructuring (content frozen, one RESTRUCTURE_<id>.md per finding).
 # The judge panel's frozen coverage map stays M1-M24 + J1-J4 on purpose.
-VERSION = "3.5.0"
+# 3.5.1 -- BOTH DIRECTIONS of every two-sided check. The checks were one-sided:
+# J3 filed overclaims (unsupported first/novel claims, causal language, a
+# generalization past the design) while an underclaim -- a supported result
+# hedged into "may"/"could"/"suggests"/"a trend"/"preliminary" -- was never a
+# finding, and the same asymmetry ran through the other paired classes
+# (M5 items missing but not unneeded; M21/M22 claims in the letter and the
+# availability statement read only in the "too strong" direction; M27 claim
+# pointers but not the printed schema M29 never describes; a lost document but
+# not an added one; length compression allowed to strip MEANING-BEARING
+# hedging, which converts an accurate claim into an overclaim). The fix is
+# symmetric, mechanical where it can be:
+#   * a new code-side ledger (paper_docx_format.claim_strength_rows) enumerates
+#     BOTH directions per claim-bearing paragraph, seeded as
+#     work/CLAIM_STRENGTH.md and artifacts/CLAIM_STRENGTH.md with a disposition
+#     per row (a decision table under the strict-artifacts policy);
+#   * the shared decision rules (D1), the defect-class vocabulary (category 0
+#     and category 2), the writing rubric (Q1) and the language pass (L1) name
+#     the underclaim as a defect of the same class as the overclaim;
+#   * the judge prompt states that a weakened supported claim is `introduced`
+#     correctness, never neutral caution;
+#   * M5, M21, M22, M27, M29 and the length rule (M18/M19) carry their own
+#     reverse direction; `document_set_check` reports added documents as well
+#     as lost ones; the revise prompt authorises a calibrated claim edit ONLY
+#     where a calibration finding names it (in either direction).
+VERSION = "3.5.1"
 STATE_VERSION = 3
 
 # The Zotero tooling policy carried in pipeline_config.json (`setup --zotero`):
@@ -3202,10 +3226,14 @@ def length_rule_text(profile=None) -> str:
       word, and an abbreviation with an inner space ("et al.") is two. Do not split hyphenated
       compounds and do not normalise anything else away.
     * An over-limit section is a CATEGORY-4 (technical formatting) item, check id M19: it is
-      compressed by removing redundancy, hedging and repeated statistics ONLY -- never by deleting
-      scientific content, claims, limitations, data, accession numbers or needed methodological
-      detail. Never flag UNDER-length text (the pipeline relaxes upper limits only and invents no
-      minimum), and never make a length-driven cut to text that is within the cap.
+      compressed by removing redundancy, repeated statistics and NON-MEANING-BEARING hedging
+      ONLY -- never by deleting scientific content, claims, limitations, data, accession numbers
+      or needed methodological detail. A hedge that carries the claim's own strength (a
+      limitation, an uncertainty the evidence supports, a result reported as uncertain because
+      it is) is CONTENT: stripping it would turn an accurate claim into an overclaim, so it
+      stays. Never flag UNDER-length text (the pipeline relaxes upper limits only and invents no
+      minimum), never make a length-driven cut to text that is within the cap, and never
+      strengthen or weaken a claim in either direction to reach one.
 {cover_para}
     * LENGTH IS NEVER A GATE: no version is made ineligible, failed, rejected, de-ranked or
       re-ordered as a whole because of a word count, and length may only ever enter a comparison
@@ -3368,8 +3396,10 @@ M18_REVIEW_SWEEP_REPORT = """3. The PIPELINE-MANDATED legend-length sweep M18 (s
    are reserved, and M21-M29 are adopted), and say so there so the operator can renumber when
    adopting them into the skill."""
 M18_REVISE_RULE_ON = """Figure captions: bring EVERY caption over @@CAPTION_LIMIT@@ words back under the limit by
-     removing redundancy, hedging and repeated statistics -- never by deleting scientific content,
-     claims, limitations or needed methodological detail. This is a SUGGESTION, not a gate: a
+     removing redundancy, repeated statistics and non-meaning-bearing hedging -- never by deleting
+     scientific content, claims, limitations or needed methodological detail, and never by
+     stripping a hedge that carries the claim's own strength (that would be an overclaim, not a
+     shortening). This is a SUGGESTION, not a gate: a
      caption that cannot be shortened without losing content is left as it is and handed to
      revised/MANUAL_STEPS.md instead of guessing. Record each affected caption in CHANGELOG.md
      (check id M18). M18 is the pipeline's caption sweep; the findings you inherited from Phase 1
@@ -3461,8 +3491,10 @@ def m19_blocks(profile=None) -> dict:
     if has_caps:
         revise = f"""Abstract/main-text length (check id M19; see the length rule): bring EVERY over-cap abstract
      or main text within the cap ({caps_article}) by removing redundancy,
-     hedging and repeated statistics only -- NEVER by deleting scientific content, claims,
-     limitations, data, accession numbers or needed methodological detail, and never by touching
+     repeated statistics and non-meaning-bearing hedging only -- NEVER by deleting scientific
+     content, claims, limitations, data, accession numbers or needed methodological detail, never
+     by stripping a hedge that carries the claim's own strength (a limitation, an uncertainty the
+     evidence supports: removing it is an overclaim, not a shortening), and never by touching
      text that is already within the cap. Count with the pipeline's definition (maximal runs of
      NON-SPACE characters; a newline is a space) and record every compression in CHANGELOG.md
      under M19. A section that cannot be brought within the cap without losing content is left as
@@ -3645,7 +3677,10 @@ REWRITE_PARITY_REVIEW = """3d. The REWRITE-PARITY checks M25-M29 and the ARCHITE
      for one sibling and before it for another). Artifact: review/artifacts/M28_symmetry.md.
    * M29 caption-promise vs printed-schema parity - pair every promised field/panel/encoding in
      a caption with the printed table header or the artwork's own text ("eleven columns" for a
-     ten-column TSV is the recorded case). Artifact: review/artifacts/M29_caption_schema.md.
+     ten-column TSV is the recorded case) AND run the reverse pairing the same way: every printed
+     column/panel/encoding the caption never describes is equally a finding (the reader cannot
+     interpret an undocumented column, and the caption, not the reader, owns the explanation).
+     Artifact: review/artifacts/M29_caption_schema.md.
    * J5 architecture & rewrite-class pass - one row per SCOPE in review/ARCHITECTURE.md
      (`document | section | paragraphs | current structure | reader cost | proposed
      reorganization | class | severity | disposition`): claim-first order, one message per
@@ -3672,6 +3707,11 @@ REWRITE_PARITY_AUDIT = """4. ATTACK THE REWRITE-PARITY RECORD - the classes a re
        (M25 artwork/text parity · M26 house-style conventions · M27 claim-to-evidence coverage ·
        M28 sibling-definition symmetry · M29 caption-promise parity - each artifact must carry a
        disposition on every row.)
+     * the TWO-SIDED rows: a caption row disposed "the print is what it is" while a printed
+       column/panel is described nowhere is an AU-finding (M29 reads in both directions), and a
+       J3 row disposed as "the wording is appropriately cautious" is an AU-finding when the
+       corpus's own data prove the claim the sentence hedges (an underclaim is the other half of
+       the calibration check, not a virtue). Read `review/artifacts/CLAIM_STRENGTH.md` both ways.
      * J5 / review/ARCHITECTURE.md: every scope row must carry a row-specific disposition. A
        document with no rows, or one "OK - reads well" sentence repeated on every row, is an
        UNFILLED artifact - raise the scopes you can evidence yourself as `AU-` findings
@@ -3702,8 +3742,11 @@ REWRITE_PARITY_REVISE = """12. REWRITE-PARITY findings (M25-M29) - resolve them 
         use); an expansion that exists nowhere in the corpus is manual-required, never invented.
       * M29 (caption-promise parity): align the editable side with what the print actually
         delivers - the caption wording, or the printed source when it is in the corpus and
-        editable - one promised item per edit; a generated print's regeneration step is a
-        manual follow-up, not a reason to carry the finding.
+        editable - one promised item per edit; a promise the print does not deliver and a printed
+        item the caption never describes are the SAME finding class in opposite directions, so
+        fix both: add the missing description for an undocumented printed field/panel, and
+        remove or reword a promise the print cannot satisfy. A generated print's regeneration
+        step is a manual follow-up, not a reason to carry the finding.
     These are normal E1 edits (substitutions / pointer additions inside the finding's own
     sentence); what differs from E1 is the corpus-wide completion of the convention.
 13. ARCHITECTURE findings (J5) - a J5 finding names a SCOPE, and rule E11 LIFTS E1's no-reflow
@@ -3801,6 +3844,14 @@ D1. ONE vocabulary. Every difference, finding and residual is named by its CLASS
     never cosmetic: `formatting` and `writing` are MINOR rows (at most one point each, never
     decisive alone), but they are always counted by whichever session stands in front of the
     package.
+    EVERY TWO-SIDED CHECK IS RUN IN BOTH DIRECTIONS, and a check reported from ONE side has not
+    been run: a claim can be too strong (an overclaim) or too weak (an underclaim -- a supported
+    result hedged into vagueness); content can be lost (preservation) or invented (correctness);
+    an item can be missing or unneeded; a claim can carry no pointer or a printed/promised item
+    can carry no description; an availability claim can be stronger or weaker than the verified
+    locator. The underclaim direction is a real defect of the same class as the overclaim
+    direction, never a neutral "more careful" wording: a version that weakens a supported claim
+    is worse than one that states it, exactly as a version that exaggerates is.
 D2. FOUR dispositions, one meaning each, for every item a session touches:
       resolved  the package now fixes it (record the before -> after text);
       carried   it cannot be fixed here: it goes to the package's single manual list (the file the
@@ -3844,17 +3895,30 @@ ADOPTED_SWEEPS_BLOCK = """
           preference.
   M20     OOXML style/formatting rows, each carrying its `tier` (`finding` | `advisory`).
   M21     correspondence policy: reviewer exclusions, required disclosures, and whether a cover
-          letter's claims about the work are supported by the manuscript itself.
+          letter's claims about the work are supported by the manuscript itself -- in BOTH
+          directions: a letter claim that exceeds the manuscript's evidence is an overclaim, and
+          a supported result the letter leaves undersold is an underclaim.
   M22     data/code-availability integrity: the locator class (DOI / archive DOI / version-pinned
           repository URL / bare URL / accession) against the claim it carries, including whether
-          two different pins of one repository are consistent with what the text asserts.
+          two different pins of one repository are consistent with what the text asserts. Read it
+          BOTH ways: a claim STRONGER than the locator supports ("permanent archive" on a
+          version-pinned URL) and a claim WEAKER than the verified reality ("available on
+          request" while the identifier lookup resolves a public deposit) are the same defect in
+          opposite directions, never one finding and one silence.
   M23     supplementary parity: the supplement's numbers, cross-references, availability
           statements, abbreviation definitions and term choices against the main text.
   M24     concept/term families: one concept with competing surface forms, plus the glossary
           decision (definition, authoritative term, forbidden synonyms) and the per-occurrence
           sense audit that follows from it.
-  J1-J4   scope fit and significance; scientific/statistical rigor; writing quality and
-          overclaiming (the Q1-Q12 rubric); plagiarism, AI-content and policy compliance.
+  J1-J4   scope fit and significance; scientific/statistical rigor; writing quality and claim
+          calibration -- overclaiming AND underclaiming (the Q1-Q12 rubric); plagiarism,
+          AI-content and policy compliance.
+  EVERY two-sided check runs in BOTH directions, and a check reported from one side only has not
+  been run: claim strength (overclaim / underclaim), content (lost / invented), items (missing /
+  unneeded), pointers (claim without its evidence / printed or promised content the text never
+  states), availability claims (overstated / undersold against the verified locator). The
+  seeded `CLAIM_STRENGTH.md` table is the J3 surface for the claim-strength pair: dispose its
+  `under` rows and its `over` rows.
   A check with no findings still gets its coverage row ("clean -- basis: <artifact/locations>");
   "not checked" is never an allowed value, and every row of every check gets a disposition (D2)."""
 
@@ -3864,8 +3928,13 @@ DISPOSITION_MANDATE = """
 DECISION-ARTIFACT MANDATE — one disposition per seeded row, about THAT ROW's own bar:
   * Every seeded table under `review/artifacts/` (M18 caption words, M19 length, M20 formatting,
     M4/NUMBERS_LEDGER numbers, M8 terms, M24 concepts, GLOSSARY, IDENTIFIERS, PLACEHOLDERS,
-    PLACEHOLDER_LOOKUP, OUTLINE) must end with exactly one row per instance and a disposition per
-    row: a finding id, or `OK — <the bar this instance is inside, and why>`.
+    PLACEHOLDER_LOOKUP, OUTLINE, CLAIM_STRENGTH) must end with exactly one row per instance and a
+    disposition per row: a finding id, or `OK — <the bar this instance is inside, and why>`.
+    CLAIM_STRENGTH carries BOTH directions of the J3 calibration check (`under` = a hedge the
+    evidence may not require, `over` = a maximal claim the evidence may not support); a session
+    that disposes one direction and leaves the other undisposed has not run the check, and a
+    single-direction reading of the corpus is exactly the one-sided defect this table exists to
+    stop.
   * ROW SHAPE IS PART OF THAT CONTRACT: keep the seeded columns exactly as they are and write
     exactly one cell per column, in order, with your verdict IN the `disposition`/`resolution`
     cell (the LAST column of the row). A row that is one cell SHORT is read POSITIONALLY: the
@@ -3917,12 +3986,16 @@ defect the same way; only the deliverable differs):
         wrong number/DOI/reference key, a broken cross-reference) or @@T_COMPLETENESS@@ (a
         mandatory item that is missing);
       - category 0 (Editor/Reviewer Concerns) -> @@T_CORRECTNESS@@ (an unsupported claim, an
-        overclaim, a rigor or ethics problem), @@T_COMPLETENESS@@ (required information or data
-        availability missing) or @@T_PRESERVATION@@ (content or a limitation that was removed);
+        overclaim, an UNDERCLAIM -- a claim or conclusion weaker than the evidence supports, the
+        same defect read in the other direction -- a rigor or ethics problem),
+        @@T_COMPLETENESS@@ (required information or data availability missing) or
+        @@T_PRESERVATION@@ (content or a limitation that was removed);
       - category 2 (Writing Quality, Logic and Repetition) -> @@T_CONSISTENCY@@ when the same
         thing is said, spelled or numbered two ways, or a convention is applied in one place and
         not another; @@T_CORRECTNESS@@ when the wording changes the meaning (a claim that
-        becomes wrong, a number attributed to the wrong metric); @@T_FORMATTING@@ when it is a
+        becomes wrong, a number attributed to the wrong metric, a claim whose STRENGTH no longer
+        matches the evidence in either direction -- an overclaim or an underclaim);
+        @@T_FORMATTING@@ when it is a
         one-off wording preference with no convention behind it; @@T_WRITING@@ when it is a
         grammar, spelling, punctuation or prose-flow error that changes no meaning (MINOR rows
         only -- the class is worth at most one point and never decides a comparison);
@@ -5062,6 +5135,13 @@ error-bar definitions, sample sizes, seeds, software versions and accessions the
 implies, plus leakage/baseline/validation statements the Methods already support. Scientific
 claims, interpretations and conclusion strength stay frozen -- those remain proposed wordings in
 the report, never an edit.
+CLAIM-CALIBRATION FINDINGS ARE THE ONE EXCEPTION, and they run in BOTH directions. A frozen J3
+finding (or the seeded `work/CLAIM_STRENGTH.md` row it came from) that names an OVERCLAIM
+authorises lowering that claim -- to exactly the strength the finding's evidence supports, never
+below it. A finding that names an UNDERCLAIM authorises raising it -- to exactly the strength the
+finding's evidence supports, never above it. The fix of one direction must not overshoot into the
+other (an overclaim "fixed" into a hedge is a new underclaim, and a hedge "fixed" into a claim is
+a new overclaim), and a claim edit with no calibration finding behind it stays frozen under E6.
 `critical_remaining` is reported in the decision record and can break a statistical tie between
 two versions whose scores are identical, so report it honestly: the number of CRITICAL-severity
 findings still open after your revision (0 when none remain). `writing_remaining` breaks a
@@ -5688,7 +5768,11 @@ LANGUAGE_PASS_RULE = """LANGUAGE PASS — a bounded, iterative pass over every e
   footnotes and the cover letter) and record ONE row per change in `@@R6_PATH@@`
   (`step | location | before | after | reason`); iterate at most TWICE, then stop and report.
   Steps, in order, each applied to the sentence it names:
-    L1 premise/factual errors (a claim contradicted by the data or by another sentence)
+    L1 premise/factual errors AND claim calibration (a claim contradicted by the data or by
+       another sentence; a claim STRONGER than the evidence, an overclaim; or a claim WEAKER
+       than the evidence, an underclaim -- a supported result left as "may"/"could"/"suggests"/
+       "a trend"; both directions are this step, and a hedge the evidence genuinely requires is
+       correct and stays)
     L2 formal-logic slips (converse/inverse swapped, "A therefore B" where only B-with-A holds)
     L3 logic jumps (the conclusion needs a step the text does not state)
     L4 coherence (sentence-to-sentence and inside one sentence: referents, connectors, tense)
@@ -5926,6 +6010,18 @@ wording preference with no convention behind it. The M1 sweep's M1b instance tab
 after the acronym's first use) is the evidence surface for the acronym case -- read it before
 scoring such a difference as merely stylistic.
 
+CLAIM CALIBRATION IS SCORED IN BOTH DIRECTIONS (correctness tier). A claim whose strength does
+not match its evidence is a defect whichever way it deviates, and one direction never cancels the
+other: `introduced` covers a claim the target states MORE strongly than the evidence supports (the
+classic overclaim) AND a claim the target states MORE weakly than its own evidence supports (an
+underclaim: a supported result hedged into "may"/"could"/"suggests"/"a trend"/"preliminary", a
+conclusion the data establish left unstated, a limitation phrased as a retreat). So an edit that
+weakens a supported claim is `introduced` correctness, and a target that states the SAME claim at
+its supported strength where the opponent undersells it has a `resolved` correctness item.
+Enumerate the two directions yourself for each target (a hedge and a maximal claim are both
+visible in the text you are given); judge the substance, and do not treat "more cautious" as
+automatically better or automatically neutral.
+
 @@WRITING_RUBRIC@@
 
 === PRIORITY ORDER (use it to decide every comparison) ===
@@ -5933,8 +6029,9 @@ scoring such a difference as merely stylistic.
   correctness  >  consistency  >  preservation  >  completeness  >  formatting  >  writing
 
 An error of fact/DOI/citation/number/premise outranks a cross-document conflict, which outranks a
-regression against the original (deleted claims, softened limitations, broken cross-references or
-numbering), which outranks missing or unneeded information, which outranks formatting and writing
+regression against the original (deleted claims, softened or WEAKENED claims and limitations,
+broken cross-references or numbering), which outranks missing or unneeded information, which
+outranks formatting and writing
 (micro-formatting and wording rows, each capped at one point). When sources in a package disagree,
 the higher-priority source wins, in this order:
   @@SOURCE_HIERARCHY@@
@@ -8812,12 +8909,26 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
         try:
             docs = corpus_text_documents(sources)
             numbers, terms, outline, ph_rows = [], [], [], []
+            claim_rows = []
             for name, rows in docs:
                 paras = [r[0] for r in rows]
                 is_ref = [r[1] for r in rows]
                 headings = [r[2] for r in rows]
                 for r in mod.number_ledger([t for i, t in enumerate(paras) if not is_ref[i]]):
                     numbers.append(dict(r, document=name))
+                # J3's two-sided claim-strength ledger: the OVER direction
+                # (maximal claims) and the UNDER direction (hedges) are
+                # enumerated together, so a session cannot report the loud
+                # direction and leave the quiet one unexamined. The section
+                # kinds come from the document's own headings (a Methods
+                # paragraph is a protocol, not a claim surface).
+                # Guarded: a mismatch between this script and an older
+                # companion module must degrade to "no ledger", never abort the
+                # whole artifact-engine block (numbers/terms/outline share it).
+                claim_fn = getattr(mod, "claim_strength_rows", None)
+                if claim_fn is not None:
+                    for r in claim_fn(paras, is_ref, mod.section_kinds(paras, headings)):
+                        claim_rows.append(dict(r, document=name))
                 for r in mod.key_term_rows(paras):
                     terms.append(dict(r, document=name))
                 for r in mod.outline_rows(paras, headings, name):
@@ -8828,6 +8939,7 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
             evidence["terms"] = {"rows": terms, "count": len(terms)}
             evidence["outline"] = {"rows": outline, "count": len(outline)}
             evidence["placeholder_ledger"] = {"rows": ph_rows, "count": len(ph_rows)}
+            evidence["claims"] = {"rows": claim_rows, "count": len(claim_rows)}
         except Exception as e:                                        # noqa: BLE001
             evidence["numbers"] = {"error": f"{type(e).__name__}: {e}"}
     return evidence
@@ -8907,6 +9019,8 @@ def evidence_pack_summary(ev: dict) -> str:
             + f"; M19 {len(lng.get('rows') or [])} section(s), {over_l} over cap"
             + f"; M20 {len(fmt.get('rows') or [])} row(s) "
               f"({fmt.get('high', 0)} high); placeholders {ph.get('count', '?')}"
+            + f"; J3 claim-strength rows "
+              f"{(ev.get('claims') or {}).get('count', '?')}"
             + f"; digest {str(ident.get('digest'))[:12]}")
 
 
@@ -9464,6 +9578,41 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
                                         "resolution"],
                                        "no hand-off placeholder found")
             + "\n")
+    # J3's claim-strength ledger: BOTH directions of the calibration check.
+    # The code enumerates the sentences that hedge below their evidence
+    # (`under`) and the sentences that claim beyond it (`over`); the
+    # disposition decides, per row, whether the sentence's strength matches
+    # what the corpus shows. An overclaim has always been a finding; an
+    # underclaim (a supported result reported as "may"/"a trend"/
+    # "preliminary") is the same defect in the other direction and is the side
+    # an instance-level review used to leave unexamined. Seeded for every
+    # layout (work/) and, like the other decision tables, copied under the
+    # review's artifacts/ directory so the disposition layer reads it.
+    cl = ev.get("claims") or {}
+    claim_rows = [{"document": r.get("document"), "paragraph": r.get("paragraph"),
+                   "kind": r.get("kind"), "direction": r.get("direction"),
+                   "markers": r.get("markers"), "n": r.get("n markers"),
+                   "sentence": (r.get("sentence") or "")[:110]}
+                  for r in (cl.get("rows") or [])]
+    claim_text = (
+        "# CLAIM_STRENGTH — claim strength vs evidence, BOTH directions (check id J3)\n\n"
+        "One row per paragraph per direction: `under` = a hedge the evidence may not "
+        "require (a potential UNDERCLAIM); `over` = a maximal claim the evidence may not "
+        "support (a potential OVERCLAIM). Dispose EVERY row against the evidence the "
+        "corpus shows: `OK — the hedge matches the evidence (reason)` / "
+        "`OK — the claim is supported by <data/table/figure>` / "
+        "`underclaim — <finding id>` / `overclaim — <finding id>`. A marker whose strength "
+        "MATCHES the evidence is a legitimate row; the ledger never licenses deleting a "
+        "hedge that carries the claim's own strength. A session that reports one direction "
+        "and leaves the other rows undisposed has not run the check.\n\n"
+        + _evidence_artifact_table(
+            claim_rows,
+            ["document", "paragraph", "kind", "direction", "markers", "n", "sentence"],
+            "no claim-bearing paragraph with a hedge or a maximal claim was found")
+        + "\n")
+    _seed_write(work / "CLAIM_STRENGTH.md", claim_text)
+    if art is not None:
+        _seed_write(art / "CLAIM_STRENGTH.md", claim_text)
     if where == "review":
         # Keep the M20 skeleton the review contract points at.
         _seed_review_format_artifact(ctx, sb)
@@ -9511,7 +9660,7 @@ def seeded_evidence_paths(sb: Path) -> set:
     # materialized review sandbox looks "already worked in" and never starts.
     prov_stems = ("PROVENANCE.json", "NUMBERS_LEDGER.md", "IDENTIFIERS.md",
                   "GENE_LEDGER.md", "PLACEHOLDER_LOOKUP.md", "M24_concepts.md",
-                  "GLOSSARY.md")
+                  "GLOSSARY.md", "CLAIM_STRENGTH.md")
     rels += [f"work/{s}" for s in prov_stems]
     rels += [f"{REVIEW_DIR}/work/{s}" for s in prov_stems]
     # Judge sandboxes are deliberately absent: nothing is seeded there (blinding).
@@ -9524,6 +9673,7 @@ def seeded_evidence_paths(sb: Path) -> set:
              f"{REVIEW_DIR}/artifacts/M8_terms.md",
              f"{REVIEW_DIR}/artifacts/OUTLINE.md",
              f"{REVIEW_DIR}/artifacts/PLACEHOLDERS.md",
+             f"{REVIEW_DIR}/artifacts/CLAIM_STRENGTH.md",
              f"{REVIEW_DIR}/artifacts/NUMBERS_LEDGER.md",
              f"{REVIEW_DIR}/artifacts/IDENTIFIERS.md",
              f"{REVIEW_DIR}/artifacts/GENE_LEDGER.md",
@@ -9540,13 +9690,17 @@ def evidence_pack_block(where: str) -> str:
                  "seeded `review/artifacts/M18_caption_words.md`, `M19_length.md`, "
                  "`M20_formatting.md`, `M4_numbers.md`, `NUMBERS_LEDGER.md`, `M8_terms.md`, "
                  "`M24_concepts.md`, `GLOSSARY.md`, `IDENTIFIERS.md`, `OUTLINE.md`, "
-                 "`PLACEHOLDERS.md` and `PLACEHOLDER_LOOKUP.md` tables)")
+                 "`PLACEHOLDERS.md`, `PLACEHOLDER_LOOKUP.md` and `CLAIM_STRENGTH.md` tables; "
+                 "CLAIM_STRENGTH enumerates BOTH directions of the J3 claim-strength check, "
+                 "`under` (a hedge the evidence may not require) and `over` (a maximal claim the "
+                 "evidence may not support), and every row must be disposed)")
     elif where == "audit":
         paths = ("`work/CODE_SCANS.json` / `EVIDENCE_PACK.md` next to your PROMPT.md, the "
                  "seeded `work/FORMAT_SCAN.json` rows (each with a `tier`), "
                  "`work/NUMBERS_LEDGER.md`, `work/IDENTIFIERS.md`, `work/PLACEHOLDER_LOOKUP.md`, "
-                 "`work/M24_concepts.md` and `work/GLOSSARY.md`, and the reviewer's disposed "
-                 "tables under `review/artifacts/`")
+                 "`work/M24_concepts.md`, `work/GLOSSARY.md` and `work/CLAIM_STRENGTH.md` (the "
+                 "J3 claim-strength ledger, BOTH directions), and the reviewer's disposed tables "
+                 "under `review/artifacts/`")
     elif where == "judge":
         # BLINDING: a judge is handed NOTHING but the blinded packages. It must
         # derive every measurement itself; the orchestrator verifies the judge's
@@ -9573,7 +9727,10 @@ def evidence_pack_block(where: str) -> str:
                  "DOI/accession/repository/ORCID with its verification verdict), "
                  "`work/PLACEHOLDER_LOOKUP.md` (the answers the pipeline already found for the "
                  "searchable hand-off markers), `work/M24_concepts.md` (competing term families "
-                 "for one concept) and `work/GLOSSARY.md` (the term decisions to conform to)")
+                 "for one concept), `work/GLOSSARY.md` (the term decisions to conform to) and "
+                 "`work/CLAIM_STRENGTH.md` (the J3 claim-strength ledger: `under` = hedges the "
+                 "evidence may not require, `over` = maximal claims the evidence may not "
+                 "support -- your own edits must not move a claim in EITHER direction)")
     return f"""CODE-SIDE EVIDENCE PACK (identical measurements in every session) -- the
    orchestrator has already scanned this corpus with the same functions it uses at setup and at
    `decide`, and seeded the result as {paths}. Treat those numbers as the session's baseline:
@@ -9706,6 +9863,16 @@ def document_set_check(base_sources: list, cand_sources: list) -> dict:
     two real documents can share a normalised name ("Supplementary-Table-1.csv"
     and "...-2.csv" both reduce to "supplementary-table.csv"), so a key that
     survives in the candidate would silently hide a deleted sibling.
+
+    The comparison is run in BOTH directions, because the defect is two-sided:
+    a document the base had and the candidate lost is a preservation failure,
+    and a submission document the candidate carries that the base never had is
+    the same comparison read the other way (content that was added/invented --
+    or a declared scaffolding addition under the mandatory-item rule). Both are
+    REPORTED, neither is failed here: a lost document is restored from the base
+    by `backfill_missing_files` wherever recovery is legal (a deliberately
+    dropped derived output stays dropped), and only a human can tell a
+    legitimate scaffold from invented content in the added direction.
     """
     base, cand = collect_documents(base_sources), collect_documents(cand_sources)
     cand_pool = [(key, rel, dig) for key, entries in cand.items() for rel, dig in entries]
@@ -9744,7 +9911,9 @@ def document_set_check(base_sources: list, cand_sources: list) -> dict:
             # merely share a stripped name are not this defect):
             # exactly the pre/post-rename twin this check exists to surface
             duplicates[key] = names
+    added = [rel for i, (_k, rel, _d) in enumerate(cand_pool) if i not in used]
     return {"missing": missing, "content_preserved_under_other_name": content_only,
+            "added": added,
             "duplicates": duplicates,
             "base_count": sum(len(v) for v in base.values()),
             "candidate_count": sum(len(v) for v in cand.values())}
@@ -15624,6 +15793,19 @@ def _caption_and_document_checks(ctx: Ctx, rec: dict, vid: str, base_sources: li
         if dset["content_preserved_under_other_name"]:
             warns.append("document(s) preserved under a different name (content-matched): "
                          + ", ".join(dset["content_preserved_under_other_name"]))
+        if dset.get("added"):
+            # The mirror of "a document was lost": a submission document this
+            # package carries that the base never had. Legal ONLY as declared
+            # scaffolding for a mandatory item (the hand-off-placeholder rule)
+            # or as the visible output of a finding; new content is invented
+            # content. Reported as a warning for the author, never failed here:
+            # only a human can tell a scaffold from an invention.
+            warns.append("NEW document(s) not present in the base: "
+                         + ", ".join(dset["added"][:6])
+                         + " -- each must be declared scaffolding for a mandatory item (with its "
+                           "hand-off placeholders) or the visible output of a finding; a "
+                           "document that adds content silently is invented content, the same "
+                           "defect class as a lost document, read in the other direction")
 
 
 def postcheck_a1(ctx: Ctx, rec: dict):
@@ -15974,7 +16156,7 @@ DECISION_ARTIFACTS = ("artifacts/M20_formatting.md", "artifacts/M18_caption_word
                       "artifacts/M19_length.md", "artifacts/M8_terms.md",
                       "artifacts/M24_concepts.md", "artifacts/GLOSSARY.md",
                       "artifacts/PLACEHOLDERS.md", "artifacts/PLACEHOLDER_LOOKUP.md",
-                      "artifacts/OUTLINE.md")
+                      "artifacts/OUTLINE.md", "artifacts/CLAIM_STRENGTH.md")
 
 
 def artifact_quality_report(review_dir: Path) -> dict:
@@ -17349,7 +17531,12 @@ SCAN_REGRESSION_IGNORE = ("FMT-T9h",)      # a separator convention, advisory by
 # provenance vocabulary (see test_judge_blinding.py): it says nothing about how
 # either package was produced.
 WRITING_RUBRIC = """WRITING RUBRIC — use it to justify every `writing`-tier row (one named check per row):
-  Q1  the sentence's factual premise is contradicted by the data or by another sentence
+  Q1  the sentence's claim does not match the evidence: its premise is contradicted by the data
+      or by another sentence, it claims MORE than the evidence supports (an overclaim) or it
+      claims LESS than the evidence supports (an underclaim -- a supported result hedged into
+      "may"/"could"/"suggests"/"a trend"/"preliminary"). Both directions are Q1; a hedge the
+      evidence genuinely requires is correct and is not a row. A claim whose strength is wrong
+      in the UNDER direction is a `correctness`-tier defect exactly like an overclaim (see J3)
   Q2  a formal-logic slip (converse/inverse swapped; "A therefore B" where only B-with-A holds)
   Q3  a logic jump (the conclusion needs a step the text never states)
   Q4  coherence (referents, connectors, tense: between sentences and inside one sentence)
@@ -18294,7 +18481,9 @@ def derived_comparison_score(comp: dict):
 #     `check 'FMT-T9C'`, its sibling once for the uppercase spelling);
 #   * `Q1`-`Q12` are the WRITING RUBRIC's items, and the frozen check that owns
 #     that rubric is J3 ("writing quality, logic, and overclaiming (the Q1-Q12
-#     rubric)"). The prompt says "a row names its rubric item (Q7)", so the panel
+#     rubric)" -- since 3.5.1 read as "claim calibration, overclaiming AND
+#     underclaiming" (the rubric's Q1 carries both directions). The prompt says
+#     "a row names its rubric item (Q7)", so the panel
 #     cites Q6/Q7/Q11/Q12 -- and the 2026-09-23 round-1 panel shows what the
 #     missing mapping costs: 8 of 24 sessions failed, three of them twice and one
 #     (judge_t1a4cb6e6_j2) on all three attempts, on nothing but

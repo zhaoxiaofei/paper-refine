@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.10 — both directions of every two-sided check (2026-09-29)
+
+The checklist was one-sided: J3 filed overclaims (unsupported first/novel
+claims, causal language over a correlation, a generalization past the tested
+conditions) and the same "too strong" reading ran through the other paired
+classes, while the mirror direction was invisible. An UNDERCLAIM — a supported
+result hedged into "may"/"could"/"suggests"/"a trend"/"preliminary", a
+limitation written as a retreat, an advance left unstated — was never a
+finding, and the other pairs (`M5` items present but unneeded, `M21` a letter
+claim below the manuscript's evidence, `M22` an availability statement weaker
+than the verified locator, `M29` a printed field the caption never describes, a
+document ADDED rather than lost, length compression allowed to strip
+meaning-bearing hedging) were unchecked in exactly the same way. This release
+makes every pair symmetric:
+
+- **J3 is claim calibration** (overclaiming AND underclaiming), with the fix
+  allowed to run only as far as the evidence goes; the class table, J1, J2
+  (precision both ways) and the `sweeps.md` preamble carry the both-directions
+  rule once, and every finding must cite the evidence that fixes the
+  calibration.
+- A new code-side ledger `claim_strength_rows` (`paper_docx_format.py`)
+  enumerates one row per claim-bearing paragraph per direction (`under` =
+  hedges, `over` = maximal claims), seeded as
+  `review/artifacts/CLAIM_STRENGTH.md` (a decision table under the
+  strict-artifacts policy) and `work/CLAIM_STRENGTH.md` for the other layouts.
+  The code cannot decide the calibration — it guarantees the quiet direction is
+  enumerated too, and a hedge the evidence requires is an `OK` row.
+- `paper-revise`'s E1/E3/E6/E11 and both standalone prompts state the mirror
+  fixes: a calibration finding authorises the edit in the direction it names
+  (never past the evidence), an availability statement is corrected toward the
+  verified locator in both directions, an M29 finding is fixed by adding the
+  missing description as well as by removing a false promise, and compression
+  may remove only hedging that carries no meaning.
+- `paper_pipeline.py` carries the rule in the shared decision block (D1), the
+  defect-class vocabulary, the writing rubric (Q1) and the language pass (L1);
+  the judge prompt states that a weakened supported claim is `introduced`
+  correctness, never neutral caution; the M5/M21/M22/M27/M29 prompt text and
+  `document_set_check` (added documents) carry their reverse directions; and
+  the review's disposition mandate lists the `CLAIM_STRENGTH.md` rows.
+
 ## 0.9 — the rewrite-parity checks (2026-09-28)
 
 The pipeline's judged rounds showed that a from-scratch rewrite (w1/w2) often

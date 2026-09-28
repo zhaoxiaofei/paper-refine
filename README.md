@@ -267,8 +267,10 @@ The review/audit/revise path now carries them explicitly:
   conventions (bundled `enumerate_conventions.py`; one authoritative form per
   family in `STYLE_CONVENTIONS.md`, one finding per deviating occurrence) ·
   **M27** claim→evidence coverage · **M28** sibling-definition symmetry ·
-  **M29** caption-promise vs printed-schema parity. Each gets its own artifact
-  under `review/artifacts/` and its own coverage row;
+  **M29** caption-promise vs printed-schema parity — a two-sided pairing: a
+  promise the print does not deliver and a printed column/panel/encoding the
+  caption never describes are the same finding class in opposite directions.
+  Each gets its own artifact under `review/artifacts/` and its own coverage row;
 * **J5** is the architecture pass: one row per scope in
   `review/ARCHITECTURE.md`, and its findings carry a `scope` key (they are the
   one legal non-instance finding);
@@ -774,6 +776,7 @@ cannot disagree about a number:
 | `CODE_SCANS.json` | M18 legend counts, M19 abstract/main-text lengths, M20 OOXML formatting rows, the hand-off placeholder count and the corpus identity (digest, file list, revision token) |
 | `EVIDENCE_PACK.md` | the same, human-readable, with the re-scan command |
 | `M18_caption_words.md`, `M19_length.md`, `M20_formatting.md` | seeded tables (one row per code-side finding, empty disposition column) for the review and the judge |
+| `CLAIM_STRENGTH.md` | J3's claim-strength ledger, BOTH directions: one row per claim-bearing paragraph per direction (`under` = a hedge the evidence may not require; `over` = a maximal claim the evidence may not support), each with a disposition column. Seeded under `review/artifacts/` for the review and under `work/` for the package-producing and audit sessions |
 | `CODE_SCANS_before.json` / `CODE_SCANS_after.json` | per stage: the input's and the delivered package's measurements, with an `evidence_delta` (over-cap sections, placeholders, formatting rows) recorded on the run and warned about when it regresses |
 
 Where it lands: `review/work/` + `review/artifacts/` (review) and `work/` at the
@@ -836,7 +839,7 @@ definition (`paper-skills/paper-revise/references/ledger.md`):
 
 | review category | scored class (`correctness > consistency > preservation > completeness > formatting`) |
 |---|---|
-| 0 Editor/Reviewer concerns | `correctness` (unsupported claim, overclaim, rigor, ethics), `completeness` (required information missing) or `preservation` (removed content/limitation) |
+| 0 Editor/Reviewer concerns | `correctness` (unsupported claim, overclaim, UNDERCLAIM, rigor, ethics), `completeness` (required information missing) or `preservation` (removed content/limitation) |
 | 1 Completeness & Factual Integrity | `correctness` (factual error, wrong number/DOI/reference key, broken cross-reference) or `completeness` (mandatory item missing) |
 | 2 Writing Quality, Logic, Repetition | `consistency` (the same thing said/spelled/numbered two ways; a convention applied unevenly), `correctness` (the wording changes the meaning) or `formatting` (a one-off wording preference) |
 | 3 Plagiarism / AI content | `correctness` (integrity of the content itself) |
@@ -850,6 +853,46 @@ is the *deliverable*, not the vocabulary: an identification session reports
 findings and never scores, a comparison session scores one target against one
 opponent and never ranks, and a package-producing session resolves findings in
 its own copy and keeps one ledger row per finding.
+
+**Every two-sided check runs in BOTH directions, and one side is not the
+check.** The checks were one-sided by construction: J3 filed overclaims
+(unsupported "first/novel" claims, causal language over a correlation, a
+generalization past the tested conditions) while an UNDERCLAIM -- a supported
+result hedged into "may"/"could"/"suggests"/"a trend"/"preliminary", a
+limitation written as a retreat, an advance left unstated -- was never a
+finding; and the same asymmetry ran through the other paired classes. The rule
+is now stated once, in the shared decision block every session carries, and
+made mechanical where it can be:
+
+* the code-side **claim-strength ledger** (`paper_docx_format.claim_strength_rows`)
+  enumerates the `under` rows (hedge markers) and the `over` rows (maximal-claim
+  markers) of every claim-bearing paragraph -- title/front matter, abstract,
+  body, legends, cover letter; never Methods, never references -- and is seeded
+  as `review/artifacts/CLAIM_STRENGTH.md` (a decision table under the
+  strict-artifacts policy) and as `work/CLAIM_STRENGTH.md` in the other
+  layouts. The code cannot decide the calibration; it guarantees that the QUIET
+  direction is enumerated as well as the loud one, and a hedge the evidence
+  requires is a legitimate `OK` row, never a licence to delete it;
+* **J3 is claim calibration**: both directions are `correctness` findings, and
+  the fix runs only as far as the evidence goes (raise an underclaim to what the
+  data support; lower an overclaim to what they support; never past either);
+* **a weakened claim is scored the same as an exaggerated one.** The judge
+  prompt states that `introduced` covers a claim the target states more weakly
+  than its own evidence supports -- "more cautious" is not automatically better
+  and not automatically neutral -- and `resolved` covers the mirror;
+* the other pairs carry their own reverse direction: **M5** items present that
+  must not ship (the "unneeded" half of category 5), **M21** a letter claim that
+  falls short of the manuscript's evidence, **M22** an availability statement
+  weaker than the verified locator ("available on request" while the lookup
+  resolves a public deposit), **M29** a printed column/panel/encoding the
+  caption never describes; and `document_set_check` now reports documents the
+  candidate ADDED as well as documents it lost;
+* **compression may not move a claim's strength.** The M18/M19 rule now allows
+  removing only non-meaning-bearing hedging: a hedge that carries the claim's
+  own strength (a limitation, an uncertainty the evidence supports) is content,
+  and stripping it would convert an accurate claim into an overclaim. A section
+  whose only route under the cap is a stronger or weaker claim is
+  `manual-required`, not compressed.
 
 **The judge's integer is derived from its own ledger, and the rules that derive it
 are consistent by construction** (fixed 2026-09-23). Each row weighs minor 1 /
@@ -1162,7 +1205,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 39 suites in ~120 s
+any failure. They are independent, so run them in parallel — 40 suites in ~120 s
 on a 20-core box, against ~5.5 min sequentially:
 
 ```bash
@@ -1197,6 +1240,10 @@ seeded files count as inputs not agent work, every prompt carries its block, the
 judge sandbox is proved to hold NO orchestrator artifact (blinding) while the
 orchestrator verifies the judge's target from its own side, and a stage records
 its before/after delta),
+`test_two_sided_checks.py` (both directions of every two-sided check: the J3
+claim-strength ledger's `under` and `over` rows, its seeding as
+`CLAIM_STRENGTH.md`, the added-document half of the document-set check, and the
+both-directions rule in all six prompts and both skills),
 `test_hash_cache.py`, `test_final_clean_version.py`, `test_grading_scheme.py`,
 `test_anonymized_judging.py`, `test_zotero_integration.py`. See
 `.paper_test/README.md` for the full table.

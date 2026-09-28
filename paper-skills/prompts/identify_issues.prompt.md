@@ -30,7 +30,7 @@ say where they went.
 
 ## Mission
 
-Diagnose, do not fix. Produce a findings report + artifacts that the revision skill (`paper-revise`) can consume mechanically. Length rule (replaces the former blanket exemption): **the venue profile's abstract/main-text limits apply, relaxed by the profile's own margins** — for the default Nature Biotechnology Article profile, abstract ≤ 150 words +15% (≤ 172) and main text ≤ 3,000 words +25% (≤ 3,750, excluding abstract, Methods, references and figure legends); another content type uses its own base numbers with the same margins. Words are maximal runs of non-space characters with a newline treated as space. Sweep **M19** reports over-cap sections as formatting findings; never cut content to meet a limit and never flag under-length text. Sweep **M18** always enumerates every figure legend's word count (the venue profile requires legends to respect the article type's limit but publishes no number; an optional proxy cap only changes the disposition). Sweep **M20** always audits the OOXML style/formatting rows the pipeline's code-side scan seeds (break-only paragraph/blank page, running head on the title page, legend spacing, heading style drift, unintended italics incl. field-protected Zotero rows, mixed URL/email treatments, mixed quotation marks, em-dash density). The cover letter's persuading part is measured against the user's **300-500-word preference** — the default profile's venue states no cover-letter word limit (checked 2026-09-19) — and is a Minor formatting item, never a journal requirement. All output in English.
+Diagnose, do not fix. Produce a findings report + artifacts that the revision skill (`paper-revise`) can consume mechanically. Length rule (replaces the former blanket exemption): **the venue profile's abstract/main-text limits apply, relaxed by the profile's own margins** — for the default Nature Biotechnology Article profile, abstract ≤ 150 words +15% (≤ 172) and main text ≤ 3,000 words +25% (≤ 3,750, excluding abstract, Methods, references and figure legends); another content type uses its own base numbers with the same margins. Words are maximal runs of non-space characters with a newline treated as space. Sweep **M19** reports over-cap sections as formatting findings; never cut content to meet a limit, never flag under-length text, and never strengthen or weaken a claim (in either direction) to reach one — a hedge the evidence requires is content, and stripping it is an overclaim. Sweep **M18** always enumerates every figure legend's word count (the venue profile requires legends to respect the article type's limit but publishes no number; an optional proxy cap only changes the disposition). Sweep **M20** always audits the OOXML style/formatting rows the pipeline's code-side scan seeds (break-only paragraph/blank page, running head on the title page, legend spacing, heading style drift, unintended italics incl. field-protected Zotero rows, mixed URL/email treatments, mixed quotation marks, em-dash density). The cover letter's persuading part is measured against the user's **300-500-word preference** — the default profile's venue states no cover-letter word limit (checked 2026-09-19) — and is a Minor formatting item, never a journal requirement. All output in English.
 
 Guidelines source: prefer a local copy of the author guidelines if present in the directory; otherwise the TARGET VENUE's own author guide -- the pipeline's venue profile names it
 (`venue_profiles/<id>.json`; the default profile's source is Nature Biotechnology's
@@ -164,7 +164,7 @@ DEFECT is, and where a category splits you classify by the concrete defect:
 
 | category | class |
 |---|---|
-| 0 Editor/Reviewer Concerns | `correctness` (unsupported claim, overclaim, rigor, ethics), `completeness` (required information or data availability missing) or `preservation` (removed content or a softened limitation) |
+| 0 Editor/Reviewer Concerns | `correctness` (unsupported claim, overclaim, UNDERCLAIM, rigor, ethics), `completeness` (required information or data availability missing) or `preservation` (removed content or a softened limitation) |
 | 1 Completeness & Factual Integrity | `correctness` (factual error, wrong number/DOI/reference key, broken cross-reference) or `completeness` (a mandatory item that is missing) |
 | 2 Writing Quality, Logic and Repetition | `consistency` (the same thing said, spelled or numbered two ways; a convention applied in one place and not another), `correctness` (the wording changes the meaning) or `formatting` (a one-off wording preference with no convention behind it) |
 | 3 Plagiarism / AI-generated content | `correctness` (the integrity of the content itself) |
@@ -174,6 +174,19 @@ DEFECT is, and where a category splits you classify by the concrete defect:
 Name the class in the finding's explanation whenever it is not obvious from the
 category: a revision or a judge that reads the finding must classify it the same
 way, and an edit that cannot be named in this vocabulary is cosmetic (score 0).
+
+**Both directions of every two-sided check.** A directional defect is only
+checked when BOTH of its directions are examined, and a run that reports one
+side has not run the check: a claim can be too STRONG (an overclaim) or too WEAK
+(an underclaim -- a supported result hedged into vagueness); content can be LOST
+(`preservation`) or INVENTED (`correctness`); an item can be MISSING or
+UNNEEDED; a claim can carry NO pointer or a printed/promised item can carry NO
+description; an availability claim can be STRONGER or WEAKER than the verified
+locator. The `under` direction is a real defect of the same class as the `over`
+direction, never a neutral preference for caution. The review's J3 rows and the
+`CLAIM_STRENGTH.md` ledger the pipeline seeds enumerate both directions of the
+claim-strength pair; the other pairs are stated in their own sweep (M5, M21,
+M22, M27/M29) and in the class table above.
 
 Conflict resolution priority (which occurrence is authoritative when documents
 disagree — extends the reference-chat order):
@@ -436,6 +449,15 @@ revised-submission stage — prepare now] / [recommended]).
 
 **Finding rules:** one finding per missing or partial item. Do not invent or
 fabricate missing data; note a placeholder may be needed and report every gap.
+The sweep runs in BOTH directions: the enumeration above finds what the
+submission must have and does not, and the same pass disposes what it HAS and
+must not ship -- a draft, an internal note or meeting record, a duplicate of a
+shipped item, personal or confidential material (PII), a document that
+identifies the authors under a double-anonymized submission. Category 5 is
+"Missing / Unneeded Information" for that reason: an unneeded item is the
+mirror of a missing one and is class `completeness` too. The two halves need
+different evidence, so an item may be `unable — <reason>` when the corpus
+cannot show whether it is required or forbidden; it may not be silently skipped.
 
 ## M6 — Placeholder & hygiene sweep (scriptable: regex)
 
@@ -684,7 +706,11 @@ into `M18_caption_words.md`: document | caption id | word count | disposition.
 **Finding rules (one per instance):**
 - a legend over the configured proxy cap → FORMATTING-tier item; it is reported
   and, only where redundancy can be removed, compressed — never by deleting
-  scientific content, claims, limitations or needed methodological detail
+  scientific content, claims, limitations or needed methodological detail, and
+  never by stripping a hedge that carries the legend's own claim strength (a
+  real limitation or an uncertainty the data support): that would be a
+  `correctness` overclaim, not a shorter legend. The same rule as M19's
+  compression, in the legend's own words.
 - no cap configured → the count is recorded with the disposition "recorded —
   the venue's per-type limit is not published; author to compare"; the word
   count alone is neither a defect nor a scoring difference
@@ -750,6 +776,16 @@ scientific content, claims, limitations, data or needed methodological detail to
 reach a cap. Length is never a gate: it never makes a version ineligible and
 only ever enters a comparison through the formatting tier.
 
+**What compression may remove -- and what it may not.** Redundancy, repeated
+statistics and hedging that carries no meaning are removable. A hedge that
+carries the claim's own strength -- a limitation, an uncertainty the evidence
+supports, a result reported as uncertain because it is -- is CONTENT: stripping
+it turns an accurate claim into an overclaim, which is a `correctness` defect
+and not a shorter version. Likewise a compression must never STRENGTHEN a claim
+to save words. If the only way to reach the cap is to move a claim's strength in
+either direction, the section is `unable — needs the author's judgement` and
+stays as it is.
+
 ## M20 — OOXML style/formatting uniformity (always runs)
 
 **Purpose:** the corpus converters read text only, so a candidate can pass every
@@ -808,7 +844,12 @@ exhaustive-by-enumeration.
 
 Breadth of interest, novelty/technical advance, suitability for the
 target journal specifically; whether the cover letter articulates the significance in plain
-terms for editors; whether claims of broad interest are supported.
+terms for editors; whether claims of broad interest are supported -- and, in the
+same pass, whether a claim of broad interest the work DOES support is left
+unstated or undersold. An unsupported claim and an undersold advance are the two
+directions of one failure (the claim's strength does not match the evidence), so
+a manuscript that hedges its own advance away is as reportable as one that
+inflates it.
 
 ## J2 — Scientific & statistical rigor
 
@@ -822,7 +863,13 @@ fairness. Methods reproducibility: enough detail (parameters, software
 versions, seeds, data splits, hardware, accession numbers) to reproduce the
 work.
 
-## J3 — Writing quality, logic, and overclaiming
+Report statistical precision in BOTH directions: an inequality where the exact
+value is known ("p < 0.05" for a value the analysis printed) hides information,
+and digits the design cannot support ("p = 0.0413" or a mean quoted to four
+decimals from three samples) invent it -- a claim's precision is part of its
+strength, so both are rigor findings.
+
+## J3 — Writing quality, logic, and claim calibration (overclaiming and underclaiming)
 
 Semantic/grammatical/syntactic errors (subject–verb agreement; tense and voice
 consistency — past for results/methods, present for established facts;
@@ -834,7 +881,25 @@ explicitly a cross-reference); repetition across sections only when the
 statement's purpose changes (Results reporting vs Discussion interpretation);
 flag recurrence that adds nothing. Overclaiming: unsupported
 "first/novel/state-of-the-art" claims, causal language for correlational
-results, generalization beyond tested conditions.
+results, generalization beyond tested conditions, "significant" for a trend, and
+an equivalence or "no effect" claim drawn from a non-significant test (absence of
+evidence is not evidence of absence).
+
+**Underclaiming -- the same defect read in the other direction.** A claim the
+evidence supports, stated BELOW its supported strength: "may", "could", "it is
+possible", "would seem to", "we speculate", "appears to", "suggests", "is
+consistent with", or "a trend" for a significant, adequately powered result; a
+conclusion the data establish left as "preliminary"/"exploratory"/"descriptive"
+without a stated reason; a limitation written as a retreat that undersells what
+was actually shown; the manuscript's own supported advance never stated. Both
+directions are `correctness` findings -- the claim's strength does not match the
+evidence -- and the fix runs only as far as the evidence goes: raise an
+underclaim to exactly what the data support, lower an overclaim to exactly what
+they support, never past either. A hedge the design genuinely requires (a real
+limitation, uncertainty the data cannot resolve) is CORRECT and is not a
+finding: the check is the CALIBRATION, not the presence of hedging, and an
+underclaim finding must name the evidence that supports the stronger statement.
+A session that reports only the overclaim direction has not run J3.
 
 ## J4 — Plagiarism, AI-content & policy compliance
 
@@ -975,7 +1040,11 @@ deliverable? | disposition.
 **Finding rules (one per instance).** An exclusion request without a conflict
 basis · a suggested e-mail on a retired/placeholder domain · a missing required
 disclosure · a letter claim that exceeds the manuscript's own evidence (compare
-against the manuscript, not against the letter).
+against the manuscript, not against the letter) · a letter claim that falls
+SHORT of it (an underclaim: a supported result or an obvious strength of the
+work the letter undersells or leaves out -- the letter is read against the
+manuscript's evidence in BOTH directions, and the same result may not be an
+overclaim in one run and unexamined silence in the next).
 
 ## M22 — Data/code-availability integrity sweep
 
@@ -998,7 +1067,13 @@ bare/version-pinned repository URL · a "publicly available" claim whose locator
 does not resolve · two different commit pins for the same repository where the
 statement says the pin produced the published numbers · an accession without a
 database name · a hand-off DOI placeholder (resolved or explicitly reported as
-not yet deposited).
+not yet deposited) · an availability statement WEAKER than the verified reality,
+which is the same defect read in the other direction: data described as
+"available upon request" (or "not yet deposited") while the corpus's accession,
+repository URL or the pipeline's own `IDENTIFIERS.md` lookup shows a public,
+resolving deposit; a "restricted" claim contradicted by the locator class. The
+statement and the locator must agree in BOTH directions, and an
+`absent`/`found` verdict from `work/IDENTIFIERS.md` is the evidence either way.
 
 ## M23 — Supplementary parity sweep
 
@@ -1151,7 +1226,9 @@ covered? | disposition.
 the sentence claims more than the cited evidence supports. State the exact
 pointer to add (e.g. `Supplementary Fig. S15`, `(Methods)`); never invent a
 source. A claim whose required set cannot be derived from the corpus is
-`unable — <reason>`, not a finding.
+`unable — <reason>`, not a finding. The pair is checked from the pointer side
+only here; the claim side (a supported result the sentence never states at all)
+is J3's underclaiming, filed there with its own evidence.
 
 ## M28 — Sibling-definition symmetry
 
@@ -1199,7 +1276,12 @@ contradicts the caption's own claim. A promise satisfied inside a dataset
 identifier rather than as its own column is recorded as partial satisfaction
 with the fix route. Fixes align the editable side (caption or printed source
 when it is in the corpus); a generated print's regeneration step goes to
-MANUAL_STEPS.md.
+MANUAL_STEPS.md. **The pairing runs in BOTH directions**: a printed
+column/panel/encoding the caption never describes is the mirror finding (readers
+cannot interpret an undocumented field, and the caption -- not the reader -- owns
+the explanation), class `completeness`, with the same fix routes (add the
+description to the editable caption, or regenerate the print). One direction
+without the other is an unfilled artifact.
 
 ## New code-side rule ids the sweeps now emit
 
@@ -1278,6 +1360,13 @@ total; if you stall, ask "what else?" twice more before stopping):
   preverb forms, term families) that M26's family list does not name?
 - does any scope's reading order still carry a rewrite-class cost that J5's
   architecture rows do not name?
+- does any KNOWN-CLASS read only ONE direction of a two-sided defect? A claim
+  can be too strong or too weak (calibration), content can be lost or invented,
+  an item can be missing or unneeded, a claim can carry no pointer or a printed
+  item no description, an availability claim can outrun or undersell its
+  locator, a document can be dropped or added. For every class whose fixed
+  definition names one direction, the missing direction is a gap row (and a
+  probe) until a run has reported both.
 
 The rows are questions about issue CLASSES, not instances — instances come
 from probes.

@@ -21,9 +21,13 @@ the pipeline's relaxed caps (abstract ≤ 172 words = 150 +15%; main text ≤ 3,
 words = 3,000 +25%, excluding abstract, Methods, references and figure legends,
 for the default Nature Biotechnology Article profile; another content type uses
 its own base numbers with the same margins, and another venue profile carries
-the numbers its own guidelines state) is brought within the cap by removing redundancy, hedging and
-repeated statistics ONLY. Never delete scientific content, claims, limitations,
-data, accession numbers or needed methodological detail, and never cut text
+the numbers its own guidelines state) is brought within the cap by removing redundancy,
+repeated statistics and hedging that carries no meaning ONLY. A hedge that carries the claim's
+own strength — a limitation, an uncertainty the evidence supports, a result
+reported as uncertain because it is — is CONTENT: stripping it turns an accurate claim into an
+overclaim (a `correctness` defect), which is never a shortening. Never delete scientific
+content, claims, limitations, data, accession numbers or needed methodological detail, never
+strengthen a claim to save words, and never cut text
 that is already within the cap for length reasons. Words are maximal runs of
 non-space characters with a newline treated as space; count with
 `count_words.py` (bundled with paper-review), never by eye. Record every
@@ -105,6 +109,14 @@ contributions list), create the file in REVISED/ with clearly marked
 final report. Otherwise just report the gap. A data-availability statement
 is not something to invent — it is something to scaffold.
 
+A data/code-availability statement is corrected in BOTH directions, and
+`work/IDENTIFIERS.md` is the evidence: when the pipeline's lookup RESOLVED the
+deposit (`found`), a statement weaker than that is an inaccurate claim —
+"available upon request" / "not yet deposited" is fixed by naming the verified
+locator, exactly as a "permanent archive" claim on a bare URL is fixed by
+softening it to what the locator supports. Only an `absent`/`error`/`skipped`
+verdict leaves the weaker wording in place (with the search evidence recorded).
+
 ## E4 — Plagiarism and AI-content findings
 
 Plagiarism findings: rewrite the flagged passage with proper paraphrase and
@@ -135,6 +147,18 @@ conclusions on your own initiative. Where a fix requires such judgement
 unchanged, provide 2–3 alternative wordings in the final report, and set the
 ledger status to `manual-required` (reason: scientific judgement). The model
 chooses wordings; the author chooses claims.
+
+**CLAIM-CALIBRATION FINDINGS ARE THE EXCEPTION, and they run in BOTH
+directions.** A frozen J3 finding (or the `work/CLAIM_STRENGTH.md` row it came
+from) that names an OVERCLAIM authorises that one edit: lower the claim to
+exactly the strength the finding's evidence supports. A finding that names an
+UNDERCLAIM authorises the mirror edit: raise the claim to exactly the strength
+the finding's evidence supports — an underclaim is a real defect of the same
+class, not a safe place to leave the text. In both cases the finding must quote
+the evidence that fixes the calibration, and the edit must not overshoot into
+the other direction (an overclaim "fixed" into a vague hedge is a new
+underclaim; a hedge "fixed" into a bare claim is a new overclaim). A claim edit
+with no calibration finding behind it stays `manual-required` under this rule.
 
 **RIGOR REPAIRS ARE LEGAL (2026-09-21).** The guard above covers claims,
 interpretations and conclusion strength — not the *supporting detail* behind
@@ -343,7 +367,10 @@ instance, never one blanket edit.**
   corpus is `manual-required`, never invented.
 * **M29 (caption-promise parity).** Align the editable side with what the print
   actually delivers — the caption wording, or the printed source when that source
-  is in the corpus and editable — one promised item per edit. A generated print's
+  is in the corpus and editable — one promised item per edit. The pairing runs in
+  BOTH directions: a printed column/panel/encoding the caption never describes is
+  the same finding class, fixed by ADDING the missing description to the editable
+  caption (or by regenerating a generated print). A generated print's
   regeneration step is a manual follow-up, not a reason to carry the finding.
 
 **J5 (scope findings): the scoped restructuring licence.** A J5 finding names a

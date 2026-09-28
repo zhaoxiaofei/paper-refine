@@ -34,6 +34,13 @@ Design rules, each one the result of an observed failure:
   instruction) is a field RESULT: Word cannot restyle it persistently because a
   refresh regenerates it. Such rows carry `protected=true`; the fix is the CSL
   style, or `unlink_zotero_fields: true` in the policy for a submission copy.
+
+The module also carries the text-side ledgers the pipeline seeds for its
+sessions (`number_ledger`, `key_term_rows`, `identifier_rows`,
+`concept_family_rows`, `outline_rows`, `placeholder_ledger`). One of them is
+two-sided on purpose: `claim_strength_rows` (check id J3) enumerates the `under`
+(hedge) AND `over` (maximal claim) directions of every claim-bearing paragraph,
+so a review cannot report the loud direction and leave the quiet one unexamined.
 """
 from __future__ import annotations
 
@@ -748,6 +755,109 @@ def number_ledger(paras: list) -> list:
                          "unit": (UNIT_RE.match(text[m.end():]).group(0).strip()
                                   if UNIT_RE.match(text[m.end():]) else None),
                          "sentence": sentence.strip()[:200], "source": ""})
+    return rows
+
+
+# --------------------------------------------------------------------------
+# The claim-strength ledger (check id J3: overclaiming AND underclaiming).
+#
+# J3's calibration check is TWO-SIDED, and only one side is loud enough to be
+# noticed by a plain read: a claim that outruns its evidence ("demonstrates",
+# "proves", "for the first time", a causal verb over a correlation) draws the
+# eye, while a claim that undersells its own evidence ("may", "could",
+# "suggests", "a trend", "preliminary") reads as careful writing and is never
+# enumerated -- so an underclaim survives every instance-level sweep of the
+# corpus.  This ledger makes BOTH directions a row a session must dispose: one
+# row per paragraph per direction, carrying the markers the code found and the
+# sentence that carries them.
+#
+# The code cannot decide the calibration (that is the evidence judgement the
+# reviewer/auditor/reviser makes); it only guarantees that the session looks at
+# the underclaim direction as well as the overclaim direction.  A marker whose
+# strength MATCHES the evidence is a legitimate disposition, not a defect: the
+# row asks "does this sentence's strength match what the corpus shows?", never
+# "delete the hedge".
+# --------------------------------------------------------------------------
+
+# Direction 1 -- UNDERCLAIM markers: the sentence weakens what the evidence
+# supports.  Deliberately conservative: each row is a QUESTION, not a verdict.
+CLAIM_HEDGE_MARKERS = (
+    r"\bmay\b", r"\bmight\b", r"\bcould\b", r"\bpossibly\b", r"\bperhaps\b",
+    r"\bpotentially\b", r"\bpresumably\b", r"\bseems?\b", r"\bappear(?:s|ed)? to\b",
+    r"\bsuggests?\b", r"\bsuggesting\b", r"\bsuggestive\b", r"\bwe speculate\b",
+    r"\bspeculation\b", r"\bplausibl[ey]\b", r"\btends? to\b", r"\ba trend\b",
+    r"\btrend(?:ed)? toward\b", r"\bborderline\b", r"\bmarginal(?:ly)?\b",
+    r"\bmodest(?:ly)?\b", r"\bsubtle\b", r"\bpreliminary\b", r"\bexploratory\b",
+    r"\bdescriptive\b", r"\bconsistent with\b", r"\bwe cannot exclude\b",
+    r"\bcannot exclude\b", r"\bremains? (?:to be|unclear)\b", r"\byet to be\b",
+    r"\bfurther (?:work|study|studies)\b", r"\bnot conclusive\b",
+    r"\bno definitive\b", r"\bwould seem\b",
+)
+
+# Direction 2 -- OVERCLAIM markers: the sentence claims more than the evidence
+# shown supports (the class J3 has always named: unsupported first/novel
+# claims, causal language over a correlation, generalization past the tested
+# conditions).  Listed here so the ledger is symmetric, and so a REVIEWER/
+# JUDGE sees the two directions side by side in one artifact.
+CLAIM_ABSOLUTE_MARKERS = (
+    r"\bfor the first time\b", r"\bfirst (?:report|demonstration|evidence)\b",
+    r"\bnovel\b", r"\bunprecedented\b", r"\bstate[- ]of[- ]the[- ]art\b",
+    r"\buniquely\b", r"\bproves?\b", r"\bproven\b", r"\bdemonstrates?\b",
+    r"\bestablishes?\b", r"\bconfirms?\b", r"\bclearly\b", r"\bundoubtedly\b",
+    r"\bdecisively\b", r"\bdramatic(?:ally)?\b", r"\bremarkabl[ey]\b",
+    r"\bstriking\b", r"\bcauses?\b", r"\bdrives?\b", r"\bleads? to\b",
+    r"\bresponsible for\b", r"\bwe prove\b",
+)
+
+# A claim's home surfaces.  Methods paragraphs describe protocols, not claims,
+# and reference lists/quoted titles are not the manuscript's own voice, so they
+# are not enumerated -- the ledger must stay small enough to be disposed row by
+# row (the repository's own "70 rows of noise" lesson).
+CLAIM_KINDS = ("front", "abstract", "body", "legend")
+
+
+def _first_marker_sentence(text: str, pattern) -> str:
+    """The sentence carrying the first match of `pattern` (trimmed for a cell)."""
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text or "") if s.strip()]
+    for s in sentences:
+        if pattern.search(s):
+            return s[:200]
+    return (text or "").strip()[:200]
+
+
+def claim_strength_rows(paras: list, is_ref: list = None, kinds: list = None) -> list:
+    """J3's two-sided claim-strength ledger: one row per paragraph per direction.
+
+    Columns: paragraph | kind | direction (`under` = a hedge the evidence may
+    not require; `over` = a maximal claim the evidence may not support) |
+    markers | sentence.  Both directions are enumerated for every claim-bearing
+    paragraph, so a session cannot report the loud direction and leave the quiet
+    one unexamined.
+    """
+    rows = []
+    is_ref = list(is_ref or [False] * len(paras))
+    kinds = list(kinds) if kinds else section_kinds(paras)
+    hedge_re = re.compile("|".join(CLAIM_HEDGE_MARKERS), re.I)
+    absolute_re = re.compile("|".join(CLAIM_ABSOLUTE_MARKERS), re.I)
+    for i, text in enumerate(paras):
+        if i < len(is_ref) and is_ref[i]:
+            continue
+        kind = kinds[i] if i < len(kinds) else "body"
+        if kind not in CLAIM_KINDS:
+            continue
+        if len((text or "").split()) < 5:
+            continue
+        for direction, pattern in (("under", hedge_re), ("over", absolute_re)):
+            # `finditer` + group(0), never `findall`: a capture group added to a
+            # marker later would silently turn every match into its group text.
+            found = [m.group(0) for m in pattern.finditer(text or "")]
+            if not found:
+                continue
+            markers = sorted({str(m).strip().lower() for m in found})
+            rows.append({"paragraph": i, "kind": kind, "direction": direction,
+                         "markers": "; ".join(markers[:6]),
+                         "n markers": len(found),
+                         "sentence": _first_marker_sentence(text, pattern)})
     return rows
 
 

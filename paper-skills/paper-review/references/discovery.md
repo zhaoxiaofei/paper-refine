@@ -60,6 +60,13 @@ total; if you stall, ask "what else?" twice more before stopping):
   preverb forms, term families) that M26's family list does not name?
 - does any scope's reading order still carry a rewrite-class cost that J5's
   architecture rows do not name?
+- does any KNOWN-CLASS read only ONE direction of a two-sided defect? A claim
+  can be too strong or too weak (calibration), content can be lost or invented,
+  an item can be missing or unneeded, a claim can carry no pointer or a printed
+  item no description, an availability claim can outrun or undersell its
+  locator, a document can be dropped or added. For every class whose fixed
+  definition names one direction, the missing direction is a gap row (and a
+  probe) until a run has reported both.
 
 The rows are questions about issue CLASSES, not instances — instances come
 from probes.

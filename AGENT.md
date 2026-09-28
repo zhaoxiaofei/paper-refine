@@ -79,6 +79,16 @@ the profiles shipped next to the script → the built-in fallback inside
    **historical identifiers**, not venue assumptions: they are the stable names
    of the installed skill packages and of this repository's entry points. Do not
    rename them in prompt text; do keep their *prose* venue-neutral.
+7. **Every two-sided check runs in BOTH directions, and one direction is not
+   the check.** A claim can be too strong (overclaim) or too weak (underclaim);
+   content can be lost or invented; an item can be missing or unneeded; a claim
+   can carry no pointer or a printed item no description; an availability claim
+   can outrun or undersell its locator; a document can be dropped or added.
+   When you touch a check, its sweep entry, its prompt text or its fix rule,
+   keep the pair symmetric (the shared decision block's D1 states the rule for
+   every session, and `paper_docx_format.claim_strength_rows` +
+   `CLAIM_STRENGTH.md` are the J3 surface; `.paper_test/test_two_sided_checks.py`
+   pins it). Never add or edit only the loud direction.
 
 ## Commands you will use
 
