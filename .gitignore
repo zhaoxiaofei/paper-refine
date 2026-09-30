@@ -1,16 +1,5 @@
-cnb-v03z/
-cnb-v04z/
-cnb-v05c/
-cnb-v06c/
-*/*.aux
-*/*.bbl
-*/*.bcf
-*/*.blg
-*/*.log
-*/*.out
-*/*.pdf
-*/*.run.xml
-*/*.synctex.gz
+# ignore data from third-party
+audit_data/
 
 # `media/` commits the PNG figures the docs embed (README.md, AGENT.md, ...); a
 # local `.pdf` render beside them stays ignored by the rule above.
