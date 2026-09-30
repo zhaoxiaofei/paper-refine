@@ -911,6 +911,24 @@ findings and never scores, a comparison session scores one target against one
 opponent and never ranks, and a package-producing session resolves findings in
 its own copy and keeps one ledger row per finding.
 
+**Small differences are scored when ONE side is worse.** A prose difference is a real difference
+when one of the two readings is worse on a NAMED item of the shared writing rubric (Q1–Q12:
+premise/calibration, formal-logic slip, logic jump, coherence/linkage, unexplained prerequisite,
+redundancy, non-academic wording, non-written register, stiff/translated phrasing, grammar,
+typography/punctuation, segmentation/structure): a single less precise, less idiomatic or less
+academic word is a Minor row exactly like a single typo, and "it appears only once" is not an
+exemption. The judgement is generic and directional (academic vs conversational, precise vs vague,
+the established collocation vs an ad-hoc pairing), never a fixed word list; a difference where BOTH
+readings satisfy every item is cosmetic (0) — "different" is not "worse". The structural level sets
+the rung (a sentence slip Minor, a paragraph-level defect Major, a section-level defect Critical
+when the scope's topic is unrecoverable), and the non-applicable mechanical conventions (character
+spacing, blank lines, line/paragraph breaks) stay with M20 and the orchestrator's normalizer, never
+a prose row. The rule reaches every session: the review files such instances as category-2/J3
+findings, the audit may not drop one without showing the text correct as written, the
+package-producing stages fix them in the L1–L11 language pass, and the integration ledger may use
+`ignore-cosmetic` only for a difference whose two readings satisfy every item — an integrated
+version is expected to score higher than every donor it was built from.
+
 **Every two-sided check runs in BOTH directions, and one side is not the
 check.** The checks were one-sided by construction: J3 filed overclaims
 (unsupported "first/novel" claims, causal language over a correlation, a

@@ -262,6 +262,19 @@ def test_judge_writing_rubric():
           and "Q7" in prompt)
     check("the rubric maps the tier's checks to the same ideas the pass fixes",
           all(k in prompt for k in ("Q1 ", "Q4 ", "Q5 ", "Q6 ", "Q10 ", "Q11 ")))
+    check("the rubric scores minor differences GENERICALLY and directionally",
+          "HOW TO COMPARE TWO READINGS" in prompt
+          and "never merely because the two readings differ" in prompt
+          and "ONE worse word, verb or connector is a MINOR row" in prompt
+          and "is cosmetic (0) for everyone" in prompt
+          and "Never work from a fixed" in prompt)
+    check("the rubric excludes the non-applicable mechanical conventions",
+          "MECHANICAL SEPARATOR CONVENTIONS ARE NOT THIS ITEM" in prompt
+          and "never scored twice" in prompt
+          and "macro argument is NOT a prerequisite" in prompt)
+    check("the rubric's severity ladder carries the structural scope rule",
+          "a slip that recurs through a" in prompt
+          and "is MAJOR" in prompt)
     forbidden = {
         r"\bround\b": "round", r"\barm\b": "arm", r"\brewrite\b": "rewrite",
         r"\brevised\b": "revised", r"\brevision\b": "revision",

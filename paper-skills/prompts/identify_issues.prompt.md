@@ -171,7 +171,10 @@ filed under:
 - **Major** — the error changes a reported fact, attribute, comparison or sample set, but not the
   paper's conclusion (a wrong age band, sex, unit or cohort label is the typical case; an
   editor/reviewer/copyeditor would flag it), or a prose/formatting failure a reader must work
-  around.
+  around. A prose slip that RECURS through a paragraph or section -- or one that leaves a whole
+  scope's topic unclear -- is Major, not "several more Minor rows": the structural level a defect
+  reaches is part of its distance from correct (a sentence-level slip is Minor, a paragraph-level
+  one Major, a section- or argument-level one Critical).
 - **Minor** — a detail that changes no claim, reported fact or downstream number (polish,
   consistency, style; the closest miss).
 
@@ -201,6 +204,34 @@ broken repeatedly, and a `formatting` row is graded on the same four rungs as ev
 cosmetic slip recorded at all stays Minor; damage a reader must work around is Major). A blank
 LINE is not a blank PAGE: the break-only paragraph that displaces a page is artifact damage,
 graded by the extent of what it displaces.
+
+**Small differences are scored when ONE side is worse** -- the rule that keeps a single less
+idiomatic word, one punctuation slip or one missing transition from reading as "cosmetic". A
+prose difference is a finding when one of the two versions is worse on a NAMED item of the shared
+writing rubric (J3/Q1–Q12), never merely because the two wordings differ:
+
+- the items, in the order every session reads them: premise/claim calibration (Q1), formal-logic
+  slip (Q2), logic jump (Q3), coherence and unit-to-parent / unit-to-next linkage (Q4), unexplained
+  prerequisite (Q5 -- a LaTeX command or macro argument is NOT a prerequisite: the full paper
+  defines it, so never file a row for a macro's argument), redundancy (Q6), non-academic wording
+  (Q7), non-written register (Q8), stiff/formulaic/translated phrasing (Q9), grammar (Q10),
+  typography and punctuation (Q11), segmentation and structural unity (Q12);
+- judge each item GENERICALLY and DIRECTIONALLY: compare the two readings of the same content and
+  name which one is worse and by what -- academic vs conversational, precise vs vague, the
+  established collocation vs an ad-hoc pairing, formal vs spoken, idiomatic vs a literal rendering
+  of another language. Never work from a fixed word or phrase list;
+- ONE worse word, verb or connector is a Minor row exactly like one typo, and "it appears only
+  once" is not an exemption; a slip that recurs through a paragraph, or one that leaves a scope's
+  topic unclear, is Major; a difference where BOTH readings satisfy every item is cosmetic (0) --
+  "different" is not "worse";
+- unity and linkage are checked at EVERY structural level, and the level sets the rung: a section
+  must carry one topic with independent sub-topics, a subsection likewise, a paragraph one
+  message, and every unit must connect to its parent and to its next sibling (Q4/Q12; the
+  scope-level form is J5);
+- MECHANICAL SEPARATOR CONVENTIONS ARE NOT PROSE: character spacing, blank lines and line or
+  paragraph breaks belong to the M20 format sweep and the orchestrator's own normalizer, never to
+  a writing row, and they are never scored twice. Venue or template rules that do not apply to
+  this manuscript are ignored rather than imported as defects.
 
 **A claim both versions get wrong is scored by the DISTANCE between the two errors**, not by two
 absolute severities that cancel: file the opponent's error as `resolved` and the target's error as
@@ -942,6 +973,19 @@ finding: the check is the CALIBRATION, not the presence of hedging, and an
 underclaim finding must name the evidence that supports the stronger statement.
 A session that reports only the overclaim direction has not run J3.
 
+**Prose findings name their item, and a small difference is a finding when one side is worse.**
+File one J3 finding per instance and name the shared writing-rubric item in the explanation (Q1
+premise/calibration, Q2 formal-logic slip, Q3 logic jump, Q4 coherence/linkage, Q5 unexplained
+prerequisite, Q6 redundancy, Q7 non-academic wording, Q8 non-written register, Q9 stiff/translated
+phrasing, Q10 grammar, Q11 typography/punctuation, Q12 segmentation/structure). A single less
+precise, less idiomatic or less academic word, verb or connector IS a finding when the alternative
+the register itself uses is available and unambiguous: judge the two readings generically and
+directionally (academic vs conversational, precise vs vague, the established collocation vs an
+ad-hoc pairing), never from a fixed word list, and say which item makes the worse side worse.
+"Different" is not "worse": a difference where both readings satisfy every item is cosmetic and is
+not a finding. Character spacing, blank lines and line/paragraph breaks are M20 formatting rows,
+not J3 findings, and a LaTeX macro argument is not an unexplained prerequisite.
+
 ## J4 — Plagiarism, AI-content & policy compliance
 
 Uncited very-related works (including preprints) to the extent detectable
@@ -1002,7 +1046,13 @@ finding id. A document with no rows at all is an unfilled artifact.
 category 2, class `consistency` when a structural convention is applied
 unevenly across sibling scopes and `writing` when only flow is at stake;
 severity Major when the reader cannot recover the argument without re-reading,
-Minor otherwise. The explanation must state the reader cost and the proposed
+Minor otherwise. Unity and linkage are checked at EVERY level -- a chapter or
+section carrying more than one top-level topic, a subsection that is not an
+independent sub-topic of its parent, a paragraph with two messages, adjacent
+units with no stated relation -- and the level sets the severity: a
+sentence-level slip is Minor, a paragraph-level defect Major, a section- or
+argument-level defect Critical when it makes the scope's topic unrecoverable.
+The explanation must state the reader cost and the proposed
 order; the evidence is a short current → proposed outline. Content is never
 changed: the same claims, numbers, citations, limitations and conclusions, in
 a different order. A scope whose only "fix" would invent or delete content is

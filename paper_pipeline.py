@@ -4126,12 +4126,15 @@ defect the same way; only the deliverable differs):
         not another; @@T_CORRECTNESS@@ when the wording changes the meaning (a claim that
         becomes wrong, a number attributed to the wrong metric, a claim whose STRENGTH no longer
         matches the evidence in either direction -- an overclaim or an underclaim);
-        @@T_FORMATTING@@ when it is a
-        one-off wording preference with no convention behind it; @@T_WRITING@@ when it is a
-        grammar, spelling, punctuation or prose-flow error that changes no MEANING (graded on the
-        same four rungs as every class: a slip that costs the reader nothing is Minor, prose a
-        reader must work around is Major, prose nobody can follow is Critical/Fatal; a row whose
-        evidence shows the meaning changed is refiled to @@T_CORRECTNESS@@);
+        @@T_WRITING@@ when it is a word, verb or connector that is less precise, less idiomatic
+        or less academic than the alternative the register itself uses, or a grammar, spelling,
+        punctuation, logic, coherence, redundancy or segmentation slip that changes no MEANING
+        (graded on the same four rungs as every class: a slip that costs the reader nothing is
+        Minor, one that recurs or leaves a scope's topic unclear is Major, prose nobody can follow
+        is Critical/Fatal; a row whose evidence shows the meaning changed is refiled to
+        @@T_CORRECTNESS@@); @@T_FORMATTING@@ only when the difference is purely mechanical
+        (character spacing, line or paragraph breaks) and carries no prose quality -- those are
+        the format sweep's own rows;
       - category 3 (Plagiarism / AI-generated content) -> @@T_CORRECTNESS@@ (the integrity of the
         content itself); category 4 (Technical Formatting) -> @@T_FORMATTING@@ for the M18/M19/M20
         COSMETIC rows, or @@T_COMPLETENESS@@ / @@T_CORRECTNESS@@ when the row damages the delivered
@@ -4147,8 +4150,11 @@ defect the same way; only the deliverable differs):
     citation, a claim the data refute, a wrong species or kind); MAJOR = the error changes a
     reported fact, attribute, comparison or sample set, but not the paper's conclusion (a wrong age
     band, sex, unit or cohort label is the typical case), or a prose/formatting failure a reader
-    must work around; MINOR = a detail that changes no claim, reported fact or downstream number
-    (the closest miss: an adjacent value, a wording slip whose meaning survives). A finding's
+    must work around -- a slip that RECURS through a paragraph or section, or that leaves a scope's
+    topic unclear, is MAJOR rather than several more MINOR rows, because the structural level a
+    defect reaches is part of its distance from correct; MINOR = a detail that changes no claim,
+    reported fact or downstream number (the closest miss: an adjacent value, a wording slip whose
+    meaning survives). A finding's
     (category, severity) and a compared item's (class, severity) must come from the SAME defect and
     the SAME rung; "it is a factual error" alone does NOT make every rung CRITICAL, and a prose or
     formatting defect is NOT thereby barred from MAJOR, CRITICAL or FATAL.
@@ -4986,6 +4992,17 @@ Skill discipline that the orchestrator will check for:
     in its artifact table (including rows later judged OK); a sweep with zero findings is INVALID
     unless its artifact exists and every row carries a disposition.
   * One finding per instance, never aggregated ("several acronyms are undefined" is not a finding).
+  * SMALL DIFFERENCES ARE FINDINGS WHEN ONE SIDE IS WORSE: a single less precise, less idiomatic
+    or less academic word, verb or connector, a missing transition, a punctuation or grammar slip,
+    a paragraph carrying two messages, or a unit that does not link to its neighbour is a
+    category-2 finding (check J3) at Minor severity when the alternative the register itself uses
+    is available and unambiguous -- name the shared prose item (Q1-Q12 in the judge's writing
+    rubric, mirrored by the language pass's L1-L11) in the explanation and quote the words. "It is
+    only style" is not a disposition: file the finding, or dispose the row OK with the reason that
+    BOTH readings satisfy every item of the shared prose rubric. Judge this generically (academic
+    vs conversational, precise vs vague, the established collocation vs an ad-hoc pairing), never
+    from a fixed word list. Character spacing, blank lines and line/paragraph breaks are M20
+    formatting rows, never J3 findings.
   * The M1 artifact's M1b instance table (un-abbreviated long forms used again after the acronym's
     first use) is NOT optional reading: each of its rows is either an M1(k) finding or a row
     disposed OK with a recorded reason -- in the row's own `disposition` cell and/or in the M1
@@ -5447,6 +5464,14 @@ treated as unfinished).
 * An added finding is a NORMAL finding: one instance, a verbatim quote, a category, a check id, a
   severity, and a 1-2 sentence problem statement. Never aggregate ("several sentences are long" is
   not a finding).
+* A `drop` of a category-2 (writing quality, logic, repetition) or category-4 finding needs your
+  own evidence for WHY it is not a defect: quote the text and show that the reading is CORRECT as
+  written -- it is not worse than the alternative on any shared prose criterion (precision, idiom,
+  academic register, written register, flow, grammar, punctuation, or the unity/linkage of the
+  unit to its parent and to its neighbour). "I would not have flagged it" and "it is only style"
+  are not evidence: a reading that is WORSE on one of those criteria is a scored `writing` row,
+  and one instance is enough. Do not drop it for being minor; drop only when the reviewer's quote
+  is accurate but the finding's own criterion does not hold.
 * Drops must be reversible by a human: the dropped id, the reviewer's claim and your evidence all
   stay in audit.json and AUDIT.md.
 * Do not invent: a fact you cannot check in the corpus or in the seeded lookup evidence is
@@ -5949,13 +5974,25 @@ LANGUAGE_PASS_RULE = """LANGUAGE PASS — a bounded, iterative pass over every e
        correct and stays)
     L2 formal-logic slips (converse/inverse swapped, "A therefore B" where only B-with-A holds)
     L3 logic jumps (the conclusion needs a step the text does not state)
-    L4 coherence (sentence-to-sentence and inside one sentence: referents, connectors, tense)
-    L5 unexplained prerequisites (a term a reader must look up; define it once, in place)
+    L4 coherence (sentence-to-sentence and inside one sentence: referents, connectors, tense; and
+       the linkage of each unit to its parent and to its next sibling)
+    L5 unexplained prerequisites (a term a reader must look up; define it once, in place). A LaTeX
+       macro argument is NOT a prerequisite -- the full paper defines it, so never rewrite text
+       for the argument of a macro
     L6 redundancy (the same fact stated twice in a paragraph -> state it once)
-    L7 non-academic wording (metaphor, hype, "one stone two birds" -> the neutral phrasing)
-    L8 non-written register (spoken/short forms -> the formal form)
-    L9 stiff/translated phrasing and word order (keep the meaning, make it flow)
-    L10 grammar   L11 typos/punctuation (also: one idea per sentence; no double spaces)
+    L7 non-academic wording: metaphor, hype, promotional adjectives, or a word, verb or connector
+       that is less precise, less idiomatic or less established than the register's own
+       alternative. Judge it GENERICALLY (academic vs conversational, precise vs vague, the
+       established collocation vs an ad-hoc pairing), never from a fixed word list
+    L8 non-written register (spoken, short or colloquial forms -> the formal equivalent)
+    L9 stiff, formulaic or translated phrasing and word order (keep the meaning, make it flow)
+    L10 grammar   L11 typos/punctuation (also: one idea per sentence). MECHANICAL SEPARATOR
+       CONVENTIONS (character spacing, blank lines, line or paragraph breaks) are NOT this pass's
+       business: the format scan and the orchestrator's normalizer own them, so never rewrite text
+       for them here
+  ONE worse word is one row: each step fixes every instance it finds, not only a recurring one, and
+  a difference is a change only when one side is WORSE on the step's own criterion -- two equally
+  acceptable readings are not an improvement.
   COVERAGE: the file ENDS with one row per step -- `step | rows changed | note` -- including the
   steps that changed nothing ("L3 | 0 | no logic jumps found"). A step with no row is an UNAUDITED
   step, and the orchestrator records which steps are missing; an empty file is not a pass.
@@ -5981,6 +6018,20 @@ DIFF_LEDGER_RULE = """INTEGRATION DIFFERENCE LEDGER — one row per difference, 
   verdict decides, neither sentence-level edits nor re-organizations are privileged; a ported
   number/figure follows the source-hierarchy rule; a difference you cannot evaluate without the
   author goes to the manual-steps list.
+  * THE INTEGRATED VERSION IS EXPECTED TO SCORE HIGHER THAN EVERY DONOR: it has all of them in
+    front of it, so every nameable improvement any donor carries -- including the ONE-OFF minor
+    prose items (a more precise, idiomatic or academic word/verb/connector, a missing transition,
+    a punctuation or grammar slip, a paragraph carrying two messages, a unit that does not link to
+    its neighbour) -- must be ported or synthesized. An unported nameable improvement is a
+    regression the panel scores as an `introduced` row against this copy.
+  * `ignore-cosmetic` is legal ONLY for a difference whose two readings satisfy EVERY item of the
+    shared prose rubric (the judge prompt's Q1-Q12 items, mirrored by the language pass's L1-L11);
+    it is never a bin for "small", "stylistic" or "not worth a row". A nameable difference you
+    deliberately do not port is `keep-self` or `synthesize` and needs its `why` (the trade-off you
+    resolved in this copy's favour), or it belongs on the manual-steps list.
+  * the integration's own language pass runs over the FINAL text, not only over the ports: a
+    merged sentence can lose a small improvement that neither donor had wrong, and the pass is
+    what catches it before the panel does.
   * EVERY row carries an ARTIFACT under `integrated/work/diffs/`: for a `small` row a before/after
     pair (the self sentence, the donor sentence, the sentence you shipped); for a `large` row the
     outline diff (self outline, donor outline, merged outline). A row without its artifact cannot
@@ -6134,8 +6185,11 @@ anchor says it means and nothing else.
 sheet is valid and is often the honest sheet. Do not manufacture differences to look useful; do not
 reward a version merely for being different, newer, longer, shorter, or more heavily edited.
 Cosmetic-only differences (spacing, font choice, ordering of identical content, wording preferences
-that do not change meaning) are 0 -- they are worth no points in either direction. Judge CONTENT,
-not style.
+where BOTH readings satisfy every item of the writing rubric) are 0 -- they are worth no points in
+either direction. A wording difference that is WORSE on a named item is NOT cosmetic: it is a
+`writing` row (see the rubric's comparison rule), and one worse word is one row. Judge content AND
+the named prose items; "different" is not "worse", and "style" is not an excuse for an unscored
+decline.
 
 === GRADED BASIS -- every score must be CHECKABLE (judge contract v4) ===
 
@@ -6198,8 +6252,12 @@ acronym introduced at its first use whose un-abbreviated long form is still used
 section, a term spelled two ways across documents, or a convention applied in one file and not
 another are CONSISTENCY-tier defects (second in the priority order) -- a version that completes the
 convention across the whole corpus is better than one that does not, and a version that expands
-short forms or mixes the two forms even further is worse. What remains cosmetic is a one-off
-wording preference with no convention behind it. The M1 sweep's M1b instance table (long forms used
+short forms or mixes the two forms even further is worse. What remains cosmetic is a wording
+preference whose two readings satisfy EVERY rubric item; a one-off choice that is worse on a named
+item (less precise, less idiomatic, non-written register, stiff or translated phrasing, a
+punctuation or grammar slip) is a `writing` row at its own rung, one instance per row -- a
+convention is not required for a small decline to count, and "it appears only once" is not an
+exemption. The M1 sweep's M1b instance table (long forms used
 after the acronym's first use) is the evidence surface for the acronym case -- read it before
 scoring such a difference as merely stylistic.
 
@@ -6255,7 +6313,9 @@ a fabricated result presented as established) AND no usable copy of that content
 in the package; CRITICAL = the error changes a conclusion,
 contradicts the data, or is a category impossibility; MAJOR = the error changes a reported
 fact/attribute/comparison without changing the conclusion, or a prose/formatting failure a reader
-must work around; MINOR = a detail that changes nothing a reader depends on (terminology, missing
+must work around (a slip that recurs through a paragraph or section is MAJOR, not several more
+MINOR rows: the structural level a defect reaches is part of its distance from correct); MINOR = a
+detail that changes nothing a reader depends on (terminology, missing
 information and artifact damage are graded by the same rungs, and so are prose and formatting).
 Because the tiers are compared LEXICOGRAPHICALLY, a bigger row in a LOWER tier never outweighs a
 smaller one above it: a formatting gain cannot answer a completeness loss, and a consistency gain
@@ -17946,17 +18006,39 @@ WRITING_RUBRIC = """WRITING RUBRIC — use it to justify every `writing`-tier ro
       in the UNDER direction is a `correctness`-tier defect exactly like an overclaim (see J3)
   Q2  a formal-logic slip (converse/inverse swapped; "A therefore B" where only B-with-A holds)
   Q3  a logic jump (the conclusion needs a step the text never states)
-  Q4  coherence (referents, connectors, tense: between sentences and inside one sentence)
-  Q5  an unexplained prerequisite (a term a reader would have to look up; define it once, in place)
-  Q6  redundancy (the same fact stated twice in one paragraph)
-  Q7  non-academic wording (metaphor, hype, promotional adjectives)
-  Q8  non-written register (spoken or short forms in formal prose)
-  Q9  stiff or translated phrasing and word order (the meaning is right, the flow is not)
+  Q4  coherence (referents, connectors, tense: between sentences and inside one sentence; and the
+      LINKAGE of each unit to its parent and to its next sibling -- a unit that does not follow
+      from what precedes it, or that is not connected to the next one, is a row here or at Q12)
+  Q5  an unexplained prerequisite (a term a reader would have to look up; define it once, in
+      place). A LaTeX command or macro argument is NOT a prerequisite -- the full paper defines
+      it, so never file a row for the argument of a macro
+  Q6  redundancy (the same fact stated twice in one paragraph; a sentence whose content adds
+      nothing to the one before it)
+  Q7  non-academic wording (metaphor, hype, promotional adjectives, or a word, verb or connector
+      that is less precise, less idiomatic or less established than the alternative the register
+      itself uses). Judge this GENERICALLY and directionally: compare the two versions' readings
+      of the same content and name which one is worse and by what -- academic vs conversational,
+      precise vs vague, the established collocation vs an ad-hoc pairing. Never work from a fixed
+      word list
+  Q8  non-written register (spoken, short or colloquial forms where the formal equivalent exists)
+  Q9  stiff, formulaic or translated phrasing and word order (the meaning survives; the idiom and
+      the flow do not -- including a literal rendering of another language's construction)
   Q10 grammar (agreement, voice, dangling modifiers, parallelism)
-  Q11 typography (typos, punctuation, a spaced hyphen used as a dash, mixed quotation marks,
-      hundreds separators used inconsistently, a quantity whose unit typography hides its value)
-  Q12 segmentation (one sentence carrying two ideas; one paragraph carrying two messages; an
-      enumeration buried inside prose instead of being itemised)
+  Q11 typography and punctuation (typos; a comma splice; a missing or wrong mark; a spaced hyphen
+      used as a dash; mixed quotation marks; hundreds separators used inconsistently; a quantity
+      whose unit typography hides its value). MECHANICAL SEPARATOR CONVENTIONS ARE NOT THIS ITEM:
+      character spacing, blank lines and line or paragraph breaks belong to the format checks
+      (M20) and the orchestrator's normalizer -- never a row here, and never scored twice
+  Q12 segmentation and structure (one sentence carrying two ideas; one paragraph carrying two
+      messages; an enumeration buried inside prose; a section whose subsections do not each carry
+      an independent sub-topic, or a unit whose topic does not match its parent)
+  HOW TO COMPARE TWO READINGS -- this is what makes small differences scorable: a difference is a
+  row when ONE side is WORSE on a named item above, never merely because the two readings differ.
+  Run the items over both versions of the same content, name the item, the register the worse side
+  belongs to and the intended reading. ONE worse word, verb or connector is a MINOR row exactly
+  like one typo, and "it appears only once" is not an exemption; a slip that recurs through a
+  paragraph, or one that leaves a whole scope's topic unclear (Q12), is MAJOR. A difference where
+  BOTH readings satisfy every item is cosmetic (0) for everyone -- "different" is not "worse".
   A row names its rubric item (`Q7` -- the row's `check` cell carries the FROZEN check id this
   rubric belongs to, `J3`: the Q1-Q12 items are the twelve faces OF J3, not check ids of their
   own, and a ledger row's `check` cell is always one of M1-M24/J1-J4), quotes the offending words

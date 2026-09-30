@@ -736,6 +736,18 @@ check("F6 formatting rows are graded on the same four rungs (a MAJOR one reaches
                                             [grow("writing", "minor")])) == 1
       and np.derived_comparison_score(gcomp(3, "writing",
                                             [grow("writing", "critical")])) == 3)
+check("F6 a one-sided minor wording difference is a scored `writing` row",
+      "A wording difference that is WORSE on a named item is NOT cosmetic" in judge_flat2
+      and "HOW TO COMPARE TWO READINGS" in judge_flat2
+      and '"different" is not "worse"' in judge_flat2
+      and np.derived_comparison_score(
+          gcomp(1, "writing", [grow("writing", "minor", "Q7",
+                                    "less idiomatic verb where the register has a precise one")]))
+      == 1
+      and not basis_problems(
+          gcomp(1, "writing", [grow("writing", "minor", "Q7",
+                                    "less idiomatic verb where the register has a precise one")]),
+          "c0", True)[0])
 
 # F7: the self-reported tie-break counts are cross-checked for every arm, not
 # only for the revise arm that happens to carry a review/ copy.

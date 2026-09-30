@@ -86,6 +86,33 @@ def test_prompts():
           and "Never ship a derived file that contradicts" in builders["revise"])
     check("integration prompt forbids shipping stale derived build outputs",
           "DERIVED BUILD OUTPUTS" in builders["integrate"])
+    # The small-difference rules must reach EVERY session, not only the judge:
+    # the review finds them, the audit must not wave them away, the integrator
+    # must not drop them, and the producers fix them in the language pass.
+    aud = np.audit_prompt(sb, "r1_audit", 1)
+    review_flat = " ".join(builders["review"].split())
+    check("the review prompt makes small one-sided differences findings",
+          "SMALL DIFFERENCES ARE FINDINGS WHEN ONE SIDE IS WORSE" in builders["review"]
+          and '"It is only style" is not a disposition' in review_flat
+          and "never from a fixed word list" in review_flat)
+    check("the audit prompt requires evidence to drop a prose/logic finding",
+          "needs your\n  own evidence for WHY it is not a defect" in aud
+          and "the reading is CORRECT as" in " ".join(aud.split())
+          and "it is not worse than the alternative on any shared prose criterion"
+          in " ".join(aud.split())
+          and "Do not drop it for being minor" in aud)
+    check("the integration prompt expects the integrated version to outrank every donor",
+          "IS EXPECTED TO SCORE HIGHER THAN EVERY DONOR" in builders["integrate"]
+          and "unported nameable improvement is a" in builders["integrate"])
+    check("`ignore-cosmetic` is restricted to differences that satisfy every rubric item",
+          "`ignore-cosmetic` is legal ONLY for a difference whose two readings satisfy EVERY item"
+          in " ".join(builders["integrate"].split()))
+    for name in ("rewrite", "revise", "integrate"):
+        flat_lp = " ".join(builders[name].split())
+        check(f"the {name} language pass carries the generic wording rule and the exclusions",
+              "Judge it GENERICALLY" in flat_lp
+              and "MECHANICAL SEPARATOR" in flat_lp
+              and "macro argument is NOT a prerequisite" in flat_lp)
     check("revise prompt overrides 'copy unchanged from non-revised/'",
           "never from\n     non_revised/" in rev and "REVERT" in rev)
     # parser default
