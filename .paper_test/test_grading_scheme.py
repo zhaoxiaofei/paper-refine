@@ -547,6 +547,173 @@ check("E4 the same sheet with a tier basis stays clean", not w_tier, str(w_tier[
 _e3, w_empty = basis_problems(comp(0, "none", [], []), "comparisons[0]", strict=True)
 check("E4 basis 'none' with empty lists stays clean", not w_empty, str(w_empty[:1]))
 
+# =====================================================================
+# F. judge-contract second pass (2026-09-30 audit round 2): severity as a
+#    distance rung in EVERY class, artifact damage scored where it damages,
+#    the basis on the sign's side, the speculative-AI non-decisiveness rule,
+#    reasoned `unable` coverage, and the cross-arm tie-break cross-check.
+# =====================================================================
+judge_flat2 = " ".join(judge_prompt_text.split())
+
+
+def grow(tier, sev, check_id="M8", ev="Fig. 2 legend: five vs six metrics"):
+    return {"check": check_id, "tier": tier, "severity": sev, "evidence": ev}
+
+
+def gcomp(score, basis, resolved=(), introduced=(), checks=None):
+    c = {"opponent_label": "v1", "score": score, "reason": "unit", "basis": basis,
+         "resolved": list(resolved), "introduced": list(introduced)}
+    if checks is not None:
+        c["checks"] = checks
+    return c
+
+
+# F1: severity is a distance from correct in every class, not a factual-only scale.
+check("F1 the judge prompt states the distance ladder for every class",
+      "Severity is shared too, and it is a DISTANCE FROM CORRECT" in judge_flat2
+      and "MINOR = a detail" in judge_flat2
+      and "MAJOR = the error changes a reported fact" in judge_flat2
+      and "CRITICAL = the error changes a conclusion" in judge_flat2)
+check("F1 the judge prompt states the same-rung distance rule",
+      "scored by the DISTANCE between the two errors" in judge_flat2)
+check("F1 the judge prompt scores artifact damage where it damages",
+      "FORMATTING IS GRADED BY WHAT IT DAMAGES" in judge_flat2
+      and "content missing from the delivered artifact" in judge_flat2)
+check("F1 the blank-page ladder is stated for the judge",
+      "one displaced page/figure = MINOR" in judge_flat2
+      and "several pages or a whole section/figure = MAJOR" in judge_flat2)
+check("F1 the shared class rule carries the artifact-damage classification",
+      "ARTIFACT DAMAGE IS NOT COSMETIC FORMATTING" in np.defect_class_rule())
+check("F1 'a factual error is not automatically Critical' is stated",
+      "does NOT make every\n    rung CRITICAL" in np.defect_class_rule())
+
+# F2: the basis names the tier on the SIGN's side; a losing-tier basis is reported.
+mix = gcomp(1, "correctness",
+            resolved=[grow("consistency", "minor"), grow("consistency", "minor")],
+            introduced=[grow("correctness", "minor", "M4",
+                             "abstract: n = 12, shipped table has 3 rows")])
+_e, w_basis = basis_problems(mix, "comparisons[0]", strict=True)
+check("F2 a basis that names the losing tier is reported",
+      any("highest-priority tier" in x and "'consistency'" in x for x in w_basis),
+      str(w_basis[:1])[:160])
+_e2, w_basis2 = basis_problems(dict(mix, basis="consistency"), "comparisons[0]", strict=True)
+check("F2 the same sheet with the sign-side basis stays clean", not w_basis2, str(w_basis2[:1]))
+check("F2 the judge prompt defines the basis as the sign-side tier",
+      "the tier that BACKS THE SIGN" in judge_flat2
+      and "never a tier the integer did not win on" in judge_flat2)
+
+# F3: a speculative-AI row can never decide a comparison on its own.
+ai_minor = grow("correctness", "minor", "J4",
+                "possible AI-generated stylistic patterns in the discussion")
+e_ai, _w_ai = basis_problems(gcomp(1, "correctness", [ai_minor]), "c0", True)
+check("F3 a score backed only by a speculative-AI row is rejected",
+      any("speculative AI-content" in x for x in e_ai), str(e_ai[:1])[:160])
+ai_crit = grow("correctness", "critical", "J4", "possible AI-generated text in the Methods")
+e_ai2, _w = basis_problems(gcomp(3, "correctness", [ai_crit]), "c0", True)
+check("F3 a 'clearly better' rung cannot rest on a speculative-AI row",
+      any("rests only on speculative AI-content" in x for x in e_ai2), str(e_ai2)[:160])
+e_ai3, _w = basis_problems(gcomp(4, "correctness", [ai_crit, MINOR_CONS[0]]), "c0", True)
+check("F3 the decisive rung needs a non-AI CRITICAL row",
+      any("decisive rung needs a CRITICAL item that is not" in x for x in e_ai3),
+      str(e_ai3)[:160])
+plag = grow("correctness", "critical", "J4",
+            "verbatim duplication of a published figure legend")
+e_plag, _w = basis_problems(gcomp(4, "correctness", [plag, MINOR_CONS[0]]), "c0", True)
+check("F3 a confirmed plagiarism/policy row (no 'possible AI' label) is not restricted",
+      not e_plag, str(e_plag[:1]))
+e_ai4, _w = basis_problems(gcomp(3, "correctness",
+                                 [grow("correctness", "major", "J4", "possible AI patterns"),
+                                  grow("consistency", "major")]), "c0", True)
+check("F3 a speculative-AI row may contribute beside a non-AI strong row",
+      not e_ai4, str(e_ai4[:1]))
+check("F3 the judge prompt requires the literal 'possible AI' prefix and the rule",
+      "BEGIN its evidence with the literal words `possible AI`" in judge_flat2
+      and "A non-zero score therefore needs at least one item on its side that is not such a row"
+      in judge_flat2)
+
+# F4: `unable` coverage must say why, and an all-`unable` map is a non-judgment.
+clean_checks = {c: "clean -- unit fixture" for c in np.JUDGE_COVERAGE_CHECKS}
+bare = dict(clean_checks)
+bare["M8"] = "unable"
+e_cov, _w_cov = np.judge_coverage_problems(gcomp(0, "none", checks=bare), "c0", True)
+check("F4 a bare `unable` with no reason is rejected",
+      any("states no reason" in x for x in e_cov), str(e_cov[:1])[:160])
+reasoned = dict(clean_checks)
+reasoned["M8"] = "unable -- the figure is image-only"
+e_cov2, _w_cov2 = np.judge_coverage_problems(gcomp(0, "none", checks=reasoned), "c0", True)
+check("F4 a reasoned `unable` passes", not e_cov2, str(e_cov2[:1])[:160])
+all_unable = {c: "unable -- the corpus is image-only" for c in np.JUDGE_COVERAGE_CHECKS}
+e_cov3, w_cov3 = np.judge_coverage_problems(gcomp(0, "none", checks=all_unable), "c0", True)
+check("F4 an all-`unable` map is reported as a non-judgment",
+      not e_cov3 and any("judged nothing" in x for x in w_cov3), str(w_cov3[:1])[:160])
+
+# F5: the review-path classes with no coverage row get a scoring bridge.
+check("F5 the judge prompt bridges M25-M29/J5 into the frozen ids",
+      "M25-M29" in judge_flat2 and "cite the closest frozen id" in judge_flat2
+      and "J5 (architecture/organization)" in judge_flat2)
+check("F5 the J1 routing rule is stated",
+      "has no tier of its own" in judge_flat2 and "J1's coverage row" in judge_flat2)
+check("F5 the shared-ceiling note is stated",
+      "Consistency and preservation share the same" in judge_flat2)
+
+# F6: the distance ladders the user's examples imply.
+check("F6 'man' is a MAJOR and 'fish' a CRITICAL correctness row",
+      np.derived_comparison_score(gcomp(2, "correctness",
+                                        [grow("correctness", "major")])) == 2
+      and np.derived_comparison_score(gcomp(3, "correctness",
+                                            [grow("correctness", "critical")])) == 3)
+check("F6 the fish->man swap is the distance (+1), not 0",
+      np.derived_comparison_score(gcomp(1, "correctness",
+                                        [grow("correctness", "critical")],
+                                        [grow("correctness", "major")])) == 1)
+check("F6 the blank-page ladder is representable and strictly ordered",
+      np.derived_comparison_score(gcomp(2, "completeness",
+                                        [grow("completeness", "major", "M20")])) == 2
+      and np.derived_comparison_score(gcomp(1, "completeness",
+                                            [grow("completeness", "minor", "M20")])) == 1
+      and np.derived_comparison_score(gcomp(0, "none")) == 0)
+check("F6 a one-off stray empty line is cosmetic (0), not a page-sized defect",
+      "is COSMETIC (0)" in judge_flat2 and "A blank LINE is not a blank PAGE" in judge_flat2)
+check("F6 cosmetic formatting stays MINOR-only (+-1) and cannot be decisive",
+      bool(basis_problems(gcomp(2, "formatting", [grow("formatting", "major")]),
+                          "c0", True)[0]))
+
+# F7: the self-reported tie-break counts are cross-checked for every arm, not
+# only for the revise arm that happens to carry a review/ copy.
+root_ctx = Path(tempfile.mkdtemp(prefix="paper_tiebreak_")) / "root"
+ctx_tb = np.Ctx(root_ctx)
+ctx_tb.cfg = {"audit": "off"}
+rev_sb = root_ctx / "runs" / "r1_review"
+(rev_sb / "review").mkdir(parents=True)
+(rev_sb / "review" / "findings.json").write_text(json.dumps({"findings": [
+    {"id": "F-001", "check": "M4", "category": 0, "severity": "Critical"},
+    {"id": "F-002", "check": "M8", "category": 2, "severity": "Minor"}]}),
+    encoding="utf-8")
+rew_sb = root_ctx / "runs" / "r1_w1"
+rew_sb.mkdir(parents=True)
+ctx_tb.state = {"runs": {
+    "r1_review": {"id": "r1_review", "kind": "review", "round": 1, "status": "done",
+                  "sandbox": "runs/r1_review"},
+    "r1_w1": {"id": "r1_w1", "kind": "rewrite", "round": 1,
+              "sandbox": "runs/r1_w1"}},
+    "rounds": {"1": {}}, "pinned": [], "log": []}
+rec_tb = {"id": "r1_w1", "kind": "rewrite", "round": 1, "sandbox": "runs/r1_w1"}
+check("F7 the round's frozen review is found for an arm without a review/ copy",
+      np.critical_findings_input(ctx_tb, rec_tb) == 1
+      and np.writing_findings_input(ctx_tb, rec_tb) == 1)
+warns_tb = []
+np.tiebreak_selfreport_warnings(ctx_tb, rec_tb,
+                                {"critical_remaining": 0, "writing_remaining": 0}, warns_tb)
+check("F7 a zero claim is cross-checked for a rewrite arm too",
+      sum("critical_remaining=0" in w for w in warns_tb) == 1
+      and sum("writing_remaining=0" in w for w in warns_tb) == 1, str(warns_tb)[:200])
+
+# F8: the README matches the code's auditor default.
+readme_text = (WS / "README.md").read_text(encoding="utf-8")
+check("F8 the README states the auditor default the code records",
+      np.DEFAULT_AUDIT == "on" and "on by default" in readme_text
+      and "off by default" not in readme_text)
+
 print()
 if FAILS:
     print(f"{len(FAILS)} FAILURE(S): " + "; ".join(FAILS))

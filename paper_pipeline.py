@@ -4117,12 +4117,34 @@ defect the same way; only the deliverable differs):
         grammar, spelling, punctuation or prose-flow error that changes no meaning (MINOR rows
         only -- the class is worth at most one point and never decides a comparison);
       - category 3 (Plagiarism / AI-generated content) -> @@T_CORRECTNESS@@ (the integrity of the
-        content itself); category 4 (Technical Formatting) -> @@T_FORMATTING@@ (the M18/M19/M20
-        rows); category 5 (Missing / Unneeded Information) -> @@T_COMPLETENESS@@.
-  * Severity is shared too: CRITICAL = a factual, integrity or ethics gap that could force a
-    correction or a rejection; MAJOR = what an editor, reviewer or copyeditor would flag,
-    including guideline violations; MINOR = polish, consistency, style. A finding's
-    (category, severity) and a compared item's (class, severity) must come from the SAME defect.
+        content itself); category 4 (Technical Formatting) -> @@T_FORMATTING@@ for the M18/M19/M20
+        COSMETIC rows, or @@T_COMPLETENESS@@ / @@T_CORRECTNESS@@ when the row damages the delivered
+        artifact (see the artifact-damage rule above); category 5 (Missing / Unneeded
+        Information) -> @@T_COMPLETENESS@@.
+  * Severity is shared too, and it is a DISTANCE FROM CORRECT, not a volume knob: MINOR = a detail
+    that changes no claim, reported fact or downstream number (the closest miss: an adjacent value,
+    a wording slip whose meaning survives); MAJOR = the error changes a reported fact, attribute,
+    comparison or sample set, but not the paper's conclusion (a wrong age band, sex, unit or cohort
+    label is the typical case); CRITICAL = the error changes a conclusion, contradicts the data, or
+    is a category impossibility (a fabricated number or citation, a claim the data refute, a wrong
+    species or kind). A finding's (category, severity) and a compared item's (class, severity) must
+    come from the SAME defect and the SAME rung; "it is a factual error" alone does NOT make every
+    rung CRITICAL.
+  * A claim BOTH versions get wrong is scored by the DISTANCE between the two errors: file the
+    opponent's error as a `resolved` row and the target's error, when it still has one, as an
+    `introduced` row, each at its OWN rung. Two rows of the same rung cancel -- which is exactly
+    "neither version is closer to the truth"; two rows of different rungs leave the difference.
+  * ARTIFACT DAMAGE IS NOT COSMETIC FORMATTING: a rendered blank page, a figure or table that did
+    not print, or an unreadable rendering is classified by what it DAMAGES, never filed as a
+    cosmetic formatting row -- content missing from the delivered artifact is @@T_COMPLETENESS@@
+    (one displaced page/figure = minor, several pages or a whole section = major, an unusable
+    artifact = critical), and an artifact that is corrupt or not what the authors believe they
+    submitted is @@T_CORRECTNESS@@. A ONE-OFF stray empty line, a spacing slip, an
+    italic/quotation treatment or a mixed URL style is COSMETIC (0) -- it becomes
+    @@T_CONSISTENCY@@ when the same convention is broken repeatedly instead -- and @@T_FORMATTING@@
+    rows stay MINOR-only and worth at most one point. A blank line is not a blank PAGE: the
+    break-only paragraph that pushes a page break is artifact damage, graded by the extent of
+    what it displaces.
   * An improvement claim must name the class it improves and the concrete item behind it, with a
     location: "this edit is better" without one is not an improvement claim. A difference that
     cannot be named in this vocabulary is COSMETIC and counts 0 for every session. A difference
@@ -6098,11 +6120,19 @@ class it is about and the concrete items that support it. The orchestrator check
 and a sheet that contradicts its own ledger FAILS its run (the panel then waits for a retry --
 never guess a number to fill a row):
 
-  "basis"      the HIGHEST-priority tier in which the target differs from this opponent:
+  "basis"      the tier that BACKS THE SIGN of this comparison -- for a positive score the
+               highest-priority tier among the items the target RESOLVES, for a negative score the
+               highest-priority tier among the items it INTRODUCES, and for a net-zero comparison
+               the highest-priority tier in which the two versions differ at all:
                correctness | consistency | preservation | completeness | formatting | writing | none
                ("none" is for a clean 0 with no item on either side).
-  "resolved"   items the TARGET resolves that the opponent still carries.
+  "resolved"   items the TARGET resolves that the opponent still carries (or improves: see below).
   "introduced" items the TARGET introduces (or makes worse) that the opponent does not carry.
+
+A CLAIM BOTH VERSIONS GET WRONG AT DIFFERENT RUNGS IS A DISTANCE, NOT A SWAP: file the opponent's
+error as `resolved` and the target's error (if it still has one) as `introduced`, each at its OWN
+severity rung, so the ledger shows both errors and the net is the distance between them. Do not
+file both at one severity, and do not drop the target's row.
 
 Each item is {"check": "M8", "tier": <one of the six tiers>, "severity": "critical"|"major"|"minor",
 "evidence": "<=25 words, with a location, e.g. 'Fig. 2 legend: five vs six metrics'"}. The optional
@@ -6111,7 +6141,13 @@ check that owns it (`FMT-*` -> M20), so citing the rule you actually read is fin
 difference instance you found on each
 side (there is no 1-3 cap: five fixed minor consistency instances are five rows); an empty list is
 a legitimate answer ("no difference of that kind"), and two empty lists mean the comparison is
-exactly 0. `basis` must not claim a lower-priority tier than the items you list.
+exactly 0. `basis` must be exactly that sign-side tier -- never a lower-priority one and never a
+tier the integer did not win on.
+
+A SPECULATIVE AI-CONTENT ROW (the standing exemption's "possible AI-generated" case) must cite
+`J4` and BEGIN its evidence with the literal words `possible AI`; it can never decide a comparison
+on its own. A non-zero score therefore needs at least one item on its side that is not such a row,
+and the |3|/|4| rungs need their MAJOR/CRITICAL backing from a row that is not such a row.
 
 THE INTEGER IS DERIVED FROM THOSE ROWS (contract v3). Weights: minor 1, major 2, critical 3 per
 row. Net contribution caps per tier: correctness +-4, consistency +-3, preservation +-3,
@@ -6160,6 +6196,34 @@ producer in the evidence (`file`, symbol or data row) and never treat "the code 
 as a reason to call the difference cosmetic: the packages in front of you carry their own code and
 raw data, and a claim the package's own artifacts refute is exactly the kind of defect this panel
 exists to separate.
+
+THE OTHER REVIEW-PATH CLASSES HAVE NO COVERAGE ROW HERE, and you still score them when a target
+differs: M25-M29 (figure-artwork/text parity, house-style/orthographic conventions,
+claim->evidence coverage, sibling-definition symmetry, caption-promise vs printed-schema parity)
+and J5 (architecture/organization). File the row under the tier the shared class rule names for
+the defect and cite the closest frozen id in the row's `check` cell (M1 acronyms, M3 display items,
+M8 terms, M20 formatting, J3 prose/architecture). A J1 scope-fit / novelty / interest difference
+that is not a claim-strength (overclaim/underclaim) issue has no tier of its own: record its basis
+in J1's coverage row and do not invent a row for it; an over- or under-claim is `correctness`.
+
+FORMATTING IS GRADED BY WHAT IT DAMAGES, NOT BY ITS OWN TIER. A rendered blank page, a figure or
+table that did not print, or a rendering whose text is unreadable is NOT a cosmetic formatting
+row: it is a `completeness` defect (content missing from the delivered artifact), graded by extent
+-- one displaced page/figure = MINOR, several pages or a whole section/figure = MAJOR, an artifact
+that cannot be used = CRITICAL. A ONE-OFF stray line, spacing slip, italic/quotation treatment or
+mixed URL style is COSMETIC (0) -- repeated, it becomes `consistency` as a broken convention --
+and `formatting` rows are MINOR-only and worth at most one point, never decisive on their own. A
+blank LINE is not a blank PAGE: a break-only paragraph that displaces a page is artifact damage,
+graded by the extent of what it displaces. The formatting cap is a cap on COSMETICS, never a cap
+on how bad a broken render is.
+
+SEVERITY IS A DISTANCE FROM CORRECT IN EVERY TIER, and the tiers are not all equally fine: a detail
+that changes nothing a reader depends on is MINOR, a wrong reported fact/attribute/comparison is
+MAJOR, and a conclusion-changing, data-contradicting or category-impossible error is CRITICAL --
+for prose, terminology, formatting damage and missing information alike, not only for factual
+errors. Consistency and preservation share the same +-3 ceiling, and cosmetic formatting/writing
+share the same MINOR-only +-1 ceiling; a comparison whose only difference is cosmetic cannot be
+"clearly better".
 
 @@WRITING_RUBRIC@@
 
@@ -14489,14 +14553,40 @@ def sandbox_audit_record(sb: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def round_consumed_findings(ctx: Ctx, r) -> list:
+    """The round's frozen (audited) review list, for arms whose sandbox carries none.
+
+    The rewrite and integration arms do not consume findings, so they never get
+    a `review/` copy -- but the round's frozen list is the SAME list the auditor
+    disposed and the revision arm acted on, so the self-reported tie-break
+    counts of every arm can be cross-checked against it. An unreadable or
+    pruned round yields [] (no cross-check), never a guess.
+    """
+    try:
+        r = int(r)
+    except (TypeError, ValueError):
+        return []
+    rev = ctx.run(rid_review(r))
+    if not rev or rev.get("status") != "done":
+        return []
+    sb = ctx.sandbox_of(rev)
+    if not (sb / FINDINGS_REL).is_file():
+        return []
+    return findings_from_sandbox(sb, audit_record_of(ctx, r))
+
+
 def critical_findings_input(ctx: Ctx, rec: dict):
     """Number of Critical findings in the frozen review the run consumed (or None).
 
     Used only as a sanity signal for the self-reported `critical_remaining`
-    tie-break: it is the count the revision started from, not the count that
-    remains, so it never gates a run.
+    tie-break: it is the count the run started from, not the count that remains,
+    so it never gates a run. An arm whose own sandbox has no `review/` copy
+    (rewrite, integration) falls back to the round's frozen list, so the
+    cross-check below is not revise-only.
     """
     findings = consumed_findings(ctx, rec)
+    if not findings:
+        findings = round_consumed_findings(ctx, rec.get("round"))
     if not findings and not (ctx.sandbox_of(rec) / FINDINGS_REL).exists():
         return None
     return sum(1 for f in findings
@@ -14515,6 +14605,8 @@ def writing_findings_input(ctx: Ctx, rec: dict):
     DEFECT_CLASS_RULE, which is why this number is a tie-break and not a score.
     """
     findings = consumed_findings(ctx, rec)
+    if not findings:
+        findings = round_consumed_findings(ctx, rec.get("round"))
     if not findings and not (ctx.sandbox_of(rec) / FINDINGS_REL).exists():
         return None
     total = 0
@@ -14525,6 +14617,40 @@ def writing_findings_input(ctx: Ctx, rec: dict):
         if cat == 2:
             total += 1
     return total
+
+
+def tiebreak_selfreport_warnings(ctx: Ctx, rec: dict, summ: dict, warns: list) -> None:
+    """Report a self-reported tie-break count that claims ZERO while the round's
+    frozen review lists findings of that kind.
+
+    `critical_remaining` and `writing_remaining` are ranking keys (after the
+    panel statistics), so an unverifiable under-report must at least be visible.
+    Only the zero claim is checkable: a non-zero remaining count cannot be
+    distinguished from a genuine partial fix, so it is taken at face value.
+    `critical_findings_input`/`writing_findings_input` fall back to the round's
+    own frozen review, so the check covers the rewrite and integration arms too
+    -- they carry no `review/` copy, which is exactly why their self-reports
+    used to be unverified.
+    """
+    if not isinstance(summ, dict):
+        return
+    n_crit_in = critical_findings_input(ctx, rec)
+    if is_int(summ.get("critical_remaining")) and n_crit_in:
+        rec["critical_findings_input"] = n_crit_in
+        if summ["critical_remaining"] == 0:
+            warns.append(f"marker reports critical_remaining=0 while the frozen review lists "
+                         f"{n_crit_in} Critical finding(s); that self-reported number is only "
+                         f"used to break a statistical tie in the ranking -- verify it in the "
+                         f"package's report before trusting the ranking")
+    n_writing_in = writing_findings_input(ctx, rec)
+    if is_int(summ.get("writing_remaining")) and n_writing_in:
+        rec["writing_findings_input"] = n_writing_in
+        if summ["writing_remaining"] == 0:
+            warns.append(f"marker reports writing_remaining=0 while the frozen review lists "
+                         f"{n_writing_in} category-2 (writing quality/logic/repetition) "
+                         f"finding(s); that self-reported number is only used to break a "
+                         f"statistical tie in the ranking -- verify it in the package's report "
+                         f"before trusting the ranking")
 
 
 def frozen_findings_total(ctx: Ctx, rec: dict):
@@ -18270,23 +18396,7 @@ def postcheck_revise(ctx: Ctx, rec: dict):
         elif int(summ[key]) < 0:
             warns.append(f"marker summary.{key}={summ[key]} is NEGATIVE; it is ignored for the "
                          f"tie-break and must be corrected in the final report")
-    n_crit_in = critical_findings_input(ctx, rec)
-    if is_int(summ.get("critical_remaining")) and n_crit_in:
-        rec["critical_findings_input"] = n_crit_in
-        if summ["critical_remaining"] == 0:
-            warns.append(f"marker reports critical_remaining=0 while the frozen review lists "
-                         f"{n_crit_in} Critical finding(s); that self-reported number is only "
-                        f"used to break a statistical tie in the ranking -- verify it in "
-                        f"REVISION_REPORT.md before trusting the ranking")
-    n_writing_in = writing_findings_input(ctx, rec)
-    if is_int(summ.get("writing_remaining")) and n_writing_in:
-        rec["writing_findings_input"] = n_writing_in
-        if summ["writing_remaining"] == 0:
-            warns.append(f"marker reports writing_remaining=0 while the frozen review lists "
-                         f"{n_writing_in} category-2 (writing quality/logic/repetition) "
-                         f"finding(s); that self-reported number is only used to break a "
-                         f"statistical tie in the ranking -- verify it in REVISION_REPORT.md "
-                         f"before trusting the ranking")
+    tiebreak_selfreport_warnings(ctx, rec, summ, warns)
     # Recovery BEFORE the document-set comparison: restore every base file the
     # agent dropped (any type) so the invariant holds by construction, and the
     # drop is reported instead of costing another agent session.
@@ -18503,6 +18613,7 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
                          f"findings or manual items cannot be negative, so the value is ignored "
                          f"for the ranking (treated like a missing number) -- check the agent's "
                          f"final report")
+    tiebreak_selfreport_warnings(ctx, rec, summ, warns)
     if is_int(summ.get("donors_read")) and donors and int(summ["donors_read"]) != len(donors):
         warns.append(f"marker summary.donors_read={summ['donors_read']} but this run has "
                      f"{len(donors)} donor(s); the marker's audit number does not match the pool")
@@ -18616,6 +18727,7 @@ def postcheck_rewrite(ctx: Ctx, rec: dict):
                          f"findings or manual items cannot be negative, so the value is ignored "
                          f"for the ranking (treated like a missing number) -- check the agent's "
                          f"final report")
+    tiebreak_selfreport_warnings(ctx, rec, summ, warns)
     for key in ("reorganized_sections", "problems_surfaced"):
         if not is_int(summ.get(key)):
             warns.append(f"marker summary.{key} is missing/not an integer (reported only; it "
@@ -18817,11 +18929,19 @@ def judge_coverage_problems(comp: dict, where: str, strict: bool) -> tuple:
             out_w.append(f"{where}.checks names {cid!r}, which is not a frozen check id of this "
                          f"round; it is ignored")
             continue
+        if text.startswith("unable") and len(text.split()) < 3:
+            emit(f"{where}.checks[{cid!r}] = {raw_val!r} states no reason; `unable` means "
+                 f"'examined, could not be judged', so say why (the keyword plus at least two "
+                 f"words, e.g. 'unable -- the figure is image-only')")
         have[cid] = text
     missing = [c for c in JUDGE_COVERAGE_CHECKS if c not in have]
     if missing:
         emit(f"{where}.checks omits {len(missing)} frozen check id(s): {', '.join(missing[:8])}"
              + (" ..." if len(missing) > 8 else ""))
+    if have and not any(v.startswith(("clean", "findings")) for v in have.values()):
+        out_w.append(f"{where}.checks carries no `clean` and no `findings` entry -- every frozen "
+                     f"id it disposed is `unable`; the session judged nothing, so its zeros are "
+                     f"non-judgments, not agreements")
     return out_e, out_w
 
 
@@ -18906,7 +19026,8 @@ def judge_basis_problems(comp: dict, where: str, strict: bool) -> tuple:
                              f"written -- cite M1-M24/J1-J4 (the writing rubric's Q1-Q12 items "
                              f"belong to {WRITING_RUBRIC_CHECK}, and an FMT-* sweep rule belongs "
                              f"to M20)")
-            items.append((side, norm[0], norm[1], norm[2]))
+            items.append((side, norm[0], norm[1], norm[2],
+                          bool(cid == "J4" and norm[2].strip().lower().startswith("possible ai"))))
     if bad:
         emit(f"{prefix}{where} has malformed ledger item(s) {bad}: each needs a valid tier "
              f"({'/'.join(BASIS_TIERS)}), a severity ({'/'.join(SEVERITIES)}) and non-empty "
@@ -18918,33 +19039,56 @@ def judge_basis_problems(comp: dict, where: str, strict: bool) -> tuple:
              f"rows (a per-tier cap applies, so formatting/writing can never exceed +-1)")
     if score is None:
         return out_e, out_w
-    supporting = [(t, s) for side, t, s, _e in items
+    supporting = [(t, s, ai) for side, t, s, _e, ai in items
                   if (side == "resolved" and score > 0) or (side == "introduced" and score < 0)]
     if score != 0 and not supporting:
         emit(f"{prefix}{where}: score {score:+d} has no ledger item on its side "
              f"({'resolved' if score > 0 else 'introduced'}); a non-zero score must be backed by "
              f"at least one concrete item, or it is 0")
+    if score != 0 and supporting and all(ai for _t, _s, ai in supporting):
+        emit(f"{prefix}{where}: every item on the scoring side is a speculative AI-content row "
+             f"(`J4` with evidence starting 'possible AI ...'); the standing exemption says such a "
+             f"row can never decide a comparison on its own -- corroborate it with a non-AI item "
+             f"or score 0")
     if score != 0 and abs(score) >= 3:
-        strong = [t for t, s in supporting
+        strong = [(t, s, ai) for t, s, ai in supporting
                   if s in ("critical", "major") and t not in ("formatting", "writing")]
         if not strong:
             emit(f"{prefix}{where}: |score| = {abs(score)} is a 'clearly better/worse' rung but "
                  f"the ledger lists no MAJOR/CRITICAL item outside the formatting/writing tiers")
+        elif not any(not ai for _t, _s, ai in strong):
+            emit(f"{prefix}{where}: |score| = {abs(score)} rests only on speculative AI-content "
+                 f"rows (`J4` with evidence starting 'possible AI ...'); the standing exemption "
+                 f"forbids such a row from deciding a comparison on its own")
     if abs(score) >= 4:
-        if not [t for t, s in supporting
-                if s == "critical" and t not in ("formatting", "writing")]:
+        crit = [(t, s, ai) for t, s, ai in supporting
+                if s == "critical" and t not in ("formatting", "writing")]
+        if not crit:
             emit(f"{prefix}{where}: |score| = 4 is the 'decisive' rung but the ledger lists no "
                  f"CRITICAL item outside the formatting/writing tiers")
+        elif not any(not ai for _t, _s, ai in crit):
+            emit(f"{prefix}{where}: |score| = 4 leans on a critical speculative AI-content row "
+                 f"alone; the decisive rung needs a CRITICAL item that is not a 'possible AI ...' "
+                 f"row")
     if items and basis:
-        top = min((t for _side, t, _s, _e in items), key=_tier_rank)
+        if score > 0:
+            pool = [t for side, t, _s, _e, _ai in items if side == "resolved"]
+            whose = "the positive score"
+        elif score < 0:
+            pool = [t for side, t, _s, _e, _ai in items if side == "introduced"]
+            whose = "the negative score"
+        else:
+            pool = [t for _side, t, _s, _e, _ai in items]
+            whose = "a net-zero comparison"
+        top = min(pool, key=_tier_rank) if pool else None
         if basis == "none":
             out_w.append(f"{where}.basis is 'none' but the ledger lists {len(items)} item(s); "
                          f"'none' is for a clean 0 with no item on either side -- name the "
-                         f"highest-priority tier in which the target differs ({top!r})")
-        elif _tier_rank(basis) > _tier_rank(top):
-            out_w.append(f"{where}.basis is {basis!r} but the ledger's highest-priority tier is "
-                         f"{top!r}; the basis must not claim a lower-priority class than the "
-                         f"items it cites")
+                         f"highest-priority tier in which the two versions differ ({top!r})")
+        elif top is not None and basis != top:
+            out_w.append(f"{where}.basis is {basis!r} but the highest-priority tier backing "
+                         f"{whose} is {top!r}; the basis must name that tier exactly (for a 0, "
+                         f"the highest-priority tier in which the two versions differ)")
     return out_e, out_w
 
 

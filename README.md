@@ -244,9 +244,11 @@ revisers. It never edits a package; its product is the decision record
 * the auditor's own artifacts pass the same disposition-quality detectors as the
   reviewer's (see below).
 
-The stage is **off by default** so that existing roots keep their plan shape and
-their arms stay comparable; turn it on when you want the extra decision layer
-(it costs one session per round, not per candidate).
+The stage is **on by default** (`DEFAULT_AUDIT = "on"`): the review's disposition layer was the
+pipeline's single largest source of shipped leftovers, and one extra session per round is cheaper
+than a second round. `setup --audit off` (or `--no-audit`) restores the two-step review → revise
+plan and keeps an existing root's recorded policy; it costs one session per round, not per
+candidate.
 
 ## The rewrite-parity checks (M25–M29 + J5): making review do the rewrite's job
 
@@ -408,7 +410,7 @@ boxes.
 | `a1` | `r<r>_a1` | the round's base: round 1 is the pristine copy, later rounds the previous champion (no agent) |
 | `rewrite` | `r<r>_w1…wM` | full alternative versions with a **declared level**: odd arms are `structural` (organization-level, reported in `## ORGANIZATION MAP`), even arms are `sentence` (same organization, prose-level). With M≥2 the round therefore carries BOTH kinds of difference for the integration stage to weigh |
 | `review` | `r<r>_review` | ONE frozen identification pass (`$paper-review`) that feeds every revise session |
-| `audit` | `r<r>_audit` | **optional** (`setup --audit on`): an INDEPENDENT AUDITOR between the reviewer and the revisers — it disposes every frozen finding (confirm, or drop WITH evidence), promotes the reviewer's boilerplate `OK` closures of finding-tier rows into real `AU-*` findings, and hands the AUDITED list to the revision arms |
+| `audit` | `r<r>_audit` | **on by default** (`setup --audit off` / `--no-audit` disables): an INDEPENDENT AUDITOR between the reviewer and the revisers — it disposes every frozen finding (confirm, or drop WITH evidence), promotes the reviewer's boilerplate `OK` closures of finding-tier rows into real `AU-*` findings, and hands the AUDITED list to the revision arms |
 | `revise` | `r<r>_a2…a{1+N}` | reviewed-and-revised versions that consume the frozen review (or the audited list, when the auditor ran) |
 | `integrate` | `r<r>_i1…iK` | "merge from the other versions": every pool member SELECTED by the round's `--integrators` mask reworked with the WHOLE pool as donors (the default mask 0xFFFFFFFF selects all K = 1+M+N members) |
 | `judge` | `judge_t…_j…` | blind pairwise panels over the round's field (the id is an opaque token: it carries no round and no arm) |
@@ -894,8 +896,11 @@ definition (`paper-skills/paper-revise/references/ledger.md`):
 | 4 Technical Formatting | `formatting` (M18/M19/M20; ≤ ±1 and never decisive alone) |
 | 5 Missing / Unneeded Information | `completeness` |
 
-Severity is shared too (CRITICAL / MAJOR / MINOR), and an improvement claim must
-name the class and the concrete item behind it -- a difference that cannot be
+Severity is shared too (CRITICAL / MAJOR / MINOR) and is a **distance from correct** in every
+class — a detail that changes nothing a reader depends on is Minor, a changed reported
+fact/attribute/comparison is Major, a conclusion-changing, data-contradicting or
+category-impossible error is Critical; a factual error is not automatically Critical. An
+improvement claim must name the class and the concrete item behind it -- a difference that cannot be
 named in this vocabulary is cosmetic and scores 0. What differs between sessions
 is the *deliverable*, not the vocabulary: an identification session reports
 findings and never scores, a comparison session scores one target against one
@@ -948,7 +953,10 @@ major 2 / critical 3, the per-tier nets are capped (correctness ±4,
 consistency/preservation ±3, completeness ±2, formatting/writing ±1), and the
 capped sum is then bounded by the rung the rows can BACK: MINOR rows reach ±2 at
 most, |3| ("clearly better/worse") needs a MAJOR row outside formatting/writing,
-|4| ("decisive") needs a CRITICAL one. Before that bound existed the caps alone
+|4| ("decisive") needs a CRITICAL one. `basis` names the highest-priority tier on the side the
+integer's sign favours (for a 0, the highest-priority tier in which the two versions differ), and
+a defect that damages the delivered artifact — a rendered blank page, an unprinted figure — is
+scored where its damage lives (`completeness` for missing content), never as cosmetic formatting. Before that bound existed the caps alone
 could DEMAND a number the rung check then forbade (three minor consistency rows
 summed to 3 with no MAJOR row; two MAJOR correctness rows summed to 4 with no
 CRITICAL row), so no sheet could satisfy both and real panel sessions failed

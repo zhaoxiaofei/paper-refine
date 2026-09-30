@@ -35,10 +35,16 @@ Categories (stable labels, used in findings):
 - **4 — Technical Formatting**: per-format rules (LaTeX refs, docx styles), alignment, fonts, headings, numbering, caption placement, math/notation, mixed formats.
 - **5 — Missing / Unneeded Information**: guideline-required info beyond §1's list; superfluous files/content (drafts, internal notes, uncited items, PII).
 
-Severity:
-- **Critical** — factual errors, ethical/completeness gaps, data-integrity items; anything that could trigger rejection or a correction later.
-- **Major** — issues an editor/reviewer/copyeditor would flag; guideline violations.
-- **Minor** — polish, consistency, style.
+Severity is a DISTANCE FROM CORRECT, in every category (not only factual ones):
+- **Critical** — the error changes a conclusion, contradicts the data, or is a category
+  impossibility (a fabricated number or citation, a claim the data refute, a wrong species or
+  kind); anything that could trigger rejection or a correction later. A factual error is NOT
+  automatically Critical: the rung comes from what the error CHANGES.
+- **Major** — the error changes a reported fact, attribute, comparison or sample set, but not the
+  paper's conclusion (a wrong age band, sex, unit or cohort label is the typical case; an
+  editor/reviewer/copyeditor would flag it).
+- **Minor** — a detail that changes no claim, reported fact or downstream number (polish,
+  consistency, style; the closest miss).
 
 Class mapping (the pipeline's sessions share ONE defect vocabulary; the judge
 panel scores by these classes, highest priority first):
@@ -54,6 +60,21 @@ DEFECT is, and where a category splits you classify by the concrete defect:
 | 3 Plagiarism / AI-generated content | `correctness` (the integrity of the content itself) |
 | 4 Technical Formatting | `formatting` (M18/M19/M20 rows; at most ±1 in a comparison and never decisive alone) |
 | 5 Missing / Unneeded Information | `completeness` |
+
+**Artifact damage is not cosmetic formatting.** A rendered blank page, a figure or table that did
+not print, or an unreadable rendering is classified by what it DAMAGES: content missing from the
+delivered artifact is `completeness` (one displaced page/figure Minor, several pages or a whole
+section Major, an unusable artifact Critical), and a corrupt or undeliverable artifact is
+`correctness`. Only a stray empty line, spacing, an italic/quotation treatment or a mixed URL
+style is COSMETIC (0) if it appears once, becomes `consistency` when the same convention is
+broken repeatedly, and stays `formatting` (MINOR-only, worth at most ±1 in a comparison) as a
+recorded row. A blank LINE is not a blank PAGE: the break-only paragraph that displaces a page is
+artifact damage, graded by the extent of what it displaces.
+
+**A claim both versions get wrong is scored by the DISTANCE between the two errors**, not by two
+absolute severities that cancel: file the opponent's error as `resolved` and the target's error as
+`introduced`, each at its own rung; the net is the distance (same rung = neither version is closer
+to the truth).
 
 Name the class in the finding's explanation whenever it is not obvious from the
 category: a revision or a judge that reads the finding must classify it the same
@@ -691,7 +712,12 @@ rule | severity | location | evidence | fix kind | disposition.
 **Finding rules (one per instance):**
 - a break-only empty paragraph, a rendered blank page, the running head on the
   title page, tracked changes or proofing markers in a final package → finding
-  (a rendered blank page is the ground truth; the XML rows explain it)
+  (a rendered blank page is the ground truth; the XML rows explain it). CLASSIFY
+  it by what it damages: a page/figure that displaces content is a
+  `completeness` finding whose severity follows the extent (one displaced
+  page/figure Minor, several pages or a whole section Major, an unusable
+  artifact Critical) — never a cosmetic `formatting` row; a corrupt or
+  undeliverable artifact is `correctness`
 - legend line spacing that is not single (`w:line=240`), or legend paragraph
   spacing that differs between figures → finding
 - a heading without `keepNext`/`keepLines`, or heading runs whose direct size
