@@ -5,9 +5,11 @@ Run:  python3 .paper_test/test_anonymized_judging.py
 
 Three properties are asserted:
 
-  A. every line the pipeline prints to stdout/stderr starts with the current
+  A. every line a COMMAND prints to stdout/stderr starts with the current
      local datetime in "year-month-day hour-minute-second" form, including the
-     continuation lines of a multi-line error;
+     continuation lines of a multi-line error -- while usage output (`-h`,
+     `--help`, an argparse usage error) prints PLAIN, so it can be read, piped
+     into documentation or diffed as-is;
   B. what a JUDGE can see carries no name, path shape, timestamp, permission
      bit, attribute or other metadata that could bias a comparison: views are
      anonymous placeholders ("d01/", "f0001<ext>") with a randomly permuted
@@ -174,7 +176,7 @@ def run_e2e(tmp: Path) -> Path:
 # =====================================================================
 
 def test_console_timestamps():
-    print("== A. every printed line carries the current datetime ==")
+    print("== A. every COMMAND-printed line carries the current datetime (usage stays plain) ==")
     tmp = scratch("paper_anon_cli_")
     src = make_source(tmp)
     root = tmp / "root"
@@ -213,12 +215,23 @@ def test_console_timestamps():
     check("the error text is still readable (message body intact)",
           any("sandbox" in ln for ln in err_lines))
 
-    # --help output also flows through the timestamping stream
+    # Usage output is NOT a run log: `-h`/`--help` (and an argparse usage error)
+    # must print plain, un-prefixed lines so an operator can read, pipe or diff
+    # the help. Stamping starts after a successful parse.
     helptext = subprocess.run([sys.executable, str(WS / "paper_pipeline.py"), "--help"],
                               capture_output=True, text=True, timeout=300).stdout
     help_lines = [ln for ln in helptext.splitlines() if ln.strip()]
-    check("--help lines are stamped too",
-          help_lines and all(STAMP_RE.match(ln) for ln in help_lines), str(help_lines[:1]))
+    check("--help lines are NOT stamped",
+          help_lines and not any(STAMP_RE.match(ln) for ln in help_lines),
+          str(help_lines[:2]))
+    check("--help still shows the usage text",
+          any(ln.startswith("usage:") for ln in help_lines), str(help_lines[:1]))
+    usage_err = subprocess.run([sys.executable, str(WS / "paper_pipeline.py"), "no-such-command"],
+                               capture_output=True, text=True, timeout=300)
+    err_lines = [ln for ln in (usage_err.stdout + usage_err.stderr).splitlines() if ln.strip()]
+    check("an argparse usage error exits 2 with un-stamped lines",
+          usage_err.returncode == 2 and err_lines
+          and not any(STAMP_RE.match(ln) for ln in err_lines), str(err_lines[:2]))
 
 
 # =====================================================================

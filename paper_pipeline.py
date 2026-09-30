@@ -550,9 +550,11 @@ USAGE
     state.json), and every judge session copies the whole field: `prune` is the
     supported way to reclaim that space (dry-run unless --yes).
 
-    Every message this program prints to stdout/stderr is prefixed with the
+    Every message a COMMAND prints to stdout/stderr is prefixed with the
     current local datetime ("YYYY-MM-DD HH:MM:SS "), so a long run's log shows
-    when each step, retry and warning happened.
+    when each step, retry and warning happened. Usage output stays plain:
+    `-h`/`--help` (and an argparse usage error) is printed without a prefix, so
+    it can be read, piped into documentation or diffed as-is.
 
     Files a JUDGE sees are anonymized (placeholder paths, one timestamp, one
     mode, no attributes); files no judge sees -- sandboxes, pins, published
@@ -7253,6 +7255,8 @@ class TimestampedStream:
     attempt. The prefix is evaluated AT WRITE TIME (format: year-month-day
     hour-minute-second, local time) and applies to every line of a multi-line
     message, so pasted tracebacks and the tabular summaries stay readable.
+    It is installed AFTER argument parsing, so `-h`/`--help` and usage errors
+    (which argparse prints during the parse) stay un-prefixed.
     """
 
     def __init__(self, stream):
@@ -27096,11 +27100,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    # Every message this program prints carries the current datetime
-    # (year-month-day hour-minute-second) so a long run's log is readable.
-    install_timestamped_streams()
     parser = build_parser()
+    # Usage output (`-h`/`--help` and an argparse error) is NOT a run log: it is
+    # something an operator reads, pipes into documentation or diffs, so it stays
+    # un-stamped. Everything a COMMAND prints afterwards is the run's own console
+    # and keeps its datetime prefix (year-month-day hour-minute-second) so a long
+    # run's log is readable.
     args = parser.parse_args()
+    install_timestamped_streams()
     # The commands that drive or mutate a root keep their console in the root
     # (`reports/<cmd>-<stamp>.log`, and `state.json` -> `run_logs`): the attempt
     # history holds each attempt's diagnostics, this holds the INVOCATION --
