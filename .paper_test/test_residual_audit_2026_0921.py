@@ -363,7 +363,7 @@ def test_delivered_table_shapes():
     # (b) a SECOND table with its own columns (the added "classes the scan cannot see")
     (art / "M19_length.md").write_text(
         "| # | section | words | disposition |\n|---|---|---|---|\n"
-        "| 1 | abstract | 150 | OK — inside the 172-word cap |\n\n"
+        "| 1 | abstract | 150 | OK — inside the 165-word cap |\n\n"
         "## Rows added from the manual pass\n\n"
         "| # | check | disposition |\n|---|---|---|\n"
         "| A1 | cover letter | OK — 400 words, inside the 300-500 preference |\n",
@@ -386,7 +386,7 @@ def test_delivered_table_shapes():
           str(notes))
     check("a second table is parsed against ITS OWN header",
           [r.get("disposition") for r in
-           nb.parse_markdown_table(art / "M19_length.md")] == ["OK — inside the 172-word cap"],
+           nb.parse_markdown_table(art / "M19_length.md")] == ["OK — inside the 165-word cap"],
           str(nb.parse_markdown_table(art / "M19_length.md")))
     check("both tables of a file are checked for dispositions",
           nb.artifact_quality_report(tmp) == {}, str(nb.artifact_quality_report(tmp)))

@@ -250,7 +250,7 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
         "OK - stub: no scope needs work |\n", encoding="utf-8")
     (out / "artifacts" / "M19_length.md").write_text(
         "# M19 (stub)\n\n| document | section | words | cap | disposition |\n|---|---|---|---|---|\n"
-        "| base | abstract | 0 | 172 | OK |\n| base | main text | 0 | 3750 | OK |\n",
+        "| base | abstract | 0 | 165 | OK |\n| base | main text | 0 | 3750 | OK |\n",
         encoding="utf-8")
     (out / "artifacts" / "VIS_visual.md").write_text(
         "# visual inspection (stub)\n\nstub: no renderer used; pages reviewed: none\n",

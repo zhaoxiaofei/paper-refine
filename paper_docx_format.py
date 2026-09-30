@@ -622,6 +622,9 @@ FINDING_TIER_RULES = {
     "FMT-T9g",   # LaTeX quantity outside \SI/\num
     "FMT-T9i",   # paragraph structure (mega-paragraph)
     "FMT-T9j",   # two term families competing for one concept (CN vs CNV)
+    "FMT-T8f",   # indentation convention broken between sibling paragraphs/captions
+    "FMT-T8g",   # the front page is split by a rendered page break (keywords on page 2)
+    "FMT-T8h",   # the cover letter exceeds its two-page budget
 }
 
 
@@ -2351,6 +2354,147 @@ MECHANICAL_RULES = {"FMT-S1", "FMT-S3", "FMT-S5", "FMT-T1", "FMT-T2a", "FMT-T2b"
                     "FMT-T6g", "FMT-T7a", "FMT-T7b", "FMT-T8a", "FMT-T8d", "FMT-T8e"}
 
 
+# ---- layout consistency and page budgets (rules FMT-T8f/T8g/T8h) ----------
+# Three layout defects the text-only pass cannot see and a reader notices at
+# once: sibling paragraphs/captions that disagree on first-line indentation, a
+# front page whose abstract and keywords are split by a page break, and a cover
+# letter that renders past its two-page budget. Two of the three are read from
+# the OOXML itself (no renderer needed): the indent is the paragraph's own
+# `w:ind`, and the page break is Word's own `w:lastRenderedPageBreak` record.
+# The cover-letter page count uses a rendered PDF beside the .docx when one
+# ships, and otherwise reports the cached `docProps/app.xml <Pages>` value.
+CAPTION_LIKE_RE = re.compile(
+    r"^\s*(?:fig(?:ure)?s?\.?|tables?|extended\s+data|supplementary\s+(?:fig(?:ure)?s?|tables?))"
+    r"\b", re.I)
+KEYWORDS_RE = re.compile(r"^\s*(?:keywords?|key\s+words)\s*[:\-–—]", re.I)
+LIST_LIKE_RE = re.compile(r"^\s*(?:[\(\[]?[a-z0-9]{1,3}[\)\].、]|[-•*·])\s+", re.I)
+PAGE_BREAK_RE = re.compile(r"<w:lastRenderedPageBreak(?=[\s/>])[^>]*/>")
+
+
+def paragraph_first_line_indent(frag: str) -> int:
+    """The paragraph's own first-line indent in twips (0 = none)."""
+    ind = elem(ppr_of(frag), "ind")
+    if ind is None:
+        return 0
+    for k in ("firstLine", "firstLineChars", "hanging", "hangingChars"):
+        v = attr(ind, k)
+        if v and re.fullmatch(r"-?\d+", v.strip()):
+            n = int(v)
+            if n:
+                return n
+    return 0
+
+
+def layout_consistency_rows(xml: str, paras: list, title_block_end, doc: str) -> list:
+    """FMT-T8f: sibling paragraphs and captions must share one indent convention."""
+    styles_of = [elem_val(ppr_of(p), "pStyle") or "" for (_a, _b, p) in paras]
+    # The front matter (title block, abstract, keywords) is its own layout family:
+    # abstracts are conventionally flush while body paragraphs are first-line
+    # indented, so never count the abstract as a body-paragraph outlier. The
+    # family ends at the first heading after the keywords line (Introduction ...).
+    kw_i = next((i for i, (_a, _b, p) in enumerate(paras)
+                 if KEYWORDS_RE.match(text_of(p).strip())), None)
+    heading_after_kw = next((i for i in range((kw_i + 1) if kw_i is not None else 0, len(paras))
+                             if styles_of[i].startswith("Heading")), None)
+    front_end = heading_after_kw if heading_after_kw is not None else 0
+    cats = {"caption": [], "body": []}
+    for i, (_p0, _p1, p) in enumerate(paras):
+        if i < front_end:
+            continue
+        text = text_of(p).strip()
+        if not text:
+            continue
+        style = elem_val(ppr_of(p), "pStyle") or ""
+        if style.startswith("Heading") or style == "Bibliography":
+            continue
+        if title_block_end is not None and i < title_block_end:
+            continue
+        # Captions first: "Fig. 1 | ..." would otherwise look like a list item
+        # (a 3-character label plus a period), and a caption is never a list.
+        if CAPTION_LIKE_RE.match(text):
+            cats["caption"].append((i, text, paragraph_first_line_indent(p)))
+            continue
+        if LIST_LIKE_RE.match(text):
+            continue
+        # A run-in label ("Software.", "Randomization.") is a heading-like
+        # paragraph: flush-left is its convention, so it is not a body outlier.
+        first_sentence = re.match(r"^\s*([^.!?]{1,80}[.!?])(?:\s|$)", text)
+        if first_sentence and len(first_sentence.group(1).split()) <= 6:
+            continue
+        if len(text.split()) >= 25:
+            cats["body"].append((i, text, paragraph_first_line_indent(p)))
+    rows = []
+    names = {"caption": "figure/table caption(s)", "body": "body paragraph(s)"}
+    for key, items in cats.items():
+        if len(items) < 2:
+            continue
+        indented = [x for x in items if x[2] > 0]
+        plain = [x for x in items if x[2] == 0]
+        if not (indented and plain):
+            continue
+        minority = indented if len(indented) <= len(plain) else plain
+        examples = "; ".join(f"p{i} {t[:40]!r}" for i, t, _v in minority[:4])
+        rows.append({"rule": "FMT-T8f", "severity": "medium", "document": doc,
+                     "location": "document",
+                     "evidence": (f"{len(indented)} {names[key]} first-line indented, "
+                                  f"{len(plain)} not (e.g. {examples})"),
+                     "detail": ("one indentation convention per document: every body paragraph "
+                                "and every caption in a family must agree (a caption indented "
+                                "like its siblings, never half of them) -- align the minority "
+                                "with the majority"),
+                     "fix": "manual", "protected": False})
+    return rows
+
+
+def front_matter_page_break_row(xml: str, paras: list, doc: str) -> dict:
+    """FMT-T8g: title + abstract + keywords must fit the front page.
+
+    Read from Word's own `w:lastRenderedPageBreak` record (the pipeline zeroes
+    nothing here; a file that was never rendered carries no markers and the row
+    is skipped -- the agents' own render covers that case). The first recorded
+    break must come AFTER the keywords line.
+    """
+    first_break = PAGE_BREAK_RE.search(xml)
+    if first_break is None:
+        return None
+    kw = next(((i, text_of(p).strip()) for i, (_p0, _p1, p) in enumerate(paras)
+               if KEYWORDS_RE.match(text_of(p).strip())), None)
+    if kw is None:
+        return None
+    kw_i, kw_text = kw
+    # The break element sits INSIDE the paragraph it starts: Word records the
+    # break at the beginning of the first paragraph on the new page. So the
+    # front matter is split when the first break belongs to the keywords
+    # paragraph itself or to any paragraph before it.
+    break_para = next((i for i, (p0, p1, _p) in enumerate(paras)
+                       if p0 <= first_break.start() < p1), None)
+    if break_para is None or break_para > kw_i:
+        return None
+    after = next(((i, text_of(p).strip()) for i, (p0, _p1, p) in enumerate(paras)
+                  if p0 >= paras[break_para][0] and text_of(p).strip()), (break_para, ""))
+    return {"rule": "FMT-T8g", "severity": "medium", "document": doc,
+            "location": "front page",
+            "evidence": (f"the first rendered page break starts paragraph {after[0]} "
+                         f"{after[1][:50]!r} (the keywords are at paragraph "
+                         f"{kw_i} {kw_text[:40]!r}), so the front page does not hold them "
+                         f"together"),
+            "detail": ("the front page must carry the title, the authors, the affiliations, "
+                       "the abstract AND the keywords together; shorten the front matter (or "
+                       "trim lines from the abstract) so the keywords stay on page 1"),
+            "fix": "manual", "protected": False}
+
+
+def cover_letter_page_row(path: Path, pages, source: str) -> dict:
+    """FMT-T8h: the cover letter's two-page budget."""
+    return {"rule": "FMT-T8h", "severity": "medium", "document": path.name,
+            "location": "document",
+            "evidence": f"the cover letter is {pages} page(s) ({source}); the budget is 2",
+            "detail": ("a cover letter that runs past two pages is not acceptable; trim the "
+                       "non-persuading boilerplate (statement blocks, reviewer lists, "
+                       "restated affiliations) first, never a claim about the work"),
+            "fix": "manual", "protected": False}
+
+
 def analyse_document(xml: str, styles: dict, policy: dict, doc: str) -> dict:
     rows = []
     paras = paragraphs(xml)
@@ -2618,6 +2762,12 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str) -> dict:
                      "detail": r["detail"], "fix": _fix_kind(r["rule"], policy),
                      "protected": False})
 
+    # ---- layout consistency and the front-page budget (FMT-T8f/T8g) ----------
+    rows.extend(layout_consistency_rows(xml, paras, title_block_end, doc))
+    _fm_row = front_matter_page_break_row(xml, paras, doc)
+    if _fm_row:
+        rows.append(_fm_row)
+
     return {"rows": rows, "paras": len(paras), "words": words, "legend_idx": legend_idx,
             "fields": [f[2][:60] for f in franges],
             "style_survey": style_survey(xml, styles),
@@ -2626,10 +2776,16 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str) -> dict:
 
 
 def analyse_package(path: Path, policy: dict) -> dict:
+    app_pages = None
     try:
         with zipfile.ZipFile(path) as pkg:
             styles = parse_styles(pkg)
             xml = pkg.read("word/document.xml").decode("utf-8")
+            if "docProps/app.xml" in pkg.namelist():
+                m = re.search(r"<Pages>(\d+)</Pages>",
+                              pkg.read("docProps/app.xml").decode("utf-8", "replace"))
+                if m:
+                    app_pages = int(m.group(1))
     except (zipfile.BadZipFile, KeyError, ET.ParseError) as e:
         row = {"rule": "FMT-X1", "severity": "high", "document": path.name, "location": "-",
                "evidence": f"{type(e).__name__}: {e}", "detail": "unreadable DOCX package",
@@ -2637,6 +2793,20 @@ def analyse_package(path: Path, policy: dict) -> dict:
         return {"file": str(path), "rows": [row], "by_rule": {"FMT-X1": 1},
                 "high": 1, "medium": 0, "low": 0, "documents": {}}
     res = analyse_document(xml, styles, policy, path.name)
+    # The cover letter's two-page budget: a rendered PDF beside the .docx is
+    # authoritative; without one, the cached Pages value is reported (and the
+    # row says which source it came from -- the cache can be stale).
+    if re.search(r"cover[\s_-]?letter", path.name, re.I):
+        pages, src = None, ""
+        pdf = path.with_suffix(".pdf")
+        if pdf.is_file() and shutil.which("pdftotext"):
+            txt = subprocess.run(["pdftotext", "-layout", str(pdf), "-"],
+                                 capture_output=True, text=True).stdout
+            pages, src = blank_pages_in_text(txt)["pages"], "the rendered PDF beside it"
+        elif app_pages is not None:
+            pages, src = app_pages, "the cached docProps/app.xml value -- render to confirm"
+        if pages and pages > 2:
+            res["rows"].append(cover_letter_page_row(path, pages, src))
     counts = Counter(r["rule"] for r in res["rows"])
     return {"file": str(path), "rows": res["rows"], "by_rule": dict(counts),
             "high": sum(1 for r in res["rows"] if r["severity"] == "high"),

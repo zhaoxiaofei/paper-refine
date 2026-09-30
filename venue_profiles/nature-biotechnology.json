@@ -15,7 +15,7 @@
         "source": "Nature Biotechnology content-types table (Article: abstract <= 150 words; main text <= 3,000 words excluding abstract, Methods, references and figure legends)",
         "abstract": {
           "base": 150,
-          "relaxation": 1.15
+          "relaxation": 1.10
         },
         "main_text": {
           "base": 3000,
@@ -204,7 +204,7 @@
     "source": "Nature Biotechnology content-types table (Article: abstract <= 150 words; main text <= 3,000 words excluding abstract, Methods, references and figure legends)",
     "abstract": {
       "base": 150,
-      "relaxation": 1.15
+      "relaxation": 1.10
     },
     "main_text": {
       "base": 3000,

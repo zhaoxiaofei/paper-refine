@@ -227,8 +227,8 @@ RULES CARRIED INTO EVERY PROMPT (AND WHERE THEY COME FROM)
       VENUES AND JOURNALS section below): for the DEFAULT nature-biotechnology
       Article profile the base limits are abstract <= 150 words and main text
       <= 3,000 words (excluding abstract, Methods, references and figure
-      legends), relaxed by the profile's own margins -- +15% on the abstract
-      (<= 172 words) and +25% on the main text (<= 3,750 words). A profile may
+      legends), relaxed by the operator's margins -- +10% on the abstract
+      (<= 165 words) and +25% on the main text (<= 3,750 words). A profile may
       carry different numbers, or none at all (the stages then count and name
       the limit the target journal's guidelines state). Words are counted as
       maximal runs of NON-SPACE characters with a newline treated as space
@@ -379,7 +379,7 @@ CODE-SIDE CHECKS (in addition to what the prompts ask the agents to do)
                           at `decide` over the pinned winner, and compared with
                           the SELECTED article type's limits, relaxed by the
                           profile's margins (the default nature-biotechnology
-                          Article: +15%/+25% -> 172 / 3,750 words; the profile's
+                          Article: +10%/+25% -> 165 / 3,750 words; the profile's
                           other article types, and a profile with no limits,
                           record counts only -- see `set-article-type`).
                           Reported next to the caption
@@ -721,8 +721,8 @@ from pathlib import Path
 # sessions can never write, no mode creates or deletes items, and the library
 # stays read-only unless the operator opted into apply.
 # 3.3.0 -- the abstract/main-text length exemption is replaced by the journal's
-# own limits relaxed by the operator's margins: abstract <= 150 words * 1.15
-# (<= 172) and main text <= 3,000 words * 1.25 (<= 3,750) for a Nature
+# own limits relaxed by the operator's margins: abstract <= 150 words * 1.10
+# (<= 165) and main text <= 3,000 words * 1.25 (<= 3,750) for a Nature
 # Biotechnology Article, with words counted as runs of non-space characters
 # (newline = space). The new sweep id is M19 (always active; M18 stays the
 # opt-in caption sweep), an over-limit section is a formatting-tier item that
@@ -1019,7 +1019,7 @@ _DEFAULT_VENUE_PROFILE = {
              "source": "Nature Biotechnology content-types table (Article: abstract <= 150 "
                        "words; main text <= 3,000 words excluding abstract, Methods, "
                        "references and figure legends)",
-             "abstract": {"base": 150, "relaxation": 1.15},
+             "abstract": {"base": 150, "relaxation": 1.10},
              "main_text": {"base": 3000, "relaxation": 1.25},
              "cover_letter": {
                  "min": 300, "max": 500,
@@ -2942,10 +2942,10 @@ DEFAULT_CAPTION_LIMIT = 0
 #   * abstract  -- up to 150 words, unreferenced;
 #   * main text -- up to 3,000 words, EXCLUDING abstract, Methods, references
 #                  and figure legends.
-# They are applied RELAXED by the profile's own margins (NBT: +15% on the
+# They are applied RELAXED by the operator's margins (NBT: +10% on the
 # abstract, +25% on the main text). The cap is the largest INTEGER word count
-# that stays inside the relaxation (floor of base*factor): 150*1.15 = 172.5 ->
-# 172 and 3000*1.25 -> exactly 3,750. A submission of another content type
+# that stays inside the relaxation (floor of base*factor): 150*1.10 = 165 and
+# 3000*1.25 -> exactly 3,750. A submission of another content type
 # (Resource, Brief Communication, ...) takes THAT type's numbers from the same
 # venue table with the same two margins; the prompts require the base and its
 # source to be named in the artifact.
@@ -3284,10 +3284,14 @@ def standing_exemptions_text(profile=None) -> str:
     cover_clause = _cover_preference_clause(prof)
     cover_bullet = (
         f"  * The master prompt's COVER-LETTER rule (the persuading part must be {cover_clause})\n"
-        f"    stays a flaggable formatting item: report it, never gate on it."
+        f"    stays a flaggable formatting item: report it, never gate on it. The LETTER ITSELF\n"
+        f"    must render to at most TWO pages (a third page is a Major formatting defect); trim\n"
+        f"    the non-persuading boilerplate first, never a claim about the work, and the page\n"
+        f"    count comes from a render, never from the cached document property."
         if cover_clause else
         "  * This venue profile states no COVER-LETTER word rule: the letter's length is recorded\n"
-        "    and reported, never gated and never cut.")
+        "    and reported, never gated and never cut. The LETTER itself must still render to at\n"
+        "    most TWO pages (a third page is a Major formatting defect), measured from a render.")
     caption_source = (prof.captions.get("source")
                       or "this venue profile states no figure-legend length rule")
     return f"""Standing exemptions and explicit limits (apply to every mode, always):
@@ -4176,6 +4180,12 @@ defect the same way; only the deliverable differs):
     what it displaces. A length/caption row (`M18`/`M19`) is always a @@T_FORMATTING@@ MINOR row:
     the venue's relaxed length margins mean slight over-length is intended, so length may move a
     comparison by at most one point and is NEVER a scoring tier of its own.
+  * PAGE BUDGETS ARE PART OF THE DELIVERED ARTIFACT: the front page must hold the title, the
+    authors, the affiliations, the abstract AND the keywords together, and the cover letter must
+    render to at most TWO pages. A keywords line that starts page 2, or a third cover-letter
+    page, is a formatting row graded MAJOR -- the reader must work around it -- and it is decided
+    by the DELIVERED layout, not by the cached page property. Never shorten a scientific claim to
+    reach a budget: cut boilerplate and redundancy, or hand the compression to the author.
   * An improvement claim must name the class it improves and the concrete item behind it, with a
     location: "this edit is better" without one is not an improvement claim. A difference that
     cannot be named in this vocabulary is COSMETIC and counts 0 for every session. A difference
@@ -4354,6 +4364,17 @@ VISUAL_INSPECTION_RULE = """VISUAL INSPECTION — RENDER FIRST, THEN LOOK (a DOC
     justified main text (must be left-aligned), overlapping or clipped text/figures, tables that
     overflow or break badly, figures/tables split across pages, orphaned headings, uneven
     spacing, caption placement, and anything that visually contradicts the style rules.
+  * THE PAGE BUDGETS ARE PART OF THE INSPECTION, and they are recorded per document:
+      - the FRONT PAGE must carry the title, the authors, the affiliations, the abstract AND the
+        keywords together; a keywords line that starts page 2 (or an abstract that spills) is a
+        defect -- shorten the front matter, never the science;
+      - the COVER LETTER must render to at most TWO pages; a third page is a defect (trim the
+        non-persuading boilerplate -- statement blocks, reviewer lists, restated affiliations --
+        before touching a claim about the work);
+      - write the rendered page count of EVERY top-level document you converted into the visual
+        artifact (`document: N page(s)`), so "it fits" is a measurement, not an impression.
+        The cached `docProps/app.xml` page count is NOT evidence: it is stale in exactly the files
+        that were generated programmatically, so count the pages of the render you looked at.
   * Record the pass in @@VISUAL_ARTIFACT@@: the renderer and version used, which files/pages you
     actually looked at, what you found, and what you corrected. If no renderer works, or you
     cannot view images, say so EXPLICITLY in the same artifact, list every page as "not visually
@@ -5001,8 +5022,12 @@ Skill discipline that the orchestrator will check for:
     only style" is not a disposition: file the finding, or dispose the row OK with the reason that
     BOTH readings satisfy every item of the shared prose rubric. Judge this generically (academic
     vs conversational, precise vs vague, the established collocation vs an ad-hoc pairing), never
-    from a fixed word list. Character spacing, blank lines and line/paragraph breaks are M20
-    formatting rows, never J3 findings.
+    from a fixed word list. The FIRST sentence of a paragraph must connect to the previous
+    paragraph (a pronoun, connector, repeated term or stated relation): a paragraph that opens
+    with a bare new-topic assertion is a finding, and so is a sentence the reader must RE-READ to
+    follow (stacked clauses, a referent that resolves only later). Character spacing, blank lines
+    and line/paragraph breaks are M20 formatting rows, never J3 findings, and the front-page /
+    two-page cover-letter budgets are decided by a render, never by the cached page property.
   * The M1 artifact's M1b instance table (un-abbreviated long forms used again after the acronym's
     first use) is NOT optional reading: each of its rows is either an M1(k) finding or a row
     disposed OK with a recorded reason -- in the row's own `disposition` cell and/or in the M1
@@ -5974,8 +5999,9 @@ LANGUAGE_PASS_RULE = """LANGUAGE PASS — a bounded, iterative pass over every e
        correct and stays)
     L2 formal-logic slips (converse/inverse swapped, "A therefore B" where only B-with-A holds)
     L3 logic jumps (the conclusion needs a step the text does not state)
-    L4 coherence (sentence-to-sentence and inside one sentence: referents, connectors, tense; and
-       the linkage of each unit to its parent and to its next sibling)
+    L4 coherence (sentence-to-sentence and inside one sentence: referents, connectors, tense; the
+       linkage of each unit to its parent and to its next sibling; and the FIRST sentence of every
+       paragraph must connect to the previous paragraph -- add the link, never delete the content)
     L5 unexplained prerequisites (a term a reader must look up; define it once, in place). A LaTeX
        macro argument is NOT a prerequisite -- the full paper defines it, so never rewrite text
        for the argument of a macro
@@ -5985,7 +6011,9 @@ LANGUAGE_PASS_RULE = """LANGUAGE PASS — a bounded, iterative pass over every e
        alternative. Judge it GENERICALLY (academic vs conversational, precise vs vague, the
        established collocation vs an ad-hoc pairing), never from a fixed word list
     L8 non-written register (spoken, short or colloquial forms -> the formal equivalent)
-    L9 stiff, formulaic or translated phrasing and word order (keep the meaning, make it flow)
+    L9 stiff, formulaic or translated phrasing and word order, and any sentence the reader must
+       RE-READ to follow (stacked clauses, a late referent): keep the meaning, split or reorder the
+       sentence, never change its claim
     L10 grammar   L11 typos/punctuation (also: one idea per sentence). MECHANICAL SEPARATOR
        CONVENTIONS (character spacing, blank lines, line or paragraph breaks) are NOT this pass's
        business: the format scan and the orchestrator's normalizer own them, so never rewrite text
@@ -18015,7 +18043,11 @@ WRITING_RUBRIC = """WRITING RUBRIC — use it to justify every `writing`-tier ro
   Q3  a logic jump (the conclusion needs a step the text never states)
   Q4  coherence (referents, connectors, tense: between sentences and inside one sentence; and the
       LINKAGE of each unit to its parent and to its next sibling -- a unit that does not follow
-      from what precedes it, or that is not connected to the next one, is a row here or at Q12)
+      from what precedes it, or that is not connected to the next one, is a row here or at Q12).
+      The first sentence of a paragraph must connect to the PREVIOUS paragraph (a pronoun,
+      connector, repeated term or stated relation): a paragraph opening with a bare new-topic
+      assertion -- a named tool or entity dropped in with no link -- is a row; add the link,
+      never delete the content
   Q5  an unexplained prerequisite (a term a reader would have to look up; define it once, in
       place). A LaTeX command or macro argument is NOT a prerequisite -- the full paper defines
       it, so never file a row for the argument of a macro
@@ -18028,8 +18060,10 @@ WRITING_RUBRIC = """WRITING RUBRIC — use it to justify every `writing`-tier ro
       precise vs vague, the established collocation vs an ad-hoc pairing. Never work from a fixed
       word list
   Q8  non-written register (spoken, short or colloquial forms where the formal equivalent exists)
-  Q9  stiff, formulaic or translated phrasing and word order (the meaning survives; the idiom and
-      the flow do not -- including a literal rendering of another language's construction)
+  Q9  stiff, formulaic or translated phrasing and word order, and any sentence the reader must
+      RE-READ to follow (stacked clauses, a referent that resolves only later, two ideas in one
+      breath): the meaning survives, the idiom and the flow do not. Includes a literal rendering
+      of another language's construction; split or reorder the sentence, never change its claim
   Q10 grammar (agreement, voice, dangling modifiers, parallelism)
   Q11 typography and punctuation (typos; a comma splice; a missing or wrong mark; a spaced hyphen
       used as a dash; mixed quotation marks; hundreds separators used inconsistently; a quantity
@@ -26184,7 +26218,7 @@ USAGE_EXAMPLES = """usage:
           own limits apply in their relaxed form (for the default
           nature-biotechnology Article: abstract <= 150 words and main text
           <= 3,000 words excluding abstract, Methods, references and figure
-          legends, relaxed by +15% -> <= 172 and +25% -> <= 3,750), with words
+          legends, relaxed by +10% -> <= 165 and +25% -> <= 3,750), with words
           counted as runs of non-space characters and a newline treated as
           space. Check id M19 is always active: the review enumerates and
           reports, the revision/integration stages compress by removing

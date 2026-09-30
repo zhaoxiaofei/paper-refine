@@ -8,7 +8,7 @@ Run:  python3 .paper_test/test_venue_config.py
 Asserts:
   * the shipped profiles (`venue_profiles/*.json`) load, agree with the
     built-in fallback inside paper_pipeline.py, and carry the numbers they claim:
-    nature-biotechnology = 150/3,000 -> 172/3,750, generic = no caps,
+    nature-biotechnology = 150/3,000 -> 165/3,750, generic = no caps,
     example-journal = 250/5,000 -> 275/6,000 with a 250-word legend cap;
   * `setup --venue/--journal` records the selection in pipeline_config.json
     (plus the resolved profile snapshot) and mirrors it into state.json;
@@ -128,7 +128,7 @@ def test_profiles():
     paper = nb.load_venue_profile("nature-biotechnology")
     limits = paper.length_limits()
     check("VC1 the default profile carries the pipeline's old Article numbers",
-          limits["abstract"] == {"base": 150, "relaxation": 1.15, "cap": 172}
+          limits["abstract"] == {"base": 150, "relaxation": 1.10, "cap": 165}
           and limits["main text"] == {"base": 3000, "relaxation": 1.25, "cap": 3750},
           str(limits))
     check("VC1 the default profile's journal is Nature Biotechnology",
@@ -157,7 +157,7 @@ def test_profiles():
           nb.length_limits() == limits)
     check("VC1 the constants kept for compatibility still match the profile",
           nb.DEFAULT_ARTICLE_ABSTRACT_WORDS == 150 and nb.DEFAULT_ARTICLE_MAIN_TEXT_WORDS == 3000
-          and nb.DEFAULT_ARTICLE_ABSTRACT_CAP == 172 and nb.DEFAULT_ARTICLE_MAIN_TEXT_CAP == 3750)
+          and nb.DEFAULT_ARTICLE_ABSTRACT_CAP == 165 and nb.DEFAULT_ARTICLE_MAIN_TEXT_CAP == 3750)
 
 
 # =====================================================================
@@ -361,7 +361,7 @@ def test_missing_invalid_inconsistent():
           str(ctx.venue_notes))
     prompts = all_prompts(nb.venue_profile_of(ctx))
     check("VC4 ... and its prompts are the old Nature Biotechnology ones",
-          "Nature Biotechnology" in prompts["review"] and "172" in prompts["review"])
+          "Nature Biotechnology" in prompts["review"] and "165" in prompts["review"])
     status = run_cli("status", "--root", root)
     check("VC4 status still works on a legacy root", status.returncode == 0, status.stdout[-200:])
 
@@ -502,8 +502,8 @@ def test_scans_and_prompts():
           + ("text " * 4000).strip() + "\n\nMethods\n\nx\n")
     default_info = nb.scan_lengths_in_sources([(tmp, "", ())])
     abstract = [r for r in default_info["rows"] if r["section"] == "abstract"][0]
-    check("VC6 the default scan flags the 200-word abstract against 172",
-          abstract["cap"] == 172 and abstract["over_limit"] is True, str(abstract))
+    check("VC6 the default scan flags the 200-word abstract against 165",
+          abstract["cap"] == 165 and abstract["over_limit"] is True, str(abstract))
     generic = nb.load_venue_profile("generic")
     generic_info = nb.scan_lengths_in_sources([(tmp, "", ())], profile=generic)
     abstract_g = [r for r in generic_info["rows"] if r["section"] == "abstract"][0]
@@ -540,7 +540,7 @@ def test_scans_and_prompts():
     check("VC6 the caption rule of a profile without a legend number says so",
           "GENERIC" not in prompts["review"] and "figure-legend length rule" in prompts["review"])
     check("VC6 the default venue keeps its numbers and its branding",
-          "172" in all_prompts()["review"] and "Nature Biotechnology" in all_prompts()["review"])
+          "165" in all_prompts()["review"] and "Nature Biotechnology" in all_prompts()["review"])
 
 
 # =====================================================================
@@ -562,7 +562,7 @@ def test_skill_script():
                           capture_output=True, text=True)
     default = json.loads(proc.stdout)
     check("VC7 without a profile it uses the default Article caps",
-          default["caps"] == {"abstract": 172, "main text": 3750}, str(default["caps"]))
+          default["caps"] == {"abstract": 165, "main text": 3750}, str(default["caps"]))
     proc = subprocess.run([sys.executable, str(script), str(tmp / "ms.md"), "--json",
                            "--venue-profile", str(WS / "venue_profiles" / "generic.json")],
                           capture_output=True, text=True)
@@ -595,7 +595,7 @@ def test_article_types():
           [t[0] for t in nbt.article_types() if t[2]] == ["article"],
           str(nbt.article_types()))
     check("VC8 the default type keeps the pipeline's old Article numbers",
-          nbt.article_type_id == "article" and nbt.length_limits()["abstract"]["cap"] == 172
+          nbt.article_type_id == "article" and nbt.length_limits()["abstract"]["cap"] == 165
           and nbt.length_limits()["main text"]["cap"] == 3750 and nbt.article_type == "Article")
     brief = nbt.with_article_type("brief-communication")
     check("VC8 another type does not borrow the Article caps",
@@ -637,13 +637,13 @@ def test_article_types():
     prompts = all_prompts(nb.venue_profile_of(ctx))
     check("VC8 the prompts carry the type, not the Article caps",
           all("Brief Communication" in t for t in prompts.values())
-          and all("172" not in t for k, t in prompts.items() if k != "audit"))
+          and all("165" not in t for k, t in prompts.items() if k != "audit"))
 
     listed = run_cli("set-article-type", "--root", root, "--list")
     check("VC8 `set-article-type --list` shows every type with its caps",
           listed.returncode == 0 and "brief-communication" in listed.stdout
           and "resource" in listed.stdout and "no numbers carried" in listed.stdout
-          and "abstract <= 172" in listed.stdout, listed.stdout[-300:])
+          and "abstract <= 165" in listed.stdout, listed.stdout[-300:])
     shown = run_cli("set-article-type", "--root", root, "--show", "--json")
     try:
         data = json.loads(shown.stdout)
@@ -661,7 +661,7 @@ def test_article_types():
     ctx2 = nb.Ctx(root)
     ctx2.load()
     check("VC8 ... and the resolved caps are the Article's again",
-          nb.venue_profile_of(ctx2).length_limits()["abstract"]["cap"] == 172)
+          nb.venue_profile_of(ctx2).length_limits()["abstract"]["cap"] == 165)
     bad = run_cli("set-article-type", "--root", root, "letter-to-the-editor")
     check("VC8 a type this profile does not carry is refused (exit 2)",
           bad.returncode == 2 and "unknown article type" in (bad.stdout + bad.stderr)

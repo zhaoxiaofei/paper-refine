@@ -37,7 +37,7 @@ for the values the profile supplied, and keeps the values you chose.
 
 | id | what it is |
 |---|---|
-| `nature-biotechnology` | the pipeline's original, pre-venue rule set, with the venue's content-type table. Its **Article** type carries the numbers the pipeline started with (abstract <= 150 words, main text <= 3,000 words, relaxed by +15%/+25% to 172/3,750); the other types (Brief Communication, Review, Perspective, Analysis, Resource, Correspondence, Matters Arising) deliberately carry no numbers, so selecting them counts and reports against the venue's table instead of borrowing the Article caps. This is the **default** venue, so an existing root keeps behaving exactly as before. |
+| `nature-biotechnology` | the pipeline's original, pre-venue rule set, with the venue's content-type table. Its **Article** type carries the numbers the pipeline started with (abstract <= 150 words, main text <= 3,000 words, relaxed by +10%/+25% to 165/3,750); the other types (Brief Communication, Review, Perspective, Analysis, Resource, Correspondence, Matters Arising) deliberately carry no numbers, so selecting them counts and reports against the venue's table instead of borrowing the Article caps. This is the **default** venue, so an existing root keeps behaving exactly as before. |
 | `generic` | a venue-agnostic profile: one `Article` type that states no limits, no legend cap and no format rule of its own. Every stage still enumerates the counts and names the limit the *target journal's own* guidelines state. |
 | `example-journal` | an **illustrative template** showing the fields the other two do not exercise: three article types with different caps (Research Article 275/6000, Review 220/9600, Letter to the Editor with no abstract cap and an 880-word main text), a published legend limit, no cover-letter preference and an explicit journal list. Its numbers are placeholders: copy the file, replace them with the ones your venue's guidelines state, cite them in `source`, and install it with `set-venue <id> --profile <file>`. |
 
@@ -137,7 +137,7 @@ types; the shape is the one to copy for a real journal:
       "id": "article", "label": "Article",
       "length_limits": {
         "source": "Nature Biotechnology content-types table (Article: abstract <= 150 words; main text <= 3,000 words excluding abstract, Methods, references and figure legends)",
-        "abstract": {"base": 150, "relaxation": 1.15},
+        "abstract": {"base": 150, "relaxation": 1.10},
         "main_text": {"base": 3000, "relaxation": 1.25},
         "cover_letter": {"min": 300, "max": 500, "source": "master-prompt preference; the journal states no limit"}
       },

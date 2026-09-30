@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.12 — one-sided small differences are scored, and the layout budgets are measured (2026-09-30)
+
+An operator review of a crowned winner found defects the rubric let through, so
+both the *prose* floor and the *layout* budget were made explicit and, where a
+file can prove it, code-checked:
+
+- **Small differences are real differences when ONE side is worse** (Q1–Q12 of
+  the shared writing rubric): a single less precise, idiomatic or academic
+  word/verb/connector, a missing transition, a punctuation or grammar slip, or a
+  paragraph that opens with a bare new-topic assertion is a finding; a difference
+  where BOTH readings satisfy every item stays cosmetic ("different" is not
+  "worse"). Character spacing, blank lines and line/paragraph breaks are M20
+  formatting rows, never prose rows, and a LaTeX macro argument is not an
+  unexplained prerequisite.
+- **The abstract margin is +10%** (150 → 165 words) in the shipped
+  nature-biotechnology profile and everywhere the limit is quoted.
+- **Layout budgets are part of the delivered artifact**: the front page must
+  hold the title, authors, affiliations, abstract AND keywords together, and the
+  cover letter must render to at most two pages (both decided by a render, never
+  by the cached `docProps/app.xml` count). The code-side M20 scan reports the
+  front-page split from Word's own `w:lastRenderedPageBreak` record
+  (`FMT-T8g`), sibling indentation drift (`FMT-T8f`) and an over-budget cover
+  letter when a render or the cached count shows it (`FMT-T8h`).
+
 ## 0.11 — M30: the source hierarchy becomes a detection rule (2026-09-29)
 
 The hierarchy (github code > data in `raw_data/` > main figures > … >

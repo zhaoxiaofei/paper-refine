@@ -30,7 +30,7 @@ say where they went.
 
 ## Mission
 
-Diagnose, do not fix. Produce a findings report + artifacts that the revision skill (`paper-revise`) can consume mechanically. Length rule (replaces the former blanket exemption): **the venue profile's abstract/main-text limits apply, relaxed by the profile's own margins** — for the default Nature Biotechnology Article profile, abstract ≤ 150 words +15% (≤ 172) and main text ≤ 3,000 words +25% (≤ 3,750, excluding abstract, Methods, references and figure legends); another content type uses its own base numbers with the same margins. Words are maximal runs of non-space characters with a newline treated as space. Sweep **M19** reports over-cap sections as formatting findings; never cut content to meet a limit, never flag under-length text, and never strengthen or weaken a claim (in either direction) to reach one — a hedge the evidence requires is content, and stripping it is an overclaim. Sweep **M18** always enumerates every figure legend's word count (the venue profile requires legends to respect the article type's limit but publishes no number; an optional proxy cap only changes the disposition). Sweep **M20** always audits the OOXML style/formatting rows the pipeline's code-side scan seeds (break-only paragraph/blank page, running head on the title page, legend spacing, heading style drift, unintended italics incl. field-protected Zotero rows, mixed URL/email treatments, mixed quotation marks, em-dash density). The cover letter's persuading part is measured against the user's **300-500-word preference** — the default profile's venue states no cover-letter word limit (checked 2026-09-19) — and is a Minor formatting item, never a journal requirement. All output in English.
+Diagnose, do not fix. Produce a findings report + artifacts that the revision skill (`paper-revise`) can consume mechanically. Length rule (replaces the former blanket exemption): **the venue profile's abstract/main-text limits apply, relaxed by the profile's own margins** — for the default Nature Biotechnology Article profile, abstract ≤ 150 words +10% (≤ 165) and main text ≤ 3,000 words +25% (≤ 3,750, excluding abstract, Methods, references and figure legends); another content type uses its own base numbers with the same margins. Words are maximal runs of non-space characters with a newline treated as space. Sweep **M19** reports over-cap sections as formatting findings; never cut content to meet a limit, never flag under-length text, and never strengthen or weaken a claim (in either direction) to reach one — a hedge the evidence requires is content, and stripping it is an overclaim. Sweep **M18** always enumerates every figure legend's word count (the venue profile requires legends to respect the article type's limit but publishes no number; an optional proxy cap only changes the disposition). Sweep **M20** always audits the OOXML style/formatting rows the pipeline's code-side scan seeds (break-only paragraph/blank page, running head on the title page, legend spacing, heading style drift, unintended italics incl. field-protected Zotero rows, mixed URL/email treatments, mixed quotation marks, em-dash density). The cover letter's persuading part is measured against the user's **300-500-word preference** — the default profile's venue states no cover-letter word limit (checked 2026-09-19) — and is a Minor formatting item, never a journal requirement. All output in English.
 
 Guidelines source: prefer a local copy of the author guidelines if present in the directory; otherwise the TARGET VENUE's own author guide -- the pipeline's venue profile names it
 (`venue_profiles/<id>.json`; the default profile's source is Nature Biotechnology's
@@ -216,6 +216,10 @@ writing rubric (J3/Q1–Q12), never merely because the two wordings differ:
   defines it, so never file a row for a macro's argument), redundancy (Q6), non-academic wording
   (Q7), non-written register (Q8), stiff/formulaic/translated phrasing (Q9), grammar (Q10),
   typography and punctuation (Q11), segmentation and structural unity (Q12);
+- the FIRST SENTENCE of every paragraph must connect to the previous paragraph (a pronoun,
+  connector, repeated term or stated relation); a paragraph that opens with a bare new-topic
+  assertion is a Q4 finding (add the link, never delete the content), and a sentence the reader
+  must RE-READ to follow (stacked clauses, a referent that resolves only later) is a Q9 finding;
 - judge each item GENERICALLY and DIRECTIONALLY: compare the two readings of the same content and
   name which one is worse and by what -- academic vs conversational, precise vs vague, the
   established collocation vs an ad-hoc pairing, formal vs spoken, idiomatic vs a literal rendering
@@ -232,6 +236,16 @@ writing rubric (J3/Q1–Q12), never merely because the two wordings differ:
   paragraph breaks belong to the M20 format sweep and the orchestrator's own normalizer, never to
   a writing row, and they are never scored twice. Venue or template rules that do not apply to
   this manuscript are ignored rather than imported as defects.
+
+**Layout budgets are part of the delivered artifact.** The FRONT PAGE must hold the title, the
+authors, the affiliations, the abstract AND the keywords together -- a keywords line that starts
+page 2 is a finding -- and the COVER LETTER must render to at most TWO pages (a third page is a
+Major formatting finding). Both are decided by a RENDER, never by the cached `docProps/app.xml`
+page property (it is stale in programmatically generated files); cut boilerplate and redundancy to
+fit, never a claim about the work. The code-side M20 scan reports the front-page split
+deterministically from Word's own `w:lastRenderedPageBreak` record (rule FMT-T8g), the indentation
+inconsistency between sibling paragraphs/captions (FMT-T8f), and a cover letter past two pages
+when a render or the cached count shows it (FMT-T8h).
 
 **A claim both versions get wrong is scored by the DISTANCE between the two errors**, not by two
 absolute severities that cancel: file the opponent's error as `resolved` and the target's error as
@@ -795,7 +809,7 @@ profile's own margins — this replaces the former blanket "abstract/main-text
 length is exempt" standing exemption. For the default Nature Biotechnology **Article** profile the base
 limits are abstract ≤ 150 words and main text ≤ 3,000 words, with the main text
 EXCLUDING the abstract, Methods, references and figure legends; this pipeline
-allows **abstract +15% (≤ 172 words)** and **main text +25% (≤ 3,750 words)**.
+allows **abstract +10% (≤ 165 words)** and **main text +25% (≤ 3,750 words)**.
 Another content type takes that type's own base numbers from the journal's
 content-types table with the same two margins, and the artifact must name the
 base and its source. A venue profile that declares different numbers (or none)

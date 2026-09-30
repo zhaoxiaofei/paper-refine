@@ -177,6 +177,82 @@ def rules(rows) -> set:
     return {r["rule"] for r in rows}
 
 
+def doc_xml_layout(split_front_page=True, mixed_indents=True) -> str:
+    """The 2026-09-30 winner's layout defects (front-page split, indent drift).
+
+    `split_front_page` puts Word's own `w:lastRenderedPageBreak` INSIDE the
+    keywords paragraph (the keywords start page 2); `mixed_indents` indents one
+    of two sibling captions and one of three body paragraphs.
+    """
+    brk = "<w:lastRenderedPageBreak/>" if split_front_page else ""
+    cap2 = ('<w:pPr><w:ind w:firstLine="480"/></w:pPr>' if mixed_indents else "")
+    body_ind = "" if mixed_indents else '<w:pPr><w:ind w:firstLine="480"/></w:pPr>'
+    para3 = f'  <w:p>{body_ind}<w:r><w:t>' + ("copy-number benchmarking sentence " * 10) + \
+            "</w:t></w:r></w:p>\n"
+    para3_plain = f'  <w:p>{body_ind}<w:r><w:t>' + ("another benchmarking sentence " * 10) + \
+                  "</w:t></w:r></w:p>\n"
+    return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="{P[1:-1]}" xmlns:r="{R[1:-1]}" xmlns:mc="{MC[1:-1]}" xmlns:w14="{W14[1:-1]}" mc:Ignorable="w14">
+<w:body>
+  <w:p><w:r><w:t>CopyNumBench: a benchmark</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Authors: A, B and C</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Abstract</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Copy-number callers diverge, so we benchmark them.</w:t></w:r></w:p>
+  <w:p><w:r>{brk}<w:t>Keywords: copy-number, benchmark.</w:t></w:r></w:p>
+  <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Introduction</w:t></w:r></w:p>
+  <w:p><w:pPr><w:ind w:firstLine="480"/></w:pPr><w:r><w:t>{"The copy-number profile of a cell is a fundamental characteristic of every cell. " * 4}</w:t></w:r></w:p>
+{para3}  <w:p><w:pPr><w:ind w:firstLine="480"/></w:pPr><w:r><w:t>Cancer-cell profiles are especially hard to infer because of heterogeneity.</w:t></w:r></w:p>
+{para3_plain}  <w:p><w:r><w:t>Fig. 1 | Benchmark overview.</w:t></w:r></w:p>
+  <w:p>{cap2}<w:r><w:t>Fig. 2 | A legend with its own indent.</w:t></w:r></w:p>
+<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+</w:body></w:document>"""
+
+
+def test_layout_budget_rules():
+    print()
+    print("== the 2026-09-30 winner's layout defects (FMT-T8f/T8g/T8h) ==")
+    tmp = scratch("paper_fmt_layout_")
+    bad = make_package(tmp / "mainText.docx", doc_xml_layout())
+    rows = fmt.scan_paths([bad], fmt.load_policy(None))["rows"]
+    got = rules(rows)
+    check("a keywords line pushed to page 2 is a front-page finding (FMT-T8g)",
+          "FMT-T8g" in got
+          and any("Keywords" in r["evidence"] for r in rows if r["rule"] == "FMT-T8g"),
+          str([r["evidence"][:80] for r in rows if r["rule"] == "FMT-T8g"]))
+    check("one indented sibling caption is an indent-consistency finding (FMT-T8f)",
+          sum(1 for r in rows if r["rule"] == "FMT-T8f") == 2
+          and any("caption" in r["evidence"] for r in rows if r["rule"] == "FMT-T8f"),
+          str([r["evidence"][:80] for r in rows if r["rule"] == "FMT-T8f"]))
+    clean = make_package(tmp / "clean.docx", doc_xml_layout(split_front_page=False,
+                                                            mixed_indents=False))
+    crows = fmt.scan_paths([clean], fmt.load_policy(None))["rows"]
+    check("a uniform layout produces neither finding",
+          "FMT-T8g" not in rules(crows) and "FMT-T8f" not in rules(crows),
+          str(sorted(rules(crows))))
+    # The cover letter's two-page budget: the cached app.xml count is the
+    # renderer-free evidence; a rendered PDF beside the .docx is authoritative.
+    for pages, want in ((2, False), (3, True)):
+        app = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+               f'<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/'
+               f'extended-properties"><Pages>{pages}</Pages></Properties>')
+        p = tmp / f"cnb-20-1-coverLetter-abc1234.docx"
+        with zipfile.ZipFile(p, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", CONTENT_TYPES)
+            z.writestr("_rels/.rels", RELS)
+            z.writestr("word/_rels/document.xml.rels", DOC_RELS)
+            z.writestr("word/document.xml", doc_xml_layout(split_front_page=False,
+                                                           mixed_indents=False))
+            z.writestr("word/styles.xml", STYLES)
+            z.writestr("docProps/core.xml", CORE)
+            z.writestr("docProps/app.xml", app)
+        lrows = fmt.scan_paths([p], fmt.load_policy(None))["rows"]
+        hit = [r for r in lrows if r["rule"] == "FMT-T8h"]
+        check(f"a cover letter with a cached {pages}-page count is "
+              f"{'a finding' if want else 'clean'} (FMT-T8h)",
+              bool(hit) is want and (not want or f"{pages} page(s)" in hit[0]["evidence"]),
+              str([r["evidence"] for r in hit]))
+
+
 def doc_xml_journal() -> str:
     """The real-world journal-emphasis defect (cover letter, 2026-09-21).
 
@@ -889,6 +965,7 @@ def main() -> int:
         test_fix_default(docx)
         test_journal_emphasis()
         test_text_consistency_rules()
+        test_layout_budget_rules()
         test_quality_engines()
         test_deliverable_validation()
         test_fix_extended(docx)

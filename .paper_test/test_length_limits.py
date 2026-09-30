@@ -7,7 +7,7 @@ Asserts:
   * the base limits are the Nature Biotechnology ARTICLE numbers (abstract
     <= 150 words, main text <= 3,000 words excluding abstract, Methods,
     references and figure legends) and the pipeline's relaxed caps are the
-    largest integer counts inside +15% / +25% (172 and 3,750);
+    largest integer counts inside +10% / +25% (165 and 3,750);
   * the counting rule is "maximal runs of non-space characters, newline treated
     as space" -- `state-of-the-art` is one word, `2026` is one word, and the
     caption counter uses the same definition;
@@ -95,16 +95,16 @@ def test_limits():
     check("LT1 main-text base is the journal's 3,000 words",
           nb.DEFAULT_ARTICLE_MAIN_TEXT_WORDS == 3000, str(nb.DEFAULT_ARTICLE_MAIN_TEXT_WORDS))
     check("LT1 the margins are +15% and +25%",
-          nb.ABSTRACT_RELAXATION == 1.15 and nb.MAIN_TEXT_RELAXATION == 1.25,
+          nb.ABSTRACT_RELAXATION == 1.10 and nb.MAIN_TEXT_RELAXATION == 1.25,
           f"{nb.ABSTRACT_RELAXATION} {nb.MAIN_TEXT_RELAXATION}")
-    check("LT1 the relaxed caps are 172 (floor of 172.5) and 3,750",
-          nb.DEFAULT_ARTICLE_ABSTRACT_CAP == 172 and nb.DEFAULT_ARTICLE_MAIN_TEXT_CAP == 3750,
+    check("LT1 the relaxed caps are 165 (150 * 1.10) and 3,750",
+          nb.DEFAULT_ARTICLE_ABSTRACT_CAP == 165 and nb.DEFAULT_ARTICLE_MAIN_TEXT_CAP == 3750,
           f"{nb.DEFAULT_ARTICLE_ABSTRACT_CAP} {nb.DEFAULT_ARTICLE_MAIN_TEXT_CAP}")
     check("LT1 the cap helper floors, never rounds up",
-          nb.lenient_word_limit(150, 1.15) == 172 and nb.lenient_word_limit(100, 1.5) == 150)
+          nb.lenient_word_limit(150, 1.10) == 165 and nb.lenient_word_limit(100, 1.5) == 150)
     limits = nb.length_limits()
     check("LT1 length_limits() carries base, relaxation and cap for both sections",
-          limits["abstract"] == {"base": 150, "relaxation": 1.15, "cap": 172}
+          limits["abstract"] == {"base": 150, "relaxation": 1.10, "cap": 165}
           and limits["main text"] == {"base": 3000, "relaxation": 1.25, "cap": 3750},
           str(limits))
     check("LT1 the provenance names the journal table",
@@ -144,7 +144,7 @@ def test_prompts():
         check(f"LT3 {name} prompt carries the length rule",
               "ABSTRACT / MAIN-TEXT LENGTH" in text and "COUNTING RULE" in text)
         check(f"LT3 {name} prompt names both relaxed caps",
-              "172" in text and "3750" in text)
+              "165" in text and "3750" in text)
         check(f"LT3 {name} prompt states the counting examples",
               '"state-of-the-art" is ONE' in text and '"2026" is ONE' in text)
         check(f"LT3 {name} prompt says length is never a gate",
@@ -245,7 +245,7 @@ def test_scanner():
           in cover["source"])
     note = nb.length_note(info)
     check("LT4 the one-line note reports the over-cap sections and the caps",
-          "OVER" in note and "172" in note and "3750" in note, note)
+          "OVER" in note and "165" in note and "3750" in note, note)
     check("LT4 the note never claims a gate",
           "advisory only -- never a gate" in note)
     check("LT4 the scan carries its provenance",
@@ -319,7 +319,7 @@ def test_orchestrator_wiring():
     out = proc.stdout + proc.stderr
     check("LT5 setup succeeds", proc.returncode == 0, out[-200:])
     check("LT5 setup prints the length scan and the caps",
-          "abstract/main-text length" in out and "172" in out and "3750" in out,
+          "abstract/main-text length" in out and "165" in out and "3750" in out,
           out[-400:])
     state = json.loads((root / "state.json").read_text(encoding="utf-8"))
     scan = state.get("original_lengths") or {}

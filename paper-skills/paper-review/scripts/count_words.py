@@ -21,7 +21,7 @@ the abstract (paragraph breaks inside it do not), and `\caption`/`\captionof`
 text is a legend even though its "Figure N" label is added at typesetting time.
 
 The default caps are the relaxed limits of the pipeline's DEFAULT venue profile
-and its default article type (nature-biotechnology Article): abstract <= 172
+and its default article type (nature-biotechnology Article): abstract <= 165
 words (150 +15%) and main text <= 3,750 words (3,000 +25%). Pass
 `--venue-profile venue_profiles/<id>.json` to read the limits from the profile
 the run is configured with (the pipeline's prompts state the same numbers), plus
@@ -86,7 +86,7 @@ TEX_SCAFFOLD = re.compile(
     r"graphicspath|hypersetup|newcommand|renewcommand)\*?(?:\[[^\]]*\])?"
     r"(?:\{[^{}]*\})*")
 
-ABSTRACT_RELAXATION = 1.15
+ABSTRACT_RELAXATION = 1.10
 MAIN_TEXT_RELAXATION = 1.25
 COVER_LETTER_MIN = 300
 COVER_LETTER_MAX = 500

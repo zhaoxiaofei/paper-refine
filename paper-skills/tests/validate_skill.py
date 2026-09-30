@@ -414,7 +414,7 @@ def main():
           "never flag abstract/main-text word limits" not in " ".join(rev_sk.split())
           and "never shorten text to meet abstract/main-text word limits"
           not in " ".join(rev_skill.split())
-          and "## M19 —" in sweeps and "172" in _sw and "3,750" in _sw
+          and "## M19 —" in sweeps and "165" in _sw and "3,750" in _sw
           and "state-of-the-art" in _sw)
     _cw_path = os.path.join(root, "paper-review", "scripts", "count_words.py")
     _cw = read(_cw_path) if os.path.isfile(_cw_path) else ""
@@ -471,9 +471,9 @@ def main():
           all(m in _rr for m in ("**off**", "**read**", "**edit**", "**apply**"))
           and "snapshot first" in _rr and "citationid" in _rr)
     check("D20 both standalone prompts carry the length rule and the Zotero protocol",
-          "172" in _ip and "3,750" in _ip and "m19" in _ip
+          "165" in _ip and "3,750" in _ip and "m19" in _ip
           and "no cover-letter word limit" in _ip and "always enumerated" in _ip
-          and "172" in _ap and "propose-then-verify" in _ap
+          and "165" in _ap and "propose-then-verify" in _ap
           and "last-modified auto" in _ap
           and "no cover-letter word limit" in _ap)
 

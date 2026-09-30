@@ -22,7 +22,7 @@ governs it like any other precision edit; it never licenses restructuring
 around the corrected value.
 
 **Scoped exception — M19 length compression.** An abstract or main text over
-the pipeline's relaxed caps (abstract ≤ 172 words = 150 +15%; main text ≤ 3,750
+the pipeline's relaxed caps (abstract ≤ 165 words = 150 +10%; main text ≤ 3,750
 words = 3,000 +25%, excluding abstract, Methods, references and figure legends,
 for the default Nature Biotechnology Article profile; another content type uses
 its own base numbers with the same margins, and another venue profile carries

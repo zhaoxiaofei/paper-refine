@@ -762,7 +762,7 @@ every other package part is byte-identical, runs `docx validate` when available,
 and the rendered page pass (`check-pdf`, the agents' `VIS_visual` record) covers
 what OOXML inspection cannot see.
 
-### Text-level consistency across the whole package (rules FMT-T8a–T8e and FMT-T9c/T9f/T9g/T9i/T9j)
+### Text-level consistency and layout budgets across the whole package (rules FMT-T8a–T8h and FMT-T9c/T9f/T9g/T9i/T9j)
 
 Some consistency problems are not OOXML at all — they are in the text — and they
 now run over every `.docx` AND every `.tex/.ltx/.md/.txt` source, so a problem is
@@ -780,6 +780,9 @@ found in the cover letter, the main text and the supplementary alike:
 | `FMT-T8c` | a distinctive term repeated in one short passage (`Nature Biotechnology` five times in a cover letter) | finding-tier redundancy: a proper name ≥3× in one paragraph, or a long content word ≥5×, must be varied or dropped — a writing-quality defect does not need a journal rule to exist. Deliberately narrow: proper names (2–3 capitalized words, no document-structure word) and single long content words |
 | `FMT-T8d` | US/UK spelling variants in body text (`tumour` … `tumor`) | report; `term_spelling="dominant"` (default) normalizes the minority form outside the reference list |
 | `FMT-T8e` | an attributive compound hyphenated in one place and not in another (`copy-number profiles` … `copy number estimate`) | report; `term_hyphenation="dominant"` (default) hyphenates the minority attributive form |
+| `FMT-T8f` | sibling paragraphs or sibling captions disagree on first-line indentation (`Fig. 4` indented while `Fig. 1/2/3/5` are not) | finding: pick one convention and align the minority with the majority (front matter — title/abstract/keywords — is its own family and never counted as a body outlier) |
+| `FMT-T8g` | Word's own `w:lastRenderedPageBreak` record shows the front matter split: the keywords line starts page 2 | finding: the front page must hold title, authors, affiliations, abstract and keywords together; shorten the front matter or trim abstract lines (never the science) |
+| `FMT-T8h` | the cover letter renders to more than two pages (a PDF beside the `.docx` is authoritative; the cached `docProps/app.xml` count is the fallback and can be stale) | finding: trim the non-persuading boilerplate first (statement blocks, reviewer lists, restated affiliations), never a claim about the work |
 
 Guard rails: the reference list is never rewritten (its titles are quotations),
 URLs/DOIs/e-mails are masked, `Table S1` inside `Supplementary Table S1` is not a

@@ -107,6 +107,22 @@ def test_prompts():
     check("`ignore-cosmetic` is restricted to differences that satisfy every rubric item",
           "`ignore-cosmetic` is legal ONLY for a difference whose two readings satisfy EVERY item"
           in " ".join(builders["integrate"].split()))
+    # The layout budgets and the paragraph-linkage rule the 2026-09-30 winner broke.
+    check("the visual rule makes the page budgets a recorded measurement",
+          "THE PAGE BUDGETS ARE PART OF THE INSPECTION" in builders["judge"]
+          and "at most TWO pages" in " ".join(builders["judge"].split())
+          and "the FRONT PAGE must carry" in " ".join(builders["judge"].split())
+          and "never from the cached document property" in " ".join(builders["judge"].split()))
+    check("the cover-letter rule carries the two-page budget",
+          "must render to at most TWO pages" in " ".join(builders["revise"].split())
+          and "Major formatting defect" in " ".join(builders["revise"].split()))
+    check("the review prompt requires the paragraph-opening connection check",
+          "The FIRST sentence of a paragraph must connect to the previous" in review_flat
+          and "must RE-READ" in review_flat)
+    check("the language pass carries the paragraph-opening and re-read rules",
+          all("FIRST sentence of every" in " ".join(builders[n].split())
+              and "RE-READ" in " ".join(builders[n].split())
+              for n in ("rewrite", "revise", "integrate")))
     for name in ("rewrite", "revise", "integrate"):
         flat_lp = " ".join(builders[name].split())
         check(f"the {name} language pass carries the generic wording rule and the exclusions",
