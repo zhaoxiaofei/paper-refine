@@ -24,6 +24,7 @@ Run:  python3 .paper_test/test_grading_scheme.py
 import importlib.util
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -472,6 +473,79 @@ check("D5 the judge prompt carries the validation rule in its provenance-neutral
       np.validation_block("judge") in judge_prompt_text
       and "VALIDATION AFTER EDITING" in judge_prompt_text
       and "MANUAL_STEPS" not in judge_prompt_text)
+
+# =====================================================================
+# E. the rubric's own wording vs the enforced arithmetic (2026-09-30 audit)
+#
+# Two independent write-ups of this rubric claimed the docs disagree with the
+# code and the anchors disagree with the derivation. Re-checked here against
+# the tree: the class vocabulary is SIX tiers (BASIS_TIERS) but five of the
+# places that state it stopped at `formatting`; the judge prompt's +4/+3
+# anchors read as if one critical / one major row reached those rungs while the
+# enforced derivation gives +3 / +2; the writing rubric offered no rule for a
+# Q1-Q3 row whose evidence shows the meaning changed (the class rule files it
+# as `correctness`); and the basis check skipped `none`, so a sheet with ledger
+# items could carry the value the prompt reserves for a clean 0.
+# =====================================================================
+order6 = " > ".join(np.BASIS_TIERS)
+five_only = re.compile(r"correctness\s*>\s*consistency\s*>\s*preservation\s*>\s*completeness"
+                       r"\s*>\s*formatting(?!\s*>\s*writing)")
+doc_sources = {
+    "README.md": (WS / "README.md").read_text(encoding="utf-8"),
+    "sweeps.md": (WS / "paper-skills/paper-review/references/sweeps.md").read_text(
+        encoding="utf-8"),
+    "ledger.md": (WS / "paper-skills/paper-revise/references/ledger.md").read_text(
+        encoding="utf-8"),
+    "paper_pipeline.py": (WS / "paper_pipeline.py").read_text(encoding="utf-8"),
+}
+for name, text in doc_sources.items():
+    flat = " ".join(text.split())
+    check(f"E1 {name} states the full six-tier class order", order6 in flat, "")
+    check(f"E1 {name} never states the five-tier order",
+          not five_only.search(text), "")
+sweeps_text = doc_sources["sweeps.md"]
+row2 = next((l for l in sweeps_text.splitlines() if l.startswith("| 2 ")), "")
+check("E1 sweeps.md's category-2 mapping row carries `writing`",
+      "`writing`" in row2, row2[:120])
+readme_row2 = next((l for l in doc_sources["README.md"].splitlines()
+                    if l.startswith("| 2 ")), "")
+check("E1 README.md's category-2 mapping row carries `writing`",
+      "`writing`" in readme_row2, readme_row2[:120])
+rule_text = np.defect_class_rule()
+check("E1 the defect-class prompt's class count matches BASIS_TIERS",
+      f"{len(np.BASIS_TIERS)} scored classes" in rule_text
+      and "Five classes" not in rule_text,
+      rule_text[:90])
+
+# E2: the anchors must not promise a rung the derived integer cannot reach.
+judge_flat = " ".join(judge_prompt_text.split())
+check("E2 the +4 anchor states the capped-sum requirement",
+      "the capped sum" in judge_flat and "a single critical row derives +3" in judge_flat)
+check("E2 the +3 anchor states the capped-sum requirement",
+      "a single major row derives +2" in judge_flat)
+for score, rowset, want_err, label in (
+        (4, CRIT, True, "one critical row with +4 is rejected"),
+        (3, CRIT, False, "one critical row with +3 is accepted"),
+        (3, MAJOR, True, "one major row with +3 is rejected"),
+        (2, MAJOR, False, "one major row with +2 is accepted")):
+    e, _w = basis_problems(comp(score, "correctness", rowset, []), "comparisons[0]", strict=True)
+    check(f"E2 {label}", bool(e) is want_err, str(e[:1]))
+
+# E3: the writing rubric must refile a meaning-changing row as `correctness`.
+check("E3 the writing rubric carries the refile rule for meaning-changing rows",
+      "REFILE RULE" in judge_flat
+      and "belongs to the `correctness` tier" in judge_flat)
+
+# E4: `basis: none` is reserved for a clean 0 with no item on either side.
+net_zero_none = comp(0, "none", MINOR_CONS, MINOR_CONS)
+_e, w_none = basis_problems(net_zero_none, "comparisons[0]", strict=True)
+check("E4 a net-zero sheet with items and basis 'none' is reported",
+      any("'none'" in x for x in w_none), str(w_none[:1]))
+net_zero_tier = comp(0, "consistency", MINOR_CONS, MINOR_CONS)
+_e2, w_tier = basis_problems(net_zero_tier, "comparisons[0]", strict=True)
+check("E4 the same sheet with a tier basis stays clean", not w_tier, str(w_tier[:1]))
+_e3, w_empty = basis_problems(comp(0, "none", [], []), "comparisons[0]", strict=True)
+check("E4 basis 'none' with empty lists stays clean", not w_empty, str(w_empty[:1]))
 
 print()
 if FAILS:

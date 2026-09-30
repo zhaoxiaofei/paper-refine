@@ -885,11 +885,11 @@ revise, integrate, judge); the same table lives in the review skill
 `paper-skills/prompts/identify_issues.prompt.md`) and in the revision ledger's
 definition (`paper-skills/paper-revise/references/ledger.md`):
 
-| review category | scored class (`correctness > consistency > preservation > completeness > formatting`) |
+| review category | scored class (`correctness > consistency > preservation > completeness > formatting > writing`) |
 |---|---|
 | 0 Editor/Reviewer concerns | `correctness` (unsupported claim, overclaim, UNDERCLAIM, rigor, ethics), `completeness` (required information missing) or `preservation` (removed content/limitation) |
 | 1 Completeness & Factual Integrity | `correctness` (factual error, wrong number/DOI/reference key, broken cross-reference) or `completeness` (mandatory item missing) |
-| 2 Writing Quality, Logic, Repetition | `consistency` (the same thing said/spelled/numbered two ways; a convention applied unevenly), `correctness` (the wording changes the meaning) or `formatting` (a one-off wording preference) |
+| 2 Writing Quality, Logic, Repetition | `consistency` (the same thing said/spelled/numbered two ways; a convention applied unevenly), `correctness` (the wording changes the meaning), `formatting` (a one-off wording preference) or `writing` (a grammar, punctuation or prose-flow error that changes no meaning; at most ±1 and never decisive alone) |
 | 3 Plagiarism / AI content | `correctness` (integrity of the content itself) |
 | 4 Technical Formatting | `formatting` (M18/M19/M20; ≤ ±1 and never decisive alone) |
 | 5 Missing / Unneeded Information | `completeness` |

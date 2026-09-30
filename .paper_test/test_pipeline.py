@@ -159,10 +159,10 @@ def test_prompts():
     sweeps = (skills / "paper-review" / "references" / "sweeps.md").read_text(encoding="utf-8")
     ledger = (skills / "paper-revise" / "references" / "ledger.md").read_text(encoding="utf-8")
     check("the review skill documents the same category -> class mapping",
-          "correctness > consistency > preservation > completeness > formatting" in sweeps
+          " > ".join(np.BASIS_TIERS) in sweeps
           and all(f"| {i} " in sweeps for i in range(6)))
     check("the revision skill's ledger ties its category column to the same mapping",
-          "correctness > consistency > preservation > completeness >" in ledger)
+          " > ".join(np.BASIS_TIERS) in " ".join(ledger.split()))
 
 
 # ---------------------------------------------------------------- selection

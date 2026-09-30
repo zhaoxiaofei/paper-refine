@@ -3350,9 +3350,9 @@ def caption_rule_template(profile=None) -> str:
     redundancy-only compression of an over-cap abstract or main text (the length rule, check id
     M19). The cover letter keeps that blanket rule unchanged.
   * When judging, caption length sits in the FORMATTING tier of the priority order
-    (correctness > consistency > preservation > completeness > formatting). A caption-length
-    difference alone never justifies a score beyond +/-1, and two versions that are BOTH over the
-    limit are indistinguishable on this check (score 0). Word-count arithmetic is never a
+    (correctness > consistency > preservation > completeness > formatting > writing). A
+    caption-length difference alone never justifies a score beyond +/-1, and two versions that are
+    BOTH over the limit are indistinguishable on this check (score 0). Word-count arithmetic is never a
     substitute for judging content, and a version over the suggested length is still fully
     eligible to win the round."""
 
@@ -4089,12 +4089,12 @@ DECISION-ARTIFACT MANDATE — one disposition per seeded row, about THAT ROW's o
 # EVERY session classifies a defect in this one vocabulary (see
 # defect_class_rule()). The review's category numbers come from the skill
 # (`paper-review/references/sweeps.md` -> CLASSIFICATION); the comparison session
-# scores by the same five classes, so the bridge has to be spelled out in both
+# scores by the same six classes, so the bridge has to be spelled out in both
 # directions: without it a reviewer's "category 2" and a judge's "formatting" can
 # describe the same edit, and the panel then reads a fixed defect as no change.
 DEFECT_CLASS_RULE_TEMPLATE = """DEFECT CLASSES — ONE VOCABULARY FOR EVERY SESSION (every session classifies a
 defect the same way; only the deliverable differs):
-  * Five classes, in this fixed priority order (highest first): @@TIER_ORDER@@.
+  * @@TIER_COUNT@@ scored classes, in this fixed priority order (highest first): @@TIER_ORDER@@.
   * Every issue, finding, edit and comparison item belongs to exactly one of them, chosen by the
     DEFECT and not by the document it was found in. The identification taxonomy's category
     numbers (0-5, see the skill's `sweeps.md`) map onto the classes; where a category splits,
@@ -4138,7 +4138,9 @@ defect the same way; only the deliverable differs):
 
 def defect_class_rule() -> str:
     """The shared defect-class block (filled from BASIS_TIERS, so it cannot drift)."""
-    out = DEFECT_CLASS_RULE_TEMPLATE.replace("@@TIER_ORDER@@", "  >  ".join(BASIS_TIERS))
+    out = (DEFECT_CLASS_RULE_TEMPLATE
+           .replace("@@TIER_COUNT@@", str(len(BASIS_TIERS)))
+           .replace("@@TIER_ORDER@@", "  >  ".join(BASIS_TIERS)))
     for tier in BASIS_TIERS:
         out = out.replace(f"@@T_{tier.upper()}@@", tier)
     return out
@@ -6064,9 +6066,11 @@ only.
     better than THIS opponent) ===
   +4  decisive advantage  — the target resolves a critical defect class that the opponent leaves
                             entirely unresolved (or the opponent introduces a new critical defect),
-                            with no offsetting loss anywhere in the priority order
+                            with no offsetting loss anywhere in the priority order; the capped sum
+                            below must reach +4 -- a single critical row derives +3
   +3  clearly better      — one or more MAJOR defects resolved that the opponent still carries, with
-                            no regression introduced in exchange
+                            no regression introduced in exchange; the capped sum below must reach
+                            +3 -- a single major row derives +2
   +2  better              — a real net advantage in content: more/larger real defects resolved than
                             introduced
   +1  slightly better     — a small but REAL net advantage (never a cosmetic one)
@@ -17795,7 +17799,12 @@ WRITING_RUBRIC = """WRITING RUBRIC — use it to justify every `writing`-tier ro
   eleven checks of the language pass every package-producing session runs from the same list
   (premise, logic slip, logic jump, coherence, unexplained prerequisite, redundancy, non-academic
   wording, register, stiff phrasing, grammar, typography); Q12 is the segmentation check, and a
-  difference that cannot be named in this rubric is cosmetic for you as well."""
+  difference that cannot be named in this rubric is cosmetic for you as well.
+  REFILE RULE: a row whose evidence shows the MEANING changed is not a `writing` row, whichever
+  item it matches -- a premise the data contradict, a logic slip that changes what the claim
+  asserts, a conclusion whose missing step leaves it unsupported, or a claim stronger/weaker than
+  its evidence belongs to the `correctness` tier (the class rule above), where that tier's weights
+  and caps apply; this rubric justifies only rows whose meaning survives the fix."""
 
 
 def language_pass_report(pkg: Path) -> dict:
@@ -18926,9 +18935,13 @@ def judge_basis_problems(comp: dict, where: str, strict: bool) -> tuple:
                 if s == "critical" and t not in ("formatting", "writing")]:
             emit(f"{prefix}{where}: |score| = 4 is the 'decisive' rung but the ledger lists no "
                  f"CRITICAL item outside the formatting/writing tiers")
-    if items and basis and basis != "none":
+    if items and basis:
         top = min((t for _side, t, _s, _e in items), key=_tier_rank)
-        if _tier_rank(basis) > _tier_rank(top):
+        if basis == "none":
+            out_w.append(f"{where}.basis is 'none' but the ledger lists {len(items)} item(s); "
+                         f"'none' is for a clean 0 with no item on either side -- name the "
+                         f"highest-priority tier in which the target differs ({top!r})")
+        elif _tier_rank(basis) > _tier_rank(top):
             out_w.append(f"{where}.basis is {basis!r} but the ledger's highest-priority tier is "
                          f"{top!r}; the basis must not claim a lower-priority class than the "
                          f"items it cites")
@@ -23640,7 +23653,7 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
              f"extra rungs would add unused resolution instead of meaning; the ledger is what "
              f"anchors the existing rungs, and a weighted aspect average is deliberately absent "
              f"(weights are arbitrary and the tier order below already IS the aggregation: "
-             f"correctness > consistency > preservation > completeness > formatting).")
+             f"correctness > consistency > preservation > completeness > formatting > writing).")
     L.append("")
     L.append("**Ranking statistic.** `median(flat score list)`, with `n`, the arithmetic "
              "`mean(flat score list)` and the IQR reported over the same flat list. The two "

@@ -94,7 +94,7 @@ Columns: `id | category | severity | location | evidence | verdict | rationale |
 
 - `category` keeps the review's category number. The defect CLASS it maps to is the judge panel's
   vocabulary (highest priority first: `correctness > consistency > preservation > completeness >
-  formatting`; the mapping table is in `paper-review/references/sweeps.md` → CLASSIFICATION). State
+  formatting > writing`; the mapping table is in `paper-review/references/sweeps.md` → CLASSIFICATION). State
   the class in the rationale whenever a row is disputed or resolved by a wording-only edit: an edit
   the panel cannot name in that vocabulary reads as cosmetic, and the reviewer's finding then never
   becomes an improvement a judge can see.

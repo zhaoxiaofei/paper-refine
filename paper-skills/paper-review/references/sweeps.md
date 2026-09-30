@@ -42,7 +42,7 @@ Severity:
 
 Class mapping (the pipeline's sessions share ONE defect vocabulary; the judge
 panel scores by these classes, highest priority first):
-**correctness > consistency > preservation > completeness > formatting**.
+**correctness > consistency > preservation > completeness > formatting > writing**.
 The category above says where the issue was found; the class says what the
 DEFECT is, and where a category splits you classify by the concrete defect:
 
@@ -50,7 +50,7 @@ DEFECT is, and where a category splits you classify by the concrete defect:
 |---|---|
 | 0 Editor/Reviewer Concerns | `correctness` (unsupported claim, overclaim, UNDERCLAIM, rigor, ethics), `completeness` (required information or data availability missing) or `preservation` (removed content or a softened limitation) |
 | 1 Completeness & Factual Integrity | `correctness` (factual error, wrong number/DOI/reference key, broken cross-reference) or `completeness` (a mandatory item that is missing) |
-| 2 Writing Quality, Logic and Repetition | `consistency` (the same thing said, spelled or numbered two ways; a convention applied in one place and not another), `correctness` (the wording changes the meaning) or `formatting` (a one-off wording preference with no convention behind it) |
+| 2 Writing Quality, Logic and Repetition | `consistency` (the same thing said, spelled or numbered two ways; a convention applied in one place and not another), `correctness` (the wording changes the meaning), `formatting` (a one-off wording preference with no convention behind it) or `writing` (a grammar, spelling, punctuation or prose-flow error that changes no meaning; MINOR rows only -- worth at most one point and never decisive alone) |
 | 3 Plagiarism / AI-generated content | `correctness` (the integrity of the content itself) |
 | 4 Technical Formatting | `formatting` (M18/M19/M20 rows; at most ±1 in a comparison and never decisive alone) |
 | 5 Missing / Unneeded Information | `completeness` |
