@@ -270,7 +270,7 @@ paper-skills/
   shortening), a claim is never strengthened or weakened to reach a cap,
   under-length text is never flagged, and length never gates a version.
   The cover letter's persuading part is measured against the master prompt's
-  own 300-500-word preference; the default profile's venue states no
+  own 300-500-word preference, and its TOTAL content is capped at 650 words by default; the default profile's venue states no
   cover-letter word limit (checked 2026-09-19), so it is a Minor formatting
   item, never a journal requirement. **M18** always enumerates figure-legend
   word counts (the venue profile requires them to respect the article type's

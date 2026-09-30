@@ -81,6 +81,14 @@ submission:
   root records the selected type, and the prompts, the M19 caps and the
   decision report follow it.
 
+The **cover letter** has two separate budgets, both reported (never gates): its
+*persuading part* against the operator's 300–500-word preference, and its
+**TOTAL content** — salutation, body, disclosures and signature — against the
+**650-word operator cap** that ships with the default profile
+(`cover_letter.total_max`; a profile may override it). Over the total cap, the
+fix is to trim the non-persuading boilerplate first, never a claim about the
+work.
+
 ```bash
 python paper_pipeline.py set-venue --list                # venues this pipeline can see
 python paper_pipeline.py set-venue generic               # switch the rule set (needs an existing root)

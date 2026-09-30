@@ -604,7 +604,8 @@ def test_article_types():
           and brief.caption_default == 0, str(brief.length_limits()))
     check("VC8 the venue-wide cover-letter preference is inherited by the type",
           brief.length_limits()["cover letter"]["min"] == 300
-          and brief.length_limits()["cover letter"]["max"] == 500)
+          and brief.length_limits()["cover letter"]["max"] == 500
+          and brief.length_limits()["cover letter"]["total_max"] == 650)
     check("VC8 the prompt names the selected type",
           "a Nature Biotechnology Brief Communication" in nb.length_rule_text(brief)
           and "no abstract or main-text number" in nb.length_rule_text(brief)

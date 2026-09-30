@@ -15,7 +15,7 @@
         "source": "Nature Biotechnology content-types table (Article: abstract <= 150 words; main text <= 3,000 words excluding abstract, Methods, references and figure legends)",
         "abstract": {
           "base": 150,
-          "relaxation": 1.10
+          "relaxation": 1.1
         },
         "main_text": {
           "base": 3000,
@@ -24,7 +24,8 @@
         "cover_letter": {
           "min": 300,
           "max": 500,
-          "source": "master-prompt preference (300-500 words in the persuading part); Nature Biotechnology's official guidance states no cover-letter word limit (checked 2026-09-19)"
+          "source": "master-prompt preference (300-500 words in the persuading part); Nature Biotechnology's official guidance states no cover-letter word limit (checked 2026-09-19); the letter's TOTAL content (salutation, body, disclosures and signature) is capped at 650 words by the operator's default",
+          "total_max": 650
         }
       },
       "captions": {
@@ -204,7 +205,7 @@
     "source": "Nature Biotechnology content-types table (Article: abstract <= 150 words; main text <= 3,000 words excluding abstract, Methods, references and figure legends)",
     "abstract": {
       "base": 150,
-      "relaxation": 1.10
+      "relaxation": 1.1
     },
     "main_text": {
       "base": 3000,
@@ -213,7 +214,8 @@
     "cover_letter": {
       "min": 300,
       "max": 500,
-      "source": "master-prompt preference (300-500 words in the persuading part); Nature Biotechnology's official guidance states no cover-letter word limit (checked 2026-09-19)"
+      "source": "master-prompt preference (300-500 words in the persuading part); Nature Biotechnology's official guidance states no cover-letter word limit (checked 2026-09-19); the letter's TOTAL content (salutation, body, disclosures and signature) is capped at 650 words by the operator's default",
+      "total_max": 650
     }
   },
   "captions": {

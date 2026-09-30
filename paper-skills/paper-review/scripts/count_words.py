@@ -20,6 +20,10 @@ sources are read as LaTeX: the abstract environment's own `\end{abstract}` ends
 the abstract (paragraph breaks inside it do not), and `\caption`/`\captionof`
 text is a legend even though its "Figure N" label is added at typesetting time.
 
+The cover letter is counted twice: its PERSUADING part against the user's
+300-500-word preference, and its TOTAL content (salutation, body, disclosures
+and signature) against the operator's 650-word default cap.
+
 The default caps are the relaxed limits of the pipeline's DEFAULT venue profile
 and its default article type (nature-biotechnology Article): abstract <= 165
 words (150 +15%) and main text <= 3,750 words (3,000 +25%). Pass
@@ -89,6 +93,7 @@ TEX_SCAFFOLD = re.compile(
 ABSTRACT_RELAXATION = 1.10
 MAIN_TEXT_RELAXATION = 1.25
 COVER_LETTER_MIN = 300
+COVER_LETTER_TOTAL_MAX = 650   # the operator's TOTAL-content cap (salutation..signature)
 COVER_LETTER_MAX = 500
 
 
@@ -368,6 +373,7 @@ def main(argv=None) -> int:
     base_abstract, base_main = args.base_abstract, args.base_main_text
     rel_abstract, rel_main = ABSTRACT_RELAXATION, MAIN_TEXT_RELAXATION
     cover_min, cover_max = COVER_LETTER_MIN, COVER_LETTER_MAX
+    cover_total_max = COVER_LETTER_TOTAL_MAX
     venue = "nature-biotechnology (the default profile)"
     if args.venue_profile:
         try:
@@ -430,6 +436,7 @@ def main(argv=None) -> int:
                     break
         cover_min = cover.get("min", cover_min)
         cover_max = cover.get("max", cover_max)
+        cover_total_max = cover.get("total_max", cover_total_max)
         if not limits:
             print(f"note: {args.venue_profile} carries no numbers for "
                   f"{type_id or 'its default type'}; reporting counts with no cap",
@@ -464,7 +471,12 @@ def main(argv=None) -> int:
                      (f"persuading part only; the {cover_min}-{cover_max}-word range is the "
                       f"user's preference, not a venue limit" if cover_min is not None else
                       "persuading part only; this venue profile configures no cover-letter "
-                      "preference"))]
+                      "preference")),
+                    ("cover letter total", count_words(text),
+                     (f"TOTAL content (salutation, body, disclosures and signature); the "
+                      f"{cover_total_max}-word cap is the operator's default, not a venue limit"
+                      if cover_total_max is not None else
+                      "TOTAL content; no operator cap configured"))]
         elif args.section == "cover-letter":
             # Never answer a cover-letter request with silence: an empty rows
             # list is indistinguishable from a crashed/ignored run.
@@ -488,6 +500,9 @@ def main(argv=None) -> int:
                 row["within_preference"] = (cover_min is None or cover_max is None
                                             or cover_min <= words <= cover_max)
                 row["over_limit"] = False                 # the preference is not a cap
+            if section == "cover letter total":
+                row["total_max"] = cover_total_max
+                row["over_limit"] = bool(cover_total_max and words > cover_total_max)
             keep.append(row)
         out.extend(keep)
     if args.json:
@@ -499,6 +514,8 @@ def main(argv=None) -> int:
         print(f"venue: {venue}; caps: {cap_text}; cover letter "
               + (f"{cover_min}-{cover_max} words in the persuading part (user preference)"
                  if cover_min is not None else "no preference configured")
+              + (f"; TOTAL content <= {cover_total_max} words (operator cap)"
+                 if cover_total_max is not None else "")
               + " -- words = non-space runs, newline = space")
         for r in out:
             mark = ("OUTSIDE-PREFERENCE" if r["section"] == "cover letter"

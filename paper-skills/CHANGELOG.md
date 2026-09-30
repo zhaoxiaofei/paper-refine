@@ -16,6 +16,10 @@ file can prove it, code-checked:
   unexplained prerequisite.
 - **The abstract margin is +10%** (150 → 165 words) in the shipped
   nature-biotechnology profile and everywhere the limit is quoted.
+- **The cover letter's TOTAL content is capped at 650 words by default**
+  (`cover_letter.total_max`; salutation, body, disclosures and signature all
+  count), separate from the 300-500 persuading-part preference; over the cap
+  the fix trims boilerplate first, never a claim about the work.
 - **Layout budgets are part of the delivered artifact**: the front page must
   hold the title, authors, affiliations, abstract AND keywords together, and the
   cover letter must render to at most two pages (both decided by a render, never

@@ -1022,10 +1022,12 @@ _DEFAULT_VENUE_PROFILE = {
              "abstract": {"base": 150, "relaxation": 1.10},
              "main_text": {"base": 3000, "relaxation": 1.25},
              "cover_letter": {
-                 "min": 300, "max": 500,
+                 "min": 300, "max": 500, "total_max": 650,
                  "source": "master-prompt preference (300-500 words in the persuading part); "
                            "Nature Biotechnology's official guidance states no cover-letter "
-                           "word limit (checked 2026-09-19)",
+                           "word limit (checked 2026-09-19); the letter's TOTAL content "
+                           "(salutation, body, disclosures and signature) is capped at 650 "
+                           "words by the operator's default",
              },
          },
          "captions": {
@@ -1231,7 +1233,13 @@ def _clean_length_limits(limits, prefix: str, problems: list):
     elif cover_min is not None and cover_min > cover_max:
         problems.append(f"{prefix}.cover_letter.min ({cover_min}) must not exceed "
                         f"max ({cover_max})")
+    cover_total = _profile_int(cover.get("total_max"), f"{prefix}.cover_letter.total_max",
+                               problems, minimum=1)
+    if cover_total is not None and cover_max is not None and cover_total < cover_max:
+        problems.append(f"{prefix}.cover_letter.total_max ({cover_total}) must not be below "
+                        f"the persuading-part max ({cover_max})")
     clean["cover_letter"] = {"min": cover_min, "max": cover_max,
+                             "total_max": cover_total,
                              "source": str(cover.get("source") or "").strip()}
     return clean
 
@@ -1258,7 +1266,7 @@ def _clean_captions(captions, prefix: str, problems: list):
 
 EMPTY_LENGTH_LIMITS = {"source": "", "abstract": {"base": None, "relaxation": None},
                        "main_text": {"base": None, "relaxation": None},
-                       "cover_letter": {"min": None, "max": None, "source": ""}}
+                       "cover_letter": {"min": None, "max": None, "total_max": None, "source": ""}}
 EMPTY_CAPTIONS = {"published_limit": None, "default_cap": 0, "source": ""}
 
 
@@ -1568,6 +1576,7 @@ class VenueProfile:
         return {"abstract": spec("abstract"),
                 "main text": spec("main_text"),
                 "cover letter": {"min": cover.get("min"), "max": cover.get("max"),
+                                 "total_max": cover.get("total_max"),
                                  "source": cover.get("source") or ""}}
 
     def known_journals(self) -> list:
@@ -2977,6 +2986,10 @@ DEFAULT_LENGTH_LIMITS_SOURCE = _DEFAULT_VENUE_OBJ.length_limits_source
 COVER_LETTER_MIN_WORDS = _DEFAULT_LIMITS["cover letter"]["min"]
 COVER_LETTER_MAX_WORDS = _DEFAULT_LIMITS["cover letter"]["max"]
 COVER_LETTER_SOURCE = _DEFAULT_LIMITS["cover letter"]["source"]
+# The operator's TOTAL-content budget for the letter (salutation, body,
+# disclosures and signature): a cap, unlike the 300-500 persuading-part
+# preference. 650 words by default; a profile may override it.
+COVER_LETTER_TOTAL_MAX_WORDS = _DEFAULT_LIMITS["cover letter"].get("total_max")
 
 
 def length_limits(profile=None) -> dict:
@@ -3245,12 +3258,19 @@ def length_rule_text(profile=None) -> str:
             f"is never\n"
             f"      presented as a journal requirement, and it is never \"fixed\" by deleting "
             f"content. Count it\n"
-            f"      with the pipeline's word rule.")
+            f"      with the pipeline's word rule. The letter's TOTAL content -- salutation, "
+            f"body, disclosures\n"
+            f"      and signature -- is a SEPARATE cap of "
+            f"{limits['cover letter'].get('total_max')} words (the operator's default): trim the "
+            f"non-persuading\n"
+            f"      boilerplate first, never a claim about the work.")
     else:
         cover_para = (
             f"    * THE COVER LETTER — NO COVER-LETTER PREFERENCE IS CONFIGURED: this venue\n"
             f"      profile states no cover-letter word limit or preference, so the letter's length\n"
-            f"      is counted and recorded but never flagged, scored or cut for length.")
+            f"      is counted and recorded but never flagged, scored or cut for length. Its TOTAL\n"
+            f"      content is still capped at {limits['cover letter'].get('total_max')} words\n"
+            f"      (the operator's default).")
     return f"""ABSTRACT / MAIN-TEXT LENGTH — THE JOURNAL'S LIMITS, RELAXED BY THIS PIPELINE:
     * This REPLACES the blanket "abstract/main-text length is exempt" standing exemption (the same
       exemption the skills inherit, and the wording the attached master-prompt excerpt below still
@@ -3285,13 +3305,18 @@ def standing_exemptions_text(profile=None) -> str:
     cover_bullet = (
         f"  * The master prompt's COVER-LETTER rule (the persuading part must be {cover_clause})\n"
         f"    stays a flaggable formatting item: report it, never gate on it. The LETTER ITSELF\n"
-        f"    must render to at most TWO pages (a third page is a Major formatting defect); trim\n"
-        f"    the non-persuading boilerplate first, never a claim about the work, and the page\n"
-        f"    count comes from a render, never from the cached document property."
+        f"    must render to at most TWO pages (a third page is a Major formatting defect) AND\n"
+        f"    its TOTAL content -- salutation, body, disclosures and signature -- must stay\n"
+        f"    within {COVER_LETTER_TOTAL_MAX_WORDS} words (the operator's default cap; a profile\n"
+        f"    may override it). Trim the non-persuading boilerplate first, never a claim about\n"
+        f"    the work, and the page count comes from a render, never from the cached document\n"
+        f"    property."
         if cover_clause else
         "  * This venue profile states no COVER-LETTER word rule: the letter's length is recorded\n"
-        "    and reported, never gated and never cut. The LETTER itself must still render to at\n"
-        "    most TWO pages (a third page is a Major formatting defect), measured from a render.")
+        f"    and reported, never gated and never cut. The LETTER itself must still render to at\n"
+        f"    most TWO pages (a third page is a Major formatting defect), measured from a render,\n"
+        f"    and its TOTAL content must stay within {COVER_LETTER_TOTAL_MAX_WORDS} words (the\n"
+        f"    operator's default cap).")
     caption_source = (prof.captions.get("source")
                       or "this venue profile states no figure-legend length rule")
     return f"""Standing exemptions and explicit limits (apply to every mode, always):
@@ -3507,17 +3532,26 @@ def m19_blocks(profile=None) -> dict:
     caps_article = _caps_clause(prof, article=True)
     cover_clause = _cover_preference_clause(prof)
     has_caps = not caps.startswith("this venue profile sets no")
-    cover_note = (f"the cover letter's persuading part is the USER PREFERENCE {cover_clause}"
-                  if cover_clause else
-                  "this venue profile states no cover-letter word preference")
+    cover_total = prof.length_limits()["cover letter"].get("total_max")
+    cover_total_note = (
+        f"the cover letter's TOTAL content must stay within {cover_total} words (every line "
+        f"counts: salutation, body, disclosures and signature)"
+        if cover_total is not None else
+        "this venue profile sets no cover-letter total-word cap")
+    cover_note = (cover_total_note
+                  + (f", and its persuading part is the USER PREFERENCE {cover_clause}"
+                     if cover_clause else ""))
     cover_tail = (f"this is the user's preference, not an {prof.short} requirement, and the venue "
                   f"profile publishes no cover-letter limit"
                   if cover_clause else "no cover-letter preference is configured")
+    if cover_total is not None:
+        cover_tail += f"; the {cover_total}-word TOTAL cap is the operator's budget"
     review = f"""3b. The PIPELINE-MANDATED length sweep M19 (see the length rule in the standing
    exemptions): enumerate the ABSTRACT and the MAIN TEXT of every submission document that carries
    one -- and the PERSUADING PART of the cover letter -- into review/artifacts/M19_length.md, one
    row per section: document | section
-   (abstract / main text / cover letter) | word count | the base limit you applied and its source | the allowed
+   (abstract / main text / cover letter) | word count (for the cover letter also its TOTAL word
+   count) | the base limit you applied and its source | the allowed
    cap ({caps_article}; {cover_note}) | disposition
    (OK / over cap -> finding id / over cap but not compressible without losing content -> manual
    verification item). Count with the pipeline's definition (maximal runs of NON-SPACE characters;
@@ -3539,19 +3573,26 @@ def m19_blocks(profile=None) -> dict:
      text that is already within the cap. Count with the pipeline's definition (maximal runs of
      NON-SPACE characters; a newline is a space) and record every compression in CHANGELOG.md
      under M19. A section that cannot be brought within the cap without losing content is left as
-     it is and handed to revised/MANUAL_STEPS.md instead of guessing. Cover letter: when the
-     persuading part is outside the user's {cover_clause or 'configured'} preference, bring it into the range by removing
+     it is and handed to revised/MANUAL_STEPS.md instead of guessing. Cover letter: bring its
+     TOTAL content within {cover_total if cover_total is not None else 'the configured cap'}
+     words -- trim the non-persuading boilerplate first (statement blocks, the reviewer list,
+     restated affiliations), never a claim about the work -- and when the persuading part is
+     outside the user's {cover_clause or 'configured'} preference, bring it into the range by removing
      redundancy only (never content); {cover_tail}."""
         integrate = f"""Abstract/main-text length (check id M19) is a FORMATTING-tier difference class: port a donor's
 version when it is within the cap and the base's is not, or when the donor removed redundancy from
 an over-cap section without losing content. Otherwise compress the base yourself under the length
 rule, and if a section cannot be brought within the cap ({caps_article}) without
-losing content, leave it and record it for manual action. Never reach a cap by deleting scientific
-content, and never port a purely shorter version that gives up correctness, consistency or
-preservation to get there."""
+losing content, leave it and record it for manual action. The cover letter's TOTAL content must
+stay within {cover_total if cover_total is not None else 'its'} words by trimming boilerplate only
+(never a claim about the work). Never reach a cap
+by deleting scientific content, and never port a purely shorter version that gives up correctness,
+consistency or preservation to get there."""
         rewrite = f"""Abstract/main-text length (check id M19) is REPORTED here, not fixed: a rewrite must not push
 an abstract or main text over the pipeline's caps ({caps_article}) and must never cut scientific
-content to meet one. If the base is ALREADY over a cap, surface it in rewritten/REWRITE_REPORT.md
+content to meet one; the cover letter's TOTAL content must stay within
+{cover_total if cover_total is not None else 'its configured cap'} words (trim boilerplate only).
+If the base is ALREADY over a cap, surface it in rewritten/REWRITE_REPORT.md
 under "PROBLEMS SURFACED" -- the revision and integration stages own the compression, and this
 stage must not change content to achieve it."""
     else:
@@ -3576,7 +3617,9 @@ SURFACED". Never change content to reach a word count."""
    within) are indistinguishable and score 0, and a length row is a formatting-tier MINOR row
    whose +/-1 can never outweigh a difference in a higher tier.
    An over-cap section never makes a version ineligible, and the cover-letter preference is
-   user-set: it is at most a +/-1 formatting-tier difference, never a journal requirement."""
+   user-set: it is at most a +/-1 formatting-tier difference, never a journal requirement. A cover
+   letter whose TOTAL content is over its cap is a formatting-tier item too: report it, never gate
+   on it, and never let it outweigh a higher tier."""
     return {"review": review, "revise": revise, "integrate": integrate, "rewrite": rewrite,
             "judge": judge}
 
@@ -4182,7 +4225,8 @@ defect the same way; only the deliverable differs):
     comparison by at most one point and is NEVER a scoring tier of its own.
   * PAGE BUDGETS ARE PART OF THE DELIVERED ARTIFACT: the front page must hold the title, the
     authors, the affiliations, the abstract AND the keywords together, and the cover letter must
-    render to at most TWO pages. A keywords line that starts page 2, or a third cover-letter
+    render to at most TWO pages AND keep its TOTAL content (salutation, body, disclosures and
+    signature) within @@COVER_LETTER_TOTAL_MAX@@ words. A keywords line that starts page 2, or a third cover-letter
     page, is a formatting row graded MAJOR -- the reader must work around it -- and it is decided
     by the DELIVERED layout, not by the cached page property. Never shorten a scientific claim to
     reach a budget: cut boilerplate and redundancy, or hand the compression to the author.
@@ -4203,7 +4247,10 @@ def defect_class_rule() -> str:
     """The shared defect-class block (filled from BASIS_TIERS, so it cannot drift)."""
     out = (DEFECT_CLASS_RULE_TEMPLATE
            .replace("@@TIER_COUNT@@", str(len(BASIS_TIERS)))
-           .replace("@@TIER_ORDER@@", "  >  ".join(BASIS_TIERS)))
+           .replace("@@TIER_ORDER@@", "  >  ".join(BASIS_TIERS))
+           .replace("@@COVER_LETTER_TOTAL_MAX@@",
+                    str(COVER_LETTER_TOTAL_MAX_WORDS
+                        if COVER_LETTER_TOTAL_MAX_WORDS is not None else "the configured")))
     for tier in BASIS_TIERS:
         out = out.replace(f"@@T_{tier.upper()}@@", tier)
     return out
@@ -8505,16 +8552,24 @@ def _cover_letter_row(lines: list, doc: str, limits: dict = None, profile=None) 
     body = [ln for ln in lines[start:end]
             if not LENGTH_COVER_DISCLOSURE_RE.match((ln or "").strip())]
     words = count_words(" ".join(body))
+    # The letter's TOTAL content is the operator's cap: every line counts
+    # (salutation, body, disclosures and signature), unlike the persuading-part
+    # preference above.
+    total_words = count_words(" ".join(lines))
+    total_max = cover.get("total_max")
+    over_total = total_max is not None and total_words > total_max
     within = True if pref_min is None or pref_max is None else (pref_min <= words <= pref_max)
     return {"document": doc, "section": "cover letter", "words": words,
+            "total_words": total_words, "total_max": total_max,
             "base": None, "relaxation": None, "cap": None,
             "min": pref_min, "max": pref_max,
             "within_preference": within,
-            # NOT over_limit: the configured range is the user's preference,
-            # not a venue cap. Marking it over_limit put cover letters into
-            # the scan's cap-violation list and made `decide` warn about a
-            # "relaxed caps (cap None)" breach for a merely long letter.
-            "over_limit": False,
+            # `over_limit` is the TOTAL-content cap only: the 300-500
+            # persuading range is a preference, not a venue cap, and marking it
+            # over_limit made `decide` warn about a "relaxed caps (cap None)"
+            # breach for a merely long letter.
+            "over_limit": over_total,
+            "over_total_cap": over_total,
             "over_preference": pref_max is not None and words > pref_max,
             "under_preference": pref_min is not None and words < pref_min,
             "source": cover.get("source") or "",
@@ -8522,7 +8577,9 @@ def _cover_letter_row(lines: list, doc: str, limits: dict = None, profile=None) 
                      f"excluded)"
                      + (f"; the {pref_min}-{pref_max} range is the user's preference, not "
                         f"{_indefinite(prof.short)} limit" if pref_min is not None else
-                        "; this venue profile configures no cover-letter preference"))}
+                        "; this venue profile configures no cover-letter preference")
+                     + (f"; TOTAL content {total_words} words against the operator's "
+                        f"{total_max}-word cap" if total_max is not None else ""))}
 
 
 def scan_lengths_in_sources(sources: list, profile=None) -> dict:
@@ -8628,24 +8685,25 @@ def length_note(info) -> str:
     parts = []
     for r in rows:
         if r["section"] == "cover letter":
-            parts.append(f"cover letter {r['words']} words"
+            parts.append(f"cover letter {r.get('total_words', r['words'])} words total"
+                         + (" OVER-TOTAL-CAP" if r.get("over_total_cap") else "")
                          + ("" if r.get("within_preference") else " OUTSIDE-PREFERENCE"))
         else:
             parts.append(f"{r['section'].replace('main text', 'main-text')} {r['words']} words"
                          + (" OVER" if r.get("over_limit") else ""))
-    over_n = len([r for r in rows if r.get("over_limit") and r["section"] != "cover letter"])
+    over_n = len([r for r in rows if r.get("over_limit")])
     pref_n = len([r for r in rows if r["section"] == "cover letter"
                   and not r.get("within_preference")])
     abs_cap, main_cap = limits["abstract"].get("cap"), limits["main text"].get("cap")
-    if abs_cap is None and main_cap is None:
+    cover_cap = limits["cover letter"].get("total_max")
+    caps_text = (f"caps: abstract {abs_cap if abs_cap is not None else 'none'}, "
+                 f"main text {main_cap if main_cap is not None else 'none'}"
+                 + (f", cover letter TOTAL {cover_cap}" if cover_cap is not None else ""))
+    if abs_cap is None and main_cap is None and cover_cap is None:
         caps_text = ("no venue cap configured: the counts are recorded for the author to compare "
                      "with the target journal's own guidelines")
-        tail = ""
-    else:
-        caps_text = (f"caps: abstract {abs_cap if abs_cap is not None else 'none'}, "
-                     f"main text {main_cap if main_cap is not None else 'none'}")
-        tail = (f"; {over_n} over the cap (advisory only -- never a gate; compress by removing "
-                f"redundancy only)" if over_n else "; all within the relaxed caps")
+    tail = (f"; {over_n} over the cap (advisory only -- never a gate; compress by removing "
+            f"redundancy only)" if over_n else "; all within the relaxed caps")
     cover_min = limits["cover letter"].get("min")
     cover_max = limits["cover letter"].get("max")
     if pref_n:

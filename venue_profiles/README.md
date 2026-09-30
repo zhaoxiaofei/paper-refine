@@ -106,10 +106,13 @@ Each entry is one content type of the venue:
 | `length_limits` | object or `null` | the type's own limits, exactly like the top-level block above. **`null` (or a block with `base: null` for abstract/main_text) means "this profile carries no numbers for this type"**: the stages count the section and name the limit the venue's own content-types table states — they never borrow another type's caps. |
 | `captions` | object or `null` | the type's legend policy; `null`/absent inherits the default type's policy (the legend rule is venue-wide in practice). |
 
-Abstract and main-text limits are **per type**. The cover-letter preference and
-the legend policy are **per venue**: a type that does not state them inherits
-the default type's, so a venue's "300–500 words in the persuading part" is not
-re-declared for every type.
+Abstract and main-text limits are **per type**. The cover-letter preference, its
+**`total_max`** (the operator's TOTAL-content cap for the letter — salutation,
+body, disclosures and signature; 650 words in the shipped default) and the
+legend policy are **per venue**: a type that does not state them inherits the
+default type's, so a venue's "300–500 words in the persuading part" is not
+re-declared for every type. `total_max` must not be below the persuading-part
+`max` — a letter that cannot even hold its persuading part is a schema error.
 
 Validation is strict and reports **every** problem at once: an unknown id, a
 non-positive `base`, a `relaxation` below 1.0, a lone `base` without its
