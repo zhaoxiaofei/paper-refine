@@ -6109,6 +6109,13 @@ absolute ratings re-compress into noise and the comparison this design exists to
    @@M19_JUDGE_SWEEP@@
    @@M20_JUDGE_SWEEP@@
 
+   THE DETERMINISTIC CHECKS ARE MEASUREMENTS, NOT IMPRESSIONS: M18 (legend word counts), M19
+   (abstract/main-text lengths) and M20 (OOXML style/formatting) are computed with the pipeline's
+   own tool, never by eye. Run `python paper_docx_format.py scan <dir>` on the target AND on the
+   opponent (`field/<label>/`) of every comparison in which you score a difference of that class:
+   the same measurement on BOTH sides is what makes a length or formatting difference checkable,
+   and a deterministic check reported from one side only has not been run.
+
    @@EVIDENCE_PACK_RULE@@
    Do NOT run the discovery phase D0-D5 and do NOT propose new sweeps: every version in the field
    must receive identical minimum scrutiny. Follow the skill's core discipline
@@ -24492,6 +24499,188 @@ def cmd_status(args) -> None:
     print(f"[status] runnable report: {ctx.reports_dir / 'DECISION_REPORT.md'}")
 
 
+# ---------------------------------------------------------------------------
+# CROSS-RUN TREND (read-only): the improvement chain of several pipeline roots
+# ---------------------------------------------------------------------------
+# "Did iteration N+1 improve on iteration N?" cannot be read off one round's
+# integer: each round scores its champion against THAT round's own input, so the
+# reference moves with the chain, and the champion's score is the argmax of a
+# noisy panel (selection inflation). Two things ARE comparable across a chain,
+# and this command reports both:
+#   * the per-round PAIRED margins the round itself recorded -- vs_input (the
+#     champion against the version that run started from) and vs_incumbent (the
+#     champion against the previous round's champion) -- with the winner counts;
+#   * the champion's ISSUE CENSUS per tier and severity (the judges' own ledger
+#     rows, counted in code): the absolute "what is left" number, which does not
+#     depend on the reference at all. Rounds decided before the census existed
+#     report "-" there.
+# It never scores, ranks or writes into a root: it reads reports/decision.json.
+TREND_ROUND_FIELDS = ("run", "round", "champion", "median", "mean", "n", "vs_input",
+                      "vs_incumbent", "correctness", "consistency", "preservation",
+                      "completeness", "formatting", "writing", "minor", "major",
+                      "critical", "fatal")
+TREND_RUN_FIELDS = ("run", "rounds", "champion", "format_rows", "format_high",
+                    "format_medium", "format_low", "over_length", "placeholders",
+                    "generated")
+
+
+def trend_read_decision(root: Path) -> dict:
+    """One root's reports/decision.json, or None when absent/unreadable."""
+    p = Path(root) / "reports" / "decision.json"
+    if not p.is_file():
+        return None
+    try:
+        dj = read_json(p, revive=False, lenient=True)
+    except Exception:                                            # noqa: BLE001
+        return None
+    return dj if isinstance(dj, dict) else None
+
+
+def trend_order(roots: list) -> list:
+    """Order roots into the chain each one's recorded `source` implies.
+
+    A root whose `config.source` lies inside another root's tree consumed that
+    root (usually its final_clean_version), so it comes AFTER it. Roots that
+    cannot be linked keep the order they were given; a cycle is reported rather
+    than guessed at.
+    """
+    items = [(str(Path(r).resolve()), Path(r), trend_read_decision(Path(r))) for r in roots]
+    known = {rp: (r, dj) for rp, r, dj in items}
+    pending = [rp for rp, _r, _dj in items]
+    order, guard = [], 0
+    while pending and guard <= len(pending) ** 2 + 1:
+        progressed = False
+        for rp in list(pending):
+            _r, dj = known[rp]
+            src = str(((dj or {}).get("config") or {}).get("source") or "")
+            parents = [op for op in pending
+                       if op != rp and src
+                       and (src == op or src.startswith(op.rstrip("/") + "/"))]
+            if not parents:
+                order.append(rp)
+                pending.remove(rp)
+                progressed = True
+        if not progressed:
+            # A cycle (or several unlinked roots): report it, keep the given order.
+            order.extend(pending)
+            break
+        guard += 1
+    return [known[rp][0] for rp in order]
+
+
+def _trend_cell(value):
+    if value is None:
+        return "-"
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+def trend_rows(roots: list) -> tuple:
+    """(per-round rows, per-run rows) for the trend tables, in chain order."""
+    round_rows, run_rows = [], []
+    for root in trend_order([str(r) for r in roots]):
+        dj = trend_read_decision(root)
+        if not dj:
+            run_rows.append({"run": root.name, "rounds": 0, "champion": None,
+                             "format_rows": None, "format_high": None, "format_medium": None,
+                             "format_low": None, "over_length": None, "placeholders": None,
+                             "generated": None})
+            continue
+        src = (dj.get("config") or {}).get("source")
+        rounds = dj.get("rounds") or []
+        for r in rounds:
+            sel = r.get("selection") or {}
+            rep = sel.get("champion_rep") or sel.get("champion") or r.get("stored_champion")
+            st = (r.get("stats") or {}).get(rep) or {}
+            census = ((r.get("issue_census") or {}).get(rep) or {})
+            tiers = census.get("tiers") or {}
+            sevs = census.get("severities") or {}
+            row = {"run": root.name, "round": r.get("round"),
+                   "champion": sel.get("champion") or r.get("stored_champion"),
+                   "median": st.get("median"), "mean": st.get("mean"), "n": st.get("n"),
+                   "vs_input": st.get("vs_original"), "vs_incumbent": st.get("vs_base")}
+            for tier in BASIS_TIERS:
+                row[tier] = (tiers.get(tier) or {}).get("total")
+            for sev in SEVERITIES:
+                row[sev] = (sevs.get(sev) or {}).get("total")
+            round_rows.append(row)
+        fin = dj.get("final") or {}
+        fmt = fin.get("format") or {}
+        lengths = fin.get("lengths") or {}
+        last = rounds[-1] if rounds else {}
+        last_rep = ((last.get("selection") or {}).get("champion_rep")
+                    or (last.get("selection") or {}).get("champion")
+                    or last.get("stored_champion"))
+        last_stat = ((last.get("stats") or {}).get(last_rep) or {})
+        run_rows.append({
+            "run": root.name, "rounds": len(rounds),
+            "champion": fin.get("champion") or last.get("stored_champion"),
+            "format_rows": (len(fmt.get("rows") or []) if fmt else None),
+            "format_high": fmt.get("high"), "format_medium": fmt.get("medium"),
+            "format_low": fmt.get("low"),
+            "over_length": (len(lengths.get("over_limit") or []) if lengths else None),
+            "placeholders": last_stat.get("author_placeholders"),
+            "generated": dj.get("generated")})
+    return round_rows, run_rows
+
+
+def format_trend(round_rows: list, run_rows: list) -> str:
+    """The markdown trend report (both tables plus the reading rules)."""
+    L = ["# Cross-run trend (read-only)", ""]
+    L.append("One row per decided round, in the chain order the recorded `source` implies "
+             "(`vs_input` = the champion against the version THAT run started from; "
+             "`vs_incumbent` = the champion against the previous round's champion). The two "
+             "margins come from different panels, so read them as PER-STEP statements: the run "
+             "that wins each step is improving on its own input, which is exactly what the "
+             "reference-moving design measures. The tier/severity columns are the champion's "
+             "ISSUE CENSUS (issues the panel attributed to it, from the judges' own ledger rows) "
+             "-- the absolute \"what is left\" number, comparable across runs, and `-` for rounds "
+             "decided before the census existed. A shrinking census with a stable margin is "
+             "progress; a stable census with a stable margin is noise-limited repetition.")
+    L.append("")
+    L.append(_tbl([[_trend_cell(r.get(k)) for k in TREND_ROUND_FIELDS] for r in round_rows],
+                  list(TREND_ROUND_FIELDS)))
+    L.append("")
+    L.append("Per-run deterministic counters (code-side, no panel; `-` when the run predates "
+             "them): the OOXML formatting rows, the over-cap section count and the champion's "
+             "hand-off placeholder count at the end of the run.")
+    L.append("")
+    L.append(_tbl([[_trend_cell(r.get(k)) for k in TREND_RUN_FIELDS] for r in run_rows],
+                  list(TREND_RUN_FIELDS)))
+    L.append("")
+    return "\n".join(L)
+
+
+def cmd_trend(args) -> None:
+    """`trend`: read several roots' decision.json files and print the chain."""
+    roots = list(getattr(args, "roots", None) or [])
+    if not roots:
+        roots = [getattr(args, "root", None) or DEFAULTS["root"]]
+    roots = [str(Path(r).expanduser().resolve()) for r in roots]
+    missing = [r for r in roots if trend_read_decision(Path(r)) is None]
+    for r in missing:
+        print(f"[trend] note: {r} has no readable reports/decision.json "
+              f"(undecided, pruned or not a pipeline root) -- it is reported as an empty run")
+    round_rows, run_rows = trend_rows(roots)
+    text = format_trend(round_rows, run_rows)
+    print(text)
+    out = getattr(args, "out", None)
+    if out:
+        write_text_atomic(Path(out), text)
+        print(f"[trend] written: {Path(out)}")
+    csvp = getattr(args, "csv", None)
+    if csvp:
+        p = Path(csvp)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        with open(tmp, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=list(TREND_ROUND_FIELDS))
+            w.writeheader()
+            w.writerows([{k: r.get(k) for k in TREND_ROUND_FIELDS} for r in round_rows])
+        os.replace(tmp, p)
+        print(f"[trend] written: {p}")
+
+
 def agent_session_plan(ctx: Ctx, only=None) -> list:
     """Every AGENT session each round plans, without touching the corpus.
 
@@ -26054,6 +26243,13 @@ USAGE_EXAMPLES = """usage:
   status  --root <dir>
           integrity, per-round progress and the per-run table.
           It also prints the venue, the journal and the resolved length limits.
+  trend   [--root <dir>] [--roots <dir> ...] [--out FILE.md] [--csv FILE.csv]
+          the improvement chain across several runs: one row per decided round
+          with the champion, its paired margins (vs_input = the version that run
+          started from; vs_incumbent = the previous round's champion) and the
+          champion's per-tier/per-severity issue census, plus the panel-free
+          deterministic counters. READ-ONLY (no lock, no writes into any root);
+          the chain order comes from each root's recorded `source`.
   set-venue --root <dir> <venue-id> [--journal NAME] [--article-type ID] [--force]
           select the venue profile this root enforces (a RULE SET, not a
           journal) and, optionally, the journal and the article type: all are written to
@@ -26529,6 +26725,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     pst = sub.add_parser("status", parents=[common], help="show round/run status")
     pst.set_defaults(func=cmd_status)
+
+    ptr = sub.add_parser("trend", parents=[common],
+                         help="report the improvement chain across several pipeline roots "
+                              "(per round: champion, its paired margins, and the per-tier issue "
+                              "census). Read-only: no root is modified, no lock is taken")
+    ptr.add_argument("--roots", nargs="+", default=None, metavar="ROOT",
+                     help="the roots to report; the ORDER is inferred from each root's recorded "
+                          "`source` (the chain of final_clean_version inputs) when it can be, "
+                          "otherwise the order given here is kept. Default: --root alone")
+    ptr.add_argument("--out", default=None, metavar="FILE",
+                     help="also write the markdown report to FILE")
+    ptr.add_argument("--csv", default=None, metavar="FILE",
+                     help="also write the per-round rows to FILE as CSV (for plotting)")
+    ptr.set_defaults(func=cmd_trend)
 
     # The sessions' own pre-flight (see `sandbox_selfcheck`): the stage prompts
     # tell every session to run it in the sandbox BEFORE it writes the marker.

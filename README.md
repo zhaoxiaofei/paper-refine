@@ -1066,6 +1066,31 @@ cancel). Opposite signs are the consistent reading and are not flagged; before
 the fix the condition was inverted, so the report listed every agreeing pair as
 a disagreement.
 
+**Reading improvement across many runs: `trend`.** A round's integer compares its
+champion against THAT round's own input, so the reference moves with the chain and
+the per-round numbers cannot be read as one trajectory (and the champion is the
+argmax of a noisy panel, so its score is inflated by selection). Two things ARE
+comparable across a chain, and `python paper_pipeline.py trend --roots RUN1 RUN2 …`
+prints both, in the chain order each root's recorded `config.source` implies:
+
+- the paired margins each round recorded -- `vs_input` (the champion against the
+  version that run started from) and `vs_incumbent` (the champion against the
+  previous round's champion) -- which are honest PER-STEP statements: a run that
+  wins its step improved on its own input, which is what the reference-moving
+  design measures;
+- the champion's **issue census** per tier and severity (the absolute "what is
+  left" number from the judges' own ledger rows) plus the panel-free
+  deterministic counters (OOXML formatting rows, over-cap sections, hand-off
+  placeholders), which do not depend on the reference at all. `-` marks a round
+  decided before the census existed.
+
+`--out FILE.md` and `--csv FILE.csv` write the same table for plotting; the
+command is read-only (no root is modified, no lock is taken), so it works on runs
+whose sandboxes were pruned. A shrinking census with a stable margin is progress;
+a stable census with a stable margin is noise-limited repetition -- and the
+deterministic counters can disagree with the panel, which is exactly the kind of
+divergence worth seeing.
+
 ## Attempt history: every attempt is kept, not just the last one
 
 A run can be attempted several times (`--retries`, a fresh invocation, a

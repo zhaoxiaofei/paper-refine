@@ -438,6 +438,10 @@ checks = [
     # quality channel and could optimise for it).
     ("the judge prompt carries no writing_remaining field",
      "writing_remaining" not in prompt),
+    ("the deterministic checks are measured on BOTH sides of a comparison",
+     "THE DETERMINISTIC CHECKS ARE MEASUREMENTS, NOT IMPRESSIONS" in prompt
+     and "field/<label>/" in prompt
+     and "reported from one side only has not been run" in " ".join(prompt.split())),
 ]
 for label, ok in checks:
     check(f"D5 {label}", ok)
