@@ -6,9 +6,9 @@ submitted to ANY venue or journal (the submission rules come from a configurable
 VENUE PROFILE, the target journal from `set-journal`; Nature Biotechnology is the
 default profile and the pipeline's pre-venue behaviour): R fixed rounds (R is
 configurable at setup and
-defaults to 2), a relative-judgment panel that produces 2*judges*(|field|-1)
-directed scores per version (at the default judges=3 that is 6*(|field|-1); the
-default plan's round-1 field of 8 gives 42), content-addressed pinning of every
+defaults to 3), a relative-judgment panel that produces 2*judges*(|field|-1)
+directed scores per version (at the default judges=2 that is 4*(|field|-1); the
+default plan's round-1 field of 8 gives 28), content-addressed pinning of every
 round's champion, and a deterministic selection layer that ranks only
 candidates whose panel is COMPLETE (a partial panel can never decide a round).
 Python 3.9+, standard library only for the pipeline itself; tracked-changes
@@ -22,7 +22,11 @@ scan and can gate on it with `--format-gate`, and the tool's own CLI
 
 ROUND MODEL
 -----------
-    for r in 1..R:                 # R = 2 by default, exactly R rounds always
+    for r in 1..R:                 # R = 3 by default, exactly R rounds always
+                                   # (the default schedule: M=[2,0,0], N=[1,1,1]
+                                   # and round 3's review scoped to formatting and
+                                   # writing only -- no later rewrites, no second
+                                   # full content review)
         A1_r  = the round's base  (round 1: a byte-identical copy of the
                                    pristine original; round r > 1: the
                                    byte-identical pinned champion of r-1)
@@ -48,7 +52,7 @@ ROUND MODEL
                                      ... and so on for every pool member.
                                    There are NO pairwise arms.
         judges score every field member against every other field member,
-        one direction each, 3 independent judge sessions per member
+        one direction each, 2 independent judge sessions per member
         champion_r = deterministic code selection (Section D); it is pinned
     into pinned/<r>_<champion_id>/ and joins every later round's field
     the round-R champion is the final answer.
@@ -70,7 +74,10 @@ ROUND MODEL
     `setup --revises` and `setup --judges` each take either one integer (the
     same count every round) or a comma-separated list with one entry per round;
     a list shorter than --rounds is extended by repeating its last element. The
-    defaults are M = [2, 1], N = [1, 1] and `--judges 3` everywhere. WHICH
+    defaults are R = 3 rounds, M = [2, 0, 0] (the two from-scratch rewrites are
+    staged in round 1 only), N = [1, 1, 1], `--judges 2` everywhere and the
+    per-round review scope [full, full, formatting-writing] (round 3 is the
+    final polish pass, not a second full content review). WHICH
     integrations run is a per-round 32-bit mask (`setup --integrators`,
     default 0xFFFFFFFF = every applicable agent): bit (k-1) belongs to the k-th
     member of the round's pool [a1, w1..wM, a2..a{1+N}], and a clear bit means
@@ -129,8 +136,8 @@ RETRY POLICY / PANEL INTEGRITY
     `reports/round<r>_panel_gaps.json` is written so the operator can
     `retry --run <judge id>` and re-decide with the full panel.
 
-THE SCORE SET (2*judges*(|field|-1) DIRECTED SCORES PER VERSION; 6*(|field|-1)
-AND 36 AT |field| = 7 WITH THE DEFAULT 3 JUDGES)
+THE SCORE SET (2*judges*(|field|-1) DIRECTED SCORES PER VERSION; 4*(|field|-1)
+AND 24 AT |field| = 7 WITH THE DEFAULT 2 JUDGES)
 ---------------------------------------------------------------------------
     Each round has a field of versions. For version V, `judges` independent
     sessions each score V against EVERY other field member in V's own
@@ -139,11 +146,11 @@ AND 36 AT |field| = 7 WITH THE DEFAULT 3 JUDGES)
     items on each side -- see JUDGE_CONTRACT_VERSION). The reverse direction of
     a pair (V,W) comes from W's own judges, negated into V's frame:
 
-        (3 judges x (|field|-1) opponents)          [V-vs-others]
-      + ((|field|-1) opponents x 3 judges x 1)      [others-vs-V, negated]
-      = 2 * judges * (|field| - 1)                  [= 6 * (|field| - 1) and 18 at
-                                                     the default 3 judges, |field| = 4;
-                                                     42 with the 8-member round-1
+        (2 judges x (|field|-1) opponents)          [V-vs-others]
+      + ((|field|-1) opponents x 2 judges x 1)      [others-vs-V, negated]
+      = 2 * judges * (|field| - 1)                  [= 4 * (|field| - 1) and 12 at
+                                                     the default 2 judges, |field| = 4;
+                                                     28 with the 8-member round-1
                                                      field the default plan builds]
 
     The field is deduplicated by CONTENT digest, so its size is whatever the
@@ -153,8 +160,9 @@ AND 36 AT |field| = 7 WITH THE DEFAULT 3 JUDGES)
     K = 1 + M + N integrated candidates (of which the round's per-round
     --integrators mask may select only some), minus everything that deduplicates
     (the base always merges into the pin or the original). The default plan
-    gives 8 members in round 1 ({original, w1, w2, a2, i1..i4}) and 7 in round
-    2 ({original, the round-1 pin, w1, a2, i1..i3}). V-vs-W and W-vs-V are
+    gives 8 members in round 1 ({original, w1, w2, a2, i1..i4}), 7 in round 2
+    ({original, the round-1 pin, a2, i1, i2} -- M = 0, so the pool is the base
+    plus the revised candidate) and the same shape in round 3. V-vs-W and W-vs-V are
     independent judgments from independent sessions, which is why the ranking
     statistic is the median of the FLAT score list, not a two-level median, with
     the ARITHMETIC MEAN of the same list, then the IQR, breaking ties before the
@@ -526,7 +534,7 @@ CONTENTS OF THIS FILE
 USAGE
 -----
     python paper_pipeline.py setup --source /path/to/non_revised \\
-        --root ./paper_rounds --rounds 2 --judges 3 [--rewrites 2,1] [--revises 1]
+        --root ./paper_rounds --rounds 3 --judges 2 [--rewrites 2,0,0] [--revises 1,1,1]
         [--integrators 0xFFFFFFFF] [--caption-limit N] [--strict-artifacts {on,fix,off}]
     python paper_pipeline.py run    --root ./paper_rounds --jobs 255
     python paper_pipeline.py run    --root ./paper_rounds --only 1,2      # only rounds 1 and 2
@@ -551,7 +559,7 @@ USAGE
     winners, integration views, the pristine copy -- keep their names,
     timestamps, modes and attributes.
 
-    For a complete worked example of a two-iteration pipeline (--rounds 2),
+    For a complete worked example of the default three-round pipeline,
     including every stage of one round and the artifacts it produces, run
     `python paper_pipeline.py -h` and read the WORKED EXAMPLE section.
 
@@ -904,14 +912,19 @@ GENERIC_VENUE = "generic"
 
 DEFAULTS = {
     "root": "./paper_rounds",
-    "rounds": 2,            # fixed-length pipeline; the round-R champion wins
-    "judges": [3],          # independent judge sessions per version, per round list
+    "rounds": 3,            # fixed-length pipeline; the round-R champion wins
+    "judges": [2],          # independent judge sessions per version, per round list
     "jobs": 255,            # concurrent agent sessions
     "venue": DEFAULT_VENUE, # the submission-requirement set the stages enforce
     "journal": "",          # the target journal (free text; "" = profile default)
     "zotero": DEFAULT_ZOTERO_MODE,   # Zotero tooling policy: off|read|edit|apply
-    "rewrites": [2, 1],     # M per round: rewritten candidates (list or one int)
-    "revises": [1, 1],      # N per round: reviewed-and-then-revised candidates
+    # The default three-round SCHEDULE: round 1 stages the two from-scratch
+    # rewrites; rounds 2 and 3 have none (M = 0), so their pool is the base plus
+    # the revised candidate(s), integrated, and judged. Round 3's review is the
+    # FORMATTING-AND-WRITING-ONLY scope (see REVIEW_SCOPE_VALUES).
+    "rewrites": [2, 0, 0],  # M per round: rewritten candidates (list or one int)
+    "revises": [1, 1, 1],   # N per round: reviewed-and-then-revised candidates
+    "review_scope": ["full", "full", "formatting-writing"],  # per-round review scope
     "integrators": [INTEGRATOR_ALL],  # bitmask per round: which pool members integrate
     "timeout": 4 * 3600,    # per-run timeout (manual mode: none)
     "retries": 2,           # automatic retries per failed run (2 = three attempts)
@@ -2802,6 +2815,43 @@ def round_integrators(ctx, r: int) -> int:
     rounds = config_rounds(ctx)
     return int(masks_of(getattr(ctx, "cfg", None), "integrators",
                         rounds)[round_index(r, rounds)])
+
+
+def round_review_scope(ctx, r: int) -> str:
+    """The review's scope for round `r` (`full` or `formatting-writing`).
+
+    The recorded plan wins (a decided round must re-derive the same review
+    contract); otherwise the per-round `review_scope` list from the config,
+    extended by repeating its last element exactly like `--rewrites`/`--judges`.
+    """
+    try:
+        plan = (ctx.round_get(int(r)) or {}).get("plan") or {}
+    except Exception:                                        # noqa: BLE001
+        plan = {}
+    scope = str(plan.get("review_scope") or "").strip().lower()
+    if scope in REVIEW_SCOPE_VALUES:
+        return scope
+    rounds = config_rounds(ctx)
+    raw = (getattr(ctx, "cfg", None) or {}).get("review_scope")
+    if raw is None:
+        raw = list(DEFAULTS["review_scope"])
+    elif not isinstance(raw, (list, tuple)):
+        raw = [raw]
+    seq = [str(x).strip().lower() for x in raw if str(x).strip()]
+    if not seq:
+        seq = ["full"]
+    while len(seq) < rounds:
+        seq.append(seq[-1])
+    value = seq[round_index(r, rounds)]
+    if value not in REVIEW_SCOPE_VALUES:
+        die(f"pipeline_config.json review_scope entry {value!r} is not one of "
+            f"{'|'.join(REVIEW_SCOPE_VALUES)}")
+    return value
+
+
+def scoped_review_checks(scope: str) -> tuple:
+    """The check ids a review of this scope must DISPOSE ITSELF (formatting pass)."""
+    return FORMATTING_WRITING_CHECKS if scope == "formatting-writing" else ()
 
 
 def round_pool_ids(m: int, n: int) -> list:
@@ -6866,7 +6916,7 @@ def review_prompt(sandbox: Path, run_id: str, r: int,
                   zotero: str = DEFAULT_ZOTERO_MODE,
                   prior_round: bool = False, prior_failure: str = "",
                   split: str = None, split_mode: str = "phases",
-                  venue=None) -> str:
+                  scope: str = "full", venue=None) -> str:
     """Phase 1 prompt: $paper-review only, writing review/* (Section C1)."""
     prof = _as_profile(venue)
     prior = (PRIOR_ROUND_RULE.replace("@@ROUND@@", str(int(r)))
@@ -6888,6 +6938,27 @@ This round runs TWO review sessions on the SAME corpus and merges their findings
   * Use finding ids {ids} so the two sessions cannot collide; the orchestrator concatenates
     the two `findings.json` files (yours and the other session's) into the frozen list that
     the revision sessions consume, so EVERY id you write must be unique and stable."""
+    scope_block = ""
+    if str(scope).strip().lower() == "formatting-writing":
+        scope_block = f"""
+
+=== THIS ROUND'S REVIEW SCOPE: FORMATTING AND WRITING ONLY (round {int(r)}) ===
+This round is the FINAL POLISH pass: the content, the science, the numbers and the citations were
+reviewed already. Run ONLY these checks, exhaustively, with the same discipline as always
+(ENUMERATE -> ARTIFACT -> AUDIT, one row per instance, a coverage row per check id):
+  * the surface sweeps: {", ".join(FORMATTING_WRITING_CHECKS[:-2])} (acronyms, display items,
+    hygiene/placeholders, cross-references, terminology, file naming, reference format,
+    SI/numeric formatting, author/affiliation blocks, anomaly tokens, legend lengths,
+    abstract/main-text lengths, OOXML style/formatting uniformity, term families, house style);
+  * the prose and architecture passes J3 (Q1-Q12: logic, coherence, wording, register, grammar,
+    typography, segmentation -- one-sided small differences included) and J5.
+Do NOT run the content/scientific sweeps and passes (M2, M4, M5, M13-M16, M21-M23, M25, M27-M30,
+J1, J2, J4) and do NOT run the discovery round D0-D5. Record every one of those ids in the
+coverage table with the disposition "out of scope -- this round's review is the formatting-and-
+writing-only pass" plus one sentence; a row that is silent is still a missing disposition.
+Do not re-open a content question you notice: if it is a real defect, record it in the coverage
+row of the check that would have owned it (or in the manual list) -- this round's deliverable is
+the surface, and the revisers may not change a claim here."""
     text = (REVIEW_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
             .replace("@@SANDBOX@@", str(sandbox.resolve()))
@@ -6915,8 +6986,8 @@ This round runs TWO review sessions on the SAME corpus and merges their findings
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(REVIEW_DIR))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("review", run_id, r))
-    return (text + shared_blocks() + split_block + attached_head(prof) + "\n" + attached_phase1(prof)
-            + REVIEW_TAIL)
+    return (text + shared_blocks() + split_block + scope_block + attached_head(prof) + "\n"
+            + attached_phase1(prof) + REVIEW_TAIL)
 
 
 def revise_prompt(sandbox: Path, run_id: str, r: int,
@@ -11444,6 +11515,16 @@ def rid_audit(r: int) -> str:
 
 
 REVIEW_SPLIT_MODES = ("off", "phases", "aspects")
+# The review's per-round SCOPE. "full" runs the whole frozen sweep set; the
+# "formatting-writing" scope is the final polish pass: only the surface checks
+# (acronyms, display items, hygiene, cross-references, terminology, naming,
+# reference/SI/affiliation formatting, anomaly tokens, lengths, OOXML formatting,
+# term families, house style) and the prose/architecture passes (J3/J5) run --
+# every content/scientific check is recorded as out of scope for the round.
+REVIEW_SCOPE_VALUES = ("full", "formatting-writing")
+FORMATTING_WRITING_CHECKS = ("M1", "M3", "M6", "M7", "M8", "M9", "M10", "M11", "M12", "M17",
+                             "M18", "M19", "M20", "M24", "M26", "J3", "J5")
+
 REVIEW_SPLIT_SCOPES = {
     "phases": ("A: the MECHANICAL sweeps M1-M17 plus the pipeline-mandated M18/M19/M20 and the "
                "adopted M21-M30 (rewrite-parity and the source-hierarchy reconciliation included; "
@@ -13631,12 +13712,18 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
     prompt = sb / "PROMPT.md"
     if not prompt.is_file():
         _copy_session_tools(sb)
+        scope = round_review_scope(ctx, r)
         prompt.write_text(review_prompt(sb, rid, r, caption_limit=caption_limit_of(ctx),
                                         zotero=zotero_mode_of(ctx),
                                         prior_round=(sb / "prior_round").is_dir(),
                                         prior_failure=note,
-                                        split=(part if split_mode != "off" else None),
+                                        # A scoped round is ONE review pass by
+                                        # definition; the complementary-split
+                                        # machinery would contradict its scope.
+                                        split=(part if split_mode != "off" and scope == "full"
+                                               else None),
                                         split_mode=split_mode,
+                                        scope=scope,
                                         venue=venue_profile_of(ctx)),
                           encoding="utf-8")
     rec = ctx.register(rid, "review", r, f"runs/{rid}",
@@ -15076,8 +15163,15 @@ def check_visual_artifact(path: Path, label: str, errs: list, warns: list,
                      f"verified -- the human gate must complete those pages")
 
 
-def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list) -> None:
-    """Verify the review deliverables the prompt promises the orchestrator checks."""
+def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
+                          scope: str = "full") -> None:
+    """Verify the review deliverables the prompt promises the orchestrator checks.
+
+    `scope` is the round's review scope: a "formatting-writing" round still has
+    to CARRY every check id in its coverage table, but the out-of-scope ids may
+    be disposed as "out of scope -- ..." (that is the scope contract), while the
+    in-scope surface checks keep the full bar.
+    """
     if not isinstance(fj, dict):
         return
     seen_ids = {}
@@ -15122,6 +15216,8 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list) -> No
         # The source-hierarchy reconciliation (sweeps.md M30): the detection side
         # of the hierarchy the prompts already use to RESOLVE a conflict.
         wanted += ["M30"]
+        in_scope = set(scoped_review_checks(scope))
+        out_of_scope = set(wanted) - in_scope if in_scope else set()
         seen_ids, seen_rows, bad = {}, {}, []
         for row in coverage:
             if not isinstance(row, dict):
@@ -15133,6 +15229,17 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list) -> No
                 seen_rows[cid] = row
             if cid and (not disp or disp.lower().startswith("not checked")):
                 bad.append(cid)
+        if out_of_scope:
+            # A scoped round must SAY that a check was left out; silence is still
+            # a missing disposition.
+            for cid in sorted(out_of_scope):
+                disp = (seen_ids.get(cid) or "").strip().lower()
+                if cid in seen_ids and not disp.replace(" ", "").startswith("outofscope"):
+                    errs.append(
+                        f"{FINDINGS_REL} coverage row {cid!r} = {disp!r} but this round's review "
+                        f"scoped OUT that check: dispose it as 'out of scope -- this round's "
+                        f"review is the formatting-and-writing-only pass' (or run the check and "
+                        f"dispose it for real)")
         missing = [c for c in wanted if c not in seen_ids]
         if missing:
             errs.append(f"{FINDINGS_REL} coverage table is missing check id(s) {missing}; a "
@@ -15163,6 +15270,12 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list) -> No
               # to RESOLVE a conflict; like M25-M29 it is a mechanical sweep on
               # this path (the judgment calls stay in the reviewer's rows).
               "M30_hierarchy_reconciliation.md": ("M30", "the source-hierarchy reconciliation")}
+    # A SCOPED round requires only the artifacts of the checks IT runs (the
+    # formatting-writing pass keeps M26's house-style table and J5's
+    # architecture table; M25/M27-M30 belong to the content rounds).
+    scope_in = set(scoped_review_checks(scope))
+    if scope_in:
+        parity = {k: v for k, v in parity.items() if v[0] in scope_in}
     # A SPLIT review divides the work: session A owns the mechanical checks
     # (M25-M29 artifacts), session B owns the J5 architecture pass and the
     # discovery round. Each session's postcheck must not demand the other's
@@ -18503,7 +18616,8 @@ def postcheck_review(ctx: Ctx, rec: dict):
             elif not fj["findings"]:
                 warns.append(f"{FINDINGS_REL} lists zero findings (valid only if the corpus is "
                             f"genuinely clean; check the coverage table)")
-            check_review_contract(ctx, sb, fj, errs, warns)
+            check_review_contract(ctx, sb, fj, errs, warns,
+                                  scope=round_review_scope(ctx, int(rec.get("round") or 1)))
     # DISPOSITION QUALITY: the reviewer's own decision tables. Recorded always;
     # it FAILS the attempt only under `setup --strict-artifacts on`, and
     # `decide --residual-gate` refuses to certify a run that carries it.
@@ -19945,7 +20059,7 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
             # `check_review_contract` needs no pipeline state (it verifies the
             # corpus pointer, the coverage table and the M1b long-form gate), so
             # the session gets the whole contract, not a summary of it.
-            check_review_contract(None, sb, fj, errs, warns)
+            check_review_contract(None, sb, fj, errs, warns)   # selfcheck: no ctx/round scope
         report = artifact_quality_report(sb / REVIEW_DIR)
         for rel, problems in sorted(report.items()):
             for p in problems:
@@ -20834,6 +20948,7 @@ def finalize_round(ctx: Ctx, r: int, field: list, dropped: list, agg: dict,
         "status": "done", "completed": utcnow(),
         "plan": {"rewrites": m, "revises": n, "pool": round_pool_ids(m, n),
                  "integrated": integrated, "integrators": mask,
+                 "review_scope": round_review_scope(ctx, r),
                  "judges": round_judges(ctx, r),
                  "judges_enabled": judges_enabled_spec(ctx, r) or JUDGES_ENABLED_ALL},
         "field": [e["id"] for e in field],
@@ -22238,6 +22353,19 @@ def cmd_setup(args) -> None:
                                   rounds, "--rewrites")
     revises = parse_round_counts(getattr(args, "revises", None) or DEFAULTS["revises"],
                                  rounds, "--revises")
+    review_scope_raw = getattr(args, "review_scope", None) or DEFAULTS["review_scope"]
+    if not isinstance(review_scope_raw, (list, tuple)):
+        review_scope_raw = [x.strip() for x in str(review_scope_raw).split(",") if x.strip()]
+    review_scope = [str(x).strip().lower() for x in review_scope_raw if str(x).strip()]
+    if not review_scope:
+        review_scope = ["full"]
+    while len(review_scope) < rounds:
+        review_scope.append(review_scope[-1])
+    review_scope = review_scope[:rounds]
+    bad_scope = [x for x in review_scope if x not in REVIEW_SCOPE_VALUES]
+    if bad_scope:
+        die(f"--review-scope entries must be one of {'|'.join(REVIEW_SCOPE_VALUES)}, "
+            f"got {bad_scope}")
     # The integrator mask addresses the pool with one bit per member; a pool that
     # outgrew the 32-bit mask cannot be expressed, and silently dropping the
     # higher members' integrations would change the field without saying so.
@@ -22357,6 +22485,7 @@ def cmd_setup(args) -> None:
                "strict_artifacts": artifact_policy != "off",
                "format_policy": format_policy, "format_fix": format_fix,
                "rewrites": rewrites, "revises": revises, "integrators": integrators,
+               "review_scope": review_scope,
                "created": utcnow(), "version": VERSION}
     format_fix_report = None
     if format_fix != "off":
@@ -26204,7 +26333,7 @@ def _cmd_retry_locked(ctx: Ctx, args) -> None:
 # =====================================================================
 
 USAGE_EXAMPLES = """usage:
-  setup   --source <dir> [--root <dir>] [--rounds 2] [--judges 3]
+  setup   --source <dir> [--root <dir>] [--rounds 3] [--judges 2] [--review-scope full,full,formatting-writing]
           [--rewrites M] [--revises N] [--integrators 0xFFFFFFFF]
           [--caption-limit N] [--venue ID] [--journal NAME] [--article-type ID]
           [--strict-venue]
@@ -26239,13 +26368,16 @@ USAGE_EXAMPLES = """usage:
           REVIEWED-AND-THEN-REVISED candidates (one $paper-review pass per round
           feeding N $paper-revise sessions). Each takes either one integer (the
           same count every round) or a comma-separated list with one entry per
-          round (--rewrites 2,1); a shorter list is extended by repeating its
-          last element. Defaults: --rewrites 2,1 and --revises 1,1. Every pool
+          round (--rewrites 2,0,0); a shorter list is extended by repeating its
+          last element. Defaults: --rewrites 2,0,0 and --revises 1,1,1, and the
+          default per-round review scope is full,full,formatting-writing. Every pool
           member (base, rewrites, revisions) is then reworked once by an
           INTEGRATION run that sees the WHOLE pool as donors.
-          --judges is a per-round list too (--judges 3,1): the number of
+          --judges is a per-round list too (--judges 2,1): the number of
           independent judge sessions per version in each round, >= 1 per round
-          (default 3 everywhere).
+          (default 2 everywhere). --review-scope is a per-round list with the
+          same rules: "full" or "formatting-writing" (default
+          full,full,formatting-writing).
           --integrators is a per-round 32-BIT MASK (decimal or 0x…; --integrators
           0xF,0x5) selecting which agents of the round run that integration:
           bit (k-1) belongs to the k-th member of the round's pool
@@ -26432,12 +26564,16 @@ USAGE_EXAMPLES = """usage:
           bridge is the companion file paper_redlines_adapter.py: keep it next to
           this script to use that backend (the built-in writer needs nothing).
 
-WORKED EXAMPLE — a complete pipeline with TWO revision iterations (--rounds 2)
+WORKED EXAMPLE — the default pipeline: THREE rounds, two from-scratch rewrites
+in round 1, integration-and-judge rounds after that, no later rewrites, and the
+round-3 review scoped to formatting and writing
 ------------------------------------------------------------------------------
-  # 0. once: create the round root. Two rounds; 3 judge sessions per version.
-  #    SOURCE is your pristine submission; --root must be new or empty.
+  # 0. once: create the round root. Three rounds; 2 judge sessions per version;
+  #    M=[2,0,0] rewrites, N=[1,1,1] revisions, review scope
+  #    [full, full, formatting-writing]. SOURCE is your pristine submission;
+  #    --root must be new or empty.
   python paper_pipeline.py setup --source ./non_revised --root ./paper_rounds \\
-      --rounds 2 --judges 3
+      --rounds 3 --judges 2
 
   # 1. run BOTH rounds end to end. Each round is the same dependency graph; the
   #    arrows below are DEPENDENCIES, not a schedule, so independent runs
@@ -26592,6 +26728,14 @@ def build_parser() -> argparse.ArgumentParser:
                          f"extended by repeating its last element, a longer one is truncated to "
                          f"--rounds entries. Each round stages its M rewrites first, from the "
                          f"round's base, before the review")
+    ps.add_argument("--review-scope", default=None, metavar="SCOPE[,SCOPE…]",
+                    help=f"the review's scope per round: {('|'.join(REVIEW_SCOPE_VALUES))} -- "
+                         f"'full' runs the whole frozen sweep set, 'formatting-writing' runs only "
+                         f"the surface checks (M1/M3/M6-M12/M17-M20/M24/M26) and the prose/"
+                         f"architecture passes J3/J5 and records every other check as out of "
+                         f"scope. An integer/list pair, same rules as --rewrites (default: "
+                         f"{','.join(DEFAULTS['review_scope'])}). Use it to make the final round "
+                         f"a polish pass instead of a second full review")
     ps.add_argument("--revises", default=None,
                     help=f"the number N of REVIEWED-AND-THEN-REVISED candidates per round: an "
                          f"integer or a comma-separated list, with the same rules as --rewrites "

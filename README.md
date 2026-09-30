@@ -409,6 +409,24 @@ still recorded in `decision.json` and printed — never silently dropped.
 For every round `r` the plan is `A1_r + M rewrites + 1 review + N revises +
 K = 1+M+N integrations + the judge panel`:
 
+**The default schedule is three rounds** (`--rounds 3`), with two judge sessions
+per version (`--judges 2`) and per-round stage counts
+`--rewrites 2,0,0` / `--revises 1,1,1` / `--review-scope full,full,formatting-writing`:
+
+| round | rewrites | review | audit | revise | integrations | judges |
+|---|---|---|---|---|---|---|
+| round 1 | `w1`, `w2` (structural + sentence) | full sweep set | on | `a2` | `i1`–`i4` (one per pool member) | 2/version |
+| round 2 | none | full sweep set | on | `a2` | `i1`, `i2` | 2/version |
+| round 3 | none | **formatting-and-writing only** | on | `a2` | `i1`, `i2` | 2/version |
+
+The rewrites are a round-1 device: they supply the alternative organizations
+the later integrations draw on. Rounds 2 and 3 drop them so the pool is the
+incumbent plus the revised candidate(s), and the final round's review stops
+re-litigating content: it runs only the surface checks and the prose/architecture
+passes (`--review-scope formatting-writing`, see below), records every content
+check as "out of scope" in its coverage table, and hands the surface findings to
+the auditor and the reviser.
+
 The round is also drawn as a diagram —
 [`media/paper-refine-one-revision-round.png`](media/paper-refine-one-revision-round.png)
 (shown at the top of this README); the table below is the text version of its
@@ -665,11 +683,18 @@ Both are per-round command-line parameters with the same list rules as
 `--rewrites`/`--revises` (one integer applies to every round; a shorter list is
 extended by repeating its last element; a longer one is truncated):
 
-* `setup --judges 3,1` runs **3 judge sessions per version in round 1 and 1 in
-  round 2**. Each round's panel is complete only when every field member
+* `setup --judges 2` (the default) runs **2 judge sessions per version in every
+  round**; `--judges 3,1` would run 3 in round 1 and 1 in round 2. Each round's panel is complete only when every field member
   carries its own round's `2*judges*(|field|-1)` directed scores, and the
   decision report prints the per-round counts. Bump the final round when the
   earlier rounds are for triage, or lower it to make a long run affordable.
+* `setup --review-scope full,full,formatting-writing` (the default) is a
+  **per-round review scope**: `full` runs the whole frozen sweep set; the
+  `formatting-writing` scope runs only the surface sweeps (M1, M3, M6–M12, M17,
+  M18, M19, M20, M24, M26) and the prose/architecture passes J3/J5, and records
+  every other check id as `out of scope -- this round's review is the
+  formatting-and-writing-only pass`. The review contract still requires the
+  complete coverage table, so a scoped round can never look like a silent skip.
 * `setup --integrators 0x5,0xFFFFFFFF` is a **32-bit mask per round** selecting
   which agents run an integration session. Bit `k-1` belongs to the k-th member
   of the round's pool `[a1, w1..wM, a2..a{1+N}]`, so in a round with M=2, N=1

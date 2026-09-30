@@ -186,10 +186,19 @@ def fill_seeded_tables(dirp: Path) -> None:
             p.write_text("\n".join(filled) + "\n", encoding="utf-8")
 
 
+# The round-3 formatting-and-writing scope: these ids are NOT run, and the
+# coverage row must say so (a "clean" disposition would claim a sweep the round
+# never performed). Everything else keeps its normal disposition.
+SCOPED_OUT_IDS = ("M2", "M4", "M5", "M13", "M14", "M15", "M16", "M21", "M22", "M23",
+                  "M25", "M27", "M28", "M29", "M30", "J1", "J2", "J4")
+
+
 def do_review(sb: Path, name: str, round_no: int) -> int:
     out = sb / "review"
     (out / "artifacts").mkdir(parents=True, exist_ok=True)
     (out / "round2").mkdir(parents=True, exist_ok=True)
+    scoped = "FORMATTING AND WRITING ONLY" in (
+        (sb / "PROMPT.md").read_text(encoding="utf-8") if (sb / "PROMPT.md").is_file() else "")
     findings = [{"id": "F-001", "location": "base/manuscript-o.md",
                  "category": 0, "check": "M1", "severity": "Minor",
                  "evidence": "stub", "explanation": "stub",
@@ -211,7 +220,11 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
         "submission_dir": "./base", "guidelines_source": "stub",
         "findings": findings,
         "artifacts": {"M1_acronyms": []},
-        "coverage": ([{"check": c, "disposition": "clean -- basis: stub artifact", "detail": "stub"}
+        "coverage": ([{"check": c,
+                       "disposition": ("out of scope -- this round's review is the "
+                                       "formatting-and-writing-only pass" if scoped and c in
+                                       SCOPED_OUT_IDS else "clean -- basis: stub artifact"),
+                       "detail": "stub"}
                       for c in [f"M{i}" for i in range(1, 18)] + [f"J{i}" for i in range(1, 5)]]
                      + [{"check": "M19",
                          "disposition": "0 findings -- abstract/main text within the relaxed caps",
@@ -223,7 +236,9 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
                          "disposition": "code-side formatting rows disposed: 0 findings",
                          "detail": "stub: review/work/FORMAT_SCAN.json audited"}]
                      + [{"check": c,
-                         "disposition": f"clean -- basis: stub {c} artifact",
+                         "disposition": ("out of scope -- this round's review is the "
+                                         "formatting-and-writing-only pass" if scoped and c in
+                                         SCOPED_OUT_IDS else f"clean -- basis: stub {c} artifact"),
                          "detail": "stub"}
                         for c in ("M21", "M22", "M23", "M24",
                                   "M25", "M26", "M27", "M28", "M29", "M30", "J5")])})
