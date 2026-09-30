@@ -497,8 +497,8 @@ def main(argv=None) -> int:
             if section == "cover letter":
                 row["min"] = cover_min
                 row["max"] = cover_max
-                row["within_preference"] = (cover_min is None or cover_max is None
-                                            or cover_min <= words <= cover_max)
+                row["within_preference"] = ((cover_min is None or words >= cover_min)
+                                            and (cover_max is None or words <= cover_max))
                 row["over_limit"] = False                 # the preference is not a cap
             if section == "cover letter total":
                 row["total_max"] = cover_total_max
@@ -511,9 +511,12 @@ def main(argv=None) -> int:
         cap_text = (f"abstract <= {caps['abstract']} words, main text <= {caps['main text']} "
                     f"words" if caps["abstract"] is not None and caps["main text"] is not None
                     else "no abstract/main-text cap configured (counts recorded)")
+        _cov = (f"{cover_min}-{cover_max} words" if cover_min is not None and cover_max is not None
+                else f"at most {cover_max} words" if cover_min is None and cover_max is not None
+                else f"at least {cover_min} words" if cover_min is not None else "")
         print(f"venue: {venue}; caps: {cap_text}; cover letter "
-              + (f"{cover_min}-{cover_max} words in the persuading part (user preference)"
-                 if cover_min is not None else "no preference configured")
+              + (f"{_cov} in the persuading part (user preference)" if _cov
+                 else "no preference configured")
               + (f"; TOTAL content <= {cover_total_max} words (operator cap)"
                  if cover_total_max is not None else "")
               + " -- words = non-space runs, newline = space")

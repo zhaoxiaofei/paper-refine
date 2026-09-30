@@ -92,6 +92,7 @@ work.
 ```bash
 python paper_pipeline.py set-venue --list                # venues this pipeline can see
 python paper_pipeline.py set-venue generic               # switch the rule set (needs an existing root)
+python paper_pipeline.py set-venue frontiers-immunology  # a shipped journal profile (Frontiers in Immunology)
 python paper_pipeline.py set-venue --journal "Cell"      # ... and the journal, atomically
 python paper_pipeline.py set-venue my-journal --profile my-journal.json   # install a profile of your own
 python paper_pipeline.py set-journal "Cell"              # change only the journal

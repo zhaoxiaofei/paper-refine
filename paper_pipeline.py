@@ -1240,10 +1240,7 @@ def _clean_length_limits(limits, prefix: str, problems: list):
                              minimum=0)
     cover_max = _profile_int(cover.get("max"), f"{prefix}.cover_letter.max", problems,
                              minimum=0)
-    if (cover_min is None) != (cover_max is None):
-        problems.append(f"{prefix}.cover_letter: 'min' and 'max' must be given together "
-                        f"(or both null)")
-    elif cover_min is not None and cover_min > cover_max:
+    if cover_min is not None and cover_max is not None and cover_min > cover_max:
         problems.append(f"{prefix}.cover_letter.min ({cover_min}) must not exceed "
                         f"max ({cover_max})")
     cover_total = _profile_int(cover.get("total_max"), f"{prefix}.cover_letter.total_max",
@@ -3234,11 +3231,20 @@ def _caps_clause(profile: VenueProfile, *, article: bool = False) -> str:
 
 
 def _cover_preference_clause(profile: VenueProfile) -> str:
-    """The cover-letter range as `300-500 words`, or "" when none is configured."""
+    """The cover-letter preference as words (`300-500`, `at most 200`, `at least 300`).
+
+    A venue may state only one side (Frontiers states a 200-word maximum for the
+    submission system's scope statement); the clause then carries that side alone.
+    """
     cover = _as_profile(profile).length_limits()["cover letter"]
-    if cover.get("min") is None:
+    lo, hi = cover.get("min"), cover.get("max")
+    if lo is None and hi is None:
         return ""
-    return f"{cover['min']}-{cover['max']} words"
+    if lo is None:
+        return f"at most {hi} words"
+    if hi is None:
+        return f"at least {lo} words"
+    return f"{lo}-{hi} words"
 
 
 def length_rule_text(profile=None) -> str:
@@ -8629,7 +8635,8 @@ def _cover_letter_row(lines: list, doc: str, limits: dict = None, profile=None) 
     total_words = count_words(" ".join(lines))
     total_max = cover.get("total_max")
     over_total = total_max is not None and total_words > total_max
-    within = True if pref_min is None or pref_max is None else (pref_min <= words <= pref_max)
+    within = ((pref_min is None or words >= pref_min)
+              and (pref_max is None or words <= pref_max))
     return {"document": doc, "section": "cover letter", "words": words,
             "total_words": total_words, "total_max": total_max,
             "base": None, "relaxation": None, "cap": None,

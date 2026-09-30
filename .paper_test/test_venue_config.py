@@ -122,7 +122,7 @@ def test_profiles():
     print()
     print("== VC1: the shipped profiles, the built-ins and their numbers ==")
     avail = nb.available_venue_profiles()
-    for vid in ("nature-biotechnology", "generic", "example-journal"):
+    for vid in ("nature-biotechnology", "generic", "example-journal", "frontiers-immunology"):
         check(f"VC1 {vid} is visible to `set-venue --list`", vid in avail,
               str(sorted(avail)))
     paper = nb.load_venue_profile("nature-biotechnology")
@@ -163,6 +163,191 @@ def test_profiles():
 # =====================================================================
 # VC2 — setup records the selection; set-venue / set-journal persist it
 # =====================================================================
+
+def test_every_shipped_profile_is_valid():
+    """Adding a profile file must be safe, and the tests must not count them.
+
+    Nothing here knows how many profiles exist: every `venue_profiles/*.json` is
+    parsed, normalised and loaded by its own id, and has to appear in
+    `set-venue --list`. The root-local route (what `set-venue <id> --profile FILE`
+    installs, and what a hand-added file in `<root>/venue_profiles/` uses) is
+    exercised with a profile this test invents, so "add another venue/journal"
+    is a tested path that cannot silently break the suite.
+    """
+    print()
+    print("== VC1g: every profile file in venue_profiles/ loads, validates and is listed ==")
+    dirp = WS / "venue_profiles"
+    files = sorted(dirp.glob("*.json"))
+    check("VC1g the directory carries at least the shipped profiles",
+          {"nature-biotechnology.json", "generic.json"} <= {p.name for p in files},
+          str(sorted(p.name for p in files)))
+    avail = nb.available_venue_profiles()
+    for p in files:
+        norm, err = None, None
+        try:
+            norm = nb.normalize_venue_profile(json.loads(p.read_text(encoding="utf-8")),
+                                              origin=str(p))
+        except Exception as e:                                  # noqa: BLE001
+            err = f"{type(e).__name__}: {e}"
+        check(f"VC1g {p.name} loads and validates", err is None, str(err))
+        if norm is None:
+            continue
+        vid = norm["id"]
+        check(f"VC1g {p.name} is visible under its own id ({vid})", vid in avail,
+              str(sorted(avail)))
+        try:
+            loaded = nb.load_venue_profile(vid)
+            ok = loaded.id == vid == p.stem
+        except Exception as e:                                  # noqa: BLE001
+            ok = False
+            print(f"      load error: {e}")
+        check(f"VC1g {p.name} is loadable by `set-venue {vid}` (file stem = id)", ok)
+
+    # --- the "add a venue of my own" path, on a fresh root -------------------
+    tmp = Path(tempfile.mkdtemp(prefix="paper_venue_added_"))
+    TMPDIRS.append(tmp)
+    write(tmp / "source" / "ms.md", "# T\n")
+    def custom(vid, label):
+        return {"id": vid, "label": label, "short": label.split()[0],
+                "default_journal": f"{label} Journal",
+                "journals": [f"{label} Journal"],
+                "default_article_type": "article",
+                "article_types": [{"id": "article", "label": "Article",
+                                   "length_limits": {
+                                       "source": "this test's own numbers",
+                                       "abstract": {"base": 200, "relaxation": 1.0},
+                                       "main_text": {"base": 5000, "relaxation": 1.0}},
+                                   "captions": {"published_limit": None, "default_cap": 0,
+                                                "source": "this test"}}],
+                "submission": {"pdf_accepted": None, "formats": [], "pdf_note": ""},
+                "prompt": {}}
+    prof_file = tmp / "added-venue.json"
+    prof_file.write_text(json.dumps(custom("added-venue", "Added Venue")), encoding="utf-8")
+    root = tmp / "root"
+    setup = run_cli("setup", "--source", str(tmp / "source"), "--root", str(root))
+    check("VC1g the fresh root sets up before the new venue is installed",
+          setup.returncode == 0, (setup.stdout + setup.stderr)[-300:])
+    installed = run_cli("set-venue", "--root", str(root), "added-venue",
+                        "--profile", str(prof_file))
+    check("VC1g `set-venue <new> --profile FILE` installs and selects a new venue",
+          installed.returncode == 0, (installed.stdout + installed.stderr)[-300:])
+    ctx = nb.Ctx(root)
+    ctx.load()
+    check("VC1g the new venue's numbers are in force",
+          nb.venue_profile_of(ctx).label == "Added Venue"
+          and nb.venue_profile_of(ctx).length_limits()["main text"]["cap"] == 5000
+          and nb.venue_profile_of(ctx).length_limits()["abstract"]["cap"] == 200,
+          str(nb.venue_profile_of(ctx).length_limits()))
+    listed = run_cli("set-venue", "--root", str(root), "--list", "--json")
+    try:
+        venues = {v["id"] for v in json.loads(listed.stdout)["venues"]}
+    except (ValueError, KeyError, TypeError):
+        venues = set()
+    check("VC1g the new venue is listed next to the shipped ones",
+          {"added-venue", "nature-biotechnology", "generic"} <= venues, str(sorted(venues)))
+    # A SECOND profile, dropped into the root's own venue_profiles/ by hand (the
+    # documented custom route), must be picked up without touching any test.
+    (root / "venue_profiles" / "hand-added.json").write_text(
+        json.dumps(custom("hand-added", "Hand Added")), encoding="utf-8")
+    listed2 = run_cli("set-venue", "--root", str(root), "--list", "--json")
+    try:
+        venues2 = {v["id"] for v in json.loads(listed2.stdout)["venues"]}
+    except (ValueError, KeyError, TypeError):
+        venues2 = set()
+    check("VC1g a hand-added file in <root>/venue_profiles/ is picked up",
+          "hand-added" in venues2, str(sorted(venues2)))
+    check("VC1g ... and can be selected",
+          run_cli("set-venue", "--root", str(root), "hand-added", "--force").returncode == 0)
+    ctx2 = nb.Ctx(root)
+    ctx2.load()
+    check("VC1g ... with its own numbers enforced",
+          nb.venue_profile_of(ctx2).label == "Hand Added"
+          and nb.venue_profile_of(ctx2).length_limits()["main text"]["cap"] == 5000,
+          nb.venue_profile_of(ctx2).label)
+
+
+def test_frontiers_immunology_profile():
+    print()
+    print("== VC1f: the Frontiers in Immunology profile ==")
+    prof = nb.load_venue_profile("frontiers-immunology")
+    check("VC1f it names the journal and defaults to the Original Research type",
+          prof.label == "Frontiers in Immunology" and prof.short == "Front Immunol"
+          and prof.default_journal == "Frontiers in Immunology"
+          and prof.article_type_id == "original-research",
+          f"{prof.label} {prof.article_type_id} {prof.default_journal}")
+    check("VC1f journal matching covers the journal and its abbreviation, not other venues",
+          prof.journal_matches("Frontiers in Immunology")
+          and prof.journal_matches("Front Immunol")
+          and not prof.journal_matches("Nature Biotechnology"))
+    lim = prof.length_limits()
+    check("VC1f the guidelines publish no abstract word limit (counted, no cap)",
+          lim["abstract"] == {"base": None, "relaxation": None, "cap": None}, str(lim["abstract"]))
+    check("VC1f Original Research is the venue's 12,000-word maximum with no margin",
+          lim["main text"] == {"base": 12000, "relaxation": 1.0, "cap": 12000},
+          str(lim["main text"]))
+    check("VC1f the 200-word scope statement is the venue-level cover-letter preference",
+          lim["cover letter"]["max"] == 200 and lim["cover letter"]["min"] is None
+          and lim["cover letter"]["total_max"] == 650
+          and nb._cover_preference_clause(prof) == "at most 200 words",
+          str(lim["cover letter"]))
+    check("VC1f it carries no legend word limit (counts only)",
+          prof.captions.get("published_limit") is None and prof.caption_default == 0,
+          str(prof.captions))
+    check("VC1f the submission block records the Word/LaTeX requirement",
+          prof.data["submission"].get("pdf_accepted") is False
+          and "Word" in (prof.data["submission"].get("pdf_note") or ""),
+          str(prof.data["submission"].get("pdf_accepted")))
+    types = {tid: carries for tid, _label, carries in prof.article_types()}
+    check("VC1f every article type carries its own numbers except the variable Editorial",
+          len(types) >= 18 and types.get("editorial") is False
+          and all(types[k] for k in ("original-research", "mini-review", "brief-research-report",
+                                     "case-report", "opinion", "general-commentary",
+                                     "conceptual-analysis", "curriculum-instruction-pedagogy",
+                                     "data-report", "review", "systematic-review")),
+          str({k: v for k, v in types.items() if not v}))
+    caps = {tid: prof.with_article_type(tid).length_limits()["main text"]["cap"]
+            for tid in ("original-research", "review", "mini-review", "brief-research-report",
+                        "case-report", "opinion", "general-commentary", "conceptual-analysis",
+                        "curriculum-instruction-pedagogy", "data-report")}
+    check("VC1f the per-type caps are the journal's own word counts",
+          caps == {"original-research": 12000, "review": 12000, "mini-review": 3000,
+                   "brief-research-report": 4000, "case-report": 3000, "opinion": 2000,
+                   "general-commentary": 1000, "conceptual-analysis": 8000,
+                   "curriculum-instruction-pedagogy": 5000, "data-report": 3000},
+          str(caps))
+    mini = prof.with_article_type("mini-review")
+    check("VC1f a type with no cover-letter numbers inherits the venue preference",
+          nb._cover_preference_clause(mini) == "at most 200 words"
+          and mini.length_limits()["cover letter"]["total_max"] == 650,
+          str(mini.length_limits()["cover letter"]))
+    root = Path(tempfile.mkdtemp(prefix="paper_frontiers_"))
+    TMPDIRS.append(root)
+    source = root / "source"
+    write(source / "ms.md", "# T\n\ntext\n")
+    setup = run_cli("setup", "--source", str(source), "--root", str(root / "root"),
+                    "--venue", "frontiers-immunology")
+    check("VC1f `setup --venue frontiers-immunology` succeeds",
+          setup.returncode == 0, (setup.stdout + setup.stderr)[-300:])
+    ctx = nb.Ctx(root / "root")
+    ctx.load()
+    check("VC1f the root records the venue, the journal and the type",
+          nb.venue_profile_of(ctx).id == "frontiers-immunology"
+          and ctx.cfg.get("journal") == "Frontiers in Immunology"
+          and ctx.cfg.get("article_type") == "original-research",
+          f"{ctx.cfg.get('venue')} {ctx.cfg.get('journal')} {ctx.cfg.get('article_type')}")
+    prompt = nb.review_prompt(ctx.runs_dir / "x", "r1_review", 1,
+                              venue=nb.venue_profile_of(ctx))
+    check("VC1f the prompts name the journal and its caps",
+          "Frontiers in Immunology" in prompt and "12000" in prompt
+          and "at most 200 words" in " ".join(prompt.split()))
+    switched = run_cli("set-article-type", "--root", str(root / "root"), "mini-review")
+    ctx2 = nb.Ctx(root / "root")
+    ctx2.load()
+    check("VC1f the selected type switches the caps (Mini Review <= 3,000 words)",
+          switched.returncode == 0
+          and nb.venue_profile_of(ctx2).length_limits()["main text"]["cap"] == 3000,
+          f"rc={switched.returncode}")
+
 
 def test_configuration_and_persistence():
     print()
@@ -740,6 +925,8 @@ def test_article_types():
 def main() -> int:
     try:
         test_profiles()
+        test_every_shipped_profile_is_valid()
+        test_frontiers_immunology_profile()
         test_configuration_and_persistence()
         test_custom_profile()
         test_missing_invalid_inconsistent()

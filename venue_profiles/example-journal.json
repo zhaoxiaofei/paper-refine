@@ -3,7 +3,7 @@
   "id": "example-journal",
   "label": "Example Journal",
   "short": "EJ",
-  "description": "Illustrative venue profile used by the documentation and the test suite. It exercises the fields the two shipped profiles do not: a published figure-legend limit, no cover-letter preference, and an explicit journal list. The numbers are placeholders, not a real journal's requirements.",
+  "description": "Illustrative venue profile used by the documentation and the test suite. It exercises the fields the other shipped profiles do not: a published figure-legend limit, no cover-letter preference, and an explicit journal list. The numbers are placeholders, not a real journal's requirements.",
   "article_type": "Research Article",
   "journals": [
     "Example Journal",
