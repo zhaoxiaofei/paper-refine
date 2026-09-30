@@ -238,13 +238,14 @@ sb = tmp / "runs" / np.rid_for_fresh(2, "a2")
 (sb / "review" / "findings.json").write_text(json.dumps({
     "findings": [{"id": "F-001", "category": 2, "severity": "Minor"},
                  {"id": "F-002", "category": "2", "severity": "Minor"},
-                 {"id": "F-003", "category": 1, "severity": "Critical"}]}),
+                 {"id": "F-003", "category": 1, "severity": "Critical"},
+                 {"id": "F-004", "category": 1, "severity": "Fatal"}]}),
     encoding="utf-8")
 rec = ctx3.run(np.rid_for_fresh(2, "a2"))
 check("B2 writing_findings_input counts the frozen review's category-2 findings",
       np.writing_findings_input(ctx3, rec) == 2, str(np.writing_findings_input(ctx3, rec)))
-check("B2 critical_findings_input still counts only Critical severity",
-      np.critical_findings_input(ctx3, rec) == 1, str(np.critical_findings_input(ctx3, rec)))
+check("B2 critical_findings_input counts Critical AND Fatal severity (not Major/Minor)",
+      np.critical_findings_input(ctx3, rec) == 2, str(np.critical_findings_input(ctx3, rec)))
 shutil.rmtree(tmp, ignore_errors=True)
 
 # =====================================================================
@@ -303,8 +304,12 @@ rules = [
     ("+3 on a major + minor consistency item is accepted", comp(3, "consistency", MAJOR3, []),
      False),
     ("+4 without a critical item is rejected", comp(4, "consistency", MAJOR, []), True),
-    ("+4 with a critical + minor item is accepted",
-     comp(4, "correctness", CRIT + MINOR_CONS, []), False),
+    ("+4 with a critical + minor item in the SAME deciding tier is accepted",
+     comp(4, "correctness",
+          CRIT + [{"tier": "correctness", "severity": "minor",
+                   "evidence": "abstract: n = 12 vs 13"}], []), False),
+    ("+4 resting on a lower tier's extra point is rejected (the lower tier is ignored)",
+     comp(4, "correctness", CRIT + MINOR_CONS, []), True),
     ("+1 with an empty ledger is rejected", comp(1, "consistency", [], []), True),
     ("0 with an empty ledger is accepted", comp(0, "none", [], []), False),
     ("-2 with an introduced item is accepted", comp(-2, "consistency", [], MAJOR), False),
@@ -318,7 +323,7 @@ for label, c, want_err in rules:
 low_basis = comp(2, "formatting", MAJOR, [])
 _e, w = basis_problems(low_basis, "comparisons[0]", strict=True)
 check("C6 a basis that understates its own ledger is reported",
-      any("highest-priority tier" in x for x in w), str(w[:1]))
+      any("tier that decides this comparison" in x for x in w), str(w[:1]))
 
 # the stubs that drive the end-to-end suites must satisfy the strict contract
 sa_spec = importlib.util.spec_from_file_location(
@@ -519,10 +524,13 @@ check("E1 the defect-class prompt's class count matches BASIS_TIERS",
 
 # E2: the anchors must not promise a rung the derived integer cannot reach.
 judge_flat = " ".join(judge_prompt_text.split())
-check("E2 the +4 anchor states the capped-sum requirement",
-      "the capped sum" in judge_flat and "a single critical row derives +3" in judge_flat)
-check("E2 the +3 anchor states the capped-sum requirement",
-      "a single major row derives +2" in judge_flat)
+check("E2 the +4 anchor states the deciding-tier requirement",
+      "the deciding tier's net reaches +4" in judge_flat)
+check("E2 the +3 anchor states the deciding-tier requirement",
+      "the deciding tier's net reaches +3" in judge_flat
+      and "includes a MAJOR defect resolved" in judge_flat)
+check("E2 the +2 anchor states the MINOR-run bound",
+      "a run of MINOR rows reaches +2 and no further" in judge_flat)
 for score, rowset, want_err, label in (
         (4, CRIT, True, "one critical row with +4 is rejected"),
         (3, CRIT, False, "one critical row with +3 is accepted"),
@@ -568,12 +576,55 @@ def gcomp(score, basis, resolved=(), introduced=(), checks=None):
     return c
 
 
-# F1: severity is a distance from correct in every class, not a factual-only scale.
-check("F1 the judge prompt states the distance ladder for every class",
-      "Severity is shared too, and it is a DISTANCE FROM CORRECT" in judge_flat2
-      and "MINOR = a detail" in judge_flat2
-      and "MAJOR = the error changes a reported fact" in judge_flat2
+# F1: four severity rungs, a distance from correct in EVERY class (judge contract v4).
+check("F1 the judge prompt states the four-rung distance ladder in every tier",
+      "SEVERITY HAS FOUR RUNGS, AND IT IS A DISTANCE FROM CORRECT IN EVERY TIER" in judge_flat2
+      and "FATAL = the artifact or the claim is unusable" in judge_flat2
+      and "MINOR = a detail that changes nothing a reader depends on" in judge_flat2
+      and "MAJOR = the error changes a reported" in judge_flat2
       and "CRITICAL = the error changes a conclusion" in judge_flat2)
+check("F1 the shared class rule states the same four rungs",
+      "Severity has FOUR RUNGS, and it is a DISTANCE FROM CORRECT in EVERY class"
+      in " ".join(np.defect_class_rule().split()))
+check("F1 every tier accepts all four severities (the tier order, not a single-rung "
+      "policy, keeps the classes apart)",
+      all(not basis_problems(gcomp({"minor": 1, "major": 2, "critical": 3, "fatal": 4}[sev],
+                                   tier, [grow(tier, sev)]), "c0", True)[0]
+          for tier in np.BASIS_TIERS
+          for sev in np.SEVERITIES))
+check("F1 a formatting MAJOR row is no longer rejected as 'MINOR-only'",
+      not any("MINOR rows only" in x or "admits MINOR" in x
+              for x in basis_problems(gcomp(2, "formatting", [grow("formatting", "major")]),
+                                      "c0", True)[0]))
+check("F1 a length/caption row is pinned to formatting+MINOR (length is never a tier)",
+      not basis_problems(gcomp(1, "formatting", [grow("formatting", "minor", "M18")]),
+                         "c0", True)[0]
+      and bool(basis_problems(gcomp(2, "formatting", [grow("formatting", "major", "M18")]),
+                              "c0", True)[0])
+      and bool(basis_problems(gcomp(1, "writing", [grow("writing", "minor", "M19")]),
+                              "c0", True)[0])
+      and "is NEVER a scoring tier of its own" in judge_flat2)
+check("F1 the tier comparison is LEXICOGRAPHIC (no lower-tier offsetting)",
+      # a consistency gain (+2) cannot answer a correctness loss (-1): the higher tier decides.
+      np.derived_comparison_score(
+          gcomp(-1, "correctness",
+                [grow("consistency", "major")],
+                [grow("correctness", "minor", "M4", "abstract: n = 12, table has 13")])) == -1
+      and np.derived_comparison_basis(
+          gcomp(-1, "correctness",
+                [grow("consistency", "major")],
+                [grow("correctness", "minor", "M4", "abstract: n = 12, table has 13")]))
+      == "correctness"
+      # a tie in the top tier leaves the next tier to decide.
+      and np.derived_comparison_score(
+          gcomp(2, "consistency", [grow("correctness", "minor"),
+                                   grow("consistency", "major")],
+                [grow("correctness", "minor")])) == 2
+      and np.derived_comparison_basis(
+          gcomp(2, "consistency", [grow("correctness", "minor"),
+                                   grow("consistency", "major")],
+                [grow("correctness", "minor")])) == "consistency"
+      and "the FIRST tier whose net is not zero DECIDES" in judge_flat2)
 check("F1 the judge prompt states the same-rung distance rule",
       "scored by the DISTANCE between the two errors" in judge_flat2)
 check("F1 the judge prompt scores artifact damage where it damages",
@@ -585,22 +636,20 @@ check("F1 the blank-page ladder is stated for the judge",
 check("F1 the shared class rule carries the artifact-damage classification",
       "ARTIFACT DAMAGE IS NOT COSMETIC FORMATTING" in np.defect_class_rule())
 check("F1 'a factual error is not automatically Critical' is stated",
-      "does NOT make every\n    rung CRITICAL" in np.defect_class_rule())
+      "does NOT make every rung CRITICAL" in " ".join(np.defect_class_rule().split()))
 
-# F2: the basis names the tier on the SIGN's side; a losing-tier basis is reported.
-mix = gcomp(1, "correctness",
-            resolved=[grow("consistency", "minor"), grow("consistency", "minor")],
-            introduced=[grow("correctness", "minor", "M4",
-                             "abstract: n = 12, shipped table has 3 rows")])
+# F2: the basis names the DECIDING tier (the first tier whose net is not zero).
+mix = gcomp(2, "formatting", resolved=[grow("consistency", "major")])
 _e, w_basis = basis_problems(mix, "comparisons[0]", strict=True)
-check("F2 a basis that names the losing tier is reported",
-      any("highest-priority tier" in x and "'consistency'" in x for x in w_basis),
+check("F2 a basis that names a tier which does not decide is reported",
+      any("tier that decides this comparison" in x and "'consistency'" in x for x in w_basis),
       str(w_basis[:1])[:160])
 _e2, w_basis2 = basis_problems(dict(mix, basis="consistency"), "comparisons[0]", strict=True)
-check("F2 the same sheet with the sign-side basis stays clean", not w_basis2, str(w_basis2[:1]))
-check("F2 the judge prompt defines the basis as the sign-side tier",
-      "the tier that BACKS THE SIGN" in judge_flat2
-      and "never a tier the integer did not win on" in judge_flat2)
+check("F2 the same sheet with the deciding tier's basis stays clean", not w_basis2,
+      str(w_basis2[:1]))
+check("F2 the judge prompt defines the basis as the deciding tier",
+      "the tier that DECIDES this comparison" in judge_flat2
+      and "never a lower-priority tier" in judge_flat2)
 
 # F3: a speculative-AI row can never decide a comparison on its own.
 ai_minor = grow("correctness", "minor", "J4",
@@ -612,18 +661,20 @@ ai_crit = grow("correctness", "critical", "J4", "possible AI-generated text in t
 e_ai2, _w = basis_problems(gcomp(3, "correctness", [ai_crit]), "c0", True)
 check("F3 a 'clearly better' rung cannot rest on a speculative-AI row",
       any("rests only on speculative AI-content" in x for x in e_ai2), str(e_ai2)[:160])
-e_ai3, _w = basis_problems(gcomp(4, "correctness", [ai_crit, MINOR_CONS[0]]), "c0", True)
+ai_minor_same = grow("correctness", "minor", "M4", "abstract: n = 12 vs shipped 13")
+e_ai3, _w = basis_problems(gcomp(4, "correctness", [ai_crit, ai_minor_same]), "c0", True)
 check("F3 the decisive rung needs a non-AI CRITICAL row",
-      any("decisive rung needs a CRITICAL item that is not" in x for x in e_ai3),
+      any("decisive rung needs a CRITICAL/FATAL item that is not" in x for x in e_ai3),
       str(e_ai3)[:160])
 plag = grow("correctness", "critical", "J4",
             "verbatim duplication of a published figure legend")
-e_plag, _w = basis_problems(gcomp(4, "correctness", [plag, MINOR_CONS[0]]), "c0", True)
+e_plag, _w = basis_problems(gcomp(4, "correctness", [plag, ai_minor_same]), "c0", True)
 check("F3 a confirmed plagiarism/policy row (no 'possible AI' label) is not restricted",
       not e_plag, str(e_plag[:1]))
 e_ai4, _w = basis_problems(gcomp(3, "correctness",
                                  [grow("correctness", "major", "J4", "possible AI patterns"),
-                                  grow("consistency", "major")]), "c0", True)
+                                  grow("correctness", "major", "M4",
+                                       "abstract: n = 12 vs shipped 13")]), "c0", True)
 check("F3 a speculative-AI row may contribute beside a non-AI strong row",
       not e_ai4, str(e_ai4[:1]))
 check("F3 the judge prompt requires the literal 'possible AI' prefix and the rule",
@@ -653,8 +704,10 @@ check("F5 the judge prompt bridges M25-M29/J5 into the frozen ids",
       and "J5 (architecture/organization)" in judge_flat2)
 check("F5 the J1 routing rule is stated",
       "has no tier of its own" in judge_flat2 and "J1's coverage row" in judge_flat2)
-check("F5 the shared-ceiling note is stated",
-      "Consistency and preservation share the same" in judge_flat2)
+check("F5 the lexicographic rule is stated for every lower tier",
+      "the FIRST tier whose net is not zero DECIDES" in judge_flat2
+      and "every lower tier is then" in judge_flat2
+      and "a bigger row in a LOWER tier never outweighs a smaller one above it" in judge_flat2)
 
 # F6: the distance ladders the user's examples imply.
 check("F6 'man' is a MAJOR and 'fish' a CRITICAL correctness row",
@@ -674,9 +727,15 @@ check("F6 the blank-page ladder is representable and strictly ordered",
       and np.derived_comparison_score(gcomp(0, "none")) == 0)
 check("F6 a one-off stray empty line is cosmetic (0), not a page-sized defect",
       "is COSMETIC (0)" in judge_flat2 and "A blank LINE is not a blank PAGE" in judge_flat2)
-check("F6 cosmetic formatting stays MINOR-only (+-1) and cannot be decisive",
-      bool(basis_problems(gcomp(2, "formatting", [grow("formatting", "major")]),
-                          "c0", True)[0]))
+check("F6 formatting rows are graded on the same four rungs (a MAJOR one reaches +2)",
+      np.derived_comparison_score(gcomp(2, "formatting",
+                                        [grow("formatting", "major")])) == 2
+      and not basis_problems(gcomp(2, "formatting", [grow("formatting", "major")]),
+                             "c0", True)[0]
+      and np.derived_comparison_score(gcomp(1, "writing",
+                                            [grow("writing", "minor")])) == 1
+      and np.derived_comparison_score(gcomp(3, "writing",
+                                            [grow("writing", "critical")])) == 3)
 
 # F7: the self-reported tie-break counts are cross-checked for every arm, not
 # only for the revise arm that happens to carry a review/ copy.

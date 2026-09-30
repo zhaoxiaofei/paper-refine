@@ -149,10 +149,12 @@ def test_prompts():
           "cannot be named in this vocabulary is COSMETIC" in " ".join(block.split())
           and "counts 0 for every session" in " ".join(block.split())
           and "never cosmetic" in " ".join(block.split())
-          and "Dropping\n    a nameable difference" in block)
+          and "Dropping a nameable difference" in " ".join(block.split())
+          and "counted at its own class and rung" in " ".join(block.split()))
     check("the defect-class block keeps systematic wording fixes visible",
           "consistency" in block
-          and "a convention is applied in one place and\n        not another" in block)
+          and "a convention is applied in one place and" in " ".join(block.split())
+          and "not another" in " ".join(block.split()))
     check("the judge prompt's priority order is the block's class order",
           "  >  ".join(np.BASIS_TIERS) in builders["judge"])
     skills = WORKSPACE / "paper-skills"

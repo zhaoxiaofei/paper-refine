@@ -2871,10 +2871,12 @@ def round_fresh_ids(m: int, n: int) -> list:
 SCORE_MIN = -4
 SCORE_MAX = 4
 
-# --- judge contract v2: the GRADED BASIS of every comparison ----------------
+# --- judge contracts v2-v4: the GRADED BASIS of every comparison ------------
 # The integer score is a claim about a DEFECT CLASS, not a mood. Judges are
 # therefore asked for a small, machine-checkable ledger per comparison:
-# `basis` names the highest-priority tier in which the target differs, and
+# `basis` names the tier that DECIDES the comparison (the first tier, in
+# priority order, whose net is not zero; for a net-zero comparison with rows,
+# the highest-priority tier in which the two versions differ), and
 # `resolved`/`introduced` list the concrete items on each side (tier, severity,
 # one-line evidence). Contract v2 (this constant) makes the orchestrator
 # enforce the claim, so a number cannot be written without something to check
@@ -2882,27 +2884,33 @@ SCORE_MAX = 4
 # scores, 2026-09-17) used -3..3 and never once used +-4, so widening the range
 # would add rungs nobody uses instead of making the existing ones mean
 # something; the tier ledger is what fixes the calibration problem.
-# v3 (2026-09-21 redesign): the integer is DERIVED from the ledger rows, the
-# `writing` class exists for grammar/prose, and formatting+writing admit MINOR
-# rows only (operator policy: both are worth at most one point and can never
-# decide a comparison).
-JUDGE_CONTRACT_VERSION = 3
+# v4 (2026-09-30): the tier ORDER is the score. Every tier carries the same FOUR
+# severity rungs (minor 1 / major 2 / critical 3 / fatal 4, a distance from
+# correct), the tiers are compared LEXICOGRAPHICALLY in
+# correctness > consistency > preservation > completeness > formatting > writing
+# order, and the first tier whose net is not zero decides the comparison -- a
+# lower-priority gain can never offset a higher-priority loss. (v3 summed the
+# tiers additively with differentiated caps and made formatting/writing
+# MINOR-only; both are superseded.)
+JUDGE_CONTRACT_VERSION = 4
 BASIS_TIERS = ("correctness", "consistency", "preservation", "completeness", "formatting",
                "writing")
 BASIS_VALUES = BASIS_TIERS + ("none",)
-# Row weights per tier (minor/major/critical) and the per-tier cap on the net
-# contribution, so one class can never dominate the whole scale.
-TIER_ROW_WEIGHTS = {"correctness": {"minor": 1, "major": 2, "critical": 3},
-                    "consistency": {"minor": 1, "major": 2, "critical": 3},
-                    "preservation": {"minor": 1, "major": 2, "critical": 3},
-                    "completeness": {"minor": 1, "major": 2, "critical": 3},
-                    "formatting": {"minor": 1, "major": 1, "critical": 1},
-                    "writing": {"minor": 1, "major": 1, "critical": 1}}
-TIER_CAPS = {"correctness": 4, "consistency": 3, "preservation": 3,
-             "completeness": 2, "formatting": 1, "writing": 1}
-# Operator policy: these two classes admit MINOR rows only.
-MINOR_ONLY_TIERS = ("formatting", "writing")
-SEVERITIES = ("critical", "major", "minor")
+# FOUR severity rungs, weakest first, and EVERY tier carries all four: minor 1 /
+# major 2 / critical 3 / fatal 4. The rungs are a DISTANCE FROM CORRECT (a
+# detail / a reported fact / a conclusion / an unusable artifact-or-claim), not
+# a factual-only scale, and each tier can reach the whole -4..+4 range.
+SEVERITIES = ("minor", "major", "critical", "fatal")
+SEVERITY_WEIGHTS = {"minor": 1, "major": 2, "critical": 3, "fatal": 4}
+TIER_ROW_WEIGHTS = {tier: dict(SEVERITY_WEIGHTS) for tier in BASIS_TIERS}
+# The per-tier net is capped at +-4: the scale's own bound. What keeps
+# correctness ahead of consistency is the LEXICOGRAPHIC tier order, not a
+# differentiated cap (see derived_comparison_score).
+TIER_CAPS = {tier: 4 for tier in BASIS_TIERS}
+# The venue LENGTH checks keep their own single-rung policy: a length/caption
+# row is a formatting-tier MINOR row, and length can only ever move a comparison
+# by at most +-1 (the length rule is a standing exemption, not a scoring tier).
+LENGTH_GUARD_CHECKS = ("M18", "M19")
 EVIDENCE_MAX_WORDS = 25
 
 # Caption cap for the pipeline's OWN extra check (id M18).
@@ -3337,9 +3345,11 @@ def caption_rule_template(profile=None) -> str:
     (check id M18) and, when the redundancy can be removed without losing anything, do so --
     NEVER by deleting scientific content, claims, limitations, or necessary methodological
     detail. A cut that removes content is a preservation defect and is worse than the long
-    caption. Severity stays in the formatting tier (the skill's Minor/Major formatting severity,
-    never Critical): a caption-length finding must never outrank a correctness, consistency or
-    preservation defect, and it must never inflate a candidate's critical-finding count.
+    caption. A length/caption row is a formatting-tier MINOR row -- the venue's relaxed margins
+    make slight over-length intended, so it is never Major/Critical/Fatal: it may break a tie
+    between otherwise equal packages by one point, it must never outrank a correctness,
+    consistency or preservation difference, and it must never inflate a candidate's
+    critical-finding count.
   * If a caption cannot be brought under @@CAPTION_LIMIT@@ words without losing content, do not
     guess and do not cut: leave the caption as it is and say so explicitly, listing it for manual
     action (revise: MANUAL_STEPS.md; review: the manual-verification list; judge: the comparison
@@ -3443,8 +3453,9 @@ M18_JUDGE_SWEEP_ON = """PLUS the pipeline-mandated caption sweep M18 (count ever
    line, a legend split across paragraphs): the orchestrator's code-side scan recognises only
    common patterns and lists anything else as "suspected" -- your M18 artifact is the authoritative
    enumeration, and a caption the code-side scan did not recognise is exactly the kind of miss you
-   must not repeat. M18 is a SUGGESTION: an over-limit caption is a formatting-tier item (<= +/-1,
-   never decisive), and it never makes a version ineligible."""
+   must not repeat. M18 is a SUGGESTION: an over-limit caption is a formatting-tier MINOR item
+   (<= +/-1 -- it can break a tie between two otherwise equal packages, never outweigh a
+   difference in a higher tier), and it never makes a version ineligible."""
 M18_JUDGE_SWEEP_REPORT = """PLUS the pipeline-mandated legend sweep M18 (count every figure
    legend's words and record the rows in judge_review/artifacts/M18_caption_words.md). M18 is part
    of the frozen set for every judge session, so do not skip it and do not treat it as optional.
@@ -3558,7 +3569,8 @@ SURFACED". Never change content to reach a word count."""
    text -- and the cover letter's persuading part -- with the pipeline's word definition and record the rows in
    judge_review/artifacts/M19_length.md; {caps_article}; {cover_note}). Length is FORMATTING-tier evidence: a version within the cap may be
    preferred to one that is over it by at most +/-1, two versions that are both over (or both
-   within) are indistinguishable and score 0, and length never decides a comparison on its own.
+   within) are indistinguishable and score 0, and a length row is a formatting-tier MINOR row
+   whose +/-1 can never outweigh a difference in a higher tier.
    An over-cap section never makes a version ineligible, and the cover-letter preference is
    user-set: it is at most a +/-1 formatting-tier difference, never a journal requirement."""
     return {"review": review, "revise": revise, "integrate": integrate, "rewrite": rewrite,
@@ -3642,7 +3654,9 @@ M20_JUDGE_SWEEP = """PLUS the pipeline-mandated OOXML formatting sweep M20 (deri
    formatting-tier difference class: a version whose formatting is UNIFORM (one URL/email
    treatment, consistent quotation marks, consistent legend spacing, no blank page) may be
    preferred to one that is not by at most +/-1, and formatting never decides a comparison on its
-   own. Mechanical defects have already been normalized by the orchestrator before the view you
+   own beyond that point: a formatting-tier difference can break a tie between two otherwise
+   equal packages, and it can never outweigh a difference in a higher tier. Mechanical defects
+   have already been normalized by the orchestrator before the view you
    read was built, so do not manufacture differences out of them. The TEXT-level consistency rows
    (citation dialect, US/UK spelling, attributive hyphenation) are deliberately NOT pre-normalized:
    a corpus that completed a convention where the other did not is a real CONSISTENCY-tier
@@ -3948,11 +3962,11 @@ SHARED_DECISION_BLOCK = """
 === THE SHARED DECISION RULES (identical in every session; only YOUR deliverable differs) ===
 D1. ONE vocabulary. Every difference, finding and residual is named by its CLASS and SEVERITY.
     Classes, highest priority first: correctness > consistency > preservation > completeness >
-    formatting > writing. Severities: Critical > Major > Minor. A difference that cannot be named
-    in that vocabulary is COSMETIC and counts 0 -- for everyone. A difference that CAN be named is
-    never cosmetic: `formatting` and `writing` are MINOR rows (at most one point each, never
-    decisive alone), but they are always counted by whichever session stands in front of the
-    package.
+    formatting > writing. Severities, a DISTANCE FROM CORRECT in every class: Fatal > Critical >
+    Major > Minor. A difference that cannot be named in that vocabulary is COSMETIC and counts 0 --
+    for everyone. A difference that CAN be named is never cosmetic: `formatting` and `writing` rows
+    are graded on the same four rungs as every other class, and always counted by whichever session
+    stands in front of the package.
     EVERY TWO-SIDED CHECK IS RUN IN BOTH DIRECTIONS, and a check reported from ONE side has not
     been run: a claim can be too strong (an overclaim) or too weak (an underclaim -- a supported
     result hedged into vagueness); content can be lost (preservation) or invented (correctness);
@@ -4114,22 +4128,28 @@ defect the same way; only the deliverable differs):
         matches the evidence in either direction -- an overclaim or an underclaim);
         @@T_FORMATTING@@ when it is a
         one-off wording preference with no convention behind it; @@T_WRITING@@ when it is a
-        grammar, spelling, punctuation or prose-flow error that changes no meaning (MINOR rows
-        only -- the class is worth at most one point and never decides a comparison);
+        grammar, spelling, punctuation or prose-flow error that changes no MEANING (graded on the
+        same four rungs as every class: a slip that costs the reader nothing is Minor, prose a
+        reader must work around is Major, prose nobody can follow is Critical/Fatal; a row whose
+        evidence shows the meaning changed is refiled to @@T_CORRECTNESS@@);
       - category 3 (Plagiarism / AI-generated content) -> @@T_CORRECTNESS@@ (the integrity of the
         content itself); category 4 (Technical Formatting) -> @@T_FORMATTING@@ for the M18/M19/M20
         COSMETIC rows, or @@T_COMPLETENESS@@ / @@T_CORRECTNESS@@ when the row damages the delivered
         artifact (see the artifact-damage rule above); category 5 (Missing / Unneeded
         Information) -> @@T_COMPLETENESS@@.
-  * Severity is shared too, and it is a DISTANCE FROM CORRECT, not a volume knob: MINOR = a detail
-    that changes no claim, reported fact or downstream number (the closest miss: an adjacent value,
-    a wording slip whose meaning survives); MAJOR = the error changes a reported fact, attribute,
-    comparison or sample set, but not the paper's conclusion (a wrong age band, sex, unit or cohort
-    label is the typical case); CRITICAL = the error changes a conclusion, contradicts the data, or
-    is a category impossibility (a fabricated number or citation, a claim the data refute, a wrong
-    species or kind). A finding's (category, severity) and a compared item's (class, severity) must
-    come from the SAME defect and the SAME rung; "it is a factual error" alone does NOT make every
-    rung CRITICAL.
+  * Severity has FOUR RUNGS, and it is a DISTANCE FROM CORRECT in EVERY class -- factual,
+    consistency, preservation, completeness, formatting and prose alike. FATAL = the artifact or
+    the claim is unusable (a deliverable that cannot be opened or read, a rendering with no
+    readable text, a fabricated result presented as established); CRITICAL = the error changes a
+    conclusion, contradicts the data, or is a category impossibility (a fabricated number or
+    citation, a claim the data refute, a wrong species or kind); MAJOR = the error changes a
+    reported fact, attribute, comparison or sample set, but not the paper's conclusion (a wrong age
+    band, sex, unit or cohort label is the typical case), or a prose/formatting failure a reader
+    must work around; MINOR = a detail that changes no claim, reported fact or downstream number
+    (the closest miss: an adjacent value, a wording slip whose meaning survives). A finding's
+    (category, severity) and a compared item's (class, severity) must come from the SAME defect and
+    the SAME rung; "it is a factual error" alone does NOT make every rung CRITICAL, and a prose or
+    formatting defect is NOT thereby barred from MAJOR, CRITICAL or FATAL.
   * A claim BOTH versions get wrong is scored by the DISTANCE between the two errors: file the
     opponent's error as a `resolved` row and the target's error, when it still has one, as an
     `introduced` row, each at its OWN rung. Two rows of the same rung cancel -- which is exactly
@@ -4138,19 +4158,22 @@ defect the same way; only the deliverable differs):
     not print, or an unreadable rendering is classified by what it DAMAGES, never filed as a
     cosmetic formatting row -- content missing from the delivered artifact is @@T_COMPLETENESS@@
     (one displaced page/figure = minor, several pages or a whole section = major, an unusable
-    artifact = critical), and an artifact that is corrupt or not what the authors believe they
+    artifact = fatal), and an artifact that is corrupt or not what the authors believe they
     submitted is @@T_CORRECTNESS@@. A ONE-OFF stray empty line, a spacing slip, an
     italic/quotation treatment or a mixed URL style is COSMETIC (0) -- it becomes
-    @@T_CONSISTENCY@@ when the same convention is broken repeatedly instead -- and @@T_FORMATTING@@
-    rows stay MINOR-only and worth at most one point. A blank line is not a blank PAGE: the
+    @@T_CONSISTENCY@@ when the same convention is broken repeatedly instead -- and a
+    @@T_FORMATTING@@ row is graded by the same four rungs (a cosmetic slip that is filed at all
+    stays minor; damage a reader must work around is major). A blank line is not a blank PAGE: the
     break-only paragraph that pushes a page break is artifact damage, graded by the extent of
-    what it displaces.
+    what it displaces. A length/caption row (`M18`/`M19`) is always a @@T_FORMATTING@@ MINOR row:
+    the venue's relaxed length margins mean slight over-length is intended, so length may move a
+    comparison by at most one point and is NEVER a scoring tier of its own.
   * An improvement claim must name the class it improves and the concrete item behind it, with a
     location: "this edit is better" without one is not an improvement claim. A difference that
     cannot be named in this vocabulary is COSMETIC and counts 0 for every session. A difference
-    that CAN be named is never cosmetic -- `formatting` and `writing` included: those are MINOR
-    rows worth at most one point each, never decisive on their own, but ALWAYS counted. Dropping
-    a nameable difference is itself a `consistency`-tier defect.
+    that CAN be named is never cosmetic -- `formatting` and `writing` included: every row is
+    counted at its own class and rung, and only the class ORDER decides which differences count
+    first. Dropping a nameable difference is itself a `consistency`-tier defect.
   * What differs between sessions is the DELIVERABLE, not the vocabulary: an identification
     session reports findings and never scores; a comparison session scores one target against one
     opponent and never ranks; a package-producing session resolves findings in its own copy and
@@ -5009,7 +5032,7 @@ Skill discipline that the orchestrator will check for:
                           ones are not):
     {"submission_dir": "./base", "guidelines_source": "<string>",
      "findings": [{"id": "F-001", "location": "...", "category": 0, "check": "M1",
-                   "severity": "Critical|Major|Minor", "evidence": "...",
+                   "severity": "Critical|Major|Minor|Fatal", "evidence": "...",
                    "explanation": "...", "status": "resolvable|unresolvable|guideline-dependent"}],
      "artifacts": {"M1_acronyms": [...], "M2_citations": {...}, "...": "..."},
      "coverage": [{"check": "M1", "disposition": "N findings", "detail": "..."}]}
@@ -5288,8 +5311,8 @@ finding's evidence supports, never above it. The fix of one direction must not o
 other (an overclaim "fixed" into a hedge is a new underclaim, and a hedge "fixed" into a claim is
 a new overclaim), and a claim edit with no calibration finding behind it stays frozen under E6.
 `critical_remaining` is reported in the decision record and can break a statistical tie between
-two versions whose scores are identical, so report it honestly: the number of CRITICAL-severity
-findings still open after your revision (0 when none remain). `writing_remaining` breaks a
+two versions whose scores are identical, so report it honestly: the number of CRITICAL/FATAL-
+severity findings still open after your revision (0 when none remain). `writing_remaining` breaks a
 statistical tie the same way, BELOW the critical count (severity outranks style) and never as a
 score or a gate: the number of the frozen review's CATEGORY-2 findings (writing quality, logic,
 repetition -- see the class mapping) still open after your revision, 0 when none remain; the
@@ -5389,7 +5412,7 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
         "dispositions": [{"id": "F-001", "verdict": "confirm|drop", "reason": "...",
                           "evidence": "verbatim quote or file:line", "severity_after": "..."}],
         "adds": [{"id": "AU-001", "location": "...", "category": 0, "check": "M20|J3|...",
-                  "severity": "Critical|Major|Minor", "evidence": "...", "problem": "..."}],
+                  "severity": "Critical|Major|Minor|Fatal", "evidence": "...", "problem": "..."}],
         "counts": {"confirmed": N, "dropped": N, "added": N},
         "coverage": [{"check": "M1", "disposition": "..."}],   # your own coverage table
         "notes": "..."}
@@ -5628,7 +5651,7 @@ root with exactly this structure:
    "summary": {"ported": <int>, "kept_base": <int>, "ignored_cosmetic": <int>,
                "shared_defects_left": <int>, "donors_read": <int>,
                "critical_remaining": <int>, "writing_remaining": <int>, "manual_items": <int>}}
-`critical_remaining` (CRITICAL-severity issues still open after your run; 0 when none remain) is
+`critical_remaining` (CRITICAL/FATAL-severity issues still open after your run; 0 when none) is
 reported and can break a statistical tie between two versions whose scores are identical;
 `writing_remaining` breaks such a tie too, BELOW the critical count (severity outranks style) and
 never as a score or a gate: the number of CATEGORY-2 writing-quality/logic/repetition issues still
@@ -5850,7 +5873,7 @@ structure:
    "status": "complete" | "failed", "error": null | "<short reason>",
    "summary": {"reorganized_sections": <int>, "problems_surfaced": <int>,
                "critical_remaining": <int>, "writing_remaining": <int>, "manual_items": <int>}}
-`critical_remaining` (CRITICAL-severity issues still open in the candidate; 0 when none) is
+`critical_remaining` (CRITICAL/FATAL-severity issues still open in the candidate; 0 when none) is
 reported and can break a statistical tie between versions whose scores are identical;
 `writing_remaining` breaks such a tie too, BELOW the critical count (severity outranks style) and
 never as a score or a gate: the number of CATEGORY-2 writing-quality/logic/repetition issues still
@@ -6086,15 +6109,14 @@ only.
 
 === SCALE (integer -4..+4, FIXED -- no halves, no other rungs; positive = the target is
     better than THIS opponent) ===
-  +4  decisive advantage  — the target resolves a critical defect class that the opponent leaves
-                            entirely unresolved (or the opponent introduces a new critical defect),
-                            with no offsetting loss anywhere in the priority order; the capped sum
-                            below must reach +4 -- a single critical row derives +3
-  +3  clearly better      — one or more MAJOR defects resolved that the opponent still carries, with
-                            no regression introduced in exchange; the capped sum below must reach
-                            +3 -- a single major row derives +2
-  +2  better              — a real net advantage in content: more/larger real defects resolved than
-                            introduced
+  +4  decisive advantage  — the deciding tier's net reaches +4: the target resolves a FATAL or
+                            CRITICAL defect the opponent leaves entirely unresolved (or the
+                            opponent introduces one), and no higher-priority tier offsets it
+  +3  clearly better      — the decisive difference includes a MAJOR defect resolved that the
+                            opponent still carries, with no regression introduced in exchange;
+                            the deciding tier's net reaches +3
+  +2  better              — a real net advantage in the deciding tier (a run of MINOR rows reaches
+                            +2 and no further): more/larger real defects resolved than introduced
   +1  slightly better     — a small but REAL net advantage (never a cosmetic one)
    0  indistinguishable   — judged on content, you cannot say which version is better
   -1  slightly worse      — the mirror of +1
@@ -6113,17 +6135,16 @@ Cosmetic-only differences (spacing, font choice, ordering of identical content, 
 that do not change meaning) are 0 -- they are worth no points in either direction. Judge CONTENT,
 not style.
 
-=== GRADED BASIS -- every score must be CHECKABLE (judge contract v3) ===
+=== GRADED BASIS -- every score must be CHECKABLE (judge contract v4) ===
 
 An integer with nothing behind it is not evidence, so every comparison also carries the defect
 class it is about and the concrete items that support it. The orchestrator checks the arithmetic,
 and a sheet that contradicts its own ledger FAILS its run (the panel then waits for a retry --
 never guess a number to fill a row):
 
-  "basis"      the tier that BACKS THE SIGN of this comparison -- for a positive score the
-               highest-priority tier among the items the target RESOLVES, for a negative score the
-               highest-priority tier among the items it INTRODUCES, and for a net-zero comparison
-               the highest-priority tier in which the two versions differ at all:
+  "basis"      the tier that DECIDES this comparison -- the FIRST tier, in the fixed priority
+               order, whose net is not zero (for a net-zero score with rows, the highest-priority
+               tier in which the two versions differ at all; "none" for a clean 0):
                correctness | consistency | preservation | completeness | formatting | writing | none
                ("none" is for a clean 0 with no item on either side).
   "resolved"   items the TARGET resolves that the opponent still carries (or improves: see below).
@@ -6134,36 +6155,41 @@ error as `resolved` and the target's error (if it still has one) as `introduced`
 severity rung, so the ledger shows both errors and the net is the distance between them. Do not
 file both at one severity, and do not drop the target's row.
 
-Each item is {"check": "M8", "tier": <one of the six tiers>, "severity": "critical"|"major"|"minor",
+Each item is {"check": "M8", "tier": <one of the six tiers>,
+"severity": "minor"|"major"|"critical"|"fatal",
 "evidence": "<=25 words, with a location, e.g. 'Fig. 2 legend: five vs six metrics'"}. The optional
 `check` names the frozen check the row belongs to; a formatting-sweep RULE id is read as the
 check that owns it (`FMT-*` -> M20), so citing the rule you actually read is fine. List EVERY
 difference instance you found on each
 side (there is no 1-3 cap: five fixed minor consistency instances are five rows); an empty list is
 a legitimate answer ("no difference of that kind"), and two empty lists mean the comparison is
-exactly 0. `basis` must be exactly that sign-side tier -- never a lower-priority one and never a
-tier the integer did not win on.
+exactly 0. `basis` must be exactly the tier the ledger decides on -- never a lower-priority tier,
+and never a tier the integer did not win in.
 
 A SPECULATIVE AI-CONTENT ROW (the standing exemption's "possible AI-generated" case) must cite
 `J4` and BEGIN its evidence with the literal words `possible AI`; it can never decide a comparison
 on its own. A non-zero score therefore needs at least one item on its side that is not such a row,
-and the |3|/|4| rungs need their MAJOR/CRITICAL backing from a row that is not such a row.
+and the |3|/|4| rungs need their MAJOR/CRITICAL/FATAL backing from a row that is not such a row.
 
-THE INTEGER IS DERIVED FROM THOSE ROWS (contract v3). Weights: minor 1, major 2, critical 3 per
-row. Net contribution caps per tier: correctness +-4, consistency +-3, preservation +-3,
-completeness +-2, formatting +-1, writing +-1; the capped sum is the score. `formatting` and
-`writing` rows are MINOR-ONLY (grammar/prose and formatting are each worth at most one point and
-can never decide a comparison). The capped sum is then bounded by the rung the rows can BACK: a run
-of MINOR rows is a real net advantage (+-2 at most), |3| ("clearly better/worse") needs at least one
-MAJOR row outside formatting/writing, and |4| ("decisive") needs a CRITICAL one. Write the
-integer the rows support -- a sheet whose number disagrees with its own ledger fails its run.
+THE INTEGER IS DERIVED FROM THOSE ROWS, LEXICOGRAPHICALLY (contract v4). The six tiers are compared
+IN THEIR PRIORITY ORDER (correctness > consistency > preservation > completeness > formatting >
+writing) and the FIRST tier whose net is not zero DECIDES the comparison: its sign decides, its
+magnitude is |net| bounded by the rung its OWN deciding rows can back, and every lower tier is then
+IGNORED (a consistency improvement can never offset a correctness loss; a formatting improvement
+can never offset a completeness loss). Within a tier the rows weigh minor 1 / major 2 / critical 3
+/ fatal 4 (resolved add, introduced subtract) and the net is capped at +-4. The magnitude bound: a
+run of MINOR rows reaches +-2 and no further, a tier whose deciding rows include a MAJOR row
+reaches +-3, and a tier whose deciding rows include a CRITICAL or FATAL row reaches +-4. A
+comparison whose six nets are all zero is 0. Write the integer the rows support -- a sheet whose
+number disagrees with its own ledger fails its run.
 
-The orchestrator enforces all of it: a non-zero score needs at least one item on its own side
-(resolved for a positive score, introduced for a negative one); |score| >= 3 ("clearly
-better/worse") needs a MAJOR or CRITICAL item OUTSIDE the formatting and writing tiers, because
-neither of those can ever be decisive; and |score| = 4 ("decisive") needs a CRITICAL item. This is how
-the panel stays calibrated across independent sessions: the number is a claim about defect classes,
-and the claim is checked, not trusted.
+The orchestrator enforces all of it: a non-zero score needs at least one item on its own side IN
+THE DECIDING TIER (resolved for a positive score, introduced for a negative one); |score| >= 3
+("clearly better/worse") needs a MAJOR, CRITICAL or FATAL row there; and |score| = 4 ("decisive")
+needs a CRITICAL or FATAL row. A length/caption row (`M18`/`M19`) is a formatting-tier MINOR row --
+length may move a comparison by at most one point and is never a scoring tier of its own. This is
+how the panel stays calibrated across independent sessions: the number is a claim about defect
+classes, and the claim is checked, not trusted.
 
 Systematic consistency failures are NOT cosmetic, even though each single instance is small: an
 acronym introduced at its first use whose un-abbreviated long form is still used throughout a
@@ -6210,20 +6236,26 @@ FORMATTING IS GRADED BY WHAT IT DAMAGES, NOT BY ITS OWN TIER. A rendered blank p
 table that did not print, or a rendering whose text is unreadable is NOT a cosmetic formatting
 row: it is a `completeness` defect (content missing from the delivered artifact), graded by extent
 -- one displaced page/figure = MINOR, several pages or a whole section/figure = MAJOR, an artifact
-that cannot be used = CRITICAL. A ONE-OFF stray line, spacing slip, italic/quotation treatment or
+that cannot be used = FATAL. A ONE-OFF stray line, spacing slip, italic/quotation treatment or
 mixed URL style is COSMETIC (0) -- repeated, it becomes `consistency` as a broken convention --
-and `formatting` rows are MINOR-only and worth at most one point, never decisive on their own. A
-blank LINE is not a blank PAGE: a break-only paragraph that displaces a page is artifact damage,
-graded by the extent of what it displaces. The formatting cap is a cap on COSMETICS, never a cap
-on how bad a broken render is.
+and a `formatting` row is graded on the same four rungs as everything else (a cosmetic slip that is
+recorded at all stays MINOR and the venue's relaxed length margins keep `M18`/`M19` rows there
+too). A blank LINE is not a blank PAGE: a break-only paragraph that displaces a page is artifact
+damage, graded by the extent of what it displaces. The scale is a scale of DAMAGE, never of which
+tier the damage happens to live in.
 
-SEVERITY IS A DISTANCE FROM CORRECT IN EVERY TIER, and the tiers are not all equally fine: a detail
-that changes nothing a reader depends on is MINOR, a wrong reported fact/attribute/comparison is
-MAJOR, and a conclusion-changing, data-contradicting or category-impossible error is CRITICAL --
-for prose, terminology, formatting damage and missing information alike, not only for factual
-errors. Consistency and preservation share the same +-3 ceiling, and cosmetic formatting/writing
-share the same MINOR-only +-1 ceiling; a comparison whose only difference is cosmetic cannot be
-"clearly better".
+SEVERITY HAS FOUR RUNGS, AND IT IS A DISTANCE FROM CORRECT IN EVERY TIER -- correctness,
+consistency, preservation, completeness, formatting and writing alike: FATAL = the artifact or the
+claim is unusable (a deliverable that cannot be opened or read, a rendering with no readable text,
+a fabricated result presented as established); CRITICAL = the error changes a conclusion,
+contradicts the data, or is a category impossibility; MAJOR = the error changes a reported
+fact/attribute/comparison without changing the conclusion, or a prose/formatting failure a reader
+must work around; MINOR = a detail that changes nothing a reader depends on (terminology, missing
+information and artifact damage are graded by the same rungs, and so are prose and formatting).
+Because the tiers are compared LEXICOGRAPHICALLY, a bigger row in a LOWER tier never outweighs a
+smaller one above it: a formatting gain cannot answer a completeness loss, and a consistency gain
+cannot answer a correctness loss. A comparison whose only difference is a single cosmetic slip
+cannot be "clearly better".
 
 @@WRITING_RUBRIC@@
 
@@ -6234,9 +6266,9 @@ share the same MINOR-only +-1 ceiling; a comparison whose only difference is cos
 An error of fact/DOI/citation/number/premise outranks a cross-document conflict, which outranks a
 regression against the original (deleted claims, softened or WEAKENED claims and limitations,
 broken cross-references or numbering), which outranks missing or unneeded information, which
-outranks formatting and writing
-(micro-formatting and wording rows, each capped at one point). When sources in a package disagree,
-the higher-priority source wins, in this order:
+outranks formatting and writing. The order is LEXICOGRAPHIC: the first tier in which the two
+versions differ decides the comparison, and no lower tier can offset it. When sources in a package
+disagree, the higher-priority source wins, in this order:
   @@SOURCE_HIERARCHY@@
 
 === PRESERVATION SIGNAL (the orchestrator's anti-regression gate) ===
@@ -6303,19 +6335,20 @@ item has a valid tier, a severity and non-empty evidence of <=25 words; every re
 specific to THAT comparison, and written in the TARGET's frame (say what the TARGET does better or
 worse -- never only what the opponent does, which is unreadable in the sheet and in
 reports/raw_scores.csv); notes <= 80 words.
-CONTRACT v3 -- two additions, both ENFORCED:
+CONTRACT v4 -- two additions, both ENFORCED:
   * `checks` on every comparison: one disposition for EVERY frozen check id (M1-M17, M18, M19, M20,
     M21, M22, M23, M24, J1-J4). Each value starts with `clean` (examined, nothing found -- add the
     one-line basis),
     `findings` (examined; the items are in `resolved`/`introduced`) or `unable` (examined, could
     not be judged -- say why). A comparison with a missing check id fails its run: a judge that
     never examined an opponent must say so rather than let code infer it.
-  * the integer is DERIVED from the rows: each row weighs minor 1 / major 2 / critical 3, the net
-    per tier is capped (correctness +-4, consistency +-3, preservation +-3, completeness +-2,
-    formatting +-1, writing +-1) and the capped sum -- BOUNDED BY THE RUNG THE ROWS CAN BACK (MINOR
-    rows reach +-2 at most; |3| needs a MAJOR row outside formatting/writing; |4| needs a CRITICAL
-    one) -- is the score. `formatting` and `writing` rows
-    are MINOR-ONLY: each class is worth at most one point and can never decide a comparison.
+  * the integer is DERIVED from the rows, LEXICOGRAPHICALLY: the six tiers are compared in their
+    priority order and the FIRST tier whose net is not zero decides the comparison (rows weigh
+    minor 1 / major 2 / critical 3 / fatal 4; resolved add, introduced subtract; the deciding
+    tier's net is capped at +-4; its |net| is bounded by its own rows -- MINOR-only reaches +-2, a
+    MAJOR row reaches +-3, a CRITICAL/FATAL row reaches +-4 -- and every lower tier is ignored).
+    A length/caption row (`M18`/`M19`) is a `formatting`-tier MINOR row: length moves a comparison
+    by at most one point and is never a scoring tier of its own.
 The graded-basis arithmetic above is ENFORCED: a sheet
 whose number contradicts its own ledger is discarded and its run retried. Do NOT add an "overall",
 "total", "weighted", "mean" or "rank" field -- aggregation is code's job, and extra aggregates are
@@ -14590,7 +14623,7 @@ def critical_findings_input(ctx: Ctx, rec: dict):
     if not findings and not (ctx.sandbox_of(rec) / FINDINGS_REL).exists():
         return None
     return sum(1 for f in findings
-               if str(f.get("severity") or "").strip().lower() == "critical")
+               if str(f.get("severity") or "").strip().lower() in ("critical", "fatal"))
 
 
 def writing_findings_input(ctx: Ctx, rec: dict):
@@ -14791,7 +14824,7 @@ def ledger_named_ids(ledger, wanted=()) -> set:
 # ---------------------------------------------------------------------
 
 REQUIRED_REVIEW_CHECKS = tuple([f"M{i}" for i in range(1, 18)] + [f"J{i}" for i in range(1, 5)])
-# Contract v3: the judge must also DISPOSE every frozen check id for every
+# Contract v2+: the judge must also DISPOSE every frozen check id for every
 # opponent, so a sheet that never looked at an opponent is detectable code-side
 # (the check ids are provenance-free: they are the journal/format checks, not a
 # pipeline history).
@@ -17361,9 +17394,10 @@ def _repair_audit_problems(sb: Path, guard: dict) -> list:
 def _repair_judge_problems(sb: Path, guard: dict) -> list:
     """The judge profile's guard: the ledger is the judgement and stays untouched.
 
-    The integer `score` is a FUNCTION of the ledger (minor 1 / major 2 /
-    critical 3, capped per tier) and `basis` names the ledger's highest tier, so
-    the repair may recompute both. Everything the judge actually decided --
+    The integer `score` is a FUNCTION of the ledger, derived lexicographically
+    (minor 1 / major 2 / critical 3 / fatal 4 in the first non-zero tier, whose
+    net is capped at +-4 and bounded by its own rows), and `basis` names that
+    deciding tier, so the repair may recompute both. Everything the judge actually decided --
     resolved/introduced rows, the comparison set, existing coverage entries --
     may not move, and new coverage entries must be the honest `unable`.
     """
@@ -17545,13 +17579,15 @@ Everything else must stay BYTE-IDENTICAL, above all:
     if kind == "judge":
         return common_head + f"""
 --- WHAT TO FILL (the sheet must be consistent WITH ITSELF) ---
-  * The integer `score` is a FUNCTION of the sheet's own resolved/introduced ledger (minor 1 /
-    major 2 / critical 3, capped per tier AND bounded by the rung the rows can back: MINOR rows
-    reach +-2 at most, |3| needs a MAJOR row outside formatting/writing, |4| needs a CRITICAL
-    one; a clean 0), and `basis` names that ledger's
-    highest-priority tier. If they disagree, recompute them from the ledger -- that is the only
-    arithmetic you may do. Never change a ledger row, and never re-judge: if the ledger itself
-    cannot support a score, that is not repairable and this attempt will fail.
+  * The integer `score` is a FUNCTION of the sheet's own resolved/introduced ledger, derived
+    LEXICOGRAPHICALLY: the FIRST tier in the priority order whose net is not zero decides the
+    comparison (rows there weigh minor 1 / major 2 / critical 3 / fatal 4, resolved add and
+    introduced subtract, the net is capped at +-4, and |net| is bounded by the deciding rows --
+    MINOR-only reaches +-2, a MAJOR row +-3, a CRITICAL/FATAL row +-4; every lower tier is
+    ignored; six zero nets = a clean 0), and `basis` names that deciding tier. If they disagree,
+    recompute them from the ledger -- that is the only arithmetic you may do. Never change a
+    ledger row, and never re-judge: if the ledger itself cannot support a score, that is not
+    repairable and this attempt will fail.
   * `checks`: every comparison needs one disposition per frozen check id. You may add an entry
     ONLY as `unable — <why>` for a check this session did not perform, and you may not touch an
     entry that is already there. Never write `clean` or `findings` for a check you did not do.
@@ -17919,18 +17955,19 @@ WRITING_RUBRIC = """WRITING RUBRIC — use it to justify every `writing`-tier ro
   A row names its rubric item (`Q7` -- the row's `check` cell carries the FROZEN check id this
   rubric belongs to, `J3`: the Q1-Q12 items are the twelve faces OF J3, not check ids of their
   own, and a ledger row's `check` cell is always one of M1-M24/J1-J4), quotes the offending words
-  and says what the sentence should read as. The tier is minor-only, so it can separate two
-  otherwise equal packages by at most one point
-  -- but every row counts, and ten unfixed rows are ten rows. Q1-Q11 correspond one-to-one to the
-  eleven checks of the language pass every package-producing session runs from the same list
+  and says what the sentence should read as. The tier carries the same four severity rungs as every
+  other class: one slip is a MINOR row, prose a reader must work around is MAJOR, prose nobody can
+  follow is CRITICAL/FATAL -- but every row counts, and ten unfixed rows are ten rows.
+  Q1-Q11 correspond one-to-one to the eleven checks of the language pass every
+  package-producing session runs from the same list
   (premise, logic slip, logic jump, coherence, unexplained prerequisite, redundancy, non-academic
   wording, register, stiff phrasing, grammar, typography); Q12 is the segmentation check, and a
   difference that cannot be named in this rubric is cosmetic for you as well.
   REFILE RULE: a row whose evidence shows the MEANING changed is not a `writing` row, whichever
   item it matches -- a premise the data contradict, a logic slip that changes what the claim
   asserts, a conclusion whose missing step leaves it unsupported, or a claim stronger/weaker than
-  its evidence belongs to the `correctness` tier (the class rule above), where that tier's weights
-  and caps apply; this rubric justifies only rows whose meaning survives the fix."""
+  its evidence belongs to the `correctness` tier (the class rule above), where that tier's rows
+  count first; this rubric justifies only rows whose meaning survives the fix."""
 
 
 def language_pass_report(pkg: Path) -> dict:
@@ -18100,7 +18137,7 @@ def add_stage_quality_checks(ctx: Ctx, rec: dict, before_sources: list, after_so
     errs.extend(rerrs)
     warns.extend(rwarns)
 AUDIT_VERDICTS = ("confirm", "drop")
-AUDIT_SEVERITIES = ("critical", "major", "minor")
+AUDIT_SEVERITIES = ("critical", "major", "minor", "fatal")
 
 
 def audit_artifact_problems(audit, frozen_ids) -> list:
@@ -18175,7 +18212,7 @@ def audit_artifact_problems(audit, frozen_ids) -> list:
             if len(str(row.get(field) or "").strip()) < minimum:
                 problems.append(f"{aid}: '{field}' is missing or too short")
         if str(row.get("severity") or "").strip().lower() not in AUDIT_SEVERITIES:
-            problems.append(f"{aid}: severity must be Critical|Major|Minor")
+            problems.append(f"{aid}: severity must be Critical|Major|Minor|Fatal")
         cat = row.get("category")
         if isinstance(cat, str) and cat.strip().isdigit():
             cat = int(cat.strip())
@@ -18782,14 +18819,6 @@ def _norm_opponent_label(x) -> str:
     return str(x or "").strip().lower()
 
 
-def _tier_rank(tier: str) -> int:
-    """Index of a tier in the priority order (0 = highest priority)."""
-    try:
-        return BASIS_TIERS.index(str(tier))
-    except ValueError:
-        return len(BASIS_TIERS)
-
-
 def _norm_basis_item(item):
     """(tier, severity, evidence) of one ledger item, or None when malformed."""
     if not isinstance(item, dict):
@@ -18802,31 +18831,18 @@ def _norm_basis_item(item):
     return tier, severity, evidence
 
 
-def derived_comparison_score(comp: dict):
-    """The integer a comparison's ledger rows imply (contract v3).
+def ledger_items(comp: dict):
+    """[(side, tier, severity, evidence, check_id, ai_suspicion)] for a comparison.
 
-    The judge still writes the integer -- the rungs are the shared vocabulary --
-    but code derives the number the rows support and rejects a sheet whose
-    integer contradicts it. Per-tier weights accumulate over instances (five
-    fixed minor consistency rows are worth five points, capped at the tier cap),
-    so an instance-level repair is proportional instead of collapsing into a
-    1-3 item sample.
-
-    The capped sum is then bounded by the SCALE's own rungs, which the judge
-    prompt states in the same breath: a run of MINOR rows is a real net advantage
-    (+-2), |3| ("clearly better/worse") needs at least one MAJOR row outside the
-    minor-only tiers, and |4| ("decisive") needs a CRITICAL one. Without that
-    bound the two rules CONTRADICT each other -- three minor consistency rows sum
-    to 3 while the rung rule demands a MAJOR row, and two MAJOR correctness rows
-    sum to 4 while |4| demands a CRITICAL one -- which is exactly how two judge
-    sessions of the 2026-09-23 round-1 panel failed: writing the number the rows
-    supported was rejected by the rung check, and the rung-clean number was
-    rejected by the arithmetic check, so no sheet could satisfy both.
+    ONE normalizer for the derivation and the validator: `None` when the sheet
+    is malformed (so the caller can report it), otherwise every row carries the
+    side it was filed on, its normalized tier and severity, the evidence, the
+    frozen check id it cites (FMT-*/Q1-Q12 mapped onto their owners, "" when the
+    cell is absent) and whether it is a speculative-AI row (`J4` + "possible AI").
     """
     if not isinstance(comp, dict):
         return None
-    totals = {}
-    supporting = []                     # (tier, severity) on the side the sign favours
+    out = []
     for side in ("resolved", "introduced"):
         raw = comp.get(side)
         if not isinstance(raw, list):
@@ -18835,27 +18851,79 @@ def derived_comparison_score(comp: dict):
             norm = _norm_basis_item(item)
             if norm is None:
                 return None
-            tier, severity, _e = norm
-            weight = TIER_ROW_WEIGHTS.get(tier, {}).get(severity)
-            if weight is None:
-                return None
-            totals[tier] = totals.get(tier, 0) + (weight if side == "resolved" else -weight)
-            supporting.append((side, tier, severity))
-    score = 0
-    for tier, net in totals.items():
-        cap = TIER_CAPS.get(tier, 0)
-        score += max(-cap, min(cap, net))
-    if score:
-        side = "resolved" if score > 0 else "introduced"
-        rows = [(tier, sev) for row_side, tier, sev in supporting if row_side == side]
-        if any(sev == "critical" and tier not in MINOR_ONLY_TIERS for tier, sev in rows):
+            cid = _norm_check_id(item.get("check")) if isinstance(item, dict) else ""
+            out.append((side, norm[0], norm[1], norm[2], cid,
+                        bool(cid == "J4"
+                             and norm[2].strip().lower().startswith("possible ai"))))
+    return out
+
+
+def tier_net_scores(items) -> dict:
+    """{tier: capped net} -- resolved rows add, introduced rows subtract (per tier)."""
+    raw = {tier: 0 for tier in BASIS_TIERS}
+    for side, tier, severity, _e, _c, _ai in items:
+        weight = TIER_ROW_WEIGHTS.get(tier, {}).get(severity, 0)
+        raw[tier] = raw.get(tier, 0) + (weight if side == "resolved" else -weight)
+    return {tier: max(-TIER_CAPS.get(tier, 0), min(TIER_CAPS.get(tier, 0), net))
+            for tier, net in raw.items()}
+
+
+def derived_comparison_basis(comp: dict):
+    """The tier the lexicographic derivation decides on ("none" for a clean 0).
+
+    For a non-zero score this is the FIRST tier whose net is not zero -- the tier
+    that decides the comparison. For a net-zero sheet with rows it is the
+    highest-priority tier in which the two versions differ at all, and for an
+    empty (or all-zero) sheet it is "none".
+    """
+    items = ledger_items(comp)
+    if items is None:
+        return None
+    nets = tier_net_scores(items)
+    for tier in BASIS_TIERS:
+        if nets[tier]:
+            return tier
+    for tier in BASIS_TIERS:
+        if any(t == tier for _s, t, _sev, _e, _c, _ai in items):
+            return tier
+    return "none"
+
+
+def derived_comparison_score(comp: dict):
+    """The integer a comparison's ledger rows imply (judge contract v4).
+
+    LEXICOGRAPHIC: the six tiers are compared IN THE FIXED PRIORITY ORDER
+    correctness > consistency > preservation > completeness > formatting >
+    writing. Within one tier, resolved rows add and introduced rows subtract
+    (minor 1 / major 2 / critical 3 / fatal 4) and the net is capped at +-4. The
+    FIRST tier whose net is not zero DECIDES the comparison: the sign is its
+    sign, and the magnitude is its |net|, bounded by the rung its own deciding
+    rows can back -- a run of MINOR rows reaches +-2, a tier with a MAJOR row
+    reaches +-3, a tier with a CRITICAL or FATAL row reaches +-4. Every lower
+    tier is then IGNORED: a consistency improvement can never offset a
+    correctness loss, and a formatting improvement can never offset a
+    completeness loss. A comparison whose six nets are all zero is 0.
+    """
+    items = ledger_items(comp)
+    if items is None:
+        return None
+    nets = tier_net_scores(items)
+    for tier in BASIS_TIERS:
+        net = nets[tier]
+        if not net:
+            continue
+        side = "resolved" if net > 0 else "introduced"
+        severities = [sev for row_side, t, sev, _e, _c, _ai in items
+                      if row_side == side and t == tier]
+        if any(sev in ("critical", "fatal") for sev in severities):
             rung = 4
-        elif any(sev == "major" and tier not in MINOR_ONLY_TIERS for tier, sev in rows):
+        elif "major" in severities:
             rung = 3
         else:
-            rung = 2                     # MINOR rows (and the minor-only classes) reach "better"
-        score = (1 if score > 0 else -1) * min(abs(score), rung)
-    return max(SCORE_MIN, min(SCORE_MAX, score))
+            rung = 2                    # a run of MINOR rows reaches "better"
+        score = (1 if net > 0 else -1) * min(abs(net), rung)
+        return max(SCORE_MIN, min(SCORE_MAX, score))
+    return 0
 
 
 # The judge prompt's OWN sub-identifiers, mapped onto the frozen check that owns
@@ -18894,9 +18962,9 @@ def _norm_check_id(raw) -> str:
 
 
 def judge_coverage_problems(comp: dict, where: str, strict: bool) -> tuple:
-    """(errors, warnings) for one comparison's per-opponent check coverage (v3).
+    """(errors, warnings) for one comparison's per-opponent check coverage.
 
-    Contract v3 requires a `checks` map on EVERY comparison: one disposition
+    Contract v2+ requires a `checks` map on EVERY comparison: one disposition
     (`clean` / `findings` / `unable`, optionally followed by a short detail) for
     every frozen check id. This is the code-side answer to "the judge sweeps
     only its target": a sheet that never looked at an opponent has to say so, and
@@ -18946,25 +19014,33 @@ def judge_coverage_problems(comp: dict, where: str, strict: bool) -> tuple:
 
 
 def judge_basis_problems(comp: dict, where: str, strict: bool) -> tuple:
-    """(errors, warnings) for one comparison's graded basis (judge contract v2).
+    """(errors, warnings) for one comparison's graded basis (judge contract v4).
 
     The integer score is a claim about a defect class, and the ledger is what
     makes the claim checkable. The orchestrator enforces the judge prompt's own
     anchors ARITHMETICALLY:
 
-      * `basis` names the highest-priority tier in which the target differs
-        (`correctness` / `consistency` / `preservation` / `completeness` /
-        `formatting`, or `none` for a clean 0);
+      * `basis` names the tier that DECIDES the comparison -- the first tier, in
+        the fixed priority order, whose net is not zero (`correctness` /
+        `consistency` / `preservation` / `completeness` / `formatting` /
+        `writing`; for a net-zero comparison with rows, the highest-priority
+        tier in which the two versions differ; `none` for a clean 0);
       * `resolved` and `introduced` list the concrete items behind a score
         (tier, severity, <=25-word evidence); an empty ledger means "no content
         difference", which is exactly a 0;
-      * a non-zero score needs at least one item on its own side;
-      * |score| >= 3 (the "clearly better/worse" rungs) needs a MAJOR or
-        CRITICAL item OUTSIDE the formatting tier -- the priority order says a
-        formatting difference can never be a decisive advantage;
-      * |score| = 4 (the "decisive" rung) needs a CRITICAL item.
+      * the score is DERIVED lexicographically: rows weigh minor 1 / major 2 /
+        critical 3 / fatal 4, resolved add and introduced subtract, the first
+        non-zero tier's net decides (capped at +-4) and its magnitude is bounded
+        by its own rows (MINOR-only <= 2, a MAJOR row <= 3, a CRITICAL/FATAL row
+        <= 4);
+      * a non-zero score needs at least one item on its own side IN that deciding
+        tier;
+      * |score| >= 3 needs a MAJOR/CRITICAL/FATAL item there, and |score| = 4 a
+        CRITICAL/FATAL one;
+      * a length/caption row (M18/M19) is a formatting-tier MINOR row: length
+        moves a comparison by at most +-1 and is never a scoring tier.
 
-    `strict` is the contract gate: a sheet written under contract >= v2 must
+    `strict` is the contract gate: a sheet written under the current contract must
     satisfy all of it (errors); a legacy sheet (no contract recorded -- its
     sandbox predates the prompt that asks for a ledger) is only warned about:
     never silently mixed into a calibrated panel, and never punished for a rule
@@ -18978,7 +19054,9 @@ def judge_basis_problems(comp: dict, where: str, strict: bool) -> tuple:
     if not basis:
         if strict:
             emit(f"{prefix}{where} has no `basis`; contract v{JUDGE_CONTRACT_VERSION} requires "
-                 f"the highest-priority tier in which the target differs "
+                 f"the tier that decides the comparison (the first tier whose net is not zero; "
+                 f"for a net-zero comparison, the highest-priority tier in which the two "
+                 f"versions differ, and `none` for a clean 0) "
                  f"({'/'.join(BASIS_VALUES)})")
         else:
             out_w.append(f"{where} is UNCALIBRATED: the sheet carries no graded basis, so its "
@@ -19006,11 +19084,12 @@ def judge_basis_problems(comp: dict, where: str, strict: bool) -> tuple:
             if len(norm[2].split()) > EVIDENCE_MAX_WORDS:
                 out_w.append(f"{where}.{side}[{k}].evidence is {len(norm[2].split())} words "
                              f"(schema: <={EVIDENCE_MAX_WORDS})")
-            if norm[0] in MINOR_ONLY_TIERS and norm[1] != "minor":
-                emit(f"{prefix}{where}.{side}[{k}]: the {norm[0]!r} class admits MINOR rows only "
-                     f"(operator policy: it is worth at most one point and never decides a "
-                     f"comparison); got severity {norm[1]!r}")
             cid = _norm_check_id(item.get("check")) if isinstance(item, dict) else ""
+            if cid in LENGTH_GUARD_CHECKS and (norm[0] != "formatting" or norm[1] != "minor"):
+                emit(f"{prefix}{where}.{side}[{k}]: a length/caption row (`{cid}`) is a "
+                     f"formatting-tier MINOR row -- length may enter a comparison by at most +-1 "
+                     f"and is never a scoring tier of its own; got tier {norm[0]!r}, severity "
+                     f"{norm[1]!r}")
             if cid and cid not in JUDGE_COVERAGE_CHECKS:
                 # A ledger row's `check` cell is DESCRIPTIVE: nothing is looked up
                 # by it (the arithmetic reads tier/severity/evidence only), and
@@ -19026,25 +19105,29 @@ def judge_basis_problems(comp: dict, where: str, strict: bool) -> tuple:
                              f"written -- cite M1-M24/J1-J4 (the writing rubric's Q1-Q12 items "
                              f"belong to {WRITING_RUBRIC_CHECK}, and an FMT-* sweep rule belongs "
                              f"to M20)")
-            items.append((side, norm[0], norm[1], norm[2],
+            items.append((side, norm[0], norm[1], norm[2], cid,
                           bool(cid == "J4" and norm[2].strip().lower().startswith("possible ai"))))
     if bad:
         emit(f"{prefix}{where} has malformed ledger item(s) {bad}: each needs a valid tier "
              f"({'/'.join(BASIS_TIERS)}), a severity ({'/'.join(SEVERITIES)}) and non-empty "
              f"evidence")
     derived = derived_comparison_score(comp)
+    deciding = derived_comparison_basis(comp)
     if score is not None and derived is not None and derived != score:
-        emit(f"{prefix}{where}: score {score:+d} contradicts its own ledger, which supports "
-             f"{derived:+d} under the tier weights and caps -- the integer is DERIVED from the "
-             f"rows (a per-tier cap applies, so formatting/writing can never exceed +-1)")
+        emit(f"{prefix}{where}: score {score:+d} contradicts its own ledger, from which it is "
+             f"DERIVED -- the rows support {derived:+d} under the lexicographic tier order: the "
+             f"first tier whose net is not zero decides the comparison (minor 1 / major 2 / "
+             f"critical 3 / fatal 4, net capped at +-4 per tier, and the deciding tier's rows "
+             f"bound the magnitude)")
     if score is None:
         return out_e, out_w
-    supporting = [(t, s, ai) for side, t, s, _e, ai in items
-                  if (side == "resolved" and score > 0) or (side == "introduced" and score < 0)]
+    supporting = [(t, s, ai) for side, t, s, _e, _c, ai in items
+                  if t == deciding
+                  and ((side == "resolved" and score > 0) or (side == "introduced" and score < 0))]
     if score != 0 and not supporting:
-        emit(f"{prefix}{where}: score {score:+d} has no ledger item on its side "
-             f"({'resolved' if score > 0 else 'introduced'}); a non-zero score must be backed by "
-             f"at least one concrete item, or it is 0")
+        emit(f"{prefix}{where}: score {score:+d} has no ledger item on its side in the deciding "
+             f"tier ({deciding!r}); a non-zero score must be backed by at least one concrete item "
+             f"there, or it is 0")
     if score != 0 and supporting and all(ai for _t, _s, ai in supporting):
         emit(f"{prefix}{where}: every item on the scoring side is a speculative AI-content row "
              f"(`J4` with evidence starting 'possible AI ...'); the standing exemption says such a "
@@ -19052,43 +19135,27 @@ def judge_basis_problems(comp: dict, where: str, strict: bool) -> tuple:
              f"or score 0")
     if score != 0 and abs(score) >= 3:
         strong = [(t, s, ai) for t, s, ai in supporting
-                  if s in ("critical", "major") and t not in ("formatting", "writing")]
-        if not strong:
-            emit(f"{prefix}{where}: |score| = {abs(score)} is a 'clearly better/worse' rung but "
-                 f"the ledger lists no MAJOR/CRITICAL item outside the formatting/writing tiers")
-        elif not any(not ai for _t, _s, ai in strong):
+                  if s in ("major", "critical", "fatal")]
+        if strong and not any(not ai for _t, _s, ai in strong):
             emit(f"{prefix}{where}: |score| = {abs(score)} rests only on speculative AI-content "
                  f"rows (`J4` with evidence starting 'possible AI ...'); the standing exemption "
                  f"forbids such a row from deciding a comparison on its own")
     if abs(score) >= 4:
         crit = [(t, s, ai) for t, s, ai in supporting
-                if s == "critical" and t not in ("formatting", "writing")]
-        if not crit:
-            emit(f"{prefix}{where}: |score| = 4 is the 'decisive' rung but the ledger lists no "
-                 f"CRITICAL item outside the formatting/writing tiers")
-        elif not any(not ai for _t, _s, ai in crit):
+                if s in ("critical", "fatal")]
+        if crit and not any(not ai for _t, _s, ai in crit):
             emit(f"{prefix}{where}: |score| = 4 leans on a critical speculative AI-content row "
-                 f"alone; the decisive rung needs a CRITICAL item that is not a 'possible AI ...' "
-                 f"row")
-    if items and basis:
-        if score > 0:
-            pool = [t for side, t, _s, _e, _ai in items if side == "resolved"]
-            whose = "the positive score"
-        elif score < 0:
-            pool = [t for side, t, _s, _e, _ai in items if side == "introduced"]
-            whose = "the negative score"
-        else:
-            pool = [t for _side, t, _s, _e, _ai in items]
-            whose = "a net-zero comparison"
-        top = min(pool, key=_tier_rank) if pool else None
+                 f"alone; the decisive rung needs a CRITICAL/FATAL item that is not a "
+                 f"'possible AI ...' row")
+    if items and basis and deciding is not None:
         if basis == "none":
             out_w.append(f"{where}.basis is 'none' but the ledger lists {len(items)} item(s); "
-                         f"'none' is for a clean 0 with no item on either side -- name the "
-                         f"highest-priority tier in which the two versions differ ({top!r})")
-        elif top is not None and basis != top:
-            out_w.append(f"{where}.basis is {basis!r} but the highest-priority tier backing "
-                         f"{whose} is {top!r}; the basis must name that tier exactly (for a 0, "
-                         f"the highest-priority tier in which the two versions differ)")
+                         f"'none' is for a clean 0 with no item on either side -- the deciding "
+                         f"tier is {deciding!r}")
+        elif basis != deciding:
+            out_w.append(f"{where}.basis is {basis!r} but the tier that decides this comparison "
+                         f"is {deciding!r} (the FIRST tier whose net is not zero; for a 0, the "
+                         f"highest-priority tier in which the two versions differ)")
     return out_e, out_w
 
 
@@ -20016,7 +20083,7 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
                 if isinstance(c, dict) and is_int(c.get("score"))]
         if vals:
             pq["judge_means"][rec["id"]] = round(sum(vals) / len(vals), 3)
-        # ---- graded-basis calibration (judge contract v2) ------------------
+        # ---- graded-basis calibration (judge contract v2+) -----------------
         # How many sheets carry a checkable basis, what tiers they claim, and
         # where an integer contradicts its own ledger. Reported, never used for
         # eligibility: the score statistics above stay the ranking input.
@@ -23104,15 +23171,18 @@ def score_model_doc() -> dict:
         "graded_basis": {
             "tiers": list(BASIS_TIERS),
             "severities": list(SEVERITIES),
-            "rules": ["a non-zero score needs a ledger item on its own side",
-                      "|score| >= 3 needs a MAJOR/CRITICAL item outside the formatting/writing "
-                      "tiers",
-                      "|score| = 4 needs a CRITICAL item",
-                      "formatting and writing rows are MINOR-only",
-                      "the integer is DERIVED from the rows: minor 1 / major 2 / critical 3, "
-                      "capped per tier (correctness +-4, consistency/preservation +-3, "
-                      "completeness +-2, formatting/writing +-1) and bounded by the rung the rows "
-                      "can back (MINOR <= 2, |3| needs a MAJOR, |4| a CRITICAL)",
+            "rules": ["the six tiers are compared LEXICOGRAPHICALLY in the priority order; the "
+                      "FIRST tier whose net is not zero decides the comparison, and no "
+                      "lower-priority tier can offset it",
+                      "rows weigh minor 1 / major 2 / critical 3 / fatal 4; resolved add, "
+                      "introduced subtract; the deciding tier's net is capped at +-4",
+                      "the magnitude is bounded by the deciding tier's own rows: MINOR-only <= 2, "
+                      "a MAJOR row reaches 3, a CRITICAL/FATAL row reaches 4",
+                      "a non-zero score needs a ledger item on its own side in the deciding tier",
+                      "|score| >= 3 needs a MAJOR/CRITICAL/FATAL item there, and |score| = 4 a "
+                      "CRITICAL/FATAL one",
+                      "a length/caption row (`M18`/`M19`) is a formatting-tier MINOR row: length "
+                      "moves a comparison by at most +-1 and is never a scoring tier",
                       "every comparison carries a `checks` disposition for every frozen check id",
                       "the integer is checked against its own ledger, and a contradicting sheet "
                       "fails its run"],
@@ -23789,14 +23859,19 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
     L.append(f"**Graded basis (judge contract v{JUDGE_CONTRACT_VERSION}).** The integer is not "
              f"free-floating: every comparison carries the tier it is about "
              f"({' > '.join(BASIS_TIERS)}) plus a ledger of the concrete items on each side "
-             f"(tier, severity, short evidence), and the orchestrator checks the arithmetic -- a "
-             f"non-zero score needs an item on its own side, |score| >= 3 needs a MAJOR/CRITICAL "
-             f"item outside the formatting tier, and |score| = 4 needs a CRITICAL item. A sheet "
-             f"that contradicts its own ledger is a failed run, not a data point. The scale is "
-             f"deliberately NOT widened: the production panel used -3..+3 and never +-4, so "
-             f"extra rungs would add unused resolution instead of meaning; the ledger is what "
-             f"anchors the existing rungs, and a weighted aspect average is deliberately absent "
-             f"(weights are arbitrary and the tier order below already IS the aggregation: "
+             f"(tier, severity, short evidence), and the orchestrator checks the derivation: the "
+             f"tiers are compared LEXICOGRAPHICALLY and the FIRST tier whose net is not zero "
+             f"decides the comparison, so no lower-priority gain can offset a higher-priority "
+             f"loss. Rows weigh minor 1 / major 2 / critical 3 / fatal 4 (resolved add, introduced "
+             f"subtract), the deciding tier's net is capped at +-4 and its magnitude is bounded by "
+             f"its own rows (MINOR-only <= 2, a MAJOR row <= 3, a CRITICAL/FATAL row <= 4), and a "
+             f"non-zero score needs an item on its own side in the deciding tier -- |score| >= 3 "
+             f"needs a MAJOR/CRITICAL/FATAL row there and |score| = 4 a CRITICAL/FATAL one. A "
+             f"sheet that contradicts its own ledger is a failed run, not a data point. The SCORE "
+             f"range is deliberately NOT widened: the production panel used -3..+3 and never +-4, "
+             f"so extra score rungs would add unused resolution instead of meaning; the ledger is "
+             f"what anchors the existing rungs, and a weighted aspect average is deliberately "
+             f"absent (weights are arbitrary and the tier order IS the aggregation: "
              f"correctness > consistency > preservation > completeness > formatting > writing).")
     L.append("")
     L.append("**Ranking statistic.** `median(flat score list)`, with `n`, the arithmetic "

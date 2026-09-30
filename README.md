@@ -369,7 +369,8 @@ review → audit → revise path (`sweeps.md` §M30):
   cite one of twelve checks (Q1–Q12: premise, logic slip, logic jump, coherence,
   unexplained prerequisite, redundancy, non-academic wording, register, stiff
   phrasing, grammar, typography, segmentation) with a quote and the intended
-  reading. The tier stays minor-only, and the rubric carries no provenance
+  reading. The tier carries the same four severity rungs as every other class
+  (Minor / Major / Critical / Fatal), and the rubric carries no provenance
   vocabulary, so the panel stays blind.
 
 ## Provenance, identifiers and the residual gate
@@ -891,15 +892,18 @@ definition (`paper-skills/paper-revise/references/ledger.md`):
 |---|---|
 | 0 Editor/Reviewer concerns | `correctness` (unsupported claim, overclaim, UNDERCLAIM, rigor, ethics), `completeness` (required information missing) or `preservation` (removed content/limitation) |
 | 1 Completeness & Factual Integrity | `correctness` (factual error, wrong number/DOI/reference key, broken cross-reference) or `completeness` (mandatory item missing) |
-| 2 Writing Quality, Logic, Repetition | `consistency` (the same thing said/spelled/numbered two ways; a convention applied unevenly), `correctness` (the wording changes the meaning), `formatting` (a one-off wording preference) or `writing` (a grammar, punctuation or prose-flow error that changes no meaning; at most ±1 and never decisive alone) |
+| 2 Writing Quality, Logic, Repetition | `consistency` (the same thing said/spelled/numbered two ways; a convention applied unevenly), `correctness` (the wording changes the meaning), `formatting` (a one-off wording preference) or `writing` (a grammar, punctuation or prose-flow error that changes no meaning; graded on the same four rungs as every class — a slip is Minor, prose a reader must work around is Major, unreadable prose is Critical/Fatal) |
 | 3 Plagiarism / AI content | `correctness` (integrity of the content itself) |
-| 4 Technical Formatting | `formatting` (M18/M19/M20; ≤ ±1 and never decisive alone) |
+| 4 Technical Formatting | `formatting` (M18/M19/M20; graded on the same four rungs — an M18/M19 length/caption row is always Minor and worth at most ±1, since the venue's relaxed margins make slight over-length intended) |
 | 5 Missing / Unneeded Information | `completeness` |
 
-Severity is shared too (CRITICAL / MAJOR / MINOR) and is a **distance from correct** in every
-class — a detail that changes nothing a reader depends on is Minor, a changed reported
-fact/attribute/comparison is Major, a conclusion-changing, data-contradicting or
-category-impossible error is Critical; a factual error is not automatically Critical. An
+Severity is shared too (FATAL / CRITICAL / MAJOR / MINOR, four rungs) and is a **distance from
+correct** in every class — a detail that changes nothing a reader depends on is Minor, a changed
+reported fact/attribute/comparison (or prose/formatting a reader must work around) is Major, a
+conclusion-changing, data-contradicting or category-impossible error is Critical, and an artifact
+or claim that is unusable (a deliverable that cannot be opened or read, a fabricated result
+presented as established) is Fatal; a factual error is not automatically Critical, and prose or
+formatting is not automatically Minor. An
 improvement claim must name the class and the concrete item behind it -- a difference that cannot be
 named in this vocabulary is cosmetic and scores 0. What differs between sessions
 is the *deliverable*, not the vocabulary: an identification session reports
@@ -947,24 +951,35 @@ made mechanical where it can be:
   whose only route under the cap is a stronger or weaker claim is
   `manual-required`, not compressed.
 
-**The judge's integer is derived from its own ledger, and the rules that derive it
-are consistent by construction** (fixed 2026-09-23). Each row weighs minor 1 /
-major 2 / critical 3, the per-tier nets are capped (correctness ±4,
-consistency/preservation ±3, completeness ±2, formatting/writing ±1), and the
-capped sum is then bounded by the rung the rows can BACK: MINOR rows reach ±2 at
-most, |3| ("clearly better/worse") needs a MAJOR row outside formatting/writing,
-|4| ("decisive") needs a CRITICAL one. `basis` names the highest-priority tier on the side the
-integer's sign favours (for a 0, the highest-priority tier in which the two versions differ), and
-a defect that damages the delivered artifact — a rendered blank page, an unprinted figure — is
-scored where its damage lives (`completeness` for missing content), never as cosmetic formatting. Before that bound existed the caps alone
-could DEMAND a number the rung check then forbade (three minor consistency rows
-summed to 3 with no MAJOR row; two MAJOR correctness rows summed to 4 with no
-CRITICAL row), so no sheet could satisfy both and real panel sessions failed
-whichever number they wrote. Two spellings/placements are tolerated for the same
-reason: a sweep RULE id in a row's `check` is read as the check that owns it
-(`FMT-*` → M20, e.g. `FMT-T9c`), and the judge's own `judge_review/work/` scratch
-(normalized copies, renders, sweeps) is never validated as a deliverable -- a
-truncated intermediate `.docx` there says nothing about the panel.
+**The judge's integer is derived from its own ledger, and the TIER ORDER is the
+derivation** (judge contract v4, 2026-09-30). Every class carries the same four
+severity rungs — Fatal 4 / Critical 3 / Major 2 / Minor 1, a distance from
+correct — and the six tiers are compared **lexicographically** in the fixed
+priority order `correctness > consistency > preservation > completeness >
+formatting > writing`: the *first* tier whose net is not zero decides the
+comparison (resolved rows add, introduced rows subtract, the net is capped at
+±4), its magnitude is bounded by the rung its own deciding rows can back (a run
+of MINOR rows reaches ±2, a MAJOR row ±3, a CRITICAL or FATAL row ±4), and every
+lower tier is then ignored — a consistency gain can never offset a correctness
+loss, and a formatting gain can never offset a completeness loss. `basis` names
+that deciding tier (for a net-zero score whose ledger still has rows, the
+highest-priority tier in which the two versions differ; `none` for a clean 0),
+and a defect that damages the
+delivered artifact — a rendered blank page, an unprinted figure — is scored
+where its damage lives (`completeness` for missing content, graded by extent:
+one displaced page Minor, several pages or a section Major, an unusable artifact
+Fatal), never as cosmetic formatting. The v3 additive sum with differentiated
+caps is superseded: it made `formatting`/`writing` MINOR-only and let lower
+tiers offset higher ones, and its caps could DEMAND a number the rung check
+then forbade. One length rule survives
+on its own: an M18/M19 length/caption row is a `formatting`-tier MINOR row worth
+at most ±1, because the venue's relaxed margins make slight over-length
+intended — length is never a scoring tier of its own. Two spellings/placements
+are tolerated for the same reason: a sweep RULE id in a row's `check` is read as
+the check that owns it (`FMT-*` → M20, e.g. `FMT-T9c`), and the judge's own
+`judge_review/work/` scratch (normalized copies, renders, sweeps) is never
+validated as a deliverable -- a truncated intermediate `.docx` there says
+nothing about the panel.
 
 The artifact *process* is shared as well; the differences are deliberate:
 

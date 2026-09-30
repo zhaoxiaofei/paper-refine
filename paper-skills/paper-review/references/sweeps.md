@@ -35,14 +35,22 @@ Categories (stable labels, used in findings):
 - **4 — Technical Formatting**: per-format rules (LaTeX refs, docx styles), alignment, fonts, headings, numbering, caption placement, math/notation, mixed formats.
 - **5 — Missing / Unneeded Information**: guideline-required info beyond §1's list; superfluous files/content (drafts, internal notes, uncited items, PII).
 
-Severity is a DISTANCE FROM CORRECT, in every category (not only factual ones):
+Severity has FOUR rungs, and it is a DISTANCE FROM CORRECT -- in every category and in every
+scored class (correctness, consistency, preservation, completeness, formatting, writing), not
+only in the factual ones. The SAME four rungs grade a factual error, a broken convention, lost
+content, a prose failure and a formatting break; what differs is only which class the row is
+filed under:
+- **Fatal** — the artifact or the claim is unusable: a deliverable that cannot be opened or read,
+  a rendering with no readable text, a fabricated result or citation presented as established.
+  Anything that makes the submission (or the conclusion it exists to support) unusable.
 - **Critical** — the error changes a conclusion, contradicts the data, or is a category
   impossibility (a fabricated number or citation, a claim the data refute, a wrong species or
   kind); anything that could trigger rejection or a correction later. A factual error is NOT
   automatically Critical: the rung comes from what the error CHANGES.
 - **Major** — the error changes a reported fact, attribute, comparison or sample set, but not the
   paper's conclusion (a wrong age band, sex, unit or cohort label is the typical case; an
-  editor/reviewer/copyeditor would flag it).
+  editor/reviewer/copyeditor would flag it), or a prose/formatting failure a reader must work
+  around.
 - **Minor** — a detail that changes no claim, reported fact or downstream number (polish,
   consistency, style; the closest miss).
 
@@ -56,20 +64,21 @@ DEFECT is, and where a category splits you classify by the concrete defect:
 |---|---|
 | 0 Editor/Reviewer Concerns | `correctness` (unsupported claim, overclaim, UNDERCLAIM, rigor, ethics), `completeness` (required information or data availability missing) or `preservation` (removed content or a softened limitation) |
 | 1 Completeness & Factual Integrity | `correctness` (factual error, wrong number/DOI/reference key, broken cross-reference) or `completeness` (a mandatory item that is missing) |
-| 2 Writing Quality, Logic and Repetition | `consistency` (the same thing said, spelled or numbered two ways; a convention applied in one place and not another), `correctness` (the wording changes the meaning), `formatting` (a one-off wording preference with no convention behind it) or `writing` (a grammar, spelling, punctuation or prose-flow error that changes no meaning; MINOR rows only -- worth at most one point and never decisive alone) |
+| 2 Writing Quality, Logic and Repetition | `consistency` (the same thing said, spelled or numbered two ways; a convention applied in one place and not another), `correctness` (the wording changes the meaning), `formatting` (a one-off wording preference with no convention behind it) or `writing` (a grammar, spelling, punctuation or prose-flow error that changes no meaning; graded on the same four rungs as every class -- a slip is Minor, prose a reader must work around is Major, unreadable prose is Critical/Fatal -- and refiled to `correctness` when the meaning changed) |
 | 3 Plagiarism / AI-generated content | `correctness` (the integrity of the content itself) |
-| 4 Technical Formatting | `formatting` (M18/M19/M20 rows; at most ±1 in a comparison and never decisive alone) |
+| 4 Technical Formatting | `formatting` (M18/M19/M20 rows; graded on the same four rungs -- a M18/M19 length/caption row is always Minor and worth at most ±1, since the venue's relaxed margins make slight over-length intended) |
 | 5 Missing / Unneeded Information | `completeness` |
 
 **Artifact damage is not cosmetic formatting.** A rendered blank page, a figure or table that did
 not print, or an unreadable rendering is classified by what it DAMAGES: content missing from the
 delivered artifact is `completeness` (one displaced page/figure Minor, several pages or a whole
-section Major, an unusable artifact Critical), and a corrupt or undeliverable artifact is
+section Major, an unusable artifact Fatal), and a corrupt or undeliverable artifact is
 `correctness`. Only a stray empty line, spacing, an italic/quotation treatment or a mixed URL
 style is COSMETIC (0) if it appears once, becomes `consistency` when the same convention is
-broken repeatedly, and stays `formatting` (MINOR-only, worth at most ±1 in a comparison) as a
-recorded row. A blank LINE is not a blank PAGE: the break-only paragraph that displaces a page is
-artifact damage, graded by the extent of what it displaces.
+broken repeatedly, and a `formatting` row is graded on the same four rungs as everything else (a
+cosmetic slip recorded at all stays Minor; damage a reader must work around is Major). A blank
+LINE is not a blank PAGE: the break-only paragraph that displaces a page is artifact damage,
+graded by the extent of what it displaces.
 
 **A claim both versions get wrong is scored by the DISTANCE between the two errors**, not by two
 absolute severities that cancel: file the opponent's error as `resolved` and the target's error as
@@ -107,7 +116,7 @@ Every finding is ONE instance, formatted:
 
 ```
 F-NNN | location: <doc>/<section>/<paragraph|line|figure|table> | category: <0–5>
-check: <M1–M30|J1–J5> | severity: <Critical|Major|Minor> | status: <...>
+check: <M1–M30|J1–J5> | severity: <Fatal|Critical|Major|Minor> | status: <...>
 evidence: "<short verbatim quote of the exact word/number/phrase>"
 problem: <1–2 sentence explanation>
 ```

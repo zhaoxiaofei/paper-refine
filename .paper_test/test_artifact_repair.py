@@ -177,7 +177,7 @@ REPAIRABLE = {
                "data (a row's id field, a mapping key or an id list), not only in prose"],
     "integrate": ["integrate: 4 ledger row(s) carry no `artifact` (a before/after pair for a "
                   "small row, an outline diff for a large row) -- the row cannot be re-checked"],
-    "judge": ["comparisons[0] has no `checks` coverage map; contract v3 requires one "
+    "judge": ["comparisons[0] has no `checks` coverage map; contract v4 requires one "
               "disposition per frozen check id for EVERY opponent (M1, M2, ...)"],
 }
 NOT_REPAIRABLE = {

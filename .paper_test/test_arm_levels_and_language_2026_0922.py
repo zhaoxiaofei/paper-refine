@@ -275,9 +275,10 @@ def test_judge_writing_rubric():
     hits = {k: v for k, v in hits.items() if v}
     check("the rubric keeps the judge prompt free of provenance vocabulary", not hits,
           str(list(hits))[:160])
-    check("the tier is still minor-only in the prompt",
-          "MINOR-ONLY" in prompt and "can never decide a comparison" in prompt
-          and "writing +-1" in prompt)
+    check("the tier carries the same four rungs as every class in the prompt",
+          "The tier carries the same four severity rungs as every" in prompt
+          and "one slip is a MINOR row" in prompt
+          and "prose nobody can" in prompt)
 
 
 # ---------------------------------------------------------------------------

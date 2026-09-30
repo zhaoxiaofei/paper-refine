@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""The 2026-09-21 redesign: judge contract v3, writing class, incumbent-margin ranking.
+"""The 2026-09-21 redesign, extended 2026-09-30: judge contract v4 (four severity rungs in
+every tier, lexicographic tier order), writing class, incumbent-margin ranking.
 
 Run:  python3 .paper_test/test_redesign_v3.py
 `PAPER_WS` retargets the suite at a baseline copy (red before the redesign).
@@ -48,44 +49,73 @@ def comp(score, resolved=(), introduced=(), checks=True, basis="consistency"):
     return out
 
 
-def test_contract_v3():
-    print("== judge contract v3: writing class, weights, derived score, coverage ==")
-    check("the contract version is 3", np.JUDGE_CONTRACT_VERSION == 3,
+def test_contract_v4():
+    print("== judge contract v4: four rungs in EVERY tier, lexicographic tier order, coverage ==")
+    check("the contract version is 4", np.JUDGE_CONTRACT_VERSION == 4,
           str(np.JUDGE_CONTRACT_VERSION))
     check("`writing` is a scored class", "writing" in np.BASIS_TIERS, str(np.BASIS_TIERS))
-    check("formatting and writing are MINOR-only classes",
-          set(np.MINOR_ONLY_TIERS) == {"formatting", "writing"})
-    # minor-only enforcement
-    e, _w = np.judge_basis_problems(comp(1, [row("writing", "major")]), "c[0]", strict=True)
-    check("a writing MAJOR row fails its run", bool(e), str(e[:1]))
-    e2, _w2 = np.judge_basis_problems(comp(1, [row("formatting", "critical")]), "c[0]",
-                                      strict=True)
-    check("a formatting CRITICAL row fails its run", bool(e2), str(e2[:1]))
-    # proportional, capped derivation, BOUNDED BY THE RUNG the rows can back
-    # (2026-09-23: the caps alone could demand a number the rung rule forbids --
-    # three minor consistency rows sum to 3 with no MAJOR row, two MAJOR
-    # correctness rows sum to 4 with no CRITICAL row -- and two judge sessions of
-    # a real panel failed on that contradiction whichever number they wrote).
+    # 2026-09-30: EVERY tier is on the same four-rung scale (a distance from correct). The v3
+    # MINOR-only presentation classes are gone: a tier whose worst row is a MAJOR/CRITICAL/FATAL
+    # one reaches +-3/+-4 like any other, and the TIER ORDER is what keeps correctness ahead.
+    check("every tier carries the same four severity rungs",
+          list(np.SEVERITIES) == ["minor", "major", "critical", "fatal"]
+          and np.SEVERITY_WEIGHTS == {"minor": 1, "major": 2, "critical": 3, "fatal": 4}
+          and all(np.TIER_ROW_WEIGHTS[t] == np.SEVERITY_WEIGHTS for t in np.BASIS_TIERS)
+          and all(np.TIER_CAPS[t] == 4 for t in np.BASIS_TIERS)
+          and not hasattr(np, "MINOR_ONLY_TIERS"))
+    for tier in np.BASIS_TIERS:
+        for sev, want in (("minor", 1), ("major", 2), ("critical", 3), ("fatal", 4)):
+            c = comp(want, [row(tier, sev)], basis=tier)
+            e, _w = np.judge_basis_problems(c, "c[0]", strict=True)
+            check(f"a {tier} {sev.upper()} row derives {want:+d} and passes",
+                  not e and np.derived_comparison_score(c) == want, f"{str(e[:1])[:120]}")
+    # the deciding tier, and ONLY it, is what the magnitude is bounded by
     five = [row("consistency", "minor") for _ in range(5)]
-    check("five minor consistency rows derive +2 (MINOR rows reach 'better', never 'clearly')",
+    check("five minor consistency rows derive +2 (a MINOR run reaches 'better', never 'clearly')",
           np.derived_comparison_score(comp(2, five)) == 2)
     three_major = [row("correctness", "major"), row("correctness", "major")]
     check("two MAJOR correctness rows derive +3 ('clearly better' needs a MAJOR, not a CRITICAL)",
           np.derived_comparison_score(comp(3, three_major, basis="correctness")) == 3)
-    for rows, want in ((five, 2), (three_major, 3)):
-        errs, _ = np.judge_basis_problems(comp(want, rows,
-                                              basis="correctness" if want == 3 else "consistency"),
-                                          "c[0]", strict=True)
-        check(f"the arithmetic and the rung rules AGREE on a {want:+d} sheet",
-              not any("rung" in x or "DERIVED" in x for x in errs), str(errs[:1]))
+    for rows, want, basis in ((five, 2, "consistency"), (three_major, 3, "correctness")):
+        errs, _ = np.judge_basis_problems(comp(want, rows, basis=basis), "c[0]", strict=True)
+        check(f"the derivation and the rung rules AGREE on a {want:+d} sheet",
+              not any("DERIVED" in x or "no ledger item" in x for x in errs), str(errs[:1]))
     fmt3 = [row("formatting", "minor") for _ in range(3)]
-    check("three formatting rows still derive +1 (class cap)",
-          np.derived_comparison_score(comp(1, fmt3)) == 1)
+    check("three formatting minor rows derive +2 (the same rung bound applies to every tier)",
+          np.derived_comparison_score(comp(2, fmt3, basis="formatting")) == 2)
     wr = [row("writing", "minor")]
-    check("writing is worth at most one point", np.derived_comparison_score(comp(1, wr)) == 1)
-    crit = [row("correctness", "critical"), row("consistency", "minor")]
-    check("critical correctness + minor derives +4",
-          np.derived_comparison_score(comp(4, crit, basis="correctness")) == 4)
+    check("writing is graded on the same rungs (+1 Minor, +2 Major, +3 Critical)",
+          np.derived_comparison_score(comp(1, wr, basis="writing")) == 1
+          and np.derived_comparison_score(comp(2, [row("writing", "major")],
+                                               basis="writing")) == 2
+          and np.derived_comparison_score(comp(3, [row("writing", "critical")],
+                                               basis="writing")) == 3)
+    # LEXICOGRAPHIC: the first non-zero tier decides, and every lower tier is ignored.
+    split = [row("correctness", "critical"), row("consistency", "minor")]
+    check("a lower tier's extra point does NOT add to the deciding tier",
+          np.derived_comparison_score(comp(3, split, basis="correctness")) == 3)
+    same_tier = [row("correctness", "critical"), row("correctness", "minor")]
+    check("critical + minor in the SAME tier reaches +4",
+          np.derived_comparison_score(comp(4, same_tier, basis="correctness")) == 4)
+    offset = comp(-1, [row("consistency", "major")],
+                  [row("correctness", "minor")], basis="correctness")
+    check("a consistency gain cannot offset a correctness loss",
+          np.derived_comparison_score(offset) == -1
+          and np.derived_comparison_basis(offset) == "correctness"
+          and not np.judge_basis_problems(offset, "c[0]", strict=True)[0])
+    tied_top = comp(2, [row("correctness", "minor"), row("consistency", "major")],
+                    [row("correctness", "minor")], basis="consistency")
+    check("a tie in the top tier leaves the NEXT tier to decide",
+          np.derived_comparison_score(tied_top) == 2
+          and np.derived_comparison_basis(tied_top) == "consistency")
+    # the venue length rule is the one standing exception: M18/M19 rows are formatting-MINOR.
+    check("a length/caption row is pinned to formatting+MINOR",
+          not np.judge_basis_problems(comp(1, [row("formatting", "minor", check_id="M18")],
+                                           basis="formatting"), "c[0]", strict=True)[0]
+          and bool(np.judge_basis_problems(comp(2, [row("formatting", "major", check_id="M18")],
+                                                basis="formatting"), "c[0]", strict=True)[0])
+          and bool(np.judge_basis_problems(comp(1, [row("writing", "minor", check_id="M19")],
+                                                basis="writing"), "c[0]", strict=True)[0]))
     # the sweep's RULE ids are accepted as the check that owns them (M20)
     fmt_rule = [row("formatting", "minor", check_id="FMT-T9C")]
     check("a formatting-sweep rule id (`FMT-T9C`) is read as its check (M20)",
@@ -316,7 +346,7 @@ def test_second_pass():
 def main() -> int:
     if "--as-zero-judge" in sys.argv[1:]:
         return zero_judge_main()
-    test_contract_v3()
+    test_contract_v4()
     test_prompts_and_policy()
     test_field_wide_ranking_and_reported_margin()
     test_second_pass()

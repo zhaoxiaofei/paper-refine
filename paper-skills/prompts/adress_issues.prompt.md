@@ -164,7 +164,8 @@ changed".
 did NOT name is legal when it is recorded, not hidden: give it an `I-xxx` id, the
 check id it belongs to (M1–M30 / J1–J5), the tier
 (`correctness|consistency|preservation|completeness|formatting|writing`), a
-severity (`critical|major|minor`), one line of evidence with a location, and the
+severity (`minor|major|critical|fatal`, a distance from correct that applies to
+every tier -- see the review skill's sweeps.md), one line of evidence with a location, and the
 diff hunk that carries it. E6 still governs *claims* (see edit_rules.md: rigor
 repairs are legal; claims, interpretations and conclusion strength are not).
 Record ONE row per instance: five fixed instances are five `I-` rows, never one

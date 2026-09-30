@@ -168,14 +168,15 @@ def test_cosmetic_rule_is_one_rule():
     check("the shared vocabulary says a nameable difference is never cosmetic",
           "A difference that\n    cannot be named in this vocabulary is COSMETIC" in rule
           or "cannot be named in this vocabulary is COSMETIC" in rule.replace("\n", " "))
-    check("it says formatting/writing are counted minor rows, not cosmetic",
+    check("it says formatting/writing rows are counted, never cosmetic",
           "formatting` and `writing` included" in rule)
     check("the integration session's difference classes no longer say 'IGNORE'",
           "-> IGNORE" not in P["integrate"] and "cosmetic-only difference" not in P["integrate"])
     check("the integration rule tells the session what a drop requires",
           "not nameable" in P["integrate"] and "Dropping a NAMEABLE difference" in P["integrate"])
-    check("the comparison session scores formatting/writing rows instead of ignoring them",
-          "MINOR-ONLY" in P["judge"] and "can never decide a comparison" in P["judge"])
+    check("the comparison session scores formatting/writing rows on the same four rungs",
+          "graded on the same four rungs as every other class" in P["judge"]
+          and "counted at its own class and rung" in P["judge"])
     check("both sessions read the same cosmetic sentence from the shared rules",
           P["judge"].count("cannot be named in this vocabulary is COSMETIC") == 1
           and P["integrate"].count("cannot be named in this vocabulary is COSMETIC") == 1)
