@@ -30,20 +30,23 @@ artifacts into the package being reviewed. If the user's SUBMISSION_DIR is the
 working directory (or contains it), put `OUT`/`WORK` in a sibling directory and
 say where they went.
 
-**The `raw_data/` evidence area is not the submission.** A corpus may carry a
-`raw_data/` directory (an older corpus spells it `raw_figs/`) with the data
-tables, figure/table sources, the analysis snapshot — and often the editors' and
-reviewers' feedback the authors received. It is the authors' INPUT and the
-review's evidence; it is never submitted to the journal and no file inside it is
-a submission document. Its files therefore get no document role (never "main
+**The EVIDENCE areas are not the submission.** A corpus carries `raw_data/`
+(an older corpus spells it `raw_figs/`) with the data tables, figure/table
+sources and the analysis snapshot, and `human_review_feedback/` (its sibling)
+with the REAL editors'/reviewers' comments from the previous submission (plus
+any previous response as context). Both are the authors' INPUT and the review's
+evidence; neither is submitted to the journal and no file inside either is a
+submission document. Their files therefore get no document role (never "main
 text", "cover letter", "title page" or "supplementary", whatever their names
 suggest), are never marked editable, and are never swept, counted or quoted as
 the authors' prose: the converter writes their text to `WORK/evidence/`, not
-`WORK/corpus/`, so M1–M29 run over the submission only. Reviewer/editor feedback
-files are *external* prose — read them as evidence of what the review requires,
-never attribute their sentences to the authors, and never treat one as a written
-surface to align. `raw_data/` stays available for fact-checking and as the
-producer tier of M30.
+`WORK/corpus/`, so M1–M29 run over the submission only — and a feedback or
+response document kept *outside* the areas is skipped by name for the same
+reason. Reviewer/editor feedback is *external* prose — read it as evidence of
+what the review requires, never attribute its sentences to the authors, and
+never treat it as a written surface to align. `raw_data/` stays available for
+fact-checking and as the producer tier of M30; `human_review_feedback/` is what
+the journal modes' concern reconciliation and response letter are built from.
 
 ## Mission
 
@@ -68,7 +71,7 @@ A plain "review my manuscript" prompt reliably misses low-salience mechanical is
    M1(a) "used before it is defined" includes the acronym-first compound: a sentence that prints the short form first and the expansion after it (`MALBAC-sequenced (multiple annealing …)`) has used the token before defining it. When the sentence itself prints the expansion, the token IS an abbreviation being defined, so "it is a tool/proper name" is not a disposition.
 6. **Sweep pattern for every mechanical check:** ENUMERATE (script preferred; scripts live in `WORK/`) → ARTIFACT (`OUT/artifacts/<ID>.md` for the M1/M2/M4–M17 tables; term/value occurrence enumerations are written to `WORK/occurrences_<slug>.md`, which is M8's artifact — pass `--out OUT/artifacts` if you prefer them alongside the others; every instance gets a row, including rows later judged OK; the artifact spans the whole submission corpus, not one file) → AUDIT (each row gets: a finding ID, `OK`, or `unable — <reason>`) → REPORT (findings derived only from artifact rows, never from general impression).
 7. **A sweep with zero findings is INVALID unless its artifact exists and every row is disposed.**
-8. **`raw_data/` is EVIDENCE, not submission content.** Its text never feeds a written-surface sweep (M1–M29), a word count (M18/M19), a file-hygiene row (M9) or a finding's evidence quote; M30 alone reads it, as the producer side of a written claim. Editors'/reviewers' feedback inside it is external prose and is never attributed to the authors.
+8. **The evidence areas (`raw_data/`, `human_review_feedback/`) are EVIDENCE, not submission content.** Their text never feeds a written-surface sweep (M1–M29), a word count (M18/M19), a file-hygiene row (M9) or a finding's evidence quote; the same holds for a feedback/response document kept elsewhere in the corpus, by name. M30 alone reads `raw_data/`, as the producer side of a written claim; the human feedback drives the concern reconciliation. Editors'/reviewers' feedback is external prose and is never attributed to the authors.
 
 ## Bundled scripts (use them — they exist so enumeration is deterministic)
 
@@ -160,21 +163,25 @@ sweeps validated from the discovery round are appended after the adopted block
 as **M31, M32…** in the same format — do not insert into the middle (IDs are
 stable).
 
-**Scope of "the corpus" — the `raw_data/` evidence area is NOT in it.** Wherever
-this file says the corpus, it means the SUBMISSION corpus (the converted text
-under `WORK/corpus/`: manuscript, cover letter, title page, supplementary
-documents, figure/table sources of the submission itself). A corpus may carry a
-`raw_data/` directory (legacy spelling `raw_figs/`) with data tables, figure
-sources, the analysis snapshot — and often the editors'/reviewers' feedback. That
-is the EVIDENCE area: it is not submitted, no file in it is a submission
-document, and its text is never enumerated, counted, quoted or disposed by any
-written-surface sweep below (M1–M29). A file there is never a "main text", "cover
-letter" or "supplementary" document, whatever its name. Reviewer/editor feedback
-inside it is external prose — evidence of what the review requires, never the
-authors' words and never a written surface to align. **M30 is the single
-exception**: it reads the evidence area, as the PRODUCER side of a written
-claim's comparison — and even there, a feedback sentence is never the authors'
-claim, only context.
+**Scope of "the corpus" — the EVIDENCE areas are NOT in it.** Wherever this file
+says the corpus, it means the SUBMISSION corpus (the converted text under
+`WORK/corpus/`: manuscript, cover letter, title page, supplementary documents,
+figure/table sources of the submission itself). A corpus carries `raw_data/`
+(legacy spelling `raw_figs/`) with data tables, figure sources and the analysis
+snapshot, and `human_review_feedback/` with the REAL editors'/reviewers'
+comments from the previous submission (and any previous response as context).
+Those are the EVIDENCE areas: they are not submitted, no file in them is a
+submission document, and their text is never enumerated, counted, quoted or
+disposed by any written-surface sweep below (M1–M29) — the same holds for a
+feedback/response document kept elsewhere in the corpus, by name. A file in an
+evidence area is never a "main text", "cover letter" or "supplementary"
+document, whatever its name. Reviewer/editor feedback is external prose —
+evidence of what the review requires, never the authors' words and never a
+written surface to align. **M30 is the single exception**: it reads
+`raw_data/`, as the PRODUCER side of a written claim's comparison — and even
+there, a feedback sentence is never the authors' claim, only context. (A JUDGE
+sees both areas, clearly labeled, in its anonymized view; see the judge
+prompt's evidence-area rule.)
 
 ---
 
@@ -189,7 +196,7 @@ Categories (stable labels, used in findings):
 - **5 — Missing / Unneeded Information**: guideline-required info beyond §1's list; superfluous files/content (drafts, internal notes, uncited items, PII).
 
 Severity has FOUR rungs, and it is a DISTANCE FROM CORRECT -- in every category and in every
-scored class (correctness, consistency, preservation, completeness, formatting, writing), not
+scored class (correctness, preservation, completeness, consistency, writing, formatting), not
 only in the factual ones. The SAME four rungs grade a factual error, a broken convention, lost
 content, a prose failure and a formatting break; what differs is only which class the row is
 filed under:
@@ -214,7 +221,7 @@ filed under:
 
 Class mapping (the pipeline's sessions share ONE defect vocabulary; the judge
 panel scores by these classes, highest priority first):
-**correctness > consistency > preservation > completeness > formatting > writing**.
+**correctness > preservation > completeness > consistency > writing > formatting**.
 The category above says where the issue was found; the class says what the
 DEFECT is, and where a category splits you classify by the concrete defect:
 

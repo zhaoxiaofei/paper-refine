@@ -66,14 +66,20 @@ def run_cli(*argv, timeout=600):
 def build_source(root: Path) -> Path:
     src = root / "src"
     (src / "raw_data").mkdir(parents=True)
+    (src / "human_review_feedback").mkdir(parents=True)
     (src / "manuscript.txt").write_text(
         "Abstract\nWe used scRNA-seq to profile the cells.\n\n"
         "Introduction\nscRNA-seq was performed once and the claims follow.\n", encoding="utf-8")
-    (src / "raw_data" / "iScience_feedback_from_reviewers_and_editors.txt").write_text(
+    # The real editors'/reviewers' comments live in their own area now; the file
+    # name is deliberately NOT English, to pin the area-based detection.
+    (src / "human_review_feedback" / "审稿意见.txt").write_text(
         "Reviewer 1:\n\n"
         "1. The sample size is too small and the claims are too strong for the evidence.\n\n"
         "2. The methods do not describe the sequencing depth or the number of cells profiled.\n",
         encoding="utf-8")
+    # ... and a previous response is context, never a concern source.
+    (src / "human_review_feedback" / "response_to_reviewers.txt").write_text(
+        "Dear editor, in the previous round we promised new experiments.\n", encoding="utf-8")
     return src
 
 
@@ -123,7 +129,8 @@ def main() -> int:
           "manuscript.txt" in files and "RESPONSE_TO_REVIEWERS.md" in files
           and "response_map.json" in files, str(files))
     check("J1 the submission excludes the raw-data evidence area",
-          not any(f.startswith(("raw_data/", "raw_figs/")) for f in files))
+          not any(f.startswith(("raw_data/", "raw_figs/", "human_review_feedback/"))
+                  for f in files))
     check("J1 the submission excludes pipeline bookkeeping",
           not any(f in ("CHANGELOG.md", "REVISION_REPORT.md", "revision_report.json",
                         "DIFF_LEDGER.md", "MANUAL_STEPS.md", "VISUAL_CHECK.md") for f in files),
@@ -311,6 +318,13 @@ def main() -> int:
     tmp = scratch("paper_jr_detect_")
     src = tmp / "src"
     (src / "raw_data").mkdir(parents=True)
+    (src / "human_review_feedback").mkdir(parents=True)
+    (src / "human_review_feedback" / "审稿意见.txt").write_text(
+        "Reviewer 1:\n\nThe claims are too strong for the evidence.\n", encoding="utf-8")
+    (src / "human_review_feedback" / "response_to_reviewers.txt").write_text(
+        "Dear editor, we previously promised more experiments.\n", encoding="utf-8")
+    # Legacy shape: a feedback-named file under raw_data still works when the
+    # dedicated area is absent or empty.
     (src / "raw_data" / "iScience_feedback_from_reviewers_and_editors.txt").write_text(
         "Reviewer 1:\n\nThe claims are too strong for the evidence.\n", encoding="utf-8")
     (src / "cover_letter_to_editor.docx").write_text("stub cover letter", encoding="utf-8")
@@ -319,8 +333,20 @@ def main() -> int:
     ctx2.pristine = src
     ctx2.cfg = {"revision_mode": "major", "journal_feedback": []}
     hits = [label for _p, label in nb.journal_feedback_files(ctx2)]
-    check("J7 auto-detection finds the feedback and ignores authored documents",
-          hits == ["raw_data/iScience_feedback_from_reviewers_and_editors.txt"], str(hits))
+    check("J7 the dedicated area wins, any file name, and needs no heuristic",
+          hits == ["human_review_feedback/审稿意见.txt"], str(hits))
+    prev = [label for _p, label in nb.journal_previous_responses(ctx2)]
+    check("J7 a previous response is context, never the letter",
+          prev == ["human_review_feedback/response_to_reviewers.txt"], str(prev))
+    # With no dedicated area, the legacy raw_data name heuristic still applies.
+    legacy = tmp / "legacy"
+    (legacy / "raw_data").mkdir(parents=True)
+    (legacy / "raw_data" / "reviewer_comments.txt").write_text("Reviewer 2:\n\nToo strong.\n",
+                                                               encoding="utf-8")
+    ctx2.pristine = legacy
+    hits = [label for _p, label in nb.journal_feedback_files(ctx2)]
+    check("J7 the legacy raw_data location still works",
+          hits == ["raw_data/reviewer_comments.txt"], str(hits))
     ctx2.cfg = {"revision_mode": "major", "journal_feedback": [str(tmp / "missing.txt")]}
     refused = False
     try:

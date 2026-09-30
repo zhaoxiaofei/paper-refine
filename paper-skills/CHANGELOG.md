@@ -1,5 +1,83 @@
 # Changelog
 
+## 0.16 — calibration: the scoring priority order, and a panel-derived selection tie-break (2026-10-01)
+
+Two calibration changes, both requested after reviewing the round-1 census of a
+real run (`reports/round1_issue_census.csv`: `peer` totals are several times the
+`own` totals because a version is the target in only its own judges' sessions
+but an opponent in every other version's):
+
+- **The scoring priority order is now `correctness > preservation > completeness
+  > consistency > writing > formatting`.** Correctness stays first (the truth of
+  what is asserted), but lost content (preservation) and missing deliverables
+  (completeness) now outrank the residual `consistency` class (the same thing
+  said/spelled/numbered two ways; meaning changes are refiled to correctness),
+  and prose whose meaning survives (writing) outranks purely mechanical layout
+  (formatting) -- the latter is pre-normalized before the judge sees the view,
+  so a length row can never outweigh a prose defect.
+- **The champion selection key is now `median -> crit/fatal -> major -> minor ->
+  mean -> IQR -> digest`**, where each severity rung is compared tier by tier
+  in the priority order and reads the EXPOSURE-NORMALIZED, DEDUPLICATED census
+  rates: peer rate first, own rate second (a version is the target in only its
+  own judges' sessions but an opponent in up to 7x as many), counts deduplicated
+  across sessions per source by an EXACT normalized evidence key (never a fuzzy
+  match, so two different defects can never be merged). The self-reported
+  `critical_remaining`/`writing_remaining` counts are still recorded and
+  cross-checked but no longer rank; the incumbent-retention rule (an exact
+  median/mean/IQR tie keeps the base) is unchanged. The census CSV gains
+  `dedup_own`/`dedup_peer`/`dedup_total`, `own_rate`/`peer_rate` and
+  `own_opps`/`peer_opps` columns; `score_model_doc()`, the decision report and
+  the round table document the new key.
+- The judge prompt now spells out how to use the evidence areas for these
+  classes: `raw_data` for value/label/cohort consistency (data-vs-written) and
+  as the reference that proves a dropped claim was real (preservation), while
+  the drop itself must be shown from the two packages.
+
+## 0.15 — `human_review_feedback/` is a first-class evidence area, visible to judges (2026-10-01)
+
+Real editors'/reviewers' comments no longer live inside `raw_data/`: the corpus
+carries them in their own top-level `human_review_feedback/` directory, a
+sibling of `raw_data/`. Both are EVIDENCE areas with the same byte-for-byte,
+never-renamed, never-submission contract, and both are visible to a judge —
+clearly labeled, so the prompt's evidence rules stay enforceable:
+
+- the review converter marks the area `area: human_review_feedback` (role
+  "human review feedback (evidence)"; a `response_to_reviewers.*` file there is
+  "previous response (evidence context)"), writes its text to `WORK/evidence/`,
+  and never sweeps it; the pipeline's written-surface scans skip both evidence
+  areas AND any feedback/response document kept elsewhere in the corpus (by
+  name), so M18/M19/M20/M4/J3 seeds no longer count a reviewer letter as a
+  manuscript document; the skill scripts (`extract_numbers`,
+  `extract_citations`, `extract_occurrences`, `enumerate_conventions`,
+  `extract_acronyms`, `count_words`) carry the same guard;
+- the four journal modes take their concerns from `human_review_feedback/`
+  first — any file name, including non-English ones — with the legacy
+  feedback-named file under `raw_data/` still detected; previous responses are
+  CONTEXT (`feedback/previous_responses/`), never concerns and never the
+  letter;
+- the JUDGE view keeps both areas under stable `evidence/raw_data/` and
+  `evidence/human_review_feedback/` directories (file names inside remain
+  anonymized). The judge prompt now says how to use them: `raw_data/` for
+  correctness/completeness, the human feedback to score how well each version
+  ADDRESSES the raised concerns (a concern the target fails to answer that an
+  opponent answers is a completeness difference; correctness when the text
+  claims to answer it). The feedback is identical in every view, so only the
+  manuscripts' handling of it can differentiate them.
+- the read-only contract is enforced for the new area too
+  (`READ-ONLY human review feedback:` warnings; restore/drop from the pristine
+  copy, modes preserved), the submission package strips both areas, and
+  `raw_data_advisories` reports deviations in either;
+- audit fixes in the same pass: retry/rebuild of the journal stages now knows
+  their dependency chain (`upstream_deps`), so a scoped round recovers cleanly;
+  `setup --venue-profile FILE` installs a brand-new venue on a fresh root (the
+  old error pointed at `set-venue`, which needs an existing root);
+  `--journal-feedback` accepts CWD-relative paths; the duplicated
+  `is_raw_data_rel` definition is gone; the stale "rounds (default 2)" text is
+  fixed; the length/caption wording now matches the lexicographic engine (a
+  length row can decide only against a WRITING-tier difference); and the
+  artifact `tier` (finding/advisory) is documented as distinct from the judge's
+  six scoring tiers.
+
 ## 0.14 — the four journal revision modes (2026-10-01)
 
 A root can now be driven against a REAL decision letter instead of the

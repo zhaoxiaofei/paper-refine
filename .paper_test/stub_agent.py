@@ -388,12 +388,23 @@ def do_response(sb: Path, name: str, round_no: int) -> int:
     target = sb / "target"
     skip_names = {"changelog.md", "manual_steps.md", "revision_report.md", "revision_report.json",
                   "diff_ledger.md", "visual_check.md"}
+    evidence_dirs = ("raw_data", "raw_figs", "human_review_feedback")
+    non_manuscript_re = re.compile(
+        r"feedback|referee|reviewers?|editors?|editorial|decision"
+        r"|response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
+
+    def citable(p: Path) -> bool:
+        rel = p.relative_to(target)
+        if not p.is_file() or np_aux(p) or p.name.lower() in skip_names:
+            return False
+        if "work" in rel.parts[:-1]:
+            return False
+        if any(part in evidence_dirs for part in rel.parts[:-1]):
+            return False
+        return not non_manuscript_re.search(p.name)
+
     files = [p.relative_to(target).as_posix() for p in sorted(target.rglob("*"))
-             if p.is_file() and not np_aux(p)
-             and p.name.lower() not in skip_names
-             and "work" not in p.relative_to(target).parts[:-1]
-             and not any(part in ("raw_data", "raw_figs") for part in p.parts[:-1])] \
-        if target.is_dir() else []
+             if citable(p)] if target.is_dir() else []
     out = sb / "response"
     out.mkdir(parents=True, exist_ok=True)
     md = ["# Response to reviewers (stub)", ""]

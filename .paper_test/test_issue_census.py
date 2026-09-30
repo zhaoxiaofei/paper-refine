@@ -135,12 +135,21 @@ def test_census_attribution():
           and orig["tiers"]["formatting"]["severities"]["minor"]["own"] == 1,
           str(orig["tiers"]["formatting"]))
     check("r1_a2: own minor + critical, peer minor -- no leakage between versions or tiers",
-          r1["tiers"]["correctness"]["severities"]["minor"] == {"own": 1, "peer": 0, "total": 1,
-                                                               "per_session": 0.3333}
+          all(r1["tiers"]["correctness"]["severities"]["minor"].get(k) == v
+              for k, v in (("own", 1), ("peer", 0), ("total", 1), ("per_session", 0.3333)))
           and r1["tiers"]["completeness"]["severities"]["critical"]["total"] == 1
           and r1["tiers"]["consistency"]["severities"]["minor"]["peer"] == 2
           and r1["tiers"]["completeness"]["severities"]["minor"]["total"] == 0,
           str(r1["tiers"]))
+    cm = orig["tiers"]["correctness"]["severities"]["major"]
+    check("the same defect mentioned by three sessions deduplicates to ONE own + ONE peer row",
+          (cm["own"], cm["peer"], cm["total"]) == (1, 2, 3)
+          and (cm["dedup_own"], cm["dedup_peer"], cm["dedup_total"]) == (1, 1, 2),
+          str(cm))
+    check("the rates divide the deduplicated counts by the OPPORTUNITIES (own 1, peer 2)",
+          (orig["own_opps"], orig["peer_opps"]) == (1, 2)
+          and abs(cm["own_rate"] - 1.0) < 1e-9 and abs(cm["peer_rate"] - 0.5) < 1e-9,
+          f"opps={orig['own_opps']}/{orig['peer_opps']} rates={cm['own_rate']}/{cm['peer_rate']}")
     check("w1: the same row repeated across one session's comparisons counts once",
           w1["total"] == 1 and w1["tiers"]["completeness"]["severities"]["minor"]["own"] == 1
           and w1["own"] == 1 and w1["peer"] == 0, str(w1))
@@ -178,10 +187,16 @@ def test_census_is_reported_never_ranked(tmp, ctx, agg):
     check("the stripped panel's census is empty (the counts came from the rows)",
           all((agg2["issue_census"][v] or {}).get("total") == 0 for v in FIELD),
           str({v: agg2["issue_census"][v]["total"] for v in FIELD}))
-    check("the census is not part of the ranking input",
-          "issue_census" not in (np.score_model_doc().get("tiebreaks") or [])
-          and any("issue census" in x
-                  for x in np.score_model_doc().get("reported_but_not_ranked") or []))
+    model = np.score_model_doc()
+    check("the census IS the tie-break the score model documents",
+          any("census" in str(x) for x in (model.get("tiebreaks") or []))
+          and "census" in str(model.get("tiebreak_notes")))
+    check("the self-reported counts are reported but no longer ranked",
+          any("critical_remaining" in str(x)
+              for x in (model.get("reported_but_not_ranked") or []))
+          and any("writing_remaining" in str(x)
+                  for x in (model.get("reported_but_not_ranked") or []))
+          and not any("critical_remaining" in str(x) for x in (model.get("tiebreaks") or [])))
 
 
 def test_direction_flips(tmp):
@@ -212,10 +227,14 @@ def test_census_file_and_table(tmp, ctx, agg):
           and all(r["run"] == ctx.root.name for r in rows), str(len(rows)))
     by = {(r["version"], r["tier"], r["severity"]): r for r in rows}
     r = by[("orig", "correctness", "major")]
-    check("the correctness/major row carries own=1, peer=2, total=3 and its own rate (3/3)",
+    check("the correctness/major row carries the raw counts and the deduplicated rates",
           (r["own"], r["peer"], r["total"]) == ("1", "2", "3")
           and abs(float(r["per_session"]) - 1.0) < 1e-6
-          and (r["own_sessions"], r["peer_sessions"], r["sessions_expected"]) == ("1", "2", "3"),
+          and (r["own_sessions"], r["peer_sessions"], r["sessions_expected"]) == ("1", "2", "3")
+          and (r["dedup_own"], r["dedup_peer"], r["dedup_total"]) == ("1", "1", "2")
+          and abs(float(r["own_rate"]) - 1.0) < 1e-9
+          and abs(float(r["peer_rate"]) - 0.5) < 1e-9
+          and (r["own_opps"], r["peer_opps"]) == ("1", "2"),
           str(r))
     r2 = by[("r1_a2", "completeness", "critical")]
     check("a critical defect appears in its own tier and its own severity",

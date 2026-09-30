@@ -189,45 +189,78 @@ check("B1 the trace documents the provenance-free tie-break",
 shutil.rmtree(tmp, ignore_errors=True)
 
 # =====================================================================
-# B2. the category-2 writing tie-break (severity > style > digest)
+# B2. the panel-derived issue census breaks an exact statistical tie
+#     (median -> crit/fatal -> major -> minor -> mean -> IQR -> digest)
 # =====================================================================
 tmp = Path(tempfile.mkdtemp(prefix="paper_grade_b2_"))
-ctx = make_ctx(tmp, summaries={"w1": {"writing_remaining": 2},
-                               "a2": {"writing_remaining": 0},
-                               "i1": {"writing_remaining": 1},
-                               "i2": {"writing_remaining": 1},
-                               "i3": {"writing_remaining": 3}})
+# Self-reported counts are given absurd values on purpose: they must NOT rank.
+ctx = make_ctx(tmp, summaries={"w1": {"writing_remaining": 99, "critical_remaining": 99},
+                               "a2": {"writing_remaining": 0, "critical_remaining": 0}})
 full_panel(ctx, tie_matrix())
-agg = np.aggregate_round(ctx, 2, FIELD)
-sel = np.select_champion(ctx, 2, agg)
-check("B2 an exact statistical tie is broken by writing_remaining, not the digest",
-      sel["champion"] == "a2",
-      f"champion={sel['champion']} ranking={[(r['id'], r['writing_remaining']) for r in sel['ranking']]}")
-check("B2 the trace names the writing key in the ranking order",
-      any("writing_remaining" in ln and "ranking key" in ln for ln in sel["trace"]),
-      str([ln for ln in sel["trace"] if "ranking key" in ln])[:200])
+agg_b2 = np.aggregate_round(ctx, 2, FIELD)
+sel_b2 = np.select_champion(ctx, 2, agg_b2)
+check("B2 self-reported counts no longer decide an exact statistical tie",
+      sel_b2["champion"] == "w1",
+      f"champion={sel_b2['champion']} "
+      f"ranking={[(r['id'], r['writing_remaining'], r['critical_remaining']) for r in sel_b2['ranking']]}")
 
-# a nonsensical (negative) or absent count is the +inf sentinel: it never wins
-ctx2 = make_ctx(tmp, summaries={"w1": {"writing_remaining": -5},
-                                "a2": {"writing_remaining": 0},
-                                "i1": {"writing_remaining": None},
-                                "i2": {"writing_remaining": 0}})
-full_panel(ctx2, tie_matrix())
-sel2 = np.select_champion(ctx2, 2, np.aggregate_round(ctx2, 2, FIELD))
-check("B2 a negative/absent writing count never wins a tie",
-      sel2["champion"] in ("a2", "i2")
-      and all(r["writing_remaining"] == np.MISSING_TIEBREAK
-              for r in sel2["ranking"] if r["id"] == "w1"),
-      f"champion={sel2['champion']} "
-      f"w1={[r['writing_remaining'] for r in sel2['ranking'] if r['id'] == 'w1']}")
+# Give w1 ONE extra defect pair inside a net-zero comparison of its own session:
+# an introduced formatting/minor row (attributed to w1) plus a resolved one
+# (attributed to the opponent). Every SCORE is unchanged, so this isolates the
+# census tie-break: w1 now carries one more minor defect than the other tied
+# challengers and must lose the tie despite the smallest digest.
+rid_w1 = np.rid_judge(2, np.judge_target_token(2, "w1"), 1)
+comps = ctx.state["runs"][rid_w1]["scores"]["comparisons"]
+comps[0]["resolved"] = [{"tier": "formatting", "severity": "minor",
+                         "evidence": "fixture: a defect the opponent carries"}]
+comps[0]["introduced"] = [{"tier": "formatting", "severity": "minor",
+                           "evidence": "fixture: a defect this target carries"}]
+agg_b2b = np.aggregate_round(ctx, 2, FIELD)
+sel_b2b = np.select_champion(ctx, 2, agg_b2b)
+check("B2 the census rung decides the tie before mean/IQR/digest",
+      sel_b2b["champion"] == "i1",
+      f"champion={sel_b2b['champion']} "
+      f"ranking={[(r['id'], r.get('issues', {}).get('minor')) for r in sel_b2b['ranking']]}")
+check("B2 the trace names the census rungs in the ranking order",
+      any("issue rungs" in ln and "ranking key" in ln for ln in sel_b2b["trace"]),
+      str([ln for ln in sel_b2b["trace"] if "ranking key" in ln])[:220])
+check("B2 the ranking rows carry the census rungs for the report",
+      all("issue_rungs" in r and "issues" in r for r in sel_b2b["ranking"]))
+
+# The peer rate is compared BEFORE the own rate (exposure normalization).
+_z = (0.0,) * (2 * 3 * len(np.BASIS_TIERS))
+row_own_worse = {"median": 1.0, "mean": 1.0, "iqr": 0.0, "digest": "a", "id": "B",
+                 "issue_rungs": (0.0, 0.5) + _z[2:]}
+row_peer_worse = {"median": 1.0, "mean": 1.0, "iqr": 0.0, "digest": "a", "id": "A",
+                  "issue_rungs": (0.5, 0.0) + _z[2:]}
+check("B2 the peer rate is compared before the own rate",
+      np.champion_sort_key(row_own_worse) < np.champion_sort_key(row_peer_worse))
+# ... and the census rungs sit BEFORE the mean.
+row_better_census = {"median": 1.0, "mean": -9.0, "iqr": 0.0, "digest": "z", "id": "A",
+                     "issue_rungs": _z}
+row_worse_census = {"median": 1.0, "mean": 9.0, "iqr": 0.0, "digest": "a", "id": "B",
+                    "issue_rungs": (0.0, 0.0, 0.1) + _z[3:]}
+check("B2 the census rungs are compared before the mean",
+      np.champion_sort_key(row_better_census) < np.champion_sort_key(row_worse_census))
+# Tier info is kept: a defect in a HIGHER-priority tier outranks a LARGER count
+# in a lower one (completeness/minor 0.1 vs writing/minor 0.2 -> the completeness
+# carrier sorts worse, even though its count is lower).
+_rungs_c = list(_z); _rungs_c[24 + 2 * list(np.BASIS_TIERS).index("completeness")] = 0.1
+_rungs_w = list(_z); _rungs_w[24 + 2 * list(np.BASIS_TIERS).index("writing")] = 0.2
+row_completeness = {"median": 1.0, "mean": 1.0, "iqr": 0.0, "digest": "a", "id": "A",
+                    "issue_rungs": tuple(_rungs_c)}
+row_writing = {"median": 1.0, "mean": 1.0, "iqr": 0.0, "digest": "a", "id": "B",
+               "issue_rungs": tuple(_rungs_w)}
+check("B2 a defect in a higher-priority tier outranks a larger lower-tier count",
+      np.champion_sort_key(row_writing) < np.champion_sort_key(row_completeness))
 
 # the incumbent-retention rule stays strictly statistical: a challenger with a
-# BETTER writing count cannot dethrone a base the panel cannot distinguish
-ctx3 = make_ctx(tmp, summaries={"w1": {"writing_remaining": 0},
-                                "a2": {"writing_remaining": 0}})
+# better census cannot dethrone a base the panel cannot distinguish on
+# (median, mean, IQR).
+ctx3 = make_ctx(tmp)
 full_panel(ctx3, {})
 sel3 = np.select_champion(ctx3, 2, np.aggregate_round(ctx3, 2, FIELD))
-check("B2 a writing count never dethrones the incumbent on an exact statistical tie",
+check("B2 the census never dethrones the incumbent on an exact statistical tie",
       sel3["champion_rep"] == "r1_a2"
       and any("incumbent base is retained" in ln for ln in sel3["trace"]),
       f"champion={sel3['champion']} rep={sel3['champion_rep']}")
@@ -417,8 +450,14 @@ shutil.rmtree(tmp, ignore_errors=True)
 sm = (getattr(np, "score_model_doc", lambda: {})() or {})
 check("D4 the score model documents the contract, the rules and the tie-breaks",
       sm.get("judge_contract") == CONTRACT
-      and sm.get("tiebreaks") == ["-median", "-mean", "IQR", "critical_remaining",
-                                  "writing_remaining", "digest", "id"]
+      and sm.get("tiebreaks") == [
+          "-median",
+          "issue census: crit/fatal -> major -> minor, tier by tier in the scoring "
+          "priority order, (peer_rate, own_rate) ascending",
+          "-mean", "IQR", "digest", "id"]
+      and "critical_remaining" not in " ".join(str(x) for x in sm.get("tiebreaks") or [])
+      and any("critical_remaining" in str(x)
+              for x in sm.get("reported_but_not_ranked") or [])
       and sm.get("scale") == [np.SCORE_MIN, np.SCORE_MAX]
       and any("CRITICAL" in r for r in (sm.get("graded_basis") or {}).get("rules") or [])
       and "unused rungs" in sm.get("scale_note", ""),
@@ -454,11 +493,11 @@ stage_prompts = {
 }
 for name in ("rewrite", "revise", "integrate"):
     flat = " ".join(stage_prompts[name].split())
-    check(f"D5 the {name} prompt asks for writing_remaining "
-          f"(tie-break only, below the critical count)",
+    check(f"D5 the {name} prompt asks for writing_remaining (reported and cross-checked, "
+          f"never a ranking key)",
           '"writing_remaining"' in flat
-          and "tie" in flat.lower()
-          and "never as a score or a gate" in flat)
+          and ("reported" in flat.lower() and "cross-check" in flat.lower())
+          and ("never a score or a gate" in flat or "never as a score or a gate" in flat))
 check("D5 the review prompt is not asked for a writing_remaining field",
       "writing_remaining" not in stage_prompts["review"])
 

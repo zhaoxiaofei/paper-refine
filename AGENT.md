@@ -101,11 +101,21 @@ the profiles shipped next to the script → the built-in fallback inside
    correctness/completeness. `.paper_test/test_hierarchy_reconciliation.py`
    pins it. Do not let a new producer-bearing artifact (a new code directory, a
    new data snapshot) enter the corpus without a way to reconcile it.
-   `raw_data/` is EVIDENCE and read-only, not submission content: the review's
-   written-surface sweeps never read its text (the converter writes it to
-   `WORK/evidence/`, the code-side scans skip it), editors'/reviewers' feedback
-   inside it is external prose, and only M30 reads it — as the producer side.
-   `.paper_test/test_raw_data_evidence_area.py` pins the contract.
+   The EVIDENCE areas are `raw_data/` (data, figure/table sources, analysis
+   snapshot; legacy `raw_figs/`) and `human_review_feedback/` (the REAL
+   editors'/reviewers' comments, plus any previous response as context). Both
+   are read-only, not submission content: the converter writes their text to
+   `WORK/evidence/` (never `WORK/corpus/`), the code-side scans and the skill
+   scripts skip them (and a feedback/response document elsewhere in the corpus,
+   by name), and no sweep counts or quotes them as the authors' prose. M30
+   reads `raw_data/` as the producer side; the journal modes build the concern
+   ledger and the response letter from `human_review_feedback/`; and a JUDGE
+   sees both under the labeled `evidence/` directory in its view (raw_data for
+   correctness, the human feedback for whether the version addresses the
+   raised concerns). `.paper_test/test_raw_data_evidence_area.py` and
+   `.paper_test/test_human_review_feedback_area.py` pin the contract. Never
+   extend a scan or a packaging step without routing it through
+   `is_evidence_rel` / `is_non_manuscript_rel`.
 
 ## Commands you will use
 
@@ -153,7 +163,8 @@ default-venue text.
 
 `pipeline_config.json` may carry `revision_mode` (one of `none`, `transfer`,
 `resubmit`, `major`, `minor`; default `none`) and `journal_feedback` (the
-decision-letter files; auto-detected by name when unset). The four non-default
+decision-letter files; when unset they are taken from `human_review_feedback/`
+first, then a legacy feedback-named file anywhere in the corpus). The four non-default
 modes are documented in README → "Journal revision modes (options 1–4)" and
 pinned by `.paper_test/test_journal_revision_modes.py`. Two rules matter when
 touching this area:
@@ -172,6 +183,34 @@ touching this area:
   against the package (cited files must exist; `planned` rows claim nothing).
   The response letter and `journal_submission/` are submission documents, never
   manuscript text, and `raw_data/` must never appear in them.
+* **Retry/rebuild must know the chain.** `upstream_deps` maps
+  feedback/concerns → a1, revise → a1 + the recorded review/concerns run, and
+  response → its recorded ledger run: without those entries a scoped round can
+  never be rebuilt after a retry (see `.paper_test/test_journal_revision_modes.py`).
+* **A new venue on a fresh root** goes in with
+  `setup --venue-profile FILE` (the file is validated, installed into
+  `<root>/venue_profiles/`, and recorded); `set-venue <id> --profile FILE`
+  remains the path for an existing root.
+
+## Scoring calibration — two rules that are easy to undo by accident
+
+* **The six scored tiers are `correctness > preservation > completeness >
+  consistency > writing > formatting`** (2026-10-01), compared
+  lexicographically: the first tier whose net is not zero decides the
+  comparison. The order is pinned in `BASIS_TIERS`, in the judge directives and
+  in the four documents `test_grading_scheme` reads (README, sweeps.md,
+  ledger.md, this file's sibling pipeline source); change all of them together
+  or none. `writing` above `formatting` is deliberate: layout is pre-normalized
+  before the judge sees the view.
+* **The champion selection key is `median -> crit/fatal -> major -> minor ->
+  mean -> IQR -> digest`** (`champion_sort_key`), where each severity rung is
+  compared tier by tier in the priority order using the issue census's
+  DEDUPLICATED, EXPOSURE-NORMALIZED rates -- peer rate first, own rate second
+  (`champion_issue_rungs`). The self-reported `critical_remaining`/
+  `writing_remaining` counts are reported and cross-checked but never rank; the
+  incumbent-retention rule on an exact median/mean/IQR tie is unchanged.
+  `.paper_test/test_grading_scheme.py` (B2) and `test_issue_census.py` pin the
+  key, the dedup and the rates.
 
 ## Known, deliberate limits
 

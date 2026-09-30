@@ -12,8 +12,8 @@ programmatically in R0 so no finding can be dropped.
 Columns: `id | category | severity | location | evidence | verdict | rationale | edit IDs | final status`
 
 - `category` keeps the review's category number. The defect CLASS it maps to is the judge panel's
-  vocabulary (highest priority first: `correctness > consistency > preservation > completeness >
-  formatting > writing`; the mapping table is in `paper-review/references/sweeps.md` → CLASSIFICATION). State
+  vocabulary (highest priority first: `correctness > preservation > completeness > consistency >
+  writing > formatting`; the mapping table is in `paper-review/references/sweeps.md` → CLASSIFICATION). State
   the class in the rationale whenever a row is disputed or resolved by a wording-only edit: an edit
   the panel cannot name in that vocabulary reads as cosmetic, and the reviewer's finding then never
   becomes an improvement a judge can see.
@@ -82,7 +82,7 @@ changed".
 **Improvement rows (`I-xxx`).** An edit that repairs a defect the frozen review
 did NOT name is legal when it is recorded, not hidden: give it an `I-xxx` id, the
 check id it belongs to (M1–M30 / J1–J5), the tier
-(`correctness|consistency|preservation|completeness|formatting|writing`), a
+(`correctness|preservation|completeness|consistency|writing|formatting`), a
 severity (`minor|major|critical|fatal`, a distance from correct that applies to
 every tier -- see the review skill's sweeps.md), one line of evidence with a location, and the
 diff hunk that carries it. E6 still governs *claims* (see edit_rules.md: rigor

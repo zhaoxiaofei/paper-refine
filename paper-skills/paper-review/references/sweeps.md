@@ -23,21 +23,25 @@ sweeps validated from the discovery round are appended after the adopted block
 as **M31, M32…** in the same format — do not insert into the middle (IDs are
 stable).
 
-**Scope of "the corpus" — the `raw_data/` evidence area is NOT in it.** Wherever
-this file says the corpus, it means the SUBMISSION corpus (the converted text
-under `WORK/corpus/`: manuscript, cover letter, title page, supplementary
-documents, figure/table sources of the submission itself). A corpus may carry a
-`raw_data/` directory (legacy spelling `raw_figs/`) with data tables, figure
-sources, the analysis snapshot — and often the editors'/reviewers' feedback. That
-is the EVIDENCE area: it is not submitted, no file in it is a submission
-document, and its text is never enumerated, counted, quoted or disposed by any
-written-surface sweep below (M1–M29). A file there is never a "main text", "cover
-letter" or "supplementary" document, whatever its name. Reviewer/editor feedback
-inside it is external prose — evidence of what the review requires, never the
-authors' words and never a written surface to align. **M30 is the single
-exception**: it reads the evidence area, as the PRODUCER side of a written
-claim's comparison — and even there, a feedback sentence is never the authors'
-claim, only context.
+**Scope of "the corpus" — the EVIDENCE areas are NOT in it.** Wherever this file
+says the corpus, it means the SUBMISSION corpus (the converted text under
+`WORK/corpus/`: manuscript, cover letter, title page, supplementary documents,
+figure/table sources of the submission itself). A corpus carries `raw_data/`
+(legacy spelling `raw_figs/`) with data tables, figure sources and the analysis
+snapshot, and `human_review_feedback/` with the REAL editors'/reviewers'
+comments from the previous submission (and any previous response as context).
+Those are the EVIDENCE areas: they are not submitted, no file in them is a
+submission document, and their text is never enumerated, counted, quoted or
+disposed by any written-surface sweep below (M1–M29) — the same holds for a
+feedback/response document kept elsewhere in the corpus, by name. A file in an
+evidence area is never a "main text", "cover letter" or "supplementary"
+document, whatever its name. Reviewer/editor feedback is external prose —
+evidence of what the review requires, never the authors' words and never a
+written surface to align. **M30 is the single exception**: it reads
+`raw_data/`, as the PRODUCER side of a written claim's comparison — and even
+there, a feedback sentence is never the authors' claim, only context. (A JUDGE
+sees both areas, clearly labeled, in its anonymized view; see the judge
+prompt's evidence-area rule.)
 
 ---
 
@@ -52,7 +56,7 @@ Categories (stable labels, used in findings):
 - **5 — Missing / Unneeded Information**: guideline-required info beyond §1's list; superfluous files/content (drafts, internal notes, uncited items, PII).
 
 Severity has FOUR rungs, and it is a DISTANCE FROM CORRECT -- in every category and in every
-scored class (correctness, consistency, preservation, completeness, formatting, writing), not
+scored class (correctness, preservation, completeness, consistency, writing, formatting), not
 only in the factual ones. The SAME four rungs grade a factual error, a broken convention, lost
 content, a prose failure and a formatting break; what differs is only which class the row is
 filed under:
@@ -77,7 +81,7 @@ filed under:
 
 Class mapping (the pipeline's sessions share ONE defect vocabulary; the judge
 panel scores by these classes, highest priority first):
-**correctness > consistency > preservation > completeness > formatting > writing**.
+**correctness > preservation > completeness > consistency > writing > formatting**.
 The category above says where the issue was found; the class says what the
 DEFECT is, and where a category splits you classify by the concrete defect:
 

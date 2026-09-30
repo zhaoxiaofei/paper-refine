@@ -1719,9 +1719,11 @@ def unknown_venue_message(venue_id, root=None) -> str:
     return (f"unknown venue {venue_id!r}: no venue profile named "
             f"{str(venue_id or '').strip().lower()!r} was found.\n"
             f"       Available venues: {known or '(none)'}\n"
-            f"       List them with `{prog} set-venue --list`; add one by "
-            f"writing {VENUE_PROFILES_DIRNAME}/<id>{VENUE_PROFILE_SUFFIX} and passing it to "
-            f"`set-venue <id> --profile <file>`.")
+            f"       List them with `{prog} set-venue --list`. For a FRESH root, create the "
+            f"profile as a JSON file and run "
+            f"`{prog} setup --source <dir> --root <dir> --venue-profile <file>` (no prior root "
+            f"needed); on an EXISTING root use `set-venue <id> --profile <file>`, or place the "
+            f"file in {VENUE_PROFILES_DIRNAME}/<id>{VENUE_PROFILE_SUFFIX} next to the script.")
 
 
 def default_venue_profile() -> VenueProfile:
@@ -2004,6 +2006,17 @@ PRISTINE_DIRNAMES = (PRISTINE_DIR, PRISTINE_DIR_LEGACY)
 RAW_DATA_DIR = "raw_data"
 RAW_DATA_DIR_LEGACY = "raw_figs"
 RAW_DATA_DIRNAMES = (RAW_DATA_DIR, RAW_DATA_DIR_LEGACY)
+# The human editors'/reviewers' feedback of a REAL submission lives in its own
+# top-level area, a sibling of raw_data/: it is the authors' INPUT (never
+# submitted, never manuscript text), it drives the concern reconciliation and
+# the response letter, and a judge may read it to score how well a version
+# ADDRESSES the human-raised concerns. Both areas together are the corpus's
+# EVIDENCE areas (see is_evidence_rel / the judge-view layout).
+HUMAN_FEEDBACK_DIR = "human_review_feedback"
+EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR,)
+# The stable root the judge view uses to expose the evidence areas (their files
+# stay anonymized inside it; see _view_layout).
+EVIDENCE_VIEW_ROOT = "evidence"
 
 
 def existing_dirname(parent: Path, canonical: str, legacy: str) -> str:
@@ -2037,11 +2050,6 @@ def area_dir(sb: Path, area: str) -> Path:
     return sb / area
 
 
-def is_raw_data_rel(rel: str) -> bool:
-    """True for a corpus-relative path inside (or at) the raw-data directory."""
-    return any(part in RAW_DATA_DIRNAMES for part in rel.replace("\\", "/").split("/")[:-1])
-
-
 def norm_raw_data_name(rel: str) -> str:
     """A corpus-relative path with the raw-data directory's name canonicalised."""
     return "/".join(RAW_DATA_DIR if part == RAW_DATA_DIR_LEGACY else part
@@ -2065,7 +2073,7 @@ def without_raw_data(m: dict) -> dict:
     INPUT (byte-verified against the pristine copy), not content the stage wrote,
     so a normalised copy of it must not read as "the champion changed".
     """
-    files = {k: v for k, v in (m or {}).get("files", {}).items() if not is_raw_data_rel(k)}
+    files = {k: v for k, v in (m or {}).get("files", {}).items() if not is_evidence_rel(k)}
     return {"files": files, "count": len(files)}
 
 
@@ -2131,13 +2139,19 @@ JOURNAL_MODES = {
 }
 
 JOURNAL_FEEDBACK_NAME_RE = re.compile(
-    r"feedback|referee|reviewers?|editors?|editorial|decision", re.I)
+    r"feedback|referee|reviewers?|editors?|editorial|decision[_ \-]*(?:letter|notice|email)",
+    re.I)
 # A file the AUTHORS wrote ("response_to_reviewers.docx", "rebuttal.md",
 # "point-by-point.docx", or a "cover_letter_to_editor.docx") is a submission
 # document, not the journal's feedback: the auto-detection must never read one
 # as the letter (the cover letter is the common trap -- "editor" is in its name).
 JOURNAL_AUTHORED_REPLY_RE = re.compile(
     r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point|cover", re.I)
+# The reply-only spelling for the written-surface scans: a cover letter IS a
+# submission document (M19 counts it as one), a response-to-reviewers is not
+# manuscript prose.
+AUTHORED_REPLY_NAME_RE = re.compile(
+    r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
 JOURNAL_CONCERN_ACTIONS = ("text", "analysis", "new-experiment", "clarification",
                            "formatting", "policy", "disagree")
 JOURNAL_CONCERN_DISPOSITIONS = ("to-fix", "already-addressed", "manual", "not-applicable")
@@ -2195,7 +2209,11 @@ def journal_feedback_paths(ctx: Ctx) -> list:
             continue
         p = Path(s)
         if not p.is_absolute():
-            p = ctx.root / p
+            # Root-relative first (the documented spelling), then CWD-relative:
+            # an operator who typed the path from their shell should not have to
+            # discover the difference.
+            root_rel = ctx.root / p
+            p = root_rel if root_rel.exists() else (Path.cwd() / p)
         out.append(p)
     return out
 
@@ -2203,10 +2221,16 @@ def journal_feedback_paths(ctx: Ctx) -> list:
 def journal_feedback_files(ctx: Ctx) -> list:
     """[(absolute path, label)] of the feedback this root revises against.
 
-    Operator-named files (setup --journal-feedback) win; when none were named,
-    the feedback-name heuristic finds them in the corpus -- typically
-    `raw_data/iScience_feedback_from_reviewers_and_editors.txt`, the real-world
-    shape this feature exists for. The corpus's own bookkeeping is skipped.
+    Precedence:
+      1. operator-named files (`setup --journal-feedback`), which win outright;
+      2. every file in the corpus's `human_review_feedback/` area that is not an
+         authored reply (the area exists for exactly this content, so it needs
+         no name heuristic -- a Chinese-named or generically named report works);
+      3. the legacy name heuristic over the whole corpus (`feedback`/`referee`/
+         `reviewer`/`editor`/`decision` in the file name), which keeps the
+         earlier design working when the letter lives in `raw_data/`.
+    A file the AUTHORS wrote (`response_to_reviewers.docx`, `cover_letter_to_
+    editor.docx`, `point-by-point.md`) is never read as the journal's letter.
     """
     named = journal_feedback_paths(ctx)
     if named:
@@ -2215,18 +2239,49 @@ def journal_feedback_files(ctx: Ctx) -> list:
             if not p.is_file():
                 die(f"--journal-feedback {p} does not exist (or is not a file). Give the "
                     f"decision letter / reviewer report(s) explicitly, or drop the flag and let "
-                    f"the pipeline find them in the corpus's raw-data evidence area.")
+                    f"the pipeline find them in the corpus's human_review_feedback/ area.")
             out.append((p, p.name))
         return out
+    if not ctx.pristine.is_dir():
+        return []
+    area = human_feedback_files_in(ctx.pristine)
+    feedback = [(p, label) for p, label in area
+                if not JOURNAL_AUTHORED_REPLY_RE.search(p.name)]
+    if feedback:
+        return feedback
     found = []
-    if ctx.pristine.is_dir():
-        for p in sorted(ctx.pristine.rglob("*")):
-            if not p.is_file() or is_bookkeeping_name(p.name):
-                continue
-            if JOURNAL_FEEDBACK_NAME_RE.search(p.name) \
-                    and not JOURNAL_AUTHORED_REPLY_RE.search(p.name):
-                found.append((p, p.relative_to(ctx.pristine).as_posix()))
+    for p in sorted(ctx.pristine.rglob("*")):
+        if not p.is_file() or is_bookkeeping_name(p.name):
+            continue
+        if JOURNAL_FEEDBACK_NAME_RE.search(p.name) \
+                and not JOURNAL_AUTHORED_REPLY_RE.search(p.name):
+            found.append((p, p.relative_to(ctx.pristine).as_posix()))
     return found
+
+
+def human_feedback_files_in(dirp: Path) -> list:
+    """[(path, corpus-relative label)] of every file in `dirp`'s feedback area."""
+    area = dirp / HUMAN_FEEDBACK_DIR
+    out = []
+    if not area.is_dir():
+        return out
+    for p in sorted(area.rglob("*")):
+        if p.is_file() and not is_bookkeeping_name(p.name):
+            out.append((p, p.relative_to(dirp).as_posix()))
+    return out
+
+
+def journal_previous_responses(ctx: Ctx) -> list:
+    """[(path, label)] of authored replies found beside the human feedback.
+
+    A previous response-to-reviewers document is CONTEXT (what was promised),
+    never a concern source and never the journal's letter. It is listed to the
+    session so it can keep the new response consistent with the old one.
+    """
+    if not ctx.pristine.is_dir():
+        return []
+    return [(p, label) for p, label in human_feedback_files_in(ctx.pristine)
+            if JOURNAL_AUTHORED_REPLY_RE.search(p.name)]
 
 
 def feedback_text_of(path: Path) -> tuple:
@@ -3181,14 +3236,25 @@ SCORE_MAX = 4
 # v4 (2026-09-30): the tier ORDER is the score. Every tier carries the same FOUR
 # severity rungs (minor 1 / major 2 / critical 3 / fatal 4, a distance from
 # correct), the tiers are compared LEXICOGRAPHICALLY in
-# correctness > consistency > preservation > completeness > formatting > writing
+# correctness > preservation > completeness > consistency > writing > formatting
 # order, and the first tier whose net is not zero decides the comparison -- a
 # lower-priority gain can never offset a higher-priority loss. (v3 summed the
 # tiers additively with differentiated caps and made formatting/writing
 # MINOR-only; both are superseded.)
 JUDGE_CONTRACT_VERSION = 4
-BASIS_TIERS = ("correctness", "consistency", "preservation", "completeness", "formatting",
-               "writing")
+# The scoring classes, in priority order (2026-10-01 calibration):
+#   correctness  -- the truth of what is asserted (wrong claim, strength mismatch)
+#   preservation -- content lost or invented between the two versions
+#   completeness -- an item the artifact promises / the venue requires, missing
+#   consistency  -- the same thing said/spelled/numbered two ways; uneven conventions
+#   writing      -- prose quality whose meaning survives (Q2-Q12 of the rubric)
+#   formatting   -- purely mechanical layout; pre-normalized before the judge sees it
+# Rationale: a minor convention drift must not outrank lost content or a missing
+# deliverable, and a prose defect whose meaning survives must not outrank (or be
+# outranked by) mechanical layout. Meaning-changing rows are refiled to
+# correctness by the class rule, so `consistency` here is the residual class.
+BASIS_TIERS = ("correctness", "preservation", "completeness", "consistency", "writing",
+               "formatting")
 BASIS_VALUES = BASIS_TIERS + ("none",)
 # FOUR severity rungs, weakest first, and EVERY tier carries all four: minor 1 /
 # major 2 / critical 3 / fatal 4. The rungs are a DISTANCE FROM CORRECT (a
@@ -3669,10 +3735,9 @@ def caption_rule_template(profile=None) -> str:
     NEVER by deleting scientific content, claims, limitations, or necessary methodological
     detail. A cut that removes content is a preservation defect and is worse than the long
     caption. A length/caption row is a formatting-tier MINOR row -- the venue's relaxed margins
-    make slight over-length intended, so it is never Major/Critical/Fatal: it may break a tie
-    between otherwise equal packages by one point, it must never outrank a correctness,
-    consistency or preservation difference, and it must never inflate a candidate's
-    critical-finding count.
+    make slight over-length intended, so it is never Major/Critical/Fatal: FORMATTING is the
+    lowest scoring tier, so a length row can decide only when every other tier (including
+    writing) is zero; it must never inflate a candidate's critical-finding count.
   * If a caption cannot be brought under @@CAPTION_LIMIT@@ words without losing content, do not
     guess and do not cut: leave the caption as it is and say so explicitly, listing it for manual
     action (revise: MANUAL_STEPS.md; review: the manual-verification list; judge: the comparison
@@ -3683,7 +3748,7 @@ def caption_rule_template(profile=None) -> str:
     redundancy-only compression of an over-cap abstract or main text (the length rule, check id
     M19). The cover letter keeps that blanket rule unchanged.
   * When judging, caption length sits in the FORMATTING tier of the priority order
-    (correctness > consistency > preservation > completeness > formatting > writing). A
+    (correctness > preservation > completeness > consistency > writing > formatting). A
     caption-length difference alone never justifies a score beyond +/-1, and two versions that are
     BOTH over the limit are indistinguishable on this check (score 0). Word-count arithmetic is never a
     substitute for judging content, and a version over the suggested length is still fully
@@ -3777,8 +3842,8 @@ M18_JUDGE_SWEEP_ON = """PLUS the pipeline-mandated caption sweep M18 (count ever
    common patterns and lists anything else as "suspected" -- your M18 artifact is the authoritative
    enumeration, and a caption the code-side scan did not recognise is exactly the kind of miss you
    must not repeat. M18 is a SUGGESTION: an over-limit caption is a formatting-tier MINOR item
-   (<= +/-1 -- it can break a tie between two otherwise equal packages, never outweigh a
-   difference in a higher tier), and it never makes a version ineligible."""
+   (<= +/-1 -- FORMATTING is the lowest tier, so a length row can decide only when every other
+   tier, including writing, is zero), and it never makes a version ineligible."""
 M18_JUDGE_SWEEP_REPORT = """PLUS the pipeline-mandated legend sweep M18 (count every figure
    legend's words and record the rows in judge_review/artifacts/M18_caption_words.md). M18 is part
    of the frozen set for every judge session, so do not skip it and do not treat it as optional.
@@ -3995,8 +4060,9 @@ M20_JUDGE_SWEEP = """PLUS the pipeline-mandated OOXML formatting sweep M20 (deri
    formatting-tier difference class: a version whose formatting is UNIFORM (one URL/email
    treatment, consistent quotation marks, consistent legend spacing, no blank page) may be
    preferred to one that is not by at most +/-1, and formatting never decides a comparison on its
-   own beyond that point: a formatting-tier difference can break a tie between two otherwise
-   equal packages, and it can never outweigh a difference in a higher tier. Mechanical defects
+   own beyond that point: FORMATTING is the lowest tier, so a formatting-tier difference can
+   decide only when every other tier (including writing) is zero; it can never outweigh a
+   correctness, preservation, completeness, consistency or writing difference. Mechanical defects
    have already been normalized by the orchestrator before the view you
    read was built, so do not manufacture differences out of them. The TEXT-level consistency rows
    (citation dialect, US/UK spelling, attributive hyphenation) are deliberately NOT pre-normalized:
@@ -4302,8 +4368,8 @@ SHARED_DECISION_BLOCK = """
 
 === THE SHARED DECISION RULES (identical in every session; only YOUR deliverable differs) ===
 D1. ONE vocabulary. Every difference, finding and residual is named by its CLASS and SEVERITY.
-    Classes, highest priority first: correctness > consistency > preservation > completeness >
-    formatting > writing. Severities, a DISTANCE FROM CORRECT in every class: Fatal > Critical >
+    Classes, highest priority first: correctness > preservation > completeness > consistency >
+    writing > formatting. Severities, a DISTANCE FROM CORRECT in every class: Fatal > Critical >
     Major > Minor. A difference that cannot be named in that vocabulary is COSMETIC and counts 0 --
     for everyone. A difference that CAN be named is never cosmetic: `formatting` and `writing` rows
     are graded on the same four rungs as every other class, and always counted by whichever session
@@ -4358,6 +4424,9 @@ ADOPTED_SWEEPS_BLOCK = """
   M19     abstract/main-text length against the journal's relaxed caps, plus the cover-letter
           preference.
   M20     OOXML style/formatting rows, each carrying its `tier` (`finding` | `advisory`).
+          This artifact `tier` is the ROW's priority in the review, NOT the judge's six scoring
+          tiers (correctness/preservation/completeness/consistency/writing/formatting); the two
+          vocabularies are independent and must never be conflated.
   M21     correspondence policy: reviewer exclusions, required disclosures, and whether a cover
           letter's claims about the work are supported by the manuscript itself -- in BOTH
           directions: a letter claim that exceeds the manuscript's evidence is an overclaim, and
@@ -4481,8 +4550,8 @@ defect the same way; only the deliverable differs):
         COSMETIC rows, or @@T_COMPLETENESS@@ / @@T_CORRECTNESS@@ when the row damages the delivered
         artifact (see the artifact-damage rule above); category 5 (Missing / Unneeded
         Information) -> @@T_COMPLETENESS@@.
-  * Severity has FOUR RUNGS, and it is a DISTANCE FROM CORRECT in EVERY class -- factual,
-    consistency, preservation, completeness, formatting and prose alike. FATAL = the artifact or
+ * Severity has FOUR RUNGS, and it is a DISTANCE FROM CORRECT in EVERY class -- correctness,
+   preservation, completeness, consistency, prose and formatting alike. FATAL = the artifact or
     the claim is unusable (a deliverable that cannot be opened or read, a rendering with no
     readable text, a fabricated result presented as established) AND no usable copy of that
     content ships elsewhere in the package (a broken render beside an intact editable source is a
@@ -4568,37 +4637,46 @@ def shared_blocks() -> str:
 # still carries `raw_figs/`.
 RAW_DATA_READONLY_RULE = """
 
-=== THE RAW-DATA DIRECTORY IS THE READ-ONLY EVIDENCE AREA (never submission content) ===
-  * The corpus's raw data -- figure and table sources, the data tables, the analysis snapshot --
-    is the AUTHOR's input and EVIDENCE for the submission, and it lives in `raw_data/`. An older
-    corpus spells that directory `raw_figs/`; the two spellings mean the SAME directory, and one
-    version corpus carries one of them.
-  * It is NOT part of the submission and is NOT submitted to the journal. Nothing inside it is a
-    submission document: a file there is never a main-text, cover-letter, title-page,
+=== THE EVIDENCE AREAS ARE READ-ONLY AND ARE NEVER SUBMISSION CONTENT ===
+  * The corpus carries its EVIDENCE in two top-level areas, beside the submission documents:
+      - `raw_data/` (an older corpus spells it `raw_figs/`; the two spellings mean the SAME
+        directory): the data tables, figure/table sources and the analysis snapshot the author's
+        own scripts regenerate -- the PRODUCER side of the written claims;
+      - `human_review_feedback/`: the REAL editors'/reviewers' comments from the previous
+        submission (decision letters, referee reports, editor correspondence). It may also hold
+        the authors' PREVIOUS response-to-reviewers documents; those are CONTEXT for what was
+        promised, never the journal's letter and never a concern source.
+  * Neither area is part of the submission and neither is submitted to the journal. Nothing in
+    them is a submission document: a file there is never a main-text, cover-letter, title-page,
     supplementary or figure document, whatever its name suggests, and its text is never the
     authors' prose. Never count it against a word limit, never sweep it for acronyms, citations,
-    numbers, terminology or file hygiene, and never quote it as something "the submission says"
-    (the one exception is M30, where the raw data is the PRODUCER side of a written claim's
-    comparison).
-  * It may also carry the editors'/reviewers' feedback and decision letters. That is EXTERNAL
-    prose: evidence about the review, never authored content, never a written surface to align and
-    never a finding quote about the manuscript. Read it for what the review requires; attribute
-    nothing in it to the authors.
-  * Nothing inside it may be edited, regenerated, rewritten, renamed, deleted or added to: not a
-    number, not a column, not a caption, not a plot, not a compiled figure, not a build artifact.
-    A package carries it BYTE-FOR-BYTE, and a document that points into it
+    numbers, terminology or file hygiene, and never quote it as something "the submission says".
+  * Nothing in either area may be edited, regenerated, rewritten, renamed, deleted or added to.
+    A package carries them BYTE-FOR-BYTE, and a document that points into them
     (`\\input{raw_data/...}`, `\\includegraphics{raw_data/...}`) names the file that is there.
-  * The ONE permitted change is the DIRECTORY's own name: if the package (or its base) still
-    spells it `raw_figs/`, rename the directory to `raw_data/` and repoint every reference to it
-    -- `raw_figs/x` becomes `raw_data/x` -- leaving every file inside untouched, names included.
-    Record that one rename in the package's own report.
-  * It is CHECKED, not merely requested: the orchestrator compares the directory against the
+  * The ONE permitted change is the raw-data DIRECTORY's own name: if the package (or its base)
+    still spells it `raw_figs/`, rename the directory to `raw_data/` and repoint every reference
+    to it -- `raw_figs/x` becomes `raw_data/x` -- leaving every file inside untouched, names
+    included. Record that one rename in the package's own report.
+  * It is CHECKED, not merely requested: the orchestrator compares both areas against the
     untouched original after every package-producing session and restores the original's copy,
-    file by file. A change inside it therefore never reaches the submission -- it only costs the
-    work.
-  * It is never a SCORED difference: no version is rewarded for changing raw data and none is
-    penalized for leaving it exactly as it is. A "fixed" data table is not a `resolved` item, and a
-    figure that regenerates identically is not an `added` one."""
+    file by file. A change inside them therefore never reaches the submission -- it only costs
+    the work.
+  * Neither area is ever a SCORED difference BY ITSELF: no version is rewarded for changing raw
+    data or the feedback files and none is penalized for leaving them exactly as they are. A
+    "fixed" data table is not a `resolved` item and a copied feedback file is not an `added` one.
+  * HOW THE EVIDENCE MAY BE USED:
+      - M30 reads `raw_data/` as the producer side of a written claim's comparison;
+      - every stage reads `human_review_feedback/` for what the review requires (the concern
+        reconciliation and the response letter are built from it);
+      - a JUDGE sees both areas in its anonymized view under the labeled `evidence/` directory
+        (see the judge prompt): `raw_data/` may be used to check correctness/completeness, and
+        the human feedback may be used to check whether a version ADDRESSES the raised concerns
+        (a concern the target fails to answer while an opponent answers it is a completeness
+        difference; it is a correctness difference when the text claims to answer it and does
+        not). The feedback is IDENTICAL in every view, so it can never by itself say which
+        version is better -- only the manuscript's handling of it can. Never quote a reviewer's
+        words as the authors' text, and never score a version by the reviewers' opinion."""
 
 
 def validation_block(role: str) -> str:
@@ -4666,7 +4744,7 @@ def derived_outputs_rule(profile=None) -> str:
     defect and their content is never evidence about how or when a package was made.
   * A build by-product that no longer matches its source (a .aux/.bbl still naming the pre-rename
     file, a .log from an earlier build) is a packaging note: report it in your reason, never score
-    it as a correctness/consistency/preservation/completeness defect, and never let it decide a
+    it as a correctness/preservation/completeness/consistency defect, and never let it decide a
     comparison.
   * A STALE SUBMITTED PDF IS NOT JUST A BY-PRODUCT. @@VENUE_PDF_NOTE@@. So
     when a TOP-LEVEL manuscript, cover-letter or supplementary PDF no longer matches the editable
@@ -5007,10 +5085,10 @@ def anti_regression_verdict(ctx, vid: str, vs, vs_vals: list):
 
 # Sentinel for a REPORTED-but-absent value (the marker summary omitted it and no
 # MANUAL_STEPS.md could be counted): a missing number is +inf, so absence never
-# looks better than a reported value and never wins a tie on absence. Only
-# `critical_remaining` is a ranking key (and only after the score statistics have
-# been compared); `manual_steps` is reported, never ranked on -- see
-# candidate_tiebreak_inputs() for why.
+# looks better than a reported value. None of these self-reported numbers is a
+# ranking key any more (the panel-derived issue census is -- see
+# champion_sort_key); they are recorded and cross-checked, never ranked on --
+# `manual_steps` was never ranked on at all.
 MISSING_TIEBREAK = float("inf")
 
 
@@ -5311,12 +5389,16 @@ Layout (paths relative to the sandbox root):
                   DIFF_LEDGER.md) from an earlier round, they are NOT submission content -- do not
                   enumerate, sweep, quote or report them as manuscript text. The manuscript is the
                   rest of the corpus.
-                  base/ may also carry raw_data/ (legacy spelling raw_figs/): the READ-ONLY
-                  EVIDENCE area. It is NOT part of the submission and not a submission document --
-                  never enumerate, sweep, count, quote or report its files as manuscript text
-                  (a data table, a figure source, an editor's decision letter or a reviewer's
+                  base/ may also carry the READ-ONLY EVIDENCE areas: raw_data/ (legacy spelling
+                  raw_figs/; data tables, figure/table sources, the analysis snapshot) and
+                  human_review_feedback/ (the REAL editors'/reviewers' comments, plus any previous
+                  response as context). Neither is part of the submission and no file in either is
+                  a submission document -- never enumerate, sweep, count, quote or report them as
+                  manuscript text (a data table, a figure source, a decision letter or a referee
                   report is evidence, not the authors' prose), whatever the file names suggest.
-                  Read it for facts and as the producer side of an M30 comparison only.
+                  Read raw_data/ for facts and as the producer side of an M30 comparison; read the
+                  human feedback for what the review requires. A feedback or response document
+                  kept elsewhere in the corpus is treated the same way (skipped by name).
   review/       — THE OUTPUT DIRECTORY (the paper-review skill's OUT). Create it if it does not
                   exist. Every artifact you produce goes here: review/findings.json,
                   review/findings.md, review/artifacts/<CHECK_ID>.md, review/work/, and the
@@ -5712,11 +5794,11 @@ below it. A finding that names an UNDERCLAIM authorises raising it -- to exactly
 finding's evidence supports, never above it. The fix of one direction must not overshoot into the
 other (an overclaim "fixed" into a hedge is a new underclaim, and a hedge "fixed" into a claim is
 a new overclaim), and a claim edit with no calibration finding behind it stays frozen under E6.
-`critical_remaining` is reported in the decision record and can break a statistical tie between
-two versions whose scores are identical, so report it honestly: the number of CRITICAL/FATAL-
-severity findings still open after your revision (0 when none remain). `writing_remaining` breaks a
-statistical tie the same way, BELOW the critical count (severity outranks style) and never as a
-score or a gate: the number of the frozen review's CATEGORY-2 findings (writing quality, logic,
+`critical_remaining` is reported in the decision record (the selection's tie-break is the panel's
+own issue census, not this self-report) and is cross-checked against the frozen review, so report
+it honestly: the number of CRITICAL/FATAL-severity findings still open after your revision (0 when
+none remain). `writing_remaining` is reported and cross-checked the same way and is never a score
+or a gate: the number of the frozen review's CATEGORY-2 findings (writing quality, logic,
 repetition -- see the class mapping) still open after your revision, 0 when none remain; the
 orchestrator cross-checks it against the frozen review. `manual_items` is reported too but
 is deliberately never ranked on: the number of hand-off items measures what the author still has
@@ -6062,10 +6144,10 @@ root with exactly this structure:
                "shared_defects_left": <int>, "donors_read": <int>,
                "critical_remaining": <int>, "writing_remaining": <int>, "manual_items": <int>}}
 `critical_remaining` (CRITICAL/FATAL-severity issues still open after your run; 0 when none) is
-reported and can break a statistical tie between two versions whose scores are identical;
-`writing_remaining` breaks such a tie too, BELOW the critical count (severity outranks style) and
-never as a score or a gate: the number of CATEGORY-2 writing-quality/logic/repetition issues still
-open in your package (0 when none remain; the class mapping is in the skill). This run has no
+reported and cross-checked (the selection's tie-break is the panel's own issue census, not this
+self-report); `writing_remaining` is reported the same way and is never a score or a gate: the
+number of CATEGORY-2 writing-quality/logic/repetition issues still open in your package (0 when
+none remain; the class mapping is in the skill). This run has no
 frozen review to cross-check against -- only the revise arm consumes one -- so report the count as
 accurately as the class mapping allows;
 `manual_items` (entries you left in integrated/MANUAL_STEPS.md) is reported but is deliberately
@@ -6284,10 +6366,10 @@ structure:
    "summary": {"reorganized_sections": <int>, "problems_surfaced": <int>,
                "critical_remaining": <int>, "writing_remaining": <int>, "manual_items": <int>}}
 `critical_remaining` (CRITICAL/FATAL-severity issues still open in the candidate; 0 when none) is
-reported and can break a statistical tie between versions whose scores are identical;
-`writing_remaining` breaks such a tie too, BELOW the critical count (severity outranks style) and
-never as a score or a gate: the number of CATEGORY-2 writing-quality/logic/repetition issues still
-open in your candidate (0 when none; the class mapping is in the skill's `sweeps.md`);
+reported and cross-checked (the selection's tie-break is the panel's own issue census, not this
+self-report); `writing_remaining` is reported the same way and is never a score or a gate: the
+number of CATEGORY-2 writing-quality/logic/repetition issues still open in your candidate (0 when
+none; the class mapping is in the skill's `sweeps.md`);
 `manual_items` (entries in rewritten/MANUAL_STEPS.md) is reported but is deliberately never ranked
 on -- the number of hand-off items measures what the author still has to do, not how good the
 package is, so a bigger honest list cannot cost you the round. Report BOTH honestly.
@@ -6528,6 +6610,13 @@ original extension kept (that extension is the only naming detail left, because 
 the file). The assignment is randomly permuted per view, so the SAME document has a DIFFERENT name
 in target/ and in every field/ opponent, and nothing in a path reveals how a
 package was produced, how many processing steps it went through, or how heavily it was edited. Consequences to respect:
+  * ONE EXCEPTION, clearly labeled: the two EVIDENCE areas keep a stable directory name --
+    `evidence/raw_data/…` (the data/figures/tables/analysis the claims were built from) and
+    `evidence/human_review_feedback/…` (the REAL editors'/reviewers' comments on the previous
+    submission, plus any previous response-to-reviewers). File names inside them are anonymized
+    like everything else. The labels are identical in every view (the areas are inputs, restored
+    byte-for-byte), so they cannot tell you which package is which -- but they tell you what the
+    files ARE. See "THE EVIDENCE AREAS" below for how to use them;
   * match documents between target/, field/* and original/ by CONTENT and ROLE, never by name;
   * document references INSIDE a file (a LaTeX \\includegraphics{...}, a \\input, a
     \\addbibresource, a build script, a hyperlink to a sibling file) have been REWRITTEN to the
@@ -6538,6 +6627,30 @@ package was produced, how many processing steps it went through, or how heavily 
     orchestrator verifies the real file set mechanically (names and bytes) outside your sandbox;
   * never infer (or let influence a score) which process produced a package from a name, a path
     shape or a token level -- judge content only.
+
+THE EVIDENCE AREAS — USE THEM, AND DO NOT MISTAKE THEM FOR THE SUBMISSION:
+  * `evidence/raw_data/` is the PRODUCER side: data tables, figure/table sources, the analysis
+    snapshot. Use it to CHECK correctness and completeness (a written number, label, sample size
+    or parameter the data contradict is a `correctness` row for the version that carries it; a
+    claim the data prove and the text omits is the same check read in the other direction), and
+    to CHECK value/label/cohort CONSISTENCY between documents (the same quantity stated
+    differently in two places is a `consistency` row when the data can say which statement is
+    which -- pure terminology, acronym or house-style drift is manuscript-internal and the data
+    cannot judge it). For PRESERVATION the data is the REFERENCE, not the instrument: it can
+    prove that a dropped claim/panel/value the opponent had was real and supported, but only the
+    two packages can show that it was dropped -- never report an evidence-area difference as a
+    version difference (the areas are byte-identical in every view by contract).
+  * `evidence/human_review_feedback/` is what the real editors and reviewers said about the
+    previous submission. Use it to judge how well each version ADDRESSES those concerns: when the
+    target answers a raised concern and the opponent does not (or answers it worse or not at
+    all), that is a `completeness` row for the target -- and a `correctness` row when a version's
+    text CLAIMS to answer a concern it does not answer. A version may also answer a concern in a
+    way the reviewer would reject; judge that on the merits, citing the concern id and the
+    manuscript's own handling of it.
+  * NEITHER area is submission text. Never quote a reviewer's sentence as the authors' text,
+    never count a data table or a letter as a manuscript document, and never let your own view of
+    whether the reviewers were right decide a comparison: the feedback is IDENTICAL in every
+    view, so only the manuscripts' handling of it can differ.
 
 File METADATA says nothing either, and the orchestrator sanitizes what it can before you see it:
 every file in every view has the SAME modification time and the SAME permission bits (one timestamp
@@ -6594,7 +6707,7 @@ never guess a number to fill a row):
   "basis"      the tier that DECIDES this comparison -- the FIRST tier, in the fixed priority
                order, whose net is not zero (for a net-zero score with rows, the highest-priority
                tier in which the two versions differ at all; "none" for a clean 0):
-               correctness | consistency | preservation | completeness | formatting | writing | none
+               correctness | preservation | completeness | consistency | writing | formatting | none
                ("none" is for a clean 0 with no item on either side).
   "resolved"   items the TARGET resolves that the opponent still carries (or improves: see below).
   "introduced" items the TARGET introduces (or makes worse) that the opponent does not carry.
@@ -6621,11 +6734,11 @@ on its own. A non-zero score therefore needs at least one item on its side that 
 and the |3|/|4| rungs need their MAJOR/CRITICAL/FATAL backing from a row that is not such a row.
 
 THE INTEGER IS DERIVED FROM THOSE ROWS, LEXICOGRAPHICALLY (contract v4). The six tiers are compared
-IN THEIR PRIORITY ORDER (correctness > consistency > preservation > completeness > formatting >
-writing) and the FIRST tier whose net is not zero DECIDES the comparison: its sign decides, its
+IN THEIR PRIORITY ORDER (correctness > preservation > completeness > consistency > writing >
+formatting) and the FIRST tier whose net is not zero DECIDES the comparison: its sign decides, its
 magnitude is |net| bounded by the rung its OWN deciding rows can back, and every lower tier is then
 IGNORED (a consistency improvement can never offset a correctness loss; a formatting improvement
-can never offset a completeness loss). Within a tier the rows weigh minor 1 / major 2 / critical 3
+can never offset a writing loss). Within a tier the rows weigh minor 1 / major 2 / critical 3
 / fatal 4 (resolved add, introduced subtract) and the net is capped at +-4. The magnitude bound: a
 run of MINOR rows reaches +-2 and no further, a tier whose deciding rows include a MAJOR row
 reaches +-3, and a tier whose deciding rows include a CRITICAL or FATAL row reaches +-4. A
@@ -6700,7 +6813,7 @@ damage, graded by the extent of what it displaces. The scale is a scale of DAMAG
 tier the damage happens to live in.
 
 SEVERITY HAS FOUR RUNGS, AND IT IS A DISTANCE FROM CORRECT IN EVERY TIER -- correctness,
-consistency, preservation, completeness, formatting and writing alike: FATAL = the artifact or the
+preservation, completeness, consistency, writing and formatting alike: FATAL = the artifact or the
 claim is unusable (a deliverable that cannot be opened or read, a rendering with no readable text,
 a fabricated result presented as established) AND no usable copy of that content ships elsewhere
 in the package; CRITICAL = the error changes a conclusion,
@@ -6719,12 +6832,13 @@ cannot be "clearly better".
 
 === PRIORITY ORDER (use it to decide every comparison) ===
 
-  correctness  >  consistency  >  preservation  >  completeness  >  formatting  >  writing
+  correctness  >  preservation  >  completeness  >  consistency  >  writing  >  formatting
 
-An error of fact/DOI/citation/number/premise outranks a cross-document conflict, which outranks a
-regression against the original (deleted claims, softened or WEAKENED claims and limitations,
-broken cross-references or numbering), which outranks missing or unneeded information, which
-outranks formatting and writing. The order is LEXICOGRAPHIC: the first tier in which the two
+An error of fact/DOI/citation/number/premise outranks a regression against the original (deleted
+claims, softened or WEAKENED claims and limitations, broken cross-references or numbering), which
+outranks missing or unneeded information, which outranks the same thing said/spelled/numbered two
+ways or a convention applied unevenly, which outranks prose whose meaning survives, which
+outranks purely mechanical layout. The order is LEXICOGRAPHIC: the first tier in which the two
 versions differ decides the comparison, and no lower tier can offset it. When sources in a package
 disagree, the higher-priority source wins, in this order:
   @@SOURCE_HIERARCHY@@
@@ -6741,7 +6855,7 @@ original, then a
 POSITIVE score means the target improved on the original and a NEGATIVE score means the target
 REGRESSED against it. That single comparison becomes the field's anti-regression gate, so weigh it
 carefully against the original's own defects (which belong to correctness/consistency/completeness/
-formatting, never to preservation).
+writing/formatting, never to preservation).
 
 If the TARGET itself is byte-identical to original/ (that is possible: the pristine original is a
 field member in its own right), then judge it like any other comparison -- a positive score means
@@ -6776,7 +6890,7 @@ score. Do not invert the direction just because you recognise the original.
   "judge_index": @@JUDGE_INDEX@@,
   "comparisons": [
     {"opponent_label": "v1", "score": <int -4..4>,
-     "basis": "correctness|consistency|preservation|completeness|formatting|writing|none",
+     "basis": "correctness|preservation|completeness|consistency|writing|formatting|none",
      "resolved":   [{"check": "M1", "tier": "consistency", "severity": "minor",
                      "evidence": "<=25 words with a location"}],
      "introduced": [],
@@ -8433,11 +8547,11 @@ def scan_captions_in_sources(sources: list, limit=None) -> dict:
                 continue                      # a later source provides this path
             if is_bookkeeping_name(p.name):
                 continue                      # pipeline bookkeeping, not submission
-            if is_raw_data_rel(rel):
-                # raw_data/ is the EVIDENCE area, not submission text: a data
-                # table, a reviewer's report or an editor's decision letter can
-                # print "Figure 1" without carrying a manuscript caption (M18
-                # enumerates the submission's legends only).
+            if is_non_manuscript_rel(rel):
+                # Evidence areas AND feedback/response documents anywhere are
+                # not submission text: a data table, a reviewer's report or an
+                # editor's decision letter can print "Figure 1" without carrying
+                # a manuscript caption (M18 enumerates the submission's legends).
                 continue
             doc = prefix + rel
             ext = p.suffix.lower()
@@ -8951,11 +9065,10 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
                 continue
             if (prefix + rel) in overrides[i]:
                 continue                      # a later source provides this path
-            if is_raw_data_rel(rel):
-                # raw_data/ is the EVIDENCE area, not a submission document: its
-                # files (data tables, figure sources, the editors'/reviewers'
-                # feedback) are never counted against the article's word limits
-                # (M19 measures the submission's abstract, body and letter only).
+            if is_non_manuscript_rel(rel):
+                # Evidence areas and feedback/response documents are never
+                # counted against the article's word limits (M19 measures the
+                # submission's abstract, body and cover letter only).
                 continue
             doc = prefix + rel
             ext = p.suffix.lower()
@@ -9168,9 +9281,9 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
             rel = p.relative_to(src).as_posix()
             if excluded and rel.split("/", 1)[0] in excluded:
                 continue
-            if is_raw_data_rel(rel):
-                # raw_data/ is the EVIDENCE area: a reviewer's .docx report or a
-                # data-source document is not a submission file whose OOXML
+            if is_non_manuscript_rel(rel):
+                # Evidence areas and feedback/response documents are inputs: a
+                # reviewer's .docx report is not a submission file whose OOXML
                 # style the M20 scan may report (and it may be mode-locked).
                 continue
             if "work" in rel.split("/")[:-1]:
@@ -9191,7 +9304,7 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
             rel = p.relative_to(src).as_posix()
             if excluded and rel.split("/", 1)[0] in excluded:
                 continue
-            if is_raw_data_rel(rel):
+            if is_non_manuscript_rel(rel):
                 continue        # evidence area, not submission prose (see above)
             if "work" in rel.split("/")[:-1]:
                 continue
@@ -9241,9 +9354,9 @@ def _fmt_corpus_files(dirp: Path) -> list:
         if not p.is_file() or p.name.startswith("~$") or _is_aux_doc(p.name):
             continue
         rel = p.relative_to(dirp).as_posix()
-        if is_raw_data_rel(rel):
-            # raw_data/ is READ-ONLY BY CONTRACT (recursively): its files are the
-            # author's inputs, so the formatter never opens one for writing --
+        if is_evidence_rel(rel):
+            # The EVIDENCE areas are READ-ONLY BY CONTRACT (recursively): their
+            # files are the author's inputs, so the formatter never opens one --
             # and an operator may have removed the write bits, which would make
             # the attempt fail on a file the pipeline must not touch anyway.
             continue
@@ -9741,11 +9854,10 @@ def corpus_text_documents(sources: list) -> list:
             rel = p.relative_to(src).as_posix()
             if excluded and rel.split("/", 1)[0] in excluded:
                 continue
-            if is_raw_data_rel(rel):
-                # raw_data/ is the EVIDENCE area (data tables, figure sources,
-                # the editors'/reviewers' feedback), never submission prose:
-                # placeholder and number-provenance scans read the submission
-                # documents only.
+            if is_non_manuscript_rel(rel):
+                # Evidence areas and feedback/response documents are never
+                # submission prose: placeholder and number-provenance scans read
+                # the submission documents only.
                 continue
             if "work" in rel.split("/")[:-1]:
                 continue
@@ -9767,7 +9879,7 @@ def corpus_text_documents(sources: list) -> list:
             rel = p.relative_to(src).as_posix()
             if excluded and rel.split("/", 1)[0] in excluded:
                 continue
-            if is_raw_data_rel(rel):
+            if is_non_manuscript_rel(rel):
                 continue        # evidence area, not submission prose (see above)
             if "work" in rel.split("/")[:-1]:
                 continue
@@ -10618,9 +10730,9 @@ def scan_placeholders_in_sources(sources: list) -> dict:
                 continue
             if (prefix + rel) in overrides[i]:
                 continue                      # a later source provides this path
-            if is_raw_data_rel(rel):
+            if is_non_manuscript_rel(rel):
                 continue        # evidence area: a hand-off marker can only be a
-                                # submission document's marker, never raw data's
+                                # submission document's marker, never evidence's
             if is_bookkeeping_name(p.name):
                 continue                      # the reports legitimately list them
             ext = p.suffix.lower()
@@ -10697,7 +10809,7 @@ def collect_documents(sources: list) -> dict:
                 continue
             if (prefix + rel) in overrides[i]:
                 continue
-            if is_raw_data_rel(rel):
+            if is_evidence_rel(rel):
                 # The evidence area is not the submission's document set: a
                 # reviewer's feedback file or a data table is never a "lost
                 # document" or an "invented document" (its byte-level contract
@@ -10867,6 +10979,49 @@ def is_raw_data_rel(rel: str) -> bool:
     """True when a corpus-relative path lives inside raw_data/ (or raw_figs/)."""
     top = str(rel or "").replace("\\", "/").lstrip("/").split("/", 1)[0]
     return top in RAW_DATA_DIRNAMES
+
+
+def evidence_area_of(rel: str) -> str:
+    """The EVIDENCE area a corpus-relative path belongs to ("" when none).
+
+    Evidence areas (`raw_data/`, legacy `raw_figs/`, `human_review_feedback/`)
+    are inputs: never submission documents, never written-surface text. They are
+    the ONE exception where the two raw-data spellings still mean one area.
+    """
+    top = str(rel or "").replace("\\", "/").lstrip("/").split("/", 1)[0]
+    return top if top in EVIDENCE_DIRNAMES else ""
+
+
+def is_evidence_rel(rel: str) -> bool:
+    """True when a corpus-relative path lives inside an EVIDENCE area."""
+    return bool(evidence_area_of(rel))
+
+
+def is_human_feedback_rel(rel: str) -> bool:
+    """True when a path lives in the human editors'/reviewers' feedback area."""
+    return evidence_area_of(rel) == HUMAN_FEEDBACK_DIR
+
+
+def is_non_manuscript_rel(rel: str) -> bool:
+    """True when a corpus path is NOT the authors' manuscript prose.
+
+    Either it lives in an EVIDENCE area, or its name says it is a feedback or
+    response-to-reviewers document wherever it sits. Used by the written-surface
+    scans (captions, lengths, formatting, numbers, placeholders): such text is
+    never the manuscript, even when the operator kept it beside the documents
+    instead of in `human_review_feedback/`. A COVER LETTER is not excluded here
+    -- it is a submission document and M19 counts it as one.
+    """
+    if is_evidence_rel(rel):
+        return True
+    base = str(rel or "").replace("\\", "/").rsplit("/", 1)[-1]
+    if AUTHORED_REPLY_NAME_RE.search(base):
+        return True
+    # A COVER LETTER is a submission document (M19 counts it as one) even when
+    # its name says "to_editor"; only its "cover" spelling protects it here.
+    if re.search(r"cover", base, re.I):
+        return False
+    return bool(JOURNAL_FEEDBACK_NAME_RE.search(base))
 
 
 def make_writable(path: Path, *, directory: bool = None) -> bool:
@@ -11923,10 +12078,20 @@ def upstream_deps(rec: dict) -> list:
     if kind == "revise":
         # With the auditor enabled the reviser consumes the AUDITED list, so the
         # audit run (not the bare review) is the dependency that must be done.
-        deps = [rid_a1(r), rid_review(r)]
+        # A scoped (major/minor) revision consumes the CONCERNS run instead of a
+        # general review; the materializer records which run that is, so the
+        # retry/rebuild path never blocks on a run this root does not have.
+        deps = [rid_a1(r), rec.get("upstream_run_id") or rid_review(r)]
         if rec.get("inputs_manifest", {}).get("audit") is not None:
             deps.append(rid_audit(r))
         return deps
+    if kind in ("feedback", "concerns"):
+        return [rid_a1(r)]
+    if kind == "response":
+        # The response letter consumes the concern ledger (feedback/concerns)
+        # and the final package the caller recorded; the package may be a pin
+        # (no run) or the scoped revision run (recorded as upstream_run_id).
+        return [rec["upstream_run_id"]] if rec.get("upstream_run_id") else []
     if kind == "integrate":
         # every pool member is a donor, so EVERY pool run must be done first
         pool = list(rec.get("pool_ids") or [])
@@ -12823,7 +12988,7 @@ def revision_token_for_dir(dirp: Path) -> dict:
     # file (the raw data included), so it stays equal to what the agents compute
     # with paper-revise/scripts/revision_token.py.
     hex_tokens = sorted({t for rel, t in named
-                         if t and DOCHASH_HEX7_RE.match(t) and not is_raw_data_rel(rel)})
+                         if t and DOCHASH_HEX7_RE.match(t) and not is_evidence_rel(rel)})
     consistent = bool(hex_tokens) and all(t == token for t in hex_tokens)
     notes = []
     if not hex_tokens:
@@ -12832,7 +12997,7 @@ def revision_token_for_dir(dirp: Path) -> dict:
         notes.append(f"filename token(s) {hex_tokens} do not match the content-derived token "
                      f"{token}")
     return {"token": token, "files": len(files),
-            "tokens_seen": sorted({t for rel, t in named if t and not is_raw_data_rel(rel)}),
+            "tokens_seen": sorted({t for rel, t in named if t and not is_evidence_rel(rel)}),
             "hex_tokens": hex_tokens, "consistent": consistent, "notes": notes}
 
 
@@ -13051,13 +13216,30 @@ def _view_is_text(rel: str) -> bool:
 
 
 def _view_layout(files: list, r: int, vid: str, view_seed: str) -> tuple:
-    """(dir_names, file_map) with the ORIGINAL random draws (same seed logic)."""
+    """(dir_names, file_map) with the ORIGINAL random draws (same seed logic).
+
+    The EVIDENCE areas are the one exception to the anonymous layout: their
+    files keep an anonymized NAME but live under a stable, labeled directory
+    (`evidence/raw_data/…`, `evidence/human_review_feedback/…`) so a judge can
+    tell producer evidence and human feedback from submission documents. The
+    labels are identical in every view -- the areas are byte-identical inputs,
+    so they carry no signal about which version is which -- while the file names
+    inside stay salted per view.
+    """
     rng = random.Random(f"judge-view|{view_seed}|{int(r)}|{vid}".encode("utf-8"))
     dirs = sorted({str(Path(rel).parent.as_posix()) for rel, _p in files
                    if str(Path(rel).parent.as_posix()) not in (".", "")})
-    shuffled = dirs[:]
+    evidence_dirs = [d for d in dirs if evidence_area_of(d)]
+    normal_dirs = [d for d in dirs if not evidence_area_of(d)]
+    shuffled = normal_dirs[:]
     rng.shuffle(shuffled)
     dir_names = {d: f"d{i:02d}" for i, d in enumerate(shuffled)}
+    for d in evidence_dirs:
+        top = evidence_area_of(d)
+        area = RAW_DATA_DIR if top in RAW_DATA_DIRNAMES else top
+        rest = d.split("/")[1:]
+        dir_names[d] = "/".join([EVIDENCE_VIEW_ROOT, area]
+                                + [f"s{i:02d}" for i, _p in enumerate(rest, 1)])
     by_dir = {}
     for rel, src in files:
         parent = str(Path(rel).parent.as_posix())
@@ -15262,8 +15444,9 @@ def critical_findings_input(ctx: Ctx, rec: dict):
     """Number of Critical findings in the frozen review the run consumed (or None).
 
     Used only as a sanity signal for the self-reported `critical_remaining`
-    tie-break: it is the count the run started from, not the count that remains,
-    so it never gates a run. An arm whose own sandbox has no `review/` copy
+    count (which no longer ranks -- the panel's issue census does): it is the
+    count the run started from, not the count that remains, so it never gates a
+    run. An arm whose own sandbox has no `review/` copy
     (rewrite, integration) falls back to the round's frozen list, so the
     cross-check below is not revise-only.
     """
@@ -15280,9 +15463,10 @@ def writing_findings_input(ctx: Ctx, rec: dict):
     """Number of category-2 (writing quality / logic / repetition) findings in
     the frozen review the run consumed (or None).
 
-    The cross-check for the self-reported `writing_remaining` tie-break, exactly
-    as `critical_findings_input` is for `critical_remaining`: it is the count the
-    run started from, not the count that remains, so it never gates a run. The
+    The cross-check for the self-reported `writing_remaining` count, exactly as
+    `critical_findings_input` is for `critical_remaining` (neither ranks any
+    more -- the panel's issue census does): it is the count the run started
+    from, not the count that remains, so it never gates a run. The
     category scale is the review skill's (`sweeps.md` -> CLASSIFICATION); the
     defect CLASS those findings map to for scoring is the shared
     DEFECT_CLASS_RULE, which is why this number is a tie-break and not a score.
@@ -15306,8 +15490,9 @@ def tiebreak_selfreport_warnings(ctx: Ctx, rec: dict, summ: dict, warns: list) -
     """Report a self-reported tie-break count that claims ZERO while the round's
     frozen review lists findings of that kind.
 
-    `critical_remaining` and `writing_remaining` are ranking keys (after the
-    panel statistics), so an unverifiable under-report must at least be visible.
+    `critical_remaining` and `writing_remaining` are reported and cross-checked
+    (the ranking's tie-break is the panel-derived issue census), so an
+    unverifiable under-report must at least be visible.
     Only the zero claim is checkable: a non-zero remaining count cannot be
     distinguished from a genuine partial fix, so it is taken at face value.
     `critical_findings_input`/`writing_findings_input` fall back to the round's
@@ -16528,6 +16713,111 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
     return {"present": True, "files": len(want), "restored": restored, "dropped": dropped}
 
 
+def human_feedback_entries(dirp: Path) -> dict:
+    """{corpus-relative path: sha256} for `dirp`'s human_review_feedback area.
+
+    No version-token normalisation here: the area is an INPUT whose file names
+    never carry this package's naming evidence, so its identity is the path.
+    """
+    out = {}
+    area = dirp / HUMAN_FEEDBACK_DIR
+    if not area.is_dir():
+        return out
+    try:
+        files = [p for p in sorted(area.rglob("*")) if p.is_file()]
+    except OSError:
+        return out
+    for p in files:
+        rel = p.relative_to(dirp).as_posix()
+        try:
+            out[rel] = sha256_file(p)
+        except OSError:
+            continue
+    return out
+
+
+def enforce_readonly_human_feedback(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
+    """Put a package's human_review_feedback/ back to the untouched original.
+
+    Same contract as raw_data (an INPUT: never edited, renamed, added to or
+    dropped), without the legacy-spelling machinery: the directory has one
+    spelling. A non-empty directory squatting on a pristine file's path is
+    reported and left alone, exactly like the raw-data layer.
+    """
+    src = ctx.pristine / HUMAN_FEEDBACK_DIR
+    if not src.is_dir():
+        return {"present": False, "files": 0, "restored": [], "dropped": []}
+    want = human_feedback_entries(ctx.pristine)
+    if not want:
+        return {"present": False, "files": 0, "restored": [], "dropped": []}
+    area = cand_dir / HUMAN_FEEDBACK_DIR
+    squat = sorted(rel for rel in want if (cand_dir / rel).is_dir())
+
+    def inside_squat(rel: str) -> bool:
+        return any(rel == s or rel.startswith(s + "/") for s in squat)
+
+    mode_plan = make_tree_writable(area) if area.is_dir() else []
+    restored, dropped = [], []
+    try:
+        for rel, dig in sorted(want.items()):
+            dest = cand_dir / rel
+            if dest.is_file():
+                try:
+                    if sha256_file(dest) == dig:
+                        continue
+                except OSError:
+                    pass
+            if dest.is_dir():
+                continue                # squatted: reported below, never deleted
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(ctx.pristine / rel, dest)
+                with contextlib.suppress(OSError):
+                    shutil.copymode(ctx.pristine / rel, dest)
+            except OSError as e:
+                warns.append(f"READ-ONLY human review feedback: could not restore "
+                             f"{dest.name}: {e}")
+                continue
+            restored.append(rel)
+        for rel in sorted(human_feedback_entries(cand_dir)):
+            if rel in want or inside_squat(rel):
+                continue
+            try:
+                (cand_dir / rel).unlink()
+            except OSError:
+                continue
+            dropped.append(rel)
+        for src_dir in [src, *[p for p in sorted(src.rglob("*")) if p.is_dir()]]:
+            rel_dir = "" if src_dir == src else src_dir.relative_to(src).as_posix()
+            dst_dir = area / rel_dir if rel_dir else area
+            if dst_dir.is_dir():
+                with contextlib.suppress(OSError):
+                    shutil.copymode(src_dir, dst_dir)
+    finally:
+        restore_modes(mode_plan)
+    for s in squat:
+        warns.append(f"READ-ONLY human review feedback: {s} is a directory where the pristine "
+                     f"original has a file; its content was left alone (the recovery layer "
+                     f"refuses to delete real work) and the attempt fails")
+    for d in sorted([p for p in area.rglob("*") if p.is_dir()],
+                    key=lambda p: len(p.parts), reverse=True):
+        try:
+            d.rmdir()                   # only empty directories disappear
+        except OSError:
+            pass
+    if restored or dropped:
+        changed = ", ".join(sorted(restored + dropped)[:6])
+        more = (f" (+{len(restored) + len(dropped) - 6} more)"
+                if len(restored) + len(dropped) > 6 else "")
+        warns.append(
+            f"READ-ONLY human review feedback: {len(restored) + len(dropped)} file(s) under "
+            f"{HUMAN_FEEDBACK_DIR}/ were put back to the pristine original ({changed}{more}). "
+            f"The area is an INPUT (the real editors'/reviewers' comments): never edit, rename, "
+            f"add or drop anything inside it -- it is copied from the original, so a document "
+            f"that points into it must use the name that is there")
+    return {"present": True, "files": len(want), "restored": restored, "dropped": dropped}
+
+
 def verify_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
     """The whole READ-ONLY raw-data contract for one package: canonical name +
     the original's bytes. Called after the missing-file recovery, so an inherited
@@ -16535,6 +16825,9 @@ def verify_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
     no-op."""
     info = canonicalize_raw_data_dir(cand_dir, warns)
     info.update(enforce_readonly_raw_data(ctx, cand_dir, warns))
+    # The human editors'/reviewers' feedback area is an INPUT like raw_data:
+    # same byte-for-byte contract, same restore-from-pristine repair.
+    info["human_review_feedback"] = enforce_readonly_human_feedback(ctx, cand_dir, warns)
     return info
 
 
@@ -16549,7 +16842,8 @@ def raw_data_advisories(ctx: Ctx) -> list:
     package.
     """
     want = raw_data_entries(ctx.pristine)
-    if not want:
+    want_hf = human_feedback_entries(ctx.pristine)
+    if not want and not want_hf:
         return []
     out, seen = [], set()
     areas = [(f"pinned/{pin['id']}", pinned_docs_dir(ctx, pin))
@@ -16562,14 +16856,25 @@ def raw_data_advisories(ctx: Ctx) -> list:
         if label in seen or not d.is_dir():
             continue
         seen.add(label)
-        got = raw_data_entries(d)
-        bad = sorted(rel for key, (rel, dig) in want.items()
-                     if (got.get(key) or (None, None))[1] != dig)
-        if bad:
-            out.append(f"{label}/ carries {len(bad)} raw-data file(s) that differ from the "
-                       f"pristine original ({', '.join(bad[:3])}"
-                       f"{f' +{len(bad) - 3} more' if len(bad) > 3 else ''}); every stage "
-                       f"materializes the original's copy, so this cannot reach a new package")
+        if want:
+            got = raw_data_entries(d)
+            bad = sorted(rel for key, (rel, dig) in want.items()
+                         if (got.get(key) or (None, None))[1] != dig)
+            if bad:
+                out.append(f"{label}/ carries {len(bad)} raw-data file(s) that differ from the "
+                           f"pristine original ({', '.join(bad[:3])}"
+                           f"{f' +{len(bad) - 3} more' if len(bad) > 3 else ''}); every stage "
+                           f"materializes the original's copy, so this cannot reach a new "
+                           f"package")
+        if want_hf:
+            got_hf = human_feedback_entries(d)
+            bad_hf = sorted(rel for rel, dig in want_hf.items() if got_hf.get(rel) != dig)
+            if bad_hf:
+                out.append(f"{label}/ carries {len(bad_hf)} human-review-feedback file(s) that "
+                           f"differ from the pristine original ({', '.join(bad_hf[:3])}"
+                           f"{f' +{len(bad_hf) - 3} more' if len(bad_hf) > 3 else ''}); every "
+                           f"stage materializes the original's copy, so this cannot reach a new "
+                           f"package")
     return out
 
 
@@ -19580,7 +19885,7 @@ def tier_net_scores(items) -> dict:
             for tier, net in raw.items()}
 
 
-# --- the issue census (REPORTED, never a ranking input) ---------------------
+# --- the issue census (the selection's tie-break input) ---------------------
 # The judge ledger is the only place in the pipeline where an issue carries a
 # TIER: a comparison's `resolved` rows name the OPPONENT's defects and its
 # `introduced` rows name the TARGET's. The panel therefore already measures
@@ -19618,17 +19923,49 @@ def build_issue_census(observations, field_ids, sessions_expected=None) -> dict:
     attributed to the version whose defect it names (`introduced` -> the
     target, `resolved` -> the opponent) and to the source that found it
     (`own` when that version is the session's target, else `peer`). Counts are
-    the REPORTED statistic only: nothing here feeds a score, a gate or the
-    ranking. `sessions_expected` is the number of enabled sessions that could
-    have mentioned a version (the round's total); without it the rate falls back
-    to the sessions that actually contributed.
+    the REPORTED statistic and the tie-break's input (severity counts); they
+    never change a score or a gate. `sessions_expected` is the number of enabled
+    sessions that could have mentioned a version (the round's total); without it
+    the rate falls back to the sessions that actually contributed.
+
+    Three views of the same mentions are reported, because they answer different
+    questions:
+      * `own`/`peer`/`total` -- every mention, deduplicated per (session,
+        version) exactly as always (the historical CSV columns);
+      * `dedup_own`/`dedup_peer`/`dedup_total` -- the same mentions deduplicated
+        ACROSS sessions by an EXACT normalized key (tier, severity, check,
+        whitespace/case-normalized evidence), PER SOURCE: a defect mentioned
+        once by the version's own judge and once by another version's comparison
+        counts once in each column, so the numbers do not depend on session
+        order. The key is deliberately conservative: it merges only rows whose
+        evidence string is identical after normalization, so two genuinely
+        different defects can never be collapsed -- a fuzzy match is the
+        bug-prone direction and is not used;
+      * `peer_rate`/`own_rate` -- the deduplicated mentions per OPPORTUNITY: a
+        version is the target in `own_opps` sessions (its own judges) and an
+        opponent in `peer_opps` sessions (every other version's judges), so the
+        raw own/peer totals are dominated by exposure (peer slots are ~7x more
+        numerous). The rates normalize that, and the selection tie-break reads
+        the peer rate first, then the own rate.
     """
     field_ids = [str(v) for v in field_ids]
     census = {vid: {"tiers": {t: {s: {"own": 0, "peer": 0} for s in SEVERITIES}
                               for t in BASIS_TIERS},
-                    "own_sessions": set(), "peer_sessions": set()} for vid in field_ids}
+                    "own_sessions": set(), "peer_sessions": set(),
+                    "own_opps": set(), "peer_opps": set(),
+                    "dedup": {t: {s: {"own": 0, "peer": 0} for s in SEVERITIES}
+                              for t in BASIS_TIERS}} for vid in field_ids}
     seen = {}                       # (session, version) -> row keys already counted
+    # (version, tier, severity, check, evidence) -> the SOURCES that reported it
+    # across sessions. A defect mentioned both by the version's own judge and by
+    # another version's comparison counts once in EACH source column -- the
+    # dedup is per (defect, source), so it is order-independent.
+    seen_global = {}
     for sess, target, opp, comp in observations:
+        if target in census:
+            census[target]["own_opps"].add(sess)
+        if opp in census:
+            census[opp]["peer_opps"].add(sess)
         items = ledger_items(comp)
         if not items:
             continue
@@ -19646,6 +19983,11 @@ def build_issue_census(observations, field_ids, sessions_expected=None) -> dict:
             src = "own" if vid == target else "peer"
             c["tiers"][tier][severity][src] += 1
             (c["own_sessions"] if src == "own" else c["peer_sessions"]).add(sess)
+            gkey = (vid, key)
+            srcs = seen_global.setdefault(gkey, set())
+            if src not in srcs:
+                srcs.add(src)
+                c["dedup"][tier][severity][src] += 1
     n_expected = (int(sessions_expected) if is_int(sessions_expected) else None)
     out = {}
     for vid in field_ids:
@@ -19657,7 +19999,16 @@ def build_issue_census(observations, field_ids, sessions_expected=None) -> dict:
             for sev in SEVERITIES:
                 own = c["tiers"][tier][sev]["own"]
                 peer = c["tiers"][tier][sev]["peer"]
-                per_sev[sev] = {"own": own, "peer": peer, "total": own + peer}
+                d_own = c["dedup"][tier][sev]["own"]
+                d_peer = c["dedup"][tier][sev]["peer"]
+                n_own_opps = len(c["own_opps"])
+                n_peer_opps = len(c["peer_opps"])
+                per_sev[sev] = {
+                    "own": own, "peer": peer, "total": own + peer,
+                    "dedup_own": d_own, "dedup_peer": d_peer, "dedup_total": d_own + d_peer,
+                    "peer_rate": (round(d_peer / n_peer_opps, 6) if n_peer_opps else 0.0),
+                    "own_rate": (round(d_own / n_own_opps, 6) if n_own_opps else 0.0),
+                }
                 sev_totals[sev]["own"] += own
                 sev_totals[sev]["peer"] += peer
                 sev_totals[sev]["total"] += own + peer
@@ -19685,6 +20036,8 @@ def build_issue_census(observations, field_ids, sessions_expected=None) -> dict:
                     "per_session": rate,
                     "own_sessions": len(c["own_sessions"]),
                     "peer_sessions": len(c["peer_sessions"]),
+                    "own_opps": len(c["own_opps"]),
+                    "peer_opps": len(c["peer_opps"]),
                     "sessions_expected": n_sessions}
     return out
 
@@ -19714,8 +20067,8 @@ def derived_comparison_score(comp: dict):
     """The integer a comparison's ledger rows imply (judge contract v4).
 
     LEXICOGRAPHIC: the six tiers are compared IN THE FIXED PRIORITY ORDER
-    correctness > consistency > preservation > completeness > formatting >
-    writing. Within one tier, resolved rows add and introduced rows subtract
+    correctness > preservation > completeness > consistency > writing >
+    formatting. Within one tier, resolved rows add and introduced rows subtract
     (minor 1 / major 2 / critical 3 / fatal 4) and the net is capped at +-4. The
     FIRST tier whose net is not zero DECIDES the comparison: the sign is its
     sign, and the magnitude is its |net|, bounded by the rung its own deciding
@@ -20228,17 +20581,26 @@ def _write_journal_feedback_inputs(ctx: Ctx, sb: Path) -> list:
     """
     files = journal_feedback_files(ctx)
     if not files:
-        die("no journal feedback was found: name the decision letter / reviewer report(s) with "
-            "`setup --journal-feedback FILE` (or `set-revision-mode ... --journal-feedback "
-            "FILE`), or put them in the corpus under raw_data/ with a name that says what they "
-            "are (feedback / referee / reviewer / editor / decision).")
+        die(f"no human review feedback was found: put the editors'/reviewers' comments in the "
+            f"corpus's {HUMAN_FEEDBACK_DIR}/ area (any file name), or name them with "
+            f"`setup --journal-feedback FILE` (or `set-revision-mode ... --journal-feedback "
+            f"FILE`). The legacy shape also works: a feedback-named file anywhere in the corpus "
+            f"(feedback / referee / reviewer / editor / decision in its name), typically under "
+            f"raw_data/.")
+    previous = journal_previous_responses(ctx)
     (sb / "feedback" / "files").mkdir(parents=True, exist_ok=True)
     (sb / "feedback" / "text").mkdir(parents=True, exist_ok=True)
+    if previous:
+        (sb / "feedback" / "previous_responses" / "files").mkdir(parents=True, exist_ok=True)
+        (sb / "feedback" / "previous_responses" / "text").mkdir(parents=True, exist_ok=True)
     seed, unparsed, labels = [], [], []
-    for path, label in files:
+    for path, label in list(files) + list(previous):
         safe = label.replace("/", "__")
-        labels.append(label)
-        dest = sb / "feedback" / "files" / safe
+        is_previous = (path, label) not in files
+        if not is_previous:
+            labels.append(label)
+        parent = (sb / "feedback" / "previous_responses") if is_previous else (sb / "feedback")
+        dest = parent / "files" / safe
         if dest.exists():
             # A read-only source (a chmod a-w evidence file) was copied with its
             # mode in a previous partial materialization: replace the stale copy
@@ -20250,13 +20612,15 @@ def _write_journal_feedback_inputs(ctx: Ctx, sb: Path) -> list:
         shutil.copy2(path, dest)
         text, note = feedback_text_of(path)
         if text.strip():
-            (sb / "feedback" / "text" / (safe + ".txt")).write_text(text, encoding="utf-8")
-            for row in seed_concern_candidates(text):
-                seed.append(dict(row, source=label))
+            (parent / "text" / (safe + ".txt")).write_text(text, encoding="utf-8")
+            if not is_previous:
+                for row in seed_concern_candidates(text):
+                    seed.append(dict(row, source=label))
         else:
             unparsed.append(f"{label}: {note or 'no text extracted'}")
     write_json_atomic(sb / "feedback" / "CONCERN_SEED.json",
                       {"files": labels, "candidates": seed, "unparsed": unparsed,
+                       "previous_responses": [label for _p, label in previous],
                        "journal_from": str((ctx.cfg or {}).get("journal_feedback_from") or ""),
                        "target_journal": str((ctx.cfg or {}).get("journal") or "")})
     if unparsed:
@@ -20387,7 +20751,8 @@ def materialize_response(ctx: Ctx, r: int, target: Path = None,
                                            target_label or target.parent.name,
                                            ledger) + note + shared_blocks()),
                           encoding="utf-8")
-    rec = ctx.register(rid, "response", r, f"runs/{rid}",
+    ledger_rid = rid_concerns(r) if journal_is_scoped(ctx) else rid_feedback(r)
+    rec = ctx.register(rid, "response", r, f"runs/{rid}", upstream_run_id=ledger_rid,
                        target_dir=target.relative_to(ctx.root).as_posix()
                        if is_within(target, ctx.root) else str(target))
     rec["inputs_manifest"] = {"target": hash_manifest(sb / "target"),
@@ -20422,12 +20787,20 @@ reviewers' feedback of {(from_j or 'the source journal')} has to become a
 complete, enumerated concern ledger before anyone touches the manuscript.
 
 WHAT YOU READ (all of it):
-  * feedback/files/  — the original file(s), byte-for-byte:
+  * feedback/files/  — the original human feedback file(s), byte-for-byte (from
+    the corpus's `human_review_feedback/` area, or, in an older corpus, from a
+    feedback-named file under `raw_data/`):
 {chr(10).join('      - ' + x for x in labels) or '      - (none)'}
   * feedback/text/   — the same files as plain text (use THIS for quoting)
   * feedback/CONCERN_SEED.json — the pipeline's mechanical candidate split; it
     is a seed, not the answer
   * base/            — the manuscript the feedback is about (read-only)
+
+If `feedback/CONCERN_SEED.json` lists `previous_responses`, those are the
+authors' OWN earlier response-to-reviewers documents (under
+`feedback/previous_responses/`): they are CONTEXT (what was promised before),
+never the journal's letter. Never enumerate a previous response as a concern
+and never quote it as something the reviewers said.
 
 SEED (read the real text after it):
 {_journal_seed_text(ctx, sb)}
@@ -20477,11 +20850,17 @@ concern requires it. Deliver the concern ledger AND the finding list the single
 revision session follows.
 
 WHAT YOU READ (all of it):
-  * feedback/files/  — the original file(s), byte-for-byte:
+  * feedback/files/  — the original human feedback file(s), byte-for-byte (from
+    the corpus's `human_review_feedback/` area, or, in an older corpus, from a
+    feedback-named file under `raw_data/`):
 {chr(10).join('      - ' + x for x in labels) or '      - (none)'}
   * feedback/text/   — the same files as plain text (use THIS for quoting)
   * feedback/CONCERN_SEED.json — the pipeline's mechanical candidate split
   * base/            — the manuscript under revision (read-only)
+
+If `feedback/CONCERN_SEED.json` lists `previous_responses`, those are the
+authors' OWN earlier response documents (under `feedback/previous_responses/`):
+context for what was promised, never a concern and never a reviewer quote.
 
 SEED (read the real text after it):
 {_journal_seed_text(ctx, sb)}
@@ -20943,7 +21322,7 @@ def postcheck_response(ctx: Ctx, rec: dict):
             f = str(c.get("file") or "").strip()
             if not f:
                 errs.append(f"response row {cid!r}: a change entry names no file")
-            elif (is_raw_data_rel(f) or _is_aux_doc(Path(f).name)
+            elif (is_evidence_rel(f) or _is_aux_doc(Path(f).name)
                   or is_bookkeeping_name(Path(f).name)
                   or "work" in Path(f).parts[:-1]):
                 errs.append(f"response row {cid!r}: change file {f!r} is not a submission "
@@ -20953,7 +21332,7 @@ def postcheck_response(ctx: Ctx, rec: dict):
                             f"package -- the letter must not cite a file the revision does not "
                             f"carry")
         for f in new_data:
-            if is_raw_data_rel(f) or is_bookkeeping_name(Path(f).name) \
+            if is_evidence_rel(f) or is_bookkeeping_name(Path(f).name) \
                     or "work" in Path(f).parts[:-1]:
                 errs.append(f"response row {cid!r}: new-data file {f!r} is not a submission "
                             f"document (bookkeeping/evidence files never ship)")
@@ -20995,7 +21374,7 @@ def _scope_tree_files(root: Path) -> dict:
         if not p.is_file() or p.name.startswith("~$") or _is_aux_doc(p.name):
             continue
         rel = p.relative_to(root).as_posix()
-        if is_raw_data_rel(rel):
+        if is_evidence_rel(rel):
             continue
         if "work" in rel.split("/")[:-1] or is_bookkeeping_name(p.name):
             continue
@@ -21103,7 +21482,7 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
         rmtree_force(dst)
     dst.mkdir(parents=True, exist_ok=True)
     copy_into(target, dst, exclude_top=("work",), skip_aux=True, strip_bookkeeping=True)
-    for name in RAW_DATA_DIRNAMES:
+    for name in EVIDENCE_DIRNAMES:
         if (dst / name).exists():
             rmtree_force(dst / name)
     response_files = []
@@ -21134,7 +21513,7 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
                     out_dir.mkdir(exist_ok=True)
                     shutil.copy2(p, out_dir / p.name)
                     marked.append(f"tracked_changes/{p.name}")
-    left = sorted(p.name for name in RAW_DATA_DIRNAMES if (dst / name).exists())
+    left = sorted(p.name for name in EVIDENCE_DIRNAMES if (dst / name).exists())
     if left:
         die(f"the submission package still carries the evidence area ({', '.join(left)}); this "
             f"is a pipeline bug -- report it before submitting anything.")
@@ -21942,8 +22321,9 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
                 if (mv > 0 and mw > 0) or (mv < 0 and mw < 0):
                     pq["direction_flips"].append(f"{v} vs {w}: {mv:g} vs {mw:g}")
     diags["panel_quality"] = pq
-    # The reported issue census: how many issues of each tier and severity the
-    # panel attributed to each version (never a ranking input).
+    # The issue census: how many issues of each tier and severity the panel
+    # attributed to each version. It is the selection's tie-break input
+    # (severity rungs, tier by tier, peer rate before own rate).
     census = build_issue_census(census_obs, field_ids,
                                 sessions_expected=sum(per_judges.values()))
     return {"round": int(r), "field": field_ids, "field_size": k,
@@ -21966,7 +22346,7 @@ def stats_row_for(agg: dict, vid: str) -> dict:
 
 
 def candidate_tiebreak_inputs(ctx: Ctx, r: int, vid: str) -> tuple:
-    """(critical_remaining, writing_remaining, manual_steps) for the tie-break/report.
+    """(critical_remaining, writing_remaining, manual_steps) for the REPORT.
 
     Priority: the values the round recorded when it was decided (so `decide`
     re-derives the same ranking even after old sandboxes are pruned for disk
@@ -21978,9 +22358,9 @@ def candidate_tiebreak_inputs(ctx: Ctx, r: int, vid: str) -> tuple:
     never taken from an inherited file when the producing run reported its own
     number.
 
-    `critical_remaining` and `writing_remaining` are ranking keys, and only after
-    the score statistics have been compared: severity outranks style, and both are
-    below the panel's median/mean/IQR. `writing_remaining` is the number of the
+    Neither count ranks any more (2026-10-01): the selection's tie-break is the
+    panel-derived issue census (`champion_sort_key`), and these two remain as
+    reported, cross-checked signals. `writing_remaining` is the number of the
     frozen review's CATEGORY-2 findings (writing quality, logic, repetition) still
     open in the package -- self-reported by the producing session exactly like
     `critical_remaining`, and never a score, a gate or a reason to make a version
@@ -22029,6 +22409,72 @@ def _valid_count(v):
     if not is_int(v):
         return MISSING_TIEBREAK
     return int(v) if int(v) >= 0 else MISSING_TIEBREAK
+
+
+# ---- the champion selection key (2026-10-01 calibration) -------------------
+# `median -> crit/fatal -> major -> minor -> mean -> IQR -> digest`:
+#   * the median stays the primary panel statistic;
+#   * the three severity rungs come from the round's issue census, TIER BY TIER
+#     in the scoring priority order, and compare the EXPOSURE-NORMALIZED peer
+#     rate first and the own rate second (a version is the target in only its
+#     own judges' sessions but an opponent in every other version's, so raw
+#     own/peer totals mostly measure exposure);
+#   * the counts are deduplicated ACROSS sessions by an exact normalized key
+#     (never a fuzzy match), then divided by the sessions that could mention
+#     the version;
+#   * mean/IQR/digest stay below them as the deterministic fallbacks, and the
+#     incumbent-retention rule (an exact median/mean/IQR tie keeps the base)
+#     is unchanged.
+SEVERITY_TIE_GROUPS = (("critical", "fatal"), ("major",), ("minor",))
+
+
+def _census_for(vid, agg) -> dict:
+    return ((agg or {}).get("issue_census") or {}).get(str(vid)) or {}
+
+
+def champion_issue_rungs(vid, agg) -> tuple:
+    """Ascending (peer_rate, own_rate) rungs: severity first, then tier order."""
+    tiers = (_census_for(vid, agg).get("tiers") or {})
+    rungs = []
+    for group in SEVERITY_TIE_GROUPS:
+        for tier in BASIS_TIERS:
+            sev = ((tiers.get(tier) or {}).get("severities") or {})
+            peer = sum(float((sev.get(s) or {}).get("peer_rate") or 0.0) for s in group)
+            own = sum(float((sev.get(s) or {}).get("own_rate") or 0.0) for s in group)
+            rungs.append(round(peer, 6))
+            rungs.append(round(own, 6))
+    return tuple(rungs)
+
+
+def champion_issue_summary(vid, agg) -> dict:
+    """Per severity group: deduplicated counts and rates (for the report/trace)."""
+    tiers = (_census_for(vid, agg).get("tiers") or {})
+    out = {}
+    for group in SEVERITY_TIE_GROUPS:
+        own = peer = 0
+        peer_rate = own_rate = 0.0
+        for tier in BASIS_TIERS:
+            sev = ((tiers.get(tier) or {}).get("severities") or {})
+            for s in group:
+                d = sev.get(s) or {}
+                own += int(d.get("dedup_own") or 0)
+                peer += int(d.get("dedup_peer") or 0)
+                peer_rate += float(d.get("peer_rate") or 0.0)
+                own_rate += float(d.get("own_rate") or 0.0)
+        out["/".join(group)] = {"own": own, "peer": peer,
+                                "peer_rate": round(peer_rate, 6),
+                                "own_rate": round(own_rate, 6)}
+    return out
+
+
+def champion_sort_key(row: dict) -> tuple:
+    """The selection key: median, the census rungs, then mean/IQR/digest."""
+    med, mean, iqr = row.get("median"), row.get("mean"), row.get("iqr")
+    return ((-(med if med is not None else -99.0),)
+            + tuple(row.get("issue_rungs") or ())
+            + (-(mean if mean is not None else -99.0),
+               (iqr if iqr is not None else 99.0),
+               str(row.get("digest") or "~"), str(row.get("id") or "")))
 
 
 def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
@@ -22131,25 +22577,28 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
                      "critical_remaining": crit, "writing_remaining": writing,
                      "manual_steps": manual,
                      "author_placeholders": st.get("author_placeholders"),
+                     "issue_rungs": champion_issue_rungs(row_id, agg),
+                     "issues": champion_issue_summary(row_id, agg),
                      "captions": st.get("caption_note")})
-    # Ranking key, in order, with the provenance of each component:
-    #   -vs_base wins         the incumbent challenge: paired sign statistic
-    #                         (wins - losses) over the (arm, base) directed
-    #                         scores, 0 for the base row itself
-    #   -vs_base median       that same pair's median
-    #   -median, -mean, IQR   field-wide panel statistics (the old primary key)
-    #   critical_remaining    self-reported by the producing agent (reported and
-    #                         cross-checked, but not verifiable by the panel)
-    #   writing_remaining     self-reported the same way: the frozen review's
-    #                         CATEGORY-2 (writing quality/logic/repetition)
-    #                         findings still open in the package. It sits BELOW
-    #                         the critical count (severity outranks style) and
-    #                         only ever separates versions the panel statistics
-    #                         cannot: it is never a score and never a gate.
+    # Ranking key, in order (2026-10-01 calibration), with each component's
+    # provenance:
+    #   -median               the field-wide panel statistic (the primary signal)
+    #   crit/fatal, major,    the round's ISSUE CENSUS, tier by tier in the
+    #   minor (peer rate      scoring priority order, ASCENDING: fewer defects is
+    #   first, own rate       better. Peer rate first, then own rate, because a
+    #   second)               version is the target in only its own judges'
+    #                         sessions but an opponent in every other version's
+    #                         (raw own/peer totals measure exposure); counts are
+    #                         deduplicated across sessions by an exact key and
+    #                         divided by the sessions that could mention them.
+    #   -mean, IQR            the rest of the field-wide panel statistics.
     #   digest, id            provenance-free deterministic fallback. The CONTENT
     #                         DIGEST comes first: a perfect tie must not be decided
     #                         by the arm's NAME, because a2 < i1 < w1 would
     #                         silently favour the revise arm on every such tie.
+    # The self-reported critical_remaining/writing_remaining values are still
+    # REPORTED (and cross-checked against the frozen review) but no longer rank:
+    # the census is panel-derived, while those two are agent-authored.
     # vs_base (the panel's head-to-head against the incumbent) is REPORTED, and
     # the incumbent-retention rule below never lets a challenger the panel cannot
     # distinguish from the base retire it -- but it is deliberately NOT a ranking
@@ -22160,9 +22609,7 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
     # decide the round.
     # MANUAL_STEPS.md is NOT a ranking key: its size measures how much work the
     # pipeline hands to the author, so ranking on it would reward under-reporting.
-    rows.sort(key=lambda t: (-t["median"], -t["mean"], t["iqr"],
-                             t["critical_remaining"], t["writing_remaining"],
-                             str(t.get("digest") or "~"), t["id"]))
+    rows.sort(key=champion_sort_key)
     champ_row = rows[0]
     base_row = next((t for t in rows if t["is_base"]), None)
     if base_row is not None and champ_row is not base_row \
@@ -22171,19 +22618,22 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
         # An exact statistical tie is not evidence of improvement: the incumbent
         # is retained rather than replaced by a version the panel cannot
         # distinguish from it (never reward a version merely for being different).
-        # This is strictly a panel-statistic rule (median/mean/IQR); the
-        # self-reported critical/writing counts and the digest never dethrone the
-        # incumbent on a tie -- a better writing count separates CHALLENGERS,
-        # it does not retire an incumbent the panel cannot distinguish from them.
+        # This is strictly a panel-statistic rule (median/mean/IQR); the census
+        # rungs, the self-reported counts and the digest never dethrone the
+        # incumbent on an exact tie -- a better defect count separates
+        # CHALLENGERS, it does not retire an incumbent the panel cannot
+        # distinguish from them.
         trace.append(f"{champ_row['id']} and the base tie exactly on (median, mean, IQR) -> the "
                      f"incumbent base is retained; a challenger must be measurably better")
         champ_row = base_row
-    trace.append("ranking key: (-median, -mean, IQR, critical_remaining, writing_remaining, "
-                 "digest, id); median/mean/IQR are field-wide panel statistics (the mean breaks "
-                 "a median tie on the SAME flat list), critical_remaining and "
-                 "writing_remaining are self-reported by the producing agent (severity outranks "
-                 "style; both are cross-checked against the frozen review), and the content "
-                 "digest is the provenance-free tie-break (an arm's NAME never decides a tie). "
+    trace.append("ranking key: (-median, then crit/fatal, major and minor issue rungs by tier "
+                 "in the scoring priority order -- peer rate first, own rate second, ascending, "
+                 "deduplicated across sessions and normalized by the sessions that could "
+                 "mention the version -- then -mean, IQR, digest, id); median/mean/IQR are "
+                 "field-wide panel statistics, the issue rungs come from the panel's own census "
+                 "(the self-reported critical_remaining/writing_remaining values are reported "
+                 "but no longer rank), and the content digest is the provenance-free tie-break "
+                 "(an arm's NAME never decides a tie). "
                  "vs_base is reported but NOT a ranking key: its 2*judges directed scores are few "
                  "enough that one outlier session flips the sign statistic, so the decision stays "
                  "on the field-wide list. MANUAL_STEPS.md is reported but never ranked on; "
@@ -23659,7 +24109,7 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
         print(f"[run] r{r} issue census: {_ic.relative_to(ctx.root).as_posix()} "
               f"({sum((v.get('total') or 0) for v in (agg.get('issue_census') or {}).values())} "
               f"issue row(s) attributed across {len(agg.get('issue_census') or {})} version(s); "
-              f"reported, never a ranking input)")
+              f"the selection's severity tie-break uses its deduplicated rates)")
     except OSError as e:
         print(f"[run] r{r} WARNING: could not write the round's issue census: {e}")
     # A shrunk panel must never produce a champion: if any field member is
@@ -23698,7 +24148,7 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
     st = agg["stats"]
     champ_rep = sel.get("champion_rep") or sel["champion"]
     rows = [["member", "n/expected", "median", "mean", "IQR", "vs_orig", "vs_base",
-             "writing", "hand-off", "note"]]
+             "issues cf/maj/min", "writing*", "hand-off", "note"]]
     ranking_by_id = {r["id"]: r for r in (sel.get("ranking") or [])}
     for e in field:
         s = st[e["id"]]
@@ -23708,16 +24158,29 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
                 f"CHAMPION (=base {sel['champion']})"
         elif s.get("anti_regression_ok") is False:
             note = "ineligible (regressed vs original)"
+        iss = (ranking_by_id.get(e["id"]) or {}).get("issues") or {}
+        if iss:
+            def _iss(key):
+                d = iss.get(key) or {}
+                return int(d.get("own") or 0) + int(d.get("peer") or 0)
+            issues_cell = f"{_iss('critical/fatal')}/{_iss('major')}/{_iss('minor')}"
+        else:
+            issues_cell = "-"
         rows.append([e["id"], f"{s['n']}/{s['expected_n']}",
                      f"{s['median']:g}" if s["median"] is not None else "-",
                      f"{s['mean']:.2f}" if s.get("mean") is not None else "-",
                      f"{s['iqr']:g}" if s["iqr"] is not None else "-",
                      f"{s['vs_original']:g}" if s["vs_original"] is not None else "-",
                      f"{s['vs_base']:g}" if s.get("vs_base") is not None else "-",
+                     issues_cell,
                      _count_cell((ranking_by_id.get(e["id"]) or {}).get("writing_remaining")),
                      f"{s.get('author_placeholders') or 0}", note])
     print()
     print(_tbl(rows[1:], rows[0]))
+    print("[run] ranking key: median -> crit/fatal -> major -> minor issue rungs "
+          "(peer rate first, own rate second; deduplicated across sessions) -> mean -> IQR -> "
+          "digest. Columns marked * are reported only, never ranked; the issue counts shown "
+          "are the tie-break's deduplicated totals.")
     if sel["champion"] == A1_ID and champ_rep != A1_ID:
         print(f"[run] round {r}: no fresh arm outranked the round's base -- the champion is the "
               f"incumbent base A1 (scored here as the content-identical member '{champ_rep}'), "
@@ -23744,15 +24207,39 @@ def cmd_setup(args) -> None:
     # a venue that publishes no legend number), and the resolved value is what
     # the config records.
     venue_arg = str(getattr(args, "venue", None) or "").strip()
+    venue_profile_file = str(getattr(args, "venue_profile", None) or "").strip()
     journal_arg = str(getattr(args, "journal", None) or "").strip()
     article_arg = str(getattr(args, "article_type", None) or "").strip().lower()
     strict_venue = bool(getattr(args, "strict_venue", False))
-    try:
-        venue_profile = load_venue_profile(venue_arg or DEFAULT_VENUE)
-    except VenueProfileError as e:
-        if e.unknown:
-            die(unknown_venue_message(venue_arg or DEFAULT_VENUE), code=2)
-        die(str(e), code=2)
+    if venue_profile_file:
+        # A brand-new venue on a FRESH root: setup had no way to accept a
+        # profile file, while `set-venue --profile` needs an existing root --
+        # the operator was told to do something impossible. Now `setup` loads
+        # and installs the file into the new root itself.
+        pf = Path(venue_profile_file)
+        if not pf.is_file():
+            die(f"--venue-profile {venue_profile_file!r} is not a readable file", code=2)
+        try:
+            _pdata = json.loads(pf.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            die(f"--venue-profile {venue_profile_file!r} is not readable JSON: {e}", code=2)
+        try:
+            venue_profile = VenueProfile(_pdata, origin="profile file", path=pf)
+        except VenueProfileError as e:
+            die(f"--venue-profile {venue_profile_file!r} is not a valid venue profile: {e}",
+                code=2)
+        if venue_arg and venue_arg != venue_profile.id:
+            die(f"--venue {venue_arg!r} does not match the id {venue_profile.id!r} declared by "
+                f"--venue-profile {venue_profile_file!r} (drop one of the two, or fix the id)",
+                code=2)
+        venue_arg = venue_profile.id
+    else:
+        try:
+            venue_profile = load_venue_profile(venue_arg or DEFAULT_VENUE)
+        except VenueProfileError as e:
+            if e.unknown:
+                die(unknown_venue_message(venue_arg or DEFAULT_VENUE), code=2)
+            die(str(e), code=2)
     if article_arg:
         try:
             venue_profile = venue_profile.with_article_type(article_arg)
@@ -23909,7 +24396,8 @@ def cmd_setup(args) -> None:
         for item in journal_feedback:
             q = Path(item)
             if not q.is_absolute():
-                q = Path(args.root).resolve() / q
+                root_rel = Path(args.root).resolve() / q
+                q = root_rel if root_rel.exists() else (Path.cwd() / q)
             if not q.is_file():
                 die(f"--journal-feedback {item!r} does not exist (looked for {q}).")
         if not journal_feedback:
@@ -23986,6 +24474,16 @@ def cmd_setup(args) -> None:
         except OSError as e:
             print(f"[setup] venue profiles:          could not copy {VENUE_PROFILES_DIRNAME}/ "
                   f"({e}); the profile recorded in pipeline_config.json is still authoritative")
+    if venue_profile_file:
+        try:
+            _dest = root / VENUE_PROFILES_DIRNAME / f"{venue_profile.id}{VENUE_PROFILE_SUFFIX}"
+            _dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(Path(venue_profile_file), _dest)
+            print(f"[setup] venue profile:           installed {venue_profile.id!r} from "
+                  f"{venue_profile_file} into {VENUE_PROFILES_DIRNAME}/ (the new root is "
+                  f"self-contained)")
+        except OSError as e:
+            die(f"could not install --venue-profile {venue_profile_file!r} into {root}: {e}")
     # Normalize the pristine copy BEFORE the manifests/digests are recorded, so
     # the byte-identity checks, the round-1 base (a1) and every later pin all
     # refer to the SAME repaired text. This is the formatting analogue of the
@@ -24678,7 +25176,8 @@ def cmd_set_revision_mode(args) -> None:
     for item in named:
         q = Path(item)
         if not q.is_absolute():
-            q = ctx.root / q
+            root_rel = ctx.root / q
+            q = root_rel if root_rel.exists() else (Path.cwd() / q)
         if not q.is_file():
             die(f"--journal-feedback {item!r} does not exist (looked for {q}).")
     info = JOURNAL_MODES[mode_arg]
@@ -25299,7 +25798,11 @@ def write_round_raw_scores(ctx: Ctx, r: int, agg: dict = None) -> Path:
 # build_issue_census), `per_session` is the field-size-stable rate, and `run` is
 # the pipeline root's name so rows from several runs can be told apart.
 ISSUE_CENSUS_FIELDS = ("run", "round", "version", "tier", "severity", "own", "peer",
-                       "total", "per_session", "own_sessions", "peer_sessions",
+                       "total", "per_session",
+                       # Cross-session, per-source dedup and the exposure-normalized
+                       # rates the selection tie-break reads (peer rate first).
+                       "dedup_own", "dedup_peer", "dedup_total", "own_rate", "peer_rate",
+                       "own_sessions", "peer_sessions", "own_opps", "peer_opps",
                        "sessions_expected")
 
 
@@ -25318,8 +25821,15 @@ def issue_census_rows(ctx: Ctx, r: int, agg: dict) -> list:
                              "peer": int(s.get("peer") or 0),
                              "total": int(s.get("total") or 0),
                              "per_session": s.get("per_session"),
+                             "dedup_own": int(s.get("dedup_own") or 0),
+                             "dedup_peer": int(s.get("dedup_peer") or 0),
+                             "dedup_total": int(s.get("dedup_total") or 0),
+                             "own_rate": s.get("own_rate"),
+                             "peer_rate": s.get("peer_rate"),
                              "own_sessions": c.get("own_sessions"),
                              "peer_sessions": c.get("peer_sessions"),
+                             "own_opps": c.get("own_opps"),
+                             "peer_opps": c.get("peer_opps"),
                              "sessions_expected": c.get("sessions_expected")})
     rows.sort(key=lambda x: (order.get(str(x["version"]), 10 ** 6), str(x["version"]),
                              BASIS_TIERS.index(x["tier"]), SEVERITIES.index(x["severity"])))
@@ -25329,11 +25839,13 @@ def issue_census_rows(ctx: Ctx, r: int, agg: dict) -> list:
 def write_round_issue_census(ctx: Ctx, r: int, agg: dict = None) -> Path:
     """`reports/round<r>_issue_census.csv`: issues per version, tier and severity.
 
-    REPORTED, never a ranking input: it answers "how many issues of each tier
-    does each version carry, and who found them (own sweep vs peer comparison)"
-    -- the number a chain of runs compares across rounds. ONE row per (version,
-    tier, severity), zeros included, so the file's shape is stable across rounds
-    and runs even when a round's sheets carry no ledger rows.
+    It answers "how many issues of each tier does each version carry, and who
+    found them (own sweep vs peer comparison)" -- the number a chain of runs
+    compares across rounds, AND the selection's severity tie-break input
+    (crit/fatal -> major -> minor, tier by tier, peer rate before own rate).
+    ONE row per (version, tier, severity), zeros included, so the file's shape
+    is stable across rounds and runs even when a round's sheets carry no ledger
+    rows.
     """
     r = int(r)
     if agg is None:
@@ -25439,8 +25951,11 @@ def score_model_doc() -> dict:
             "legacy_policy": "sheets from sandboxes materialized before the contract are "
                              "accepted with a warning and counted as uncalibrated; they are "
                              "never silently mixed into a calibrated panel"},
-        "ranking": "median of the flat directed-score list, arithmetic mean of the same list to "
-                   "break a median tie",
+        "ranking": "median of the flat directed-score list, then the round's panel-derived issue "
+                   "census (crit/fatal, then major, then minor; tier by tier in the scoring "
+                   "priority order; peer rate before own rate, deduplicated across sessions and "
+                   "normalized by the sessions that could mention the version), then the "
+                   "arithmetic mean, the IQR and the content digest",
         "cross_round_comparability": "per-round champion statistics come from different panels "
                                      "and different fields and are NOT comparable across rounds; "
                                      "the vs_base margin of the final round is the only paired "
@@ -25451,25 +25966,32 @@ def score_model_doc() -> dict:
                                 f"over the pair's 2*judges directed scores is significant at "
                                 f"{VS_ORIGINAL_ALPHA}; with so few scores NEITHER rule is "
                                 f"well-powered, and every row reports its wins/losses/ties and p",
-        "tiebreaks": ["-median", "-mean", "IQR", "critical_remaining", "writing_remaining",
-                      "digest", "id"],
-        "tiebreak_notes": "median/mean/IQR are PANEL statistics (verifiable); vs_base is reported "
-                          "(the incumbent margin a human reads) but is deliberately NOT a ranking "
-                          "key: its 2*judges directed scores are few enough that one outlier "
-                          "session flips its sign statistic; critical_remaining "
-                          "and writing_remaining (the frozen review's CATEGORY-2 writing-quality/"
-                          "logic/repetition findings still open in the package) are SELF-REPORTED "
-                          "by the producing agent (cross-checked against the frozen review only "
-                          "for the revise arm and only in the reported-zero direction); severity "
-                          "outranks style; an exact tie on median, mean and IQR keeps the "
-                          "incumbent base (the counts and the digest never dethrone it); the "
-                          "content digest is the provenance-free fallback so an arm's NAME never "
-                          "decides a tie; manual_steps, caption length and hand-off placeholders "
-                          "are reported, never ranked",
+        "tiebreaks": ["-median",
+                      "issue census: crit/fatal -> major -> minor, tier by tier in the scoring "
+                      "priority order, (peer_rate, own_rate) ascending",
+                      "-mean", "IQR", "digest", "id"],
+        "tiebreak_notes": "median/mean/IQR are PANEL statistics (verifiable); the census rungs "
+                          "come from the panel's own ledger rows (reports/round<r>_"
+                          "issue_census.csv): severity first, tier by tier in the scoring "
+                          "priority order, and within each rung the peer rate before the own "
+                          "rate, because a version is the target in only its own judges' "
+                          "sessions but an opponent in every other version's; counts are "
+                          "deduplicated across sessions by an exact normalized key (never a "
+                          "fuzzy match) and divided by the sessions that could mention the "
+                          "version; vs_base is reported (the incumbent margin a human reads) "
+                          "but is deliberately NOT a ranking key: its 2*judges directed scores "
+                          "are few enough that one outlier session flips its sign statistic; "
+                          "critical_remaining and writing_remaining are SELF-REPORTED by the "
+                          "producing agent, reported and cross-checked but NOT ranked; an exact "
+                          "tie on median, mean and IQR keeps the incumbent base (the census "
+                          "rungs and the digest never dethrone it); the content digest is the "
+                          "provenance-free fallback so an arm's NAME never decides a tie; "
+                          "manual_steps, caption length and hand-off placeholders are reported, "
+                          "never ranked",
         "reported_but_not_ranked": ["manual_steps", "figure-caption length (M18)",
                                     "hand-off placeholders",
-                                    "issue census (issues per version/tier/severity, from the "
-                                    "judges' own ledger rows: reports/round<r>_issue_census.csv)"],
+                                    "critical_remaining (self-reported)",
+                                    "writing_remaining (self-reported)"],
         "visual_tools_detected": visual_tools_summary(),
         "review_contract": "submission_dir must resolve to base/, the coverage table must carry "
                            "every required check id, review/artifacts/ must exist, finding ids "
@@ -25536,14 +26058,14 @@ def _increment_final_clean_counters(dirp: Path) -> dict:
     for p in sorted(dirp.rglob("*")):
         if not p.is_file():
             continue
-        if is_raw_data_rel(p.relative_to(dirp).as_posix()):
+        if is_evidence_rel(p.relative_to(dirp).as_posix()):
             raw_data_skipped += 1
             continue
         files.append(p)
     # The counter runs on the pipeline's OWN copy of the package, so it owns the
     # write bits -- but the copy inherits the source's modes, and the source may
     # be read-only outside raw_data too. Clear them (never inside raw_data).
-    make_tree_writable(dirp, skip_top=RAW_DATA_DIRNAMES)
+    make_tree_writable(dirp, skip_top=EVIDENCE_DIRNAMES)
     file_map = {}
     for p in files:
         rel = p.relative_to(dirp).as_posix()
@@ -25638,7 +26160,7 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     # counter has to rename inside) would otherwise make publication fail on
     # permissions the author set for their own protection. raw_data/ keeps its
     # modes -- and its content -- untouched; the rest of the tree is ours to write.
-    chmod_plan = make_tree_writable(tmp, skip_top=RAW_DATA_DIRNAMES)
+    chmod_plan = make_tree_writable(tmp, skip_top=EVIDENCE_DIRNAMES)
     manifest = corpus_dir_manifest(tmp)
     if not manifest["count"]:
         rmtree_force(tmp, ignore_errors=True)
@@ -25667,10 +26189,11 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
         if not q.is_file():
             continue
         rel = q.relative_to(tmp).as_posix()
-        if is_raw_data_rel(rel):
+        if is_evidence_rel(rel):
             # READ-ONLY BY CONTRACT: the published package carries the author's
-            # raw-data files exactly as they are, build by-products included --
-            # the pipeline neither deletes nor renames anything inside it.
+            # evidence files (raw data, human review feedback) exactly as they
+            # are, build by-products included -- the pipeline neither deletes
+            # nor renames anything inside them.
             hygiene["raw_data_untouched"] += 1
             continue
         low = q.name.lower()
@@ -25982,24 +26505,29 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
         L.append(_tbl(rows, ["member", "scores", "median", "mean", "IQR", "vs_original",
                              "vs_base", "critical", "writing", "eligible", "judges",
                              "hand-off", "note"]))
-        # The reported ISSUE CENSUS: how many issues of each tier and severity the
+        # The ISSUE CENSUS: how many issues of each tier and severity the
         # panel attributed to each version, counted from the judges' OWN ledger
-        # rows. Reported, never a ranking input -- it is the number a chain of runs
-        # compares across rounds ("fewer correctness/major issues than last round").
+        # rows. It is BOTH the number a chain of runs compares across rounds
+        # ("fewer correctness/major issues than last round") and the selection's
+        # tie-break input (severity rungs, tier by tier, peer rate first).
         census = agg.get("issue_census") or {}
         if census:
             L.append("")
-            L.append("**Issue census (REPORTED, never a ranking input):** the judges' own "
+            L.append("**Issue census (also the selection's severity tie-break):** the judges' own "
                      "ledger rows, counted per version, tier and severity. `own` = the "
                      "version's own sweep sessions (`introduced` rows), `peer` = the other "
                      "versions' comparisons against it (`resolved` rows); rows are "
                      "deduplicated per session, so one defect repeated across a session's "
-                     "opponent comparisons counts once. `per session` divides by the sessions "
-                     "that COULD mention the version (field-size-stable), and the last column "
-                     "prints its own/peer/expected session counts. Tier columns and severity "
-                     "columns overlap (a tier total already contains its severities), and the "
-                     "census is not a score: it answers \"what is left and where\", not \"who "
-                     "won this pair\". The same numbers are in "
+                     "opponent comparisons counts once; `dedup` columns additionally merge "
+                     "rows whose normalized evidence is IDENTICAL across sessions, per "
+                     "source. `per session` divides by the sessions that COULD mention the "
+                     "version (field-size-stable); `own rate`/`peer rate` divide the "
+                     "deduplicated counts by the OPPORTUNITIES (own judge sessions vs "
+                     "opponent slots), which is what the selection compares (peer rate "
+                     "first). Tier columns and severity columns overlap (a tier total "
+                     "already contains its severities), and the census is not a score by "
+                     "itself: it answers \"what is left and where\", and it separates "
+                     "versions whose panel MEDIAN is tied. The same numbers are in "
                      f"`reports/round{r}_issue_census.csv` (one row per version/tier/severity) "
                      "for concatenation across runs.")
             L.append(_tbl(issue_census_table(agg), list(ISSUE_CENSUS_TABLE_HEAD)))
@@ -26145,15 +26673,22 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
              f"so extra score rungs would add unused resolution instead of meaning; the ledger is "
              f"what anchors the existing rungs, and a weighted aspect average is deliberately "
              f"absent (weights are arbitrary and the tier order IS the aggregation: "
-             f"correctness > consistency > preservation > completeness > formatting > writing).")
+             f"correctness > preservation > completeness > consistency > writing > formatting).")
     L.append("")
     L.append("**Ranking statistic.** `median(flat score list)`, with `n`, the arithmetic "
              "`mean(flat score list)` and the IQR reported over the same flat list. The two "
              "directions of a pair are independent judgments from independent sessions, so the "
              "flat median is the intended statistic; a two-level median would discard that "
-             "independence. The median is coarse on a -4..+4 integer scale, so `mean` (the "
-             "arithmetic average of the SAME scores, never a different statistic and never a "
-             "re-judgement) breaks a median tie before any non-score key is consulted.")
+             "independence. The selection key is `median -> crit/fatal -> major -> minor issue "
+             "rungs -> mean -> IQR -> digest`: the median is coarse on a -4..+4 integer scale, so "
+             "a median tie is first separated by the round's OWN ISSUE CENSUS -- severity-first, "
+             "tier by tier in the scoring priority order, peer rate before own rate to normalize "
+             "the ~7x exposure difference between opponent slots and a version's own judge "
+             "sessions, deduplicated across sessions by an exact normalized key. `mean` and the "
+             "IQR then separate versions the census cannot (a round whose sheets carry no ledger "
+             "rows scores all-zero rungs), and the content digest is the provenance-free final "
+             "fallback. The self-reported `critical_remaining`/`writing_remaining` values are "
+             "reported and cross-checked but are NOT ranking inputs.")
     L.append("")
     L.append(f"**Anti-regression gate.** `vs_original` is the median of the directed scores "
              f"involving the pinned original (own + negated received). A version is ineligible to "
@@ -28401,7 +28936,8 @@ def build_parser() -> argparse.ArgumentParser:
                     "venue or journal: the rule set comes from a configurable VENUE PROFILE "
                     "(`set-venue`, `setup --venue`), the target journal is the free-text "
                     "`set-journal` value, and no stage hard-codes Nature Biotechnology. R fixed "
-                    "rounds (default 2), M REWRITTEN candidates staged first in every round, N "
+                    f"rounds (default {DEFAULTS['rounds']}), M REWRITTEN candidates staged first "
+                    "in every round, N "
                     "reviewed-and-then-revised candidates from one shared review pass, one "
                     "INTEGRATION run per pool member (each reworking it with the whole pool as "
                     "donors), a "
@@ -28431,6 +28967,12 @@ def build_parser() -> argparse.ArgumentParser:
                          f"{DEFAULTS['venue']} -- this pipeline's pre-venue behaviour, kept as "
                          f"the default for backward compatibility. A venue is a RULE SET, not a "
                          f"journal: `--journal` names the publication the manuscript goes to")
+    ps.add_argument("--venue-profile", default=None, metavar="FILE",
+                    help="install and use a NEW venue profile from a JSON file on a FRESH root "
+                         "(no prior root needed): the file is validated, its `id` selects the "
+                         "venue, it is copied into <root>/venue_profiles/, and the resolved "
+                         "profile is recorded in pipeline_config.json. On an existing root use "
+                         "`set-venue <id> --profile FILE` instead")
     ps.add_argument("--journal", default=None, metavar="NAME",
                     help="the target journal as free text (e.g. \"Nature Biotechnology\", "
                          "\"Cell\"); the prompts name it and the venue profile is checked "

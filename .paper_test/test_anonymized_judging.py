@@ -271,7 +271,11 @@ def test_judge_views_are_anonymous():
     check("no ORIGINAL directory name survives in any judge view",
           not any(part in original_dirs for p in all_paths for part in Path(p).parts),
           str(sorted(original_dirs)))
-    anon_re = r"(?:v\d+/)?(?:d\d{2}/)?f\d{4}(?:\.[A-Za-z0-9]+)?"
+    # The EVIDENCE areas keep a stable, LABELED directory (evidence/raw_data/…,
+    # evidence/human_review_feedback/…; nested subdirs are sNN) while the file
+    # names inside stay anonymous -- see _view_layout.
+    anon_re = (r"(?:evidence/(?:raw_data|human_review_feedback)/(?:s\d{2}/)*)?"
+               r"(?:v\d+/)?(?:d\d{2}/)?f\d{4}(?:\.[A-Za-z0-9]+)?")
     check("every judge path is an anonymous placeholder",
           all(re.fullmatch(anon_re, p) for p in all_paths),
           str([p for p in all_paths if not re.fullmatch(anon_re, p)][:3]))
@@ -421,11 +425,17 @@ def test_view_references_and_metadata():
           f"{core[:80]!r} {app[:80]!r}")
     check("B. every OOXML zip entry carries the fixed timestamp",
           times == {(2020, 1, 1, 0, 0, 0)}, str(times))
-    pdf = next(dst.rglob("*.pdf"))
+    # The LaTeX compile check above may have written its own PDF into the same
+    # view directory: pick the FIXTURE pdf by its known length (the compiled one
+    # differs), never "the first pdf in the tree".
+    want_len = len(_pdf_with_metadata())
+    pdf = next(p for p in dst.rglob("*.pdf")
+               if not nb.is_evidence_rel(p.relative_to(dst).as_posix())
+               and len(p.read_bytes()) == want_len)
     data = pdf.read_bytes()
     check("B. PDF /Info identifying values are blanked IN PLACE",
           b"Jane Doe" not in data and b"Word 2021" not in data
-          and len(data) == len(_pdf_with_metadata()), f"{len(data)} bytes")
+          and len(data) == want_len, f"{len(data)} bytes")
 
 
 def test_each_view_gets_its_own_mapping():

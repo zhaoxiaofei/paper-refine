@@ -131,7 +131,7 @@ def main() -> int:
           and any("dataset_summary" in n for n in evidence_files),
           str(evidence_files))
     check("E1 the converter says so on stdout",
-          "raw-data evidence" in r.stdout and "evidence" in r.stdout)
+          "evidence-area" in r.stdout and "Raw-data evidence text" in r.stdout)
 
     print("== E2: extract_acronyms.py -- no M1/M1b row from evidence prose ==")
     r = subprocess.run([sys.executable, str(SCRIPTS / "extract_acronyms.py"),
@@ -205,12 +205,15 @@ def main() -> int:
     print("== E5: the prompts carry the rule ==")
     shared = nb.shared_blocks()
     check("E5 the shared block names the evidence area",
-          "READ-ONLY EVIDENCE AREA" in shared
-          and "NOT part of the submission" in shared
-          and "never a finding quote about the manuscript" in shared)
+          "THE EVIDENCE AREAS ARE READ-ONLY" in shared
+          and "NEVER SUBMISSION CONTENT" in shared
+          and "human_review_feedback" in shared
+          and "never quote it as something \"the submission says\"" in shared)
     check("E5 the review directives name the evidence area",
-          "EVIDENCE area" in nb.REVIEW_DIRECTIVES
-          and "not a submission document" in nb.REVIEW_DIRECTIVES)
+          "EVIDENCE areas" in nb.REVIEW_DIRECTIVES
+          and "human_review_feedback/" in nb.REVIEW_DIRECTIVES
+          and "a submission document" in nb.REVIEW_DIRECTIVES
+          and "Neither is part of the submission" in nb.REVIEW_DIRECTIVES)
 
     print()
     if FAILS:

@@ -9,15 +9,19 @@ plain text under WORK/corpus/, and writes:
   WORK/corpus/<rel>.txt — converted plain text (structure-aware)
   WORK/evidence/<rel>.txt — converted text of the raw-data EVIDENCE area
 
-The corpus's `raw_data/` directory (legacy spelling `raw_figs/`) is NOT part of
-the submission: it carries data tables, figure/table sources, the analysis
-snapshot and possibly the editors'/reviewers' feedback the author received. Its
-files are inventoried with `area: raw_data`, are never marked editable, and
+Two directories are EVIDENCE areas, NOT part of the submission: `raw_data/`
+(legacy spelling `raw_figs/`) carries data tables, figure/table sources and the
+analysis snapshot — and an older corpus may also keep the editors'/reviewers'
+feedback there; `human_review_feedback/` (sibling of raw_data/) carries the real
+editors'/reviewers' comments from the previous submission (and any previous
+response-to-reviewers, as context). Their files are inventoried with
+`area: raw_data` / `area: human_review_feedback`, are never marked editable, and
 their converted text goes to `WORK/evidence/` — never to `WORK/corpus/` — so no
 submission sweep (M1 acronyms, M4 numbers, M9 file roles, M18/M19 lengths, …)
 can read a data table, a reviewer's sentence or an editor's decision letter as
 if it were the authors' manuscript. The evidence text stays available to the
-review for fact-checking and the M30 producer comparison.
+review for fact-checking, the M30 producer comparison and the human-concern
+reconciliation.
 
 Conversion details that matter downstream:
   * .docx — body paragraphs, plus header/footer and footnote/endnote parts,
@@ -73,8 +77,11 @@ ROLE_PATTERNS = [
 ]
 
 RAW_DATA_DIRNAMES = ("raw_data", "raw_figs")
+HUMAN_FEEDBACK_DIR = "human_review_feedback"
+EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR,)
 EVIDENCE_DIRNAME = "evidence"
 FEEDBACK_NAME_RE = re.compile(r"feedback|referee|reviewers?|editors?|editorial|decision", re.I)
+REPLY_NAME_RE = re.compile(r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
 
 
 def guess_role(rel_path: str) -> str:
@@ -93,6 +100,21 @@ def is_raw_data_rel(rel_path: str) -> bool:
     """
     parts = rel_path.replace("\\", "/").split("/")
     return any(part in RAW_DATA_DIRNAMES for part in parts[:-1])
+
+
+def evidence_area_of(rel_path: str) -> str:
+    """The canonical EVIDENCE area a path belongs to ("" when none).
+
+    `human_review_feedback/` is the real editors'/reviewers' comments (sibling
+    of raw_data/); both areas are inputs, never submission text.
+    """
+    parts = rel_path.replace("\\", "/").split("/")[:-1]
+    for part in parts:
+        if part in RAW_DATA_DIRNAMES:
+            return "raw_data"
+        if part == HUMAN_FEEDBACK_DIR:
+            return HUMAN_FEEDBACK_DIR
+    return ""
 
 
 def is_feedback_rel(rel_path: str) -> bool:
@@ -538,23 +560,36 @@ def main():
     for rel in files:
         p = os.path.join(sub, rel)
         entry = convert_one(p, rel)
-        if is_raw_data_rel(rel):
-            # The raw-data directory is the EVIDENCE area: the submission does
-            # not include it, so it gets no document role (never "main text",
-            # "cover letter" or "supplementary"), is never editable, and its
-            # converted text must not enter the corpus the sweeps read.
-            entry["area"] = "raw_data"
-            entry["role"] = ("reviewer/editor feedback (raw-data evidence)"
-                             if is_feedback_rel(rel) else "raw data (evidence)")
+        area = evidence_area_of(rel)
+        if area:
+            # The EVIDENCE areas (raw_data/, human_review_feedback/) are inputs:
+            # the submission does not include them, so they get no document role
+            # (never "main text", "cover letter" or "supplementary"), are never
+            # editable, and their converted text must not enter the corpus the
+            # sweeps read.
+            entry["area"] = area
+            if area == HUMAN_FEEDBACK_DIR:
+                entry["role"] = ("previous response to reviewers (evidence context)"
+                                 if REPLY_NAME_RE.search(os.path.basename(rel))
+                                 else "human review feedback (evidence)")
+            else:
+                entry["role"] = ("reviewer/editor feedback (raw-data evidence)"
+                                 if is_feedback_rel(rel) else "raw data (evidence)")
             entry["editable"] = False
-            if is_feedback_rel(rel):
+            if area == HUMAN_FEEDBACK_DIR:
+                entry["notes"].append(
+                    "human editors'/reviewers' feedback — external prose, never the authors' "
+                    "submission text; read as evidence for the concern reconciliation, the "
+                    "response letter and the judge's concern-addressing check; never swept, "
+                    "counted or edited")
+            elif is_feedback_rel(rel):
                 entry["notes"].append(
                     "editors'/reviewers' feedback — external prose, never the authors' "
                     "submission text; read as evidence only (M30/fact-check), never swept, "
                     "counted or edited")
             entry["notes"].append(
-                "raw-data evidence area — not part of the submission; converted text goes to "
-                "WORK/%s/, never WORK/corpus/" % EVIDENCE_DIRNAME)
+                "%s evidence area — not part of the submission; converted text goes to "
+                "WORK/%s/, never WORK/corpus/" % (area, EVIDENCE_DIRNAME))
         else:
             entry["area"] = "submission"
             entry["role"] = guess_role(rel)
@@ -564,7 +599,7 @@ def main():
         inventory.append(entry)
         if entry["status"] in ("converted", "converted-empty"):
             stem = rel.replace(os.sep, "__")
-            if entry["area"] == "raw_data":
+            if entry["area"] in EVIDENCE_DIRNAMES:
                 out_txt = os.path.join(evidence_dir, stem + ".txt")
                 used_names = evidence_names
             else:
@@ -603,8 +638,8 @@ def main():
     with open(os.path.join(work, "inventory.json"), "w", encoding="utf-8") as f:
         json.dump(js, f, indent=2)
 
-    n_ev = sum(1 for e in inventory if e["area"] == "raw_data")
-    print("Inventoried %d files (%d submission, %d raw-data evidence)."
+    n_ev = sum(1 for e in inventory if e["area"] in ("raw_data", HUMAN_FEEDBACK_DIR))
+    print("Inventoried %d files (%d submission, %d evidence-area)."
           % (len(inventory), len(inventory) - n_ev, n_ev))
     print("Converted text corpus in %s" % corpus_dir)
     if n_ev:

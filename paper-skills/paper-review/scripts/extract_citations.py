@@ -28,6 +28,28 @@ import re
 import sys
 from collections import Counter, defaultdict
 
+EVIDENCE_DIRNAMES = ("raw_data", "raw_figs", "human_review_feedback")
+_NON_MANUSCRIPT_RE = re.compile(
+    r"feedback|referee|reviewers?|editors?|editorial|decision[_ \-]*(?:letter|notice|email)"
+    r"|response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
+_REPLY_RE = re.compile(r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
+
+
+def is_non_manuscript(name: str) -> bool:
+    """True for an evidence-area / feedback / response file (never author prose)."""
+    parts = str(name).replace("\\", "/").split("/")
+    if any(part in EVIDENCE_DIRNAMES for part in parts[:-1]):
+        return True
+    base = parts[-1]
+    if any(base.startswith(d + "__") for d in EVIDENCE_DIRNAMES):
+        return True
+    if _REPLY_RE.search(base):
+        return True
+    if "cover" in base.lower():
+        return False            # a cover letter IS a submission document
+    return bool(_NON_MANUSCRIPT_RE.search(base))
+
+
 NUM_CIT_RE = re.compile(r"\[(\d{1,3}(?:\s*[,;–-]\s*\d{1,3})*)\]")
 AY_CIT_RE = re.compile(
     r"(?P<a1>[A-Z][A-Za-z'\-]+)\s+et al\.?\s*,?\s*\(?(?P<y1>(?:19|20)\d{2}[a-z]?)\)?"
@@ -190,6 +212,8 @@ def main():
     for fname in sorted(os.listdir(corpus)):
         if not fname.endswith(".txt"):
             continue
+        if is_non_manuscript(fname):
+            continue  # a letter or a data table carries no manuscript citations
         text = open(os.path.join(corpus, fname), encoding="utf-8", errors="replace").read()
         lines = text.split("\n")
         if fname.endswith(".bib.txt"):

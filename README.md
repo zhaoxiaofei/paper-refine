@@ -309,7 +309,9 @@ the shipped code or raw data contradicted was found only when a human happened
 to compare them — even though every session's corpus already carries the
 producers (the analysis code under `code/`, the byte-identical `raw_data/`
 snapshot, the figure/table sources), and the judge's blinded view carries them
-too (renamed, e.g. `d01/f0001.py` and `d00/f0001.csv`).
+too — under the labeled `evidence/raw_data/` directory, with anonymized file
+names (e.g. `evidence/raw_data/f0001.py`, `evidence/raw_data/f0002.csv`) — as
+it also carries the human feedback under `evidence/human_review_feedback/`.
 
 **M30 — source-hierarchy reconciliation** closes that gap on the
 review → audit → revise path (`sweeps.md` §M30):
@@ -448,21 +450,23 @@ own output directory, `PROMPT.md`, `_pipeline_done.json`). Completion is a
 marker file, never "the directory is non-empty"; every published winner and pin
 is verified against the digest of the corpus the judges actually scored.
 
-### The two input areas, and the read-only `raw_data/` directory
+### The input and evidence areas, and the read-only evidence directories
 
-Every corpus the pipeline handles carries two areas that are **inputs**, never
-revision content:
+Every corpus the pipeline handles carries one pristine input area and two
+**evidence areas** — inputs, never revision content:
 
 | area | what it is | rule |
 |---|---|---|
 | `non_revised/` (in the root) | the pristine copy of `--source` | read-only: re-hashed at the start of every `run`/`decide`, byte-verified in every sandbox, never written (the operator's `--source` is never touched at all) |
-| `raw_data/` (inside each corpus) | the raw data — figure and table sources, data tables, the analysis snapshot the author's own scripts regenerate, and the editors'/reviewers' feedback the author received | read-only: a package CARRIES it, and the pipeline puts the untouched original's copy back after every package-producing stage. It is also NOT submission content: no file in it is a main-text/cover-letter/supplementary document, its text is never swept/counted/quoted as the authors' prose, and feedback files in it are external prose read only as evidence |
+| `raw_data/` (inside each corpus) | the raw data — figure and table sources, data tables, the analysis snapshot the author's own scripts regenerate; an older corpus may also keep feedback here | read-only: a package CARRIES it, and the pipeline puts the untouched original's copy back after every package-producing stage; NOT submission content |
+| `human_review_feedback/` (inside each corpus) | the REAL editors'/reviewers' comments from the previous submission (decision letters, referee reports), plus any previous response-to-reviewers as context | read-only and NOT submission content like raw_data; the journal modes build the concern ledger and the response letter from it, and a judge may read it (under `evidence/human_review_feedback/` in its view) to score how well a version ADDRESSES the human-raised concerns |
 
-Both names are this repo's snake_case spellings of older ones — `non-revised/`
-and `raw_figs/` — and **both spellings of each name stay resolved**: a sandbox
-area is found under either spelling (`area_dir`, `pristine_dirname`,
-`raw_data_dirname`) and the raw-data manifest keys are normalised, so renaming
-one of the directories never reads as a modification of the corpus.
+The first two names are this repo's snake_case spellings of older ones —
+`non-revised/` and `raw_figs/` — and **both spellings of each name stay
+resolved**: a sandbox area is found under either spelling (`area_dir`,
+`pristine_dirname`, `raw_data_dirname`) and the raw-data manifest keys are
+normalised, so renaming one of the directories never reads as a modification of
+the corpus.
 
 Nothing in the pipeline MOVES an existing directory: a root or a corpus set up
 under the older spellings keeps them (`runs` and `pinned/` keep their recorded
@@ -475,35 +479,39 @@ corpus whose directory is still `raw_figs/` appears in the package as
 file names and bytes are untouched. Rename an existing root by hand if you want
 the new spelling there too; every check accepts either.
 
-The raw-data rule is enforced, not merely requested:
+The evidence-area rule is enforced, not merely requested:
 
 * the version-token rule never renames anything inside it, and a token found on
   such a file name is not read as this package's naming evidence;
-* after every rewrite / revise / integrate session the directory is compared,
+* after every rewrite / revise / integrate session each directory is compared,
   file by file, against the untouched original: an edited file is restored, a
   dropped one is copied back, one the original does not have is removed, and a
   directory squatting on an original file's path is left alone (the recovery
   layer refuses to delete real work and fails that attempt) — each case is named
-  in a `READ-ONLY raw data:` warning and counted in the run record
-  (`runs.<id>.raw_data`);
-* a pinned champion or published winner that carries raw-data edits from before
-  the rule existed is REPORTED (never rewritten) when `run`/`decide` start; the
-  next stage materializes the original's copy, so the deviation cannot reach a
-  new package. The pin/winner comparison leaves the raw-data area out of both
+  in a `READ-ONLY raw data:` / `READ-ONLY human review feedback:` warning and
+  counted in the run record (`runs.<id>.raw_data`, and the
+  `human_review_feedback` block beside it);
+* a pinned champion or published winner that carries edits from before the rule
+  existed is REPORTED (never rewritten) when `run`/`decide` start; the next
+  stage materializes the original's copy, so the deviation cannot reach a new
+  package. The pin/winner comparison leaves both evidence areas out of both
   sides for the same reason.
 
-Nothing in the area is ever a scored difference: a version is not rewarded for
-changing raw data and none is penalized for leaving it exactly as it is.
+Nothing in the areas is ever a scored difference BY ITSELF: a version is not
+rewarded for changing raw data or the feedback files and none is penalized for
+leaving them exactly as they are.
 
-The area is also **not the submission**: a file inside it is never a
+Neither area is **the submission**: a file inside one is never a
 main-text/cover-letter/supplementary document whatever its name, its text is
 never enumerated by the review's written-surface sweeps (M1–M29), counted
 against a word limit (M18/M19), role-classified (M9) or quoted as the authors'
 prose, and the code-side caption/length/formatting/placeholder/number scans
-skip it. It remains available as EVIDENCE — the producer tier of M30 and the
-fact-checking reference. One common content is the editors'/reviewers'
-feedback: that is external prose, read for what the review requires, never
-attributed to the authors and never a written surface to align.
+skip it — the same guard applies to a feedback/response document kept outside
+the areas, by name. `raw_data/` stays available as the producer tier of M30 and
+the fact-checking reference; the human feedback is what the concern
+reconciliation and the response letter are built from, and it is what lets a
+judge score whether a version answers the human-raised concerns (see the judge
+view: both areas appear under the labeled `evidence/` directory).
 
 ## Journal revision modes (options 1–4)
 
@@ -528,6 +536,10 @@ How each mode runs:
   quote — checked against the text rendering of the feedback — plus `action`
   and `disposition`). The feedback is EXTERNAL prose: it never becomes a
   finding quote about the authors, and it never enters the submission package.
+  The primary source is the corpus's `human_review_feedback/` area (any file
+  name, including non-English ones; a `response_to_reviewers` file there is
+  previous-response CONTEXT, not a concern); an older shape — a
+  feedback-named file under `raw_data/` — is still detected.
 * **Options 1–2** feed the ledger into the normal round: the review reconciles
   every concern (`review/concerns_reconciled.json`) and files a `check: "JF"`
   finding for each unanswered one; the rewrites carry the concern block; the
@@ -1004,7 +1016,7 @@ revise, integrate, judge); the same table lives in the review skill
 `paper-skills/prompts/identify_issues.prompt.md`) and in the revision ledger's
 definition (`paper-skills/paper-revise/references/ledger.md`):
 
-| review category | scored class (`correctness > consistency > preservation > completeness > formatting > writing`) |
+| review category | scored class (`correctness > preservation > completeness > consistency > writing > formatting`) |
 |---|---|
 | 0 Editor/Reviewer concerns | `correctness` (unsupported claim, overclaim, UNDERCLAIM, rigor, ethics), `completeness` (required information missing) or `preservation` (removed content/limitation) |
 | 1 Completeness & Factual Integrity | `correctness` (factual error, wrong number/DOI/reference key, broken cross-reference) or `completeness` (mandatory item missing) |
@@ -1089,8 +1101,8 @@ made mechanical where it can be:
 derivation** (judge contract v4, 2026-09-30). Every class carries the same four
 severity rungs — Fatal 4 / Critical 3 / Major 2 / Minor 1, a distance from
 correct — and the six tiers are compared **lexicographically** in the fixed
-priority order `correctness > consistency > preservation > completeness >
-formatting > writing`: the *first* tier whose net is not zero decides the
+priority order `correctness > preservation > completeness > consistency >
+writing > formatting`: the *first* tier whose net is not zero decides the
 comparison (resolved rows add, introduced rows subtract, the net is capped at
 ±4), its magnitude is bounded by the rung its own deciding rows can back (a run
 of MINOR rows reaches ±2, a MAJOR row ±3, a CRITICAL or FATAL row ±4), and every
@@ -1127,17 +1139,19 @@ The artifact *process* is shared as well; the differences are deliberate:
 | `scores.json` (signed comparison items with class + severity) | judge | only the panel scores |
 
 **How a round is decided (one ranking key, every arm on the same terms):**
-`-median`, `-mean` (breaks a median tie on the same flat directed-score list),
-`IQR`, `critical_remaining`, `writing_remaining`, then the provenance-free
-content digest and only after that the run id. `critical_remaining` and
-`writing_remaining` are counts the *package-producing* session reports in its
-completion marker -- CRITICAL-severity findings still open, and the frozen
-review's category-2 (writing quality / logic / repetition) findings still open
--- so severity outranks style, and style can only separate versions the panel
-statistics cannot. Both are cross-checked against the frozen review (the
-revision arm is warned when it claims zero while the review lists such
-findings), both are +inf when absent (absence never wins a tie), they are never
-a score, a gate or a reason to make a version ineligible -- and the judge is
+`-median`, then the round's **issue census** (crit/fatal, then major, then
+minor; tier by tier in the scoring priority order; peer rate before own rate,
+so the ~7x exposure difference between opponent slots and a version's own judge
+sessions is normalized; counts are deduplicated across sessions by an exact
+normalized key and divided by the sessions that could mention them), then
+`-mean`, `IQR`, the provenance-free content digest and only after that the run
+id. The census comes from the panel's own ledgers, so a median tie is separated
+by how many defects the panel actually attributed to each version. The
+self-reported `critical_remaining`/`writing_remaining` counts are still
+recorded and cross-checked against the frozen review (a revise arm claiming
+zero while the review lists such findings is warned), but they no longer rank:
+the census replaced them. They are never a score, a gate or a reason to make a
+version ineligible -- and the judge is
 never asked for either number (blinding). An exact tie on `median`, `mean` and
 `IQR` still keeps the incumbent base: a better writing count separates
 challengers, it does not retire an incumbent the panel cannot distinguish from
@@ -1171,9 +1185,15 @@ session's opponent comparisons counts once). The table separates `own` (the
 rows a version's own sweep sessions filed) from `peer` (the rows the other
 versions' comparisons filed against it) -- the panel's scrutiny check, since
 the two sources have different depth -- and normalizes by the sessions that
-could mention the version, which is stable as the field size changes. It is
-REPORTED, never a ranking input: the census says what is left and where, the
-signed comparison says who won the pair.
+could mention the version, which is stable as the field size changes. Since the
+2026-10-01 calibration it is also the selection's **severity tie-break**: after
+the median, `run` compares crit/fatal, then major, then minor, tier by tier in
+the scoring priority order, using the exposure-normalized peer rate first and
+the own rate second (the peer columns come from ~7x more session slots, so raw
+own/peer totals mostly measure exposure; the `dedup` columns merge rows whose
+normalized evidence is identical across sessions, per source, and the rates
+divide those by the opportunities). It is not a score by itself: it separates
+versions whose panel median is tied.
 
 The panel-quality diagnostic that reads the same pairs has one fixed rule:
 `direction_flips` lists the pairs where BOTH sides claim to be better (both own
@@ -1538,12 +1558,13 @@ compatibility for a root with no `venue`/`article_type` key.
   (`non_revised/`, `base/`, pins, winners) is digest-verified, and the
   corpus's read-only `raw_data/` directory (see "The two input areas") is
   restored from that pristine copy whenever a stage touches it.
-* That read-only contract is taken literally: `raw_data/` (and everything
-  inside it) may be `chmod -R a-w`, so the pipeline never needs write
-  permission there — `setup`, publication of `final_clean_version/`, pruning,
-  retries and the restore-from-pristine step all work on a read-only tree, and
-  the modes the author set are preserved in every copy. The restore step is the
-  only thing that writes there, and it puts the modes back exactly as it found
-  them; the generation-counter rename never reaches inside `raw_data/`.
+* That read-only contract is taken literally: `raw_data/` and
+  `human_review_feedback/` (and everything inside them) may be
+  `chmod -R a-w`, so the pipeline never needs write permission there — `setup`,
+  publication of `final_clean_version/`, pruning, retries and the
+  restore-from-pristine step all work on a read-only tree, and the modes the
+  author set are preserved in every copy. The restore step is the only thing
+  that writes there, and it puts the modes back exactly as it found them; the
+  generation-counter rename never reaches inside either area.
 * On WSL, `/mnt/c` occasionally returns transient `EIO` errors under a synced
   folder; re-running the affected command is safe (the pipeline is resumable).

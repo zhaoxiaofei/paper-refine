@@ -481,11 +481,12 @@ def test_field_and_selection():
     check("CR1d an INTEGRATED candidate wins when the panel ranks it first",
           sel["champion"] == "i1", f"champion={sel['champion']} "
           f"ranking={[(r['id'], r['median']) for r in sel['ranking']]}")
-    check("CR1d the ranking key keeps every arm on the same terms (panel stats first, then the "
-          "self-reported counts (severity, then the category-2 writing count), the "
-          "provenance-free content digest and the id)",
-          "ranking key: (-median, -mean, IQR, critical_remaining, writing_remaining, digest, id)"
-          in " ".join(sel["trace"]))
+    check("CR1d the ranking key keeps every arm on the same terms (median first, then the "
+          "panel-derived severity/census rungs, then mean/IQR/digest/id; the self-reported "
+          "counts no longer rank)",
+          "ranking key: (-median, then crit/fatal, major and minor issue rungs" in
+          " ".join(sel["trace"])
+          and "then -mean, IQR, digest, id)" in " ".join(sel["trace"]))
 
 
 # =====================================================================

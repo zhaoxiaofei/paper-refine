@@ -155,6 +155,28 @@ def _candidate_key(token: str) -> str:
     return t
 
 
+EVIDENCE_DIRNAMES = ("raw_data", "raw_figs", "human_review_feedback")
+_NON_MANUSCRIPT_RE = re.compile(
+    r"feedback|referee|reviewers?|editors?|editorial|decision[_ \-]*(?:letter|notice|email)"
+    r"|response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
+_REPLY_RE = re.compile(r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
+
+
+def _non_manuscript(name: str) -> bool:
+    """True for an evidence-area / feedback / response path (never manuscript text)."""
+    parts = str(name).replace("\\", "/").split("/")
+    if any(part in EVIDENCE_DIRNAMES for part in parts[:-1]):
+        return True
+    base = parts[-1]
+    if any(base.startswith(d + "__") for d in EVIDENCE_DIRNAMES):
+        return True
+    if _REPLY_RE.search(base):
+        return True
+    if "cover" in base.lower():
+        return False            # a cover letter IS a submission document
+    return bool(_NON_MANUSCRIPT_RE.search(base))
+
+
 def read_text_files(corpus: str):
     """(name, lines) for every text file under corpus, sorted by name."""
     out = []
@@ -164,6 +186,8 @@ def read_text_files(corpus: str):
                 continue
             path = os.path.join(root, fname)
             rel = os.path.relpath(path, corpus).replace(os.sep, "/")
+            if _non_manuscript(rel):
+                continue        # evidence / feedback / response text is not the manuscript
             try:
                 text = open(path, encoding="utf-8", errors="replace").read()
             except OSError:

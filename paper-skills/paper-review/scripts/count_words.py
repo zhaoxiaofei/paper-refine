@@ -336,6 +336,8 @@ def is_cover_letter(text: str, name: str = "") -> bool:
 
 
 RAW_DATA_DIRNAMES = ("raw_data", "raw_figs")
+HUMAN_FEEDBACK_DIR = "human_review_feedback"
+EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR,)
 EXTERNAL_FEEDBACK_RE = re.compile(
     r"feedback"
     r"|referees?[_ \-]*(?:report|comment)"
@@ -343,6 +345,8 @@ EXTERNAL_FEEDBACK_RE = re.compile(
     r"|editor(?:s|ial)?[_ \-]*(?:comment|decision|report)"
     r"|decision[_ \-]*letter",
     re.I)
+AUTHORED_REPLY_RE = re.compile(
+    r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
 
 
 def is_evidence_path(path: str) -> bool:
@@ -353,9 +357,10 @@ def is_evidence_path(path: str) -> bool:
     cover-letter limits, whatever its name suggests.
     """
     parts = str(path).replace("\\", "/").split("/")
-    if any(part in RAW_DATA_DIRNAMES for part in parts[:-1]):
+    if any(part in EVIDENCE_DIRNAMES for part in parts[:-1]):
         return True
-    return bool(EXTERNAL_FEEDBACK_RE.search(parts[-1]))
+    return bool(EXTERNAL_FEEDBACK_RE.search(parts[-1])
+                or AUTHORED_REPLY_RE.search(parts[-1]))
 
 
 def cover_letter_words(text: str) -> int:

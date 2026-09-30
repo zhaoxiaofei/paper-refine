@@ -68,6 +68,8 @@ import sys
 from collections import defaultdict
 
 RAW_DATA_DIRNAMES = ("raw_data", "raw_figs")
+HUMAN_FEEDBACK_DIR = "human_review_feedback"
+EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR,)
 EXTERNAL_FEEDBACK_RE = re.compile(
     r"feedback"
     r"|referees?[_ \-]*(?:report|comment)"
@@ -75,6 +77,8 @@ EXTERNAL_FEEDBACK_RE = re.compile(
     r"|editor(?:s|ial)?[_ \-]*(?:comment|decision|report)"
     r"|decision[_ \-]*letter",
     re.I)
+AUTHORED_REPLY_RE = re.compile(
+    r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
 
 
 def is_evidence_name(fname: str) -> bool:
@@ -85,12 +89,14 @@ def is_evidence_name(fname: str) -> bool:
     produced by an older converter or an adapted workflow.
     """
     parts = fname.replace("\\", "/").split("/")
-    if any(part in RAW_DATA_DIRNAMES for part in parts[:-1]):
+    if any(part in EVIDENCE_DIRNAMES for part in parts[:-1]):
         return True
     base = parts[-1]
-    if any(base.startswith(d + "__") for d in RAW_DATA_DIRNAMES):
+    if any(base.startswith(d + "__") for d in EVIDENCE_DIRNAMES):
         return True
-    return bool(EXTERNAL_FEEDBACK_RE.search(base))
+    # A previous response-to-reviewers (the authors' own document) is not
+    # manuscript prose either: it never produces an M1/M1b row.
+    return bool(EXTERNAL_FEEDBACK_RE.search(base) or AUTHORED_REPLY_RE.search(base))
 
 
 # Universal abbreviations exempt from redefinition anywhere
