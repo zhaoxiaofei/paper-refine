@@ -456,7 +456,7 @@ revision content:
 | area | what it is | rule |
 |---|---|---|
 | `non_revised/` (in the root) | the pristine copy of `--source` | read-only: re-hashed at the start of every `run`/`decide`, byte-verified in every sandbox, never written (the operator's `--source` is never touched at all) |
-| `raw_data/` (inside each corpus) | the raw data — figure and table sources, data tables, the analysis snapshot the author's own scripts regenerate | read-only: a package CARRIES it, and the pipeline puts the untouched original's copy back after every package-producing stage |
+| `raw_data/` (inside each corpus) | the raw data — figure and table sources, data tables, the analysis snapshot the author's own scripts regenerate, and the editors'/reviewers' feedback the author received | read-only: a package CARRIES it, and the pipeline puts the untouched original's copy back after every package-producing stage. It is also NOT submission content: no file in it is a main-text/cover-letter/supplementary document, its text is never swept/counted/quoted as the authors' prose, and feedback files in it are external prose read only as evidence |
 
 Both names are this repo's snake_case spellings of older ones — `non-revised/`
 and `raw_figs/` — and **both spellings of each name stay resolved**: a sandbox
@@ -494,6 +494,85 @@ The raw-data rule is enforced, not merely requested:
 
 Nothing in the area is ever a scored difference: a version is not rewarded for
 changing raw data and none is penalized for leaving it exactly as it is.
+
+The area is also **not the submission**: a file inside it is never a
+main-text/cover-letter/supplementary document whatever its name, its text is
+never enumerated by the review's written-surface sweeps (M1–M29), counted
+against a word limit (M18/M19), role-classified (M9) or quoted as the authors'
+prose, and the code-side caption/length/formatting/placeholder/number scans
+skip it. It remains available as EVIDENCE — the producer tier of M30 and the
+fact-checking reference. One common content is the editors'/reviewers'
+feedback: that is external prose, read for what the review requires, never
+attributed to the authors and never a written surface to align.
+
+## Journal revision modes (options 1–4)
+
+A root can be driven against a REAL journal decision letter instead of the
+pipeline's own review rounds. `setup --revision-mode <mode>` (or
+`set-revision-mode <mode>` on an existing root) selects one of four workflows;
+the feedback file(s) are named with `--journal-feedback FILE` (repeatable) or
+auto-detected in the corpus by name — typically
+`raw_data/iScience_feedback_from_reviewers_and_editors.txt`.
+
+| option | mode | what it is | response to reviewers | rewrites | edits |
+|---|---|---|---|---|---|
+| option 1 | `transfer` | revise for a **new journal** (e.g. read iScience, submit to Frontiers in Immunology) | **not written** | allowed | the round's full review + the decision letter's concerns |
+| option 2 | `resubmit` | new submission to the **same journal** | **required** | allowed | the round's full review + the concerns |
+| option 3 | `major` | complete a **major revision** at the same journal | **required** | forbidden | **concern-scoped only** — no general review, no audit, no judge panel |
+| option 4 | `minor` | as 3, for a **minor revision** | **required** | forbidden | concern-scoped only |
+
+How each mode runs:
+
+* **All four** enumerate the letter into a concern ledger
+  (`concerns/JF_concerns.json|md`: one row per distinct concern, verbatim
+  quote — checked against the text rendering of the feedback — plus `action`
+  and `disposition`). The feedback is EXTERNAL prose: it never becomes a
+  finding quote about the authors, and it never enters the submission package.
+* **Options 1–2** feed the ledger into the normal round: the review reconciles
+  every concern (`review/concerns_reconciled.json`) and files a `check: "JF"`
+  finding for each unanswered one; the rewrites carry the concern block; the
+  revise arms answer the findings; the judge panel and `decide` work as usual.
+* **Options 3–4** run a different, restricted path: `r1_concerns` produces the
+  ledger AND the only finding list (`check: "JF"`, one finding per concern);
+  the single `r1_a2_revise` session edits the manuscript ONLY for those ids
+  (every other observation goes to `MANUAL_STEPS.md`), and the code-side scope
+  guard fails the attempt for a changed file the ledger does not name or a
+  file added/removed. There is no judge panel and no champion decision —
+  `decide` reports the scoped revision instead.
+* **Options 2–4** then run a response stage: `RESPONSE_TO_REVIEWERS.md` +
+  `response_map.json`, one block/row per concern, every cited file verified to
+  exist in the final package, `planned` rows forbidden from claiming results,
+  and a new-experiment concern required to cite its new data.
+* **All four** finish by assembling `<root>/journal_submission/`: the final
+  package minus `raw_data/`, minus the pipeline's bookkeeping and revision
+  auxiliaries (plus the response letter when the mode requires one), with
+  `<root>/journal_submission.json` recording the mode and the manifest. When a
+  mode requires a letter and none exists, the package is NOT assembled. When
+  the round produced tracked changes (`redlines/<version>/from-original/`), the
+  marked-up copies ship in `journal_submission/tracked_changes/` BESIDE the
+  clean documents.
+
+With no `--revision-mode` the default is `none` and nothing above runs: the
+historical workflow is byte-for-byte unchanged (no journal stages in the round
+plan, no journal block in any prompt, no new files).
+
+```bash
+# option 1: iScience -> Frontiers in Immunology, no response letter
+# (select the TARGET journal's venue profile: the rules every stage enforces)
+python paper_pipeline.py setup --source ./submission --root ./rounds \
+    --venue frontiers-immunology --journal "Frontiers in Immunology" \
+    --revision-mode transfer \
+    --journal-feedback-from iScience
+
+# option 3: major revision at the same journal (feedback auto-detected in raw_data/)
+python paper_pipeline.py setup --source ./submission --root ./rounds \
+    --journal iScience --revision-mode major --journal-feedback-from iScience
+python paper_pipeline.py run --root ./rounds
+python paper_pipeline.py status --root ./rounds   # shows the mode and the package
+
+# changing the mode on an existing (not yet run) root
+python paper_pipeline.py set-revision-mode minor --root ./rounds
+```
 
 ## Running only some of the steps
 

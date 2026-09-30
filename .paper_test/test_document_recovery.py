@@ -291,17 +291,25 @@ def main() -> int:
     ctx = build_root(tmp)
     rec, sb = build_revise_sandbox(ctx, drop=("raw_figs/entire_pipeline.git-snapshot.txt",))
     # Make the file un-restorable: backfill refuses to delete a non-empty
-    # directory, so the document-set check reports it missing and the pipeline
-    # itself (not this test) formats the names-first warning.
+    # directory, so the pipeline itself (not this test) formats the names-first
+    # warning. A raw-data path is EVIDENCE, not a submission document, so the
+    # document-set check does not own it; the recovery layer's
+    # "backfill could not restore" warning and the raw-data contract's
+    # "READ-ONLY raw data:" squat warning both name the file first.
     ghost = sb / "revised" / "raw_figs" / "entire_pipeline.git-snapshot.txt"
     ghost.mkdir()
     (ghost / "keep").write_text("agent scratch\n")
     nb.postcheck(ctx, rec)
     warns = (rec.get("postcheck") or {}).get("warnings") or []
-    missing = [w for w in warns if w.startswith("MISSING FROM THE CANDIDATE")]
-    line = missing[0] if missing else ""
+    named = [w for w in warns if "entire_pipeline.git-snapshot.txt" in w[:140]]
+    line = named[0] if named else ""
     check("D8 the filename is visible inside the first 140 chars",
-          "raw_figs/entire_pipeline.git-snapshot.txt" in line[:140], line)
+          bool(named), line)
+    check("D8 the read-only raw-data contract names the squatting directory",
+          any(w.startswith("READ-ONLY raw data:")
+              and "raw_data/entire_pipeline.git-snapshot.txt" in w[:140]
+              for w in warns),
+          " | ".join(w[:120] for w in warns)[:300])
 
     # ---- D9: the retry budget is per invocation -----------------------
     print("== D9: a fresh `run` grants a failed run a fresh retry budget ==")

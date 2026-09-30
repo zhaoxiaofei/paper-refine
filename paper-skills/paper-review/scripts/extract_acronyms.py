@@ -9,6 +9,13 @@ acronym-like token, and builds the ACRONYM INVENTORY artifact:
                                     AFTER its first use in the same context
   OUT/artifacts/M1_acronyms.json  — machine-readable copy for findings.json
 
+The submission corpus NEVER contains the raw-data evidence area (`raw_data/`,
+legacy `raw_figs/`): convert_corpus.py writes its text to WORK/evidence/. Any
+file that still looks like raw-data evidence, or like editors'/reviewers'
+feedback, is skipped explicitly here and named in the artifact header — a data
+table, a reviewer's sentence or an editor's decision letter is not the authors'
+prose and must never produce an M1/M1b row.
+
 The M1b table is the evidence base for finding rule M1(k). The convention is
 the master prompt's own: "repeating fully expanded long-forms after their first
 use". So in every context (abstract / introduction / main text / Methods / each
@@ -59,6 +66,32 @@ import os
 import re
 import sys
 from collections import defaultdict
+
+RAW_DATA_DIRNAMES = ("raw_data", "raw_figs")
+EXTERNAL_FEEDBACK_RE = re.compile(
+    r"feedback"
+    r"|referees?[_ \-]*(?:report|comment)"
+    r"|reviewers?[_ \-]*(?:comment|report|critique)"
+    r"|editor(?:s|ial)?[_ \-]*(?:comment|decision|report)"
+    r"|decision[_ \-]*letter",
+    re.I)
+
+
+def is_evidence_name(fname: str) -> bool:
+    """True when a corpus file name belongs to the evidence area / external prose.
+
+    convert_corpus.py keeps raw-data text out of WORK/corpus/ (it goes to
+    WORK/evidence/); this is the defense-in-depth gate for a WORK/corpus/
+    produced by an older converter or an adapted workflow.
+    """
+    parts = fname.replace("\\", "/").split("/")
+    if any(part in RAW_DATA_DIRNAMES for part in parts[:-1]):
+        return True
+    base = parts[-1]
+    if any(base.startswith(d + "__") for d in RAW_DATA_DIRNAMES):
+        return True
+    return bool(EXTERNAL_FEEDBACK_RE.search(base))
+
 
 # Universal abbreviations exempt from redefinition anywhere
 UNIVERSAL = {
@@ -725,10 +758,16 @@ def main():
     acro = defaultdict(lambda: {"occurrences": [], "expansions": set(), "exempt": False,
                                 "reason": None, "detectors": set(), "def_phrases": set()})
     reference_notes = []
+    evidence_notes = []
     swept = []  # (file, line, context, masked, raw) for the M1b long-form audit
 
     for fname in sorted(os.listdir(corpus)):
         if not fname.endswith(".txt"):
+            continue
+        if is_evidence_name(fname):
+            # A raw-data table, a reviewer's report or an editor's decision
+            # letter is EVIDENCE, not the authors' prose: never an M1/M1b row.
+            evidence_notes.append(fname)
             continue
         role = classify_context(fname)
         if role == "references":
@@ -904,6 +943,9 @@ def main():
           "",
           "Reference-list regions skipped (boundary is explicit, never silent):",
           ] + (["- " + n for n in reference_notes] or ["- none"]) + [
+          "",
+          "Raw-data evidence / external feedback excluded (never submission text):",
+          ] + (["- " + n for n in evidence_notes] or ["- none"]) + [
           "",
           "| acronym | exempt? | expansion(s) as written | n | defined at first use? | long form after first use (n) | files | first per context | consistent? |",
           "|---|---|---|---|---|---|---|---|---|"]

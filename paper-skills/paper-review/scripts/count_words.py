@@ -335,6 +335,29 @@ def is_cover_letter(text: str, name: str = "") -> bool:
     return False
 
 
+RAW_DATA_DIRNAMES = ("raw_data", "raw_figs")
+EXTERNAL_FEEDBACK_RE = re.compile(
+    r"feedback"
+    r"|referees?[_ \-]*(?:report|comment)"
+    r"|reviewers?[_ \-]*(?:comment|report|critique)"
+    r"|editor(?:s|ial)?[_ \-]*(?:comment|decision|report)"
+    r"|decision[_ \-]*letter",
+    re.I)
+
+
+def is_evidence_path(path: str) -> bool:
+    """True when the given file is raw-data EVIDENCE, not a submission document.
+
+    A file under `raw_data/` (legacy `raw_figs/`), or an editors'/reviewers'
+    feedback file, is never counted against a submission's abstract/main-text/
+    cover-letter limits, whatever its name suggests.
+    """
+    parts = str(path).replace("\\", "/").split("/")
+    if any(part in RAW_DATA_DIRNAMES for part in parts[:-1]):
+        return True
+    return bool(EXTERNAL_FEEDBACK_RE.search(parts[-1]))
+
+
 def cover_letter_words(text: str) -> int:
     """Words in the PERSUADING part (salutation, signature, disclosures excluded)."""
     lines = (text or "").splitlines()
@@ -448,6 +471,12 @@ def main(argv=None) -> int:
     out, failed = [], False
     for name in args.files:
         p = Path(name)
+        if is_evidence_path(name):
+            print(f"error: {name} is raw-data EVIDENCE (or editors'/reviewers' feedback), "
+                  f"not a submission document — it is never counted against an "
+                  f"abstract/main-text/cover-letter limit", file=sys.stderr)
+            failed = True
+            continue
         try:
             text = p.read_text(encoding="utf-8", errors="replace")
         except OSError as e:

@@ -18,6 +18,8 @@ target journal's own author guide and say which source you used.
 - `SUBMISSION_DIR` = `./non-revised` (override: any explicit path or argument from the user)
 - `OUT` = `./review` — create it; ALL outputs land here
 - `WORK` = `./review/work` — corpus, scripts, state
+- `raw_data/` (legacy spelling `raw_figs/`) — when SUBMISSION_DIR carries it: the **evidence
+  area**, not submission content (see below)
 - `ZOTERO_SKILL` = `/mnt/d/software/plugins/plugins/zotero/skills/zotero/scripts/zotero.py` (override if the user provides one; if absent → fall back to manual-verification)
 - `ZOT_CLI` = `zot` (pyzotero-cli) and the `$zotero-use` skill — the reference route for resolving citations read-only (`zot --local ... items list|get|citation|bib`, `zot fulltext get`). This review never edits a citation field and never writes to the Zotero library.
 
@@ -27,6 +29,21 @@ If `SUBMISSION_DIR` does not exist or is empty: **STOP and ask the user.**
 artifacts into the package being reviewed. If the user's SUBMISSION_DIR is the
 working directory (or contains it), put `OUT`/`WORK` in a sibling directory and
 say where they went.
+
+**The `raw_data/` evidence area is not the submission.** A corpus may carry a
+`raw_data/` directory (an older corpus spells it `raw_figs/`) with the data
+tables, figure/table sources, the analysis snapshot — and often the editors' and
+reviewers' feedback the authors received. It is the authors' INPUT and the
+review's evidence; it is never submitted to the journal and no file inside it is
+a submission document. Its files therefore get no document role (never "main
+text", "cover letter", "title page" or "supplementary", whatever their names
+suggest), are never marked editable, and are never swept, counted or quoted as
+the authors' prose: the converter writes their text to `WORK/evidence/`, not
+`WORK/corpus/`, so M1–M29 run over the submission only. Reviewer/editor feedback
+files are *external* prose — read them as evidence of what the review requires,
+never attribute their sentences to the authors, and never treat one as a written
+surface to align. `raw_data/` stays available for fact-checking and as the
+producer tier of M30.
 
 ## Mission
 
@@ -49,8 +66,9 @@ A plain "review my manuscript" prompt reliably misses low-salience mechanical is
 4. **Mechanical sweeps M1–M17 are EXHAUSTIVE and MANDATORY, and M18 (figure-legend lengths), M19 (abstract/main-text length plus the cover-letter preference) and M20 (OOXML style/formatting uniformity, enumerated by the pipeline's code-side scan) always run with them, together with the adopted sweeps M21–M24 (correspondence policy, data/code-availability integrity, supplementary parity, concept/term families), the REWRITE-PARITY checks M25–M29 (figure-artwork/text parity, house-style/orthographic conventions, claim→evidence coverage, sibling-definition symmetry, caption-promise vs printed-schema parity) and the SOURCE-HIERARCHY reconciliation M30 (a written claim against the code/raw data that produced it).** M18's optional proxy cap only changes whether an over-count legend is reported as an over-cap item. Only judgment passes J1–J5 may be prioritized; J5 (architecture & rewrite-class) produces scope-level rows in `OUT/ARCHITECTURE.md`, not per-sentence findings. The word "non-exhaustive" never applies to a mechanical sweep.
 5. **One finding per instance.** "Several acronyms are undefined" is not a finding; each undefined acronym is its own finding with its own ID, quote, and location.
    M1(a) "used before it is defined" includes the acronym-first compound: a sentence that prints the short form first and the expansion after it (`MALBAC-sequenced (multiple annealing …)`) has used the token before defining it. When the sentence itself prints the expansion, the token IS an abbreviation being defined, so "it is a tool/proper name" is not a disposition.
-6. **Sweep pattern for every mechanical check:** ENUMERATE (script preferred; scripts live in `WORK/`) → ARTIFACT (`OUT/artifacts/<ID>.md` for the M1/M2/M4–M17 tables; term/value occurrence enumerations are written to `WORK/occurrences_<slug>.md`, which is M8's artifact — pass `--out OUT/artifacts` if you prefer them alongside the others; every instance gets a row, including rows later judged OK; the artifact spans the whole corpus, not one file) → AUDIT (each row gets: a finding ID, `OK`, or `unable — <reason>`) → REPORT (findings derived only from artifact rows, never from general impression).
+6. **Sweep pattern for every mechanical check:** ENUMERATE (script preferred; scripts live in `WORK/`) → ARTIFACT (`OUT/artifacts/<ID>.md` for the M1/M2/M4–M17 tables; term/value occurrence enumerations are written to `WORK/occurrences_<slug>.md`, which is M8's artifact — pass `--out OUT/artifacts` if you prefer them alongside the others; every instance gets a row, including rows later judged OK; the artifact spans the whole submission corpus, not one file) → AUDIT (each row gets: a finding ID, `OK`, or `unable — <reason>`) → REPORT (findings derived only from artifact rows, never from general impression).
 7. **A sweep with zero findings is INVALID unless its artifact exists and every row is disposed.**
+8. **`raw_data/` is EVIDENCE, not submission content.** Its text never feeds a written-surface sweep (M1–M29), a word count (M18/M19), a file-hygiene row (M9) or a finding's evidence quote; M30 alone reads it, as the producer side of a written claim. Editors'/reviewers' feedback inside it is external prose and is never attributed to the authors.
 
 ## Bundled scripts (use them — they exist so enumeration is deterministic)
 
@@ -58,7 +76,7 @@ All stdlib-only Python, runnable anywhere Python 3.8+ exists. Copy them into `WO
 
 | script | purpose |
 |---|---|
-| `scripts/convert_corpus.py` | Phase 1: recursive inventory + docx/xlsx/tex/bib/md/txt → plain-text corpus in `WORK/corpus/` (+ `inventory.md`/`inventory.json`) |
+| `scripts/convert_corpus.py` | Phase 1: recursive inventory + docx/xlsx/tex/bib/md/txt → plain-text corpus in `WORK/corpus/` (+ `inventory.md`/`inventory.json`); the `raw_data/` evidence area is inventoried with `area: raw_data`, is never editable, and its text goes to `WORK/evidence/` — never `WORK/corpus/` — so no submission sweep reads it |
 | `scripts/extract_acronyms.py` | M1: full acronym inventory with expansions, first-use-per-context, consistency flags, PLUS the M1b long-form audit (every use of a defined acronym's un-abbreviated long form after its first use in a context — case/hyphen/plural-tolerant — as an instance table of finding rows; see sweeps.md rule (k)). Reads optional `WORK/extra_acronyms.txt` (one token per line, case-insensitive) for project-specific terms — the way to add digit-free lowercase symbols such as `tnf` |
 | `scripts/extract_citations.py` | M2: every call-out vs every reference entry; orphans, uncited, duplicates, order |
 | `scripts/extract_numbers.py` | M4: labeled metrics, accessions, versions; auto-flags same-label conflicts |
@@ -141,6 +159,22 @@ reports the rewrite-class issues no instance-level sweep can enumerate
 sweeps validated from the discovery round are appended after the adopted block
 as **M31, M32…** in the same format — do not insert into the middle (IDs are
 stable).
+
+**Scope of "the corpus" — the `raw_data/` evidence area is NOT in it.** Wherever
+this file says the corpus, it means the SUBMISSION corpus (the converted text
+under `WORK/corpus/`: manuscript, cover letter, title page, supplementary
+documents, figure/table sources of the submission itself). A corpus may carry a
+`raw_data/` directory (legacy spelling `raw_figs/`) with data tables, figure
+sources, the analysis snapshot — and often the editors'/reviewers' feedback. That
+is the EVIDENCE area: it is not submitted, no file in it is a submission
+document, and its text is never enumerated, counted, quoted or disposed by any
+written-surface sweep below (M1–M29). A file there is never a "main text", "cover
+letter" or "supplementary" document, whatever its name. Reviewer/editor feedback
+inside it is external prose — evidence of what the review requires, never the
+authors' words and never a written surface to align. **M30 is the single
+exception**: it reads the evidence area, as the PRODUCER side of a written
+claim's comparison — and even there, a feedback sentence is never the authors'
+claim, only context.
 
 ---
 
@@ -315,8 +349,11 @@ disposed artifact.
 
 **Purpose:** the classic missed-issue class. Every acronym-like token gets a row.
 
-**Enumeration:** run `extract_acronyms.py --work WORK [--out OUT]` on the corpus.
-It extracts every acronym-like token via four detectors: strict (all-caps ≥2
+**Enumeration:** run `extract_acronyms.py --work WORK [--out OUT]` on the
+SUBMISSION corpus (`WORK/corpus/` — the `raw_data/` evidence area and the
+editors'/reviewers' feedback are never in it; the script lists any such file it
+skips in the artifact header). It extracts every acronym-like token via four
+detectors: strict (all-caps ≥2
 letters: PCR, CRISPR; and mixed-case tokens containing an uppercase letter:
 qPCR, mRNA, scRNA-seq, sgRNA, IL-6), gene-symbol shapes (Foxp3, Nrf2, CD8,
 Tbx21, p53, p21, nf1, il6, stat3, mbd3, nrf2, C1, S100 — any letter run followed
@@ -609,7 +646,9 @@ where the text never defines them as the same cohort).
 
 **Purpose:** the submission's file hygiene.
 
-**Enumeration:** from `inventory.json`: every file, its role, extension,
+**Enumeration:** from `inventory.json`: every file with `area: submission` (the
+`raw_data/` evidence rows are inventoried for visibility but are not submission
+files — never a role, a naming or a hygiene row), its role, extension,
 duplicate roles (two "main text" files?), version-junk filenames (v2, FINAL,
 old, backup, copy, ~), mixed formats for the same role (one figure as .tif +
 .png), zero-byte or corrupted files, files that belong to a different
@@ -783,6 +822,9 @@ over-cap item.
 **Enumeration:** every figure caption / legend in the corpus (the leading
 "Figure N |" label and title count; labels drawn inside the artwork do not)
 into `M18_caption_words.md`: document | caption id | word count | disposition.
+Only SUBMISSION documents are counted: a figure-like line in the `raw_data/`
+evidence area (a data table's column header, a reviewer's report) is never a
+caption row.
 
 **Finding rules (one per instance):**
 - a legend over the configured proxy cap → FORMATTING-tier item; it is reported
@@ -838,7 +880,9 @@ journal requirement and never gated. `count_words.py --cover-letter` counts it.
 count | the base limit applied and its source | the allowed cap | disposition
 (OK / over cap → finding id / over cap but not compressible without losing
 content → manual verification item). Say in the artifact which text was counted
-as the main text. When no editable manuscript or cover letter exists and the
+as the main text. Only SUBMISSION documents are counted — `raw_data/` files and
+the editors'/reviewers' feedback inside it are evidence, never an abstract, main
+text or cover letter, whatever their names. When no editable manuscript or cover letter exists and the
 text lives only in a PDF/slide rendering, the row is `unable — the only copy is
 not editable; the author must convert/count it` (a manual item), never a silent
 skip.
@@ -1414,6 +1458,11 @@ table B: the module-level literals the corpus's code/config files declare
 parameter. Extend it with the rows no code can see: figure/panel ↔ the code or
 data that generates it, protocol step ↔ the code that implements it,
 sample/cohort set ↔ the data's rows, Methods parameter ↔ the code's constant.
+This is the ONE sweep that reads the `raw_data/` evidence area — as the
+PRODUCER side only. An editors'/reviewers' feedback file there is not a
+producer and not a written surface: it documents what the review requires
+(J1 / category 0 may cite it as external context) and is never quoted as
+something the submission says.
 
 **Artifact.** `review/artifacts/M30_hierarchy_reconciliation.md`:
 `document | kind | number | unit | sentence | candidate producer | producer
@@ -1436,6 +1485,10 @@ rows the session adds. Every seeded row and every added row is disposed.
   run-time override reconciles → `OK` with that reconciling reason;
 - an M30 row is never fixed here: the review reports, rule C of paper-revise
   owns a code fix, and a regenerated figure/table goes to the manual list.
+- a sentence that exists only in an editors'/reviewers' feedback file is NEVER
+  a finding about the submission: it is external prose. The written side must
+  be quoted from a submission document (`document:location`), or the row is
+  not filed.
 
 Validation: the class exists because the hierarchy was one-directional — a
 resolution rule with no detection sweep leaves every text-vs-code and

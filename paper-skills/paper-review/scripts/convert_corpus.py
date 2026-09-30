@@ -7,6 +7,17 @@ plain text under WORK/corpus/, and writes:
   WORK/inventory.md     — human-readable inventory table
   WORK/inventory.json   — machine-readable inventory
   WORK/corpus/<rel>.txt — converted plain text (structure-aware)
+  WORK/evidence/<rel>.txt — converted text of the raw-data EVIDENCE area
+
+The corpus's `raw_data/` directory (legacy spelling `raw_figs/`) is NOT part of
+the submission: it carries data tables, figure/table sources, the analysis
+snapshot and possibly the editors'/reviewers' feedback the author received. Its
+files are inventoried with `area: raw_data`, are never marked editable, and
+their converted text goes to `WORK/evidence/` — never to `WORK/corpus/` — so no
+submission sweep (M1 acronyms, M4 numbers, M9 file roles, M18/M19 lengths, …)
+can read a data table, a reviewer's sentence or an editor's decision letter as
+if it were the authors' manuscript. The evidence text stays available to the
+review for fact-checking and the M30 producer comparison.
 
 Conversion details that matter downstream:
   * .docx — body paragraphs, plus header/footer and footnote/endnote parts,
@@ -61,6 +72,10 @@ ROLE_PATTERNS = [
     ("data", re.compile(r"\.csv$|\.tsv$|data", re.I)),
 ]
 
+RAW_DATA_DIRNAMES = ("raw_data", "raw_figs")
+EVIDENCE_DIRNAME = "evidence"
+FEEDBACK_NAME_RE = re.compile(r"feedback|referee|reviewers?|editors?|editorial|decision", re.I)
+
 
 def guess_role(rel_path: str) -> str:
     base = os.path.basename(rel_path).lower()
@@ -68,6 +83,25 @@ def guess_role(rel_path: str) -> str:
         if pat.search(base):
             return role
     return "other"
+
+
+def is_raw_data_rel(rel_path: str) -> bool:
+    """True for a submission-relative path inside the raw-data evidence area.
+
+    The check looks at the DIRECTORY parts only: a submission file that happens
+    to be *named* raw_data... is still a submission file.
+    """
+    parts = rel_path.replace("\\", "/").split("/")
+    return any(part in RAW_DATA_DIRNAMES for part in parts[:-1])
+
+
+def is_feedback_rel(rel_path: str) -> bool:
+    """True when a raw-data file is editors'/reviewers' feedback.
+
+    Feedback is external prose: it is evidence about the review, never the
+    authors' submission text and never a document to sweep, count or edit.
+    """
+    return bool(FEEDBACK_NAME_RE.search(os.path.basename(rel_path)))
 
 
 # ---------------------------------------------------------------- docx / xlsx
@@ -484,7 +518,9 @@ def main():
         print("ERROR: SUBMISSION_DIR %s does not exist. Stop and ask the user." % sub)
         sys.exit(2)
     corpus_dir = os.path.join(work, "corpus")
+    evidence_dir = os.path.join(work, EVIDENCE_DIRNAME)
     os.makedirs(corpus_dir, exist_ok=True)
+    os.makedirs(evidence_dir, exist_ok=True)
 
     files = []
     for root, dirs, names in os.walk(sub):
@@ -498,50 +534,81 @@ def main():
 
     inventory = []
     corpus_names = set()      # flattened corpus stems written so far
+    evidence_names = set()    # flattened evidence stems written so far
     for rel in files:
         p = os.path.join(sub, rel)
         entry = convert_one(p, rel)
-        entry["role"] = guess_role(rel)
-        entry["editable"] = os.path.splitext(rel)[1].lower() in EDITABLE_EXTS and \
-            entry["status"] in ("converted", "converted-empty")
+        if is_raw_data_rel(rel):
+            # The raw-data directory is the EVIDENCE area: the submission does
+            # not include it, so it gets no document role (never "main text",
+            # "cover letter" or "supplementary"), is never editable, and its
+            # converted text must not enter the corpus the sweeps read.
+            entry["area"] = "raw_data"
+            entry["role"] = ("reviewer/editor feedback (raw-data evidence)"
+                             if is_feedback_rel(rel) else "raw data (evidence)")
+            entry["editable"] = False
+            if is_feedback_rel(rel):
+                entry["notes"].append(
+                    "editors'/reviewers' feedback — external prose, never the authors' "
+                    "submission text; read as evidence only (M30/fact-check), never swept, "
+                    "counted or edited")
+            entry["notes"].append(
+                "raw-data evidence area — not part of the submission; converted text goes to "
+                "WORK/%s/, never WORK/corpus/" % EVIDENCE_DIRNAME)
+        else:
+            entry["area"] = "submission"
+            entry["role"] = guess_role(rel)
+            entry["editable"] = os.path.splitext(rel)[1].lower() in EDITABLE_EXTS and \
+                entry["status"] in ("converted", "converted-empty")
         entry["size_bytes"] = os.path.getsize(p)
         inventory.append(entry)
         if entry["status"] in ("converted", "converted-empty"):
             stem = rel.replace(os.sep, "__")
-            out_txt = os.path.join(corpus_dir, stem + ".txt")
-            if stem in corpus_names:
+            if entry["area"] == "raw_data":
+                out_txt = os.path.join(evidence_dir, stem + ".txt")
+                used_names = evidence_names
+            else:
+                out_txt = os.path.join(corpus_dir, stem + ".txt")
+                used_names = corpus_names
+            if stem in used_names:
                 # Two files can flatten to one corpus name ("figs/notes.md" and
                 # "figs__notes.md"): the second used to overwrite the first, so a
                 # document silently vanished from the review corpus.
                 suffix = hashlib.sha256(rel.encode("utf-8")).hexdigest()[:8]
-                out_txt = os.path.join(corpus_dir, "%s.__%s.txt" % (stem, suffix))
+                out_txt = os.path.join(os.path.dirname(out_txt),
+                                       "%s.__%s.txt" % (stem, suffix))
                 entry["notes"].append(
                     "corpus text written as %s.__%s.txt -- another file converts to the "
                     "same flattened corpus name" % (stem, suffix))
-            corpus_names.add(stem)
+            used_names.add(stem)
             os.makedirs(os.path.dirname(out_txt), exist_ok=True)
             with open(out_txt, "w", encoding="utf-8") as f:
                 f.write(entry["text"] if entry["text"] else "(empty file)")
 
     md = ["# File inventory", "",
-          "| path | role | ext | editable | size | conversion status | notes |",
-          "|---|---|---|---|---|---|---|"]
+          "| path | area | role | ext | editable | size | conversion status | notes |",
+          "|---|---|---|---|---|---|---|---|"]
     for e in inventory:
         notes = "; ".join(sorted(set(e["notes"]))) or "—"
-        md.append("| %s | %s | %s | %s | %d | %s | %s |" % (
-            e["path"], e["role"], e["ext"], "yes" if e["editable"] else "no",
+        md.append("| %s | %s | %s | %s | %s | %d | %s | %s |" % (
+            e["path"], e["area"], e["role"], e["ext"], "yes" if e["editable"] else "no",
             e["size_bytes"], e["status"], notes.replace("|", "\\|")))
     with open(os.path.join(work, "inventory.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(md) + "\n")
 
-    js = [{"path": e["path"], "role": e["role"], "ext": e["ext"],
+    js = [{"path": e["path"], "area": e["area"], "role": e["role"], "ext": e["ext"],
            "editable": e["editable"], "size_bytes": e["size_bytes"],
            "status": e["status"], "notes": sorted(set(e["notes"]))}
           for e in inventory]
     with open(os.path.join(work, "inventory.json"), "w", encoding="utf-8") as f:
         json.dump(js, f, indent=2)
 
-    print("Inventoried %d files. Converted text corpus in %s" % (len(inventory), corpus_dir))
+    n_ev = sum(1 for e in inventory if e["area"] == "raw_data")
+    print("Inventoried %d files (%d submission, %d raw-data evidence)."
+          % (len(inventory), len(inventory) - n_ev, n_ev))
+    print("Converted text corpus in %s" % corpus_dir)
+    if n_ev:
+        print("Raw-data evidence text (never swept as submission content) in %s" % evidence_dir)
     print("Artifacts: inventory.md, inventory.json")
     n_fail = sum(1 for e in inventory if e["status"] in ("failed", "read-only/unreadable"))
     if n_fail:

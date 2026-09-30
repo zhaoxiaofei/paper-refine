@@ -434,6 +434,16 @@ tables > supplementary tables > main text > supplementary text`).
 * **`raw_data/` is READ-ONLY by contract** (enforced code-side): a finding whose
   only fix is inside it is `manual-required` with the exact file, row and value
   the author must decide on — never an edit, never a delete, never a "cleanup".
+  The directory is EVIDENCE, not submission content: it is carried
+  byte-for-byte and never version-token-renamed (raw-data file names stay as
+  they are), and the only permitted change anywhere near it is the legacy
+  directory rename the pipeline itself makes.
+* **The editors'/reviewers' feedback inside `raw_data/` is never the written
+  side.** It is external prose that documents what the review requires; a
+  finding that quotes it as the submission's text is a review-side
+  misclassification (discard under R1/rule 7), and it is never an editable
+  surface and never a "fix" target. Use it only as the requirement the authored
+  text is checked against.
 * **A reconciling difference is not a defect**: a stated unit conversion,
   rounding convention or run-time override the Methods documents is recorded as
   `OK — <the reconciling reason>` in the M30 artifact, and the revision changes

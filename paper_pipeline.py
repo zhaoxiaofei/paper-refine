@@ -536,6 +536,12 @@ USAGE
     python paper_pipeline.py setup --source /path/to/non_revised \\
         --root ./paper_rounds --rounds 3 --judges 2 [--rewrites 2,0,0] [--revises 1,1,1]
         [--integrators 0xFFFFFFFF] [--caption-limit N] [--strict-artifacts {on,fix,off}]
+    # revise against a REAL journal decision letter (options 1-4):
+    python paper_pipeline.py setup --source /path/to/submission --root ./paper_rounds \\
+        --journal "Frontiers in Immunology" --revision-mode transfer \\
+        --journal-feedback-from iScience [--journal-feedback FILE ...]
+    python paper_pipeline.py set-revision-mode major --root ./paper_rounds
+        # none | transfer (1) | resubmit (2) | major (3) | minor (4)
     python paper_pipeline.py run    --root ./paper_rounds --jobs 255
     python paper_pipeline.py run    --root ./paper_rounds --only 1,2      # only rounds 1 and 2
     python paper_pipeline.py run    --root ./paper_rounds --only 2:review,2:merge
@@ -2061,6 +2067,236 @@ def without_raw_data(m: dict) -> dict:
     """
     files = {k: v for k, v in (m or {}).get("files", {}).items() if not is_raw_data_rel(k)}
     return {"files": files, "count": len(files)}
+
+
+# =====================================================================
+# JOURNAL REVISION MODES (options 1-4)
+#
+# A root can be driven against a REAL journal decision letter instead of the
+# pipeline's own from-scratch review. Four modes, one per operator workflow:
+#
+#   1 transfer  revise for a NEW journal (e.g. read iScience, submit to
+#               Frontiers in Immunology). NO response to reviewers. Rewrites
+#               allowed (a new journal is a new submission).
+#   2 resubmit  revise for a NEW submission to the SAME journal. Response to
+#               reviewers REQUIRED. Rewrites allowed.
+#   3 major     complete a MAJOR revision at the same journal. Response to
+#               reviewers REQUIRED. Rewrites NOT allowed and the manuscript is
+#               revised ONLY to address the raised concerns: every change must
+#               be traceable to a concern, so the general review-audit-revise
+#               workflow does not run.
+#   4 minor     as 3, for a MINOR revision.
+#
+# The default mode is "none" and the historical pipeline is byte-for-byte
+# unchanged there: every journal-specific code path below is entered only when
+# `journal_mode_of(ctx) != "none"`.
+# =====================================================================
+
+JOURNAL_MODE_TRANSFER = "transfer"
+JOURNAL_MODE_RESUBMIT = "resubmit"
+JOURNAL_MODE_MAJOR = "major"
+JOURNAL_MODE_MINOR = "minor"
+JOURNAL_MODE_NONE = "none"
+
+JOURNAL_MODES = {
+    JOURNAL_MODE_NONE: {
+        "option": 0,
+        "label": "the pipeline's own review/revise rounds (no journal feedback)",
+        "response": False, "rewrites": True, "scoped": False,
+    },
+    JOURNAL_MODE_TRANSFER: {
+        "option": 1,
+        "label": "transfer: revise for a NEW journal from another journal's feedback; "
+                 "no response to reviewers",
+        "response": False, "rewrites": True, "scoped": False,
+    },
+    JOURNAL_MODE_RESUBMIT: {
+        "option": 2,
+        "label": "resubmit: revise for a new submission to the SAME journal; "
+                 "response to reviewers required",
+        "response": True, "rewrites": True, "scoped": False,
+    },
+    JOURNAL_MODE_MAJOR: {
+        "option": 3,
+        "label": "major revision: concern-scoped edits only at the same journal; "
+                 "response to reviewers required; no rewrites",
+        "response": True, "rewrites": False, "scoped": True,
+    },
+    JOURNAL_MODE_MINOR: {
+        "option": 4,
+        "label": "minor revision: concern-scoped edits only at the same journal; "
+                 "response to reviewers required; no rewrites",
+        "response": True, "rewrites": False, "scoped": True,
+    },
+}
+
+JOURNAL_FEEDBACK_NAME_RE = re.compile(
+    r"feedback|referee|reviewers?|editors?|editorial|decision", re.I)
+# A file the AUTHORS wrote ("response_to_reviewers.docx", "rebuttal.md",
+# "point-by-point.docx", or a "cover_letter_to_editor.docx") is a submission
+# document, not the journal's feedback: the auto-detection must never read one
+# as the letter (the cover letter is the common trap -- "editor" is in its name).
+JOURNAL_AUTHORED_REPLY_RE = re.compile(
+    r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point|cover", re.I)
+JOURNAL_CONCERN_ACTIONS = ("text", "analysis", "new-experiment", "clarification",
+                           "formatting", "policy", "disagree")
+JOURNAL_CONCERN_DISPOSITIONS = ("to-fix", "already-addressed", "manual", "not-applicable")
+JOURNAL_CONCERNS_MD_REL = "concerns/JF_concerns.md"
+JOURNAL_CONCERNS_JSON_REL = "concerns/JF_concerns.json"
+JOURNAL_RESPONSE_MD_REL = "response/RESPONSE_TO_REVIEWERS.md"
+JOURNAL_RESPONSE_MAP_REL = "response/response_map.json"
+JOURNAL_SUBMISSION_DIR = "journal_submission"
+
+
+def journal_mode_of(ctx=None) -> str:
+    """The configured journal revision mode ('none' when unset/unknown).
+
+    Reads `revision_mode` from pipeline_config.json (mirrored into state.json
+    as `config`). An unknown value is an error, not a silent 'none': a typo in
+    the mode would otherwise silently run the wrong workflow.
+    """
+    cfg = (getattr(ctx, "cfg", None) if ctx is not None else None) or {}
+    mode = str(cfg.get("revision_mode") or JOURNAL_MODE_NONE).strip().lower()
+    if mode not in JOURNAL_MODES:
+        die(f"pipeline_config.json records revision_mode {mode!r}, which is not one of "
+            f"{', '.join(JOURNAL_MODES)}. Fix it with `set-revision-mode <mode>` or start a "
+            f"fresh root.")
+    return mode
+
+
+def journal_mode_info(ctx=None) -> dict:
+    return JOURNAL_MODES[journal_mode_of(ctx)]
+
+
+def journal_is_scoped(ctx=None) -> bool:
+    """True for the major/minor modes: concern-scoped edits only."""
+    return bool(journal_mode_info(ctx).get("scoped"))
+
+
+def journal_needs_response(ctx=None) -> bool:
+    """True when a response-to-reviewers document is a required deliverable."""
+    return bool(journal_mode_info(ctx).get("response"))
+
+
+def journal_rewrites_allowed(ctx=None) -> bool:
+    """False for the major/minor modes: the manuscript may not be rewritten."""
+    return bool(journal_mode_info(ctx).get("rewrites"))
+
+
+def journal_feedback_paths(ctx: Ctx) -> list:
+    """The operator-named feedback files, resolved (absolute paths)."""
+    out = []
+    raw = (ctx.cfg or {}).get("journal_feedback") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    for item in raw:
+        s = str(item or "").strip()
+        if not s:
+            continue
+        p = Path(s)
+        if not p.is_absolute():
+            p = ctx.root / p
+        out.append(p)
+    return out
+
+
+def journal_feedback_files(ctx: Ctx) -> list:
+    """[(absolute path, label)] of the feedback this root revises against.
+
+    Operator-named files (setup --journal-feedback) win; when none were named,
+    the feedback-name heuristic finds them in the corpus -- typically
+    `raw_data/iScience_feedback_from_reviewers_and_editors.txt`, the real-world
+    shape this feature exists for. The corpus's own bookkeeping is skipped.
+    """
+    named = journal_feedback_paths(ctx)
+    if named:
+        out = []
+        for p in named:
+            if not p.is_file():
+                die(f"--journal-feedback {p} does not exist (or is not a file). Give the "
+                    f"decision letter / reviewer report(s) explicitly, or drop the flag and let "
+                    f"the pipeline find them in the corpus's raw-data evidence area.")
+            out.append((p, p.name))
+        return out
+    found = []
+    if ctx.pristine.is_dir():
+        for p in sorted(ctx.pristine.rglob("*")):
+            if not p.is_file() or is_bookkeeping_name(p.name):
+                continue
+            if JOURNAL_FEEDBACK_NAME_RE.search(p.name) \
+                    and not JOURNAL_AUTHORED_REPLY_RE.search(p.name):
+                found.append((p, p.relative_to(ctx.pristine).as_posix()))
+    return found
+
+
+def feedback_text_of(path: Path) -> tuple:
+    """(text, note) for one feedback file -- the reviewable rendering."""
+    ext = path.suffix.lower()
+    if ext in (".txt", ".md", ".markdown", ".rst", ".tex", ".bib", ".csv", ".tsv"):
+        try:
+            return path.read_text(encoding="utf-8", errors="replace"), ""
+        except OSError as e:
+            return "", f"unreadable: {e}"
+    if ext == ".docx":
+        paras = _docx_paragraphs(path)
+        if paras is None:
+            return "", "docx-unreadable"
+        return "\n".join(paras), ""
+    if ext == ".pdf":
+        if shutil.which("pdftotext"):
+            try:
+                proc = subprocess.run(["pdftotext", "-layout", str(path), "-"],
+                                      capture_output=True, timeout=60)
+                text = proc.stdout.decode("utf-8", errors="replace")
+                if text.strip():
+                    return text, ""
+                return "", "pdftotext produced no text (scanned/image PDF?)"
+            except Exception as e:                                   # noqa: BLE001
+                return "", f"pdftotext failed: {e}"
+        return "", "pdf-unconvertible: pdftotext not available"
+    return "", f"unparseable extension {ext!r} (the original is still copied for the session)"
+
+
+def seed_concern_candidates(text: str) -> list:
+    """Code-side candidate split of a decision letter / reviewer report.
+
+    Not the deliverable: a SEED the session refines. Splits at reviewer/editor
+    headings and numbered-point markers; a document with none falls back to
+    blank-line paragraphs. Bounded (200 rows, 400 chars each) so a runaway
+    letter cannot flood the prompt.
+    """
+    lines = [ln.rstrip() for ln in (text or "").splitlines()]
+    starts = []
+    head_re = re.compile(
+        r"^\s*(?:reviewer|referee|editor|comments?|major|minor|point|query|"
+        r"\d+\s*[.)]|[-*•])\b", re.I)
+    for i, ln in enumerate(lines):
+        if head_re.match(ln):
+            starts.append(i)
+    rows = []
+    if starts:
+        bounds = starts + [len(lines)]
+        for a, b in zip(bounds, bounds[1:]):
+            block = " ".join(x.strip() for x in lines[a:b] if x.strip())
+            if block:
+                rows.append({"heading": lines[a].strip()[:160], "excerpt": block[:400]})
+    else:
+        for para in re.split(r"\n\s*\n", "\n".join(lines)):
+            block = " ".join(para.split())
+            if block:
+                rows.append({"heading": block[:80], "excerpt": block[:400]})
+    return rows[:200]
+
+
+def journal_concern_ledger(sandbox: Path) -> dict:
+    """The concern ledger a feedback/concerns run wrote ({} when absent)."""
+    data = read_json(sandbox / JOURNAL_CONCERNS_JSON_REL, revive=False, lenient=True)
+    return data if isinstance(data, dict) else {}
+
+
+def journal_concern_rows(sandbox: Path) -> list:
+    rows = (journal_concern_ledger(sandbox) or {}).get("concerns")
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
 
 
 # The archive excludes the re-derivable INPUT corpora: every materialization
@@ -4332,11 +4568,22 @@ def shared_blocks() -> str:
 # still carries `raw_figs/`.
 RAW_DATA_READONLY_RULE = """
 
-=== THE RAW-DATA DIRECTORY IS READ-ONLY (a rule about CONTENT, and a hard one) ===
+=== THE RAW-DATA DIRECTORY IS THE READ-ONLY EVIDENCE AREA (never submission content) ===
   * The corpus's raw data -- figure and table sources, the data tables, the analysis snapshot --
-    is the AUTHOR's input, and it lives in `raw_data/`. An older corpus spells that directory
-    `raw_figs/`; the two spellings mean the SAME directory, and one version corpus carries one of
-    them.
+    is the AUTHOR's input and EVIDENCE for the submission, and it lives in `raw_data/`. An older
+    corpus spells that directory `raw_figs/`; the two spellings mean the SAME directory, and one
+    version corpus carries one of them.
+  * It is NOT part of the submission and is NOT submitted to the journal. Nothing inside it is a
+    submission document: a file there is never a main-text, cover-letter, title-page,
+    supplementary or figure document, whatever its name suggests, and its text is never the
+    authors' prose. Never count it against a word limit, never sweep it for acronyms, citations,
+    numbers, terminology or file hygiene, and never quote it as something "the submission says"
+    (the one exception is M30, where the raw data is the PRODUCER side of a written claim's
+    comparison).
+  * It may also carry the editors'/reviewers' feedback and decision letters. That is EXTERNAL
+    prose: evidence about the review, never authored content, never a written surface to align and
+    never a finding quote about the manuscript. Read it for what the review requires; attribute
+    nothing in it to the authors.
   * Nothing inside it may be edited, regenerated, rewritten, renamed, deleted or added to: not a
     number, not a column, not a caption, not a plot, not a compiled figure, not a build artifact.
     A package carries it BYTE-FOR-BYTE, and a document that points into it
@@ -5064,6 +5311,12 @@ Layout (paths relative to the sandbox root):
                   DIFF_LEDGER.md) from an earlier round, they are NOT submission content -- do not
                   enumerate, sweep, quote or report them as manuscript text. The manuscript is the
                   rest of the corpus.
+                  base/ may also carry raw_data/ (legacy spelling raw_figs/): the READ-ONLY
+                  EVIDENCE area. It is NOT part of the submission and not a submission document --
+                  never enumerate, sweep, count, quote or report its files as manuscript text
+                  (a data table, a figure source, an editor's decision letter or a reviewer's
+                  report is evidence, not the authors' prose), whatever the file names suggest.
+                  Read it for facts and as the producer side of an M30 comparison only.
   review/       — THE OUTPUT DIRECTORY (the paper-review skill's OUT). Create it if it does not
                   exist. Every artifact you produce goes here: review/findings.json,
                   review/findings.md, review/artifacts/<CHECK_ID>.md, review/work/, and the
@@ -6924,7 +7177,7 @@ def review_prompt(sandbox: Path, run_id: str, r: int,
                   zotero: str = DEFAULT_ZOTERO_MODE,
                   prior_round: bool = False, prior_failure: str = "",
                   split: str = None, split_mode: str = "phases",
-                  scope: str = "full", venue=None) -> str:
+                  scope: str = "full", venue=None, journal_block: str = "") -> str:
     """Phase 1 prompt: $paper-review only, writing review/* (Section C1)."""
     prof = _as_profile(venue)
     prior = (PRIOR_ROUND_RULE.replace("@@ROUND@@", str(int(r)))
@@ -6995,14 +7248,15 @@ the surface, and the revisers may not change a claim here."""
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(REVIEW_DIR))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("review", run_id, r))
     return (text + shared_blocks() + split_block + scope_block + attached_head(prof) + "\n"
-            + attached_phase1(prof) + REVIEW_TAIL)
+            + attached_phase1(prof) + REVIEW_TAIL + journal_block)
 
 
 def revise_prompt(sandbox: Path, run_id: str, r: int,
                   index: int = 1, total: int = 1,
                   caption_limit: int = DEFAULT_CAPTION_LIMIT,
                   zotero: str = DEFAULT_ZOTERO_MODE,
-                  prior_failure: str = "", audit: bool = False, venue=None) -> str:
+                  prior_failure: str = "", audit: bool = False, venue=None,
+                  journal_block: str = "") -> str:
     """Phase 2 prompt: $paper-revise, consuming the round's frozen review/ copy."""
     prof = _as_profile(venue)
     audit_block = ("""
@@ -7043,7 +7297,8 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(REVISED_DIR))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("revise", run_id, r))
-    return text + shared_blocks() + attached_head(prof) + "\n" + ATTACHED_PHASE2 + REVISE_TAIL
+    return (text + shared_blocks() + attached_head(prof) + "\n" + ATTACHED_PHASE2
+            + REVISE_TAIL + journal_block)
 
 
 
@@ -7131,7 +7386,8 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
                    index: int = 1, total: int = 1,
                    caption_limit: int = DEFAULT_CAPTION_LIMIT,
                    zotero: str = DEFAULT_ZOTERO_MODE,
-                   prior_failure: str = "", level: str = "", venue=None) -> str:
+                   prior_failure: str = "", level: str = "", venue=None,
+                   journal_block: str = "") -> str:
     """The rewrite prompt: one of the round's M rewritten candidates.
 
     Staged FIRST in the round (before the review), and it is a CANDIDATE like
@@ -7170,7 +7426,7 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
     text = text.replace("@@SELFCHECK@@", selfcheck_block("rewrite", run_id, r))
     text = apply_hierarchy_reconcile(text, "rewrite")
     return (text + shared_blocks() + attached_head(prof) + "\n" + attached_phase1(prof) + "\n"
-            + ATTACHED_PHASE2 + REWRITE_TAIL)
+            + ATTACHED_PHASE2 + REWRITE_TAIL + journal_block)
 
 
 def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index: int,
@@ -8177,6 +8433,12 @@ def scan_captions_in_sources(sources: list, limit=None) -> dict:
                 continue                      # a later source provides this path
             if is_bookkeeping_name(p.name):
                 continue                      # pipeline bookkeeping, not submission
+            if is_raw_data_rel(rel):
+                # raw_data/ is the EVIDENCE area, not submission text: a data
+                # table, a reviewer's report or an editor's decision letter can
+                # print "Figure 1" without carrying a manuscript caption (M18
+                # enumerates the submission's legends only).
+                continue
             doc = prefix + rel
             ext = p.suffix.lower()
             units = None
@@ -8689,6 +8951,12 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
                 continue
             if (prefix + rel) in overrides[i]:
                 continue                      # a later source provides this path
+            if is_raw_data_rel(rel):
+                # raw_data/ is the EVIDENCE area, not a submission document: its
+                # files (data tables, figure sources, the editors'/reviewers'
+                # feedback) are never counted against the article's word limits
+                # (M19 measures the submission's abstract, body and letter only).
+                continue
             doc = prefix + rel
             ext = p.suffix.lower()
             if "supp" in p.name.lower():
@@ -8900,6 +9168,11 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
             rel = p.relative_to(src).as_posix()
             if excluded and rel.split("/", 1)[0] in excluded:
                 continue
+            if is_raw_data_rel(rel):
+                # raw_data/ is the EVIDENCE area: a reviewer's .docx report or a
+                # data-source document is not a submission file whose OOXML
+                # style the M20 scan may report (and it may be mode-locked).
+                continue
             if "work" in rel.split("/")[:-1]:
                 continue                      # stage scratch is never corpus content
             if is_bookkeeping_name(p.name):
@@ -8918,6 +9191,8 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
             rel = p.relative_to(src).as_posix()
             if excluded and rel.split("/", 1)[0] in excluded:
                 continue
+            if is_raw_data_rel(rel):
+                continue        # evidence area, not submission prose (see above)
             if "work" in rel.split("/")[:-1]:
                 continue
             paras = text_source_paragraphs(p)
@@ -9466,6 +9741,12 @@ def corpus_text_documents(sources: list) -> list:
             rel = p.relative_to(src).as_posix()
             if excluded and rel.split("/", 1)[0] in excluded:
                 continue
+            if is_raw_data_rel(rel):
+                # raw_data/ is the EVIDENCE area (data tables, figure sources,
+                # the editors'/reviewers' feedback), never submission prose:
+                # placeholder and number-provenance scans read the submission
+                # documents only.
+                continue
             if "work" in rel.split("/")[:-1]:
                 continue
             try:
@@ -9486,6 +9767,8 @@ def corpus_text_documents(sources: list) -> list:
             rel = p.relative_to(src).as_posix()
             if excluded and rel.split("/", 1)[0] in excluded:
                 continue
+            if is_raw_data_rel(rel):
+                continue        # evidence area, not submission prose (see above)
             if "work" in rel.split("/")[:-1]:
                 continue
             paras = text_source_paragraphs(p)
@@ -10335,6 +10618,9 @@ def scan_placeholders_in_sources(sources: list) -> dict:
                 continue
             if (prefix + rel) in overrides[i]:
                 continue                      # a later source provides this path
+            if is_raw_data_rel(rel):
+                continue        # evidence area: a hand-off marker can only be a
+                                # submission document's marker, never raw data's
             if is_bookkeeping_name(p.name):
                 continue                      # the reports legitimately list them
             ext = p.suffix.lower()
@@ -10410,6 +10696,12 @@ def collect_documents(sources: list) -> dict:
             if excluded and rel.split("/", 1)[0] in excluded:
                 continue
             if (prefix + rel) in overrides[i]:
+                continue
+            if is_raw_data_rel(rel):
+                # The evidence area is not the submission's document set: a
+                # reviewer's feedback file or a data table is never a "lost
+                # document" or an "invented document" (its byte-level contract
+                # is enforced by verify_readonly_raw_data instead).
                 continue
             if is_bookkeeping_name(p.name):
                 continue
@@ -11509,6 +11801,30 @@ def rid_review(r: int) -> str:
 def rid_review_b(r: int) -> str:
     """The SECOND review run when `--review-split` is on (part B)."""
     return f"r{r}_review_b"
+
+
+def rid_feedback(r: int) -> str:
+    """The round's JOURNAL-FEEDBACK enumeration run (modes 1-2: transfer/resubmit).
+
+    It turns the editors'/reviewers' decision letter into the concern ledger the
+    round's review reconciles and the revise/rewrite sessions answer.
+    """
+    return f"r{r}_feedback"
+
+
+def rid_concerns(r: int) -> str:
+    """The concern-scoped reconciliation run (modes 3-4: major/minor).
+
+    It REPLACES the round's review: it enumerates the concerns and writes the
+    finding list the single revision session consumes, so the general
+    review-audit-revise workflow never runs in a major/minor revision.
+    """
+    return f"r{r}_concerns"
+
+
+def rid_response(r: int) -> str:
+    """The response-to-reviewers run (modes 2-4; option 1 writes no letter)."""
+    return f"r{r}_response"
 
 
 def rid_audit(r: int) -> str:
@@ -13656,6 +13972,13 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
     sb.mkdir(parents=True, exist_ok=True)
     ensure_copy(ctx.sandbox_of(a1) / "base", sb / "base")
     ensure_copy(ctx.pristine, sb / PRISTINE_DIR)
+    if journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_RESUBMIT):
+        # A rewrite for a real submission attempt must answer the decision
+        # letter: the concern ledger travels beside the corpus.
+        fb = _journal_concern_source(ctx, r)
+        ensure_copy(fb / "concerns", sb / "concerns")
+        if (fb / "feedback").is_dir():
+            ensure_copy(fb / "feedback", sb / "feedback")
     (sb / REWRITTEN_DIR).mkdir(exist_ok=True)
     seed_evidence_pack(ctx, sb, sb / "base", "stage")
     note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
@@ -13667,7 +13990,11 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
                                          zotero=zotero_mode_of(ctx),
                                          prior_failure=note,
                                          level=rewrite_level_of(k, m),
-                                         venue=venue_profile_of(ctx)),
+                                         venue=venue_profile_of(ctx),
+                                         journal_block=(journal_rewrite_block(ctx)
+                                                        if journal_mode_of(ctx) in
+                                                        (JOURNAL_MODE_TRANSFER,
+                                                         JOURNAL_MODE_RESUBMIT) else "")),
                           encoding="utf-8")
     rec = ctx.register(rid, "rewrite", r, f"runs/{rid}", upstream_run_id=rid_a1(r),
                        source_id=A1_ID, produces=vid)
@@ -13687,6 +14014,13 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
     sb.mkdir(parents=True, exist_ok=True)
     ensure_copy(ctx.sandbox_of(a1) / "base", sb / "base")
     ensure_copy(ctx.pristine, sb / PRISTINE_DIR)
+    if journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_RESUBMIT):
+        # The review reconciles the real decision letter: the concern ledger
+        # travels beside the corpus (never inside it).
+        fb = _journal_concern_source(ctx, r)
+        ensure_copy(fb / "concerns", sb / "concerns")
+        if (fb / "feedback").is_dir():
+            ensure_copy(fb / "feedback", sb / "feedback")
     prior = prior_review_dir(ctx, r)
     inputs = {"base": hash_manifest(sb / "base"),
               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR)}
@@ -13728,6 +14062,10 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
                                         zotero=zotero_mode_of(ctx),
                                         prior_round=(sb / "prior_round").is_dir(),
                                         prior_failure=note,
+                                        journal_block=(journal_review_block(ctx, sb)
+                                                       if journal_mode_of(ctx) in
+                                                       (JOURNAL_MODE_TRANSFER,
+                                                        JOURNAL_MODE_RESUBMIT) else ""),
                                         # A scoped round is ONE review pass by
                                         # definition; the complementary-split
                                         # machinery would contradict its scope.
@@ -13805,7 +14143,12 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     _m, n = round_counts(ctx, r)
     rid = rid_for_fresh(r, vid)
     sb = ctx.runs_dir / rid
-    merge_rid = rid_review_b(r) if review_split_of(ctx) != "off" else rid_review(r)
+    if journal_is_scoped(ctx):
+        # A major/minor revision consumes the concerns run's finding list, not a
+        # general review: that is what keeps the edits concern-scoped.
+        merge_rid = rid_concerns(r)
+    else:
+        merge_rid = rid_review_b(r) if review_split_of(ctx) != "off" else rid_review(r)
     rev_rec = _require_done(ctx, merge_rid,
                             "every revise session consumes the round's frozen review/ output")
     _require_done(ctx, rid_a1(r), "every revise session edits a copy of the round's base")
@@ -13816,8 +14159,13 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     # The frozen review/ is the authoritative finding list: a partial copy must
     # never be trusted (the revision ledger keys on every finding id).
     ensure_copy(src_sb / REVIEW_DIR, sb / REVIEW_DIR)
+    if journal_mode_of(ctx) != JOURNAL_MODE_NONE:
+        if (src_sb / "concerns").is_dir():
+            ensure_copy(src_sb / "concerns", sb / "concerns")
+        if (src_sb / "feedback").is_dir():
+            ensure_copy(src_sb / "feedback", sb / "feedback")
     aud_manifest = None
-    if audit_enabled(ctx):
+    if audit_enabled(ctx) and not journal_is_scoped(ctx):
         # The reviser acts on the AUDITED list: the auditor's drops (with their
         # evidence) and its `AU-` additions travel beside the frozen review/.
         aud_rec = _require_done(ctx, rid_audit(r),
@@ -13834,7 +14182,10 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
                                         caption_limit=caption_limit_of(ctx),
                                         zotero=zotero_mode_of(ctx),
                                         prior_failure=note, audit=audit_enabled(ctx),
-                                        venue=venue_profile_of(ctx)),
+                                        venue=venue_profile_of(ctx),
+                                        journal_block=(journal_revise_block(ctx)
+                                                       if journal_mode_of(ctx) !=
+                                                       JOURNAL_MODE_NONE else "")),
                           encoding="utf-8")
     rec = ctx.register(rid, "revise", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=A1_ID, produces=vid)
@@ -14272,12 +14623,31 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
             probs.append(mismatch("base", hash_manifest(ctx.sandbox_of(a1) / "base")))
         if src_ok:
             probs.append(mismatch(pristine_dirname(sb), ctx.source_manifest))
-        rev_rec = ctx.run(rid_review(r))
+        # A scoped (major/minor) revision consumes the CONCERNS run's finding
+        # list, not a general review: pointing this check at the review run
+        # would mark every scoped revision stale on every re-run.
+        rev_rec = ctx.run(rid_concerns(r) if journal_is_scoped(ctx) else rid_review(r))
         if rev_rec is None or rev_rec.get("status") != "done":
-            probs.append("upstream review run is not done")
+            probs.append("upstream review/concerns run is not done")
         else:
             probs.append(mismatch("review",
                                   hash_manifest(ctx.sandbox_of(rev_rec) / REVIEW_DIR)))
+    elif kind in ("feedback", "concerns"):
+        if a1 is not None and a1.get("status") == "done":
+            probs.append(mismatch("base", hash_manifest(ctx.sandbox_of(a1) / "base")))
+        if src_ok:
+            probs.append(mismatch(pristine_dirname(sb), ctx.source_manifest))
+    elif kind == "response":
+        tgt_rel = str(rec.get("target_dir") or "").strip()
+        if tgt_rel:
+            tgt = ctx.root / tgt_rel
+            if tgt.is_dir() and (sb / "target").is_dir():
+                probs.append(mismatch("target", hash_manifest(tgt)))
+        src_rec = ctx.run(rid_concerns(r) if journal_is_scoped(ctx) else rid_feedback(r))
+        if src_rec is not None and src_rec.get("status") == "done" \
+                and (sb / "concerns").is_dir():
+            probs.append(mismatch("concerns",
+                                  hash_manifest(ctx.sandbox_of(src_rec) / "concerns")))
     elif kind == "audit":
         # The auditor consumes the round's base AND the frozen review, and its
         # whole product is a disposition OF that review. If the review (or the
@@ -14355,7 +14725,13 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
     rewrite_ids = [rid_for_fresh(r, v) for v in pool if arm_of_vid(v) == "rewrite"]
     revise_ids = [rid_for_fresh(r, v) for v in pool if arm_of_vid(v) == "revise"]
     integrate_ids = [rid_for_fresh(r, v) for v in round_integrated_run_ids(ctx, r, m, n)]
-    order = rewrite_ids + ([rid_review(r)] if n else []) + revise_ids + integrate_ids
+    jmode = journal_mode_of(ctx)
+    j_feedback = rid_feedback(r) if jmode in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_RESUBMIT) else None
+    j_concerns = rid_concerns(r) if journal_is_scoped(ctx) else None
+    j_response = rid_response(r) if ctx.run(rid_response(r)) is not None else None
+    order = ((rewrite_ids + ([rid_review(r)] if n else []) + revise_ids + integrate_ids)
+             + ([j_feedback] if j_feedback else []) + ([j_concerns] if j_concerns else [])
+             + ([j_response] if j_response else []))
     if n and review_split_of(ctx) != "off":
         order = (rewrite_ids + [rid_review(r), rid_review_b(r)] + revise_ids
                  + integrate_ids)
@@ -14365,6 +14741,24 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
     # integration run that takes it as a donor.
     dependents = {rid_a1(r): rewrite_ids + ([rid_review(r)] if n else []),
                   rid_review(r): list(revise_ids)}
+    if j_feedback:
+        dependents.setdefault(rid_a1(r), []).append(j_feedback)
+        dependents[j_feedback] = (list(rewrite_ids) + ([rid_review(r)] if n else []))
+    if j_concerns:
+        dependents.setdefault(rid_a1(r), []).append(j_concerns)
+        dependents[j_concerns] = list(revise_ids)
+        for rid in revise_ids:
+            dependents.setdefault(rid, [])
+            if j_response:
+                dependents[rid].append(j_response)
+    if j_response and jmode in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_RESUBMIT):
+        # The post-round response describes the final package: any pool member
+        # changing invalidates it.
+        for vid in pool:
+            if vid != A1_ID:
+                dependents.setdefault(rid_for_fresh(r, vid), []).append(j_response)
+        for iid in integrate_ids:
+            dependents.setdefault(iid, []).append(j_response)
     if n and review_split_of(ctx) != "off":
         # B's frozen input is A's review/ output, so resetting A resets B too.
         dependents[rid_review(r)] = [rid_review_b(r)] + dependents[rid_review(r)]
@@ -18629,6 +19023,8 @@ def postcheck_review(ctx: Ctx, rec: dict):
                             f"genuinely clean; check the coverage table)")
             check_review_contract(ctx, sb, fj, errs, warns,
                                   scope=round_review_scope(ctx, int(rec.get("round") or 1)))
+            if journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_RESUBMIT):
+                errs.extend(journal_review_coverage_problems(ctx, rec, sb, fj))
     # DISPOSITION QUALITY: the reviewer's own decision tables. Recorded always;
     # it FAILS the attempt only under `setup --strict-artifacts on`, and
     # `decide --residual-gate` refuses to certify a run that carries it.
@@ -18812,6 +19208,11 @@ def postcheck_revise(ctx: Ctx, rec: dict):
                   + (f"; id remap {m['id_remap']}" if m["id_remap"] else ""))
         except Exception as e:                                        # noqa: BLE001
             errs.append(f"the split-review merge failed ({type(e).__name__}: {e})")
+    if journal_is_scoped(ctx):
+        # A major/minor revision may change the manuscript ONLY where a reviewer
+        # concern requires it: every changed file must be named in the revision
+        # ledger, and no file may be added or removed.
+        errs.extend(scoped_scope_problems(ctx, sb, rev))
     return (not errs), errs, warns, None
 
 
@@ -19799,6 +20200,998 @@ def run_kind_support_problems(ctx: Ctx) -> list:
         if missing:
             problems.append(f"run kind {kind!r} has no {' and no '.join(missing)} handler")
     return problems
+
+
+# =====================================================================
+# JOURNAL REVISION STAGES (options 1-4)
+#
+#   feedback   (transfer/resubmit)   enumerate the decision letter's concerns
+#   concerns   (major/minor)         the same ledger + the finding list the one
+#                                    scoped revision session consumes
+#   response   (resubmit/major/minor) the point-by-point response letter
+#
+# The stages never touch the submission corpus they read: `base/` is a copy of
+# the round's base, the feedback files are copied into `feedback/`, and the
+# deliverables land in `concerns/` / `review/` / `response/` at the sandbox
+# root -- outside every corpus directory, so no judge view or package carries
+# them.
+# =====================================================================
+
+def _write_journal_feedback_inputs(ctx: Ctx, sb: Path) -> list:
+    """Copy the feedback into `feedback/` and write the concern seed.
+
+    The ORIGINAL files are copied byte-for-byte under `feedback/files/` (the
+    session may need to quote them exactly) and a text rendering lands under
+    `feedback/text/` (docx/pdf converted when possible). A file that cannot be
+    rendered is recorded in `feedback/unparsed.txt` instead of being dropped
+    silently.
+    """
+    files = journal_feedback_files(ctx)
+    if not files:
+        die("no journal feedback was found: name the decision letter / reviewer report(s) with "
+            "`setup --journal-feedback FILE` (or `set-revision-mode ... --journal-feedback "
+            "FILE`), or put them in the corpus under raw_data/ with a name that says what they "
+            "are (feedback / referee / reviewer / editor / decision).")
+    (sb / "feedback" / "files").mkdir(parents=True, exist_ok=True)
+    (sb / "feedback" / "text").mkdir(parents=True, exist_ok=True)
+    seed, unparsed, labels = [], [], []
+    for path, label in files:
+        safe = label.replace("/", "__")
+        labels.append(label)
+        dest = sb / "feedback" / "files" / safe
+        if dest.exists():
+            # A read-only source (a chmod a-w evidence file) was copied with its
+            # mode in a previous partial materialization: replace the stale copy
+            # instead of failing on the permission bits.
+            with contextlib.suppress(OSError):
+                make_writable(dest)
+            with contextlib.suppress(OSError):
+                dest.unlink()
+        shutil.copy2(path, dest)
+        text, note = feedback_text_of(path)
+        if text.strip():
+            (sb / "feedback" / "text" / (safe + ".txt")).write_text(text, encoding="utf-8")
+            for row in seed_concern_candidates(text):
+                seed.append(dict(row, source=label))
+        else:
+            unparsed.append(f"{label}: {note or 'no text extracted'}")
+    write_json_atomic(sb / "feedback" / "CONCERN_SEED.json",
+                      {"files": labels, "candidates": seed, "unparsed": unparsed,
+                       "journal_from": str((ctx.cfg or {}).get("journal_feedback_from") or ""),
+                       "target_journal": str((ctx.cfg or {}).get("journal") or "")})
+    if unparsed:
+        (sb / "feedback" / "unparsed.txt").write_text("\n".join(unparsed) + "\n",
+                                                      encoding="utf-8")
+    return seed
+
+
+JOURNAL_LEDGER_SCHEMA = """{
+  "journal_from": "<the journal the feedback came from>",
+  "target_journal": "<the journal this revision is for>",
+  "mode": "<transfer|resubmit|major|minor>",
+  "source_files": ["<the feedback file names you read>"],
+  "concerns": [
+    {"id": "R1-1",
+     "source": "<feedback file>",
+     "author": "Reviewer 1",
+     "quote": "<verbatim, <=300 chars; it must appear in feedback/text/>",
+     "summary": "<one sentence, in your own words>",
+     "action": "text|analysis|new-experiment|clarification|formatting|policy|disagree",
+     "manuscript_location": "<where the concern lives in base/, or null>",
+     "disposition": "to-fix|already-addressed|manual|not-applicable",
+     "evidence_needed": "<what evidence an answer needs; empty when the text answers it>"}
+  ]
+}"""
+
+
+def _journal_stage_base(ctx: Ctx, sb: Path, r: int) -> None:
+    """base/ + non_revised/ for one journal stage (read-only copies)."""
+    _require_done(ctx, rid_a1(r), "the journal revision stages read the round's base")
+    ensure_copy(ctx.sandbox_of(ctx.run(rid_a1(r))) / "base", sb / "base")
+    ensure_copy(ctx.pristine, sb / PRISTINE_DIR)
+
+
+def materialize_feedback(ctx: Ctx, r: int) -> dict:
+    """Modality 1-2: the concern-enumeration sandbox (kind "feedback")."""
+    rid = rid_feedback(r)
+    sb = ctx.runs_dir / rid
+    sb.mkdir(parents=True, exist_ok=True)
+    _journal_stage_base(ctx, sb, r)
+    (sb / "concerns").mkdir(exist_ok=True)
+    seed = _write_journal_feedback_inputs(ctx, sb)
+    note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
+    prompt = sb / "PROMPT.md"
+    if not prompt.is_file():
+        _copy_session_tools(sb)
+        prompt.write_text((feedback_prompt(ctx, sb, r, seed) + note + shared_blocks()),
+                          encoding="utf-8")
+    rec = ctx.register(rid, "feedback", r, f"runs/{rid}", produces=rid)
+    rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
+                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR)}
+    rec["feedback_files"] = [label for _p, label in journal_feedback_files(ctx)]
+    return rec
+
+
+def materialize_concerns(ctx: Ctx, r: int) -> dict:
+    """Modalities 3-4: the scoped concern ledger + finding list (kind "concerns")."""
+    rid = rid_concerns(r)
+    sb = ctx.runs_dir / rid
+    sb.mkdir(parents=True, exist_ok=True)
+    _journal_stage_base(ctx, sb, r)
+    (sb / "concerns").mkdir(exist_ok=True)
+    (sb / REVIEW_DIR).mkdir(exist_ok=True)
+    (sb / REVIEW_DIR / "artifacts").mkdir(parents=True, exist_ok=True)
+    seed = _write_journal_feedback_inputs(ctx, sb)
+    note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
+    prompt = sb / "PROMPT.md"
+    if not prompt.is_file():
+        _copy_session_tools(sb)
+        prompt.write_text((concerns_prompt(ctx, sb, r, seed) + note + shared_blocks()),
+                          encoding="utf-8")
+    rec = ctx.register(rid, "concerns", r, f"runs/{rid}", produces=rid)
+    rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
+                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR)}
+    rec["feedback_files"] = [label for _p, label in journal_feedback_files(ctx)]
+    return rec
+
+
+def _journal_concern_source(ctx: Ctx, r: int) -> Path:
+    """The sandbox that carries the concern ledger for this round."""
+    rid = rid_concerns(r) if journal_is_scoped(ctx) else rid_feedback(r)
+    _require_done(ctx, rid, "the concern ledger is the input of this stage")
+    return ctx.sandbox_of(ctx.run(rid))
+
+
+def materialize_response(ctx: Ctx, r: int, target: Path = None,
+                         target_label: str = "") -> dict:
+    """Modes 2-4: the response-to-reviewers sandbox (kind "response").
+
+    `target` is the final package the letter describes: the single scoped
+    revision's `revised/` for major/minor, or the pinned champion for a
+    resubmit. The caller records the target in the run's provenance so `retry`
+    rebuilds the same sandbox.
+    """
+    rid = rid_response(r)
+    sb = ctx.runs_dir / rid
+    sb.mkdir(parents=True, exist_ok=True)
+    src_sb = _journal_concern_source(ctx, r)
+    ensure_copy(src_sb / "concerns", sb / "concerns")
+    if (src_sb / "feedback").is_dir():
+        ensure_copy(src_sb / "feedback", sb / "feedback")
+    if (src_sb / REVIEW_DIR).is_dir():
+        ensure_copy(src_sb / REVIEW_DIR, sb / REVIEW_DIR)
+    if target is None:
+        rec0 = ctx.run(rid) or {}
+        tgt_rel = str(rec0.get("target_dir") or "").strip()
+        if tgt_rel:
+            target = ctx.root / tgt_rel
+        elif journal_is_scoped(ctx):
+            rev_rec = ctx.run(rid_for_fresh(r, revise_vid(1)))
+            if rev_rec is None:
+                die(f"the response stage cannot be materialized: the scoped revision run "
+                    f"{rid_for_fresh(r, revise_vid(1))} does not exist yet. Run the revision "
+                    f"stage first (`run`).")
+            target = ctx.sandbox_of(rev_rec) / REVISED_DIR
+    if target is None or not target.is_dir():
+        die(f"the response stage has no final package to describe (run {rid}). "
+            f"This is an orchestration error -- report it with the root's state.json.")
+    if not (sb / "target").is_dir():
+        copy_into(target, sb / "target", exclude_top=("work",), skip_aux=True)
+    (sb / "response").mkdir(exist_ok=True)
+    ledger = journal_concern_ledger(src_sb)
+    note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
+    prompt = sb / "PROMPT.md"
+    if not prompt.is_file():
+        _copy_session_tools(sb)
+        prompt.write_text((response_prompt(ctx, sb, r,
+                                           target_label or target.parent.name,
+                                           ledger) + note + shared_blocks()),
+                          encoding="utf-8")
+    rec = ctx.register(rid, "response", r, f"runs/{rid}",
+                       target_dir=target.relative_to(ctx.root).as_posix()
+                       if is_within(target, ctx.root) else str(target))
+    rec["inputs_manifest"] = {"target": hash_manifest(sb / "target"),
+                              "concerns": hash_manifest(sb / "concerns")}
+    return rec
+
+
+def _journal_feedback_labels(ctx: Ctx) -> list:
+    return [label for _p, label in journal_feedback_files(ctx)]
+
+
+def _journal_seed_text(ctx: Ctx, sb: Path) -> str:
+    data = read_json(sb / "feedback" / "CONCERN_SEED.json", revive=False, lenient=True) or {}
+    rows = [r for r in (data.get("candidates") or []) if isinstance(r, dict)]
+    if not rows:
+        return "- (the mechanical split found no candidate headings; read the text yourself)"
+    return "\n".join(f"- [{str(r.get('source') or '')}] "
+                     f"{str(r.get('heading') or '')[:110]}: "
+                     f"{str(r.get('excerpt') or '')[:280]}" for r in rows[:80])
+
+
+def feedback_prompt(ctx: Ctx, sb: Path, r: int, seed_rows: list) -> str:
+    """The concern-enumeration prompt (modes 1-2)."""
+    mode = journal_mode_of(ctx)
+    info = JOURNAL_MODES[mode]
+    labels = _journal_feedback_labels(ctx)
+    from_j = str((ctx.cfg or {}).get("journal_feedback_from") or "").strip()
+    return f"""JOURNAL FEEDBACK — CONCERN ENUMERATION (one session; you do NOT edit any manuscript)
+
+This run is "{mode}" (option {info['option']}: {info['label']}). The editors'/
+reviewers' feedback of {(from_j or 'the source journal')} has to become a
+complete, enumerated concern ledger before anyone touches the manuscript.
+
+WHAT YOU READ (all of it):
+  * feedback/files/  — the original file(s), byte-for-byte:
+{chr(10).join('      - ' + x for x in labels) or '      - (none)'}
+  * feedback/text/   — the same files as plain text (use THIS for quoting)
+  * feedback/CONCERN_SEED.json — the pipeline's mechanical candidate split; it
+    is a seed, not the answer
+  * base/            — the manuscript the feedback is about (read-only)
+
+SEED (read the real text after it):
+{_journal_seed_text(ctx, sb)}
+
+THE LEDGER IS THE DELIVERABLE (one row per distinct concern):
+  * A reviewer paragraph that raises three separate demands is three rows; the
+    same demand repeated by the editor and a reviewer is ONE row whose `source`
+    names both. Never merge two demands, never split one.
+  * `quote` is VERBATIM from the feedback (<=300 chars, whitespace-normalised):
+    it is checked mechanically against feedback/text/, so a paraphrase fails.
+  * `id` is stable and human-usable: `ED-<k>` for editor/decision points,
+    `R<n>-<k>` for reviewer n (R1-3 = reviewer 1, third point).
+  * `action` says what answering it demands: text | analysis | new-experiment |
+    clarification | formatting | policy | disagree.
+  * `disposition`: to-fix (the manuscript must change) | already-addressed
+    (base/ already answers it — name the location and quote it) | manual (needs
+    the authors: a new experiment or a judgement call) | not-applicable (say why
+    in evidence_needed).
+  * Never invent a concern, never soften or sharpen one, never drop a repeat.
+
+WRITE:
+  * concerns/JF_concerns.json — the ledger:
+{JOURNAL_LEDGER_SCHEMA}
+  * concerns/JF_concerns.md — the same rows as a markdown table
+    (id | source | author | action | disposition | quote | summary | location)
+  * Do NOT write review/, do NOT edit base/, non_revised/ or feedback/, and do
+    not write any other directory.
+
+{marker_root_rule()}
+Write `_pipeline_done.json` (JSON: stage "feedback", run_id "{sb.name}",
+round {int(r)}, status "complete") as the very LAST step.
+"""
+
+
+def concerns_prompt(ctx: Ctx, sb: Path, r: int, seed_rows: list) -> str:
+    """The scoped concern-enumeration + finding-list prompt (modes 3-4)."""
+    mode = journal_mode_of(ctx)
+    info = JOURNAL_MODES[mode]
+    labels = _journal_feedback_labels(ctx)
+    from_j = str((ctx.cfg or {}).get("journal_feedback_from") or "").strip()
+    return f"""JOURNAL FEEDBACK — {mode.upper()} REVISION RECONCILIATION (one session; NO edits)
+
+This run REPLACES the general review of a {mode} revision (option
+{info['option']}: {info['label']}). The journal {(from_j or 'raised the concerns')}
+requires an answer to every point, and the manuscript may change ONLY where a
+concern requires it. Deliver the concern ledger AND the finding list the single
+revision session follows.
+
+WHAT YOU READ (all of it):
+  * feedback/files/  — the original file(s), byte-for-byte:
+{chr(10).join('      - ' + x for x in labels) or '      - (none)'}
+  * feedback/text/   — the same files as plain text (use THIS for quoting)
+  * feedback/CONCERN_SEED.json — the pipeline's mechanical candidate split
+  * base/            — the manuscript under revision (read-only)
+
+SEED (read the real text after it):
+{_journal_seed_text(ctx, sb)}
+
+THE LEDGER (one row per distinct concern; same shape as modes 1-2):
+{JOURNAL_LEDGER_SCHEMA}
+`disposition` for a scoped revision:
+  * to-fix             the manuscript must change; becomes ONE finding
+  * already-addressed  quote the base/ location that already answers it
+  * manual             needs the authors (new experiment / judgement call);
+                       becomes ONE finding with status "unresolvable"
+  * not-applicable     say why; no finding
+
+THE FINDING LIST (the revision session consumes it):
+  * review/findings.json — {{"submission_dir": "base", "findings": [ ... ],
+    "coverage": [ ... ]}} with ONE finding per concern whose disposition is
+    to-fix or manual, and NO other findings (a scoped revision does not fix
+    what the reviewers did not raise):
+      id          the concern id        location  "<file:section/line in base/>"
+      category    0                     check     "JF"
+      severity    "Critical"|"Major"|"Minor"
+      evidence    the verbatim reviewer quote
+      explanation what the revision must change (or why it is manual)
+      status      "resolvable" (to-fix) | "unresolvable" (manual)
+      concern     the concern id
+  * review/artifacts/JF_concerns.md — the ledger as a markdown table.
+  * review/findings.md — the findings in the review's markdown shape.
+  * Do NOT edit base/ or the feedback; do not write revised/ here.
+
+{marker_root_rule()}
+Write `_pipeline_done.json` (JSON: stage "concerns", run_id "{sb.name}",
+round {int(r)}, status "complete") as the very LAST step.
+"""
+
+
+def response_prompt(ctx: Ctx, sb: Path, r: int, target_label: str,
+                    concern_ledger: dict) -> str:
+    """The response-to-reviewers prompt (modes 2-4; option 1 writes no letter)."""
+    mode = journal_mode_of(ctx)
+    info = JOURNAL_MODES[mode]
+    from_j = str((ctx.cfg or {}).get("journal_feedback_from") or "").strip()
+    to_j = str((ctx.cfg or {}).get("journal") or "").strip()
+    ids = [str(c.get("id") or "") for c in (concern_ledger.get("concerns") or [])
+           if isinstance(c, dict)]
+    return f"""RESPONSE TO REVIEWERS (the point-by-point letter; you do NOT edit the manuscript)
+
+Revision mode: {mode} (option {info['option']}: {info['label']}).
+Feedback from: {(from_j or '(the source journal)')}. Target journal:
+{(to_j or '(the target journal)')}.
+
+WHAT YOU READ:
+  * target/   — the FINAL package ({target_label}); every change you claim must
+    exist here. revision_report.json and DIFF_LEDGER.md name what changed and
+    where — use them, never your memory.
+  * concerns/JF_concerns.json — the concern ledger; the letter covers EVERY id
+    exactly once: {', '.join(ids) if ids else '(none)'}
+  * feedback/text/ — the reviewers' own wording (quote verbatim; never invent a
+    reviewer or a sentence).
+
+WRITE:
+  * response/RESPONSE_TO_REVIEWERS.md — one block per concern:
+      ## <id> — <short title>
+      **Comment:** "<verbatim reviewer quote>"
+      **Response:** what the authors did, or why they did not; state no claim
+      beyond what target/ shows; a new experiment cites its actual new data/file
+      or is marked "planned" with the exact steps and claims no result
+      **Changes:** <file:location — before -> after>, one line per change
+  * response/response_map.json — the machine-readable map:
+      {{"journal_from": "...", "target_journal": "...", "mode": "{mode}",
+        "rows": [{{"id": "<concern id>",
+                   "status": "addressed|partially-addressed|already-addressed|planned|not-applicable",
+                   "response": "<one sentence>",
+                   "changes": [{{"file": "<package-relative path>",
+                                 "location": "<section/line>",
+                                 "before": "...", "after": "..."}}],
+                   "new_data": ["<package-relative file the response cites>"]}}]}}
+    ONE row per concern id, the same ids as the ledger, no extras.
+
+ABSOLUTE RULES:
+  * every changes[].file and new_data[] path must EXIST in target/ (checked
+    mechanically): never cite a figure, table or file that is not in the package;
+  * status "addressed"/"partially-addressed" needs at least one change or one
+    new data file; status "already-addressed" is only for a concern the ledger
+    already marks `already-addressed` (name the location in `response`, cite no
+    change); status "planned" claims nothing done yet;
+  * never fabricate a result, a number or a reviewer sentence;
+  * the letter is a submission document but NOT manuscript text: write it here
+    in response/ and never edit the package.
+
+{marker_root_rule()}
+Write `_pipeline_done.json` (JSON: stage "response", run_id "{sb.name}",
+round {int(r)}, status "complete") as the very LAST step.
+"""
+
+
+def journal_review_block(ctx: Ctx, sb: Path) -> str:
+    """The block appended to the standard review prompt (modes 1-2)."""
+    mode = journal_mode_of(ctx)
+    return f"""
+
+=== JOURNAL FEEDBACK RECONCILIATION (revision mode: {mode}) ===
+The round carries the editors'/reviewers' decision letter in `concerns/`
+(`JF_concerns.json` / `JF_concerns.md`; external prose -- never quote a reviewer
+as if the authors wrote it). Beyond the normal sweep:
+  * reconcile EVERY concern id in the ledger and write
+    `review/concerns_reconciled.json` with one row per id:
+    {{"id": "...", "status": "finding|already-addressed|manual|not-applicable",
+      "finding": "<finding id or null>", "location": "<base/ file:where>",
+      "rationale": "<one sentence>"}};
+  * a concern base/ does not answer is a FINDING with `check: "JF"`,
+    `concern: "<id>"`, id `JF-<n>`, category 0, and the reviewer's verbatim
+    quote as its evidence;
+  * do not drop, merge or soften a concern. Real defects the sweeps find are
+    still findings -- this is a normal round otherwise.
+"""
+
+
+def journal_revise_block(ctx: Ctx) -> str:
+    """The block appended to the revise prompt (all four modes)."""
+    mode = journal_mode_of(ctx)
+    info = JOURNAL_MODES[mode]
+    if info["scoped"]:
+        return f"""
+
+=== {mode.upper()} REVISION — CONCERN-SCOPED EDITS ONLY ===
+This is a real {mode} revision: the journal raised the concerns now in
+`review/findings.json` (every finding has `check: "JF"` and a `concern` id;
+`concerns/JF_concerns.md` carries the reviewers' own words).
+  * Change the manuscript ONLY where a concern requires it. Every edit names the
+    JF finding id / concern id that raised it.
+  * NO unrelated changes: no restructuring, no style re-wording, no new findings
+    from a rescan, no renames, no deletions, no added documents, no figure
+    regeneration. Anything else you notice goes to MANUAL_STEPS.md as a note for
+    the authors -- it is NOT edited here.
+  * Findings with status "unresolvable" (a new experiment, a judgement call) are
+    answered in MANUAL_STEPS.md with the exact steps; never invent the result.
+  * The response letter is written in a later, separate stage from your ledger:
+    record every edit (file, location, before, after).
+  * The pipeline verifies the scope mechanically: a changed file the ledger does
+    not name, or a file added/removed, fails the attempt.
+"""
+    tail = ("A response-to-reviewers letter is NOT written for this mode."
+            if not info["response"] else
+            "A response-to-reviewers letter is generated AFTER this stage from the "
+            "revision ledger -- record every JF edit (file, location, before, after) "
+            "and never claim a change that is not in the package.")
+    return f"""
+
+=== JOURNAL REVISION MODE: {mode.upper()} (option {info['option']}) ===
+The round is a real revision against the editors'/reviewers' feedback in
+`concerns/` (external prose -- never attribute it to the authors). The review's
+JF findings (`check: "JF"`, with a `concern` id) are mandatory: every one is
+either fixed in the package or recorded as a manual item with the exact steps.
+{tail}
+The manuscript must answer every concern; the normal findings still apply.
+"""
+
+
+def journal_rewrite_block(ctx: Ctx) -> str:
+    """The block appended to the standard rewrite prompt (modes 1-2)."""
+    mode = journal_mode_of(ctx)
+    info = JOURNAL_MODES[mode]
+    tail = ("No response letter is written for a transfer; the rewrite IS the answer."
+            if not info["response"] else
+            "The response letter is generated later from the final package's ledger.")
+    return f"""
+
+=== JOURNAL REVISION MODE: {mode.upper()} — the rewrite answers the concerns ===
+This from-scratch rewrite is for a real submission attempt (mode {mode}, option
+{info['option']}). `concerns/JF_concerns.json|md` carries the editors'/reviewers'
+feedback (external prose; never copy a reviewer's sentence into the manuscript).
+  * The rewritten manuscript must demonstrably answer every concern whose
+    `disposition` is `to-fix` or `manual`; list the per-concern handling in
+    REWRITE_REPORT.md (concern id -> what the rewrite does, or why it is manual).
+  * A `manual` concern (a new experiment) is never faked: state the plan in
+    MANUAL_STEPS.md and keep the claim honest.
+  * {tail}
+"""
+
+
+def _norm_ws(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict:
+    """Schema + quote verification of the concern ledger ({} when unusable)."""
+    path = sb / JOURNAL_CONCERNS_JSON_REL
+    if not path.is_file():
+        errs.append(f"{JOURNAL_CONCERNS_JSON_REL} is missing: it is the concern ledger every "
+                    f"later journal stage keys on")
+        return {}
+    data = read_json(path, revive=False, lenient=True)          # agent-written
+    if not isinstance(data, dict):
+        errs.append(f"{JOURNAL_CONCERNS_JSON_REL} does not parse as a JSON object")
+        return {}
+    rows = data.get("concerns")
+    if not isinstance(rows, list) or not rows:
+        errs.append(f"{JOURNAL_CONCERNS_JSON_REL} carries no 'concerns' rows: the ledger is the "
+                    f"deliverable (one row per distinct concern), and an empty ledger would "
+                    f"silently answer nothing")
+        return data
+    texts = []
+    tdir = sb / "feedback" / "text"
+    if tdir.is_dir():
+        for p in sorted(tdir.glob("*.txt")):
+            try:
+                texts.append(_norm_ws(p.read_text(encoding="utf-8", errors="replace")))
+            except OSError:
+                continue
+    haystack = " \n ".join(texts)
+    seen = set()
+    for i, row in enumerate(rows, 1):
+        if not isinstance(row, dict):
+            errs.append(f"concerns[{i}] is not an object")
+            continue
+        cid = str(row.get("id") or "").strip()
+        if not cid:
+            errs.append(f"concerns[{i}] has no id")
+            continue
+        if cid in seen:
+            errs.append(f"concern id {cid!r} appears twice: ids are the keys every later stage "
+                        f"uses, so they must be unique")
+        seen.add(cid)
+        quote = _norm_ws(row.get("quote"))
+        if len(quote) < 8:
+            errs.append(f"concern {cid}: quote is missing/too short (a verbatim <=300-char "
+                        f"excerpt is required)")
+        elif quote not in haystack:
+            errs.append(f"concern {cid}: the quote is not verbatim in any feedback/text/ "
+                        f"rendering (checked whitespace-normalised); a paraphrase fails here")
+        action = str(row.get("action") or "").strip()
+        if action not in JOURNAL_CONCERN_ACTIONS:
+            errs.append(f"concern {cid}: action {action!r} is not one of "
+                        f"{', '.join(JOURNAL_CONCERN_ACTIONS)}")
+        disp = str(row.get("disposition") or "").strip()
+        if disp not in JOURNAL_CONCERN_DISPOSITIONS:
+            errs.append(f"concern {cid}: disposition {disp!r} is not one of "
+                        f"{', '.join(JOURNAL_CONCERN_DISPOSITIONS)}")
+        if disp == "already-addressed" and not str(row.get("manuscript_location") or "").strip():
+            errs.append(f"concern {cid}: disposition 'already-addressed' needs the base/ "
+                        f"location that answers it")
+        if disp in ("manual", "not-applicable") and not str(
+                row.get("evidence_needed") or "").strip():
+            errs.append(f"concern {cid}: disposition {disp!r} needs evidence_needed (the exact "
+                        f"steps the authors must take / why the point does not apply)")
+        if not str(row.get("summary") or "").strip():
+            errs.append(f"concern {cid}: summary is empty")
+    if not (sb / JOURNAL_CONCERNS_MD_REL).is_file():
+        warns.append(f"{JOURNAL_CONCERNS_MD_REL} is missing (the human-readable ledger table)")
+    data["_to_fix"] = sum(1 for r in rows if isinstance(r, dict)
+                          and str(r.get("disposition")) in ("to-fix", "manual"))
+    return data
+
+
+def postcheck_feedback(ctx: Ctx, rec: dict):
+    """Modes 1-2: the concern ledger is complete and verbatim."""
+    sb = ctx.sandbox_of(rec)
+    errs, warns = [], []
+    marker = marker_json(sb, rec["kind"])
+    _marker_checks(rec, marker, "feedback", errs, warns, sb=sb)
+    errs.extend(structured_output_problems(ctx, rec))
+    warns.extend(inherited_structured_output_notes(ctx, rec))
+    data = journal_ledger_problems(ctx, sb, errs, warns)
+    if data:
+        rec["concerns"] = {"count": len(data.get("concerns") or []),
+                           "to_fix": data.get("_to_fix", 0),
+                           "files": rec.get("feedback_files") or []}
+    fdir = sb / "feedback" / "files"
+    if not fdir.is_dir() or not any(fdir.iterdir()):
+        errs.append("feedback/files/ is empty: the original feedback files must be copied in "
+                    "(they are the quote source of record)")
+    _check_pristine_copy(ctx, rec, pristine_dirname(sb), errs)
+    errs.extend(input_mismatches(ctx, rec))
+    return (not errs), errs, warns, None
+
+
+def journal_review_coverage_problems(ctx: Ctx, rec: dict, sb: Path, fj: dict) -> list:
+    """Modes 1-2: the review reconciled EVERY concern of the decision letter.
+
+    Reads `review/concerns_reconciled.json` (one row per concern id) against the
+    feedback run's ledger and the review's own findings: a row that claims
+    `finding` must name a JF finding that exists; `already-addressed` must name
+    the location; `manual`/`not-applicable` must give a rationale.
+    """
+    errs = []
+    r = int(rec.get("round") or 1)
+    fb_rec = ctx.run(rid_feedback(r))
+    if fb_rec is None:
+        return [f"the review must reconcile the decision letter's concerns, but the feedback run "
+                f"{rid_feedback(r)} does not exist"]
+    rows = journal_concern_rows(ctx.sandbox_of(fb_rec))
+    if not rows:
+        return errs
+    want = {str(x.get("id")) for x in rows}
+    path = sb / REVIEW_DIR / "concerns_reconciled.json"
+    if not path.is_file():
+        errs.append(f"{REVIEW_DIR}/concerns_reconciled.json is missing: revision modes 1-2 must "
+                    f"reconcile every concern of the decision letter (one row per id)")
+        return errs
+    data = read_json(path, revive=False, lenient=True)
+    if not isinstance(data, dict):
+        errs.append(f"{REVIEW_DIR}/concerns_reconciled.json does not parse as a JSON object")
+        return errs
+    got_rows = [x for x in (data.get("rows") or []) if isinstance(x, dict)]
+    got = [str(x.get("id") or "") for x in got_rows]
+    missing = sorted(want - set(got))
+    extra = sorted(set(got) - want)
+    if missing:
+        errs.append(f"the review did not reconcile {len(missing)} concern(s): "
+                    f"{', '.join(missing[:6])}")
+    if extra:
+        errs.append(f"the reconciliation names {len(extra)} row(s) that are not concerns: "
+                    f"{', '.join(extra[:6])}")
+    by_id = {str(x.get("id")): x for x in (fj.get("findings") or []) if isinstance(x, dict)}
+    for row in got_rows:
+        cid = str(row.get("id") or "")
+        status = str(row.get("status") or "").strip()
+        if status not in ("finding", "already-addressed", "manual", "not-applicable"):
+            errs.append(f"reconciliation row {cid!r}: status {status!r} is not one of finding/"
+                        f"already-addressed/manual/not-applicable")
+            continue
+        fid = str(row.get("finding") or "").strip()
+        if status == "finding":
+            if not fid or fid not in by_id:
+                errs.append(f"reconciliation row {cid!r} claims a finding but names none that "
+                            f"exists in {FINDINGS_REL} ({fid or 'no id'})")
+            else:
+                f = by_id[fid]
+                if str(f.get("check") or "").upper() != "JF" \
+                        or str(f.get("concern") or "") != cid:
+                    errs.append(f"reconciliation row {cid!r}: finding {fid!r} is not the JF "
+                                f"finding for this concern (check/concern mismatch)")
+        elif status == "already-addressed" and not str(row.get("location") or "").strip():
+            errs.append(f"reconciliation row {cid!r}: 'already-addressed' needs the base/ "
+                        f"location")
+        elif status in ("manual", "not-applicable") and not str(row.get("rationale") or "").strip():
+            errs.append(f"reconciliation row {cid!r}: {status!r} needs a rationale")
+    return errs
+
+
+def postcheck_concerns(ctx: Ctx, rec: dict):
+    """Modes 3-4: the scoped ledger AND the finding list it produces."""
+    sb = ctx.sandbox_of(rec)
+    errs, warns = [], []
+    marker = marker_json(sb, rec["kind"])
+    _marker_checks(rec, marker, "concerns", errs, warns, sb=sb)
+    errs.extend(structured_output_problems(ctx, rec))
+    warns.extend(inherited_structured_output_notes(ctx, rec))
+    data = journal_ledger_problems(ctx, sb, errs, warns)
+    rows = [r for r in (data.get("concerns") or []) if isinstance(r, dict)]
+    must_fix = {str(r.get("id")) for r in rows
+                if str(r.get("disposition")) in ("to-fix", "manual")}
+    manual = {str(r.get("id")) for r in rows if str(r.get("disposition")) == "manual"}
+    fj = read_json(sb / FINDINGS_REL, revive=False, lenient=True)
+    if not isinstance(fj, dict):
+        errs.append(f"{FINDINGS_REL} is missing/unparsable: the single revision session consumes "
+                    f"it, and a scoped revision has no other finding source")
+    else:
+        findings = [f for f in (fj.get("findings") or []) if isinstance(f, dict)]
+        by_concern = {}
+        for f in findings:
+            check = str(f.get("check") or "").strip().upper()
+            concern = str(f.get("concern") or "").strip()
+            if check != "JF":
+                errs.append(f"finding {f.get('id')!r} has check {check!r}: a scoped revision "
+                            f"carries ONLY the reviewers' concerns (check JF); an unrelated "
+                            f"finding would license an unrelated edit")
+            if not concern:
+                errs.append(f"finding {f.get('id')!r} names no concern id")
+            elif concern in by_concern:
+                errs.append(f"concern {concern!r} has more than one finding")
+            by_concern[concern] = f
+            if not str(f.get("evidence") or "").strip():
+                errs.append(f"finding {f.get('id')!r} has no evidence (quote the reviewer)")
+            if not str(f.get("location") or "").strip():
+                errs.append(f"finding {f.get('id')!r} has no location")
+            status = str(f.get("status") or "").strip()
+            want = "unresolvable" if concern in manual else "resolvable"
+            if status not in ("resolvable", "unresolvable"):
+                errs.append(f"finding {f.get('id')!r}: status {status!r} must be resolvable or "
+                            f"unresolvable")
+            elif status != want:
+                errs.append(f"finding {f.get('id')!r}: status {status!r} does not match its "
+                            f"ledger disposition (expected {want!r})")
+        missing = sorted(must_fix - set(by_concern))
+        extra = sorted(set(by_concern) - must_fix)
+        if missing:
+            errs.append(f"{len(missing)} concern(s) need an action but have no finding: "
+                        f"{', '.join(missing[:6])}")
+        if extra:
+            errs.append(f"{len(extra)} finding(s) do not match a to-fix/manual concern: "
+                        f"{', '.join(extra[:6])}")
+        if not (sb / REVIEW_DIR / "artifacts" / "JF_concerns.md").is_file():
+            errs.append(f"{ARTIFACTS_REL}/JF_concerns.md is missing")
+        if not (sb / REVIEW_DIR / "findings.md").is_file():
+            warns.append(f"{REVIEW_DIR}/findings.md is missing (the human-readable list)")
+    if data:
+        rec["concerns"] = {"count": len(rows), "to_fix": len(must_fix),
+                           "manual": len(manual), "files": rec.get("feedback_files") or []}
+    _check_pristine_copy(ctx, rec, pristine_dirname(sb), errs)
+    errs.extend(input_mismatches(ctx, rec))
+    return (not errs), errs, warns, None
+
+
+def postcheck_response(ctx: Ctx, rec: dict):
+    """Modes 2-4: the letter covers every concern and cites the package truthfully."""
+    sb = ctx.sandbox_of(rec)
+    r = int(rec.get("round") or 1)
+    errs, warns = [], []
+    marker = marker_json(sb, rec["kind"])
+    _marker_checks(rec, marker, "response", errs, warns, sb=sb)
+    errs.extend(structured_output_problems(ctx, rec))
+    warns.extend(inherited_structured_output_notes(ctx, rec))
+    target = sb / "target"
+    src_rec = ctx.run(rid_concerns(r)) or ctx.run(rid_feedback(r))
+    if src_rec is None:
+        errs.append("the concern ledger's sandbox is missing (no concerns/feedback run in this "
+                    "round): the letter cannot be verified against the concerns")
+        src = None
+    else:
+        src = ctx.sandbox_of(src_rec)
+    ledger_rows = {str(row.get("id")): row
+                   for row in (journal_concern_rows(src) if src else [])}
+    md = sb / JOURNAL_RESPONSE_MD_REL
+    letter = ""
+    if not md.is_file():
+        errs.append(f"{JOURNAL_RESPONSE_MD_REL} is missing: the response to reviewers is the "
+                    f"deliverable of this mode")
+    else:
+        letter = md.read_text(encoding="utf-8", errors="replace")
+    data = read_json(sb / JOURNAL_RESPONSE_MAP_REL, revive=False, lenient=True)
+    if not isinstance(data, dict):
+        errs.append(f"{JOURNAL_RESPONSE_MAP_REL} is missing/unparsable (the letter's "
+                    f"machine-readable map)")
+        return (not errs), errs, warns, None
+    rows = [x for x in (data.get("rows") or []) if isinstance(x, dict)]
+    got = [str(x.get("id") or "") for x in rows]
+    want = list(ledger_rows)
+    if sorted(got) != sorted(want):
+        missing = sorted(set(want) - set(got))
+        extra = sorted(set(got) - set(want))
+        errs.append(f"{JOURNAL_RESPONSE_MAP_REL} covers {len(got)} concern(s), the ledger has "
+                    f"{len(want)}"
+                    + (f"; missing: {', '.join(missing[:5])}" if missing else "")
+                    + (f"; extra: {', '.join(extra[:5])}" if extra else ""))
+    for row in rows:
+        cid = str(row.get("id") or "")
+        status = str(row.get("status") or "").strip()
+        response = str(row.get("response") or "").strip()
+        if status not in ("addressed", "partially-addressed", "already-addressed", "planned",
+                          "not-applicable"):
+            errs.append(f"response row {cid!r}: status {status!r} is not one of addressed/"
+                        f"partially-addressed/already-addressed/planned/not-applicable")
+        if not response:
+            errs.append(f"response row {cid!r}: the response sentence is empty")
+        changes = [c for c in (row.get("changes") or []) if isinstance(c, dict)]
+        new_data = [str(x) for x in (row.get("new_data") or []) if str(x).strip()]
+        for c in changes:
+            f = str(c.get("file") or "").strip()
+            if not f:
+                errs.append(f"response row {cid!r}: a change entry names no file")
+            elif (is_raw_data_rel(f) or _is_aux_doc(Path(f).name)
+                  or is_bookkeeping_name(Path(f).name)
+                  or "work" in Path(f).parts[:-1]):
+                errs.append(f"response row {cid!r}: change file {f!r} is not a submission "
+                            f"document (bookkeeping/auxiliary/evidence files never ship)")
+            elif not (target / f).exists():
+                errs.append(f"response row {cid!r}: change file {f!r} does not exist in the "
+                            f"package -- the letter must not cite a file the revision does not "
+                            f"carry")
+        for f in new_data:
+            if is_raw_data_rel(f) or is_bookkeeping_name(Path(f).name) \
+                    or "work" in Path(f).parts[:-1]:
+                errs.append(f"response row {cid!r}: new-data file {f!r} is not a submission "
+                            f"document (bookkeeping/evidence files never ship)")
+            elif not (target / f).exists():
+                errs.append(f"response row {cid!r}: new-data file {f!r} does not exist in the "
+                            f"package")
+        src_row = ledger_rows.get(cid) or {}
+        if status == "already-addressed" \
+                and str(src_row.get("disposition") or "") != "already-addressed":
+            errs.append(f"response row {cid!r}: status 'already-addressed' is only valid when the "
+                        f"concern ledger marks this concern already-addressed (it says "
+                        f"{str(src_row.get('disposition') or 'nothing')!r})")
+        if status in ("addressed", "partially-addressed") and not changes and not new_data:
+            errs.append(f"response row {cid!r}: status {status!r} claims work done but cites no "
+                        f"change and no new data file")
+        if status == "planned" and (changes or new_data):
+            errs.append(f"response row {cid!r}: status 'planned' must not list completed "
+                        f"changes/new data")
+        if status in ("addressed", "partially-addressed") \
+                and str(src_row.get("action") or "") == "new-experiment" and not new_data:
+            errs.append(f"response row {cid!r}: the concern needs a new experiment; an "
+                        f"'addressed' answer must cite the new data file(s)")
+        if cid and letter and cid not in letter:
+            errs.append(f"response letter does not mention concern {cid!r}")
+    return (not errs), errs, warns, None
+
+
+def _scope_tree_files(root: Path) -> dict:
+    """{version-stripped key: (rel, sha256)} of a package's submission files.
+
+    The key strips the content-hash version token, so the revision skill's
+    token rename (`main-4f3a9c1.docx` -> `main-9b2c7e4.docx`) is the SAME
+    document, not an add + delete.
+    """
+    out = {}
+    if not root.is_dir():
+        return out
+    for p in sorted(root.rglob("*")):
+        if not p.is_file() or p.name.startswith("~$") or _is_aux_doc(p.name):
+            continue
+        rel = p.relative_to(root).as_posix()
+        if is_raw_data_rel(rel):
+            continue
+        if "work" in rel.split("/")[:-1] or is_bookkeeping_name(p.name):
+            continue
+        try:
+            out[_doc_key(rel)] = (rel, sha256_file(p))
+        except OSError:
+            continue
+    return out
+
+
+def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path) -> list:
+    """The major/minor scope guard: only concern-driven edits are allowed.
+
+    File-level and mechanical: an added or deleted file is an error; a modified
+    file must be named in the package's revision ledger (which `postcheck_revise`
+    requires to name every frozen finding id). The prompt asks for hunk-level
+    discipline; this is the enforceable floor.
+    """
+    errs = []
+    base = sb / "base"
+    if not base.is_dir() or not rev.is_dir():
+        return errs
+    want, got = _scope_tree_files(base), _scope_tree_files(rev)
+    ledger_text = ""
+    lp = rev / "revision_report.json"
+    if lp.is_file():
+        try:
+            ledger_text = lp.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            ledger_text = ""
+    for key in sorted(set(got) - set(want)):
+        rel = got[key][0]
+        errs.append(f"scoped revision added {rel!r}: a major/minor revision may not add a "
+                    f"document (the reviewers asked for no new file)")
+    for key in sorted(set(want) - set(got)):
+        rel = want[key][0]
+        errs.append(f"scoped revision dropped {rel!r}: a major/minor revision may not remove a "
+                    f"document; restore it")
+    for key in sorted(k for k in set(want) & set(got) if want[k][1] != got[k][1]):
+        rel = got[key][0]
+        if rel not in ledger_text and Path(rel).name not in ledger_text:
+            errs.append(f"scoped revision changed {rel!r} but the ledger names neither the file "
+                        f"nor its basename: every edit must trace to a reviewer concern")
+    return errs
+
+
+POSTCHECK_HANDLERS.update({
+    "feedback": postcheck_feedback,
+    "concerns": postcheck_concerns,
+    "response": postcheck_response,
+})
+REBUILD_HANDLERS.update({
+    "feedback": lambda ctx, rec: materialize_feedback(ctx, int(rec["round"])),
+    "concerns": lambda ctx, rec: materialize_concerns(ctx, int(rec["round"])),
+    "response": lambda ctx, rec: materialize_response(ctx, int(rec["round"])),
+})
+
+
+def journal_final_target(ctx: Ctx) -> tuple:
+    """(the package the submission is built from, a label for the prompt)."""
+    mode = journal_mode_of(ctx)
+    if journal_is_scoped(ctx):
+        rid = rid_for_fresh(1, revise_vid(1))
+        rec = ctx.run(rid)
+        if rec is None or rec.get("status") != "done":
+            die(f"the {mode} revision has no finished revision run ({rid} is "
+                f"{(rec or {}).get('status', 'missing')}): finish the round before publishing a "
+                f"submission package.")
+        sb = ctx.sandbox_of(rec)
+        return sb / REVISED_DIR, f"the {mode} revision"
+    pins = ctx.state.get("pinned") or []
+    if pins:
+        pin = pins[-1]
+        return pinned_docs_dir(ctx, pin), f"the pinned champion {pin.get('id')}"
+    return ctx.pristine, "the original (no round was pinned)"
+
+
+def journal_final_version_id(ctx: Ctx) -> str:
+    """The round-version id whose tracked changes belong to the submission.
+
+    The scoped revision is `a2`; for modes 1-2 it is the pinned champion's own
+    version (an `a1` champion has no redline -- the base did not change -- so
+    nothing is copied). Empty when it cannot be resolved.
+    """
+    if journal_is_scoped(ctx):
+        # The redline DIRECTORY is named for the round-version pair
+        # (`redlines/r1_a2/...`), not for the run id (`r1_a2_revise`).
+        return f"r{int(ctx.rounds_count())}_{revise_vid(1)}"
+    pins = ctx.state.get("pinned") or []
+    return str(pins[-1].get("id") or "") if pins else ""
+
+
+def publish_journal_submission(ctx: Ctx, target: Path, label: str,
+                               response_dir: Path = None) -> Path:
+    """Assemble the JOURNAL SUBMISSION: the package minus the evidence area.
+
+    `raw_data/` is an INPUT (evidence), never a submitted document, so the
+    submission copy strips it (and the pipeline's own bookkeeping and
+    revision auxiliaries) and includes the response-to-reviewers letter when
+    the mode requires one. The manifest records exactly what shipped.
+    """
+    mode = journal_mode_of(ctx)
+    dst = ctx.root / JOURNAL_SUBMISSION_DIR
+    if dst.exists():
+        rmtree_force(dst)
+    dst.mkdir(parents=True, exist_ok=True)
+    copy_into(target, dst, exclude_top=("work",), skip_aux=True, strip_bookkeeping=True)
+    for name in RAW_DATA_DIRNAMES:
+        if (dst / name).exists():
+            rmtree_force(dst / name)
+    response_files = []
+    if response_dir is not None:
+        for rel in (JOURNAL_RESPONSE_MD_REL, JOURNAL_RESPONSE_MAP_REL):
+            src = response_dir / rel
+            if src.is_file():
+                out = dst / Path(rel).name
+                shutil.copy2(src, out)
+                response_files.append(out.name)
+    if journal_needs_response(ctx) and not response_files:
+        die(f"revision mode {mode!r} requires a response to reviewers, but the response stage "
+            f"produced none: nothing was published to {dst.name}/. Run the response stage "
+            f"(`run`) or retry it with `retry --run {rid_response(ctx.rounds_count())}`.")
+    # Marked-up copies: a journal revision is usually submitted as the clean
+    # manuscript PLUS the changes marked against what was submitted.
+    # `run_redlines` writes them per version under redlines/<version>/from-original/.
+    marked = []
+    vid = journal_final_version_id(ctx)
+    if vid:
+        rd = ctx.root / REDLINE_DIRNAME / vid / "from-original"
+        if rd.is_dir():
+            out_dir = dst / "tracked_changes"
+            for p in sorted(rd.iterdir()):
+                if p.is_file():
+                    # NEVER overwrite the clean document: the marked-up copies
+                    # go in their own folder beside it.
+                    out_dir.mkdir(exist_ok=True)
+                    shutil.copy2(p, out_dir / p.name)
+                    marked.append(f"tracked_changes/{p.name}")
+    left = sorted(p.name for name in RAW_DATA_DIRNAMES if (dst / name).exists())
+    if left:
+        die(f"the submission package still carries the evidence area ({', '.join(left)}); this "
+            f"is a pipeline bug -- report it before submitting anything.")
+    manifest = hash_manifest(dst)
+    write_json_atomic(ctx.root / "journal_submission.json",
+                      {"mode": mode,
+                       "option": JOURNAL_MODES[mode]["option"],
+                       "label": JOURNAL_MODES[mode]["label"],
+                       "target": label,
+                       "source_package": (target.relative_to(ctx.root).as_posix()
+                                          if is_within(target, ctx.root) else str(target)),
+                       "response_files": response_files,
+                       "marked_changes": marked,
+                       "raw_data_included": False,
+                       "manifest": manifest,
+                       "created": utcnow()})
+    return dst
+
+
+def drive_journal_finalize(ctx: Ctx, *, cmd, timeout: int, jobs: int, retries: int,
+                           manual: bool, nowait: bool, poll: int,
+                           retry_backoff: int = 0, retry_backoff_max: int = 0) -> tuple:
+    """The post-round journal step: the response letter (when required) + the
+    submission package."""
+    r = max(1, ctx.rounds_count())
+    target, label = journal_final_target(ctx)
+    if not target.is_dir():
+        die(f"the journal finalization has no package to publish ({target} does not exist); "
+            f"finish the round first")
+    response_dir = None
+    if journal_needs_response(ctx):
+        rid = rid_response(r)
+        rec = ctx.run(rid)
+        done = bool(rec and rec.get("status") == "done"
+                    and (ctx.sandbox_of(rec) / JOURNAL_RESPONSE_MD_REL).is_file())
+        if not done:
+            materialize_response(ctx, r, target=target, target_label=label)
+            ph = {"cmd": cmd, "timeout": timeout, "jobs": jobs, "retries": retries,
+                  "manual": manual, "nowait": nowait, "poll": poll,
+                  "retry_backoff": retry_backoff, "retry_backoff_max": retry_backoff_max}
+            ok, paused = run_phase(ctx, [rid], label="journal response", **ph)
+            if not ok:
+                return False, paused
+        rec = ctx.run(rid) or {}
+        response_dir = ctx.sandbox_of(rec)
+    dst = publish_journal_submission(ctx, target, label, response_dir=response_dir)
+    ctx.state.setdefault("journal", {})
+    ctx.state["journal"].update({"mode": journal_mode_of(ctx),
+                                 "submission_dir": dst.relative_to(ctx.root).as_posix(),
+                                 "response": bool(response_dir),
+                                 "published_at": utcnow()})
+    ctx.save_state()
+    print(f"[run] journal submission assembled: {dst} "
+          f"({len((hash_manifest(dst) or {}).get('files') or {})} file(s); raw_data/ excluded"
+          + (f"; response letter included ({', '.join(sorted(p.name for p in dst.iterdir() if p.name.startswith('RESPONSE') or p.name == 'response_map.json'))})" if response_dir else "; no response letter (transfer mode)")
+          + ")")
+    return True, False
 
 
 def postcheck(ctx: Ctx, rec: dict, source: str = "postcheck") -> bool:
@@ -21629,17 +23022,41 @@ def round_run_plan(ctx: Ctx, r: int) -> list:
     m, n = round_counts(ctx, r)
     pool = round_pool_ids(m, n)
     entries = []
+    jmode = journal_mode_of(ctx)
+    scoped = journal_is_scoped(ctx)
+    if scoped and n != 1:
+        die(f"revision mode {jmode!r} needs exactly ONE revision arm, but round {r} plans "
+            f"N={n} (and M={m}). The mode is concern-scoped by definition; run "
+            f"`set-revision-mode {jmode}` (it normalises rewrites/revises/integrators/rounds) "
+            f"or start a fresh root.")
+    feedback_rid = rid_feedback(r) if jmode in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_RESUBMIT) \
+        else None
+    if feedback_rid:
+        entries.append({"id": feedback_rid, "kind": "feedback", "vid": None,
+                        "deps": [rid_a1(r)], "stage": "feedback",
+                        "materialize": (lambda c: materialize_feedback(c, r))})
+    rewrite_deps = [rid_a1(r)] + ([feedback_rid] if feedback_rid else [])
     for k in range(1, m + 1):
         vid = rewrite_vid(k)
         entries.append({"id": rid_for_fresh(r, vid), "kind": "rewrite", "vid": vid,
-                        "deps": [rid_a1(r)], "stage": f"rewrite {k}/{m}",
+                        "deps": list(rewrite_deps), "stage": f"rewrite {k}/{m}",
                         "materialize": (lambda c, k=k: materialize_rewrite(c, r, k))})
     if n:
-        entries.append({"id": rid_review(r), "kind": "review", "vid": None,
-                        "deps": [rid_a1(r)], "stage": "review",
-                        "materialize": (lambda c: materialize_review(c, r, "a"))})
-        review_deps = [rid_review(r)]
-        if review_split_of(ctx) != "off":
+        if scoped:
+            # A major/minor revision runs NO general review: the concerns run
+            # produces the ledger AND the only finding list the single revise
+            # session sees.
+            entries.append({"id": rid_concerns(r), "kind": "concerns", "vid": None,
+                            "deps": [rid_a1(r)], "stage": "concerns",
+                            "materialize": (lambda c: materialize_concerns(c, r))})
+            review_deps = [rid_concerns(r)]
+        else:
+            entries.append({"id": rid_review(r), "kind": "review", "vid": None,
+                            "deps": [rid_a1(r)] + ([feedback_rid] if feedback_rid else []),
+                            "stage": "review",
+                            "materialize": (lambda c: materialize_review(c, r, "a"))})
+            review_deps = [rid_review(r)]
+        if review_split_of(ctx) != "off" and not scoped:
             entries.append({"id": rid_review_b(r), "kind": "review", "vid": None,
                             # Session B consumes session A's OUTPUT (`review_a/`,
                             # copied by materialize_review): with the same deps as
@@ -21649,7 +23066,7 @@ def round_run_plan(ctx: Ctx, r: int) -> list:
                             "deps": [rid_a1(r), rid_review(r)], "stage": "review",
                             "materialize": (lambda c: materialize_review(c, r, "b"))})
             review_deps.append(rid_review_b(r))
-        if audit_enabled(ctx):
+        if audit_enabled(ctx) and not scoped:
             # review -> AUDIT -> revise. The auditor disposes the frozen review
             # before any reviser sees it, so a boilerplate closure or a
             # mis-located finding is caught while it is still one finding, not
@@ -21664,7 +23081,11 @@ def round_run_plan(ctx: Ctx, r: int) -> list:
                             "deps": [rid_a1(r)] + review_deps,
                             "stage": f"revise {j}/{n}",
                             "materialize": (lambda c, v=vid: materialize_revise(c, r, v))})
-    mask = round_integrators(ctx, r)
+    if scoped and journal_needs_response(ctx):
+        entries.append({"id": rid_response(r), "kind": "response", "vid": None,
+                        "deps": [rid_for_fresh(r, revise_vid(1))], "stage": "response",
+                        "materialize": (lambda c: materialize_response(c, r))})
+    mask = 0 if scoped else round_integrators(ctx, r)
     arms = integrator_arms(m, n, mask)
     for k in arms:
         vid = integrate_vid(k)
@@ -22004,6 +23425,33 @@ def wait_futures(running: dict, timeout: float = 0.5):
     return wait(running, timeout=timeout, return_when=FIRST_COMPLETED)
 
 
+def round_redlines(ctx: Ctx, r: int, enabled: bool) -> None:
+    """Tracked-changes copies for one round (an audit aid; never fails the round).
+
+    Shared by the standard round close and by the concern-scoped (major/minor)
+    close: a real journal revision needs the marked-up copy as much as the
+    standard flow does.
+    """
+    if not enabled:
+        return
+    try:
+        mf = run_redlines(ctx, rounds=[r], versions=None, tool="auto",
+                          redline_cmd=None, quiet=True)
+        ok_n = sum(1 for v in mf["versions"] for c in v["comparisons"] if c["ok"])
+        bad_n = sum(1 for v in mf["versions"] for c in v["comparisons"] if not c["ok"])
+        warn_n = sum(1 for v in mf["versions"] for c in v["comparisons"] if c.get("warning"))
+        tools = sorted({c["tool"] for v in mf["versions"] for c in v["comparisons"]
+                        if c["ok"] and c["tool"]})
+        print(f"[run] round {r} tracked changes: {ok_n} docx pair(s) written"
+              + (f" with {', '.join(tools)}" if tools else "")
+              + (f", {bad_n} failed (see {REDLINE_DIRNAME}/manifest.json)" if bad_n else "")
+              + (f", {warn_n} with caveats -- READ {REDLINE_DIRNAME}/README.md before "
+                 f"trusting them" if warn_n else "")
+              + f" -> {REDLINE_DIRNAME}/")
+    except Exception as e:                                  # noqa: BLE001
+        print(f"[run] round {r} WARNING: tracked-changes generation failed: {e}")
+
+
 def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
                 manual: bool, nowait: bool, poll: int,
                 judge_cmd=None, judge_manual: bool = None, judge_timeout=None,
@@ -22095,6 +23543,33 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
     ok, paused = run_round_runs(ctx, r, label=f"r{r}", only=only, **ph)
     if not ok:
         return False, paused
+
+    if journal_is_scoped(ctx):
+        # A major/minor revision has no judge panel and no champion choice: the
+        # single concern-scoped revision IS the answer, and the response letter
+        # (mode 2-4) was produced by the same plan. The round is closed here.
+        a2 = revise_vid(1)
+        rec2 = ctx.run(rid_for_fresh(r, a2)) or {}
+        if rec2.get("status") != "done":
+            print(f"[run] r{r}: the scoped revision run is not done "
+                  f"({rec2.get('status', 'missing')}); the round stays incomplete")
+            return False, False
+        rrec = ctx.round_rec(r)
+        rrec["champion"] = a2
+        rrec["winner_dir"] = (f"{rec2.get('sandbox') or ('runs/' + rid_for_fresh(r, a2))}"
+                              f"/{REVISED_DIR}")
+        rrec["journal_mode"] = journal_mode_of(ctx)
+        rrec["scoped"] = True
+        rrec["field"] = [A1_ID, a2]
+        rrec["scores_per_version"] = 0
+        rrec["status"] = "done"
+        rrec["finished"] = utcnow()
+        ctx.save_state()
+        print(f"[run] r{r} {journal_mode_of(ctx)} revision complete: {a2} is the revised "
+              f"manuscript (no judge panel: a concern-scoped revision is judged by the journal, "
+              f"not by a quality panel)")
+        round_redlines(ctx, r, redline)
+        return True, False
 
     # (viii) field + judge panel.
     field, dropped = build_field(ctx, r)
@@ -22251,25 +23726,9 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
           f"(pinned at {PIN_DIRNAME}/{pin['id']}, digest {pin['digest'][:12]})")
     print(f"[run] round {r} winner published at {winner['directory']}/ "
           f"(same content as the pin; verified)")
-    if redline:
-        # Tracked-changes copies are an audit aid: a failure here must never fail
-        # the round, but it is always reported and recorded in the manifest.
-        try:
-            mf = run_redlines(ctx, rounds=[r], versions=None, tool="auto",
-                              redline_cmd=None, quiet=True)
-            ok_n = sum(1 for v in mf["versions"] for c in v["comparisons"] if c["ok"])
-            bad_n = sum(1 for v in mf["versions"] for c in v["comparisons"] if not c["ok"])
-            warn_n = sum(1 for v in mf["versions"] for c in v["comparisons"] if c.get("warning"))
-            tools = sorted({c["tool"] for v in mf["versions"] for c in v["comparisons"]
-                            if c["ok"] and c["tool"]})
-            print(f"[run] round {r} tracked changes: {ok_n} docx pair(s) written"
-                  + (f" with {', '.join(tools)}" if tools else "")
-                  + (f", {bad_n} failed (see {REDLINE_DIRNAME}/manifest.json)" if bad_n else "")
-                  + (f", {warn_n} with caveats -- READ {REDLINE_DIRNAME}/README.md before "
-                     f"trusting them" if warn_n else "")
-                  + f" -> {REDLINE_DIRNAME}/")
-        except Exception as e:                                  # noqa: BLE001
-            print(f"[run] round {r} WARNING: tracked-changes generation failed: {e}")
+    # Tracked-changes copies are an audit aid: a failure here must never fail
+    # the round, but it is always reported and recorded in the manifest.
+    round_redlines(ctx, r, redline)
     return True, False
 
 
@@ -22364,6 +23823,49 @@ def cmd_setup(args) -> None:
                                   rounds, "--rewrites")
     revises = parse_round_counts(getattr(args, "revises", None) or DEFAULTS["revises"],
                                  rounds, "--revises")
+    # ---- journal revision modes (options 1-4) -------------------------------
+    # "none" (the default) leaves every value below exactly as the operator
+    # passed it: the historical workflow is unchanged.
+    revision_mode = str(getattr(args, "revision_mode", None) or JOURNAL_MODE_NONE).strip().lower()
+    if revision_mode not in JOURNAL_MODES:
+        die(f"--revision-mode must be one of {', '.join(JOURNAL_MODES)} (got {revision_mode!r}). "
+            f"1=transfer (new journal, no response letter), 2=resubmit (same journal, letter), "
+            f"3=major revision (scoped edits, letter), 4=minor revision (scoped edits, letter).")
+    journal_feedback = [str(x) for x in (getattr(args, "journal_feedback", None) or [])
+                        if str(x).strip()]
+    journal_feedback_from = str(getattr(args, "journal_feedback_from", None) or "").strip()
+    if revision_mode != JOURNAL_MODE_NONE:
+        info = JOURNAL_MODES[revision_mode]
+        if info["scoped"]:
+            # Major/minor revisions are concern-scoped by definition: no
+            # rewrites, ONE revision arm, no integration and ONE round. The
+            # values are normalised (not refused) and the normalisation is
+            # printed, so an operator who passed the defaults learns exactly
+            # what the mode changed.
+            forced = []
+            if rewrites != [0] * rounds:
+                rewrites = [0] * rounds
+                forced.append("rewrites=0 (a major/minor revision may not rewrite the manuscript)")
+            if revises != [1] * rounds:
+                revises = [1] * rounds
+                forced.append("revises=1 (concern-scoped edits are one deterministic pass)")
+            if integrators != [0] * rounds:
+                integrators = [0] * rounds
+                forced.append("integrators=0 (nothing to integrate without rewrite arms)")
+            if rounds != 1:
+                rounds = 1
+                forced.append("rounds=1 (the concerns are addressed once)")
+            if getattr(args, "audit", DEFAULT_AUDIT) not in (None, "", "off"):
+                forced.append("audit off (the general review audits do not run in this mode)")
+            args.audit = "off"
+            print(f"[setup] revision mode {revision_mode} (option {info['option']}): "
+                  f"{info['label']}")
+            for f in forced:
+                print(f"[setup]   forced by the mode: {f}")
+        else:
+            print(f"[setup] revision mode {revision_mode} (option {info['option']}): "
+                  f"{info['label']}; rewrites stay "
+                  f"{'allowed' if info['rewrites'] else 'forbidden'}")
     review_scope_raw = getattr(args, "review_scope", None) or DEFAULTS["review_scope"]
     if not isinstance(review_scope_raw, (list, tuple)):
         review_scope_raw = [x.strip() for x in str(review_scope_raw).split(",") if x.strip()]
@@ -22400,6 +23902,28 @@ def cmd_setup(args) -> None:
     files = [p for p in source.rglob("*") if p.is_file()]
     if not files:
         die(f"--source directory is empty: {source}")
+    if revision_mode != JOURNAL_MODE_NONE:
+        # The evidence the whole mode rests on must exist BEFORE a root is
+        # created: a journal mode with no feedback file would run the scoped
+        # stages against nothing.
+        for item in journal_feedback:
+            q = Path(item)
+            if not q.is_absolute():
+                q = Path(args.root).resolve() / q
+            if not q.is_file():
+                die(f"--journal-feedback {item!r} does not exist (looked for {q}).")
+        if not journal_feedback:
+            hits = [p for p in files if JOURNAL_FEEDBACK_NAME_RE.search(p.name)]
+            if hits:
+                print(f"[setup] journal feedback auto-detected in --source: "
+                      + ", ".join(sorted(p.name for p in hits)[:4])
+                      + (" +%d more" % (len(hits) - 4) if len(hits) > 4 else ""))
+            else:
+                print(f"[setup] WARNING: revision mode {revision_mode!r} needs the editors'/"
+                      f"reviewers' feedback, and no feedback-named file was found in --source "
+                      f"(looked for feedback/referee/reviewer/editor/decision in the file "
+                      f"names). Add it to the corpus (typically raw_data/), or name it with "
+                      f"`setup --journal-feedback FILE`; the first `run` will refuse without it.")
     if any(p.is_dir() and p.name == REVISED_DIR for p in source.rglob("*")):
         print("WARNING: --source contains a 'revised' directory already; the source should be the "
               "pristine 'non_revised' corpus. Continuing anyway.")
@@ -22498,6 +24022,14 @@ def cmd_setup(args) -> None:
                "rewrites": rewrites, "revises": revises, "integrators": integrators,
                "review_scope": review_scope,
                "created": utcnow(), "version": VERSION}
+    if revision_mode != JOURNAL_MODE_NONE:
+        # Journal revision modes (options 1-4). The keys are written ONLY for a
+        # journal mode: a default root keeps the exact config it always had
+        # (`journal_mode_of` reads a missing key as "none"), so the historical
+        # workflow is byte-compatible down to pipeline_config.json.
+        ctx.cfg.update({"revision_mode": revision_mode,
+                        "journal_feedback": journal_feedback,
+                        "journal_feedback_from": journal_feedback_from})
     format_fix_report = None
     if format_fix != "off":
         setup_warns = []
@@ -22532,6 +24064,7 @@ def cmd_setup(args) -> None:
     ctx.log("setup", detail=f"rounds={rounds} judges={judges_list} rewrites={rewrites} "
                             f"revises={revises} integrators={[hex(x) for x in integrators]} "
                             f"venue={venue_profile.id} journal={journal or '(unset)'} "
+                            f"revision_mode={revision_mode} "
                             f"files={len(files)} "
                             f"caption_limit={caption_limit} "
                             f"zotero={zotero} "
@@ -22567,6 +24100,11 @@ def cmd_setup(args) -> None:
           + ")")
     print(f"[setup] journal:                {journal or '(not set -- run `set-journal <name>`)'}"
           + ("" if journal else "  (the prompts say \"the target journal\")"))
+    if revision_mode != JOURNAL_MODE_NONE:
+        print(f"[setup] revision mode:          {revision_mode} (option "
+              f"{JOURNAL_MODES[revision_mode]['option']}) -- "
+              f"{JOURNAL_MODES[revision_mode]['label']}"
+              + (f"; feedback from {journal_feedback_from}" if journal_feedback_from else ""))
     _lim = venue_profile.length_limits()
     if _lim["abstract"].get("cap") is None and _lim["main text"].get("cap") is None:
         print(f"[setup] length limits (M19):     none configured by this venue profile -- the "
@@ -22577,27 +24115,45 @@ def cmd_setup(args) -> None:
               f"({venue_profile.length_limits_source})")
     print(f"[setup] rounds:                 {rounds} (FIXED length; the round-{rounds} champion "
           f"is the final answer)")
-    print(f"[setup] judges per round:       {judges_list}  (independent judge sessions PER "
-          f"VERSION per round)")
-    print(f"[setup] rewrites per round (M): {rewrites}  (rewritten candidates w1..wM per round)")
-    print(f"[setup] revises per round (N):  {revises}  (reviewed-and-then-revised candidates "
-          f"a2..a{{1+N}} per round; ONE $paper-review pass per round feeds all of them)")
-    print(f"[setup] integrators per round:  {[hex(x) for x in integrators]}  (bit k-1 selects the "
-          f"k-th pool member's integration arm; 0x{INTEGRATOR_ALL:X} = every applicable agent)")
-    for r in range(1, rounds + 1):
-        m, n_ = rewrites[r - 1], revises[r - 1]
-        pool = round_pool_ids(m, n_)
-        arms = set(round_arms[r - 1])
-        plan = "; ".join(
-            f"{integrate_vid(k + 1)} = {src} <- ({', '.join(v for v in pool if v != src)})"
-            + ("" if k + 1 in arms else "  [SKIPPED: integrators bit clear]")
-            for k, src in enumerate(pool))
-        print(f"[setup]   round {r}: pool = {', '.join(pool)}  ->  {plan}")
-    print(f"[setup] directed scores/version: 2*judges*(|field|-1) per round "
-          f"({2 * judges_list[0] * (field_bound[0] - 1)} in round 1 at its upper-bound field of "
-          f"{field_bound[0]}, {judges_list[0]} judges; 6*(|field|-1) when judges=3)")
-    print(f"[setup] expected judge sessions: ~{est_sessions} over {rounds} round(s) "
-          f"(upper bounds {field_bound}; content-identical field members dedup away)")
+    if revision_mode in (JOURNAL_MODE_MAJOR, JOURNAL_MODE_MINOR):
+        print(f"[setup] judge panel:            none -- a {revision_mode} revision is "
+              f"concern-scoped, and the journal (not a quality panel) decides next")
+        print(f"[setup] rewrites per round (M): {rewrites}  (forbidden in this mode)")
+        print(f"[setup] revises per round (N):  {revises}  (ONE concern-scoped revision pass; "
+              f"the reviewers' points are its only findings)")
+        print(f"[setup] integrators per round:  {[hex(x) for x in integrators]}  "
+              f"(nothing to integrate without rewrite arms)")
+        print(f"[setup] pipeline:               concerns -> revision -> "
+              f"{'response -> ' if revision_mode in (JOURNAL_MODE_MAJOR, JOURNAL_MODE_MINOR) else ''}"
+              f"{JOURNAL_SUBMISSION_DIR}/ (raw_data/ never submitted)")
+        _jm_skip = True
+    else:
+        _jm_skip = False
+    if not _jm_skip:
+        print(f"[setup] judges per round:       {judges_list}  (independent judge sessions PER "
+              f"VERSION per round)")
+        print(f"[setup] rewrites per round (M): {rewrites}  (rewritten candidates w1..wM per "
+              f"round)")
+        print(f"[setup] revises per round (N):  {revises}  (reviewed-and-then-revised candidates "
+              f"a2..a{{1+N}} per round; ONE $paper-review pass per round feeds all of them)")
+        print(f"[setup] integrators per round:  {[hex(x) for x in integrators]}  (bit k-1 selects "
+              f"the k-th pool member's integration arm; 0x{INTEGRATOR_ALL:X} = every applicable "
+              f"agent)")
+    if not _jm_skip:
+        for r in range(1, rounds + 1):
+            m, n_ = rewrites[r - 1], revises[r - 1]
+            pool = round_pool_ids(m, n_)
+            arms = set(round_arms[r - 1])
+            plan = "; ".join(
+                f"{integrate_vid(k + 1)} = {src} <- ({', '.join(v for v in pool if v != src)})"
+                + ("" if k + 1 in arms else "  [SKIPPED: integrators bit clear]")
+                for k, src in enumerate(pool))
+            print(f"[setup]   round {r}: pool = {', '.join(pool)}  ->  {plan}")
+        print(f"[setup] directed scores/version: 2*judges*(|field|-1) per round "
+              f"({2 * judges_list[0] * (field_bound[0] - 1)} in round 1 at its upper-bound field "
+              f"of {field_bound[0]}, {judges_list[0]} judges; 6*(|field|-1) when judges=3)")
+        print(f"[setup] expected judge sessions: ~{est_sessions} over {rounds} round(s) "
+              f"(upper bounds {field_bound}; content-identical field members dedup away)")
     if caption_limit:
         _cap_origin = ("the venue's own published legend limit, carried by its profile"
                        if venue_profile.captions.get("published_limit")
@@ -23082,6 +24638,88 @@ def cmd_set_journal(args) -> None:
                   " (--strict-venue requested: re-run with the flag to make this an error.)"))
 
 
+def cmd_set_revision_mode(args) -> None:
+    """Set (or show) the journal revision mode of an existing root.
+
+    `none` restores the historical pipeline. Switching to major/minor
+    normalises the round plan to what that mode permits (rewrites 0, one
+    revision arm, no integration, one round) and says so. Switching to
+    transfer/resubmit only records the mode: the standard rounds still apply,
+    with the journal feedback added as an input.
+    """
+    ctx = Ctx(_venue_command_root(args, "set-revision-mode"),
+              strict_venue=bool(getattr(args, "strict_venue", False)))
+    ctx.load()
+    mode_arg = str(getattr(args, "mode", None) or "").strip().lower()
+    show = bool(getattr(args, "show", False)) or not mode_arg
+    if show:
+        mode = journal_mode_of(ctx)
+        info = JOURNAL_MODES[mode]
+        feedback = [str(p) for p in ((ctx.cfg or {}).get("journal_feedback") or [])]
+        print(f"[set-revision-mode] mode: {mode} (option {info['option']}) -- {info['label']}")
+        print(f"[set-revision-mode] response to reviewers: "
+              f"{'required' if info['response'] else 'not written'}; "
+              f"rewrites: {'allowed' if info['rewrites'] else 'forbidden'}; "
+              f"edits: {'concern-scoped only' if info['scoped'] else 'the full review findings'}")
+        print(f"[set-revision-mode] feedback from: "
+              f"{(ctx.cfg or {}).get('journal_feedback_from') or '(not set)'}; "
+              f"named feedback file(s): {', '.join(feedback) if feedback else '(auto-detected)'}")
+        return
+    if mode_arg not in JOURNAL_MODES:
+        die(f"set-revision-mode needs one of {', '.join(JOURNAL_MODES)} (got {mode_arg!r}): "
+            f"none / transfer (option 1) / resubmit (option 2) / major (option 3) / "
+            f"minor (option 4)", code=2)
+    begin_run_log("set-revision-mode", ctx.root, sys.argv)
+    if ctx.state.get("runs") and not getattr(args, "force", False):
+        die(f"this root already has {len(ctx.state['runs'])} run record(s): the revision mode "
+            f"decides which stages those runs were built for.\n"
+            f"       Re-run `set-revision-mode {mode_arg} --force` if the change is intended.")
+    named = [str(x) for x in (getattr(args, "journal_feedback", None) or []) if str(x).strip()]
+    for item in named:
+        q = Path(item)
+        if not q.is_absolute():
+            q = ctx.root / q
+        if not q.is_file():
+            die(f"--journal-feedback {item!r} does not exist (looked for {q}).")
+    info = JOURNAL_MODES[mode_arg]
+    with ctx.lock("set-revision-mode"):
+        ctx.cfg["revision_mode"] = mode_arg
+        if named:
+            ctx.cfg["journal_feedback"] = named
+        if getattr(args, "journal_feedback_from", None):
+            ctx.cfg["journal_feedback_from"] = str(args.journal_feedback_from).strip()
+        forced = []
+        if info["scoped"]:
+            rounds = int(ctx.cfg.get("rounds") or 1)
+            if rounds != 1:
+                ctx.cfg["rounds"] = 1
+                forced.append("rounds=1")
+            if list(ctx.cfg.get("rewrites") or []) != [0]:
+                ctx.cfg["rewrites"] = [0]
+                forced.append("rewrites=0")
+            if list(ctx.cfg.get("revises") or []) != [1]:
+                ctx.cfg["revises"] = [1]
+                forced.append("revises=1")
+            if list(ctx.cfg.get("integrators") or []) != [0]:
+                ctx.cfg["integrators"] = [0]
+                forced.append("integrators=0")
+            ctx.cfg["audit"] = "off"
+            forced.append("audit=off")
+        ctx.state["config"] = ctx.cfg
+        write_json_atomic(ctx.cfg_path, ctx.cfg)
+        ctx.log("set-revision-mode", detail=mode_arg)
+        ctx.save_state()
+    print(f"[set-revision-mode] mode: {mode_arg} (option {info['option']}) -- {info['label']}")
+    for f in forced:
+        print(f"[set-revision-mode]   forced by the mode: {f}")
+    if mode_arg != JOURNAL_MODE_NONE:
+        hits = journal_feedback_files(ctx)
+        print(f"[set-revision-mode] feedback file(s): "
+              + (", ".join(label for _p, label in hits) if hits
+                 else "(none found yet -- `run` will refuse until the feedback is in the corpus "
+                      "or named with --journal-feedback)"))
+
+
 def validate_only_selectors(ctx: Ctx, only) -> None:
     """Refuse an `--only` SESSION item this plan cannot satisfy.
 
@@ -23183,6 +24821,12 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     if only is not None and only.is_everything():
         only = None                     # `--only all`: exactly a plain `run`
     if only is not None:
+        if journal_mode_of(ctx) != JOURNAL_MODE_NONE:
+            die(f"--only does not apply to revision mode {journal_mode_of(ctx)!r}: the journal "
+                f"stages form one dependency chain (feedback -> concerns/review -> revision -> "
+                f"response -> submission package), and a partial invocation could assemble the "
+                f"package from an unfinished chain. Run a plain `run` (or `retry --run <ID>` for "
+                f"one failed session).")
         resolve_judge_run_ids(ctx, only)    # `--only judge_t497f106d_j1`
         only.validate(ctx.rounds_count())
         validate_only_selectors(ctx, only)
@@ -23323,6 +24967,50 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     R = ctx.rounds_count()
     if R < 1:
         die("pipeline_config.json records no rounds; re-run `setup` with --rounds >= 1")
+    if journal_is_scoped(ctx):
+        # Options 3/4: ONE concern-scoped round, no judge panel, no rewrite, then
+        # the response letter (when required) and the submission package.
+        print(f"[run] journal revision mode: {journal_mode_of(ctx)} "
+              f"(option {JOURNAL_MODES[journal_mode_of(ctx)]['option']}) -- "
+              f"{JOURNAL_MODES[journal_mode_of(ctx)]['label']}")
+        if ctx.round_rec(1).get("status") == "done":
+            print(f"[run] round 1 is already complete: {ctx.round_rec(1).get('champion')}")
+        else:
+            ok, paused = drive_round(ctx, 1, cmd=cmd, timeout=timeout, jobs=args.jobs,
+                                     retries=retries, manual=manual, nowait=args.no_wait,
+                                     poll=args.poll, judge_cmd=judge_cmd,
+                                     judge_manual=judge_manual, judge_timeout=judge_timeout,
+                                     retry_backoff=retry_backoff,
+                                     retry_backoff_max=retry_backoff_max,
+                                     redline=not getattr(args, "no_redline", False),
+                                     only=None)
+            ctx.save_state()
+            if not ok:
+                summarize(ctx)
+                if paused:
+                    print("[run] manual mode: prompts printed above; nothing was executed by the "
+                          "orchestrator. Re-run `run --agent manual` after your agents finish.")
+                    return
+                ctx.round_rec(1)["status"] = "pending"
+                ctx.save_state()
+                keep_failed_sandboxes(ctx, manual=manual)
+                print(f"[run] the {journal_mode_of(ctx)} revision is incomplete; progress is "
+                      f"saved. Resume with `run --root {ctx.root}` or reset one run with "
+                      f"`retry --run <ID>`.")
+                sys.exit(3)
+        ok, _ = drive_journal_finalize(ctx, cmd=cmd, timeout=timeout, jobs=args.jobs,
+                                       retries=retries, manual=manual, nowait=args.no_wait,
+                                       poll=args.poll, retry_backoff=retry_backoff,
+                                       retry_backoff_max=retry_backoff_max)
+        ctx.save_state()
+        if not ok:
+            summarize(ctx)
+            print(f"[run] the {journal_mode_of(ctx)} revision itself is complete, but the "
+                  f"response/submission stage did not finish; re-run `run` (or "
+                  f"`retry --run {rid_response(1)}`) to finish it.")
+            sys.exit(3)
+        summarize(ctx)
+        return
     driven = []                      # the rounds this invocation actually drove
     for r in range(1, R + 1):
         if only is not None and not only.covers_round(r):
@@ -23396,6 +25084,24 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                   f"pinned the incumbent base ({stop_k} configured). `decide` will treat round "
                   f"{r} as the final answer and record the stop in decision.json.")
             break
+
+    if journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_RESUBMIT) and only is None:
+        R = ctx.rounds_count()
+        if all(ctx.round_rec(r).get("status") == "done" for r in range(1, R + 1)):
+            ok, _ = drive_journal_finalize(ctx, cmd=cmd, timeout=timeout, jobs=args.jobs,
+                                           retries=retries, manual=manual, nowait=args.no_wait,
+                                           poll=args.poll, retry_backoff=retry_backoff,
+                                           retry_backoff_max=retry_backoff_max)
+            ctx.save_state()
+            if not ok:
+                summarize(ctx)
+                print(f"[run] the rounds are complete, but the journal finalization did not "
+                      f"finish; re-run `run` (or `retry --run {rid_response(R)}`) to finish it.")
+                sys.exit(3)
+        else:
+            print(f"[run] journal mode {journal_mode_of(ctx)!r}: the response letter and the "
+                  f"submission package are assembled once EVERY round is complete; finish the "
+                  f"pending round(s) and re-run.")
 
     print()
     summarize(ctx)
@@ -24653,6 +26359,23 @@ def cmd_status(args) -> None:
     print(f"config:        rounds={ctx.rounds_count()} "
           f"judges/version={judges_config_note(ctx)} "
           f"integrators/round={integrators_config_note(ctx)}")
+    _jmode = journal_mode_of(ctx)
+    if _jmode != JOURNAL_MODE_NONE:
+        _jinfo = JOURNAL_MODES[_jmode]
+        _jfb = [str(x) for x in ((ctx.cfg or {}).get("journal_feedback") or [])]
+        print(f"revision mode: {_jmode} (option {_jinfo['option']}) -- {_jinfo['label']}")
+        print(f"               response to reviewers: "
+              f"{'required' if _jinfo['response'] else 'not written'}; "
+              f"rewrites: {'allowed' if _jinfo['rewrites'] else 'forbidden'}; "
+              f"edits: {'concern-scoped only' if _jinfo['scoped'] else 'full review findings'}")
+        print(f"               feedback from: "
+              f"{(ctx.cfg or {}).get('journal_feedback_from') or '(unset)'}; files: "
+              + (", ".join(_jfb) if _jfb else "(auto-detected in the corpus)"))
+        _jsub = (ctx.state.get("journal") or {}).get("submission_dir")
+        if _jsub:
+            print(f"               submission package: {_jsub}"
+                  f" (raw_data/ excluded; response "
+                  f"{'included' if (ctx.state.get('journal') or {}).get('response') else 'not written'})")
     # Filesystem-level numbers only: walking an 11 GB sandbox tree here would make
     # `status` take minutes. Exact per-sandbox sizes are what `prune` reports.
     try:
@@ -25087,6 +26810,22 @@ def cmd_decide(args) -> None:
               strict_venue=bool(getattr(args, "strict_venue", False)))
     ctx.load()
     venue_profile_of(ctx)          # the report names the venue and quotes its limits
+    if journal_is_scoped(ctx):
+        # A major/minor revision is not decided: there is no field, no judge
+        # panel and no champion choice -- the single concern-scoped revision is
+        # the answer, and the journal itself decides next.
+        j = (ctx.state.get("journal") or {})
+        print(f"[decide] revision mode {journal_mode_of(ctx)!r} "
+              f"(option {JOURNAL_MODES[journal_mode_of(ctx)]['option']}): a concern-scoped "
+              f"revision has no judge panel and no champion decision.")
+        if j.get("submission_dir"):
+            print(f"[decide] the submission package is {j['submission_dir']}"
+                  + (" (with the response to reviewers)"
+                     if j.get("response") else " (no response letter in this mode)"))
+        else:
+            print(f"[decide] nothing is published yet: run `run` to finish the revision and "
+                  f"assemble {JOURNAL_SUBMISSION_DIR}/.")
+        return
     R = ctx.rounds_count()
     if R < 1:
         die("pipeline_config.json records no rounds")
@@ -26747,6 +28486,26 @@ def build_parser() -> argparse.ArgumentParser:
                          f"scope. An integer/list pair, same rules as --rewrites (default: "
                          f"{','.join(DEFAULTS['review_scope'])}). Use it to make the final round "
                          f"a polish pass instead of a second full review")
+    ps.add_argument("--revision-mode", default=None, metavar="MODE",
+                    help="revise against a REAL journal decision letter instead of the "
+                         "pipeline's own review rounds. One of: none (default; the historical "
+                         "workflow, unchanged), transfer (option 1: revise for a NEW journal; "
+                         "no response to reviewers; rewrites allowed), resubmit (option 2: new "
+                         "submission to the SAME journal; response to reviewers required; "
+                         "rewrites allowed), major (option 3: major revision at the same "
+                         "journal; response required; concern-scoped edits ONLY, no rewrites, "
+                         "no general review-audit-revise), minor (option 4: as major, for a "
+                         "minor revision). The feedback file(s) are auto-detected in --source "
+                         "by name (feedback/referee/reviewer/editor/decision), or named with "
+                         "--journal-feedback")
+    ps.add_argument("--journal-feedback", action="append", default=None, metavar="FILE",
+                    help="the decision letter / reviewer report file the revision modes read "
+                         "(repeatable; a path relative to --root is resolved against it). "
+                         "Without this flag the feedback is auto-detected in --source, "
+                         "typically under raw_data/")
+    ps.add_argument("--journal-feedback-from", default=None, metavar="JOURNAL",
+                    help="the journal the feedback came from (free text, e.g. \"iScience\"); "
+                         "the response letter names it. The TARGET journal is still --journal")
     ps.add_argument("--revises", default=None,
                     help=f"the number N of REVIEWED-AND-THEN-REVISED candidates per round: an "
                          f"integer or a comma-separated list, with the same rules as --rewrites "
@@ -27062,6 +28821,26 @@ def build_parser() -> argparse.ArgumentParser:
     psj.add_argument("--force", action="store_true",
                      help="change the journal although this root already has run records")
     psj.set_defaults(func=cmd_set_journal)
+
+    psm = sub.add_parser("set-revision-mode", parents=[common],
+                         help="select the journal revision mode (option 1 transfer / 2 resubmit / "
+                              "3 major / 4 minor / none), or show the current one")
+    psm.add_argument("mode", nargs="?", default=None, metavar="MODE",
+                     help="none | transfer (option 1: new journal, no response letter) | "
+                          "resubmit (option 2: same journal, response letter) | "
+                          "major (option 3: scoped major revision + response letter) | "
+                          "minor (option 4: scoped minor revision + response letter). "
+                          "Omit (or pass --show) to print the current mode")
+    psm.add_argument("--journal-feedback", action="append", default=None, metavar="FILE",
+                     help="the decision letter / reviewer report file (repeatable; relative "
+                          "paths resolve against the root)")
+    psm.add_argument("--journal-feedback-from", default=None, metavar="JOURNAL",
+                     help="the journal the feedback came from (free text, e.g. iScience)")
+    psm.add_argument("--show", action="store_true",
+                     help="print the current revision mode and its feedback files")
+    psm.add_argument("--force", action="store_true",
+                     help="change the mode although this root already has run records")
+    psm.set_defaults(func=cmd_set_revision_mode)
 
     pst = sub.add_parser("set-article-type", parents=[common],
                          help="select the venue's article type (Article, Brief Communication, "

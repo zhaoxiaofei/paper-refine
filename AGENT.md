@@ -101,6 +101,11 @@ the profiles shipped next to the script → the built-in fallback inside
    correctness/completeness. `.paper_test/test_hierarchy_reconciliation.py`
    pins it. Do not let a new producer-bearing artifact (a new code directory, a
    new data snapshot) enter the corpus without a way to reconcile it.
+   `raw_data/` is EVIDENCE and read-only, not submission content: the review's
+   written-surface sweeps never read its text (the converter writes it to
+   `WORK/evidence/`, the code-side scans skip it), editors'/reviewers' feedback
+   inside it is external prose, and only M30 reads it — as the producer side.
+   `.paper_test/test_raw_data_evidence_area.py` pins the contract.
 
 ## Commands you will use
 
@@ -143,6 +148,30 @@ If you add a rule that depends on the venue, add a field to the profile schema
 (documented in `venue_profiles/README.md`), a rendering function here, and a
 case in `test_venue_config.py` that asserts a non-default venue produces no
 default-venue text.
+
+## Journal revision modes — do not regress the default
+
+`pipeline_config.json` may carry `revision_mode` (one of `none`, `transfer`,
+`resubmit`, `major`, `minor`; default `none`) and `journal_feedback` (the
+decision-letter files; auto-detected by name when unset). The four non-default
+modes are documented in README → "Journal revision modes (options 1–4)" and
+pinned by `.paper_test/test_journal_revision_modes.py`. Two rules matter when
+touching this area:
+
+* **Mode `none` is untouchable.** Every journal code path is entered only
+  through `journal_mode_of(ctx) != "none"`: the round plan, prompt builders,
+  postchecks, `decide`/`status` output and the submission packager must all be
+  identical to their historical behaviour when the mode is absent. The J6
+  section of the test suite asserts the plan has no journal stage and the
+  prompt carries no journal block.
+* **Careful with the scoped modes.** `major`/`minor` normalise the plan
+  (rewrites 0, one revise arm, integrators 0, one round, audit off), replace the
+  review with the concerns run, and enforce `scoped_scope_problems` in the
+  revise postcheck: a changed file the revision ledger does not name, or any
+  added/removed file, fails the attempt. The response letter is verified
+  against the package (cited files must exist; `planned` rows claim nothing).
+  The response letter and `journal_submission/` are submission documents, never
+  manuscript text, and `raw_data/` must never appear in them.
 
 ## Known, deliberate limits
 

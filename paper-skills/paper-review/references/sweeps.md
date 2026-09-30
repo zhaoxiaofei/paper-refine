@@ -23,6 +23,22 @@ sweeps validated from the discovery round are appended after the adopted block
 as **M31, M32…** in the same format — do not insert into the middle (IDs are
 stable).
 
+**Scope of "the corpus" — the `raw_data/` evidence area is NOT in it.** Wherever
+this file says the corpus, it means the SUBMISSION corpus (the converted text
+under `WORK/corpus/`: manuscript, cover letter, title page, supplementary
+documents, figure/table sources of the submission itself). A corpus may carry a
+`raw_data/` directory (legacy spelling `raw_figs/`) with data tables, figure
+sources, the analysis snapshot — and often the editors'/reviewers' feedback. That
+is the EVIDENCE area: it is not submitted, no file in it is a submission
+document, and its text is never enumerated, counted, quoted or disposed by any
+written-surface sweep below (M1–M29). A file there is never a "main text", "cover
+letter" or "supplementary" document, whatever its name. Reviewer/editor feedback
+inside it is external prose — evidence of what the review requires, never the
+authors' words and never a written surface to align. **M30 is the single
+exception**: it reads the evidence area, as the PRODUCER side of a written
+claim's comparison — and even there, a feedback sentence is never the authors'
+claim, only context.
+
 ---
 
 ## CLASSIFICATION
@@ -196,8 +212,11 @@ disposed artifact.
 
 **Purpose:** the classic missed-issue class. Every acronym-like token gets a row.
 
-**Enumeration:** run `extract_acronyms.py --work WORK [--out OUT]` on the corpus.
-It extracts every acronym-like token via four detectors: strict (all-caps ≥2
+**Enumeration:** run `extract_acronyms.py --work WORK [--out OUT]` on the
+SUBMISSION corpus (`WORK/corpus/` — the `raw_data/` evidence area and the
+editors'/reviewers' feedback are never in it; the script lists any such file it
+skips in the artifact header). It extracts every acronym-like token via four
+detectors: strict (all-caps ≥2
 letters: PCR, CRISPR; and mixed-case tokens containing an uppercase letter:
 qPCR, mRNA, scRNA-seq, sgRNA, IL-6), gene-symbol shapes (Foxp3, Nrf2, CD8,
 Tbx21, p53, p21, nf1, il6, stat3, mbd3, nrf2, C1, S100 — any letter run followed
@@ -490,7 +509,9 @@ where the text never defines them as the same cohort).
 
 **Purpose:** the submission's file hygiene.
 
-**Enumeration:** from `inventory.json`: every file, its role, extension,
+**Enumeration:** from `inventory.json`: every file with `area: submission` (the
+`raw_data/` evidence rows are inventoried for visibility but are not submission
+files — never a role, a naming or a hygiene row), its role, extension,
 duplicate roles (two "main text" files?), version-junk filenames (v2, FINAL,
 old, backup, copy, ~), mixed formats for the same role (one figure as .tif +
 .png), zero-byte or corrupted files, files that belong to a different
@@ -664,6 +685,9 @@ over-cap item.
 **Enumeration:** every figure caption / legend in the corpus (the leading
 "Figure N |" label and title count; labels drawn inside the artwork do not)
 into `M18_caption_words.md`: document | caption id | word count | disposition.
+Only SUBMISSION documents are counted: a figure-like line in the `raw_data/`
+evidence area (a data table's column header, a reviewer's report) is never a
+caption row.
 
 **Finding rules (one per instance):**
 - a legend over the configured proxy cap → FORMATTING-tier item; it is reported
@@ -719,7 +743,9 @@ journal requirement and never gated. `count_words.py --cover-letter` counts it.
 count | the base limit applied and its source | the allowed cap | disposition
 (OK / over cap → finding id / over cap but not compressible without losing
 content → manual verification item). Say in the artifact which text was counted
-as the main text. When no editable manuscript or cover letter exists and the
+as the main text. Only SUBMISSION documents are counted — `raw_data/` files and
+the editors'/reviewers' feedback inside it are evidence, never an abstract, main
+text or cover letter, whatever their names. When no editable manuscript or cover letter exists and the
 text lives only in a PDF/slide rendering, the row is `unable — the only copy is
 not editable; the author must convert/count it` (a manual item), never a silent
 skip.
@@ -1295,6 +1321,11 @@ table B: the module-level literals the corpus's code/config files declare
 parameter. Extend it with the rows no code can see: figure/panel ↔ the code or
 data that generates it, protocol step ↔ the code that implements it,
 sample/cohort set ↔ the data's rows, Methods parameter ↔ the code's constant.
+This is the ONE sweep that reads the `raw_data/` evidence area — as the
+PRODUCER side only. An editors'/reviewers' feedback file there is not a
+producer and not a written surface: it documents what the review requires
+(J1 / category 0 may cite it as external context) and is never quoted as
+something the submission says.
 
 **Artifact.** `review/artifacts/M30_hierarchy_reconciliation.md`:
 `document | kind | number | unit | sentence | candidate producer | producer
@@ -1317,6 +1348,10 @@ rows the session adds. Every seeded row and every added row is disposed.
   run-time override reconciles → `OK` with that reconciling reason;
 - an M30 row is never fixed here: the review reports, rule C of paper-revise
   owns a code fix, and a regenerated figure/table goes to the manual list.
+- a sentence that exists only in an editors'/reviewers' feedback file is NEVER
+  a finding about the submission: it is external prose. The written side must
+  be quoted from a submission document (`document:location`), or the row is
+  not filed.
 
 Validation: the class exists because the hierarchy was one-directional — a
 resolution rule with no detection sweep leaves every text-vs-code and

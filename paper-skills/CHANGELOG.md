@@ -1,5 +1,75 @@
 # Changelog
 
+## 0.14 — the four journal revision modes (2026-10-01)
+
+A root can now be driven against a REAL decision letter instead of the
+pipeline's own review rounds (`setup --revision-mode …`, `set-revision-mode …`,
+`--journal-feedback`, `--journal-feedback-from`):
+
+- **option 1 `transfer`** — revise for a NEW journal from another journal's
+  feedback; NO response to reviewers; rewrites allowed;
+- **option 2 `resubmit`** — new submission to the SAME journal; response to
+  reviewers required; rewrites allowed;
+- **option 3 `major`** and **option 4 `minor`** — complete a major/minor
+  revision at the same journal; response required; rewrites forbidden; the
+  manuscript is edited ONLY where a concern requires it, so the general
+  review–audit–revise workflow does not run (the plan is
+  `concerns → single scoped revision → response → journal_submission/`).
+
+A new stage family does the work: the feedback stage copies the decision
+letter into `feedback/` (byte-for-byte originals + text renderings) and
+enumerates it into `concerns/JF_concerns.json|md` (one row per distinct
+concern, verbatim quotes checked mechanically, `action` + `disposition`); the
+modes 3–4 concerns stage also writes the ONLY finding list the single revision
+session sees (`check: "JF"`); the response stage writes the point-by-point
+letter (`RESPONSE_TO_REVIEWERS.md` + `response_map.json`, every cited change
+file verified against the package, `planned` rows forbidden from claiming
+results); and the finalizer assembles `<root>/journal_submission/` — the
+submitted documents only, with `raw_data/` (evidence) and the pipeline's
+bookkeeping excluded, plus the response letter and, when the round generated
+them, the marked-up copies under `tracked_changes/` (generated against what was
+submitted). The major/minor path is guarded mechanically
+(`scoped_scope_problems`): a changed file the revision ledger does not name, or
+any added/removed file, fails the attempt.
+
+The default mode is `none` and the historical pipeline is unchanged there —
+the journal stages never appear in the round plan, the prompts carry no journal
+block, and `decide`/`status` behave exactly as before.
+`.paper_test/test_journal_revision_modes.py` pins all four modes plus the
+mode-`none` regression.
+
+## 0.13 — raw_data is the EVIDENCE area, never submission content (2026-10-01)
+
+An operator corpus carries `raw_data/` next to the submitted documents (main
+text, cover letter, supplementary information), with its data tables, figure
+sources, the analysis snapshot — and the editors'/reviewers' feedback the
+authors received (e.g. `raw_data/iScience_feedback_from_reviewers_and_editors.txt`).
+The pipeline always knew the area is byte-immutable; it did not know it is also
+not a submission document, so its text could be swept as the authors' prose
+(the feedback letter defaulted to the "main text" context in M1, a data table's
+file name could be read as "main text"/"cover letter"/"supplementary" by the
+role classifier, and the code-side M18/M19/placeholder/number/document-set
+scans read its files too). That is now fixed end to end:
+
+- `paper-review/scripts/convert_corpus.py` gives every `raw_data/` (legacy
+  `raw_figs/`) file `area: raw_data`, no document role, `editable: false`, and
+  writes its converted text to `WORK/evidence/` — never `WORK/corpus/` — so no
+  submission sweep can read it. Feedback-named files are labelled
+  "reviewer/editor feedback (raw-data evidence)".
+- `extract_acronyms.py` (M1/M1b) skips evidence files explicitly and names them
+  in the artifact header; `count_words.py` refuses a raw-data/feedback path
+  instead of counting it as main text or a cover letter.
+- `SKILL.md`, `references/sweeps.md`, the fallback prompt and `paper-revise`
+  state the rule: the evidence area is never a sweep input, a word count, a
+  document role or a finding quote; M30 alone reads it, as the producer side,
+  and editors'/reviewers' feedback is external prose that is never attributed
+  to the authors.
+- `paper_pipeline.py`'s code-side scans (M18 captions, M19 lengths, OOXML
+  formatting, placeholders, number provenance, document-set comparison) and
+  `paper_docx_format.py`'s directory expansion skip `raw_data/`; the shared
+  prompt block now says the area is not submission content.
+- `.paper_test/test_raw_data_evidence_area.py` pins the whole contract.
+
 ## 0.12 — one-sided small differences are scored, and the layout budgets are measured (2026-09-30)
 
 An operator review of a crowned winner found defects the rubric let through, so

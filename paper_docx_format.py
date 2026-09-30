@@ -60,6 +60,10 @@ from xml.sax.saxutils import unescape as xml_unescape
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
+# A corpus's read-only EVIDENCE area (`raw_data/`, legacy spelling
+# `raw_figs/`): never submission content, never a formatting/validation target.
+RAW_DATA_DIRNAMES = ("raw_data", "raw_figs")
+
 POLICY_DEFAULTS = {
     "journal_italics": "refs-only",     # refs-only | everywhere | off
     # Text-level consistency (rules FMT-T8a/T8d/T8e). "drop" deletes the redundant
@@ -2835,6 +2839,11 @@ def scan_paths(paths: list, policy: dict) -> dict:
                 continue
             if any(part == "work" for part in f.parts[:-1]):
                 continue
+            if any(part in RAW_DATA_DIRNAMES for part in f.parts[:-1]):
+                # The raw-data EVIDENCE area is not submission content: a
+                # reviewer's .docx report or a data-source document is never a
+                # submission formatting finding.
+                continue
             docs.append(analyse_package(f, policy))
     rows = [r for d in docs for r in d["rows"]]
     return {"files": [d["file"] for d in docs], "documents": docs, "rows": rows,
@@ -3440,8 +3449,10 @@ def validate_paths(paths: list, json_out: Path = None, timeout: int = 300) -> di
         p = Path(p)
         if p.is_dir():
             files += [q for q in sorted(p.rglob("*.docx"))
-                      if not q.name.startswith("~$") and not _is_aux_name(q.name)]
-            files += sorted(p.rglob("*.tex")) + sorted(p.rglob("*.ltx"))
+                      if not q.name.startswith("~$") and not _is_aux_name(q.name)
+                      and not any(part in RAW_DATA_DIRNAMES for part in q.parts[:-1])]
+            files += [q for q in sorted(p.rglob("*.tex")) + sorted(p.rglob("*.ltx"))
+                      if not any(part in RAW_DATA_DIRNAMES for part in q.parts[:-1])]
         elif p.is_file():
             files.append(p)
     results = []

@@ -19,6 +19,8 @@ target journal's own author guide and say which source you used.
 - `SUBMISSION_DIR` = `./non-revised` (override: any explicit path or argument from the user)
 - `OUT` = `./review` — create it; ALL outputs land here
 - `WORK` = `./review/work` — corpus, scripts, state
+- `raw_data/` (legacy spelling `raw_figs/`) — when SUBMISSION_DIR carries it: the **evidence
+  area**, not submission content (see below)
 - `ZOTERO_SKILL` = `/mnt/d/software/plugins/plugins/zotero/skills/zotero/scripts/zotero.py` (override if the user provides one; if absent → fall back to manual-verification)
 - `ZOT_CLI` = `zot` (pyzotero-cli) and the `$zotero-use` skill — the reference route for resolving citations read-only (`zot --local ... items list|get|citation|bib`, `zot fulltext get`). This skill never edits a citation field and never writes to the Zotero library (see M2 and Phase 1).
 
@@ -28,6 +30,21 @@ If `SUBMISSION_DIR` does not exist or is empty: **STOP and ask the user.**
 artifacts into the package being reviewed. If the user's SUBMISSION_DIR is the
 working directory (or contains it), put `OUT`/`WORK` in a sibling directory and
 say where they went.
+
+**The `raw_data/` evidence area is not the submission.** A corpus may carry a
+`raw_data/` directory (an older corpus spells it `raw_figs/`) with the data
+tables, figure/table sources, the analysis snapshot — and often the editors' and
+reviewers' feedback the authors received. It is the authors' INPUT and the
+review's evidence; it is never submitted to the journal and no file inside it is
+a submission document. Its files therefore get no document role (never "main
+text", "cover letter", "title page" or "supplementary", whatever their names
+suggest), are never marked editable, and are never swept, counted or quoted as
+the authors' prose: the converter writes their text to `WORK/evidence/`, not
+`WORK/corpus/`, so M1–M29 run over the submission only. Reviewer/editor feedback
+files are *external* prose — read them as evidence of what the review requires,
+never attribute their sentences to the authors, and never treat one as a written
+surface to align. `raw_data/` stays available for fact-checking and as the
+producer tier of M30.
 
 ## Mission
 
@@ -49,8 +66,9 @@ A plain "review my manuscript" prompt reliably misses low-salience mechanical is
 3. **No silent skips.** Every check ID must end up in the coverage table with a real disposition (`N findings` / `clean — basis: <artifact/locations>` / `unable — <reason>`). "Not checked" is not an allowed value.
 4. **Mechanical sweeps M1–M17 are EXHAUSTIVE and MANDATORY, and M18 (figure-legend lengths), M19 (abstract/main-text length plus the cover-letter preference) and M20 (OOXML style/formatting uniformity, enumerated by the pipeline's code-side scan) always run with them, together with the adopted sweeps M21–M24 (correspondence policy, data/code-availability integrity, supplementary parity, concept/term families), the REWRITE-PARITY checks M25–M29 (figure-artwork/text parity, house-style/orthographic conventions, claim→evidence coverage, sibling-definition symmetry, caption-promise vs printed-schema parity) and the SOURCE-HIERARCHY reconciliation M30 (a written claim against the code/raw data that produced it).** M18's optional proxy cap only changes whether an over-count legend is reported as an over-cap item. Only judgment passes J1–J5 may be prioritized; J5 (architecture & rewrite-class) produces scope-level rows in `OUT/ARCHITECTURE.md`, not per-sentence findings. The word "non-exhaustive" never applies to a mechanical sweep.
 5. **One finding per instance.** "Several acronyms are undefined" is not a finding; each undefined acronym is its own finding with its own ID, quote, and location.
-6. **Sweep pattern for every mechanical check:** ENUMERATE (script preferred; scripts live in `WORK/`) → ARTIFACT (`OUT/artifacts/<ID>.md` for the M1/M2/M4–M17 tables; term/value occurrence enumerations are written to `WORK/occurrences_<slug>.md`, which is M8's artifact — pass `--out OUT/artifacts` if you prefer them alongside the others; every instance gets a row, including rows later judged OK; the artifact spans the whole corpus, not one file) → AUDIT (each row gets: a finding ID, `OK`, or `unable — <reason>`) → REPORT (findings derived only from artifact rows, never from general impression).
+6. **Sweep pattern for every mechanical check:** ENUMERATE (script preferred; scripts live in `WORK/`) → ARTIFACT (`OUT/artifacts/<ID>.md` for the M1/M2/M4–M17 tables; term/value occurrence enumerations are written to `WORK/occurrences_<slug>.md`, which is M8's artifact — pass `--out OUT/artifacts` if you prefer them alongside the others; every instance gets a row, including rows later judged OK; the artifact spans the whole submission corpus, not one file) → AUDIT (each row gets: a finding ID, `OK`, or `unable — <reason>`) → REPORT (findings derived only from artifact rows, never from general impression).
 7. **A sweep with zero findings is INVALID unless its artifact exists and every row is disposed.**
+8. **`raw_data/` is EVIDENCE, not submission content.** Its text never feeds a written-surface sweep (M1–M29), a word count (M18/M19), a file-hygiene row (M9) or a finding's evidence quote; M30 alone reads it, as the producer side of a written claim. Editors'/reviewers' feedback inside it is external prose and is never attributed to the authors.
 
 ## Bundled scripts (use them — they exist so enumeration is deterministic)
 
@@ -58,7 +76,7 @@ All stdlib-only Python, runnable anywhere Python 3.8+ exists. Copy them into `WO
 
 | script | purpose |
 |---|---|
-| `scripts/convert_corpus.py` | Phase 1: recursive inventory + docx/xlsx/tex/bib/md/txt → plain-text corpus in `WORK/corpus/` (+ `inventory.md`/`inventory.json`) |
+| `scripts/convert_corpus.py` | Phase 1: recursive inventory + docx/xlsx/tex/bib/md/txt → plain-text corpus in `WORK/corpus/` (+ `inventory.md`/`inventory.json`); the `raw_data/` evidence area is inventoried with `area: raw_data`, is never editable, and its text goes to `WORK/evidence/` — never `WORK/corpus/` — so no submission sweep reads it |
 | `scripts/extract_acronyms.py` | M1: full acronym inventory with expansions, first-use-per-context, consistency flags, PLUS the M1b long-form audit (every use of a defined acronym's un-abbreviated long form after its first use in a context — case/hyphen/plural-tolerant — as an instance table of finding rows; see sweeps.md rule (k)). Reads optional `WORK/extra_acronyms.txt` (one token per line, case-insensitive) for project-specific terms — the way to add digit-free lowercase symbols such as `tnf` |
 | `scripts/extract_citations.py` | M2: every call-out vs every reference entry; orphans, uncited, duplicates, order |
 | `scripts/extract_numbers.py` | M4: labeled metrics, accessions, versions; auto-flags same-label conflicts |
@@ -70,7 +88,7 @@ If a script misses a case class (e.g., a citation style it can't parse), **exten
 
 ## Phases (in order; each completes before the next)
 
-**Phase 1 — Setup.** Run `convert_corpus.py` on SUBMISSION_DIR. Review the inventory: role classification, editable vs read-only, conversion status. Every conversion failure is recorded, never skipped. Images are marked `visually unverifiable` unless OCR/VLM is available; when a PDF/Word renderer exists, render them and LOOK instead of marking them unverifiable. Zotero live fields: the converter marks them `[[FIELD: ...]]`; check the rendered text; an unreadable or incomplete field goes to the manual-verification list (tell the user to verify it in Word). Resolve citations READ-ONLY with `ZOT_CLI` / `$ZOTERO_SKILL` / `$zotero-use` (parent bibliographic item keys, never attachment keys; confirm title, creators, year, DOI; `zot fulltext get` for the abstract/full text). This skill never edits a field and never writes to the library: a suspected metadata error becomes a finding with the proposed correction for paper-revise or the user to apply under their Zotero policy.
+**Phase 1 — Setup.** Run `convert_corpus.py` on SUBMISSION_DIR. Review the inventory: `area` (submission vs raw-data evidence), role classification, editable vs read-only, conversion status. Every conversion failure is recorded, never skipped. The `area: raw_data` rows are EVIDENCE: they are read for facts and M30, never swept or counted, and a feedback file there is the editors'/reviewers' prose, not the authors'. Images are marked `visually unverifiable` unless OCR/VLM is available; when a PDF/Word renderer exists, render them and LOOK instead of marking them unverifiable. Zotero live fields: the converter marks them `[[FIELD: ...]]`; check the rendered text; an unreadable or incomplete field goes to the manual-verification list (tell the user to verify it in Word). Resolve citations READ-ONLY with `ZOT_CLI` / `$ZOTERO_SKILL` / `$zotero-use` (parent bibliographic item keys, never attachment keys; confirm title, creators, year, DOI; `zot fulltext get` for the abstract/full text). This skill never edits a field and never writes to the library: a suspected metadata error becomes a finding with the proposed correction for paper-revise or the user to apply under their Zotero policy.
 
 **Phase 2 — Sweeps.** Mechanical sweeps M1–M17 plus M18 (legend lengths, always enumerated), M19 (abstract/main-text length plus the cover-letter preference) and M20 (OOXML style/formatting uniformity; the pipeline seeds `review/work/FORMAT_SCAN.json` and `review/artifacts/M20_formatting.md`, and every row must be disposed), the adopted sweeps M21–M24 (see `references/sweeps.md` §M21–M24), the rewrite-parity checks M25–M29 (artwork/text parity, house-style/orthographic conventions, claim→evidence coverage, sibling-definition symmetry, caption-promise parity), the source-hierarchy reconciliation M30 (the seeded `review/artifacts/M30_hierarchy_reconciliation.md` rows, disposed, plus the producers the code cannot see) and judgment passes J1–J5 (J5 writes `OUT/ARCHITECTURE.md`, one row per scope): procedures, artifact columns, finding rules, classification, and the finding format are specified in `references/sweeps.md` — follow it exactly. One sweep at a time; finish one artifact before starting the next. For long documents, sweep file by file, then merge so every artifact spans the whole corpus.
 

@@ -204,6 +204,28 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
                  "evidence": "stub", "explanation": "stub",
                  "status": "resolvable"}]
     nid = 2
+    # Journal modes 1-2: the review must reconcile the decision letter's concern
+    # ledger (a stub of the real session's job).
+    reconciled = []
+    concerns_doc = sb / "concerns" / "JF_concerns.json"
+    if concerns_doc.is_file():
+        try:
+            rows = (json.loads(concerns_doc.read_text(encoding="utf-8")) or {}).get("concerns") or []
+        except (OSError, ValueError):
+            rows = []
+        for i, row in enumerate(rows, 1):
+            if not isinstance(row, dict):
+                continue
+            cid = str(row.get("id") or f"C{i}")
+            fid = f"JF-{i:03d}"
+            findings.append({"id": fid, "location": "base", "category": 0, "check": "JF",
+                             "severity": "Major",
+                             "evidence": str(row.get("quote") or "stub"),
+                             "explanation": f"stub concern {cid}", "status": "resolvable",
+                             "concern": cid})
+            reconciled.append({"id": cid, "status": "finding", "finding": fid,
+                               "location": "base",
+                               "rationale": "stub: filed as a JF finding"})
     prior = sb / "prior_round" / "findings.json"
     if prior.is_file():
         pj = json.loads(prior.read_text(encoding="utf-8"))
@@ -243,6 +265,8 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
                         for c in ("M21", "M22", "M23", "M24",
                                   "M25", "M26", "M27", "M28", "M29", "M30", "J5")])})
     (out / "findings.md").write_text("# findings (stub)\n\nsummary: stub\n", encoding="utf-8")
+    if reconciled:
+        write_json(out / "concerns_reconciled.json", {"rows": reconciled})
     (out / "artifacts" / "M1_acronyms.md").write_text("| row |\n|---|\n", encoding="utf-8")
     # The rewrite-parity artifacts, the source-hierarchy reconciliation and the
     # architecture table are part of the review contract (M25-M30 + J5): a sweep
@@ -268,7 +292,8 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
         "| base | abstract | 0 | 165 | OK |\n| base | main text | 0 | 3750 | OK |\n",
         encoding="utf-8")
     (out / "artifacts" / "VIS_visual.md").write_text(
-        "# visual inspection (stub)\n\nstub: no renderer used; pages reviewed: none\n",
+        "# visual inspection (stub)\n\nstub: pages NOT visually verified (no renderer used); "
+        "the rendering step is handed to the author\n",
         encoding="utf-8")
     write_json(out / "round2" / "findings_extra.json", {"findings": [], "coverage": []})
     (out / "round2" / "findings_extra.md").write_text("# extra (stub)\n", encoding="utf-8")
@@ -278,6 +303,116 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
         "stage": "review", "run_id": name, "round": round_no, "status": "complete",
         "error": None, "summary": {"findings_total": 1, "critical_found": 0,
                                    "major_found": 0, "minor_found": 1}})
+    return 0
+
+
+def _stub_concerns(sb: Path) -> list:
+    """Deterministic concern rows from feedback/text/ (one per paragraph)."""
+    tdir = sb / "feedback" / "text"
+    texts = []
+    if tdir.is_dir():
+        for p in sorted(tdir.glob("*.txt")):
+            texts.append((p.name, p.read_text(encoding="utf-8", errors="replace")))
+    rows = []
+    for fname, text in texts:
+        for para in re.split(r"\n\s*\n", text):
+            block = " ".join(para.split())
+            if len(block) < 30:
+                continue
+            rows.append({"id": f"C{len(rows) + 1}", "source": fname,
+                         "author": "Reviewer 1", "quote": block[:200],
+                         "summary": "stub concern", "action": "text",
+                         "manuscript_location": None, "disposition": "to-fix",
+                         "evidence_needed": ""})
+    return rows
+
+
+def do_feedback(sb: Path, name: str, round_no: int) -> int:
+    """Stub of the journal feedback enumeration (modes 1-2)."""
+    rows = _stub_concerns(sb)
+    out = sb / "concerns"
+    out.mkdir(parents=True, exist_ok=True)
+    write_json(out / "JF_concerns.json",
+               {"journal_from": "stub-journal", "target_journal": "stub-target",
+                "mode": "stub", "source_files": ["stub"], "concerns": rows})
+    (out / "JF_concerns.md").write_text(
+        "| id | source | author | action | disposition | quote | summary | location |\n"
+        "|---|---|---|---|---|---|---|---|\n"
+        + "\n".join(f"| {r['id']} | {r['source']} | {r['author']} | {r['action']} | "
+                    f"{r['disposition']} | {r['quote']} | {r['summary']} | — |" for r in rows)
+        + "\n", encoding="utf-8")
+    write_json(sb / "_pipeline_done.json", {
+        "stage": "feedback", "run_id": name, "round": round_no, "status": "complete",
+        "error": None, "summary": {"concerns": len(rows)}})
+    return 0
+
+
+def do_concerns(sb: Path, name: str, round_no: int) -> int:
+    """Stub of the scoped concern reconciliation (modes 3-4)."""
+    rows = _stub_concerns(sb)
+    out = sb / "concerns"
+    out.mkdir(parents=True, exist_ok=True)
+    write_json(out / "JF_concerns.json",
+               {"journal_from": "stub-journal", "target_journal": "stub-target",
+                "mode": "stub", "source_files": ["stub"], "concerns": rows})
+    (out / "JF_concerns.md").write_text(
+        "| id | source | author | action | disposition | quote | summary | location |\n"
+        "|---|---|---|---|---|---|---|---|\n"
+        + "\n".join(f"| {r['id']} | {r['source']} | {r['author']} | {r['action']} | "
+                    f"{r['disposition']} | {r['quote']} | {r['summary']} | — |" for r in rows)
+        + "\n", encoding="utf-8")
+    rev = sb / "review"
+    (rev / "artifacts").mkdir(parents=True, exist_ok=True)
+    findings = [{"id": r["id"], "location": "base", "category": 0, "check": "JF",
+                 "severity": "Major", "evidence": r["quote"],
+                 "explanation": f"stub: answer concern {r['id']}",
+                 "status": "resolvable", "concern": r["id"]} for r in rows]
+    write_json(rev / "findings.json", {"submission_dir": "./base",
+                                       "guidelines_source": "stub",
+                                       "findings": findings, "coverage": []})
+    (rev / "findings.md").write_text("# findings (stub journal)\n", encoding="utf-8")
+    (rev / "artifacts" / "JF_concerns.md").write_text(
+        "# JF_concerns (stub)\n", encoding="utf-8")
+    write_json(sb / "_pipeline_done.json", {
+        "stage": "concerns", "run_id": name, "round": round_no, "status": "complete",
+        "error": None, "summary": {"concerns": len(rows)}})
+    return 0
+
+
+def do_response(sb: Path, name: str, round_no: int) -> int:
+    """Stub of the response-to-reviewers letter (modes 2-4)."""
+    rows = []
+    doc = sb / "concerns" / "JF_concerns.json"
+    if doc.is_file():
+        rows = (json.loads(doc.read_text(encoding="utf-8")) or {}).get("concerns") or []
+    target = sb / "target"
+    skip_names = {"changelog.md", "manual_steps.md", "revision_report.md", "revision_report.json",
+                  "diff_ledger.md", "visual_check.md"}
+    files = [p.relative_to(target).as_posix() for p in sorted(target.rglob("*"))
+             if p.is_file() and not np_aux(p)
+             and p.name.lower() not in skip_names
+             and "work" not in p.relative_to(target).parts[:-1]
+             and not any(part in ("raw_data", "raw_figs") for part in p.parts[:-1])] \
+        if target.is_dir() else []
+    out = sb / "response"
+    out.mkdir(parents=True, exist_ok=True)
+    md = ["# Response to reviewers (stub)", ""]
+    mapped = []
+    for i, row in enumerate(rows, 1):
+        cid = str(row.get("id") or f"C{i}")
+        md += [f"## {cid}", f"**Comment:** \"{str(row.get('quote') or '')[:120]}\"",
+               "**Response:** stub", ""]
+        mapped.append({"id": cid, "status": "addressed", "response": "stub",
+                       "changes": ([{"file": files[0], "location": "stub",
+                                     "before": "a", "after": "b"}] if files else []),
+                       "new_data": []})
+    (out / "RESPONSE_TO_REVIEWERS.md").write_text("\n".join(md), encoding="utf-8")
+    write_json(out / "response_map.json",
+               {"journal_from": "stub-journal", "target_journal": "stub-target",
+                "mode": "stub", "rows": mapped})
+    write_json(sb / "_pipeline_done.json", {
+        "stage": "response", "run_id": name, "round": round_no, "status": "complete",
+        "error": None, "summary": {"rows": len(mapped)}})
     return 0
 
 
@@ -342,6 +477,12 @@ def do_revision(sb: Path, name: str, round_no: int, stage: str) -> int:
     # revise stage consumes review/findings.json; the cross stage works from the
     # self/ package, which carries the same ledger back in). A run that lists no
     # row at all cannot prove "no finding was silently dropped" and is retried.
+    changed = [p.relative_to(out).as_posix() for p in sorted(out.rglob("*"))
+               if p.is_file() and not np_aux(p)
+               and p.name.lower() not in ("changelog.md", "manual_steps.md",
+                                          "revision_report.md", "revision_report.json",
+                                          "visual_check.md")
+               and "work" not in p.relative_to(out).parts[:-1]]
     rows = []
     for rel in ("review/findings.json", "revised/revision_report.json"):
         p = sb / rel
@@ -359,7 +500,8 @@ def do_revision(sb: Path, name: str, round_no: int, stage: str) -> int:
             if fid and not any(r.get("id") == fid for r in rows):
                 rows.append({"id": fid, "verdict": "fixed",
                              "rationale": "stub revision applied",
-                             "evidence": "chromium-free stub edit marker in the document"})
+                             "evidence": "chromium-free stub edit marker in the document",
+                             "files": changed})
     write_json(out / "revision_report.json",
                rows or [{"id": "F-000", "verdict": "none",
                          "rationale": "stub: the frozen review listed no finding",
@@ -380,7 +522,9 @@ def do_revision(sb: Path, name: str, round_no: int, stage: str) -> int:
             png = sorted(out.glob("vis*.png"))
         lines += [f"- renderer: pandoc (content-level; direct Word formatting is dropped)",
                   f"- file: {docx[0].name}; rendered images: {[p.name for p in png]}",
-                  "- findings: none (stub)"]
+                  "- findings: none (stub)",
+                  "- the stub does NOT claim a visual pass: pages NOT visually verified "
+                  "(the temporary renders are deleted); the check is handed to the author"]
         if pdf.is_file():
             pdf.unlink()
         for p in png:
@@ -557,7 +701,8 @@ def do_judge(sb: Path, name: str, round_no: int, prompt: str) -> int:
     (jr / "inventory.md").write_text("# inventory (stub)\n", encoding="utf-8")
     (jr / "artifacts" / "M1_acronyms.md").write_text("| row |\n|---|\n", encoding="utf-8")
     (jr / "artifacts" / "VIS_visual.md").write_text(
-        "# visual inspection (stub)\n\nstub: pages reviewed: none\n", encoding="utf-8")
+        "# visual inspection (stub)\n\nstub: pages NOT visually verified (no renderer); "
+        "handed to the author\n", encoding="utf-8")
     write_json(sb / "_pipeline_done.json", {"stage": "judge", "run_id": name,
                                             "status": "complete", "error": None})
     return 0
@@ -569,6 +714,12 @@ def main() -> int:
     name = sb.name
     m = re.search(r"r(\d+)_", name)
     round_no = int(m.group(1)) if m else 1
+    if name.endswith("_feedback"):
+        return do_feedback(sb, name, round_no)
+    if name.endswith("_concerns"):
+        return do_concerns(sb, name, round_no)
+    if name.endswith("_response"):
+        return do_response(sb, name, round_no)
     if name.endswith("_review"):
         return do_review(sb, name, round_no)
     if name.endswith("_audit"):
