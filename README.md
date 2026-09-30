@@ -1024,6 +1024,30 @@ against this one, stored negated), with the sheet it came from
 `member_n`/`member_median`/`member_mean` repeated on every row -- so "why do the
 median and the mean disagree?" is answered from the file alone.
 
+**The issue census: how many issues of each tier each version still carries.**
+The judge ledger is the only place an issue carries a tier, so `run` and `decide`
+COUNT it, in code, into `reports/round<r>_issue_census.csv` (one row per
+version/tier/severity, the run's name on every row, so a chain of runs
+concatenates into a trend) and into `decision.json` under
+`rounds[i].issue_census`; `DECISION_REPORT.md` prints the same table per round.
+A comparison's `introduced` rows name the TARGET's defects and its `resolved`
+rows the OPPONENT's, so every row is attributed to the version whose defect it
+names, and rows are deduplicated per session (one defect repeated across a
+session's opponent comparisons counts once). The table separates `own` (the
+rows a version's own sweep sessions filed) from `peer` (the rows the other
+versions' comparisons filed against it) -- the panel's scrutiny check, since
+the two sources have different depth -- and normalizes by the sessions that
+could mention the version, which is stable as the field size changes. It is
+REPORTED, never a ranking input: the census says what is left and where, the
+signed comparison says who won the pair.
+
+The panel-quality diagnostic that reads the same pairs has one fixed rule:
+`direction_flips` lists the pairs where BOTH sides claim to be better (both own
+medians positive, or both negative -- negated into one frame they do not
+cancel). Opposite signs are the consistent reading and are not flagged; before
+the fix the condition was inverted, so the report listed every agreeing pair as
+a disagreement.
+
 ## Attempt history: every attempt is kept, not just the last one
 
 A run can be attempted several times (`--retries`, a fresh invocation, a
@@ -1321,6 +1345,9 @@ code-literal producer side, the seeded two-table ledger and its disposition
 enforcement, the review contract's M30 row + artifact, the five prompts'
 blocks, rule E12 and a strict-artifact stub review round),
 `test_hash_cache.py`, `test_final_clean_version.py`, `test_grading_scheme.py`,
+`test_issue_census.py` (the reported issues-per-version/tier/severity census, the
+own/peer scrutiny split, per-session dedup, the run-concatenable
+`reports/round<r>_issue_census.csv`, and the fixed `direction_flips` rule),
 `test_anonymized_judging.py`, `test_zotero_integration.py`. See
 `.paper_test/README.md` for the full table.
 `test_raw_data_readonly.py` covers the read-only `raw_data/` contract

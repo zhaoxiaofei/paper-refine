@@ -161,7 +161,9 @@ content, a prose failure and a formatting break; what differs is only which clas
 filed under:
 - **Fatal** — the artifact or the claim is unusable: a deliverable that cannot be opened or read,
   a rendering with no readable text, a fabricated result or citation presented as established.
-  Anything that makes the submission (or the conclusion it exists to support) unusable.
+  Anything that makes the submission (or the conclusion it exists to support) unusable AND that
+  has no usable copy elsewhere in the package: a broken render beside an intact editable source
+  is a packaging/completeness item, never a fatal one.
 - **Critical** — the error changes a conclusion, contradicts the data, or is a category
   impossibility (a fabricated number or citation, a claim the data refute, a wrong species or
   kind); anything that could trigger rejection or a correction later. A factual error is NOT
@@ -191,7 +193,8 @@ DEFECT is, and where a category splits you classify by the concrete defect:
 **Artifact damage is not cosmetic formatting.** A rendered blank page, a figure or table that did
 not print, or an unreadable rendering is classified by what it DAMAGES: content missing from the
 delivered artifact is `completeness` (one displaced page/figure Minor, several pages or a whole
-section Major, an unusable artifact Fatal), and a corrupt or undeliverable artifact is
+section Major, an artifact with no usable copy of its content Fatal), and a corrupt or
+undeliverable artifact is
 `correctness`. Only a stray empty line, spacing, an italic/quotation treatment or a mixed URL
 style is COSMETIC (0) if it appears once, becomes `consistency` when the same convention is
 broken repeatedly, and a `formatting` row is graded on the same four rungs as everything else (a

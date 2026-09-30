@@ -4140,7 +4140,9 @@ defect the same way; only the deliverable differs):
   * Severity has FOUR RUNGS, and it is a DISTANCE FROM CORRECT in EVERY class -- factual,
     consistency, preservation, completeness, formatting and prose alike. FATAL = the artifact or
     the claim is unusable (a deliverable that cannot be opened or read, a rendering with no
-    readable text, a fabricated result presented as established); CRITICAL = the error changes a
+    readable text, a fabricated result presented as established) AND no usable copy of that
+    content ships elsewhere in the package (a broken render beside an intact editable source is a
+    packaging/completeness item, not a fatal one); CRITICAL = the error changes a
     conclusion, contradicts the data, or is a category impossibility (a fabricated number or
     citation, a claim the data refute, a wrong species or kind); MAJOR = the error changes a
     reported fact, attribute, comparison or sample set, but not the paper's conclusion (a wrong age
@@ -4157,8 +4159,8 @@ defect the same way; only the deliverable differs):
   * ARTIFACT DAMAGE IS NOT COSMETIC FORMATTING: a rendered blank page, a figure or table that did
     not print, or an unreadable rendering is classified by what it DAMAGES, never filed as a
     cosmetic formatting row -- content missing from the delivered artifact is @@T_COMPLETENESS@@
-    (one displaced page/figure = minor, several pages or a whole section = major, an unusable
-    artifact = fatal), and an artifact that is corrupt or not what the authors believe they
+    (one displaced page/figure = minor, several pages or a whole section = major, an artifact with
+    no usable copy of its content = fatal), and an artifact that is corrupt or not what the authors believe they
     submitted is @@T_CORRECTNESS@@. A ONE-OFF stray empty line, a spacing slip, an
     italic/quotation treatment or a mixed URL style is COSMETIC (0) -- it becomes
     @@T_CONSISTENCY@@ when the same convention is broken repeatedly instead -- and a
@@ -6236,7 +6238,9 @@ FORMATTING IS GRADED BY WHAT IT DAMAGES, NOT BY ITS OWN TIER. A rendered blank p
 table that did not print, or a rendering whose text is unreadable is NOT a cosmetic formatting
 row: it is a `completeness` defect (content missing from the delivered artifact), graded by extent
 -- one displaced page/figure = MINOR, several pages or a whole section/figure = MAJOR, an artifact
-that cannot be used = FATAL. A ONE-OFF stray line, spacing slip, italic/quotation treatment or
+that cannot be used AND has no usable copy of its content anywhere in the package = FATAL (an
+unreadable render beside an intact editable source is a packaging note, not a fatal defect). A
+ONE-OFF stray line, spacing slip, italic/quotation treatment or
 mixed URL style is COSMETIC (0) -- repeated, it becomes `consistency` as a broken convention --
 and a `formatting` row is graded on the same four rungs as everything else (a cosmetic slip that is
 recorded at all stays MINOR and the venue's relaxed length margins keep `M18`/`M19` rows there
@@ -6247,7 +6251,8 @@ tier the damage happens to live in.
 SEVERITY HAS FOUR RUNGS, AND IT IS A DISTANCE FROM CORRECT IN EVERY TIER -- correctness,
 consistency, preservation, completeness, formatting and writing alike: FATAL = the artifact or the
 claim is unusable (a deliverable that cannot be opened or read, a rendering with no readable text,
-a fabricated result presented as established); CRITICAL = the error changes a conclusion,
+a fabricated result presented as established) AND no usable copy of that content ships elsewhere
+in the package; CRITICAL = the error changes a conclusion,
 contradicts the data, or is a category impossibility; MAJOR = the error changes a reported
 fact/attribute/comparison without changing the conclusion, or a prose/formatting failure a reader
 must work around; MINOR = a detail that changes nothing a reader depends on (terminology, missing
@@ -18868,6 +18873,115 @@ def tier_net_scores(items) -> dict:
             for tier, net in raw.items()}
 
 
+# --- the issue census (REPORTED, never a ranking input) ---------------------
+# The judge ledger is the only place in the pipeline where an issue carries a
+# TIER: a comparison's `resolved` rows name the OPPONENT's defects and its
+# `introduced` rows name the TARGET's. The panel therefore already measures
+# "how many issues of each tier does this version carry" -- it just never
+# counted them. The census counts them in CODE, from the sheets the panel
+# produced:
+#   * `own`  rows a version's OWN sessions attribute to it (the sessions that
+#            swept it as their target: their `introduced` rows);
+#   * `peer` rows the OTHER versions' sessions attribute to it (a session whose
+#            target is W lists V's defects in the (W vs V) comparison's
+#            `resolved` rows);
+#   * rows are DEDUPLICATED per (session, version, tier, severity, check,
+#     normalized evidence): the same defect a judge repeats in every opponent
+#     comparison of one session is ONE issue, never |field|-1 of them.
+# The own/peer split is deliberate: the two sources have different scrutiny
+# depth (own = an artifact-backed sweep of the version, peer = a read-only
+# comparison against it), so a large own/peer gap is the visible symptom of a
+# panel that under-reads its opponents. The count is reported per tier AND per
+# severity, and normalized by the number of sessions that could have mentioned
+# the version (`per_session`), which is stable as the field size changes --
+# that is the number a chain of runs can compare.
+
+
+def _issue_row_key(tier, severity, evidence, check) -> tuple:
+    """One ledger row's identity inside a (session, version) bucket."""
+    return (str(tier), str(severity), str(check or ""),
+            " ".join(str(evidence or "").split()).lower())
+
+
+def build_issue_census(observations, field_ids, sessions_expected=None) -> dict:
+    """{vid: issue counts per tier/severity} from the round's judge sheets.
+
+    `observations` is an iterable of `(session_id, target_vid, opponent_vid,
+    comparison)` for every resolvable comparison the panel produced. A row is
+    attributed to the version whose defect it names (`introduced` -> the
+    target, `resolved` -> the opponent) and to the source that found it
+    (`own` when that version is the session's target, else `peer`). Counts are
+    the REPORTED statistic only: nothing here feeds a score, a gate or the
+    ranking. `sessions_expected` is the number of enabled sessions that could
+    have mentioned a version (the round's total); without it the rate falls back
+    to the sessions that actually contributed.
+    """
+    field_ids = [str(v) for v in field_ids]
+    census = {vid: {"tiers": {t: {s: {"own": 0, "peer": 0} for s in SEVERITIES}
+                              for t in BASIS_TIERS},
+                    "own_sessions": set(), "peer_sessions": set()} for vid in field_ids}
+    seen = {}                       # (session, version) -> row keys already counted
+    for sess, target, opp, comp in observations:
+        items = ledger_items(comp)
+        if not items:
+            continue
+        target, opp = str(target), str(opp)
+        for side, tier, severity, evidence, check, _ai in items:
+            vid = target if side == "introduced" else opp
+            c = census.get(vid)
+            if c is None or tier not in c["tiers"] or severity not in SEVERITIES:
+                continue
+            bucket = seen.setdefault((sess, vid), set())
+            key = _issue_row_key(tier, severity, evidence, check)
+            if key in bucket:
+                continue
+            bucket.add(key)
+            src = "own" if vid == target else "peer"
+            c["tiers"][tier][severity][src] += 1
+            (c["own_sessions"] if src == "own" else c["peer_sessions"]).add(sess)
+    n_expected = (int(sessions_expected) if is_int(sessions_expected) else None)
+    out = {}
+    for vid in field_ids:
+        c = census[vid]
+        sev_totals = {s: {"own": 0, "peer": 0, "total": 0} for s in SEVERITIES}
+        tiers, own_total, peer_total = {}, 0, 0
+        for tier in BASIS_TIERS:
+            per_sev, t_own, t_peer = {}, 0, 0
+            for sev in SEVERITIES:
+                own = c["tiers"][tier][sev]["own"]
+                peer = c["tiers"][tier][sev]["peer"]
+                per_sev[sev] = {"own": own, "peer": peer, "total": own + peer}
+                sev_totals[sev]["own"] += own
+                sev_totals[sev]["peer"] += peer
+                sev_totals[sev]["total"] += own + peer
+                t_own += own
+                t_peer += peer
+            total = t_own + t_peer
+            tiers[tier] = {"own": t_own, "peer": t_peer, "total": total,
+                           "severities": per_sev}
+            own_total += t_own
+            peer_total += t_peer
+        total = own_total + peer_total
+        n_sessions = n_expected if n_expected is not None else (
+            len(c["own_sessions"]) + len(c["peer_sessions"]))
+        rate = (round(total / n_sessions, 4) if n_sessions else None)
+        for row in tiers.values():
+            row["per_session"] = (round(row["total"] / n_sessions, 4) if n_sessions else None)
+            for per_sev in row["severities"].values():
+                per_sev["per_session"] = (round(per_sev["total"] / n_sessions, 4)
+                                          if n_sessions else None)
+        out[vid] = {"tiers": tiers,
+                    "severities": {s: dict(v, per_session=(round(v["total"] / n_sessions, 4)
+                                                           if n_sessions else None))
+                                   for s, v in sev_totals.items()},
+                    "own": own_total, "peer": peer_total, "total": total,
+                    "per_session": rate,
+                    "own_sessions": len(c["own_sessions"]),
+                    "peer_sessions": len(c["peer_sessions"]),
+                    "sessions_expected": n_sessions}
+    return out
+
+
 def derived_comparison_basis(comp: dict):
     """The tier the lexicographic derivation decides on ("none" for a clean 0).
 
@@ -19839,6 +19953,9 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
     # per frame entry: the target's own score, and the SAME integer negated into
     # the opponent's received list).
     score_rows = []
+    # Every resolvable comparison, kept for the issue census (which counts the
+    # ledger rows per version, tier and severity -- see build_issue_census).
+    census_obs = []
     if selection:
         diags["judges_enabled"] = judges_enabled_spec(ctx, r)
         diags["judges_per_version"] = dict(per_judges)
@@ -19914,6 +20031,7 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
                 diags["unresolved"].append(
                     f"{rec['id']}: score {score!r} for label {label!r} is out of range")
                 continue
+            census_obs.append((rec.get("id"), vid, opp, comp))
             per[vid]["own"].setdefault(opp, []).append(int(score))
             per[opp]["received"].setdefault(vid, []).append(-int(score))
             for member, direction, credited, other in ((vid, "own", int(score), opp),
@@ -20116,12 +20234,22 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
             own_w = per[w].get("own", {}).get(v) or []
             if own_v and own_w:
                 mv, mw = statistics.median(own_v), statistics.median(own_w)
-                if (mv > 0 > mw) or (mw > 0 > mv):
+                # A FLIP is the two sides claiming the SAME side is better (both own
+                # medians positive, or both negative): negated into one frame they
+                # would not cancel. Opposite signs are the consistent reading (V's
+                # judges say V is better, W's judges say W is worse). The comparison
+                # used to be inverted here, so the report listed every AGREEING pair
+                # as a disagreement and hid the real ones.
+                if (mv > 0 and mw > 0) or (mv < 0 and mw < 0):
                     pq["direction_flips"].append(f"{v} vs {w}: {mv:g} vs {mw:g}")
     diags["panel_quality"] = pq
+    # The reported issue census: how many issues of each tier and severity the
+    # panel attributed to each version (never a ranking input).
+    census = build_issue_census(census_obs, field_ids,
+                                sessions_expected=sum(per_judges.values()))
     return {"round": int(r), "field": field_ids, "field_size": k,
             "scores_per_version": expected, "stats": stats, "diagnostics": diags,
-            "score_rows": score_rows,
+            "score_rows": score_rows, "issue_census": census,
             "base_id": A1_ID, "base_rep": base_rep,
             "generated": utcnow()}
 
@@ -21741,6 +21869,17 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
               f"median/mean are computed from its `credited` column)")
     except OSError as e:
         print(f"[run] r{r} WARNING: could not write the round's raw scores: {e}")
+    # The reported issue census (issues per version, tier and severity) rides
+    # beside the raw scores: same sheets, same aggregation, one extra file the
+    # operator can concatenate across runs.
+    try:
+        _ic = write_round_issue_census(ctx, r, agg)
+        print(f"[run] r{r} issue census: {_ic.relative_to(ctx.root).as_posix()} "
+              f"({sum((v.get('total') or 0) for v in (agg.get('issue_census') or {}).values())} "
+              f"issue row(s) attributed across {len(agg.get('issue_census') or {})} version(s); "
+              f"reported, never a ranking input)")
+    except OSError as e:
+        print(f"[run] r{r} WARNING: could not write the round's issue census: {e}")
     # A shrunk panel must never produce a champion: if any field member is
     # missing directed scores (a judge sheet that silently dropped a comparison,
     # a stale judge run, a whole version's sheets), stop BEFORE selecting and
@@ -23127,8 +23266,90 @@ def write_round_raw_scores(ctx: Ctx, r: int, agg: dict = None) -> Path:
     return p
 
 
+# The columns of a round's issue-census file: ONE row per (version, tier,
+# severity), so a chain of runs concatenates into a trend table without parsing
+# the report. `own`/`peer` keep the two ledger sources apart (see
+# build_issue_census), `per_session` is the field-size-stable rate, and `run` is
+# the pipeline root's name so rows from several runs can be told apart.
+ISSUE_CENSUS_FIELDS = ("run", "round", "version", "tier", "severity", "own", "peer",
+                       "total", "per_session", "own_sessions", "peer_sessions",
+                       "sessions_expected")
+
+
+def issue_census_rows(ctx: Ctx, r: int, agg: dict) -> list:
+    """The flat (version, tier, severity) rows of one round's issue census."""
+    rows = []
+    run = ctx.root.name
+    order = {str(v): i for i, v in enumerate(agg.get("field") or [])}
+    for vid, c in (agg.get("issue_census") or {}).items():
+        for tier in BASIS_TIERS:
+            t = (c.get("tiers") or {}).get(tier) or {}
+            for sev in SEVERITIES:
+                s = (t.get("severities") or {}).get(sev) or {}
+                rows.append({"run": run, "round": int(r), "version": vid, "tier": tier,
+                             "severity": sev, "own": int(s.get("own") or 0),
+                             "peer": int(s.get("peer") or 0),
+                             "total": int(s.get("total") or 0),
+                             "per_session": s.get("per_session"),
+                             "own_sessions": c.get("own_sessions"),
+                             "peer_sessions": c.get("peer_sessions"),
+                             "sessions_expected": c.get("sessions_expected")})
+    rows.sort(key=lambda x: (order.get(str(x["version"]), 10 ** 6), str(x["version"]),
+                             BASIS_TIERS.index(x["tier"]), SEVERITIES.index(x["severity"])))
+    return rows
+
+
+def write_round_issue_census(ctx: Ctx, r: int, agg: dict = None) -> Path:
+    """`reports/round<r>_issue_census.csv`: issues per version, tier and severity.
+
+    REPORTED, never a ranking input: it answers "how many issues of each tier
+    does each version carry, and who found them (own sweep vs peer comparison)"
+    -- the number a chain of runs compares across rounds. ONE row per (version,
+    tier, severity), zeros included, so the file's shape is stable across rounds
+    and runs even when a round's sheets carry no ledger rows.
+    """
+    r = int(r)
+    if agg is None:
+        field = [str(v) for v in (ctx.round_rec(r).get("field") or [])]
+        agg = aggregate_round(ctx, r, field) if field else {"issue_census": {}, "field": []}
+    p = ctx.reports_dir / f"round{r}_issue_census.csv"
+    tmp = p.with_suffix(".csv.tmp")
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(ISSUE_CENSUS_FIELDS))
+        w.writeheader()
+        w.writerows(issue_census_rows(ctx, r, agg))
+    os.replace(tmp, p)
+    return p
+
+
+# The per-round census table's columns (DECISION_REPORT.md). The tier columns
+# are totals over severities and the severity columns are totals over tiers, so
+# the two blocks overlap on purpose: one answers "what is left and where", the
+# other "how bad is it".
+ISSUE_CENSUS_TABLE_HEAD = (["member"] + list(BASIS_TIERS) + list(SEVERITIES)
+                           + ["own/peer", "per session", "sessions o/p/expected"])
+
+
+def issue_census_table(agg: dict) -> list:
+    """The reported census rows (one per field member) for DECISION_REPORT.md."""
+    census = agg.get("issue_census") or {}
+    rows = []
+    for vid in agg.get("field") or []:
+        c = census.get(vid) or {}
+        tiers = c.get("tiers") or {}
+        sevs = c.get("severities") or {}
+        rows.append([vid]
+                    + [str((tiers.get(t) or {}).get("total", 0)) for t in BASIS_TIERS]
+                    + [str((sevs.get(s) or {}).get("total", 0)) for s in SEVERITIES]
+                    + [f"{c.get('own', 0)}/{c.get('peer', 0)}",
+                       (f"{c.get('per_session'):g}" if c.get("per_session") is not None else "-"),
+                       f"{c.get('own_sessions')}/{c.get('peer_sessions')}/"
+                       f"{c.get('sessions_expected')}"])
+    return rows
+
+
 def backfill_round_raw_scores(ctx: Ctx) -> list:
-    """Write `reports/round<r>_raw_scores.csv` for DECIDED rounds that lack it.
+    """Write `reports/round<r>_raw_scores.csv` / `_issue_census.csv` for decided rounds.
 
     A round decided before this report existed (or by an older copy of the
     pipeline) still has its judge sheets in state, so re-aggregating it costs one
@@ -23141,12 +23362,14 @@ def backfill_round_raw_scores(ctx: Ctx) -> list:
         rec = ctx.round_rec(r)
         if rec.get("status") != "done" or not (rec.get("field") or []):
             continue
-        if (ctx.reports_dir / f"round{r}_raw_scores.csv").is_file():
-            continue
-        try:
-            out.append(write_round_raw_scores(ctx, r))
-        except Exception as e:                                   # noqa: BLE001
-            print(f"[run] r{r} WARNING: could not write its raw scores: {e}")
+        for name, writer in ((f"round{r}_raw_scores.csv", write_round_raw_scores),
+                             (f"round{r}_issue_census.csv", write_round_issue_census)):
+            if (ctx.reports_dir / name).is_file():
+                continue
+            try:
+                out.append(writer(ctx, r))
+            except Exception as e:                               # noqa: BLE001
+                print(f"[run] r{r} WARNING: could not write reports/{name}: {e}")
     if out:
         print("[run] raw scores written for round(s) decided before this report existed: "
               + ", ".join(f"reports/{p.name}" for p in out))
@@ -23217,7 +23440,9 @@ def score_model_doc() -> dict:
                           "decides a tie; manual_steps, caption length and hand-off placeholders "
                           "are reported, never ranked",
         "reported_but_not_ranked": ["manual_steps", "figure-caption length (M18)",
-                                    "hand-off placeholders"],
+                                    "hand-off placeholders",
+                                    "issue census (issues per version/tier/severity, from the "
+                                    "judges' own ledger rows: reports/round<r>_issue_census.csv)"],
         "visual_tools_detected": visual_tools_summary(),
         "review_contract": "submission_dir must resolve to base/, the coverage table must carry "
                            "every required check id, review/artifacts/ must exist, finding ids "
@@ -23730,6 +23955,27 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
         L.append(_tbl(rows, ["member", "scores", "median", "mean", "IQR", "vs_original",
                              "vs_base", "critical", "writing", "eligible", "judges",
                              "hand-off", "note"]))
+        # The reported ISSUE CENSUS: how many issues of each tier and severity the
+        # panel attributed to each version, counted from the judges' OWN ledger
+        # rows. Reported, never a ranking input -- it is the number a chain of runs
+        # compares across rounds ("fewer correctness/major issues than last round").
+        census = agg.get("issue_census") or {}
+        if census:
+            L.append("")
+            L.append("**Issue census (REPORTED, never a ranking input):** the judges' own "
+                     "ledger rows, counted per version, tier and severity. `own` = the "
+                     "version's own sweep sessions (`introduced` rows), `peer` = the other "
+                     "versions' comparisons against it (`resolved` rows); rows are "
+                     "deduplicated per session, so one defect repeated across a session's "
+                     "opponent comparisons counts once. `per session` divides by the sessions "
+                     "that COULD mention the version (field-size-stable), and the last column "
+                     "prints its own/peer/expected session counts. Tier columns and severity "
+                     "columns overlap (a tier total already contains its severities), and the "
+                     "census is not a score: it answers \"what is left and where\", not \"who "
+                     "won this pair\". The same numbers are in "
+                     f"`reports/round{r}_issue_census.csv` (one row per version/tier/severity) "
+                     "for concatenation across runs.")
+            L.append(_tbl(issue_census_table(agg), list(ISSUE_CENSUS_TABLE_HEAD)))
         # The incumbent margin is the number a human reads before trusting a
         # "progress" claim, but it is deliberately NOT a ranking key (a 2*judges
         # pair is one outlier session away from flipping): print the pair's own
@@ -24372,6 +24618,11 @@ def cmd_decide(args) -> None:
             print(f"[decide] round {r} raw scores -> {_rp.relative_to(ctx.root)}")
         except OSError as e:
             print(f"[decide] round {r} WARNING: could not write its raw scores: {e}")
+        try:
+            _icp = write_round_issue_census(ctx, r, agg)
+            print(f"[decide] round {r} issue census -> {_icp.relative_to(ctx.root)}")
+        except OSError as e:
+            print(f"[decide] round {r} WARNING: could not write its issue census: {e}")
         # The same guard `run` applies before deciding a round: a shrunk panel must
         # never be certified. `run` refuses to decide; `decide` must refuse to sign.
         gaps = [vid for vid in agg["field"]
@@ -24542,6 +24793,12 @@ def cmd_decide(args) -> None:
                     "scores_per_version": rd["agg"]["scores_per_version"],
                     "stats": rd["agg"]["stats"],
                     "diagnostics": rd["agg"]["diagnostics"],
+                    # The reported issue census (issues per version/tier/severity,
+                    # from the judges' own ledger rows). REPORTED ONLY -- it never
+                    # feeds the ranking; it is the number a chain of runs compares
+                    # across rounds. The same data is in
+                    # reports/round<r>_issue_census.csv.
+                    "issue_census": rd["agg"].get("issue_census") or {},
                     "selection": rd["sel"],
                     "champion_pin": rd["pin"],
                     "stored_champion": rd["stored"].get("champion"),
