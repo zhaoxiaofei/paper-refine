@@ -2,7 +2,7 @@
   "id": "nature-biotechnology",
   "label": "Nature Biotechnology",
   "short": "NBT",
-  "description": "Nature Biotechnology (Nature Portfolio): the pipeline's original, pre-venue requirement set. It carries the venue's content types; the Article limits are the ones this pipeline was originally written for and are the only ones the profile states numbers for (the others are counted and reported against the venue's own content-types table, never against the Article caps).",
+  "description": "Nature Biotechnology (Nature Portfolio / Springer Nature), the pipeline's default venue. Every number in this profile is quoted from the journal's own public author pages, retrieved 2026-10-01: the Content Types page (https://www.nature.com/nbt/content) states Article abstract <= 150 words and main text <= 3,000 words excluding abstract, Methods, references and figure legends, Brief Communication abstract <= 70 words (3 sentences) with 1,000-1,500 words of main text including abstract, references and figure legends, Resource abstract 100-150 words with main text <= 3,000 words, Review 3,000-4,000 words, Perspective <= 3,000 words, Correspondence 300-800 words and Feature <= 3,000 words; the specialist Matters Arising page states 'ideally not exceed 1,200 words'. A type the page gives no number for (Analysis, Comment, News & Views, Book Review, Patent Article, Careers and Recruitment, Primer) carries null, so the stages count the section and name the venue's own table instead of borrowing the Article caps. The Article limits (150/3,000) keep the +10%/+25% margins the pipeline was originally written with (promoted caps 165/3,750); every other type is applied with no margin (relaxation 1.0).",
   "article_type": "Article",
   "article_type_id": "article",
   "default_article_type": "article",
@@ -10,114 +10,47 @@
     {
       "id": "article",
       "label": "Article",
-      "source": "Nature Biotechnology content-types table",
+      "source": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Article': 'An Article is a substantial novel research study, with a complex story often involving several techniques or approaches.' Format: 'Main text - up to 3,000 words, excluding abstract, Methods, references and figure legends. Abstract - up to 150 words, unreferenced. Display items - up to 6 items (figures and/or tables).' The same entry prescribes the section order 'Introduction (without heading), Results, Discussion, Online Methods' and recommends up to 50 references, none of which this profile models.",
       "length_limits": {
-        "source": "Nature Biotechnology content-types table (Article: abstract <= 150 words; main text <= 3,000 words excluding abstract, Methods, references and figure legends)",
+        "source": "https://www.nature.com/nbt/content (checked 2026-10-01), Article format: abstract <= 150 words, unreferenced; main text <= 3,000 words excluding abstract, Methods, references and figure legends",
         "abstract": {
           "base": 150,
-          "relaxation": 1.1
+          "relaxation": 1.1,
+          "note": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Article' format: 'Abstract - up to 150 words, unreferenced.' The +10% relaxation is this pipeline's own margin (the one the shipped profile carried before this verification), not an NBT rule; the promoted cap is 165 words."
         },
         "main_text": {
           "base": 3000,
-          "relaxation": 1.25
+          "relaxation": 1.25,
+          "note": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Article' format: 'Main text - up to 3,000 words, excluding abstract, Methods, references and figure legends.' The +25% relaxation is this pipeline's own margin (unchanged from the rule set the pipeline shipped with), not an NBT rule; the promoted cap is 3,750 words. The same page caps display items at 6 (figures and/or tables) and recommends up to 50 references -- neither is modelled here."
         },
         "cover_letter": {
           "min": 300,
           "max": 500,
-          "source": "master-prompt preference (300-500 words in the persuading part); Nature Biotechnology's official guidance states no cover-letter word limit (checked 2026-09-19); the letter's TOTAL content (salutation, body, disclosures and signature) is capped at 650 words by the operator's default",
-          "total_max": 650
+          "total_max": 650,
+          "source": "master-prompt preference (300-500 words in the persuading part). Nature Biotechnology states no cover-letter word limit; its Preparing your material page (https://www.nature.com/nbt/submission-guidelines/preparing-your-submission, checked 2026-10-01) says only that 'The cover letter should explain the importance of the work, and why you consider it appropriate for the diverse readership of Nature Biotechnology', that it should disclose related manuscripts, prior editorial discussions and (for double-anonymized peer review) author affiliations, and that it is not seen by peer reviewers. The 650-word total_max is the operator's own TOTAL-content cap (salutation, body, disclosures and signature), not an NBT rule."
         }
       },
       "captions": {
         "published_limit": null,
         "default_cap": 0,
-        "source": "Nature Biotechnology requires that a legend \"does not exceed the word limit of the article type\" but does not publish that number on its public pages (checked 2026-09-19)"
+        "source": "https://www.nature.com/nbt/submission-guidelines/aip-and-formatting (checked 2026-10-01), 'Figure legends': 'Ensure the legend does not exceed the word limit of the article type.' Nature Biotechnology publishes no separate legend word count, so published_limit is null and the pipeline counts legends without a cap."
       }
     },
     {
       "id": "brief-communication",
       "label": "Brief Communication",
-      "source": "Nature Biotechnology content-types table",
+      "source": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Brief Communication': 'A Brief Communication reports a concise study of high quality and broad interest.'",
       "length_limits": {
-        "source": "Nature Biotechnology content-types table (Brief Communication: this profile carries no number for that type -- the stage names the abstract and main-text limits the table states, with their source)",
+        "source": "https://www.nature.com/nbt/content (checked 2026-10-01), Brief Communication format: abstract 3 sentences up to 70 words; main text 1,000-1,500 words including abstract, references and figure legends",
         "abstract": {
-          "base": null,
-          "relaxation": null
+          "base": 70,
+          "relaxation": 1.0,
+          "note": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Brief Communication' format: 'Brief unreferenced abstract - 3 sentences, up to 70 words, which will appear on Medline.' The venue's own ceiling is used with no margin (relaxation 1.0)."
         },
         "main_text": {
-          "base": null,
-          "relaxation": null
-        },
-        "cover_letter": {
-          "min": null,
-          "max": null,
-          "source": ""
-        }
-      },
-      "captions": null
-    },
-    {
-      "id": "review",
-      "label": "Review",
-      "source": "Nature Biotechnology content-types table",
-      "length_limits": {
-        "source": "Nature Biotechnology content-types table (Review: this profile carries no number for that type -- the stage names the abstract and main-text limits the table states, with their source)",
-        "abstract": {
-          "base": null,
-          "relaxation": null
-        },
-        "main_text": {
-          "base": null,
-          "relaxation": null
-        },
-        "cover_letter": {
-          "min": null,
-          "max": null,
-          "source": ""
-        }
-      },
-      "captions": null
-    },
-    {
-      "id": "perspective",
-      "label": "Perspective",
-      "source": "Nature Biotechnology content-types table",
-      "length_limits": {
-        "source": "Nature Biotechnology content-types table (Perspective: this profile carries no number for that type -- the stage names the abstract and main-text limits the table states, with their source)",
-        "abstract": {
-          "base": null,
-          "relaxation": null
-        },
-        "main_text": {
-          "base": null,
-          "relaxation": null
-        },
-        "cover_letter": {
-          "min": null,
-          "max": null,
-          "source": ""
-        }
-      },
-      "captions": null
-    },
-    {
-      "id": "analysis",
-      "label": "Analysis",
-      "source": "Nature Biotechnology content-types table",
-      "length_limits": {
-        "source": "Nature Biotechnology content-types table (Analysis: this profile carries no number for that type -- the stage names the abstract and main-text limits the table states, with their source)",
-        "abstract": {
-          "base": null,
-          "relaxation": null
-        },
-        "main_text": {
-          "base": null,
-          "relaxation": null
-        },
-        "cover_letter": {
-          "min": null,
-          "max": null,
-          "source": ""
+          "base": 1500,
+          "relaxation": 1.0,
+          "note": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Brief Communication' format: 'Main text - 1,000-1,500 words, including abstract, references and figure legends, and contains no headings.' The profile uses the range's upper bound (1,500) as base, applies no margin (relaxation 1.0) and does not model the venue's floor of 1,000 words. The same entry caps the title at 10 words (or 90 characters) and display items at 2."
         }
       },
       "captions": null
@@ -125,21 +58,18 @@
     {
       "id": "resource",
       "label": "Resource",
-      "source": "Nature Biotechnology content-types table",
+      "source": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Resource': 'A Resource presents a large data set of broad utility, interest and significance to the community.'",
       "length_limits": {
-        "source": "Nature Biotechnology content-types table (Resource: this profile carries no number for that type -- the stage names the abstract and main-text limits the table states, with their source)",
+        "source": "https://www.nature.com/nbt/content (checked 2026-10-01), Resource format: abstract 100-150 words; main text <= 3,000 words excluding abstract, online Methods, references and figure legends",
         "abstract": {
-          "base": null,
-          "relaxation": null
+          "base": 150,
+          "relaxation": 1.0,
+          "note": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Resource' format: 'Abstract - 100-150 words, unreferenced.' Base is the range's upper bound (150); the venue's own number is used with no margin (relaxation 1.0)."
         },
         "main_text": {
-          "base": null,
-          "relaxation": null
-        },
-        "cover_letter": {
-          "min": null,
-          "max": null,
-          "source": ""
+          "base": 3000,
+          "relaxation": 1.0,
+          "note": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Resource' format: 'Main text - up to 3,000 words (excluding abstract, online Methods, references and figure legends).' Applied with no margin (relaxation 1.0); the same entry caps display items at 6 and recommends up to 50 references."
         }
       },
       "captions": null
@@ -147,21 +77,94 @@
     {
       "id": "correspondence",
       "label": "Correspondence",
-      "source": "Nature Biotechnology content-types table",
+      "source": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Correspondence': 'The Correspondence section provides a forum for comment on issues relevant to the journal's community. This format may not be used for presentation of research data or analysis.'",
       "length_limits": {
-        "source": "Nature Biotechnology content-types table (Correspondence: this profile carries no number for that type -- the stage names the abstract and main-text limits the table states, with their source)",
+        "source": "https://www.nature.com/nbt/content (checked 2026-10-01), Correspondence format: 300-800 words; 1 display item; up to 10 references",
         "abstract": {
           "base": null,
-          "relaxation": null
+          "relaxation": null,
+          "note": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Correspondence' format, publishes no abstract for this type (and no abstract word count); base and relaxation are null so the stages count any abstract without a cap."
+        },
+        "main_text": {
+          "base": 800,
+          "relaxation": 1.0,
+          "note": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Correspondence' format: 'Correspondence - between 300-800 words'. Base is the range's upper bound (800), applied with no margin (relaxation 1.0); the venue's 300-word floor and its 1-display-item / 10-reference limits are not modelled. Note the same page: 'Correspondence pieces are not technical comments on peer-reviewed research papers; these should be submitted as Matters Arising.'"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "review",
+      "label": "Review",
+      "source": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Review': 'A Review is an authoritative, balanced and scholarly survey of recent developments in a research field.'",
+      "length_limits": {
+        "source": "https://www.nature.com/nbt/content (checked 2026-10-01), Review format: 3,000-4,000 words; up to 100 references",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Review' format, states no abstract and no abstract word count for Reviews; base and relaxation are null (no number invented)."
+        },
+        "main_text": {
+          "base": 4000,
+          "relaxation": 1.0,
+          "note": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Review' format: 'Main text - 3,000-4,000 words'. Base is the range's upper bound (4,000), applied with no margin (relaxation 1.0); the venue's 3,000-word floor and its recommendation of up to 100 references are not modelled."
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "perspective",
+      "label": "Perspective",
+      "source": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Perspective': 'A Perspective is a format for scholarly reviews and discussions of the primary research literature that are too technical for a Comment but do not meet the criteria for a Review.'",
+      "length_limits": {
+        "source": "https://www.nature.com/nbt/content (checked 2026-10-01), Perspective format: up to 3,000 words; up to 50 references",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Perspective' format, states no abstract and no abstract word count for Perspectives; base and relaxation are null (no number invented)."
+        },
+        "main_text": {
+          "base": 3000,
+          "relaxation": 1.0,
+          "note": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Perspective' format: 'Length - up to 3,000 words.' Applied with no margin (relaxation 1.0); the same entry recommends up to 50 references."
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "analysis",
+      "label": "Analysis",
+      "source": "https://www.nature.com/nbt/articles?type=analysis (checked 2026-10-01) lists the journal's Analyses; the submitting Content Types page (https://www.nature.com/nbt/content) does not list Analysis and states no numbers for it",
+      "length_limits": {
+        "source": "Nature Biotechnology publishes Analyses on its own site (https://www.nature.com/nbt/articles?type=analysis, checked 2026-10-01) but its Content Types page (https://www.nature.com/nbt/content, checked 2026-10-01) does not list Analysis as a submittable type and publishes no abstract or main-text word count for it",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "No number published: https://www.nature.com/nbt/content (checked 2026-10-01) carries no 'Analysis' entry and no abstract word count for it, so base and relaxation are null rather than guessed; the stages count the abstract and report against the venue's own page."
         },
         "main_text": {
           "base": null,
-          "relaxation": null
+          "relaxation": null,
+          "note": "No number published: https://www.nature.com/nbt/content (checked 2026-10-01) carries no 'Analysis' entry and no main-text word count for it, so base and relaxation are null rather than guessed. The type is kept in this profile because the journal does publish Analyses (https://www.nature.com/nbt/articles?type=analysis) and a root configured with 'analysis' must keep resolving."
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "comment",
+      "label": "Comment",
+      "source": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Comment': 'A Comment is a flexible format that focuses on the scientific, commercial, ethical, legal, societal, or political issues surrounding research.'",
+      "length_limits": {
+        "source": "https://www.nature.com/nbt/content (checked 2026-10-01), Comment format: 'Length - typically 1-4 pages, although some may be longer. There are no specific structural guidelines.'",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Comment' format, states no abstract and no abstract word count; base and relaxation are null (no number invented)."
         },
-        "cover_letter": {
-          "min": null,
-          "max": null,
-          "source": ""
+        "main_text": {
+          "base": null,
+          "relaxation": null,
+          "note": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Comment' format gives a PAGE range ('typically 1-4 pages, although some may be longer'), not a word count, so base and relaxation are null; a page limit is not a word count and this schema does not model it. The same entry says references should be used sparingly, up to 15, and that Comments 'do not normally contain primary research data'."
         }
       },
       "captions": null
@@ -169,21 +172,132 @@
     {
       "id": "matters-arising",
       "label": "Matters Arising",
-      "source": "Nature Biotechnology content-types table",
+      "source": "https://www.nature.com/nbt/submission-guidelines/matters-arising (checked 2026-10-01): 'Matters Arising are exceptionally interesting and timely scientific comments and clarifications on original research papers published in Nature Biotechnology.'",
       "length_limits": {
-        "source": "Nature Biotechnology content-types table (Matters Arising: this profile carries no number for that type -- the stage names the abstract and main-text limits the table states, with their source)",
+        "source": "https://www.nature.com/nbt/submission-guidelines/matters-arising (checked 2026-10-01): 'The main text should be as concise as possible, and ideally not exceed 1,200 words. Any extended Methods may be reported as Supplementary Information.'",
         "abstract": {
           "base": null,
-          "relaxation": null
+          "relaxation": null,
+          "note": "https://www.nature.com/nbt/submission-guidelines/matters-arising (checked 2026-10-01) publishes no abstract word count: it says only that 'Contributions should start with a brief paragraph that summarizes the message of the article without specialized terminology, for a non-specialist readership. This paragraph should be used as the abstract for submission purposes.' base and relaxation are null (no number invented)."
+        },
+        "main_text": {
+          "base": 1200,
+          "relaxation": 1.0,
+          "note": "https://www.nature.com/nbt/submission-guidelines/matters-arising (checked 2026-10-01): 'The main text should be as concise as possible, and ideally not exceed 1,200 words.' The venue states this as an ideal ceiling, so the profile applies the number with no margin (relaxation 1.0); the same page's guideline of up to 15 references is not modelled."
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "feature",
+      "label": "Feature",
+      "source": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Feature': 'A Feature encompasses both the technical and commercial aspects of any topic relevant to our readership.' The page marks Features (with Comment, News & Views, Book Review, Patent Article, Careers and Recruitment, Primer and Correspondence) as non-primary content that is not eligible for Open Access.",
+      "length_limits": {
+        "source": "https://www.nature.com/nbt/content (checked 2026-10-01), Feature format: 'Length - up to 3,000 words. Use of tables and figures is strongly encouraged. Written in a journalistic style, accessible to a wide range of non-specialist readers.'",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Feature' format, states no abstract and no abstract word count; base and relaxation are null (no number invented)."
+        },
+        "main_text": {
+          "base": 3000,
+          "relaxation": 1.0,
+          "note": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Feature' format: 'Length - up to 3,000 words.' Applied with no margin (relaxation 1.0). Note this is a non-primary, journalistic content type (see the same page's footnote), not a research manuscript; the review and rewrite models assume a research package and will report most checks as not applicable."
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "news-and-views",
+      "label": "News & Views",
+      "source": "https://www.nature.com/nbt/content (checked 2026-10-01), 'News & Views': articles that 'inform readers about the latest advances in biotechnology'; 'Unsolicited contributions will not normally be considered' and they 'are not peer reviewed'.",
+      "length_limits": {
+        "source": "https://www.nature.com/nbt/content (checked 2026-10-01), 'News & Views' entry",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "No number published: https://www.nature.com/nbt/content (checked 2026-10-01) gives News & Views no abstract and no word count; base and relaxation are null (no number invented)."
         },
         "main_text": {
           "base": null,
-          "relaxation": null
+          "relaxation": null,
+          "note": "No number published: https://www.nature.com/nbt/content (checked 2026-10-01) gives News & Views no main-text word count; base and relaxation are null (no number invented). The same page states these pieces are commissioned and not peer reviewed."
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "book-review",
+      "label": "Book Review",
+      "source": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Book Review': 'Book Reviews are by prior arrangement only, although suggestions are welcome. Book reviews are not peer reviewed.'",
+      "length_limits": {
+        "source": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Book Review' entry",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "No number published: https://www.nature.com/nbt/content (checked 2026-10-01) gives Book Reviews no abstract and no word count; base and relaxation are null (no number invented)."
         },
-        "cover_letter": {
-          "min": null,
-          "max": null,
-          "source": ""
+        "main_text": {
+          "base": null,
+          "relaxation": null,
+          "note": "No number published: https://www.nature.com/nbt/content (checked 2026-10-01) gives Book Reviews no main-text word count; base and relaxation are null (no number invented)."
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "patent-article",
+      "label": "Patent Article",
+      "source": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Patent Article': 'A Patent Article offers our readership an expert insight and analysis of the legal issues that pertain to our field of science, including patenting, licensing, and technology transfer.'",
+      "length_limits": {
+        "source": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Patent Article' entry",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "No number published: https://www.nature.com/nbt/content (checked 2026-10-01) gives Patent Articles no abstract and no word count; base and relaxation are null (no number invented)."
+        },
+        "main_text": {
+          "base": null,
+          "relaxation": null,
+          "note": "No number published: https://www.nature.com/nbt/content (checked 2026-10-01) gives Patent Articles no main-text word count; base and relaxation are null (no number invented)."
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "careers-and-recruitment",
+      "label": "Careers and Recruitment",
+      "source": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Careers and Recruitment': 'A Careers and Recruitment article provides a view on training, career development or hiring issues and information on the job market.'",
+      "length_limits": {
+        "source": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Careers and Recruitment' entry",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "No number published: https://www.nature.com/nbt/content (checked 2026-10-01) gives this type no abstract and no word count; base and relaxation are null (no number invented)."
+        },
+        "main_text": {
+          "base": null,
+          "relaxation": null,
+          "note": "No number published: https://www.nature.com/nbt/content (checked 2026-10-01) gives this type no main-text word count; base and relaxation are null (no number invented)."
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "primer",
+      "label": "Primer",
+      "source": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Primer': 'A Primer describes an approach to computational analysis in simple terms.'",
+      "length_limits": {
+        "source": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Primer' entry",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "No number published: https://www.nature.com/nbt/content (checked 2026-10-01) gives Primers no abstract and no word count; base and relaxation are null (no number invented)."
+        },
+        "main_text": {
+          "base": null,
+          "relaxation": null,
+          "note": "No number published: https://www.nature.com/nbt/content (checked 2026-10-01) gives Primers no main-text word count; base and relaxation are null (no number invented)."
         }
       },
       "captions": null
@@ -202,26 +316,28 @@
   "accepts_any_journal": false,
   "default_journal": "Nature Biotechnology",
   "length_limits": {
-    "source": "Nature Biotechnology content-types table (Article: abstract <= 150 words; main text <= 3,000 words excluding abstract, Methods, references and figure legends)",
+    "source": "https://www.nature.com/nbt/content (checked 2026-10-01), Article format: abstract <= 150 words, unreferenced; main text <= 3,000 words excluding abstract, Methods, references and figure legends",
     "abstract": {
       "base": 150,
-      "relaxation": 1.1
+      "relaxation": 1.1,
+      "note": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Article' format: 'Abstract - up to 150 words, unreferenced.' The +10% relaxation is this pipeline's own margin (unchanged from the shipped profile), not an NBT rule; the promoted cap is 165 words."
     },
     "main_text": {
       "base": 3000,
-      "relaxation": 1.25
+      "relaxation": 1.25,
+      "note": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Article' format: 'Main text - up to 3,000 words, excluding abstract, Methods, references and figure legends.' The +25% relaxation is this pipeline's own margin (unchanged from the shipped profile), not an NBT rule; the promoted cap is 3,750 words."
     },
     "cover_letter": {
       "min": 300,
       "max": 500,
-      "source": "master-prompt preference (300-500 words in the persuading part); Nature Biotechnology's official guidance states no cover-letter word limit (checked 2026-09-19); the letter's TOTAL content (salutation, body, disclosures and signature) is capped at 650 words by the operator's default",
-      "total_max": 650
+      "total_max": 650,
+      "source": "master-prompt preference (300-500 words in the persuading part). Nature Biotechnology states no cover-letter word limit; its Preparing your material page (https://www.nature.com/nbt/submission-guidelines/preparing-your-submission, checked 2026-10-01) says the letter 'should explain the importance of the work, and why you consider it appropriate for the diverse readership of Nature Biotechnology' and lists the disclosures it must carry. The 650-word total_max is the operator's own TOTAL-content cap (salutation, body, disclosures and signature), not an NBT rule."
     }
   },
   "captions": {
     "published_limit": null,
     "default_cap": 0,
-    "source": "Nature Biotechnology requires that a legend \"does not exceed the word limit of the article type\" but does not publish that number on its public pages (checked 2026-09-19)"
+    "source": "https://www.nature.com/nbt/submission-guidelines/aip-and-formatting (checked 2026-10-01), 'Figure legends': 'Ensure the legend does not exceed the word limit of the article type.' Nature Biotechnology publishes no legend word count of its own, so published_limit is null and the stages count legends without a cap (default_cap 0)."
   },
   "submission": {
     "pdf_accepted": true,
@@ -230,13 +346,28 @@
       "Word",
       "TeX/LaTeX"
     ],
-    "pdf_note": "Nature Biotechnology accepts a PDF as the initial submission file (\"We accept initial submissions in PDF, Word or TeX/LaTeX formats\" -- submission guidelines, checked 2026-09-19), and a reader/editor may open exactly that PDF"
+    "pdf_note": "Nature Biotechnology accepts a PDF for the INITIAL submission -- 'We accept initial submissions in PDF, Word or TeX/LaTeX formats; if you are using TeX/LaTeX, please submit compiled PDFs' (https://www.nature.com/nbt/submission-guidelines/initial-formatting, checked 2026-10-01) -- so a reader or editor may open exactly that PDF. The accepted version must be Word or TeX/LaTeX: 'Please submit your manuscript in either Word or TeX/LaTeX format. We do not accept PDFs for final submissions' (https://www.nature.com/nbt/submission-guidelines/aip-and-formatting, checked 2026-10-01).",
+    "initial_submission_note": "https://www.nature.com/nbt/submission-guidelines/initial-formatting (checked 2026-10-01): 'Your initial submission does not need to be specially formatted, as long as the study is described in a way that is suitable for editorial assessment and peer review.'",
+    "latex_note": "https://www.nature.com/nbt/submission-guidelines/aip-and-formatting (checked 2026-10-01): 'To submit a TeX/LaTeX file, please use any of the standard class files such as article.cls, revtex.cls or amsart.cls', and 'For further guidelines on TeX/LaTeX, please visit https://www.springernature.com/gp/authors/campaigns/latex-author-support where you can download the Springer Nature LaTeX template.' A copy of that template is staged in nature-biotechnology.official/."
   },
   "prompt": {
     "subject": "a Nature Biotechnology (NBT) manuscript submission",
     "editor": "a Nature Biotechnology editor or reviewer",
     "requirements": "the Nature Biotechnology author guidelines and submission requirements",
     "requirement_authority": "Nature Biotechnology",
-    "guidelines_source": "the current Nature Biotechnology author guidelines"
+    "guidelines_source": "the current Nature Biotechnology author guidelines (submission guidelines, content types and formatting requirements at nature.com/nbt/submission-guidelines and nature.com/nbt/content)"
+  },
+  "sources": {
+    "submission_guidelines": "https://www.nature.com/nbt/submission-guidelines",
+    "content_types": "https://www.nature.com/nbt/content",
+    "initial_formatting": "https://www.nature.com/nbt/submission-guidelines/initial-formatting",
+    "preparing_your_submission": "https://www.nature.com/nbt/submission-guidelines/preparing-your-submission",
+    "formatting_requirements": "https://www.nature.com/nbt/submission-guidelines/aip-and-formatting",
+    "matters_arising": "https://www.nature.com/nbt/submission-guidelines/matters-arising",
+    "analysis_article_type_browse": "https://www.nature.com/nbt/articles?type=analysis",
+    "official_latex_template": "https://www.springernature.com/gp/authors/campaigns/latex-author-support",
+    "official_chemdraw_stylesheet": "https://www.nature.com/documents/nr-chemdraw-stylesheet.cds",
+    "checked": "2026-10-01",
+    "note": "Every word count in this file is quoted from the Nature Biotechnology (or Springer Nature) pages above, retrieved 2026-10-01. Where a content type has no published number the profile carries null and says so in that entry's note, rather than borrowing another type's caps or inventing a limit. The Article type keeps the +10%/+25% margins the pipeline was originally written with; every other type is applied with no margin (relaxation 1.0)."
   }
 }

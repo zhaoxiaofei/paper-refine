@@ -1,0 +1,537 @@
+{
+  "id": "frontiers-in-immunology",
+  "label": "Frontiers in Immunology",
+  "short": "Front Immunol",
+  "description": "Frontiers in Immunology (Frontiers). A single-journal Frontiers profile: the Article-types page carries the per-type maximum word counts (Original Research 12,000; Review 12,000; Mini Review 3,000; Brief Research Report 4,000; Case Report 3,000; Opinion 2,000; General Commentary 1,000; Conceptual Analysis 8,000; ...), and the profile applies each type's own maximum with no margin (relaxation 1.0). Frontiers publishes no separate abstract word limit, no legend word limit and no cover-letter limit, so those are counted without a cap; the submission system's 200-word scope statement is carried as the venue-level cover-letter preference on top of the operator's 650-word TOTAL-content cap. Frontiers requires an editable Word or LaTeX manuscript, so submission.pdf_accepted is false.",
+  "default_article_type": "original-research",
+  "article_type": "Original Research",
+  "journals": [
+    "Frontiers in Immunology"
+  ],
+  "journal_aliases": [
+    "Front Immunol",
+    "Front. Immunol.",
+    "Frontiers Immunol"
+  ],
+  "journal_patterns": [
+    "^frontiers\\s+in\\s+immunology\\b"
+  ],
+  "accepts_any_journal": false,
+  "default_journal": "Frontiers in Immunology",
+  "length_limits": {
+    "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Original Research'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- maximum 12,000 words",
+    "abstract": {
+      "base": null,
+      "relaxation": null,
+      "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+    },
+    "main_text": {
+      "base": 12000,
+      "relaxation": 1.0,
+      "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the page states a maximum word count of 12,000 for Original Research. Frontiers Author guidelines, 'Manuscript length' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'The manuscript length includes only the main body of the text, footnotes, and all citations within it. It excludes the abstract, section titles, figure and table captions, contents of tables and boxes, funding statement, acknowledgments, and references in the bibliography.' The profile applies the venue's own maximum with no margin (relaxation 1.0), because Frontiers states the number as a maximum"
+    },
+    "cover_letter": {
+      "min": null,
+      "max": 200,
+      "total_max": 650,
+      "source": "Frontiers Author guidelines, 'Scope statement' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'When you submit your manuscript, you will be required to summarize in 200 words your manuscript's scope and its relevance to the journal and/or specialty section you're submitting to.' Frontiers publishes no cover-letter word limit; this profile carries the submission system's 200-word scope statement as the persuading-part preference. The 650-word total_max is the operator's own TOTAL-content cap (salutation, body, disclosures and signature), not a Frontiers rule"
+    }
+  },
+  "captions": {
+    "published_limit": null,
+    "default_cap": 0,
+    "source": "Frontiers Author guidelines, 'Captions' and 'Tables' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'Captions should be preceded by the appropriate label, for example Figure 1. Figure captions should be placed at the end of the manuscript'; 'Table captions must be placed immediately before the table ... Please use only a single paragraph for the caption'. The guidelines publish no legend WORD limit, so published_limit is null and the stages count legends without a cap (default_cap 0)"
+  },
+  "submission": {
+    "pdf_accepted": false,
+    "formats": [
+      "docx (Word)",
+      "doc (Word)",
+      "tex + PDF + bib (LaTeX)"
+    ],
+    "pdf_note": "Frontiers Author guidelines, 'Templates' and 'Format' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'The manuscript should be written using either Word or LaTeX'; 'If you wish to submit your article as LaTeX, we recommend our LaTeX templates ... please ensure all relevant manuscript files are uploaded: .tex file, PDF, and .bib file (if the bibliography is not already included in the .tex file)'. Editors and reviewers only download the PDF the system builds from that source, so a lone PDF is not the manuscript"
+  },
+  "prompt": {
+    "subject": "a Frontiers in Immunology research-article submission",
+    "editor": "a Frontiers in Immunology editor or reviewer",
+    "requirements": "the Frontiers Author guidelines and the Frontiers in Immunology Article types rules",
+    "requirement_authority": "the Frontiers Author guidelines",
+    "guidelines_source": "the Frontiers Author guidelines (frontiersin.org/guidelines/author-guidelines) and the Frontiers in Immunology Article types page (frontiersin.org/journals/immunology/for-authors/article-types)"
+  },
+  "article_types": [
+    {
+      "id": "original-research",
+      "label": "Original Research",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'Original Research': 12,000 maximum words",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Original Research'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- maximum 12,000 words",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": 12000,
+          "relaxation": 1.0,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the page states a maximum word count of 12,000 for Original Research. Frontiers Author guidelines, 'Manuscript length' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'The manuscript length includes only the main body of the text, footnotes, and all citations within it. It excludes the abstract, section titles, figure and table captions, contents of tables and boxes, funding statement, acknowledgments, and references in the bibliography.' The profile applies the venue's own maximum with no margin (relaxation 1.0), because Frontiers states the number as a maximum"
+        },
+        "cover_letter": {
+          "min": null,
+          "max": 200,
+          "total_max": 650,
+          "source": "Frontiers Author guidelines, 'Scope statement' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'When you submit your manuscript, you will be required to summarize in 200 words your manuscript's scope and its relevance to the journal and/or specialty section you're submitting to.' Frontiers publishes no cover-letter word limit; this profile carries the submission system's 200-word scope statement as the persuading-part preference. The 650-word total_max is the operator's own TOTAL-content cap (salutation, body, disclosures and signature), not a Frontiers rule"
+        }
+      },
+      "captions": {
+        "published_limit": null,
+        "default_cap": 0,
+        "source": "Frontiers Author guidelines, 'Captions' and 'Tables' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'Captions should be preceded by the appropriate label, for example Figure 1. Figure captions should be placed at the end of the manuscript'; 'Table captions must be placed immediately before the table ... Please use only a single paragraph for the caption'. The guidelines publish no legend WORD limit, so published_limit is null and the stages count legends without a cap (default_cap 0)"
+      }
+    },
+    {
+      "id": "systematic-review",
+      "label": "Systematic Review",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'Systematic Review': 12,000 maximum words",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Systematic Review'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- maximum 12,000 words",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": 12000,
+          "relaxation": 1.0,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the page states a maximum word count of 12,000 for Systematic Review. Frontiers Author guidelines, 'Manuscript length' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'The manuscript length includes only the main body of the text, footnotes, and all citations within it. It excludes the abstract, section titles, figure and table captions, contents of tables and boxes, funding statement, acknowledgments, and references in the bibliography.' The profile applies the venue's own maximum with no margin (relaxation 1.0), because Frontiers states the number as a maximum"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "methods",
+      "label": "Methods",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'Methods': 12,000 maximum words",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Methods'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- maximum 12,000 words",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": 12000,
+          "relaxation": 1.0,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the page states a maximum word count of 12,000 for Methods. Frontiers Author guidelines, 'Manuscript length' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'The manuscript length includes only the main body of the text, footnotes, and all citations within it. It excludes the abstract, section titles, figure and table captions, contents of tables and boxes, funding statement, acknowledgments, and references in the bibliography.' The profile applies the venue's own maximum with no margin (relaxation 1.0), because Frontiers states the number as a maximum"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "review",
+      "label": "Review",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'Review': 12,000 maximum words",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Review'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- maximum 12,000 words",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": 12000,
+          "relaxation": 1.0,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the page states a maximum word count of 12,000 for Review. Frontiers Author guidelines, 'Manuscript length' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'The manuscript length includes only the main body of the text, footnotes, and all citations within it. It excludes the abstract, section titles, figure and table captions, contents of tables and boxes, funding statement, acknowledgments, and references in the bibliography.' The profile applies the venue's own maximum with no margin (relaxation 1.0), because Frontiers states the number as a maximum"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "mini-review",
+      "label": "Mini Review",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'Mini Review': 3,000 maximum words. No more than 2 figure(s)/table(s)",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Mini Review'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- maximum 3,000 words",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": 3000,
+          "relaxation": 1.0,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the page states a maximum word count of 3,000 for Mini Review and 'may contain no more than 2 Figures/Tables'. Frontiers Author guidelines, 'Manuscript length' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'The manuscript length includes only the main body of the text, footnotes, and all citations within it. It excludes the abstract, section titles, figure and table captions, contents of tables and boxes, funding statement, acknowledgments, and references in the bibliography.' The profile applies the venue's own maximum with no margin (relaxation 1.0), because Frontiers states the number as a maximum"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "policy-practice-review",
+      "label": "Policy & Practice Review",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'Policy & Practice Review': 12,000 maximum words",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Policy & Practice Review'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- maximum 12,000 words",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": 12000,
+          "relaxation": 1.0,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the page states a maximum word count of 12,000 for Policy & Practice Review. Frontiers Author guidelines, 'Manuscript length' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'The manuscript length includes only the main body of the text, footnotes, and all citations within it. It excludes the abstract, section titles, figure and table captions, contents of tables and boxes, funding statement, acknowledgments, and references in the bibliography.' The profile applies the venue's own maximum with no margin (relaxation 1.0), because Frontiers states the number as a maximum"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "hypothesis-and-theory",
+      "label": "Hypothesis and Theory",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'Hypothesis and Theory': 12,000 maximum words",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Hypothesis and Theory'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- maximum 12,000 words",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": 12000,
+          "relaxation": 1.0,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the page states a maximum word count of 12,000 for Hypothesis and Theory. Frontiers Author guidelines, 'Manuscript length' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'The manuscript length includes only the main body of the text, footnotes, and all citations within it. It excludes the abstract, section titles, figure and table captions, contents of tables and boxes, funding statement, acknowledgments, and references in the bibliography.' The profile applies the venue's own maximum with no margin (relaxation 1.0), because Frontiers states the number as a maximum"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "perspective",
+      "label": "Perspective",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'Perspective': 3,000 maximum words. No more than 2 figure(s)/table(s)",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Perspective'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- maximum 3,000 words",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": 3000,
+          "relaxation": 1.0,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the page states a maximum word count of 3,000 for Perspective and 'may contain no more than 2 Figures/Tables'. Frontiers Author guidelines, 'Manuscript length' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'The manuscript length includes only the main body of the text, footnotes, and all citations within it. It excludes the abstract, section titles, figure and table captions, contents of tables and boxes, funding statement, acknowledgments, and references in the bibliography.' The profile applies the venue's own maximum with no margin (relaxation 1.0), because Frontiers states the number as a maximum"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "clinical-trial",
+      "label": "Clinical Trial",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'Clinical Trial': 12,000 maximum words",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Clinical Trial'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- maximum 12,000 words",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": 12000,
+          "relaxation": 1.0,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the page states a maximum word count of 12,000 for Clinical Trial. Frontiers Author guidelines, 'Manuscript length' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'The manuscript length includes only the main body of the text, footnotes, and all citations within it. It excludes the abstract, section titles, figure and table captions, contents of tables and boxes, funding statement, acknowledgments, and references in the bibliography.' The profile applies the venue's own maximum with no margin (relaxation 1.0), because Frontiers states the number as a maximum"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "case-report",
+      "label": "Case Report",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'Case Report': 3,000 maximum words. No more than 4 figure(s)/table(s)",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Case Report'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- maximum 3,000 words",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": 3000,
+          "relaxation": 1.0,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the page states a maximum word count of 3,000 for Case Report and 'may contain no more than 4 Figures/Tables'. Frontiers Author guidelines, 'Manuscript length' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'The manuscript length includes only the main body of the text, footnotes, and all citations within it. It excludes the abstract, section titles, figure and table captions, contents of tables and boxes, funding statement, acknowledgments, and references in the bibliography.' The profile applies the venue's own maximum with no margin (relaxation 1.0), because Frontiers states the number as a maximum"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "conceptual-analysis",
+      "label": "Conceptual Analysis",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'Conceptual Analysis': 8,000 maximum words. No more than 10 figure(s)/table(s)",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Conceptual Analysis'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- maximum 8,000 words",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": 8000,
+          "relaxation": 1.0,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the page states a maximum word count of 8,000 for Conceptual Analysis and 'may contain no more than 10 Figures/Tables'. Frontiers Author guidelines, 'Manuscript length' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'The manuscript length includes only the main body of the text, footnotes, and all citations within it. It excludes the abstract, section titles, figure and table captions, contents of tables and boxes, funding statement, acknowledgments, and references in the bibliography.' The profile applies the venue's own maximum with no margin (relaxation 1.0), because Frontiers states the number as a maximum"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "classification",
+      "label": "Classification",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'Classification': 12,000 maximum words",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Classification'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- maximum 12,000 words",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": 12000,
+          "relaxation": 1.0,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the page states a maximum word count of 12,000 for Classification. Frontiers Author guidelines, 'Manuscript length' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'The manuscript length includes only the main body of the text, footnotes, and all citations within it. It excludes the abstract, section titles, figure and table captions, contents of tables and boxes, funding statement, acknowledgments, and references in the bibliography.' The profile applies the venue's own maximum with no margin (relaxation 1.0), because Frontiers states the number as a maximum"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "curriculum-instruction-pedagogy",
+      "label": "Curriculum, Instruction, and Pedagogy",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'Curriculum, Instruction, and Pedagogy': 5,000 maximum words. No more than 5 figure(s)/table(s)",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Curriculum, Instruction, and Pedagogy'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- maximum 5,000 words",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": 5000,
+          "relaxation": 1.0,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the page states a maximum word count of 5,000 for Curriculum, Instruction, and Pedagogy and 'may contain no more than 5 Figures/Tables'. Frontiers Author guidelines, 'Manuscript length' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'The manuscript length includes only the main body of the text, footnotes, and all citations within it. It excludes the abstract, section titles, figure and table captions, contents of tables and boxes, funding statement, acknowledgments, and references in the bibliography.' The profile applies the venue's own maximum with no margin (relaxation 1.0), because Frontiers states the number as a maximum"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "data-report",
+      "label": "Data Report",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'Data Report': 3,000 maximum words. No more than 2 figure(s)/table(s)",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Data Report'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- maximum 3,000 words",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": 3000,
+          "relaxation": 1.0,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the page states a maximum word count of 3,000 for Data Report and 'may contain no more than 2 Figures/Tables'. Frontiers Author guidelines, 'Manuscript length' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'The manuscript length includes only the main body of the text, footnotes, and all citations within it. It excludes the abstract, section titles, figure and table captions, contents of tables and boxes, funding statement, acknowledgments, and references in the bibliography.' The profile applies the venue's own maximum with no margin (relaxation 1.0), because Frontiers states the number as a maximum"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "brief-research-report",
+      "label": "Brief Research Report",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'Brief Research Report': 4,000 maximum words. No more than 4 figure(s)/table(s)",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Brief Research Report'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- maximum 4,000 words",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": 4000,
+          "relaxation": 1.0,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the page states a maximum word count of 4,000 for Brief Research Report and 'may contain no more than 4 Figures/Tables'. Frontiers Author guidelines, 'Manuscript length' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'The manuscript length includes only the main body of the text, footnotes, and all citations within it. It excludes the abstract, section titles, figure and table captions, contents of tables and boxes, funding statement, acknowledgments, and references in the bibliography.' The profile applies the venue's own maximum with no margin (relaxation 1.0), because Frontiers states the number as a maximum"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "general-commentary",
+      "label": "General Commentary",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'General Commentary': 1,000 maximum words. No more than 1 figure(s)/table(s)",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'General Commentary'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- maximum 1,000 words",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": 1000,
+          "relaxation": 1.0,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the page states a maximum word count of 1,000 for General Commentary and 'may contain no more than 1 Figures/Tables'. Frontiers Author guidelines, 'Manuscript length' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'The manuscript length includes only the main body of the text, footnotes, and all citations within it. It excludes the abstract, section titles, figure and table captions, contents of tables and boxes, funding statement, acknowledgments, and references in the bibliography.' The profile applies the venue's own maximum with no margin (relaxation 1.0), because Frontiers states the number as a maximum"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "opinion",
+      "label": "Opinion",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'Opinion': 2,000 maximum words. No more than 1 figure(s)/table(s)",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Opinion'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- maximum 2,000 words",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": 2000,
+          "relaxation": 1.0,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the page states a maximum word count of 2,000 for Opinion and 'may contain no more than 1 Figures/Tables'. Frontiers Author guidelines, 'Manuscript length' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'The manuscript length includes only the main body of the text, footnotes, and all citations within it. It excludes the abstract, section titles, figure and table captions, contents of tables and boxes, funding statement, acknowledgments, and references in the bibliography.' The profile applies the venue's own maximum with no margin (relaxation 1.0), because Frontiers states the number as a maximum"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "correction",
+      "label": "Correction",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'Correction'",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Correction'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- this profile carries no number for that type",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": null,
+          "relaxation": null,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the Article-types page publishes no word count for this type -- base and relaxation stay null and the stages report the page's own wording"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "editorial",
+      "label": "Editorial",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'Editorial'",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Editorial'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- this profile carries no number for that type",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": null,
+          "relaxation": null,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the Article-types page publishes no word count for this type. The page gives the Editorial word count as 1,000 words for a Research Topic with 5-10 articles, rising with each additional article to a maximum of 5,000 words for 50 articles or more, so no single base number exists -- base and relaxation stay null and the stages report the page's own wording"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "retraction",
+      "label": "Retraction",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'Retraction'",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Retraction'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- this profile carries no number for that type",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": null,
+          "relaxation": null,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the Article-types page publishes no word count for this type -- base and relaxation stay null and the stages report the page's own wording"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "addendum",
+      "label": "Addendum",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'Addendum'",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Addendum'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- this profile carries no number for that type",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": null,
+          "relaxation": null,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the Article-types page publishes no word count for this type -- base and relaxation stay null and the stages report the page's own wording"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "technology-and-code",
+      "label": "Technology & Code",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'Technology & Code': 12,000 maximum words",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Technology & Code'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- maximum 12,000 words",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": 12000,
+          "relaxation": 1.0,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the page states a maximum word count of 12,000 for Technology & Code. Frontiers Author guidelines, 'Manuscript length' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'The manuscript length includes only the main body of the text, footnotes, and all citations within it. It excludes the abstract, section titles, figure and table captions, contents of tables and boxes, funding statement, acknowledgments, and references in the bibliography.' The profile applies the venue's own maximum with no margin (relaxation 1.0), because Frontiers states the number as a maximum"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "study-protocol",
+      "label": "Study Protocol",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'Study Protocol': 12,000 maximum words",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Study Protocol'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- maximum 12,000 words",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": 12000,
+          "relaxation": 1.0,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the page states a maximum word count of 12,000 for Study Protocol. Frontiers Author guidelines, 'Manuscript length' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'The manuscript length includes only the main body of the text, footnotes, and all citations within it. It excludes the abstract, section titles, figure and table captions, contents of tables and boxes, funding statement, acknowledgments, and references in the bibliography.' The profile applies the venue's own maximum with no margin (relaxation 1.0), because Frontiers states the number as a maximum"
+        }
+      },
+      "captions": null
+    },
+    {
+      "id": "fair2-data",
+      "label": "FAIR² Data",
+      "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01), 'FAIR² Data'",
+      "length_limits": {
+        "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'FAIR² Data'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- this profile carries no number for that type",
+        "abstract": {
+          "base": null,
+          "relaxation": null,
+          "note": "Frontiers Author guidelines, 'Abstract' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): the abstract is a single structured paragraph (for example IMRAD), abbreviations are minimised and references, figures and tables are not cited in it; the guidelines publish NO separate abstract word limit, so base and relaxation are null and the stages count the abstract without a cap."
+        },
+        "main_text": {
+          "base": null,
+          "relaxation": null,
+          "note": "https://www.frontiersin.org/journals/immunology/for-authors/article-types (checked 2026-10-01): the Article-types page publishes no word count for this type -- base and relaxation stay null and the stages report the page's own wording. FAIR² Data is the venue's data-management submission route, not a word-limited manuscript type"
+        }
+      },
+      "captions": null
+    }
+  ],
+  "sources": {
+    "author_guidelines": "https://www.frontiersin.org/guidelines/author-guidelines",
+    "article_types": "https://www.frontiersin.org/journals/immunology/for-authors/article-types",
+    "word_templates": "https://www.frontiersin.org/Design/zip/Frontiers_Word_Templates.zip",
+    "latex_templates": "https://www.frontiersin.org/design/zip/Frontiers_LaTeX_Templates.zip",
+    "checked": "2026-10-01",
+    "note": "every word count in this file is quoted from the two Frontiers pages above, retrieved 2026-10-01; no number is inferred"
+  }
+}

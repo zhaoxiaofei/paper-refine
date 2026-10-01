@@ -16,3 +16,18 @@ __pycache__/
 # Node dependencies of mcp-docx-converter/: installed from its package-lock.json
 # (`npm ci` inside mcp-docx-converter/), never vendored into the repository.
 node_modules/
+
+# Venue profiles: the JSON profiles and the README are curated, shipped content
+# (a root resolves its venue from them), so they stay trackable. Everything an
+# `add-venue` run DOWNLOADS or DERIVES is local data and stays out of the repo:
+#   <id>.official/                  the journal's own template files
+#   <id>.manuscripts/               downloaded OA articles / transcriptions
+#   <id>.templates/                 the generated structure-only pack
+#   <id>.manually-created-official/ hand-collected template copies
+#   .add-venue/                     agent scratch (prompts, logs, staged store)
+venue_profiles/*
+!venue_profiles/README.md
+!venue_profiles/*.json
+
+# Excel lock files ("~$name.xlsx") appear whenever a workbook is open.
+~$*.xlsx
