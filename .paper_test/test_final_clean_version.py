@@ -109,6 +109,11 @@ def main() -> int:
     check("FCV decision.json records the renamed count and both digests",
           info.get("renamed", 0) >= 4 and info.get("pin_digest") != info.get("digest"),
           json.dumps(info)[:200])
+    cert = decision.get("certification") or {}
+    check("FCV the decision records itself as CERTIFIED and the clean copy as published",
+          cert.get("certified") is True and cert.get("blockers") == []
+          and (cert.get("clean_version") or {}).get("published") is True,
+          json.dumps(cert)[:200])
     # idempotence: a second decide leaves the tree byte-identical (no churn)
     before = sorted(nb.sha256_file(p) for p in final.rglob("*") if p.is_file())
     proc = run(["decide", "--root", str(root)])

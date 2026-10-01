@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.21 — one certification verdict, and the clean package only for a certified champion (2026-10-01)
+
+Found while auditing the recorded `cnb-20to21-*` run: `decide` printed
+"final clean version … ready as `setup --source …`" and THEN exited 5 with
+"the champion is NOT certified" -- the residual/format gates were evaluated
+after `final_clean_version/` was published, so an uncertified run could hand the
+operator a package it had just refused to sign.
+
+- `decide` now computes ONE `certification` verdict
+  (`decide_certification()`): `certified` / `provisional` / `blockers` /
+  `exit_code` / `clean_version`. `decision.json` carries it, `DECISION_REPORT.md`
+  prints it right under the header, `status` and `trend` surface it, and the
+  process exit code (5 blocker, 4 provisional under `--require-complete`, 0
+  otherwise) reads from the same object — the file, the report and the exit can
+  no longer disagree.
+- `final_clean_version/` is published ONLY for a certified champion: the
+  residual/format gates and the plain-language anti-regression failure were
+  missing from the publication reason and are now included. A pre-existing
+  directory from an earlier decision is never overwritten by an uncertified run
+  and the run prints a NOTE saying it was not refreshed.
+- `trend` gains a `certified` column on the per-run table (`-` for decisions
+  written before the block existed), and `status` prints the verdict.
+- The residual gate's message now says what to do when the environment is
+  offline (the recorded run's lookups were all `skipped`): write the verified
+  fact/negative into the document, run the lookups where the network is
+  reachable, or record them as advisory with `--non-residual-gate`.
+- README: the beginning is now at-a-glance (what you give it / what it produces
+  / the default plan), quick start, what lands in the root, an `Everyday
+  commands` table, a "Is my decision certified?" section, requirements, and the
+  two read-only evidence areas.
+
 ## 0.20 — the defect prefix leads the ranking; the four severity rungs stay separate (2026-10-01)
 
 - **The champion selection key is now

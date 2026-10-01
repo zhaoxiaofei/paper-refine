@@ -11,6 +11,23 @@ them blindly against each other, pins the champion by content digest, and feeds
 that champion into the next round. `decide` publishes the final decision report
 and a clean, ready-to-use package.
 
+**At a glance**
+
+* **You give it** a pristine submission directory — the manuscript files, plus
+  (optionally) a `raw_data/` evidence area and a `human_review_feedback/` area
+  when you are revising against a real editor/reviewer decision.
+* **It runs** one or more rounds of candidate versions — full rewrites, a
+  reviewed-and-revised version, and integrations that merge the pool — judges
+  the candidates blindly against each other, and pins the round's champion by
+  content digest.
+* **You get** `reports/DECISION_REPORT.md` (the ranked decision, the issue
+  census, every reported-only signal) and `decision.json` (the same, machine
+  readable, with an explicit certification verdict), each round's winner, and
+  `final_clean_version/` — the certified champion, ready to be the next run's
+  `--source`.
+* **Default plan** — three rounds, two judges per version, two round-1 rewrites
+  and one reviewed-and-revised candidate per round; everything is a flag.
+
 ## Two ways to run it
 
 * **The agent rounds (the default).** Point `setup` at a pristine submission
@@ -74,6 +91,32 @@ The selection key is one ordered line: the round's reported **defect prefix**
 prefix comes from the blind panel's own issue ledger; the panel statistics sit
 below it, and an exact (median, mean, IQR) tie keeps the incumbent base. See
 *How a round is decided* below for the rationale and the gates.
+
+**Is my decision certified?** `decision.json` carries a `certification` block
+(and `DECISION_REPORT.md` prints the same verdict):
+
+* `certified: true` — every gate passed (complete panel, the champion
+  re-derives, evidence unchanged, the enabled gates clean) and the answer is
+  final;
+* `provisional: true` — only some rounds are complete; the champion is the last
+  completed round's. `decide --require-complete` makes that an exit 4;
+* a `blockers` entry — the champion is **NOT certified**; `decide` exits 5 and
+  `final_clean_version/` is **not** (re)published by that run, so a directory
+  left from an earlier decision is never mistaken for this one's output.
+
+## Everyday commands
+
+| command | what it does |
+| --- | --- |
+| `setup --source DIR --root ROOT` | copy the pristine corpus read-only, record its hashes, write `pipeline_config.json` + `state.json` |
+| `run --root ROOT` / `run-decide` | run every stage (staged in dependency order) / run and then decide |
+| `decide --root ROOT` | re-derive every round, verify the pin chain, write the report + `decision.json`, publish `final_clean_version/` |
+| `status --root ROOT` | the root's config, integrity, ranking floor and dedup mode |
+| `trend --roots A B C` | cross-run chain: per-round medians, margins, censuses and certification |
+| `set-venue` / `set-journal` / `set-article-type` | change the rule set / target journal / content type |
+| `set-revision-mode transfer\|resubmit\|major\|minor` | switch to one of the four real-journal workflows |
+| `set-tiebreak-defect-floor N` / `set-dedup-mode off\|location` | calibration of the selection key |
+| `retry --run ID` / `prune --keep-latest N` | re-run one session / reclaim disk from old sandboxes |
 
 ## Requirements
 
@@ -463,11 +506,19 @@ one cheap probe per process decides whether to query at all, results are reused
 across the sandboxes of a root, and `--placeholder-lookup off` records the
 questions and checks nothing (useful offline).
 
-`decide --residual-gate` turns the recorded residuals into decision problems
-(exit 5): a `searchable` marker the lookup engine answered that still sits in a
-delivered package, a review whose decision tables were boilerplate or unfilled,
-or unsourced numbers in the abstract/legends. Without the flag the residuals are
-still recorded in `decision.json` and printed — never silently dropped.
+The residual gate is **ON by default**: `decide` turns the recorded residuals
+into decision problems (exit 5) — a `searchable` marker the lookup engine
+answered (or could not even reach) that still sits in a delivered package, a
+review whose decision tables were boilerplate or unfilled, or an integration
+ledger row that would undo a resolved finding. `decide --non-residual-gate`
+records them as advisory only (they are always recorded in `decision.json` and
+printed either way — never silently dropped), which is the documented path for
+an offline environment where the pipeline's own identifier lookups all come
+back `skipped`: the package must still not ship the marker, so the alternative
+is to have the stage write the verified fact (or the verified negative with its
+search date) into the document. A gated residual blocks certification and
+prevents `final_clean_version/` from being (re)published — see the
+`certification` block above.
 
 ## Round model
 

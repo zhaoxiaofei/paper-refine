@@ -20,6 +20,7 @@ Run:  python3 .paper_test/test_decide_antiregression.py
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import re
 import shutil
@@ -34,6 +35,11 @@ STUB = HERE / "stub_agent.py"
 ORIGINAL = "orig"
 FAILS = []
 TMPDIRS = []
+
+_spec = importlib.util.spec_from_file_location("paperp_ar", WS / "paper_pipeline.py")
+nb = importlib.util.module_from_spec(_spec)
+sys.modules["paperp_ar"] = nb
+_spec.loader.exec_module(nb)
 
 
 def check(name, cond, detail=""):
@@ -172,6 +178,20 @@ def test_decide_refuses_to_certify_a_regression():
           str(problems)[:300])
     check("decide refuses to certify (exit 5)", dec.returncode == 5,
           f"rc={dec.returncode} out={(dec.stdout + dec.stderr)[-300:]}")
+    cert = dj.get("certification") or {}
+    check("decision.json records the NOT-CERTIFIED verdict and its blocker",
+          cert.get("certified") is False and cert.get("blockers")
+          and any("WORSE than the pristine original" in str(b) for b in cert["blockers"]),
+          json.dumps(cert)[:300])
+    check("an uncertified decision never publishes final_clean_version/",
+          (cert.get("clean_version") or {}).get("published") is False
+          and not (root / "final_clean_version").exists(),
+          f"clean={cert.get('clean_version')} dir={(root / 'final_clean_version').exists()}")
+    st = subprocess.run([sys.executable, str(WS / "paper_pipeline.py"), "status",
+                         "--root", str(root)], capture_output=True, text=True, timeout=300)
+    check("status surfaces the NOT-CERTIFIED verdict",
+          st.returncode == 0 and "decision:" in st.stdout and "NOT CERTIFIED" in st.stdout,
+          (st.stdout or st.stderr)[-200:])
 
 
 def cleanup():
@@ -179,10 +199,45 @@ def cleanup():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_certification_verdicts():
+    print()
+    print("== decide_certification: one verdict for the file, the report and the exit code ==")
+    ok = nb.decide_certification([], [{"mismatch": None}], True, {}, None, False, False, 2, 2,
+                                 {"files": 3}, "")
+    check("certified: certified True, exit 0, clean published",
+          ok["certified"] is True and ok["exit_code"] == 0
+          and ok["clean_version"]["published"] is True, json.dumps(ok))
+    gated = nb.decide_certification(["2 gated residual(s)"], [{"mismatch": None}], True, {}, None,
+                                    False, False, 2, 2, {"skipped": "2 gated residual(s)"},
+                                    "2 gated residual(s)")
+    check("a gate: certified False, exit 5, clean NOT published",
+          gated["certified"] is False and gated["exit_code"] == 5
+          and gated["clean_version"]["published"] is False
+          and "gated" in gated["clean_version"]["skipped_reason"], json.dumps(gated))
+    prov = nb.decide_certification([], [{"mismatch": None}], True, {}, None, True, False, 1, 2,
+                                   {"skipped": "provisional"}, "provisional")
+    check("provisional without --require-complete: not certified, exit 0",
+          prov["certified"] is False and prov["provisional"] is True
+          and prov["exit_code"] == 0, json.dumps(prov))
+    prov4 = nb.decide_certification([], [{"mismatch": None}], True, {}, None, True, True, 1, 2,
+                                    {"skipped": "provisional"}, "provisional")
+    check("provisional with --require-complete: exit 4",
+          prov4["exit_code"] == 4 and prov4["blockers"] == [], json.dumps(prov4))
+    mism = nb.decide_certification([], [{"mismatch": "recomputed champion 'i1' != stored 'i4'"}],
+                                   True, {}, None, False, False, 1, 3,
+                                   {"skipped": "the stored champion failed recomputation"},
+                                   "the stored champion failed recomputation")
+    check("a champion mismatch is a blocker and the clean copy is skipped",
+          mism["exit_code"] == 5
+          and any("recomputed champion" in b for b in mism["blockers"])
+          and mism["clean_version"]["published"] is False, json.dumps(mism))
+
+
 def main() -> int:
     if "--as-judge" in sys.argv[1:]:
         return judge_main()
     test_decide_refuses_to_certify_a_regression()
+    test_certification_verdicts()
     cleanup()
     if FAILS:
         print(f"\n[FAIL] {len(FAILS)} check(s) failed: {', '.join(FAILS)}")

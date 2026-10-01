@@ -61,16 +61,20 @@ def census(totals):
             "sessions_expected": 2}
 
 
-def write_decision(root: Path, source, rounds: list, final: dict = None) -> Path:
+def write_decision(root: Path, source, rounds: list, final: dict = None,
+                   certification: dict = None) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     (root / "reports").mkdir(parents=True, exist_ok=True)
     p = root / "reports" / "decision.json"
-    p.write_text(json.dumps({
+    doc = {
         "generated": "2026-01-01T00:00:00+00:00",
         "pipeline_root": str(root),
         "config": {"source": str(source) if source else None},
         "rounds": rounds,
-        "final": final or {}}, indent=1), encoding="utf-8")
+        "final": final or {}}
+    if certification is not None:
+        doc["certification"] = certification
+    p.write_text(json.dumps(doc, indent=1), encoding="utf-8")
     return p
 
 
@@ -92,7 +96,8 @@ write_decision(root_a, None, [
     round_rec(1, "i1", 2.0, 1.5, 42, 2.0, 2.0,
               {"correctness": 3, "writing": 1, "major": 3, "minor": 1})],
     {"champion": "i1", "format": {"rows": [{"rule": "FMT-T1"}], "high": 0, "medium": 1, "low": 0},
-     "lengths": {"over_limit": []}})
+     "lengths": {"over_limit": []}},
+    certification={"certified": True, "blockers": []})
 
 
 # B CONSUMED A's output (the moving reference), and predates the census.
@@ -101,7 +106,8 @@ write_decision(root_b, root_a / "final_clean_version", [
     round_rec(3, "a2", 2.0, 1.1, 36, 2.0, 0.5)],
     {"champion": "a2", "format": {"rows": [{"rule": "FMT-T1"}, {"rule": "FMT-T2"}],
                                   "high": 0, "medium": 2, "low": 0},
-     "lengths": {"over_limit": ["main text"]}})
+     "lengths": {"over_limit": ["main text"]}},
+    certification={"certified": False, "blockers": ["2 gated residual(s)"]})
 
 
 def test_order():
@@ -139,6 +145,9 @@ def test_rows():
           run[0]["format_rows"] == 1 and run[0]["over_length"] == 0
           and run[1]["format_rows"] == 2 and run[1]["over_length"] == 1
           and run[1]["champion"] == "a2", str(run))
+    check("the certification verdict rides along (and a pre-certification run is '-')",
+          run[0]["certified"] is True and run[1]["certified"] is False,
+          str([(r["run"], r.get("certified")) for r in run]))
 
 
 def test_render_and_writes():
@@ -152,6 +161,8 @@ def test_render_and_writes():
     check("both tables are rendered with their headers",
           all(k in text for k in np.TREND_ROUND_FIELDS)
           and all(k in text for k in np.TREND_RUN_FIELDS))
+    check("the run table shows the certification verdict and explains it",
+          "certified" in text and "refused decision" in text, text[-400:])
     out = tmp / "TREND.md"
     csvp = tmp / "TREND.csv"
     buf = io.StringIO()

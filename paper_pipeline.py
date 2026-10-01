@@ -26637,6 +26637,43 @@ def _increment_final_clean_counters(dirp: Path) -> dict:
             "raw_data_untouched": raw_data_skipped}
 
 
+def decide_certification(gate_problems, rounds_data, chain_ok, panel_gaps, final_regression,
+                         provisional, require_complete, final_round, rounds_total,
+                         final_clean, clean_reason) -> dict:
+    """The ONE certification verdict: decision.json, the report and the exit code.
+
+    `certified` is true only when nothing blocks AND the answer is not
+    provisional; `exit_code` is 5 for a blocker, 4 for a provisional answer
+    under --require-complete, and 0 otherwise. `clean_version` records whether
+    THIS invocation published final_clean_version/ (and why not), so a reader
+    can tell a fresh package from one left by an earlier decision.
+    """
+    blockers = list(gate_problems)
+    if any(rd.get("mismatch") for rd in rounds_data):
+        blockers.extend(str(rd["mismatch"]) for rd in rounds_data if rd.get("mismatch"))
+    if not chain_ok:
+        blockers.append("the pristine/pinned/evidence integrity no longer matches disk")
+    if panel_gaps:
+        blockers.append("one or more rounds have an incomplete judge panel")
+    if final_regression:
+        blockers.append(final_regression)
+    notes = []
+    if provisional:
+        notes.append(f"only round {final_round} of {rounds_total} is complete; the answer is "
+                     f"provisional")
+    return {"certified": bool(not blockers and not provisional),
+            "provisional": bool(provisional),
+            "blockers": blockers,
+            "notes": notes,
+            # What THIS invocation exits with: 5 = a blocker, 4 = a provisional
+            # answer under --require-complete, 0 = certified (or a deliberately
+            # provisional answer without the flag).
+            "exit_code": (5 if blockers
+                          else (4 if (provisional and require_complete) else 0)),
+            "clean_version": {"published": bool((final_clean or {}).get("files")),
+                              "skipped_reason": clean_reason or None}}
+
+
 def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = "") -> dict:
     """Publish <root>/final_clean_version/: the champion corpus for a new run.
 
@@ -26802,9 +26839,12 @@ def collect_residuals(ctx: Ctx) -> dict:
                     f"that the lookup engine answered are still in the delivered package "
                     f"(see runs/{rid}/work/PLACEHOLDER_LOOKUP.md)", gate=True)
             if res.get("searchable_placeholders") and not res.get("answered_kinds"):
-                add(f"{rid}: {res['searchable_placeholders']} searchable hand-off marker(s) "
-                    f"with no lookup evidence in the sandbox (run the lookups: they answer "
-                    f"this class)", gate=True)
+                add(f"{rid}: {res['searchable_placeholders']} searchable hand-off marker(s) are "
+                    f"still in the delivered package and the sandbox carries no lookup verdict "
+                    f"for them -- write the verified fact (or the verified negative with its "
+                    f"search date) into the document, run the lookups where the network is "
+                    f"reachable (`--placeholder-lookup online`), or re-run `decide "
+                    f"--non-residual-gate` to record them as advisory only", gate=True)
         if kind in ("revise", "integrate") and res.get("unsourced_numbers_in_abstract_legends"):
             add(f"{rid}: {res['unsourced_numbers_in_abstract_legends']} number(s) in the "
                 f"abstract/legends are not proved by any shipped data table", gate=False)
@@ -26826,7 +26866,8 @@ def collect_residuals(ctx: Ctx) -> dict:
 def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
                           problems: list, final: dict, win_lengths=None,
                           final_clean=None, revision_token=None, win_format=None,
-                          format_gate: bool = False, format_problems=None) -> str:
+                          format_gate: bool = False, format_problems=None,
+                          certification: dict = None) -> str:
     L = []
     L.append("# Round Pipeline — Decision Report")
     L.append("")
@@ -26836,6 +26877,19 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
              f"| source: `{ctx.cfg.get('source')}`")
     for line in venue_status_lines(ctx):
         L.append(f"- {line}")
+    if certification:
+        _cert = certification
+        _verdict = ("CERTIFIED" if _cert.get("certified")
+                    else ("PROVISIONAL" if _cert.get("provisional")
+                          and not _cert.get("blockers") else "NOT CERTIFIED"))
+        _why = (_cert.get("blockers") or _cert.get("notes")
+                or ["every gate passed"])
+        L.append("")
+        L.append(f"**Certification: {_verdict}.** " + "; ".join(str(x) for x in _why))
+        _cv = _cert.get("clean_version") or {}
+        if not _cv.get("published"):
+            L.append(f"- final_clean_version/: NOT published by this decision"
+                     + (f" ({_cv['skipped_reason']})" if _cv.get("skipped_reason") else ""))
     L.append("")
     L.append("## 0. Integrity")
     L.append("")
@@ -27456,6 +27510,15 @@ def cmd_status(args) -> None:
           f"(`set-tiebreak-defect-floor N`; 0 = one cell only, 999999 = every cell)")
     print(f"dedup mode:    {dedup_mode_of(ctx)} "
           f"(`set-dedup-mode off|location`; off counts every sheet's rows)")
+    _dj = trend_read_decision(ctx.root)
+    _cert = (_dj or {}).get("certification")
+    if isinstance(_cert, dict):
+        _verdict = ("CERTIFIED" if _cert.get("certified")
+                    else ("PROVISIONAL" if _cert.get("provisional")
+                          and not _cert.get("blockers") else "NOT CERTIFIED"))
+        print(f"decision:      {_verdict}"
+              + (f" -- {'; '.join(str(b) for b in _cert.get('blockers') or [])}"
+                 if _cert.get("blockers") else ""))
     if _jmode != JOURNAL_MODE_NONE:
         _jinfo = JOURNAL_MODES[_jmode]
         _jfb = [str(x) for x in ((ctx.cfg or {}).get("journal_feedback") or [])]
@@ -27572,7 +27635,7 @@ TREND_ROUND_FIELDS = ("run", "round", "champion", "median", "mean", "n", "vs_inp
                       "critical", "fatal")
 TREND_RUN_FIELDS = ("run", "rounds", "champion", "format_rows", "format_high",
                     "format_medium", "format_low", "over_length", "placeholders",
-                    "generated")
+                    "generated", "certified")
 
 
 def trend_read_decision(root: Path) -> dict:
@@ -27636,7 +27699,9 @@ def trend_rows(roots: list) -> tuple:
             run_rows.append({"run": root.name, "rounds": 0, "champion": None,
                              "format_rows": None, "format_high": None, "format_medium": None,
                              "format_low": None, "over_length": None, "placeholders": None,
-                             "generated": None})
+                             "generated": None,
+                             # None = the decision predates the certification block.
+                             "certified": None})
             continue
         src = (dj.get("config") or {}).get("source")
         rounds = dj.get("rounds") or []
@@ -27672,7 +27737,11 @@ def trend_rows(roots: list) -> tuple:
             "format_low": fmt.get("low"),
             "over_length": (len(lengths.get("over_limit") or []) if lengths else None),
             "placeholders": last_stat.get("author_placeholders"),
-            "generated": dj.get("generated")})
+            "generated": dj.get("generated"),
+            # `-` for decisions written before the certification block existed:
+            # the old files carry no explicit verdict, so do not imply one.
+            "certified": ((dj.get("certification") or {}).get("certified")
+                          if isinstance(dj.get("certification"), dict) else None)})
     return round_rows, run_rows
 
 
@@ -27695,7 +27764,10 @@ def format_trend(round_rows: list, run_rows: list) -> str:
     L.append("")
     L.append("Per-run deterministic counters (code-side, no panel; `-` when the run predates "
              "them): the OOXML formatting rows, the over-cap section count and the champion's "
-             "hand-off placeholder count at the end of the run.")
+             "hand-off placeholder count at the end of the run. `certified` is the run's own "
+             "decision.json verdict (`true`/`false`; `-` when the decision predates the "
+             "certification block) -- a `false` row is a recorded, refused decision, not a "
+             "certified answer.")
     L.append("")
     L.append(_tbl([[_trend_cell(r.get(k)) for k in TREND_RUN_FIELDS] for r in run_rows],
                   list(TREND_RUN_FIELDS)))
@@ -28083,6 +28155,22 @@ def cmd_decide(args) -> None:
     # unfilled, or unsourced numbers in the abstract/legends. Always recorded;
     # `--residual-gate` makes them decision problems.
     residuals = collect_residuals(ctx)
+    # The two opt-out gates are collected here, BEFORE the clean copy is
+    # published, because they are certification blockers too: a run that exits 5
+    # must not print "final_clean_version ... ready as `setup --source ...`".
+    # (Found in a recorded root: the clean copy was published and the process
+    # then exited 5 on the residual gate.)
+    gate_problems = []
+    if getattr(args, "format_gate", False) and format_problems:
+        gate_problems.append(f"{len(format_problems)} HIGH-severity formatting finding(s) in the "
+                             f"final winner (--format-gate)")
+    if residuals.get("gating") and getattr(args, "residual_gate",
+                                            DEFAULT_RESIDUAL_GATE):
+        gate_problems.append(f"{len(residuals['gating'])} gated residual(s) "
+                             f"(--residual-gate is ON by default; --non-residual-gate records "
+                             f"them as advisory only)")
+    if gate_problems:
+        problems.extend(f"gate: {p}" for p in gate_problems)
     if residuals.get("gating") and getattr(args, "residual_gate",
                                             DEFAULT_RESIDUAL_GATE):
         problems.extend(f"residual: {it}" for it in residuals["gating"])
@@ -28094,6 +28182,11 @@ def cmd_decide(args) -> None:
     # never published as a ready-to-use source.
     if final["mismatch"]:
         _clean_reason = "the stored champion failed recomputation"
+    elif final_regression:
+        # A final champion the panel judged WORSE than the pristine original is
+        # not a package to hand to the next run (the same reason `decide`
+        # refuses to certify it below).
+        _clean_reason = final_regression
     elif not chain_ok:
         _clean_reason = "the content-addressed chain is broken"
     elif provisional:
@@ -28101,9 +28194,15 @@ def cmd_decide(args) -> None:
                          f"(the champion is provisional)")
     elif panel_gaps:
         _clean_reason = "the judge panel is incomplete"
+    elif gate_problems:
+        _clean_reason = "; ".join(gate_problems)
     else:
         _clean_reason = ""
     final_clean = publish_final_clean(ctx, final, not _clean_reason, _clean_reason)
+    if _clean_reason and (ctx.root / FINAL_CLEAN_DIRNAME).exists():
+        print(f"[decide] NOTE: an existing {FINAL_CLEAN_DIRNAME}/ was NOT refreshed by this "
+              f"decision ({_clean_reason}); it is the output of an EARLIER decision -- do not "
+              f"treat it as this run's clean package")
     # `action` (created/unchanged) describes THIS invocation, not the decision:
     # keeping it out of decision.json/report keeps two consecutive `decide` runs
     # byte-identical (apart from their generation timestamp).
@@ -28112,6 +28211,17 @@ def cmd_decide(args) -> None:
                  "evidence_not_verifiable": list(evid_missing),
                  "recovery": advisories["recovery"],
                  "visual_not_verified": advisories["visual_not_verified"]}
+    # CERTIFICATION: ONE verdict that the process exit code, decision.json and
+    # the report all read from (`decide_certification`). Before this block a
+    # failed `decide` wrote a decision.json with no explicit verdict (and could
+    # even publish the clean copy first); a reader could not tell a certified
+    # answer from a refused one without re-deriving the exit conditions.
+    certification = decide_certification(
+        gate_problems, rounds_data, chain_ok, panel_gaps, final_regression, provisional,
+        bool(getattr(args, "require_complete", False)), final["round"], R,
+        final_clean, _clean_reason)
+    cert_blockers = certification["blockers"]
+    cert_notes = certification["notes"]
     decision = {
         "generated": utcnow(),
         "pipeline_root": str(ctx.root),
@@ -28123,6 +28233,7 @@ def cmd_decide(args) -> None:
         "config": ctx.cfg,
         "integrity": integrity,
         "problems": problems,
+        "certification": certification,
         "judge_provider": ctx.state.get("judge_provider") or {},
         "stopped_early": _stopped or None,
         # Gates are reported at the TOP level as well as inside the final round's
@@ -28203,7 +28314,8 @@ def cmd_decide(args) -> None:
                                    win_lengths=win_lengths, final_clean=final_clean_json,
                                    revision_token=win_token, win_format=win_format,
                                    format_gate=bool(getattr(args, "format_gate", False)),
-                                   format_problems=format_problems)
+                                   format_problems=format_problems,
+                                   certification=certification)
     write_text_atomic(ctx.reports_dir / "DECISION_REPORT.md", report)
 
     # Warn about a provisional answer BEFORE anything can be packaged from it.
@@ -28254,6 +28366,12 @@ def cmd_decide(args) -> None:
             print(f"[decide] final package: {dst}")
 
     print()
+    _verdict = ("CERTIFIED" if certification["certified"]
+                else ("PROVISIONAL" if certification["provisional"] and not cert_blockers
+                      else "NOT CERTIFIED"))
+    print(f"[decide] certification: {_verdict}"
+          + (f" -- {'; '.join(cert_blockers)}" if cert_blockers else "")
+          + (f" ({'; '.join(cert_notes)})" if cert_notes else ""))
     for rd in rounds_data:
         st = rd["agg"]["stats"]
         champ = rd["stored"].get("champion")
@@ -28301,34 +28419,18 @@ def cmd_decide(args) -> None:
     # OOXML findings in the final winner) and `--residual-gate` (the pipeline's
     # own unanswered items) both refuse to CERTIFY the decision. Without this
     # the flag only printed "not certified" in the report while exiting 0.
-    gated = []
-    if getattr(args, "format_gate", False) and format_problems:
-        gated += format_problems
-    if getattr(args, "residual_gate", DEFAULT_RESIDUAL_GATE) and residuals.get("gating"):
-        gated += list(residuals["gating"])
-    if gated:
-        print(f"[decide] exit 5: a gate is enabled and {len(gated)} item(s) are in the "
-              f"PROBLEMS list above (the champion is NOT certified; fix them or re-run "
-              f"without the gate to record them as advisory only).")
+    # ONE source of truth: `certification` was computed above (before the clean
+    # copy was published and before decision.json was written), so the file, the
+    # report and this exit code can never disagree.
+    if certification["exit_code"] == 5:
+        print("[decide] exit 5: NOT CERTIFIED -- " + "; ".join(cert_blockers)
+              + " (decision.json's `certification` block records the same blockers; "
+                "the champion is not signed).")
         sys.exit(5)
-    if provisional:
-        if args.require_complete:
-            sys.exit(4)
-    if any(rd["mismatch"] for rd in rounds_data):
-        sys.exit(5)
-    if panel_gaps:
-        print("[decide] exit 5: one or more rounds have an incomplete judge panel and are not "
-              "certified (see the PROBLEMS list and reports/round<r>_panel_gaps.json).")
-        sys.exit(5)
-    if final_regression:
-        print(f"[decide] exit 5: {final_regression}; the final answer is not certified (see the "
-              f"PROBLEMS list).")
-        sys.exit(5)
-    if evid_changed or not pok or perrs:
-        # A decision is only certified when the evidence it rests on still
-        # matches disk: judge inputs, the pristine reference, and the pin/winner
-        # copies. `run` already refuses in the same situations.
-        sys.exit(5)
+    if certification["exit_code"] == 4:
+        print(f"[decide] exit 4: only round {final['round']} of {R} is complete and "
+              f"--require-complete was given; the answer is PROVISIONAL.")
+        sys.exit(4)
     if args.require_clean_captions and not cap_ok:
         # Kept for CLI compatibility only. Caption length is the pipeline's own
         # SUGGESTION (and 0/off by default), handled exactly like the master
