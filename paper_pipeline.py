@@ -19926,8 +19926,11 @@ def _issue_row_key(tier, severity, evidence, check) -> tuple:
 # ---- the OPT-IN structured-location dedup (default OFF) --------------------
 # Cross-sheet matching by free-text evidence was removed because it is a noise
 # source. This optional mode instead matches on a STRUCTURED key the judge rows
-# already carry in prose: the defect CLASS (the normalized check id, e.g. M01),
-# an exact LINE number, and the excerpt (at least DEDUP_MIN_WORDS words) matched
+# already carry in prose: the defect CLASS -- the NORMALIZED CHECK ID the sheet
+# cites, whatever it is (the numeric `M`-ids are examples, never a closed set:
+# `J1`-`J5`, `FMT-*` -> `M20`, the writing-rubric `Q` ids -> `J3`, and any other
+# id is its own class) --, an exact LINE number, and the excerpt (at least
+# DEDUP_MIN_WORDS words) matched
 # FUZZILY (token-set Jaccard >= DEDUP_FUZZY_THRESHOLD). Rows without a parseable
 # line number, or with a shorter excerpt, are NEVER merged (the conservative
 # direction). It is enabled only by `setup --dedup-mode location` /
@@ -19952,7 +19955,13 @@ def dedup_mode_of(ctx=None) -> str:
 
 
 def dedup_class_id(check) -> str:
-    """The defect CLASS used by the dedup key: M01, M02, ... / J3 / other ids."""
+    """The defect CLASS used by the dedup key: the NORMALIZED check id.
+
+    `M01`, `M02`, ... are examples (zero-padded numeric check ids), never a
+    closed set: `J1`-`J5` are their own classes, `FMT-*` normalizes to `M20`,
+    the writing-rubric `Q` ids to `J3`, and any other id the sheet cites is its
+    own class. A row with NO check id has no class and never merges.
+    """
     cid = _norm_check_id(check)
     m = _NUMERIC_CHECK_RE.match(cid)
     if m:
@@ -20011,7 +20020,9 @@ machine-locatable from its `evidence` alone:
     a higher median than the control group`).
 
 Two rows are merged only when their `check` resolves to the same defect class, their line numbers
-are EQUAL, and their quoted excerpts overlap at the word-set level. A row without a parseable
+are EQUAL, and their quoted excerpts overlap at the word-set level. Every frozen check id is its
+own class (M01, M02, ... are examples of the numeric ids, not the whole set: J1-J5, FMT-* and the
+writing-rubric ids all work), so cite the check you actually read. A row without a parseable
 `line N` or with a shorter quote is never merged -- it is counted on its own. This rule only makes
 the rows machine-locatable; it never changes what you report or how it is scored.
 """
@@ -20035,8 +20046,10 @@ def build_issue_census(observations, field_ids, sessions_expected=None,
     mentions each sheet filed, collapsed only per (session, version) -- a judge
     sheet that repeats the same row for several opponent comparisons counts it
     once. The OPT-IN `dedup="location"` mode merges rows ACROSS sheets when the
-    structured key matches: the same defect CLASS (`M01`, `M02`, ... from the
-    normalized check id), the SAME exact line number, and evidence excerpts of
+    structured key matches: the same defect CLASS (the NORMALIZED CHECK ID --
+    `M01`/`M02`/... are examples, never a closed set; `J1`-`J5`, `FMT-*` ->
+    `M20`, the writing-rubric `Q` ids -> `J3`, and any other id is its own
+    class), the SAME exact line number, and evidence excerpts of
     at least DEDUP_MIN_WORDS words whose token-set Jaccard is >=
     dedup_threshold (DEDUP_FUZZY_THRESHOLD when None). Rows without a parseable
     line number or with a shorter excerpt are never merged; every merge is
@@ -22563,10 +22576,13 @@ def _valid_count(v):
 #     IQR/digest stay below it as the deterministic fallbacks, and the
 #     incumbent-retention rule (an exact median/mean/IQR tie keeps the base)
 #     is unchanged.
-# The adaptive defect-prefix tie-break (2026-10-01, second calibration):
-#   * cells are ordered `severity_tier_category`: fatal before critical before
-#     major before minor, tier by tier in the scoring priority order, and within
-#     a (severity, tier) cell `peer` before `own`;
+# The adaptive defect-prefix tie-break (2026-10-01, third calibration):
+#   * cells are ordered `severity_tier_category`: the TOP TWO rungs are MERGED
+#     into one `critical_or_fatal` level (the long-form census still reports
+#     fatal and critical separately -- only this lattice, the prefix walk and
+#     the two matrix files merge them), then major, then minor, tier by tier in
+#     the scoring priority order, and within a (severity-group, tier) cell
+#     `peer` before `own`. 36 cells, not 48;
 #   * walking that order, the counts are accumulated for every ranked version and
 #     the walk STOPS at the first prefix where the version with the FEWEST
 #     defects already carries `tiebreak_defect_floor` of them (default 10, a
@@ -22578,19 +22594,40 @@ def _valid_count(v):
 # order the scoring semantics prioritises grows the evidence until the cleanest
 # candidate has enough counts (or there is nothing left to add), and the single
 # accumulated number is more reliable than the mean of small integer scores.
-SEVERITY_TIE_ORDER = ("fatal", "critical", "major", "minor")
+# WHY the top-rung merge: the tie-break counts every defect as 1, so fatal vs
+# critical changes only WHERE a defect enters the walk, never the compared total
+# once both cells are included; the two are the hardest pair for a judge to
+# separate, and the scoring contract already groups them at the |score| = 4 rung
+# ("a CRITICAL/FATAL row reaches +-4"). No recorded real round has ever filed
+# either rung (0 of 8,541 ledger rows across the ten real roots), so the merge
+# changes no recorded verdict while removing a classification wobble.
+CRITICAL_OR_FATAL = "critical_or_fatal"
+# [(group name, the census severities it sums)], in the tie-break's rung order.
+TIEBREAK_SEVERITY_GROUPS = ((CRITICAL_OR_FATAL, ("critical", "fatal")),
+                            ("major", ("major",)),
+                            ("minor", ("minor",)))
+# Convenience: the flat rung order (kept for callers that only need the names).
+SEVERITY_TIE_ORDER = tuple(name for name, _sev in TIEBREAK_SEVERITY_GROUPS)
 TIEBREAK_SOURCES = ("peer", "own")
 DEFAULT_TIEBREAK_DEFECT_FLOOR = 10
 
 
 def tiebreak_cell_specs() -> list:
-    """[(severity, tier, source)] in the canonical `severity_tier_category` order."""
-    return [(sev, tier, src) for sev in SEVERITY_TIE_ORDER
+    """[(severity group, tier, source)] in the canonical `severity_tier_category` order."""
+    return [(name, tier, src) for name, _sev in TIEBREAK_SEVERITY_GROUPS
             for tier in BASIS_TIERS for src in TIEBREAK_SOURCES]
 
 
 def tiebreak_cell_names() -> list:
-    return [f"{sev}_{tier}_{src}" for sev, tier, src in tiebreak_cell_specs()]
+    return [f"{name}_{tier}_{src}" for name, tier, src in tiebreak_cell_specs()]
+
+
+def tiebreak_group_severities(name) -> tuple:
+    """The census severities one tie-break rung sums (itself for major/minor)."""
+    for group_name, severities in TIEBREAK_SEVERITY_GROUPS:
+        if group_name == str(name):
+            return tuple(severities)
+    return ()
 
 
 def tiebreak_defect_floor_of(ctx) -> int:
@@ -22621,9 +22658,10 @@ def issue_matrix_and_cumulative(census, versions) -> tuple:
     for vid in versions:
         tiers = (_census_for(vid, {"issue_census": census}).get("tiers") or {})
         row = []
-        for sev, tier, src in specs:
-            sev_d = ((tiers.get(tier) or {}).get("severities") or {}).get(sev) or {}
-            row.append(int(sev_d.get(src) or 0))
+        for name, tier, src in specs:
+            sevs = ((tiers.get(tier) or {}).get("severities") or {})
+            row.append(sum(int((sevs.get(sev) or {}).get(src) or 0)
+                           for sev in tiebreak_group_severities(name)))
         matrix[str(vid)] = row
     cumulative = {vid: list(itertools.accumulate(row)) for vid, row in matrix.items()}
     return names, matrix, cumulative
@@ -22833,7 +22871,9 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
         champ_row = base_row
     trace.append(f"ranking key: (-median, then the cumulative defect count over the first "
                  f"{prefix_cells} cell(s) of the canonical severity_tier_category order "
-                 f"(fatal->critical->major->minor, tier order, peer before own; the walk stops "
+                 f"({CRITICAL_OR_FATAL}->major->minor, tier order, peer before own; the top two "
+                 f"rungs are merged for this walk -- the census still reports them separately; "
+                 f"the walk stops "
                  f"when the cleanest ranked version reaches the floor {floor} or all "
                  f"{len(cell_names)} cells are used) -- then -mean (only when the cumulative "
                  f"counts are equal), IQR, digest, id); median/mean/IQR are "
@@ -24407,7 +24447,8 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
     print(_tbl(rows[1:], rows[0]))
     _tb = (sel or {}).get("tiebreak") or {}
     print(f"[run] ranking key: median -> the cumulative defect count over the "
-          f"adaptive severity_tier_category prefix (fatal->critical->major->minor, tier order, "
+          f"adaptive severity_tier_category prefix ({CRITICAL_OR_FATAL}->major->minor -- the top "
+          f"two rungs merged for this walk, the census keeps them apart -- tier order, "
           f"peer before own; used {_tb.get('cells_used', '?')} of {_tb.get('cells_total', '?')} "
           f"cells at floor {_tb.get('floor', '?')}) -> mean (only when the cumulative counts are "
           f"equal) -> IQR -> digest. Columns marked * are reported only, never ranked; the "
@@ -25431,9 +25472,10 @@ def cmd_set_dedup_mode(args) -> None:
 
     "off" (the default) counts every judge sheet's rows as separate mentions --
     the mode every existing root was decided with. "location" additionally
-    merges rows ACROSS sheets on the structured key (defect class + exact line
-    number + >= 7-word excerpt, token-set Jaccard >= DEDUP_FUZZY_THRESHOLD); the
-    change takes effect on the next round decided by `run`, and every merge is
+    merges rows ACROSS sheets on the structured key (the NORMALIZED CHECK ID the
+    sheet cites -- `M01`/`M02`/... are examples, never a closed set -- + exact
+    line number + >= 7-word excerpt, token-set Jaccard >= DEDUP_FUZZY_THRESHOLD);
+    the change takes effect on the next round decided by `run`, and every merge is
     recorded in reports/round<r>_dedup_audit.json.
     """
     ctx = Ctx(_venue_command_root(args, "set-dedup-mode"),
@@ -25443,7 +25485,8 @@ def cmd_set_dedup_mode(args) -> None:
     show = bool(getattr(args, "show", False)) or not mode_arg
     if show:
         print(f"[set-dedup-mode] mode: {dedup_mode_of(ctx)} (default off; 'location' merges "
-              f"rows across sheets on defect class + exact line number + a >= "
+              f"rows across sheets on the normalized check id (any id works; M01/M02 are "
+              f"examples) + exact line number + a >= "
               f"{DEDUP_MIN_WORDS}-word excerpt with token-set Jaccard >= "
               f"{DEDUP_FUZZY_THRESHOLD:g})")
         return
@@ -26247,7 +26290,9 @@ def _write_issue_matrix_file(path: Path, names: list, rows: list) -> Path:
 def write_round_issue_matrix(ctx: Ctx, r: int, agg: dict = None) -> Path:
     """`reports/round<r>_issue_matrix.csv` (fileA): rows = versions, columns =
     the severity_tier_category cells in canonical order, values = the reported
-    defect counts per cell (peer/own as separate cells)."""
+    defect counts per cell (peer/own as separate cells). The lattice MERGES the
+    top two rungs into `critical_or_fatal` (36 cells: it is the tie-break's own
+    lattice, not the long-form census, which keeps all four severities)."""
     r, agg = _issue_file_agg(ctx, r, agg)
     names, rows = issue_matrix_rows(ctx, r, agg)
     return _write_issue_matrix_file(ctx.reports_dir / f"round{r}_issue_matrix.csv", names, rows)
@@ -26385,9 +26430,12 @@ def score_model_doc(ctx=None) -> dict:
                              "accepted with a warning and counted as uncalibrated; they are "
                              "never silently mixed into a calibrated panel"},
         "ranking": "median of the flat directed-score list, then the cumulative reported "
-                   "defect count over the adaptive severity_tier_category prefix (fatal -> "
-                   "critical -> major -> minor, tier by tier in the scoring priority order, peer "
-                   "before own; the walk stops when the cleanest ranked version reaches the "
+                   "defect count over the adaptive severity_tier_category prefix "
+                   "(critical_or_fatal -> major -> minor, tier by tier in the scoring priority "
+                   "order, peer before own; the top two rungs are MERGED for this walk -- a "
+                   "defect counts the same wherever it enters the walk, and the long-form "
+                   "census still reports fatal and critical separately; the walk stops when the "
+                   "cleanest ranked version reaches the "
                    "`tiebreak_defect_floor` or every cell is used), then the arithmetic mean "
                    "(only when the cumulative counts are equal), the IQR and the content digest",
         "cross_round_comparability": "per-round champion statistics come from different panels "
@@ -26404,14 +26452,19 @@ def score_model_doc(ctx=None) -> dict:
         "dedup_mode": dedup_mode_of(ctx),
         "tiebreaks": ["-median",
                       "cumulative defect count over the adaptive severity_tier_category prefix "
-                      "(fatal->critical->major->minor, tier order, peer then own; the walk stops "
+                      "(critical_or_fatal->major->minor -- the top two rungs merged -- tier order, "
+                      "peer then own; the walk stops "
                       "when the cleanest ranked version reaches `tiebreak_defect_floor` or every "
                       "cell is used), ascending",
                       "-mean (only when the cumulative counts are equal)", "IQR", "digest", "id"],
         "tiebreak_notes": "median/mean/IQR are PANEL statistics (verifiable); the cumulative "
                           "counts come from the panel's own ledger rows: each cell is the "
                           "count of one (severity, tier, source) combination "
-                          "(reports/round<r>_issue_matrix.csv), the cells are accumulated in the "
+                          "(reports/round<r>_issue_matrix.csv), with the TOP TWO RUNGS "
+                          "MERGED into `critical_or_fatal` (a count weights every defect "
+                          "equally, so fatal and critical are summed per tier and source; the "
+                          "long-form census still reports them separately), the cells are "
+                          "accumulated in the "
                           "canonical severity_tier_category order (reports/round<r>_"
                           "issue_cumulative.csv), and the walk stops at the first prefix where "
                           "the version with the FEWEST defects has "
@@ -26421,8 +26474,10 @@ def score_model_doc(ctx=None) -> dict:
                           "`dedup_mode` off (the default) performs NO cross-sheet matching (a "
                           "judge sheet that repeats a row in the same sheet counts it once, a row "
                           "two sheets both filed counts twice); the opt-in `dedup_mode` location "
-                          "merges rows across sheets ONLY on the structured key (same defect "
-                          "class, same exact line number, both excerpts >= DEDUP_MIN_WORDS words "
+                          "merges rows across sheets ONLY on the structured key (the same "
+                          "defect class -- the NORMALIZED CHECK ID, whatever the sheet cites, "
+                          "e.g. M01/M02/J3/FMT-*, never a closed set --, the same exact line "
+                          "number, both excerpts >= DEDUP_MIN_WORDS words "
                           "with token-set Jaccard >= DEDUP_FUZZY_THRESHOLD), never merges rows "
                           "without a parseable line or a short excerpt, and records every merge "
                           "in reports/round<r>_dedup_audit.json; vs_base is reported (the incumbent margin a human reads) "
@@ -26981,9 +27036,11 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
                      "by itself: it answers \"what is left and where\", and the selection "
                      "reads it through two sibling matrices: "
                      f"`reports/round{r}_issue_matrix.csv` (rows = versions, columns = the "
-                     "canonical severity_tier_category cells fatal_correctness_peer, "
-                     "fatal_correctness_own, ..., minor_formatting_own; values = the "
-                     "reported counts) and "
+                     "canonical severity_tier_category cells critical_or_fatal_correctness_peer, "
+                     "critical_or_fatal_correctness_own, ..., minor_formatting_own; the TOP TWO "
+                     "rungs are merged into `critical_or_fatal` for this lattice and the walk "
+                     "(the long-form census below still reports fatal and critical separately); "
+                     "values = the reported counts) and "
                      f"`reports/round{r}_issue_cumulative.csv` (the PREFIX SUMS of the same "
                      "rows and columns). The selection accumulates the cells in that order "
                      "and stops at the first prefix where the cleanest ranked version reaches "
@@ -27146,7 +27203,11 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
              "IQR -> digest`: the median is coarse on a "
              "-4..+4 integer scale, so a median tie is first separated by the round's OWN ISSUE "
              "CENSUS, read as the canonical severity_tier_category order "
-             "(fatal_correctness_peer, fatal_correctness_own, ..., minor_formatting_own): the "
+             f"({CRITICAL_OR_FATAL}_correctness_peer, {CRITICAL_OR_FATAL}_correctness_own, ..., "
+             "minor_formatting_own; the top two rungs are MERGED into "
+             f"`{CRITICAL_OR_FATAL}` -- the count weights every defect equally, so fatal vs "
+             "critical only moves where a defect enters the walk; the long-form census keeps "
+             "them apart): the "
              "cells are accumulated for every ranked version and the walk STOPS at the first "
              f"prefix where the version with the FEWEST defects reaches the configured floor "
              f"(default {DEFAULT_TIEBREAK_DEFECT_FLOOR} defects, "
@@ -29515,7 +29576,9 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--dedup-mode", default=None, metavar="MODE",
                     help="off (default) counts every judge sheet's issue rows as separate "
                          "mentions; location additionally merges rows ACROSS sheets when they "
-                         "carry the same defect class (M01, M02, ...), the SAME exact line "
+                         "carry the same defect class (the NORMALIZED CHECK ID the sheet cites "
+                         "-- M01/M02/... are examples, never a closed set: J1-J5, FMT-* (-> M20), "
+                         "the writing-rubric Q ids (-> J3) and any other id all work), the SAME exact line "
                          "number and >= 7-word excerpts whose token-set Jaccard is >= 0.8. "
                          "Only rows with both a parseable line number and a long enough excerpt "
                          "are ever merged; every merge is recorded in "
@@ -29565,7 +29628,8 @@ def build_parser() -> argparse.ArgumentParser:
                     metavar="N",
                     help=f"the adaptive defect-prefix tie-break's floor (default "
                          f"{DEFAULT_TIEBREAK_DEFECT_FLOOR}): walk the canonical "
-                         f"severity_tier_category order (fatal->critical->major->minor, tier by "
+                         f"severity_tier_category order (critical_or_fatal->major->minor -- the "
+                         f"top two rungs are merged for this walk -- tier by "
                          f"tier in the scoring priority order, peer before own) accumulating "
                          f"each version's reported defect counts, and STOP at the first "
                          f"prefix where the version with the FEWEST defects reaches N (or when "

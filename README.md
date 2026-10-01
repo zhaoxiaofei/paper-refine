@@ -1141,8 +1141,12 @@ The artifact *process* is shared as well; the differences are deliberate:
 **How a round is decided (one ranking key, every arm on the same terms):**
 `-median`, then the **cumulative defect count over the adaptive
 severity_tier_category prefix** (the canonical cell order is
-`fatal_correctness_peer, fatal_correctness_own, …, minor_formatting_own`: walk
-the cells accumulating every ranked version's reported defect counts, and STOP
+`critical_or_fatal_correctness_peer, critical_or_fatal_correctness_own, …,
+minor_formatting_own`: the lattice merges the TOP TWO rungs into one
+`critical_or_fatal` level -- 36 cells -- because the count weights every defect
+equally, so fatal vs critical only moves where a defect enters the walk; the
+long-form census still reports them separately. Walk the cells accumulating
+every ranked version's reported defect counts, and STOP
 at the first prefix where the version with the FEWEST defects reaches the
 configured floor -- default 10, `setup --tiebreak-defect-floor N` /
 `set-tiebreak-defect-floor N` -- or when every cell is used; the cumulative
@@ -1154,7 +1158,9 @@ repeated row inside one sheet counts once), and the peer/own split plus the
 exposure-normalized rates stay in the census for inspection. The OPT-IN
 `setup --dedup-mode location` / `set-dedup-mode location` additionally merges
 rows ACROSS sheets, but only on a structured key the judge can state exactly:
-the same defect class (the normalized check id, e.g. `M01`, `M02`), the SAME
+the same defect class (the NORMALIZED CHECK ID the sheet cites -- `M01`, `M02`,
+… are examples, never a closed set: `J1`-`J5`, `FMT-*` (→ `M20`), the
+writing-rubric `Q` ids (→ `J3`) and any other id all work), the SAME
 exact line number parsed from `line N`, and excerpts of at least 7 words whose
 token-set Jaccard is >= 0.8. A row without a parseable line number or with a
 shorter excerpt is never merged, merges never cross the own/peer boundary (each
@@ -1202,7 +1208,8 @@ the two sources have different depth -- and normalizes by the sessions that
 could mention the version, which is stable as the field size changes. Since the
 2026-10-01 calibration it is also the selection's **defect-prefix tie-break**:
 after the median, `run` accumulates the reported defect counts over the
-canonical severity_tier_category order and stops at the first prefix where the
+canonical severity_tier_category order (the lattice merges the top two rungs
+into `critical_or_fatal`, so it is 36 cells, not 48) and stops at the first prefix where the
 cleanest ranked version reaches the configured floor (default 10 defects), or
 when every cell is used; the cumulative count at that prefix separates versions
 whose panel median is tied. A per-cell count is never a rung of its own: with

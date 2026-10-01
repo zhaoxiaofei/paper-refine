@@ -158,20 +158,25 @@ def test_census_attribution():
     # canonical severity_tier_category order and the prefix sums are accumulated
     # per version.
     names, matrix, cumulative = np.issue_matrix_and_cumulative(census, FIELD)
-    check("the tie-break cells are severity_tier_category (fatal first, minor last, peer/own)",
-          names[:4] == ["fatal_correctness_peer", "fatal_correctness_own",
-                        "fatal_preservation_peer", "fatal_preservation_own"]
+    check("the tie-break cells are severity_tier_category (critical_or_fatal first, minor "
+          "last, peer/own; the top two rungs merged into one level)",
+          names[:4] == ["critical_or_fatal_correctness_peer", "critical_or_fatal_correctness_own",
+                        "critical_or_fatal_preservation_peer", "critical_or_fatal_preservation_own"]
           and names[-1] == "minor_formatting_own"
-          and len(names) == len(np.SEVERITY_TIE_ORDER) * len(np.BASIS_TIERS) * 2,
+          and len(names) == len(np.TIEBREAK_SEVERITY_GROUPS) * len(np.BASIS_TIERS) * 2 == 36,
           str(names[:4] + names[-2:]))
     check("the cumulative matrix is the prefix sum of the non-cumulative matrix",
           all(list(itertools.accumulate(matrix[v])) == list(cumulative[v]) for v in FIELD)
           and cumulative["orig"][-1] == orig["total"],
           f"orig last={cumulative['orig'][-1]} total={orig['total']}")
-    check("a fatal_correctness_peer cell reads the census's peer count",
+    check("the critical_or_fatal cell SUMS the census's fatal and critical peer counts",
           matrix["orig"][0] ==
-          orig["tiers"]["correctness"]["severities"]["fatal"]["peer"],
-          f"{matrix['orig'][0]}")
+          (orig["tiers"]["correctness"]["severities"]["fatal"]["peer"]
+           + orig["tiers"]["correctness"]["severities"]["critical"]["peer"])
+          and matrix["orig"][1] ==
+          (orig["tiers"]["correctness"]["severities"]["fatal"]["own"]
+           + orig["tiers"]["correctness"]["severities"]["critical"]["own"]),
+          f"{matrix['orig'][:2]}")
     check("w1: the same row repeated across one session's comparisons counts once",
           w1["total"] == 1 and w1["tiers"]["completeness"]["severities"]["minor"]["own"] == 1
           and w1["own"] == 1 and w1["peer"] == 0, str(w1))
@@ -447,6 +452,55 @@ def test_location_dedup_optin(tmp):
           str(rows_c[0]))
 
 
+def test_critical_or_fatal_merge_and_any_class(tmp):
+    print()
+    print("== the tie-break merges fatal+critical; the dedup class is ANY check id ==")
+    # (a) The tie-break lattice merges the top two rungs: one fatal and one
+    # critical row of the same version land in ONE critical_or_fatal cell, while
+    # the long-form census still reports the two severities separately.
+    fatal_row = row("correctness", "fatal", "line 12: the shipped artifact cannot be "
+                    "opened at all by the reader", "M1")
+    crit_row = row("correctness", "critical", "line 90: the conclusion contradicts the "
+                   "reported table values everywhere", "M1")
+    cen = np.build_issue_census(
+        [("s1", "v1", "v2", comp("v2", 0, introduced=[fatal_row, crit_row]))],
+        ["v1", "v2"])
+    sev = cen["v1"]["tiers"]["correctness"]["severities"]
+    check("the long-form census keeps fatal and critical apart",
+          sev["fatal"]["own"] == 1 and sev["critical"]["own"] == 1,
+          f"{sev['fatal']['own']}/{sev['critical']['own']}")
+    names, matrix, cumulative = np.issue_matrix_and_cumulative(cen, ["v1", "v2"])
+    check("the critical_or_fatal lattice cell sums both rungs per tier and source",
+          matrix["v1"][1] == 2 and matrix["v1"][0] == 0
+          and cumulative["v1"][1] == 2,
+          f"cells={matrix['v1'][:2]}")
+    check("the lattice is 36 cells and the merged rung leads it",
+          len(names) == 36 and names[0] == "critical_or_fatal_correctness_peer"
+          and np.TIEBREAK_SEVERITY_GROUPS[0][1] == ("critical", "fatal"),
+          str(names[:2]))
+    # (b) The dedup CLASS is the normalized check id, whatever it is: M01/M02 are
+    # examples, never a closed set. J3-J3 and Q5-J3 (both -> J3) and
+    # FMT-*/M20 pairs merge; J3 vs J4 still does not.
+    ev = ("line 33: the abstract states twelve patients while the table lists thirteen "
+          "enrolled subjects")
+    def two_checks(c1, c2):
+        return np.build_issue_census(
+            [("s1", "v1", "p1", comp("v1", 0, introduced=[row("writing", "minor", ev, c1)])),
+             ("s2", "v1", "p2", comp("v1", 0, introduced=[row("writing", "minor", ev, c2)]))],
+            ["v1"], dedup="location")["v1"]["total"]
+    check("two J-class rows merge on the same class (J3/J3)",
+          two_checks("J3", "J3") == 1, str(two_checks("J3", "J3")))
+    check("a writing-rubric Q id normalizes onto its owner and merges (Q5/J3)",
+          two_checks("Q5", "J3") == 1 and np.dedup_class_id("Q7") == np.WRITING_RUBRIC_CHECK,
+          str(two_checks("Q5", "J3")))
+    check("a formatting rule id normalizes onto its owner and merges (FMT-* / M20)",
+          two_checks("FMT-T3f", "M20") == 1
+          and np.dedup_class_id("fmt-t3f") == "M20",
+          str(two_checks("FMT-T3f", "M20")))
+    check("two DIFFERENT non-M classes still do not merge (J3/J4)",
+          two_checks("J3", "J4") == 2, str(two_checks("J3", "J4")))
+
+
 def test_dedup_mode_cli(tmp):
     print()
     print("== the dedup mode is a CLI parameter (setup + set-dedup-mode) ==")
@@ -512,6 +566,7 @@ def main() -> int:
     test_direction_flips(tmp)
     test_census_file_and_table(tmp, ctx, agg)
     test_location_dedup_optin(tmp)
+    test_critical_or_fatal_merge_and_any_class(tmp)
     test_dedup_mode_cli(tmp)
     print()
     if FAILS:

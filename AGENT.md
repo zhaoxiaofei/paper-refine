@@ -205,8 +205,10 @@ touching this area:
 * **The champion selection key is `median -> cumulative defect count over the
   adaptive severity_tier_category prefix -> mean -> IQR -> digest`**
   (`champion_sort_key`, `tiebreak_cell_names`, `tiebreak_prefix_cells`): the
-  canonical cell order is fatal/critical/major/minor × the tier priority order ×
-  peer/own; the walk stops at the first prefix where the cleanest ranked version
+  canonical cell order is `critical_or_fatal` (the TOP TWO rungs merged for this
+  walk -- 36 cells; the long-form census still reports fatal and critical
+  separately) × the tier priority order ×
+  peer/own, then major, then minor; the walk stops at the first prefix where the cleanest ranked version
   reaches `tiebreak_defect_floor` (default 10, `setup
   --tiebreak-defect-floor N` / `set-tiebreak-defect-floor N`) or when every cell
   is used, and the cumulative count at that prefix breaks a median tie; the mean
@@ -214,8 +216,11 @@ touching this area:
   is performed by default (`dedup_mode` `off`; mentions are per judge sheet,
   collapsed only per session+version). The OPT-IN `dedup_mode` `location`
   (`setup --dedup-mode location` / `set-dedup-mode location`) merges rows across
-  sheets only on the structured key -- same defect class, SAME exact line number
-  parsed from `line N`, and >= 7-word excerpts with token-set Jaccard >= 0.8 --
+  sheets only on the structured key -- the same defect class defined as the
+  NORMALIZED CHECK ID the sheet cites (M01/M02/... are examples, never a closed
+  set: J1-J5, FMT-* -> M20, the writing-rubric Q ids -> J3, any other id), the
+  SAME exact line number parsed from `line N`, and >= 7-word excerpts with
+  token-set Jaccard >= 0.8 --
   never merges a row without a parseable line or with a short excerpt, never
   crosses the own/peer boundary, and records every merge in
   `reports/round<r>_dedup_audit.json`. The self-reported

@@ -230,15 +230,18 @@ check("B2 the ranking rows carry the prefix total and the cell count",
       all("defect_prefix_total" in r and "tiebreak_prefix_cells" in r
           for r in sel_b2b["ranking"]))
 
-# The canonical cell order is severity_tier_category: fatal, critical, major,
-# minor; tier in the scoring priority order; peer before own.
+# The canonical cell order is severity_tier_category: critical_or_fatal (the
+# TOP TWO rungs merged for the walk -- the census keeps them apart), major,
+# minor; tier in the scoring priority order; peer before own. 36 cells.
 _cells = np.tiebreak_cell_names()
-check("B2 the tie-break cells follow severity_tier_category (fatal first, minor last, peer "
-      "before own)",
-      _cells[:4] == ["fatal_correctness_peer", "fatal_correctness_own",
-                     "fatal_preservation_peer", "fatal_preservation_own"]
+check("B2 the tie-break cells follow severity_tier_category (critical_or_fatal first, minor "
+      "last, peer before own; the top two rungs merged)",
+      _cells[:4] == ["critical_or_fatal_correctness_peer", "critical_or_fatal_correctness_own",
+                     "critical_or_fatal_preservation_peer", "critical_or_fatal_preservation_own"]
       and _cells[-1] == "minor_formatting_own"
-      and len(_cells) == len(np.SEVERITY_TIE_ORDER) * len(np.BASIS_TIERS) * 2,
+      and len(_cells) == len(np.TIEBREAK_SEVERITY_GROUPS) * len(np.BASIS_TIERS) * 2 == 36
+      and np.tiebreak_group_severities(np.CRITICAL_OR_FATAL) == ("critical", "fatal")
+      and np.tiebreak_group_severities("major") == ("major",),
       str(_cells[:4] + _cells[-2:]))
 # The adaptive stop: keep adding cells until the version with the FEWEST defects
 # reaches the floor, or every cell is used.
@@ -482,7 +485,8 @@ check("D4 the score model documents the contract, the rules and the tie-breaks",
       and sm.get("tiebreaks") == [
           "-median",
           "cumulative defect count over the adaptive severity_tier_category prefix "
-          "(fatal->critical->major->minor, tier order, peer then own; the walk stops "
+          "(critical_or_fatal->major->minor -- the top two rungs merged -- tier order, "
+          "peer then own; the walk stops "
           "when the cleanest ranked version reaches `tiebreak_defect_floor` or every "
           "cell is used), ascending",
           "-mean (only when the cumulative counts are equal)", "IQR", "digest", "id"]

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.19 — the top two severity rungs merged in the tie-break lattice; location dedup classes are open-ended (2026-10-01)
+
+- **The adaptive defect-prefix walk now merges `fatal` and `critical` into one
+  `critical_or_fatal` level**, so the `severity_tier_category` lattice is 36
+  cells (`critical_or_fatal` -> `major` -> `minor`, tier in the scoring priority
+  order, peer before own) instead of 48. The compared number is an unweighted
+  count, so fatal vs critical only moved WHERE a defect entered the walk; the
+  two are the hardest pair for a judge to separate, the scoring contract
+  already groups them at the `|score| = 4` rung, and no recorded real round has
+  ever filed either rung (0 of 8,541 ledger rows across the ten real roots), so
+  the merge changes no recorded verdict while removing a classification wobble.
+  The long-form `round<r>_issue_census.csv` still reports all FOUR severities
+  (audit fidelity); only the matrix/cumulative files and the prefix walk merge
+  them, and the fileA/cumulative columns are now
+  `critical_or_fatal_<tier>_<peer|own>`.
+- **The structured-location dedup's defect class is the NORMALIZED CHECK ID,
+  whatever the sheet cites**: `M01`, `M02`, ... are examples, never a closed
+  set. `J1`-`J5` are their own classes, `FMT-*` normalizes to `M20`, the
+  writing-rubric `Q` ids to `J3`, and any other id is its own class; a row with
+  no check id still never merges. The judge-side ISSUE-LOCATION RULE says the
+  same, so nobody reads it as "numeric ids only".
+
 ## 0.18 — the OPT-IN structured-location dedup (2026-10-01)
 
 Cross-sheet deduplication stays OFF by default; the new mode is a prototype the
@@ -9,7 +31,8 @@ operator must switch on:
   `set-dedup-mode off|location [--show] [--force]` on an existing root. `off`
   (the default) counts every judge sheet's row as a mention, exactly as 0.17
   did; `location` merges rows ACROSS sheets when BOTH rows carry the same defect
-  class (the normalized check id, `M01`/`M02`/… — `FMT-*` normalizes to `M20`),
+  class (the normalized check id; `M01`/`M02`/… are examples, and `FMT-*`
+  normalizes to `M20`),
   the SAME exact line number parsed as `line N`, and excerpts of at least 7
   words whose token-SET Jaccard is >= 0.8 (`DEDUP_MIN_WORDS`,
   `DEDUP_FUZZY_THRESHOLD`).
