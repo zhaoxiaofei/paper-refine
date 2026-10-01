@@ -202,17 +202,19 @@ touching this area:
   ledger.md, this file's sibling pipeline source); change all of them together
   or none. `writing` above `formatting` is deliberate: layout is pre-normalized
   before the judge sees the view.
-* **The champion selection key is `median -> cumulative defect count over the
-  adaptive severity_tier_category prefix -> mean -> IQR -> digest`**
+* **The champion selection key is `cumulative defect count over the adaptive
+  severity_tier_category prefix -> median -> mean -> IQR -> digest`**
   (`champion_sort_key`, `tiebreak_cell_names`, `tiebreak_prefix_cells`): the
-  canonical cell order is `critical_or_fatal` (the TOP TWO rungs merged for this
-  walk -- 36 cells; the long-form census still reports fatal and critical
-  separately) × the tier priority order ×
-  peer/own, then major, then minor; the walk stops at the first prefix where the cleanest ranked version
+  DEFECT PREFIX LEADS the key; the canonical cell order is fatal, critical,
+  major, minor -- the SAME four severity rungs the long-form census, the judge
+  contract and the score model use (48 cells) -- × the tier priority order ×
+  peer/own; the walk stops at the first prefix where the cleanest ranked version
   reaches `tiebreak_defect_floor` (default 10, `setup
   --tiebreak-defect-floor N` / `set-tiebreak-defect-floor N`) or when every cell
-  is used, and the cumulative count at that prefix breaks a median tie; the mean
-  is consulted only when those counts are equal. NO cross-session deduplication
+  is used; the cumulative count at that prefix is the leading comparator, and
+  the panel median (then the mean, the IQR and the digest) is the tie-break
+  below it. The incumbent-retention rule OVERRIDES the prefix on an exact
+  (median, mean, IQR) tie and keeps the base. NO cross-session deduplication
   is performed by default (`dedup_mode` `off`; mentions are per judge sheet,
   collapsed only per session+version). The OPT-IN `dedup_mode` `location`
   (`setup --dedup-mode location` / `set-dedup-mode location`) merges rows across
@@ -225,8 +227,7 @@ touching this area:
   crosses the own/peer boundary, and records every merge in
   `reports/round<r>_dedup_audit.json`. The self-reported
   `critical_remaining`/`writing_remaining` counts are reported and cross-checked
-  but never rank; the incumbent-retention rule on an exact median/mean/IQR tie is
-  unchanged.
+  but never rank.
   `.paper_test/test_grading_scheme.py` (B2) and `test_issue_census.py` pin the
   cell order, the adaptive stop, the files and the rates.
 
@@ -241,3 +242,12 @@ touching this area:
 * The historical **triage ledgers** (`NBT_*_LEDGER.md`) were removed from this
   repository on request; they remain in the git history if an old decision needs
   its evidence (the per-run audit reports a stage writes are unaffected).
+* The **defect prefix leads the ranking**, and it is a REPORTED count: a panel
+  that under-reports defects (or a version whose sheets filed few ledger rows)
+  lowers its own prefix. The panel contract makes a sheet that contradicts its
+  own ledger FAIL, and a complete panel is required for eligibility, but neither
+  can force a judge to file a row it did not find. The median/mean/IQR below the
+  prefix are the cross-check a human reads, and the incumbent rule keeps the
+  base on an exact panel-statistic tie. Keep this in mind when comparing
+  prefixes across ROUNDS (different panels) -- within one round every ranked
+  version is read by the same-sized panel, which is what the prefix assumes.

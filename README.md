@@ -1,12 +1,5 @@
 # Round-based revision pipeline (any venue or journal)
 
-[![One revision round: the read-only manuscript, the round base, the directed-evolution and large-scale-mutation arms, the cross-over integration and the blind judge panel](media/paper-refine-one-revision-round.png)](media/paper-refine-one-revision-round.png)
-
-*One revision round — the read-only manuscript, the round's base `a1`, the
-directed-evolution (review/audit/revise) and large-scale-mutation (rewrite) arms,
-the cross-over integration, and the blind judge panel that pins the champion by
-digest ([PNG](media/paper-refine-one-revision-round.png)).*
-
 `paper_pipeline.py` drives a **round-based, content-addressed revision loop** for a
 manuscript package submitted to **any venue or journal**. The submission rules
 the stages enforce come from a configurable **venue profile** (`set-venue`,
@@ -18,33 +11,35 @@ them blindly against each other, pins the champion by content digest, and feeds
 that champion into the next round. `decide` publishes the final decision report
 and a clean, ready-to-use package.
 
-The repository also carries the two companion tools the pipeline uses:
+## Two ways to run it
 
-* **`paper_docx_format.py`** — the code-side OOXML style/formatting scanner and
-  normalizer (blank pages, running head on the title page, legend spacing,
-  heading style drift, unintended italics, URL/email treatment, quotation
-  marks, em-dash density).
-* **`paper_redlines_adapter.py`** — the tracked-changes bridge to
-  `python-redlines[docxodus]` (or `docx-trackdiff`).
-
-## Requirements
-
-* Python 3.9+ (the pipeline and both companion tools are standard-library only).
-* An agent CLI for the stage sessions: `codex` (default), `claude`, or a custom
-  command via `--agent-cmd`; `--agent manual` stages prompts for a human.
-* Optional, probed at runtime and never required: the `docx` CLI (read/render/
-  diff/validate), a .docx→PDF converter (the `docx-converter` MCP tool,
-  `docx2pdf.sh` + Word, `docx render`, LibreOffice, `pandoc`), `pdftotext`/
-  `pdftoppm`, and the `zot` CLI for read-only Zotero reference resolution.
+* **The agent rounds (the default).** Point `setup` at a pristine submission
+  directory and run; the pipeline rewrites, reviews, revises, integrates and
+  judges its own candidate rounds, pinning a champion after every round. No
+  external material is required.
+* **Against a real journal decision.** Put the decision letter and the reviewer
+  reports (plus any previous response to reviewers) in the submission's
+  `human_review_feedback/` directory, then pick one of four workflows with
+  `setup --revision-mode …` (or `set-revision-mode …` on an existing root):
+  **1** `transfer` — revise for a NEW journal; no response to reviewers; rewrites
+  allowed. **2** `resubmit` — a new submission to the SAME journal; a
+  point-by-point response is required; rewrites allowed. **3** `major` — a major
+  revision at the same journal; concern-scoped edits ONLY, with the response;
+  no rewrites and no general review-audit-revise. **4** `minor` — the same, for
+  a minor revision.
 
 ## Quick start
 
 ```bash
 # 1. create a pipeline root from the pristine submission directory
 python paper_pipeline.py setup --source /path/to/non_revised --root ./paper_rounds
-#    ... for another venue/journal:
+#    another venue/journal:
 python paper_pipeline.py setup --source /path/to/non_revised --root ./paper_rounds \
         --venue generic --journal "Journal Name"
+#    revise against a REAL editor/reviewer decision (the feedback lives in the
+#    source's human_review_feedback/ directory; pick one of the four modes):
+python paper_pipeline.py setup --source /path/to/non_revised --root ./paper_rounds \
+        --revision-mode transfer --journal "Frontiers in Immunology"
 
 # 2. run all rounds and decide (or run + decide as separate steps)
 python paper_pipeline.py run-decide --root ./paper_rounds
@@ -57,6 +52,73 @@ python paper_pipeline.py run-decide --root ./paper_rounds
 #   ./paper_rounds/round<r>_winner/          the champion of each round
 #   ./paper_rounds/final_clean_version/      the champion, renamed for the next run
 ```
+
+`status --root ./paper_rounds` prints what the root is configured to do at any
+time, and `--help` lists every command and flag.
+
+## What you get
+
+Everything lives under the root you passed to `setup`:
+
+| path | what it is |
+| --- | --- |
+| `reports/DECISION_REPORT.md` | the human-readable decision: each round's ranked table, the champion, the issue census, and every reported-only signal |
+| `reports/decision.json` | the same decision, machine-readable; its `score_model_doc` defines the scoring and ranking contract |
+| `reports/round<r>_raw_scores.csv` | every directed score the panel produced, with the sheet it came from |
+| `reports/round<r>_issue_census.csv` | how many defects of each tier and severity every version carries (`own` vs `peer`), plus the sibling matrices the ranking walks |
+| `round<r>_winner/` | the champion of each round (content-addressed: identical content is never re-run) |
+| `final_clean_version/` | the final champion, ready to be used as the next run's `--source` |
+
+The selection key is one ordered line: the round's reported **defect prefix**
+(fewer defects wins) → **median** → **mean** → **IQR** → content **digest**. The
+prefix comes from the blind panel's own issue ledger; the panel statistics sit
+below it, and an exact (median, mean, IQR) tie keeps the incumbent base. See
+*How a round is decided* below for the rationale and the gates.
+
+## Requirements
+
+* Python 3.9+ (the pipeline and both companion tools are standard-library only).
+* An agent CLI for the stage sessions: `codex` (default), `claude`, or a custom
+  command via `--agent-cmd`; `--agent manual` stages prompts for a human.
+* Optional, probed at runtime and never required: the `docx` CLI (read/render/
+  diff/validate), a .docx→PDF converter (the `docx-converter` MCP tool,
+  `docx2pdf.sh` + Word, `docx render`, LibreOffice, `pandoc`), `pdftotext`/
+  `pdftoppm`, and the `zot` CLI for read-only Zotero reference resolution.
+
+## Evidence is not submission text: `raw_data/` and `human_review_feedback/`
+
+A submission directory may carry two **read-only evidence areas** beside its
+manuscript files:
+
+* **`raw_data/`** — factual evidence (measurements, tables, figures' source
+  data, protocols, notes). The stages READ it to check facts; it is never
+  treated as the manuscript, a cover letter or supplementary information, and it
+  is never shipped in the published package.
+* **`human_review_feedback/`** — the REAL editors'/reviewers' comments (the
+  decision letter, the reviewer reports, a previous response to reviewers). The
+  four journal revision modes read it, and the blind judges may read both
+  evidence areas (`evidence/raw_data/…`, `evidence/human_review_feedback/…`)
+  because correctness and "were the humans' concerns addressed" cannot be
+  judged without them. It is never copied into the submission package either.
+
+Both areas are hash-pinned, and any stage write into them is restored and
+reported.
+
+[![One revision round: the read-only manuscript, the round base, the directed-evolution and large-scale-mutation arms, the cross-over integration and the blind judge panel](media/paper-refine-one-revision-round.png)](media/paper-refine-one-revision-round.png)
+
+*One revision round — the read-only manuscript, the round's base `a1`, the
+directed-evolution (review/audit/revise) and large-scale-mutation (rewrite) arms,
+the cross-over integration, and the blind judge panel that pins the champion by
+digest ([PNG](media/paper-refine-one-revision-round.png)).*
+
+The repository also carries the two companion tools the pipeline uses:
+
+* **`paper_docx_format.py`** — the code-side OOXML style/formatting scanner and
+  normalizer (blank pages, running head on the title page, legend spacing,
+  heading style drift, unintended italics, URL/email treatment, quotation
+  marks, em-dash density).
+* **`paper_redlines_adapter.py`** — the tracked-changes bridge to
+  `python-redlines[docxodus]` (or `docx-trackdiff`).
 
 ## Venues and journals
 
@@ -1139,20 +1201,22 @@ The artifact *process* is shared as well; the differences are deliberate:
 | `scores.json` (signed comparison items with class + severity) | judge | only the panel scores |
 
 **How a round is decided (one ranking key, every arm on the same terms):**
-`-median`, then the **cumulative defect count over the adaptive
+the **cumulative defect count over the adaptive
 severity_tier_category prefix** (the canonical cell order is
-`critical_or_fatal_correctness_peer, critical_or_fatal_correctness_own, …,
-minor_formatting_own`: the lattice merges the TOP TWO rungs into one
-`critical_or_fatal` level -- 36 cells -- because the count weights every defect
-equally, so fatal vs critical only moves where a defect enters the walk; the
-long-form census still reports them separately. Walk the cells accumulating
+`fatal_correctness_peer, fatal_correctness_own, …,
+minor_formatting_own`: fatal, critical, major and minor -- the SAME four severity
+rungs the census, the judge contract and the score model use (48 cells). Walk
+the cells accumulating
 every ranked version's reported defect counts, and STOP
 at the first prefix where the version with the FEWEST defects reaches the
 configured floor -- default 10, `setup --tiebreak-defect-floor N` /
 `set-tiebreak-defect-floor N` -- or when every cell is used; the cumulative
-count at that prefix breaks the median tie), then `-mean` (only when those
-cumulative counts are equal), `IQR`, the provenance-free content digest and only
-after that the run id. No cross-session deduplication is applied by default
+count at that prefix LEADS the ranking -- the number of defects the panel
+attributed to a version is the most direct improvement signal, while the flat
+median is coarse on a -4..+4 integer scale), then `-median`, then `-mean`, `IQR`,
+the provenance-free content digest and only after that the run id. An exact
+(median, mean, IQR) tie still keeps the incumbent base -- that rule overrides
+the prefix. No cross-session deduplication is applied by default
 (`dedup_mode` `off`): the counts are the mentions each judge sheet filed (a
 repeated row inside one sheet counts once), and the peer/own split plus the
 exposure-normalized rates stay in the census for inspection. The OPT-IN
@@ -1165,17 +1229,18 @@ exact line number parsed from `line N`, and excerpts of at least 7 words whose
 token-set Jaccard is >= 0.8. A row without a parseable line number or with a
 shorter excerpt is never merged, merges never cross the own/peer boundary (each
 source stays normalized by its own opportunities), and every merge is recorded
-in `reports/round<r>_dedup_audit.json` for inspection. The census comes from the panel's own ledgers, so a median tie is separated
-by how many defects the panel actually attributed to each version. The
+in `reports/round<r>_dedup_audit.json` for inspection. The census comes from the panel's own ledgers, so the ranking
+leads on how many defects the panel actually attributed to each version. The
 self-reported `critical_remaining`/`writing_remaining` counts are still
 recorded and cross-checked against the frozen review (a revise arm claiming
 zero while the review lists such findings is warned), but they no longer rank:
 the census replaced them. They are never a score, a gate or a reason to make a
 version ineligible -- and the judge is
 never asked for either number (blinding). An exact tie on `median`, `mean` and
-`IQR` still keeps the incumbent base: a better writing count separates
-challengers, it does not retire an incumbent the panel cannot distinguish from
-them. `manual_steps`, caption lengths and hand-off placeholders are reported in
+`IQR` still keeps the incumbent base -- even when a challenger carries a lower
+defect prefix: a better count separates challengers, it does not retire an
+incumbent the panel cannot distinguish from them. `manual_steps`, caption
+lengths and hand-off placeholders are reported in
 `DECISION_REPORT.md` / `decision.json` (the table has `critical` and `writing`
 columns) but never ranked on.
 
@@ -1206,13 +1271,13 @@ rows a version's own sweep sessions filed) from `peer` (the rows the other
 versions' comparisons filed against it) -- the panel's scrutiny check, since
 the two sources have different depth -- and normalizes by the sessions that
 could mention the version, which is stable as the field size changes. Since the
-2026-10-01 calibration it is also the selection's **defect-prefix tie-break**:
-after the median, `run` accumulates the reported defect counts over the
-canonical severity_tier_category order (the lattice merges the top two rungs
-into `critical_or_fatal`, so it is 36 cells, not 48) and stops at the first prefix where the
+2026-10-01 calibration it is also the selection's **leading ranking signal**:
+the `run` command accumulates the reported defect counts over the
+canonical severity_tier_category order (fatal, critical, major, minor -- the
+SAME four rungs this table reports, 48 cells) and stops at the first prefix where the
 cleanest ranked version reaches the configured floor (default 10 defects), or
-when every cell is used; the cumulative count at that prefix separates versions
-whose panel median is tied. A per-cell count is never a rung of its own: with
+when every cell is used; the cumulative count at that prefix is the LEADING
+comparator (the panel median/mean/IQR are the tie-breaks below it). A per-cell count is never a rung of its own: with
 small counts its fluctuation is larger than the signal. Two sibling files carry
 the numbers: `reports/round<r>_issue_matrix.csv` (fileA: rows = versions,
 columns = the cells in canonical order, values = reported counts) and

@@ -1,6 +1,30 @@
 # Changelog
 
-## 0.19 — the top two severity rungs merged in the tie-break lattice; location dedup classes are open-ended (2026-10-01)
+## 0.20 — the defect prefix leads the ranking; the four severity rungs stay separate (2026-10-01)
+
+- **The champion selection key is now
+  `cumulative defect prefix -> median -> mean -> IQR -> digest`** (it was
+  `median -> prefix -> mean -> IQR -> digest`): the number of defects the panel
+  attributed to a version is the most direct improvement signal and the leading
+  comparator; the panel median, mean and IQR are the TIE-BREAKS below it. The
+  incumbent-retention rule is unchanged and OVERRIDES the prefix: an exact
+  (median, mean, IQR) tie still keeps the incumbent base even when a challenger
+  carries fewer defects. `score_model_doc`, the trace, the report, the CLI help
+  and the tests all state the new order. A root whose rounds were DECIDED under
+  the previous key re-derives a different ranking on `decide` and reports a
+  recomputed-champion mismatch (exit 5) -- that is the decision-verification
+  layer working as intended: re-run the affected round under the new key, or
+  keep the old `decision.json` as the record of the old calibration.
+- **The 0.19 top-rung merge is REVERTED for consistency**: the
+  `severity_tier_category` lattice is 48 cells again --
+  `fatal`, `critical`, `major`, `minor` × the tier priority order ×
+  peer/own -- so the lattice, `round<r>_issue_matrix.csv`,
+  `round<r>_issue_cumulative.csv`, the long-form census, the judge contract and
+  the score model all speak the SAME four severity rungs, with `fatal` first
+  and `critical` second. (The 0.19 rationale is kept in the history above; a
+  codebase with two severities vocabularies was the heavier cost.)
+
+## 0.19 — the top two severity rungs merged in the tie-break lattice; location dedup classes are open-ended (2026-10-01; the merge was reverted by 0.20 the same day)
 
 - **The adaptive defect-prefix walk now merges `fatal` and `critical` into one
   `critical_or_fatal` level**, so the `severity_tier_category` lattice is 36

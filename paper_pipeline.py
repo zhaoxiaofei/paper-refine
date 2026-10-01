@@ -164,10 +164,14 @@ AND 24 AT |field| = 7 WITH THE DEFAULT 2 JUDGES)
     ({original, the round-1 pin, a2, i1, i2} -- M = 0, so the pool is the base
     plus the revised candidate) and the same shape in round 3. V-vs-W and W-vs-V are
     independent judgments from independent sessions, which is why the ranking
-    statistic is the median of the FLAT score list, not a two-level median, with
-    the ARITHMETIC MEAN of the same list, then the IQR, breaking ties before the
-    self-reported critical count is consulted, and with the CONTENT DIGEST as the
-    final provenance-free fallback (the arm's NAME never decides a tie).
+    LEADS on the round's reported DEFECT PREFIX (the issue census accumulated in
+    severity_tier_category order until the cleanest version reaches the
+    configured floor, or every cell is used); below it come the median of the
+    FLAT score list (not a two-level median), then the ARITHMETIC MEAN of the
+    same list, the IQR and the CONTENT DIGEST as the final provenance-free
+    fallback (the arm's NAME never decides a tie). The self-reported
+    critical_remaining/writing_remaining values are reported and cross-checked
+    but never rank, and an exact (median, mean, IQR) tie keeps the incumbent base.
     ELIGIBILITY requires the full
     panel (and, for a fresh arm, both directions against the original): a version
     whose panel is short -- because a judge sheet omitted a comparison or a judge
@@ -5794,7 +5798,7 @@ below it. A finding that names an UNDERCLAIM authorises raising it -- to exactly
 finding's evidence supports, never above it. The fix of one direction must not overshoot into the
 other (an overclaim "fixed" into a hedge is a new underclaim, and a hedge "fixed" into a claim is
 a new overclaim), and a claim edit with no calibration finding behind it stays frozen under E6.
-`critical_remaining` is reported in the decision record (the selection's tie-break is the panel's
+`critical_remaining` is reported in the decision record (the ranking's leading comparator is the panel's
 own issue census, not this self-report) and is cross-checked against the frozen review, so report
 it honestly: the number of CRITICAL/FATAL-severity findings still open after your revision (0 when
 none remain). `writing_remaining` is reported and cross-checked the same way and is never a score
@@ -6144,7 +6148,7 @@ root with exactly this structure:
                "shared_defects_left": <int>, "donors_read": <int>,
                "critical_remaining": <int>, "writing_remaining": <int>, "manual_items": <int>}}
 `critical_remaining` (CRITICAL/FATAL-severity issues still open after your run; 0 when none) is
-reported and cross-checked (the selection's tie-break is the panel's own issue census, not this
+reported and cross-checked (the ranking's leading comparator is the panel's own issue census, not this
 self-report); `writing_remaining` is reported the same way and is never a score or a gate: the
 number of CATEGORY-2 writing-quality/logic/repetition issues still open in your package (0 when
 none remain; the class mapping is in the skill). This run has no
@@ -6366,7 +6370,7 @@ structure:
    "summary": {"reorganized_sections": <int>, "problems_surfaced": <int>,
                "critical_remaining": <int>, "writing_remaining": <int>, "manual_items": <int>}}
 `critical_remaining` (CRITICAL/FATAL-severity issues still open in the candidate; 0 when none) is
-reported and cross-checked (the selection's tie-break is the panel's own issue census, not this
+reported and cross-checked (the ranking's leading comparator is the panel's own issue census, not this
 self-report); `writing_remaining` is reported the same way and is never a score or a gate: the
 number of CATEGORY-2 writing-quality/logic/repetition issues still open in your candidate (0 when
 none; the class mapping is in the skill's `sweeps.md`);
@@ -19890,7 +19894,7 @@ def tier_net_scores(items) -> dict:
             for tier, net in raw.items()}
 
 
-# --- the issue census (the selection's tie-break input) ---------------------
+# --- the issue census (the selection's LEADING ranking input) ---------------
 # The judge ledger is the only place in the pipeline where an issue carries a
 # TIER: a comparison's `resolved` rows name the OPPONENT's defects and its
 # `introduced` rows name the TARGET's. The panel therefore already measures
@@ -22146,8 +22150,10 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
         independent sessions, so flattening is correct; a two-level median would
         throw away that independence. The median is a coarse statistic on a
         -4..+4 integer scale and ties are common, so the arithmetic mean of the
-        SAME score list breaks a median tie (never a different statistic, never
-        a re-judgement).
+        SAME score list is the panel-statistic fallback when a median ties
+        (never a different statistic, never a re-judgement). The RANKING key
+        itself puts the round's reported defect prefix above the median -- see
+        `champion_sort_key`.
     D3  vs_original = median over the directed scores involving the pristine
         original (own + negated received); anti_regression_ok = vs_original
         >= VS_ORIGINAL_TOLERANCE (0 here; see the constant's comment).
@@ -22464,8 +22470,9 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
                     pq["direction_flips"].append(f"{v} vs {w}: {mv:g} vs {mw:g}")
     diags["panel_quality"] = pq
     # The issue census: how many issues of each tier and severity the panel
-    # attributed to each version. It is the selection's tie-break input: each
-    # severity rung totals ALL TIERS of that severity, peer rate before own rate.
+    # attributed to each version. It is the selection's LEADING ranking input:
+    # the cumulative defect count over the adaptive severity_tier_category
+    # prefix, rung by rung (the four severities, tier order, peer before own).
     census = build_issue_census(census_obs, field_ids,
                                 sessions_expected=sum(per_judges.values()),
                                 dedup=dedup_mode_of(ctx),
@@ -22502,7 +22509,7 @@ def candidate_tiebreak_inputs(ctx: Ctx, r: int, vid: str) -> tuple:
     never taken from an inherited file when the producing run reported its own
     number.
 
-    Neither count ranks any more (2026-10-01): the selection's tie-break is the
+    Neither count ranks any more (2026-10-01): the ranking's leading comparator is the
     panel-derived issue census (`champion_sort_key`), and these two remain as
     reported, cross-checked signals. `writing_remaining` is the number of the
     frozen review's CATEGORY-2 findings (writing quality, logic, repetition) still
@@ -22544,21 +22551,26 @@ def candidate_tiebreak_inputs(ctx: Ctx, r: int, vid: str) -> tuple:
 def _valid_count(v):
     """A reported count, or MISSING_TIEBREAK when it is absent or impossible.
 
-    `critical_remaining` is a ranking key (after the score statistics), so a
-    NEGATIVE number must never be rewarded: an agent (or a corrupted marker)
-    reporting -99 sorted ahead of an honest 0 and won the tie-break. A count is
-    a count of findings -- it cannot be negative, so a nonsensical value is
-    treated exactly like an absent one (sentinel +inf, which never wins a tie).
+    `critical_remaining`/`writing_remaining` are REPORTED (cross-checked against
+    the frozen review) but never rank -- the ranking's leading comparator is the
+    panel's own issue census. The guard survives from when they did rank: a
+    NEGATIVE number must never be rewarded, so an agent (or a corrupted marker)
+    reporting -99 sorted ahead of an honest 0. A count of findings cannot be
+    negative, so a nonsensical value is treated exactly like an absent one
+    (sentinel +inf, which never wins a tie).
     """
     if not is_int(v):
         return MISSING_TIEBREAK
     return int(v) if int(v) >= 0 else MISSING_TIEBREAK
 
 
-# ---- the champion selection key (2026-10-01 calibration) -------------------
-# `median -> crit/fatal -> major -> minor -> mean -> IQR -> digest`, where the
-# crit/fatal -> major -> minor stage is the ADAPTIVE DEFECT PREFIX below:
-#   * the median stays the primary panel statistic;
+# ---- the champion selection key (2026-10-01 calibrations) ------------------
+# `fatal -> critical -> major -> minor -> median -> mean -> IQR -> digest`,
+# where the fatal -> ... -> minor stage is the ADAPTIVE DEFECT PREFIX below:
+#   * the DEFECT PREFIX LEADS (fourth calibration): the number of defects the
+#     panel attributed to a version is the most direct improvement signal, and
+#     the panel median is coarse on a small integer scale;
+#   * the median, the mean and the IQR are the panel statistics BELOW it;
 #   * the defect counts come from the round's issue census and compare the
 #     TOTAL number of defects over the leading `severity_tier_category` cells
 #     (a single tiny cell fluctuates too much to rank on): the walk grows the
@@ -22576,13 +22588,13 @@ def _valid_count(v):
 #     IQR/digest stay below it as the deterministic fallbacks, and the
 #     incumbent-retention rule (an exact median/mean/IQR tie keeps the base)
 #     is unchanged.
-# The adaptive defect-prefix tie-break (2026-10-01, third calibration):
-#   * cells are ordered `severity_tier_category`: the TOP TWO rungs are MERGED
-#     into one `critical_or_fatal` level (the long-form census still reports
-#     fatal and critical separately -- only this lattice, the prefix walk and
-#     the two matrix files merge them), then major, then minor, tier by tier in
-#     the scoring priority order, and within a (severity-group, tier) cell
-#     `peer` before `own`. 36 cells, not 48;
+# The adaptive defect-prefix tie-break (2026-10-01, fifth calibration):
+#   * cells are ordered `severity_tier_category`: fatal, then critical, then
+#     major, then minor, tier by tier in the scoring priority order, and within
+#     a (severity, tier) cell `peer` before `own`. 48 cells -- the SAME four
+#     severity rungs the census, the judge contract and the score model use, so
+#     every artifact speaks one vocabulary (an earlier 36-cell variant merged
+#     fatal+critical for the walk; it was reverted for consistency);
 #   * walking that order, the counts are accumulated for every ranked version and
 #     the walk STOPS at the first prefix where the version with the FEWEST
 #     defects already carries `tiebreak_defect_floor` of them (default 10, a
@@ -22594,21 +22606,21 @@ def _valid_count(v):
 # order the scoring semantics prioritises grows the evidence until the cleanest
 # candidate has enough counts (or there is nothing left to add), and the single
 # accumulated number is more reliable than the mean of small integer scores.
-# WHY the top-rung merge: the tie-break counts every defect as 1, so fatal vs
-# critical changes only WHERE a defect enters the walk, never the compared total
-# once both cells are included; the two are the hardest pair for a judge to
-# separate, and the scoring contract already groups them at the |score| = 4 rung
-# ("a CRITICAL/FATAL row reaches +-4"). No recorded real round has ever filed
-# either rung (0 of 8,541 ledger rows across the ten real roots), so the merge
-# changes no recorded verdict while removing a classification wobble.
-CRITICAL_OR_FATAL = "critical_or_fatal"
 # [(group name, the census severities it sums)], in the tie-break's rung order.
-TIEBREAK_SEVERITY_GROUPS = ((CRITICAL_OR_FATAL, ("critical", "fatal")),
+# Every rung is ONE census severity: the lattice, the long-form census, the
+# judge contract and the score model all use the same four rungs.
+TIEBREAK_SEVERITY_GROUPS = (("fatal", ("fatal",)),
+                            ("critical", ("critical",)),
                             ("major", ("major",)),
                             ("minor", ("minor",)))
-# Convenience: the flat rung order (kept for callers that only need the names).
+# Convenience: the flat rung order (fatal, critical, major, minor) -- the walk
+# order, also used for the report table's severity columns.
 SEVERITY_TIE_ORDER = tuple(name for name, _sev in TIEBREAK_SEVERITY_GROUPS)
 TIEBREAK_SOURCES = ("peer", "own")
+# Historical name: the defect prefix now LEADS the ranking (it is not a
+# tie-break any more); this constant still governs how far the walk accumulates
+# before it stops, and the `--tiebreak-defect-floor` CLI/config name is kept for
+# compatibility with existing roots.
 DEFAULT_TIEBREAK_DEFECT_FLOOR = 10
 
 
@@ -22696,10 +22708,19 @@ def champion_issue_summary(vid, agg) -> dict:
 
 
 def champion_sort_key(row: dict) -> tuple:
-    """median -> cumulative defect count at the adaptive prefix -> mean -> IQR -> digest."""
+    """cumulative defect count at the adaptive prefix -> median -> mean -> IQR -> digest.
+
+    The defect prefix now LEADS the key (2026-10-01, fourth calibration): the
+    number of defects the panel attributed to a version is the most direct
+    improvement signal, and the medians of a small panel are coarse. The panel's
+    median/mean/IQR stay the first TIE-BREAK below it, and the incumbent rule
+    (an exact median/mean/IQR tie keeps the base) is unchanged -- it is applied
+    after the sort, so a challenger with a lower prefix but a panel-statistic
+    tie does NOT retire the incumbent.
+    """
     med, mean, iqr = row.get("median"), row.get("mean"), row.get("iqr")
-    return ((-(med if med is not None else -99.0),)
-            + (int(row.get("defect_prefix_total") or 0),)
+    return ((int(row.get("defect_prefix_total") or 0),)
+            + (-(med if med is not None else -99.0),)
             + (-(mean if mean is not None else -99.0),
                (iqr if iqr is not None else 99.0),
                str(row.get("digest") or "~"), str(row.get("id") or "")))
@@ -22807,12 +22828,12 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
                      "author_placeholders": st.get("author_placeholders"),
                      "issues": champion_issue_summary(row_id, agg),
                      "captions": st.get("caption_note")})
-    # The adaptive defect-prefix tie-break: walk the canonical
-    # severity_tier_category order, accumulate the reported counts for every
-    # ranked version, and stop at the first prefix where the version with the
-    # FEWEST defects reaches the configured floor (or when every cell is used).
-    # The cumulative count at that prefix breaks a median tie; the mean is
-    # consulted only when those cumulative counts are equal.
+    # The adaptive defect prefix (the ranking's LEADING comparator): walk the
+    # canonical severity_tier_category order, accumulate the reported counts for
+    # every ranked version, and stop at the first prefix where the version with
+    # the FEWEST defects reaches the configured floor (or when every cell is
+    # used). The cumulative count at that prefix leads the sort key; the median
+    # (then the mean, IQR, digest and id) is the tie-break below it.
     floor = tiebreak_defect_floor_of(ctx)
     rep_ids = sorted({str(t["rep"]) for t in rows})
     cell_names, _matrix, cumulative = issue_matrix_and_cumulative(
@@ -22822,19 +22843,21 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
         t["defect_prefix_total"] = (cumulative[str(t["rep"])][prefix_cells - 1]
                                     if prefix_cells else 0)
         t["tiebreak_prefix_cells"] = prefix_cells
-    # Ranking key, in order (2026-10-01 calibration), with each component's
-    # provenance:
-    #   -median               the field-wide panel statistic (the primary signal)
+    # Ranking key, in order (2026-10-01, fourth calibration), with each
+    # component's provenance:
     #   defect_prefix_total   the cumulative defect count (per source, collapsed
     #                         only per session+version) over the adaptive
     #                         severity_tier_category
-    #                         prefix, ASCENDING: fewer defects is better. The
-    #                         prefix stops when the cleanest ranked version has
-    #                         `tiebreak_defect_floor` counts (default 10) or
+    #                         prefix, ASCENDING: fewer defects is better. THE
+    #                         PREFIX LEADS the key: it is the most direct
+    #                         improvement signal, and the panel median is coarse.
+    #                         The prefix stops when the cleanest ranked version
+    #                         has `tiebreak_defect_floor` counts (default 10) or
     #                         every cell is included.
-    #   -mean                 consulted ONLY when the cumulative counts are
-    #                         equal (a total count is more reliable than the
-    #                         mean of small integer scores).
+    #   -median               the field-wide panel statistic: the first
+    #                         TIE-BREAK when two versions carry the same prefix.
+    #   -mean                 consulted after the median (a total count is more
+    #                         reliable than the mean of small integer scores).
     #   IQR, digest, id       deterministic fallbacks (the CONTENT DIGEST comes
     #                         before the id: a perfect tie must not be decided by
     #                         the arm's NAME, because a2 < i1 < w1 would silently
@@ -22861,26 +22884,26 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
         # An exact statistical tie is not evidence of improvement: the incumbent
         # is retained rather than replaced by a version the panel cannot
         # distinguish from it (never reward a version merely for being different).
-        # This is strictly a panel-statistic rule (median/mean/IQR); the census
-        # prefix, the self-reported counts and the digest never dethrone the
-        # incumbent on an exact tie -- a better defect count separates
-        # CHALLENGERS, it does not retire an incumbent the panel cannot
-        # distinguish from them.
+        # This is strictly a panel-statistic rule (median/mean/IQR) and it
+        # OVERRIDES the leading defect prefix on purpose: a challenger with a
+        # lower defect count but an identical (median, mean, IQR) does not retire
+        # the incumbent -- a better defect count separates CHALLENGERS, it does
+        # not retire an incumbent the panel cannot distinguish from them.
         trace.append(f"{champ_row['id']} and the base tie exactly on (median, mean, IQR) -> the "
                      f"incumbent base is retained; a challenger must be measurably better")
         champ_row = base_row
-    trace.append(f"ranking key: (-median, then the cumulative defect count over the first "
+    trace.append(f"ranking key: (the cumulative defect count over the first "
                  f"{prefix_cells} cell(s) of the canonical severity_tier_category order "
-                 f"({CRITICAL_OR_FATAL}->major->minor, tier order, peer before own; the top two "
-                 f"rungs are merged for this walk -- the census still reports them separately; "
-                 f"the walk stops "
+                 f"(fatal->critical->major->minor, tier order, peer before own; the walk stops "
                  f"when the cleanest ranked version reaches the floor {floor} or all "
-                 f"{len(cell_names)} cells are used) -- then -mean (only when the cumulative "
-                 f"counts are equal), IQR, digest, id); median/mean/IQR are "
-                 "field-wide panel statistics, the cumulative counts come from the panel's own "
+                 f"{len(cell_names)} cells are used) -- then -median, -mean, IQR, digest, id); "
+                 "the cumulative counts come from the panel's own "
                  "census (the self-reported critical_remaining/writing_remaining values are "
-                 "reported but no longer rank), and the content digest is the provenance-free "
-                 "tie-break (an arm's NAME never decides a tie). "
+                 "reported but no longer rank), median/mean/IQR are the field-wide panel "
+                 "statistics below it, and the content digest is the provenance-free tie-break "
+                 "(an arm's NAME never decides a tie). "
+                 "The incumbent-retention rule still fires on an exact (median, mean, IQR) "
+                 "tie: it overrides the prefix and keeps the base. "
                  "vs_base is reported but NOT a ranking key: its 2*judges directed scores are few "
                  "enough that one outlier session flips the sign statistic, so the decision stays "
                  "on the field-wide list. MANUAL_STEPS.md is reported but never ranked on; "
@@ -23036,7 +23059,7 @@ def finalize_round(ctx: Ctx, r: int, field: list, dropped: list, agg: dict,
                    sel: dict, pin: dict) -> dict:
     rrec = ctx.round_rec(r)
     winner = find_winner(ctx, r) or {}
-    # Freeze the tie-break inputs that produced this ranking. `decide` re-derives
+    # Freeze the ranking inputs that produced this decision. `decide` re-derives
     # the ranking from them, so pruning old sandboxes cannot flip a champion.
     tiebreak_inputs = {row["id"]: {"critical_remaining": row.get("critical_remaining"),
                                    "writing_remaining": row.get("writing_remaining"),
@@ -24446,12 +24469,11 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
     print()
     print(_tbl(rows[1:], rows[0]))
     _tb = (sel or {}).get("tiebreak") or {}
-    print(f"[run] ranking key: median -> the cumulative defect count over the "
-          f"adaptive severity_tier_category prefix ({CRITICAL_OR_FATAL}->major->minor -- the top "
-          f"two rungs merged for this walk, the census keeps them apart -- tier order, "
+    print(f"[run] ranking key: the cumulative defect count over the "
+          f"adaptive severity_tier_category prefix (fatal->critical->major->minor, tier order, "
           f"peer before own; used {_tb.get('cells_used', '?')} of {_tb.get('cells_total', '?')} "
-          f"cells at floor {_tb.get('floor', '?')}) -> mean (only when the cumulative counts are "
-          f"equal) -> IQR -> digest. Columns marked * are reported only, never ranked; the "
+          f"cells at floor {_tb.get('floor', '?')}) -> median -> mean -> IQR -> digest. "
+          f"Columns marked * are reported only, never ranked; the "
           f"per-severity totals are counts, not the tie-break ordering.")
     if sel["champion"] == A1_ID and champ_rep != A1_ID:
         print(f"[run] round {r}: no fresh arm outranked the round's base -- the champion is the "
@@ -26221,7 +26243,7 @@ def write_round_issue_census(ctx: Ctx, r: int, agg: dict = None) -> Path:
 
     It answers "how many issues of each tier does each version carry, and who
     found them (own sweep vs peer comparison)" -- the number a chain of runs
-    compares across rounds. The selection's tie-break reads the reported
+    compares across rounds. The selection's LEADING comparator reads the reported
     per-source counts through the two sibling files this module also writes:
     `round<r>_issue_matrix.csv` (each severity_tier_category cell) and
     `round<r>_issue_cumulative.csv` (their prefix sums).
@@ -26290,9 +26312,9 @@ def _write_issue_matrix_file(path: Path, names: list, rows: list) -> Path:
 def write_round_issue_matrix(ctx: Ctx, r: int, agg: dict = None) -> Path:
     """`reports/round<r>_issue_matrix.csv` (fileA): rows = versions, columns =
     the severity_tier_category cells in canonical order, values = the reported
-    defect counts per cell (peer/own as separate cells). The lattice MERGES the
-    top two rungs into `critical_or_fatal` (36 cells: it is the tie-break's own
-    lattice, not the long-form census, which keeps all four severities)."""
+    defect counts per cell (peer/own as separate cells). The lattice uses the
+    SAME four severity rungs as the long-form census (fatal, critical, major,
+    minor; 48 cells), so every artifact speaks one vocabulary."""
     r, agg = _issue_file_agg(ctx, r, agg)
     names, rows = issue_matrix_rows(ctx, r, agg)
     return _write_issue_matrix_file(ctx.reports_dir / f"round{r}_issue_matrix.csv", names, rows)
@@ -26339,8 +26361,10 @@ def write_round_dedup_audit(ctx: Ctx, r: int, agg: dict = None) -> Path:
 # The per-round census table's columns (DECISION_REPORT.md). The tier columns
 # are totals over severities and the severity columns are totals over tiers, so
 # the two blocks overlap on purpose: one answers "what is left and where", the
-# other "how bad is it".
-ISSUE_CENSUS_TABLE_HEAD = (["member"] + list(BASIS_TIERS) + list(SEVERITIES)
+# other "how bad is it". The severity columns follow the RANKING's rung order
+# (fatal, critical, major, minor -- the walk order), not the judge's weakest-
+# first `SEVERITIES` vocabulary, so the table reads like the key it feeds.
+ISSUE_CENSUS_TABLE_HEAD = (["member"] + list(BASIS_TIERS) + list(SEVERITY_TIE_ORDER)
                            + ["own/peer", "per session", "sessions o/p/expected"])
 
 
@@ -26354,7 +26378,7 @@ def issue_census_table(agg: dict) -> list:
         sevs = c.get("severities") or {}
         rows.append([vid]
                     + [str((tiers.get(t) or {}).get("total", 0)) for t in BASIS_TIERS]
-                    + [str((sevs.get(s) or {}).get("total", 0)) for s in SEVERITIES]
+                    + [str((sevs.get(s) or {}).get("total", 0)) for s in SEVERITY_TIE_ORDER]
                     + [f"{c.get('own', 0)}/{c.get('peer', 0)}",
                        (f"{c.get('per_session'):g}" if c.get("per_session") is not None else "-"),
                        f"{c.get('own_sessions')}/{c.get('peer_sessions')}/"
@@ -26429,15 +26453,15 @@ def score_model_doc(ctx=None) -> dict:
             "legacy_policy": "sheets from sandboxes materialized before the contract are "
                              "accepted with a warning and counted as uncalibrated; they are "
                              "never silently mixed into a calibrated panel"},
-        "ranking": "median of the flat directed-score list, then the cumulative reported "
-                   "defect count over the adaptive severity_tier_category prefix "
-                   "(critical_or_fatal -> major -> minor, tier by tier in the scoring priority "
-                   "order, peer before own; the top two rungs are MERGED for this walk -- a "
-                   "defect counts the same wherever it enters the walk, and the long-form "
-                   "census still reports fatal and critical separately; the walk stops when the "
-                   "cleanest ranked version reaches the "
-                   "`tiebreak_defect_floor` or every cell is used), then the arithmetic mean "
-                   "(only when the cumulative counts are equal), the IQR and the content digest",
+        "ranking": "the cumulative reported defect count over the adaptive "
+                   "severity_tier_category prefix LEADS (fewer defects is better; the cells are "
+                   "fatal -> critical -> major -> minor, tier by tier in the scoring priority "
+                   "order, peer before own -- the SAME four severity rungs the census, the "
+                   "judge contract and the score model use; the walk stops when the "
+                   "cleanest ranked version reaches the `tiebreak_defect_floor` or every cell "
+                   "is used), then the median of the flat directed-score list, then the "
+                   "arithmetic mean, the IQR and the content digest; an exact "
+                   "(median, mean, IQR) tie still keeps the incumbent base",
         "cross_round_comparability": "per-round champion statistics come from different panels "
                                      "and different fields and are NOT comparable across rounds; "
                                      "the vs_base margin of the final round is the only paired "
@@ -26450,26 +26474,25 @@ def score_model_doc(ctx=None) -> dict:
                                 f"well-powered, and every row reports its wins/losses/ties and p",
         "tiebreak_defect_floor": tiebreak_defect_floor_of(ctx),
         "dedup_mode": dedup_mode_of(ctx),
-        "tiebreaks": ["-median",
-                      "cumulative defect count over the adaptive severity_tier_category prefix "
-                      "(critical_or_fatal->major->minor -- the top two rungs merged -- tier order, "
-                      "peer then own; the walk stops "
+        "tiebreaks": ["cumulative defect count over the adaptive severity_tier_category prefix "
+                      "(fatal->critical->major->minor, tier order, peer then own; the walk stops "
                       "when the cleanest ranked version reaches `tiebreak_defect_floor` or every "
                       "cell is used), ascending",
-                      "-mean (only when the cumulative counts are equal)", "IQR", "digest", "id"],
+                      "-median", "-mean", "IQR", "digest", "id",
+                      "the incumbent rule overrides on an exact (median, mean, IQR) tie"],
         "tiebreak_notes": "median/mean/IQR are PANEL statistics (verifiable); the cumulative "
                           "counts come from the panel's own ledger rows: each cell is the "
                           "count of one (severity, tier, source) combination "
-                          "(reports/round<r>_issue_matrix.csv), with the TOP TWO RUNGS "
-                          "MERGED into `critical_or_fatal` (a count weights every defect "
-                          "equally, so fatal and critical are summed per tier and source; the "
-                          "long-form census still reports them separately), the cells are "
+                          "(reports/round<r>_issue_matrix.csv) on the same four severity rungs "
+                          "the long-form census reports (fatal, critical, major, minor), the "
+                          "cells are "
                           "accumulated in the "
                           "canonical severity_tier_category order (reports/round<r>_"
                           "issue_cumulative.csv), and the walk stops at the first prefix where "
                           "the version with the FEWEST defects has "
                           "`tiebreak_defect_floor` of them (default 10) -- or when every cell is "
-                          "included; the cumulative count at that prefix breaks a median tie, "
+                          "included; the cumulative count at that prefix LEADS the ranking (the "
+                          "median, then the mean, the IQR and the digest are the fallbacks), "
                           "and a small per-cell count is deliberately never a rung of its own; "
                           "`dedup_mode` off (the default) performs NO cross-sheet matching (a "
                           "judge sheet that repeats a row in the same sheet counts it once, a row "
@@ -27011,13 +27034,14 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
         # panel attributed to each version, counted from the judges' OWN ledger
         # rows. It is BOTH the number a chain of runs compares across rounds
         # ("fewer correctness/major issues than last round") and the selection's
-        # tie-break input (the adaptive severity_tier_category prefix: the walk
+        # LEADING ranking input (the adaptive severity_tier_category prefix: the walk
         # accumulates the cells until the cleanest ranked version reaches the
         # configured defect floor, or every cell is used).
         census = agg.get("issue_census") or {}
         if census:
             L.append("")
-            L.append("**Issue census (also the selection's defect-prefix tie-break):** the judges' own "
+            L.append("**Issue census (also the selection's leading ranking signal, the defect "
+                     "prefix):** the judges' own "
                      "ledger rows, counted per version, tier and severity. `own` = the "
                      "version's own sweep sessions (`introduced` rows), `peer` = the other "
                      "versions' comparisons against it (`resolved` rows); rows are "
@@ -27036,10 +27060,9 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
                      "by itself: it answers \"what is left and where\", and the selection "
                      "reads it through two sibling matrices: "
                      f"`reports/round{r}_issue_matrix.csv` (rows = versions, columns = the "
-                     "canonical severity_tier_category cells critical_or_fatal_correctness_peer, "
-                     "critical_or_fatal_correctness_own, ..., minor_formatting_own; the TOP TWO "
-                     "rungs are merged into `critical_or_fatal` for this lattice and the walk "
-                     "(the long-form census below still reports fatal and critical separately); "
+                     "canonical severity_tier_category cells fatal_correctness_peer, "
+                     "fatal_correctness_own, ..., minor_formatting_own -- the SAME four severity "
+                     "rungs the long-form census below reports; "
                      "values = the reported counts) and "
                      f"`reports/round{r}_issue_cumulative.csv` (the PREFIX SUMS of the same "
                      "rows and columns). The selection accumulates the cells in that order "
@@ -27195,32 +27218,29 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
              f"absent (weights are arbitrary and the tier order IS the aggregation: "
              f"correctness > preservation > completeness > consistency > writing > formatting).")
     L.append("")
-    L.append("**Ranking statistic.** `median(flat score list)`, with `n`, the arithmetic "
-             "`mean(flat score list)` and the IQR reported over the same flat list. The two "
-             "directions of a pair are independent judgments from independent sessions, so the "
-             "flat median is the intended statistic; a two-level median would discard that "
-             "independence. The selection key is `median -> cumulative-defect-prefix -> mean -> "
-             "IQR -> digest`: the median is coarse on a "
-             "-4..+4 integer scale, so a median tie is first separated by the round's OWN ISSUE "
-             "CENSUS, read as the canonical severity_tier_category order "
-             f"({CRITICAL_OR_FATAL}_correctness_peer, {CRITICAL_OR_FATAL}_correctness_own, ..., "
-             "minor_formatting_own; the top two rungs are MERGED into "
-             f"`{CRITICAL_OR_FATAL}` -- the count weights every defect equally, so fatal vs "
-             "critical only moves where a defect enters the walk; the long-form census keeps "
-             "them apart): the "
-             "cells are accumulated for every ranked version and the walk STOPS at the first "
+    L.append("**Ranking key.** The selection key is `cumulative-defect-prefix -> median -> "
+             "mean -> IQR -> digest`: the round's OWN ISSUE CENSUS leads -- how many defects "
+             "the panel attributed to the version is the most direct improvement signal, while "
+             "the flat median is coarse on a -4..+4 integer scale. The prefix is read from the "
+             "canonical severity_tier_category order "
+             f"(fatal_correctness_peer, fatal_correctness_own, ..., minor_formatting_own -- the "
+             "SAME four severity rungs the census reports): the cells are accumulated for "
+             "every ranked version and the walk STOPS at the first "
              f"prefix where the version with the FEWEST defects reaches the configured floor "
              f"(default {DEFAULT_TIEBREAK_DEFECT_FLOOR} defects, "
              f"`setup --tiebreak-defect-floor N` / `set-tiebreak-defect-floor N`), or when every "
-             "cell is included; the cumulative count at that prefix is the tie-break (fewer is "
-             "better). A per-cell count is never a rung of its own: with small counts its "
-             "fluctuation is larger than the signal, which is why the prefix keeps accumulating "
-             "until the cleanest candidate carries enough evidence. Counts are the mentions "
-             "each judge sheet filed (collapsed only per session+version; no cross-session "
-             "matching). `mean` is consulted ONLY when the "
-             "cumulative counts are equal; the IQR and the content digest are the deterministic "
-             "fallbacks (a round whose sheets carry no ledger rows scores a zero prefix and "
-             "therefore falls through to them). The self-reported "
+             "cell is included; the cumulative count at that prefix LEADS the ranking (fewer is "
+             "better), and `median(flat score list)` (with the arithmetic mean and the IQR over "
+             "the same flat list) is the first tie-break below it. A per-cell count is never a "
+             "rung of its own: with small counts its fluctuation is larger than the signal, "
+             "which is why the prefix keeps accumulating until the cleanest candidate carries "
+             "enough evidence. Counts are the mentions each judge sheet filed (collapsed only "
+             "per session+version; no cross-session matching). The median and the mean are the "
+             "panel statistics below the prefix; the IQR and the content digest are the "
+             "deterministic fallbacks. The incumbent-retention rule still fires on an exact "
+             "(median, mean, IQR) tie and KEEPS the base even when a challenger has a lower "
+             "defect prefix (a better defect count separates challengers, it does not retire an "
+             "incumbent the panel cannot distinguish from them). The self-reported "
              "`critical_remaining`/`writing_remaining` values are reported and cross-checked but "
              "are NOT ranking inputs.")
     L.append("")
@@ -27266,14 +27286,16 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
              "base wins the round honestly reports no demonstrable, non-regressing progress "
              "(exactly as the no-eligible-candidate fallback always did). A fresh arm must also "
              "clear the anti-regression gate; the base row needs only a complete panel. The "
-             "winner is the first under: `-median`, `-mean` (breaks a median tie), `IQR`, "
-             "`critical_remaining` (the producing run's marker summary -- cross-checked against "
-             "the frozen review for the revise arm and self-reported for the rewrite and "
-             "integration arms; +inf when absent), then `writing_remaining` (the same kind of "
-             "self-reported count for the frozen review's CATEGORY-2 writing-quality/logic/"
-             "repetition findings; severity outranks style, so it sits below the critical count "
-             "and is never a score or a gate), then the CONTENT DIGEST (provenance-free: a "
+             "winner is the first under: the cumulative DEFECT PREFIX (the round's issue census "
+             "walked over the canonical severity_tier_category cells -- fatal, critical, major, "
+             "minor, tier priority order, peer before own -- until the cleanest version reaches "
+             "the configured floor or every cell is used; fewer defects first), then `-median`, "
+             "`-mean`, `IQR`, the CONTENT DIGEST (provenance-free: a "
              "perfect tie must never be decided by the arm's name) and only after that the id. "
+             "An exact (median, mean, IQR) tie still keeps the incumbent base -- that rule "
+             "overrides the prefix. `critical_remaining`/`writing_remaining` are reported and "
+             "cross-checked (self-reported marker values, +inf when absent) but are NOT ranking "
+             "keys. "
              "`vs_base` -- the panel's own head-to-head median against the round's incumbent -- is "
              "REPORTED (and is what the incumbent rule is about) but is deliberately not a second "
              "ranking key: it is one of the pairs already inside the flat list. An exact tie on "
@@ -27429,7 +27451,7 @@ def cmd_status(args) -> None:
           f"judges/version={judges_config_note(ctx)} "
           f"integrators/round={integrators_config_note(ctx)}")
     _jmode = journal_mode_of(ctx)
-    print(f"tie-break:     adaptive severity_tier_category prefix; defect floor "
+    print(f"ranking:       adaptive severity_tier_category defect prefix LEADS; floor "
           f"{tiebreak_defect_floor_of(ctx)} "
           f"(`set-tiebreak-defect-floor N`; 0 = one cell only, 999999 = every cell)")
     print(f"dedup mode:    {dedup_mode_of(ctx)} "
@@ -29628,14 +29650,14 @@ def build_parser() -> argparse.ArgumentParser:
                     metavar="N",
                     help=f"the adaptive defect-prefix tie-break's floor (default "
                          f"{DEFAULT_TIEBREAK_DEFECT_FLOOR}): walk the canonical "
-                         f"severity_tier_category order (critical_or_fatal->major->minor -- the "
-                         f"top two rungs are merged for this walk -- tier by "
+                         f"severity_tier_category order (fatal->critical->major->minor, "
+                         f"tier by "
                          f"tier in the scoring priority order, peer before own) accumulating "
                          f"each version's reported defect counts, and STOP at the first "
                          f"prefix where the version with the FEWEST defects reaches N (or when "
-                         f"every cell is used). The cumulative count at that prefix breaks a "
-                         f"median tie; the arithmetic mean is consulted only when those counts "
-                         f"are equal. 0 stops at the first cell (the mean/IQR/digest decide); "
+                         f"every cell is used). The cumulative count at that prefix LEADS the "
+                         f"ranking; the panel median (then mean, IQR, digest) is the tie-break "
+                         f"below it. 0 stops at the first cell (the median/mean/IQR/digest decide); "
                          f"a value no prefix can reach (e.g. 999999) uses every cell")
     ps.add_argument("--stop-after-no-progress", type=int, default=0, metavar="K",
                     help="adaptive stop (default 0 = off): once K CONSECUTIVE rounds pin the "
@@ -29953,8 +29975,8 @@ def build_parser() -> argparse.ArgumentParser:
     psm.set_defaults(func=cmd_set_revision_mode)
 
     ptf = sub.add_parser("set-tiebreak-defect-floor", parents=[common],
-                         help="set (or show) the adaptive defect-prefix floor used to break a "
-                              "median tie in champion selection")
+                         help="set (or show) the adaptive defect-prefix walk's floor (the prefix "
+                              "LEADS champion selection; the name is historical)")
     ptf.add_argument("floor", nargs="?", type=int, default=None, metavar="N",
                      help=f"the number of defects the CLEANEST ranked version must reach before "
                           f"the severity_tier_category walk stops (default "
