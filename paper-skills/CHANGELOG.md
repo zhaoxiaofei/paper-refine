@@ -1,6 +1,69 @@
 # Changelog
 
-## 0.16 — calibration: the scoring priority order, and a panel-derived selection tie-break (2026-10-01)
+## 0.18 — the OPT-IN structured-location dedup (2026-10-01)
+
+Cross-sheet deduplication stays OFF by default; the new mode is a prototype the
+operator must switch on:
+
+- `setup --dedup-mode off|location` (config key `dedup_mode`) and
+  `set-dedup-mode off|location [--show] [--force]` on an existing root. `off`
+  (the default) counts every judge sheet's row as a mention, exactly as 0.17
+  did; `location` merges rows ACROSS sheets when BOTH rows carry the same defect
+  class (the normalized check id, `M01`/`M02`/… — `FMT-*` normalizes to `M20`),
+  the SAME exact line number parsed as `line N`, and excerpts of at least 7
+  words whose token-SET Jaccard is >= 0.8 (`DEDUP_MIN_WORDS`,
+  `DEDUP_FUZZY_THRESHOLD`).
+- The conservative direction is structural: a row without a parseable line
+  number, or with a shorter excerpt, is NEVER merged; a merge never crosses the
+  `own`/`peer` boundary (each source stays normalized by its own
+  opportunities), and the merge is attributed to the first-kept row's tier and
+  severity.
+- Every merge is audited in `reports/round<r>_dedup_audit.json` (version,
+  source, session, class, line, excerpt, the kept session and its excerpt);
+  the census CSV gains `raw_own`/`raw_peer` (what the sheets filed) and
+  `merged_own`/`merged_peer` (what the mode merged away) beside the effective
+  `own`/`peer`, plus the `dedup_mode` column. The file is written in both modes
+  (an `off` round carries zero merges) so the report shape is stable.
+- The judge prompt gains the ISSUE-LOCATION RULE (name the line number as
+  `line N`, quote >= 7 words of the affected text) ONLY in `location` mode: the
+  default prompt is byte-identical, and the rule only makes the rows
+  machine-locatable. On the recorded round-1 sheets (no `line N` anywhere) the
+  mode merges zero rows, i.e. it changes nothing until a run's judges are asked
+  for the location.
+
+## 0.17 — the adaptive defect-prefix tie-break, and no cross-session dedup (2026-10-01)
+
+The selection tie-break is now an **adaptive defect prefix** instead of a
+per-severity rung comparison:
+
+- the cells are the canonical `severity_tier_category` order:
+  `fatal_correctness_peer, fatal_correctness_own, fatal_preservation_peer, …,
+  minor_formatting_peer, minor_formatting_own` (severity fatal→critical→major→
+  minor, tier in the scoring priority order, peer before own);
+- walking that order, each ranked version's reported defect counts are
+  accumulated and the walk **stops at the first prefix where the version with
+  the FEWEST defects reaches `tiebreak_defect_floor`** (default 10;
+  `setup --tiebreak-defect-floor N` / `set-tiebreak-defect-floor N`) or when
+  every cell is included;
+- the **cumulative count at that prefix breaks a median tie** (fewer is
+  better); the arithmetic mean is consulted only when those cumulative counts
+  are equal, then IQR, digest and id. The incumbent-retention rule (an exact
+  median/mean/IQR tie keeps the base) is unchanged.
+- **No cross-session deduplication is performed.** Matching rows across judge
+  sheets by their evidence text was a noise source of its own (reworded
+  duplicates missed, boilerplate could over-merge), so the counts are the
+  mentions each sheet actually filed; the ONE collapse kept is per (session,
+  version) — a judge sheet that repeats the same row across its opponent
+  comparisons counts it once. The `dedup_*` columns of 0.16 are removed; the
+  exposure-normalized `own_rate`/`peer_rate` stay (computed from the reported
+  counts).
+- two files sit beside `round<r>_issue_census.csv`: `round<r>_issue_matrix.csv`
+  (**fileA**: rows = versions, columns = the cells in canonical order, values =
+  reported counts) and `round<r>_issue_cumulative.csv` (the prefix sums of the
+  same rows and columns). `score_model_doc()`, `DECISION_REPORT.md` and the
+  round table document the new key.
+
+## 0.16 — calibration: the scoring priority order, and a panel-derived selection tie-break (2026-10-01; the tie-break and the dedup columns were superseded by 0.17 the same day)
 
 Two calibration changes, both requested after reviewing the round-1 census of a
 real run (`reports/round1_issue_census.csv`: `peer` totals are several times the
@@ -16,9 +79,11 @@ but an opponent in every other version's):
   (formatting) -- the latter is pre-normalized before the judge sees the view,
   so a length row can never outweigh a prose defect.
 - **The champion selection key is now `median -> crit/fatal -> major -> minor ->
-  mean -> IQR -> digest`**, where each severity rung is compared tier by tier
-  in the priority order and reads the EXPOSURE-NORMALIZED, DEDUPLICATED census
-  rates: peer rate first, own rate second (a version is the target in only its
+  mean -> IQR -> digest`**, where each severity rung is the TOTAL defect count
+  across ALL TIERS of that severity (a per-tier count is deliberately not a
+  sub-rung: small counts fluctuate too much to rank on) and reads the
+  EXPOSURE-NORMALIZED, DEDUPLICATED census rates: peer rate first, own rate
+  second (a version is the target in only its
   own judges' sessions but an opponent in up to 7x as many), counts deduplicated
   across sessions per source by an EXACT normalized evidence key (never a fuzzy
   match, so two different defects can never be merged). The self-reported

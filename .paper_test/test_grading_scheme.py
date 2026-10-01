@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -189,8 +190,8 @@ check("B1 the trace documents the provenance-free tie-break",
 shutil.rmtree(tmp, ignore_errors=True)
 
 # =====================================================================
-# B2. the panel-derived issue census breaks an exact statistical tie
-#     (median -> crit/fatal -> major -> minor -> mean -> IQR -> digest)
+# B2. the adaptive defect-prefix tie-break breaks an exact statistical tie
+#     (median -> cumulative defect prefix -> mean -> IQR -> digest)
 # =====================================================================
 tmp = Path(tempfile.mkdtemp(prefix="paper_grade_b2_"))
 # Self-reported counts are given absurd values on purpose: they must NOT rank.
@@ -221,38 +222,66 @@ check("B2 the census rung decides the tie before mean/IQR/digest",
       sel_b2b["champion"] == "i1",
       f"champion={sel_b2b['champion']} "
       f"ranking={[(r['id'], r.get('issues', {}).get('minor')) for r in sel_b2b['ranking']]}")
-check("B2 the trace names the census rungs in the ranking order",
-      any("issue rungs" in ln and "ranking key" in ln for ln in sel_b2b["trace"]),
+check("B2 the trace names the cumulative-defect key",
+      any("cumulative defect count" in ln and "ranking key" in ln
+          for ln in sel_b2b["trace"]),
       str([ln for ln in sel_b2b["trace"] if "ranking key" in ln])[:220])
-check("B2 the ranking rows carry the census rungs for the report",
-      all("issue_rungs" in r and "issues" in r for r in sel_b2b["ranking"]))
+check("B2 the ranking rows carry the prefix total and the cell count",
+      all("defect_prefix_total" in r and "tiebreak_prefix_cells" in r
+          for r in sel_b2b["ranking"]))
 
-# The peer rate is compared BEFORE the own rate (exposure normalization).
-_z = (0.0,) * (2 * 3 * len(np.BASIS_TIERS))
-row_own_worse = {"median": 1.0, "mean": 1.0, "iqr": 0.0, "digest": "a", "id": "B",
-                 "issue_rungs": (0.0, 0.5) + _z[2:]}
-row_peer_worse = {"median": 1.0, "mean": 1.0, "iqr": 0.0, "digest": "a", "id": "A",
-                  "issue_rungs": (0.5, 0.0) + _z[2:]}
-check("B2 the peer rate is compared before the own rate",
-      np.champion_sort_key(row_own_worse) < np.champion_sort_key(row_peer_worse))
-# ... and the census rungs sit BEFORE the mean.
+# The canonical cell order is severity_tier_category: fatal, critical, major,
+# minor; tier in the scoring priority order; peer before own.
+_cells = np.tiebreak_cell_names()
+check("B2 the tie-break cells follow severity_tier_category (fatal first, minor last, peer "
+      "before own)",
+      _cells[:4] == ["fatal_correctness_peer", "fatal_correctness_own",
+                     "fatal_preservation_peer", "fatal_preservation_own"]
+      and _cells[-1] == "minor_formatting_own"
+      and len(_cells) == len(np.SEVERITY_TIE_ORDER) * len(np.BASIS_TIERS) * 2,
+      str(_cells[:4] + _cells[-2:]))
+# The adaptive stop: keep adding cells until the version with the FEWEST defects
+# reaches the floor, or every cell is used.
+_cum = {"A": [1, 5, 12], "B": [0, 4, 11]}
+check("B2 the prefix stops when the cleanest version reaches the floor",
+      np.tiebreak_prefix_cells(_cum, ["A", "B"], 10) == 3
+      and np.tiebreak_prefix_cells(_cum, ["A", "B"], 30) == 3
+      and np.tiebreak_prefix_cells(_cum, ["A", "B"], 0) == 1,
+      f"{np.tiebreak_prefix_cells(_cum, ['A','B'], 10)}/"
+      f"{np.tiebreak_prefix_cells(_cum, ['A','B'], 30)}/"
+      f"{np.tiebreak_prefix_cells(_cum, ['A','B'], 0)}")
+# The cumulative defect count sits BEFORE the mean...
 row_better_census = {"median": 1.0, "mean": -9.0, "iqr": 0.0, "digest": "z", "id": "A",
-                     "issue_rungs": _z}
+                     "defect_prefix_total": 0}
 row_worse_census = {"median": 1.0, "mean": 9.0, "iqr": 0.0, "digest": "a", "id": "B",
-                    "issue_rungs": (0.0, 0.0, 0.1) + _z[3:]}
-check("B2 the census rungs are compared before the mean",
+                    "defect_prefix_total": 1}
+check("B2 the cumulative defect count is compared before the mean",
       np.champion_sort_key(row_better_census) < np.champion_sort_key(row_worse_census))
-# Tier info is kept: a defect in a HIGHER-priority tier outranks a LARGER count
-# in a lower one (completeness/minor 0.1 vs writing/minor 0.2 -> the completeness
-# carrier sorts worse, even though its count is lower).
-_rungs_c = list(_z); _rungs_c[24 + 2 * list(np.BASIS_TIERS).index("completeness")] = 0.1
-_rungs_w = list(_z); _rungs_w[24 + 2 * list(np.BASIS_TIERS).index("writing")] = 0.2
-row_completeness = {"median": 1.0, "mean": 1.0, "iqr": 0.0, "digest": "a", "id": "A",
-                    "issue_rungs": tuple(_rungs_c)}
-row_writing = {"median": 1.0, "mean": 1.0, "iqr": 0.0, "digest": "a", "id": "B",
-               "issue_rungs": tuple(_rungs_w)}
-check("B2 a defect in a higher-priority tier outranks a larger lower-tier count",
-      np.champion_sort_key(row_writing) < np.champion_sort_key(row_completeness))
+# A LOWER total wins even when its defects live in lower-priority tiers: the
+# prefix decides on the accumulated NUMBER, not on per-cell identity.
+row_total_1 = {"median": 1.0, "mean": 1.0, "iqr": 0.0, "digest": "a", "id": "A",
+               "defect_prefix_total": 2}
+row_total_2 = {"median": 1.0, "mean": 1.0, "iqr": 0.0, "digest": "a", "id": "B",
+               "defect_prefix_total": 1}
+check("B2 the cumulative total decides (fewer defects is better)",
+      np.champion_sort_key(row_total_2) < np.champion_sort_key(row_total_1))
+# ... and equal cumulative totals fall through to the mean.
+row_mean_better = {"median": 1.0, "mean": 2.0, "iqr": 9.0, "digest": "z", "id": "A",
+                   "defect_prefix_total": 1}
+row_mean_worse = {"median": 1.0, "mean": 1.0, "iqr": 0.0, "digest": "a", "id": "B",
+                  "defect_prefix_total": 1}
+check("B2 equal cumulative totals are broken by the mean",
+      np.champion_sort_key(row_mean_better) < np.champion_sort_key(row_mean_worse))
+# The configured floor changes the stop: floor 0 stops at the FIRST cell (all
+# zero there), so the defect key cannot separate the versions and the digest
+# decides; the default floor 10 keeps accumulating to the cell that carries the
+# only defect (minor_formatting_own) and i1 wins.
+ctx.cfg["tiebreak_defect_floor"] = 0
+sel_floor0 = np.select_champion(ctx, 2, agg_b2b)
+check("B2 a floor of 0 stops at the first cell and falls through to the digest",
+      sel_floor0["champion"] == "w1" and sel_floor0["tiebreak"]["cells_used"] == 1,
+      f"champion={sel_floor0['champion']} used={sel_floor0['tiebreak']['cells_used']}")
+ctx.cfg.pop("tiebreak_defect_floor", None)
 
 # the incumbent-retention rule stays strictly statistical: a challenger with a
 # better census cannot dethrone a base the panel cannot distinguish on
@@ -452,12 +481,15 @@ check("D4 the score model documents the contract, the rules and the tie-breaks",
       sm.get("judge_contract") == CONTRACT
       and sm.get("tiebreaks") == [
           "-median",
-          "issue census: crit/fatal -> major -> minor, tier by tier in the scoring "
-          "priority order, (peer_rate, own_rate) ascending",
-          "-mean", "IQR", "digest", "id"]
+          "cumulative defect count over the adaptive severity_tier_category prefix "
+          "(fatal->critical->major->minor, tier order, peer then own; the walk stops "
+          "when the cleanest ranked version reaches `tiebreak_defect_floor` or every "
+          "cell is used), ascending",
+          "-mean (only when the cumulative counts are equal)", "IQR", "digest", "id"]
       and "critical_remaining" not in " ".join(str(x) for x in sm.get("tiebreaks") or [])
       and any("critical_remaining" in str(x)
               for x in sm.get("reported_but_not_ranked") or [])
+      and sm.get("tiebreak_defect_floor") == np.DEFAULT_TIEBREAK_DEFECT_FLOOR
       and sm.get("scale") == [np.SCORE_MIN, np.SCORE_MAX]
       and any("CRITICAL" in r for r in (sm.get("graded_basis") or {}).get("rules") or [])
       and "unused rungs" in sm.get("scale_note", ""),
@@ -500,6 +532,37 @@ for name in ("rewrite", "revise", "integrate"):
           and ("never a score or a gate" in flat or "never as a score or a gate" in flat))
 check("D5 the review prompt is not asked for a writing_remaining field",
       "writing_remaining" not in stage_prompts["review"])
+
+# The adaptive defect floor is a CLI parameter: `setup --tiebreak-defect-floor`
+# records it, `set-tiebreak-defect-floor` changes an existing root, `--show`
+# prints it.
+_floor_tmp = Path(tempfile.mkdtemp(prefix="paper_floor_"))
+_floor_src = _floor_tmp / "src"
+_floor_src.mkdir()
+(_floor_src / "manuscript.md").write_text("Abstract\n\nwords here.\n", encoding="utf-8")
+_cli = [sys.executable, str(WS / "paper_pipeline.py")]
+r = subprocess.run(_cli + ["setup", "--source", str(_floor_src), "--root",
+                           str(_floor_tmp / "root"), "--rounds", "1", "--judges", "1",
+                           "--rewrites", "0", "--revises", "1",
+                           "--tiebreak-defect-floor", "3"],
+                   capture_output=True, text=True)
+cfg_f = json.loads((_floor_tmp / "root" / "pipeline_config.json").read_text(encoding="utf-8"))
+check("D6 setup records --tiebreak-defect-floor",
+      r.returncode == 0 and cfg_f.get("tiebreak_defect_floor") == 3,
+      (r.stderr or r.stdout)[-200:])
+r = subprocess.run(_cli + ["set-tiebreak-defect-floor", "5", "--root",
+                           str(_floor_tmp / "root")],
+                   capture_output=True, text=True)
+cfg_f = json.loads((_floor_tmp / "root" / "pipeline_config.json").read_text(encoding="utf-8"))
+check("D6 set-tiebreak-defect-floor changes an existing root",
+      r.returncode == 0 and cfg_f.get("tiebreak_defect_floor") == 5,
+      (r.stderr or r.stdout)[-200:])
+r = subprocess.run(_cli + ["set-tiebreak-defect-floor", "--show", "--root",
+                           str(_floor_tmp / "root")],
+                   capture_output=True, text=True)
+check("D6 --show prints the current floor", r.returncode == 0 and "floor: 5" in r.stdout,
+      (r.stdout or r.stderr)[-160:])
+shutil.rmtree(_floor_tmp, ignore_errors=True)
 
 # Every EDITING stage must validate what it produced, with a bounded loop, and
 # the orchestrator re-runs the session when the package it produced is invalid.

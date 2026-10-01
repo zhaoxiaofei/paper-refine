@@ -10,7 +10,11 @@ counting of the sheets the panel already produced:
   * `own`  -- a version's own sessions (it was their sweep target);
   * `peer` -- the other versions' sessions (it was their comparison opponent);
   * deduplicated per (session, version, tier, severity, check, evidence), so one
-    defect a judge repeats in every opponent comparison counts once;
+    defect a judge repeats in every opponent comparison counts once; NO
+    cross-sheet matching happens in the default mode (a row two sessions both
+    filed counts twice), and the OPT-IN `dedup="location"` mode merges rows
+    across sheets only on the structured key (defect class + exact line number +
+    a fuzzy-matched >= 7-word excerpt);
   * normalized by the sessions that could have mentioned the version, so the
     number is comparable across rounds, fields and runs.
 
@@ -24,6 +28,7 @@ from __future__ import annotations
 
 import csv
 import importlib.util
+import itertools
 import sys
 import tempfile
 from pathlib import Path
@@ -142,14 +147,31 @@ def test_census_attribution():
           and r1["tiers"]["completeness"]["severities"]["minor"]["total"] == 0,
           str(r1["tiers"]))
     cm = orig["tiers"]["correctness"]["severities"]["major"]
-    check("the same defect mentioned by three sessions deduplicates to ONE own + ONE peer row",
-          (cm["own"], cm["peer"], cm["total"]) == (1, 2, 3)
-          and (cm["dedup_own"], cm["dedup_peer"], cm["dedup_total"]) == (1, 1, 2),
+    check("three sessions' mentions count as three reported mentions (NO cross-session dedup)",
+          (cm["own"], cm["peer"], cm["total"]) == (1, 2, 3),
           str(cm))
-    check("the rates divide the deduplicated counts by the OPPORTUNITIES (own 1, peer 2)",
+    check("the rates divide the reported counts by the OPPORTUNITIES (own 1, peer 2)",
           (orig["own_opps"], orig["peer_opps"]) == (1, 2)
-          and abs(cm["own_rate"] - 1.0) < 1e-9 and abs(cm["peer_rate"] - 0.5) < 1e-9,
+          and abs(cm["own_rate"] - 1.0) < 1e-9 and abs(cm["peer_rate"] - 1.0) < 1e-9,
           f"opps={orig['own_opps']}/{orig['peer_opps']} rates={cm['own_rate']}/{cm['peer_rate']}")
+    # The selection's adaptive defect-prefix tie-break: the cells are the
+    # canonical severity_tier_category order and the prefix sums are accumulated
+    # per version.
+    names, matrix, cumulative = np.issue_matrix_and_cumulative(census, FIELD)
+    check("the tie-break cells are severity_tier_category (fatal first, minor last, peer/own)",
+          names[:4] == ["fatal_correctness_peer", "fatal_correctness_own",
+                        "fatal_preservation_peer", "fatal_preservation_own"]
+          and names[-1] == "minor_formatting_own"
+          and len(names) == len(np.SEVERITY_TIE_ORDER) * len(np.BASIS_TIERS) * 2,
+          str(names[:4] + names[-2:]))
+    check("the cumulative matrix is the prefix sum of the non-cumulative matrix",
+          all(list(itertools.accumulate(matrix[v])) == list(cumulative[v]) for v in FIELD)
+          and cumulative["orig"][-1] == orig["total"],
+          f"orig last={cumulative['orig'][-1]} total={orig['total']}")
+    check("a fatal_correctness_peer cell reads the census's peer count",
+          matrix["orig"][0] ==
+          orig["tiers"]["correctness"]["severities"]["fatal"]["peer"],
+          f"{matrix['orig'][0]}")
     check("w1: the same row repeated across one session's comparisons counts once",
           w1["total"] == 1 and w1["tiers"]["completeness"]["severities"]["minor"]["own"] == 1
           and w1["own"] == 1 and w1["peer"] == 0, str(w1))
@@ -188,9 +210,10 @@ def test_census_is_reported_never_ranked(tmp, ctx, agg):
           all((agg2["issue_census"][v] or {}).get("total") == 0 for v in FIELD),
           str({v: agg2["issue_census"][v]["total"] for v in FIELD}))
     model = np.score_model_doc()
-    check("the census IS the tie-break the score model documents",
-          any("census" in str(x) for x in (model.get("tiebreaks") or []))
-          and "census" in str(model.get("tiebreak_notes")))
+    check("the adaptive defect prefix IS the tie-break the score model documents",
+          any("severity_tier_category" in str(x) for x in (model.get("tiebreaks") or []))
+          and "issue_matrix" in str(model.get("tiebreak_notes"))
+          and model.get("tiebreak_defect_floor") == np.DEFAULT_TIEBREAK_DEFECT_FLOOR)
     check("the self-reported counts are reported but no longer ranked",
           any("critical_remaining" in str(x)
               for x in (model.get("reported_but_not_ranked") or []))
@@ -231,9 +254,8 @@ def test_census_file_and_table(tmp, ctx, agg):
           (r["own"], r["peer"], r["total"]) == ("1", "2", "3")
           and abs(float(r["per_session"]) - 1.0) < 1e-6
           and (r["own_sessions"], r["peer_sessions"], r["sessions_expected"]) == ("1", "2", "3")
-          and (r["dedup_own"], r["dedup_peer"], r["dedup_total"]) == ("1", "1", "2")
           and abs(float(r["own_rate"]) - 1.0) < 1e-9
-          and abs(float(r["peer_rate"]) - 0.5) < 1e-9
+          and abs(float(r["peer_rate"]) - 1.0) < 1e-9
           and (r["own_opps"], r["peer_opps"]) == ("1", "2"),
           str(r))
     r2 = by[("r1_a2", "completeness", "critical")]
@@ -249,6 +271,239 @@ def test_census_file_and_table(tmp, ctx, agg):
           and orow["major"] == "3" and orow["minor"] == "1"
           and orow["critical"] == "0" and orow["own/peer"] == "2/2",
           str(orow))
+    # fileA (the non-cumulative severity_tier_category matrix) and its prefix-sum
+    # sibling, stored beside the census file.
+    p_m = np.write_round_issue_matrix(ctx, 2, agg)
+    p_c = np.write_round_issue_cumulative(ctx, 2, agg)
+    check("the matrix and cumulative files sit beside the census file",
+          p_m.is_file() and p_c.is_file()
+          and p_m.parent == p.parent == p_c.parent, f"{p_m} {p_c}")
+    with open(p_m, newline="", encoding="utf-8") as f:
+        mrows = list(csv.DictReader(f))
+    with open(p_c, newline="", encoding="utf-8") as f:
+        crows = list(csv.DictReader(f))
+    mhead, chead = list(mrows[0]), list(crows[0])
+    cells = np.tiebreak_cell_names()
+    check("both files have the same version rows and the same severity_tier_category columns",
+          mhead == chead == ["run", "round", "version"] + cells
+          and [r["version"] for r in mrows] == FIELD
+          and [r["version"] for r in crows] == FIELD,
+          str(mhead[:5]))
+    by_v = {r["version"]: r for r in mrows}
+    cy_v = {r["version"]: r for r in crows}
+    check("the cumulative file is the prefix sum of the matrix file",
+          all(list(itertools.accumulate(int(by_v[v][c]) for c in cells))
+             == [int(cy_v[v][c]) for c in cells] for v in FIELD),
+          str({v: cy_v[v][cells[-1]] for v in FIELD}))
+
+
+def test_location_dedup_optin(tmp):
+    print()
+    print("== the OPT-IN structured-location dedup (off by default) ==")
+    # Two sessions own-sweep the SAME version; both file the identical M4
+    # correctness/major row at the same line with the same long excerpt. With
+    # dedup off they are two mentions; with "location" on they are ONE, and the
+    # merge is audited.
+    ev = ("line 42: the treated group showed a higher median than the control "
+          "group in every cohort")
+    rows = [("sess_1", "orig", "peer_1", comp("v1", 0, introduced=[row(
+        "correctness", "major", ev, "M4")])),
+            ("sess_2", "orig", "peer_2", comp("v1", 0, introduced=[row(
+                "correctness", "major", ev, "M4")]))]
+    off = np.build_issue_census(rows, ["orig"])["orig"]
+    check("dedup off (the default): the two sheets' rows are two mentions",
+          off["total"] == 2 and off["merged"] == 0
+          and off["tiers"]["correctness"]["severities"]["major"]["own"] == 2,
+          str(off["total"]))
+    on = np.build_issue_census(rows, ["orig"], dedup="location")["orig"]
+    check("dedup=location: the same class+line+fuzzy excerpt merges to ONE mention",
+          on["total"] == 1 and on["merged"] == 1
+          and on["tiers"]["correctness"]["severities"]["major"]["own"] == 1
+          and on["tiers"]["correctness"]["severities"]["major"]["raw_own"] == 2
+          and on["tiers"]["correctness"]["severities"]["major"]["merged_own"] == 1,
+          str(on["total"]))
+    check("the merge is recorded in the audit with the kept session",
+          len(on["dedup_audit"]) == 1
+          and on["dedup_audit"][0]["session"] == "sess_2"
+          and on["dedup_audit"][0]["kept_session"] == "sess_1"
+          and on["dedup_audit"][0]["class"] == "M04"
+          and on["dedup_audit"][0]["line"] == 42 and "line 42" in on["dedup_audit"][0]["excerpt"],
+          str(on["dedup_audit"]))
+    check("the defect classes are normalized to the padded M01/M02 form",
+          np.dedup_class_id("M4") == "M04" and np.dedup_class_id("M04") == "M04"
+          and np.dedup_class_id("fmt-3") == "M20"
+          and np.dedup_class_id("J3") == "J3" and np.dedup_class_id("") == "",
+          f"{np.dedup_class_id('M4')}/{np.dedup_class_id('fmt-3')}")
+    # Every guard: each row below differs in exactly ONE component from `ev`,
+    # so it must NOT merge.
+    def one(ev2, check2="M4", sess="sess_2"):
+        return np.build_issue_census(
+            [("sess_1", "orig", "p1", comp("v1", 0, introduced=[row(
+                "correctness", "major", ev, "M4")])),
+             (sess, "orig", "p2", comp("v1", 0, introduced=[row(
+                 "correctness", "major", ev2, check2)]))],
+            ["orig"], dedup="location")["orig"]["total"]
+    check("a different defect class does NOT merge",
+          one(ev, "M5") == 2, str(one(ev, "M5")))
+    check("a row with NO check id never merges (the class key would be incomplete)",
+          one(ev, "") == 2, str(one(ev, "")))
+    check("a different line number does NOT merge",
+          one(ev.replace("line 42", "line 43")) == 2,
+          str(one(ev.replace("line 42", "line 43"))))
+    check("a missing line number does NOT merge (conservative)",
+          one(ev.replace("line 42: ", "")) == 2,
+          str(one(ev.replace("line 42: ", ""))))
+    check("an excerpt shorter than 7 words does NOT merge",
+          one("line 42: treated higher than control") == 2,
+          str(one("line 42: treated higher than control")))
+    check("one side short is enough to block the merge (both must be long)",
+          np.build_issue_census(
+              [("sess_1", "orig", "p1", comp("v1", 0, introduced=[row(
+                  "correctness", "major",
+                  "line 42: the treated group showed a higher median than the control "
+                  "group in every cohort", "M4")])),
+               ("sess_2", "orig", "p2", comp("v1", 0, introduced=[row(
+                   "correctness", "major", "line 42: treated group median higher", "M4")]))],
+              ["orig"], dedup="location")["orig"]["total"] == 2,
+          "asymmetric excerpts")
+    check("a fuzzy near-duplicate at the same line DOES merge (Jaccard >= 0.8)",
+          one("line 42: the treated group showed a higher median than the control "
+              "group, in every cohort.") == 1,
+          str(one("line 42: the treated group showed a higher median than the control "
+                  "group, in every cohort.")))
+    check("a reworded excerpt below the fuzzy threshold does NOT merge",
+          one("line 42: the treated arm had a bigger middle value than the "
+              "comparison arm overall") == 2,
+          str(one("line 42: the treated arm had a bigger middle value than the "
+                  "comparison arm overall")))
+    check("the threshold is a parameter (a low threshold lets the rewording merge)",
+          np.build_issue_census(
+              [("sess_1", "orig", "p1", comp("v1", 0, introduced=[row(
+                  "correctness", "major", ev, "M4")])),
+               ("sess_2", "orig", "p2", comp("v1", 0, introduced=[row(
+                   "correctness", "major",
+                   "line 42: the treated arm had a bigger middle value than the "
+                   "comparison arm overall", "M4")]))],
+              ["orig"], dedup="location", dedup_threshold=0.1)["orig"]["total"] == 1,
+          "threshold=0.1")
+    # The own/peer split survives the merge: the merge happens WITHIN a source,
+    # because each source's count is normalized by its own opportunities.
+    mixed = np.build_issue_census(
+        [("sess_1", "orig", "p1", comp("v1", 0, introduced=[row(
+            "correctness", "major", ev, "M4")])),
+         ("sess_2", "r1_a2", "orig", comp("v1", 0, resolved=[row(
+             "correctness", "major", ev, "M4")]))],
+        ["orig", "r1_a2"], dedup="location")
+    check("a merge never crosses the own/peer boundary (the split stays normalized)",
+          mixed["orig"]["total"] == 2 and mixed["orig"]["own"] == 1
+          and mixed["orig"]["peer"] == 1 and mixed["orig"]["merged"] == 0
+          and mixed["r1_a2"]["total"] == 0,
+          f"orig={mixed['orig']['total']} own/peer={mixed['orig']['own']}/"
+          f"{mixed['orig']['peer']} merged={mixed['orig']['merged']}")
+    check("an unknown mode falls back to off inside build_issue_census",
+          np.build_issue_census(rows, ["orig"], dedup="junk")["orig"]["total"] == 2)
+    # dedup_mode_of: the config reader, its default and its rejection of junk.
+    check("dedup_mode_of defaults to off and reads the config key",
+          np.dedup_mode_of(None) == "off"
+          and np.dedup_mode_of(type("C", (), {"cfg": {}})()) == "off"
+          and np.dedup_mode_of(type("C", (), {"cfg": {"dedup_mode": "Location"}})()) == "location")
+    bad = type("C", (), {"cfg": {"dedup_mode": "fuzzy"}})()
+    try:
+        np.dedup_mode_of(bad)
+        rejected = False
+    except SystemExit:
+        rejected = True
+    check("dedup_mode_of rejects an unknown configured mode", rejected)
+    # The judge prompt carries the location rule ONLY in the opt-in mode: the
+    # default prompt is byte-identical (the rule block is never concatenated).
+    p_off = np.judge_prompt(Path("/tmp/x"), "r1_t1_j1", 1, "t1", 1, 2, ["v1"])
+    p_on = np.judge_prompt(Path("/tmp/x"), "r1_t1_j1", 1, "t1", 1, 2, ["v1"],
+                           dedup_mode="location")
+    check("the judge prompt gains the line+excerpt rule only in location mode",
+          "ISSUE-LOCATION RULE" not in p_off and "ISSUE-LOCATION RULE" in p_on
+          and p_on.startswith(p_off.rstrip("\n")[:400]))
+    check("the location rule asks for `line N` and >= 7 words",
+          "`line N`" in p_on and "7 words" in p_on)
+    # The audit file rides beside the census/matrix/cumulative files.
+    ctx = make_ctx(Path(tempfile.mkdtemp(prefix="paper_census_dedup_")))
+    ctx.cfg["dedup_mode"] = "location"
+    agg = np.aggregate_round(ctx, 2, FIELD)
+    p_a = np.write_round_dedup_audit(ctx, 2, agg)
+    check("reports/round2_dedup_audit.json is written beside the census",
+          p_a.is_file() and p_a.name == "round2_dedup_audit.json", str(p_a))
+    payload = np.json.loads(p_a.read_text(encoding="utf-8"))
+    check("the audit records the mode and the merge count",
+          payload.get("mode") == "location"
+          and payload.get("merged_rows") == len(payload.get("merges") or [])
+          and payload.get("min_words") == np.DEDUP_MIN_WORDS,
+          str({k: payload.get(k) for k in ("mode", "merged_rows", "min_words")}))
+    # The mode flows through the census file's columns, too.
+    p = np.write_round_issue_census(ctx, 2, agg)
+    with open(p, newline="", encoding="utf-8") as f:
+        rows_c = list(csv.DictReader(f))
+    check("the census CSV carries the raw/merged counters and the mode",
+          all(r["dedup_mode"] == "location" for r in rows_c)
+          and all(k in rows_c[0] for k in ("raw_own", "raw_peer", "merged_own", "merged_peer")),
+          str(rows_c[0]))
+
+
+def test_dedup_mode_cli(tmp):
+    print()
+    print("== the dedup mode is a CLI parameter (setup + set-dedup-mode) ==")
+    import json
+    import shutil
+    import subprocess
+    root = tmp / "root"
+    src = tmp / "src"
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "manuscript.md").write_text("Abstract\n\nwords here.\n", encoding="utf-8")
+    cli = [sys.executable, str(WS / "paper_pipeline.py")]
+    r = subprocess.run(cli + ["setup", "--source", str(src), "--root", str(root),
+                              "--rounds", "1", "--judges", "1", "--rewrites", "0",
+                              "--revises", "1", "--dedup-mode", "location"],
+                       capture_output=True, text=True)
+    cfg = json.loads((root / "pipeline_config.json").read_text(encoding="utf-8"))
+    check("setup --dedup-mode location records the key",
+          r.returncode == 0 and cfg.get("dedup_mode") == "location",
+          (r.stderr or r.stdout)[-200:])
+    r = subprocess.run(cli + ["setup", "--source", str(src), "--root", str(tmp / "root2"),
+                              "--rounds", "1", "--judges", "1", "--rewrites", "0",
+                              "--revises", "1"],
+                       capture_output=True, text=True)
+    cfg2 = json.loads((tmp / "root2" / "pipeline_config.json").read_text(encoding="utf-8"))
+    check("setup without the flag records off (the default)",
+          r.returncode == 0 and cfg2.get("dedup_mode") == "off",
+          (r.stderr or r.stdout)[-200:])
+    r = subprocess.run(cli + ["setup", "--source", str(src), "--root", str(tmp / "root3"),
+                              "--rounds", "1", "--dedup-mode", "junk"],
+                       capture_output=True, text=True)
+    check("setup rejects an unknown --dedup-mode", r.returncode != 0,
+          (r.stderr or r.stdout)[-160:])
+    r = subprocess.run(cli + ["set-dedup-mode", "location", "--root", str(root)],
+                       capture_output=True, text=True)
+    cfg = json.loads((root / "pipeline_config.json").read_text(encoding="utf-8"))
+    check("set-dedup-mode changes an existing root",
+          r.returncode == 0 and cfg.get("dedup_mode") == "location",
+          (r.stderr or r.stdout)[-200:])
+    r = subprocess.run(cli + ["set-dedup-mode", "off", "--root", str(root)],
+                       capture_output=True, text=True)
+    cfg = json.loads((root / "pipeline_config.json").read_text(encoding="utf-8"))
+    check("set-dedup-mode off restores the default",
+          r.returncode == 0 and cfg.get("dedup_mode") == "off",
+          (r.stderr or r.stdout)[-200:])
+    r = subprocess.run(cli + ["set-dedup-mode", "--show", "--root", str(root)],
+                       capture_output=True, text=True)
+    check("set-dedup-mode --show prints the current mode",
+          r.returncode == 0 and "mode: off" in r.stdout, (r.stdout or r.stderr)[-160:])
+    r = subprocess.run(cli + ["set-dedup-mode", "junk", "--root", str(root)],
+                       capture_output=True, text=True)
+    check("set-dedup-mode rejects an unknown mode", r.returncode != 0,
+          (r.stdout or r.stderr)[-160:])
+    r = subprocess.run(cli + ["status", "--root", str(root)], capture_output=True, text=True)
+    check("status prints the dedup mode",
+          r.returncode == 0 and "dedup mode:" in r.stdout, (r.stdout or r.stderr)[-160:])
+    for p in (root, tmp / "root2", tmp / "root3"):
+        shutil.rmtree(p, ignore_errors=True)
 
 
 def main() -> int:
@@ -256,6 +511,8 @@ def main() -> int:
     test_census_is_reported_never_ranked(tmp, ctx, agg)
     test_direction_flips(tmp)
     test_census_file_and_table(tmp, ctx, agg)
+    test_location_dedup_optin(tmp)
+    test_dedup_mode_cli(tmp)
     print()
     if FAILS:
         print(f"{len(FAILS)} FAILURE(S): " + "; ".join(FAILS))

@@ -7547,7 +7547,7 @@ def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index
                  judge_total: int, opponent_labels: list,
                  caption_limit: int = DEFAULT_CAPTION_LIMIT,
                  zotero: str = DEFAULT_ZOTERO_MODE,
-                 field_first: bool = False, venue=None) -> str:
+                 field_first: bool = False, venue=None, dedup_mode: str = "off") -> str:
     """Relative-judgment prompt, one per (version, judge) session (Section C4)."""
     prof = _as_profile(venue)
     labels = ", ".join(opponent_labels)
@@ -7592,6 +7592,10 @@ def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index
     text = text.replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("judge"))
     text = text.replace("@@JUDGE_SELFCHECK@@", judge_selfcheck_block(run_id))
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
+    if str(dedup_mode or "off").strip().lower() == "location":
+        # The OPT-IN structured-location dedup needs machine-locatable evidence
+        # rows; in the default mode this block is never concatenated.
+        text += DEDUP_LOCATION_JUDGE_RULE
     return text + shared_blocks()
 
 
@@ -14570,7 +14574,8 @@ def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
                                            field_first=(judges > 1 and j % 2 == 0),
                                            caption_limit=caption_limit_of(ctx),
                                            zotero=zotero_mode_of(ctx),
-                                           venue=venue_profile_of(ctx)),
+                                           venue=venue_profile_of(ctx),
+                                           dedup_mode=dedup_mode_of(ctx)),
                                   encoding="utf-8")
             # One timestamp for the WHOLE judge sandbox (views, prompt and the
             # public tool alike): a listing must not be able to order the
@@ -19899,7 +19904,11 @@ def tier_net_scores(items) -> dict:
 #            `resolved` rows);
 #   * rows are DEDUPLICATED per (session, version, tier, severity, check,
 #     normalized evidence): the same defect a judge repeats in every opponent
-#     comparison of one session is ONE issue, never |field|-1 of them.
+#     comparison of one session is ONE issue, never |field|-1 of them. NO
+#     cross-sheet matching is performed by default (`dedup_mode` "off"): a row
+#     two sessions both filed counts twice. The OPT-IN "location" mode merges
+#     rows across sheets only on a structured key (defect class + exact line +
+#     fuzzy-matchable >= 7-word excerpt); see DEDUP_MODES below.
 # The own/peer split is deliberate: the two sources have different scrutiny
 # depth (own = an artifact-backed sweep of the version, peer = a read-only
 # comparison against it), so a large own/peer gap is the visible symptom of a
@@ -19914,8 +19923,102 @@ def _issue_row_key(tier, severity, evidence, check) -> tuple:
     return (str(tier), str(severity), str(check or ""),
             " ".join(str(evidence or "").split()).lower())
 
+# ---- the OPT-IN structured-location dedup (default OFF) --------------------
+# Cross-sheet matching by free-text evidence was removed because it is a noise
+# source. This optional mode instead matches on a STRUCTURED key the judge rows
+# already carry in prose: the defect CLASS (the normalized check id, e.g. M01),
+# an exact LINE number, and the excerpt (at least DEDUP_MIN_WORDS words) matched
+# FUZZILY (token-set Jaccard >= DEDUP_FUZZY_THRESHOLD). Rows without a parseable
+# line number, or with a shorter excerpt, are NEVER merged (the conservative
+# direction). It is enabled only by `setup --dedup-mode location` /
+# `set-dedup-mode location`; the default `off` performs no cross-sheet merging.
+DEDUP_MODES = ("off", "location")
+DEDUP_MIN_WORDS = 7
+DEDUP_FUZZY_THRESHOLD = 0.8
+DEDUP_LINE_RE = re.compile(r"(?:\blines?\b|\bln\b|\bl\.)\s*[:#]?\s*(\d+)\b", re.I)
+DEDUP_WORD_RE = re.compile(r"[0-9A-Za-z]+")
+_NUMERIC_CHECK_RE = re.compile(r"^M0*(\d+)$", re.I)
 
-def build_issue_census(observations, field_ids, sessions_expected=None) -> dict:
+
+def dedup_mode_of(ctx=None) -> str:
+    """The configured dedup mode ('off' when unset/unknown; an operator typo dies)."""
+    raw = (getattr(ctx, "cfg", None) or {}).get("dedup_mode")
+    mode = str(raw or "off").strip().lower()
+    if mode not in DEDUP_MODES:
+        die(f"pipeline_config.json records dedup_mode {mode!r}, which is not one of "
+            f"{', '.join(DEDUP_MODES)}. Fix it with `set-dedup-mode <mode>` or start a fresh "
+            f"root.")
+    return mode
+
+
+def dedup_class_id(check) -> str:
+    """The defect CLASS used by the dedup key: M01, M02, ... / J3 / other ids."""
+    cid = _norm_check_id(check)
+    m = _NUMERIC_CHECK_RE.match(cid)
+    if m:
+        return f"M{int(m.group(1)):02d}"
+    return cid
+
+
+def dedup_location_of(evidence) -> tuple:
+    """(line or None, word tuple) parsed from one ledger row's evidence text."""
+    text = " ".join(str(evidence or "").split())
+    m = DEDUP_LINE_RE.search(text)
+    line = int(m.group(1)) if m else None
+    return line, tuple(w.lower() for w in DEDUP_WORD_RE.findall(text))
+
+
+def dedup_fuzzy_similarity(a_words, b_words) -> float:
+    """Token-SET Jaccard similarity (0.0 when either side is empty)."""
+    a, b = set(a_words or ()), set(b_words or ())
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def dedup_rows_match(class_a, loc_a, class_b, loc_b, threshold: float = None) -> bool:
+    """True when two rows are the SAME defect under the structured key.
+
+    Requires: same defect class, BOTH line numbers present and EQUAL, both
+    excerpts at least DEDUP_MIN_WORDS words, and token-set Jaccard >= threshold.
+    A row with NO check id has no defect class, so it never merges: the key
+    would be incomplete.
+    """
+    if not class_a or not class_b or class_a != class_b:
+        return False
+    line_a, words_a = loc_a
+    line_b, words_b = loc_b
+    if line_a is None or line_b is None or line_a != line_b:
+        return False
+    if len(words_a) < DEDUP_MIN_WORDS or len(words_b) < DEDUP_MIN_WORDS:
+        return False
+    thr = DEDUP_FUZZY_THRESHOLD if threshold is None else float(threshold)
+    return dedup_fuzzy_similarity(words_a, words_b) >= thr
+
+
+# The judge-side instruction the OPT-IN `dedup_mode` "location" adds to the
+# prompt (never concatenated in the default mode, so the historical prompt is
+# byte-identical): the machine reader needs `line N` and a long enough quote to
+# find the same defect across two sessions' sheets.
+DEDUP_LOCATION_JUDGE_RULE = """
+=== ISSUE-LOCATION RULE (this pipeline merges duplicate issue rows by location) ===
+
+The issue census merges the rows TWO sessions file for the SAME defect, so every ledger row must be
+machine-locatable from its `evidence` alone:
+
+  * name the LINE NUMBER of the affected text as `line N` (e.g. `line 42 of the manuscript`), and
+  * quote AT LEAST 7 words of the affected text after it (e.g. `line 42: the treated group showed
+    a higher median than the control group`).
+
+Two rows are merged only when their `check` resolves to the same defect class, their line numbers
+are EQUAL, and their quoted excerpts overlap at the word-set level. A row without a parseable
+`line N` or with a shorter quote is never merged -- it is counted on its own. This rule only makes
+the rows machine-locatable; it never changes what you report or how it is scored.
+"""
+
+
+def build_issue_census(observations, field_ids, sessions_expected=None,
+                       dedup: str = "off", dedup_threshold: float = None) -> dict:
     """{vid: issue counts per tier/severity} from the round's judge sheets.
 
     `observations` is an iterable of `(session_id, target_vid, opponent_vid,
@@ -19923,44 +20026,39 @@ def build_issue_census(observations, field_ids, sessions_expected=None) -> dict:
     attributed to the version whose defect it names (`introduced` -> the
     target, `resolved` -> the opponent) and to the source that found it
     (`own` when that version is the session's target, else `peer`). Counts are
-    the REPORTED statistic and the tie-break's input (severity counts); they
-    never change a score or a gate. `sessions_expected` is the number of enabled
-    sessions that could have mentioned a version (the round's total); without it
-    the rate falls back to the sessions that actually contributed.
+    the REPORTED statistic and the tie-break's input; they never change a score
+    or a gate. `sessions_expected` is the number of enabled sessions that could
+    have mentioned a version (the round's total); without it the rate falls back
+    to the sessions that actually contributed.
 
-    Three views of the same mentions are reported, because they answer different
-    questions:
-      * `own`/`peer`/`total` -- every mention, deduplicated per (session,
-        version) exactly as always (the historical CSV columns);
-      * `dedup_own`/`dedup_peer`/`dedup_total` -- the same mentions deduplicated
-        ACROSS sessions by an EXACT normalized key (tier, severity, check,
-        whitespace/case-normalized evidence), PER SOURCE: a defect mentioned
-        once by the version's own judge and once by another version's comparison
-        counts once in each column, so the numbers do not depend on session
-        order. The key is deliberately conservative: it merges only rows whose
-        evidence string is identical after normalization, so two genuinely
-        different defects can never be collapsed -- a fuzzy match is the
-        bug-prone direction and is not used;
-      * `peer_rate`/`own_rate` -- the deduplicated mentions per OPPORTUNITY: a
-        version is the target in `own_opps` sessions (its own judges) and an
-        opponent in `peer_opps` sessions (every other version's judges), so the
-        raw own/peer totals are dominated by exposure (peer slots are ~7x more
-        numerous). The rates normalize that, and the selection tie-break reads
-        the peer rate first, then the own rate.
+    Cross-sheet dedup is OFF by default (`dedup="off"`): the counts are the
+    mentions each sheet filed, collapsed only per (session, version) -- a judge
+    sheet that repeats the same row for several opponent comparisons counts it
+    once. The OPT-IN `dedup="location"` mode merges rows ACROSS sheets when the
+    structured key matches: the same defect CLASS (`M01`, `M02`, ... from the
+    normalized check id), the SAME exact line number, and evidence excerpts of
+    at least DEDUP_MIN_WORDS words whose token-set Jaccard is >=
+    dedup_threshold (DEDUP_FUZZY_THRESHOLD when None). Rows without a parseable
+    line number or with a shorter excerpt are never merged; every merge is
+    recorded under the version's `dedup_audit` for inspection.
+
+    Per (version, tier, severity): `own`/`peer`/`total` are the EFFECTIVE counts
+    (deduplicated when the mode is on), `raw_own`/`raw_peer` the pre-dedup
+    counts, and `merged_own`/`merged_peer` the number of rows merged away; the
+    `peer_rate`/`own_rate` divide the effective counts by the OPPORTUNITIES.
     """
     field_ids = [str(v) for v in field_ids]
-    census = {vid: {"tiers": {t: {s: {"own": 0, "peer": 0} for s in SEVERITIES}
-                              for t in BASIS_TIERS},
+    mode = str(dedup or "off").strip().lower()
+    if mode not in DEDUP_MODES:
+        mode = "off"
+    census = {vid: {"tiers": {t: {s: {"own": 0, "peer": 0, "raw_own": 0, "raw_peer": 0,
+                                     "merged_own": 0, "merged_peer": 0}
+                              for s in SEVERITIES} for t in BASIS_TIERS},
                     "own_sessions": set(), "peer_sessions": set(),
                     "own_opps": set(), "peer_opps": set(),
-                    "dedup": {t: {s: {"own": 0, "peer": 0} for s in SEVERITIES}
-                              for t in BASIS_TIERS}} for vid in field_ids}
+                    "dedup_audit": []} for vid in field_ids}
     seen = {}                       # (session, version) -> row keys already counted
-    # (version, tier, severity, check, evidence) -> the SOURCES that reported it
-    # across sessions. A defect mentioned both by the version's own judge and by
-    # another version's comparison counts once in EACH source column -- the
-    # dedup is per (defect, source), so it is order-independent.
-    seen_global = {}
+    accepted = {}                   # (version, source) -> [(class, (line, words), session)]
     for sess, target, opp, comp in observations:
         if target in census:
             census[target]["own_opps"].add(sess)
@@ -19981,36 +20079,53 @@ def build_issue_census(observations, field_ids, sessions_expected=None) -> dict:
                 continue
             bucket.add(key)
             src = "own" if vid == target else "peer"
-            c["tiers"][tier][severity][src] += 1
+            c["tiers"][tier][severity]["raw_" + src] += 1
             (c["own_sessions"] if src == "own" else c["peer_sessions"]).add(sess)
-            gkey = (vid, key)
-            srcs = seen_global.setdefault(gkey, set())
-            if src not in srcs:
-                srcs.add(src)
-                c["dedup"][tier][severity][src] += 1
+            effective = True
+            if mode == "location":
+                class_id = dedup_class_id(check)
+                loc = dedup_location_of(evidence)
+                entries = accepted.setdefault((vid, src), [])
+                for kept_class, kept_loc, kept_sess in entries:
+                    if dedup_rows_match(class_id, loc, kept_class, kept_loc,
+                                        threshold=dedup_threshold):
+                        effective = False
+                        c["tiers"][tier][severity]["merged_" + src] += 1
+                        c["dedup_audit"].append({
+                            "version": vid, "source": src, "session": str(sess),
+                            "class": class_id, "line": loc[0],
+                            "excerpt": " ".join(str(evidence or "").split())[:200],
+                            "kept_session": str(kept_sess),
+                            "kept_excerpt": " ".join(kept_loc[1])[:200]})
+                        break
+                else:
+                    entries.append((class_id, loc, sess))
+            if effective:
+                c["tiers"][tier][severity][src] += 1
     n_expected = (int(sessions_expected) if is_int(sessions_expected) else None)
     out = {}
     for vid in field_ids:
         c = census[vid]
-        sev_totals = {s: {"own": 0, "peer": 0, "total": 0} for s in SEVERITIES}
+        sev_totals = {s: {"own": 0, "peer": 0, "total": 0, "raw_own": 0, "raw_peer": 0,
+                          "merged_own": 0, "merged_peer": 0} for s in SEVERITIES}
         tiers, own_total, peer_total = {}, 0, 0
+        raw_own_total = raw_peer_total = merged_own_total = merged_peer_total = 0
         for tier in BASIS_TIERS:
             per_sev, t_own, t_peer = {}, 0, 0
             for sev in SEVERITIES:
-                own = c["tiers"][tier][sev]["own"]
-                peer = c["tiers"][tier][sev]["peer"]
-                d_own = c["dedup"][tier][sev]["own"]
-                d_peer = c["dedup"][tier][sev]["peer"]
+                d = c["tiers"][tier][sev]
+                own, peer = d["own"], d["peer"]
                 n_own_opps = len(c["own_opps"])
                 n_peer_opps = len(c["peer_opps"])
                 per_sev[sev] = {
                     "own": own, "peer": peer, "total": own + peer,
-                    "dedup_own": d_own, "dedup_peer": d_peer, "dedup_total": d_own + d_peer,
-                    "peer_rate": (round(d_peer / n_peer_opps, 6) if n_peer_opps else 0.0),
-                    "own_rate": (round(d_own / n_own_opps, 6) if n_own_opps else 0.0),
+                    "raw_own": d["raw_own"], "raw_peer": d["raw_peer"],
+                    "merged_own": d["merged_own"], "merged_peer": d["merged_peer"],
+                    "peer_rate": (round(peer / n_peer_opps, 6) if n_peer_opps else 0.0),
+                    "own_rate": (round(own / n_own_opps, 6) if n_own_opps else 0.0),
                 }
-                sev_totals[sev]["own"] += own
-                sev_totals[sev]["peer"] += peer
+                for k in ("own", "peer", "raw_own", "raw_peer", "merged_own", "merged_peer"):
+                    sev_totals[sev][k] += d[k]
                 sev_totals[sev]["total"] += own + peer
                 t_own += own
                 t_peer += peer
@@ -20019,21 +20134,35 @@ def build_issue_census(observations, field_ids, sessions_expected=None) -> dict:
                            "severities": per_sev}
             own_total += t_own
             peer_total += t_peer
+            raw_own_total += sum(per_sev[s]["raw_own"] for s in SEVERITIES)
+            raw_peer_total += sum(per_sev[s]["raw_peer"] for s in SEVERITIES)
+            merged_own_total += sum(per_sev[s]["merged_own"] for s in SEVERITIES)
+            merged_peer_total += sum(per_sev[s]["merged_peer"] for s in SEVERITIES)
         total = own_total + peer_total
+        raw_total = raw_own_total + raw_peer_total
         n_sessions = n_expected if n_expected is not None else (
             len(c["own_sessions"]) + len(c["peer_sessions"]))
         rate = (round(total / n_sessions, 4) if n_sessions else None)
+        raw_rate = (round(raw_total / n_sessions, 4) if n_sessions else None)
         for row in tiers.values():
             row["per_session"] = (round(row["total"] / n_sessions, 4) if n_sessions else None)
             for per_sev in row["severities"].values():
                 per_sev["per_session"] = (round(per_sev["total"] / n_sessions, 4)
                                           if n_sessions else None)
+        merged_total = merged_own_total + merged_peer_total
         out[vid] = {"tiers": tiers,
                     "severities": {s: dict(v, per_session=(round(v["total"] / n_sessions, 4)
                                                            if n_sessions else None))
                                    for s, v in sev_totals.items()},
                     "own": own_total, "peer": peer_total, "total": total,
+                    "raw_own": raw_own_total, "raw_peer": raw_peer_total,
+                    "raw_total": raw_total,
+                    "merged_own": merged_own_total, "merged_peer": merged_peer_total,
+                    "merged": merged_total,
+                    "dedup_mode": mode,
+                    "dedup_audit": c["dedup_audit"],
                     "per_session": rate,
+                    "raw_per_session": raw_rate,
                     "own_sessions": len(c["own_sessions"]),
                     "peer_sessions": len(c["peer_sessions"]),
                     "own_opps": len(c["own_opps"]),
@@ -22322,10 +22451,12 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
                     pq["direction_flips"].append(f"{v} vs {w}: {mv:g} vs {mw:g}")
     diags["panel_quality"] = pq
     # The issue census: how many issues of each tier and severity the panel
-    # attributed to each version. It is the selection's tie-break input
-    # (severity rungs, tier by tier, peer rate before own rate).
+    # attributed to each version. It is the selection's tie-break input: each
+    # severity rung totals ALL TIERS of that severity, peer rate before own rate.
     census = build_issue_census(census_obs, field_ids,
-                                sessions_expected=sum(per_judges.values()))
+                                sessions_expected=sum(per_judges.values()),
+                                dedup=dedup_mode_of(ctx),
+                                dedup_threshold=DEDUP_FUZZY_THRESHOLD)
     return {"round": int(r), "field": field_ids, "field_size": k,
             "scores_per_version": expected, "stats": stats, "diagnostics": diags,
             "score_rows": score_rows, "issue_census": census,
@@ -22412,66 +22543,125 @@ def _valid_count(v):
 
 
 # ---- the champion selection key (2026-10-01 calibration) -------------------
-# `median -> crit/fatal -> major -> minor -> mean -> IQR -> digest`:
+# `median -> crit/fatal -> major -> minor -> mean -> IQR -> digest`, where the
+# crit/fatal -> major -> minor stage is the ADAPTIVE DEFECT PREFIX below:
 #   * the median stays the primary panel statistic;
-#   * the three severity rungs come from the round's issue census, TIER BY TIER
-#     in the scoring priority order, and compare the EXPOSURE-NORMALIZED peer
-#     rate first and the own rate second (a version is the target in only its
-#     own judges' sessions but an opponent in every other version's, so raw
-#     own/peer totals mostly measure exposure);
-#   * the counts are deduplicated ACROSS sessions by an exact normalized key
-#     (never a fuzzy match), then divided by the sessions that could mention
-#     the version;
-#   * mean/IQR/digest stay below them as the deterministic fallbacks, and the
+#   * the defect counts come from the round's issue census and compare the
+#     TOTAL number of defects over the leading `severity_tier_category` cells
+#     (a single tiny cell fluctuates too much to rank on): the walk grows the
+#     prefix until the cleanest ranked version carries `tiebreak_defect_floor`
+#     defects or every cell is included. The cumulative count at that prefix is
+#     a TOTAL, not a rate -- every ranked version's opportunities are the same
+#     in a complete panel, so the exposure normalization (own/peer) is already
+#     carried by the cell ORDER (peer before own) rather than by dividing;
+#   * the counts are the mentions each judge sheet filed (collapsed only per
+#     session+version, never matched across sheets by default), with the opt-in
+#     `dedup_mode` "location" available when the operator wants the
+#     structured-key merge;
+#   * the mean breaks a tie ONLY when those cumulative totals are equal
+#     (a total count is more reliable than the mean of small integer scores);
+#     IQR/digest stay below it as the deterministic fallbacks, and the
 #     incumbent-retention rule (an exact median/mean/IQR tie keeps the base)
 #     is unchanged.
-SEVERITY_TIE_GROUPS = (("critical", "fatal"), ("major",), ("minor",))
+# The adaptive defect-prefix tie-break (2026-10-01, second calibration):
+#   * cells are ordered `severity_tier_category`: fatal before critical before
+#     major before minor, tier by tier in the scoring priority order, and within
+#     a (severity, tier) cell `peer` before `own`;
+#   * walking that order, the counts are accumulated for every ranked version and
+#     the walk STOPS at the first prefix where the version with the FEWEST
+#     defects already carries `tiebreak_defect_floor` of them (default 10, a
+#     CLI/config parameter), or when every cell is included;
+#   * the version's cumulative count at that prefix is the tie-break for a
+#     median tie (fewer defects is better). The arithmetic mean is consulted
+#     ONLY when those cumulative counts are equal, then IQR, digest and id.
+# Rationale: a per-cell count is tiny and fluctuates; accumulating cells in the
+# order the scoring semantics prioritises grows the evidence until the cleanest
+# candidate has enough counts (or there is nothing left to add), and the single
+# accumulated number is more reliable than the mean of small integer scores.
+SEVERITY_TIE_ORDER = ("fatal", "critical", "major", "minor")
+TIEBREAK_SOURCES = ("peer", "own")
+DEFAULT_TIEBREAK_DEFECT_FLOOR = 10
+
+
+def tiebreak_cell_specs() -> list:
+    """[(severity, tier, source)] in the canonical `severity_tier_category` order."""
+    return [(sev, tier, src) for sev in SEVERITY_TIE_ORDER
+            for tier in BASIS_TIERS for src in TIEBREAK_SOURCES]
+
+
+def tiebreak_cell_names() -> list:
+    return [f"{sev}_{tier}_{src}" for sev, tier, src in tiebreak_cell_specs()]
+
+
+def tiebreak_defect_floor_of(ctx) -> int:
+    """The configured prefix floor (>= 0); DEFAULT_TIEBREAK_DEFECT_FLOOR when unset."""
+    raw = (getattr(ctx, "cfg", None) or {}).get("tiebreak_defect_floor")
+    try:
+        floor = int(raw) if raw is not None else DEFAULT_TIEBREAK_DEFECT_FLOOR
+    except (TypeError, ValueError):
+        floor = DEFAULT_TIEBREAK_DEFECT_FLOOR
+    return max(0, floor)
 
 
 def _census_for(vid, agg) -> dict:
     return ((agg or {}).get("issue_census") or {}).get(str(vid)) or {}
 
 
-def champion_issue_rungs(vid, agg) -> tuple:
-    """Ascending (peer_rate, own_rate) rungs: severity first, then tier order."""
-    tiers = (_census_for(vid, agg).get("tiers") or {})
-    rungs = []
-    for group in SEVERITY_TIE_GROUPS:
-        for tier in BASIS_TIERS:
-            sev = ((tiers.get(tier) or {}).get("severities") or {})
-            peer = sum(float((sev.get(s) or {}).get("peer_rate") or 0.0) for s in group)
-            own = sum(float((sev.get(s) or {}).get("own_rate") or 0.0) for s in group)
-            rungs.append(round(peer, 6))
-            rungs.append(round(own, 6))
-    return tuple(rungs)
+def issue_matrix_and_cumulative(census, versions) -> tuple:
+    """(cell names, per-version counts per cell, per-version prefix sums).
+
+    The counts are the census's EFFECTIVE defect counts (per source): the raw
+    mentions with dedup off (the default), the merged counts in the opt-in
+    `dedup_mode` "location". The two files this feeds and the selection read the
+    same numbers.
+    """
+    specs = tiebreak_cell_specs()
+    names = tiebreak_cell_names()
+    matrix = {}
+    for vid in versions:
+        tiers = (_census_for(vid, {"issue_census": census}).get("tiers") or {})
+        row = []
+        for sev, tier, src in specs:
+            sev_d = ((tiers.get(tier) or {}).get("severities") or {}).get(sev) or {}
+            row.append(int(sev_d.get(src) or 0))
+        matrix[str(vid)] = row
+    cumulative = {vid: list(itertools.accumulate(row)) for vid, row in matrix.items()}
+    return names, matrix, cumulative
+
+
+def tiebreak_prefix_cells(cumulative: dict, versions, floor: int) -> int:
+    """How many leading cells the tie-break uses (>= 1 unless there are no cells).
+
+    The first prefix at which the version with the FEWEST defects reaches the
+    floor wins; if no prefix reaches it, every cell is used.
+    """
+    if not cumulative or not versions:
+        return 0
+    n_cells = len(next(iter(cumulative.values())))
+    for i in range(n_cells):
+        if min(int(cumulative[str(v)][i]) for v in versions) >= floor:
+            return i + 1
+    return n_cells
 
 
 def champion_issue_summary(vid, agg) -> dict:
-    """Per severity group: deduplicated counts and rates (for the report/trace)."""
+    """Per severity: counts and rates (for the report/trace)."""
     tiers = (_census_for(vid, agg).get("tiers") or {})
     out = {}
-    for group in SEVERITY_TIE_GROUPS:
-        own = peer = 0
-        peer_rate = own_rate = 0.0
-        for tier in BASIS_TIERS:
-            sev = ((tiers.get(tier) or {}).get("severities") or {})
-            for s in group:
-                d = sev.get(s) or {}
-                own += int(d.get("dedup_own") or 0)
-                peer += int(d.get("dedup_peer") or 0)
-                peer_rate += float(d.get("peer_rate") or 0.0)
-                own_rate += float(d.get("own_rate") or 0.0)
-        out["/".join(group)] = {"own": own, "peer": peer,
-                                "peer_rate": round(peer_rate, 6),
-                                "own_rate": round(own_rate, 6)}
+    for sev in ("critical", "fatal", "major", "minor"):
+        own = sum(int((((tiers.get(t) or {}).get("severities") or {})
+                       .get(sev) or {}).get("own") or 0) for t in BASIS_TIERS)
+        peer = sum(int((((tiers.get(t) or {}).get("severities") or {})
+                        .get(sev) or {}).get("peer") or 0) for t in BASIS_TIERS)
+        out[sev] = {"own": own, "peer": peer}
     return out
 
 
 def champion_sort_key(row: dict) -> tuple:
-    """The selection key: median, the census rungs, then mean/IQR/digest."""
+    """median -> cumulative defect count at the adaptive prefix -> mean -> IQR -> digest."""
     med, mean, iqr = row.get("median"), row.get("mean"), row.get("iqr")
     return ((-(med if med is not None else -99.0),)
-            + tuple(row.get("issue_rungs") or ())
+            + (int(row.get("defect_prefix_total") or 0),)
             + (-(mean if mean is not None else -99.0),
                (iqr if iqr is not None else 99.0),
                str(row.get("digest") or "~"), str(row.get("id") or "")))
@@ -22577,25 +22767,40 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
                      "critical_remaining": crit, "writing_remaining": writing,
                      "manual_steps": manual,
                      "author_placeholders": st.get("author_placeholders"),
-                     "issue_rungs": champion_issue_rungs(row_id, agg),
                      "issues": champion_issue_summary(row_id, agg),
                      "captions": st.get("caption_note")})
+    # The adaptive defect-prefix tie-break: walk the canonical
+    # severity_tier_category order, accumulate the reported counts for every
+    # ranked version, and stop at the first prefix where the version with the
+    # FEWEST defects reaches the configured floor (or when every cell is used).
+    # The cumulative count at that prefix breaks a median tie; the mean is
+    # consulted only when those cumulative counts are equal.
+    floor = tiebreak_defect_floor_of(ctx)
+    rep_ids = sorted({str(t["rep"]) for t in rows})
+    cell_names, _matrix, cumulative = issue_matrix_and_cumulative(
+        (agg or {}).get("issue_census") or {}, rep_ids)
+    prefix_cells = tiebreak_prefix_cells(cumulative, rep_ids, floor)
+    for t in rows:
+        t["defect_prefix_total"] = (cumulative[str(t["rep"])][prefix_cells - 1]
+                                    if prefix_cells else 0)
+        t["tiebreak_prefix_cells"] = prefix_cells
     # Ranking key, in order (2026-10-01 calibration), with each component's
     # provenance:
     #   -median               the field-wide panel statistic (the primary signal)
-    #   crit/fatal, major,    the round's ISSUE CENSUS, tier by tier in the
-    #   minor (peer rate      scoring priority order, ASCENDING: fewer defects is
-    #   first, own rate       better. Peer rate first, then own rate, because a
-    #   second)               version is the target in only its own judges'
-    #                         sessions but an opponent in every other version's
-    #                         (raw own/peer totals measure exposure); counts are
-    #                         deduplicated across sessions by an exact key and
-    #                         divided by the sessions that could mention them.
-    #   -mean, IQR            the rest of the field-wide panel statistics.
-    #   digest, id            provenance-free deterministic fallback. The CONTENT
-    #                         DIGEST comes first: a perfect tie must not be decided
-    #                         by the arm's NAME, because a2 < i1 < w1 would
-    #                         silently favour the revise arm on every such tie.
+    #   defect_prefix_total   the cumulative defect count (per source, collapsed
+    #                         only per session+version) over the adaptive
+    #                         severity_tier_category
+    #                         prefix, ASCENDING: fewer defects is better. The
+    #                         prefix stops when the cleanest ranked version has
+    #                         `tiebreak_defect_floor` counts (default 10) or
+    #                         every cell is included.
+    #   -mean                 consulted ONLY when the cumulative counts are
+    #                         equal (a total count is more reliable than the
+    #                         mean of small integer scores).
+    #   IQR, digest, id       deterministic fallbacks (the CONTENT DIGEST comes
+    #                         before the id: a perfect tie must not be decided by
+    #                         the arm's NAME, because a2 < i1 < w1 would silently
+    #                         favour the revise arm on every such tie).
     # The self-reported critical_remaining/writing_remaining values are still
     # REPORTED (and cross-checked against the frozen review) but no longer rank:
     # the census is panel-derived, while those two are agent-authored.
@@ -22619,21 +22824,23 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
         # is retained rather than replaced by a version the panel cannot
         # distinguish from it (never reward a version merely for being different).
         # This is strictly a panel-statistic rule (median/mean/IQR); the census
-        # rungs, the self-reported counts and the digest never dethrone the
+        # prefix, the self-reported counts and the digest never dethrone the
         # incumbent on an exact tie -- a better defect count separates
         # CHALLENGERS, it does not retire an incumbent the panel cannot
         # distinguish from them.
         trace.append(f"{champ_row['id']} and the base tie exactly on (median, mean, IQR) -> the "
                      f"incumbent base is retained; a challenger must be measurably better")
         champ_row = base_row
-    trace.append("ranking key: (-median, then crit/fatal, major and minor issue rungs by tier "
-                 "in the scoring priority order -- peer rate first, own rate second, ascending, "
-                 "deduplicated across sessions and normalized by the sessions that could "
-                 "mention the version -- then -mean, IQR, digest, id); median/mean/IQR are "
-                 "field-wide panel statistics, the issue rungs come from the panel's own census "
-                 "(the self-reported critical_remaining/writing_remaining values are reported "
-                 "but no longer rank), and the content digest is the provenance-free tie-break "
-                 "(an arm's NAME never decides a tie). "
+    trace.append(f"ranking key: (-median, then the cumulative defect count over the first "
+                 f"{prefix_cells} cell(s) of the canonical severity_tier_category order "
+                 f"(fatal->critical->major->minor, tier order, peer before own; the walk stops "
+                 f"when the cleanest ranked version reaches the floor {floor} or all "
+                 f"{len(cell_names)} cells are used) -- then -mean (only when the cumulative "
+                 f"counts are equal), IQR, digest, id); median/mean/IQR are "
+                 "field-wide panel statistics, the cumulative counts come from the panel's own "
+                 "census (the self-reported critical_remaining/writing_remaining values are "
+                 "reported but no longer rank), and the content digest is the provenance-free "
+                 "tie-break (an arm's NAME never decides a tie). "
                  "vs_base is reported but NOT a ranking key: its 2*judges directed scores are few "
                  "enough that one outlier session flips the sign statistic, so the decision stays "
                  "on the field-wide list. MANUAL_STEPS.md is reported but never ranked on; "
@@ -22641,6 +22848,11 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
     for i, t in enumerate(rows, 1):
         trace.append(f"  {i}. {t['id']}: median={t['median']:g} mean={t['mean']:.3f} "
                      f"vs_original={_g(t['vs_original'])} vs_base={_g(t['vs_base'])} "
+                     f"defects@{prefix_cells}={t['defect_prefix_total']} "
+                     + "(cf/maj/min peer+own="
+                     + "/".join(f"{t['issues'][g]['peer']}+{t['issues'][g]['own']}"
+                                for g in ("fatal", "critical", "major", "minor"))
+                     + ") "
                      f"iqr={t['iqr']:g} critical_remaining={t['critical_remaining']} "
                      f"writing_remaining={t['writing_remaining']} "
                      f"manual_steps={t['manual_steps']} "
@@ -22648,7 +22860,10 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
                      f"n={t['n']} digest={str(t.get('digest') or 'n/a')[:12]} "
                      f"[{t.get('captions')}]")
     return {"champion": champ_row["id"], "champion_rep": champ_row["rep"],
-            "base_rep": base_rep, "eligible": eligible, "ranking": rows, "trace": trace}
+            "base_rep": base_rep, "eligible": eligible, "ranking": rows, "trace": trace,
+            "tiebreak": {"floor": floor, "cells_used": prefix_cells,
+                         "cell_order": cell_names[:prefix_cells],
+                         "cells_total": len(cell_names)}}
 
 
 def _g(v) -> str:
@@ -24106,10 +24321,14 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
     # operator can concatenate across runs.
     try:
         _ic = write_round_issue_census(ctx, r, agg)
+        _im = write_round_issue_matrix(ctx, r, agg)
+        _icm = write_round_issue_cumulative(ctx, r, agg)
+        _ida = write_round_dedup_audit(ctx, r, agg)
         print(f"[run] r{r} issue census: {_ic.relative_to(ctx.root).as_posix()} "
               f"({sum((v.get('total') or 0) for v in (agg.get('issue_census') or {}).values())} "
-              f"issue row(s) attributed across {len(agg.get('issue_census') or {})} version(s); "
-              f"the selection's severity tie-break uses its deduplicated rates)")
+              f"issue row(s) attributed across {len(agg.get('issue_census') or {})} version(s)); "
+              f"severity_tier_category matrix + prefix sums -> "
+              f"{_im.name}, {_icm.name}; dedup audit ({dedup_mode_of(ctx)}) -> {_ida.name}")
     except OSError as e:
         print(f"[run] r{r} WARNING: could not write the round's issue census: {e}")
     # A shrunk panel must never produce a champion: if any field member is
@@ -24141,6 +24360,12 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
         return False, False
 
     sel = select_champion(ctx, r, agg)
+    _tb = sel.get("tiebreak") or {}
+    print(f"[run] r{r} defect-prefix tie-break: floor {_tb.get('floor', '?')}, used "
+          f"{_tb.get('cells_used', '?')} of {_tb.get('cells_total', '?')} "
+          f"severity_tier_category cell(s)"
+          + (f" (last: {_tb.get('cell_order', [])[-1]})"
+             if _tb.get("cell_order") else ""))
     pin = pin_champion(ctx, r, sel["champion"], agg)
     winner = publish_winner(ctx, r, sel["champion"], pin, agg)
     finalize_round(ctx, r, field, dropped, agg, sel, pin)
@@ -24148,7 +24373,7 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
     st = agg["stats"]
     champ_rep = sel.get("champion_rep") or sel["champion"]
     rows = [["member", "n/expected", "median", "mean", "IQR", "vs_orig", "vs_base",
-             "issues cf/maj/min", "writing*", "hand-off", "note"]]
+             "defects@K", "severity totals f/c/maj/min", "writing*", "hand-off", "note"]]
     ranking_by_id = {r["id"]: r for r in (sel.get("ranking") or [])}
     for e in field:
         s = st[e["id"]]
@@ -24160,27 +24385,33 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
             note = "ineligible (regressed vs original)"
         iss = (ranking_by_id.get(e["id"]) or {}).get("issues") or {}
         if iss:
-            def _iss(key):
-                d = iss.get(key) or {}
+            def _iss(sev):
+                d = iss.get(sev) or {}
                 return int(d.get("own") or 0) + int(d.get("peer") or 0)
-            issues_cell = f"{_iss('critical/fatal')}/{_iss('major')}/{_iss('minor')}"
+            severity_cell = "/".join(str(_iss(s)) for s in ("fatal", "critical", "major", "minor"))
         else:
-            issues_cell = "-"
+            severity_cell = "-"
+        rank_row = ranking_by_id.get(e["id"]) or {}
+        prefix_cell = (f"{rank_row.get('defect_prefix_total')}"
+                       if rank_row.get("defect_prefix_total") is not None else "-")
         rows.append([e["id"], f"{s['n']}/{s['expected_n']}",
                      f"{s['median']:g}" if s["median"] is not None else "-",
                      f"{s['mean']:.2f}" if s.get("mean") is not None else "-",
                      f"{s['iqr']:g}" if s["iqr"] is not None else "-",
                      f"{s['vs_original']:g}" if s["vs_original"] is not None else "-",
                      f"{s['vs_base']:g}" if s.get("vs_base") is not None else "-",
-                     issues_cell,
-                     _count_cell((ranking_by_id.get(e["id"]) or {}).get("writing_remaining")),
+                     prefix_cell, severity_cell,
+                     _count_cell(rank_row.get("writing_remaining")),
                      f"{s.get('author_placeholders') or 0}", note])
     print()
     print(_tbl(rows[1:], rows[0]))
-    print("[run] ranking key: median -> crit/fatal -> major -> minor issue rungs "
-          "(peer rate first, own rate second; deduplicated across sessions) -> mean -> IQR -> "
-          "digest. Columns marked * are reported only, never ranked; the issue counts shown "
-          "are the tie-break's deduplicated totals.")
+    _tb = (sel or {}).get("tiebreak") or {}
+    print(f"[run] ranking key: median -> the cumulative defect count over the "
+          f"adaptive severity_tier_category prefix (fatal->critical->major->minor, tier order, "
+          f"peer before own; used {_tb.get('cells_used', '?')} of {_tb.get('cells_total', '?')} "
+          f"cells at floor {_tb.get('floor', '?')}) -> mean (only when the cumulative counts are "
+          f"equal) -> IQR -> digest. Columns marked * are reported only, never ranked; the "
+          f"per-severity totals are counts, not the tie-break ordering.")
     if sel["champion"] == A1_ID and champ_rep != A1_ID:
         print(f"[run] round {r}: no fresh arm outranked the round's base -- the champion is the "
               f"incumbent base A1 (scored here as the content-identical member '{champ_rep}'), "
@@ -24304,6 +24535,17 @@ def cmd_setup(args) -> None:
                                     rounds, "--integrators")
     if caption_limit < 0:
         die("--caption-limit must be >= 0 (0 = no caption suggestion at all, the default)")
+    _floor_arg = getattr(args, "tiebreak_defect_floor", None)
+    tiebreak_floor = int(_floor_arg if _floor_arg is not None
+                         else DEFAULT_TIEBREAK_DEFECT_FLOOR)
+    if tiebreak_floor < 0:
+        die("--tiebreak-defect-floor must be >= 0 (it is the number of defects the cleanest "
+            "ranked version must reach before the adaptive severity_tier_category prefix stops; "
+            "default 10)")
+    dedup_mode = str(getattr(args, "dedup_mode", None) or "off").strip().lower()
+    if dedup_mode not in DEDUP_MODES:
+        die(f"--dedup-mode must be one of {', '.join(DEDUP_MODES)} (got {dedup_mode!r}); "
+            f"the default 'off' performs no cross-sheet merging")
     if zotero not in ZOTERO_MODES:
         die(f"--zotero must be one of {', '.join(ZOTERO_MODES)} (got {zotero!r})")
     rewrites = parse_round_counts(getattr(args, "rewrites", None) or DEFAULTS["rewrites"],
@@ -24505,6 +24747,14 @@ def cmd_setup(args) -> None:
                "venue_profile": _venue_snapshot,
                "caption_limit": caption_limit, "zotero": zotero,
                "vs_original_rule": str(getattr(args, "vs_original_rule", VS_ORIGINAL_RULE)),
+               # The adaptive defect-prefix tie-break's floor: keep accumulating
+               # severity_tier_category cells until the cleanest ranked version
+               # carries this many defects (or every cell is used).
+               "tiebreak_defect_floor": tiebreak_floor,
+               # The issue-census dedup mode: "off" (default) counts every
+               # sheet's rows; "location" merges rows across sheets on the
+               # structured key (defect class + exact line + fuzzy excerpt).
+               "dedup_mode": dedup_mode,
                "stop_after_no_progress": int(getattr(args, "stop_after_no_progress", 0) or 0),
                "review_split": str(getattr(args, "review_split", "off") or "off"),
                "audit": str(getattr(args, "audit", DEFAULT_AUDIT) or DEFAULT_AUDIT),
@@ -25134,6 +25384,85 @@ def cmd_set_journal(args) -> None:
               f"rules still apply. Use `set-venue <id>` for another rule set." + (
                   "" if not getattr(args, "strict_venue", False) else
                   " (--strict-venue requested: re-run with the flag to make this an error.)"))
+
+
+def cmd_set_tiebreak_defect_floor(args) -> None:
+    """Set (or show) the adaptive defect-prefix floor of an existing root.
+
+    The floor is the number of defects the CLEANEST ranked version must reach
+    before the severity_tier_category walk stops; it takes effect on the next
+    round decided by `run` (past decisions keep the key they were made with).
+    """
+    ctx = Ctx(_venue_command_root(args, "set-tiebreak-defect-floor"),
+              strict_venue=bool(getattr(args, "strict_venue", False)))
+    ctx.load()
+    value = getattr(args, "floor", None)
+    show = bool(getattr(args, "show", False)) or value is None
+    if show:
+        print(f"[set-tiebreak-defect-floor] floor: {tiebreak_defect_floor_of(ctx)} "
+              f"(default {DEFAULT_TIEBREAK_DEFECT_FLOOR}; 0 = stop at the first "
+              f"severity_tier_category cell, so the mean/IQR/digest decide; a huge value such "
+              f"as 999999 uses every cell)")
+        return
+    try:
+        floor = int(value)
+    except (TypeError, ValueError):
+        die(f"set-tiebreak-defect-floor needs an integer >= 0 (got {value!r})", code=2)
+    if floor < 0:
+        die("the tie-break defect floor must be >= 0", code=2)
+    begin_run_log("set-tiebreak-defect-floor", ctx.root, sys.argv)
+    if ctx.state.get("runs") and not getattr(args, "force", False):
+        die(f"this root already has {len(ctx.state['runs'])} run record(s): the floor changes how "
+            f"a future round is decided.\n"
+            f"       Re-run `set-tiebreak-defect-floor {floor} --force` if the change is intended.")
+    with ctx.lock("set-tiebreak-defect-floor"):
+        ctx.cfg["tiebreak_defect_floor"] = floor
+        ctx.state["config"] = ctx.cfg
+        write_json_atomic(ctx.cfg_path, ctx.cfg)
+        ctx.log("set-tiebreak-defect-floor", detail=str(floor))
+        ctx.save_state()
+    print(f"[set-tiebreak-defect-floor] floor: {floor} (the severity_tier_category walk stops "
+          f"when the cleanest ranked version reaches {floor} defect(s), or when every cell is "
+          f"used)")
+
+
+def cmd_set_dedup_mode(args) -> None:
+    """Set (or show) the issue-census dedup mode of an existing root.
+
+    "off" (the default) counts every judge sheet's rows as separate mentions --
+    the mode every existing root was decided with. "location" additionally
+    merges rows ACROSS sheets on the structured key (defect class + exact line
+    number + >= 7-word excerpt, token-set Jaccard >= DEDUP_FUZZY_THRESHOLD); the
+    change takes effect on the next round decided by `run`, and every merge is
+    recorded in reports/round<r>_dedup_audit.json.
+    """
+    ctx = Ctx(_venue_command_root(args, "set-dedup-mode"),
+              strict_venue=bool(getattr(args, "strict_venue", False)))
+    ctx.load()
+    mode_arg = str(getattr(args, "mode", None) or "").strip().lower()
+    show = bool(getattr(args, "show", False)) or not mode_arg
+    if show:
+        print(f"[set-dedup-mode] mode: {dedup_mode_of(ctx)} (default off; 'location' merges "
+              f"rows across sheets on defect class + exact line number + a >= "
+              f"{DEDUP_MIN_WORDS}-word excerpt with token-set Jaccard >= "
+              f"{DEDUP_FUZZY_THRESHOLD:g})")
+        return
+    if mode_arg not in DEDUP_MODES:
+        die(f"set-dedup-mode needs one of {', '.join(DEDUP_MODES)} (got {mode_arg!r})", code=2)
+    begin_run_log("set-dedup-mode", ctx.root, sys.argv)
+    if ctx.state.get("runs") and not getattr(args, "force", False):
+        die(f"this root already has {len(ctx.state['runs'])} run record(s): the dedup mode "
+            f"changes how a future round's census counts issues.\n"
+            f"       Re-run `set-dedup-mode {mode_arg} --force` if the change is intended.")
+    with ctx.lock("set-dedup-mode"):
+        ctx.cfg["dedup_mode"] = mode_arg
+        ctx.state["config"] = ctx.cfg
+        write_json_atomic(ctx.cfg_path, ctx.cfg)
+        ctx.log("set-dedup-mode", detail=mode_arg)
+        ctx.save_state()
+    detail = ("every sheet's rows are separate mentions" if mode_arg == "off"
+              else "rows across sheets merge on the structured location key")
+    print(f"[set-dedup-mode] mode: {mode_arg} ({detail})")
 
 
 def cmd_set_revision_mode(args) -> None:
@@ -25799,9 +26128,15 @@ def write_round_raw_scores(ctx: Ctx, r: int, agg: dict = None) -> Path:
 # the pipeline root's name so rows from several runs can be told apart.
 ISSUE_CENSUS_FIELDS = ("run", "round", "version", "tier", "severity", "own", "peer",
                        "total", "per_session",
-                       # Cross-session, per-source dedup and the exposure-normalized
-                       # rates the selection tie-break reads (peer rate first).
-                       "dedup_own", "dedup_peer", "dedup_total", "own_rate", "peer_rate",
+                       # The counts are per-session mentions; the rates divide them
+                       # by the opportunities (no cross-session matching).
+                       "own_rate", "peer_rate",
+                       # `own`/`peer` are the EFFECTIVE counts. With the opt-in
+                       # `dedup_mode` "location" the *_raw columns are what the
+                       # sheets filed and *_merged how many rows were merged
+                       # away; both equal their effective counterparts when off.
+                       "raw_own", "raw_peer", "merged_own", "merged_peer",
+                       "dedup_mode",
                        "own_sessions", "peer_sessions", "own_opps", "peer_opps",
                        "sessions_expected")
 
@@ -25821,11 +26156,13 @@ def issue_census_rows(ctx: Ctx, r: int, agg: dict) -> list:
                              "peer": int(s.get("peer") or 0),
                              "total": int(s.get("total") or 0),
                              "per_session": s.get("per_session"),
-                             "dedup_own": int(s.get("dedup_own") or 0),
-                             "dedup_peer": int(s.get("dedup_peer") or 0),
-                             "dedup_total": int(s.get("dedup_total") or 0),
                              "own_rate": s.get("own_rate"),
                              "peer_rate": s.get("peer_rate"),
+                             "raw_own": int(s.get("raw_own") or 0),
+                             "raw_peer": int(s.get("raw_peer") or 0),
+                             "merged_own": int(s.get("merged_own") or 0),
+                             "merged_peer": int(s.get("merged_peer") or 0),
+                             "dedup_mode": c.get("dedup_mode") or "off",
                              "own_sessions": c.get("own_sessions"),
                              "peer_sessions": c.get("peer_sessions"),
                              "own_opps": c.get("own_opps"),
@@ -25841,16 +26178,15 @@ def write_round_issue_census(ctx: Ctx, r: int, agg: dict = None) -> Path:
 
     It answers "how many issues of each tier does each version carry, and who
     found them (own sweep vs peer comparison)" -- the number a chain of runs
-    compares across rounds, AND the selection's severity tie-break input
-    (crit/fatal -> major -> minor, tier by tier, peer rate before own rate).
+    compares across rounds. The selection's tie-break reads the reported
+    per-source counts through the two sibling files this module also writes:
+    `round<r>_issue_matrix.csv` (each severity_tier_category cell) and
+    `round<r>_issue_cumulative.csv` (their prefix sums).
     ONE row per (version, tier, severity), zeros included, so the file's shape
     is stable across rounds and runs even when a round's sheets carry no ledger
     rows.
     """
-    r = int(r)
-    if agg is None:
-        field = [str(v) for v in (ctx.round_rec(r).get("field") or [])]
-        agg = aggregate_round(ctx, r, field) if field else {"issue_census": {}, "field": []}
+    r, agg = _issue_file_agg(ctx, r, agg)
     p = ctx.reports_dir / f"round{r}_issue_census.csv"
     tmp = p.with_suffix(".csv.tmp")
     with open(tmp, "w", newline="", encoding="utf-8") as f:
@@ -25858,6 +26194,100 @@ def write_round_issue_census(ctx: Ctx, r: int, agg: dict = None) -> Path:
         w.writeheader()
         w.writerows(issue_census_rows(ctx, r, agg))
     os.replace(tmp, p)
+    return p
+
+
+def _issue_file_agg(ctx: Ctx, r: int, agg: dict = None) -> tuple:
+    """(round, aggregation) for the census/matrix/cumulative writers."""
+    r = int(r)
+    if agg is None:
+        field = [str(v) for v in (ctx.round_rec(r).get("field") or [])]
+        agg = aggregate_round(ctx, r, field) if field else {"issue_census": {}, "field": []}
+    return r, agg
+
+
+ISSUE_MATRIX_META_FIELDS = ("run", "round", "version")
+
+
+def issue_matrix_rows(ctx: Ctx, r: int, agg: dict) -> tuple:
+    """(cell names, rows) for the NON-cumulative severity_tier_category matrix."""
+    field = [str(v) for v in (agg.get("field") or [])]
+    names, matrix, _cum = issue_matrix_and_cumulative(agg.get("issue_census") or {}, field)
+    rows = []
+    for vid in field:
+        row = {"run": ctx.root.name, "round": int(r), "version": vid}
+        row.update({name: matrix[str(vid)][i] for i, name in enumerate(names)})
+        rows.append(row)
+    return names, rows
+
+
+def issue_cumulative_rows(ctx: Ctx, r: int, agg: dict) -> tuple:
+    """(cell names, rows) for the PREFIX-SUM severity_tier_category matrix."""
+    field = [str(v) for v in (agg.get("field") or [])]
+    names, _matrix, cumulative = issue_matrix_and_cumulative(
+        agg.get("issue_census") or {}, field)
+    rows = []
+    for vid in field:
+        row = {"run": ctx.root.name, "round": int(r), "version": vid}
+        row.update({name: cumulative[str(vid)][i] for i, name in enumerate(names)})
+        rows.append(row)
+    return names, rows
+
+
+def _write_issue_matrix_file(path: Path, names: list, rows: list) -> Path:
+    tmp = path.with_suffix(".csv.tmp")
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(ISSUE_MATRIX_META_FIELDS) + list(names))
+        w.writeheader()
+        w.writerows(rows)
+    os.replace(tmp, path)
+    return path
+
+
+def write_round_issue_matrix(ctx: Ctx, r: int, agg: dict = None) -> Path:
+    """`reports/round<r>_issue_matrix.csv` (fileA): rows = versions, columns =
+    the severity_tier_category cells in canonical order, values = the reported
+    defect counts per cell (peer/own as separate cells)."""
+    r, agg = _issue_file_agg(ctx, r, agg)
+    names, rows = issue_matrix_rows(ctx, r, agg)
+    return _write_issue_matrix_file(ctx.reports_dir / f"round{r}_issue_matrix.csv", names, rows)
+
+
+def write_round_issue_cumulative(ctx: Ctx, r: int, agg: dict = None) -> Path:
+    """`reports/round<r>_issue_cumulative.csv`: the PREFIX SUMS of fileA, same
+    rows and columns: cell k holds the cumulative defect count over the first k
+    cells of the canonical order."""
+    r, agg = _issue_file_agg(ctx, r, agg)
+    names, rows = issue_cumulative_rows(ctx, r, agg)
+    return _write_issue_matrix_file(ctx.reports_dir / f"round{r}_issue_cumulative.csv",
+                                    names, rows)
+
+
+def dedup_audit_payload(ctx: Ctx, r: int, agg: dict) -> dict:
+    """The machine-readable record of one round's cross-sheet merges."""
+    census = agg.get("issue_census") or {}
+    merges = []
+    for vid in agg.get("field") or []:
+        merges.extend(list((census.get(str(vid)) or {}).get("dedup_audit") or []))
+    return {"run": ctx.root.name, "round": int(r),
+            "mode": dedup_mode_of(ctx),
+            "min_words": DEDUP_MIN_WORDS,
+            "fuzzy_threshold": DEDUP_FUZZY_THRESHOLD,
+            "merged_rows": len(merges),
+            "merges": merges}
+
+
+def write_round_dedup_audit(ctx: Ctx, r: int, agg: dict = None) -> Path:
+    """`reports/round<r>_dedup_audit.json`: every merge the opt-in mode made.
+
+    One record per merged row (version, source, session, defect class, line,
+    excerpt, and the kept row's session/excerpt), so an operator can audit the
+    fuzzy step by hand. The file is written for every mode -- an "off" round
+    carries zero merges -- so the report shape does not change with the mode.
+    """
+    r, agg = _issue_file_agg(ctx, r, agg)
+    p = ctx.reports_dir / f"round{r}_dedup_audit.json"
+    write_json_atomic(p, dedup_audit_payload(ctx, r, agg))
     return p
 
 
@@ -25902,7 +26332,10 @@ def backfill_round_raw_scores(ctx: Ctx) -> list:
         if rec.get("status") != "done" or not (rec.get("field") or []):
             continue
         for name, writer in ((f"round{r}_raw_scores.csv", write_round_raw_scores),
-                             (f"round{r}_issue_census.csv", write_round_issue_census)):
+                             (f"round{r}_issue_census.csv", write_round_issue_census),
+                             (f"round{r}_issue_matrix.csv", write_round_issue_matrix),
+                             (f"round{r}_issue_cumulative.csv", write_round_issue_cumulative),
+                             (f"round{r}_dedup_audit.json", write_round_dedup_audit)):
             if (ctx.reports_dir / name).is_file():
                 continue
             try:
@@ -25915,7 +26348,7 @@ def backfill_round_raw_scores(ctx: Ctx) -> list:
     return out
 
 
-def score_model_doc() -> dict:
+def score_model_doc(ctx=None) -> dict:
     """The machine-readable description of how a round is scored and ranked.
 
     Factored out of build_decision_report so the score model is one object with
@@ -25951,11 +26384,12 @@ def score_model_doc() -> dict:
             "legacy_policy": "sheets from sandboxes materialized before the contract are "
                              "accepted with a warning and counted as uncalibrated; they are "
                              "never silently mixed into a calibrated panel"},
-        "ranking": "median of the flat directed-score list, then the round's panel-derived issue "
-                   "census (crit/fatal, then major, then minor; tier by tier in the scoring "
-                   "priority order; peer rate before own rate, deduplicated across sessions and "
-                   "normalized by the sessions that could mention the version), then the "
-                   "arithmetic mean, the IQR and the content digest",
+        "ranking": "median of the flat directed-score list, then the cumulative reported "
+                   "defect count over the adaptive severity_tier_category prefix (fatal -> "
+                   "critical -> major -> minor, tier by tier in the scoring priority order, peer "
+                   "before own; the walk stops when the cleanest ranked version reaches the "
+                   "`tiebreak_defect_floor` or every cell is used), then the arithmetic mean "
+                   "(only when the cumulative counts are equal), the IQR and the content digest",
         "cross_round_comparability": "per-round champion statistics come from different panels "
                                      "and different fields and are NOT comparable across rounds; "
                                      "the vs_base margin of the final round is the only paired "
@@ -25966,19 +26400,32 @@ def score_model_doc() -> dict:
                                 f"over the pair's 2*judges directed scores is significant at "
                                 f"{VS_ORIGINAL_ALPHA}; with so few scores NEITHER rule is "
                                 f"well-powered, and every row reports its wins/losses/ties and p",
+        "tiebreak_defect_floor": tiebreak_defect_floor_of(ctx),
+        "dedup_mode": dedup_mode_of(ctx),
         "tiebreaks": ["-median",
-                      "issue census: crit/fatal -> major -> minor, tier by tier in the scoring "
-                      "priority order, (peer_rate, own_rate) ascending",
-                      "-mean", "IQR", "digest", "id"],
-        "tiebreak_notes": "median/mean/IQR are PANEL statistics (verifiable); the census rungs "
-                          "come from the panel's own ledger rows (reports/round<r>_"
-                          "issue_census.csv): severity first, tier by tier in the scoring "
-                          "priority order, and within each rung the peer rate before the own "
-                          "rate, because a version is the target in only its own judges' "
-                          "sessions but an opponent in every other version's; counts are "
-                          "deduplicated across sessions by an exact normalized key (never a "
-                          "fuzzy match) and divided by the sessions that could mention the "
-                          "version; vs_base is reported (the incumbent margin a human reads) "
+                      "cumulative defect count over the adaptive severity_tier_category prefix "
+                      "(fatal->critical->major->minor, tier order, peer then own; the walk stops "
+                      "when the cleanest ranked version reaches `tiebreak_defect_floor` or every "
+                      "cell is used), ascending",
+                      "-mean (only when the cumulative counts are equal)", "IQR", "digest", "id"],
+        "tiebreak_notes": "median/mean/IQR are PANEL statistics (verifiable); the cumulative "
+                          "counts come from the panel's own ledger rows: each cell is the "
+                          "count of one (severity, tier, source) combination "
+                          "(reports/round<r>_issue_matrix.csv), the cells are accumulated in the "
+                          "canonical severity_tier_category order (reports/round<r>_"
+                          "issue_cumulative.csv), and the walk stops at the first prefix where "
+                          "the version with the FEWEST defects has "
+                          "`tiebreak_defect_floor` of them (default 10) -- or when every cell is "
+                          "included; the cumulative count at that prefix breaks a median tie, "
+                          "and a small per-cell count is deliberately never a rung of its own; "
+                          "`dedup_mode` off (the default) performs NO cross-sheet matching (a "
+                          "judge sheet that repeats a row in the same sheet counts it once, a row "
+                          "two sheets both filed counts twice); the opt-in `dedup_mode` location "
+                          "merges rows across sheets ONLY on the structured key (same defect "
+                          "class, same exact line number, both excerpts >= DEDUP_MIN_WORDS words "
+                          "with token-set Jaccard >= DEDUP_FUZZY_THRESHOLD), never merges rows "
+                          "without a parseable line or a short excerpt, and records every merge "
+                          "in reports/round<r>_dedup_audit.json; vs_base is reported (the incumbent margin a human reads) "
                           "but is deliberately NOT a ranking key: its 2*judges directed scores "
                           "are few enough that one outlier session flips its sign statistic; "
                           "critical_remaining and writing_remaining are SELF-REPORTED by the "
@@ -26509,27 +26956,43 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
         # panel attributed to each version, counted from the judges' OWN ledger
         # rows. It is BOTH the number a chain of runs compares across rounds
         # ("fewer correctness/major issues than last round") and the selection's
-        # tie-break input (severity rungs, tier by tier, peer rate first).
+        # tie-break input (the adaptive severity_tier_category prefix: the walk
+        # accumulates the cells until the cleanest ranked version reaches the
+        # configured defect floor, or every cell is used).
         census = agg.get("issue_census") or {}
         if census:
             L.append("")
-            L.append("**Issue census (also the selection's severity tie-break):** the judges' own "
+            L.append("**Issue census (also the selection's defect-prefix tie-break):** the judges' own "
                      "ledger rows, counted per version, tier and severity. `own` = the "
                      "version's own sweep sessions (`introduced` rows), `peer` = the other "
                      "versions' comparisons against it (`resolved` rows); rows are "
                      "deduplicated per session, so one defect repeated across a session's "
-                     "opponent comparisons counts once; `dedup` columns additionally merge "
-                     "rows whose normalized evidence is IDENTICAL across sessions, per "
-                     "source. `per session` divides by the sessions that COULD mention the "
+                     "opponent comparisons counts once. There is NO cross-session matching "
+                     "by default (`dedup_mode` off): merging rows across judge sheets by "
+                     "their evidence text alone is a noise source of its own. The OPT-IN "
+                     "`dedup_mode` location merges across sheets only on the structured key "
+                     "(same defect class, same exact line number, both excerpts >= 7 words "
+                     "with token-set Jaccard >= 0.8) and audits every merge in "
+                     f"`reports/round{r}_dedup_audit.json`. `per session` divides by the sessions that COULD mention the "
                      "version (field-size-stable); `own rate`/`peer rate` divide the "
-                     "deduplicated counts by the OPPORTUNITIES (own judge sessions vs "
-                     "opponent slots), which is what the selection compares (peer rate "
-                     "first). Tier columns and severity columns overlap (a tier total "
-                     "already contains its severities), and the census is not a score by "
-                     "itself: it answers \"what is left and where\", and it separates "
-                     "versions whose panel MEDIAN is tied. The same numbers are in "
-                     f"`reports/round{r}_issue_census.csv` (one row per version/tier/severity) "
-                     "for concatenation across runs.")
+                     "counts by the OPPORTUNITIES (own judge sessions vs "
+                     "opponent slots). Tier columns and severity columns overlap (a tier "
+                     "total already contains its severities), and the census is not a score "
+                     "by itself: it answers \"what is left and where\", and the selection "
+                     "reads it through two sibling matrices: "
+                     f"`reports/round{r}_issue_matrix.csv` (rows = versions, columns = the "
+                     "canonical severity_tier_category cells fatal_correctness_peer, "
+                     "fatal_correctness_own, ..., minor_formatting_own; values = the "
+                     "reported counts) and "
+                     f"`reports/round{r}_issue_cumulative.csv` (the PREFIX SUMS of the same "
+                     "rows and columns). The selection accumulates the cells in that order "
+                     "and stops at the first prefix where the cleanest ranked version reaches "
+                     f"the configured floor (default {DEFAULT_TIEBREAK_DEFECT_FLOOR}), or when "
+                     "every cell is used; the cumulative count at that prefix breaks a median "
+                     f"tie. The long-form table is `reports/round{r}_issue_census.csv` (one "
+                     "row per version/tier/severity) for concatenation across runs, and "
+                     f"`reports/round{r}_dedup_audit.json` records every cross-sheet merge the "
+                     "opt-in `dedup_mode` location made (zero merges when it is off).")
             L.append(_tbl(issue_census_table(agg), list(ISSUE_CENSUS_TABLE_HEAD)))
         # The incumbent margin is the number a human reads before trusting a
         # "progress" claim, but it is deliberately NOT a ranking key (a 2*judges
@@ -26679,16 +27142,26 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
              "`mean(flat score list)` and the IQR reported over the same flat list. The two "
              "directions of a pair are independent judgments from independent sessions, so the "
              "flat median is the intended statistic; a two-level median would discard that "
-             "independence. The selection key is `median -> crit/fatal -> major -> minor issue "
-             "rungs -> mean -> IQR -> digest`: the median is coarse on a -4..+4 integer scale, so "
-             "a median tie is first separated by the round's OWN ISSUE CENSUS -- severity-first, "
-             "tier by tier in the scoring priority order, peer rate before own rate to normalize "
-             "the ~7x exposure difference between opponent slots and a version's own judge "
-             "sessions, deduplicated across sessions by an exact normalized key. `mean` and the "
-             "IQR then separate versions the census cannot (a round whose sheets carry no ledger "
-             "rows scores all-zero rungs), and the content digest is the provenance-free final "
-             "fallback. The self-reported `critical_remaining`/`writing_remaining` values are "
-             "reported and cross-checked but are NOT ranking inputs.")
+             "independence. The selection key is `median -> cumulative-defect-prefix -> mean -> "
+             "IQR -> digest`: the median is coarse on a "
+             "-4..+4 integer scale, so a median tie is first separated by the round's OWN ISSUE "
+             "CENSUS, read as the canonical severity_tier_category order "
+             "(fatal_correctness_peer, fatal_correctness_own, ..., minor_formatting_own): the "
+             "cells are accumulated for every ranked version and the walk STOPS at the first "
+             f"prefix where the version with the FEWEST defects reaches the configured floor "
+             f"(default {DEFAULT_TIEBREAK_DEFECT_FLOOR} defects, "
+             f"`setup --tiebreak-defect-floor N` / `set-tiebreak-defect-floor N`), or when every "
+             "cell is included; the cumulative count at that prefix is the tie-break (fewer is "
+             "better). A per-cell count is never a rung of its own: with small counts its "
+             "fluctuation is larger than the signal, which is why the prefix keeps accumulating "
+             "until the cleanest candidate carries enough evidence. Counts are the mentions "
+             "each judge sheet filed (collapsed only per session+version; no cross-session "
+             "matching). `mean` is consulted ONLY when the "
+             "cumulative counts are equal; the IQR and the content digest are the deterministic "
+             "fallbacks (a round whose sheets carry no ledger rows scores a zero prefix and "
+             "therefore falls through to them). The self-reported "
+             "`critical_remaining`/`writing_remaining` values are reported and cross-checked but "
+             "are NOT ranking inputs.")
     L.append("")
     L.append(f"**Anti-regression gate.** `vs_original` is the median of the directed scores "
              f"involving the pinned original (own + negated received). A version is ineligible to "
@@ -26895,6 +27368,11 @@ def cmd_status(args) -> None:
           f"judges/version={judges_config_note(ctx)} "
           f"integrators/round={integrators_config_note(ctx)}")
     _jmode = journal_mode_of(ctx)
+    print(f"tie-break:     adaptive severity_tier_category prefix; defect floor "
+          f"{tiebreak_defect_floor_of(ctx)} "
+          f"(`set-tiebreak-defect-floor N`; 0 = one cell only, 999999 = every cell)")
+    print(f"dedup mode:    {dedup_mode_of(ctx)} "
+          f"(`set-dedup-mode off|location`; off counts every sheet's rows)")
     if _jmode != JOURNAL_MODE_NONE:
         _jinfo = JOURNAL_MODES[_jmode]
         _jfb = [str(x) for x in ((ctx.cfg or {}).get("journal_feedback") or [])]
@@ -27397,7 +27875,13 @@ def cmd_decide(args) -> None:
             print(f"[decide] round {r} WARNING: could not write its raw scores: {e}")
         try:
             _icp = write_round_issue_census(ctx, r, agg)
-            print(f"[decide] round {r} issue census -> {_icp.relative_to(ctx.root)}")
+            _imp = write_round_issue_matrix(ctx, r, agg)
+            _icup = write_round_issue_cumulative(ctx, r, agg)
+            _idap = write_round_dedup_audit(ctx, r, agg)
+            print(f"[decide] round {r} issue census -> {_icp.relative_to(ctx.root)}"
+                  f"; severity_tier_category matrix -> {_imp.relative_to(ctx.root)}"
+                  f"; prefix sums -> {_icup.relative_to(ctx.root)}"
+                  f"; dedup audit -> {_idap.relative_to(ctx.root)}")
         except OSError as e:
             print(f"[decide] round {r} WARNING: could not write its issue census: {e}")
         # The same guard `run` applies before deciding a round: a shrunk panel must
@@ -27563,7 +28047,7 @@ def cmd_decide(args) -> None:
         # know where a gate put its rows.
         "residual_gate": bool(getattr(args, "residual_gate", DEFAULT_RESIDUAL_GATE)),
         "residuals": residuals,
-        "score_model": score_model_doc(),
+        "score_model": score_model_doc(ctx),
         "rounds": [{"round": rd["round"],
                     "field": rd["agg"]["field"],
                     "field_size": rd["agg"]["field_size"],
@@ -29028,6 +29512,14 @@ def build_parser() -> argparse.ArgumentParser:
                          f"scope. An integer/list pair, same rules as --rewrites (default: "
                          f"{','.join(DEFAULTS['review_scope'])}). Use it to make the final round "
                          f"a polish pass instead of a second full review")
+    ps.add_argument("--dedup-mode", default=None, metavar="MODE",
+                    help="off (default) counts every judge sheet's issue rows as separate "
+                         "mentions; location additionally merges rows ACROSS sheets when they "
+                         "carry the same defect class (M01, M02, ...), the SAME exact line "
+                         "number and >= 7-word excerpts whose token-set Jaccard is >= 0.8. "
+                         "Only rows with both a parseable line number and a long enough excerpt "
+                         "are ever merged; every merge is recorded in "
+                         "reports/round<r>_dedup_audit.json")
     ps.add_argument("--revision-mode", default=None, metavar="MODE",
                     help="revise against a REAL journal decision letter instead of the "
                          "pipeline's own review rounds. One of: none (default; the historical "
@@ -29069,6 +29561,18 @@ def build_parser() -> argparse.ArgumentParser:
                          "only when the exact one-sided sign test over that pair's directed "
                          "scores is significant at 0.05. The pair is 2*judges scores, so both "
                          "rules are coarse -- the sign counts and p are reported either way")
+    ps.add_argument("--tiebreak-defect-floor", type=int, default=DEFAULT_TIEBREAK_DEFECT_FLOOR,
+                    metavar="N",
+                    help=f"the adaptive defect-prefix tie-break's floor (default "
+                         f"{DEFAULT_TIEBREAK_DEFECT_FLOOR}): walk the canonical "
+                         f"severity_tier_category order (fatal->critical->major->minor, tier by "
+                         f"tier in the scoring priority order, peer before own) accumulating "
+                         f"each version's reported defect counts, and STOP at the first "
+                         f"prefix where the version with the FEWEST defects reaches N (or when "
+                         f"every cell is used). The cumulative count at that prefix breaks a "
+                         f"median tie; the arithmetic mean is consulted only when those counts "
+                         f"are equal. 0 stops at the first cell (the mean/IQR/digest decide); "
+                         f"a value no prefix can reach (e.g. 999999) uses every cell")
     ps.add_argument("--stop-after-no-progress", type=int, default=0, metavar="K",
                     help="adaptive stop (default 0 = off): once K CONSECUTIVE rounds pin the "
                          "round's own base (no demonstrable, non-regressing progress), `run` "
@@ -29383,6 +29887,35 @@ def build_parser() -> argparse.ArgumentParser:
     psm.add_argument("--force", action="store_true",
                      help="change the mode although this root already has run records")
     psm.set_defaults(func=cmd_set_revision_mode)
+
+    ptf = sub.add_parser("set-tiebreak-defect-floor", parents=[common],
+                         help="set (or show) the adaptive defect-prefix floor used to break a "
+                              "median tie in champion selection")
+    ptf.add_argument("floor", nargs="?", type=int, default=None, metavar="N",
+                     help=f"the number of defects the CLEANEST ranked version must reach before "
+                          f"the severity_tier_category walk stops (default "
+                          f"{DEFAULT_TIEBREAK_DEFECT_FLOOR}; 0 = stop at the first cell, a value "
+                          f"no prefix can reach, e.g. 999999, = use every cell). Omit, or pass "
+                          f"--show, to print the current value")
+    ptf.add_argument("--show", action="store_true",
+                     help="print the root's current floor and exit")
+    ptf.add_argument("--force", action="store_true",
+                     help="change the floor although this root already has run records")
+    ptf.set_defaults(func=cmd_set_tiebreak_defect_floor)
+
+    pdm = sub.add_parser("set-dedup-mode", parents=[common],
+                         help="set (or show) the issue-census dedup mode: off (default, no "
+                              "cross-sheet merging) or location (merge rows on defect class + "
+                              "exact line number + a fuzzy-matched >= 7-word excerpt)")
+    pdm.add_argument("mode", nargs="?", default=None, choices=list(DEDUP_MODES), metavar="MODE",
+                     help="off (every sheet's rows are separate mentions) or location (merge "
+                          "across sheets on the structured location key). Omit, or pass --show, "
+                          "to print the current mode")
+    pdm.add_argument("--show", action="store_true",
+                     help="print the root's current dedup mode and exit")
+    pdm.add_argument("--force", action="store_true",
+                     help="change the mode although this root already has run records")
+    pdm.set_defaults(func=cmd_set_dedup_mode)
 
     pst = sub.add_parser("set-article-type", parents=[common],
                          help="select the venue's article type (Article, Brief Communication, "

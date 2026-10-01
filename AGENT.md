@@ -202,15 +202,28 @@ touching this area:
   ledger.md, this file's sibling pipeline source); change all of them together
   or none. `writing` above `formatting` is deliberate: layout is pre-normalized
   before the judge sees the view.
-* **The champion selection key is `median -> crit/fatal -> major -> minor ->
-  mean -> IQR -> digest`** (`champion_sort_key`), where each severity rung is
-  compared tier by tier in the priority order using the issue census's
-  DEDUPLICATED, EXPOSURE-NORMALIZED rates -- peer rate first, own rate second
-  (`champion_issue_rungs`). The self-reported `critical_remaining`/
-  `writing_remaining` counts are reported and cross-checked but never rank; the
-  incumbent-retention rule on an exact median/mean/IQR tie is unchanged.
+* **The champion selection key is `median -> cumulative defect count over the
+  adaptive severity_tier_category prefix -> mean -> IQR -> digest`**
+  (`champion_sort_key`, `tiebreak_cell_names`, `tiebreak_prefix_cells`): the
+  canonical cell order is fatal/critical/major/minor × the tier priority order ×
+  peer/own; the walk stops at the first prefix where the cleanest ranked version
+  reaches `tiebreak_defect_floor` (default 10, `setup
+  --tiebreak-defect-floor N` / `set-tiebreak-defect-floor N`) or when every cell
+  is used, and the cumulative count at that prefix breaks a median tie; the mean
+  is consulted only when those counts are equal. NO cross-session deduplication
+  is performed by default (`dedup_mode` `off`; mentions are per judge sheet,
+  collapsed only per session+version). The OPT-IN `dedup_mode` `location`
+  (`setup --dedup-mode location` / `set-dedup-mode location`) merges rows across
+  sheets only on the structured key -- same defect class, SAME exact line number
+  parsed from `line N`, and >= 7-word excerpts with token-set Jaccard >= 0.8 --
+  never merges a row without a parseable line or with a short excerpt, never
+  crosses the own/peer boundary, and records every merge in
+  `reports/round<r>_dedup_audit.json`. The self-reported
+  `critical_remaining`/`writing_remaining` counts are reported and cross-checked
+  but never rank; the incumbent-retention rule on an exact median/mean/IQR tie is
+  unchanged.
   `.paper_test/test_grading_scheme.py` (B2) and `test_issue_census.py` pin the
-  key, the dedup and the rates.
+  cell order, the adaptive stop, the files and the rates.
 
 ## Known, deliberate limits
 

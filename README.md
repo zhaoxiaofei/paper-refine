@@ -1139,13 +1139,27 @@ The artifact *process* is shared as well; the differences are deliberate:
 | `scores.json` (signed comparison items with class + severity) | judge | only the panel scores |
 
 **How a round is decided (one ranking key, every arm on the same terms):**
-`-median`, then the round's **issue census** (crit/fatal, then major, then
-minor; tier by tier in the scoring priority order; peer rate before own rate,
-so the ~7x exposure difference between opponent slots and a version's own judge
-sessions is normalized; counts are deduplicated across sessions by an exact
-normalized key and divided by the sessions that could mention them), then
-`-mean`, `IQR`, the provenance-free content digest and only after that the run
-id. The census comes from the panel's own ledgers, so a median tie is separated
+`-median`, then the **cumulative defect count over the adaptive
+severity_tier_category prefix** (the canonical cell order is
+`fatal_correctness_peer, fatal_correctness_own, …, minor_formatting_own`: walk
+the cells accumulating every ranked version's reported defect counts, and STOP
+at the first prefix where the version with the FEWEST defects reaches the
+configured floor -- default 10, `setup --tiebreak-defect-floor N` /
+`set-tiebreak-defect-floor N` -- or when every cell is used; the cumulative
+count at that prefix breaks the median tie), then `-mean` (only when those
+cumulative counts are equal), `IQR`, the provenance-free content digest and only
+after that the run id. No cross-session deduplication is applied by default
+(`dedup_mode` `off`): the counts are the mentions each judge sheet filed (a
+repeated row inside one sheet counts once), and the peer/own split plus the
+exposure-normalized rates stay in the census for inspection. The OPT-IN
+`setup --dedup-mode location` / `set-dedup-mode location` additionally merges
+rows ACROSS sheets, but only on a structured key the judge can state exactly:
+the same defect class (the normalized check id, e.g. `M01`, `M02`), the SAME
+exact line number parsed from `line N`, and excerpts of at least 7 words whose
+token-set Jaccard is >= 0.8. A row without a parseable line number or with a
+shorter excerpt is never merged, merges never cross the own/peer boundary (each
+source stays normalized by its own opportunities), and every merge is recorded
+in `reports/round<r>_dedup_audit.json` for inspection. The census comes from the panel's own ledgers, so a median tie is separated
 by how many defects the panel actually attributed to each version. The
 self-reported `critical_remaining`/`writing_remaining` counts are still
 recorded and cross-checked against the frozen review (a revise arm claiming
@@ -1186,14 +1200,20 @@ rows a version's own sweep sessions filed) from `peer` (the rows the other
 versions' comparisons filed against it) -- the panel's scrutiny check, since
 the two sources have different depth -- and normalizes by the sessions that
 could mention the version, which is stable as the field size changes. Since the
-2026-10-01 calibration it is also the selection's **severity tie-break**: after
-the median, `run` compares crit/fatal, then major, then minor, tier by tier in
-the scoring priority order, using the exposure-normalized peer rate first and
-the own rate second (the peer columns come from ~7x more session slots, so raw
-own/peer totals mostly measure exposure; the `dedup` columns merge rows whose
-normalized evidence is identical across sessions, per source, and the rates
-divide those by the opportunities). It is not a score by itself: it separates
-versions whose panel median is tied.
+2026-10-01 calibration it is also the selection's **defect-prefix tie-break**:
+after the median, `run` accumulates the reported defect counts over the
+canonical severity_tier_category order and stops at the first prefix where the
+cleanest ranked version reaches the configured floor (default 10 defects), or
+when every cell is used; the cumulative count at that prefix separates versions
+whose panel median is tied. A per-cell count is never a rung of its own: with
+small counts its fluctuation is larger than the signal. Two sibling files carry
+the numbers: `reports/round<r>_issue_matrix.csv` (fileA: rows = versions,
+columns = the cells in canonical order, values = reported counts) and
+`reports/round<r>_issue_cumulative.csv` (its prefix sums, same rows/columns); a
+third, `reports/round<r>_dedup_audit.json`, records every merge the opt-in
+`location` mode made (`own`/`peer` in the census are the effective counts;
+`raw_own`/`raw_peer` and `merged_own`/`merged_peer` in the CSV say what was
+merged away).
 
 The panel-quality diagnostic that reads the same pairs has one fixed rule:
 `direction_flips` lists the pairs where BOTH sides claim to be better (both own
@@ -1525,8 +1545,9 @@ enforcement, the review contract's M30 row + artifact, the five prompts'
 blocks, rule E12 and a strict-artifact stub review round),
 `test_hash_cache.py`, `test_final_clean_version.py`, `test_grading_scheme.py`,
 `test_issue_census.py` (the reported issues-per-version/tier/severity census, the
-own/peer scrutiny split, per-session dedup, the run-concatenable
-`reports/round<r>_issue_census.csv`, and the fixed `direction_flips` rule),
+own/peer scrutiny split, per-session counting, the run-concatenable
+`reports/round<r>_issue_census.csv` plus the severity_tier_category matrix and
+prefix-sum files, and the fixed `direction_flips` rule),
 `test_anonymized_judging.py`, `test_zotero_integration.py`. See
 `.paper_test/README.md` for the full table.
 `test_raw_data_readonly.py` covers the read-only `raw_data/` contract

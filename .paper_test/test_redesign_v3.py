@@ -245,8 +245,9 @@ def test_field_wide_ranking_and_reported_margin():
     check("flipping the incumbent pair does not change the champion (it is not a ranking key)",
           sel2["champion"] == "w1", f"champion={sel2['champion']}")
     check("the trace documents the field-wide key and the reported-only margin",
-          any("ranking key: (-median, then crit/fatal, major and minor issue rungs" in ln
-              and "then -mean, IQR, digest, id)" in ln for ln in sel2["trace"])
+          any("ranking key: (-median, then the cumulative defect count over the first" in ln
+              and "severity_tier_category order" in ln
+              and "then -mean (only when the cumulative" in ln for ln in sel2["trace"])
           and any("vs_base is reported but NOT a ranking key" in ln for ln in sel2["trace"]),
           str(sel2["trace"][-1:])[:200])
 
