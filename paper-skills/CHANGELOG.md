@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.24 — official journal templates are authoritative; the derived norm stays advisory (2026-10-01)
+
+Many venues publish their own Word/LaTeX template (e.g. Frontiers'
+`Frontiers_Word_Templates.zip` / `Frontiers_LaTeX_Templates.zip`). The venue
+store now carries them explicitly, with two tiers of authority:
+
+- **`venue_profiles/<venue-id>.official/`** — the journal's OWN template files
+  (`.docx`/`.dotx`/`.tex`/`.cls`/`.sty`), unzipped, plus a `manifest.json`
+  (source URL, archive, extracted files, retrieval date, license note) and an
+  optional `requirements.json` (`{"mandatory_sections": [...]}`) for operator
+  overrides. This tier is AUTHORITATIVE: the derived LaTeX skeleton keeps the
+  journal's `\documentclass`, the Word skeleton marks the template's mandatory
+  sections, and the declaration blocks use the template's own headings.
+- **`venue_profiles/<venue-id>.manuscripts/`** — recent OA exemplars, unchanged
+  from 0.23, and now strictly the ADVISORY tier: it fills what the official
+  template leaves open and can never override it.
+- `build-venue-templates` (and `add-venue`, whose prompt now asks for the
+  official template archives FIRST) derives both tiers into
+  `<venue-id>.templates/` deterministically; `structure.json` carries the
+  `official` and `norm` blocks, `venue_architecture.md` prints them in that
+  order, and `MANIFEST.json` pins every official file, every exemplar and the
+  download provenance. An official-only venue (no exemplars) still gets a pack.
+- The review evidence pack now contains a code-side conformance scan
+  (`work/OFFICIAL_TEMPLATE.json` / `.md`): missing mandatory sections, missing
+  statement blocks (matched by MEANING -- "Conflict of Interest" satisfies the
+  "Competing interests" requirement) and a wrong `\documentclass`. It is
+  evidence for the review's J5/M20 disposition, never a gate.
+- The prompt block gains the two-tier rules and a TRANSFER clause: in
+  `transfer` mode the target venue's official template REPLACES the previous
+  venue's (old class/styles, section names, declarations, reference style and
+  figure conventions are findings to remove), and the humans' concerns from
+  `human_review_feedback/` are still answered without a response letter.
+
 ## 0.23 — pinned, structure-only venue exemplars and the `add-venue` command (2026-10-01)
 
 A venue can now ship a shared exemplar corpus and a derived template pack:

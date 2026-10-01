@@ -215,17 +215,21 @@ python paper_pipeline.py set-venue --show --json         # the same, machine-rea
 python paper_pipeline.py status --root ./paper_rounds      # prints venue, journal and limits too
 ```
 
-**Venue exemplars and the advisory structure norm.** A venue can ship
-`venue_profiles/<venue-id>.manuscripts/` — recently published OA articles of
-that venue (or structure-only Markdown transcriptions of them). The pipeline
-reads them for their **structure only** and derives the pinned
-`venue_profiles/<venue-id>.templates/` pack: the modal section order with
-presence counts, statement placement, and `word-template.md` /
-`latex-template.tex` skeletons (every input and output sha256-pinned, no
-timestamps). The review and rewrite prompts embed the resulting
-`venue_architecture.md` as an **advisory** norm: it never gates, never scores,
-and never overrides the venue's own guidelines or the manuscript's content
-logic.
+**Official journal templates and venue exemplars.** When the venue publishes
+its own Word/LaTeX template (most do — e.g. Frontiers' Word/LaTeX template zips
+linked from its author guidelines), those files live in
+`venue_profiles/<venue-id>.official/` and are **authoritative**: the derived
+skeletons keep the journal's class file and section skeleton, mark its
+mandatory sections, and keep the template's own wording for the declaration
+blocks. `venue_profiles/<venue-id>.manuscripts/` (recent OA articles, or
+structure-only transcriptions) adds a second, **advisory** tier used only for
+what the template leaves open. Both feed the pinned
+`venue_profiles/<venue-id>.templates/` pack (every input and output
+sha256-pinned, no timestamps); review and rewrite prompts embed it, plus the
+code-side conformance rows (`work/OFFICIAL_TEMPLATE.md`: missing mandatory
+section, missing statement block, wrong class). A template requirement the
+manuscript cannot supply becomes a manual item for the author — never invented
+text — and neither tier gates or scores by itself.
 
 ```bash
 python paper_pipeline.py add-venue frontiers-immunology --journal "Frontiers in Immunology"

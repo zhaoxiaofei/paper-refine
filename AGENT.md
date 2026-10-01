@@ -230,16 +230,25 @@ touching this area:
   but never rank.
   `.paper_test/test_grading_scheme.py` (B2) and `test_issue_census.py` pin the
   cell order, the adaptive stop, the files and the rates.
-* **The venue structure norm is ADVISORY, structure-only and pinned**
-  (2026-10-01): `venue_profiles/<id>.manuscripts/` holds recent OA exemplars;
-  `build-venue-templates` derives `<id>.templates/` (modal section order with
-  presence counts, statement placement, `word-template.md`,
-  `latex-template.tex`, `MANIFEST.json` with sha256 of every input and output;
-  deterministic, no timestamps). `add-venue` drives an agent to write the
-  profile + README row + downloads, then the CODE derives the pack. The review
-  and rewrite prompts embed `venue_architecture.md`; no finding may rest on the
-  norm alone, no prose is copied from an exemplar, and the venue's own
-  guidelines always win. Pinned by `.paper_test/test_venue_templates.py`.
+* **Official templates are AUTHORITATIVE; derived structure is ADVISORY**
+  (2026-10-01): `venue_profiles/<id>.official/` holds the journal's own
+  Word/LaTeX template files (+ source/license/retrieval manifest) and
+  optionally `requirements.json` with extra mandatory sections;
+  `venue_profiles/<id>.manuscripts/` holds recent OA exemplars;
+  `build-venue-templates` derives `<id>.templates/` with BOTH tiers
+  (official: class, mandatory sections, declaration headings; advisory: modal
+  order + presence counts), `word-template.md`, `latex-template.tex`, and
+  `MANIFEST.json` pinning every input/output (deterministic, no timestamps).
+  `add-venue` drives an agent to write the profile + README row + downloads,
+  then the CODE derives the pack; `status` prints the pack. The review/rewrite
+  prompts embed `venue_architecture.md`, and the code-side conformance rows
+  (`work/OFFICIAL_TEMPLATE.md`) name a missing mandatory section, missing
+  statement block or wrong class. A requirement the manuscript cannot supply is
+  a MANUAL item, never invented text; no prose is copied from an exemplar or a
+  template sample; neither tier gates or scores by itself. Transfer sessions
+  get the extra clause that the target venue's template REPLACES the previous
+  venue's (styles, section names, declarations, reference style). Pinned by
+  `.paper_test/test_venue_templates.py`.
 
 ## Known, deliberate limits
 

@@ -115,6 +115,28 @@ none
 \end{document}
 """
 
+OFFICIAL_TEX = r"""\documentclass{frontiersSCNS}
+\begin{document}
+\section{Introduction}
+\section{Materials and Methods}
+\section{Results}
+\section{Discussion}
+\section{Data Availability Statement}
+\section{Author Contributions}
+\section{Funding}
+\section{Conflict of Interest}
+\end{document}
+"""
+
+SUBMITTED_TEX = r"""\documentclass{article}
+\begin{document}
+\section{Introduction}
+\section{Methods}
+\section{Results}
+\section{Discussion}
+\end{document}
+"""
+
 
 def make_store(tmp: Path) -> Path:
     store = tmp / "venue_profiles"
@@ -212,10 +234,10 @@ def test_prompt_norm(tmp: Path):
     print("== the norm reaches review/rewrite as an ADVISORY block ==")
     block = np.venue_norm_block("demo", root=tmp)
     check("venue_norm_block finds the pack through the root's venue_profiles/",
-          "VENUE STRUCTURE NORM" in block and "| 1 | Abstract | 2/3 |" in block
+          "VENUE TEMPLATE / STRUCTURE" in block and "| 1 | Abstract | 2/3 |" in block
           and "sha256" in block, block[:200])
     check("the block forbids copying prose and says it is not a gate",
-          "NEVER copy sentences" in block and "NOT a gate" in block)
+          "NEVER copy sentences" in block and "Neither tier is a gate" in block)
     check("a venue without a pack contributes no block",
           np.venue_norm_block("nosuchvenue", root=tmp) == "")
     nd = np.add_venue_prompt("demo", tmp / "store", want_download=False)
@@ -230,12 +252,19 @@ def test_prompt_norm(tmp: Path):
     base_review = np.review_prompt(Path("/tmp/x"), "r1_review", 1)
     with_norm = np.review_prompt(Path("/tmp/x"), "r1_review", 1, venue_norm=block)
     check("the review prompt gains the block only when it is passed",
-          "VENUE STRUCTURE NORM" not in base_review and "VENUE STRUCTURE NORM" in with_norm
+          "VENUE TEMPLATE / STRUCTURE" not in base_review
+          and "VENUE TEMPLATE / STRUCTURE" in with_norm
           and with_norm.endswith(block))
     base_rw = np.rewrite_prompt(Path("/tmp/x"), "r1_w1", 1)
     with_rw = np.rewrite_prompt(Path("/tmp/x"), "r1_w1", 1, venue_norm=block)
     check("the rewrite prompt gains the block only when it is passed",
-          "VENUE STRUCTURE NORM" not in base_rw and "VENUE STRUCTURE NORM" in with_rw)
+          "VENUE TEMPLATE / STRUCTURE" not in base_rw
+          and "VENUE TEMPLATE / STRUCTURE" in with_rw)
+    transfer_block = np.venue_norm_block("demo", root=tmp, transfer=True)
+    check("the transfer clause names the target template as the replacement",
+          "TRANSFER MODE" in transfer_block
+          and "REPLACES the previous venue" in transfer_block
+          and "TRANSFER MODE" not in block)
 
 
 ADD_VENUE_STUB = '''#!/usr/bin/env python3
@@ -272,6 +301,88 @@ ex.mkdir(parents=True, exist_ok=True)
 Path("_pipeline_done.json").write_text(json.dumps(
     {"stage": "add-venue", "status": "complete", "error": None}), encoding="utf-8")
 '''
+
+
+def test_official_template(tmp: Path):
+    print()
+    print("== the OFFICIAL journal template: authoritative skeleton + conformance scan ==")
+    store = tmp / "official_store"
+    off = store / "official-venue.official"
+    off.mkdir(parents=True)
+    (off / "sample.tex").write_text(OFFICIAL_TEX, encoding="utf-8")
+    (off / "requirements.json").write_text(json.dumps(
+        {"mandatory_sections": ["Introduction", "Materials and Methods", "Results",
+                                "Discussion"]}), encoding="utf-8")
+    (off / "manifest.json").write_text(json.dumps([
+        {"source_url": "https://example.org/Frontiers_LaTeX_Templates.zip",
+         "archive": "Frontiers_LaTeX_Templates.zip", "files": ["sample.tex"],
+         "retrieved": "2026-10-01", "license_note": "venue template, author reuse"}],
+        indent=1), encoding="utf-8")
+    (store / "official-venue.manuscripts").mkdir()
+    (store / "official-venue.manuscripts" / "one.md").write_text(MD_A, encoding="utf-8")
+    report = np.build_venue_templates("official-venue", profiles_dir=store)
+    pack = store / "official-venue.templates"
+    check("a pack is built from the official template + exemplars",
+          report["official"] == 1 and report["exemplars"] == 1 and pack.is_dir(), str(report))
+    check("the mandatory sections and the official class are reported",
+          report["mandatory_sections"] == ["Introduction", "Materials and Methods", "Results",
+                                           "Discussion"]
+          and report["documentclass"] == "frontiersSCNS", str(report))
+    structure = json.loads((pack / np.VENUE_STRUCTURE_FILE).read_text(encoding="utf-8"))
+    check("structure.json carries the official block next to the norm",
+          structure["official"]["documentclass"] == "frontiersSCNS"
+          and structure["official"]["mandatory_sections"]
+          and structure["norm"]["n_exemplars"] == 1, str(structure)[:200])
+    arch = (pack / np.VENUE_NORM_FILE).read_text(encoding="utf-8")
+    check("the summary puts the OFFICIAL tier above the advisory tier",
+          arch.index("OFFICIAL journal template (AUTHORITATIVE)")
+          < arch.index("Recent-practice structure (ADVISORY")
+          and "Mandatory sections (must exist)" in arch, arch[:200])
+    word = (pack / np.VENUE_WORD_TEMPLATE).read_text(encoding="utf-8")
+    check("the Word skeleton marks the mandatory sections",
+          "## Introduction [MANDATORY]" in word and "## Materials and Methods [MANDATORY]" in word
+          and "## Data Availability Statement" in word, word[:300])
+    latex = (pack / np.VENUE_LATEX_TEMPLATE).read_text(encoding="utf-8")
+    check("the LaTeX skeleton uses the journal's own documentclass and order",
+          "\\documentclass{frontiersSCNS}" in latex
+          and "\\section{Materials and Methods}" in latex
+          and latex.index("\\section{Introduction}") < latex.index("\\section{Discussion}"),
+          latex[:200])
+    manifest = json.loads((pack / np.VENUE_PACK_MANIFEST).read_text(encoding="utf-8"))
+    check("the manifest pins the official files and their download provenance",
+          any(f["file"] == "sample.tex" for f in manifest["official_files"])
+          and manifest["official_sources"][0]["source_url"].endswith(".zip"), str(manifest)[:200])
+    # The conformance scan: a corpus with the wrong class and a missing statement.
+    reqs = np.official_template_requirements("official-venue", root=tmp.parent)
+    reqs = json.loads((pack / np.VENUE_STRUCTURE_FILE).read_text(encoding="utf-8"))["official"]
+    sub = tmp / "submission"
+    sub.mkdir()
+    (sub / "manuscript.tex").write_text(SUBMITTED_TEX, encoding="utf-8")
+    conf = np.scan_template_conformance([(sub, "", ())], reqs)
+    flat = " ".join(conf["missing_sections"] + conf["missing_statements"]).lower()
+    check("the scan reports the missing mandatory sections and statements",
+          "data availability" in flat and "author contributions" in flat
+          and "funding" in flat and conf["class_ok"] is False
+          and conf["conforms"] is False, str(conf)[:300])
+    (sub / "manuscript.tex").write_text(
+        OFFICIAL_TEX.replace("frontiersSCNS", "frontiersSCNS"), encoding="utf-8")
+    conf_ok = np.scan_template_conformance([(sub, "", ())], reqs)
+    check("a conforming corpus passes the code-side scan",
+          conf_ok["conforms"] is True and conf_ok["missing_sections"] == []
+          and conf_ok["missing_statements"] == [], str(conf_ok)[:200])
+    # Official-only venues (no exemplars) still get a pack.
+    off_only = store / "only-official.official"
+    off_only.mkdir()
+    (off_only / "sample.tex").write_text(OFFICIAL_TEX, encoding="utf-8")
+    rep2 = np.build_venue_templates("only-official", profiles_dir=store)
+    check("an official-only venue still gets a pack (no exemplars required)",
+          rep2["official"] == 1 and rep2["exemplars"] == 0
+          and (store / "only-official.templates" / np.VENUE_NORM_FILE).is_file(), str(rep2))
+    check("the session sandbox declares the conformance evidence it seeds",
+          any(str(p).endswith("work/OFFICIAL_TEMPLATE.json")
+              for p in np.seeded_evidence_paths(tmp / "sb"))
+          and any(str(p).endswith("review/work/OFFICIAL_TEMPLATE.md")
+                  for p in np.seeded_evidence_paths(tmp / "sb")))
 
 
 def test_add_venue_cli(tmp: Path):
@@ -325,6 +436,7 @@ def main() -> int:
     test_extraction_and_norm(tmp)
     test_pack_and_templates(tmp)
     test_prompt_norm(tmp)
+    test_official_template(tmp)
     test_add_venue_cli(tmp)
     print()
     if FAILS:

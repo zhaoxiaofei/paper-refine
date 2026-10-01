@@ -270,19 +270,24 @@ python paper_pipeline.py add-venue <venue-id> --journal "Journal Name" \
 
 The session (a) writes/updates `<venue-id>.json` against the schema in this
 file, with every number citing the venue's own guidelines, (b) adds one row to
-the "Shipped profiles" table below, and (c) downloads 8-15 recent OA articles
-of the requested article type into `<venue-id>.manuscripts/`, preferring the
-venue's own website/OA pages, saving a structure-only Markdown transcription
-(headings + statement names, never prose) for each, plus a `manifest.json` with
-source URL/DOI/license/retrieval date. `--agent manual` only stages the prompt.
-The orchestrator then VALIDATES the JSON and derives the template pack itself.
+the "Shipped profiles" table below, (c) downloads the venue's OWN official
+Word/LaTeX template archives into `<venue-id>.official/` (unzipped, with a
+source/license/retrieval manifest) when the venue publishes them, and
+(d) downloads 8-15 recent OA articles of the requested article type into
+`<venue-id>.manuscripts/`, preferring the venue's own website/OA pages, saving a
+structure-only Markdown transcription (headings + statement names, never prose)
+for each, plus a `manifest.json` with source URL/DOI/license/retrieval date.
+`--agent manual` only stages the prompt; `--no-download` turns (c) and (d) into
+an explicit skip. The orchestrator then VALIDATES the JSON and derives the
+template pack itself.
 
 ### Exemplar manuscripts and the generated template pack
 
-A venue MAY ship two sibling directories of its profile:
+A venue MAY ship THREE sibling directories of its profile:
 
 | directory | what it holds |
 |---|---|
+| `<venue-id>.official/` | the journal's OWN template files (Word `.docx`/`.dotx`, LaTeX `.tex`/`.cls`/`.sty`) + a `manifest.json` with source URL/license/retrieval. **AUTHORITATIVE**: its class file, mandatory sections and declaration wording win over everything the code infers. |
 | `<venue-id>.manuscripts/` | recently published OA articles of the venue (or their structure-only transcriptions). Read ONLY for structure; never treated as submission text and never shipped in a package. |
 | `<venue-id>.templates/` | the DERIVED, pinned pack: `structure.json`, `venue_architecture.md`, `word-template.md`, `latex-template.tex` and `MANIFEST.json` (sha256 of every input exemplar and every output; no timestamps, so two builds are byte-identical). |
 
@@ -290,17 +295,28 @@ A venue MAY ship two sibling directories of its profile:
 python paper_pipeline.py build-venue-templates --venue <id> [--profiles-dir DIR] [--root DIR]
 ```
 
-derives the pack from whatever exemplars are present, code-side and
-deterministically: the modal section order (with presence counts and mean
-positions), abstract presence, and statement placement (data availability,
-ethics, funding, author contributions, competing interests, acknowledgements).
-The `word-template.md` and `latex-template.tex` skeletons use that order.
+derives the pack from whatever inputs are present, code-side and
+deterministically. Two tiers, with different authority:
 
-The derived norm is **advisory**: the review and rewrite sessions receive
-`venue_architecture.md` through their prompts, follow it only where it serves
-the manuscript's content, and the venue's own author guidelines always win. The
-norm never adds, removes or scores anything by itself, and no prose from an
-exemplar is ever copied.
+* the **OFFICIAL** tier (from `<venue-id>.official/`): the class file, the
+  section skeleton with its MANDATORY sections, and the declaration blocks in
+  the template's own wording. An operator may pin extra mandatory sections in
+  `<venue-id>.official/requirements.json`
+  (`{"mandatory_sections": ["..."]}`);
+* the **recent-practice** tier (from `<venue-id>.manuscripts/`): the modal
+  section order with presence counts and mean positions, abstract presence and
+  statement placement. **ADVISORY**, filling what the official template leaves
+  open.
+
+The `word-template.md` and `latex-template.tex` skeletons follow the official
+skeleton (and the official `\documentclass`) when one exists, otherwise the
+modal order. The review and rewrite sessions receive `venue_architecture.md`
+through their prompts; the code-side conformance rows
+(`work/OFFICIAL_TEMPLATE.md`) name a missing mandatory section, a missing
+statement block or a wrong class file. A template requirement the manuscript
+cannot supply becomes a MANUAL item for the author, never invented text; no
+prose from an exemplar or a template sample is ever copied; neither tier is a
+gate by itself, and the venue's author guidelines still come first.
 
 ## What the pipeline does when something is missing or inconsistent
 

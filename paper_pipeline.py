@@ -1764,6 +1764,12 @@ VENUE_WORD_TEMPLATE = "word-template.md"
 VENUE_LATEX_TEMPLATE = "latex-template.tex"
 VENUE_EXEMPLAR_TEXT_SUFFIXES = (".tex", ".md", ".markdown", ".txt")
 VENUE_EXEMPLAR_DOCX_SUFFIXES = (".docx",)
+# The journal's OWN template files (Word .dotx/.docx, LaTeX .tex/.cls/.sty),
+# unzipped into this sibling dir. They are AUTHORITATIVE: the derived skeleton,
+# the mandatory sections and the class file all come from here when present.
+VENUE_OFFICIAL_SUFFIX = ".official"
+VENUE_OFFICIAL_REQUIREMENTS = "requirements.json"
+TEX_DOCCLASS_RE = re.compile(r"\\documentclass(?:\[[^\]]*\])?\{([^{}]+)\}")
 
 TEX_SECTION_RE = re.compile(r"\\(part|chapter|section|subsection|subsubsection)\*?\{([^{}]*)\}")
 MD_HEADING_RE = re.compile(r"^(#{1,4})[ \t]+(.+?)[ \t]*$", re.M)
@@ -1803,6 +1809,201 @@ def venue_pack_dir(venue_id, root=None):
         if (p / VENUE_NORM_FILE).is_file():
             return p
     return None
+
+
+def venue_official_dirs(venue_id, root=None, profiles_dir=None) -> list:
+    """Existing `<venue-id>.official/` dirs (explicit profiles_dir first)."""
+    vid = str(venue_id or "").strip().lower()
+    out = []
+    if profiles_dir:
+        p = Path(profiles_dir) / f"{vid}{VENUE_OFFICIAL_SUFFIX}"
+        if p.is_dir():
+            out.append(p)
+    for d in venue_profile_search_dirs(root):
+        p = Path(d) / f"{vid}{VENUE_OFFICIAL_SUFFIX}"
+        if p.is_dir() and p not in out:
+            out.append(p)
+    return out
+
+
+def extract_official_template(path: Path) -> dict:
+    """Structure of ONE journal-provided template file (never prose)."""
+    suffix = path.suffix.lower()
+    out = {"file": path.name, "format": suffix.lstrip("."), "sha256": sha256_file(path),
+           "documentclass": "", "sections": [], "abstract": False, "statements": []}
+    if suffix in (".cls", ".sty", ".bst"):
+        # A class/style file carries no skeleton; its hash pins it and the
+        # documentclass is taken from the sample .tex beside it.
+        return out
+    if suffix in VENUE_EXEMPLAR_TEXT_SUFFIXES:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return {"skipped": "unreadable"}
+        m = TEX_DOCCLASS_RE.search(text)
+        out["documentclass"] = m.group(1).strip() if m else ""
+        out["sections"] = [{"level": lvl, "title": title}
+                           for lvl, title in _sections_from_text(text, suffix)]
+        out["abstract"] = bool(TEX_ABSTRACT_RE.search(text) if suffix == ".tex"
+                               else MD_ABSTRACT_RE.search(text))
+        out["statements"] = [label for label, pat in VENUE_STATEMENT_PATTERNS if pat.search(text)]
+        return out
+    if suffix in VENUE_EXEMPLAR_DOCX_SUFFIXES:
+        parsed = _docx_exemplar_text(path)
+        if parsed is None:
+            return {"skipped": "docx text could not be extracted (paper_docx_format.py missing "
+                               "or not a readable .docx/.dotx)"}
+        sections, text = parsed
+        out["sections"] = [{"level": lvl, "title": title} for lvl, title in sections]
+        out["abstract"] = any(lvl == 1 and t.strip().lower() == "abstract" for lvl, t in sections)
+        out["statements"] = [label for label, pat in VENUE_STATEMENT_PATTERNS if pat.search(text)]
+        return out
+    return {"skipped": f"unsupported suffix {suffix!r}"}
+
+
+def official_skeleton(records: list, explicit_requirements: dict = None) -> dict:
+    """The AUTHORITATIVE skeleton: mandatory sections, class file, statements.
+
+    `mandatory_sections` are the sections present in EVERY parsed official
+    sample document, plus any the operator lists explicitly in
+    `<venue-id>.official/requirements.json` (`{"mandatory_sections": [...]}`).
+    """
+    n = len(records)
+    positions, spellings, counts = {}, {}, {}
+    st_positions, st_spellings = {}, {}
+    for rec in records:
+        for i, sec in enumerate(rec.get("sections") or []):
+            if int(sec.get("level") or 0) != 1:
+                continue
+            key = str(sec.get("title") or "").strip().lower()
+            if not key:
+                continue
+            if _section_is_statement(sec.get("title")):
+                # Statement sections are carried by `statements`, not by the
+                # body order / mandatory-section list; their SPELLING (the
+                # template's own wording) is kept for the skeleton.
+                st_positions.setdefault(key, []).append(i)
+                st_spellings.setdefault(key, {})
+                st_spellings[key][sec["title"].strip()] = \
+                    st_spellings[key].get(sec["title"].strip(), 0) + 1
+                continue
+            counts[key] = counts.get(key, 0) + 1
+            positions.setdefault(key, []).append(i)
+            spellings.setdefault(key, {})
+            spellings[key][sec["title"].strip()] = spellings[key].get(sec["title"].strip(), 0) + 1
+    order = sorted(counts, key=lambda k: (sum(positions[k]) / len(positions[k]), k))
+    sections = [{"title": max(spellings[k], key=spellings[k].get), "present": counts[k],
+                 "n_samples": n,
+                 "mean_position": round(sum(positions[k]) / len(positions[k]), 2)}
+                for k in order]
+    mandatory = [s["title"] for s in sections if n and s["present"] == n]
+    for extra in ((explicit_requirements or {}).get("mandatory_sections") or []):
+        if str(extra).strip() and str(extra).strip().lower() not in \
+                {m.lower() for m in mandatory}:
+            mandatory.append(str(extra).strip())
+    classes = [r.get("documentclass") for r in records if r.get("documentclass")]
+    statements = []
+    for label, _pat in VENUE_STATEMENT_PATTERNS:
+        c = sum(1 for r in records if label in (r.get("statements") or []))
+        if c:
+            statements.append({"label": label, "present": c, "n_samples": n})
+    st_order = sorted(st_positions, key=lambda k: (sum(st_positions[k]) / len(st_positions[k]), k))
+    statement_sections = [max(st_spellings[k], key=st_spellings[k].get) for k in st_order]
+    return {"n_samples": n, "documentclass": classes[0] if classes else "",
+            "sections": sections, "mandatory_sections": mandatory,
+            "statements": statements,
+            "statement_sections": statement_sections,
+            "files": [{"file": r["file"], "format": r.get("format"), "sha256": r["sha256"]}
+                      for r in records]}
+
+
+def official_template_requirements(venue_id, root=None) -> dict:
+    """The pinned official-template requirements a session must conform to."""
+    pack = venue_pack_dir(venue_id, root)
+    if pack is None:
+        return {}
+    try:
+        data = json.loads((pack / VENUE_STRUCTURE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    official = (data or {}).get("official") or {}
+    if not isinstance(official, dict) or not official.get("sections") \
+            and not official.get("mandatory_sections"):
+        return {}
+    return official
+
+
+def scan_template_conformance(sources: list, requirements: dict) -> dict:
+    """Code-side official-template conformance rows over a corpus.
+
+    `sources` is the same [(dir, prefix, excluded_top)] shape the other scans
+    take. Reports, never gates: a row names the requirement and the file that
+    would satisfy it. Detects the LaTeX documentclass when one is required, each
+    mandatory section (by heading/title text), and the statement sections the
+    official templates carry.
+    """
+    req = requirements or {}
+    mandatory = [str(s) for s in (req.get("mandatory_sections") or []) if str(s).strip()]
+    statements = [str(s.get("label")) for s in (req.get("statements") or [])]
+    want_class = str(req.get("documentclass") or "").strip()
+    have_class, texts, docs = "", [], set()
+    for src, prefix, excluded in sources:
+        if not src.is_dir():
+            continue
+        for p in sorted(src.rglob("*")):
+            if not p.is_file() or _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
+                continue
+            rel = p.relative_to(src).as_posix()
+            if excluded and rel.split("/", 1)[0] in excluded:
+                continue
+            if is_non_manuscript_rel(rel):
+                continue
+            doc = prefix + rel
+            ext = p.suffix.lower()
+            if ext in LENGTH_DOCX_EXTS:
+                paras = _docx_paragraphs(p)
+                if paras is not None:
+                    texts.append("\n".join(paras))
+                    docs.add(doc)
+            elif ext in LENGTH_TEX_EXTS:
+                try:
+                    text = p.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                texts.append(text)
+                docs.add(doc)
+                m = TEX_DOCCLASS_RE.search(text)
+                if m and not have_class:
+                    have_class = m.group(1).strip()
+            elif ext in LENGTH_TEXT_EXTS:
+                try:
+                    texts.append(p.read_text(encoding="utf-8", errors="replace"))
+                except OSError:
+                    continue
+                docs.add(doc)
+    blob = "\n".join(texts)
+    low = blob.lower()
+    missing_sections = [s for s in mandatory if s.strip().lower() not in low]
+    # A statement requirement matches by its PATTERN, not by the canonical
+    # label: a template that says "Conflict of Interest" satisfies the
+    # "Competing interests" requirement, and one that says "Data Availability
+    # Statement" satisfies "Data availability".
+    pats = {label: pat for label, pat in VENUE_STATEMENT_PATTERNS}
+    missing_statements = [
+        s for s in statements
+        if not ((pats[s].search(blob) if s in pats else None)
+                or s.strip().lower() in low)]
+    class_ok = (not want_class or not have_class or have_class == want_class)
+    return {"official": bool(req), "required": {"documentclass": want_class,
+                                                "mandatory_sections": mandatory,
+                                                "statements": statements},
+            "found": {"documentclass": have_class, "documents": sorted(docs)},
+            "missing_sections": missing_sections, "missing_statements": missing_statements,
+            "class_ok": class_ok,
+            "conforms": bool(req) and not missing_sections and not missing_statements and class_ok,
+            "note": ("advisory, code-side: a row names a requirement the official template "
+                     "demands and the corpus does not show; the review disposes it"
+                     if req else "no official template pack for this venue")}
 
 
 def venue_profiles_write_dir(root=None) -> Path:
@@ -1908,7 +2109,6 @@ def structure_norm(records: list) -> dict:
     """
     n = len(records)
     positions, spellings, counts = {}, {}, {}
-    statement_keys = {label.lower() for label, _pat in VENUE_STATEMENT_PATTERNS}
     for rec in records:
         for i, sec in enumerate(rec.get("sections") or []):
             if int(sec.get("level") or 0) != 1:
@@ -1918,7 +2118,7 @@ def structure_norm(records: list) -> dict:
             key = str(sec.get("title") or "").strip().lower()
             if not key:
                 continue
-            if key in statement_keys:
+            if _section_is_statement(sec.get("title")):
                 # Statement sections are reported under "Statement placement",
                 # not in the body-section order.
                 continue
@@ -1946,75 +2146,141 @@ def _norm_section_titles(norm: dict) -> list:
     return [s["title"] for s in (norm.get("sections") or [])]
 
 
-def render_architecture_summary(venue_id: str, norm: dict) -> str:
-    """The advisory summary the review/rewrite prompts embed (structure only)."""
+def _section_is_statement(title) -> bool:
+    """True when a section TITLE names one of the template's statement blocks."""
+    low = str(title or "").strip().lower()
+    return bool(low) and any(pat.search(low) for _label, pat in VENUE_STATEMENT_PATTERNS)
+
+
+def render_architecture_summary(venue_id: str, norm: dict, official: dict = None) -> str:
+    """The structure summary the prompts embed: OFFICIAL first, advisory norm second."""
+    off = official or {}
+    L = [f"# Venue structure -- {venue_id}", ""]
+    if off.get("sections") or off.get("mandatory_sections"):
+        L += ["## OFFICIAL journal template (AUTHORITATIVE)", "",
+              f"Derived by CODE from {off.get('n_samples') or 0} file(s) of the venue's OWN "
+              f"template pack"
+              + (f" (class `{off['documentclass']}`)" if off.get("documentclass") else "")
+              + ". STRUCTURE ONLY.", "",
+              "| # | section | present | mandatory |", "|---|---|---|---|"]
+        mandatory = {m.lower() for m in (off.get("mandatory_sections") or [])}
+        for i, s in enumerate(off.get("sections") or [], 1):
+            L.append(f"| {i} | {s['title']} | {s['present']}/{s['n_samples']} | "
+                     + ("YES" if s["title"].lower() in mandatory else "") + " |")
+        if off.get("mandatory_sections"):
+            L += ["", "Mandatory sections (must exist): "
+                  + ", ".join(off["mandatory_sections"]) + "."]
+        if off.get("statements"):
+            shown = {}
+            for title in off.get("statement_sections") or []:
+                for label, pat in VENUE_STATEMENT_PATTERNS:
+                    if label not in shown and pat.search(title):
+                        shown[label] = title
+            L += ["", "Statement sections the template carries:", ""]
+            for s in off["statements"]:
+                L.append(f"- {s['label']} ({s['present']}/{s['n_samples']}"
+                         + (f"; template heading: {shown[s['label']]}"
+                            if s["label"] in shown else "") + ")")
+        L += ["", "Rules: use the journal's template/class and its styles; the mandatory "
+              "sections must be present; declaration blocks use the template's own wording; "
+              "content the template requires but the manuscript cannot supply becomes a "
+              "manual item for the author, never invented text.", ""]
     n = norm.get("n_exemplars") or 0
-    L = [f"# Venue structure norm -- {venue_id}", "",
-         f"Derived by CODE from {n} exemplar manuscript(s) downloaded from the venue's own "
-         f"published articles (formats: {', '.join(norm.get('formats') or []) or 'n/a'}). "
-         f"STRUCTURE ONLY: no prose was copied.", "",
-         "## Section order (modal, by mean position)", "",
-         "| # | section | present | mean position |", "|---|---|---|---|"]
-    for i, s in enumerate(norm.get("sections") or [], 1):
-        L.append(f"| {i} | {s['title']} | {s['present']}/{s['n_exemplars']} | "
-                 f"{s['mean_position']:g} |")
-    if norm.get("abstract_present"):
-        L.append("")
-        L.append(f"- Abstract: present in {norm['abstract_present']}/{n} exemplar(s).")
-    if norm.get("statements"):
-        L.append("")
-        L.append("## Statement placement")
-        L.append("")
-        for s in norm["statements"]:
-            L.append(f"- {s['label']}: {s['present']}/{s['n_exemplars']}")
-    L.append("")
-    L.append("This norm is ADVISORY: follow it where it serves the manuscript's content; the "
-             "venue's own author guidelines (the venue profile) always win over an inferred "
-             "norm, and no section is added or removed merely to match it.")
+    if norm.get("sections"):
+        L += [f"## Recent-practice structure (ADVISORY, {n} exemplar manuscript(s))", "",
+              f"Derived by CODE from {n} exemplar manuscript(s) downloaded from the venue's own "
+              f"published articles (formats: {', '.join(norm.get('formats') or []) or 'n/a'}). "
+              f"STRUCTURE ONLY: no prose was copied.", "",
+              "| # | section | present | mean position |", "|---|---|---|---|"]
+        for i, s in enumerate(norm.get("sections") or [], 1):
+            L.append(f"| {i} | {s['title']} | {s['present']}/{s['n_exemplars']} | "
+                     f"{s['mean_position']:g} |")
+        if norm.get("abstract_present"):
+            L.append("")
+            L.append(f"- Abstract: present in {norm['abstract_present']}/{n} exemplar(s).")
+        if norm.get("statements"):
+            L += ["", "Statement placement (recent practice):", ""]
+            for s in norm["statements"]:
+                L.append(f"- {s['label']}: {s['present']}/{s['n_exemplars']}")
+        L += ["", "This part is ADVISORY: it fills what the official template leaves open and "
+              "never overrides it; no section is added or removed merely to match it."]
+    if not L[-1]:
+        L.pop()
     return "\n".join(L)
 
 
-def render_word_template(venue_id: str, norm: dict) -> str:
+def _skeleton_titles(norm: dict, official: dict = None) -> list:
+    off_titles = [s["title"] for s in ((official or {}).get("sections") or [])]
+    return off_titles or _norm_section_titles(norm) or ["Abstract", "Introduction", "Methods",
+                                                        "Results", "Discussion"]
+
+
+def _skeleton_statements(norm: dict, official: dict = None) -> list:
+    off = official or {}
+    if off.get("statement_sections"):
+        # The template's OWN wording for the declaration blocks wins over the
+        # canonical labels.
+        return list(off["statement_sections"])
+    if off.get("statements"):
+        return [s["label"] for s in off["statements"]]
+    return [s["label"] for s in (norm.get("statements") or [])]
+
+
+def render_word_template(venue_id: str, norm: dict, official: dict = None) -> str:
     """A Word-oriented skeleton: heading levels + statement placeholders."""
-    titles = _norm_section_titles(norm) or ["Abstract", "Introduction", "Methods", "Results",
-                                            "Discussion"]
+    off = official or {}
+    titles = _skeleton_titles(norm, off)
+    mandatory = {m.lower() for m in (off.get("mandatory_sections") or [])}
     L = [f"<!-- Word template skeleton for venue '{venue_id}'. Structure only; replace every "
          f"placeholder. Word styles: use Heading 1 for the title, Heading 2 for top-level "
          f"sections and Heading 3 for subsections, so the generated .docx carries a navigable "
-         f"outline. -->", "",
+         f"outline."
+         + (" The sections marked [MANDATORY] come from the journal's OWN template: they must "
+            "exist. Use the styles the journal's .dotx/.docx template provides."
+            if off.get("sections") else "")
+         + " -->", "",
          "# <Manuscript title>", ""]
-    statement_labels = [s["label"] for s in (norm.get("statements") or [])]
+    statement_labels = _skeleton_statements(norm, off)
     for title in titles:
+        mark = " [MANDATORY]" if title.strip().lower() in mandatory else ""
         if title.strip().lower() in ("abstract",):
-            L += ["## Abstract", "", "<Abstract: one paragraph, no citations.>", ""]
+            L += [f"## Abstract{mark}", "", "<Abstract: one paragraph, no citations.>", ""]
             continue
-        L += [f"## {title}", "", f"<{title} text.>", ""]
+        L += [f"## {title}{mark}", "", f"<{title} text.>", ""]
     for label in statement_labels:
         L += [f"## {label}", "", f"<{label} statement.>", ""]
-    L += ["<!-- End of template. The list above is the venue's modal section order; adjust only "
-          "where the manuscript's content or the venue's guidelines require it. -->"]
+    L += ["<!-- End of template. The section list follows the journal's OWN template when one "
+          "is present (otherwise the venue's modal order); adjust only where the manuscript's "
+          "content or the venue's guidelines require it. -->"]
     return "\n".join(L)
 
 
-def render_latex_template(venue_id: str, norm: dict) -> str:
-    """A LaTeX skeleton with the same modal section order."""
-    titles = _norm_section_titles(norm) or ["Abstract", "Introduction", "Methods", "Results",
-                                            "Discussion"]
-    statement_labels = [s["label"] for s in (norm.get("statements") or [])]
+def render_latex_template(venue_id: str, norm: dict, official: dict = None) -> str:
+    """A LaTeX skeleton: the journal's class/section order when one is known."""
+    off = official or {}
+    titles = _skeleton_titles(norm, off)
+    statement_labels = _skeleton_statements(norm, off)
+    docclass = str(off.get("documentclass") or "").strip()
     L = ["% LaTeX template skeleton for venue '" + venue_id + "'.",
-         "% Structure only: replace the placeholders and the class/preamble with the venue's.",
-         "\\documentclass[11pt]{article}",
-         "\\usepackage[utf8]{inputenc}",
-         "\\usepackage{graphicx}",
-         "\\usepackage{amsmath}",
-         "",
-         "\\title{<Manuscript title>}",
-         "\\author{<Authors>}",
-         "\\date{}",
-         "",
-         "\\begin{document}",
-         "\\maketitle",
-         ""]
+         "% Structure only: replace the placeholders with the manuscript's own content."]
+    if docclass:
+        L += [f"% The journal's OWN template uses \\documentclass{{{docclass}}}; keep it (and "
+              f"the class file the template ships).",
+              f"\\documentclass{{{docclass}}}"]
+    else:
+        L += ["% No official class file was found: use the journal's template class here.",
+              "\\documentclass[11pt]{article}"]
+    L += ["\\usepackage[utf8]{inputenc}",
+          "\\usepackage{graphicx}",
+          "\\usepackage{amsmath}",
+          "",
+          "\\title{<Manuscript title>}",
+          "\\author{<Authors>}",
+          "\\date{}",
+          "",
+          "\\begin{document}",
+          "\\maketitle",
+          ""]
     for title in titles:
         low = title.strip().lower()
         if low == "abstract":
@@ -2028,12 +2294,16 @@ def render_latex_template(venue_id: str, norm: dict) -> str:
     return "\n".join(L)
 
 
-def build_venue_templates(venue_id, root=None, profiles_dir=None, exemplar_dir=None) -> dict:
-    """Generate the pinned structure-only pack for one venue, from its exemplars.
+def build_venue_templates(venue_id, root=None, profiles_dir=None, exemplar_dir=None,
+                          official_dir=None) -> dict:
+    """Generate the pinned structure-only pack for one venue.
 
-    Deterministic (no timestamps): the same exemplars produce byte-identical
-    files, and MANIFEST.json pins every input and output by sha256, so a run
-    that embedded the summary can be reproduced and audited.
+    Inputs: the venue's OFFICIAL template files
+    (`<venue-id>.official/`, AUTHORITATIVE) and/or the exemplar manuscripts
+    (`<venue-id>.manuscripts/`, ADVISORY). Deterministic (no timestamps): the
+    same inputs produce byte-identical files, and MANIFEST.json pins every input
+    and output by sha256, plus the downloaders' source provenance, so a run that
+    embedded the summary can be reproduced and audited.
     """
     vid = str(venue_id or "").strip().lower()
     if not vid:
@@ -2049,6 +2319,8 @@ def build_venue_templates(venue_id, root=None, profiles_dir=None, exemplar_dir=N
         src_dirs.extend(d for d in venue_exemplar_dirs(vid, root) if d not in src_dirs)
     write_dir = (Path(profiles_dir) if profiles_dir
                  else (src_dirs[0].parent if src_dirs else venue_profiles_write_dir(root)))
+    off_dirs = ([Path(official_dir)] if official_dir
+                else venue_official_dirs(vid, root, profiles_dir))
     files = []
     for d in src_dirs:
         files.extend(_exemplar_files(d))
@@ -2059,26 +2331,53 @@ def build_venue_templates(venue_id, root=None, profiles_dir=None, exemplar_dir=N
             skipped.append({"file": p.name, "why": rec["skipped"]})
         else:
             records.append(rec)
-    if not records:
-        return {"venue": vid, "exemplars": 0, "skipped": skipped, "written": [],
-                "looked": [str(d) for d in src_dirs],
-                "note": "no readable exemplar manuscripts were found"
-                        + (f" under {', '.join(str(d) for d in src_dirs)}" if src_dirs else "")}
+    off_files = []
+    off_archives = []
+    for d in off_dirs:
+        off_files.extend(_exemplar_files(d))
+        off_archives.extend(p for p in sorted(d.rglob("*.zip")) if p.is_file())
+    off_records, off_skipped = [], []
+    for p in off_files:
+        rec = extract_official_template(p)
+        if rec.get("skipped"):
+            off_skipped.append({"file": p.name, "why": rec["skipped"]})
+        else:
+            off_records.append(rec)
+    explicit = None
+    for d in off_dirs:
+        p = d / VENUE_OFFICIAL_REQUIREMENTS
+        if p.is_file():
+            try:
+                explicit = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                explicit = None
+            break
+    if not records and not off_records:
+        looked = [str(d) for d in src_dirs + off_dirs]
+        return {"venue": vid, "exemplars": 0, "official": 0, "skipped": skipped + off_skipped,
+                "written": [], "looked": looked,
+                "note": "no readable official template and no readable exemplar manuscripts "
+                        "were found"
+                        + (f" under {', '.join(looked)}" if looked else "")}
     norm = structure_norm(records)
+    official = official_skeleton(off_records, explicit)
     out_dir = write_dir
     pack = out_dir / f"{vid}{VENUE_TEMPLATE_SUFFIX}"
     pack.mkdir(parents=True, exist_ok=True)
     payload = {
-        VENUE_STRUCTURE_FILE: json.dumps({"venue": vid, "norm": norm}, indent=2,
+        VENUE_STRUCTURE_FILE: json.dumps({"venue": vid, "official": official, "norm": norm},
+                                         indent=2,
                                          sort_keys=True) + "\n",
-        VENUE_NORM_FILE: render_architecture_summary(vid, norm) + "\n",
-        VENUE_WORD_TEMPLATE: render_word_template(vid, norm) + "\n",
-        VENUE_LATEX_TEMPLATE: render_latex_template(vid, norm) + "\n",
+        VENUE_NORM_FILE: render_architecture_summary(vid, norm, official) + "\n",
+        VENUE_WORD_TEMPLATE: render_word_template(vid, norm, official) + "\n",
+        VENUE_LATEX_TEMPLATE: render_latex_template(vid, norm, official) + "\n",
     }
     manifest = {"venue": vid, "pipeline_version": VERSION,
                 "generated_from": [{"file": r["file"], "sha256": r["sha256"],
                                     "format": r.get("format")} for r in records],
-                "skipped": skipped,
+                "official_files": [{"file": r["file"], "sha256": r["sha256"],
+                                    "format": r.get("format")} for r in off_records],
+                "skipped": skipped + off_skipped,
                 "files": {}}
     # The downloader's own provenance (source URL/DOI/license/retrieval date per
     # article) travels into the pack's manifest, so the norm can be audited back
@@ -2094,39 +2393,70 @@ def build_venue_templates(venue_id, root=None, profiles_dir=None, exemplar_dir=N
             break
     if prov is not None:
         manifest["sources"] = prov
+    for d in off_dirs:
+        p = d / "manifest.json"
+        if p.is_file():
+            try:
+                manifest["official_sources"] = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+            break
     for name, text in payload.items():
         p = pack / name
         write_text_atomic(p, text)
         manifest["files"][name] = sha256_file(p)
     write_json_atomic(pack / VENUE_PACK_MANIFEST, manifest)
-    return {"venue": vid, "exemplars": len(records), "skipped": skipped,
+    return {"venue": vid, "exemplars": len(records), "official": len(off_records),
+            "official_archives": [p.name for p in off_archives],
+            "skipped": skipped + off_skipped,
             "pack": str(pack), "files": sorted(payload) + [VENUE_PACK_MANIFEST],
-            "norm_sections": _norm_section_titles(norm), "written": sorted(payload)}
+            "norm_sections": _skeleton_titles(norm, official),
+            "mandatory_sections": official.get("mandatory_sections") or [],
+            "documentclass": official.get("documentclass") or "",
+            "written": sorted(payload)}
 
 
 VENUE_NORM_RULES = """\
-=== VENUE STRUCTURE NORM (ADVISORY -- read with the venue profile, never instead of it) ===
+=== VENUE TEMPLATE / STRUCTURE (read together with the venue profile) ===
 
-The excerpt below was derived by CODE from recently published articles of this venue (structure
-only: section order, abstract presence and statement placement; no prose was copied). Use it to
-shape the manuscript's ARCHITECTURE where that serves the content:
+The excerpt below was derived by CODE (structure only: section order, the class file, abstract
+and statement placement; no prose was copied). Two tiers, with different authority:
 
-  * follow the venue's own author guidelines (the profile) FIRST; this norm only fills the gaps
-    they leave;
-  * the order is a MODAL one with presence counts: adopt a section the norm does not list only
-    when the content needs it, and keep a section the norm lists when the manuscript has that
-    material -- do NOT add empty sections to match a template;
-  * NEVER copy sentences, headings' phrasing or paragraph text from any published article; the
-    norm is structure, and the manuscript must be its authors' own prose;
-  * this is NOT a gate and not a score: no finding may rest on the norm alone, and a deliberate,
-    content-driven deviation is allowed (the review records it under J5 with one sentence).
+  * **The OFFICIAL journal template is AUTHORITATIVE.** When the excerpt names one: use the
+    journal's own template/class and its styles, keep every MANDATORY section it lists, keep the
+    declaration blocks it provides (use its own wording for them), and do not invent a section
+    order that contradicts it. A requirement the template demands but the manuscript cannot
+    supply (e.g. an ethics statement that does not apply) becomes a precise MANUAL item for the
+    author -- never invented text. The venue's author guidelines (the profile) still come first
+    where they state a number or a rule the template does not.
+  * **The recent-practice part is ADVISORY.** It fills what the official template leaves open
+    (e.g. how the body is usually organised). Follow it only where it serves the content; never
+    add empty sections to match it, and never let it override the official template.
+
+  * NEVER copy sentences, headings' phrasing or paragraph text from any published article or
+    from a template's sample manuscript: structure and boilerplate declarations only, and the
+    manuscript's prose must be its authors' own.
+  * Neither tier is a gate or a score by itself: the code-side conformance rows in
+    `work/OFFICIAL_TEMPLATE.md` are evidence for the review's J5/M20 disposition, and no
+    finding may rest on a descriptive deviation alone. A missing MANDATORY section or a wrong
+    class file is a real conformance finding; a deviation from the ADVISORY part is recorded
+    under J5 with one sentence and is allowed.
+@@TRANSFER@@
 
 @@NORM@@
 """
 
+VENUE_TRANSFER_RULES = """
+  * **TRANSFER MODE (new journal, no response letter):** the target venue's official template
+    REPLACES the previous venue's. Treat the old class file/styles, old section names, old
+    declaration wording, old reference style and old figure/supplementary conventions as
+    findings to remove, and verify the new venue's mandatory sections and statements exist.
+    Answer the humans' concerns from `human_review_feedback/` where they still apply; never
+    depend on a response letter."""
 
-def venue_norm_block(venue_id, root=None) -> str:
-    """The advisory-norm prompt block for one venue, or "" when it has no pack."""
+
+def venue_norm_block(venue_id, root=None, transfer: bool = False) -> str:
+    """The template/norm prompt block for one venue, or "" when it has no pack."""
     pack = venue_pack_dir(venue_id, root)
     if pack is None:
         return ""
@@ -2136,6 +2466,7 @@ def venue_norm_block(venue_id, root=None) -> str:
         return ""
     digest = sha256_file(pack / VENUE_NORM_FILE)
     return (VENUE_NORM_RULES.replace("@@NORM@@", summary)
+            .replace("@@TRANSFER@@", VENUE_TRANSFER_RULES if transfer else "")
             + f"\n\n(pack: {pack} -- {VENUE_NORM_FILE} sha256 {digest[:16]})")
 
 
@@ -10769,6 +11100,38 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
         except Exception as e:                                        # noqa: BLE001
             prov = {}
             ev["provenance"] = {"error": f"{type(e).__name__}: {e}"}
+        # Official-template conformance: a code-side measurement of the row the
+        # venue's OWN template demands (mandatory sections, class file,
+        # statement blocks). Evidence only, never a gate; the review disposes it
+        # under J5/M20 and the producing arms apply it.
+        try:
+            req = official_template_requirements(venue_id_of(ctx), ctx.root)
+            if req:
+                conf = scan_template_conformance([(corpus_dir, "", CORPUS_EXCLUDE_TOP)], req)
+                ev["official_template"] = conf
+                write_json_atomic(work / "OFFICIAL_TEMPLATE.json", conf)
+                rows = ([{"row": f"mandatory section missing: {s}"} for s in
+                         conf["missing_sections"]]
+                        + [{"row": f"statement block missing: {s}"} for s in
+                           conf["missing_statements"]]
+                        + ([] if conf["class_ok"] else
+                           [{"row": f"documentclass {conf['found']['documentclass']!r} != "
+                                    f"required {conf['required']['documentclass']!r}"}]))
+                md = ["# OFFICIAL TEMPLATE — code-side conformance (advisory evidence)", "",
+                      f"Required by the venue's own template pack: class "
+                      f"`{conf['required']['documentclass'] or '(unspecified)'}`; mandatory "
+                      f"sections: {', '.join(conf['required']['mandatory_sections']) or '(none)'}.",
+                      "",
+                      ("The corpus CONFORMS to every code-checkable requirement."
+                       if conf["conforms"] else
+                       "Consistency check: the review disposes every row below under J5/M20 and "
+                       "the producing arms apply the fixes (a requirement the manuscript cannot "
+                       "supply becomes a manual item, never invented text)."),
+                      ""]
+                md += [f"- {r['row']}" for r in rows] or ["- (no rows)"]
+                write_text_atomic(work / "OFFICIAL_TEMPLATE.md", "\n".join(md) + "\n")
+        except Exception as e:                                        # noqa: BLE001
+            ev["official_template"] = {"error": f"{type(e).__name__}: {e}"}
     # ONE atomic write per seeded scan (provenance included): a second one cost
     # another fsync on the critical path with no benefit.
     write_json_atomic(work / "CODE_SCANS.json", ev)
@@ -11023,7 +11386,8 @@ def seeded_evidence_paths(sb: Path) -> set:
     materialized review/judge sandbox already contains them.
     """
     rels = ["EVIDENCE_PACK.md", "work/CODE_SCANS.json", "work/FORMAT_SCAN.json",
-            "work/EVIDENCE_PACK.md", "work/PROVENANCE.json"]
+            "work/EVIDENCE_PACK.md", "work/PROVENANCE.json",
+            "work/OFFICIAL_TEMPLATE.json", "work/OFFICIAL_TEMPLATE.md"]
     # The provenance pack is seeded into EVERY non-judge layout, so the review
     # sandbox's copies live under review/work/ and the stage sandboxes' under
     # work/; `leftovers_present` must treat both as inputs, or a freshly
@@ -11033,6 +11397,8 @@ def seeded_evidence_paths(sb: Path) -> set:
                   "GLOSSARY.md", "CLAIM_STRENGTH.md", "M30_hierarchy_reconciliation.md")
     rels += [f"work/{s}" for s in prov_stems]
     rels += [f"{REVIEW_DIR}/work/{s}" for s in prov_stems]
+    rels += [f"{REVIEW_DIR}/work/OFFICIAL_TEMPLATE.json",
+             f"{REVIEW_DIR}/work/OFFICIAL_TEMPLATE.md"]
     # Judge sandboxes are deliberately absent: nothing is seeded there (blinding).
     rels += [f"{REVIEW_DIR}/EVIDENCE_PACK.md", f"{REVIEW_DIR}/work/CODE_SCANS.json",
              f"{REVIEW_DIR}/work/FORMAT_SCAN.json", f"{REVIEW_DIR}/work/EVIDENCE_PACK.md",
@@ -14597,7 +14963,9 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
                                                         (JOURNAL_MODE_TRANSFER,
                                                          JOURNAL_MODE_RESUBMIT) else ""),
                                          venue_norm=venue_norm_block(venue_id_of(ctx),
-                                                                     ctx.root)),
+                                                                     ctx.root,
+                                                                     transfer=(journal_mode_of(ctx)
+                                                                               == JOURNAL_MODE_TRANSFER))),
                           encoding="utf-8")
     rec = ctx.register(rid, "rewrite", r, f"runs/{rid}", upstream_run_id=rid_a1(r),
                        source_id=A1_ID, produces=vid)
@@ -14678,7 +15046,9 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
                                         scope=scope,
                                         venue=venue_profile_of(ctx),
                                         venue_norm=venue_norm_block(venue_id_of(ctx),
-                                                                    ctx.root)),
+                                                                    ctx.root,
+                                                                    transfer=(journal_mode_of(ctx)
+                                                                              == JOURNAL_MODE_TRANSFER))),
                           encoding="utf-8")
     rec = ctx.register(rid, "review", r, f"runs/{rid}",
                        upstream_run_id=rid_a1(r), source_id=a1.get("source_id"))
@@ -25893,7 +26263,23 @@ Write or UPDATE `@@DEST@@/@@VENUE@@.json`. It must validate against the schema i
 Update `@@DEST@@/README.md`: add (or refresh) ONE row for `@@VENUE@@` in the "Shipped
 profiles" table with a one-sentence description. Do not restructure the file.
 
-## 2. Recent exemplar manuscripts (structure input ONLY)
+## 2. Official journal templates (AUTHORITATIVE, if the venue publishes them)
+
+Most venues publish their own Word and/or LaTeX template (for example Frontiers:
+`https://www.frontiersin.org/Design/zip/Frontiers_Word_Templates.zip` and
+`https://www.frontiersin.org/design/zip/Frontiers_LaTeX_Templates.zip`). Find the equivalents
+for THIS venue on its own author-guidelines page and:
+
+  * download each template archive into `@@DEST@@/@@VENUE@@.official/` (keep the `.zip` too),
+    then UNZIP it in place (subdirectories are fine) so the `.docx`/`.dotx`/`.tex`/`.cls`/`.sty`
+    files are readable;
+  * write `@@DEST@@/@@VENUE@@.official/manifest.json` as a list of
+    `{"source_url": ..., "archive": <file>, "files": [<extracted files>], "retrieved":
+      "<ISO date>", "license_note": "<what the venue says about reuse>"}` objects;
+  * if the venue publishes NO template, do not invent one: say so in the transcript and skip
+    this section.
+
+## 3. Recent exemplar manuscripts (structure input ONLY, ADVISORY)
 
 Download recently published ARTICLE-TYPE examples for this venue into
 `@@DEST@@/@@VENUE@@.manuscripts/`, preferring the venue's OWN website / official OA pages
@@ -25915,7 +26301,7 @@ Download recently published ARTICLE-TYPE examples for this venue into
   * aim for 8-15 articles of the target article type from the last ~3 years; if you can
     only reach fewer, save what you have and say so in the transcript.
 
-## 3. Finish
+## 4. Finish
 
 Write `_pipeline_done.json` in this sandbox with
 `{"stage": "add-venue", "status": "complete", "error": null}` (or `"failed"` with a short
@@ -25932,13 +26318,16 @@ def add_venue_prompt(venue_id: str, dest: Path, journal: str = "",
             .replace("@@VENUE@@", venue_id)
             .replace("@@ARTICLE_TYPE@@", article_type or "the venue's main research article"))
     if not want_download:
-        head, _, tail = text.partition("## 2. Recent exemplar manuscripts")
-        _body, _, finish = tail.partition("## 3. Finish")
-        text = (head + "## 2. Recent exemplar manuscripts (SKIPPED: `--no-download`)\n\n"
+        head, _, _tail = text.partition("## 2. Official journal templates")
+        text = (head + "## 2. Official journal templates (SKIPPED: `--no-download`)\n\n"
                 "Do NOT download anything for this request: the operator will supply the "
-                "exemplars in `@@DEST@@/@@VENUE@@.manuscripts/` themselves. Your job is the "
-                "profile and the README row ONLY.\n\n## 3. Finish"
-                + finish).replace("@@DEST@@", str(dest)).replace("@@VENUE@@", venue_id)
+                "official template files in `@@DEST@@/@@VENUE@@.official/` and the exemplars in "
+                "`@@DEST@@/@@VENUE@@.manuscripts/` themselves. Your job is the profile and the "
+                "README row ONLY. Keep section 4's completion contract.\n\n## 4. Finish\n\n"
+                "Write `_pipeline_done.json` in this sandbox with\n"
+                "`{\"stage\": \"add-venue\", \"status\": \"complete\", \"error\": null}` (or "
+                "`\"failed\"` with a short error).\n"
+                ).replace("@@DEST@@", str(dest)).replace("@@VENUE@@", venue_id)
     if journal:
         text += f"\n\nTarget journal (for `journals` and the prompts): {journal}.\n"
     return text
@@ -25952,10 +26341,11 @@ def cmd_build_venue_templates(args) -> None:
     report = build_venue_templates(vid, root=getattr(args, "root", None),
                                    profiles_dir=getattr(args, "profiles_dir", None),
                                    exemplar_dir=getattr(args, "exemplars", None))
-    if not report.get("exemplars"):
+    if not report.get("exemplars") and not report.get("official"):
         looked = report.get("looked") or [
             str(d) for d in venue_exemplar_dirs(vid, getattr(args, "root", None))]
-        print(f"[build-venue-templates] venue {vid}: no readable exemplars"
+        print(f"[build-venue-templates] venue {vid}: no readable official template and no "
+              f"readable exemplars"
               + (f" (looked under {', '.join(looked)})" if looked else ""))
         for s in report.get("skipped") or []:
             print(f"  - skipped {s['file']}: {s['why']}")
@@ -25963,12 +26353,20 @@ def cmd_build_venue_templates(args) -> None:
                  if getattr(args, "profiles_dir", None)
                  else venue_profiles_write_dir(getattr(args, "root", None)))
         print(f"  put OA article transcriptions in {store}/{vid}{VENUE_EXEMPLAR_SUFFIX}/ "
-              f"and re-run")
+              f"and/or the journal's unzipped template files in "
+              f"{store}/{vid}{VENUE_OFFICIAL_SUFFIX}/ and re-run")
         raise SystemExit(2)
-    print(f"[build-venue-templates] venue {vid}: {report['exemplars']} exemplar(s) -> "
-          f"{report['pack']}")
-    print(f"[build-venue-templates] modal sections: "
-          + ", ".join(report["norm_sections"]) or "(none detected)")
+    print(f"[build-venue-templates] venue {vid}: {report.get('official', 0)} official template "
+          f"file(s), {report['exemplars']} exemplar(s) -> {report['pack']}")
+    if report.get("official_archives") and not report.get("official"):
+        print(f"[build-venue-templates] WARNING: {len(report['official_archives'])} archive(s) "
+              f"are present but no extracted template file was parsed -- UNZIP the archive(s) "
+              f"({', '.join(report['official_archives'])}) and re-run")
+    print(f"[build-venue-templates] skeleton sections: "
+          + (", ".join(report["norm_sections"]) or "(none detected)"))
+    if report.get("mandatory_sections"):
+        print(f"[build-venue-templates] MANDATORY (official): "
+              + ", ".join(report["mandatory_sections"]))
     for s in report.get("skipped") or []:
         print(f"[build-venue-templates] skipped {s['file']}: {s['why']}")
     print(f"[build-venue-templates] files: {', '.join(report['files'])}; "
@@ -26029,21 +26427,33 @@ def cmd_add_venue(args) -> None:
     # the profile, not under another venue_profiles/ level.
     ex_dir = dest / f"{vid}{VENUE_EXEMPLAR_SUFFIX}"
     n_exemplars = len(_exemplar_files(ex_dir)) if ex_dir.is_dir() else 0
+    off_dir = dest / f"{vid}{VENUE_OFFICIAL_SUFFIX}"
+    n_official = len(_exemplar_files(off_dir)) if off_dir.is_dir() else 0
     if problems:
         print("[add-venue] PROBLEMS:")
         for p in problems:
             print(f"  - {p}")
-    if n_exemplars == 0:
-        print(f"[add-venue] WARNING: no exemplar manuscripts landed in "
-              f"{ex_dir}; the template pack was NOT generated "
+    if n_exemplars == 0 and n_official == 0:
+        print(f"[add-venue] WARNING: neither official templates ({off_dir}) nor exemplars "
+              f"({ex_dir}) landed; the template pack was NOT generated "
               f"(the profile part still stands)")
         raise SystemExit(1 if problems else 0)
     report = build_venue_templates(vid, profiles_dir=dest)
     print(f"[add-venue] templates: {report.get('pack')} "
-          f"({report.get('exemplars')} exemplar(s); modal sections: "
-          f"{', '.join(report.get('norm_sections') or []) or '(none detected)'})")
-    print(f"[add-venue] the norm is ADVISORY: review/rewrite sessions follow it only where it "
-          f"serves the content, and the venue profile's own guidelines win")
+          f"({report.get('official', 0)} official template file(s), "
+          f"{report.get('exemplars')} exemplar(s)"
+          + (f"; class: {report['documentclass']}" if report.get("documentclass") else "")
+          + f"; sections: {', '.join(report.get('norm_sections') or []) or '(none detected)'})")
+    if report.get("official_archives") and not report.get("official"):
+        print(f"[add-venue] WARNING: {len(report['official_archives'])} official template "
+              f"archive(s) landed but no extracted file was parsed -- UNZIP them "
+              f"({', '.join(report['official_archives'])}) and re-run "
+              f"`build-venue-templates --venue {vid}`")
+    if report.get("mandatory_sections"):
+        print(f"[add-venue] MANDATORY sections (official template): "
+              f"{', '.join(report['mandatory_sections'])}")
+    print(f"[add-venue] the official template is AUTHORITATIVE; the recent-practice norm is "
+          f"ADVISORY, and the venue profile's own guidelines win over both")
     raise SystemExit(1 if problems else 0)
 
 
