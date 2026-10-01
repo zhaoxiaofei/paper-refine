@@ -1669,8 +1669,8 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 41 suites in ~120 s
-on a 20-core box, against ~5.5 min sequentially:
+any failure. They are independent, so run them in parallel — 53 suites (a few
+minutes on a 20-core box; ~5.5 min sequentially):
 
 ```bash
 python3 .paper_test/run_all.py          # GNU parallel (8 jobs by default); falls back
@@ -1696,9 +1696,10 @@ Highlights: `test_pipeline.py` (prompts, gates, ranking), `test_length_limits.py
 setup/stage normalization, the seeded M20 artifact and its contract, plus a real
 LibreOffice render proving the blank page is gone), `test_stage_subset.py`
 (`--only` review/revise/merge/judge end-to-end with the stub agent),
-`test_only_rounds_integrators_judges.py` (`--only 1,2` / `--only 2:review` round
-filtering, the per-round `--integrators` mask including 0x0 and the arms it
-skips, and the per-round `--judges` panel expectation),
+`test_only_rounds_{1_run_plan,2_session_selection,3_agent_ids}.py` (`--only 1,2`
+/ `--only 2:review` round filtering, the per-round `--integrators` mask
+including 0x0 and the arms it skips, and the per-round `--judges` panel
+expectation),
 `test_evidence_pack.py` (the pack is written for all five session layouts, the
 seeded files count as inputs not agent work, every prompt carries its block, the
 judge sandbox is proved to hold NO orchestrator artifact (blinding) while the

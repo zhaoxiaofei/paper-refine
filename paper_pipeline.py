@@ -1274,6 +1274,11 @@ def _clean_length_limits(limits, prefix: str, problems: list):
             problems.append(f"{prefix}.{key}: 'base' and 'relaxation' must be given "
                             f"together (or both null)")
         clean[key] = {"base": base, "relaxation": relaxation}
+    # Distinguish "this type states no cover letter at all" (inherit the
+    # default type's, handled in length_limits()) from "this type explicitly
+    # states no preference" (min/max null): the README documents the latter as
+    # none, so the block must survive normalization with its source intact.
+    cover_stated = isinstance(limits.get("cover_letter"), dict)
     cover = limits.get("cover_letter") or {}
     if not isinstance(cover, dict):
         problems.append(f"{prefix}.cover_letter must be an object with 'min' and 'max' "
@@ -1291,9 +1296,10 @@ def _clean_length_limits(limits, prefix: str, problems: list):
     if cover_total is not None and cover_max is not None and cover_total < cover_max:
         problems.append(f"{prefix}.cover_letter.total_max ({cover_total}) must not be below "
                         f"the persuading-part max ({cover_max})")
-    clean["cover_letter"] = {"min": cover_min, "max": cover_max,
-                             "total_max": cover_total,
-                             "source": str(cover.get("source") or "").strip()}
+    if cover_stated:
+        clean["cover_letter"] = {"min": cover_min, "max": cover_max,
+                                 "total_max": cover_total,
+                                 "source": str(cover.get("source") or "").strip()}
     return clean
 
 
@@ -1622,10 +1628,13 @@ class VenueProfile:
                    if base is not None and relaxation is not None else None)
             return {"base": base, "relaxation": relaxation, "cap": cap}
 
-        cover = raw.get("cover_letter") or {}
-        if cover.get("min") is None and cover.get("max") is None:
+        # Inherit only when the type does not state a cover-letter block at
+        # all; an explicit block with null min/max MEANS "none" (the README's
+        # schema), so it must not be replaced by the default type's preference.
+        cover = raw.get("cover_letter")
+        if cover is None:
             cover = ((self._default_type_entry().get("length_limits") or {})
-                     .get("cover_letter") or cover)
+                     .get("cover_letter") or {})
         return {"abstract": spec("abstract"),
                 "main text": spec("main_text"),
                 "cover letter": {"min": cover.get("min"), "max": cover.get("max"),
@@ -4504,21 +4513,30 @@ def standing_exemptions_text(profile=None) -> str:
     """The standing exemptions block, with this venue's length and legend rules."""
     prof = _as_profile(profile)
     cover_clause = _cover_preference_clause(prof)
+    cover_total = prof.length_limits()["cover letter"].get("total_max")
+    total_pref = (
+        f"must stay within {cover_total} words (the operator's default cap; a profile may\n"
+        f"    override it)"
+        if cover_total is not None else
+        "is counted and recorded, but this profile configures no TOTAL-content cap, so no\n"
+        "    total-word limit is applied")
+    total_plain = (
+        f"must stay within {cover_total} words (the operator's default cap)"
+        if cover_total is not None else
+        "is counted and recorded with no total-word cap (this profile configures none)")
     cover_bullet = (
         f"  * The master prompt's COVER-LETTER rule (the persuading part must be {cover_clause})\n"
         f"    stays a flaggable formatting item: report it, never gate on it. The LETTER ITSELF\n"
         f"    must render to at most TWO pages (a third page is a Major formatting defect) AND\n"
-        f"    its TOTAL content -- salutation, body, disclosures and signature -- must stay\n"
-        f"    within {COVER_LETTER_TOTAL_MAX_WORDS} words (the operator's default cap; a profile\n"
-        f"    may override it). Trim the non-persuading boilerplate first, never a claim about\n"
+        f"    its TOTAL content -- salutation, body, disclosures and signature -- {total_pref}.\n"
+        f"    Trim the non-persuading boilerplate first, never a claim about\n"
         f"    the work, and the page count comes from a render, never from the cached document\n"
         f"    property."
         if cover_clause else
         "  * This venue profile states no COVER-LETTER word rule: the letter's length is recorded\n"
         f"    and reported, never gated and never cut. The LETTER itself must still render to at\n"
         f"    most TWO pages (a third page is a Major formatting defect), measured from a render,\n"
-        f"    and its TOTAL content must stay within {COVER_LETTER_TOTAL_MAX_WORDS} words (the\n"
-        f"    operator's default cap).")
+        f"    and its TOTAL content {total_plain}.")
     caption_source = (prof.captions.get("source")
                       or "this venue profile states no figure-legend length rule")
     return f"""Standing exemptions and explicit limits (apply to every mode, always):
@@ -4742,11 +4760,37 @@ def m19_blocks(profile=None) -> dict:
     cover_note = (cover_total_note
                   + (f", and its persuading part is the USER PREFERENCE {cover_clause}"
                      if cover_clause else ""))
-    cover_tail = (f"this is the user's preference, not an {prof.short} requirement, and the venue "
+    cover_tail = (f"this is the user's preference, not {_indefinite(prof.short)} requirement, "
+                  f"and the venue "
                   f"profile publishes no cover-letter limit"
                   if cover_clause else "no cover-letter preference is configured")
     if cover_total is not None:
         cover_tail += f"; the {cover_total}-word TOTAL cap is the operator's budget"
+    # The cover-letter TOTAL cap is a profile value like every other M19
+    # number: a profile that configures none must not be told to hit "the
+    # configured cap" (or the default venue's 650) in a mandate.
+    if cover_total is not None:
+        revise_cover = (f"Cover letter: bring its TOTAL content within {cover_total} words -- "
+                        f"trim the non-persuading boilerplate first (statement blocks, the "
+                        f"reviewer list, restated affiliations), never a claim about the work")
+        integrate_cover = (f"The cover letter's TOTAL content must stay within {cover_total} words "
+                           f"by trimming boilerplate only (never a claim about the work).")
+        rewrite_cover = (f"the cover letter's TOTAL content must stay within {cover_total} words "
+                         f"(trim boilerplate only)")
+    else:
+        revise_cover = ("Cover letter: this profile configures no TOTAL-content cap, so count and "
+                        "record its TOTAL content without cutting it for length")
+        integrate_cover = ("The cover letter has no configured TOTAL-content cap: report its count "
+                           "and never cut it for length.")
+        rewrite_cover = ("the cover letter has no configured TOTAL-content cap: count it and never "
+                         "cut it for length")
+    # The persuading-part preference is separate from the TOTAL cap: say
+    # nothing about "the configured preference" when the profile configures
+    # none (an explicit null pair means none).
+    pref_clause = (
+        f" -- and when the persuading part is outside the user's {cover_clause} preference, bring "
+        f"it into the range by removing redundancy only (never content); {cover_tail}"
+        if cover_clause else "")
     review = f"""3b. The PIPELINE-MANDATED length sweep M19 (see the length rule in the standing
    exemptions): enumerate the ABSTRACT and the MAIN TEXT of every submission document that carries
    one -- and the PERSUADING PART of the cover letter -- into review/artifacts/M19_length.md, one
@@ -4774,25 +4818,17 @@ def m19_blocks(profile=None) -> dict:
      text that is already within the cap. Count with the pipeline's definition (maximal runs of
      NON-SPACE characters; a newline is a space) and record every compression in CHANGELOG.md
      under M19. A section that cannot be brought within the cap without losing content is left as
-     it is and handed to revised/MANUAL_STEPS.md instead of guessing. Cover letter: bring its
-     TOTAL content within {cover_total if cover_total is not None else 'the configured cap'}
-     words -- trim the non-persuading boilerplate first (statement blocks, the reviewer list,
-     restated affiliations), never a claim about the work -- and when the persuading part is
-     outside the user's {cover_clause or 'configured'} preference, bring it into the range by removing
-     redundancy only (never content); {cover_tail}."""
+     it is and handed to revised/MANUAL_STEPS.md instead of guessing. {revise_cover}{pref_clause}."""
         integrate = f"""Abstract/main-text length (check id M19) is a FORMATTING-tier difference class: port a donor's
 version when it is within the cap and the base's is not, or when the donor removed redundancy from
 an over-cap section without losing content. Otherwise compress the base yourself under the length
 rule, and if a section cannot be brought within the cap ({caps_article}) without
-losing content, leave it and record it for manual action. The cover letter's TOTAL content must
-stay within {cover_total if cover_total is not None else 'its'} words by trimming boilerplate only
-(never a claim about the work). Never reach a cap
+losing content, leave it and record it for manual action. {integrate_cover} Never reach a cap
 by deleting scientific content, and never port a purely shorter version that gives up correctness,
 consistency or preservation to get there."""
         rewrite = f"""Abstract/main-text length (check id M19) is REPORTED here, not fixed: a rewrite must not push
 an abstract or main text over the pipeline's caps ({caps_article}) and must never cut scientific
-content to meet one; the cover letter's TOTAL content must stay within
-{cover_total if cover_total is not None else 'its configured cap'} words (trim boilerplate only).
+content to meet one; {rewrite_cover}.
 If the base is ALREADY over a cap, surface it in rewritten/REWRITE_REPORT.md
 under "PROBLEMS SURFACED" -- the revision and integration stages own the compression, and this
 stage must not change content to achieve it."""
@@ -5431,7 +5467,7 @@ defect the same way; only the deliverable differs):
   * PAGE BUDGETS ARE PART OF THE DELIVERED ARTIFACT: the front page must hold the title, the
     authors, the affiliations, the abstract AND the keywords together, and the cover letter must
     render to at most TWO pages AND keep its TOTAL content (salutation, body, disclosures and
-    signature) within @@COVER_LETTER_TOTAL_MAX@@ words. A keywords line that starts page 2, or a third cover-letter
+    signature) @@COVER_LETTER_TOTAL_CLAUSE@@. A keywords line that starts page 2, or a third cover-letter
     page, is a formatting row graded MAJOR -- the reader must work around it -- and it is decided
     by the DELIVERED layout, not by the cached page property. Never shorten a scientific claim to
     reach a budget: cut boilerplate and redundancy, or hand the compression to the author.
@@ -5448,14 +5484,21 @@ defect the same way; only the deliverable differs):
     from the session that finds it to the session that scores the result."""
 
 
-def defect_class_rule() -> str:
-    """The shared defect-class block (filled from BASIS_TIERS, so it cannot drift)."""
+def defect_class_rule(profile=None) -> str:
+    """The shared defect-class block (filled from BASIS_TIERS, so it cannot drift).
+
+    The cover-letter total cap comes from the selected venue profile, exactly
+    like the standing exemptions: a profile that configures no total cap must
+    not be told the default venue's 650 words in this block while
+    `length_rule_text` says no cap is configured.
+    """
+    cover_total = _as_profile(profile).length_limits()["cover letter"].get("total_max")
+    cover_clause = (f"within {cover_total} words" if cover_total is not None else
+                    "with no total-word cap (this profile configures none)")
     out = (DEFECT_CLASS_RULE_TEMPLATE
            .replace("@@TIER_COUNT@@", str(len(BASIS_TIERS)))
            .replace("@@TIER_ORDER@@", "  >  ".join(BASIS_TIERS))
-           .replace("@@COVER_LETTER_TOTAL_MAX@@",
-                    str(COVER_LETTER_TOTAL_MAX_WORDS
-                        if COVER_LETTER_TOTAL_MAX_WORDS is not None else "the configured")))
+           .replace("@@COVER_LETTER_TOTAL_CLAUSE@@", cover_clause))
     for tier in BASIS_TIERS:
         out = out.replace(f"@@T_{tier.upper()}@@", tier)
     return out
@@ -8183,7 +8226,7 @@ the surface, and the revisers may not change a claim here."""
             .replace("@@ROUND@@", str(int(r)))
             .replace("@@PRIOR_ROUND@@", prior)
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE)
-            .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule())
+            .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule(prof))
             .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
             .replace("@@PLACEHOLDER_RULE@@", PLACEHOLDER_RULE)
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
@@ -8230,7 +8273,7 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@ROUND@@", str(int(r)))
             .replace("@@REVISE_INDEX@@", str(int(index)))
             .replace("@@REVISE_TOTAL@@", str(int(total)))
-            .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule())
+            .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule(prof))
             .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
             .replace("@@PLACEHOLDER_RULE@@", PLACEHOLDER_RULE)
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
@@ -8275,7 +8318,7 @@ def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
             .replace("@@SANDBOX@@", str(sandbox.resolve()))
             .replace("@@ROUND@@", str(int(r)))
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE)
-            .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule())
+            .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule(prof))
             .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
             .replace("@@PLACEHOLDER_RULE@@", PLACEHOLDER_RULE)
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
@@ -8312,7 +8355,7 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@SELF_ID@@", self_id)
             .replace("@@OTHER_IDS@@", ", ".join(other_ids))
             .replace("@@OTHER_COUNT@@", str(len(other_ids)))
-            .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule())
+            .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule(prof))
             .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
             .replace("@@PLACEHOLDER_RULE@@", PLACEHOLDER_RULE)
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
@@ -8360,7 +8403,7 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@REWRITE_TOTAL@@", str(int(total)))
             .replace("@@REWRITE_LEVEL_BLOCK@@", REWRITE_LEVEL_BLOCKS[level])
             .replace("@@SOURCE_HIERARCHY@@", SOURCE_HIERARCHY)
-            .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule())
+            .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule(prof))
             .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
             .replace("@@PLACEHOLDER_RULE@@", PLACEHOLDER_RULE)
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
@@ -8404,7 +8447,7 @@ def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index
             .replace("@@K_OPPONENTS@@", str(len(opponent_labels)))
             .replace("@@OPPONENT_LABELS@@", labels)
             .replace("@@SOURCE_HIERARCHY@@", SOURCE_HIERARCHY)
-            .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule())
+            .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule(prof))
             .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
             .replace("@@PLACEHOLDER_RULE@@", PLACEHOLDER_RULE_JUDGE)
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
@@ -8848,19 +8891,35 @@ def _iter_tree_files(root: Path, follow_dir_links: bool = False) -> list:
     ensure_pristine_input). Every walk that defines a corpus, a judge view or an
     INPUT manifest must therefore ask for the followed variant explicitly, or a
     linked `raw_data/` would be invisible to the identity it is supposed to
-    contribute to.
+    contribute to. The walk is recursive instead of one `rglob` per link: a
+    directory symlink nested INSIDE a linked area (`raw_data/linked_dir`)
+    used to be invisible, so a sandbox's manifest quietly disagreed with the
+    canonical tree's. An ancestor-inode set keeps a link cycle finite.
     """
     if not root.is_dir():
         return []
     out = []
-    for p in sorted(root.rglob("*")):
-        if p.is_symlink() and p.is_dir():
-            if follow_dir_links:
-                out.extend(q for q in sorted(p.rglob("*")) if q.is_file())
-            continue
-        if p.is_file():
-            out.append(p)
-    return out
+
+    def walk(d: Path, ancestors: frozenset) -> None:
+        for p in sorted(d.iterdir()):
+            if p.is_symlink() and p.is_dir():
+                if not follow_dir_links:
+                    continue
+                try:
+                    st = os.stat(p)
+                except OSError:
+                    continue
+                key = (st.st_dev, st.st_ino)
+                if key in ancestors:
+                    continue
+                walk(p, ancestors | {key})
+            elif p.is_dir():
+                walk(p, ancestors)
+            elif p.is_file():
+                out.append(p)
+
+    walk(root, frozenset())
+    return sorted(out)
 
 
 def hash_manifest(dirp: Path, follow_dir_links: bool = False, exclude_top=()) -> dict:
@@ -13513,8 +13572,9 @@ class Ctx:
         forgotten second terminal, a cron job) both see the same pending runs,
         both launch agents into the SAME sandbox -- two sessions writing one
         deliverable -- and both save their own state.json copy, so the second
-        save silently drops the first one's run records. `run`, `retry`, `prune`
-        and `redline` therefore take this lock for the whole command.
+        save silently drops the first one's run records. `run`, `decide`, `retry`,
+        `prune` and `redline` therefore take this lock for the whole command
+        (`decide` writes decision.json, the round reports and final_clean_version/).
 
         The lock is a plain file holding the owner's pid. A lock whose pid is
         gone (crashed/killed pipeline) is reclaimed with a warning instead of
@@ -23350,7 +23410,7 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
     k = len(field_ids)
     # Directed scores per version = judges * (|field|-1) own scores plus
     # (|field|-1) * judges negated received scores = 2 * judges * (|field|-1).
-    # At the default 3 judges that is the documented 6*(|field|-1) (36 at
+    # At the default 2 judges that is the documented 4*(|field|-1) (24 at
     # |field| = 7); the formula is written generically so a setup with a
     # different --judges value is not reported as an incomplete panel.
     # A `run --only r1_judge_w2_j1` selection gives each version its own panel, so the
@@ -27908,7 +27968,7 @@ def score_model_doc(ctx=None) -> dict:
     """
     return {
         "scores_per_version": "2*judges*(|field|-1) "
-                              "(= 6*(|field|-1) at the default 3 judges)",
+                              "(= 4*(|field|-1) at the default 2 judges)",
         "scale": [SCORE_MIN, SCORE_MAX],
         "scale_note": "bounded by design: the production panel used -3..+3 and never +-4, so "
                       "widening the range would add unused rungs; the graded basis below is what "
@@ -29551,6 +29611,14 @@ def cmd_decide(args) -> None:
     ctx = Ctx(Path(args.root).resolve(),
               strict_venue=bool(getattr(args, "strict_venue", False)))
     ctx.load()
+    with ctx.lock("decide"):
+        _cmd_decide_locked(ctx, args)
+
+
+def _cmd_decide_locked(ctx: Ctx, args) -> None:
+    # `decide` is NOT the read-only audit the comment in cmd_run_decide claims:
+    # it writes decision.json, the round reports and final_clean_version/, so it
+    # must hold the same root lock as run/retry/prune/redline.
     venue_profile_of(ctx)          # the report names the venue and quotes its limits
     if journal_is_scoped(ctx):
         # A major/minor revision is not decided: there is no field, no judge
@@ -30022,11 +30090,13 @@ def cmd_run_decide(args) -> None:
     """`run`, then `decide`, in series, honouring decide's flags.
 
     `run` holds the root lock for its whole phase and releases it when it
-    returns; the decide phase is then a read-only audit, so the digest cache is
-    safe to switch on for it (main() left it off because `run-decide` is not a
-    read-only command). A hard error inside `run` (a `die()`) propagates and the
-    decide phase is skipped -- deciding a root that could not even be started
-    would only repeat the same error.
+    returns; `decide` then takes the lock for its own writes (reports,
+    decision.json, final_clean_version/). The digest cache is safe to switch on
+    for that phase only because decision.json's integrity checks run under the
+    same lock (main() left the cache off because `run-decide` is not a read-only
+    command). A hard error inside `run` (a `die()`) propagates and the decide
+    phase is skipped -- deciding a root that could not even be started would
+    only repeat the same error.
     """
     cmd_run(args)
     note = configure_hash_cache_for_command("decide", getattr(args, "root", None))

@@ -880,7 +880,7 @@ suitability; excluding the salutation, the signature block and required
 disclosures such as related manuscripts, prior editor discussions,
 double-anonymized author details and reviewer suggestions) should be
 **300-500 words**; outside that range is a MINOR formatting item, never a
-journal requirement and never gated. `count_words.py --cover-letter` counts it.
+journal requirement and never gated. `count_words.py --section cover-letter` counts it.
 
 **Enumeration:** for every document that carries one, one row per section into
 `M19_length.md`: document | section (abstract / main text / cover letter) | word

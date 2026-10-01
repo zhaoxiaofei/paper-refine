@@ -451,10 +451,13 @@ def main(argv=None) -> int:
             base_main, rel_main = _limit("main_text", base_main, rel_main)
         else:
             base_abstract = base_main = rel_abstract = rel_main = None
+        cover_stated = isinstance(limits.get("cover_letter"), dict)
         cover = limits.get("cover_letter") or {}
-        if (cover.get("min") is None and cover.get("max") is None) and types:
-            # The cover-letter preference is venue-wide: a type that states none
-            # inherits the default type's, exactly as the pipeline does.
+        if not cover_stated and types:
+            # The cover-letter preference is venue-wide: a type that states NO
+            # cover_letter block at all inherits the default type's, exactly as
+            # the pipeline does. An explicit block with null min/max MEANS
+            # "none" (venue_profiles/README.md), so it is not inherited.
             default_id = str((profile or {}).get("default_article_type") or "").strip().lower()
             for candidate in types:
                 if isinstance(candidate, dict) and \

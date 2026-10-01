@@ -111,6 +111,13 @@ RUN_RE = re.compile(r"<w:r(?=[\s/>]).*?</w:r>|<w:r(?=[\s/>])[^>]*/>", re.S)
 FIELD_CHAR_RE = re.compile(r"<w:fldChar[^>]*w:fldCharType=\"(\w+)\"[^>]*/?>")
 INSTR_RE = re.compile(r"<w:instrText(?:\s[^>]*)?>.*?</w:instrText>", re.S)
 PROOFERR_RE = re.compile(r"<w:proofErr[^>]*/>")
+# Revision marks beyond the run-level w:ins/w:del pair: Word records tracked
+# table/cell edits and property changes with their own elements, and a final
+# package that carries only those is still carrying revision marks.
+OTHER_REVISION_MARK_RE = re.compile(
+    r"<w:(?:moveFrom|moveTo|cellIns|cellDel|cellMerge|"
+    r"pPrChange|rPrChange|tblPrChange|trPrChange|tcPrChange|sectPrChange|"
+    r"numberingChange)(?=[\s/>])")
 DRAWING_RE = re.compile(r"<w:(?:drawing|pict|object|txbxContent)(?=[\s/>])")
 PAGEBREAK_RE = re.compile(r"<w:br[^>]*w:type=\"page\"[^>]*/?>")
 LEGEND_RE = re.compile(r"^\s*(?:Fig(?:ure)?\.?)\s*\d+\s*[|:.\u2014\u2013-]")
@@ -155,7 +162,10 @@ def _spans(xml: str, tokens: re.Pattern) -> list:
     out, depth, start = [], 0, None
     for m in tokens.finditer(xml):
         if m.group(0).startswith("</"):
-            depth -= 1
+            # A hand-edited package can carry an unmatched close tag; without
+            # the clamp the depth goes negative and every later span is lost
+            # (the closer never brings a -1 depth back to 0).
+            depth = max(0, depth - 1)
             if depth <= 0 and start is not None:
                 out.append((start, m.end(), xml[start:m.end()]))
                 start, depth = None, 0
@@ -2431,11 +2441,17 @@ PAGE_BREAK_RE = re.compile(r"<w:lastRenderedPageBreak(?=[\s/>])[^>]*/>")
 
 
 def paragraph_first_line_indent(frag: str) -> int:
-    """The paragraph's own first-line indent in twips (0 = none)."""
+    """The paragraph's own first-line indent in twips (0 = none).
+
+    `w:hanging` is a LEFT PULL on the following lines, not a first-line
+    indent: a bibliography-style hanging paragraph is flush on its first line,
+    so reporting the hanging value as a first-line indent misclassifies it in
+    the FMT-T8f convention check.
+    """
     ind = elem(ppr_of(frag), "ind")
     if ind is None:
         return 0
-    for k in ("firstLine", "firstLineChars", "hanging", "hangingChars"):
+    for k in ("firstLine", "firstLineChars"):
         v = attr(ind, k)
         if v and re.fullmatch(r"-?\d+", v.strip()):
             n = int(v)
@@ -2787,8 +2803,11 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str) -> dict:
             "add w:titlePg to the section properties so page 1 carries no header")
     n_ins = len(re.findall(r"<w:ins(?=[\s/>])", xml))
     n_del = len(re.findall(r"<w:del(?=[\s/>])", xml))
-    if n_ins or n_del:
-        row("FMT-S4", "high", "document", f"tracked changes present: {n_ins} ins / {n_del} del",
+    n_other_rev = len(OTHER_REVISION_MARK_RE.findall(xml))
+    if n_ins or n_del or n_other_rev:
+        other = f" / {n_other_rev} other revision mark(s)" if n_other_rev else ""
+        row("FMT-S4", "high", "document",
+            f"tracked changes present: {n_ins} ins / {n_del} del{other}",
             "a final package must not carry revision marks; accept or reject them first")
     n_proof = len(PROOFERR_RE.findall(xml))
     if n_proof:
@@ -3504,22 +3523,30 @@ def validate_latex(path: Path, workdir: Path = None, timeout: int = 300) -> dict
                           "compilation not verified"}
     name, argv = engine
     scratch = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="paper_tex_check_"))
+    owns_scratch = workdir is None
     try:
-        target_dir = scratch / path.parent.name if not workdir else scratch
-        if not target_dir.is_dir():
-            shutil.copytree(path.parent, target_dir,
-                            ignore=shutil.ignore_patterns("work", "*.tracked.docx"))
-        proc = subprocess.run(argv + [path.name], cwd=str(target_dir),
-                              capture_output=True, text=True, timeout=timeout)
-    except (OSError, subprocess.SubprocessError, shutil.Error) as e:
-        return {"file": str(path), "kind": "tex", "ok": False, "engine": name,
-                "errors": [f"{type(e).__name__}: {e}"], "detail": "the compile step itself failed"}
-    out = (proc.stdout or "") + (proc.stderr or "")
-    errors = [ln.strip() for ln in out.splitlines() if ln.startswith("!")][:5]
-    return {"file": str(path), "kind": "tex", "ok": proc.returncode == 0, "engine": name,
-            "errors": errors, "detail": (errors[0] if errors else
-                                         ("compiled" if proc.returncode == 0
-                                          else f"engine exited {proc.returncode}"))}
+        try:
+            target_dir = scratch / path.parent.name if not workdir else scratch
+            if not target_dir.is_dir():
+                shutil.copytree(path.parent, target_dir,
+                                ignore=shutil.ignore_patterns("work", "*.tracked.docx"))
+            proc = subprocess.run(argv + [path.name], cwd=str(target_dir),
+                                  capture_output=True, text=True, timeout=timeout)
+        except (OSError, subprocess.SubprocessError, shutil.Error) as e:
+            return {"file": str(path), "kind": "tex", "ok": False, "engine": name,
+                    "errors": [f"{type(e).__name__}: {e}"],
+                    "detail": "the compile step itself failed"}
+        out = (proc.stdout or "") + (proc.stderr or "")
+        errors = [ln.strip() for ln in out.splitlines() if ln.startswith("!")][:5]
+        return {"file": str(path), "kind": "tex", "ok": proc.returncode == 0, "engine": name,
+                "errors": errors, "detail": (errors[0] if errors else
+                                             ("compiled" if proc.returncode == 0
+                                              else f"engine exited {proc.returncode}"))}
+    finally:
+        # A validation pass over N .tex files must not leak N full project
+        # copies; an operator-supplied workdir is not ours to remove.
+        if owns_scratch:
+            shutil.rmtree(scratch, ignore_errors=True)
 
 
 def validate_paths(paths: list, json_out: Path = None, timeout: int = 300) -> dict:

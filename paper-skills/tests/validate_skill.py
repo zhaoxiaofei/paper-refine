@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regression harness for the paper-review scripts (shipped with the package).
 
-Covers the 24 script-level and 16 instruction-level checks from the v0.3 audit:
+Covers the 52 script-level and instruction-level checks from the v0.3–v0.27 audits:
 reference-list truncation, xlsx shared strings, percentage/AUC extraction,
 acronym detectors, citation matching and bookkeeping, docx header/footer
 coverage, RTF handling, occurrence-artifact naming, prompt/reference sync.
