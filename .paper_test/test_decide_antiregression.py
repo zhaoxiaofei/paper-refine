@@ -183,10 +183,15 @@ def test_decide_refuses_to_certify_a_regression():
           cert.get("certified") is False and cert.get("blockers")
           and any("WORSE than the pristine original" in str(b) for b in cert["blockers"]),
           json.dumps(cert)[:300])
-    check("an uncertified decision never publishes final_clean_version/",
-          (cert.get("clean_version") or {}).get("published") is False
-          and not (root / "final_clean_version").exists(),
+    readme = root / "final_clean_version.readme.md"
+    check("an uncertified decision STILL builds final_clean_version/ (always generated)",
+          (cert.get("clean_version") or {}).get("published") is True
+          and (root / "final_clean_version").is_dir(),
           f"clean={cert.get('clean_version')} dir={(root / 'final_clean_version').exists()}")
+    check("the sibling readme carries the NOT-CERTIFIED status and the blocker",
+          readme.is_file() and "NOT CERTIFIED" in readme.read_text(encoding="utf-8")
+          and "WORSE than the pristine original" in readme.read_text(encoding="utf-8"),
+          str(readme))
     st = subprocess.run([sys.executable, str(WS / "paper_pipeline.py"), "status",
                          "--root", str(root)], capture_output=True, text=True, timeout=300)
     check("status surfaces the NOT-CERTIFIED verdict",
@@ -204,21 +209,31 @@ def test_certification_verdicts():
     print("== decide_certification: one verdict for the file, the report and the exit code ==")
     ok = nb.decide_certification([], [{"mismatch": None}], True, {}, None, False, False, 2, 2,
                                  {"files": 3}, "")
-    check("certified: certified True, exit 0, clean published",
+    check("certified: certified True, exit 0, clean published + status certified",
           ok["certified"] is True and ok["exit_code"] == 0
-          and ok["clean_version"]["published"] is True, json.dumps(ok))
+          and ok["clean_version"]["published"] is True
+          and ok["clean_version"]["status"] == "certified"
+          and ok["clean_version"]["readme"] == nb.FINAL_CLEAN_README_NAME, json.dumps(ok))
+    # A gate blocks the CERTIFICATION, not the copy: the directory is always
+    # built and the verdict travels in the sibling readme.
     gated = nb.decide_certification(["2 gated residual(s)"], [{"mismatch": None}], True, {}, None,
-                                    False, False, 2, 2, {"skipped": "2 gated residual(s)"},
-                                    "2 gated residual(s)")
-    check("a gate: certified False, exit 5, clean NOT published",
+                                    False, False, 2, 2, {"files": 31, "path": "/x"}, None)
+    check("a gate: certified False, exit 5, clean still published (status not_certified)",
           gated["certified"] is False and gated["exit_code"] == 5
-          and gated["clean_version"]["published"] is False
-          and "gated" in gated["clean_version"]["skipped_reason"], json.dumps(gated))
+          and gated["clean_version"]["published"] is True
+          and gated["clean_version"]["status"] == "not_certified", json.dumps(gated))
+    skipped = nb.decide_certification([], [{"mismatch": None}], True, {}, None, False, False, 2, 2,
+                                      {"skipped": "the champion corpus is empty"},
+                                      "the champion corpus is empty")
+    check("a corpus that cannot be built records why (published False + skipped_reason)",
+          skipped["clean_version"]["published"] is False
+          and "empty" in skipped["clean_version"]["skipped_reason"], json.dumps(skipped))
     prov = nb.decide_certification([], [{"mismatch": None}], True, {}, None, True, False, 1, 2,
                                    {"skipped": "provisional"}, "provisional")
     check("provisional without --require-complete: not certified, exit 0",
           prov["certified"] is False and prov["provisional"] is True
-          and prov["exit_code"] == 0, json.dumps(prov))
+          and prov["exit_code"] == 0
+          and prov["clean_version"]["status"] == "provisional", json.dumps(prov))
     prov4 = nb.decide_certification([], [{"mismatch": None}], True, {}, None, True, True, 1, 2,
                                     {"skipped": "provisional"}, "provisional")
     check("provisional with --require-complete: exit 4",

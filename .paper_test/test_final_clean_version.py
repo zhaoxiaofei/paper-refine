@@ -112,8 +112,16 @@ def main() -> int:
     cert = decision.get("certification") or {}
     check("FCV the decision records itself as CERTIFIED and the clean copy as published",
           cert.get("certified") is True and cert.get("blockers") == []
-          and (cert.get("clean_version") or {}).get("published") is True,
+          and (cert.get("clean_version") or {}).get("published") is True
+          and (cert.get("clean_version") or {}).get("status") == "certified",
           json.dumps(cert)[:200])
+    fcv_readme = root / "final_clean_version.readme.md"
+    fcv_text = fcv_readme.read_text(encoding="utf-8") if fcv_readme.is_file() else ""
+    check("FCV the sibling readme states CERTIFIED and how to reuse the package",
+          fcv_readme.is_file() and fcv_text.startswith("# final_clean_version")
+          and "Certification: CERTIFIED" in fcv_text
+          and "setup --source" in fcv_text,
+          fcv_text[:200])
     # idempotence: a second decide leaves the tree byte-identical (no churn)
     before = sorted(nb.sha256_file(p) for p in final.rglob("*") if p.is_file())
     proc = run(["decide", "--root", str(root)])

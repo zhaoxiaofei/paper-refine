@@ -297,8 +297,9 @@ RULES CARRIED INTO EVERY PROMPT (AND WHERE THEY COME FROM)
       champion as <root>/final_clean_version/: the same corpus byte-for-byte
       without process scratch, auxiliaries or self-written reports, ready to
       seed a new pipeline run (`setup --source <root>/final_clean_version`).
-      It is written only for a certified champion (complete rounds, complete
-      judge panel, intact pin/winner chain) and is idempotent.
+      It is written on EVERY decide, certified or not, and is idempotent; the
+      certification verdict (and why a package is not signed) is stated in the
+      sibling <root>/final_clean_version.readme.md.
     * ONE CONTENT-HASH VERSION TOKEN PER PACKAGE (replaces the old letter/digit
       increments): every producing stage names all of its editable documents
       with the SAME 7-character token, the first 7 hex of SHA-256 over the
@@ -662,7 +663,9 @@ DIRECTORY LAYOUT CREATED UNDER --root
     final_clean_version/            `decide`'s clean copy of the final champion:
                                     submission documents + code/, no scratch,
                                     auxiliaries or self-written reports -- a
-                                    ready `setup --source` for the next run
+                                    `setup --source` for the next run (always
+                                    generated; its certification status is in
+                                    the sibling final_clean_version.readme.md)
     redlines/r<R>_<version>/        tracked-changes .docx per candidate:
                                     from-base/, from-original/,
                                     from-setup-source/, plus manifest.json and
@@ -2392,9 +2395,15 @@ WINNER_DIR_FMT = "round{r}_winner"
 # that can seed a NEW pipeline run: <root>/final_clean_version/. It is the
 # winner corpus byte-for-byte (no process scratch, no auxiliaries, no
 # self-written reports), so `setup --source <root>/final_clean_version` starts
-# from exactly the content the judges scored. Nothing is written INSIDE it:
+# from exactly the content the judges scored. It is generated on EVERY decide,
+# certified or not; the verdict and the package's provenance live in the
+# SIBLING <root>/final_clean_version.readme.md. Nothing is written INSIDE it:
 # an added README/manifest would become manuscript content for the next round.
 FINAL_CLEAN_DIRNAME = "final_clean_version"
+# The SIBLING status file: the directory itself stays a byte-clean manuscript
+# corpus (anything inside it would become manuscript content in the next run),
+# so the certification verdict and the package's provenance live beside it.
+FINAL_CLEAN_README_NAME = FINAL_CLEAN_DIRNAME + ".readme.md"
 # Companion module for the code-side OOXML style/formatting scan (see
 # scan_format_in_sources). `setup` copies it next to the pipeline script so the
 # root stays self-contained; when it is absent the scan reports "unavailable"
@@ -26661,6 +26670,8 @@ def decide_certification(gate_problems, rounds_data, chain_ok, panel_gaps, final
     if provisional:
         notes.append(f"only round {final_round} of {rounds_total} is complete; the answer is "
                      f"provisional")
+    status = ("certified" if (not blockers and not provisional)
+              else ("provisional" if (provisional and not blockers) else "not_certified"))
     return {"certified": bool(not blockers and not provisional),
             "provisional": bool(provisional),
             "blockers": blockers,
@@ -26671,7 +26682,19 @@ def decide_certification(gate_problems, rounds_data, chain_ok, panel_gaps, final
             "exit_code": (5 if blockers
                           else (4 if (provisional and require_complete) else 0)),
             "clean_version": {"published": bool((final_clean or {}).get("files")),
+                              "status": status,
+                              "readme": FINAL_CLEAN_README_NAME,
                               "skipped_reason": clean_reason or None}}
+
+
+def certification_label(certification) -> str:
+    """`CERTIFIED` / `PROVISIONAL` / `NOT CERTIFIED` for one certification dict."""
+    cert = certification or {}
+    if cert.get("certified"):
+        return "CERTIFIED"
+    if cert.get("provisional") and not cert.get("blockers"):
+        return "PROVISIONAL"
+    return "NOT CERTIFIED"
 
 
 def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = "") -> dict:
@@ -26694,13 +26717,20 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     `final_clean_version/` is the NEXT round's source under the user's naming
     convention (cnb-11-* -> cnb-12-*, ...).
 
-    Returns {"path", "digest", "pin_digest", "files", "renamed", "action"} or
-    {"skipped": <reason>}. The write is idempotent: an existing copy that
+    The copy is ALWAYS attempted (2026-10-01): an uncertified champion's corpus
+    is still materialized, and its certification verdict travels in the SIBLING
+    `final_clean_version.readme.md` (see write_final_clean_readme), never inside
+    this directory -- so `--source` never silently mixes a status file into the
+    next run's manuscript. `certified`/`reason` are carried into the returned
+    record for that readme (they no longer gate the copy).
+
+    Returns {"path", "digest", "pin_digest", "files", "renamed", "action",
+    "certified", "certification_note"} or {"skipped": <reason>, ...} when the
+    corpus itself cannot be built (no winner/pin on disk, empty corpus, a digest
+    mismatch, a name collision). The write is idempotent: an existing copy that
     already hashes to the expected (incremented) tree is left untouched; a
     superseded copy is archived under _superseded/, never deleted.
     """
-    if not certified:
-        return {"skipped": reason or "the decision is not certified"}
     pin = final.get("pin") or {}
     src = None
     winner = final["stored"].get("winner_dir")
@@ -26710,8 +26740,9 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
         d = pinned_docs_dir(ctx, pin)
         if d.is_dir():
             src = d
+    _meta = {"certified": bool(certified), "certification_note": reason or None}
     if src is None:
-        return {"skipped": "neither the published winner nor the pin is present on disk"}
+        return dict(_meta, skipped="neither the published winner nor the pin is present on disk")
     dst = ctx.root / FINAL_CLEAN_DIRNAME
     tmp = ctx.root / (FINAL_CLEAN_DIRNAME + ".tmp")
     if tmp.exists():
@@ -26726,19 +26757,19 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     manifest = corpus_dir_manifest(tmp)
     if not manifest["count"]:
         rmtree_force(tmp, ignore_errors=True)
-        return {"skipped": "the champion corpus is empty"}
+        return dict(_meta, skipped="the champion corpus is empty")
     digest = manifest_digest(manifest)
     if pin.get("digest") and digest != pin["digest"]:
         rmtree_force(tmp, ignore_errors=True)
-        return {"skipped": f"the clean copy hashes to {digest[:12]} but the pin recorded "
-                           f"{str(pin.get('digest'))[:12]}"}
+        return dict(_meta, skipped=f"the clean copy hashes to {digest[:12]} but the pin "
+                                   f"recorded {str(pin.get('digest'))[:12]}")
     # The pin digest above is verified BEFORE the counter increment; the
     # published copy carries the incremented names and the repointed references.
     counter = _increment_final_clean_counters(tmp)
     if counter.get("collisions"):
         rmtree_force(tmp, ignore_errors=True)
-        return {"skipped": "filenames collide after the +1 increment (nothing was published): "
-                           + "; ".join(counter["collisions"][:4])}
+        return dict(_meta, skipped="filenames collide after the +1 increment (nothing was "
+                                   "published): " + "; ".join(counter["collisions"][:4]))
     # Hygiene: the published package is what the author hands over, so the build
     # by-products of an editable source (LaTeX .blg/.bcf/.run.xml/.synctex.gz/
     # .aux/.log/... and an EMPTY .bbl) are dropped -- a compile regenerates them.
@@ -26785,22 +26816,83 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     final_digest = manifest_digest(manifest)
     if dst.is_dir() and corpus_tree_digest(dst) == final_digest:
         rmtree_force(tmp, ignore_errors=True)
-        return {"path": str(dst), "digest": final_digest, "pin_digest": digest,
-                "files": manifest["count"], "renamed": counter["renamed"],
-                "raw_data_untouched": counter.get("raw_data_untouched", 0),
-                "modes_cleared": len(chmod_plan),
-                "format_fix": format_fix, "hygiene": hygiene, "action": "unchanged"}
+        return dict(_meta, path=str(dst), digest=final_digest, pin_digest=digest,
+                    files=manifest["count"], renamed=counter["renamed"],
+                    raw_data_untouched=counter.get("raw_data_untouched", 0),
+                    modes_cleared=len(chmod_plan),
+                    format_fix=format_fix, hygiene=hygiene, action="unchanged")
     if dst.exists():
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         aside = unique_path(superseded_dir_of(ctx) / f"{FINAL_CLEAN_DIRNAME}.{stamp}")
         aside.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(dst), str(aside))
     os.replace(tmp, dst)
-    return {"path": str(dst), "digest": final_digest, "pin_digest": digest,
-            "files": manifest["count"], "renamed": counter["renamed"],
-            "raw_data_untouched": counter.get("raw_data_untouched", 0),
-            "modes_cleared": len(chmod_plan),
-            "format_fix": format_fix, "hygiene": hygiene, "action": "created"}
+    return dict(_meta, path=str(dst), digest=final_digest, pin_digest=digest,
+                files=manifest["count"], renamed=counter["renamed"],
+                raw_data_untouched=counter.get("raw_data_untouched", 0),
+                modes_cleared=len(chmod_plan),
+                format_fix=format_fix, hygiene=hygiene, action="created")
+
+
+def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
+                            final_clean: dict) -> str:
+    """The SIBLING status document that always accompanies final_clean_version/.
+
+    The verdict, the blockers, the champion identity and the package digests --
+    written next to the directory, never inside it (anything inside would become
+    manuscript content in the next run).
+    """
+    cert = certification or {}
+    fc = final_clean or {}
+    verdict = certification_label(cert)
+    pin = final.get("pin") or {}
+    stored = final.get("stored") or {}
+    L = ["# final_clean_version — status", ""]
+    L.append(f"Generated: {utcnow()}  |  pipeline root: `{ctx.root}`  |  "
+             f"orchestrator v{VERSION}")
+    L.append("")
+    L.append(f"**Certification: {verdict}.**")
+    L.append("")
+    L.append(f"- champion: `{stored.get('champion')}` (round {stored.get('round')}); "
+             f"pin `{pin.get('id') or stored.get('pin_id')}`, digest "
+             f"`{str(pin.get('digest'))[:12]}`")
+    if cert.get("blockers"):
+        L.append("- blockers (why the decision is not certified):")
+        L.extend(f"  - {b}" for b in cert["blockers"])
+    if cert.get("notes"):
+        L.append("- notes:")
+        L.extend(f"  - {n}" for n in cert["notes"])
+    L.append(f"- this decision's exit code: {cert.get('exit_code')}")
+    if fc.get("skipped"):
+        L.append(f"- final_clean_version/: NOT (re)built by this decision -- {fc['skipped']}")
+    else:
+        L.append(f"- final_clean_version/: {fc.get('action', 'published')}; "
+                 f"{fc.get('files', '?')} file(s), digest `{str(fc.get('digest'))[:12]}`"
+                 + (f", {fc['renamed']} filename counter(s) incremented"
+                    if fc.get("renamed") else "")
+                 + f", {fc.get('raw_data_untouched', 0)} raw-data file(s) untouched")
+    L.append("")
+    if cert.get("certified"):
+        L.append(f"This directory is the certified champion corpus: "
+                 f"`setup --source {ctx.root / FINAL_CLEAN_DIRNAME}` starts the next run from it.")
+    else:
+        L.append("> **Do not treat this directory as a certified answer.** It is the champion "
+                 "corpus this decision produced; the blockers above say why the decision was "
+                 "not signed. Inspect it, or start the next run from it only after resolving "
+                 "them.")
+    L.append("")
+    L.append("(This file is a SIBLING of the directory on purpose: the directory must stay a "
+             "byte-clean manuscript corpus, so anything written into it would become manuscript "
+             "content in the next run.)")
+    return "\n".join(L)
+
+
+def write_final_clean_readme(ctx: Ctx, certification: dict, final: dict,
+                             final_clean: dict) -> Path:
+    """Write `<root>/final_clean_version.readme.md`; always called by `decide`."""
+    p = ctx.root / FINAL_CLEAN_README_NAME
+    write_text_atomic(p, final_clean_readme_text(ctx, certification, final, final_clean))
+    return p
 
 
 def collect_residuals(ctx: Ctx) -> dict:
@@ -26879,17 +26971,20 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
         L.append(f"- {line}")
     if certification:
         _cert = certification
-        _verdict = ("CERTIFIED" if _cert.get("certified")
-                    else ("PROVISIONAL" if _cert.get("provisional")
-                          and not _cert.get("blockers") else "NOT CERTIFIED"))
+        _verdict = certification_label(_cert)
         _why = (_cert.get("blockers") or _cert.get("notes")
                 or ["every gate passed"])
         L.append("")
         L.append(f"**Certification: {_verdict}.** " + "; ".join(str(x) for x in _why))
         _cv = _cert.get("clean_version") or {}
-        if not _cv.get("published"):
-            L.append(f"- final_clean_version/: NOT published by this decision"
-                     + (f" ({_cv['skipped_reason']})" if _cv.get("skipped_reason") else ""))
+        if _cv.get("published"):
+            L.append(f"- final_clean_version/: published by this decision "
+                     f"({_cv.get('status') or _verdict.lower()}); status in "
+                     f"`{_cv.get('readme') or FINAL_CLEAN_README_NAME}`")
+        else:
+            L.append(f"- final_clean_version/: NOT (re)built by this decision"
+                     + (f" -- {_cv['skipped_reason']}" if _cv.get("skipped_reason") else "")
+                     + f" (status still recorded in `{FINAL_CLEAN_README_NAME}`)")
     L.append("")
     L.append("## 0. Integrity")
     L.append("")
@@ -26943,7 +27038,9 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
                  f"the copy verified against the pin `"
                  f"{str(final_clean.get('pin_digest') or '')[:16]}…` BEFORE the counter increment). "
                  f"It is the champion corpus with no scratch, no auxiliaries and no self-written "
-                 f"reports, so it can seed the next pipeline run directly:")
+                 f"reports, so it can seed the next pipeline run directly. Its certification "
+                 f"status and provenance are in the SIBLING `{FINAL_CLEAN_README_NAME}` "
+                 f"(the directory itself stays byte-clean manuscript content):")
         if final_clean.get("renamed"):
             L.append("")
             L.append(f"Its filenames carry the generation counter INCREMENTED by one "
@@ -26955,9 +27052,10 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
         L.append(f"```\npython paper_pipeline.py setup --source {final_clean['path']} "
                  f"--root <new-root>\n```")
     elif final_clean and final_clean.get("skipped"):
-        L.append(f"**Clean version for a new round: NOT published** -- "
-                 f"{final_clean['skipped']}. (A clean source is only written for a certified "
-                 f"champion; the reason above says why this decision is not certified.)")
+        L.append(f"**Clean version for a new round: NOT (re)built** -- "
+                 f"{final_clean['skipped']}. (The directory is rebuilt on every `decide` when "
+                 f"the champion corpus is available; the status file "
+                 f"`{FINAL_CLEAN_README_NAME}` records the certification verdict either way.)")
     L.append("")
     if revision_token and revision_token.get("token"):
         L.append(f"**Revision token of the final winner (content-hash version ID):** "
@@ -27513,9 +27611,7 @@ def cmd_status(args) -> None:
     _dj = trend_read_decision(ctx.root)
     _cert = (_dj or {}).get("certification")
     if isinstance(_cert, dict):
-        _verdict = ("CERTIFIED" if _cert.get("certified")
-                    else ("PROVISIONAL" if _cert.get("provisional")
-                          and not _cert.get("blockers") else "NOT CERTIFIED"))
+        _verdict = certification_label(_cert)
         print(f"decision:      {_verdict}"
               + (f" -- {'; '.join(str(b) for b in _cert.get('blockers') or [])}"
                  if _cert.get("blockers") else ""))
@@ -28155,11 +28251,10 @@ def cmd_decide(args) -> None:
     # unfilled, or unsourced numbers in the abstract/legends. Always recorded;
     # `--residual-gate` makes them decision problems.
     residuals = collect_residuals(ctx)
-    # The two opt-out gates are collected here, BEFORE the clean copy is
-    # published, because they are certification blockers too: a run that exits 5
-    # must not print "final_clean_version ... ready as `setup --source ...`".
-    # (Found in a recorded root: the clean copy was published and the process
-    # then exited 5 on the residual gate.)
+    # The two opt-out gates are collected here so the CERTIFICATION verdict (and
+    # the status readme) carries them. They no longer gate the clean copy itself
+    # (2026-10-01: the directory is always generated, operator's request); the
+    # readme says NOT CERTIFIED and why.
     gate_problems = []
     if getattr(args, "format_gate", False) and format_problems:
         gate_problems.append(f"{len(format_problems)} HIGH-severity formatting finding(s) in the "
@@ -28177,9 +28272,11 @@ def cmd_decide(args) -> None:
     for it in residuals.get("advisory") or []:
         print(f"[decide] residual (advisory, never gated): {it}")
     # A clean, self-contained copy of the champion that can seed the NEXT
-    # pipeline run (`setup --source <root>/final_clean_version`). The same
-    # certification rules as --package-winner apply: an uncertified champion is
-    # never published as a ready-to-use source.
+    # pipeline run (`setup --source <root>/final_clean_version`). It is ALWAYS
+    # built, certified or not (2026-10-01, operator's request): the certification
+    # verdict and the reasons travel in the SIBLING `final_clean_version.readme.md`
+    # (never inside the directory, which must stay byte-clean manuscript
+    # content). `_clean_reason` is now only the note the readme carries.
     if final["mismatch"]:
         _clean_reason = "the stored champion failed recomputation"
     elif final_regression:
@@ -28199,10 +28296,6 @@ def cmd_decide(args) -> None:
     else:
         _clean_reason = ""
     final_clean = publish_final_clean(ctx, final, not _clean_reason, _clean_reason)
-    if _clean_reason and (ctx.root / FINAL_CLEAN_DIRNAME).exists():
-        print(f"[decide] NOTE: an existing {FINAL_CLEAN_DIRNAME}/ was NOT refreshed by this "
-              f"decision ({_clean_reason}); it is the output of an EARLIER decision -- do not "
-              f"treat it as this run's clean package")
     # `action` (created/unchanged) describes THIS invocation, not the decision:
     # keeping it out of decision.json/report keeps two consecutive `decide` runs
     # byte-identical (apart from their generation timestamp).
@@ -28219,9 +28312,13 @@ def cmd_decide(args) -> None:
     certification = decide_certification(
         gate_problems, rounds_data, chain_ok, panel_gaps, final_regression, provisional,
         bool(getattr(args, "require_complete", False)), final["round"], R,
-        final_clean, _clean_reason)
+        final_clean, final_clean.get("skipped"))
     cert_blockers = certification["blockers"]
     cert_notes = certification["notes"]
+    # The status document is a SIBLING of the directory and is written on every
+    # `decide` (certified, provisional or refused), so the package is never
+    # mistaken for a signed answer.
+    readme_path = write_final_clean_readme(ctx, certification, final, final_clean)
     decision = {
         "generated": utcnow(),
         "pipeline_root": str(ctx.root),
@@ -28366,9 +28463,7 @@ def cmd_decide(args) -> None:
             print(f"[decide] final package: {dst}")
 
     print()
-    _verdict = ("CERTIFIED" if certification["certified"]
-                else ("PROVISIONAL" if certification["provisional"] and not cert_blockers
-                      else "NOT CERTIFIED"))
+    _verdict = certification_label(certification)
     print(f"[decide] certification: {_verdict}"
           + (f" -- {'; '.join(cert_blockers)}" if cert_blockers else "")
           + (f" ({'; '.join(cert_notes)})" if cert_notes else ""))
@@ -28402,10 +28497,14 @@ def cmd_decide(args) -> None:
               f"digest {str(final_clean['digest'])[:12]}"
               + (f", {final_clean['renamed']} filename counter(s) incremented"
                  if final_clean.get("renamed") else "")
-              + f") -- ready as "
-              f"`setup --source {final_clean['path']}`")
+              + f") -- "
+              + ("ready as " if certification["certified"]
+                 else "NOT CERTIFIED, inspect before use; ")
+              + f"`setup --source {final_clean['path']}`")
     else:
-        print(f"[decide] final clean version: SKIPPED -- {final_clean.get('skipped')}")
+        print(f"[decide] final clean version: NOT (re)built -- {final_clean.get('skipped')}")
+    print(f"[decide] certification status: {readme_path} "
+          f"({certification_label(certification)})")
     if win_token and win_token.get("token"):
         print(f"[decide] revision token (final winner): {win_token['token']} over "
               f"{win_token['files']} payload file(s); filename token(s) "

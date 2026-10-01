@@ -1,6 +1,34 @@
 # Changelog
 
+## 0.22 — `final_clean_version/` is always generated, with a sibling status readme (2026-10-01)
+
+The 0.21 rule ("publish the clean package only for a certified champion") is
+replaced at the operator's request: the champion corpus is materialized on
+EVERY `decide`, certified, provisional or refused, so the workflow never loses
+the package — and the certification verdict travels in a SIBLING markdown file
+that can never become manuscript content:
+
+- `<root>/final_clean_version/` is rebuilt (or left untouched when byte-identical
+  to the expected tree) regardless of the exit code; the only reasons it is not
+  built are missing content (no winner/pin on disk, an empty corpus, a pin
+  digest mismatch, an after-increment filename collision), and those are
+  recorded as `skipped_reason` in `decision.json` and in the status readme;
+- `<root>/final_clean_version.readme.md` is written by every `decide`: the
+  certification verdict (CERTIFIED / PROVISIONAL / NOT CERTIFIED), the blockers
+  and notes, the champion and pin digests, this decision's exit code, the
+  package's file/digest/renamed/raw-data counts, and the reuse hint
+  (`setup --source …`) or an explicit "do not treat this as a certified answer"
+  warning. It is deliberately a SIBLING: anything written inside the directory
+  would become manuscript content in the next run;
+- `certification.clean_version` in `decision.json` now records
+  `{published, status, readme, skipped_reason}`, the DECISION_REPORT prints the
+  published/skipped line with the readme name, and `decide` prints the readme
+  path on every run.
+
 ## 0.21 — one certification verdict, and the clean package only for a certified champion (2026-10-01)
+
+The "only for a certified champion" half of this entry was superseded by 0.22
+the same day; the certification verdict itself stands.
 
 Found while auditing the recorded `cnb-20to21-*` run: `decide` printed
 "final clean version … ready as `setup --source …`" and THEN exited 5 with

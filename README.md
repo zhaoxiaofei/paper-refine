@@ -23,8 +23,9 @@ and a clean, ready-to-use package.
 * **You get** `reports/DECISION_REPORT.md` (the ranked decision, the issue
   census, every reported-only signal) and `decision.json` (the same, machine
   readable, with an explicit certification verdict), each round's winner, and
-  `final_clean_version/` — the certified champion, ready to be the next run's
-  `--source`.
+  `final_clean_version/` with its sibling `final_clean_version.readme.md` (the
+  status document) — always generated, so the champion corpus can seed the next
+  run's `--source`.
 * **Default plan** — three rounds, two judges per version, two round-1 rewrites
   and one reviewed-and-revised candidate per round; everything is a flag.
 
@@ -68,6 +69,7 @@ python paper_pipeline.py run-decide --root ./paper_rounds
 #   ./paper_rounds/reports/decision.json
 #   ./paper_rounds/round<r>_winner/          the champion of each round
 #   ./paper_rounds/final_clean_version/      the champion, renamed for the next run
+#   ./paper_rounds/final_clean_version.readme.md   its certification status
 ```
 
 `status --root ./paper_rounds` prints what the root is configured to do at any
@@ -84,7 +86,8 @@ Everything lives under the root you passed to `setup`:
 | `reports/round<r>_raw_scores.csv` | every directed score the panel produced, with the sheet it came from |
 | `reports/round<r>_issue_census.csv` | how many defects of each tier and severity every version carries (`own` vs `peer`), plus the sibling matrices the ranking walks |
 | `round<r>_winner/` | the champion of each round (content-addressed: identical content is never re-run) |
-| `final_clean_version/` | the final champion, ready to be used as the next run's `--source` |
+| `final_clean_version/` | the champion corpus, renamed for the next run's `--source`; ALWAYS built, certified or not |
+| `final_clean_version.readme.md` | the package's status document (sibling of the directory): certification verdict, blockers/notes, champion + digests, and the reuse hint |
 
 The selection key is one ordered line: the round's reported **defect prefix**
 (fewer defects wins) → **median** → **mean** → **IQR** → content **digest**. The
@@ -100,9 +103,10 @@ below it, and an exact (median, mean, IQR) tie keeps the incumbent base. See
   final;
 * `provisional: true` — only some rounds are complete; the champion is the last
   completed round's. `decide --require-complete` makes that an exit 4;
-* a `blockers` entry — the champion is **NOT certified**; `decide` exits 5 and
-  `final_clean_version/` is **not** (re)published by that run, so a directory
-  left from an earlier decision is never mistaken for this one's output.
+* a `blockers` entry — the champion is **NOT certified**; `decide` exits 5.
+  `final_clean_version/` is still generated (with the champion corpus), and its
+  sibling `final_clean_version.readme.md` says so in plain words — never treat
+  that package as a signed answer, and check the readme before reusing it.
 
 ## Everyday commands
 
@@ -110,7 +114,7 @@ below it, and an exact (median, mean, IQR) tie keeps the incumbent base. See
 | --- | --- |
 | `setup --source DIR --root ROOT` | copy the pristine corpus read-only, record its hashes, write `pipeline_config.json` + `state.json` |
 | `run --root ROOT` / `run-decide` | run every stage (staged in dependency order) / run and then decide |
-| `decide --root ROOT` | re-derive every round, verify the pin chain, write the report + `decision.json`, publish `final_clean_version/` |
+| `decide --root ROOT` | re-derive every round, verify the pin chain, write the report + `decision.json`, build `final_clean_version/` + its status readme |
 | `status --root ROOT` | the root's config, integrity, ranking floor and dedup mode |
 | `trend --roots A B C` | cross-run chain: per-round medians, margins, censuses and certification |
 | `set-venue` / `set-journal` / `set-article-type` | change the rule set / target journal / content type |
@@ -516,9 +520,10 @@ printed either way — never silently dropped), which is the documented path for
 an offline environment where the pipeline's own identifier lookups all come
 back `skipped`: the package must still not ship the marker, so the alternative
 is to have the stage write the verified fact (or the verified negative with its
-search date) into the document. A gated residual blocks certification and
-prevents `final_clean_version/` from being (re)published — see the
-`certification` block above.
+search date) into the document. A gated residual blocks certification; the
+champion corpus is still built into `final_clean_version/`, and
+`final_clean_version.readme.md` records the refusal — see the `certification`
+block above.
 
 ## Round model
 
