@@ -1518,8 +1518,8 @@ bar above applies hardest to the `finding` tier.
 
 # Discovery Round D0–D5 — paper-review (Phase 3)
 
-Purpose: the standard review runs fixed sweeps M1–M17 and judgment passes
-J1–J4. Those are finite lists — the checklist itself can be incomplete. This
+Purpose: the standard review runs fixed sweeps M1–M30 and judgment passes
+J1–J5. Those are finite lists — the checklist itself can be incomplete. This
 round hunts for issue CLASSES the checklist does not cover.
 
 It cannot prove completeness; its deliverables are (a) executed checks for
@@ -1544,7 +1544,7 @@ over attention.
 ## D0 — Dedup base
 
 From PRIOR build two indexes (`OUT2/known_index.md`):
-- **KNOWN-CLASSES**: the 36 check IDs (M1–M30, J1–J5) with one-line descriptions.
+- **KNOWN-CLASSES**: the 35 check IDs (M1–M30, J1–J5) with one-line descriptions.
 - **KNOWN-INSTANCES**: every prior finding as `id | class | location | evidence quote`.
 
 Anything matching a KNOWN-INSTANCE (same class + same location + same
@@ -1635,10 +1635,10 @@ enumeration procedure · artifact columns · finding rules) so the next review
 run catches it mechanically:
 
 ```
-## M25 — <name> (proposed)
+## M31 — <name> (proposed)
 **Purpose:** ...
 **Enumeration:** <script or manual procedure — must be enumerable>
-**Artifact:** M25_<slug>.md: <columns>
+**Artifact:** M31_<slug>.md: <columns>
 **Finding rules:** one per instance, listed
 ```
 

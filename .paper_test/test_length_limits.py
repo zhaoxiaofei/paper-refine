@@ -89,12 +89,12 @@ def all_prompts() -> dict:
 
 def test_limits():
     print()
-    print("== LT1: NBT Article limits, relaxed by +15% / +25% ==")
+    print("== LT1: NBT Article limits, relaxed by +10% / +25% ==")
     check("LT1 abstract base is the journal's 150 words", nb.DEFAULT_ARTICLE_ABSTRACT_WORDS == 150,
           str(nb.DEFAULT_ARTICLE_ABSTRACT_WORDS))
     check("LT1 main-text base is the journal's 3,000 words",
           nb.DEFAULT_ARTICLE_MAIN_TEXT_WORDS == 3000, str(nb.DEFAULT_ARTICLE_MAIN_TEXT_WORDS))
-    check("LT1 the margins are +15% and +25%",
+    check("LT1 the margins are +10% and +25%",
           nb.ABSTRACT_RELAXATION == 1.10 and nb.MAIN_TEXT_RELAXATION == 1.25,
           f"{nb.ABSTRACT_RELAXATION} {nb.MAIN_TEXT_RELAXATION}")
     check("LT1 the relaxed caps are 165 (150 * 1.10) and 3,750",

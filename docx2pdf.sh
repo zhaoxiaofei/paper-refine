@@ -57,6 +57,15 @@ case "${DOCX,,}" in
         exit 2
         ;;
 esac
+# ...and never delete the file a symlink RESOLVES to. A link named `alias.docx`
+# whose target is `realfile.pdf` slipped past the guard above, and the
+# stale-output cleanup then removed the resolved PDF before failing.
+case "${DOCX_REAL,,}" in
+    *.pdf)
+        echo "Error: input resolves to a PDF (nothing to convert): $DOCX" >&2
+        exit 2
+        ;;
+esac
 
 # The PDF this run is supposed to produce. Remove any earlier render first: the
 # render-then-look rule inspects this file, and a PDF left over from a previous

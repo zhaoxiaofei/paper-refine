@@ -308,16 +308,23 @@ def main():
             duplicate_entries[f] = dupes
 
     order_violations = []
-    prev_by_file = defaultdict(int)
+    # Numeric styles number a reference at its FIRST call-out: a later call-out
+    # that repeats an already-cited number is normal and must not be reported
+    # ("[1], [2], then [1] again" was a guaranteed false order violation).
+    # Only a NEW number that arrives below the highest one already introduced
+    # is out of order.
+    max_by_file = defaultdict(int)
+    seen_by_file = defaultdict(set)
     for c in callouts:
         for r in c["refs"]:
-            if isinstance(r, int):
-                prev = prev_by_file[c["file"]]
+            if isinstance(r, int) and r not in seen_by_file[c["file"]]:
+                prev = max_by_file[c["file"]]
                 if r < prev:
                     order_violations.append({"file": c["file"], "line": c["line"],
                                              "raw": c["raw"],
                                              "issue": "citation %d after %d" % (r, prev)})
-                prev_by_file[c["file"]] = max(prev, r)
+                seen_by_file[c["file"]].add(r)
+                max_by_file[c["file"]] = max(prev, r)
 
     max_cited = max(all_cited) if all_cited else 0
     md = ["# M2 — CITATION INVENTORY (artifact)", "",

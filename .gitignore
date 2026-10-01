@@ -2,7 +2,11 @@
 audit_data/
 
 # `media/` commits the PNG figures the docs embed (README.md, AGENT.md, ...); a
-# local `.pdf` render beside them stays ignored by the rule above.
+# local `.pdf` render beside them is NOT ignored (it shows in `git status` until
+# it is deleted or explicitly ignored).
+
+# The README quickstart's own run root (`./paper_rounds`) is output, not source.
+paper_rounds/
 
 # Windows/WSL "downloaded from the internet" marker files (`name:Zone.Identifier`)
 *:Zone.Identifier

@@ -122,7 +122,8 @@ def test_profiles():
     print()
     print("== VC1: the shipped profiles, the built-ins and their numbers ==")
     avail = nb.available_venue_profiles()
-    for vid in ("nature-biotechnology", "generic", "example-journal", "frontiers-immunology"):
+    for vid in ("nature-biotechnology", "generic", "example-journal",
+                "frontiers-in-immunology"):
         check(f"VC1 {vid} is visible to `set-venue --list`", vid in avail,
               str(sorted(avail)))
     paper = nb.load_venue_profile("nature-biotechnology")
@@ -269,7 +270,7 @@ def test_every_shipped_profile_is_valid():
 def test_frontiers_immunology_profile():
     print()
     print("== VC1f: the Frontiers in Immunology profile ==")
-    prof = nb.load_venue_profile("frontiers-immunology")
+    prof = nb.load_venue_profile("frontiers-in-immunology")
     check("VC1f it names the journal and defaults to the Original Research type",
           prof.label == "Frontiers in Immunology" and prof.short == "Front Immunol"
           and prof.default_journal == "Frontiers in Immunology"
@@ -325,13 +326,13 @@ def test_frontiers_immunology_profile():
     source = root / "source"
     write(source / "ms.md", "# T\n\ntext\n")
     setup = run_cli("setup", "--source", str(source), "--root", str(root / "root"),
-                    "--venue", "frontiers-immunology")
-    check("VC1f `setup --venue frontiers-immunology` succeeds",
+                    "--venue", "frontiers-in-immunology")
+    check("VC1f `setup --venue frontiers-in-immunology` succeeds",
           setup.returncode == 0, (setup.stdout + setup.stderr)[-300:])
     ctx = nb.Ctx(root / "root")
     ctx.load()
     check("VC1f the root records the venue, the journal and the type",
-          nb.venue_profile_of(ctx).id == "frontiers-immunology"
+          nb.venue_profile_of(ctx).id == "frontiers-in-immunology"
           and ctx.cfg.get("journal") == "Frontiers in Immunology"
           and ctx.cfg.get("article_type") == "original-research",
           f"{ctx.cfg.get('venue')} {ctx.cfg.get('journal')} {ctx.cfg.get('article_type')}")

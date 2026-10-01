@@ -106,7 +106,8 @@ def main(argv):
                 except Exception:                              # noqa: BLE001
                     obj = None
         except SystemExit:
-            raise                                              # unreadable input -> exit 6
+            raise                # the adapter's own fail() exits (e.g. unreadable input
+                                 # -> exit 6); never swallow it into the next probe
         if obj is None:
             continue
         for meth in ("output_docx", "to_docx", "save_docx", "write_docx",

@@ -354,7 +354,11 @@ def plain_copy(path: str) -> tuple:
     raw = open(path, "rb").read()
     # A BOM is authoritative: Word/Notepad exports a .txt as UTF-16 on Windows,
     # and reading it as UTF-8 "succeeded" with NUL-separated mojibake that then
-    # fed the corpus sweeps as if it were text.
+    # fed the corpus sweeps as if it were text. The UTF-8 BOM matters too: left
+    # in place it glues an invisible character to the first heading ("\ufeffAbstract"),
+    # so the abstract row silently disappears from every downstream sweep.
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw.decode("utf-8-sig", errors="replace"), []
     for bom, enc in ((b"\xff\xfe\x00\x00", "utf-32"), (b"\x00\x00\xfe\xff", "utf-32"),
                      (b"\xff\xfe", "utf-16"), (b"\xfe\xff", "utf-16")):
         if raw.startswith(bom):

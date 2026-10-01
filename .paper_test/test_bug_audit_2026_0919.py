@@ -410,6 +410,10 @@ def test_c17_redlines_adapter():
 # =====================================================================
 
 def test_c16_docx2pdf_paths():
+    if not (shutil.which("wslpath") or shutil.which("cygpath")):
+        print("[skip] C16 docx2pdf.sh path handling needs WSL or Git Bash "
+              "(no wslpath/cygpath on this box)")
+        return
     tmp = scratch("paper_audit_pdf_")
     (tmp / "real").mkdir()
     (tmp / "link").mkdir()

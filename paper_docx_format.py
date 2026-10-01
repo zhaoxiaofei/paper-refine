@@ -198,6 +198,17 @@ def ppr_of(frag: str) -> str | None:
     return m.group(0) if m else None
 
 
+def first_section_props(xml: str) -> str | None:
+    """The FIRST `w:sectPr` in document order: the section that governs page 1.
+
+    A manuscript with a separate title-page section carries one `w:sectPr` at
+    the end of that section and the body's own at the end of `w:body`; the
+    title page's header comes from the FIRST one, never the last.
+    """
+    m = re.search(r"<w:sectPr(?=[\s>]).*?</w:sectPr>", xml, re.S)
+    return m.group(0) if m else None
+
+
 def rpr_of(frag: str) -> str | None:
     m = re.search(r"<w:rPr(?=[\s>]).*?</w:rPr>|<w:rPr(?=[\s>])[^>]*/>", frag, re.S)
     return m.group(0) if m else None
@@ -758,8 +769,23 @@ def number_ledger(paras: list) -> list:
     rows = []
     for i, text in enumerate(paras):
         sentences = re.split(r"(?<=[.!?])\s+", text)
+        bounds, pos = [], 0
+        for sentence in sentences:
+            bounds.append((pos, pos + len(sentence)))
+            pos += len(sentence)
+            while pos < len(text) and text[pos].isspace():
+                pos += 1
         for m in NUMBER_RE.finditer(text):
-            sentence = next((s for s in sentences if m.group(0) in s), text)
+            # Attribute by the match POSITION, not by substring membership: a
+            # paragraph that repeats a number would otherwise put every
+            # instance in the first sentence that happens to contain the digits.
+            idx = 0
+            for k, (start, _end) in enumerate(bounds):
+                if start <= m.start():
+                    idx = k
+                else:
+                    break
+            sentence = sentences[idx] if sentences else text
             rows.append({"document_paragraph": i, "number": m.group(0),
                          "thousands_separated": "," in m.group(0),
                          "unit": (UNIT_RE.match(text[m.end():]).group(0).strip()
@@ -976,13 +1002,20 @@ def key_term_rows(paras: list, terms=None) -> list:
     """Occurrence ledger for the manuscript's key terms (the M8 artifact rows)."""
     rows = []
     for term in (terms or KEY_TERMS):
-        pattern = re.compile(rf"\b{re.escape(term.strip())}\w*", re.I)
+        core = term.strip()
+        # A term written with a trailing space ("CN ") means "standalone only":
+        # the `\w*` suffix that lets "caller" count "callers" would otherwise
+        # make it a prefix that also swallows CNV/CNVs/CNA (the M8 ledger then
+        # overstates CN and double-counts the CNV family).
+        pattern = (re.compile(rf"\b{re.escape(core)}\b", re.I)
+                   if term != core and term.endswith(" ") else
+                   re.compile(rf"\b{re.escape(core)}\w*", re.I))
         hits = [(i, t) for i, t in enumerate(paras) if pattern.search(t)]
         if not hits:
             continue
         ctx = pattern.search(hits[0][1])
         s = ctx.start() if ctx else 0
-        rows.append({"term": term.strip(), "count": len(hits),
+        rows.append({"term": core, "count": len(hits),
                      "first_paragraph": hits[0][0],
                      "first_context": hits[0][1][max(0, s - 60):s + 60].strip(),
                      "variant": ""})
@@ -1683,7 +1716,7 @@ CODE_SOURCE_EXTS = (".py", ".r", ".jl", ".m", ".sh", ".bash", ".c", ".cc", ".cpp
 # A module-level literal: `NAME = 15`, `NAME: 0.05,`, `export const N = 12;`.
 CODE_LITERAL_RE = re.compile(
     r"^\s*(?:export\s+|public\s+|static\s+|final\s+|const\s+|let\s+|var\s+)*"
-    r"(?P<name>[A-Za-z_][A-Za-z0-9_.]{1,40})\s*[:=]\s*"
+    r"(?P<name>[\"']?[A-Za-z_][A-Za-z0-9_.]{1,40}[\"']?)\s*[:=]\s*"
     r"(?P<value>-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|'[^']{1,60}'|\"[^\"]{1,60}\")"
     r"\s*[,;]?\s*(?:#|//|$)")
 # Names that carry an operational parameter (a Methods-relevant constant).
@@ -1720,8 +1753,25 @@ def _simple_table(text: str):
               ("," if head.count(",") >= 1 else None)))
     if delim is None:
         return None, None
-    header = [c.strip() for c in head.split(delim)]
-    body = [[c.strip() for c in l.split(delim)] for l in lines[1:]]
+    def cells(line: str) -> list:
+        if delim == "|":
+            # Markdown row: the leading/trailing pipes are delimiters, not
+            # empty first/last columns (they each used to emit a phantom
+            # empty-name column of statistics).
+            line = line.strip()
+            if line.startswith("|"):
+                line = line[1:]
+            if line.endswith("|"):
+                line = line[:-1]
+        return [c.strip() for c in line.split(delim)]
+
+    header = cells(head)
+    body = [cells(l) for l in lines[1:]]
+    if delim == "|" and body and body[0]:
+        # `|---|---|` (with optional alignment colons) is the separator row, not
+        # a data row: counting it made every table's row count off by one.
+        if all(re.fullmatch(r":?-{2,}:?", c or "") for c in body[0]):
+            body = body[1:]
     if len(header) < 2 or not body:
         return None, None
     return header, body
@@ -1822,7 +1872,8 @@ def code_literal_rows(sources: list, limit: int = 200, skip_name=None) -> list:
                 m = CODE_LITERAL_RE.match(line)
                 if not m:
                     continue
-                name, value = m.group("name").strip(), m.group("value").strip()
+                name = m.group("name").strip().strip("\"'")
+                value = m.group("value").strip()
                 upper_caps = name.upper() == name and any(c.isalpha() for c in name)
                 if not (upper_caps or CODE_NAME_HINT_RE.search(name)):
                     continue
@@ -2250,8 +2301,9 @@ def rewrite_text_spans(para: str, edits: list) -> tuple:
 
     def _drop_empty_runs(mm):
         body = mm.group(0)
-        if re.search(r"<w:(?:drawing|pict|object|br|tab|fldChar|instrText|noBreakHyphen|sym)",
-                     body):
+        if re.search(r"<w:(?:drawing|pict|object|br|cr|tab|ptab|fldChar|instrText|"
+                     r"noBreakHyphen|sym|commentReference|footnoteReference|"
+                     r"endnoteReference)(?=[\s/>])", body):
             return body
         if re.search(r"<w:t(?:\s[^>]*)?>[^<]", body):
             return body
@@ -2727,7 +2779,9 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str) -> dict:
             row("FMT-P3", "low", "document", f"{n} {label}", "text hygiene", )
 
     # ---- header / title page / tracked changes --------------------------------
-    if re.search(r"<w:headerReference", xml) and "<w:titlePg" not in xml \
+    first_sect = first_section_props(xml)
+    if first_sect and re.search(r"<w:headerReference", first_sect) \
+            and "<w:titlePg" not in first_sect \
             and policy["title_page_header"] == "suppress":
         row("FMT-S3", "low", "document", "the running head is printed on the title page",
             "add w:titlePg to the section properties so page 1 carries no header")
@@ -2793,7 +2847,7 @@ def analyse_package(path: Path, policy: dict) -> dict:
                               pkg.read("docProps/app.xml").decode("utf-8", "replace"))
                 if m:
                     app_pages = int(m.group(1))
-    except (zipfile.BadZipFile, KeyError, ET.ParseError) as e:
+    except (zipfile.BadZipFile, KeyError, ET.ParseError, UnicodeDecodeError) as e:
         row = {"rule": "FMT-X1", "severity": "high", "document": path.name, "location": "-",
                "evidence": f"{type(e).__name__}: {e}", "detail": "unreadable DOCX package",
                "fix": "manual", "protected": False}
@@ -2882,7 +2936,15 @@ def insert_into_ppr(para: str, element: str, after=("pStyle", "keepNext", "keepL
     ppr = ppr_of(para)
     if ppr is None:
         tag_end = para.find(">") + 1
-        return para[:tag_end] + "<w:pPr>" + element + "</w:pPr>" + para[tag_end:]
+        head, tail = para[:tag_end], para[tag_end:]
+        if head.rstrip().endswith("/>"):
+            # A self-closing paragraph (`<w:p w:rsidR="..."/>`, what python-docx
+            # emits for an empty paragraph) has no `>` that closes an open tag:
+            # inserting after it would orphan the properties OUTSIDE the
+            # paragraph and produce schema-invalid XML. Expand the tag first.
+            head = head.rstrip()[:-2].rstrip() + ">"
+            tail = "</w:p>" + tail
+        return head + "<w:pPr>" + element + "</w:pPr>" + tail
     pos = 0
     for tag in after:
         m = re.search(rf"<w:{tag}(?=[\s/>])[^>]*/>|<w:{tag}(?=[\s/>])[^>]*>.*?</w:{tag}>", ppr, re.S)
@@ -2988,7 +3050,8 @@ def fix_document(xml: str, styles: dict, policy: dict) -> tuple:
                 for _, _, run in runs(new_para):
                     rpr = rpr_of(run)
                     if elem_val(rpr, "sz") and elem_val(rpr, "sz") != want:
-                        new_run = run.replace(rpr, re.sub(r"<w:sz[^>]*/>", "", rpr), 1)
+                        new_run = run.replace(
+                            rpr, re.sub(r"<w:sz(?=[\s/>])[^>]*/>", "", rpr), 1)
                         new_para = new_para.replace(run, new_run, 1)
                         aligned += 1
         if new_para != para:
@@ -3001,11 +3064,11 @@ def fix_document(xml: str, styles: dict, policy: dict) -> tuple:
             changes.append(f"aligned {aligned} heading run size(s) with their heading style")
 
     # 5. title-page header ------------------------------------------------------
-    if policy["title_page_header"] == "suppress" and "<w:headerReference" in xml \
-            and "<w:titlePg" not in xml:
+    if policy["title_page_header"] == "suppress":
         sects = list(re.finditer(r"<w:sectPr(?=[\s>]).*?</w:sectPr>", xml, re.S))
-        if sects:
-            s = sects[-1]
+        if sects and re.search(r"<w:headerReference", sects[0].group(0)) \
+                and "<w:titlePg" not in sects[0].group(0):
+            s = sects[0]
             at = s.start() + s.group(0).find("</w:sectPr>")
             for tag in ("docGrid", "printerSettings"):
                 t = s.group(0).find(f"<w:{tag}")
@@ -3040,7 +3103,8 @@ def fix_document(xml: str, styles: dict, policy: dict) -> tuple:
                 continue                      # reported as style-field, never silently "fixed"
             if block or (style == "Bibliography" and re.search(r"\bet\s+al\.", rtext)):
                 if rpr:
-                    edits.append((p0 + r0, p0 + r1, run.replace(rpr, re.sub(r"<w:i(?:Cs)?[^>]*/>", "", rpr), 1)))
+                    edits.append((p0 + r0, p0 + r1, run.replace(
+                        rpr, re.sub(r"<w:i(?:Cs)?(?=[\s/>])[^>]*/>", "", rpr), 1)))
                     n += 1
     if edits:
         xml = apply_edits(xml, edits)
@@ -3198,6 +3262,13 @@ def fix_document(xml: str, styles: dict, policy: dict) -> tuple:
     # These DO change document text, so each edit is recorded and the fixer's
     # verification proves that nothing beyond the recorded edits moved (the
     # reference list is never rewritten: its titles are quotations).
+    # The edits below are enumerated and offset against THIS XML (after the
+    # structural fixes and the quote normalisation), so the verification must
+    # reconstruct its expectation from the same stage -- reconstructing from the
+    # original XML applied them to the wrong paragraphs once a break-only
+    # paragraph had been deleted above (and mismatched quotes whenever
+    # quote_style also fired).
+    text_stage_xml = xml
     text_edits, cit_n, spell_n, hy_n = [], 0, 0, 0
     want_cit = policy["citation_journal_names"] == "drop"
     want_spell = policy["term_spelling"] == "dominant"
@@ -3265,7 +3336,7 @@ def fix_document(xml: str, styles: dict, policy: dict) -> tuple:
             if bits:
                 changes.append("text consistency: " + "; ".join(bits))
 
-    return xml, changes, {"text_edits": text_edits}
+    return xml, changes, {"text_edits": text_edits, "text_stage_xml": text_stage_xml}
 
 
 def fix_package(src: Path, out: Path, policy: dict) -> dict:
@@ -3288,9 +3359,13 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
     quote_free = lambda s: re.sub(r"[\"'\u2018\u2019\u201c\u201d]", "", s)
     # The recorded text edits (citation journals, spelling, hyphenation) are the
     # only allowed text differences; rebuild the expected text by applying them to
-    # the ORIGINAL paragraph texts (descending offsets, so they stay valid).
-    before_paras = [text_of(p[2]) for p in paragraphs(xml_before)]
-    expected_paras = list(before_paras)
+    # the STAGE the edits were recorded against (descending offsets, so they stay
+    # valid). `text_stage` differs from the input only by the structural fixes --
+    # which delete empty paragraphs, never text -- and the quote normalisation.
+    stage_xml = meta.get("text_stage_xml") or xml_before
+    stage_paras = [text_of(p[2]) for p in paragraphs(stage_xml)]
+    text_stage = "\n".join(t for t in stage_paras if t.strip())
+    expected_paras = list(stage_paras)
     by_para = {}
     for idx, s, e, repl in meta.get("text_edits") or []:
         by_para.setdefault(idx, []).append((s, e, repl))
@@ -3314,6 +3389,7 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
         "parts_intact": same_parts,
         "text_identical": text_before == text_after,
         "text_diff_only_quotes": quote_free(text_before) == quote_free(text_after),
+        "text_stage_diff_only_quotes": quote_free(text_before) == quote_free(text_stage),
         "text_diff_only_recorded_edits": text_after == text_expected,
         "text_edits": len(meta.get("text_edits") or []),
         "mechanical_findings_before": len([r for r in before_rows if r["fix"] == "mechanical"]),
@@ -3323,7 +3399,8 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
     }
     ok = bool(same_parts
               and (verified["text_identical"] or verified["text_diff_only_quotes"]
-                   or verified["text_diff_only_recorded_edits"])
+                   or (verified["text_stage_diff_only_quotes"]
+                       and verified["text_diff_only_recorded_edits"]))
               and not remaining
               and schema[0] is not False)
     return {"source": str(src), "output": str(out), "changes": changes, "verified": verified, "ok": ok}
@@ -3485,8 +3562,22 @@ def check_pdf(path: Path, policy: dict) -> dict:
                           "location": "-", "evidence": "pdftotext not available",
                           "detail": "cannot check pages for blankness", "fix": "manual",
                           "protected": False}]}
-    txt = subprocess.run(["pdftotext", "-layout", str(path), "-"],
-                         capture_output=True, text=True).stdout
+    proc = subprocess.run(["pdftotext", "-layout", str(path), "-"],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        # An unreadable/missing PDF yields empty text, which parses as 0 pages
+        # and 0 blank pages: reporting that as clean is a false pass on the one
+        # input the check must never pass.
+        detail = (proc.stderr or proc.stdout or "").strip().replace("\n", " ")[:200]
+        return {"file": str(path), "pages": 0, "blank_pages": [], "ok": False,
+                "rows": [{"rule": "FMT-S2", "severity": "high", "document": path.name,
+                          "location": "-",
+                          "evidence": f"pdftotext exited {proc.returncode}"
+                                      + (f": {detail}" if detail else ""),
+                          "detail": "the PDF could not be read; no blank-page verdict "
+                                    "is possible",
+                          "fix": "manual", "protected": False}]}
+    txt = proc.stdout
     res = blank_pages_in_text(txt)
     blank = res["blank_pages"]
     rows = [{"rule": "FMT-S2", "severity": "high", "document": path.name,

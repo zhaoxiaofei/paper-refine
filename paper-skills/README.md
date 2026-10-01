@@ -1,6 +1,6 @@
 # paper-review + paper-revise — Codex Skills for Manuscript Submissions (any venue or journal)
 
-**Package version:** 0.11 (M30: the source hierarchy is a detection rule, 2026-09-29; see CHANGELOG.md) — distributed as the directory
+**Package version:** 0.27 (the built-in default profile tracks the shipped file; see CHANGELOG.md) — distributed as the directory
 `paper-skills-v03`. The version lives here, not in the skill frontmatter. If more
 than one copy of this package is installed, check this line and retire the
 older copies (`paper-skills-v01/`, `paper-skills-v02/`): Codex registers skills by
@@ -65,8 +65,8 @@ The audit findings are pinned by three runnable suites; they write only inside
 `--run-dir` and exit non-zero on any failure:
 
 ```bash
-python3 tests/validate_skill.py    --skill-root . --run-dir /tmp/paper_validate   # 40 checks
-python3 tests/probe_regressions.py --skill-root . --run-dir /tmp/paper_probe      # 14 probes
+python3 tests/validate_skill.py    --skill-root . --run-dir /tmp/paper_validate   # 52 checks
+python3 tests/probe_regressions.py --skill-root . --run-dir /tmp/paper_probe      # 20 probes
 python3 tests/probe_hardcases.py   --skill-root . --run-dir /tmp/paper_hard       # 4 hard cases
 ```
 
@@ -76,10 +76,11 @@ findings and the heuristics most likely to misfire (blank-line lists, wrapped
 entries, measurement-noun noise).
 
 Shipped scripts cover Phase-1 conversion and the M1 (acronyms), M2
-(citations), M4 (numbers), M8 (term/value occurrences) and M19 (abstract /
-main-text / cover-letter word counts) sweeps. M3, M5–M7 and M9–M18 are specified in
-`references/sweeps.md` but are not script-backed: for those, the agent builds
-the enumeration table itself and every row must still be disposed.
+(citations), M4 (numbers), M8 (term/value occurrences), M19 (abstract /
+main-text / cover-letter word counts; it also subtracts legend spans) and M26
+(house-style / orthographic conventions) sweeps. The remaining sweeps are
+specified in `references/sweeps.md` but are not script-backed: for those, the
+agent builds the enumeration table itself and every row must still be disposed.
 
 ## Usage
 
@@ -233,7 +234,7 @@ paper-skills/
 ├── paper-revise/
 │   ├── SKILL.md                     # R0–V pipeline, hard rules
 │   ├── references/ledger.md         # A1–A9 artifact specs
-│   ├── references/edit_rules.md     # E1–E6, P1, C
+│   ├── references/edit_rules.md     # E1–E12, P1, C
 │   └── scripts/revision_token.py    # the 7-char content-hash version token
 └── prompts/                         # standalone prompt fallbacks
     ├── identify_issues.prompt.md

@@ -2,7 +2,7 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { accessSync, constants, existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -11,18 +11,27 @@ import * as z from 'zod/v4';
 const execFileAsync = promisify(execFile);
 
 // The converter script is NOT welded to one machine: an explicit env override
-// wins, then the repo-relative copy, then a sibling copy, then PATH, and the
-// historical absolute path remains as a last-resort fallback for the deployed
-// ~/mcp-docx-converter layout.
+// wins, then the repo-relative copy, then a sibling copy, then PATH. A
+// candidate that exists but is not executable (a fresh clone tracks
+// docx2pdf.sh without the executable bit) must not shadow PATH: execFile has
+// no shell to fall back on and would fail with EACCES.
+function isExecutable(p) {
+  try {
+    accessSync(p, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function resolveConverter() {
   const candidates = [
     process.env.DOCX2PDF_SH,
     fileURLToPath(new URL('../docx2pdf.sh', import.meta.url)),
     fileURLToPath(new URL('docx2pdf.sh', import.meta.url)),
-    '/home/zhaoxiaofei/.local/bin/docx2pdf.sh',
   ].filter(Boolean);
   for (const c of candidates) {
-    if (existsSync(c)) return c;
+    if (existsSync(c) && isExecutable(c)) return c;
   }
   return 'docx2pdf.sh';                 // let execFile resolve it on PATH
 }

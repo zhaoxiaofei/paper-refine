@@ -155,6 +155,10 @@ def build_view(corpus: Path, dst: Path, seed: str = "seed-A") -> None:
             shutil.copyfile(src, out)
         else:
             out.write_bytes(data)
+        # The real build_judge_view normalises every view file's mode; without
+        # this the helper's own assertion fails on a umask-002 system, where
+        # freshly written files are 0o664.
+        os.chmod(out, 0o644)
     nb.stamp_tree(dst, 1700000000.0)
 
 

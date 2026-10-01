@@ -213,7 +213,7 @@ work.
 ```bash
 python paper_pipeline.py set-venue --list                # venues this pipeline can see
 python paper_pipeline.py set-venue generic               # switch the rule set (needs an existing root)
-python paper_pipeline.py set-venue frontiers-immunology  # a shipped journal profile (Frontiers in Immunology)
+python paper_pipeline.py set-venue frontiers-in-immunology  # a shipped journal profile (Frontiers in Immunology)
 python paper_pipeline.py set-venue --journal "Cell"      # ... and the journal, atomically
 python paper_pipeline.py set-venue my-journal --profile my-journal.json   # install a profile of your own
 python paper_pipeline.py set-journal "Cell"              # change only the journal
@@ -242,24 +242,26 @@ manuscript cannot supply becomes a manual item for the author — never invented
 text — and neither tier gates or scores by itself.
 
 ```bash
-python paper_pipeline.py add-venue frontiers-immunology --journal "Frontiers in Immunology"
+python paper_pipeline.py add-venue frontiers-in-immunology --journal "Frontiers in Immunology"
 #   an agent writes/updates the profile + venue_profiles/README.md row and
 #   downloads recent OA exemplars into <id>.manuscripts/; the code then derives
 #   the template pack (use --agent manual to stage the prompt only)
-python paper_pipeline.py add-venue frontiers-immunology --publish-only
+python paper_pipeline.py add-venue frontiers-in-immunology --publish-only
 #   publish a completed agent sandbox (its work is staged under ./store/ there)
 #   into the shared venue_profiles/ without re-running the agent
-python paper_pipeline.py build-venue-templates --venue frontiers-immunology
+python paper_pipeline.py build-venue-templates --venue frontiers-in-immunology
 #   re-derive the pack from whatever exemplars are present, no agent needed
 ```
 
 `setup --article-type <id>` selects the type at creation time, and
 `set-venue --article-type <id>` does it atomically with a venue change. The
 shipped `nature-biotechnology` profile carries the venue's content types but
-states word limits for its **Article** type only: choosing Brief Communication
-(or Review, Perspective, Analysis, Resource, Correspondence, Matters Arising)
-never borrows the Article caps — the stages count the sections and name the
-limit the venue's own content-types table gives. Fill a type's numbers into a
+states numbers for the primary types it quotes from the venue's table (Article,
+Brief Communication, Review, Perspective, Resource, Correspondence, Matters
+Arising, Feature): choosing a type the profile carries no numbers for (Analysis,
+Comment, News & Views, Book Review, Patent Article, Careers and Recruitment,
+Primer) never borrows the Article caps — the stages count the sections and name
+the limit the venue's own content-types table gives. Fill a type's numbers into a
 copy of the profile (see `venue_profiles/README.md`) and install it with
 `set-venue <id> --profile <file>` to have the pipeline enforce them.
 
@@ -331,7 +333,7 @@ with a note, when it does not).
 | invalid profile file | `set-venue --profile` fails before writing anything, listing every schema error; an invalid file already in `venue_profiles/` shows as `INVALID` in `set-venue --list`. |
 | venue change on a root that already has runs | refused unless `--force` (the rounds were planned, prompted and judged under the previous rule set). |
 | unknown article type | `setup --article-type`/`set-article-type`/`set-venue --article-type` fail with the type ids and labels the profile carries; a root recording one reports it, and every command that must render a prompt refuses to run. |
-| article type the profile states no numbers for (e.g. Brief Communication in the shipped Nature Biotechnology profile) | reported as a note; the stages count the abstract/main text and name the limit the venue's own content-types table gives — the Article caps are never borrowed. |
+| article type the profile states no numbers for (e.g. Analysis in the shipped Nature Biotechnology profile) | reported as a note; the stages count the abstract/main text and name the limit the venue's own content-types table gives — the Article caps are never borrowed. |
 | article type change on a root that already has runs | refused unless `--force`, like a venue change (the recorded prompts, caps and judgments belong to the previous type). |
 
 `--strict-venue` (accepted by every subcommand that works on a root: `setup`,
@@ -730,7 +732,7 @@ plan, no journal block in any prompt, no new files).
 # option 1: iScience -> Frontiers in Immunology, no response letter
 # (select the TARGET journal's venue profile: the rules every stage enforces)
 python paper_pipeline.py setup --source ./submission --root ./rounds \
-    --venue frontiers-immunology --journal "Frontiers in Immunology" \
+    --venue frontiers-in-immunology --journal "Frontiers in Immunology" \
     --revision-mode transfer \
     --journal-feedback-from iScience
 

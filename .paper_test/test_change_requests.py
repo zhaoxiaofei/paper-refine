@@ -13,10 +13,11 @@ Covers four areas plus two end-to-end runs:
        Asserted: no pairwise "cross-pollination" arms exist anywhere.
   CR2  M (--rewrites) and N (--revises) are command-line parameters that accept
        either one integer or a per-round list; a short list is extended by
-       repeating its last element, a long one is truncated; defaults [2,1]/[1,1].
+       repeating its last element, a long one is truncated; defaults
+       [2,0,0]/[1,1,1].
   CR3  the optional `docx` CLI (including `docx diff`) is probed and documented
        in every prompt, useable by every agent and required of none.
-  CR4  the cmd-line defaults --rounds 2 / --jobs 255 still hold.
+  CR4  the cmd-line defaults --rounds 3 / --jobs 255 still hold.
 
 The end-to-end sections drive real rounds with `.paper_test/stub_agent.py` (and a
 deterministic panel, `stub_judge.py`, so the outcome does not depend on hash

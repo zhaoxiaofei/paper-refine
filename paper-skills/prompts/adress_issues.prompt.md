@@ -76,6 +76,7 @@ Artifacts A1–A9 column specifications and status vocabularies: `references/led
 4. The checksum statement appears in REVISION_REPORT.md.
 5. Every `[AUTHOR TO COMPLETE: ...]` in the revised files appears in the placeholder list.
 6. Every citation-field edit is recorded in CHANGELOG.md with the item key and validated against the pre-edit snapshot (`validate_zotero_docx.py`); every over-cap abstract/main text (M19) is either within the relaxed caps or listed in MANUAL_STEPS.md with the reason, and the legend/cover-letter rows (M18/M19) are recorded (compressed only where a cap or the user's preference allows it without losing content).
+7. Every M25–M29 finding has either a corpus-wide aligned edit (with the M26 re-run proving no deviating occurrence survives) or a recorded `unable —`/manual reason; every M30 finding has the written side aligned to the authoritative producer (or a code fix under rule C with its rerun note, or a recorded manual reason with the exact file/value); every J5 finding has a `WORK/RESTRUCTURE_<id>.md` artifact or a written manual reordering step. A parity/convention finding carried as `manual-required` while an editable occurrence still exists is a failed resolution.
 
 
 ## APPENDIX: Ledger A1–A9 specifications (references/ledger.md)
@@ -209,9 +210,9 @@ One row per finding ID (F-* and X-*) plus each R-xxx:
 A finding ID without a coverage row, or a row without evidence, means the
 task is not finished.
 
-## APPENDIX: Edit rules E1–E11, P1, C (references/edit_rules.md)
+## APPENDIX: Edit rules E1–E12, P1, C (references/edit_rules.md)
 
-# Edit Rules E1–E6, Propagation P1, Code C — paper-revise
+# Edit Rules E1–E12, Propagation P1, Code C — paper-revise
 
 Applied during Step E (one edit at a time, in A4 plan order). Each rule
 exists because its violation is a documented failure mode of LLM-driven

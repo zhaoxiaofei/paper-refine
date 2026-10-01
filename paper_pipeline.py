@@ -22,7 +22,8 @@ scan and can gate on it with `--format-gate`, and the tool's own CLI
 
 ROUND MODEL
 -----------
-    for r in 1..R:                 # R = 3 by default, exactly R rounds always
+    for r in 1..R:                 # R = 3 by default, exactly R rounds (unless
+                                   # setup pre-registered --stop-after-no-progress K)
                                    # (the default schedule: M=[2,0,0], N=[1,1,1]
                                    # and round 3's review scoped to formatting and
                                    # writing only -- no later rewrites, no second
@@ -86,9 +87,11 @@ ROUND MODEL
     by round (`--only 1,2`), by stage (`--only judge`) or both
     (`--only 2:merge,3:judge`).
 
-    The loop is FIXED-LENGTH: there is no convergence test, no "stop when
-    unchanged", and no early exit on a round whose score did not improve. A
-    killed process resumes at the next incomplete round from state.json.
+    The loop is FIXED-LENGTH: there is no convergence test, no implicit "stop
+    when unchanged", and no early exit on a round whose score did not improve.
+    The one deliberate exception is the pre-registered `--stop-after-no-progress
+    K` (a setup-time operator decision, never an automatic exit). A killed
+    process resumes at the next incomplete round from state.json.
 
 A2 PRODUCTION -- REVIEW -> REVISE AS TWO CHAINED SESSIONS (A4)
 -------------------------------------------------------------
@@ -160,7 +163,7 @@ AND 24 AT |field| = 7 WITH THE DEFAULT 2 JUDGES)
     K = 1 + M + N integrated candidates (of which the round's per-round
     --integrators mask may select only some), minus everything that deduplicates
     (the base always merges into the pin or the original). The default plan
-    gives 8 members in round 1 ({original, w1, w2, a2, i1..i4}), 7 in round 2
+    gives 8 members in round 1 ({original, w1, w2, a2, i1..i4}), 5 in round 2
     ({original, the round-1 pin, a2, i1, i2} -- M = 0, so the pool is the base
     plus the revised candidate) and the same shape in round 3. V-vs-W and W-vs-V are
     independent judgments from independent sessions, which is why the ranking
@@ -1160,12 +1163,13 @@ def _shipped_default_venue_profile() -> dict:
 
     `add-venue` can update the shipped `venue_profiles/<default>.json` with
     numbers verified against the journal's own pages and new article types.
-    The built-in fallback (what a STRIPPED deployment -- script only, no
-    venue_profiles/ -- still enforces) must be the same profile, so it is
-    loaded from the shipped file when that file is present and readable, and
-    the embedded pre-venue literal is used otherwise. That keeps "a full
-    checkout and a single-file copy enforce the same rules" true without a
-    second hand-maintained copy.
+    A normal checkout always reads the shipped file (the single source of
+    truth); the embedded literal below is only the fallback for a STRIPPED
+    deployment (script only, no venue_profiles/). That fallback is the
+    pipeline's original pre-venue requirement set, so it deliberately carries
+    FEWER article types (8, Article-only numbers) than the shipped profile --
+    a stripped deployment runs the legacy rule set, not a mirrored copy of the
+    curated one.
     """
     try:
         p = (Path(__file__).resolve().parent / VENUE_PROFILES_DIRNAME
@@ -4155,7 +4159,9 @@ DEFAULT_CAPTION_LIMIT = 0
 
 def lenient_word_limit(base: int, factor: float) -> int:
     """The largest integer word count within `base` words relaxed by `factor`."""
-    return int(float(base) * float(factor))
+    # floor(base*factor), tolerant of the float representation error that made
+    # "100 words +15%" 114.99999999999999 -> 114 instead of 115.
+    return math.floor(float(base) * float(factor) + 1e-9)
 
 
 _DEFAULT_VENUE_OBJ = VenueProfile(BUILTIN_VENUE_PROFILES[DEFAULT_VENUE], origin="built-in")
@@ -4433,6 +4439,13 @@ def length_rule_text(profile=None) -> str:
             f"margins from\n"
             f"      the same venue table.")
     cover_clause = _cover_preference_clause(prof)
+    cover_total = limits['cover letter'].get('total_max')
+    cover_total_clause = (
+        f"is a SEPARATE cap of {cover_total} words (the operator's default): trim the "
+        f"non-persuading\n      boilerplate first, never a claim about the work."
+        if cover_total is not None else
+        "is counted and recorded, but this profile configures no TOTAL-content cap, so "
+        "no\n      total-word limit is applied to it.")
     if cover_clause:
         cover_para = (
             f"    * THE COVER LETTER — A USER PREFERENCE, NOT {_indefinite(prof.short).upper()} "
@@ -4453,17 +4466,13 @@ def length_rule_text(profile=None) -> str:
             f"content. Count it\n"
             f"      with the pipeline's word rule. The letter's TOTAL content -- salutation, "
             f"body, disclosures\n"
-            f"      and signature -- is a SEPARATE cap of "
-            f"{limits['cover letter'].get('total_max')} words (the operator's default): trim the "
-            f"non-persuading\n"
-            f"      boilerplate first, never a claim about the work.")
+            f"      and signature -- {cover_total_clause}")
     else:
         cover_para = (
             f"    * THE COVER LETTER — NO COVER-LETTER PREFERENCE IS CONFIGURED: this venue\n"
             f"      profile states no cover-letter word limit or preference, so the letter's length\n"
             f"      is counted and recorded but never flagged, scored or cut for length. Its TOTAL\n"
-            f"      content is still capped at {limits['cover letter'].get('total_max')} words\n"
-            f"      (the operator's default).")
+            f"      content {cover_total_clause}")
     return f"""ABSTRACT / MAIN-TEXT LENGTH — THE JOURNAL'S LIMITS, RELAXED BY THIS PIPELINE:
     * This REPLACES the blanket "abstract/main-text length is exempt" standing exemption (the same
       exemption the skills inherit, and the wording the attached master-prompt excerpt below still
@@ -4704,7 +4713,7 @@ on content and correctness only."""
 #
 # Unlike the opt-in caption sweep (M18), M19 is always on: the user replaced
 # the blanket "abstract/main-text length is exempt" standing exemption with the
-# journal's own limits relaxed by +15% (abstract) and +25% (main text). Every
+# journal's own limits relaxed by +10% (abstract) and +25% (main text). Every
 # stage therefore has a job -- the review enumerates and reports, the revision
 # and integration stages compress by removing redundancy only, the rewrite
 # surfaces without cutting, the judges treat length as formatting-tier evidence.
@@ -26545,7 +26554,7 @@ first). Required shape:
     `"accepts_any_journal": true` only when it is genuinely journal-agnostic;
   * `"article_types"`: a NON-EMPTY list of the venue's content types, each with
     `"id"` (slug), `"label"`, and `"length_limits"` carrying `abstract`/`main_text`
-    entries of the form `{"base": <words|null>, "relaxation": <extra words|null>,
+    entries of the form `{"base": <words|null>, "relaxation": <factor >= 1.0|null>,
     "note": "<where the number comes from>"}` -- use `null` when the venue publishes no
     number for that type (never invent one; say so in `"note"`);
   * `"captions"`, `"submission"` (cover letter / format guidance), `"prompt"` (the venue

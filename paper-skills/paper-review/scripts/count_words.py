@@ -26,7 +26,7 @@ and signature) against the operator's 650-word default cap.
 
 The default caps are the relaxed limits of the pipeline's DEFAULT venue profile
 and its default article type (nature-biotechnology Article): abstract <= 165
-words (150 +15%) and main text <= 3,750 words (3,000 +25%). Pass
+words (150 +10%) and main text <= 3,750 words (3,000 +25%). Pass
 `--venue-profile venue_profiles/<id>.json` to read the limits from the profile
 the run is configured with (the pipeline's prompts state the same numbers), plus
 `--article-type <id>` to use that type's own entry from the profile's
@@ -483,7 +483,10 @@ def main(argv=None) -> int:
             failed = True
             continue
         try:
-            text = p.read_text(encoding="utf-8", errors="replace")
+            # utf-8-sig: a Windows-authored manuscript can start with a UTF-8
+            # BOM; read as plain utf-8 it turns the first line into
+            # "\ufeffAbstract" and the abstract heading is never seen.
+            text = p.read_text(encoding="utf-8-sig", errors="replace")
         except OSError as e:
             print(f"error: cannot read {name}: {e}", file=sys.stderr)
             failed = True

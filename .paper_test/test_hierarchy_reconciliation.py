@@ -354,7 +354,7 @@ def test_skill_docs():
           "check: <M1–M30|J1–J5>" in sweeps and "M1–M30 and" in sweeps)
     check("discovery proposals now start at M31",
           "Proposals therefore start at M31" in " ".join(discovery.split())
-          and "36 check IDs (M1–M30, J1–J5)" in discovery)
+          and "35 check IDs (M1–M30, J1–J5)" in discovery)
     check("edit_rules.md defines E12 (align the written side, rule C for code, raw_data read-only)",
           "## E12 — Source-hierarchy findings (M30)" in rules
           and "raw_data/` is READ-ONLY by contract" in rules

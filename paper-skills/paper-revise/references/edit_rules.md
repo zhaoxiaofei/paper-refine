@@ -1,4 +1,4 @@
-# Edit Rules E1–E6, Propagation P1, Code C — paper-revise
+# Edit Rules E1–E12, Propagation P1, Code C — paper-revise
 
 Applied during Step E (one edit at a time, in A4 plan order). Each rule
 exists because its violation is a documented failure mode of LLM-driven
