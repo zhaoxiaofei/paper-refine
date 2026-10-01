@@ -259,6 +259,49 @@ always see where a number came from — and which type it belongs to.
 5. `python paper_pipeline.py set-venue --show` prints the resolved venue,
    journal, limits and any configuration problem.
 
+### Adding a venue with an agent (`add-venue`)
+
+The manual steps above can be driven by an LLM session:
+
+```bash
+python paper_pipeline.py add-venue <venue-id> --journal "Journal Name" \
+        [--agent codex|claude|manual] [--agent-cmd '<json argv>'] [--timeout S]
+```
+
+The session (a) writes/updates `<venue-id>.json` against the schema in this
+file, with every number citing the venue's own guidelines, (b) adds one row to
+the "Shipped profiles" table below, and (c) downloads 8-15 recent OA articles
+of the requested article type into `<venue-id>.manuscripts/`, preferring the
+venue's own website/OA pages, saving a structure-only Markdown transcription
+(headings + statement names, never prose) for each, plus a `manifest.json` with
+source URL/DOI/license/retrieval date. `--agent manual` only stages the prompt.
+The orchestrator then VALIDATES the JSON and derives the template pack itself.
+
+### Exemplar manuscripts and the generated template pack
+
+A venue MAY ship two sibling directories of its profile:
+
+| directory | what it holds |
+|---|---|
+| `<venue-id>.manuscripts/` | recently published OA articles of the venue (or their structure-only transcriptions). Read ONLY for structure; never treated as submission text and never shipped in a package. |
+| `<venue-id>.templates/` | the DERIVED, pinned pack: `structure.json`, `venue_architecture.md`, `word-template.md`, `latex-template.tex` and `MANIFEST.json` (sha256 of every input exemplar and every output; no timestamps, so two builds are byte-identical). |
+
+```bash
+python paper_pipeline.py build-venue-templates --venue <id> [--profiles-dir DIR] [--root DIR]
+```
+
+derives the pack from whatever exemplars are present, code-side and
+deterministically: the modal section order (with presence counts and mean
+positions), abstract presence, and statement placement (data availability,
+ethics, funding, author contributions, competing interests, acknowledgements).
+The `word-template.md` and `latex-template.tex` skeletons use that order.
+
+The derived norm is **advisory**: the review and rewrite sessions receive
+`venue_architecture.md` through their prompts, follow it only where it serves
+the manuscript's content, and the venue's own author guidelines always win. The
+norm never adds, removes or scores anything by itself, and no prose from an
+exemplar is ever copied.
+
 ## What the pipeline does when something is missing or inconsistent
 
 | situation | behaviour |

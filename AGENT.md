@@ -230,6 +230,16 @@ touching this area:
   but never rank.
   `.paper_test/test_grading_scheme.py` (B2) and `test_issue_census.py` pin the
   cell order, the adaptive stop, the files and the rates.
+* **The venue structure norm is ADVISORY, structure-only and pinned**
+  (2026-10-01): `venue_profiles/<id>.manuscripts/` holds recent OA exemplars;
+  `build-venue-templates` derives `<id>.templates/` (modal section order with
+  presence counts, statement placement, `word-template.md`,
+  `latex-template.tex`, `MANIFEST.json` with sha256 of every input and output;
+  deterministic, no timestamps). `add-venue` drives an agent to write the
+  profile + README row + downloads, then the CODE derives the pack. The review
+  and rewrite prompts embed `venue_architecture.md`; no finding may rest on the
+  norm alone, no prose is copied from an exemplar, and the venue's own
+  guidelines always win. Pinned by `.paper_test/test_venue_templates.py`.
 
 ## Known, deliberate limits
 

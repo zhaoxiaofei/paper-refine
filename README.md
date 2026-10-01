@@ -118,6 +118,8 @@ below it, and an exact (median, mean, IQR) tie keeps the incumbent base. See
 | `status --root ROOT` | the root's config, integrity, ranking floor and dedup mode |
 | `trend --roots A B C` | cross-run chain: per-round medians, margins, censuses and certification |
 | `set-venue` / `set-journal` / `set-article-type` | change the rule set / target journal / content type |
+| `add-venue ID` | an agent writes/updates the venue profile + README row and downloads OA exemplars; the code then derives the pinned structure-only template pack |
+| `build-venue-templates --venue ID` | re-derive that pack from the exemplars (`<venue-id>.manuscripts/`) without an agent |
 | `set-revision-mode transfer\|resubmit\|major\|minor` | switch to one of the four real-journal workflows |
 | `set-tiebreak-defect-floor N` / `set-dedup-mode off\|location` | calibration of the selection key |
 | `retry --run ID` / `prune --keep-latest N` | re-run one session / reclaim disk from old sandboxes |
@@ -211,6 +213,27 @@ python paper_pipeline.py set-article-type --show         # current venue / type 
 python paper_pipeline.py set-venue --show                # current venue, journal, resolved limits
 python paper_pipeline.py set-venue --show --json         # the same, machine-readable
 python paper_pipeline.py status --root ./paper_rounds      # prints venue, journal and limits too
+```
+
+**Venue exemplars and the advisory structure norm.** A venue can ship
+`venue_profiles/<venue-id>.manuscripts/` — recently published OA articles of
+that venue (or structure-only Markdown transcriptions of them). The pipeline
+reads them for their **structure only** and derives the pinned
+`venue_profiles/<venue-id>.templates/` pack: the modal section order with
+presence counts, statement placement, and `word-template.md` /
+`latex-template.tex` skeletons (every input and output sha256-pinned, no
+timestamps). The review and rewrite prompts embed the resulting
+`venue_architecture.md` as an **advisory** norm: it never gates, never scores,
+and never overrides the venue's own guidelines or the manuscript's content
+logic.
+
+```bash
+python paper_pipeline.py add-venue frontiers-immunology --journal "Frontiers in Immunology"
+#   an agent writes/updates the profile + venue_profiles/README.md row and
+#   downloads recent OA exemplars into <id>.manuscripts/; the code then derives
+#   the template pack (use --agent manual to stage the prompt only)
+python paper_pipeline.py build-venue-templates --venue frontiers-immunology
+#   re-derive the pack from whatever exemplars are present, no agent needed
 ```
 
 `setup --article-type <id>` selects the type at creation time, and
