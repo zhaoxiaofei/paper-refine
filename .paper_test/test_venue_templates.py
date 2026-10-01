@@ -415,6 +415,12 @@ def test_add_venue_cli(tmp: Path):
     print("== add-venue: an agent writes the profile + downloads, the CODE derives the pack ==")
     store = tmp / "store"
     store.mkdir(parents=True, exist_ok=True)
+    # A README with TWO tables: the venue row must land in the Shipped-profiles
+    # table, never in the schema table that follows it.
+    (store / "README.md").write_text(
+        "# Venue profiles\n\n## Shipped profiles\n\n| id | what it is |\n|---|---|\n"
+        "| `other-venue` | an existing venue |\n\n## Schema\n\n| field | type |\n|---|---|\n"
+        "| `id` | slug |\n", encoding="utf-8")
     stub = tmp / "stub_add_venue.py"
     stub.write_text(ADD_VENUE_STUB, encoding="utf-8")
     cli = [sys.executable, str(WS / "paper_pipeline.py")]
@@ -432,6 +438,10 @@ def test_add_venue_cli(tmp: Path):
     check("venue_profiles/README.md gained a row",
           "demo-venue" in (store / "README.md").read_text(encoding="utf-8")
           and "README=unchanged" not in out, out[-300:])
+    readme_text = (store / "README.md").read_text(encoding="utf-8")
+    check("the row lands at the end of the Shipped-profiles table, not a later table",
+          readme_text.index("`other-venue`") < readme_text.index("`demo-venue`")
+          < readme_text.index("## Schema"), readme_text[:400])
     check("the derived pack exists and names the modal sections",
           (store / "demo-venue.templates" / np.VENUE_NORM_FILE).is_file()
           and "Introduction" in

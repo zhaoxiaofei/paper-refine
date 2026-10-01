@@ -249,6 +249,19 @@ touching this area:
   get the extra clause that the target venue's template REPLACES the previous
   venue's (styles, section names, declarations, reference style). Pinned by
   `.paper_test/test_venue_templates.py`.
+* **The read-only evidence areas are SYMLINKED into sandboxes** (2026-10-01):
+  each stage sandbox's `non_revised/raw_data|raw_figs|human_review_feedback`
+  is a RELATIVE symlink to the root's canonical, chmod-protected pristine copy
+  (`ensure_pristine_input`), so no sandbox duplicates the evidence. Every walk
+  that defines identity/view/input manifests FOLLOWS directory links
+  (`_iter_tree_files`, `hash_manifest(..., follow_dir_links=True)`,
+  `corpus_dir_manifest`, `corpus_dir_view_files`, the run input manifests and
+  `input_mismatches`), `make_tree_writable`/`rmtree_force` never chmod through
+  or delete the shared target, and `enforce_readonly_*` verifies a link instead
+  of writing through it. Judge views stay per-view COPIES: they anonymize and
+  re-name every file, which a link cannot express. A platform without symlinks
+  falls back to real copies, reported in the materialization record.
+  `.paper_test/test_evidence_symlinks.py` pins all of it.
 
 ## Known, deliberate limits
 

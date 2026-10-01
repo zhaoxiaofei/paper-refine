@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.26 — read-only evidence areas are symlinked into sandboxes, not copied (2026-10-01)
+
+`raw_data/`, `raw_figs/` and `human_review_feedback/` are inputs; every stage
+sandbox needed its own copy, and each round materializes ~10 sandboxes, so the
+same evidence was duplicated gigabytes at a time. Now:
+
+- each root keeps ONE canonical copy (`<root>/non_revised/<area>`), made
+  chmod-protected read-only at `setup` (and re-asserted lazily);
+- a stage sandbox's `non_revised/<area>` is a RELATIVE symlink to it
+  (`ensure_pristine_input`), idempotent and self-healing like `ensure_copy`; a
+  write through the link fails at the filesystem level instead of corrupting
+  every sandbox's evidence;
+- every identity/view/input walk FOLLOWS directory links
+  (`_iter_tree_files`, `hash_manifest(..., follow_dir_links=True)`,
+  `corpus_dir_manifest`, `corpus_tree_manifest`, `corpus_dir_view_files`,
+  `_entries_in`/`human_feedback_entries`, the run `inputs_manifest` and
+  `input_mismatches`, `dir_matches`), so pins, digests, tamper checks and judge
+  views still see the evidence;
+- the mode/deletion helpers are link-safe: `make_tree_writable` skips symlinks
+  (chmod would follow them and strip the store's protection), `rmtree_force`
+  unlinks links without descending, and `enforce_readonly_raw_data` /
+  `enforce_readonly_human_feedback` VERIFY a canonical link instead of writing
+  through it (a link to the wrong target is replaced);
+- judge views remain per-view COPIES by design: they anonymize and re-name every
+  file, which a link cannot express;
+- a filesystem without symlink support (or a permission that forbids them)
+  falls back to the old real copies and the materialization record says so.
+
+Pinned by `.paper_test/test_evidence_symlinks.py` (canonical protection, relative
+links, inode sharing, blocked writes, fallback, tamper detection, enforcement,
+prune-safety and a real stub rewrite run).
+
+Also fixed here while testing `add-venue`: the synthesized/merged README row now
+lands at the END of the "Shipped profiles" table (it used to be appended after
+whatever table came last in the file, e.g. the schema table), and `add-venue`
+warns when it updates a venue that ALSO has a built-in fallback
+(`nature-biotechnology`, `generic`): a root without the shipped file keeps the
+built-in rules, so the built-in must be synced or the file deleted.
+
 ## 0.25 — add-venue publishes from the sandbox; template guidance sections filtered (2026-10-01)
 
 Debug of a real `add-venue frontiers-in-immunology` run (agent rc=0, 10 min,

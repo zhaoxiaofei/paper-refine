@@ -153,6 +153,16 @@ manuscript files:
 Both areas are hash-pinned, and any stage write into them is restored and
 reported.
 
+To avoid duplicating gigabytes into every sandbox, the pipeline keeps **ONE**
+read-only copy of each evidence area per root (`<root>/non_revised/<area>`,
+chmod-protected) and the stage sandboxes carry **relative symlinks** to it —
+the content is identical, a write through a link fails instead of corrupting
+the shared copy, and every identity/manifest/view walk follows directory links
+so tampering is still detected. On a filesystem without symlink support the
+pipeline falls back to real copies and says so. Judge views are the exception:
+they must anonymize and re-name every file, so they receive per-view copies
+(by design, not a space bug).
+
 [![One revision round: the read-only manuscript, the round base, the directed-evolution and large-scale-mutation arms, the cross-over integration and the blind judge panel](media/paper-refine-one-revision-round.png)](media/paper-refine-one-revision-round.png)
 
 *One revision round — the read-only manuscript, the round's base `a1`, the

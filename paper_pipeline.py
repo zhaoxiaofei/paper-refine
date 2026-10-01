@@ -8807,11 +8807,39 @@ def sha256_files(paths, on_error=None) -> list:
     return list(_hash_pool().map(one, paths))
 
 
-def hash_manifest(dirp: Path) -> dict:
+def _iter_tree_files(root: Path, follow_dir_links: bool = False) -> list:
+    """Every file under `root`; optionally descend into symlinked directories.
+
+    `pathlib.rglob` does NOT follow directory symlinks -- and the read-only
+    evidence areas of a sandbox ARE symlinks to the root's canonical copy (see
+    ensure_pristine_input). Every walk that defines a corpus, a judge view or an
+    INPUT manifest must therefore ask for the followed variant explicitly, or a
+    linked `raw_data/` would be invisible to the identity it is supposed to
+    contribute to.
+    """
+    if not root.is_dir():
+        return []
+    out = []
+    for p in sorted(root.rglob("*")):
+        if p.is_symlink() and p.is_dir():
+            if follow_dir_links:
+                out.extend(q for q in sorted(p.rglob("*")) if q.is_file())
+            continue
+        if p.is_file():
+            out.append(p)
+    return out
+
+
+def hash_manifest(dirp: Path, follow_dir_links: bool = False, exclude_top=()) -> dict:
     """SHA-256 manifest of every file under dirp (relative posix paths)."""
     if not dirp.is_dir():
         return {"files": {}, "count": 0}
-    paths = [p for p in sorted(dirp.rglob("*")) if p.is_file()]
+    paths = _iter_tree_files(dirp, follow_dir_links=follow_dir_links)
+    if exclude_top:
+        blocked = set(exclude_top)
+        paths = [p for p in paths
+                 if p.relative_to(dirp).parts[:1] and
+                 p.relative_to(dirp).parts[0] not in blocked]
     digs = sha256_files(paths)
     files = {p.relative_to(dirp).as_posix(): d for p, d in zip(paths, digs)}
     return {"files": files, "count": len(files)}
@@ -8847,8 +8875,8 @@ def corpus_tree_manifest(dirp: Path) -> dict:
     """
     if not dirp.is_dir():
         return {"files": {}, "count": 0}
-    paths = [p for p in sorted(dirp.rglob("*"))
-             if p.is_file() and not _is_aux_doc(p.name)]
+    paths = [p for p in _iter_tree_files(dirp, follow_dir_links=True)
+             if not _is_aux_doc(p.name)]
     digs = sha256_files(paths)
     files = {p.relative_to(dirp).as_posix(): d for p, d in zip(paths, digs)}
     return {"files": files, "count": len(files)}
@@ -8884,7 +8912,7 @@ def corpus_dir_manifest(dirp: Path, exclude_top=()) -> dict:
             return False
         return True
 
-    paths = [p for p in sorted(dirp.rglob("*")) if keep(p)]
+    paths = [p for p in _iter_tree_files(dirp, follow_dir_links=True) if keep(p)]
     digs = sha256_files(paths)
     files = {p.relative_to(dirp).as_posix(): d for p, d in zip(paths, digs)}
     return {"files": files, "count": len(files)}
@@ -11908,6 +11936,11 @@ def make_tree_writable(root: Path, skip_top=()) -> list:
     skipped = set(skip_top or ())
 
     def bump(p: Path, bits: int) -> None:
+        if p.is_symlink():
+            # chmod() follows symlinks, so bumping one would change the SHARED
+            # canonical target's modes (the read-only evidence store). Links are
+            # never the thing that needs write bits.
+            return
         try:
             mode = p.lstat().st_mode
         except OSError:
@@ -11953,6 +11986,13 @@ def restore_modes(plan) -> None:
 
 def _rmtree_retry(func, path, _exc=None) -> None:
     """shutil.rmtree error hook: clear the blocking mode and retry the call."""
+    if os.path.islink(path):
+        # Never chmod THROUGH a link: the shared evidence store must keep its
+        # modes. rmtree unlinks a symlink without descending, so this is a guard
+        # for the odd entry that reaches here as a link.
+        with contextlib.suppress(OSError):
+            func(path)
+        return
     with contextlib.suppress(OSError):
         os.chmod(path, 0o700)
     with contextlib.suppress(OSError):
@@ -11986,6 +12026,126 @@ def rmtree_force(path: Path, ignore_errors: bool = False) -> bool:
         if ignore_errors:
             return not p.exists()
         raise
+
+
+# ---- read-only evidence areas: ONE copy per root, symlinked into sandboxes ----
+# raw_data/ and human_review_feedback/ are INPUTS: nothing may write them, and
+# every stage sandbox needs them. Copying them into every sandbox (each round
+# materializes ~10 stage sandboxes) duplicated gigabytes for nothing, so the
+# sandbox's copy is a SYMLINK to the root's canonical pristine copy
+# (<root>/non_revised/<area>), which is chmod-protected read-only. If the
+# platform cannot create symlinks the copy path is used unchanged.
+def _try_symlink_dir(target: Path, link: Path) -> bool:
+    """Create `link` -> `target` as a RELATIVE directory symlink; False on failure."""
+    try:
+        rel = os.path.relpath(str(target), str(link.parent))
+        os.symlink(rel, str(link), target_is_directory=True)
+        return True
+    except (OSError, NotImplementedError, AttributeError):
+        return False
+
+
+def make_tree_readonly(root: Path, skip_top=()) -> int:
+    """Clear the write bits of a tree (never following symlinks); count entries.
+
+    The write bits are cleared on FILES first and on DIRECTORIES last, so the
+    caller can still traverse while working. A symlink is left alone (chmod
+    would follow it).
+    """
+    changed = 0
+    root = Path(root)
+    if not root.is_dir():
+        return 0
+    dirs = []
+    for p in [root, *sorted(root.rglob("*"))]:
+        if p.is_symlink():
+            continue
+        try:
+            if p.relative_to(root).parts[:1] and p.relative_to(root).parts[0] in skip_top:
+                continue
+        except (ValueError, IndexError):
+            pass
+        try:
+            if p.is_dir():
+                dirs.append(p)
+                continue
+            mode = stat.S_IMODE(p.lstat().st_mode)
+            if mode & 0o222:
+                os.chmod(p, mode & ~0o222)
+                changed += 1
+        except OSError:
+            continue
+    for d in sorted(dirs, key=lambda x: len(x.parts), reverse=True):
+        try:
+            mode = stat.S_IMODE(d.lstat().st_mode)
+            if mode & 0o222:
+                os.chmod(d, mode & ~0o222)
+                changed += 1
+        except OSError:
+            continue
+    return changed
+
+
+def evidence_areas_of(dirp: Path) -> list:
+    """The top-level evidence area names present in one corpus directory."""
+    out = []
+    for name in EVIDENCE_DIRNAMES:
+        p = Path(dirp) / name
+        if p.is_dir() or p.is_symlink():
+            out.append(name)
+    return out
+
+
+def ensure_pristine_input(ctx: Ctx, dst: Path) -> dict:
+    """Materialize a sandbox's pristine input with SYMLINKED evidence areas.
+
+    Everything else is copied (the manuscript sources are edited/copied by the
+    stages); the evidence areas (raw_data/, raw_figs/, human_review_feedback/)
+    become RELATIVE symlinks to the root's canonical pristine copy -- one
+    physical copy per root, no per-sandbox duplication. The canonical areas are
+    chmod-protected read-only, so a write through a link fails at the filesystem
+    level instead of corrupting every sandbox. Falls back to real copies when
+    the platform refuses symlinks. Returns a small record for the run/print:
+    {"rebuilt", "linked": [...], "copied": [...], "fallback_reason"}.
+    """
+    areas = evidence_areas_of(ctx.pristine)
+    want = {name: ctx.pristine / name for name in areas}
+    info = {"rebuilt": False, "linked": [], "copied": [], "fallback_reason": None}
+    for name in areas:
+        # The canonical copy is read-only: a write through a sandbox's link
+        # fails instead of corrupting every sandbox's evidence.
+        make_tree_readonly(want[name])
+    ok = dst.is_dir()
+    if ok:
+        # The non-evidence part must match the pristine corpus exactly, and every
+        # evidence area must be a link to the canonical copy.
+        if (hash_manifest(ctx.pristine, exclude_top=set(areas)).get("files")
+                != hash_manifest(dst, follow_dir_links=True,
+                                 exclude_top=set(areas)).get("files")):
+            ok = False
+        for name in areas:
+            link = dst / name
+            if not link.is_symlink() or link.resolve() != want[name].resolve():
+                ok = False
+                break
+    if ok:
+        return info
+    if dst.exists():
+        rmtree_force(dst, ignore_errors=True)
+    dst.mkdir(parents=True, exist_ok=True)
+    copy_into(ctx.pristine, dst, exclude_top=set(areas))
+    for name in areas:
+        link = dst / name
+        if _try_symlink_dir(want[name], link):
+            info["linked"].append(name)
+        else:
+            copy_into(want[name], link)
+            info["copied"].append(name)
+            if info["fallback_reason"] is None:
+                info["fallback_reason"] = ("symlinks are unavailable on this filesystem; the "
+                                           "evidence areas were copied (no space saving)")
+    info["rebuilt"] = True
+    return info
 
 
 def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
@@ -12046,7 +12206,8 @@ def dir_matches(dst: Path, expected_files: dict) -> bool:
     """True when `dst` is a directory whose files hash exactly like expected_files."""
     if not dst.is_dir():
         return False
-    return dict(hash_manifest(dst).get("files") or {}) == dict(expected_files or {})
+    return dict(hash_manifest(dst, follow_dir_links=True).get("files") or {}) \
+        == dict(expected_files or {})
 
 
 def ensure_copy(src: Path, dst: Path, **kw) -> bool:
@@ -13600,7 +13761,7 @@ def input_mismatches(ctx: Ctx, rec: dict) -> list:
         if not p.is_dir():
             errs.append(f"{area}/ is missing from the sandbox")
             continue
-        if not manifests_equal(hash_manifest(p), im[area]):
+        if not manifests_equal(hash_manifest(p, follow_dir_links=True), im[area]):
             errs.append(f"{area}/ was modified after the sandbox was built")
     return errs
 
@@ -13975,7 +14136,7 @@ def corpus_dir_view_files(dirp: Path) -> list:
     from an auxiliary file, a changelog, a ledger, a build log or a rendering.
     """
     out = []
-    entries = [p for p in sorted(dirp.rglob("*")) if p.is_file()]
+    entries = _iter_tree_files(dirp, follow_dir_links=True)
     siblings = {}
     for p in entries:
         siblings.setdefault(p.parent, []).append(p.name)
@@ -14948,15 +15109,16 @@ def materialize_a1(ctx: Ctx, r: int) -> dict:
         # must never silently become this round's base (the digest would say one
         # thing and the documents another).
         rmtree_force(base)
-    if nr.exists() and ctx.source_manifest \
-            and not manifests_equal(hash_manifest(nr), ctx.source_manifest):
-        rmtree_force(nr)
     if not base.exists():
         copy_into(src_dir, base)
-    if not nr.exists():
-        copy_into(ctx.pristine, nr)
+    # The pristine input is materialized with the read-only evidence areas
+    # SYMLINKED to the root's canonical copy (see ensure_pristine_input); the
+    # helper is idempotent and repairs a partial or tampered copy itself.
+    ensure_pristine_input(ctx, nr)
     rec = ctx.register(rid, "a1", r, f"runs/{rid}", source_id=src_id)
-    rec["inputs_manifest"] = {"base": hash_manifest(base), PRISTINE_DIR: hash_manifest(nr)}
+    rec["inputs_manifest"] = {
+        "base": hash_manifest(base, follow_dir_links=True),
+        PRISTINE_DIR: hash_manifest(nr, follow_dir_links=True)}
     rec["corpus_digest"] = recompute_corpus_digest(ctx, r, A1_ID)
     rec["content_fingerprint"] = corpus_content_fingerprint(ctx, r, A1_ID)
     rec["base_source_digest"] = want
@@ -15002,7 +15164,7 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
                            f"{(a1 or {}).get('status', 'missing')}")
     sb.mkdir(parents=True, exist_ok=True)
     ensure_copy(ctx.sandbox_of(a1) / "base", sb / "base")
-    ensure_copy(ctx.pristine, sb / PRISTINE_DIR)
+    ensure_pristine_input(ctx, sb / PRISTINE_DIR)
     if journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_RESUBMIT):
         # A rewrite for a real submission attempt must answer the decision
         # letter: the concern ledger travels beside the corpus.
@@ -15035,7 +15197,7 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
                        source_id=A1_ID, produces=vid)
     rec["rewrite_level"] = rewrite_level_of(k, m)
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
-                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR)}
+                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True)}
     return rec
 
 
@@ -15048,7 +15210,7 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
         raise RuntimeError(f"cannot materialize {rid}: {rid_a1(r)} does not exist")
     sb.mkdir(parents=True, exist_ok=True)
     ensure_copy(ctx.sandbox_of(a1) / "base", sb / "base")
-    ensure_copy(ctx.pristine, sb / PRISTINE_DIR)
+    ensure_pristine_input(ctx, sb / PRISTINE_DIR)
     if journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_RESUBMIT):
         # The review reconciles the real decision letter: the concern ledger
         # travels beside the corpus (never inside it).
@@ -15058,7 +15220,7 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
             ensure_copy(fb / "feedback", sb / "feedback")
     prior = prior_review_dir(ctx, r)
     inputs = {"base": hash_manifest(sb / "base"),
-              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR)}
+              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True)}
     if prior is not None:
         want_prior = {name: sha256_file(prior / name) for name in PRIOR_ROUND_FILES
                       if (prior / name).is_file()}
@@ -15138,7 +15300,7 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
                             "the auditor consumes the round's frozen review/ output")
     sb.mkdir(parents=True, exist_ok=True)
     ensure_copy(ctx.sandbox_of(a1) / "base", sb / "base")
-    ensure_copy(ctx.pristine, sb / PRISTINE_DIR)
+    ensure_pristine_input(ctx, sb / PRISTINE_DIR)
     ensure_copy(ctx.sandbox_of(rev_rec) / REVIEW_DIR, sb / REVIEW_DIR)
     (sb / "audit").mkdir(exist_ok=True)
     seed_evidence_pack(ctx, sb, sb / "base", "audit")
@@ -15152,7 +15314,7 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
     rec = ctx.register(rid, "audit", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=a1.get("source_id"))
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
-                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR),
+                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True),
                               "review": hash_manifest(sb / REVIEW_DIR)}
     return rec
 
@@ -15194,7 +15356,7 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     src_sb = ctx.sandbox_of(rev_rec)
     sb.mkdir(parents=True, exist_ok=True)
     ensure_copy(ctx.sandbox_of(ctx.run(rid_a1(r))) / "base", sb / "base")
-    ensure_copy(ctx.pristine, sb / PRISTINE_DIR)
+    ensure_pristine_input(ctx, sb / PRISTINE_DIR)
     # The frozen review/ is the authoritative finding list: a partial copy must
     # never be trusted (the revision ledger keys on every finding id).
     ensure_copy(src_sb / REVIEW_DIR, sb / REVIEW_DIR)
@@ -15229,7 +15391,7 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     rec = ctx.register(rid, "revise", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=A1_ID, produces=vid)
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
-                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR),
+                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True),
                               "review": hash_manifest(sb / REVIEW_DIR)}
     if aud_manifest is not None:
         rec["inputs_manifest"]["audit"] = aud_manifest
@@ -15276,7 +15438,7 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
         for stale in [p for p in others_dir.iterdir()
                       if p.is_dir() and p.name not in other_ids]:
             rmtree_force(stale, ignore_errors=True)
-    ensure_copy(ctx.pristine, sb / PRISTINE_DIR)
+    ensure_pristine_input(ctx, sb / PRISTINE_DIR)
     (sb / INTEGRATED_DIR).mkdir(exist_ok=True)
     seed_evidence_pack(ctx, sb, sb / "self", "stage")
     note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
@@ -15292,7 +15454,7 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
                        other_ids=other_ids, pool_ids=pool, produces=vid,
                        field_ids=other_ids)
     rec["inputs_manifest"] = {"self": hash_manifest(sb / "self"),
-                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR),
+                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True),
                               "others": hash_manifest(sb / "others")}
     return rec
 
@@ -15636,7 +15798,9 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
         p = area_dir(sb, area)
         if not p.is_dir():
             return f"{area}/ is missing (upstream content changed)"
-        if not manifests_equal(hash_manifest(p), expected):
+        # follow_dir_links: a sandbox's evidence areas are symlinks to the
+        # root's canonical copy (see ensure_pristine_input).
+        if not manifests_equal(hash_manifest(p, follow_dir_links=True), expected):
             return f"{area}/ no longer matches its current upstream source"
         return None
 
@@ -16199,7 +16363,7 @@ def _check_pristine_copy(ctx: Ctx, rec: dict, area: str, errs: list,
                 errs.append(f"{area}/ does not carry the pristine original's content any more "
                             f"(an anonymized view must keep the expected transformed content)")
         return
-    if not manifests_equal(hash_manifest(p), ctx.source_manifest):
+    if not manifests_equal(hash_manifest(p, follow_dir_links=True), ctx.source_manifest):
         errs.append(f"{area}/ is not byte-identical to the setup-time pristine original")
 
 
@@ -17386,7 +17550,7 @@ def _entries_in(area: Path, base: Path) -> dict:
     if not area.is_dir():
         return out
     try:
-        files = [p for p in sorted(area.rglob("*")) if p.is_file()]
+        files = _iter_tree_files(area, follow_dir_links=True)
     except OSError:
         return out                      # an unreadable tree is reported by the caller
     for p in files:
@@ -17474,6 +17638,20 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
     name = raw_data_dirname(cand_dir)
     area = cand_dir / name
     other = cand_dir / (RAW_DATA_DIR if name == RAW_DATA_DIR_LEGACY else RAW_DATA_DIR_LEGACY)
+    if area.is_symlink():
+        # The sandbox INPUT links this area to the canonical copy; a package
+        # that carries the link onward must be verified, never written through.
+        try:
+            same = area.resolve() == src.resolve()
+        except OSError:
+            same = False
+        if same:
+            return {"present": True, "files": len(want), "restored": [], "dropped": [],
+                    "linked": True}
+        with contextlib.suppress(OSError):
+            area.unlink()
+        warns.append(f"READ-ONLY raw data: {name}/ was a symlink to a different target and was "
+                     f"replaced with the pristine copy")
     if other.is_dir() and area.is_dir():
         # Both spellings present: a duplicate of the SAME directory is collapsed,
         # anything else is reported and left for the operator.
@@ -17582,7 +17760,7 @@ def human_feedback_entries(dirp: Path) -> dict:
     if not area.is_dir():
         return out
     try:
-        files = [p for p in sorted(area.rglob("*")) if p.is_file()]
+        files = _iter_tree_files(area, follow_dir_links=True)
     except OSError:
         return out
     for p in files:
@@ -17609,6 +17787,18 @@ def enforce_readonly_human_feedback(ctx: Ctx, cand_dir: Path, warns: list) -> di
     if not want:
         return {"present": False, "files": 0, "restored": [], "dropped": []}
     area = cand_dir / HUMAN_FEEDBACK_DIR
+    if area.is_symlink():
+        try:
+            same = area.resolve() == src.resolve()
+        except OSError:
+            same = False
+        if same:
+            return {"present": True, "files": len(want), "restored": [], "dropped": [],
+                    "linked": True}
+        with contextlib.suppress(OSError):
+            area.unlink()
+        warns.append(f"READ-ONLY human review feedback: {HUMAN_FEEDBACK_DIR}/ was a symlink to "
+                     f"a different target and was replaced with the pristine copy")
     squat = sorted(rel for rel in want if (cand_dir / rel).is_dir())
 
     def inside_squat(rel: str) -> bool:
@@ -21647,7 +21837,7 @@ def _journal_stage_base(ctx: Ctx, sb: Path, r: int) -> None:
     """base/ + non_revised/ for one journal stage (read-only copies)."""
     _require_done(ctx, rid_a1(r), "the journal revision stages read the round's base")
     ensure_copy(ctx.sandbox_of(ctx.run(rid_a1(r))) / "base", sb / "base")
-    ensure_copy(ctx.pristine, sb / PRISTINE_DIR)
+    ensure_pristine_input(ctx, sb / PRISTINE_DIR)
 
 
 def materialize_feedback(ctx: Ctx, r: int) -> dict:
@@ -21666,7 +21856,7 @@ def materialize_feedback(ctx: Ctx, r: int) -> dict:
                           encoding="utf-8")
     rec = ctx.register(rid, "feedback", r, f"runs/{rid}", produces=rid)
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
-                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR)}
+                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True)}
     rec["feedback_files"] = [label for _p, label in journal_feedback_files(ctx)]
     return rec
 
@@ -21689,7 +21879,7 @@ def materialize_concerns(ctx: Ctx, r: int) -> dict:
                           encoding="utf-8")
     rec = ctx.register(rid, "concerns", r, f"runs/{rid}", produces=rid)
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
-                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR)}
+                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True)}
     rec["feedback_files"] = [label for _p, label in journal_feedback_files(ctx)]
     return rec
 
@@ -25600,6 +25790,15 @@ def cmd_setup(args) -> None:
           f"frozen into the root and is what every later `run` executes)")
     print(f"[setup] copying {len(files)} file(s) from {source} -> {ctx.pristine}")
     shutil.copytree(source, ctx.pristine)
+    _protected = 0
+    for _name in evidence_areas_of(ctx.pristine):
+        # The root's canonical evidence areas are read-only: sandboxes SYMLINK
+        # them (see ensure_pristine_input), so a write through a link fails at
+        # the filesystem level instead of corrupting every sandbox's evidence.
+        _protected += make_tree_readonly(ctx.pristine / _name)
+    if _protected:
+        print(f"[setup] read-only evidence: {_protected} entr(y/ies) chmod-protected under "
+              f"{ctx.pristine.name}/; stage sandboxes will symlink them instead of copying")
     # Copy the script that is RUNNING, not its basename resolved against the CWD:
     # `setup` is normally launched as `python /path/to/paper_pipeline.py setup
     # --root ...` from whatever directory the operator is in, and the basename
@@ -26466,11 +26665,29 @@ def _merge_readme_row(staged: Path, dest: Path, vid: str,
             lines[i] = row
             dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
             return "updated"
-    last_table = max((i for i, ln in enumerate(lines) if ln.startswith("|")), default=None)
-    if last_table is None:
+    # Insert at the END of the "Shipped profiles" table -- the table the README
+    # documents as the venue list. The file carries several tables, and a row
+    # appended to the schema table (which also has backticked first cells) is
+    # worse than no row.
+    anchor = None
+    heading = next((i for i, ln in enumerate(lines)
+                    if ln.strip().lower().startswith("## shipped profiles")), None)
+    if heading is not None:
+        i = heading
+        while i < len(lines) and not lines[i].startswith("|"):
+            i += 1
+        while i < len(lines) and lines[i].startswith("|"):
+            anchor = i
+            i += 1
+    if anchor is None:
+        venue_row_re = re.compile(r"^\|\s*`[a-z0-9._+-]+`\s*\|")
+        anchor = max((i for i, ln in enumerate(lines) if venue_row_re.match(ln)), default=None)
+    if anchor is None:
+        anchor = max((i for i, ln in enumerate(lines) if ln.startswith("|")), default=None)
+    if anchor is None:
         lines.append(row)
     else:
-        lines.insert(last_table + 1, row)
+        lines.insert(anchor + 1, row)
     dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return "synthesized" if synthesized else "appended"
 
@@ -26621,6 +26838,19 @@ def cmd_add_venue(args) -> None:
           f"exemplar files={pub['manuscript_files']}")
     for note in pub.get("notes") or []:
         print(f"[add-venue] staged note: {note}")
+    if vid in BUILTIN_VENUE_PROFILES:
+        try:
+            _published = json.loads((dest / f"{vid}{VENUE_PROFILE_SUFFIX}")
+                                    .read_text(encoding="utf-8"))
+            _builtin = BUILTIN_VENUE_PROFILES[vid]
+            if (json.dumps(_published, sort_keys=True)
+                    != json.dumps(_builtin, sort_keys=True)):
+                print(f"[add-venue] NOTE: {vid!r} also has a BUILT-IN fallback and the shipped "
+                      f"file now differs from it. A root with NO venue_profiles/{vid}.json "
+                      f"keeps the built-in rules; sync BUILTIN_VENUE_PROFILES (or delete the "
+                      f"shipped file) if the update should be the default everywhere.")
+        except (OSError, ValueError):
+            pass
     profile_path = dest / f"{vid}{VENUE_PROFILE_SUFFIX}"
     problems = []
     if not profile_path.is_file():
