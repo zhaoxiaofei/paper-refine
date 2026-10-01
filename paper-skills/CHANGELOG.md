@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.27 — the built-in default profile tracks the shipped file; slow test suites split for parallel runs (2026-10-01)
+
+- `_shipped_default_venue_profile()` loads `venue_profiles/<default>.json` at
+  import time when the file is present and valid, and falls back to the
+  embedded pre-venue literal only for a STRIPPED deployment (script without the
+  profiles directory). `add-venue` can therefore update the default profile
+  (re-verified numbers, new article types) without the built-in fallback
+  drifting behind it; the embedded literal remains the last-resort copy.
+- `test_only_rounds_integrators_judges.py` and
+  `test_arm_levels_and_language_2026_0922.py` are split into three
+  `test_*_N_*.py` parts each with a shared `*_lib.py` harness, so
+  `run_all.py`/GNU parallel schedules the independent sections concurrently
+  (the first suite: ~450 s serial -> ~240 s wall with the parts in parallel).
+  The same pattern applies to any other single-suite bottleneck.
+- `test_parallel_scheduling.py` now asserts the SCHEDULING INVARIANT
+  structurally (the dependency graph has no barrier on the rewrites; the
+  integrations depend on the whole pool) and keeps only generous one-sided
+  wall-clock windows, so a loaded box can no longer turn a scheduling bug into
+  a false alarm (the previous pairwise-overlap assertions failed under load).
+- The venue/length-limit tests follow the re-verified default profile (its
+  provenance now cites the journal's own content-types page).
+
 ## 0.26 — read-only evidence areas are symlinked into sandboxes, not copied (2026-10-01)
 
 `raw_data/`, `raw_figs/` and `human_review_feedback/` are inputs; every stage

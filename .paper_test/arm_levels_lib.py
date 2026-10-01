@@ -357,14 +357,11 @@ def test_stub_round_arm_levels():
               bool(list((out / "work" / "diffs").glob("D-*.md"))))
 
 
-def main() -> int:
+def run_parts(funcs, banner: str) -> int:
+    """Run the given test functions in THIS process (one part of the suite)."""
     try:
-        test_rewrite_levels()
-        test_diff_ledger_rule_and_report()
-        test_scan_regression_compare()
-        test_language_pass_contract_and_prompts()
-        test_judge_writing_rubric()
-        test_stub_round_arm_levels()
+        for fn in funcs:
+            fn()
     finally:
         cleanup()
     print()
@@ -373,9 +370,5 @@ def main() -> int:
         for f in FAILS:
             print(f"  - {f}")
         return 1
-    print("all arm-level / language-pass checks passed")
+    print(banner)
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

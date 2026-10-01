@@ -25,6 +25,7 @@ concurrent sessions.
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import re
 import shutil
@@ -38,6 +39,10 @@ WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
 HERE = Path(__file__).resolve().parent
 STUB = HERE / "stub_timed.py"
 STUB_JUDGE = HERE / "stub_judge.py"
+_spec = importlib.util.spec_from_file_location("paper_sched", WS / "paper_pipeline.py")
+nb = importlib.util.module_from_spec(_spec)
+sys.modules["paper_sched"] = nb
+_spec.loader.exec_module(nb)
 FAILS = []
 TMPDIRS = []
 
@@ -139,12 +144,12 @@ def test_dag_scheduling():
     # both failed for the machine's load, not for a scheduling barrier. The slow
     # rewrites are therefore 6 s and the phases whose PARALLELISM is asserted are
     # 1.5 s / 1.0 s, so the suite measures the graph, not the CPU.
-    sleeps = {"PAPER_TIMING_SLEEP_W": 6.0,     # rewrites: the slowest production arm
+    sleeps = {"PAPER_TIMING_SLEEP_W": 8.0,     # rewrites: the slowest production arm
               "PAPER_TIMING_SLEEP_R": 0.6,     # review: finishes long before them
               "PAPER_TIMING_SLEEP_AU": 0.4,    # auditor: between the review and the revise
               "PAPER_TIMING_SLEEP_V": 0.5,     # revise
-              "PAPER_TIMING_SLEEP_I": 1.5,     # integrations (parallelism is asserted)
-              "PAPER_TIMING_SLEEP_J": 1.0}     # judges (parallelism is asserted)
+              "PAPER_TIMING_SLEEP_I": 3.0,     # integrations (parallelism is asserted)
+              "PAPER_TIMING_SLEEP_J": 1.5}     # judges (parallelism is asserted)
     root, proc, spans = run_round(tmp, rewrites="2", revises="1", jobs=8, sleeps=sleeps)
     out = proc.stdout + proc.stderr
     check("the round completes", proc.returncode == 0, out[-300:])
@@ -157,12 +162,17 @@ def test_dag_scheduling():
     w1, w2, rev = spans["r1_w1"], spans["r1_w2"], spans["r1_review"]
     check("the two rewrites run in parallel with each other", overlap(w1, w2),
           f"w1 {w1['start']:.2f}-{w1['end']:.2f} w2 {w2['start']:.2f}-{w2['end']:.2f}")
-    check("the REVIEW runs in parallel with the rewrites (no stage barrier)",
-          overlap(rev, w1) and overlap(rev, w2),
-          f"review {rev['start']:.2f}-{rev['end']:.2f}")
+    # The INVARIANT is structural (the deps below); the wall-clock comparisons
+    # stay one-sided and generous so a loaded box cannot turn a scheduling bug
+    # into a false alarm -- a barrier would put the review AFTER the last
+    # rewrite, which even a slow machine cannot hide inside an 8 s sleep.
+    check("the REVIEW starts while the rewrites are still running (no stage barrier)",
+          rev["start"] < max(w1["end"], w2["end"]),
+          f"review {rev['start']:.2f}-{rev['end']:.2f} "
+          f"rewrite ends {w1['end']:.2f}/{w2['end']:.2f}")
     check("the review finishes BEFORE the slow rewrites (so a revise can start early)",
-          rev["end"] < w1["start"] + sleeps["PAPER_TIMING_SLEEP_W"] - 0.3,
-          f"review end {rev['end']:.2f} vs rewrite end {w1['end']:.2f}")
+          rev["end"] < max(w1["end"], w2["end"]) - 0.3,
+          f"review end {rev['end']:.2f} vs rewrite ends {w1['end']:.2f}/{w2['end']:.2f}")
     a2 = spans["r1_a2_revise"]
     # 2026-09-22: the auditor sits between the review and the revisers (default
     # `--audit on`), so the revise starts after the AUDIT -- still without waiting
@@ -174,9 +184,13 @@ def test_dag_scheduling():
           and a2["start"] >= aud["end"] - 0.05,
           f"review end {rev['end']:.2f} audit {aud and (aud['start'], aud['end'])} "
           f"revise {a2['start']:.2f}")
-    check("the REVISE starts before the slow rewrites finish (no barrier on them)",
-          a2["start"] < w1["end"] and a2["start"] < w2["end"],
-          f"revise start {a2['start']:.2f} vs rewrite ends {w1['end']:.2f}/{w2['end']:.2f}")
+    # Wall-clock overlap between the revise and the rewrites is NOT an invariant:
+    # review + audit + two postchecks can outlast the rewrites on a loaded box.
+    # The DAG is the invariant, so it is checked structurally below; the timings
+    # are printed for the operator.
+    print(f"[info] revise start {a2['start']:.2f} vs rewrite ends "
+          f"{w1['end']:.2f}/{w2['end']:.2f} (wall-clock overlap is expected on an idle box; "
+          f"the dependency graph below is the invariant)")
     check("the revise does not start before the review ends",
           a2["start"] >= rev["end"] - 0.05,
           f"revise {a2['start']:.2f} review end {rev['end']:.2f}")
@@ -186,16 +200,35 @@ def test_dag_scheduling():
           all(s["start"] >= pool_end - 0.05 for s in integrations.values()),
           f"pool end {pool_end:.2f}, earliest integration "
           f"{min(s['start'] for s in integrations.values()):.2f}")
-    first, second = sorted(integrations.values(), key=lambda s: s["start"])[:2]
-    check("the integrations run in parallel with each other", overlap(first, second))
-    judge_spans = [s for n, s in spans.items() if ("_judge_" in n or n.startswith("judge_"))]
+    check("the integrations run in parallel with each other",
+          max_concurrency(integrations) >= 2,
+          f"max concurrency {max_concurrency(integrations)} over "
+          f"{len(integrations)} integration(s)")
+    judge_map = {n: s for n, s in spans.items() if ("_judge_" in n or n.startswith("judge_"))}
+    judge_spans = list(judge_map.values())
     integ_end = max(s["end"] for s in integrations.values())
     check("the judge wave starts only after the last integration",
           min(s["start"] for s in judge_spans) >= integ_end - 0.05,
           f"integrations end {integ_end:.2f}, first judge "
           f"{min(s['start'] for s in judge_spans):.2f}")
-    j_first, j_second = sorted(judge_spans, key=lambda s: s["start"])[:2]
-    check("judge sessions run in parallel with each other", overlap(j_first, j_second))
+    check("judge sessions run in parallel with each other",
+          max_concurrency(judge_map) >= 2,
+          f"max concurrency {max_concurrency(judge_map)} over {len(judge_map)} judge(s)")
+    # The structural invariant behind every timing check above: the dependency
+    # graph has NO stage barrier -- review and revise depend on the base/review
+    # only, and integrations wait for the whole pool.
+    ctx = nb.Ctx(root)
+    ctx.load()
+    plan = {e["id"]: e for e in nb.round_run_plan(ctx, 1)}
+    check("the DAG has no barrier on the rewrites (review/revise deps exclude w1/w2)",
+          all(w not in plan["r1_review"]["deps"] for w in ("r1_w1", "r1_w2"))
+          and all(w not in plan["r1_a2_revise"]["deps"] for w in ("r1_w1", "r1_w2"))
+          and "r1_review" in plan["r1_a2_revise"]["deps"],
+          str({k: plan[k]["deps"] for k in ("r1_review", "r1_a2_revise")}))
+    check("the integrations depend on the WHOLE pool",
+          all(set(plan[f"r1_i{k}"]["deps"]) >= {"r1_w1", "r1_w2", "r1_a2_revise"}
+              for k in (1, 2, 3, 4) if f"r1_i{k}" in plan),
+          str({k: v["deps"] for k, v in plan.items() if re.search(r"_i\d+$", k)}))
     state = json.loads((root / "state.json").read_text(encoding="utf-8"))
     check("the round is decided normally",
           state["rounds"]["1"]["status"] == "done"

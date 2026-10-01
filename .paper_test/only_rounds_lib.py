@@ -738,28 +738,24 @@ def test_agents_command():
             bad.append(rid)
     check("G8 every judge id `agents` prints is a valid `--only` item", not bad, str(bad))
 
-def main() -> int:
+def run_parts(funcs, banner: str) -> int:
+    """Run the given test functions in THIS process (one part of the suite).
+
+    The suite is split into several `test_only_rounds_*.py` parts so GNU parallel
+    can schedule the independent sections concurrently; every part imports this
+    module (which owns the helpers, the fixtures and the FAILS list) and calls
+    this function with its own subset.
+    """
     try:
-        test_only_rounds()
-        test_integrator_mask()
-        test_judges_per_round()
-        test_plan_survives_a_config_edit()
-        test_only_judge_sessions()
-        test_only_agent_sessions()
-        test_only_accepts_the_printed_ids()
-        test_only_judge_the_pinned_base()
-        test_agents_command()
+        for fn in funcs:
+            fn()
     finally:
         cleanup()
     print()
     if FAILS:
-        print(f"{len(FAILS)} ONLY-ROUNDS/INTEGRATORS/JUDGES CHECK(S) FAILED")
+        print(f"{len(FAILS)} CHECK(S) FAILED:")
         for f in FAILS:
             print(f"  - {f}")
         return 1
-    print("ALL ONLY-ROUNDS/INTEGRATORS/JUDGES CHECKS PASSED")
+    print(banner)
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

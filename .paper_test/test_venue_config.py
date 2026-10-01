@@ -776,24 +776,33 @@ def test_article_types():
     check("VC8 the shipped profile carries the venue's content types",
           {"article", "brief-communication", "review", "resource", "analysis",
            "matters-arising"} <= set(ids), str(ids))
-    check("VC8 only the Article type carries numbers in the shipped profile",
-          [t[0] for t in nbt.article_types() if t[2]] == ["article"],
-          str(nbt.article_types()))
+    by_type = {t[0]: t[2] for t in nbt.article_types()}
+    check("VC8 the profile carries numbers for exactly the types the venue publishes them for",
+          by_type["article"] and by_type["brief-communication"] and by_type["resource"]
+          and by_type["review"] and by_type["perspective"] and by_type["matters-arising"]
+          and not by_type["analysis"] and not by_type["comment"] and not by_type["primer"],
+          str(by_type))
     check("VC8 the default type keeps the pipeline's old Article numbers",
           nbt.article_type_id == "article" and nbt.length_limits()["abstract"]["cap"] == 165
           and nbt.length_limits()["main text"]["cap"] == 3750 and nbt.article_type == "Article")
     brief = nbt.with_article_type("brief-communication")
-    check("VC8 another type does not borrow the Article caps",
-          brief.length_limits()["abstract"]["cap"] is None
-          and brief.length_limits()["main text"]["cap"] is None
-          and brief.caption_default == 0, str(brief.length_limits()))
+    check("VC8 a type WITH its own numbers uses them, not the Article caps",
+          brief.length_limits()["abstract"]["cap"] == 70
+          and brief.length_limits()["main text"]["cap"] == 1500, str(brief.length_limits()))
+    analysis = nbt.with_article_type("analysis")
+    check("VC8 a type the profile carries no numbers for does not borrow the Article caps",
+          analysis.length_limits()["abstract"]["cap"] is None
+          and analysis.length_limits()["main text"]["cap"] is None
+          and analysis.caption_default == 0, str(analysis.length_limits()))
     check("VC8 the venue-wide cover-letter preference is inherited by the type",
           brief.length_limits()["cover letter"]["min"] == 300
           and brief.length_limits()["cover letter"]["max"] == 500
           and brief.length_limits()["cover letter"]["total_max"] == 650)
-    check("VC8 the prompt names the selected type",
+    check("VC8 the prompt names the selected type and states ITS numbers",
           "a Nature Biotechnology Brief Communication" in nb.length_rule_text(brief)
-          and "no abstract or main-text number" in nb.length_rule_text(brief)
+          and "abstract <= 70 words" in " ".join(nb.length_rule_text(brief).split())
+          and "no abstract or main-text number for a Nature Biotechnology Analysis"
+          in " ".join(nb.length_rule_text(analysis).split())
           and "a Nature Biotechnology Article" in nb.length_rule_text(nbt))
     try:
         nbt.with_article_type("no-such-type")
@@ -804,13 +813,13 @@ def test_article_types():
 
     tmp = scratch("paper_venue_types_")
     root = setup_root(tmp, "--venue", "nature-biotechnology", "--journal", "Nature Biotechnology",
-                      "--article-type", "brief-communication")
+                      "--article-type", "analysis")
     cfg = cfg_of(root)
     check("VC8 setup records the article type and its source",
-          cfg.get("article_type") == "brief-communication"
+          cfg.get("article_type") == "analysis"
           and cfg.get("article_type_source") == "operator", str(cfg.get("article_type")))
     check("VC8 the state mirror carries it too",
-          (state_of(root).get("config") or {}).get("article_type") == "brief-communication")
+          (state_of(root).get("config") or {}).get("article_type") == "analysis")
     check("VC8 the snapshot keeps the whole type table",
           len((cfg.get("venue_profile") or {}).get("article_types") or []) >= 6)
     ctx = nb.Ctx(root)
@@ -822,22 +831,22 @@ def test_article_types():
           and any("no word limits" in n for n in ctx.venue_notes), str(ctx.venue_notes))
     prompts = all_prompts(nb.venue_profile_of(ctx))
     check("VC8 the prompts carry the type, not the Article caps",
-          all("Brief Communication" in t for t in prompts.values())
+          all("Analysis" in t for t in prompts.values())
           and all("165" not in t for k, t in prompts.items() if k != "audit"))
 
     listed = run_cli("set-article-type", "--root", root, "--list")
     check("VC8 `set-article-type --list` shows every type with its caps",
           listed.returncode == 0 and "brief-communication" in listed.stdout
           and "resource" in listed.stdout and "no numbers carried" in listed.stdout
-          and "abstract <= 165" in listed.stdout, listed.stdout[-300:])
+          and "abstract <= 70" in listed.stdout, listed.stdout[-300:])
     shown = run_cli("set-article-type", "--root", root, "--show", "--json")
     try:
         data = json.loads(shown.stdout)
     except ValueError:
         data = {}
     check("VC8 `set-article-type --show --json` reports the selection",
-          data.get("article_type_id") == "brief-communication"
-          and data.get("article_type") == "Brief Communication"
+          data.get("article_type_id") == "analysis"
+          and data.get("article_type") == "Analysis"
           and len(data.get("article_types") or []) >= 6, str(data)[:200])
 
     proc = run_cli("set-article-type", "--root", root, "article")

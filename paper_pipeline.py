@@ -1155,8 +1155,32 @@ _GENERIC_VENUE_PROFILE = {
     },
 }
 
+def _shipped_default_venue_profile() -> dict:
+    """The default profile's SINGLE SOURCE OF TRUTH.
+
+    `add-venue` can update the shipped `venue_profiles/<default>.json` with
+    numbers verified against the journal's own pages and new article types.
+    The built-in fallback (what a STRIPPED deployment -- script only, no
+    venue_profiles/ -- still enforces) must be the same profile, so it is
+    loaded from the shipped file when that file is present and readable, and
+    the embedded pre-venue literal is used otherwise. That keeps "a full
+    checkout and a single-file copy enforce the same rules" true without a
+    second hand-maintained copy.
+    """
+    try:
+        p = (Path(__file__).resolve().parent / VENUE_PROFILES_DIRNAME
+             / f"{DEFAULT_VENUE}{VENUE_PROFILE_SUFFIX}")
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(data, dict) \
+                and str(data.get("id") or "").strip().lower() == DEFAULT_VENUE:
+            return data
+    except (OSError, ValueError, NameError):
+        pass
+    return copy.deepcopy(_DEFAULT_VENUE_PROFILE)
+
+
 BUILTIN_VENUE_PROFILES = {
-    _DEFAULT_VENUE_PROFILE["id"]: _DEFAULT_VENUE_PROFILE,
+    DEFAULT_VENUE: _shipped_default_venue_profile(),
     _GENERIC_VENUE_PROFILE["id"]: _GENERIC_VENUE_PROFILE,
 }
 
