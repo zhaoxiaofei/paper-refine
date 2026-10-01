@@ -281,6 +281,23 @@ for each, plus a `manifest.json` with source URL/DOI/license/retrieval date.
 an explicit skip. The orchestrator then VALIDATES the JSON and derives the
 template pack itself.
 
+The agent runs in a sandbox that can only write inside itself, so it stages the
+store's own layout under `<sandbox>/store/` and the ORCHESTRATOR publishes that
+tree into this directory (profile, README row, `.official/`, `.manuscripts/`).
+If a session finished but its work is still only staged (an older run, a
+read-only mount, an interrupted session), publish it without re-running the
+agent:
+
+```bash
+python paper_pipeline.py add-venue <venue-id> --publish-only
+# or from a specific sandbox:  --publish-only --from-sandbox <dir>
+```
+
+The README row is taken from the staged README when it names the id; otherwise
+the orchestrator SYNTHESIZES the row from the validated profile, so the venue is
+always listed (a session that refreshed another venue's row for the same
+journal cannot leave the new id unlisted).
+
 ### Exemplar manuscripts and the generated template pack
 
 A venue MAY ship THREE sibling directories of its profile:

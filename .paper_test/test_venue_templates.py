@@ -121,6 +121,9 @@ OFFICIAL_TEX = r"""\documentclass{frontiersSCNS}
 \section{Materials and Methods}
 \section{Results}
 \section{Discussion}
+\section{Article types}
+\section{Manuscript Formatting}
+\section{Keywords:}
 \section{Data Availability Statement}
 \section{Author Contributions}
 \section{Funding}
@@ -268,10 +271,17 @@ def test_prompt_norm(tmp: Path):
 
 
 ADD_VENUE_STUB = '''#!/usr/bin/env python3
-"""Test stub for `add-venue`: writes a valid profile, a README row, exemplars."""
+"""Test stub for `add-venue`: STAGES a valid profile, README row and exemplars.
+
+Like a real agent session, this runs inside a sandbox that can only write to
+its own directory: everything goes under ./store/ (the store's exact layout)
+and the ORCHESTRATOR publishes it afterwards.
+"""
 import json, sys
 from pathlib import Path
 dest, vid = Path(sys.argv[1]), sys.argv[2]
+stage = Path.cwd() / "store"
+stage.mkdir(parents=True, exist_ok=True)
 profile = {
     "id": vid, "label": "Demo Venue", "short": "Demo",
     "journals": ["Demo Journal"], "accepts_any_journal": False,
@@ -287,11 +297,15 @@ profile = {
     "prompt": {"venue_phrase": "a Demo Venue manuscript"},
     "description": "written by the test stub",
 }
-(dest / f"{vid}.json").write_text(json.dumps(profile, indent=1), encoding="utf-8")
-readme = dest / "README.md"
-readme.write_text((readme.read_text(encoding="utf-8") if readme.is_file() else "# Venue profiles\\n\\n")
-                  + f"| `{vid}` | written by the test stub |\\n", encoding="utf-8")
-ex = dest / f"{vid}.manuscripts"
+(stage / f"{vid}.json").write_text(json.dumps(profile, indent=1), encoding="utf-8")
+readme = stage / "README.md"
+base = (dest / "README.md").read_text(encoding="utf-8") if (dest / "README.md").is_file() \\
+    else "# Venue profiles\\n\\n| id | what it is |\\n|---|---|\\n"
+# Deliberately DO NOT add the row here: this reproduces the real-world case where
+# the agent refreshed ANOTHER venue's row for the same journal; the orchestrator
+# must synthesize the row for THIS id from the validated profile.
+readme.write_text(base, encoding="utf-8")
+ex = stage / f"{vid}.manuscripts"
 ex.mkdir(parents=True, exist_ok=True)
 (ex / "one.md").write_text("# T\\n\\n## Abstract\\n\\nx\\n\\n## Introduction\\n\\nx\\n"
                            "\\n## Results\\n\\nx\\n\\n## Methods\\n\\nx\\n", encoding="utf-8")
@@ -333,6 +347,13 @@ def test_official_template(tmp: Path):
           structure["official"]["documentclass"] == "frontiersSCNS"
           and structure["official"]["mandatory_sections"]
           and structure["norm"]["n_exemplars"] == 1, str(structure)[:200])
+    check("guidance sections a template file embeds are filtered out",
+          not any("Article types" == s["title"] or "Manuscript Formatting" == s["title"]
+                  for s in structure["official"]["sections"])
+          and structure["official"]["mandatory_sections"] == ["Introduction",
+                                                              "Materials and Methods",
+                                                              "Results", "Discussion"],
+          str(structure["official"]["sections"]))
     arch = (pack / np.VENUE_NORM_FILE).read_text(encoding="utf-8")
     check("the summary puts the OFFICIAL tier above the advisory tier",
           arch.index("OFFICIAL journal template (AUTHORITATIVE)")
@@ -342,6 +363,10 @@ def test_official_template(tmp: Path):
     check("the Word skeleton marks the mandatory sections",
           "## Introduction [MANDATORY]" in word and "## Materials and Methods [MANDATORY]" in word
           and "## Data Availability Statement" in word, word[:300])
+    check("the advisory tier COMPLETES the official skeleton (Abstract inserted first; the "
+          "one-word `Methods` variant folds into `Materials and Methods`)",
+          word.index("## Abstract") < word.index("## Introduction [MANDATORY]")
+          and "## Methods" not in word, word[:300])
     latex = (pack / np.VENUE_LATEX_TEMPLATE).read_text(encoding="utf-8")
     check("the LaTeX skeleton uses the journal's own documentclass and order",
           "\\documentclass{frontiersSCNS}" in latex
@@ -405,12 +430,31 @@ def test_add_venue_cli(tmp: Path):
           and np.VenueProfile(json.loads((store / "demo-venue.json").read_text(encoding="utf-8")))
           .id == "demo-venue", out[-200:])
     check("venue_profiles/README.md gained a row",
-          "demo-venue" in (store / "README.md").read_text(encoding="utf-8"))
+          "demo-venue" in (store / "README.md").read_text(encoding="utf-8")
+          and "README=unchanged" not in out, out[-300:])
     check("the derived pack exists and names the modal sections",
           (store / "demo-venue.templates" / np.VENUE_NORM_FILE).is_file()
           and "Introduction" in
           (store / "demo-venue.templates" / np.VENUE_NORM_FILE).read_text(encoding="utf-8"),
           out[-300:])
+    check("the orchestrator published the sandbox's staged store/ tree",
+          "staged artifacts published" in out
+          and (store / "demo-venue.official").is_dir() is False
+          and (store / "demo-venue.manuscripts" / "one.md").is_file(), out[-300:])
+    # A COMPLETED sandbox can be published again into another store without the
+    # agent: the recovery path for a session that could only stage its work.
+    store2 = tmp / "store2"
+    store2.mkdir()
+    sb = next((store / ".add-venue").iterdir())
+    r_pub = subprocess.run(cli + ["add-venue", "demo-venue", "--profiles-dir", str(store2),
+                                  "--publish-only", "--from-sandbox", str(sb)],
+                           capture_output=True, text=True, timeout=600)
+    out_pub = r_pub.stdout + r_pub.stderr
+    check("--publish-only republishes a completed sandbox (no agent run)",
+          r_pub.returncode == 0 and (store2 / "demo-venue.json").is_file()
+          and (store2 / "demo-venue.manuscripts" / "two.tex").is_file()
+          and (store2 / "demo-venue.templates" / np.VENUE_NORM_FILE).is_file(),
+          out_pub[-300:])
     # An agent that writes a broken profile is reported, and the exit is non-zero.
     broken = tmp / "stub_broken.py"
     broken.write_text("#!/usr/bin/env python3\nprint('did nothing')\n", encoding="utf-8")

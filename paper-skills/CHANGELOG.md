@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.25 — add-venue publishes from the sandbox; template guidance sections filtered (2026-10-01)
+
+Debug of a real `add-venue frontiers-in-immunology` run (agent rc=0, 10 min,
+nothing in the store):
+
+- **Root cause**: the agent runs inside a sandbox whose only writable paths are
+  its own directory and /tmp, so the shared `venue_profiles/` store (a parent)
+  is read-only to it (`EROFS`). The agent had staged the complete work --
+  profile, README copy, `.official/` and `.manuscripts/` -- under
+  `<sandbox>/store/` and left a `PUBLISH.md`, but nothing published it.
+- **Fix**: the prompt now stages into `./store/` BY DESIGN (store layout), and
+  the orchestrator publishes that tree after the session: the profile JSON is
+  validated and copied, the venue's README row is merged (UPDATE if present,
+  APPEND otherwise, and SYNTHESIZED from the validated profile when the staged
+  README only refreshed ANOTHER venue's row for the same journal), and the
+  `.official/`/`.manuscripts/` corpora are merged file-by-file. `add-venue
+  --publish-only [--from-sandbox DIR]` republishes a completed sandbox without
+  re-running the agent (how the recorded Frontiers run was recovered).
+- **Template guidance filtered**: journal template files often embed the
+  venue's own instructions as sections (Frontiers: "Article types", "Manuscript
+  Formatting", "Nomenclature", "Additional Requirements", "Keywords:", "Figure
+  captions"). They are no longer mistaken for manuscript sections: a guidance
+  denylist plus the statement patterns filter both tiers, mandatory sections are
+  computed over the samples that carry a BODY (a supplementary template cannot
+  veto "Introduction"), the advisory tier now COMPLETES the official skeleton
+  (Abstract inserted before Introduction; one-word variants like "Methods" fold
+  into "Materials and Methods"; singular/plural headings dedupe), and
+  "Supplemental Data" is recognised as a statement block.
+
 ## 0.24 — official journal templates are authoritative; the derived norm stays advisory (2026-10-01)
 
 Many venues publish their own Word/LaTeX template (e.g. Frontiers'

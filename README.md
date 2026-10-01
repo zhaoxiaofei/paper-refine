@@ -236,6 +236,9 @@ python paper_pipeline.py add-venue frontiers-immunology --journal "Frontiers in 
 #   an agent writes/updates the profile + venue_profiles/README.md row and
 #   downloads recent OA exemplars into <id>.manuscripts/; the code then derives
 #   the template pack (use --agent manual to stage the prompt only)
+python paper_pipeline.py add-venue frontiers-immunology --publish-only
+#   publish a completed agent sandbox (its work is staged under ./store/ there)
+#   into the shared venue_profiles/ without re-running the agent
 python paper_pipeline.py build-venue-templates --venue frontiers-immunology
 #   re-derive the pack from whatever exemplars are present, no agent needed
 ```

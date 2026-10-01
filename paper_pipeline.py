@@ -1786,8 +1786,25 @@ VENUE_STATEMENT_PATTERNS = (
     ("Author contributions", re.compile(r"author\s+contributions?", re.I)),
     ("Competing interests", re.compile(r"competing\s+interests?|conflict\s+of\s+interest", re.I)),
     ("Acknowledgements", re.compile(r"acknowledg", re.I)),
-    ("Supplementary material", re.compile(r"supplementary\s+(material|information)", re.I)),
+    ("Supplementary material", re.compile(
+        r"supplement(?:ary|al)\s+(material|information|data|tables?|figures?|methods?)", re.I)),
 )
+# Journal template FILES often embed the venue's own GUIDELINES as sections
+# ("Article types", "Manuscript Formatting", ...) next to the sample manuscript.
+# Those are not manuscript sections: they are filtered from both tiers (the
+# operator can still pin extra mandatory sections in requirements.json).
+VENUE_GUIDANCE_SECTIONS = {
+    "article types", "manuscript formatting", "nomenclature", "additional requirements",
+    "reference styles", "reference style", "figure captions", "keywords",
+    "permission to reuse and copyright", "international phonetic alphabet",
+    "resource identification initiative", "life science identifiers",
+}
+
+
+def _is_guidance_title(title) -> bool:
+    """True when a heading belongs to the template's own instructions."""
+    low = str(title or "").strip().strip(":").strip().lower()
+    return not low or low in VENUE_GUIDANCE_SECTIONS
 
 
 def venue_exemplar_dirs(venue_id, root=None) -> list:
@@ -1876,7 +1893,7 @@ def official_skeleton(records: list, explicit_requirements: dict = None) -> dict
             if int(sec.get("level") or 0) != 1:
                 continue
             key = str(sec.get("title") or "").strip().lower()
-            if not key:
+            if not key or _is_guidance_title(sec.get("title")):
                 continue
             if _section_is_statement(sec.get("title")):
                 # Statement sections are carried by `statements`, not by the
@@ -1908,7 +1925,24 @@ def official_skeleton(records: list, explicit_requirements: dict = None) -> dict
         if c:
             statements.append({"label": label, "present": c, "n_samples": n})
     st_order = sorted(st_positions, key=lambda k: (sum(st_positions[k]) / len(st_positions[k]), k))
-    statement_sections = [max(st_spellings[k], key=st_spellings[k].get) for k in st_order]
+    statement_sections, seen_st = [], set()
+    for k in st_order:
+        title = max(st_spellings[k], key=st_spellings[k].get)
+        word_key = tuple(sorted(set(re.findall(r"[a-z0-9]+", title.lower()))))
+        if word_key in seen_st:
+            continue
+        seen_st.add(word_key)
+        statement_sections.append(title)
+    # Mandatory sections are computed over the samples that carry a BODY at all:
+    # a supplementary-material template in the same pack must not veto a body
+    # section the main samples all share.
+    body_samples = 0
+    for rec in records:
+        if any(int(s.get("level") or 0) == 1 and not _is_guidance_title(s.get("title"))
+               and not _section_is_statement(s.get("title")) for s in (rec.get("sections") or [])):
+            body_samples += 1
+    mandatory = [s["title"] for s in sections
+                 if body_samples and s["present"] >= body_samples]
     return {"n_samples": n, "documentclass": classes[0] if classes else "",
             "sections": sections, "mandatory_sections": mandatory,
             "statements": statements,
@@ -2116,7 +2150,7 @@ def structure_norm(records: list) -> dict:
                 # their parent and are reported in structure.json only.
                 continue
             key = str(sec.get("title") or "").strip().lower()
-            if not key:
+            if not key or _is_guidance_title(sec.get("title")):
                 continue
             if _section_is_statement(sec.get("title")):
                 # Statement sections are reported under "Statement placement",
@@ -2210,9 +2244,39 @@ def render_architecture_summary(venue_id: str, norm: dict, official: dict = None
 
 
 def _skeleton_titles(norm: dict, official: dict = None) -> list:
-    off_titles = [s["title"] for s in ((official or {}).get("sections") or [])]
-    return off_titles or _norm_section_titles(norm) or ["Abstract", "Introduction", "Methods",
-                                                        "Results", "Discussion"]
+    """The skeleton order: the OFFICIAL sections as the backbone, completed by
+    the advisory norm's sections (inserted at their modal positions)."""
+    off = list((official or {}).get("sections") or [])
+    adv = list(norm.get("sections") or [])
+    if not off:
+        return [s["title"] for s in adv] or ["Abstract", "Introduction", "Methods", "Results",
+                                             "Discussion"]
+
+    def key(title):
+        words = re.findall(r"[a-z0-9]+", str(title).lower())
+        return " ".join(w[:-1] if len(w) > 3 and w.endswith("s") else w for w in words)
+
+    merged = [s["title"] for s in off]
+    seen = {key(t) for t in merged}
+    word_sets = [set(key(t).split()) for t in merged]
+    for a in adv:
+        title = a["title"]
+        k = key(title)
+        if k in seen:
+            continue
+        if len(k.split()) == 1 and any(k in ws for ws in word_sets):
+            # A one-word variant ("Methods", "Conclusion") is folded into the
+            # fuller heading already present.
+            continue
+        idx = len(merged)
+        for i, o in enumerate(off):
+            if float(a.get("mean_position", 99)) <= float(o.get("mean_position", 99)):
+                idx = i
+                break
+        merged.insert(idx, title)
+        seen.add(k)
+        word_sets.append(set(k.split()))
+    return merged
 
 
 def _skeleton_statements(norm: dict, official: dict = None) -> list:
@@ -26237,13 +26301,20 @@ def cmd_set_journal(args) -> None:
 ADD_VENUE_PROMPT = """\
 === TASK: create or update ONE venue profile, and download its recent exemplars ===
 
-You are working in the SHARED venue store `@@DEST@@`. Do BOTH jobs below, in order, and
-finish with the completion marker.
+You are working inside a SANDBOX. The shared venue store `@@DEST@@` is READ-ONLY here, so
+write EVERY artifact into `@@STAGE@@/` in this sandbox, using the store's own layout
+(`@@STAGE@@/@@VENUE@@.json`, `@@STAGE@@/README.md`, `@@STAGE@@/@@VENUE@@.official/`,
+`@@STAGE@@/@@VENUE@@.manuscripts/`). The ORCHESTRATOR validates and publishes that staging
+tree into the shared store after you finish -- never try to write to `@@DEST@@` yourself,
+and never treat the read-only store as a failure. Do BOTH jobs below, in order, and finish
+with the completion marker.
 
 ## 1. The venue profile (JSON)
 
-Write or UPDATE `@@DEST@@/@@VENUE@@.json`. It must validate against the schema in
-`@@DEST@@/README.md` (read it first). Required shape:
+Write or UPDATE `@@STAGE@@/@@VENUE@@.json`, copying the store's current README (and, when
+it exists, the current `@@VENUE@@.json`) into `@@STAGE@@/` first so your edit is an UPDATE
+of the real files. It must validate against the schema in `@@DEST@@/README.md` (read it
+first). Required shape:
 
   * `"id"`: exactly `"@@VENUE@@"` (a slug);
   * `"label"`: the venue's human name; `"short"`: a short name for prompts;
@@ -26260,8 +26331,10 @@ Write or UPDATE `@@DEST@@/@@VENUE@@.json`. It must validate against the schema i
     the page states). If a value cannot be verified, write `null` and say so -- never
     guess a limit.
 
-Update `@@DEST@@/README.md`: add (or refresh) ONE row for `@@VENUE@@` in the "Shipped
-profiles" table with a one-sentence description. Do not restructure the file.
+Update `@@STAGE@@/README.md`: add (or refresh) ONE row for `@@VENUE@@` in the "Shipped
+profiles" table with a one-sentence description, whose FIRST COLUMN is exactly
+`` `@@VENUE@@` ``. If the store already carries a profile for the same journal under ANOTHER
+id, do NOT edit that venue's row -- add a row for your id. Do not restructure the file.
 
 ## 2. Official journal templates (AUTHORITATIVE, if the venue publishes them)
 
@@ -26270,10 +26343,10 @@ Most venues publish their own Word and/or LaTeX template (for example Frontiers:
 `https://www.frontiersin.org/design/zip/Frontiers_LaTeX_Templates.zip`). Find the equivalents
 for THIS venue on its own author-guidelines page and:
 
-  * download each template archive into `@@DEST@@/@@VENUE@@.official/` (keep the `.zip` too),
+  * download each template archive into `@@STAGE@@/@@VENUE@@.official/` (keep the `.zip` too),
     then UNZIP it in place (subdirectories are fine) so the `.docx`/`.dotx`/`.tex`/`.cls`/`.sty`
     files are readable;
-  * write `@@DEST@@/@@VENUE@@.official/manifest.json` as a list of
+  * write `@@STAGE@@/@@VENUE@@.official/manifest.json` as a list of
     `{"source_url": ..., "archive": <file>, "files": [<extracted files>], "retrieved":
       "<ISO date>", "license_note": "<what the venue says about reuse>"}` objects;
   * if the venue publishes NO template, do not invent one: say so in the transcript and skip
@@ -26282,7 +26355,7 @@ for THIS venue on its own author-guidelines page and:
 ## 3. Recent exemplar manuscripts (structure input ONLY, ADVISORY)
 
 Download recently published ARTICLE-TYPE examples for this venue into
-`@@DEST@@/@@VENUE@@.manuscripts/`, preferring the venue's OWN website / official OA pages
+`@@STAGE@@/@@VENUE@@.manuscripts/`, preferring the venue's OWN website / official OA pages
 (@@ARTICLE_TYPE@@). Rules:
 
   * obey robots.txt, terms of service and paywalls: open-access articles only; never
@@ -26295,7 +26368,7 @@ Download recently published ARTICLE-TYPE examples for this venue into
     acknowledgements) when the article carries it. DO NOT paste the article's prose into
     the transcription: headings and statement NAMES only;
   * keep the downloaded PDF/HTML when licensing allows it, named `<name>.pdf`/`<name>.html`;
-  * write `@@DEST@@/@@VENUE@@.manuscripts/manifest.json` as a list of
+  * write `@@STAGE@@/@@VENUE@@.manuscripts/manifest.json` as a list of
     `{"article": <file>, "transcription": <file|null>, "source_url": ..., "doi": ...,
       "license": ..., "retrieved": "<ISO date>"}` objects -- one per article;
   * aim for 8-15 articles of the target article type from the last ~3 years; if you can
@@ -26306,31 +26379,151 @@ Download recently published ARTICLE-TYPE examples for this venue into
 Write `_pipeline_done.json` in this sandbox with
 `{"stage": "add-venue", "status": "complete", "error": null}` (or `"failed"` with a short
 error). The orchestrator then validates the JSON profile and derives the structure-only
-template pack itself -- do NOT write anything under `@@DEST@@/@@VENUE@@.templates/`.
+template pack itself -- do NOT write anything under `@@STAGE@@/@@VENUE@@.templates/`.
+`"complete"` means the STAGING TREE is complete; a read-only shared store is expected.
 """
 
 
 def add_venue_prompt(venue_id: str, dest: Path, journal: str = "",
-                     article_type: str = "", want_download: bool = True) -> str:
+                     article_type: str = "", want_download: bool = True,
+                     stage: str = "store") -> str:
     """The `add-venue` agent prompt (profile + README + OA exemplar downloads)."""
     text = (ADD_VENUE_PROMPT
             .replace("@@DEST@@", str(dest))
+            .replace("@@STAGE@@", stage)
             .replace("@@VENUE@@", venue_id)
             .replace("@@ARTICLE_TYPE@@", article_type or "the venue's main research article"))
     if not want_download:
         head, _, _tail = text.partition("## 2. Official journal templates")
         text = (head + "## 2. Official journal templates (SKIPPED: `--no-download`)\n\n"
                 "Do NOT download anything for this request: the operator will supply the "
-                "official template files in `@@DEST@@/@@VENUE@@.official/` and the exemplars in "
-                "`@@DEST@@/@@VENUE@@.manuscripts/` themselves. Your job is the profile and the "
+                "official template files in `@@STAGE@@/@@VENUE@@.official/` and the exemplars in "
+                "`@@STAGE@@/@@VENUE@@.manuscripts/` themselves. Your job is the profile and the "
                 "README row ONLY. Keep section 4's completion contract.\n\n## 4. Finish\n\n"
                 "Write `_pipeline_done.json` in this sandbox with\n"
                 "`{\"stage\": \"add-venue\", \"status\": \"complete\", \"error\": null}` (or "
                 "`\"failed\"` with a short error).\n"
-                ).replace("@@DEST@@", str(dest)).replace("@@VENUE@@", venue_id)
+                ).replace("@@DEST@@", str(dest)).replace("@@STAGE@@", stage).replace(
+                    "@@VENUE@@", venue_id)
     if journal:
         text += f"\n\nTarget journal (for `journals` and the prompts): {journal}.\n"
     return text
+
+
+def _merge_tree(src: Path, dst: Path) -> int:
+    """Copy every file under `src` into `dst` (creating paths); count writes."""
+    written = 0
+    for p in sorted(src.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(src)
+        target = dst / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_file():
+            try:
+                if sha256_file(target) == sha256_file(p):
+                    continue
+            except OSError:
+                pass
+        shutil.copy2(p, target)
+        written += 1
+    return written
+
+
+def _merge_readme_row(staged: Path, dest: Path, vid: str,
+                      profile: dict = None) -> str:
+    """Publish one venue's row from the staged README into the shared one.
+
+    Returns "created" (no README existed), "updated" (the venue's row was
+    replaced), "appended"/"synthesized" (the row was added to the table) or
+    "unchanged". When the agent's staged README has no row for THIS id (it may
+    have refreshed another venue's row for the same journal), the row is
+    SYNTHESIZED from the validated profile, so the README always names the id.
+    """
+    staged_lines = []
+    if staged is not None:
+        try:
+            staged_lines = staged.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            staged_lines = []
+    rows = [ln for ln in staged_lines if ln.startswith("|") and f"`{vid}`" in ln]
+    synthesized = False
+    if not rows:
+        label = str((profile or {}).get("label") or vid)
+        desc = str((profile or {}).get("description") or "").strip() or \
+            f"{label} (created by `add-venue`)"
+        rows = [f"| `{vid}` | {desc} |"]
+        synthesized = True
+    row = rows[0]
+    if not dest.is_file():
+        dest.write_text(row + "\n", encoding="utf-8")
+        return "created"
+    lines = dest.read_text(encoding="utf-8").splitlines()
+    for i, ln in enumerate(lines):
+        if ln.startswith("|") and f"`{vid}`" in ln:
+            if ln == row:
+                return "unchanged"
+            lines[i] = row
+            dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            return "updated"
+    last_table = max((i for i, ln in enumerate(lines) if ln.startswith("|")), default=None)
+    if last_table is None:
+        lines.append(row)
+    else:
+        lines.insert(last_table + 1, row)
+    dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return "synthesized" if synthesized else "appended"
+
+
+def publish_add_venue_staging(sb: Path, dest: Path, vid: str) -> dict:
+    """Publish a completed `add-venue` sandbox into the shared store.
+
+    The agent works in a sandbox that can only write inside itself, so it stages
+    the store's exact layout under `<sandbox>/store/` (older runs may have left
+    the files at the sandbox root). This copies the staged profile, the venue's
+    README row, and the `.official`/`.manuscripts` corpora into `dest`, then the
+    caller validates and derives the template pack.
+    """
+    roots = [sb / "store", sb]
+    out = {"profile": None, "readme": "unchanged", "official_files": 0,
+           "manuscript_files": 0, "sandbox": str(sb), "notes": []}
+    profile = next((r / f"{vid}{VENUE_PROFILE_SUFFIX}" for r in roots
+                    if (r / f"{vid}{VENUE_PROFILE_SUFFIX}").is_file()), None)
+    if profile is not None:
+        shutil.copy2(profile, dest / f"{vid}{VENUE_PROFILE_SUFFIX}")
+        out["profile"] = str(dest / f"{vid}{VENUE_PROFILE_SUFFIX}")
+    staged_readme = next((r / "README.md" for r in roots if (r / "README.md").is_file()), None)
+    staged_profile = None
+    if profile is not None:
+        try:
+            staged_profile = json.loads(profile.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            staged_profile = None
+    out["readme"] = _merge_readme_row(staged_readme, dest / "README.md", vid, staged_profile)
+    official = next((r / f"{vid}{VENUE_OFFICIAL_SUFFIX}" for r in roots
+                     if (r / f"{vid}{VENUE_OFFICIAL_SUFFIX}").is_dir()), None)
+    if official is not None:
+        out["official_files"] = _merge_tree(official, dest / f"{vid}{VENUE_OFFICIAL_SUFFIX}")
+    manuscripts = next((r / f"{vid}{VENUE_EXEMPLAR_SUFFIX}" for r in roots
+                        if (r / f"{vid}{VENUE_EXEMPLAR_SUFFIX}").is_dir()), None)
+    if manuscripts is not None:
+        out["manuscript_files"] = _merge_tree(manuscripts,
+                                              dest / f"{vid}{VENUE_EXEMPLAR_SUFFIX}")
+    for rel, why in (("PUBLISH.md", "the agent explained a publish blocker"),
+                     ("_pipeline_done.json", "the agent's completion marker")):
+        if (sb / rel).is_file():
+            out["notes"].append(f"{rel}: {why}")
+    return out
+
+
+def latest_add_venue_sandbox(dest: Path, vid: str):
+    """The newest `<dest>/.add-venue/<vid>-*` sandbox, or None."""
+    base = Path(dest) / ".add-venue"
+    if not base.is_dir():
+        return None
+    cands = sorted((p for p in base.iterdir() if p.is_dir() and p.name.startswith(vid + "-")),
+                   key=lambda p: p.name)
+    return cands[-1] if cands else None
 
 
 def cmd_build_venue_templates(args) -> None:
@@ -26381,35 +26574,53 @@ def cmd_add_venue(args) -> None:
             f"got {vid!r}", code=2)
     dest = Path(getattr(args, "profiles_dir", None) or venue_profiles_write_dir()).resolve()
     dest.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    sb = dest / ".add-venue" / f"{vid}-{stamp}"
-    sb.mkdir(parents=True, exist_ok=True)
-    prompt = add_venue_prompt(vid, dest, journal=str(getattr(args, "journal", None) or ""),
-                              article_type=str(getattr(args, "article_type", None) or ""),
-                              want_download=not bool(getattr(args, "no_download", False)))
-    (sb / PROMPT_FILE).write_text(prompt, encoding="utf-8")
-    if bool(getattr(args, "no_download", False)):
-        print("[add-venue] note: --no-download: the prompt asks for the profile + README row "
-              "ONLY; supply exemplars in "
-              f"{dest / (vid + VENUE_EXEMPLAR_SUFFIX)}/ and run "
-              f"`build-venue-templates --venue {vid}` when ready")
     print(f"[add-venue] venue: {vid}")
     print(f"[add-venue] store: {dest}")
-    print(f"[add-venue] prompt: {sb / PROMPT_FILE}")
-    agent = str(getattr(args, "agent", None) or DEFAULTS.get("agent", "codex"))
-    if agent == "manual":
-        print(f"[add-venue] manual mode: run the prompt yourself, then re-run "
-              f"`build-venue-templates --venue {vid}` "
-              f"(or this command) to validate and generate the template pack")
-        return
-    cmd = resolve_agent_cmd(agent, getattr(args, "agent_cmd", None))
-    rec = {"id": f"add-venue_{vid}", "kind": "add-venue", "status": "running",
-           "sandbox": str(sb), "round": 0}
-    res = _execute_attempt_in(sb, rec, cmd, int(getattr(args, "timeout", 3600) or 3600))
-    print(f"[add-venue] agent rc={res.get('rc')} in {res.get('dur', 0):.0f}s "
-          f"(log: {res.get('log')})")
-    if res.get("error"):
-        print(f"[add-venue] WARNING: {res['error']}")
+    publish_only = bool(getattr(args, "publish_only", False)) or \
+        bool(str(getattr(args, "from_sandbox", "") or "").strip())
+    if publish_only:
+        from_sb = str(getattr(args, "from_sandbox", "") or "").strip()
+        sb = Path(from_sb).resolve() if from_sb else latest_add_venue_sandbox(dest, vid)
+        if sb is None or not sb.is_dir():
+            die(f"add-venue --publish-only: no staged sandbox found under "
+                f"{dest / '.add-venue'} for {vid!r}; pass --from-sandbox DIR")
+        print(f"[add-venue] publish-only: staging sandbox {sb}")
+    else:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        sb = dest / ".add-venue" / f"{vid}-{stamp}"
+        sb.mkdir(parents=True, exist_ok=True)
+        prompt = add_venue_prompt(vid, dest, journal=str(getattr(args, "journal", None) or ""),
+                                  article_type=str(getattr(args, "article_type", None) or ""),
+                                  want_download=not bool(getattr(args, "no_download", False)))
+        (sb / PROMPT_FILE).write_text(prompt, encoding="utf-8")
+        if bool(getattr(args, "no_download", False)):
+            print("[add-venue] note: --no-download: the prompt asks for the profile + README row "
+                  "ONLY; supply exemplars in "
+                  f"{dest / (vid + VENUE_EXEMPLAR_SUFFIX)}/ and run "
+                  f"`build-venue-templates --venue {vid}` when ready")
+        print(f"[add-venue] prompt: {sb / PROMPT_FILE}")
+        agent = str(getattr(args, "agent", None) or DEFAULTS.get("agent", "codex"))
+        if agent == "manual":
+            print(f"[add-venue] manual mode: run the prompt yourself, then re-run "
+                  f"`add-venue {vid} --publish-only` (or `build-venue-templates --venue {vid}`) "
+                  f"to validate and generate the template pack")
+            return
+        cmd = resolve_agent_cmd(agent, getattr(args, "agent_cmd", None))
+        rec = {"id": f"add-venue_{vid}", "kind": "add-venue", "status": "running",
+               "sandbox": str(sb), "round": 0}
+        res = _execute_attempt_in(sb, rec, cmd, int(getattr(args, "timeout", 3600) or 3600))
+        print(f"[add-venue] agent rc={res.get('rc')} in {res.get('dur', 0):.0f}s "
+              f"(log: {res.get('log')})")
+        if res.get("error"):
+            print(f"[add-venue] WARNING: {res['error']}")
+    # The agent works in a sandbox that can only write inside itself; the
+    # orchestrator publishes the staged store layout into the shared store.
+    pub = publish_add_venue_staging(sb, dest, vid)
+    print(f"[add-venue] staged artifacts published: profile={pub['profile'] or 'MISSING'}, "
+          f"README={pub['readme']}, official files={pub['official_files']}, "
+          f"exemplar files={pub['manuscript_files']}")
+    for note in pub.get("notes") or []:
+        print(f"[add-venue] staged note: {note}")
     profile_path = dest / f"{vid}{VENUE_PROFILE_SUFFIX}"
     problems = []
     if not profile_path.is_file():
@@ -31232,6 +31443,13 @@ def build_parser() -> argparse.ArgumentParser:
     pav.add_argument("--no-download", action="store_true",
                      help="keep the prompt unchanged but skip the download section when the "
                           "agent prompt is staged for a manual operator")
+    pav.add_argument("--publish-only", action="store_true",
+                     help="skip the agent: publish a COMPLETED sandbox's staged `store/` tree "
+                          "into the shared store, then validate and derive the pack (use after "
+                          "an agent run that could only stage its work)")
+    pav.add_argument("--from-sandbox", default=None, metavar="DIR",
+                     help="the staging sandbox for --publish-only (default: the newest "
+                          "<profiles-dir>/.add-venue/<venue>-*)")
     pav.set_defaults(func=cmd_add_venue)
 
     pbt = sub.add_parser("build-venue-templates", parents=[common],
