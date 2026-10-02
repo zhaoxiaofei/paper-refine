@@ -1669,7 +1669,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 53 suites (a few
+any failure. They are independent, so run them in parallel — 55 suites (a few
 minutes on a 20-core box; ~5.5 min sequentially):
 
 ```bash
@@ -1741,6 +1741,7 @@ compatibility for a root with no `venue`/`article_type` key.
 | 1 | a run failed / the process hit an error |
 | 2 | nothing to decide yet, or a usage error |
 | 3 | a round is incomplete (progress saved; resume with `run`) |
+| 4 | a valid stopping point that is not a certified answer: `decide --require-complete` on a provisional decision, or `redline` with failed renders (when a tool was used) |
 | 5 | `decide` found integrity or (with `--format-gate`) high-severity formatting problems |
 
 ## Notes
@@ -1748,7 +1749,7 @@ compatibility for a root with no `venue`/`article_type` key.
 * `--root` and `--source` must not be nested; `setup` refuses a non-empty root.
 * The pipeline never edits the operator's `--source`; every copy it makes
   (`non_revised/`, `base/`, pins, winners) is digest-verified, and the
-  corpus's read-only `raw_data/` directory (see "The two input areas") is
+  corpus's read-only `raw_data/` directory (see "The input and evidence areas") is
   restored from that pristine copy whenever a stage touches it.
 * That read-only contract is taken literally: `raw_data/` and
   `human_review_feedback/` (and everything inside them) may be

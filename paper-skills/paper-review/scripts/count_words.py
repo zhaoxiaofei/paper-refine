@@ -439,7 +439,12 @@ def main(argv=None) -> int:
                   if types else (profile or {}).get("length_limits")) or {}
 
         def _limit(key, default_base, default_relaxation):
-            spec = limits.get(key) or {}
+            spec = limits.get(key)
+            if spec is None:
+                # The profile was loaded and this type states no number for the
+                # section: never borrow the built-in default or another type's
+                # cap (the pipeline reports cap: null for the same profile).
+                return None, None
             base = spec.get("base", default_base)
             relaxation = spec.get("relaxation", default_relaxation)
             if base is None or relaxation is None:
@@ -467,7 +472,13 @@ def main(argv=None) -> int:
                     break
         cover_min = cover.get("min", cover_min)
         cover_max = cover.get("max", cover_max)
-        cover_total_max = cover.get("total_max", cover_total_max)
+        # A profile is authoritative: an absent total_max MEANS "no TOTAL cap"
+        # (the pipeline's rule), never the built-in default venue's 650. Only
+        # the no-profile path keeps the built-in default.
+        if args.venue_profile:
+            cover_total_max = cover.get("total_max")
+        else:
+            cover_total_max = cover.get("total_max", cover_total_max)
         if not limits:
             print(f"note: {args.venue_profile} carries no numbers for "
                   f"{type_id or 'its default type'}; reporting counts with no cap",
@@ -476,6 +487,23 @@ def main(argv=None) -> int:
                          if base_abstract is not None and rel_abstract is not None else None),
             "main text": (lenient_cap(base_main, rel_main)
                           if base_main is not None and rel_main is not None else None)}
+    if cover_min is not None and cover_max is not None:
+        cover_pref = f"the {cover_min}-{cover_max}-word range"
+    elif cover_max is not None:
+        cover_pref = f"at most {cover_max} words"
+    elif cover_min is not None:
+        cover_pref = f"at least {cover_min} words"
+    else:
+        cover_pref = ""
+    cover_pref_note = (
+        f"persuading part only; {cover_pref} is the user's preference, not a venue limit"
+        if cover_pref else
+        "persuading part only; this venue profile configures no cover-letter preference")
+    cover_total_note = (
+        f"TOTAL content (salutation, body, disclosures and signature); the "
+        f"{cover_total_max}-word cap is the operator's default, not a venue limit"
+        if cover_total_max is not None else
+        "TOTAL content; no operator cap configured")
     out, failed = [], False
     for name in args.files:
         p = Path(name)
@@ -508,15 +536,8 @@ def main(argv=None) -> int:
                     if args.section == "whole" else sections(text))
         if (args.section in ("auto", "cover-letter")) and is_cover_letter(text, p.name):
             rows = [("cover letter", cover_letter_words(text),
-                     (f"persuading part only; the {cover_min}-{cover_max}-word range is the "
-                      f"user's preference, not a venue limit" if cover_min is not None else
-                      "persuading part only; this venue profile configures no cover-letter "
-                      "preference")),
-                    ("cover letter total", count_words(text),
-                     (f"TOTAL content (salutation, body, disclosures and signature); the "
-                      f"{cover_total_max}-word cap is the operator's default, not a venue limit"
-                      if cover_total_max is not None else
-                      "TOTAL content; no operator cap configured"))]
+                     cover_pref_note),
+                    ("cover letter total", count_words(text), cover_total_note)]
         elif args.section == "cover-letter":
             # Never answer a cover-letter request with silence: an empty rows
             # list is indistinguishable from a crashed/ignored run.

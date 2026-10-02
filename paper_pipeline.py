@@ -1440,6 +1440,11 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
         problems.append(f"submission.pdf_accepted must be true, false or null (got "
                         f"{pdf_accepted!r})")
         pdf_accepted = None
+    # Validate `formats` BEFORE the single raise below: this call appends its
+    # problems, and after the raise nothing it appends would ever be seen (an
+    # invalid string silently became an empty list instead of failing).
+    formats = _profile_str_list(submission.get("formats"), "submission.formats",
+                                problems) or []
 
     if problems:
         raise VenueProfileError(f"{origin}: " + "; ".join(problems))
@@ -1471,8 +1476,7 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
         "captions": clean_captions,
         "submission": {
             "pdf_accepted": pdf_accepted,
-            "formats": _profile_str_list(submission.get("formats"), "submission.formats",
-                                         problems) or [],
+            "formats": formats,
             "pdf_note": str(submission.get("pdf_note") or "").strip(),
         },
         "prompt": clean_prompt,
@@ -1951,10 +1955,6 @@ def official_skeleton(records: list, explicit_requirements: dict = None) -> dict
                  "mean_position": round(sum(positions[k]) / len(positions[k]), 2)}
                 for k in order]
     mandatory = [s["title"] for s in sections if n and s["present"] == n]
-    for extra in ((explicit_requirements or {}).get("mandatory_sections") or []):
-        if str(extra).strip() and str(extra).strip().lower() not in \
-                {m.lower() for m in mandatory}:
-            mandatory.append(str(extra).strip())
     classes = [r.get("documentclass") for r in records if r.get("documentclass")]
     statements = []
     for label, _pat in VENUE_STATEMENT_PATTERNS:
@@ -1980,6 +1980,13 @@ def official_skeleton(records: list, explicit_requirements: dict = None) -> dict
             body_samples += 1
     mandatory = [s["title"] for s in sections
                  if body_samples and s["present"] >= body_samples]
+    # The operator's pinned sections must survive the body-samples recompute:
+    # requirements.json is authoritative about what this venue ALWAYS requires,
+    # even when the sampled official templates do not all carry the section.
+    for extra in ((explicit_requirements or {}).get("mandatory_sections") or []):
+        if str(extra).strip() and str(extra).strip().lower() not in \
+                {m.lower() for m in mandatory}:
+            mandatory.append(str(extra).strip())
     return {"n_samples": n, "documentclass": classes[0] if classes else "",
             "sections": sections, "mandatory_sections": mandatory,
             "statements": statements,
@@ -4766,6 +4773,12 @@ def m19_blocks(profile=None) -> dict:
                   if cover_clause else "no cover-letter preference is configured")
     if cover_total is not None:
         cover_tail += f"; the {cover_total}-word TOTAL cap is the operator's budget"
+    cover_row = (
+        f"only when the persuading part falls outside the user preference "
+        f"({cover_clause}) -- never as a journal requirement, and never a reason to delete content."
+        if cover_clause else
+        "only when a cover-letter preference is configured -- never as a journal requirement, "
+        "and never a reason to delete content.")
     # The cover-letter TOTAL cap is a profile value like every other M19
     # number: a profile that configures none must not be told to hit "the
     # configured cap" (or the default venue's 650) in a mandate.
@@ -4806,8 +4819,7 @@ def m19_blocks(profile=None) -> dict:
    over-cap section as a CATEGORY-4 (technical formatting) finding. M19 is mandatory (the skill's
    references/sweeps.md defines the same sweep as always-on) and it is NEVER a gate: an over-cap
    section never makes a version ineligible. The cover-letter row adds a MINOR formatting finding
-   only when the persuading part falls outside the {cover_clause + '-word ' if cover_clause else ''}user preference -- never as a
-   journal requirement, and never a reason to delete content."""
+   {cover_row}"""
     if has_caps:
         revise = f"""Abstract/main-text length (check id M19; see the length rule): bring EVERY over-cap abstract
      or main text within the cap ({caps_article}) by removing redundancy,
@@ -8651,11 +8663,23 @@ def start_run_log(cmd: str, root, argv=None) -> Path:
         reports = Path(root) / "reports"
         reports.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        path = reports / f"{cmd}-{stamp}.log"
+        base = reports / f"{cmd}-{stamp}.log"
+        path = base
+        n = 2
+        while True:
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+                break
+            except FileExistsError:
+                # A second invocation inside the same UTC second must not
+                # truncate the first one's log (it is opened before the root
+                # lock, so a racing double-start is exactly this case).
+                path = base.with_name(f"{base.stem}-{n}{base.suffix}")
+                n += 1
         header = (f"# paper_pipeline {cmd} -- {utcnow()}\n"
                   f"# root: {Path(root).resolve()}\n"
                   f"# argv: {' '.join(str(a) for a in (argv or []))}\n")
-        with open(path, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(header)
         return path
     except OSError:
@@ -8754,18 +8778,20 @@ def _env_hash_cache():
 
 _HASH_CACHE_FORCED = _env_hash_cache()
 # Default OFF. configure_hash_cache_for_command() enables it for the READ-ONLY
-# audits (`decide`, `status`), and only while no other pipeline process holds
-# the root lock. The reason for the restriction is measured, not theoretical:
+# audit (`status`), and only while no other pipeline process holds the root
+# lock. The reason for the restriction is measured, not theoretical:
 # this machine's /tmp lives on an ext4 mount whose mtime/ctime move only once
 # per second, so a same-second, same-size rewrite of a file can leave the whole
 # stat identity unchanged -- a stat-keyed cache would then serve a stale digest
 # and HIDE exactly the kind of tampering the integrity checks exist to catch.
-# Commands that run agents (notably `run`) may hash a tree, let a writer touch
-# it, and hash it again, so they must not use the cache. `PAPER_HASH_CACHE=1`
-# forces it on (only for operators who know their tree is quiescent) and
-# `PAPER_HASH_CACHE=0` forces it off.
+# Commands that run agents (notably `run`) or write the trees they hash
+# (`decide` repoints references inside final_clean_version.tmp AFTER hashing
+# it) may hash a file, rewrite it in place with the same size inside one
+# filesystem timestamp tick, and hash it again, so they must not use the
+# cache. `PAPER_HASH_CACHE=1` forces it on (only for operators who know their
+# tree is quiescent) and `PAPER_HASH_CACHE=0` forces it off.
 HASH_CACHE_ENABLED = bool(_HASH_CACHE_FORCED)
-HASH_CACHE_AUTO_COMMANDS = ("decide", "status")
+HASH_CACHE_AUTO_COMMANDS = ("status",)
 try:
     HASH_WORKERS = max(1, int(os.environ.get("PAPER_HASH_WORKERS", "")
                               or min(32, (os.cpu_count() or 4) * 2)))
@@ -8812,11 +8838,12 @@ def configure_hash_cache_for_command(cmd: str, root) -> str:
     """Turn the digest cache on only for a quiescent, read-only audit.
 
     Returns a note for the operator ("" when there is nothing to say). The
-    automatic rule: the cache is ON for `decide`/`status` (which never write the
-    trees they hash) unless another live pipeline process holds the root lock
-    (a `run`/`retry`/`prune`/`redline` can be writing those trees right now), in
-    which case the audit re-reads every byte; it is OFF for everything else.
-    PAPER_HASH_CACHE=1/0 overrides the whole rule.
+    automatic rule: the cache is ON for `status` (which never writes the tree it
+    hashes) unless another live pipeline process holds the root lock (a
+    `run`/`decide`/`retry`/`prune`/`redline` can be writing that tree right
+    now), in which case the audit re-reads every byte; it is OFF for everything
+    else -- `decide` included, because it rewrites final_clean_version.tmp
+    after hashing it. PAPER_HASH_CACHE=1/0 overrides the whole rule.
     """
     global HASH_CACHE_ENABLED
     if _HASH_CACHE_FORCED is not None:
@@ -8900,25 +8927,35 @@ def _iter_tree_files(root: Path, follow_dir_links: bool = False) -> list:
         return []
     out = []
 
+    def dir_key(p: Path):
+        try:
+            st = os.stat(p)
+        except OSError:
+            return None
+        return (st.st_dev, st.st_ino)
+
     def walk(d: Path, ancestors: frozenset) -> None:
         for p in sorted(d.iterdir()):
             if p.is_symlink() and p.is_dir():
                 if not follow_dir_links:
                     continue
-                try:
-                    st = os.stat(p)
-                except OSError:
-                    continue
-                key = (st.st_dev, st.st_ino)
-                if key in ancestors:
+                key = dir_key(p)
+                if key is None or key in ancestors:
                     continue
                 walk(p, ancestors | {key})
             elif p.is_dir():
-                walk(p, ancestors)
+                key = dir_key(p)
+                if key is None or key in ancestors:
+                    continue
+                walk(p, ancestors | {key})
             elif p.is_file():
                 out.append(p)
 
-    walk(root, frozenset())
+    # Seed the ancestor set with the ROOT's own inode: a link that points back
+    # at the tree being walked (canon/loop -> canon) would otherwise duplicate
+    # every file once under the link's path.
+    root_key = dir_key(root)
+    walk(root, frozenset({root_key}) if root_key is not None else frozenset())
     return sorted(out)
 
 
@@ -12024,6 +12061,12 @@ def make_tree_writable(root: Path, skip_top=()) -> list:
     the read-only raw-data directory is the reason this helper exists, so callers
     that may write anywhere BUT raw_data pass `skip_top=RAW_DATA_DIRNAMES`.
     """
+    if Path(root).is_symlink():
+        # chmod() follows links, and iterdir() would list the target's entries:
+        # descending through a symlinked root would hand write bits to the
+        # SHARED read-only evidence store. A link is never the pipeline's own
+        # copy to make writable.
+        return []
     plan: list = []
     skipped = set(skip_top or ())
 
@@ -13184,7 +13227,10 @@ def upstream_deps(rec: dict) -> list:
         # general review; the materializer records which run that is, so the
         # retry/rebuild path never blocks on a run this root does not have.
         deps = [rid_a1(r), rec.get("upstream_run_id") or rid_review(r)]
-        if rec.get("inputs_manifest", {}).get("audit") is not None:
+        # `register()` initializes inputs_manifest to None; `.get(k, {})` does
+        # not cover an existing None, and the AttributeError used to break
+        # retry/rebuild for a registered-but-unmaterialized revise run.
+        if (rec.get("inputs_manifest") or {}).get("audit") is not None:
             deps.append(rid_audit(r))
         return deps
     if kind in ("feedback", "concerns"):
@@ -28230,6 +28276,33 @@ def certification_label(certification) -> str:
     return "NOT CERTIFIED"
 
 
+def final_clean_reason(final: dict, rounds_data: list, rounds_total: int, final_regression,
+                       chain_ok: bool, provisional: bool, panel_gaps: dict,
+                       gate_problems: list) -> str:
+    """The note the final_clean_version sibling readme carries ("" = none).
+
+    Mirrors decide_certification's blockers: ANY round whose stored champion
+    failed recomputation blocks the verdict, not only the final round. The
+    inlined form checked `final["mismatch"]` alone, so decision.json could carry
+    `final_clean_version.certified: true` beside `certification.certified:
+    false` when an earlier round mismatched.
+    """
+    if any(rd.get("mismatch") for rd in rounds_data):
+        return "a stored champion failed recomputation"
+    if final_regression:
+        return final_regression
+    if not chain_ok:
+        return "the content-addressed chain is broken"
+    if provisional:
+        return (f"only round {final['round']} of {rounds_total} is complete "
+                f"(the champion is provisional)")
+    if panel_gaps:
+        return "the judge panel is incomplete"
+    if gate_problems:
+        return "; ".join(gate_problems)
+    return ""
+
+
 def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = "") -> dict:
     """Publish <root>/final_clean_version/: the champion corpus for a new run.
 
@@ -29823,24 +29896,11 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     # verdict and the reasons travel in the SIBLING `final_clean_version.readme.md`
     # (never inside the directory, which must stay byte-clean manuscript
     # content). `_clean_reason` is now only the note the readme carries.
-    if final["mismatch"]:
-        _clean_reason = "the stored champion failed recomputation"
-    elif final_regression:
-        # A final champion the panel judged WORSE than the pristine original is
-        # not a package to hand to the next run (the same reason `decide`
-        # refuses to certify it below).
-        _clean_reason = final_regression
-    elif not chain_ok:
-        _clean_reason = "the content-addressed chain is broken"
-    elif provisional:
-        _clean_reason = (f"only round {final['round']} of {R} is complete "
-                         f"(the champion is provisional)")
-    elif panel_gaps:
-        _clean_reason = "the judge panel is incomplete"
-    elif gate_problems:
-        _clean_reason = "; ".join(gate_problems)
-    else:
-        _clean_reason = ""
+    # A final champion the panel judged WORSE than the pristine original is not
+    # a package to hand to the next run; ANY round's recomputation mismatch
+    # blocks, exactly as it blocks `certification` below.
+    _clean_reason = final_clean_reason(final, rounds_data, R, final_regression, chain_ok,
+                                       provisional, panel_gaps, gate_problems)
     final_clean = publish_final_clean(ctx, final, not _clean_reason, _clean_reason)
     # `action` (created/unchanged) describes THIS invocation, not the decision:
     # keeping it out of decision.json/report keeps two consecutive `decide` runs
@@ -30091,12 +30151,12 @@ def cmd_run_decide(args) -> None:
 
     `run` holds the root lock for its whole phase and releases it when it
     returns; `decide` then takes the lock for its own writes (reports,
-    decision.json, final_clean_version/). The digest cache is safe to switch on
-    for that phase only because decision.json's integrity checks run under the
-    same lock (main() left the cache off because `run-decide` is not a read-only
-    command). A hard error inside `run` (a `die()`) propagates and the decide
-    phase is skipped -- deciding a root that could not even be started would
-    only repeat the same error.
+    decision.json, final_clean_version/). The digest cache stays OFF for that
+    phase: it rewrites files it hashed, and a same-size rewrite inside one
+    timestamp tick would otherwise reuse the stale digest (main() left the cache
+    off because `run-decide` is not a read-only command). A hard error inside
+    `run` (a `die()`) propagates and the decide phase is skipped -- deciding a
+    root that could not even be started would only repeat the same error.
     """
     cmd_run(args)
     note = configure_hash_cache_for_command("decide", getattr(args, "root", None))
@@ -31123,10 +31183,11 @@ USAGE_EXAMPLES = """usage:
           write reports/DECISION_REPORT.md + decision.json + raw_scores.csv,
           and publish <root>/final_clean_version/ (the champion corpus without
           process scratch, auxiliaries or self-written reports) so a new
-          pipeline can be seeded directly from it. The clean copy is written
-          only for a CERTIFIED champion: provisional rounds, an incomplete
-          judge panel or a broken pin/winner chain make `decide` skip it with
-          the reason (never a silent copy of an uncertified winner).
+          pipeline can be seeded directly from it. The clean copy is ALWAYS
+          written (2026-10-01), certified or not; the verdict and its blockers
+          travel in the sibling final_clean_version.readme.md, so an uncertified
+          copy is never silent. Only a corpus that cannot be built at all is
+          skipped, with the reason.
           The round-R champion is the final answer; each round's winner is also
           published at <root>/round<R>_winner/, and --package-winner copies the
           final one to <root>/final/ (refused when the pin/winner chain, the

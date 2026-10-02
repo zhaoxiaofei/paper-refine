@@ -216,7 +216,11 @@ def word_pattern(variant: str) -> re.Pattern:
     v = variant.strip()
     if not v:
         return None
-    return re.compile(r"(?<![A-Za-z0-9])" + v + r"(?![A-Za-z0-9])", re.IGNORECASE)
+    # The variant is literal text, not a pattern: "C++" (and "N.B.", "IL-6"),
+    # interpolated raw, matched a lone "C" (or any character where "." sat) and
+    # over-reported occurrences of the family.
+    return re.compile(r"(?<![A-Za-z0-9])" + re.escape(v) + r"(?![A-Za-z0-9])",
+                      re.IGNORECASE)
 
 
 def collect_family_rows(docs, families):

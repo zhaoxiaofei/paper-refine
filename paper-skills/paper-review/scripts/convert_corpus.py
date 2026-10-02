@@ -143,7 +143,10 @@ def docx_part_to_lines(xml: str):
         for m in TEXT_RUN_RE.finditer(para):
             tag = m.group(0)
             content = _html_unescape(m.group(1))
-            if "instrText" in tag:
+            # Test the TAG NAME, never a substring of the whole match: a visible
+            # w:t whose sentence merely mentions "instrText" became a fake
+            # [[FIELD: ...]] marker that polluted every downstream sweep.
+            if re.match(r"<w:instrText(?=[\s/>])", tag):
                 texts.append("[[FIELD: %s]]" % content.strip())
                 notes.append("live field instruction present (possible Zotero citation)")
             else:

@@ -507,6 +507,12 @@ def _rpr_set_emphasis(rpr: str | None, on: bool) -> tuple:
     rpr = re.sub(r"<w:i(?=[\s/>])[^>]*>.*?</w:i>", "", rpr, flags=re.S)
     rpr = re.sub(r"<w:iCs(?=[\s/>])[^>]*>.*?</w:iCs>", "", rpr, flags=re.S)
     insert = "<w:i/>" if on else '<w:i w:val="0"/><w:iCs w:val="0"/>'
+    if re.fullmatch(r"<w:rPr(?=[\s/>])[^>]*/>", rpr, re.S):
+        # A self-closing properties element has no `</w:rPr>` tail to anchor
+        # the insert on; splicing at len(rpr) - len("</w:rPr>") cut INTO the
+        # tag and produced unparseable XML. Expand the element first.
+        rpr = rpr[:rpr.rfind("/>")] + ">" + insert + "</w:rPr>"
+        return rpr, rpr != before
     after_tags = ("caps", "smallCaps", "strike", "dstrike", "outline", "shadow", "emboss",
                   "imprint", "noProof", "snapToGrid", "vanish", "webHidden", "color",
                   "spacing", "w", "kern", "position", "sz", "szCs", "highlight", "u",

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""The cached/parallel hashing that makes `decide` fast must stay exact.
+"""The cached/parallel hashing that makes `status` fast must stay exact.
 
 Run:  python3 .paper_test/test_hash_cache.py
 
-`decide` re-verifies the whole content-addressed chain, which re-hashes the same
-corpus dozens of times (every judge sandbox carries a full target + field copy).
-The fix is a process-local cache keyed by the file's FULL stat identity plus a
-threaded first pass. These checks prove the properties the integrity checks
-depend on:
+The read-only audits (`status`) re-hash the same corpus repeatedly, so they use
+a process-local cache keyed by the file's FULL stat identity plus a threaded
+first pass. `decide` must NOT use it: it rewrites final_clean_version.tmp after
+hashing it, and a same-size rewrite inside one filesystem timestamp tick would
+otherwise reuse a stale digest. These checks prove the properties the
+integrity checks depend on:
 
   * the digest is the standard SHA-256 of the bytes;
   * a same-size edit is detected (cache miss by mtime/ctime/size);
@@ -130,17 +131,20 @@ def test_cache_fast_path():
 
 def test_command_scoping():
     print()
-    print("== HC3: the cache is enabled only for a quiescent decide/status ==")
+    print("== HC3: the cache is enabled only for a quiescent status ==")
     tmp = scratch("paper_hash_cmd_")
     note = nb.configure_hash_cache_for_command("run", tmp)
     check("HC3 `run` never uses the cache",
           nb.hash_cache_stats()["enabled"] is False and note == "")
     note = nb.configure_hash_cache_for_command("decide", tmp)
-    check("HC3 `decide` on a quiescent root enables the cache",
+    check("HC3 `decide` never uses the cache (it rewrites files it hashed)",
+          nb.hash_cache_stats()["enabled"] is False and note == "")
+    note = nb.configure_hash_cache_for_command("status", tmp)
+    check("HC3 `status` on a quiescent root enables the cache",
           nb.hash_cache_stats()["enabled"] is True and note == "")
     (tmp / nb.LOCK_FILE).write_text(
         '{"pid": %d, "what": "run", "since": "now"}' % os.getpid(), encoding="utf-8")
-    note = nb.configure_hash_cache_for_command("decide", tmp)
+    note = nb.configure_hash_cache_for_command("status", tmp)
     check("HC3 a live lock disables the cache and says so",
           nb.hash_cache_stats()["enabled"] is False and "holds" in note, note)
     (tmp / nb.LOCK_FILE).unlink()
@@ -151,8 +155,8 @@ def test_command_scoping():
         check("HC3 PAPER_HASH_CACHE=1 forces the cache on even for `run`",
               nb.hash_cache_stats()["enabled"] is True)
         nb._HASH_CACHE_FORCED = False
-        nb.configure_hash_cache_for_command("decide", tmp)
-        check("HC3 PAPER_HASH_CACHE=0 forces the cache off even for `decide`",
+        nb.configure_hash_cache_for_command("status", tmp)
+        check("HC3 PAPER_HASH_CACHE=0 forces the cache off even for `status`",
               nb.hash_cache_stats()["enabled"] is False)
     finally:
         nb._HASH_CACHE_FORCED = forced
