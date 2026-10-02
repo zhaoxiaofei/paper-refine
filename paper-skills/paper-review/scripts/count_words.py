@@ -440,10 +440,12 @@ def main(argv=None) -> int:
 
         def _limit(key, default_base, default_relaxation):
             spec = limits.get(key)
-            if spec is None:
-                # The profile was loaded and this type states no number for the
-                # section: never borrow the built-in default or another type's
-                # cap (the pipeline reports cap: null for the same profile).
+            if not isinstance(spec, dict) or "base" not in spec or "relaxation" not in spec:
+                # The profile was loaded and this type states no USABLE number
+                # for the section (absent, null, an empty block, or an unpaired
+                # base): never borrow the built-in default or another type's cap
+                # (the pipeline reports cap: null for the same profile and its
+                # validator requires base+relaxation together).
                 return None, None
             base = spec.get("base", default_base)
             relaxation = spec.get("relaxation", default_relaxation)

@@ -216,6 +216,26 @@ def test_count_words_does_not_borrow_another_types_caps():
     except Exception as e:                      # noqa: BLE001
         ok, caps = False, f"{type(e).__name__}: {e} / {proc.stdout[:120]}"
     check("count_words.py reports no main-text cap for a type that states none", ok, str(caps))
+    # The same rule for a section stated as an empty block or with only a base:
+    # the validator requires base+relaxation together, so neither may borrow.
+    for stated in ({}, {"base": 250}):
+        prof2 = json.loads(json.dumps(prof))
+        entry2 = prof2["article_types"][1]
+        entry2["length_limits"] = {"source": "fixture", "abstract": stated}
+        ppath2 = pdir / "profile2.json"
+        ppath2.write_text(json.dumps(prof2), encoding="utf-8")
+        proc2 = subprocess.run([sys.executable, str(WS / "paper-skills/paper-review/scripts/"
+                                                   "count_words.py"),
+                                str(paper), "--venue-profile", str(ppath2),
+                                "--article-type", entry2["id"], "--json"],
+                               capture_output=True, text=True, timeout=120)
+        try:
+            caps2 = json.loads(proc2.stdout)["caps"]
+            ok2 = caps2.get("abstract") is None and caps2.get("main text") is None
+        except Exception as e:                  # noqa: BLE001
+            ok2, caps2 = False, f"{type(e).__name__}: {e} / {proc2.stdout[:120]}"
+        check(f"count_words.py borrows nothing for a section stated as {stated!r}",
+              ok2, str(caps2))
 
 
 def test_self_closing_rpr_stays_well_formed():
