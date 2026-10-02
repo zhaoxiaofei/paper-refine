@@ -159,8 +159,13 @@ def main() -> int:
     check("J1 status names the revision mode", "revision mode: major" in r.stdout)
     r = run_cli("run", "--root", str(root), "--only", "1",
                 "--agent-cmd", json.dumps([sys.executable, str(STUB)]))
-    check("J1 --only is refused in a journal mode",
-          r.returncode != 0 and "does not apply to revision mode" in (r.stdout + r.stderr),
+    # 2026-10-02: `--only` now selects the journal chain's stages; a completed
+    # root is a successful no-op and the submission package stays as published
+    # (a partial invocation never assembles it -- see test_journal_only.py).
+    check("J1 --only is accepted in a journal mode and leaves a finished root alone",
+          r.returncode == 0 and "does not apply to revision mode" not in (r.stdout + r.stderr)
+          and "already complete" in (r.stdout + r.stderr)
+          and (root / "journal_submission").is_dir(),
           (r.stdout + r.stderr)[-200:])
     # J8: the response statuses are tied to the concern ledger.
     ctx1 = nb.Ctx(root)

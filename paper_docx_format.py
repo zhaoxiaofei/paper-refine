@@ -307,6 +307,21 @@ def parse_styles(pkg: zipfile.ZipFile) -> dict:
     return out
 
 
+def docx_style_ids(path: Path) -> list:
+    """The style ids one DOCX package declares ([] when unreadable).
+
+    Used by the venue-template conformance scan: a package restyled into the
+    journal's template carries the template's style ids; one that still carries
+    only its own styles does not.
+    """
+    try:
+        with zipfile.ZipFile(path) as pkg:
+            xml = pkg.read("word/styles.xml").decode("utf-8", "replace")
+    except (OSError, zipfile.BadZipFile, KeyError):
+        return []
+    return sorted(set(re.findall(r'w:styleId="([^"]+)"', xml)))
+
+
 def _tri_state(node) -> bool | None:
     """True/False for an OOXML on/off toggle, None when the element is absent."""
     if node is None:
@@ -3502,6 +3517,227 @@ def validate_docx_parts(path: Path) -> dict:
         errs.append(f"schema check failed: {schema_detail}")
     return {"file": str(path), "kind": "docx", "ok": not errs, "errors": errs,
             "schema_ok": schema_ok, "detail": schema_detail if schema_ok is None else "valid"}
+
+
+# --------------------------------------------------------------------------
+# Official venue templates: restyle a package into the journal's own DOCX
+# --------------------------------------------------------------------------
+
+_STYLE_REF_RE = re.compile(r'<w:(pStyle|rStyle)\b[^>]*?w:val="([^"]+)"')
+# Direct properties the template's styles are supposed to own. Semantic run
+# formatting (b/i/u/color/vertAlign/...) is deliberately NOT stripped.
+_DIRECT_FORMAT_PATTERNS = (
+    r"<w:spacing(?=[\s/>])[^>]*/>",
+    r"<w:ind(?=[\s/>])[^>]*/>",
+    r"<w:jc(?=[\s/>])[^>]*/>",
+    r"<w:rFonts(?=[\s/>])[^>]*/>",
+    r"<w:sz(?=[\s/>])[^>]*/>",
+    r"<w:szCs(?=[\s/>])[^>]*/>",
+)
+_SECT_RE = re.compile(r"<w:sectPr(?=[\s>])[\s\S]*?</w:sectPr>")
+
+
+def _style_index(styles_xml: str) -> tuple:
+    """({styleId: (type, normalized-name)}, {(type, name): styleId})."""
+    try:
+        root = ET.fromstring(styles_xml)
+    except ET.ParseError:
+        return {}, {}
+    by_id, by_name = {}, {}
+    for st in root.iter(W + "style"):
+        sid = str(st.get(W + "styleId") or "")
+        if not sid:
+            continue
+        typ = str(st.get(W + "type") or "paragraph")
+        name_el = st.find(W + "name")
+        name = (str(name_el.get(W + "val")) if name_el is not None
+                and name_el.get(W + "val") else sid)
+        key = re.sub(r"[^a-z0-9]+", "", name.lower())
+        by_id[sid] = (typ, key)
+        by_name.setdefault((typ, key), sid)
+    return by_id, by_name
+
+
+def _strip_direct_format(para: str) -> tuple:
+    """(fragment, removed_count): drop direct props that defeat a template style."""
+    removed = 0
+    for pat in _DIRECT_FORMAT_PATTERNS:
+        para, n = re.subn(pat, "", para)
+        removed += n
+    return para, removed
+
+
+def _remap_style_refs(xml: str, mapping: dict) -> tuple:
+    """(xml, count): rewrite pStyle/rStyle ids through the manuscript->template map."""
+    count = [0]
+
+    def sub(m):
+        new = mapping.get(m.group(2))
+        if not new or new == m.group(2):
+            return m.group(0)
+        count[0] += 1
+        return m.group(0).replace(f'w:val="{m.group(2)}"', f'w:val="{new}"')
+
+    return _STYLE_REF_RE.sub(sub, xml), count[0]
+
+
+def _adopt_page_geometry(doc_xml: str, template_doc_xml: str) -> tuple:
+    """(xml, applied): give the manuscript the template's last sectPr geometry."""
+    t_sects = list(_SECT_RE.finditer(template_doc_xml or ""))
+    m_sects = list(_SECT_RE.finditer(doc_xml))
+    if not t_sects or not m_sects:
+        return doc_xml, False
+    # CT_SectPr's child order; a replacement must keep the sequence valid even
+    # when the manuscript carries elements between the geometry children
+    # (lnNumType/pgNumType/...), which re-serializing from scratch would move.
+    order = ("headerReference", "footerReference", "footnotePr", "endnotePr", "type",
+             "pgSz", "pgMar", "paperSrc", "pgBorders", "lnNumType", "pgNumType", "cols",
+             "formProt", "vAlign", "noEndnote", "titlePg", "textDirection", "bidi",
+             "rtlGutter", "docGrid", "printerSettings", "sectPrChange")
+    tpl_sect = t_sects[-1].group(0)
+    geo = {tag: elem(tpl_sect, tag) for tag in ("pgSz", "pgMar", "cols", "docGrid")}
+    geo = {k: v for k, v in geo.items() if v}
+    if not geo:
+        return doc_xml, False
+    body = m_sects[-1].group(0)
+    for tag in ("pgSz", "pgMar", "cols", "docGrid"):
+        el = elem(body, tag)
+        new_el = geo.get(tag)
+        if el and new_el:
+            body = body.replace(el, new_el, 1)
+        elif new_el:
+            pos = body.rfind("</w:sectPr>")
+            idx = order.index(tag)
+            for m in re.finditer(r"<w:([A-Za-z]+)(?=[\s/>])", body):
+                name = m.group(1)
+                if name in order and order.index(name) > idx:
+                    pos = min(pos, m.start())
+                    break
+            body = body[:pos] + new_el + body[pos:]
+    return doc_xml[:m_sects[-1].start()] + body + doc_xml[m_sects[-1].end():], True
+
+
+def apply_word_template(src: Path, out: Path, template: Path) -> dict:
+    """Restyle one DOCX into the venue's official Word template.
+
+    The template's styles/theme/font table/numbering REPLACE the manuscript's
+    (the names are mapped by style NAME, so a manuscript that uses its own ids
+    still lands on the template's Heading 1/2, Title, Caption, ...), the
+    template's page geometry is adopted, and the direct fonts/sizes/spacing/
+    indentation that would otherwise override the styles are dropped on
+    styled paragraphs. Content, media, fields, headers/footers and relationships
+    are preserved; the document TEXT must be byte-identical (reported as
+    `text_unchanged`, and the caller keeps the original when it is not).
+    """
+    try:
+        with zipfile.ZipFile(src) as spkg, zipfile.ZipFile(template) as tpkg:
+            tnames = set(tpkg.namelist())
+            if "word/styles.xml" not in tnames or "word/document.xml" not in tnames:
+                return {"file": str(src), "ok": False,
+                        "error": "the template is not a readable Word template "
+                                 "(word/styles.xml / word/document.xml missing)"}
+            parts = {i.filename: spkg.read(i.filename) for i in spkg.infolist()}
+            src_styles = parts.get("word/styles.xml", b"").decode("utf-8", "replace")
+            tpl_styles = tpkg.read("word/styles.xml").decode("utf-8", "replace")
+            s_by_id, _s_names = _style_index(src_styles)
+            t_by_id, t_by_name = _style_index(tpl_styles)
+            mapping = {}
+            for sid, (typ, key) in s_by_id.items():
+                if sid in t_by_id:
+                    mapping[sid] = sid
+                elif (typ, key) in t_by_name:
+                    mapping[sid] = t_by_name[(typ, key)]
+            mapped_ids = set(mapping.values())
+            copied = []
+            for name in ("word/styles.xml", "word/fontTable.xml", "word/numbering.xml"):
+                if name in tnames:
+                    parts[name] = tpkg.read(name)
+                    copied.append(name)
+            for name in sorted(tnames):
+                if name.startswith("word/theme/"):
+                    parts[name] = tpkg.read(name)
+                    copied.append(name)
+            tpl_doc = tpkg.read("word/document.xml").decode("utf-8", "replace")
+
+            # A manuscript-only style the document still references must survive
+            # the styles.xml replacement (otherwise its pStyle/rStyle points at
+            # a definition that no longer exists).
+            doc_part_re = re.compile(r"word/(?:document|header\d*|footer\d*|footnotes|endnotes)\.xml")
+            ref_ids = set()
+            for name in sorted(parts):
+                if doc_part_re.fullmatch(name):
+                    xml = parts[name].decode("utf-8", "replace")
+                    ref_ids |= {m.group(2) for m in _STYLE_REF_RE.finditer(xml)}
+            kept_styles = []
+            for sid in sorted(ref_ids - set(t_by_id) - set(mapping)):
+                m = re.search(rf'<w:style\b[^>]*w:styleId="{re.escape(sid)}"[\s\S]*?</w:style>',
+                              src_styles)
+                if m:
+                    kept_styles.append(m.group(0))
+            if kept_styles:
+                tpl_styles = tpl_styles.replace("</w:styles>",
+                                                "".join(kept_styles) + "</w:styles>")
+                parts["word/styles.xml"] = tpl_styles.encode("utf-8")
+
+            remapped = stripped = 0
+            page_ok = False
+            for name in sorted(parts):
+                if not doc_part_re.fullmatch(name):
+                    continue
+                xml = parts[name].decode("utf-8", "replace")
+                new_xml, n = _remap_style_refs(xml, mapping)
+                remapped += n
+                # A paragraph whose style exists in the template follows that
+                # style: drop the direct geometry/typography that would hide it.
+                edits = []
+                for p0, p1, para in paragraphs(new_xml):
+                    pstyle = elem_val(ppr_of(para), "pStyle")
+                    # The reference was already rewritten to the TEMPLATE id, so
+                    # test against the mapped ids, not the manuscript's old ids.
+                    # An UNSTYLED paragraph also follows the template's default
+                    # (Normal/theme) once its direct font/size/spacing overrides
+                    # are gone; a paragraph with an unmapped custom style is left
+                    # alone (there is no template equivalent to fall back to).
+                    if pstyle and pstyle not in mapped_ids:
+                        continue
+                    stripped_para, k = _strip_direct_format(para)
+                    if k:
+                        stripped += k
+                        edits.append((p0, p1, stripped_para))
+                if edits:
+                    new_xml = apply_edits(new_xml, edits)
+                if name == "word/document.xml":
+                    new_xml, page_ok = _adopt_page_geometry(new_xml, tpl_doc)
+                if new_xml != xml:
+                    parts[name] = new_xml.encode("utf-8")
+            with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+                for name, data in parts.items():
+                    z.writestr(name, data)
+    except (OSError, zipfile.BadZipFile, KeyError) as e:
+        return {"file": str(src), "ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    def _text(p: Path) -> str:
+        with zipfile.ZipFile(p) as z:
+            xml = z.read("word/document.xml").decode("utf-8", "replace")
+        return "\n".join(t for t in (text_of(par[2]) for par in paragraphs(xml)) if t.strip())
+
+    try:
+        text_ok = _text(src) == _text(out)
+        with zipfile.ZipFile(out) as z:
+            for name in ("word/document.xml", "word/styles.xml"):
+                ET.fromstring(z.read(name))
+    except (OSError, zipfile.BadZipFile, ET.ParseError, KeyError) as e:
+        return {"file": str(src), "ok": False, "error": f"verification failed: {e}"}
+    changes = [f"copied {len(copied)} template part(s)",
+               f"remapped {remapped} style reference(s)"]
+    if stripped:
+        changes.append(f"removed {stripped} direct formatting propert(ies)")
+    if page_ok:
+        changes.append("adopted the template page geometry")
+    return {"file": str(src), "template": str(template), "ok": bool(text_ok),
+            "text_unchanged": bool(text_ok), "changes": changes,
+            "styles_copied": copied, "style_refs_remapped": remapped,
+            "direct_format_removed": stripped, "page_geometry": page_ok}
 
 
 def validate_latex(path: Path, workdir: Path = None, timeout: int = 300) -> dict:

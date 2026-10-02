@@ -1884,6 +1884,105 @@ def venue_official_dirs(venue_id, root=None, profiles_dir=None) -> list:
     return out
 
 
+def official_template_files(venue_id, root=None, profiles_dir=None) -> dict:
+    """The venue's OWN deliverable templates, resolved per format.
+
+    Returns `{"official_dir", "word": {"main", "supplementary"}, "latex":
+    {"sample", "cls": [...], "bst": [...]}, "sha256": {path: digest}}`; an empty
+    dict when the venue ships no `.official` corpus. The ROOT's copy wins (setup
+    copies the whole venue_profiles/ tree into the root), so a root-local update
+    is what runs.
+
+    Roles are resolved from the file names the journals use (a Word template
+    with "template" in its name and a supplementary sibling; a LaTeX sample
+    `.tex` plus the `.cls`/`.bst` it needs). Nothing outside `.official` is
+    consulted, and the files are never modified.
+    """
+    vid = str(venue_id or "").strip().lower()
+    dirs = venue_official_dirs(vid, root, profiles_dir)
+    if not dirs:
+        return {}
+    d = Path(dirs[0])
+    word, latex = {}, {}
+    for p in sorted(d.rglob("*")):
+        if not p.is_file():
+            continue
+        low = p.name.lower()
+        if p.suffix.lower() in (".docx", ".dotx"):
+            if "supp" in low and "supplementary" not in word:
+                word["supplementary"] = p
+            elif "supp" not in low and "main" not in word:
+                word["main"] = p
+            elif "main" not in word:
+                word["main"] = p
+        elif p.suffix.lower() in (".tex", ".ltx"):
+            if "supp" not in low and "sample" not in latex:
+                latex["sample"] = p
+            elif "supp" in low and "supplementary" not in latex:
+                latex["supplementary"] = p
+        elif p.suffix.lower() == ".cls":
+            latex.setdefault("cls", []).append(p)
+        elif p.suffix.lower() == ".bst":
+            latex.setdefault("bst", []).append(p)
+    # Prefer a file that literally calls itself the template for the main role.
+    if not word.get("main") or "template" not in Path(word["main"]).name.lower():
+        cands = [p for p in sorted(d.rglob("*"))
+                 if p.is_file() and p.suffix.lower() in (".docx", ".dotx")
+                 and "template" in p.name.lower() and "supp" not in p.name.lower()]
+        if cands:
+            word["main"] = cands[0]
+    files = {}
+    for role, p in list(word.items()) + list(latex.items()):
+        for q in (p if isinstance(p, list) else [p]):
+            if isinstance(q, Path) and q.is_file():
+                files[str(q)] = sha256_file(q)
+    return {"official_dir": d, "word": word, "latex": latex, "sha256": files}
+
+
+def stage_venue_template(ctx: "Ctx", sb: Path) -> dict:
+    """Stage the venue's official templates into one sandbox, read-only.
+
+    A prompt that says "use the venue's own template" is not actionable when the
+    template lives outside the sandbox: agents are confined to their sandbox
+    (plus the skills). Every producing/reviewing sandbox therefore gets a
+    `venue_template/` copy (sha256-pinned in its own manifest) when the venue
+    ships one. Returns the staged manifest (empty when there is nothing to
+    stage), and is idempotent.
+    """
+    res = official_template_files(venue_id_of(ctx), ctx.root)
+    if not res or not venue_templates_enabled():
+        return {}
+    dst = sb / "venue_template"
+    staged = {}
+    for role, value in (("word", res.get("word") or {}), ("latex", res.get("latex") or {})):
+        for key, p in value.items():
+            for q in (p if isinstance(p, list) else [p]):
+                if not isinstance(q, Path) or not q.is_file():
+                    continue
+                target = dst / role / q.name
+                if not target.is_file() or sha256_file(target) != sha256_file(q):
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(q, target)
+                with contextlib.suppress(OSError):
+                    os.chmod(target, 0o444)
+                staged[f"{role}/{q.name}"] = sha256_file(target)
+    if staged:
+        write_json_atomic(dst / "manifest.json",
+                          {"venue": venue_id_of(ctx), "files": staged})
+    return staged
+
+
+def venue_templates_enabled() -> bool:
+    """Is the official-template pass on? Default YES; `PAPER_VENUE_TEMPLATES=0` opts out.
+
+    The restyle is default-on because the operator asked for template
+    conformance; the escape hatch exists for a venue whose template is wrong or
+    for a run that must keep the author's own formatting byte-for-byte.
+    """
+    v = os.environ.get("PAPER_VENUE_TEMPLATES", "").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
 def extract_official_template(path: Path) -> dict:
     """Structure of ONE journal-provided template file (never prose)."""
     suffix = path.suffix.lower()
@@ -1996,7 +2095,13 @@ def official_skeleton(records: list, explicit_requirements: dict = None) -> dict
 
 
 def official_template_requirements(venue_id, root=None) -> dict:
-    """The pinned official-template requirements a session must conform to."""
+    """The pinned official-template requirements a session must conform to.
+
+    `advisory_sections` carries the recent-practice order from the same pack:
+    some official template packs yield only one parsible official section
+    (Frontiers' does), so the architecture-order scan falls back to the
+    advisory order -- always labelled as advisory in the row it emits.
+    """
     pack = venue_pack_dir(venue_id, root)
     if pack is None:
         return {}
@@ -2008,23 +2113,65 @@ def official_template_requirements(venue_id, root=None) -> dict:
     if not isinstance(official, dict) or not official.get("sections") \
             and not official.get("mandatory_sections"):
         return {}
+    norm = (data or {}).get("norm") or {}
+    advisory = [str(s.get("title") or "") for s in (norm.get("sections") or [])
+                if isinstance(s, dict) and str(s.get("title") or "").strip()]
+    if advisory:
+        official = dict(official)
+        official["advisory_sections"] = advisory
     return official
 
 
-def scan_template_conformance(sources: list, requirements: dict) -> dict:
+_TEMPLATE_HEADING_KEY_RE = re.compile(r"[^a-z0-9]+")
+_TEMPLATE_CAPTION_RE = re.compile(r"^\s*(Figure|Fig\.?|Table)\s*(\d{1,3})[A-Za-z]?\b", re.I)
+
+
+def _heading_key(text) -> str:
+    return _TEMPLATE_HEADING_KEY_RE.sub("", str(text or "").lower())
+
+
+def _docx_style_ids(path: Path) -> list:
+    """The style ids a DOCX declares, via the formatter module ([] when absent)."""
+    mod = _format_module()
+    fn = getattr(mod, "docx_style_ids", None)
+    return fn(path) if fn is not None else []
+
+
+def scan_template_conformance(sources: list, requirements: dict,
+                              word_template: Path = None,
+                              word_template_supplementary: Path = None) -> dict:
     """Code-side official-template conformance rows over a corpus.
 
     `sources` is the same [(dir, prefix, excluded_top)] shape the other scans
     take. Reports, never gates: a row names the requirement and the file that
     would satisfy it. Detects the LaTeX documentclass when one is required, each
-    mandatory section (by heading/title text), and the statement sections the
-    official templates carry.
+    mandatory section (by heading/title text), the statement sections, the
+    ARCHITECTURE order (section sequence and figure/table caption sequence) and,
+    when a Word template is given, whether each .docx carries the template's
+    style ids.
     """
     req = requirements or {}
     mandatory = [str(s) for s in (req.get("mandatory_sections") or []) if str(s).strip()]
     statements = [str(s.get("label")) for s in (req.get("statements") or [])]
     want_class = str(req.get("documentclass") or "").strip()
+    official_titles = [str(s.get("title") or "") for s in (req.get("sections") or [])
+                       if isinstance(s, dict) and str(s.get("title") or "").strip()]
+    advisory = [str(t) for t in (req.get("advisory_sections") or []) if str(t).strip()]
+    # The official pack can yield a single parsable section (Frontiers). Then the
+    # recent-practice order is the only usable architecture order; the rows say
+    # which basis they used.
+    order_basis = "official template"
+    order_titles = official_titles
+    if len(order_titles) < 2 and len(advisory) >= 2:
+        order_titles, order_basis = advisory, "recent practice (advisory)"
+    order_index = {}
+    for i, t in enumerate(order_titles):
+        order_index.setdefault(_heading_key(t), i)
+
     have_class, texts, docs = "", [], set()
+    doc_headings = []           # (doc, title) in document order
+    caption_rows = []           # (doc, is_table, number)
+    docx_paths = {}             # doc -> Path
     for src, prefix, excluded in sources:
         if not src.is_dir():
             continue
@@ -2040,9 +2187,22 @@ def scan_template_conformance(sources: list, requirements: dict) -> dict:
             ext = p.suffix.lower()
             if ext in LENGTH_DOCX_EXTS:
                 paras = _docx_paragraphs(p)
-                if paras is not None:
-                    texts.append("\n".join(paras))
-                    docs.add(doc)
+                if paras is None:
+                    continue
+                texts.append("\n".join(paras))
+                docs.add(doc)
+                docx_paths[doc] = p
+                seen = set()
+                for para in paras:
+                    line = para.strip()
+                    key = _heading_key(line)
+                    if key in order_index and key not in seen:
+                        seen.add(key)
+                        doc_headings.append((doc, order_titles[order_index[key]]))
+                    m = _TEMPLATE_CAPTION_RE.match(line)
+                    if m:
+                        caption_rows.append((doc, m.group(1).lower().startswith("tab"),
+                                             int(m.group(2))))
             elif ext in LENGTH_TEX_EXTS:
                 try:
                     text = p.read_text(encoding="utf-8", errors="replace")
@@ -2050,15 +2210,34 @@ def scan_template_conformance(sources: list, requirements: dict) -> dict:
                     continue
                 texts.append(text)
                 docs.add(doc)
+                for m in TEX_SECTION_RE.finditer(text):
+                    key = _heading_key(m.group(2))
+                    if key in order_index:
+                        doc_headings.append((doc, order_titles[order_index[key]]))
+                for line in text.splitlines():
+                    m = _TEMPLATE_CAPTION_RE.match(line)
+                    if m:
+                        caption_rows.append((doc, m.group(1).lower().startswith("tab"),
+                                             int(m.group(2))))
                 m = TEX_DOCCLASS_RE.search(text)
                 if m and not have_class:
                     have_class = m.group(1).strip()
             elif ext in LENGTH_TEXT_EXTS:
                 try:
-                    texts.append(p.read_text(encoding="utf-8", errors="replace"))
+                    text = p.read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     continue
+                texts.append(text)
                 docs.add(doc)
+                for m in MD_HEADING_RE.finditer(text):
+                    key = _heading_key(m.group(2))
+                    if key in order_index:
+                        doc_headings.append((doc, order_titles[order_index[key]]))
+                for line in text.splitlines():
+                    m = _TEMPLATE_CAPTION_RE.match(line)
+                    if m:
+                        caption_rows.append((doc, m.group(1).lower().startswith("tab"),
+                                             int(m.group(2))))
     blob = "\n".join(texts)
     low = blob.lower()
     missing_sections = [s for s in mandatory if s.strip().lower() not in low]
@@ -2072,13 +2251,61 @@ def scan_template_conformance(sources: list, requirements: dict) -> dict:
         if not ((pats[s].search(blob) if s in pats else None)
                 or s.strip().lower() in low)]
     class_ok = (not want_class or not have_class or have_class == want_class)
+    # Architecture order: the first inversion per document, against the official
+    # order (or the labelled advisory order when the official pack yields none).
+    order_rows = []
+    by_doc = {}
+    for doc, title in doc_headings:
+        by_doc.setdefault(doc, []).append(title)
+    for doc, seq in sorted(by_doc.items()):
+        for i in range(len(seq)):
+            inversion = next((j for j in range(i + 1, len(seq))
+                              if order_index.get(_heading_key(seq[j]), -1)
+                              < order_index.get(_heading_key(seq[i]), -1)), None)
+            if inversion is not None:
+                order_rows.append(
+                    f"{doc}: section {seq[inversion]!r} appears before {seq[i]!r} "
+                    f"(order basis: {order_basis}: {' > '.join(order_titles)})")
+                break
+    # Figure/table labels: first occurrences must be ascending and gap-free.
+    label_rows = []
+    for is_table, label in ((False, "Figure"), (True, "Table")):
+        nums = [n for _doc, table, n in caption_rows if table is is_table]
+        first = []
+        for n in nums:
+            if n not in first:
+                first.append(n)
+        if first and first != sorted(first):
+            label_rows.append(f"{label} captions are out of order: first occurrences {first}")
+        if first:
+            gaps = sorted(set(range(1, max(first) + 1)) - set(first))
+            if gaps:
+                label_rows.append(f"{label} numbering has gaps: {gaps}")
+    # Word template styles: every corpus .docx must carry the template's ids.
+    word_styles_missing = []
+    if word_template is not None:
+        main_ids = set(_docx_style_ids(Path(word_template)))
+        supp_ids = (set(_docx_style_ids(Path(word_template_supplementary)))
+                    if word_template_supplementary is not None else set())
+        if main_ids:
+            for doc, path in sorted(docx_paths.items()):
+                want = supp_ids if (supp_ids and "supp" in Path(doc).name.lower()) else main_ids
+                missing = sorted(want - set(_docx_style_ids(path)))
+                if missing:
+                    word_styles_missing.append({"document": doc, "missing": missing[:12],
+                                                "missing_count": len(missing)})
+    conforms = (bool(req) and not missing_sections and not missing_statements and class_ok
+                and not order_rows and not label_rows and not word_styles_missing)
     return {"official": bool(req), "required": {"documentclass": want_class,
                                                 "mandatory_sections": mandatory,
                                                 "statements": statements},
             "found": {"documentclass": have_class, "documents": sorted(docs)},
             "missing_sections": missing_sections, "missing_statements": missing_statements,
-            "class_ok": class_ok,
-            "conforms": bool(req) and not missing_sections and not missing_statements and class_ok,
+            "class_ok": class_ok, "order_basis": order_basis,
+            "order_rows": order_rows, "label_rows": label_rows,
+            "word_styles_missing": word_styles_missing,
+            "word_template_ok": not word_styles_missing,
+            "conforms": conforms,
             "note": ("advisory, code-side: a row names a requirement the official template "
                      "demands and the corpus does not show; the review disposes it"
                      if req else "no official template pack for this venue")}
@@ -2549,6 +2776,12 @@ and statement placement; no prose was copied). Two tiers, with different authori
     finding may rest on a descriptive deviation alone. A missing MANDATORY section or a wrong
     class file is a real conformance finding; a deviation from the ADVISORY part is recorded
     under J5 with one sentence and is allowed.
+  * ARCHITECTURE AND FORMATTING FOLLOW THE TEMPLATE when the venue ships one: the
+    section/subsection set and their ORDER, the declaration blocks, the figure/table labels and
+    their order, and the fonts, paragraph spacing, indentation and heading styles all come from
+    the template's own file. A read-only copy is staged in `venue_template/` and every produced
+    .docx is restyled into the template's styles by the code-side normalizer before the
+    postcheck -- keep those styles and never re-copy the previous venue's.
 @@TRANSFER@@
 
 @@NORM@@
@@ -2573,9 +2806,62 @@ def venue_norm_block(venue_id, root=None, transfer: bool = False) -> str:
     except OSError:
         return ""
     digest = sha256_file(pack / VENUE_NORM_FILE)
-    return (VENUE_NORM_RULES.replace("@@NORM@@", summary)
-            .replace("@@TRANSFER@@", VENUE_TRANSFER_RULES if transfer else "")
-            + f"\n\n(pack: {pack} -- {VENUE_NORM_FILE} sha256 {digest[:16]})")
+    text = (VENUE_NORM_RULES.replace("@@NORM@@", summary)
+            .replace("@@TRANSFER@@", VENUE_TRANSFER_RULES if transfer else ""))
+    files = official_template_files(venue_id, root) if venue_templates_enabled() else {}
+    word = files.get("word") or {}
+    latex = files.get("latex") or {}
+    if word or latex:
+        lines = ["", "TEMPLATE FILES FOR THIS RUN (producer/reviewer sandboxes carry a "
+                     "read-only `venue_template/` copy; the venue's own files are named here):"]
+        if word.get("main"):
+            lines.append(f"  * Word (.docx): venue_template/word/{Path(word['main']).name}"
+                         + (f"; supplementary: venue_template/word/"
+                            f"{Path(word['supplementary']).name}" if word.get("supplementary")
+                            else ""))
+        if latex.get("sample"):
+            lines.append(f"  * LaTeX: venue_template/latex/{Path(latex['sample']).name}"
+                         + ("; class: " + ", ".join(Path(p).name for p in latex.get("cls") or [])
+                            if latex.get("cls") else "")
+                         + ("; bibliography style: "
+                            + ", ".join(Path(p).name for p in latex.get("bst") or [])
+                            if latex.get("bst") else ""))
+        lines.append("  * Every produced .docx is restyled into the Word template's styles and "
+                     "theme by the code-side normalizer before the postcheck. Keep the template's "
+                     "heading styles, statement names, and figure/table label order; do not "
+                     "reintroduce the previous venue's styles.")
+        text += "\n" + "\n".join(lines)
+    return text + f"\n\n(pack: {pack} -- {VENUE_NORM_FILE} sha256 {digest[:16]})"
+
+
+def venue_norm_for(ctx: "Ctx") -> str:
+    """The template/structure block for ONE root, with the mode's transfer rules."""
+    if getattr(ctx, "root", None) is None:
+        return ""                      # a stub/partial context carries no root-local profiles
+    return venue_norm_block(venue_id_of(ctx), ctx.root,
+                            transfer=(journal_mode_of(ctx) == JOURNAL_MODE_TRANSFER))
+
+
+def venue_word_templates(ctx: "Ctx") -> dict:
+    """{"main": Path, "supplementary": Path} of the venue's official Word templates.
+
+    Empty when the venue ships no `.official` Word template; passed to the
+    formatter so every produced .docx is restyled into the journal's own
+    template instead of merely being described to the agents.
+    """
+    root = getattr(ctx, "root", None)
+    if root is None:
+        return {}                      # a stub/partial context carries no root-local profiles
+    if not venue_templates_enabled():
+        return {}                      # operator opt-out (PAPER_VENUE_TEMPLATES=0)
+    res = official_template_files(venue_id_of(ctx), root)
+    word = res.get("word") or {}
+    out = {}
+    if word.get("main"):
+        out["main"] = Path(word["main"])
+    if word.get("supplementary"):
+        out["supplementary"] = Path(word["supplementary"])
+    return out
 
 
 def _ctx_cfg(ctx) -> dict:
@@ -3258,12 +3544,16 @@ DEFAULT_FORMAT_FIX = "auto"
 # `run --only`: run a subset of the round's stages. `merge` is an alias for the
 # integration stage (the pipeline's "merge from the other versions" step), and
 # `a`/`w`/`i` are the short spellings used in the round plan.
-ONLY_STAGES = ("rewrite", "review", "audit", "revise", "integrate", "judge")
+ONLY_STAGES = ("rewrite", "review", "audit", "revise", "integrate", "judge",
+               "feedback", "concerns", "response")
 ONLY_ALIASES = {"w": "rewrite", "rewrites": "rewrite", "r": "review", "reviews": "review",
                 "aud": "audit", "audits": "audit", "auditor": "audit", "verify": "audit",
                 "a": "revise", "a2": "revise", "revises": "revise", "revision": "revise",
                 "i": "integrate", "integrations": "integrate", "integration": "integrate",
-                "merge": "integrate", "merges": "integrate", "j": "judge", "judges": "judge"}
+                "merge": "integrate", "merges": "integrate", "j": "judge", "judges": "judge",
+                "fb": "feedback", "feedbacks": "feedback",
+                "concern": "concerns",
+                "resp": "response", "responses": "response", "response-to-reviewers": "response"}
 # The auditor sits between the reviewer and the reviser: it disposes the frozen
 # review's findings (confirm / drop-with-evidence) and attacks the reviewer's
 # boilerplate dispositions, and the reviser consumes the AUDITED list. `off`
@@ -8268,7 +8558,7 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
                   caption_limit: int = DEFAULT_CAPTION_LIMIT,
                   zotero: str = DEFAULT_ZOTERO_MODE,
                   prior_failure: str = "", audit: bool = False, venue=None,
-                  journal_block: str = "") -> str:
+                  journal_block: str = "", venue_norm: str = "") -> str:
     """Phase 2 prompt: $paper-revise, consuming the round's frozen review/ copy."""
     prof = _as_profile(venue)
     audit_block = ("""
@@ -8310,12 +8600,13 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(REVISED_DIR))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("revise", run_id, r))
     return (text + shared_blocks() + attached_head(prof) + "\n" + ATTACHED_PHASE2
-            + REVISE_TAIL + journal_block)
+            + REVISE_TAIL + journal_block + venue_norm)
 
 
 
 def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
-                 zotero: str = DEFAULT_ZOTERO_MODE, venue=None) -> str:
+                 zotero: str = DEFAULT_ZOTERO_MODE, venue=None,
+                 venue_norm: str = "") -> str:
     """The AUDITOR prompt: review -> AUDIT -> revise.
 
     The auditor consumes the round's FROZEN review (read-only) and produces the
@@ -8346,14 +8637,14 @@ def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
     text = render_venue_tokens(text, prof)
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule("audit"))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("audit", run_id, r))
-    return text + shared_blocks() + AUDIT_TAIL
+    return text + shared_blocks() + AUDIT_TAIL + venue_norm
 
 
 def integrate_prompt(sandbox: Path, run_id: str, r: int,
                      self_id: str, other_ids: list,
                      caption_limit: int = DEFAULT_CAPTION_LIMIT,
                      zotero: str = DEFAULT_ZOTERO_MODE,
-                     prior_failure: str = "", venue=None) -> str:
+                     prior_failure: str = "", venue=None, venue_norm: str = "") -> str:
     """Integration prompt: self/ reworked with ALL the other pool members.
 
     One run per pool member (there are no pairwise arms): the base stays the
@@ -8391,7 +8682,7 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
     text = text.replace("@@SELFCHECK@@", selfcheck_block("integrate", run_id, r))
     text = apply_hierarchy_reconcile(text, "integrate")
     return (text + shared_blocks() + attached_phase1(prof) + "\n" + ATTACHED_PHASE2
-            + INTEGRATE_TAIL)
+            + INTEGRATE_TAIL + venue_norm)
 
 
 def rewrite_prompt(sandbox: Path, run_id: str, r: int,
@@ -8445,7 +8736,8 @@ def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index
                  judge_total: int, opponent_labels: list,
                  caption_limit: int = DEFAULT_CAPTION_LIMIT,
                  zotero: str = DEFAULT_ZOTERO_MODE,
-                 field_first: bool = False, venue=None, dedup_mode: str = "off") -> str:
+                 field_first: bool = False, venue=None, dedup_mode: str = "off",
+                 venue_norm: str = "") -> str:
     """Relative-judgment prompt, one per (version, judge) session (Section C4)."""
     prof = _as_profile(venue)
     labels = ", ".join(opponent_labels)
@@ -8494,7 +8786,7 @@ def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index
         # The OPT-IN structured-location dedup needs machine-locatable evidence
         # rows; in the default mode this block is never concatenated.
         text += DEDUP_LOCATION_JUDGE_RULE
-    return text + shared_blocks()
+    return text + shared_blocks() + venue_norm
 
 
 # Readable aliases for the structural summary in the specification.
@@ -10337,13 +10629,19 @@ def _fmt_corpus_files(dirp: Path) -> list:
     return out
 
 
-def fix_docx_in_place(path: Path, policy: dict) -> dict:
+def fix_docx_in_place(path: Path, policy: dict, template: Path = None) -> dict:
     """Repair one corpus DOCX in place, or leave it untouched and say why.
 
     The fixer's own verification decides: a file is replaced only when the
     document text is unchanged (quote-policy edits excepted), the other parts
     stayed byte-identical, the schema check passed when available, and every
     mechanical finding is gone. A failed verification keeps the original file.
+
+    When `template` (the venue's OWN Word template) is given, the package is
+    additionally restyled into it: template styles/theme/font-table/numbering,
+    style-name mapping, page geometry, and removal of the direct font/size/
+    spacing overrides that would hide the styles. The text must stay identical;
+    a template step that cannot prove that is skipped and reported.
     """
     mod = _format_module()
     if mod is None:
@@ -10355,19 +10653,42 @@ def fix_docx_in_place(path: Path, policy: dict) -> dict:
         with contextlib.suppress(OSError):
             tmp.unlink()
         return {"file": path.name, "error": f"fixer failed: {type(e).__name__}: {e}"}
-    if not rep.get("changes"):
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-        return {"file": path.name, "changes": [], "applied": False,
-                "note": "already clean"}
-    if not rep.get("ok"):
+    if rep.get("changes") and not rep.get("ok"):
         with contextlib.suppress(OSError):
             tmp.unlink()
         return {"file": path.name, "changes": rep.get("changes") or [], "applied": False,
                 "error": "self-verification failed (the original file was kept)",
                 "verified": rep.get("verified")}
+    base = tmp if rep.get("changes") else path
+    changes = list(rep.get("changes") or [])
+    template_report = None
+    tpl_tmp = None
+    if template is not None:
+        tpl_tmp = path.with_name(f".{path.name}.papertpl{os.getpid()}.tmp")
+        try:
+            template_report = mod.apply_word_template(base, tpl_tmp, Path(template))
+        except Exception as e:                                    # noqa: BLE001
+            template_report = {"file": path.name, "ok": False,
+                               "error": f"{type(e).__name__}: {e}"}
+        if template_report.get("ok"):
+            if base == tmp:
+                with contextlib.suppress(OSError):
+                    tmp.unlink()
+            base = tpl_tmp
+            changes.append("venue template: "
+                           + "; ".join(template_report.get("changes") or []))
+        else:
+            with contextlib.suppress(OSError):
+                tpl_tmp.unlink()
+    if base == path and not changes:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        out = {"file": path.name, "changes": [], "applied": False, "note": "already clean"}
+        if template_report is not None:
+            out["template"] = template_report
+        return out
     try:
-        os.replace(tmp, path)
+        os.replace(base, path)
     except OSError:
         # The formatter writes the repaired package NEXT TO the original and
         # swaps it in: replacing an entry needs WRITE on the directory, which an
@@ -10376,23 +10697,29 @@ def fix_docx_in_place(path: Path, policy: dict) -> dict:
         # _fmt_corpus_files), so clearing the blocking mode is safe.
         make_writable(path.parent, directory=True)
         try:
-            os.replace(tmp, path)
+            os.replace(base, path)
         except OSError as e:
             with contextlib.suppress(OSError):
-                tmp.unlink()
-            return {"file": path.name, "changes": rep.get("changes") or [],
-                    "applied": False,
+                Path(base).unlink()
+            return {"file": path.name, "changes": changes, "applied": False,
                     "error": f"the repaired file could not replace the original: {e}",
                     "verified": rep.get("verified")}
-    return {"file": path.name, "changes": rep.get("changes") or [], "applied": True,
-            "verified": {k: rep["verified"].get(k) for k in
-                         ("parts_intact", "text_identical", "text_diff_only_quotes",
-                          "schema_ok", "mechanical_findings_before",
-                          "mechanical_findings_after")}}
+    for leftover in (tmp, tpl_tmp):
+        if leftover is not None and leftover != base:
+            with contextlib.suppress(OSError):
+                leftover.unlink()
+    out = {"file": path.name, "changes": changes, "applied": True,
+           "verified": {k: (rep.get("verified") or {}).get(k) for k in
+                        ("parts_intact", "text_identical", "text_diff_only_quotes",
+                         "schema_ok", "mechanical_findings_before",
+                         "mechanical_findings_after")}}
+    if template_report is not None:
+        out["template"] = template_report
+    return out
 
 
 def normalize_formatting_in_dir(dirp: Path, policy: dict, label: str,
-                                warns=None, artifacts_dir=None) -> dict:
+                                warns=None, artifacts_dir=None, template=None) -> dict:
     """Repair every corpus DOCX in `dirp` and record a machine-readable artifact.
 
     Called by `setup` (the pristine copy), by every package-producing stage's
@@ -10401,11 +10728,28 @@ def normalize_formatting_in_dir(dirp: Path, policy: dict, label: str,
     (`FORMAT_FIX.json`, plus before/after scans) lands in `artifacts_dir` (the
     run sandbox), never inside the package: `work/` scratch is stripped from the
     corpus but a top-level JSON would become submission content.
+
+    `template` is the venue's OWN Word template: a path, or
+    `{"main": path, "supplementary": path}` so a supplementary-material file is
+    restyled into the journal's supplementary template. Every restyle keeps the
+    document text byte-identical or the original file is kept and the failure is
+    recorded.
     """
     info_before = scan_format_in_sources([(dirp, "", ())], policy=policy)
     per_file, applied, failed = [], [], []
+
+    def template_for(f: Path):
+        if template is None:
+            return None
+        if isinstance(template, dict):
+            supp = template.get("supplementary")
+            if supp and re.search(r"(?:^|[_\-.])supp", f.stem, re.I):
+                return supp
+            return template.get("main")
+        return Path(template)
+
     for f in _fmt_corpus_files(dirp):
-        rep = fix_docx_in_place(f, policy)
+        rep = fix_docx_in_place(f, policy, template=template_for(f))
         per_file.append(rep)
         if rep.get("applied"):
             applied.append(rep)
@@ -10442,6 +10786,9 @@ def normalize_formatting_in_dir(dirp: Path, policy: dict, label: str,
         if failed:
             msg += (f" -- {len(failed)} file(s) left untouched after a failed "
                     f"self-verification: {', '.join(summary['failed'][:3])}")
+        tpl_n = sum(1 for r in per_file if (r.get("template") or {}).get("ok"))
+        if tpl_n:
+            msg += f"; {tpl_n} restyled into the venue's official Word template"
         warns.append(msg)
     return summary
 
@@ -10515,7 +10862,7 @@ def _format_fix_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, warns: list,
     try:
         rec["format_fix"] = normalize_formatting_in_dir(
             pkg_dir, pre_judge_format_policy(ctx), rec["id"], warns=warns,
-            artifacts_dir=ctx.sandbox_of(rec))
+            artifacts_dir=ctx.sandbox_of(rec), template=venue_word_templates(ctx) or None)
     except Exception as e:                                            # noqa: BLE001
         rec["format_fix"] = {"label": rec["id"], "error": f"{type(e).__name__}: {e}"}
         warns.append(f"FORMAT-FIX: the code-side formatting normalization could not run "
@@ -11328,7 +11675,11 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
         try:
             req = official_template_requirements(venue_id_of(ctx), ctx.root)
             if req:
-                conf = scan_template_conformance([(corpus_dir, "", CORPUS_EXCLUDE_TOP)], req)
+                _w = venue_word_templates(ctx) or {}
+                word_tpl = _w.get("main")
+                conf = scan_template_conformance([(corpus_dir, "", CORPUS_EXCLUDE_TOP)], req,
+                                                 word_template=word_tpl,
+                                                 word_template_supplementary=_w.get("supplementary"))
                 ev["official_template"] = conf
                 write_json_atomic(work / "OFFICIAL_TEMPLATE.json", conf)
                 rows = ([{"row": f"mandatory section missing: {s}"} for s in
@@ -11337,7 +11688,12 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
                            conf["missing_statements"]]
                         + ([] if conf["class_ok"] else
                            [{"row": f"documentclass {conf['found']['documentclass']!r} != "
-                                    f"required {conf['required']['documentclass']!r}"}]))
+                                    f"required {conf['required']['documentclass']!r}"}])
+                        + [{"row": r} for r in conf.get("order_rows") or []]
+                        + [{"row": r} for r in conf.get("label_rows") or []]
+                        + [{"row": f"{m['missing_count']} template style(s) missing from "
+                                   f"{m['document']}: {', '.join(m['missing'][:6])}"}
+                           for m in conf.get("word_styles_missing") or []])
                 md = ["# OFFICIAL TEMPLATE — code-side conformance (advisory evidence)", "",
                       f"Required by the venue's own template pack: class "
                       f"`{conf['required']['documentclass'] or '(unspecified)'}`; mandatory "
@@ -12471,7 +12827,8 @@ def parse_only_stage(token: str, item: str) -> str:
     name = ONLY_ALIASES.get(token, token)
     if name not in ONLY_STAGES:
         die(f"--only: unknown stage {item!r}; choose from {', '.join(ONLY_STAGES)} "
-            f"(aliases: merge=integrate, w=rewrite, a/a2=revise, j=judge)")
+            f"(aliases: merge=integrate, w=rewrite, a/a2=revise, j=judge, "
+            f"fb=feedback, resp=response)")
     return name
 
 
@@ -12627,14 +12984,17 @@ class OnlySpec:
         vid = str(tok)
         if vid in ("review", "review_b"):
             return "review"
+        # Exact stage names win over the single-letter prefixes below: "audit"
+        # must not be read as "a" (revise), and the journal chain's stages are
+        # their own classes.
+        if vid in ("audit", "feedback", "concerns", "response"):
+            return vid
         if vid.startswith("w"):
             return "rewrite"
         if vid.startswith("a"):
             return "revise"
         if vid.startswith("i"):
             return "integrate"
-        if vid == "audit":
-            return "audit"
         return "review"
 
     def stage_selected(self, r: int, stage: str) -> bool:
@@ -12780,6 +13140,7 @@ def parse_only_spec(raw) -> OnlySpec:
         # ONE session of one round. A `_j<k>` tail makes it a judge session
         # (`r1_w2_j1`), the same selection as `r1_judge_w2_j1`.
         sel = re.fullmatch(r"r(\d+)\s*[_:/.-]\s*(w\d+|a\d+|i\d+|review|reviewer|audit|"
+                           r"feedback|concerns|response|"
                            r"rewriter\d+|reviser\d+|integrator\d+)"
                            r"((?:[_:/.-](?:b|j\d+))?)", token)
         if sel:
@@ -12965,7 +13326,8 @@ def _add_session_id(spec: "OnlySpec", r, session_id: str, part: str) -> None:
     if sid == "a1":
         die(f"--only: {part!r} names a1, the round base COPY -- it has no agent session "
             f"(use `reviser1` for the first reviser, which edits a1 into a2)")
-    if not re.fullmatch(r"(?:w\d+|a\d+|i\d+|review|review_b|audit)", sid):
+    if not re.fullmatch(r"(?:w\d+|a\d+|i\d+|review|review_b|audit|feedback|concerns|response)",
+                        sid):
         die(f"--only: {part!r} is not a session this pipeline knows (use a stage name, or a "
             f"session such as `rewriter1`, `reviser1`, `integrator1`, `review`, `audit`, `w2`, "
             f"`w2_j1`, `r1_w2`, `r1_judge_w2_j1`)")
@@ -13033,7 +13395,7 @@ def _session_token(raw: str, part: str) -> str:
     m = re.fullmatch(r"(reviewer|review)(_?b)?", tok)
     if m:
         return "review_b" if m.group(2) else "review"
-    if re.fullmatch(r"(?:a1|w\d+|a\d+|i\d+|orig|audit)", tok):
+    if re.fullmatch(r"(?:a1|w\d+|a\d+|i\d+|orig|audit|feedback|concerns|response)", tok):
         if tok == "a1":
             die(f"--only: {part!r} names a1, the round base COPY -- it has no agent session "
                 f"(use `reviser1` for the first reviser, which edits a1 into a2)")
@@ -15312,6 +15674,7 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
         if (fb / "feedback").is_dir():
             ensure_copy(fb / "feedback", sb / "feedback")
     (sb / REWRITTEN_DIR).mkdir(exist_ok=True)
+    stage_venue_template(ctx, sb)
     seed_evidence_pack(ctx, sb, sb / "base", "stage")
     note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / "PROMPT.md"
@@ -15327,10 +15690,7 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
                                                         if journal_mode_of(ctx) in
                                                         (JOURNAL_MODE_TRANSFER,
                                                          JOURNAL_MODE_RESUBMIT) else ""),
-                                         venue_norm=venue_norm_block(venue_id_of(ctx),
-                                                                     ctx.root,
-                                                                     transfer=(journal_mode_of(ctx)
-                                                                               == JOURNAL_MODE_TRANSFER))),
+                                         venue_norm=venue_norm_for(ctx)),
                           encoding="utf-8")
     rec = ctx.register(rid, "rewrite", r, f"runs/{rid}", upstream_run_id=rid_a1(r),
                        source_id=A1_ID, produces=vid)
@@ -15384,6 +15744,7 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
             ensure_copy(a_sb / REVIEW_DIR, sb / "review_a")
             inputs["review_a"] = hash_manifest(sb / "review_a")
     (sb / REVIEW_DIR).mkdir(exist_ok=True)
+    stage_venue_template(ctx, sb)
     # Seed the M20 formatting sweep: the code-side OOXML scan IS the enumeration
     # (text-only converters cannot see layout/character formatting), so the
     # orchestrator writes the rows before the agent starts and the prompt asks
@@ -15410,10 +15771,7 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
                                         split_mode=split_mode,
                                         scope=scope,
                                         venue=venue_profile_of(ctx),
-                                        venue_norm=venue_norm_block(venue_id_of(ctx),
-                                                                    ctx.root,
-                                                                    transfer=(journal_mode_of(ctx)
-                                                                              == JOURNAL_MODE_TRANSFER))),
+                                        venue_norm=venue_norm_for(ctx)),
                           encoding="utf-8")
     rec = ctx.register(rid, "review", r, f"runs/{rid}",
                        upstream_run_id=rid_a1(r), source_id=a1.get("source_id"))
@@ -15442,6 +15800,7 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
     ensure_pristine_input(ctx, sb / PRISTINE_DIR)
     ensure_copy(ctx.sandbox_of(rev_rec) / REVIEW_DIR, sb / REVIEW_DIR)
     (sb / "audit").mkdir(exist_ok=True)
+    stage_venue_template(ctx, sb)
     seed_evidence_pack(ctx, sb, sb / "base", "audit")
     note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / "PROMPT.md"
@@ -15449,7 +15808,8 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
         _copy_session_tools(sb)
         prompt.write_text(audit_prompt(sb, rid, r, prior_failure=note,
                                        zotero=zotero_mode_of(ctx),
-                                       venue=venue_profile_of(ctx)), encoding="utf-8")
+                                       venue=venue_profile_of(ctx),
+                                       venue_norm=venue_norm_for(ctx)), encoding="utf-8")
     rec = ctx.register(rid, "audit", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=a1.get("source_id"))
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
@@ -15513,6 +15873,7 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
         ensure_copy(ctx.sandbox_of(aud_rec) / "audit", sb / "audit")
         aud_manifest = hash_manifest(sb / "audit")
     (sb / REVISED_DIR).mkdir(exist_ok=True)
+    stage_venue_template(ctx, sb)
     seed_evidence_pack(ctx, sb, sb / "base", "stage")
     note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / "PROMPT.md"
@@ -15525,7 +15886,8 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
                                         venue=venue_profile_of(ctx),
                                         journal_block=(journal_revise_block(ctx)
                                                        if journal_mode_of(ctx) !=
-                                                       JOURNAL_MODE_NONE else "")),
+                                                       JOURNAL_MODE_NONE else ""),
+                                        venue_norm=venue_norm_for(ctx)),
                           encoding="utf-8")
     rec = ctx.register(rid, "revise", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=A1_ID, produces=vid)
@@ -15579,6 +15941,7 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
             rmtree_force(stale, ignore_errors=True)
     ensure_pristine_input(ctx, sb / PRISTINE_DIR)
     (sb / INTEGRATED_DIR).mkdir(exist_ok=True)
+    stage_venue_template(ctx, sb)
     seed_evidence_pack(ctx, sb, sb / "self", "stage")
     note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / "PROMPT.md"
@@ -15588,7 +15951,8 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
                                            caption_limit=caption_limit_of(ctx),
                                            zotero=zotero_mode_of(ctx),
                                            prior_failure=note,
-                                           venue=venue_profile_of(ctx)), encoding="utf-8")
+                                           venue=venue_profile_of(ctx),
+                                           venue_norm=venue_norm_for(ctx)), encoding="utf-8")
     rec = ctx.register(rid, "integrate", r, f"runs/{rid}", self_id=self_id,
                        other_ids=other_ids, pool_ids=pool, produces=vid,
                        field_ids=other_ids)
@@ -15716,6 +16080,10 @@ def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
             # sessions). The judge derives its own M18/M19/M20 rows from the
             # blinded packages with the same public tool; the orchestrator only
             # verifies those rows afterwards (postcheck_judge), never seeds them.
+            # The judge gets the venue's template RULES as prompt text (identical
+            # for every session and every target/opponent) but no staged file:
+            # the no-orchestrator-artifact rule stays intact, and the style-level
+            # conformance is measured by code, not by the panel.
             prompt = sb / "PROMPT.md"
             if not prompt.is_file():
                 _copy_session_tools(sb, stamp=view_stamp)
@@ -15729,7 +16097,8 @@ def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
                                            caption_limit=caption_limit_of(ctx),
                                            zotero=zotero_mode_of(ctx),
                                            venue=venue_profile_of(ctx),
-                                           dedup_mode=dedup_mode_of(ctx)),
+                                           dedup_mode=dedup_mode_of(ctx),
+                                           venue_norm=venue_norm_for(ctx)),
                                   encoding="utf-8")
             # One timestamp for the WHOLE judge sandbox (views, prompt and the
             # public tool alike): a listing must not be able to order the
@@ -26033,7 +26402,7 @@ def cmd_setup(args) -> None:
         setup_warns = []
         format_fix_report = normalize_formatting_in_dir(
             ctx.pristine, pre_judge_format_policy(ctx), "original", warns=setup_warns,
-            artifacts_dir=ctx.reports_dir)
+            artifacts_dir=ctx.reports_dir, template=venue_word_templates(ctx) or None)
         for w in setup_warns:
             print(f"[setup] {w}")
     ctx.state = {"version": STATE_VERSION, "runs": {}, "rounds": {}, "pinned": [], "log": [],
@@ -27303,11 +27672,16 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         only = None                     # `--only all`: exactly a plain `run`
     if only is not None:
         if journal_mode_of(ctx) != JOURNAL_MODE_NONE:
-            die(f"--only does not apply to revision mode {journal_mode_of(ctx)!r}: the journal "
-                f"stages form one dependency chain (feedback -> concerns/review -> revision -> "
-                f"response -> submission package), and a partial invocation could assemble the "
-                f"package from an unfinished chain. Run a plain `run` (or `retry --run <ID>` for "
-                f"one failed session).")
+            # The journal chain's stages are selectable exactly like the round
+            # model's (feedback, concerns, review, audit, revise, integrate,
+            # response). The safety rule is preserved at the SINK, not by
+            # refusing the selection: the response letter and the
+            # journal_submission/ package are assembled only by a plain `run`
+            # once every stage of the chain is done.
+            print(f"[run] --only {getattr(args, 'only', None)!r} in revision mode "
+                  f"{journal_mode_of(ctx)!r}: the journal stages are selectable; the response "
+                  f"letter and journal_submission/ are assembled only by a plain `run` once "
+                  f"every stage of the chain is done.")
         resolve_judge_run_ids(ctx, only)    # `--only judge_t497f106d_j1`
         only.validate(ctx.rounds_count())
         validate_only_selectors(ctx, only)
@@ -27464,7 +27838,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                                      retry_backoff=retry_backoff,
                                      retry_backoff_max=retry_backoff_max,
                                      redline=not getattr(args, "no_redline", False),
-                                     only=None)
+                                     only=only)
             ctx.save_state()
             if not ok:
                 summarize(ctx)
@@ -27479,6 +27853,12 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                       f"saved. Resume with `run --root {ctx.root}` or reset one run with "
                       f"`retry --run <ID>`.")
                 sys.exit(3)
+        if only is not None:
+            print(f"[run] --only {getattr(args, 'only', None)!r}: the response letter and "
+                  f"journal_submission/ are assembled only by a plain `run` once the "
+                  f"{journal_mode_of(ctx)} revision is complete.")
+            summarize(ctx)
+            return
         ok, _ = drive_journal_finalize(ctx, cmd=cmd, timeout=timeout, jobs=args.jobs,
                                        retries=retries, manual=manual, nowait=args.no_wait,
                                        poll=args.poll, retry_backoff=retry_backoff,
@@ -28417,7 +28797,8 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
                   if str((ctx.cfg or {}).get("format_fix") or DEFAULT_FORMAT_FIX) == "off"
                   else normalize_formatting_in_dir(tmp, format_policy_of(ctx),
                                                    FINAL_CLEAN_DIRNAME, warns=None,
-                                                   artifacts_dir=ctx.reports_dir))
+                                                   artifacts_dir=ctx.reports_dir,
+                                                   template=venue_word_templates(ctx) or None))
     manifest = corpus_dir_manifest(tmp)
     final_digest = manifest_digest(manifest)
     if dst.is_dir() and corpus_tree_digest(dst) == final_digest:
@@ -31617,7 +31998,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "comma-separated and combine as a UNION: a ROUND ordinal or range "
                          "(--only 1,2 = only rounds 1 and 2, every stage; --only 1-3), a STAGE "
                          "name (--only review = that stage in every round; rewrite, review, "
-                         "audit, revise, integrate, judge; aliases w, a/a2, i, merge, j), "
+                         "audit, revise, integrate, judge, and the journal modes' feedback, "
+                         "concerns, response; aliases w, a/a2, i, merge, j, fb, resp), "
                          "ROUND:STAGE (--only 2:merge,3:judge = round 2's integration and round "
                          "3's judge; '.' and '/' also separate, 'all' stands for every stage), or "
                          "ONE AGENT SESSION instead of its whole stage: --only rewriter2 runs only "

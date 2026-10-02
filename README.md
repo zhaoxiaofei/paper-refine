@@ -231,15 +231,24 @@ linked from its author guidelines), those files live in
 `venue_profiles/<venue-id>.official/` and are **authoritative**: the derived
 skeletons keep the journal's class file and section skeleton, mark its
 mandatory sections, and keep the template's own wording for the declaration
-blocks. `venue_profiles/<venue-id>.manuscripts/` (recent OA articles, or
+blocks, and every produced `.docx` is **restyled into the official Word
+template by the code-side normalizer** (default on; `PAPER_VENUE_TEMPLATES=0`
+opts out): the template's styles/theme/font table/numbering replace the
+manuscript's, style references are remapped by style name, the template's page
+geometry is adopted, and the direct font/size/spacing overrides that would hide
+those styles are removed — with the document text proven byte-identical or the
+original file kept. The template files are also staged read-only into every
+producing/reviewing sandbox as `venue_template/`, and all prompts (review,
+rewrite, revise, integrate, audit, judge) carry the architecture/formatting
+mandate. `venue_profiles/<venue-id>.manuscripts/` (recent OA articles, or
 structure-only transcriptions) adds a second, **advisory** tier used only for
 what the template leaves open. Both feed the pinned
 `venue_profiles/<venue-id>.templates/` pack (every input and output
-sha256-pinned, no timestamps); review and rewrite prompts embed it, plus the
-code-side conformance rows (`work/OFFICIAL_TEMPLATE.md`: missing mandatory
-section, missing statement block, wrong class). A template requirement the
-manuscript cannot supply becomes a manual item for the author — never invented
-text — and neither tier gates or scores by itself.
+sha256-pinned, no timestamps), plus the code-side conformance rows
+(`work/OFFICIAL_TEMPLATE.md`: missing mandatory section, missing statement
+block, wrong class, section/figure/table order, template-style coverage). A
+template requirement the manuscript cannot supply becomes a manual item for the
+author — never invented text — and neither tier gates or scores by itself.
 
 ```bash
 python paper_pipeline.py add-venue frontiers-in-immunology --journal "Frontiers in Immunology"
@@ -754,13 +763,21 @@ not run stays incomplete until they do. Resume at any time with a later `run`,
 another `--only`, or `retry --run <ID>` (which resets one run so a COMPLETED
 stage can run again).
 
+The four **journal revision modes** use the same grammar: `feedback`,
+`concerns`, `review`, `audit`, `revise`, `integrate` and `response` are all
+selectable (`--only feedback`, `--only 1:review`, `--only r1_concerns`), a
+partial selection leaves the chain incomplete, and the response letter +
+`journal_submission/` are assembled only by a plain `run` once every stage of
+the chain is done.
+
 The selection items are comma-separated and combine as a **union**:
 
 * a **round ordinal** or range — `--only 1,2` runs only the first and second
   rounds, every stage; `--only 1-3` is the same for rounds 1..3;
 * a **stage name** — the stage in every round: `rewrite`, `review`, `audit`,
   `revise`, `integrate`, `judge`, plus the aliases `w`, `a`/`a2`, `i`, `merge`,
-  `j` (plurals work too);
+  `j` (plurals work too); in a journal revision mode the chain's `feedback`,
+  `concerns` and `response` stages are selectable as well (`fb`, `resp`);
 * **`ROUND:STAGE`** — one stage of one round (`2:merge`, `3:judge`;
   `.`/`/` separate as well, and `all` stands for every stage, e.g. `2:all`);
 * **one agent SESSION** — the session, not its whole stage: `rewriter2` (only
@@ -1669,7 +1686,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 55 suites (a few
+any failure. They are independent, so run them in parallel — 57 suites (a few
 minutes on a 20-core box; ~5.5 min sequentially):
 
 ```bash
