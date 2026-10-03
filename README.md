@@ -256,8 +256,11 @@ those styles are removed — with the document text proven byte-identical or the
   scan reports what the
   agents must still fix (front-matter styles, sub-sub-sections, container
   headings imported from another publisher's template). When the venue ships a
-  Word template, the orchestrator also **renders it once per root** (Word via
-  `docx2pdf.sh` first, LibreOffice as the fallback: PDF + page images + a
+  Word template, the orchestrator also **renders it once per root** (the
+  operator's `docx-converter` MCP tool first -- the orchestrator drives the
+  configured server over a minimal stdio JSON-RPC client, the same first choice
+  every prompt mandates -- then `docx2pdf.sh`, then LibreOffice: PDF + page
+  images + a
   `manifest.json` naming the renderer and each template document's page count,
   cached by template digest) and seeds that render into every producing/
   reviewing/judging sandbox as `visual_template/`. The visual-inspection record

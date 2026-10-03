@@ -514,6 +514,95 @@ def test_even_odd_furniture():
           str(after.get("rows")))
 
 
+FAKE_MCP_SERVER_PY = '''#!/usr/bin/env python3
+"""Minimal newline-delimited JSON-RPC MCP server for the tests: answers
+initialize, ignores notifications, and writes a stand-in PDF next to the DOCX
+its single tool is handed."""
+import json
+import sys
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line.startswith("{"):
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        print(json.dumps({"jsonrpc": "2.0", "id": msg.get("id"),
+                          "result": {"protocolVersion": "2025-06-18",
+                                     "capabilities": {"tools": {}},
+                                     "serverInfo": {"name": "fake-docx-converter",
+                                                    "version": "0"}}}), flush=True)
+    elif method == "tools/call":
+        args = (msg.get("params") or {}).get("arguments") or {}
+        docx = str(args.get("docxPath") or "")
+        pdf = docx[:-5] + ".pdf" if docx.lower().endswith(".docx") else docx + ".pdf"
+        with open(pdf, "wb") as fh:
+            fh.write(b"%PDF-1.4\\n% fake mcp render\\n")
+        print(json.dumps({"jsonrpc": "2.0", "id": msg.get("id"),
+                          "result": {"content": [{"type": "text", "text": "converted"}],
+                                     "isError": False}}), flush=True)
+'''
+
+
+def test_mcp_first_render_chain():
+    """The orchestrator's own template renders use the operator's FIRST choice:
+    the docx-converter MCP tool, then docx2pdf.sh, then LibreOffice."""
+    tmp = scratch("paper_tpl_mcp_")
+    home = tmp / "codex_home"
+    home.mkdir()
+    server = tmp / "fake_mcp_server.py"
+    server.write_text(FAKE_MCP_SERVER_PY, encoding="utf-8")
+    (home / "config.toml").write_text(
+        "[mcp_servers.docx-converter]\n"
+        f'command = "{sys.executable}"\n'
+        f'args = ["{server}"]\n', encoding="utf-8")
+    old_home = os.environ.get("CODEX_HOME")
+    os.environ["CODEX_HOME"] = str(home)
+    try:
+        check("a configured docx-converter MCP server is discovered and parsed",
+              nb.mcp_server_configured("docx-converter") is True
+              and nb.mcp_server_spec("docx-converter").get("command") == sys.executable,
+              str(nb.mcp_server_spec("docx-converter")))
+        names = [c[0] for c in nb.visual_renderer_choices()]
+        check("the MCP tool heads the renderer chain",
+              bool(names) and names[0] == "mcp:docx-converter", str(names))
+        docx = tmp / "sample.docx"
+        docx.write_bytes(b"PK\x03\x04not-a-real-package")
+        out = tmp / "out"
+        out.mkdir()
+        rep = nb.render_docx_visual(docx, out)
+        check("the orchestrator renders through the MCP tool first (Word fidelity)",
+              rep.get("ok") is True and rep.get("renderer") == "mcp:docx-converter"
+              and (out / "sample.pdf").is_file()
+              and not (tmp / "sample.pdf").exists(), str(rep)[:260])
+        # a dead MCP server must fall back to the next renderer, and say so
+        broken = tmp / "broken_mcp.py"
+        broken.write_text("import sys\nsys.exit(3)\n", encoding="utf-8")
+        fake_sh = tmp / "docx2pdf.sh"
+        fake_sh.write_text('#!/bin/sh\nprintf \'%%PDF-1.4\\n%% fake word\\n\' > "${1%.*}.pdf"\n',
+                           encoding="utf-8")
+        os.chmod(fake_sh, 0o755)
+        real_choices, real_pages = nb.visual_renderer_choices, nb._pdf_page_count
+        nb.visual_renderer_choices = lambda: [
+            ("mcp:docx-converter", {"command": sys.executable, "args": [str(broken)]}),
+            ("word", fake_sh)]
+        nb._pdf_page_count = lambda _pdf: 1
+        try:
+            fallback = nb.render_docx_visual(docx, out)
+        finally:
+            nb.visual_renderer_choices, nb._pdf_page_count = real_choices, real_pages
+        check("a dead MCP server falls back to docx2pdf.sh, recording the failure",
+              fallback.get("ok") is True and fallback.get("renderer") == "word"
+              and (fallback.get("fallbacks") or [{}])[0].get("renderer")
+              == "mcp:docx-converter", str(fallback)[:300])
+    finally:
+        if old_home is None:
+            os.environ.pop("CODEX_HOME", None)
+        else:
+            os.environ["CODEX_HOME"] = old_home
+
+
 def test_visual_template_render_and_comparison():
     """The venue's own templates are RENDERED into each session sandbox, and the
     recorded visual pass must compare against that render (page count + names)."""
@@ -536,17 +625,17 @@ def test_visual_template_render_and_comparison():
     fake.write_text('#!/bin/sh\nprintf \'%%PDF-1.4\\n%% fake render\\n\' > "${1%.*}.pdf"\n',
                     encoding="utf-8")
     os.chmod(fake, 0o755)
-    real_choice, real_pages = nb.visual_renderer_choice, nb._pdf_page_count
+    real_choices, real_pages = nb.visual_renderer_choices, nb._pdf_page_count
     page_calls = {"n": 0}
 
-    def fake_choice():
-        return ("word", fake)
+    def fake_choices():
+        return [("word", fake)]
 
     def fake_page_count(_pdf):
         page_calls["n"] += 1
         return 4
 
-    nb.visual_renderer_choice = fake_choice
+    nb.visual_renderer_choices = fake_choices
     nb._pdf_page_count = fake_page_count
     try:
         man = nb.seed_template_visuals(ctx, sb)
@@ -570,7 +659,7 @@ def test_visual_template_render_and_comparison():
         check("the prompt names the seeded render as the comparison basis",
               "visual_template/" in nb.venue_norm_block("fake-venue", root))
     finally:
-        nb.visual_renderer_choice, nb._pdf_page_count = real_choice, real_pages
+        nb.visual_renderer_choices, nb._pdf_page_count = real_choices, real_pages
 
     # The cache's failure policy: retry once, then reuse the recorded failure.
     cache = tmp / "cache"
@@ -652,6 +741,7 @@ def main() -> int:
         test_prompt_wiring()
         test_generalized_template_restyle()
         test_even_odd_furniture()
+        test_mcp_first_render_chain()
         test_visual_template_render_and_comparison()
     finally:
         cleanup()

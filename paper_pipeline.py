@@ -429,10 +429,12 @@ CODE-SIDE CHECKS (in addition to what the prompts ask the agents to do)
                           impossible with a manual step. Reading a .docx is not
                           a visual inspection (text carries no layout). When the
                           venue ships an official Word template, the orchestrator
-                          renders it ONCE per root (Word first, LibreOffice as
-                          the fallback) into each session's `visual_template/`
-                          (PDF + page images + renderer/page manifest) so every
-                          agent compares its own render side by side with the
+                          renders it ONCE per root (the `docx-converter` MCP
+                          tool first -- driven by the orchestrator's own tiny
+                          stdio client -- then docx2pdf.sh, then LibreOffice)
+                          into each session's `visual_template/` (PDF + page
+                          images + renderer/page manifest) so every agent
+                          compares its own render side by side with the
                           template's, and the recorded pass must name each
                           template document and its rendered page count.
     * review contract     submission_dir must resolve to base/, every check id
@@ -703,6 +705,7 @@ import json
 import math
 import os
 import posixpath
+import queue
 import random
 import re
 import shutil
@@ -8246,14 +8249,16 @@ def codex_config_path() -> Path:
 def mcp_server_configured(name: str) -> bool:
     """Is the Codex MCP server `name` configured AND startable on this machine?
 
-    The pipeline ships no MCP client of its own and needs none: the MCP tools
-    are used by the AGENT sessions it launches, which inherit the operator's
-    Codex configuration. What the probe answers is therefore "can the agents we
-    are about to start actually call this server?", by checking the config
-    written by `codex mcp add` (`[mcp_servers.<name>]`) and verifying that the
-    files the entry names still exist (a deleted script used to look
-    configured). A missing/unreadable config yields False, and the prompts then
-    tell the agents to use the next converter in the list.
+    The MCP tools are used by the AGENT sessions the pipeline launches, which
+    inherit the operator's Codex configuration; the orchestrator itself also
+    drives this one server (see `mcp_stdio_tool_call`) so the template renders IT
+    seeds use the same first-choice converter. What the probe answers is
+    therefore "can the agents we are about to start actually call this server?",
+    by checking the config written by `codex mcp add`
+    (`[mcp_servers.<name>]`) and verifying that the files the entry names still
+    exist (a deleted script used to look configured). A missing/unreadable
+    config yields False, and the prompts then tell the agents to use the next
+    converter in the list.
     """
     cfg = codex_config_path()
     try:
@@ -17293,17 +17298,179 @@ VISUAL_PAGE_DPI = 110
 VISUAL_MAX_RENDER_ATTEMPTS = 2
 
 
-def visual_renderer_choice() -> tuple:
-    """(name, executable) for the best layout-faithful DOCX->PDF renderer here."""
+def mcp_server_spec(name: str) -> dict:
+    """{command, args} for one configured MCP server, {} when unreadable.
+
+    The operator's own `~/.codex/config.toml` entry is the authority (same
+    regex-scoped read as `mcp_server_configured`): the orchestrator must drive
+    EXACTLY the server the agent sessions are configured with.
+    """
+    try:
+        text = codex_config_path().read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    quoted = re.escape(name)
+    header = re.compile(r"^\s*\[\s*mcp_servers\s*\.\s*(?:\"" + quoted + r"\"|'"
+                        + quoted + r"'|" + quoted + r")\s*\]\s*$", re.MULTILINE)
+    m = header.search(text)
+    if not m:
+        return {}
+    rest = text[m.end():]
+    nxt = re.search(r"^\s*\[", rest, re.MULTILINE)
+    body = rest[:nxt.start()] if nxt else rest
+    cm = re.search(r"""^\s*command\s*=\s*["']([^"']+)["']""", body, re.MULTILINE)
+    if not cm:
+        return {}
+    args = []
+    am = re.search(r"^\s*args\s*=\s*(\[[^\]]*\])", body, re.MULTILINE)
+    if am:
+        try:
+            args = [str(a) for a in json.loads(am.group(1))]
+        except ValueError:
+            args = []
+    return {"command": os.path.expanduser(cm.group(1)), "args": args}
+
+
+def mcp_stdio_tool_call(spec: dict, tool: str, arguments: dict,
+                        timeout: float = 300) -> dict:
+    """Drive one configured MCP stdio server for ONE tool call, then stop it.
+
+    Minimal newline-delimited JSON-RPC: `initialize` ->
+    `notifications/initialized` -> `tools/call`. The orchestrator seeds the
+    venue-template renders itself, so it uses the SAME first-choice converter
+    the agent prompts mandate (the operator's docx-converter MCP tool, i.e.
+    Microsoft Word through PowerShell interop) instead of silently falling back
+    to a lower-fidelity shim.
+    """
+    argv = [str(spec.get("command") or ""), *[str(a) for a in spec.get("args") or []]]
+    if not argv[0]:
+        return {"ok": False, "error": "the MCP server entry names no command"}
+    try:
+        proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True, bufsize=1)
+    except OSError as e:
+        return {"ok": False, "error": f"the MCP server would not start: {e}"}
+    lines = queue.Queue()
+
+    def pump(stream) -> None:
+        try:
+            for line in stream:
+                lines.put(line)
+        finally:
+            lines.put(None)
+
+    threading.Thread(target=pump, args=(proc.stdout,), daemon=True).start()
+
+    def send(obj: dict) -> None:
+        proc.stdin.write(json.dumps(obj) + "\n")
+        proc.stdin.flush()
+
+    def wait_for(rid: int, deadline: float):
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            try:
+                line = lines.get(timeout=min(remaining, 0.5))
+            except queue.Empty:
+                continue
+            if line is None:
+                return None
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(msg, dict) and msg.get("id") == rid:
+                return msg
+
+    try:
+        send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+              "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                         "clientInfo": {"name": "paper_pipeline", "version": VERSION}}})
+        init = wait_for(1, time.monotonic() + min(float(timeout), 60.0))
+        if init is None:
+            return {"ok": False, "error": "the MCP server did not answer initialize()"}
+        if init.get("error"):
+            return {"ok": False, "error": f"initialize() failed: {init['error']}"}
+        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        send({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+              "params": {"name": tool, "arguments": arguments}})
+        rep = wait_for(2, time.monotonic() + float(timeout))
+        if rep is None:
+            return {"ok": False,
+                    "error": f"the MCP tool {tool} did not answer within {int(timeout)}s"}
+        if rep.get("error"):
+            return {"ok": False, "error": f"the MCP tool {tool} failed: {rep['error']}"}
+        return {"ok": True, "result": rep.get("result") or {}}
+    except (OSError, ValueError) as e:                                  # noqa: BLE001
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    finally:
+        with contextlib.suppress(OSError):
+            proc.stdin.close()
+        if proc.poll() is None:
+            proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def mcp_convert_docx_to_pdf(spec: dict, docx: Path, timeout: float = 300) -> dict:
+    """Convert one DOCX through the operator's docx-converter MCP tool.
+
+    The tool writes `<stem>.pdf` NEXT TO the file it is handed, so callers pass
+    a disposable copy and read-only inputs never change.
+    """
+    rep = mcp_stdio_tool_call(spec, DOCX_MCP_TOOL, {"docxPath": str(docx)}, timeout=timeout)
+    if not rep.get("ok"):
+        return rep
+    result = rep.get("result") or {}
+    if result.get("isError"):
+        text = " ".join(str(c.get("text") or "") for c in result.get("content") or []
+                        if isinstance(c, dict))
+        return {"ok": False, "error": f"the MCP tool reported an error: {text[:200]}"}
+    pdf = Path(docx).with_suffix(".pdf")
+    if not pdf.is_file() or pdf.stat().st_size == 0:
+        return {"ok": False,
+                "error": f"the MCP tool returned success but wrote no PDF next to {Path(docx).name}"}
+    return {"ok": True, "pdf": pdf}
+
+
+def visual_renderer_choices() -> list:
+    """Every usable DOCX->PDF renderer, in the order the prompts mandate.
+
+    The operator's docx-converter MCP tool comes FIRST (Microsoft Word through
+    PowerShell interop, the highest-fidelity renderer); `docx2pdf.sh` -- the
+    script that MCP tool drives internally -- is the fallback when the server is
+    not installed or cannot start, and LibreOffice is the last resort.
+    """
+    out = []
+    if mcp_server_configured(DOCX_MCP_SERVER):
+        spec = mcp_server_spec(DOCX_MCP_SERVER)
+        cmd = str(spec.get("command") or "")
+        present = Path(cmd).exists() if cmd.startswith(("/", "~")) else bool(shutil.which(cmd))
+        if cmd and present:
+            out.append((f"mcp:{DOCX_MCP_SERVER}", spec))
     here = Path(__file__).resolve().parent
     for cand in (here / "docx2pdf.sh", shutil.which("docx2pdf.sh")):
         if cand and Path(cand).is_file() and os.access(str(cand), os.X_OK):
-            return "word", Path(cand)
+            out.append(("word", Path(cand)))
+            break
     for exe in ("soffice", "libreoffice"):
         p = shutil.which(exe)
         if p:
-            return "libreoffice", Path(p)
-    return "none", None
+            out.append(("libreoffice", Path(p)))
+            break
+    return out
+
+
+def visual_renderer_choice() -> tuple:
+    """(name, payload) for the BEST renderer: MCP first, then Word, then LibreOffice."""
+    choices = visual_renderer_choices()
+    return choices[0] if choices else ("none", None)
 
 
 def _pdf_page_count(pdf: Path) -> int:
@@ -17334,11 +17501,31 @@ def _child_output(raw) -> str:
 def render_docx_visual(docx: Path, out_dir: Path, renderer=None) -> dict:
     """Render ONE DOCX to PDF + page PNGs under `out_dir`.
 
-    Word (docx2pdf.sh) is preferred because pagination, fonts and headers/
-    footers differ between Word and LibreOffice; the renderer actually used is
-    recorded so the agents and the decision report can state it.
+    `renderer` pins ONE renderer (tests, retries); None tries the whole choice
+    list in order -- the docx-converter MCP tool first, then docx2pdf.sh, then
+    LibreOffice -- because pagination, fonts and headers/footers differ between
+    Word and LibreOffice. The renderer that actually produced the PDF, and any
+    lower-fidelity fallbacks, are recorded so the agents and the decision report
+    can state them.
     """
-    name, exe = renderer or visual_renderer_choice()
+    if renderer is None:
+        choices = visual_renderer_choices()
+        if not choices:
+            return {"ok": False, "renderer": "none",
+                    "error": "no DOCX->PDF renderer is installed (docx-converter MCP tool, "
+                             "docx2pdf.sh or LibreOffice)"}
+        failures = []
+        for cand in choices:
+            res = render_docx_visual(docx, out_dir, cand)
+            if res.get("ok"):
+                if failures:
+                    res["fallbacks"] = failures
+                return res
+            failures.append({"renderer": cand[0], "error": res.get("error")})
+        return {"ok": False, "renderer": choices[0][0], "attempts": failures,
+                "error": "no renderer produced a PDF: "
+                         + "; ".join(f"{f['renderer']}: {f['error']}" for f in failures)[:300]}
+    name, exe = renderer
     out_dir.mkdir(parents=True, exist_ok=True)
     if name == "none" or exe is None:
         return {"ok": False, "renderer": "none", "error": "no DOCX->PDF renderer on PATH"}
@@ -17346,7 +17533,13 @@ def render_docx_visual(docx: Path, out_dir: Path, renderer=None) -> dict:
     try:
         src = tmp / docx.name
         shutil.copy2(docx, src)
-        if name == "word":
+        proc = None
+        if name.startswith("mcp:"):
+            conv = mcp_convert_docx_to_pdf(exe, src, timeout=900)
+            if not conv.get("ok"):
+                return {"ok": False, "renderer": name, "error": conv.get("error")}
+            pdf = Path(conv["pdf"])
+        elif name == "word":
             proc = subprocess.run([str(exe), str(src)], capture_output=True,
                                   timeout=900, cwd=str(tmp))
             pdf = src.with_suffix(".pdf")
@@ -17358,7 +17551,8 @@ def render_docx_visual(docx: Path, out_dir: Path, renderer=None) -> dict:
                                   capture_output=True, timeout=900)
             pdf = tmp / (src.stem + ".pdf")
         if not pdf.is_file() or pdf.stat().st_size == 0:
-            detail = (_child_output(proc.stderr) + _child_output(proc.stdout)) \
+            detail = (_child_output(getattr(proc, "stderr", None))
+                      + _child_output(getattr(proc, "stdout", None))) \
                 .strip().replace("\n", " ")[:200]
             return {"ok": False, "renderer": name,
                     "error": f"the renderer produced no PDF: {detail}"}
@@ -17381,19 +17575,22 @@ def render_docx_visual(docx: Path, out_dir: Path, renderer=None) -> dict:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _cached_visual_render(cache: Path, renderer_name: str) -> tuple:
+def _cached_visual_render(cache: Path, choice: str) -> tuple:
     """(reusable cached record or None, render attempts already made).
 
     A successful render is reused. A FAILED one is retried until
     VISUAL_MAX_RENDER_ATTEMPTS: one flaked Word/COM call must not silently
     disable the template comparison for the whole root, and a renderer that
-    cannot work here must not be re-driven once per session either.
+    cannot work here must not be re-driven once per session either. `choice` is
+    the FIRST renderer the machine offers (the MCP tool); a record made by a
+    lower-fidelity fallback of the same choice is still reusable.
     """
     try:
         stored = json.loads((cache / "manifest.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None, 0
-    if not isinstance(stored, dict) or stored.get("renderer") != renderer_name:
+    if not isinstance(stored, dict) \
+            or (stored.get("choice") or stored.get("renderer")) != choice:
         return None, 0
     try:
         attempts = int(stored.get("attempts") or 1)
@@ -17410,13 +17607,16 @@ def seed_template_visuals(ctx: Ctx, sb: Path) -> dict:
     Cached per root by template digest, so one Word render serves every session.
     Venue-level and identical for every session -- no provenance, so the judge
     sandboxes may receive it (unlike package renders, which stay blinding-safe
-    because the judge renders its own target/field views).
+    because the judge renders its own target/field views). The renderer chain is
+    the operator's own order: the docx-converter MCP tool first, docx2pdf.sh
+    next, LibreOffice last.
     """
     tpls = venue_word_templates(ctx)
     if not tpls:
         return {}
-    renderer = visual_renderer_choice()
-    manifest = {"renderer": renderer[0], "documents": []}
+    choices = visual_renderer_choices()
+    choice = choices[0][0] if choices else "none"
+    manifest = {"renderer": choice, "choice": choice, "documents": []}
     out = sb / VISUAL_TEMPLATE_DIR
     for role, path in sorted(tpls.items()):
         try:
@@ -17424,16 +17624,18 @@ def seed_template_visuals(ctx: Ctx, sb: Path) -> dict:
         except OSError:
             continue
         cache = ctx.root / VISUAL_CACHE_DIRNAME / digest[:2] / digest
-        rec, attempts = _cached_visual_render(cache, renderer[0])
+        rec, attempts = _cached_visual_render(cache, choice)
         if rec is None:
             cache.mkdir(parents=True, exist_ok=True)
             # a retry after a failed attempt must not inherit its partial pages
             for stale in list(cache.glob("*.pdf")) + list(cache.glob("*.png")):
                 with contextlib.suppress(OSError):
                     stale.unlink()
-            r = render_docx_visual(path, cache, renderer)
-            rec = {"ok": r.get("ok"), "renderer": r.get("renderer"), "pages": r.get("pages", 0),
-                   "pdf": r.get("pdf"), "pngs": r.get("pngs") or [], "error": r.get("error"),
+            r = render_docx_visual(path, cache, None)
+            rec = {"ok": r.get("ok"), "renderer": r.get("renderer"), "choice": choice,
+                   "pages": r.get("pages", 0), "pdf": r.get("pdf"),
+                   "pngs": r.get("pngs") or [], "error": r.get("error"),
+                   "fallbacks": r.get("fallbacks"),
                    "source": str(path), "sha256": digest, "attempts": attempts + 1}
             write_json_atomic(cache / "manifest.json", rec)
         dest = out / role
@@ -17448,6 +17650,8 @@ def seed_template_visuals(ctx: Ctx, sb: Path) -> dict:
             "renderer": rec.get("renderer"), "pages": rec.get("pages"),
             "pdf": rec.get("pdf"), "ok": rec.get("ok"), "error": rec.get("error")})
     if manifest["documents"]:
+        rendered = [d.get("renderer") for d in manifest["documents"] if d.get("ok")]
+        manifest["renderer"] = rendered[0] if rendered else choice
         write_json_atomic(out / "manifest.json", manifest)
     return manifest
 
