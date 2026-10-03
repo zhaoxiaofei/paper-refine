@@ -158,6 +158,9 @@ def main() -> int:
         "\\includegraphics{raw_data/fig1.png}\n\\end{document}\n", encoding="utf-8")
     (root / "non_revised" / "human_review_feedback" / "审稿意见.txt").write_text(
         "Reviewer 1:\n\nThe claims are too strong.\n", encoding="utf-8")
+    (root / "non_revised" / "human_review_feedback" / "original_submission").mkdir()
+    (root / "non_revised" / "human_review_feedback" / "original_submission"
+     / "submitted.txt").write_text("The version the reviewers saw.\n", encoding="utf-8")
     (root / "non_revised" / "raw_data" / "data.tsv").write_text("a\tb\n1\t2\n", encoding="utf-8")
     (root / "non_revised" / "raw_data" / "fig1.png").write_bytes(b"\x89PNG-fake")
     ctx = nb.Ctx(root)
@@ -173,6 +176,9 @@ def main() -> int:
     paths = sorted(p.relative_to(dst).as_posix() for p in dst.rglob("*") if p.is_file())
     check("HF4 the feedback reaches the judge under the labeled evidence directory",
           any(p.startswith("evidence/human_review_feedback/") for p in paths), str(paths))
+    check("HF4 the reviewer-visible original submission keeps its label",
+          any(p.startswith("evidence/human_review_feedback/original_submission/")
+              for p in paths), str(paths))
     check("HF4 raw_data reaches the judge too",
           any(p.startswith("evidence/raw_data/") for p in paths), str(paths))
     check("HF4 the submission file stays anonymous",
@@ -188,6 +194,70 @@ def main() -> int:
           "THE EVIDENCE AREAS" in judge_prompt
           and "evidence/human_review_feedback" in judge_prompt
           and "ADDRESS" in judge_prompt.upper())
+    check("HF4 the judge prompt explains the reviewer-visible submission",
+          "original_submission" in judge_prompt)
+
+    print()
+    print("== HF5: original_submission/ is labeled EVIDENCE, never feedback or the submission ==")
+    tmp = scratch("paper_hf_orig_")
+    src = tmp / "src"
+    (src / "human_review_feedback" / "original_submission").mkdir(parents=True)
+    (src / "human_review_feedback" / "reviewer_letter.txt").write_text(
+        "Reviewer 1:\n\nThe claims are too strong for the evidence.\n", encoding="utf-8")
+    (src / "human_review_feedback" / "original_submission" / "submitted_manuscript.txt").write_text(
+        "Introduction\nThis is the version the reviewers actually saw.\n", encoding="utf-8")
+    ctx = nb.Ctx(tmp / "root")
+    ctx.pristine = src
+    ctx.cfg = {"revision_mode": "transfer", "journal": "Frontiers in Immunology",
+               "journal_feedback_from": "iScience", "rounds": 1, "judges": [1],
+               "rewrites": [1], "revises": [1]}
+    hits = [label for _p, label in nb.journal_feedback_files(ctx)]
+    check("HF5 original_submission/ is never discovered as a feedback document",
+          any(h.endswith("reviewer_letter.txt") for h in hits)
+          and not any("original_submission" in h for h in hits), str(hits))
+    sb = tmp / "runs" / "r1_feedback"
+    sb.mkdir(parents=True)
+    nb._write_journal_feedback_inputs(ctx, sb)
+    staged = sb / "feedback" / "original_submission" / "submitted_manuscript.txt"
+    original = src / "human_review_feedback" / "original_submission" / "submitted_manuscript.txt"
+    seed = json.loads((sb / "feedback" / "CONCERN_SEED.json").read_text(encoding="utf-8"))
+    check("HF5 the reviewer-visible manuscript is staged byte-for-byte and labeled",
+          staged.is_file()
+          and staged.read_bytes() == original.read_bytes()
+          and seed["original_submission"]["present"] is True
+          and seed["original_submission"]["files"]
+          == ["original_submission/submitted_manuscript.txt"], str(seed.get("original_submission")))
+    check("HF5 the staged manuscript is never enumerated as feedback",
+          not (sb / "feedback" / "files" / "original_submission").exists()
+          and not any("submitted_manuscript" in p.name
+                      for p in (sb / "feedback" / "text").glob("*"))
+          and all("submitted_manuscript" not in (row.get("source") or "")
+                  for row in (seed.get("candidates") or [])), str(seed)[:200])
+    check("HF5 every journal prompt names the reviewer-visible copy and its rules",
+          "original_submission" in nb.feedback_prompt(ctx, sb, 1, [])
+          and "original_submission" in nb.journal_review_block(ctx, sb)
+          and "original_submission" in nb.journal_rewrite_block(ctx)
+          and "original_submission" in nb.journal_revise_block(ctx))
+    check("HF5 the staged copy verifies clean",
+          nb.original_submission_staging_problems(ctx, sb) == [])
+    nb._write_journal_feedback_inputs(ctx, sb)          # a retry re-stages it
+    check("HF5 re-staging a READ-ONLY copy is idempotent (retry-safe)",
+          staged.is_file() and staged.read_bytes() == original.read_bytes()
+          and nb.original_submission_staging_problems(ctx, sb) == [])
+    os.chmod(staged, 0o644)
+    staged.write_text("TAMPERED\n", encoding="utf-8")
+    check("HF5 a modified staged file is caught",
+          any("was modified" in e for e in
+              nb.original_submission_staging_problems(ctx, sb)))
+    os.chmod(staged.parent, 0o755)
+    staged.unlink()
+    check("HF5 a dropped staged file is caught",
+          any("was dropped" in e for e in
+              nb.original_submission_staging_problems(ctx, sb)))
+    (sb / "feedback" / "original_submission" / "extra.txt").write_text("x\n", encoding="utf-8")
+    check("HF5 an added staged file is caught",
+          any("was added" in e for e in
+              nb.original_submission_staging_problems(ctx, sb)))
 
     print()
     if FAILS:

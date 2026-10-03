@@ -878,6 +878,95 @@ def test_template_rewrite_postcheck():
           rep6.get("ok") is False
           and any("no longer USE the styles" in e for e in rep6["errors"]),
           str(rep6["errors"])[:260])
+    # ---- exact parity: the 5-word cutoff, the 95% tolerance floor and the
+    # joined-text fallback are gone; every paragraph must be accounted for ----
+    pkg2 = tmp / "pkg_parity"
+    pkg2.mkdir()
+    lines = ["A short unique line"] + [
+        f"Paragraph number {i} carries enough words to be checked." for i in range(1, 22)]
+    body = "".join(para(None, t) for t in lines)
+    full_docx(pkg2 / "mainText.docx",
+              '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+              '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+              "<w:body>" + body
+              + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>'
+              "</w:body></w:document>")
+    sb2 = tmp / "session_parity"
+    (sb2 / "out").mkdir(parents=True)
+    ledger = sb2 / "out" / "REPLACEMENT_LEDGER.md"
+    ledger.write_text("| placeholder | replacement |\n", encoding="utf-8")
+    fmt.apply_word_template(pkg2 / "mainText.docx", sb2 / "out" / "mainText.docx", tpl)
+    base_rep = nb.template_rewrite_postcheck(sb2, pkg2, {"main": tpl})
+    check("exact parity: the untampered package passes at ratio 1.0",
+          base_rep.get("ok") is True and base_rep["coverage"]["ratio"] == 1.0
+          and base_rep["coverage"]["mode"] == "exact-multiset", str(base_rep)[:240])
+    # a SHORT source paragraph dropped (the old check never looked at <5 words)
+    _drop_docx_paragraph(sb2 / "out" / "mainText.docx", "A short unique line")
+    rep_short = nb.template_rewrite_postcheck(sb2, pkg2, {"main": tpl})
+    check("a dropped SHORT source line fails exact parity",
+          rep_short.get("ok") is False and any("coverage" in e for e in rep_short["errors"]),
+          str(rep_short["errors"])[:240])
+    # one of 21 long paragraphs dropped = 95.2%: the old 95% floor passed it
+    fmt.apply_word_template(pkg2 / "mainText.docx", sb2 / "out" / "mainText.docx", tpl)
+    _drop_docx_paragraph(sb2 / "out" / "mainText.docx", "Paragraph number 7 carries")
+    rep95 = nb.template_rewrite_postcheck(sb2, pkg2, {"main": tpl})
+    check("a 95.2%-covered package fails exact parity (no tolerance floor)",
+          rep95.get("ok") is False and rep95["coverage"]["ratio"] < 1.0,
+          str(rep95["errors"])[:240])
+    # an undeclared 6-word addition fails; declaring it in the ledger's JSON passes
+    fmt.apply_word_template(pkg2 / "mainText.docx", sb2 / "out" / "mainText.docx", tpl)
+    _add_docx_paragraph(sb2 / "out" / "mainText.docx", "An invented sentence appears here.")
+    rep_add = nb.template_rewrite_postcheck(sb2, pkg2, {"main": tpl})
+    check("an undeclared content-bearing addition fails",
+          rep_add.get("ok") is False
+          and any("not present in any source" in e for e in rep_add["errors"]),
+          str(rep_add["errors"])[:240])
+    ledger.write_text(
+        "| placeholder | replacement |\n\n```json\n"
+        '{"exceptions": [{"kind": "addition", '
+        '"output": "An invented sentence appears here.", '
+        '"reason": "venue statement block"}]}\n```\n', encoding="utf-8")
+    rep_add2 = nb.template_rewrite_postcheck(sb2, pkg2, {"main": tpl})
+    check("a declared addition is accounted for and passes",
+          rep_add2.get("ok") is True, str(rep_add2["errors"])[:240])
+    # a declared re-wrap excuses a short line the template folds into a block
+    fmt.apply_word_template(pkg2 / "mainText.docx", sb2 / "out" / "mainText.docx", tpl)
+    _drop_docx_paragraph(sb2 / "out" / "mainText.docx", "A short unique line")
+    ledger.write_text(
+        "| placeholder | replacement |\n\n```json\n"
+        '{"exceptions": [{"kind": "rewrap", "source": "A short unique line", '
+        '"output": "Paragraph number 1 carries enough words to be checked.", '
+        '"reason": "folded into the correspondence block"}]}\n```\n', encoding="utf-8")
+    rep_rw = nb.template_rewrite_postcheck(sb2, pkg2, {"main": tpl})
+    check("a declared re-wrap passes while an unaccounted drop does not",
+          rep_rw.get("ok") is True, str(rep_rw["errors"])[:240])
+
+
+def _rewrite_docx_document(path: Path, edit) -> None:
+    """Apply edit(document_xml) -> document_xml to one DOCX; other parts untouched."""
+    with zipfile.ZipFile(path) as z:
+        items = [(i, z.read(i.filename)) for i in z.infolist()]
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for i, d in items:
+            if i.filename == "word/document.xml":
+                d = edit(d.decode("utf-8", "replace")).encode("utf-8")
+            z.writestr(i, d)
+
+
+def _drop_docx_paragraph(path: Path, needle: str) -> None:
+    def edit(xml: str) -> str:
+        for block in re.findall(r"<w:p\b[\s\S]*?</w:p>", xml):
+            if needle.lower() in re.sub(r"<[^>]+>", "", block).lower():
+                return xml.replace(block, "", 1)
+        raise AssertionError(f"paragraph {needle!r} not found in {path}")
+    _rewrite_docx_document(path, edit)
+
+
+def _add_docx_paragraph(path: Path, text: str) -> None:
+    def edit(xml: str) -> str:
+        block = f'<w:p><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p>'
+        return xml.replace("</w:body>", block + "</w:body>", 1)
+    _rewrite_docx_document(path, edit)
 
 
 def _hf_roles(path: Path) -> list:

@@ -14,7 +14,9 @@ Two directories are EVIDENCE areas, NOT part of the submission: `raw_data/`
 analysis snapshot — and an older corpus may also keep the editors'/reviewers'
 feedback there; `human_review_feedback/` (sibling of raw_data/) carries the real
 editors'/reviewers' comments from the previous submission (and any previous
-response-to-reviewers, as context). Their files are inventoried with
+response-to-reviewers, as context), plus — when present — its child
+`original_submission/` with the manuscript version those reviewers actually
+saw (evidence for resolving a concern, never the current submission). Their files are inventoried with
 `area: raw_data` / `area: human_review_feedback`, are never marked editable, and
 their converted text goes to `WORK/evidence/` — never to `WORK/corpus/` — so no
 submission sweep (M1 acronyms, M4 numbers, M9 file roles, M18/M19 lengths, …)
@@ -78,6 +80,10 @@ ROLE_PATTERNS = [
 
 RAW_DATA_DIRNAMES = ("raw_data", "raw_figs")
 HUMAN_FEEDBACK_DIR = "human_review_feedback"
+# The manuscript version the PREVIOUS journal's editors/reviewers actually saw,
+# optionally kept inside the feedback area. It is EVIDENCE (an earlier,
+# reviewer-visible version), never the current submission.
+ORIGINAL_SUBMISSION_DIRNAME = "original_submission"
 EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR,)
 EVIDENCE_DIRNAME = "evidence"
 FEEDBACK_NAME_RE = re.compile(r"feedback|referee|reviewers?|editors?|editorial|decision", re.I)
@@ -115,6 +121,13 @@ def evidence_area_of(rel_path: str) -> str:
         if part == HUMAN_FEEDBACK_DIR:
             return HUMAN_FEEDBACK_DIR
     return ""
+
+
+def is_original_submission_rel(rel_path: str) -> bool:
+    """True for a path inside `human_review_feedback/original_submission/`."""
+    parts = rel_path.replace("\\", "/").split("/")
+    return (len(parts) >= 3 and parts[0] == HUMAN_FEEDBACK_DIR
+            and parts[1] == ORIGINAL_SUBMISSION_DIRNAME)
 
 
 def is_feedback_rel(rel_path: str) -> bool:
@@ -576,19 +589,30 @@ def main():
             # sweeps read.
             entry["area"] = area
             if area == HUMAN_FEEDBACK_DIR:
-                entry["role"] = ("previous response to reviewers (evidence context)"
-                                 if REPLY_NAME_RE.search(os.path.basename(rel))
-                                 else "human review feedback (evidence)")
+                if is_original_submission_rel(rel):
+                    entry["role"] = "reviewer-visible original submission (evidence)"
+                else:
+                    entry["role"] = ("previous response to reviewers (evidence context)"
+                                     if REPLY_NAME_RE.search(os.path.basename(rel))
+                                     else "human review feedback (evidence)")
             else:
                 entry["role"] = ("reviewer/editor feedback (raw-data evidence)"
                                  if is_feedback_rel(rel) else "raw data (evidence)")
             entry["editable"] = False
             if area == HUMAN_FEEDBACK_DIR:
-                entry["notes"].append(
-                    "human editors'/reviewers' feedback — external prose, never the authors' "
-                    "submission text; read as evidence for the concern reconciliation, the "
-                    "response letter and the judge's concern-addressing check; never swept, "
-                    "counted or edited")
+                if is_original_submission_rel(rel):
+                    entry["notes"].append(
+                        "the manuscript version the PREVIOUS journal's editors/reviewers "
+                        "actually saw — EVIDENCE, never the current submission; use it only to "
+                        "resolve what a raised concern refers to and whether base/ already "
+                        "answers it; never swept, counted, quoted as the authors' current prose "
+                        "or edited")
+                else:
+                    entry["notes"].append(
+                        "human editors'/reviewers' feedback — external prose, never the authors' "
+                        "submission text; read as evidence for the concern reconciliation, the "
+                        "response letter and the judge's concern-addressing check; never swept, "
+                        "counted or edited")
             elif is_feedback_rel(rel):
                 entry["notes"].append(
                     "editors'/reviewers' feedback — external prose, never the authors' "

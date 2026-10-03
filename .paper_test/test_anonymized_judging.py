@@ -272,9 +272,10 @@ def test_judge_views_are_anonymous():
           not any(part in original_dirs for p in all_paths for part in Path(p).parts),
           str(sorted(original_dirs)))
     # The EVIDENCE areas keep a stable, LABELED directory (evidence/raw_data/…,
-    # evidence/human_review_feedback/…; nested subdirs are sNN) while the file
-    # names inside stay anonymous -- see _view_layout.
-    anon_re = (r"(?:evidence/(?:raw_data|human_review_feedback)/(?:s\d{2}/)*)?"
+    # evidence/human_review_feedback/…; nested subdirs are sNN, except the named
+    # original_submission/ child) while the file names inside stay anonymous.
+    anon_re = (r"(?:evidence/(?:raw_data|human_review_feedback)/"
+               r"(?:original_submission/)?(?:s\d{2}/)*)?"
                r"(?:v\d+/)?(?:d\d{2}/)?f\d{4}(?:\.[A-Za-z0-9]+)?")
     check("every judge path is an anonymous placeholder",
           all(re.fullmatch(anon_re, p) for p in all_paths),

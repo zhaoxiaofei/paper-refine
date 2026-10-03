@@ -159,6 +159,13 @@ manuscript files:
   evidence areas (`evidence/raw_data/…`, `evidence/human_review_feedback/…`)
   because correctness and "were the humans' concerns addressed" cannot be
   judged without them. It is never copied into the submission package either.
+  When it carries a child `original_submission/`, that child is the manuscript
+  version the previous journal's editors/reviewers actually saw — still
+  evidence, never the current submission: the journal stages read it only to
+  resolve what a raised concern refers to and whether the current `base/`
+  already answers it (a concern that no longer exists is `already-addressed` or
+  `not-applicable`, never a `to-fix` row whose location exists only there), and
+  it is never swept, counted or quoted as the authors' current prose.
 
 Both areas are hash-pinned, and any stage write into them is restored and
 reported.
@@ -266,11 +273,17 @@ read-only in `source/`, an empty `out/` — and writes the prompt that says exac
 template, then replace every placeholder/sample element with the actual content of `source/`, keep
 the template's styles, structure, first-page block and headers/footers, and record every
 replacement in `out/REPLACEMENT_LEDGER.md`*. One agent session runs on it (`--agent-cmd`,
-`--timeout`). The deliverable is then verified code-side, venue-agnostically: every source
-paragraph must be covered (≥ 95 % verbatim, per document), none of the template's own guide
-sentences may survive (the template was *filled*, not paraphrased), the template's style set must
-still be present, and the template's **header/footer roles** (first-page logo, page-number footer,
-even/odd furniture) must be carried by every output. The report lands in
+`--timeout`). The deliverable is then verified code-side, venue-agnostically with an EXACT
+paragraph-multiset parity check: every non-empty source paragraph, short lines included, must
+appear in the outputs at least as many times as in the source, unless the session declares a
+machine-readable `rewrap` exception (verbatim source + replacement + reason) in a fenced
+`json` block of `out/REPLACEMENT_LEDGER.md`; a content-bearing (≥ 5-word) output paragraph absent
+from the source must be declared as an `addition`. The former 95 % coverage floor, the 5-word
+source cutoff and the joined-text fallback are gone, because this package becomes the pipeline's
+`original`. None of the template's own guide sentences may survive (the template was *filled*,
+not paraphrased), the template's style set must still be present, and the template's
+**header/footer roles** (first-page logo, page-number footer, even/odd furniture) must be carried
+by every output. The report lands in
 `reports/template_rewrite.{md,json}`. The deterministic mode verifies the same header/footer roles
 and marks a document failed if its rebuild lost them:
 
@@ -735,7 +748,7 @@ Every corpus the pipeline handles carries one pristine input area and two
 |---|---|---|
 | `non_revised/` (in the root) | the pristine copy of `--source` | read-only: re-hashed at the start of every `run`/`decide`, byte-verified in every sandbox, never written (the operator's `--source` is never touched at all) |
 | `raw_data/` (inside each corpus) | the raw data — figure and table sources, data tables, the analysis snapshot the author's own scripts regenerate; an older corpus may also keep feedback here | read-only: a package CARRIES it, and the pipeline puts the untouched original's copy back after every package-producing stage; NOT submission content |
-| `human_review_feedback/` (inside each corpus) | the REAL editors'/reviewers' comments from the previous submission (decision letters, referee reports), plus any previous response-to-reviewers as context | read-only and NOT submission content like raw_data; the journal modes build the concern ledger and the response letter from it, and a judge may read it (under `evidence/human_review_feedback/` in its view) to score how well a version ADDRESSES the human-raised concerns |
+| `human_review_feedback/` (inside each corpus) | the REAL editors'/reviewers' comments from the previous submission (decision letters, referee reports), plus any previous response-to-reviewers as context; its child `original_submission/`, when present, is the manuscript version those reviewers actually saw | read-only and NOT submission content like raw_data; the journal modes build the concern ledger and the response letter from it, and a judge may read it (under `evidence/human_review_feedback/` in its view) to score how well a version ADDRESSES the human-raised concerns; `original_submission/` is evidence for resolving a concern and checking whether the current `base/` already answers it — never the submission, a sweep surface or a source of text |
 
 The first two names are this repo's snake_case spellings of older ones —
 `non-revised/` and `raw_figs/` — and **both spellings of each name stay
@@ -815,7 +828,10 @@ How each mode runs:
   The primary source is the corpus's `human_review_feedback/` area (any file
   name, including non-English ones; a `response_to_reviewers` file there is
   previous-response CONTEXT, not a concern); an older shape — a
-  feedback-named file under `raw_data/` — is still detected.
+  feedback-named file under `raw_data/` — is still detected. A child
+  `original_submission/` is never discovered as a letter: it is staged
+  READ-ONLY and separately under `feedback/original_submission/`, and every
+  journal stage may read it only as the reviewer-visible earlier manuscript.
 * **Options 1–2** feed the ledger into the normal round: the review reconciles
   every concern (`review/concerns_reconciled.json`) and files a `check: "JF"`
   finding for each unanswered one; the rewrites carry the concern block; the

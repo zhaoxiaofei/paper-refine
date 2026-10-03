@@ -80,6 +80,12 @@ def build_source(root: Path) -> Path:
     # ... and a previous response is context, never a concern source.
     (src / "human_review_feedback" / "response_to_reviewers.txt").write_text(
         "Dear editor, in the previous round we promised new experiments.\n", encoding="utf-8")
+    # ... and the manuscript version those reviewers actually saw is EVIDENCE,
+    # never the current submission and never a feedback document.
+    (src / "human_review_feedback" / "original_submission").mkdir()
+    (src / "human_review_feedback" / "original_submission" / "submitted_manuscript.txt").write_text(
+        "Abstract\nThe version the reviewers saw; the current corpus has moved on.\n",
+        encoding="utf-8")
     return src
 
 
@@ -225,10 +231,17 @@ def main() -> int:
     prompt = (wsb / "PROMPT.md").read_text(encoding="utf-8")
     check("J3 the rewrite prompt carries the concern block",
           "the rewrite answers the concerns" in prompt
-          and (wsb / "concerns" / "JF_concerns.json").is_file())
+          and (wsb / "concerns" / "JF_concerns.json").is_file()
+          and "original_submission" in prompt
+          and (wsb / "feedback" / "original_submission" / "submitted_manuscript.txt").is_file())
     rp = (root / "runs" / "r1_review" / "PROMPT.md").read_text(encoding="utf-8")
     check("J3 the review prompt carries the reconciliation block",
-          "JOURNAL FEEDBACK RECONCILIATION" in rp)
+          "JOURNAL FEEDBACK RECONCILIATION" in rp and "original_submission" in rp)
+    check("J3 the reviewer-visible manuscript is staged with the letter, not as one",
+          (root / "runs" / "r1_feedback" / "feedback" / "original_submission"
+           / "submitted_manuscript.txt").is_file()
+          and not (root / "runs" / "r1_feedback" / "feedback" / "files"
+                   / "original_submission").exists())
     check("J3 the transfer wrote no response run", not (root / "runs" / "r1_response").exists())
 
     print()

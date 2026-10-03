@@ -2865,7 +2865,9 @@ VENUE_TRANSFER_RULES = """
     declaration wording, old reference style and old figure/supplementary conventions as
     findings to remove, and verify the new venue's mandatory sections and statements exist.
     Answer the humans' concerns from `human_review_feedback/` where they still apply; never
-    depend on a response letter."""
+    depend on a response letter. Its child `original_submission/`, when present, is the
+    manuscript version those reviewers actually saw -- evidence for understanding a concern,
+    never the current submission and never a source of text to copy."""
 
 
 def venue_norm_block(venue_id, root=None, transfer: bool = False) -> str:
@@ -3257,6 +3259,13 @@ RAW_DATA_DIRNAMES = (RAW_DATA_DIR, RAW_DATA_DIR_LEGACY)
 # ADDRESSES the human-raised concerns. Both areas together are the corpus's
 # EVIDENCE areas (see is_evidence_rel / the judge-view layout).
 HUMAN_FEEDBACK_DIR = "human_review_feedback"
+# A corpus may keep the manuscript version the PREVIOUS journal's editors/
+# reviewers actually saw inside the feedback area, under this fixed child name.
+# It is EVIDENCE, not the current submission: it never feeds feedback discovery,
+# sweeps, counts or corpus identity, and the stages may only use it to
+# understand what a raised concern refers to and whether the CURRENT base
+# already answers it.
+ORIGINAL_SUBMISSION_DIRNAME = "original_submission"
 EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR,)
 # The stable root the judge view uses to expose the evidence areas (their files
 # stay anonymized inside it; see _view_layout).
@@ -3497,21 +3506,63 @@ def journal_feedback_files(ctx: Ctx) -> list:
     for p in sorted(ctx.pristine.rglob("*")):
         if not p.is_file() or is_bookkeeping_name(p.name):
             continue
+        if is_original_submission_rel(p.relative_to(ctx.pristine).as_posix()):
+            continue
         if JOURNAL_FEEDBACK_NAME_RE.search(p.name) \
                 and not JOURNAL_AUTHORED_REPLY_RE.search(p.name):
             found.append((p, p.relative_to(ctx.pristine).as_posix()))
     return found
 
 
+def is_original_submission_rel(rel: str) -> bool:
+    """True for a corpus-relative path inside `human_review_feedback/original_submission/`.
+
+    The child directory holds the manuscript version the previous journal's
+    editors/reviewers saw. It is EVIDENCE: it must never be enumerated as a
+    feedback document (the area's files otherwise need no name heuristic), never
+    seeded as a concern and never counted as the current submission's text.
+    """
+    parts = str(rel or "").replace("\\", "/").lstrip("/").split("/")
+    return (len(parts) >= 2 and parts[0] == HUMAN_FEEDBACK_DIR
+            and parts[1] == ORIGINAL_SUBMISSION_DIRNAME)
+
+
+def human_original_submission_dirs(dirp: Path) -> list:
+    """[(path, label)] of the reviewer-visible submission copies in `dirp`.
+
+    The layout is fixed: `<corpus>/human_review_feedback/original_submission/`.
+    More than one corpus can contribute to one root only for named feedback
+    files, so at most one entry exists in practice; returning a list keeps the
+    staging code honest when a future layout nests several.
+    """
+    area = Path(dirp) / HUMAN_FEEDBACK_DIR
+    out = []
+    if not area.is_dir():
+        return out
+    for child in sorted(area.iterdir()):
+        if child.is_dir() and child.name == ORIGINAL_SUBMISSION_DIRNAME:
+            out.append((child, f"{HUMAN_FEEDBACK_DIR}/{ORIGINAL_SUBMISSION_DIRNAME}"))
+    return out
+
+
 def human_feedback_files_in(dirp: Path) -> list:
-    """[(path, corpus-relative label)] of every file in `dirp`'s feedback area."""
+    """[(path, corpus-relative label)] of every FEEDBACK FILE in `dirp`'s area.
+
+    `original_submission/` is deliberately excluded: it is a manuscript, not a
+    letter or a response. Treating its files as feedback would seed the concern
+    ledger from the manuscript itself.
+    """
     area = dirp / HUMAN_FEEDBACK_DIR
     out = []
     if not area.is_dir():
         return out
     for p in sorted(area.rglob("*")):
-        if p.is_file() and not is_bookkeeping_name(p.name):
-            out.append((p, p.relative_to(dirp).as_posix()))
+        if not p.is_file() or is_bookkeeping_name(p.name):
+            continue
+        label = p.relative_to(dirp).as_posix()
+        if is_original_submission_rel(label):
+            continue
+        out.append((p, label))
     return out
 
 
@@ -5947,7 +5998,11 @@ RAW_DATA_READONLY_RULE = """
       - `human_review_feedback/`: the REAL editors'/reviewers' comments from the previous
         submission (decision letters, referee reports, editor correspondence). It may also hold
         the authors' PREVIOUS response-to-reviewers documents; those are CONTEXT for what was
-        promised, never the journal's letter and never a concern source.
+        promised, never the journal's letter and never a concern source. When it carries a child
+        directory `original_submission/`, that child is the manuscript version the previous
+        journal's editors/reviewers ACTUALLY SAW -- the version their comments were written
+        against. It is EVIDENCE (an earlier, reviewer-visible version), never the current
+        submission and never a candidate.
   * Neither area is part of the submission and neither is submitted to the journal. Nothing in
     them is a submission document: a file there is never a main-text, cover-letter, title-page,
     supplementary or figure document, whatever its name suggests, and its text is never the
@@ -5971,6 +6026,14 @@ RAW_DATA_READONLY_RULE = """
       - M30 reads `raw_data/` as the producer side of a written claim's comparison;
       - every stage reads `human_review_feedback/` for what the review requires (the concern
         reconciliation and the response letter are built from it);
+      - `human_review_feedback/original_submission/` (when present) may be read ONLY to resolve
+        what a raised concern refers to and to decide whether the CURRENT manuscript (`base/`)
+        already answers a concern the reviewers raised against the earlier version. Never edit
+        it, never copy its text into a candidate package (all edits are made in `base/`), never
+        sweep, count or quote it as the authors' current prose, and never treat it as a
+        competing version: a concern that no longer exists in `base/` is `already-addressed`
+        (quoting the `base/` location that answers it) or `not-applicable` (with the reason) --
+        never a `to-fix` row whose only location is `original_submission/`;
       - a JUDGE sees both areas in its anonymized view under the labeled `evidence/` directory
         (see the judge prompt): `raw_data/` may be used to check correctness/completeness, and
         the human feedback may be used to check whether a version ADDRESSES the raised concerns
@@ -6706,7 +6769,9 @@ Layout (paths relative to the sandbox root):
                   base/ may also carry the READ-ONLY EVIDENCE areas: raw_data/ (legacy spelling
                   raw_figs/; data tables, figure/table sources, the analysis snapshot) and
                   human_review_feedback/ (the REAL editors'/reviewers' comments, plus any previous
-                  response as context). Neither is part of the submission and no file in either is
+                  response as context; its child original_submission/, when present, is the
+                  manuscript version those reviewers ACTUALLY SAW -- evidence for concern
+                  reconciliation only). Neither is part of the submission and no file in either is
                   a submission document -- never enumerate, sweep, count, quote or report them as
                   manuscript text (a data table, a figure source, a decision letter or a referee
                   report is evidence, not the authors' prose), whatever the file names suggest.
@@ -7161,6 +7226,12 @@ Layout (paths relative to the sandbox root):
                   finding list, ids F-*/X-*), artifacts/ (the seeded, disposed sweep tables) and
                   work/ (the code-side scans the reviewer was given). READ-ONLY, byte-verified: you
                   must not modify one byte of it.
+  concerns/     — (journal modes) the round's concern ledger JF_concerns.json/md: the
+                  editors'/reviewers' points the review's JF findings cite. READ-ONLY.
+  feedback/     — (journal modes) the decision letter (files/, text/) and, when present,
+                  original_submission/ -- the manuscript version the reviewers ACTUALLY SAW.
+                  EVIDENCE, READ-ONLY: never the submission under audit, never a source of
+                  text; use it only to check whether base/ already answers a concern.
   audit/        — YOU create this: your AUDIT.md, audit.json, work/ and the disposition audit table.
   work/         — the orchestrator's evidence pack for THIS session (CODE_SCANS.json,
                   EVIDENCE_PACK.md and the seeded tables listed under "EVIDENCE" below).
@@ -7961,6 +8032,12 @@ THE EVIDENCE AREAS — USE THEM, AND DO NOT MISTAKE THEM FOR THE SUBMISSION:
     text CLAIMS to answer a concern it does not answer. A version may also answer a concern in a
     way the reviewer would reject; judge that on the merits, citing the concern id and the
     manuscript's own handling of it.
+  * When `evidence/human_review_feedback/` carries an `original_submission/` child, that is the
+    manuscript version the reviewers actually saw (their comments were written against it). It
+    is EVIDENCE like the letter -- not a candidate and not the submission: never score a version
+    by how it differs from that earlier manuscript, never quote it as the authors' current text,
+    and use it only to resolve what a raised concern refers to and whether a version answers it.
+    It is an input, not a candidate, so it can never by itself distinguish two versions.
   * NEITHER area is submission text. Never quote a reviewer's sentence as the authors' text,
     never count a data table or a letter as a manuscript document, and never let your own view of
     whether the reviewers were right decide a comparison: the feedback is IDENTICAL in every
@@ -11012,12 +11089,17 @@ WRITE (only inside out/):
      teaches the author how to use the template, and every sample name,
      laboratory, affiliation, email, keyword, citation and caption placeholder.
      The template's STRUCTURE and FURNITURE stay; its PROSE does not.
-  4. CARRY THE SOURCE COMPLETELY: every section, paragraph, citation, figure and
-     table reference, number and statement of the source must appear in the
-     output. Never invent, summarize, merge or drop content. Rewording is allowed
-     only where the template's structure demands it (for example folding a
-     separate "Lead contact"/"Corresponding author" line into the correspondence
-     block as "<Name>, lead contact").
+  4. CARRY THE SOURCE COMPLETELY -- the code side now verifies this EXACTLY:
+     every non-empty source paragraph, SHORT LINES INCLUDED, must appear in the
+     outputs at least as many times as it appears in the source, unless you
+     declare it as a re-wrap in step 7. Never invent, summarize, merge or drop
+     content. Rewording is allowed only where the template's structure demands
+     it (for example folding a separate "Lead contact"/"Corresponding author"
+     line into the correspondence block as "<Name>, lead contact"), and every
+     such paragraph must be declared in the ledger's machine-readable block.
+     The reverse direction is checked too: no output paragraph of 5+ words may
+     be absent from the source unless it is declared (as an addition, or as a
+     re-wrap's declared output).
   5. Keep the template's first-page block, running head/logo, page numbers and
      even/odd furniture exactly as the template defines them.
      FALL BACK IN LEVELS, moving to the next level ONLY for what the current
@@ -11041,7 +11123,26 @@ WRITE (only inside out/):
   7. Write `out/REPLACEMENT_LEDGER.md`: one row per template placeholder or
      sample element -- the style it carried, what replaced it (file + section),
      how many copies the real content needed, and any template element you
-     deliberately KEPT because the venue's structure requires it.
+     deliberately KEPT because the venue's structure requires it. The ledger
+     MUST end with ONE fenced ```json block declaring every occurrence that
+     breaks exact parity, with the paragraphs quoted VERBATIM (the checker
+     matches them by normalized text; one entry accounts for ONE occurrence, so
+     a paragraph that appears N times and is re-wrapped N times needs N
+     entries):
+       ```json
+       {{"exceptions": [
+         {{"kind": "rewrap",
+          "source": "<verbatim source paragraph that was not carried verbatim>",
+          "output": "<verbatim replacement paragraph>",
+          "reason": "<the template element/structure that forces the re-wrap>"}},
+         {{"kind": "addition",
+          "output": "<verbatim output paragraph not present in the source>",
+          "reason": "<why the venue's structure requires it>"}}
+       ]}}
+       ```
+     `{{"exceptions": []}}` when nothing needed re-wrapping or adding. A missing,
+     empty or non-matching declaration FAILS the code-side check: the ledger is
+     the machine-readable accounting, not prose commentary.
 
 @@VISUAL_INSPECTION_RULE@@
 
@@ -11198,12 +11299,152 @@ def _superscripts_by_paragraph(path: Path) -> dict:
     return out
 
 
+TEMPLATE_LEDGER_ADD_MIN_WORDS = 5
+
+
+def _template_norm_para(text) -> str:
+    """The comparison form of one paragraph: whitespace-collapsed, lower-case."""
+    return re.sub(r"\s+", " ", str(text or "")).strip().lower()
+
+
+def _template_word_count(text) -> int:
+    return len(_template_norm_para(text).split())
+
+
+def _template_ledger_exceptions(ledger: Path) -> tuple:
+    """Parse the machine-readable exceptions block(s) of REPLACEMENT_LEDGER.md.
+
+    Every discrepancy between the source package and the template-authored
+    output has to be ACCOUNTED FOR, not merely summarized in prose: the ledger
+    must carry one fenced JSON object with an `exceptions` list whose entries are
+
+        {"kind": "rewrap",   "source": "<source paragraph>",
+         "output": "<replacement paragraph>", "reason": "<template element>"}
+        {"kind": "addition", "output": "<new output paragraph>",
+         "reason": "<why the venue's structure requires it>"}
+
+    Returns (exceptions, problems). A missing ledger yields no exceptions and no
+    problem here -- the caller already fails the stage when the ledger is absent.
+    """
+    path = Path(ledger)
+    if not path.is_file():
+        return [], []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return [], [f"unreadable: {e}"]
+    out, problems = [], []
+    # Only ```json blocks are the machine-readable accounting; a fenced example
+    # of anything else must never make the stage fail as "unparsable ledger".
+    blocks = re.findall(r"```([A-Za-z0-9_+-]*)\s*([\s\S]*?)```", text)
+    for tag, raw in blocks:
+        if tag.strip().lower() != "json":
+            continue
+        try:
+            data = json.loads(raw)
+        except ValueError as e:
+            problems.append(f"the machine-readable exceptions block does not parse as JSON: {e}")
+            continue
+        rows = data if isinstance(data, list) else (
+            data.get("exceptions") if isinstance(data, dict) else None)
+        if rows is None:
+            continue
+        if not isinstance(rows, list):
+            problems.append("`exceptions` must be a list")
+            continue
+        for i, row in enumerate(rows, 1):
+            if not isinstance(row, dict):
+                problems.append(f"exceptions[{i}] is not an object")
+                continue
+            kind = str(row.get("kind") or "").strip().lower()
+            if kind not in ("rewrap", "addition"):
+                problems.append(f"exceptions[{i}]: kind {kind!r} is not 'rewrap' or 'addition'")
+                continue
+            entry = {"kind": kind,
+                     "source": _template_norm_para(row.get("source")),
+                     "output": _template_norm_para(row.get("output")),
+                     "reason": str(row.get("reason") or "").strip()}
+            if not entry["reason"]:
+                problems.append(f"exceptions[{i}] ({kind}) has no reason")
+            if kind == "rewrap" and (not entry["source"] or not entry["output"]):
+                problems.append(f"exceptions[{i}] (rewrap) needs both `source` and `output`")
+                continue
+            if kind == "addition" and not entry["output"]:
+                problems.append(f"exceptions[{i}] (addition) needs `output`")
+                continue
+            out.append(entry)
+    return out, problems
+
+
+def _docx_document_role(name: str) -> str:
+    """The submission role a package DOCX name advertises: main/supp/cover."""
+    stem = Path(str(name)).stem.lower()
+    if "supp" in stem:
+        return "supp"
+    if "cover" in stem or "letter" in stem:
+        return "cover"
+    return "main"
+
+
+def _match_source_output_docs(src_docs: list, out_docs: list, templates: dict) -> tuple:
+    """Map every source document to the output document that carries it.
+
+    The template-first session is told to hand back COPIES OF THE TEMPLATES, so
+    output names are often the template's (`Frontiers_Template.docx`), not the
+    source's (`...-mainText.docx`). Matching by exact name, then by the
+    main/supplementary/cover role, then by the sole remaining output lets the
+    content checks run PER DOCUMENT instead of falling back to the joined text of
+    the whole package. Returns ({source name: output Path}, used output names,
+    errors).
+    """
+    mapping, used, errs = {}, set(), []
+
+    def assign(doc: Path, cand: Path) -> None:
+        mapping[doc.name] = cand
+        used.add(cand.name)
+
+    for doc in src_docs:                                    # 1. exact file name
+        cands = [p for p in out_docs if p.name == doc.name and p.name not in used]
+        if len(cands) == 1:
+            assign(doc, cands[0])
+    for doc in src_docs:                                    # 2. advertised role
+        if doc.name in mapping:
+            continue
+        role = _docx_document_role(doc.name)
+        cands = [p for p in out_docs
+                 if p.name not in used and _docx_document_role(p.name) == role]
+        if not cands and role in ("main", "supp"):
+            tpl = templates.get("main" if role == "main" else "supplementary")
+            if tpl:
+                cands = [p for p in out_docs
+                         if p.name not in used and p.name == Path(tpl).name]
+        if len(cands) == 1:
+            assign(doc, cands[0])
+    remaining = [doc for doc in src_docs if doc.name not in mapping]
+    rest_out = [p for p in out_docs if p.name not in used]
+    if len(remaining) == 1 and len(rest_out) == 1:          # 3. sole remainder
+        assign(remaining[0], rest_out[0])
+    for doc in remaining:
+        if doc.name not in mapping:
+            errs.append(f"cannot tell which output document carries {doc.name!r}: copy each "
+                        f"source document into its template under a name that keeps its "
+                        f"main/supplementary/cover role recognizable")
+    return mapping, used, errs
+
+
 def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
     """Verify a template-first rewrite session (venue-agnostic verifiers).
 
     Two questions decide it:
-      * COVERAGE -- every paragraph of the source package's actual content
-        appears in the outputs;
+      * PARITY -- the source package's paragraph MULTISET is carried over
+        exactly (every non-empty paragraph, short lines included, at least as
+        many times as in the source), except for re-wraps the session declares
+        in the machine-readable block of out/REPLACEMENT_LEDGER.md; and no
+        content-bearing output paragraph (>= TEMPLATE_LEDGER_ADD_MIN_WORDS
+        words) exists that is neither in the source nor declared as an
+        addition. A 95% threshold or a blanket allowance for short paragraphs
+        is NOT enough: this package becomes the pipeline's `original`, so a
+        silent drop or reword would corrupt every later round;
       * TEMPLATE PROSE -- none of the template's own guide sentences/sample
         elements survives (the templates were COPIED and FILLED), while the
         template's style set is still present in every output.
@@ -11215,45 +11456,99 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
                       if not _is_aux_doc(p.name) and not p.name.startswith("~$"))
     out_docs = sorted(p for p in out.glob("*.docx")
                       if not _is_aux_doc(p.name) and not p.name.startswith("~$"))
+    if not src_docs:
+        return {"ok": False, "errors": [f"{Path(src)} carries no .docx to re-house: the "
+                                        f"template-first stage has nothing to fill"]}
     if not out_docs:
         return {"ok": False, "errors": ["out/ carries no .docx deliverable"]}
     errs, warns = [], []
-    out_text = {p.name: " \u241f ".join(_docx_paragraph_texts(p)).lower() for p in out_docs}
+    exceptions, exception_problems = _template_ledger_exceptions(
+        out / "REPLACEMENT_LEDGER.md")
+    mapping, _used_out, map_errs = _match_source_output_docs(src_docs, out_docs,
+                                                             templates or {})
+    errs.extend(map_errs)
+    src_counter, out_counter = Counter(), Counter()
+    for doc in src_docs:
+        src_counter.update(_template_norm_para(t) for t in _docx_paragraph_texts(doc))
+    out_text = {}
+    for doc in out_docs:
+        texts = _docx_paragraph_texts(doc)
+        out_counter.update(_template_norm_para(t) for t in texts)
+        out_text[doc.name] = " \u241f ".join(texts).lower()
     joined = " \u241f ".join(out_text.values())
+    rewraps = [e for e in exceptions if e["kind"] == "rewrap"]
+    additions = [e for e in exceptions if e["kind"] == "addition"]
+    for e in exceptions:
+        if e["kind"] == "rewrap":
+            if e["source"] and e["source"] not in src_counter:
+                exception_problems.append(
+                    f"a declared re-wrap's SOURCE paragraph is not in the source package: "
+                    f"{e['source'][:70]!r}")
+            if e["output"] and e["output"] not in out_counter:
+                exception_problems.append(
+                    f"a declared re-wrap's OUTPUT paragraph is not in the outputs: "
+                    f"{e['output'][:70]!r}")
+        elif e["output"] not in out_counter:
+            exception_problems.append(
+                f"a declared addition is not in the outputs: {e['output'][:70]!r}")
     leftover = []
     for role in sorted(templates or {}):
         tpl = templates.get(role)
         for text in (_docx_paragraph_texts(Path(tpl)) if tpl else []):
-            if len(text.split()) >= 6 and text.lower() in joined:
+            norm = _template_norm_para(text)
+            # A long template paragraph the SOURCE also carries is source
+            # content (a required statement the authors wrote), not leftover
+            # template prose; everything else must have been filled in.
+            if len(norm.split()) >= 6 and norm in out_counter and norm not in src_counter:
                 leftover.append({"role": role, "text": text[:120]})
     if leftover:
         errs.append(f"{len(leftover)} template guide sentence(s) survive in the outputs "
                     f"(the templates must be FILLED, not paraphrased): "
                     + "; ".join(repr(l["text"][:60]) for l in leftover[:3]))
-    missing, checked = [], 0
-    for doc in src_docs:
-        target = next((p for p in out_docs if p.name == doc.name), None) or \
-            next((p for p in out_docs
-                  if (re.search(r"supp", p.name, re.I) and re.search(r"supp", doc.name, re.I))
-                  or (re.search(r"cover", p.name, re.I)
-                      and re.search(r"cover", doc.name, re.I))), None)
-        hay = out_text.get(target.name) if target is not None else joined
-        for text in _docx_paragraph_texts(doc):
-            if len(text.split()) < 5:
-                continue
-            checked += 1
-            if text.lower() not in hay:
-                missing.append({"source": doc.name, "text": text[:120]})
-    covered = checked - len(missing)
+    declared_rewrap_sources = Counter(e["source"] for e in rewraps if e["source"])
+    declared_rewrap_outputs = Counter(e["output"] for e in rewraps if e["output"])
+    declared_additions = Counter(e["output"] for e in additions if e["output"])
+    missing = []
+    for text in sorted(src_counter):
+        want_n = src_counter[text]
+        have_n = out_counter.get(text, 0)
+        deficit = want_n - have_n - declared_rewrap_sources.get(text, 0)
+        if deficit > 0:
+            missing.append({"text": text[:120], "source_count": want_n,
+                            "output_count": have_n, "unaccounted": deficit})
+    checked = sum(src_counter.values())
+    missing_occurrences = sum(m["unaccounted"] for m in missing)
+    covered = checked - missing_occurrences
     ratio = (covered / checked) if checked else 1.0
-    if checked and ratio < 0.95:
-        errs.append(f"content coverage {covered}/{checked} ({ratio:.0%}) is below 95%: the source "
-                    f"content must be carried over completely "
-                    f"(e.g. missing {missing[0]['text'][:70]!r})")
-    elif missing:
-        warns.append(f"{len(missing)} source paragraph(s) not found verbatim in the outputs "
-                     f"(allowed only for re-wraps the template's structure demands): "
-                     + "; ".join(m["text"][:50] for m in missing[:3]))
+    if missing:
+        errs.append(f"content coverage is not exact: {missing_occurrences} of {checked} source "
+                    f"paragraph occurrence(s) are missing or reworded and no matching re-wrap is "
+                    f"declared in out/REPLACEMENT_LEDGER.md (e.g. {missing[0]['text'][:70]!r}); "
+                    f"every source paragraph -- short ones included -- must appear in the "
+                    f"outputs at least as many times as in the source, or be declared")
+    unaccounted_additions, short_additions = [], 0
+    for text in sorted(out_counter):
+        extra = (out_counter[text] - src_counter.get(text, 0)
+                 - declared_rewrap_outputs.get(text, 0) - declared_additions.get(text, 0))
+        if extra <= 0:
+            continue
+        if _template_word_count(text) >= TEMPLATE_LEDGER_ADD_MIN_WORDS:
+            unaccounted_additions.append({"text": text[:120], "count": extra})
+        else:
+            short_additions += extra
+    if unaccounted_additions:
+        errs.append(f"{len(unaccounted_additions)} output paragraph(s) of "
+                    f">= {TEMPLATE_LEDGER_ADD_MIN_WORDS} words are not present in any source "
+                    f"document and are not declared in out/REPLACEMENT_LEDGER.md "
+                    f"(e.g. {unaccounted_additions[0]['text'][:70]!r}); never invent content -- "
+                    f"declare every new content-bearing paragraph as an `addition` with its "
+                    f"reason")
+    if short_additions:
+        warns.append(f"{short_additions} short output line(s) (< "
+                     f"{TEMPLATE_LEDGER_ADD_MIN_WORDS} words) have no source counterpart: "
+                     f"template labels/headings are fine, content-bearing additions are not")
+    if exception_problems:
+        errs.extend(f"REPLACEMENT_LEDGER.md: {p}" for p in exception_problems)
     style_gap = []
     for doc in out_docs:
         try:
@@ -11316,7 +11611,7 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
     # superscript runs as the source had.
     sub_lost = []
     for doc in src_docs:
-        target = next((p for p in out_docs if p.name == doc.name), None)
+        target = mapping.get(doc.name)
         if target is None:
             continue
         want_sup = _superscripts_by_paragraph(doc)
@@ -11336,7 +11631,7 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
     # may not invent a style the template does not define.
     style_use_gap = []
     for doc in src_docs:
-        target = next((p for p in out_docs if p.name == doc.name), None)
+        target = mapping.get(doc.name)
         if target is None:
             continue
         lost = sorted(_style_usage(doc) - _style_usage(target))
@@ -11362,8 +11657,13 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
         errs.append("out/REPLACEMENT_LEDGER.md is missing: record every template placeholder and "
                     "what replaced it")
     return {"ok": not errs, "errors": errs, "warnings": warns,
-            "coverage": {"checked": checked, "covered": covered, "ratio": round(ratio, 4),
-                         "missing_samples": missing[:8]},
+            "coverage": {"mode": "exact-multiset", "checked": checked, "covered": covered,
+                         "ratio": round(ratio, 4), "missing_samples": missing[:8],
+                         "unaccounted_additions": unaccounted_additions[:8],
+                         "short_unaccounted_additions": short_additions,
+                         "declared_exceptions": len(exceptions)},
+            "document_mapping": {k: v.name for k, v in sorted(mapping.items())},
+            "ledger_exception_problems": exception_problems[:8],
             "template_prose_left": leftover[:8],
             "headers_footers": {p.name: _docx_hf_signature(p) for p in out_docs},
             "template_derived_gaps": derived_gap[:8],
@@ -15443,9 +15743,11 @@ def _view_layout(files: list, r: int, vid: str, view_seed: str) -> tuple:
     files keep an anonymized NAME but live under a stable, labeled directory
     (`evidence/raw_data/…`, `evidence/human_review_feedback/…`) so a judge can
     tell producer evidence and human feedback from submission documents. The
+    `human_review_feedback/original_submission/` child keeps its name too (it is
+    the reviewer-visible manuscript, an input where present), while every
+    other/deeper directory and every file name stays salted per view. The
     labels are identical in every view -- the areas are byte-identical inputs,
-    so they carry no signal about which version is which -- while the file names
-    inside stay salted per view.
+    so they carry no signal about which version is which.
     """
     rng = random.Random(f"judge-view|{view_seed}|{int(r)}|{vid}".encode("utf-8"))
     dirs = sorted({str(Path(rel).parent.as_posix()) for rel, _p in files
@@ -15459,8 +15761,16 @@ def _view_layout(files: list, r: int, vid: str, view_seed: str) -> tuple:
         top = evidence_area_of(d)
         area = RAW_DATA_DIR if top in RAW_DATA_DIRNAMES else top
         rest = d.split("/")[1:]
-        dir_names[d] = "/".join([EVIDENCE_VIEW_ROOT, area]
-                                + [f"s{i:02d}" for i, _p in enumerate(rest, 1)])
+        parts = []
+        for i, seg in enumerate(rest, 1):
+            if (i == 1 and top == HUMAN_FEEDBACK_DIR
+                    and seg == ORIGINAL_SUBMISSION_DIRNAME):
+                # Fixed, identical in every view: the judge must be able to tell
+                # the reviewer-visible manuscript from a submission document.
+                parts.append(ORIGINAL_SUBMISSION_DIRNAME)
+            else:
+                parts.append(f"s{i:02d}")
+        dir_names[d] = "/".join([EVIDENCE_VIEW_ROOT, area] + parts)
     by_dir = {}
     for rel, src in files:
         parent = str(Path(rel).parent.as_posix())
@@ -16511,6 +16821,16 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
     ensure_copy(ctx.sandbox_of(a1) / "base", sb / "base")
     ensure_pristine_input(ctx, sb / PRISTINE_DIR)
     ensure_copy(ctx.sandbox_of(rev_rec) / REVIEW_DIR, sb / REVIEW_DIR)
+    if journal_mode_of(ctx) != JOURNAL_MODE_NONE:
+        # The auditor disposes JF findings against the real letter, and a
+        # concern the reviewers raised against the earlier version can only be
+        # classified with that version in view: carry the ledger and the
+        # labeled feedback/ area (original_submission included) beside the
+        # frozen review, exactly like the revise sandbox does.
+        if (ctx.sandbox_of(rev_rec) / "concerns").is_dir():
+            ensure_copy(ctx.sandbox_of(rev_rec) / "concerns", sb / "concerns")
+        if (ctx.sandbox_of(rev_rec) / "feedback").is_dir():
+            ensure_copy(ctx.sandbox_of(rev_rec) / "feedback", sb / "feedback")
     (sb / "audit").mkdir(exist_ok=True)
     stage_venue_template(ctx, sb)
     seed_template_visuals(ctx, sb)
@@ -23418,6 +23738,116 @@ def run_kind_support_problems(ctx: Ctx) -> list:
 # them.
 # =====================================================================
 
+def _stage_original_submission(ctx: Ctx, sb: Path) -> dict:
+    """Stage the reviewer-visible submission under `feedback/original_submission/`.
+
+    When the corpus keeps the version the PREVIOUS journal's editors/reviewers
+    saw at `human_review_feedback/original_submission/`, every journal stage
+    needs it beside the letter: a reviewer quote often refers to text that the
+    current `base/` has already changed, so a concern's disposition cannot be
+    decided from the letter alone. The copy is byte-for-byte, READ-ONLY and
+    SEPARATE from `feedback/files/` (the letter source): a manuscript inside the
+    feedback area must never be enumerated as feedback text, seeded as a
+    concern, or treated as the current submission.
+    """
+    dirs = human_original_submission_dirs(ctx.pristine)
+    label = f"{HUMAN_FEEDBACK_DIR}/{ORIGINAL_SUBMISSION_DIRNAME}"
+    info = {"present": False, "label": label, "files": [],
+            "note": ("the manuscript version the editors/reviewers of the previous journal "
+                     "actually saw -- EVIDENCE, not the current submission (base/) and not a "
+                     "feedback document")}
+    if not dirs:
+        return info
+    root = sb / "feedback" / ORIGINAL_SUBMISSION_DIRNAME
+    # Re-materialization (a retry) must start from a clean tree: the previous
+    # attempt's copy is READ-ONLY (files and directories), so writing over it
+    # would fail on the permission bits.
+    if root.exists():
+        rmtree_force(root, ignore_errors=True)
+        if root.exists():
+            make_tree_writable(root)
+    root.mkdir(parents=True, exist_ok=True)
+    for path, _dir_label in dirs:
+        for p in sorted(_iter_tree_files(path, follow_dir_links=True)):
+            rel = p.relative_to(path).as_posix()
+            dest = root / rel
+            if dest.is_dir():
+                rmtree_force(dest, ignore_errors=True)
+            elif dest.exists():
+                with contextlib.suppress(OSError):
+                    dest.unlink()
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(p, dest)
+            info["files"].append(f"{ORIGINAL_SUBMISSION_DIRNAME}/{rel}")
+    # Harden the staged copy: the evidence contract is read-only, and a write
+    # through the sandbox copy must fail exactly like a write through the
+    # canonical `non_revised/human_review_feedback/` link.
+    make_tree_readonly(root)
+    info["present"] = True
+    (sb / "feedback" / "ORIGINAL_SUBMISSION.md").write_text(
+        "# original_submission/ -- the reviewer-visible manuscript (EVIDENCE)\n\n"
+        "This directory is the manuscript version the editors/reviewers of the\n"
+        "PREVIOUS journal actually saw. It is NOT the current submission: `base/`\n"
+        "is the submission under review/revision, and this copy is supplied only\n"
+        "so the raised concerns can be understood. Use it to resolve what a\n"
+        "reviewer's quote refers to and to decide whether `base/` already answers\n"
+        "a concern. Never edit or copy its text into a candidate package, never\n"
+        "sweep, count or quote it as the authors' current prose, and never give a\n"
+        "`to-fix` concern a location that exists only in `original_submission/`.\n"
+        f"\nFiles ({len(info['files'])}): " + ", ".join(sorted(info["files"])) + "\n",
+        encoding="utf-8")
+    return info
+
+
+def original_submission_staging_problems(ctx: Ctx, sb: Path) -> list:
+    """Byte-for-byte verification of the staged reviewer-visible submission.
+
+    The stage's own copy under `feedback/original_submission/` is an INPUT like
+    the canonical evidence area: the session may read it, never edit, drop or
+    add a file. Checked after every feedback/concerns attempt so a manuscript
+    the previous journal's reviewers saw can never be silently altered on its
+    way into the concern ledger or the revision sandboxes.
+    """
+    dirs = human_original_submission_dirs(ctx.pristine)
+    root = sb / "feedback" / ORIGINAL_SUBMISSION_DIRNAME
+    errs = []
+    if not dirs:
+        if root.exists():
+            errs.append(f"feedback/{ORIGINAL_SUBMISSION_DIRNAME}/ exists although the corpus's "
+                        f"{HUMAN_FEEDBACK_DIR}/ area carries no {ORIGINAL_SUBMISSION_DIRNAME}/ "
+                        f"directory: remove it -- evidence is staged from the corpus, never "
+                        f"invented by the session")
+        return errs
+    if not root.is_dir():
+        return [f"feedback/{ORIGINAL_SUBMISSION_DIRNAME}/ is missing: the corpus carries the "
+                f"reviewer-visible submission and every journal stage must receive it read-only"]
+
+    def entries(base: Path) -> dict:
+        out = {}
+        for p in sorted(_iter_tree_files(base, follow_dir_links=True)):
+            try:
+                out[p.relative_to(base).as_posix()] = sha256_file(p)
+            except OSError as e:
+                errs.append(f"feedback/{ORIGINAL_SUBMISSION_DIRNAME}/{p.name} is unreadable: {e}")
+        return out
+
+    want = {}
+    for path, _label in dirs:
+        want.update(entries(path))
+    have = entries(root)
+    for rel in sorted(want):
+        if rel not in have:
+            errs.append(f"feedback/{ORIGINAL_SUBMISSION_DIRNAME}/{rel} was dropped: the "
+                        f"reviewer-visible submission is READ-ONLY evidence")
+        elif have[rel] != want[rel]:
+            errs.append(f"feedback/{ORIGINAL_SUBMISSION_DIRNAME}/{rel} was modified: the "
+                        f"reviewer-visible submission is READ-ONLY evidence")
+    for rel in sorted(set(have) - set(want)):
+        errs.append(f"feedback/{ORIGINAL_SUBMISSION_DIRNAME}/{rel} was added: the staged copy "
+                    f"must stay byte-for-byte identical to the corpus's evidence")
+    return errs
+
+
 def _write_journal_feedback_inputs(ctx: Ctx, sb: Path) -> list:
     """Copy the feedback into `feedback/` and write the concern seed.
 
@@ -23425,7 +23855,9 @@ def _write_journal_feedback_inputs(ctx: Ctx, sb: Path) -> list:
     session may need to quote them exactly) and a text rendering lands under
     `feedback/text/` (docx/pdf converted when possible). A file that cannot be
     rendered is recorded in `feedback/unparsed.txt` instead of being dropped
-    silently.
+    silently. The reviewer-visible submission, when the corpus carries one, is
+    staged READ-ONLY and separately under `feedback/original_submission/` (see
+    _stage_original_submission) so it is never seeded as feedback.
     """
     files = journal_feedback_files(ctx)
     if not files:
@@ -23466,9 +23898,11 @@ def _write_journal_feedback_inputs(ctx: Ctx, sb: Path) -> list:
                     seed.append(dict(row, source=label))
         else:
             unparsed.append(f"{label}: {note or 'no text extracted'}")
+    original_submission = _stage_original_submission(ctx, sb)
     write_json_atomic(sb / "feedback" / "CONCERN_SEED.json",
                       {"files": labels, "candidates": seed, "unparsed": unparsed,
                        "previous_responses": [label for _p, label in previous],
+                       "original_submission": original_submission,
                        "journal_from": str((ctx.cfg or {}).get("journal_feedback_from") or ""),
                        "target_journal": str((ctx.cfg or {}).get("journal") or "")})
     if unparsed:
@@ -23489,7 +23923,7 @@ JOURNAL_LEDGER_SCHEMA = """{
      "quote": "<verbatim, <=300 chars; it must appear in feedback/text/>",
      "summary": "<one sentence, in your own words>",
      "action": "text|analysis|new-experiment|clarification|formatting|policy|disagree",
-     "manuscript_location": "<where the concern lives in base/, or null>",
+     "manuscript_location": "<where the concern lives in base/, or null; cite the reviewer-visible original_submission/ only as context, never as the fix target>",
      "disposition": "to-fix|already-addressed|manual|not-applicable",
      "evidence_needed": "<what evidence an answer needs; empty when the text answers it>"}
   ]
@@ -23521,6 +23955,9 @@ def materialize_feedback(ctx: Ctx, r: int) -> dict:
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True)}
     rec["feedback_files"] = [label for _p, label in journal_feedback_files(ctx)]
+    rec["original_submission"] = (read_json(sb / "feedback" / "CONCERN_SEED.json",
+                                            revive=False, lenient=True) or {}).get(
+        "original_submission") or {"present": False}
     return rec
 
 
@@ -23544,6 +23981,9 @@ def materialize_concerns(ctx: Ctx, r: int) -> dict:
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True)}
     rec["feedback_files"] = [label for _p, label in journal_feedback_files(ctx)]
+    rec["original_submission"] = (read_json(sb / "feedback" / "CONCERN_SEED.json",
+                                            revive=False, lenient=True) or {}).get(
+        "original_submission") or {"present": False}
     return rec
 
 
@@ -23643,12 +24083,27 @@ WHAT YOU READ (all of it):
   * feedback/CONCERN_SEED.json — the pipeline's mechanical candidate split; it
     is a seed, not the answer
   * base/            — the manuscript the feedback is about (read-only)
+  * feedback/original_submission/ — ONLY when the seed records
+    `original_submission.present`: the manuscript version the editors/reviewers
+    of {(from_j or 'the source journal')} actually saw (READ-ONLY evidence)
 
 If `feedback/CONCERN_SEED.json` lists `previous_responses`, those are the
 authors' OWN earlier response-to-reviewers documents (under
 `feedback/previous_responses/`): they are CONTEXT (what was promised before),
 never the journal's letter. Never enumerate a previous response as a concern
 and never quote it as something the reviewers said.
+
+ABOUT `feedback/original_submission/` (when present): the reviewers wrote their
+concerns against THIS earlier version, while every row's `manuscript_location`
+must name where the concern lives in the CURRENT `base/`. Use the reviewer-visible
+copy only to resolve what a quote refers to and to decide whether `base/` already
+answers a concern. It is never the submission under revision, never a source of
+text to copy, and never swept or quoted as the authors' current prose. A concern
+whose target no longer exists in `base/` because it was already changed is
+`already-addressed` (quote the `base/` location that answers it; cite
+`original_submission/` only as context) or `not-applicable` (state why). Never
+mark a concern `to-fix` with a location that exists only in
+`feedback/original_submission/`.
 
 SEED (read the real text after it):
 {_journal_seed_text(ctx, sb)}
@@ -23664,9 +24119,10 @@ THE LEDGER IS THE DELIVERABLE (one row per distinct concern):
   * `action` says what answering it demands: text | analysis | new-experiment |
     clarification | formatting | policy | disagree.
   * `disposition`: to-fix (the manuscript must change) | already-addressed
-    (base/ already answers it — name the location and quote it) | manual (needs
-    the authors: a new experiment or a judgement call) | not-applicable (say why
-    in evidence_needed).
+    (base/ already answers it — name and quote the BASE/ location, never
+    `feedback/original_submission/`) | manual (needs the authors: a new
+    experiment or a judgement call) | not-applicable (say why in
+    evidence_needed).
   * Never invent a concern, never soften or sharpen one, never drop a repeat.
 
 WRITE:
@@ -23705,10 +24161,19 @@ WHAT YOU READ (all of it):
   * feedback/text/   — the same files as plain text (use THIS for quoting)
   * feedback/CONCERN_SEED.json — the pipeline's mechanical candidate split
   * base/            — the manuscript under revision (read-only)
+  * feedback/original_submission/ — ONLY when the seed records
+    `original_submission.present`: the manuscript version the editors/reviewers
+    of {(from_j or 'the source journal')} actually saw (READ-ONLY evidence)
 
 If `feedback/CONCERN_SEED.json` lists `previous_responses`, those are the
 authors' OWN earlier response documents (under `feedback/previous_responses/`):
 context for what was promised, never a concern and never a reviewer quote.
+
+When `feedback/original_submission/` is present, the reviewers wrote against
+THAT version while every finding and every `manuscript_location` must name the
+CURRENT `base/`. Use the reviewer-visible copy only to resolve a quote and to
+decide whether `base/` already answers a concern; never edit it, never copy its
+text, and never quote it as the authors' current prose.
 
 SEED (read the real text after it):
 {_journal_seed_text(ctx, sb)}
@@ -23717,7 +24182,8 @@ THE LEDGER (one row per distinct concern; same shape as modes 1-2):
 {JOURNAL_LEDGER_SCHEMA}
 `disposition` for a scoped revision:
   * to-fix             the manuscript must change; becomes ONE finding
-  * already-addressed  quote the base/ location that already answers it
+  * already-addressed  quote the base/ location that already answers it (never
+                       `feedback/original_submission/`, which is only context)
   * manual             needs the authors (new experiment / judgement call);
                        becomes ONE finding with status "unresolvable"
   * not-applicable     say why; no finding
@@ -23821,6 +24287,14 @@ as if the authors wrote it). Beyond the normal sweep:
   * a concern base/ does not answer is a FINDING with `check: "JF"`,
     `concern: "<id>"`, id `JF-<n>`, category 0, and the reviewer's verbatim
     quote as its evidence;
+  * when `feedback/original_submission/` exists it is the manuscript version the
+    editors/reviewers ACTUALLY SAW -- EVIDENCE, not the submission under review.
+    Use it only to resolve what a quoted concern refers to and to decide whether
+    `base/` already answers it; a concern that no longer exists in `base/` is
+    `already-addressed` (with the `base/` location) or `not-applicable`, never a
+    finding. Every finding still quotes `base/`; never sweep, count or quote the
+    reviewer-visible copy as the authors' current prose, and never report a
+    defect that exists only in it;
   * do not drop, merge or soften a concern. Real defects the sweeps find are
     still findings -- this is a normal round otherwise.
 """
@@ -23849,6 +24323,10 @@ This is a real {mode} revision: the journal raised the concerns now in
     record every edit (file, location, before, after).
   * The pipeline verifies the scope mechanically: a changed file the ledger does
     not name, or a file added/removed, fails the attempt.
+  * When `feedback/original_submission/` exists it is the manuscript the
+    previous journal's reviewers saw -- EVIDENCE, not the package you edit.
+    Read it only to understand a concern; every edit and every quoted location
+    must come from `base/` (never copy text out of the reviewer-visible copy).
 """
     tail = ("A response-to-reviewers letter is NOT written for this mode."
             if not info["response"] else
@@ -23864,6 +24342,9 @@ JF findings (`check: "JF"`, with a `concern` id) are mandatory: every one is
 either fixed in the package or recorded as a manual item with the exact steps.
 {tail}
 The manuscript must answer every concern; the normal findings still apply.
+When `feedback/original_submission/` exists it is the earlier, reviewer-visible
+version -- EVIDENCE, not the package you edit: read it only to understand a
+concern, and make every edit, and quote every location, in the current `base/`.
 """
 
 
@@ -23885,6 +24366,10 @@ feedback (external prose; never copy a reviewer's sentence into the manuscript).
     REWRITE_REPORT.md (concern id -> what the rewrite does, or why it is manual).
   * A `manual` concern (a new experiment) is never faked: state the plan in
     MANUAL_STEPS.md and keep the claim honest.
+  * When `feedback/original_submission/` exists it is the version the reviewers
+    saw -- EVIDENCE, not the rewrite's source. Use it only to understand a
+    concern, rewrite from `base/`, and never copy text out of the
+    reviewer-visible copy.
   * {tail}
 """
 
@@ -23980,6 +24465,7 @@ def postcheck_feedback(ctx: Ctx, rec: dict):
     if not fdir.is_dir() or not any(fdir.iterdir()):
         errs.append("feedback/files/ is empty: the original feedback files must be copied in "
                     "(they are the quote source of record)")
+    errs.extend(original_submission_staging_problems(ctx, sb))
     _check_pristine_copy(ctx, rec, pristine_dirname(sb), errs)
     errs.extend(input_mismatches(ctx, rec))
     return (not errs), errs, warns, None
@@ -24058,6 +24544,7 @@ def postcheck_concerns(ctx: Ctx, rec: dict):
     errs.extend(structured_output_problems(ctx, rec))
     warns.extend(inherited_structured_output_notes(ctx, rec))
     data = journal_ledger_problems(ctx, sb, errs, warns)
+    errs.extend(original_submission_staging_problems(ctx, sb))
     rows = [r for r in (data.get("concerns") or []) if isinstance(r, dict)]
     must_fix = {str(r.get("id")) for r in rows
                 if str(r.get("disposition")) in ("to-fix", "manual")}
