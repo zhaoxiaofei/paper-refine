@@ -630,6 +630,74 @@ for line in sys.stdin:
 '''
 
 
+def _package_docx(path: Path, heading: str) -> None:
+    body = ("<w:p><w:pPr><w:pStyle w:val=\"Title\"/></w:pPr>"
+            + _run("A package title", sz=32, bold=True) + "</w:p>"
+            + f"<w:p>{_run('word ' * 30, sz=22, space=True)}</w:p>"
+            + f"<w:p>{_run(heading, sz=28, bold=True)}</w:p>")
+    full_docx(path, ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                     '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/'
+                     '2006/main"><w:body>' + body +
+                     '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>'
+                     '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" '
+                     'w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>'
+                     '</w:body></w:document>'))
+
+
+def test_apply_template_package():
+    """`apply-template`: the WHOLE package rebuilt inside the venue's templates."""
+    tmp = scratch("paper_tpl_pkg_")
+    tpl = tmp / "tpl"
+    tpl.mkdir()
+    main_tpl = tpl / "Fake_Template.docx"
+    supp_tpl = tpl / "Fake_Supplementary_Material.docx"
+    for t, marker in ((main_tpl, "Main"), (supp_tpl, "Supplementary")):
+        full_docx(t, ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                      '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/'
+                      '2006/main"><w:body>' + para("Heading1", marker + " one")
+                      + para("Heading1", marker + " two") + para("Heading2", "sub")
+                      + para("Heading2", "sub two") +
+                      '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>'
+                      '<w:pgMar w:top="1138" w:right="1181" w:bottom="1138" w:left="1282" '
+                      'w:header="283" w:footer="510" w:gutter="0"/></w:sectPr>'
+                      '</w:body></w:document>'))
+    pkg = tmp / "pkg"
+    (pkg / "work").mkdir(parents=True)
+    _package_docx(pkg / "mainText.docx", "Introduction")
+    _package_docx(pkg / "suppInfo.docx", "Supplementary tables")
+    (pkg / "figure1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (pkg / "MANUAL_STEPS.md").write_text("steps\n", encoding="utf-8")
+    (pkg / "work" / "scratch.txt").write_text("scratch\n", encoding="utf-8")
+    (pkg / "mainText.tracked.docx").write_bytes((pkg / "mainText.docx").read_bytes())
+    dest = tmp / "out"
+    rep = nb.rebuild_package_from_templates(
+        {"main": main_tpl, "supplementary": supp_tpl}, pkg, dest)
+    check("the package rebuild restyles every DOCX and copies every other file",
+          rep.get("ok") is True and rep.get("documents_rebuilt") == 2
+          and rep.get("files_copied") == 2, str(rep)[:260])
+    names = sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file())
+    check("process scratch and tracked-change auxiliaries stay out of the rebuilt package",
+          names == ["MANUAL_STEPS.md", "figure1.png", "mainText.docx", "suppInfo.docx"],
+          str(names))
+    check("the supplementary document uses the supplementary template",
+          (rep["files"] and any(f["file"] == "suppInfo.docx"
+                                and Path(str(f.get("template") or "")).name
+                                == "Fake_Supplementary_Material.docx"
+                                for f in rep["files"])), str(rep["files"]))
+    with zipfile.ZipFile(dest / "mainText.docx") as z:
+        docx = z.read("word/document.xml").decode("utf-8", "replace")
+    check("the rebuilt manuscript keeps its text and its headings are tagged",
+          'w:pStyle w:val="Heading1"' in docx
+          and all(f.get("text_unchanged") is not False for f in rep["files"]
+                  if f["kind"] == "docx-rebuilt")
+          and any(len(f.get("headings_retagged") or []) == 1 for f in rep["files"]),
+          str([f.get("headings_retagged") for f in rep["files"]]))
+    check("the report is written BESIDE the package, never inside it",
+          (dest.parent / "out.template_report.json").is_file()
+          and (dest.parent / "out.template_report.md").is_file()
+          and not any("template_report" in n for n in names), str(names))
+
+
 def test_mcp_first_render_chain():
     """The orchestrator's own template renders use the operator's FIRST choice:
     the docx-converter MCP tool, then docx2pdf.sh, then LibreOffice."""
@@ -827,6 +895,7 @@ def main() -> int:
         test_generalized_template_restyle()
         test_heading_retag()
         test_even_odd_furniture()
+        test_apply_template_package()
         test_mcp_first_render_chain()
         test_visual_template_render_and_comparison()
     finally:

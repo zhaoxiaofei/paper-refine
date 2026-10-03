@@ -393,6 +393,8 @@ def docx_front_matter_report(path: Path, template: Path = None) -> dict:
         if t:
             texts.append(t)
             styles.append(elem_val(ppr_of(p[2]), "pStyle") or "")
+    corr = next((p[2] for p in paragraphs(doc)
+                 if _CORRESP_RE.match(text_of(p[2]).strip())), "")
     title_style = styles[0] if styles else ""
     author_style = next((styles[i] for i in range(1, min(4, len(styles)))
                          if "," in texts[i] or " and " in texts[i]), "")
@@ -410,6 +412,9 @@ def docx_front_matter_report(path: Path, template: Path = None) -> dict:
            "abstract_style": abstract_style, "keywords_style": keywords_style,
            "first_header": bool(first_header), "logo_header": logo,
            "first_footer": bool(part("footer", "first") or part("footer", "default")),
+           "correspondence": bool(corr),
+           "correspondence_bold": bool(corr and _label_is_bold(corr)),
+           "correspondence_lines": (corr.count("<w:br") if corr else None),
            "even_odd": "evenAndOddHeaders" in settings,
            "deep_headings": deep,
            "heading3": sum(1 for s in styles if heading_level_of.get(s) == 3),
@@ -441,6 +446,30 @@ def docx_front_matter_report(path: Path, template: Path = None) -> dict:
     if _template_uses_even_odd(Path(template)) and not out["even_odd"]:
         rows.append("the template's even-page header/footer cannot render: the document does "
                     "not set <w:evenAndOddHeaders/>")
+    tpl_doc, layout = "", {}
+    try:
+        with zipfile.ZipFile(template) as tpkg:
+            tpl_doc = tpkg.read("word/document.xml").decode("utf-8", "replace")
+        layout = _template_front_layout(tpl_doc)
+    except (OSError, zipfile.BadZipFile, KeyError):
+        layout = {}
+    if layout:
+        if corr:
+            if not out["correspondence_bold"]:
+                rows.append("the '* Correspondence:' label is not bold (the template's own is)")
+            if layout.get("correspondence") \
+                    and not re.search(r"<w:spacing\b", ppr_of(corr) or ""):
+                rows.append("the correspondence block does not carry the template's own paragraph "
+                            "spacing")
+            if out["correspondence_lines"] is not None and out["correspondence_lines"] < 2:
+                rows.append("the correspondence block is not the template's three-line form: "
+                            "BOLD '* Correspondence:', the corresponding author, the email")
+        affs = [p[2] for p in paragraphs(doc)
+                if re.match(r"^\d+[A-Z]", text_of(p[2]).strip())]
+        if affs and layout.get("affiliation_first") and not any(
+                re.search(r"<w:spacing\b", ppr_of(a) or "") for a in affs[:2]):
+            rows.append("the affiliation lines do not carry the template's before=240/after=0 "
+                        "spacing")
     for container in containers:
         rows.append(f"source-template container heading {container!r} is not part of the "
                     f"venue's structure")
@@ -4164,7 +4193,145 @@ def _retag_headings(doc_xml: str, roles: dict) -> tuple:
     return (apply_edits(doc_xml, edits) if edits else doc_xml), done
 
 
-def _front_matter_styles(doc_xml: str, roles: dict) -> tuple:
+_CORRESP_RE = re.compile(r"^\s*\*\s*Correspondence\s*:", re.I)
+
+
+def _ppr_extra(ppr_xml: str) -> str:
+    """A template paragraph's NON-style pPr children (spacing/ind/jc/rPr)."""
+    if not ppr_xml:
+        return ""
+    keep = []
+    for tag in ("spacing", "ind", "jc", "keepNext", "keepLines", "rPr"):
+        keep += re.findall(rf"<w:{tag}(?=[\s/>])[^>]*/>|<w:{tag}(?=[\s>])[^>]*>[\s\S]*?</w:{tag}>",
+                           ppr_xml)
+    return "".join(keep)
+
+
+def _template_front_layout(tpl_doc: str) -> dict:
+    """The TEMPLATE's own paragraph properties for the first-page block.
+
+    The title/author/keywords/abstract roles come from style ids, but a Word
+    template formats its affiliation lines and its correspondence block with
+    DIRECT `w:spacing` (before=240/after=0) and a Times New Roman cs font. The
+    normalizer strips direct paragraph properties, so unless those values are
+    copied from the template the block ends up under Normal's spacing -- which is
+    exactly the "line spacing between the affiliation/correspondence lines is
+    wrong" deviation. Returns {role: pPr-snippet} for affiliation (first and
+    rest), correspondence, keywords, abstract_head and abstract_body.
+    """
+    out = {}
+    paras = list(paragraphs(tpl_doc))
+    affil = 0
+    abstract_seen = False
+    for _p0, _p1, frag in paras:
+        text = text_of(frag).strip()
+        ppr = ppr_of(frag)
+        extra = _ppr_extra(ppr)
+        if not text:
+            continue
+        style = elem_val(ppr, "pStyle")
+        if _CORRESP_RE.match(text):
+            out.setdefault("correspondence", extra)
+        elif style == "AuthorList" and text.lower().startswith("keywords"):
+            out.setdefault("keywords", extra)
+        elif style == "AuthorList" and text.lower() == "abstract":
+            out.setdefault("abstract_head", extra)
+            abstract_seen = True
+        elif abstract_seen and "abstract_body" not in out and style not in ("Heading1", "Heading2"):
+            out["abstract_body"] = extra
+        elif re.match(r"^\d+[A-Z]", text) and "correspondence" not in text.lower():
+            affil += 1
+            out.setdefault("affiliation_first" if affil == 1 else "affiliation_rest", extra)
+    return out
+
+
+def _bold_label_runs(para_xml: str) -> str:
+    """Make the leading `* Correspondence:` label BOLD (template's own look).
+
+    The label is often one run that also carries the name/email; the run is split
+    at the colon so only the label is bold -- the concatenated w:t text stays
+    byte-identical.
+    """
+    m = _CORRESP_RE.match(text_of(para_xml).strip())
+    if not m:
+        return para_xml
+    left = len(m.group(0))
+    out = para_xml
+    for rm in list(re.finditer(r"<w:r\b[\s\S]*?</w:r>", out)):
+        run = rm.group(0)
+        tm = re.search(r"(<w:t[^>]*>)([\s\S]*?)(</w:t>)", run)
+        if not tm:
+            continue
+        text = xml_unescape(tm.group(2))
+        if not text.strip():
+            continue
+        take = min(left, len(text))
+        head, tail = text[:take], text[take:]
+        left -= take
+        rpr = re.search(r"<w:rPr>[\s\S]*?</w:rPr>", run)
+        props = rpr.group(0) if rpr else ""
+        bold = props if ("<w:b/>" in props or re.search(r'<w:b w:val="(?:1|true|on)"', props)) \
+            else (props.replace("<w:rPr>", "<w:rPr><w:b/>", 1) if props
+                  else "<w:rPr><w:b/></w:rPr>")
+
+        def with_text(txt: str, want: str) -> str:
+            frag = run[:tm.start(2)] + xml_escape(txt) + run[tm.end(2):]
+            if re.search(r"<w:rPr>[\s\S]*?</w:rPr>", frag):
+                return re.sub(r"<w:rPr>[\s\S]*?</w:rPr>", want, frag, count=1)
+            om = re.match(r"<w:r\b[^>]*>", frag)
+            return frag[:om.end()] + want + frag[om.end():]
+
+        new_runs = with_text(head, bold)
+        if tail:
+            new_runs += with_text(tail, props)
+        out = out.replace(run, new_runs, 1)
+        if left <= 0:
+            break
+    return out
+
+
+def _label_is_bold(para_xml: str) -> bool:
+    """Is the `* Correspondence: ` label (up to the colon) actually bold?"""
+    m = _CORRESP_RE.match(text_of(para_xml).strip())
+    if not m:
+        return False
+    left = len(m.group(0))
+    for run in re.findall(r"<w:r\b[\s\S]*?</w:r>", para_xml):
+        text = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", run))
+        if not text.strip():
+            continue
+        take = min(left, len(text))
+        if take > 0 and not re.search(r"<w:b/>|<w:b w:val=\"(?:1|true|on)\"", run):
+            return False
+        left -= take
+        if left <= 0:
+            return True
+    return False
+
+
+def _insert_ppr_extra(ppr_xml: str, extra: str) -> str:
+    """Add template pPr children (spacing/ind/jc/rPr) in schema-safe positions."""
+    if not extra:
+        return ppr_xml
+    rm = re.search(r"<w:rPr(?=[\s>])", ppr_xml)
+    if rm:
+        return ppr_xml[:rm.start()] + extra + ppr_xml[rm.start():]
+    return ppr_xml.replace("</w:pPr>", extra + "</w:pPr>", 1)
+
+
+def _apply_ppr_extra(frag: str, extra: str) -> str:
+    """Give a paragraph the TEMPLATE's own pPr children (its direct spacing)."""
+    if not extra:
+        return frag
+    m = re.search(r"<w:pPr(?=[\s>])[^>]*>[\s\S]*?</w:pPr>", frag)
+    if m:
+        block = re.sub(r"<w:(?:spacing|ind|jc)(?=[\s/>])[^>]*/>", "", m.group(0))
+        return frag.replace(m.group(0), _insert_ppr_extra(block, extra), 1)
+    om = re.match(r"<w:p\b[^>]*>", frag)
+    return frag[:om.end()] + f"<w:pPr>{extra}</w:pPr>" + frag[om.end():]
+
+
+def _front_matter_styles(doc_xml: str, roles: dict, tpl_doc: str = "") -> tuple:
     """(xml, info): template front matter + the template's heading depth.
 
     Title on the first paragraph, AuthorList on the author line (bold),
@@ -4177,8 +4344,9 @@ def _front_matter_styles(doc_xml: str, roles: dict) -> tuple:
     author_id = roles.get("author") or ""
     headings = dict(roles.get("headings") or {})
     depth = int(roles.get("max_heading_level") or 2)
+    layout = _template_front_layout(tpl_doc) if tpl_doc else {}
     info = {"title": False, "authors": False, "abstract": False, "keywords": False,
-            "deep_headings_demoted": 0}
+            "correspondence": False, "deep_headings_demoted": 0}
     if not (title_id or author_id or headings):
         return doc_xml, info
     paras = paragraphs(doc_xml)
@@ -4187,9 +4355,12 @@ def _front_matter_styles(doc_xml: str, roles: dict) -> tuple:
         return doc_xml, info
     edits = []
 
-    def style_para(idx, style):
+    def style_para(idx, style, role=None):
         p0, p1, frag = paras[idx]
-        edits.append((p0, p1, _strip_direct_props(_set_para_style(frag, style), strip_num=True)))
+        new = _strip_direct_props(_set_para_style(frag, style), strip_num=True)
+        if role and layout.get(role):
+            new = _apply_ppr_extra(new, layout[role])
+        edits.append((p0, p1, new))
 
     if title_id:
         style_para(entries[0][0], title_id)
@@ -4207,7 +4378,7 @@ def _front_matter_styles(doc_xml: str, roles: dict) -> tuple:
         t = text_of(p[2]).strip()
         low = t.lower()
         if low == "abstract":
-            style_para(idx, author_id or "AuthorList")
+            style_para(idx, author_id or "AuthorList", "abstract_head")
             info["abstract"] = True
         elif low == "keywords":
             kw_heading = idx
@@ -4223,6 +4394,35 @@ def _front_matter_styles(doc_xml: str, roles: dict) -> tuple:
             style_para(idx, author_id or "AuthorList")
             info["keywords"] = True
             kw_pending = False
+    # The FIRST page's block order and its direct spacing come from the template:
+    # the affiliation lines (before=240/after=0) and the correspondence block
+    # (* Correspondence: in BOLD, then the name and the email on their own lines).
+    affil = 0
+    after_front = len(paras)
+    for idx, p in entries:
+        t = text_of(p[2]).strip()
+        if _CORRESP_RE.match(t) or t.lower() == "abstract" or t.lower().startswith("keywords"):
+            after_front = min(after_front, idx)
+    for idx, p in entries:
+        t = text_of(p[2]).strip()
+        if _CORRESP_RE.match(t):
+            p0, p1, frag = p
+            new = _strip_direct_props(frag, strip_num=True)
+            if layout.get("correspondence"):
+                new = _apply_ppr_extra(new, layout["correspondence"])
+            new = _bold_label_runs(new)
+            if new != frag:
+                edits.append((p0, p1, new))
+            info["correspondence"] = True
+        elif idx < after_front and re.match(r"^\d+[A-Z]", t):
+            affil += 1
+            role = "affiliation_first" if affil == 1 else "affiliation_rest"
+            if layout.get(role):
+                p0, p1, frag = p
+                new = _strip_direct_props(frag, strip_num=True)
+                new = _apply_ppr_extra(new, layout[role])
+                if new != frag:
+                    edits.append((p0, p1, new))
     deep = {sid: level for level, sid in headings.items() if level > depth}
     for idx, p in enumerate(paras):
         pstyle = elem_val(ppr_of(p[2]), "pStyle")
@@ -4454,7 +4654,7 @@ def apply_word_template(src: Path, out: Path, template: Path) -> dict:
                     new_xml = apply_edits(new_xml, edits)
                 if name == "word/document.xml":
                     new_xml, page_ok = _adopt_page_geometry(new_xml, tpl_doc)
-                    new_xml, front_info = _front_matter_styles(new_xml, roles)
+                    new_xml, front_info = _front_matter_styles(new_xml, roles, tpl_doc)
                 if new_xml != xml:
                     parts[name] = new_xml.encode("utf-8")
             front_parts = _template_front_parts(tpkg, parts, tnames)

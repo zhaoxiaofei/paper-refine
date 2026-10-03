@@ -2817,6 +2817,14 @@ and statement placement; no prose was copied). Two tiers, with different authori
     own document uses (never a sub-sub-section such as 2.2.1 when the template stops at 2.2).
     The template's first-page header (logo) and its page-number footer are part of the
     deliverable, not decoration.
+  * THE FIRST-PAGE BLOCK IS THE TEMPLATE'S OWN, IN ITS ORDER AND SPACING: one title line, ONE
+    author-list line, the affiliation lines the template spaces with before=240/after=0, then ONE
+    correspondence block -- the BOLD label "* Correspondence:" followed by a line break, the
+    corresponding author ("<Name>, lead contact" when the source marks a lead contact or a
+    corresponding author), another line break and the email -- then ONE "Keywords: ..." line and
+    the unnumbered "Abstract" heading with its paragraph. Fold a separate "Lead contact" /
+    "Corresponding author" line into that block instead of leaving it as its own paragraph, and
+    never keep the old publisher's "Highlights"/"Summary"/"Motivation" containers.
   * CONTAINER HEADINGS THAT BELONG TO ANOTHER PUBLISHER'S TEMPLATE (for example "Lead contact",
     "Resource availability", "Materials availability", "Method details", or a bare "Key
     resources" heading) are not part of this venue's structure: fold their content into the
@@ -10855,6 +10863,126 @@ def normalize_formatting_in_dir(dirp: Path, policy: dict, label: str,
 
 
 VALIDATE_TEX_TIMEOUT = 600
+
+
+TEMPLATE_PACKAGE_DIRNAME = "template_package"
+
+
+def template_for_package_file(path: Path, templates: dict):
+    """The venue Word template one package DOCX should be rebuilt in."""
+    supp = templates.get("supplementary")
+    if supp and re.search(r"(?:^|[_\-.])supp", Path(path).stem, re.I):
+        return Path(supp)
+    main = templates.get("main")
+    return Path(main) if main else None
+
+
+def template_package_files(src: Path) -> list:
+    """Every file of a submission package, minus process scratch/auxiliaries.
+
+    `work/` is the pipeline's own scratch and `*.tracked.docx` /
+    `*.before-after.docx` are tracked-changes auxiliaries -- neither belongs to a
+    submission, so the rebuilt package leaves them out (the same rule the corpus
+    builder and the judges apply). Everything else -- figures, tables, data,
+    bibliography, the author's own notes -- is copied byte-for-byte.
+    """
+    out = []
+    for p in sorted(Path(src).rglob("*")):
+        if not p.is_file() or p.name.startswith("~$"):
+            continue
+        rel = p.relative_to(src)
+        if "work" in rel.parts[:-1] or _is_aux_doc(p.name):
+            continue
+        out.append(p)
+    return out
+
+
+def rebuild_package_from_templates(templates: dict, src: Path, dest: Path,
+                                   force: bool = False) -> dict:
+    """Rebuild a WHOLE submission package inside the venue's own Word templates.
+
+    Every package DOCX is restyled into the journal's template by
+    `apply_word_template`: the template's styles/theme/font table/numbering and
+    page geometry, its front matter (title/author/affiliations/correspondence/
+    keywords/abstract, with the template's own paragraph spacing and the bold
+    `* Correspondence:` label), its first-page logo header and page-number
+    footers with the template's odd/even parity, and the template's Heading 1..N
+    for section headings the source only direct-formatted. The manuscript TEXT of
+    every restyled file must stay byte-identical or THAT file is copied unchanged
+    and reported as failed. Every non-DOCX file is copied byte-for-byte; `work/`
+    and tracked-change auxiliaries are left out. The report is written BESIDE the
+    package (`<dest>.template_report.json` / `.md`), never inside it -- a
+    submission package must not carry pipeline artifacts.
+    """
+    mod = _format_module()
+    if mod is None:
+        return {"ok": False, "error": f"{DOCX_FORMAT_MODULE} not found"}
+    if not templates:
+        return {"ok": False, "error": "the venue ships no official Word template"}
+    src, dest = Path(src), Path(dest)
+    if not src.is_dir():
+        return {"ok": False, "error": f"the source package {src} is not a directory"}
+    if is_within(dest, src) or is_within(src, dest):
+        return {"ok": False, "error": "the source and the destination must not be nested"}
+    if dest.exists():
+        if not any(dest.iterdir()):
+            pass
+        elif force:
+            rmtree_force(dest)
+        else:
+            return {"ok": False, "error": f"{dest} exists and is not empty (use --force)"}
+    dest.mkdir(parents=True, exist_ok=True)
+    files = []
+    for p in template_package_files(src):
+        target = dest / p.relative_to(src)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if p.suffix.lower() != ".docx":
+            shutil.copy2(p, target)
+            files.append({"file": p.relative_to(src).as_posix(), "kind": "copied"})
+            continue
+        tpl = template_for_package_file(p, templates)
+        rep = mod.apply_word_template(p, target, tpl) if tpl else \
+            {"ok": False, "error": "no matching Word template for this document"}
+        if rep.get("ok"):
+            files.append({"file": p.relative_to(src).as_posix(), "kind": "docx-rebuilt",
+                          "ok": True, "text_unchanged": rep.get("text_unchanged"),
+                          "template": rep.get("template"),
+                          "headings_retagged": rep.get("headings_retagged"),
+                          "changes": rep.get("changes")})
+        else:
+            shutil.copy2(p, target)
+            files.append({"file": p.relative_to(src).as_posix(),
+                          "kind": "docx-kept-original", "ok": False,
+                          "error": rep.get("error")})
+    rebuilt = [f for f in files if f["kind"] == "docx-rebuilt"]
+    failed = [f for f in files if f.get("ok") is False]
+    report = {"ok": not failed, "source": str(src), "dest": str(dest),
+              "templates": {k: str(v) for k, v in templates.items()},
+              "documents_rebuilt": len(rebuilt), "files_copied":
+                  sum(1 for f in files if f["kind"] == "copied"),
+              "failed": [f["file"] for f in failed], "files": files}
+    write_json_atomic(dest.parent / (dest.name + ".template_report.json"), report)
+    (dest.parent / (dest.name + ".template_report.md")).write_text(
+        template_package_md(report), encoding="utf-8")
+    return report
+
+
+def template_package_md(report: dict) -> str:
+    """The readable sibling of the package rebuild's JSON report."""
+    L = [f"# Template package: `{report['dest']}`", "",
+         f"- source: `{report['source']}`",
+         f"- templates: " + ", ".join(f"{k}=`{v}`" for k, v in report["templates"].items()),
+         f"- rebuilt documents: {report['documents_rebuilt']}",
+         f"- other files copied: {report['files_copied']}",
+         f"- failures: {', '.join(report['failed']) if report['failed'] else 'none'}", ""]
+    for f in report["files"]:
+        if f["kind"] == "docx-rebuilt":
+            L.append(f"- `{f['file']}`: template text preserved="
+                     f"{f.get('text_unchanged')}; headings retagged="
+                     f"{len(f.get('headings_retagged') or [])}")
+        elif f["kind"] == "docx-kept-original":
+            L.append(f"- `{f['file']}`: KEPT ORIGINAL -- {f.get('error')}")
+    return "\n".join(L) + "\n"
 
 
 def _validate_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, input_dir: Path,
@@ -27837,6 +27965,60 @@ def latest_add_venue_sandbox(dest: Path, vid: str):
     return cands[-1] if cands else None
 
 
+def default_template_package_source(ctx: Ctx):
+    """The package `apply-template` rebuilds when no --source is given.
+
+    The published final package when the root has one (`final_clean_version/`),
+    else the most recent complete round's `round<r>_winner/`, else None.
+    """
+    fin = ctx.root / "final_clean_version"
+    if fin.is_dir() and any(fin.iterdir()):
+        return fin
+    rounds = sorted((int(k) for k in (ctx.state.get("rounds") or {})
+                     if str(k).isdigit()), reverse=True)
+    for r in rounds:
+        w = ctx.root / f"round{r}_winner"
+        if w.is_dir() and any(w.iterdir()):
+            return w
+    return None
+
+
+def cmd_apply_template(args) -> None:
+    """Rebuild a whole submission package inside the venue's Word templates."""
+    ctx = Ctx(Path(args.root))
+    ctx.load()
+    templates = venue_word_templates(ctx)
+    if not templates:
+        die(f"the venue {venue_id_of(ctx)!r} ships no official Word template, so there is "
+            f"nothing to rebuild from: put the journal's .docx (main + supplementary) under "
+            f"{ctx.root}/venue_profiles/{venue_id_of(ctx)}{VENUE_OFFICIAL_SUFFIX}/ and re-run "
+            f"`build-venue-templates`/`setup`")
+    src = Path(args.source).expanduser() if args.source else default_template_package_source(ctx)
+    if src is None:
+        die("no package to rebuild: the root has no final_clean_version/ and no completed "
+            "round's round<r>_winner/ -- name one with --source <dir>")
+    dest = Path(args.dest).expanduser() if args.dest else ctx.root / TEMPLATE_PACKAGE_DIRNAME
+    report = rebuild_package_from_templates(templates, src, dest, force=bool(args.force))
+    if not report.get("ok"):
+        if report.get("error"):
+            die(report["error"])
+        die("the rebuild left files un-restyled: " + ", ".join(report.get("failed") or []))
+    print(f"[apply-template] venue: {venue_id_of(ctx)} "
+          f"({venue_profile_of(ctx, required=False).journal if venue_profile_of(ctx, required=False) else ''})")
+    print(f"[apply-template] rebuilt {report['documents_rebuilt']} document(s) and copied "
+          f"{report['files_copied']} other file(s):")
+    for f in report["files"]:
+        if f["kind"] == "docx-rebuilt":
+            print(f"  [docx] {f['file']}  (template: {Path(str(f.get('template') or '')).name}, "
+                  f"text preserved={f.get('text_unchanged')}, "
+                  f"headings retagged={len(f.get('headings_retagged') or [])})")
+    print(f"[apply-template] package: {report['dest']}")
+    print(f"[apply-template] report:  {report['dest']}.template_report.md "
+          f"(+ .json; written BESIDE the package, never inside it)")
+    print(f"[apply-template] the source package is untouched; every rebuilt document's text is "
+          f"proven byte-identical to its source ({DOCX_FORMAT_MODULE} self-verification)")
+
+
 def cmd_build_venue_templates(args) -> None:
     """Generate the pinned structure-only template pack from a venue's exemplars."""
     vid = str(getattr(args, "venue", None) or "").strip().lower()
@@ -32870,6 +33052,23 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--yes", action="store_true",
                     help="actually delete; without it prune only reports what it would remove")
     pp.set_defaults(func=cmd_prune)
+
+    pat = sub.add_parser("apply-template", parents=[common],
+                         help="rebuild a WHOLE submission package inside the venue's official "
+                              "Word templates: styles/theme/fonts, front matter (bold "
+                              "'* Correspondence:' block, its own spacing), heading styles, "
+                              "first-page logo and page-number footers; every non-DOCX file is "
+                              "copied as is and every restyled document's text must stay "
+                              "byte-identical")
+    pat.add_argument("--source", default=None, metavar="DIR",
+                     help="the package to rebuild (default: <root>/final_clean_version/, else "
+                          "the last complete round's round<r>_winner/)")
+    pat.add_argument("--dest", default=None, metavar="DIR",
+                     help=f"destination package directory (default: "
+                          f"<root>/{TEMPLATE_PACKAGE_DIRNAME}/)")
+    pat.add_argument("--force", action="store_true",
+                     help="replace a non-empty destination")
+    pat.set_defaults(func=cmd_apply_template)
     return p
 
 

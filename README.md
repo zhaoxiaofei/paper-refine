@@ -233,7 +233,31 @@ python paper_pipeline.py set-article-type --show         # current venue / type 
 python paper_pipeline.py set-venue --show                # current venue, journal, resolved limits
 python paper_pipeline.py set-venue --show --json         # the same, machine-readable
 python paper_pipeline.py status --root ./paper_rounds      # prints venue, journal and limits too
+python paper_pipeline.py apply-template --root ./paper_rounds   # rebuild a WHOLE package in the journal's Word templates
 ```
+
+**Rebuilding a whole package in the journal's templates (`apply-template`).** When you want the
+submission itself -- every DOCX, the cover letter and the supplementary material, plus the figures
+and data files -- rewritten into the journal-provided Word templates without re-running the agents,
+`apply-template` does exactly that on a package directory: it resolves the venue's official
+`venue_profiles/<venue>.official/` templates (main and supplementary), restyles every package DOCX
+into them with the same code-side pass the runs use (styles/theme/font table/numbering, page
+geometry, the front-matter block including the BOLD `* Correspondence:` label and its own spacing,
+the first-page logo and page-number footers, the template's odd/even page furniture, and the
+template's `Heading 1..N` for section headings the source only direct-formatted), and copies every
+other file byte-for-byte. `work/` scratch and `*.tracked.docx` auxiliaries stay out. Each rebuilt
+document's TEXT must stay byte-identical to its source or that file is kept unchanged and reported;
+the report lands BESIDE the package (`<dest>.template_report.json`/`.md`), never inside it. The
+source package is never modified:
+
+```bash
+python paper_pipeline.py apply-template --root ./paper_rounds                 # -> <root>/template_package/
+python paper_pipeline.py apply-template --root ./paper_rounds --source ./paper_rounds/final_clean_version --dest ./submission_word
+python paper_pipeline.py apply-template --root ./paper_rounds --source ./paper_rounds/runs/r1_w1/rewritten --force
+```
+
+With no `--source` it rebuilds `<root>/final_clean_version/`, else the last complete round's
+`round<r>_winner/`.
 
 **Official journal templates and venue exemplars.** When the venue publishes
 its own Word/LaTeX template (most do — e.g. Frontiers' Word/LaTeX template zips
