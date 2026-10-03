@@ -10943,8 +10943,37 @@ READ (read-only, hash-verified):
     unchanged unless the venue's own template covers them)
 
 WRITE (only inside out/):
-  1. COPY each template you need (a byte copy; the staged copies are read-only)
-     and edit the COPY:
+  1. COPY each template FILE byte-for-byte (`cp`; the staged copies are
+     read-only) and edit IN PLACE inside the copy's `word/document.xml`. The copy
+     must keep the template's `[Content_Types].xml`, `word/styles.xml`,
+     `word/theme/`, `word/fontTable.xml`, `word/numbering.xml`,
+     `word/settings.xml`, every `word/header*.xml` and `word/footer*.xml` (with
+     their `_rels`) and every `word/media/*` file BYTE-IDENTICAL -- never rebuild
+     the package, never re-save it through a converter, and never regenerate the
+     styles. The checker compares those parts against the template: a rebuilt
+     package fails.
+  1b. EDIT A PLACEHOLDER BY REPLACING ITS TEXT, NEVER ITS FORMATTING. The template
+     is a fill-in form: each sample paragraph (title, author list, affiliation,
+     correspondence block, keywords, abstract, headings, body text, bullet/
+     numbered list items, figure and table captions, the statement blocks, the
+     reference entries, the supplementary items) carries the style, indentation,
+     numbering/bullet, spacing and run properties the journal wants. For every
+     one of them:
+       - keep the paragraph's `w:pPr` (its `pStyle`, `numPr` bullet/numbering,
+         indentation, spacing, keepNext, ...) EXACTLY as the template wrote it;
+       - keep the run's `w:rPr` (font, size, bold/italic, colour, `vertAlign` for
+         superscript affiliation markers, ...) EXACTLY as the template wrote it;
+       - change ONLY the text inside `w:t` (splitting a run when the real content
+         needs differently formatted pieces, e.g. a superscript affiliation
+         number);
+       - when the real content needs MORE items than the template shows (a
+         reference list, a bullet list, several affiliations, several figure
+         captions), DUPLICATE the sample paragraph once per item and keep its
+         `w:pPr`/`w:rPr` in every copy; when it needs FEWER, DELETE the surplus
+         samples;
+       - never invent a style, font, size, colour, indentation or bullet, and
+         never re-tag a paragraph with a style the template does not use for that
+         kind of content.
        - the main text     <- venue_template/word/{main.name}
        - the supplementary <- {supp_src}
        - a cover letter has no journal template: keep the source letter (styled
@@ -10975,13 +11004,18 @@ WRITE (only inside out/):
      text, single-spaced inside the table, captions in the body font at body
      size). Never invent a requirement the journal does not state, and never
      leave such a style unset.
-  6. Render each output and LOOK at it (the visual-inspection rule below).The
-     code side then re-checks the package for leftover template prose and for
-     content coverage against `source/`.
+  6. Render each output and LOOK at it (the visual-inspection rule below), then
+     SELF-CHECK, at minimum: the Frontiers logo is in the first-page header; the
+     footer furniture is there on odd AND even pages (the template's own, e.g.
+     its colored/`This is a provisional file...` even-page footer); affiliation
+     numbers (and other superscripts) are still superscript; the styles/theme
+     are the template's. The code side re-checks the package for leftover
+     template prose, content coverage, the template's styles, its header/footer
+     roles, its protected furniture parts and the superscript runs.
   7. Write `out/REPLACEMENT_LEDGER.md`: one row per template placeholder or
-     sample element -- what it was, what replaced it (file + section), and any
-     template element you deliberately KEPT because the venue's structure
-     requires it.
+     sample element -- the style it carried, what replaced it (file + section),
+     how many copies the real content needed, and any template element you
+     deliberately KEPT because the venue's structure requires it.
 
 @@VISUAL_INSPECTION_RULE@@
 
@@ -11052,6 +11086,92 @@ def _hf_gap(want: dict, got: dict) -> dict:
     return gap
 
 
+def _style_usage(docx: Path) -> set:
+    """The paragraph style ids a DOCX's body actually uses."""
+    mod = _format_module()
+    if mod is None:
+        return set()
+    try:
+        with zipfile.ZipFile(docx) as z:
+            xml = z.read("word/document.xml").decode("utf-8", "replace")
+    except (OSError, zipfile.BadZipFile, KeyError):
+        return set()
+    return {sid for sid in re.findall(r'<w:pStyle w:val="([^"]+)"', xml) if sid}
+
+
+def _defined_styles(docx: Path) -> set:
+    try:
+        with zipfile.ZipFile(docx) as z:
+            styles = z.read("word/styles.xml").decode("utf-8", "replace")
+    except (OSError, zipfile.BadZipFile, KeyError):
+        return set()
+    return set(re.findall(r'w:styleId="([^"]+)"', styles))
+
+
+def _protected_template_parts(tpl: Path) -> dict:
+    """{part name: sha256} of the template parts a template-DERIVED copy must keep.
+
+    The theme, font table, numbering, and every header/footer part (the logo
+    drawing, the journal's colored/numbered footers) are furniture, not content:
+    an agent that copies the template and edits its text keeps them byte-for-byte.
+    A rebuilt package loses them, which is exactly the failure this catches.
+    """
+    out = {}
+    try:
+        with zipfile.ZipFile(tpl) as z:
+            for name in z.namelist():
+                low = name.lower()
+                if low.startswith("word/theme/") or low in ("word/fonttable.xml",
+                                                            "word/numbering.xml"):
+                    out[name] = hashlib.sha256(z.read(name)).hexdigest()
+                    continue
+                if re.match(r"word/(header|footer)\w*\.xml$", low):
+                    body = z.read(name).decode("utf-8", "replace")
+                    text = " ".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", body))
+                    # A part that carries the template's own PROSE (its typesetting
+                    # note) or a VML/DrawingML TEXT BOX may be intentionally replaced
+                    # by a plain page-number footer; the logo header, the empty
+                    # headers and the plain page-number parts must stay.
+                    if len(text.split()) >= 6 \
+                            or re.search(r"<w:txbxContent|<wps:wsp|<w:pict\b", body):
+                        continue
+                    out[name] = hashlib.sha256(z.read(name)).hexdigest()
+    except (OSError, zipfile.BadZipFile, KeyError):
+        return {}
+    return out
+
+
+def _out_part_hashes(docx: Path) -> set:
+    hashes = set()
+    try:
+        with zipfile.ZipFile(docx) as z:
+            for name in z.namelist():
+                if name.endswith((".xml", ".rels", ".jpeg", ".jpg", ".png", ".emf", ".wmf")):
+                    hashes.add(hashlib.sha256(z.read(name)).hexdigest())
+    except (OSError, zipfile.BadZipFile, KeyError):
+        return set()
+    return hashes
+
+
+def _superscripts_by_paragraph(path: Path) -> dict:
+    """{normalized paragraph text: superscript-run count} for one DOCX."""
+    mod = _format_module()
+    out = {}
+    if mod is None:
+        return out
+    try:
+        with zipfile.ZipFile(path) as z:
+            xml = z.read("word/document.xml").decode("utf-8", "replace")
+    except (OSError, zipfile.BadZipFile, KeyError):
+        return out
+    for _p0, _p1, frag in mod.paragraphs(xml):
+        text = re.sub(r"\s+", " ", mod.text_of(frag)).strip().lower()
+        n = frag.count("superscript")
+        if text and n:
+            out[text] = max(out.get(text, 0), n)
+    return out
+
+
 def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
     """Verify a template-first rewrite session (venue-agnostic verifiers).
 
@@ -11065,8 +11185,10 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
     out = sb / "out"
     if not out.is_dir():
         return {"ok": False, "errors": ["out/ is missing: the session produced no package"]}
-    src_docs = sorted(p for p in Path(src).glob("*.docx") if not _is_aux_doc(p.name))
-    out_docs = sorted(p for p in out.glob("*.docx") if not _is_aux_doc(p.name))
+    src_docs = sorted(p for p in Path(src).glob("*.docx")
+                      if not _is_aux_doc(p.name) and not p.name.startswith("~$"))
+    out_docs = sorted(p for p in out.glob("*.docx")
+                      if not _is_aux_doc(p.name) and not p.name.startswith("~$"))
     if not out_docs:
         return {"ok": False, "errors": ["out/ carries no .docx deliverable"]}
     errs, warns = [], []
@@ -11144,6 +11266,72 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
     if hf_gap:
         errs.append("the outputs do not carry the template's headers/footers: "
                     + json.dumps(hf_gap)[:300])
+    # TEMPLATE-DERIVED PARTS: the theme, font table, numbering and every header/
+    # footer part of the template must still be in the output (byte-identical, any
+    # part name -- a copied template keeps the names; a re-style may rename them).
+    derived_gap = []
+    for doc in out_docs:
+        tpl = template_for_package_file(doc, templates or {})
+        if not tpl:
+            continue
+        want = _protected_template_parts(Path(tpl))
+        have = _out_part_hashes(doc)
+        gone = sorted(name for name, h in want.items() if h not in have)
+        if gone:
+            derived_gap.append({"file": doc.name, "template": Path(tpl).name,
+                                "missing_template_parts": gone[:8]})
+    if derived_gap:
+        errs.append("the outputs are not derived from the templates: furniture parts of the "
+                    "template are gone (theme/fonts/numbering/headers/footers) -- COPY the "
+                    "template and edit it, never rebuild the package: "
+                    + json.dumps(derived_gap)[:300])
+    # SUPERSCRIPTS (affiliation markers, footnotes) are content-level formatting:
+    # every source paragraph found in an output must keep at least as many
+    # superscript runs as the source had.
+    sub_lost = []
+    for doc in src_docs:
+        target = next((p for p in out_docs if p.name == doc.name), None)
+        if target is None:
+            continue
+        want_sup = _superscripts_by_paragraph(doc)
+        got_sup = _superscripts_by_paragraph(target)
+        for text, n in want_sup.items():
+            if text in got_sup and got_sup[text] < n:
+                sub_lost.append({"file": doc.name, "text": text[:80],
+                                 "source_superscripts": n, "output_superscripts": got_sup[text]})
+            elif text not in got_sup and text in " ".join(out_text.values()):
+                sub_lost.append({"file": doc.name, "text": text[:80],
+                                 "source_superscripts": n, "output_superscripts": 0})
+    if sub_lost:
+        errs.append("superscript runs were dropped (affiliation numbers / footnote markers): "
+                    + json.dumps(sub_lost[:4])[:300])
+    # STYLE PRESERVATION: every style the SOURCE content uses must still be used
+    # by the output (the placeholders' styles carry the content), and the output
+    # may not invent a style the template does not define.
+    style_use_gap = []
+    for doc in src_docs:
+        target = next((p for p in out_docs if p.name == doc.name), None)
+        if target is None:
+            continue
+        lost = sorted(_style_usage(doc) - _style_usage(target))
+        if lost:
+            style_use_gap.append({"file": doc.name, "styles_lost": lost[:8]})
+    if style_use_gap:
+        errs.append("the outputs no longer USE the styles the source content carried (each "
+                    "placeholder keeps its style while its text is replaced, and surplus "
+                    "samples are duplicated/deleted, never re-tagged): "
+                    + json.dumps(style_use_gap)[:300])
+    invented = []
+    for doc in out_docs:
+        tpl = template_for_package_file(doc, templates or {})
+        if not tpl:
+            continue
+        extra = sorted(_style_usage(doc) - _defined_styles(Path(tpl)))
+        if extra:
+            invented.append({"file": doc.name, "undefined_styles": extra[:8]})
+    if invented:
+        errs.append("the outputs use paragraph styles the template does not define "
+                    "(never invent a style): " + json.dumps(invented)[:300])
     if not any(p.match("*[Ll][Ee][Dd][Gg][Ee][Rr]*.md") for p in out.iterdir() if p.is_file()):
         errs.append("out/REPLACEMENT_LEDGER.md is missing: record every template placeholder and "
                     "what replaced it")
@@ -11152,6 +11340,10 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
                          "missing_samples": missing[:8]},
             "template_prose_left": leftover[:8],
             "headers_footers": {p.name: _docx_hf_signature(p) for p in out_docs},
+            "template_derived_gaps": derived_gap[:8],
+            "styles_lost": style_use_gap[:8],
+            "styles_invented": invented[:8],
+            "superscripts_lost": sub_lost[:8],
             "documents": [p.name for p in out_docs]}
 
 

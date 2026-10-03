@@ -265,6 +265,7 @@ FULL_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr></w:style>
 <w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:pPr><w:outlineLvl w:val="2"/></w:pPr></w:style>
 <w:style w:type="paragraph" w:styleId="Caption"><w:name w:val="caption"/></w:style>
+<w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:style>
 </w:styles>"""
 
 
@@ -631,9 +632,16 @@ for line in sys.stdin:
 
 
 def _package_docx(path: Path, heading: str) -> None:
+    sup = ("<w:r><w:rPr><w:vertAlign w:val=\"superscript\"/><w:sz w:val=\"22\"/></w:rPr>"
+           "<w:t>1</w:t></w:r>")
+    bullet = ("<w:p><w:pPr><w:pStyle w:val=\"ListParagraph\"/><w:numPr>"
+              "<w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr></w:pPr>"
+              + _run("A bulleted point of the real content", sz=22) + "</w:p>")
     body = ("<w:p><w:pPr><w:pStyle w:val=\"Title\"/></w:pPr>"
             + _run("A package title", sz=32, bold=True) + "</w:p>"
+            + f"<w:p>{_run('Ann Author', sz=22)}{sup}</w:p>"
             + f"<w:p>{_run('word ' * 30, sz=22, space=True)}</w:p>"
+            + bullet
             + f"<w:p>{_run(heading, sz=28, bold=True)}</w:p>")
     full_docx(path, ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                      '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/'
@@ -753,7 +761,8 @@ def _furnished_template(path: Path, guide: str, *, main: bool = True) -> None:
             + para(None, "* Correspondence: Corresponding Authoremail@uni.edu")
             + f"<w:p>{_run(guide, sz=22, space=True)}</w:p>"
             + para("Heading1", "Introduction") + para("Heading1", "Methods")
-            + para("Heading2", "A subsection") + para("Heading2", "Another subsection"))
+            + para("Heading2", "A subsection") + para("Heading2", "Another subsection")
+            + para("ListParagraph", "A sample bullet the journal wants"))
     doc = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
@@ -823,6 +832,48 @@ def test_template_rewrite_postcheck():
     check("an output that lost the template's headers/footers is rejected",
           rep3.get("ok") is False
           and any("headers/footers" in e for e in rep3["errors"]), str(rep3["errors"])[:260])
+    # a REBUILT package (no template furniture parts) is rejected as not derived
+    fmt.apply_word_template(pkg / "mainText.docx", sb / "out" / "mainText.docx", tpl)
+    with zipfile.ZipFile(sb / "out" / "mainText.docx") as z:
+        items = [(i, z.read(i.filename)) for i in z.infolist()]
+    rebuilt = [(i, d) for i, d in items
+               if not re.match(r"word/(theme/|fontTable\.xml|numbering\.xml|"
+                               r"(?:header|footer)\w*\.xml)", i.filename)]
+    with zipfile.ZipFile(sb / "out" / "mainText.docx", "w", zipfile.ZIP_DEFLATED) as z:
+        for i, d in rebuilt:
+            z.writestr(i, d)
+    rep4 = nb.template_rewrite_postcheck(sb, pkg, {"main": tpl})
+    check("a package REBUILT without the template's furniture parts is rejected",
+          rep4.get("ok") is False
+          and any("not derived from the templates" in e for e in rep4["errors"]),
+          str(rep4["errors"])[:260])
+    # a dropped superscript (affiliation marker) is rejected
+    fmt.apply_word_template(pkg / "mainText.docx", sb / "out" / "mainText.docx", tpl)
+    with zipfile.ZipFile(sb / "out" / "mainText.docx") as z:
+        items = [(i, z.read(i.filename)) for i in z.infolist()]
+    doc = {i.filename: d for i, d in items}["word/document.xml"].decode("utf-8", "replace")
+    doc = doc.replace('<w:vertAlign w:val="superscript"/>', "")
+    with zipfile.ZipFile(sb / "out" / "mainText.docx", "w", zipfile.ZIP_DEFLATED) as z:
+        for i, d in items:
+            z.writestr(i, doc.encode("utf-8") if i.filename == "word/document.xml" else d)
+    rep5 = nb.template_rewrite_postcheck(sb, pkg, {"main": tpl})
+    check("a dropped affiliation superscript is rejected",
+          rep5.get("ok") is False
+          and any("superscript" in e for e in rep5["errors"]), str(rep5["errors"])[:260])
+    # a list item re-tagged away from the template's bullet style is rejected
+    fmt.apply_word_template(pkg / "mainText.docx", sb / "out" / "mainText.docx", tpl)
+    with zipfile.ZipFile(sb / "out" / "mainText.docx") as z:
+        items = [(i, z.read(i.filename)) for i in z.infolist()]
+    doc = {i.filename: d for i, d in items}["word/document.xml"].decode("utf-8", "replace")
+    doc = doc.replace('<w:pStyle w:val="ListParagraph"/>', "")
+    with zipfile.ZipFile(sb / "out" / "mainText.docx", "w", zipfile.ZIP_DEFLATED) as z:
+        for i, d in items:
+            z.writestr(i, doc.encode("utf-8") if i.filename == "word/document.xml" else d)
+    rep6 = nb.template_rewrite_postcheck(sb, pkg, {"main": tpl})
+    check("a bullet whose template list style was dropped is rejected",
+          rep6.get("ok") is False
+          and any("no longer USE the styles" in e for e in rep6["errors"]),
+          str(rep6["errors"])[:260])
 
 
 def _hf_roles(path: Path) -> list:
