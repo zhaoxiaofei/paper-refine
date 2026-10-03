@@ -3361,37 +3361,55 @@ JOURNAL_MODE_TRANSFER = "transfer"
 JOURNAL_MODE_RESUBMIT = "resubmit"
 JOURNAL_MODE_MAJOR = "major"
 JOURNAL_MODE_MINOR = "minor"
+JOURNAL_MODE_CONTINUE = "continue"
+# The pre-rename spelling of `continue`: kept so existing roots (a config with
+# `"revision_mode": "none"`), scripts and `set-revision-mode none` keep working.
 JOURNAL_MODE_NONE = "none"
+JOURNAL_MODE_INIT = "init"
+JOURNAL_MODE_ALIASES = {JOURNAL_MODE_NONE: JOURNAL_MODE_CONTINUE}
 
 JOURNAL_MODES = {
-    JOURNAL_MODE_NONE: {
+    JOURNAL_MODE_CONTINUE: {
         "option": 0,
         "label": "the pipeline's own review/revise rounds (no journal feedback)",
-        "response": False, "rewrites": True, "scoped": False,
+        "feedback": False, "response": False, "rewrites": True, "scoped": False,
+    },
+    JOURNAL_MODE_INIT: {
+        # `init` starts a NEW submission: the conform (template-first) stage runs
+        # before round 1 exactly like transfer's, but there is no decision letter
+        # anywhere in the chain -- no feedback/concerns stage, no response letter,
+        # no journal submission package. Everything after the conform stage is the
+        # historical `continue` workflow.
+        "option": 0,
+        "label": "init: conform the submission first -- inside the venue's own Word template "
+                 "when one ships, else to the journal's author guidelines and academic "
+                 "convention -- then run the pipeline's own review/revise rounds; no journal "
+                 "feedback",
+        "feedback": False, "response": False, "rewrites": True, "scoped": False,
     },
     JOURNAL_MODE_TRANSFER: {
         "option": 1,
         "label": "transfer: revise for a NEW journal from another journal's feedback; "
                  "no response to reviewers",
-        "response": False, "rewrites": True, "scoped": False,
+        "feedback": True, "response": False, "rewrites": True, "scoped": False,
     },
     JOURNAL_MODE_RESUBMIT: {
         "option": 2,
         "label": "resubmit: revise for a new submission to the SAME journal; "
                  "response to reviewers required",
-        "response": True, "rewrites": True, "scoped": False,
+        "feedback": True, "response": True, "rewrites": True, "scoped": False,
     },
     JOURNAL_MODE_MAJOR: {
         "option": 3,
         "label": "major revision: concern-scoped edits only at the same journal; "
                  "response to reviewers required; no rewrites",
-        "response": True, "rewrites": False, "scoped": True,
+        "feedback": True, "response": True, "rewrites": False, "scoped": True,
     },
     JOURNAL_MODE_MINOR: {
         "option": 4,
         "label": "minor revision: concern-scoped edits only at the same journal; "
                  "response to reviewers required; no rewrites",
-        "response": True, "rewrites": False, "scoped": True,
+        "feedback": True, "response": True, "rewrites": False, "scoped": True,
     },
 }
 
@@ -3419,15 +3437,26 @@ JOURNAL_RESPONSE_MAP_REL = "response/response_map.json"
 JOURNAL_SUBMISSION_DIR = "journal_submission"
 
 
+def normalize_revision_mode(value=None) -> str:
+    """The canonical revision-mode name for a configured/passed value.
+
+    The default is `continue` (the pipeline's own review/revise rounds). The
+    pre-rename spelling `none` is accepted as an alias of `continue` so existing
+    roots, scripts and habits keep working.
+    """
+    mode = str(value or JOURNAL_MODE_CONTINUE).strip().lower()
+    return JOURNAL_MODE_ALIASES.get(mode, mode)
+
+
 def journal_mode_of(ctx=None) -> str:
-    """The configured journal revision mode ('none' when unset/unknown).
+    """The configured journal revision mode ('continue' when unset).
 
     Reads `revision_mode` from pipeline_config.json (mirrored into state.json
-    as `config`). An unknown value is an error, not a silent 'none': a typo in
-    the mode would otherwise silently run the wrong workflow.
+    as `config`). An unknown value is an error, not a silent 'continue': a typo
+    in the mode would otherwise silently run the wrong workflow.
     """
     cfg = (getattr(ctx, "cfg", None) if ctx is not None else None) or {}
-    mode = str(cfg.get("revision_mode") or JOURNAL_MODE_NONE).strip().lower()
+    mode = normalize_revision_mode(cfg.get("revision_mode"))
     if mode not in JOURNAL_MODES:
         die(f"pipeline_config.json records revision_mode {mode!r}, which is not one of "
             f"{', '.join(JOURNAL_MODES)}. Fix it with `set-revision-mode <mode>` or start a "
@@ -3447,6 +3476,17 @@ def journal_is_scoped(ctx=None) -> bool:
 def journal_needs_response(ctx=None) -> bool:
     """True when a response-to-reviewers document is a required deliverable."""
     return bool(journal_mode_info(ctx).get("response"))
+
+
+def journal_has_feedback(ctx=None) -> bool:
+    """True when the mode consumes an editors'/reviewers' decision letter.
+
+    `continue` (the pre-rename `none`) and `init` do not: no feedback/concerns
+    stage, no journal block in any prompt, no response letter. The conform stage
+    of `init` runs regardless -- it fills the venue's template, it does not read
+    a letter.
+    """
+    return bool(journal_mode_info(ctx).get("feedback"))
 
 
 def journal_rewrites_allowed(ctx=None) -> bool:
@@ -11039,7 +11079,13 @@ def apply_template_prompt(ctx: Ctx, sb: Path, src: Path, templates: dict) -> str
     the resolved profile/templates, and every rule is about the SHAPE of the job
     (copy the template, replace its placeholders with the submission's content,
     change nothing else), never about a journal's vocabulary.
+
+    A venue with no official template gets the guideline/convention variant:
+    the authority chain starts at the journal's own author guidelines instead of
+    a template file.
     """
+    if not templates:
+        return apply_guideline_conform_prompt(ctx, src)
     main = Path(templates.get("main") or "")
     supp = Path(templates.get("supplementary") or "")
     docs = sorted(p.name for p in Path(src).glob("*.docx")) or ["(no .docx in source/)"]
@@ -11161,6 +11207,87 @@ WRITE (only inside out/):
           "reason": "<the template element/structure that forces the re-wrap>"}},
          {{"kind": "addition",
           "output": "<verbatim output paragraph not present in the source>",
+          "reason": "<why the venue's structure requires it>"}}
+       ]}}
+       ```
+     `{{"exceptions": []}}` when nothing needed re-wrapping or adding. A missing,
+     empty or non-matching declaration FAILS the code-side check: the ledger is
+     the machine-readable accounting, not prose commentary.
+
+@@VISUAL_INSPECTION_RULE@@
+
+@@DOCX_CLI_RULE@@
+""" .replace("@@VISUAL_INSPECTION_RULE@@", visual_inspection_block("out/VISUAL_CHECK.md")) \
+    .replace("@@DOCX_CLI_RULE@@", docx_cli_block())
+
+
+def apply_guideline_conform_prompt(ctx: Ctx, src: Path) -> str:
+    """The conform prompt for a venue that ships NO official Word template.
+
+    The authority chain starts one level down from the template: the journal's
+    own author guidelines (the venue profile's recorded guidance), then
+    established academic convention. The deliverable is the WHOLE package in
+    `out/`, content-identical to `source/` and re-authored to those rules.
+    """
+    docs = sorted(p.name for p in Path(src).glob("*.docx")) or ["(no .docx in source/)"]
+    prof = venue_profile_of(ctx, required=False)
+    label = (prof.label if prof is not None else venue_id_of(ctx))
+    prompt = (prof.prompt if prof is not None else {})
+    guideline_lines = []
+    if str(prompt.get("guidelines_source") or "").strip():
+        guideline_lines.append(f"  * guidelines: {prompt['guidelines_source']}")
+    if str(prompt.get("requirements") or "").strip():
+        guideline_lines.append(f"  * requirements: {prompt['requirements']}")
+    guidelines = ("\n".join(guideline_lines) if guideline_lines
+                  else "  * (this profile records no guideline text: use established academic "
+                       "convention)")
+    return f"""SUBMISSION CONFORM -- author this submission to {label}'s own rules
+
+This venue ships NO official Word template (`venue_template/` is empty), so
+there is no template layout to copy. The deliverable is the WHOLE submission
+package in `out/`, re-authored to the venue's own rules with EXACTLY the same
+content as `source/`.
+
+AUTHORITY, in order -- move to the next level ONLY for what the current one
+leaves open:
+  1. the journal's own official author guidelines, as recorded for this venue:
+{guidelines}
+  2. established academic convention (for example table text one step smaller
+     than the body text, single-spaced inside the table, captions in the body
+     font at body size).
+Never invent a requirement no level states, and never leave such a style unset.
+{venue_norm_for(ctx)}
+
+READ (read-only, hash-verified):
+  * source/ -- the package whose content you carry over:
+{chr(10).join('      - ' + n for n in docs)}
+    (figures, tables, data and the cover letter included; copy them into out/)
+
+WRITE (only inside out/):
+  1. COPY the whole source package into out/ -- every .docx, figure, table, data
+     file and the cover letter -- then edit the documents to follow the
+     authority chain above. Never rebuild a package through a converter and
+     never regenerate its styles from scratch.
+  2. CHANGE FORMATTING ONLY: the text of every paragraph stays as the source
+     wrote it. Never invent, summarize, merge or drop content.
+  3. The code side verifies this EXACTLY: every non-empty source paragraph,
+     SHORT LINES INCLUDED, must appear in the outputs at least as many times as
+     in the source, unless you declare it as a re-wrap in step 5; and no output
+     paragraph of 5+ words may be absent from the source unless it is declared.
+  4. Render each output and LOOK at it (the visual-inspection rule below), then
+     SELF-CHECK: the guidelines' mandatory sections and statements are present,
+     headings/captions/tables/list labels follow the rules above, affiliation
+     numbers (and other superscripts) are still superscript, and no other
+     journal's furniture has been imported.
+  5. Write `out/REPLACEMENT_LEDGER.md`: one row per formatting decision and every
+     exception, and it MUST end with ONE fenced ```json block declaring every
+     occurrence that breaks exact parity, with the paragraphs quoted VERBATIM
+     (one entry accounts for ONE occurrence):
+       ```json
+       {{"exceptions": [
+         {{"kind": "rewrap", "source": "<verbatim source paragraph that was not carried verbatim>",
+          "output": "<verbatim replacement paragraph>", "reason": "<rule that forces it>"}},
+         {{"kind": "addition", "output": "<verbatim output paragraph not present in the source>",
           "reason": "<why the venue's structure requires it>"}}
        ]}}
        ```
@@ -11673,20 +11800,24 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
                     + json.dumps(sub_lost[:4])[:300])
     # STYLE PRESERVATION: every style the SOURCE content uses must still be used
     # by the output (the placeholders' styles carry the content), and the output
-    # may not invent a style the template does not define.
+    # may not invent a style the template does not define. This is a
+    # TEMPLATE-conformance rule: without an official template the guideline
+    # chain may legitimately restyle the content, so only the content parity
+    # checks above apply.
     style_use_gap = []
-    for doc in src_docs:
-        target = mapping.get(doc.name)
-        if target is None:
-            continue
-        lost = sorted(_style_usage(doc) - _style_usage(target))
-        if lost:
-            style_use_gap.append({"file": doc.name, "styles_lost": lost[:8]})
-    if style_use_gap:
-        errs.append("the outputs no longer USE the styles the source content carried (each "
-                    "placeholder keeps its style while its text is replaced, and surplus "
-                    "samples are duplicated/deleted, never re-tagged): "
-                    + json.dumps(style_use_gap)[:300])
+    if templates:
+        for doc in src_docs:
+            target = mapping.get(doc.name)
+            if target is None:
+                continue
+            lost = sorted(_style_usage(doc) - _style_usage(target))
+            if lost:
+                style_use_gap.append({"file": doc.name, "styles_lost": lost[:8]})
+        if style_use_gap:
+            errs.append("the outputs no longer USE the styles the source content carried (each "
+                        "placeholder keeps its style while its text is replaced, and surplus "
+                        "samples are duplicated/deleted, never re-tagged): "
+                        + json.dumps(style_use_gap)[:300])
     invented = []
     for doc in out_docs:
         tpl = template_for_package_file(doc, templates or {})
@@ -11699,8 +11830,9 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
         errs.append("the outputs use paragraph styles the template does not define "
                     "(never invent a style): " + json.dumps(invented)[:300])
     if ledger is None:
-        errs.append("out/REPLACEMENT_LEDGER.md is missing: record every template placeholder and "
-                    "what replaced it")
+        errs.append("out/REPLACEMENT_LEDGER.md is missing: record every "
+                    + ("template placeholder and what replaced it" if templates else
+                       "formatting decision and every parity exception"))
     return {"ok": not errs, "errors": errs, "warnings": warns,
             "coverage": {"mode": "exact-multiset", "checked": checked, "covered": covered,
                          "ratio": round(ratio, 4), "missing_samples": missing[:8],
@@ -16890,7 +17022,7 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
     ensure_copy(ctx.sandbox_of(a1) / "base", sb / "base")
     ensure_pristine_input(ctx, sb / PRISTINE_DIR)
     ensure_copy(ctx.sandbox_of(rev_rec) / REVIEW_DIR, sb / REVIEW_DIR)
-    if journal_mode_of(ctx) != JOURNAL_MODE_NONE:
+    if journal_has_feedback(ctx):
         # The auditor disposes JF findings against the real letter, and a
         # concern the reviewers raised against the earlier version can only be
         # classified with that version in view: carry the ledger and the
@@ -16961,7 +17093,7 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     # The frozen review/ is the authoritative finding list: a partial copy must
     # never be trusted (the revision ledger keys on every finding id).
     ensure_copy(src_sb / REVIEW_DIR, sb / REVIEW_DIR)
-    if journal_mode_of(ctx) != JOURNAL_MODE_NONE:
+    if journal_has_feedback(ctx):
         if (src_sb / "concerns").is_dir():
             ensure_copy(src_sb / "concerns", sb / "concerns")
         if (src_sb / "feedback").is_dir():
@@ -16988,8 +17120,7 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
                                         prior_failure=note, audit=audit_enabled(ctx),
                                         venue=venue_profile_of(ctx),
                                         journal_block=(journal_revise_block(ctx)
-                                                       if journal_mode_of(ctx) !=
-                                                       JOURNAL_MODE_NONE else ""),
+                                                       if journal_has_feedback(ctx) else ""),
                                         venue_norm=venue_norm_for(ctx)),
                           encoding="utf-8")
     rec = ctx.register(rid, "revise", r, f"runs/{rid}",
@@ -24398,6 +24529,10 @@ def journal_revise_block(ctx: Ctx) -> str:
     """The block appended to the revise prompt (all four modes)."""
     mode = journal_mode_of(ctx)
     info = JOURNAL_MODES[mode]
+    if not info.get("feedback"):
+        # `init`/`continue` have no letter and no concern ledger: the historical
+        # revise prompt must not claim a journal revision is under way.
+        return ""
     if info["scoped"]:
         return f"""
 
@@ -27980,18 +28115,31 @@ def cmd_setup(args) -> None:
                                   rounds, "--rewrites")
     revises = parse_round_counts(getattr(args, "revises", None) or DEFAULTS["revises"],
                                  rounds, "--revises")
-    # ---- journal revision modes (options 1-4) -------------------------------
-    # "none" (the default) leaves every value below exactly as the operator
+    # ---- revision modes (init, options 1-4, continue) -----------------------
+    # "continue" (the default) leaves every value below exactly as the operator
     # passed it: the historical workflow is unchanged.
-    revision_mode = str(getattr(args, "revision_mode", None) or JOURNAL_MODE_NONE).strip().lower()
+    raw_revision_mode = str(getattr(args, "revision_mode", None)
+                            or JOURNAL_MODE_CONTINUE).strip().lower()
+    revision_mode = normalize_revision_mode(raw_revision_mode)
+    if raw_revision_mode != revision_mode:
+        print(f"[setup] note: revision mode {raw_revision_mode!r} is the pre-rename spelling "
+              f"of {revision_mode!r}; using {revision_mode!r}.")
     if revision_mode not in JOURNAL_MODES:
         die(f"--revision-mode must be one of {', '.join(JOURNAL_MODES)} (got {revision_mode!r}). "
-            f"1=transfer (new journal, no response letter), 2=resubmit (same journal, letter), "
-            f"3=major revision (scoped edits, letter), 4=minor revision (scoped edits, letter).")
+            f"continue=the historical workflow (the pipeline's own review/revise rounds; the "
+            f"pre-rename spelling was 'none'), init=author the submission in the venue's own "
+            f"Word template first (the conform stage) then run the pipeline's own rounds with "
+            f"no journal feedback, 1=transfer (new journal, no response letter), 2=resubmit "
+            f"(same journal, letter), 3=major revision (scoped edits, letter), 4=minor "
+            f"revision (scoped edits, letter).")
     journal_feedback = [str(x) for x in (getattr(args, "journal_feedback", None) or [])
                         if str(x).strip()]
     journal_feedback_from = str(getattr(args, "journal_feedback_from", None) or "").strip()
-    if revision_mode != JOURNAL_MODE_NONE:
+    if (journal_feedback or journal_feedback_from) \
+            and not JOURNAL_MODES[revision_mode]["feedback"]:
+        print(f"[setup] note: revision mode {revision_mode!r} reads no journal feedback; "
+              f"--journal-feedback/--journal-feedback-from are ignored")
+    if revision_mode != JOURNAL_MODE_CONTINUE:
         info = JOURNAL_MODES[revision_mode]
         if info["scoped"]:
             # Major/minor revisions are concern-scoped by definition: no
@@ -28059,7 +28207,7 @@ def cmd_setup(args) -> None:
     files = [p for p in source.rglob("*") if p.is_file()]
     if not files:
         die(f"--source directory is empty: {source}")
-    if revision_mode != JOURNAL_MODE_NONE:
+    if JOURNAL_MODES[revision_mode]["feedback"]:
         # The evidence the whole mode rests on must exist BEFORE a root is
         # created: a journal mode with no feedback file would run the scoped
         # stages against nothing.
@@ -28207,13 +28355,15 @@ def cmd_setup(args) -> None:
                "rewrites": rewrites, "revises": revises, "integrators": integrators,
                "review_scope": review_scope,
                "created": utcnow(), "version": VERSION}
-    if revision_mode != JOURNAL_MODE_NONE:
-        # Journal revision modes (options 1-4). The keys are written ONLY for a
-        # journal mode: a default root keeps the exact config it always had
-        # (`journal_mode_of` reads a missing key as "none"), so the historical
-        # workflow is byte-compatible down to pipeline_config.json.
-        ctx.cfg.update({"revision_mode": revision_mode,
-                        "journal_feedback": journal_feedback,
+    if revision_mode != JOURNAL_MODE_CONTINUE:
+        # Journal revision modes (options 1-4) and `init`. The keys are written
+        # ONLY for a non-default mode: a default root keeps the exact config it
+        # always had (`journal_mode_of` reads a missing key as "continue"), so the
+        # historical workflow is byte-compatible down to pipeline_config.json.
+        # The feedback keys belong to the modes that actually read a letter.
+        ctx.cfg["revision_mode"] = revision_mode
+    if JOURNAL_MODES[revision_mode]["feedback"]:
+        ctx.cfg.update({"journal_feedback": journal_feedback,
                         "journal_feedback_from": journal_feedback_from})
     format_fix_report = None
     if format_fix != "off":
@@ -28286,7 +28436,7 @@ def cmd_setup(args) -> None:
           + ")")
     print(f"[setup] journal:                {journal or '(not set -- run `set-journal <name>`)'}"
           + ("" if journal else "  (the prompts say \"the target journal\")"))
-    if revision_mode != JOURNAL_MODE_NONE:
+    if revision_mode != JOURNAL_MODE_CONTINUE:
         print(f"[setup] revision mode:          {revision_mode} (option "
               f"{JOURNAL_MODES[revision_mode]['option']}) -- "
               f"{JOURNAL_MODES[revision_mode]['label']}"
@@ -29142,35 +29292,47 @@ def _record_template_stage(ctx: Ctx, sb: Path, agent: str) -> dict:
 
 
 def _ensure_template_stage_for_run(ctx: Ctx, args) -> None:
-    """TRANSFER MODE: author the submission inside the journal's templates FIRST.
+    """TRANSFER/INIT MODES: conform the submission to the journal's rules FIRST.
 
-    The stage is staged and run like `conform --agent`; its code-side
+    With an official Word template the stage is the template-first session
+    (`conform --agent`): copy the template, replace its placeholders. Without
+    one, `init` still runs it, falling back to the journal's own author
+    guidelines and then to established academic convention. Its code-side
     postcheck gates the whole run, and a passing package becomes round 1's
     working original (the a1 base, the field's `original` view and every
-    `vs_original` comparison read it). `--no-template-stage` opts out.
+    `vs_original` comparison read it). `--no-template-stage` opts out. `init`
+    runs this stage without any journal feedback; `transfer` also feeds the
+    decision letter into the rounds afterwards -- and without a template the
+    transfer stage is skipped (its job IS the target journal's template).
     """
     if template_stage_record(ctx):
         print("[run] template-first stage: already recorded (state.json)")
         return
+    if bool(getattr(args, "no_template_stage", False)):
+        print("[run] template-first stage: skipped by --no-template-stage")
+        return
+    mode = journal_mode_of(ctx)
     templates = venue_word_templates(ctx)
-    if not templates:
+    if not templates and mode != JOURNAL_MODE_INIT:
         print("[run] template-first stage: the venue ships no Word template -- skipping")
         return
     if not any(p.suffix.lower() == ".docx" for p in template_package_files(ctx.pristine)):
         print("[run] template-first stage: the corpus carries no .docx -- skipping "
-              "(nothing to author in the journal's Word template)")
+              "(nothing to author in Word format)")
         return
-    if bool(getattr(args, "no_template_stage", False)):
-        print("[run] template-first stage: skipped by --no-template-stage")
-        return
+    if not templates:
+        print("[run] template-first stage: the venue ships no Word template -- conforming to "
+              "the journal's own author guidelines, then to academic convention")
     sb = _stage_template_rewrite_sandbox(ctx, ctx.pristine, templates, force=True)
-    print(f"[run] template-first stage: {sb} (copy the journal's templates, replace their "
-          f"placeholders with this submission's content)")
+    action = ("copy the journal's templates, replace their placeholders with this submission's "
+              "content" if templates else
+              "re-author the whole package to the journal's guidelines and academic convention")
+    print(f"[run] template-first stage: {sb} ({action})")
     agent = str(getattr(args, "agent", None) or DEFAULTS.get("agent", "codex"))
     if agent == "manual":
-        die(f"transfer mode authors the submission INSIDE the journal's templates before any "
-            f"other stage: fill {sb / 'out'} using {sb / PROMPT_FILE}, then re-run `run` "
-            f"(or check it with `conform --root {ctx.root} --agent manual`)")
+        die(f"{mode} mode conforms the submission before any other stage: fill {sb / 'out'} "
+            f"using {sb / PROMPT_FILE}, then re-run `run` (or check it with "
+            f"`conform --root {ctx.root} --agent manual`)")
     cmd = resolve_agent_cmd(agent, getattr(args, "agent_cmd", None))
     rec = {"id": TEMPLATE_REWRITE_DIRNAME, "kind": "template-rewrite", "status": "running",
            "sandbox": str(sb), "round": 0}
@@ -29211,14 +29373,15 @@ def default_template_package_source(ctx: Ctx):
 
 
 def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> None:
-    """`conform --agent`: one LLM session that fills the journal's templates.
+    """`conform --agent`: one LLM session that conforms the package.
 
     The sandbox mirrors the pipeline's stages: the venue's templates are staged
     READ-ONLY, the source package is copied read-only beside them, and the prompt
     tells the agent to copy a template and replace its placeholders with the
-    source content. The postcheck verifies the outcome code-side (template guide
-    prose gone, source content covered, template styles still present) and the
-    report lands in the root's reports/.
+    source content; a venue with no official template falls back to its author
+    guidelines and academic convention. The postcheck verifies the outcome
+    code-side (template guide prose gone, source content covered, template
+    styles still present) and the report lands in the root's reports/.
     """
     agent = str(getattr(args, "agent", None) or "").strip()
     sb = ctx.root / TEMPLATE_REWRITE_DIRNAME
@@ -29316,11 +29479,16 @@ def cmd_apply_template(args) -> None:
     ctx = Ctx(Path(args.root))
     ctx.load()
     templates = venue_word_templates(ctx)
-    if not templates:
+    agent_mode = bool(str(getattr(args, "agent", None) or "").strip())
+    if not templates and not agent_mode:
         die(f"the venue {venue_id_of(ctx)!r} ships no official Word template, so there is "
             f"nothing to rebuild from: put the journal's .docx (main + supplementary) under "
             f"{ctx.root}/venue_profiles/{venue_id_of(ctx)}{VENUE_OFFICIAL_SUFFIX}/ and re-run "
             f"`build-venue-templates`/`setup`")
+    if not templates:
+        print(f"[conform] note: the venue {venue_id_of(ctx)!r} ships no official Word template; "
+              f"the agent session follows the journal's own author guidelines, then academic "
+              f"convention")
     src = Path(args.source).expanduser() if args.source else default_template_package_source(ctx)
     if src is None:
         die("no package to rebuild: the root has no final_clean_version/ and no completed "
@@ -29608,7 +29776,8 @@ def cmd_set_revision_mode(args) -> None:
     normalises the round plan to what that mode permits (rewrites 0, one
     revision arm, no integration, one round) and says so. Switching to
     transfer/resubmit only records the mode: the standard rounds still apply,
-    with the journal feedback added as an input.
+    with the journal feedback added as an input. `init` records the mode and
+    runs the conform (template-first) stage before round 1 -- no feedback.
     """
     ctx = Ctx(_venue_command_root(args, "set-revision-mode"),
               strict_venue=bool(getattr(args, "strict_venue", False)))
@@ -29624,14 +29793,25 @@ def cmd_set_revision_mode(args) -> None:
               f"{'required' if info['response'] else 'not written'}; "
               f"rewrites: {'allowed' if info['rewrites'] else 'forbidden'}; "
               f"edits: {'concern-scoped only' if info['scoped'] else 'the full review findings'}")
-        print(f"[set-revision-mode] feedback from: "
-              f"{(ctx.cfg or {}).get('journal_feedback_from') or '(not set)'}; "
-              f"named feedback file(s): {', '.join(feedback) if feedback else '(auto-detected)'}")
+        if info.get("feedback"):
+            print(f"[set-revision-mode] feedback from: "
+                  f"{(ctx.cfg or {}).get('journal_feedback_from') or '(not set)'}; "
+                  f"named feedback file(s): {', '.join(feedback) if feedback else '(auto-detected)'}")
+        elif mode != JOURNAL_MODE_CONTINUE:
+            print("[set-revision-mode] this mode reads no journal feedback and writes no "
+                  "response letter")
         return
+    raw_mode_arg = mode_arg
+    mode_arg = normalize_revision_mode(mode_arg)
+    if raw_mode_arg != mode_arg:
+        print(f"[set-revision-mode] note: {raw_mode_arg!r} is the pre-rename spelling of "
+              f"{mode_arg!r}; using {mode_arg!r}.")
     if mode_arg not in JOURNAL_MODES:
         die(f"set-revision-mode needs one of {', '.join(JOURNAL_MODES)} (got {mode_arg!r}): "
-            f"none / transfer (option 1) / resubmit (option 2) / major (option 3) / "
-            f"minor (option 4)", code=2)
+            f"continue (the historical workflow, the pipeline's own review/revise rounds; the "
+            f"pre-rename spelling was 'none') / init (conform into the venue template first, "
+            f"then the pipeline's own rounds) / transfer (option 1) / resubmit (option 2) / "
+            f"major (option 3) / minor (option 4)", code=2)
     begin_run_log("set-revision-mode", ctx.root, sys.argv)
     if ctx.state.get("runs") and not getattr(args, "force", False):
         die(f"this root already has {len(ctx.state['runs'])} run record(s): the revision mode "
@@ -29646,11 +29826,14 @@ def cmd_set_revision_mode(args) -> None:
         if not q.is_file():
             die(f"--journal-feedback {item!r} does not exist (looked for {q}).")
     info = JOURNAL_MODES[mode_arg]
+    if named and not info["feedback"]:
+        print(f"[set-revision-mode] note: mode {mode_arg!r} reads no journal feedback; "
+              f"--journal-feedback/--journal-feedback-from are ignored")
     with ctx.lock("set-revision-mode"):
         ctx.cfg["revision_mode"] = mode_arg
-        if named:
+        if named and info["feedback"]:
             ctx.cfg["journal_feedback"] = named
-        if getattr(args, "journal_feedback_from", None):
+        if getattr(args, "journal_feedback_from", None) and info["feedback"]:
             ctx.cfg["journal_feedback_from"] = str(args.journal_feedback_from).strip()
         forced = []
         if info["scoped"]:
@@ -29676,7 +29859,7 @@ def cmd_set_revision_mode(args) -> None:
     print(f"[set-revision-mode] mode: {mode_arg} (option {info['option']}) -- {info['label']}")
     for f in forced:
         print(f"[set-revision-mode]   forced by the mode: {f}")
-    if mode_arg != JOURNAL_MODE_NONE:
+    if info.get("feedback"):
         hits = journal_feedback_files(ctx)
         print(f"[set-revision-mode] feedback file(s): "
               + (", ".join(label for _p, label in hits) if hits
@@ -29776,16 +29959,15 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
 
     _only_probe = parse_only_spec(getattr(args, "only", None))
     if only_is_template_stage_only(_only_probe):
-        if journal_mode_of(ctx) != JOURNAL_MODE_TRANSFER:
-            die("--only conform (formerly template/author-submission/apply-template) is a "
-                f"TRANSFER-mode stage: "
-                f"this root's revision mode is "
-                f"{journal_mode_of(ctx)!r}")
+        if journal_mode_of(ctx) not in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_INIT):
+            die("--only conform (formerly template/author-submission/apply-template) is the "
+                f"template-first stage of the transfer and init revision modes: this root's "
+                f"revision mode is {journal_mode_of(ctx)!r}")
         _ensure_template_stage_for_run(ctx, args)
         die(f"the template-first stage is {'done' if template_stage_record(ctx) else 'pending'}; "
             f"the round(s) are still pending -- run a plain `run` (or another --only selection) "
             f"to continue the chain", code=3)
-    if journal_mode_of(ctx) == JOURNAL_MODE_TRANSFER:
+    if journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_INIT):
         _ensure_template_stage_for_run(ctx, args)
 
     perrs = pinned_integrity(ctx)
@@ -29812,7 +29994,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     if only is not None and only.is_everything():
         only = None                     # `--only all`: exactly a plain `run`
     if only is not None:
-        if journal_mode_of(ctx) != JOURNAL_MODE_NONE:
+        if journal_has_feedback(ctx):
             # The journal chain's stages are selectable exactly like the round
             # model's (feedback, concerns, review, audit, revise, integrate,
             # response). The safety rule is preserved at the SINK, not by
@@ -31760,7 +31942,7 @@ def cmd_status(args) -> None:
         print(f"decision:      {_verdict}"
               + (f" -- {'; '.join(str(b) for b in _cert.get('blockers') or [])}"
                  if _cert.get("blockers") else ""))
-    if _jmode != JOURNAL_MODE_NONE:
+    if _jmode != JOURNAL_MODE_CONTINUE:
         _jinfo = JOURNAL_MODES[_jmode]
         _jfb = [str(x) for x in ((ctx.cfg or {}).get("journal_feedback") or [])]
         print(f"revision mode: {_jmode} (option {_jinfo['option']}) -- {_jinfo['label']}")
@@ -31768,9 +31950,12 @@ def cmd_status(args) -> None:
               f"{'required' if _jinfo['response'] else 'not written'}; "
               f"rewrites: {'allowed' if _jinfo['rewrites'] else 'forbidden'}; "
               f"edits: {'concern-scoped only' if _jinfo['scoped'] else 'full review findings'}")
-        print(f"               feedback from: "
-              f"{(ctx.cfg or {}).get('journal_feedback_from') or '(unset)'}; files: "
-              + (", ".join(_jfb) if _jfb else "(auto-detected in the corpus)"))
+        if _jinfo.get("feedback"):
+            print(f"               feedback from: "
+                  f"{(ctx.cfg or {}).get('journal_feedback_from') or '(unset)'}; files: "
+                  + (", ".join(_jfb) if _jfb else "(auto-detected in the corpus)"))
+        else:
+            print("               no journal feedback is read in this mode")
         _jsub = (ctx.state.get("journal") or {}).get("submission_dir")
         if _jsub:
             print(f"               submission package: {_jsub}"
@@ -33951,15 +34136,21 @@ def build_parser() -> argparse.ArgumentParser:
                          "reports/round<r>_dedup_audit.json")
     ps.add_argument("--revision-mode", default=None, metavar="MODE",
                     help="revise against a REAL journal decision letter instead of the "
-                         "pipeline's own review rounds. One of: none (default; the historical "
-                         "workflow, unchanged), transfer (option 1: revise for a NEW journal; "
-                         "no response to reviewers; rewrites allowed), resubmit (option 2: new "
-                         "submission to the SAME journal; response to reviewers required; "
-                         "rewrites allowed), major (option 3: major revision at the same "
-                         "journal; response required; concern-scoped edits ONLY, no rewrites, "
-                         "no general review-audit-revise), minor (option 4: as major, for a "
-                         "minor revision). The feedback file(s) are auto-detected in --source "
-                         "by name (feedback/referee/reviewer/editor/decision), or named with "
+                         "pipeline's own review rounds. One of: continue (default; the "
+                         "historical workflow, unchanged; the pre-rename spelling was none), "
+                         "init (start a NEW submission: the venue's own Word template is filled "
+                         "by the conform stage BEFORE round 1 -- or, when no template ships, "
+                         "the journal's author guidelines and then academic convention -- "
+                         "`--no-template-stage` opts out; then the pipeline's own rounds run "
+                         "with no journal feedback and no response letter), transfer (option 1: "
+                         "revise for a NEW journal; no response to reviewers; rewrites "
+                         "allowed), resubmit (option 2: new submission to the SAME journal; "
+                         "response to reviewers required; rewrites allowed), major (option 3: "
+                         "major revision at the same journal; response required; "
+                         "concern-scoped edits ONLY, no rewrites, no general "
+                         "review-audit-revise), minor (option 4: as major, for a minor "
+                         "revision). The feedback file(s) are auto-detected in --source by name "
+                         "(feedback/referee/reviewer/editor/decision), or named with "
                          "--journal-feedback")
     ps.add_argument("--journal-feedback", action="append", default=None, metavar="FILE",
                     help="the decision letter / reviewer report file the revision modes read "
@@ -34305,11 +34496,13 @@ def build_parser() -> argparse.ArgumentParser:
     psj.set_defaults(func=cmd_set_journal)
 
     psm = sub.add_parser("set-revision-mode", parents=[common],
-                         help="select the journal revision mode (option 1 transfer / 2 resubmit / "
-                              "3 major / 4 minor / none), or show the current one")
+                         help="select the revision mode (none / init / option 1 transfer / "
+                              "2 resubmit / 3 major / 4 minor), or show the current one")
     psm.add_argument("mode", nargs="?", default=None, metavar="MODE",
-                     help="none | transfer (option 1: new journal, no response letter) | "
-                          "resubmit (option 2: same journal, response letter) | "
+                     help="none (the historical workflow) | init (conform into the venue's own "
+                          "Word template before round 1, then the pipeline's own rounds; no "
+                          "journal feedback) | transfer (option 1: new journal, no response "
+                          "letter) | resubmit (option 2: same journal, response letter) | "
                           "major (option 3: scoped major revision + response letter) | "
                           "minor (option 4: scoped minor revision + response letter). "
                           "Omit (or pass --show) to print the current mode")

@@ -29,12 +29,18 @@ and a clean, ready-to-use package.
 * **Default plan** — three rounds, two judges per version, two round-1 rewrites
   and one reviewed-and-revised candidate per round; everything is a flag.
 
-## Two ways to run it
+## Three ways to run it
 
-* **The agent rounds (the default).** Point `setup` at a pristine submission
-  directory and run; the pipeline rewrites, reviews, revises, integrates and
-  judges its own candidate rounds, pinning a champion after every round. No
-  external material is required.
+* **The agent rounds (the default, `continue`).** Point `setup` at a pristine
+  submission directory and run; the pipeline rewrites, reviews, revises,
+  integrates and judges its own candidate rounds, pinning a champion after
+  every round. No external material is required. (The mode was spelled `none`
+  before; that spelling is still accepted as an alias.)
+* **Start a new submission (`init`).** `setup --revision-mode init` conforms the
+  submission to the venue's rules BEFORE round 1: inside the venue's own Word
+  template when one ships, else to the journal's own author guidelines and then
+  to established academic convention. No journal feedback is read and no
+  response letter is written; the rest is the default workflow.
 * **Against a real journal decision.** Put the decision letter and the reviewer
   reports (plus any previous response to reviewers) in the submission's
   `human_review_feedback/` directory, then pick one of four workflows with
@@ -58,6 +64,10 @@ python paper_pipeline.py setup --source /path/to/non_revised --root ./paper_roun
 #    source's human_review_feedback/ directory; pick one of the four modes):
 python paper_pipeline.py setup --source /path/to/non_revised --root ./paper_rounds \
         --revision-mode transfer --journal "Frontiers in Immunology"
+#    ... or start a NEW submission: conform to the venue's template (or its
+#    guidelines -> academic convention) before round 1, with no feedback:
+python paper_pipeline.py setup --source /path/to/non_revised --root ./paper_rounds \
+        --revision-mode init --journal "Journal Name"
 
 # 2. run all rounds and decide (or run + decide as separate steps)
 python paper_pipeline.py run-decide --root ./paper_rounds
@@ -130,7 +140,7 @@ the base's from this round's review) or to the arm's own marker. A `-` now means
 | `set-venue` / `set-journal` / `set-article-type` | change the rule set / target journal / content type |
 | `add-venue ID` | an agent writes/updates the venue profile + README row and downloads OA exemplars; the code then derives the pinned structure-only template pack |
 | `build-venue-templates --venue ID` | re-derive that pack from the exemplars (`<venue-id>.manuscripts/`) without an agent |
-| `set-revision-mode transfer\|resubmit\|major\|minor` | switch to one of the four real-journal workflows |
+| `set-revision-mode continue\|init\|transfer\|resubmit\|major\|minor` | switch the revision mode (`none` still accepted as the pre-rename spelling of `continue`) |
 | `set-tiebreak-defect-floor N` / `set-dedup-mode off\|location` | calibration of the selection key |
 | `retry --run ID` / `prune --keep-latest N` | re-run one session / reclaim disk from old sandboxes |
 
@@ -155,7 +165,7 @@ manuscript files:
   is never shipped in the published package.
 * **`human_review_feedback/`** — the REAL editors'/reviewers' comments (the
   decision letter, the reviewer reports, a previous response to reviewers). The
-  four journal revision modes read it, and the blind judges may read both
+  four journal-feedback revision modes read it, and the blind judges may read both
   evidence areas (`evidence/raw_data/…`, `evidence/human_review_feedback/…`)
   because correctness and "were the humans' concerns addressed" cannot be
   judged without them. It is never copied into the submission package either.
@@ -293,15 +303,18 @@ python paper_pipeline.py conform --root ./paper_rounds --agent manual     # stag
 python paper_pipeline.py conform --root ./paper_rounds --agent --agent-cmd '["myagent"]'
 ```
 
-**Transfer mode runs that stage FIRST.** A root configured with `--revision-mode transfer` and a
-venue that ships Word templates starts every `run` with the template-first stage, before the
-feedback/round stages: the sandbox is staged and (unless `--agent manual`, which stops with the
-instruction to fill it) the agent session runs, and the code-side postcheck gates the whole run.
-The passing package becomes **round 1's working original** — the `a1` base the rewrites start
-from, the field's `original` view and every `vs_original` comparison read it — while the true
-pristine manuscript stays the root's read-only evidence (`non_revised/`). `--no-template-stage`
-opts out (the historical transfer behaviour). A corpus without any `.docx` skips the stage (there
-is nothing to author in a Word template).
+**`transfer` and `init` run that stage FIRST.** A root configured with `--revision-mode transfer`
+or `--revision-mode init` conforms the submission before the feedback/round stages: the sandbox is
+staged and (unless `--agent manual`, which stops with the instruction to fill it) the agent
+session runs, and the code-side postcheck gates the whole run. With an official Word template the
+session copies it and replaces its placeholders; with no `.official` directory, `init` still runs
+the session, falling back to the journal's own author guidelines and then to academic convention
+(`transfer` skips the stage instead — its job IS the target journal's template). The passing
+package becomes **round 1's working original** — the `a1` base the rewrites start from, the
+field's `original` view and every `vs_original` comparison read it — while the true pristine
+manuscript stays the root's read-only evidence (`non_revised/`). `--no-template-stage` opts out
+(the historical behaviour). A corpus without any `.docx` skips the stage (there is nothing to
+author in a Word-oriented pass).
 
 **Style precedence: template → venue guidelines → academic convention.** Anything the official
 template does not pin (table font size, spacing inside a table, caption size, list indentation,
@@ -802,17 +815,26 @@ reconciliation and the response letter are built from, and it is what lets a
 judge score whether a version answers the human-raised concerns (see the judge
 view: both areas appear under the labeled `evidence/` directory).
 
-## Journal revision modes (options 1–4)
+## Revision modes: `continue`, `init`, and the journal modes (options 1–4)
 
 A root can be driven against a REAL journal decision letter instead of the
 pipeline's own review rounds. `setup --revision-mode <mode>` (or
-`set-revision-mode <mode>` on an existing root) selects one of four workflows;
-the feedback file(s) are named with `--journal-feedback FILE` (repeatable) or
-auto-detected in the corpus by name — typically
+`set-revision-mode <mode>` on an existing root) selects one of the workflows
+below. Two of them read no feedback at all: **`continue`** (the default; the
+pipeline's own review/revise rounds — the mode was spelled `none` before, and
+that spelling is still accepted as an alias) and **`init`** (start a NEW
+submission: the `conform` stage runs BEFORE round 1 — inside the venue's own
+Word template when one ships, else to the journal's own author guidelines and
+then to established academic convention — and everything after it is the
+`continue` workflow). `--no-template-stage` opts `init` out of the conform
+stage. In the four journal modes the feedback file(s) are named with
+`--journal-feedback FILE` (repeatable) or auto-detected in the corpus by name — typically
 `raw_data/iScience_feedback_from_reviewers_and_editors.txt`.
 
 | option | mode | what it is | response to reviewers | rewrites | edits |
 |---|---|---|---|---|---|
+| — | `continue` | the pipeline's own review/revise rounds (the default; the pre-rename spelling was `none`) | **not written** | allowed | the round's full review |
+| — | `init` | start a **new submission**: conform to the venue's template (or its guidelines → academic convention when no template ships) first, then the default rounds | **not written** | allowed | the round's full review |
 | option 1 | `transfer` | revise for a **new journal** (e.g. read iScience, submit to Frontiers in Immunology) | **not written** | allowed | the round's full review + the decision letter's concerns |
 | option 2 | `resubmit` | new submission to the **same journal** | **required** | allowed | the round's full review + the concerns |
 | option 3 | `major` | complete a **major revision** at the same journal | **required** | forbidden | **concern-scoped only** — no general review, no audit, no judge panel |
@@ -820,7 +842,7 @@ auto-detected in the corpus by name — typically
 
 How each mode runs:
 
-* **All four** enumerate the letter into a concern ledger
+* **The four journal modes** enumerate the letter into a concern ledger
   (`concerns/JF_concerns.json|md`: one row per distinct concern, verbatim
   quote — checked against the text rendering of the feedback — plus `action`
   and `disposition`). The feedback is EXTERNAL prose: it never becomes a
@@ -847,7 +869,7 @@ How each mode runs:
   `response_map.json`, one block/row per concern, every cited file verified to
   exist in the final package, `planned` rows forbidden from claiming results,
   and a new-experiment concern required to cite its new data.
-* **All four** finish by assembling `<root>/journal_submission/`: the final
+* **The four journal modes** finish by assembling `<root>/journal_submission/`: the final
   package minus `raw_data/`, minus the pipeline's bookkeeping and revision
   auxiliaries (plus the response letter when the mode requires one), with
   `<root>/journal_submission.json` recording the mode and the manifest. When a
@@ -856,9 +878,11 @@ How each mode runs:
   marked-up copies ship in `journal_submission/tracked_changes/` BESIDE the
   clean documents.
 
-With no `--revision-mode` the default is `none` and nothing above runs: the
+With no `--revision-mode` the default is `continue` and nothing above runs: the
 historical workflow is byte-for-byte unchanged (no journal stages in the round
-plan, no journal block in any prompt, no new files).
+plan, no journal block in any prompt, no new files). The pre-rename spelling
+`none` is still accepted (config files, `setup` and `set-revision-mode`) and
+normalises to `continue`.
 
 ```bash
 # option 1: iScience -> Frontiers in Immunology, no response letter
@@ -892,6 +916,10 @@ selectable (`--only feedback`, `--only 1:review`, `--only r1_concerns`), a
 partial selection leaves the chain incomplete, and the response letter +
 `journal_submission/` are assembled only by a plain `run` once every stage of
 the chain is done.
+
+`transfer` and `init` additionally expose the conform stage: `--only conform`
+drives (or checks, with `--agent manual`) that stage alone and reports it
+pending/done; the rounds stay pending until a later `run`.
 
 The selection items are comma-separated and combine as a **union**:
 

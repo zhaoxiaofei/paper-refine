@@ -161,20 +161,32 @@ default-venue text.
 
 ## Journal revision modes — do not regress the default
 
-`pipeline_config.json` may carry `revision_mode` (one of `none`, `transfer`,
-`resubmit`, `major`, `minor`; default `none`) and `journal_feedback` (the
-decision-letter files; when unset they are taken from `human_review_feedback/`
-first, then a legacy feedback-named file anywhere in the corpus). The four non-default
-modes are documented in README → "Journal revision modes (options 1–4)" and
-pinned by `.paper_test/test_journal_revision_modes.py`. Two rules matter when
+`pipeline_config.json` may carry `revision_mode` (one of `continue`, `init`,
+`transfer`, `resubmit`, `major`, `minor`; default `continue`) and
+`journal_feedback` (the decision-letter files; when unset they are taken from
+`human_review_feedback/` first, then a legacy feedback-named file anywhere in
+the corpus). `continue` is the historical workflow; `none` is its pre-rename
+spelling and is still accepted everywhere as an alias (it normalises to
+`continue` and is never returned by `journal_mode_of`). `init` starts a NEW
+submission: the conform stage runs before round 1 (inside the venue's own Word
+template when one ships, else to the journal's own author guidelines and then
+academic convention) and reads no feedback. The modes are documented in README
+→ "Revision modes: continue, init, and the journal modes" and pinned by
+`.paper_test/test_journal_revision_modes.py` + the init section of
+`.paper_test/test_venue_template_conformance.py`. Two rules matter when
 touching this area:
 
-* **Mode `none` is untouchable.** Every journal code path is entered only
-  through `journal_mode_of(ctx) != "none"`: the round plan, prompt builders,
-  postchecks, `decide`/`status` output and the submission packager must all be
-  identical to their historical behaviour when the mode is absent. The J6
-  section of the test suite asserts the plan has no journal stage and the
-  prompt carries no journal block.
+* **The default mode is untouchable.** Every journal code path is entered only
+  through the mode table (`journal_has_feedback`, `journal_is_scoped`,
+  `journal_needs_response`) or `journal_mode_of(ctx) != JOURNAL_MODE_CONTINUE`:
+  the round plan, prompt builders, postchecks, `decide`/`status` output and the
+  submission packager must all be identical to their historical behaviour when
+  the mode is absent. The J6 section of the test suite asserts the plan has no
+  journal stage and the prompt carries no journal block.
+* **`init` = conform first, then the default rounds.** Its plan is the default
+  plan (no feedback/concerns/response stages) and the revise prompt must carry
+  no journal block; only the conform stage runs first, and it must skip that
+  stage only on `--no-template-stage` or a corpus with no `.docx`.
 * **Careful with the scoped modes.** `major`/`minor` normalise the plan
   (rewrites 0, one revise arm, integrators 0, one round, audit off), replace the
   review with the concerns run, and enforce `scoped_scope_problems` in the

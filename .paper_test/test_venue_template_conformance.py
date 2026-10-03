@@ -1075,7 +1075,7 @@ def test_transfer_mode_runs_the_template_stage_first():
     except SystemExit as e:
         code = int(e.code or 0)
     check("transfer mode stops at the template stage and tells the operator to fill it",
-          code == 1 and "templates before any other stage" in err.getvalue()
+          code == 1 and "before any other stage" in err.getvalue()
           and (root / "template_rewrite" / "out").is_dir()
           and (root / "template_rewrite" / "PROMPT.md").is_file(),
           err.getvalue()[-200:])
@@ -1127,6 +1127,93 @@ def test_transfer_mode_runs_the_template_stage_first():
         a1_err = f"{type(e).__name__}: {e}"
     check("the passed template stage can seed round 1 (materialize_a1 does not raise)",
           a1 is not None and a1.get("status") == "done", a1_err[:200])
+
+
+def test_init_mode_conform_stage():
+    """`init`: the conform stage runs before anything else; with an official
+    template it fills it, without one it falls back to the journal's own author
+    guidelines and then to academic convention -- never to a feedback agent."""
+    import contextlib as _ctxlib
+    import io as _io
+
+    class Args:
+        no_template_stage = False
+        agent = "manual"
+        agent_cmd = None
+        timeout = 5
+
+    class Skip(Args):
+        no_template_stage = True
+
+    def build_ctx(base: Path, with_template: bool) -> nb.Ctx:
+        (base / "non_revised").mkdir(parents=True)
+        _package_docx(base / "non_revised" / "mainText.docx", "Introduction")
+        off = base / "venue_profiles" / "fake-venue.official"
+        off.mkdir(parents=True)
+        if with_template:
+            _furnished_template(off / "Fake_Template.docx",
+                                "Fill this template with your own manuscript content, please.")
+        (base / "venue_profiles" / "fake-venue.json").write_text(json.dumps({
+            "id": "fake-venue", "label": "Fake Venue", "journals": ["Fake Journal"],
+            "default_journal": "Fake Journal"}), encoding="utf-8")
+        (base / "reports").mkdir()
+        ctx = nb.Ctx(base)
+        ctx.cfg = {"venue": "fake-venue", "revision_mode": "init", "rounds": 1}
+        ctx.state = {"version": nb.STATE_VERSION, "runs": {}, "rounds": {}, "pinned": [],
+                     "log": [], "source_manifest": {"files": {}, "count": 0},
+                     "original_digest": "d0", "config": ctx.cfg}
+        return ctx
+
+    tmp = scratch("paper_tpl_init_")
+    # --- the venue ships an official Word template -----------------------------
+    root = tmp / "with"
+    ctx = build_ctx(root, with_template=True)
+    check("init plans no journal stages (no feedback/concerns/response)",
+          not ({e["kind"] for e in nb.round_run_plan(ctx, 1)}
+               & {"feedback", "concerns", "response"}))
+    nb._ensure_template_stage_for_run(ctx, Skip())
+    check("--no-template-stage opts init out before anything is staged",
+          not (root / "template_rewrite").exists())
+    err = _io.StringIO()
+    code = 0
+    try:
+        with _ctxlib.redirect_stderr(err), _ctxlib.redirect_stdout(_io.StringIO()):
+            nb._ensure_template_stage_for_run(ctx, Args())
+    except SystemExit as e:
+        code = int(e.code or 0)
+    prompt = (root / "template_rewrite" / "PROMPT.md").read_text(encoding="utf-8")
+    check("init with an official template stages the template-fill session before any round",
+          code == 1 and "before any other stage" in err.getvalue()
+          and "COPY each template FILE" in prompt
+          and not (ctx.state.get("runs") or {}), err.getvalue()[-200:])
+
+    # --- the venue ships NO official template: guidelines then convention -----
+    root2 = tmp / "without"
+    ctx2 = build_ctx(root2, with_template=False)
+    err2 = _io.StringIO()
+    out2 = _io.StringIO()
+    code2 = 0
+    try:
+        with _ctxlib.redirect_stderr(err2), _ctxlib.redirect_stdout(out2):
+            nb._ensure_template_stage_for_run(ctx2, Args())
+    except SystemExit as e:
+        code2 = int(e.code or 0)
+    prompt2 = (root2 / "template_rewrite" / "PROMPT.md").read_text(encoding="utf-8")
+    check("init without an official template falls back to guidelines, then convention",
+          code2 == 1 and "author guidelines" in out2.getvalue()
+          and "NO official Word template" in prompt2 and "academic convention" in prompt2
+          and "COPY each template FILE" not in prompt2
+          and not (ctx2.state.get("runs") or {}),
+          (out2.getvalue() + err2.getvalue())[-200:])
+
+    # --- a passed stage becomes round 1's working original either way ---------
+    out = root2 / "template_rewrite" / "out"
+    _package_docx(out / "mainText.docx", "Introduction")
+    ctx2.state["template_stage"] = {"ok": True, "dir": "template_rewrite/out",
+                                    "digest": "d-init", "content_fingerprint": "fp"}
+    check("a passed no-template init stage seeds round 1's working original",
+          nb.working_original_dir(ctx2) == out
+          and nb.working_original_digest(ctx2) == "d-init")
 
 
 def test_mcp_first_render_chain():
@@ -1330,6 +1417,7 @@ def main() -> int:
         test_apply_template_package()
         test_template_rewrite_postcheck()
         test_transfer_mode_runs_the_template_stage_first()
+        test_init_mode_conform_stage()
         test_mcp_first_render_chain()
         test_visual_template_render_and_comparison()
     finally:

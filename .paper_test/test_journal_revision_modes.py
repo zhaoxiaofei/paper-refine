@@ -16,7 +16,7 @@ and assemble `journal_submission/` WITHOUT the raw-data evidence area.
 The last section pins the most important compatibility rule: with no
 `--revision-mode` (the default) the historical workflow is unchanged -- the
 round plan has no journal stages, the review prompt carries no journal block,
-and the config records mode "none".
+and the config records no mode (which means "continue").
 """
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
@@ -300,9 +301,9 @@ def main() -> int:
     r = run_cli("setup", "--source", str(src), "--root", str(root), "--rounds", "1")
     check("J6 setup without a mode succeeds", r.returncode == 0, r.stderr[-200:])
     cfg = json.loads((root / "pipeline_config.json").read_text(encoding="utf-8"))
-    # The key is OMITTED for a default root: a mode-none pipeline_config.json
+    # The key is OMITTED for a default root: a mode-continue pipeline_config.json
     # stays byte-identical to the historical one (`journal_mode_of` reads a
-    # missing key as "none"), which is the strongest form of "unchanged".
+    # missing key as "continue"), which is the strongest form of "unchanged".
     check("J6 the default root does not record a journal mode",
           "revision_mode" not in cfg, json.dumps(sorted(cfg)))
     ctx = nb.Ctx(root)
@@ -310,10 +311,26 @@ def main() -> int:
     kinds = {e["kind"] for e in nb.round_run_plan(ctx, 1)}
     check("J6 the round plan has no journal stages",
           not (kinds & {"feedback", "concerns", "response"}), str(sorted(kinds)))
-    check("J6 journal_mode_of reports none", nb.journal_mode_of(ctx) == "none")
+    check("J6 journal_mode_of reports continue", nb.journal_mode_of(ctx) == "continue")
     r = run_cli("set-revision-mode", "--root", str(root))
     check("J6 set-revision-mode --show prints the current mode",
-          r.returncode == 0 and "mode: none" in r.stdout, r.stdout[-200:])
+          r.returncode == 0 and "mode: continue" in r.stdout, r.stdout[-200:])
+    # the pre-rename spelling is accepted everywhere and normalizes to `continue`
+    legacy = dict(cfg)
+    legacy["revision_mode"] = "none"
+    (root / "pipeline_config.json").write_text(json.dumps(legacy), encoding="utf-8")
+    ctx_legacy = nb.Ctx(root)
+    ctx_legacy.load()
+    check("J6 a config recording the pre-rename 'none' normalizes to 'continue'",
+          nb.journal_mode_of(ctx_legacy) == "continue"
+          and not nb.journal_has_feedback(ctx_legacy))
+    (root / "pipeline_config.json").write_text(json.dumps(cfg), encoding="utf-8")
+    r = run_cli("set-revision-mode", "none", "--root", str(root))
+    check("J6 set-revision-mode none is accepted as the pre-rename alias",
+          r.returncode == 0 and "pre-rename spelling" in r.stdout, r.stdout[-200:])
+    check("J6 the alias records the canonical mode",
+          json.loads((root / "pipeline_config.json").read_text(encoding="utf-8"))
+          .get("revision_mode") == "continue")
     r = run_cli("set-revision-mode", "major", "--root", str(root))
     check("J6 switching the default root to a journal mode succeeds",
           r.returncode == 0, (r.stdout + r.stderr)[-200:])
@@ -330,6 +347,95 @@ def main() -> int:
     check("J6 the switched root plans the scoped journal stages",
           {"concerns", "revise", "response"} <= kinds
           and "review" not in kinds and "rewrite" not in kinds, str(sorted(kinds)))
+    # `continue` is the default; the pre-rename `none` is accepted by setup too
+    tmp2 = scratch("paper_jr_continue_")
+    root2 = tmp2 / "root"
+    r = run_cli("setup", "--source", str(build_source(tmp2)), "--root", str(root2),
+                "--rounds", "1", "--revision-mode", "continue")
+    check("J6 setup --revision-mode continue is the default and writes no mode key",
+          r.returncode == 0
+          and "revision_mode" not in json.loads(
+              (root2 / "pipeline_config.json").read_text(encoding="utf-8")),
+          r.stderr[-200:])
+    tmp3 = scratch("paper_jr_none_alias_")
+    root3 = tmp3 / "root"
+    r = run_cli("setup", "--source", str(build_source(tmp3)), "--root", str(root3),
+                "--rounds", "1", "--revision-mode", "none")
+    check("J6 setup --revision-mode none is accepted as the pre-rename alias",
+          r.returncode == 0 and "pre-rename spelling" in r.stdout
+          and "revision_mode" not in json.loads(
+              (root3 / "pipeline_config.json").read_text(encoding="utf-8")),
+          (r.stdout + r.stderr)[-200:])
+
+    print()
+    print("== J6b: init -- conform first (guidelines/convention when no template), no feedback ==")
+    tmp = scratch("paper_jr_init_")
+    src = tmp / "src"
+    (src / "raw_data").mkdir(parents=True)
+    (src / "manuscript.txt").write_text(
+        "Abstract\nWe used scRNA-seq to profile the cells.\n\n"
+        "Introduction\nscRNA-seq was performed once and the claims follow.\n", encoding="utf-8")
+    with zipfile.ZipFile(src / "mainText.docx", "w") as z:
+        z.writestr("word/document.xml",
+                   '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/'
+                   'wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Introduction</w:t></w:r>'
+                   '</w:p></w:body></w:document>')
+        z.writestr("word/styles.xml",
+                   '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/'
+                   '2006/main"/>')
+    root = tmp / "root"
+    # NO human_review_feedback area at all: init must not need a decision letter
+    r = run_cli("setup", "--source", str(src), "--root", str(root), "--rounds", "1",
+                "--rewrites", "0", "--revises", "1", "--judges", "1", "--venue", "generic",
+                "--journal", "Journal of Tests", "--revision-mode", "init")
+    check("J6b init setup succeeds without any feedback file", r.returncode == 0,
+          (r.stdout + r.stderr)[-300:])
+    cfg = json.loads((root / "pipeline_config.json").read_text(encoding="utf-8"))
+    check("J6b init records the mode but no feedback keys",
+          cfg.get("revision_mode") == "init"
+          and not [k for k in cfg if k.startswith("journal_feedback")], json.dumps(sorted(cfg)))
+    ctx = nb.Ctx(root)
+    ctx.load()
+    check("J6b init is not a feedback/response/scoped mode",
+          nb.journal_mode_of(ctx) == "init" and not nb.journal_has_feedback(ctx)
+          and not nb.journal_needs_response(ctx) and not nb.journal_is_scoped(ctx))
+    kinds = {e["kind"] for e in nb.round_run_plan(ctx, 1)}
+    check("J6b init plans NO journal stages",
+          not (kinds & {"feedback", "concerns", "response"}), str(sorted(kinds)))
+    check("J6b init adds no journal block to the revise prompt",
+          nb.journal_revise_block(ctx) == "")
+    # The conform stage runs BEFORE round 1, with no .official directory: it
+    # falls back to the journal's guidelines and then academic convention.
+    r = run_cli("run", "--root", str(root), "--agent", "manual", "--retries", "0")
+    out = r.stdout + r.stderr
+    prompt_path = root / "template_rewrite" / "PROMPT.md"
+    check("J6b init conforms before round 1 via the guidelines/convention fallback",
+          r.returncode != 0 and "conforming to the journal's own author guidelines" in out
+          and prompt_path.is_file() and not (root / "runs" / "r1_a1").exists(), out[-300:])
+    prompt = prompt_path.read_text(encoding="utf-8")
+    check("J6b the fallback prompt names the authority chain and requires the ledger",
+          "NO official Word template" in prompt and "academic convention" in prompt
+          and "REPLACEMENT_LEDGER.md" in prompt and "JF_concerns" not in prompt
+          and "COPY each template FILE" not in prompt, prompt[:200])
+    # The init revise sandbox must get the historical prompt, never the journal one.
+    ctx = nb.Ctx(root)
+    ctx.load()
+    ctx.cfg["audit"] = "off"
+    nb.materialize_a1(ctx, 1)
+    nb.materialize_review(ctx, 1)
+    rev = ctx.run(nb.rid_review(1))
+    (ctx.sandbox_of(rev) / "review").mkdir(parents=True, exist_ok=True)
+    (ctx.sandbox_of(rev) / "review" / "findings.json").write_text('{"findings": []}\n',
+                                                                  encoding="utf-8")
+    rev["status"] = "done"
+    ctx.save_state()
+    nb.materialize_revise(ctx, 1, "a2")
+    rsb = ctx.sandbox_of(ctx.run(nb.rid_for_fresh(1, "a2")))
+    revise_prompt = (rsb / "PROMPT.md").read_text(encoding="utf-8")
+    check("J6b the init revise prompt carries no journal-feedback block",
+          "JOURNAL REVISION MODE" not in revise_prompt
+          and "JF_concerns" not in revise_prompt
+          and not (rsb / "concerns").exists(), revise_prompt[:200])
 
     print()
     print("== J7: feedback auto-detection and explicit paths ==")
