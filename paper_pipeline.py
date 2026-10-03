@@ -3636,7 +3636,7 @@ DEFAULT_FORMAT_FIX = "auto"
 # integration stage (the pipeline's "merge from the other versions" step), and
 # `a`/`w`/`i` are the short spellings used in the round plan.
 ONLY_STAGES = ("rewrite", "review", "audit", "revise", "integrate", "judge",
-               "feedback", "concerns", "response")
+               "feedback", "concerns", "response", "apply-template")
 ONLY_ALIASES = {"w": "rewrite", "rewrites": "rewrite", "r": "review", "reviews": "review",
                 "aud": "audit", "audits": "audit", "auditor": "audit", "verify": "audit",
                 "a": "revise", "a2": "revise", "revises": "revise", "revision": "revise",
@@ -3644,6 +3644,8 @@ ONLY_ALIASES = {"w": "rewrite", "rewrites": "rewrite", "r": "review", "reviews":
                 "merge": "integrate", "merges": "integrate", "j": "judge", "judges": "judge",
                 "fb": "feedback", "feedbacks": "feedback",
                 "concern": "concerns",
+                "applytemplate": "apply-template", "apply_template": "apply-template",
+                "template": "apply-template",
                 "resp": "response", "responses": "response", "response-to-reviewers": "response"}
 # The auditor sits between the reviewer and the reviser: it disposes the frozen
 # review's findings (confirm / drop-with-evidence) and attacks the reviewer's
@@ -13510,7 +13512,7 @@ def parse_only_stage(token: str, item: str) -> str:
     if name not in ONLY_STAGES:
         die(f"--only: unknown stage {item!r}; choose from {', '.join(ONLY_STAGES)} "
             f"(aliases: merge=integrate, w=rewrite, a/a2=revise, j=judge, "
-            f"fb=feedback, resp=response)")
+            f"fb=feedback, resp=response, template=apply-template)")
     return name
 
 
@@ -13669,7 +13671,7 @@ class OnlySpec:
         # Exact stage names win over the single-letter prefixes below: "audit"
         # must not be read as "a" (revise), and the journal chain's stages are
         # their own classes.
-        if vid in ("audit", "feedback", "concerns", "response"):
+        if vid in ("audit", "feedback", "concerns", "response", "apply-template"):
             return vid
         if vid.startswith("w"):
             return "rewrite"
@@ -29066,6 +29068,17 @@ def cmd_set_revision_mode(args) -> None:
                       "or named with --journal-feedback)"))
 
 
+def only_is_template_stage_only(spec) -> bool:
+    """`--only apply-template` / `--only 1:apply-template`: that stage alone."""
+    if spec is None or getattr(spec, "all_stages", False):
+        return False
+    stages = set(getattr(spec, "stages", ()) or ())
+    pairs = getattr(spec, "pairs", {}) or {}
+    stages |= {s for v in pairs.values() for s in (v or ())}
+    sessions = getattr(spec, "sessions", {}) or {}
+    return stages == {"apply-template"} and not any(sessions.values())
+
+
 def validate_only_selectors(ctx: Ctx, only) -> None:
     """Refuse an `--only` SESSION item this plan cannot satisfy.
 
@@ -29143,6 +29156,15 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             f"fresh pipeline root with `setup`.")
     print(f"[run] pristine original: {detail}")
 
+    _only_probe = parse_only_spec(getattr(args, "only", None))
+    if only_is_template_stage_only(_only_probe):
+        if journal_mode_of(ctx) != JOURNAL_MODE_TRANSFER:
+            die("--only apply-template is a TRANSFER-mode stage: this root's revision mode is "
+                f"{journal_mode_of(ctx)!r}")
+        _ensure_template_stage_for_run(ctx, args)
+        die(f"the template-first stage is {'done' if template_stage_record(ctx) else 'pending'}; "
+            f"the round(s) are still pending -- run a plain `run` (or another --only selection) "
+            f"to continue the chain", code=3)
     if journal_mode_of(ctx) == JOURNAL_MODE_TRANSFER:
         _ensure_template_stage_for_run(ctx, args)
 
