@@ -17078,14 +17078,62 @@ def writing_findings_input(ctx: Ctx, rec: dict):
         findings = round_consumed_findings(ctx, rec.get("round"))
     if not findings and not (ctx.sandbox_of(rec) / FINDINGS_REL).exists():
         return None
+    return _category2_count(findings)
+
+
+def _category2_count(findings) -> int:
+    """Category-2 (writing quality / logic / repetition) rows in a finding list."""
     total = 0
-    for f in findings:
+    for f in findings or ():
+        if not isinstance(f, dict):
+            continue
         cat = f.get("category")
         if isinstance(cat, str) and cat.strip().isdigit():
             cat = int(cat.strip())
         if cat == 2:
             total += 1
     return total
+
+
+def round_writing_remaining(ctx: Ctx, r: int):
+    """Category-2 findings in the round's frozen review -- the review the round's
+    BASE was examined by.
+
+    The version the review inspected has no producing session YET (the pristine
+    original in round 1, the incumbent later on), so it cannot self-report
+    `writing_remaining` the way every fresh arm does; the review's category-2
+    finding count IS its number at the start of the round (nothing has been
+    revised from it yet). Prefers the review sandbox (the AUDITED list), then the
+    archived `reports/round<r>_review/findings.json` (+ its discovery sibling),
+    which the pipeline keeps after a prune. None when neither is readable --
+    absence must print as '-', never as a fabricated 0.
+    """
+    findings = round_consumed_findings(ctx, r)
+    if not findings:
+        archive = ctx.reports_dir / f"round{int(r)}_review"
+        for name in ("findings.json", "findings_extra.json"):
+            data = read_json(archive / name, revive=False, lenient=True)
+            if isinstance(data, dict):
+                findings.extend(f for f in data.get("findings") or []
+                                if isinstance(f, dict))
+    if not findings:
+        return None
+    return _category2_count(findings)
+
+
+def original_writing_remaining(ctx: Ctx, r: int, agg: dict):
+    """Open category-2 findings of the PRISTINE ORIGINAL.
+
+    The original is never edited, so the review that examined it (round 1 -- the
+    original is that round's base) still describes its writing findings: every
+    one of them is open. When the current round's base IS the original the
+    current round's review is that same document's review; later rounds fall
+    back to round 1's review (sandbox or archive). None when no review of the
+    original is readable.
+    """
+    if str((agg or {}).get("base_rep") or "") == ORIGINAL_ID:
+        return round_writing_remaining(ctx, r)
+    return round_writing_remaining(ctx, 1)
 
 
 def tiebreak_selfreport_warnings(ctx: Ctx, rec: dict, summ: dict, warns: list) -> None:
@@ -24700,6 +24748,26 @@ def tiebreak_prefix_cells(cumulative: dict, versions, floor: int) -> int:
     return n_cells
 
 
+def census_prefix_total(agg: dict, sel: dict, vid: str):
+    """The `defects@K` number for ONE member, over the ranking's adaptive prefix.
+
+    Every field member carries census counts -- including the members that never
+    enter the ranking (the pristine original, an ineligible arm). Report the same
+    cumulative statistic over the SAME prefix the ranked rows use, so the run
+    table's `defects@K` column compares like with like. None when the member has
+    no census row at all (the cell then stays '-', never a fabricated 0).
+    """
+    census = (agg or {}).get("issue_census") or {}
+    if str(vid) not in census:
+        return None
+    _, _, cumulative = issue_matrix_and_cumulative(census, [str(vid)])
+    row = cumulative.get(str(vid)) or []
+    cells = int(((sel or {}).get("tiebreak") or {}).get("cells_used") or 0)
+    if not cells or not row:
+        return 0
+    return int(row[min(cells, len(row)) - 1])
+
+
 def champion_issue_summary(vid, agg) -> dict:
     """Per severity: counts and rates (for the report/trace)."""
     tiers = (_census_for(vid, agg).get("tiers") or {})
@@ -24944,11 +25012,100 @@ def _count_cell(v) -> str:
     """Format a tie-break count for the decision report ('-' when unknown).
 
     A missing count is the MISSING_TIEBREAK sentinel (+inf, "absence never wins
-    a tie"), which must not be printed as a number.
+    a tie"), which must not be printed as a number -- in memory or in its strict-
+    JSON spelling ("Infinity", which a reader that does not revive the sentinel
+    hands back as a string).
     """
-    if v is None or (isinstance(v, float) and not math.isfinite(v)):
+    if _missing_count(v) or not isinstance(v, (int, float)):
         return "-"
     return f"{v:g}"
+
+
+def _missing_count(v) -> bool:
+    """True when a reported count is absent (None, the +inf sentinel, or its JSON spelling)."""
+    if v is None or isinstance(v, bool):
+        return True
+    if isinstance(v, float):
+        return not math.isfinite(v)
+    if isinstance(v, str):
+        return v.strip().lower() in ("", "infinity", "+infinity", "-infinity", "inf", "nan")
+    return False
+
+
+def round_member_table_rows(ctx: Ctx, r: int, field: list, agg: dict, sel: dict,
+                            champ_rep: str) -> list:
+    """The run's per-member summary table (header row, then one row per member).
+
+    Every member gets its three evidence columns filled from the round's own
+    records: `defects@K` and the severity totals come from the panel's issue
+    census -- the SAME numbers the ranking reads, over the SAME adaptive prefix
+    -- and `writing*` falls back to the round's frozen review for the rows that
+    have no producing session to self-report it (the pristine original, the
+    round's base), then to the producing run's own marker for an arm the ranking
+    did not admit. A '-' therefore means "this root genuinely has no record",
+    not "this member was not ranked".
+    """
+    st = agg["stats"]
+    ranking_by_id = {row["id"]: row for row in (sel.get("ranking") or [])}
+    for row in (sel.get("ranking") or []):
+        if row.get("rep"):
+            # the base row carries the stats of the content-identical member it
+            # stands for (a1 -> orig in round 1, a1 -> the previous champion later)
+            ranking_by_id.setdefault(str(row["rep"]), row)
+    # Column order = the champion-selection key order (`champion_sort_key`):
+    # defect prefix -> median -> mean -> IQR -> digest -> id. The id is the row
+    # label; every column after the digest is REPORTED only and never ranked.
+    rows = [["member", "defects@K", "median", "mean", "IQR", "digest", "n/expected",
+             "vs_orig", "vs_base", "severity totals f/c/maj/min", "writing*", "hand-off",
+             "note"]]
+    census = (agg or {}).get("issue_census") or {}
+    for e in field:
+        s = st[e["id"]]
+        note = ""
+        if e["id"] == champ_rep:
+            note = "CHAMPION" if sel.get("champion") == e["id"] else \
+                f"CHAMPION (=base {sel.get('champion')})"
+        elif s.get("anti_regression_ok") is False:
+            note = "ineligible (regressed vs original)"
+        rank_row = ranking_by_id.get(e["id"]) or {}
+        if rank_row.get("issues"):
+            iss = rank_row["issues"]
+        elif str(e["id"]) in census:
+            iss = champion_issue_summary(e["id"], agg)
+        else:
+            iss = {}
+        if iss:
+            def _iss(sev):
+                d = iss.get(sev) or {}
+                return int(d.get("own") or 0) + int(d.get("peer") or 0)
+            severity_cell = "/".join(str(_iss(sev))
+                                     for sev in ("fatal", "critical", "major", "minor"))
+        else:
+            severity_cell = "-"
+        prefix = rank_row.get("defect_prefix_total")
+        if prefix is None:
+            prefix = census_prefix_total(agg, sel, e["id"])
+        writing = rank_row.get("writing_remaining")
+        if _missing_count(writing):
+            if rank_row.get("is_base") or e["id"] == A1_ID:
+                # the round's review inspected exactly this package (the base)
+                writing = round_writing_remaining(ctx, r)
+            elif e["id"] == ORIGINAL_ID:
+                writing = original_writing_remaining(ctx, r, agg)
+            elif is_fresh_vid(e["id"]):
+                writing = candidate_tiebreak_inputs(ctx, r, e["id"])[1]
+        rows.append([e["id"],
+                     f"{prefix}" if prefix is not None else "-",
+                     f"{s['median']:g}" if s["median"] is not None else "-",
+                     f"{s['mean']:.2f}" if s.get("mean") is not None else "-",
+                     f"{s['iqr']:g}" if s["iqr"] is not None else "-",
+                     (str(s.get("digest") or "")[:12] or "-"),
+                     f"{s['n']}/{s['expected_n']}",
+                     f"{s['vs_original']:g}" if s["vs_original"] is not None else "-",
+                     f"{s['vs_base']:g}" if s.get("vs_base") is not None else "-",
+                     severity_cell, _count_cell(writing),
+                     f"{s.get('author_placeholders') or 0}", note])
+    return rows
 
 
 def pin_champion(ctx: Ctx, r: int, champ_id: str, agg: dict) -> dict:
@@ -26439,39 +26596,8 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
     winner = publish_winner(ctx, r, sel["champion"], pin, agg)
     finalize_round(ctx, r, field, dropped, agg, sel, pin)
     ctx.save_state()
-    st = agg["stats"]
     champ_rep = sel.get("champion_rep") or sel["champion"]
-    rows = [["member", "n/expected", "median", "mean", "IQR", "vs_orig", "vs_base",
-             "defects@K", "severity totals f/c/maj/min", "writing*", "hand-off", "note"]]
-    ranking_by_id = {r["id"]: r for r in (sel.get("ranking") or [])}
-    for e in field:
-        s = st[e["id"]]
-        note = ""
-        if e["id"] == champ_rep:
-            note = "CHAMPION" if sel["champion"] == e["id"] else \
-                f"CHAMPION (=base {sel['champion']})"
-        elif s.get("anti_regression_ok") is False:
-            note = "ineligible (regressed vs original)"
-        iss = (ranking_by_id.get(e["id"]) or {}).get("issues") or {}
-        if iss:
-            def _iss(sev):
-                d = iss.get(sev) or {}
-                return int(d.get("own") or 0) + int(d.get("peer") or 0)
-            severity_cell = "/".join(str(_iss(s)) for s in ("fatal", "critical", "major", "minor"))
-        else:
-            severity_cell = "-"
-        rank_row = ranking_by_id.get(e["id"]) or {}
-        prefix_cell = (f"{rank_row.get('defect_prefix_total')}"
-                       if rank_row.get("defect_prefix_total") is not None else "-")
-        rows.append([e["id"], f"{s['n']}/{s['expected_n']}",
-                     f"{s['median']:g}" if s["median"] is not None else "-",
-                     f"{s['mean']:.2f}" if s.get("mean") is not None else "-",
-                     f"{s['iqr']:g}" if s["iqr"] is not None else "-",
-                     f"{s['vs_original']:g}" if s["vs_original"] is not None else "-",
-                     f"{s['vs_base']:g}" if s.get("vs_base") is not None else "-",
-                     prefix_cell, severity_cell,
-                     _count_cell(rank_row.get("writing_remaining")),
-                     f"{s.get('author_placeholders') or 0}", note])
+    rows = round_member_table_rows(ctx, r, field, agg, sel, champ_rep)
     print()
     print(_tbl(rows[1:], rows[0]))
     _tb = (sel or {}).get("tiebreak") or {}
@@ -26479,8 +26605,9 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
           f"adaptive severity_tier_category prefix (fatal->critical->major->minor, tier order, "
           f"peer before own; used {_tb.get('cells_used', '?')} of {_tb.get('cells_total', '?')} "
           f"cells at floor {_tb.get('floor', '?')}) -> median -> mean -> IQR -> digest. "
-          f"Columns marked * are reported only, never ranked; the "
-          f"per-severity totals are counts, not the tie-break ordering.")
+          f"The table's columns follow that order (member id, the LAST key, is the row label); "
+          f"every column after the digest is reported only, never ranked, and the per-severity "
+          f"totals are counts, not the tie-break ordering.")
     if sel["champion"] == A1_ID and champ_rep != A1_ID:
         print(f"[run] round {r}: no fresh arm outranked the round's base -- the champion is the "
               f"incumbent base A1 (scored here as the content-identical member '{champ_rep}'), "
@@ -29610,9 +29737,20 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
         rows = []
         champ_rep = stored.get("champion_rep") or stored.get("champion")
         tiebreak_inputs = stored.get("tiebreak_inputs") or {}
+        base_reps = {str(t.get("rep") or t.get("id"))
+                     for t in ((stored.get("selection") or {}).get("ranking") or [])
+                     if t.get("is_base")}
         for vid in agg["field"]:
             s = agg["stats"][vid]
             ti = tiebreak_inputs.get(vid) or {}
+            writing = ti.get("writing_remaining")
+            if _missing_count(writing):
+                if vid == A1_ID or vid in base_reps:
+                    writing = round_writing_remaining(ctx, r)
+                elif vid == ORIGINAL_ID:
+                    writing = original_writing_remaining(ctx, r, agg)
+                elif is_fresh_vid(vid):
+                    writing = candidate_tiebreak_inputs(ctx, r, vid)[1]
             rows.append([vid, f"{s['n']}/{s['expected_n']}",
                          f"{s['median']:g}" if s["median"] is not None else "-",
                          f"{s['mean']:.2f}" if s.get("mean") is not None else "-",
@@ -29620,7 +29758,7 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
                          f"{s['vs_original']:g}" if s["vs_original"] is not None else "-",
                          f"{s['vs_base']:g}" if s.get("vs_base") is not None else "-",
                          _count_cell(ti.get("critical_remaining")),
-                         _count_cell(ti.get("writing_remaining")),
+                         _count_cell(writing),
                          {True: "yes", False: "NO", None: "-"}[s.get("anti_regression_ok")],
                          f"{s['judges_seen']}/{s['judges_expected']}",
                          f"{s.get('author_placeholders') or 0}",

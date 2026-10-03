@@ -29,6 +29,7 @@ from __future__ import annotations
 import csv
 import importlib.util
 import itertools
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -240,6 +241,65 @@ def test_direction_flips(tmp):
     src = (WS / "paper_pipeline.py").read_text(encoding="utf-8")
     check("the report's gloss for the list matches the fixed condition",
           report_gloss in " ".join(src.split()))
+
+
+def test_member_table_columns(tmp, ctx, agg):
+    """The run's member table: key-ordered columns and no '-' where the round has records."""
+    print()
+    print("== the run's member table: selection-key column order, every evidence cell filled ==")
+    # The archived reviews: round 2 reviewed THIS round's base (the pin r1_a2),
+    # round 1 reviewed the pristine original -- whose writing findings are all
+    # still open, because the original itself is never revised.
+    for rnd, cats in ((2, [2, "2", 2, 1]), (1, [2, "2"])):
+        archive = ctx.reports_dir / f"round{rnd}_review"
+        archive.mkdir(parents=True, exist_ok=True)
+        (archive / "findings.json").write_text(
+            json.dumps({"findings": [{"id": f"F-{i:03d}", "category": c, "severity": "Major"}
+                                     for i, c in enumerate(cats, start=1)]}), encoding="utf-8")
+    # A fresh arm the ranking did not admit still has its own marker to report.
+    ctx.state["runs"]["r2_w1"] = {"id": "r2_w1", "kind": "rewrite", "round": 2,
+                                  "status": "done", "sandbox": "runs/r2_w1", "attempts": 1,
+                                  "summary": {"writing_remaining": 4, "critical_remaining": 0,
+                                              "manual_items": 1}}
+    field = [{"id": v} for v in FIELD]
+    sel = {"champion": "r1_a2", "champion_rep": "r1_a2", "base_rep": "orig",
+           "ranking": [
+               {"id": "a1", "rep": "r1_a2", "is_base": True, "defect_prefix_total": 7,
+                "writing_remaining": float("inf"),
+                "issues": np.champion_issue_summary("r1_a2", agg)}],
+           "tiebreak": {"cells_used": 3, "cells_total": 48, "floor": 1}}
+    rows = np.round_member_table_rows(ctx, 2, field, agg, sel, "r1_a2")
+    head, body = rows[0], rows[1:]
+    check("the columns read in the champion-selection key order",
+          head == ["member", "defects@K", "median", "mean", "IQR", "digest", "n/expected",
+                   "vs_orig", "vs_base", "severity totals f/c/maj/min", "writing*",
+                   "hand-off", "note"], str(head))
+    by = {r[0]: dict(zip(head, r)) for r in body}
+    check("every member has a row", set(by) == set(FIELD), str(sorted(by)))
+    census_sev = np.champion_issue_summary("orig", agg)
+    orig = by["orig"]
+    check("the unranked original shows its own census defect count and severities, not '-'",
+          orig["defects@K"] == str(np.census_prefix_total(agg, sel, "orig")) != "-"
+          and orig["severity totals f/c/maj/min"] ==
+          "/".join(str(int((census_sev[sev] or {}).get("own") or 0)
+                        + int((census_sev[sev] or {}).get("peer") or 0))
+                   for sev in ("fatal", "critical", "major", "minor")), str(orig))
+    check("the original's writing cell is the review OF THE ORIGINAL (round 1), all open",
+          orig["writing*"] == "2", orig["writing*"])
+    check("the base's member row carries the base ranking entry and THIS round's review count",
+          by["r1_a2"]["defects@K"] == "7" and by["r1_a2"]["writing*"] == "3",
+          str(by["r1_a2"]))
+    check("an arm the ranking did not admit still reports its own marker count",
+          by["w1"]["writing*"] == "4" and by["w1"]["defects@K"] != "-", str(by["w1"]))
+    sel2 = dict(sel, ranking=[r for r in sel["ranking"] if r["id"] != "a1"])
+    orig2 = {r[0]: dict(zip(head, r))
+             for r in np.round_member_table_rows(ctx, 2, field, agg, sel2, "r1_a2")[1:]}["orig"]
+    check("a member absent from the ranking falls back to the same-prefix census count",
+          orig2["defects@K"] == str(np.census_prefix_total(agg, sel2, "orig")),
+          f"{orig2['defects@K']} vs {np.census_prefix_total(agg, sel2, 'orig')}")
+    check("no evidence cell is a bare '-' for a member the round has records for",
+          all(by[v]["defects@K"] != "-" and by[v]["severity totals f/c/maj/min"] != "-"
+              and by[v]["writing*"] != "-" for v in FIELD), str(by))
 
 
 def test_census_file_and_table(tmp, ctx, agg):
@@ -565,6 +625,7 @@ def main() -> int:
     tmp, ctx, agg = test_census_attribution()
     test_census_is_reported_never_ranked(tmp, ctx, agg)
     test_direction_flips(tmp)
+    test_member_table_columns(tmp, ctx, agg)
     test_census_file_and_table(tmp, ctx, agg)
     test_location_dedup_optin(tmp)
     test_severity_lattice_and_any_class(tmp)

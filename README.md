@@ -95,6 +95,16 @@ prefix comes from the blind panel's own issue ledger; the panel statistics sit
 below it, and an exact (median, mean, IQR) tie keeps the incumbent base. See
 *How a round is decided* below for the rationale and the gates.
 
+The run's member table prints its columns in exactly that order — `member` (the
+id, the last key) is the row label, then `defects@K`, median, mean, IQR and the
+digest; every column after the digest is reported only and never ranked. Every
+member carries its own numbers, including the ones the ranking never admits: the
+pristine original and an unadmitted arm show their panel census defect count and
+severity totals, and `writing*` falls back to the frozen review that examined
+the row's package (the original's count comes from the review of the original,
+the base's from this round's review) or to the arm's own marker. A `-` now means
+"this root holds no record for that cell", not "this member was not ranked".
+
 **Is my decision certified?** `decision.json` carries a `certification` block
 (and `DECISION_REPORT.md` prints the same verdict):
 
