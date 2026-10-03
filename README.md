@@ -259,6 +259,27 @@ python paper_pipeline.py apply-template --root ./paper_rounds --source ./paper_r
 With no `--source` it rebuilds `<root>/final_clean_version/`, else the last complete round's
 `round<r>_winner/`.
 
+**`apply-template --agent` — the LLM fills the journal's own templates.** With `--agent`
+(default name `codex`; `manual` stages only) the command does not restyle anything: it stages a
+session sandbox — the journal's DOCX templates read-only in `venue_template/`, the source package
+read-only in `source/`, an empty `out/` — and writes the prompt that says exactly: *copy the
+template, then replace every placeholder/sample element with the actual content of `source/`, keep
+the template's styles, structure, first-page block and headers/footers, and record every
+replacement in `out/REPLACEMENT_LEDGER.md`*. One agent session runs on it (`--agent-cmd`,
+`--timeout`). The deliverable is then verified code-side, venue-agnostically: every source
+paragraph must be covered (≥ 95 % verbatim, per document), none of the template's own guide
+sentences may survive (the template was *filled*, not paraphrased), the template's style set must
+still be present, and the template's **header/footer roles** (first-page logo, page-number footer,
+even/odd furniture) must be carried by every output. The report lands in
+`reports/template_rewrite.{md,json}`. The deterministic mode verifies the same header/footer roles
+and marks a document failed if its rebuild lost them:
+
+```bash
+python paper_pipeline.py apply-template --root ./paper_rounds --agent            # one codex session
+python paper_pipeline.py apply-template --root ./paper_rounds --agent manual     # stage the prompt only
+python paper_pipeline.py apply-template --root ./paper_rounds --agent --agent-cmd '["myagent"]'
+```
+
 **Official journal templates and venue exemplars.** When the venue publishes
 its own Word/LaTeX template (most do — e.g. Frontiers' Word/LaTeX template zips
 linked from its author guidelines), those files live in

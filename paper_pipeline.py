@@ -10896,6 +10896,246 @@ VALIDATE_TEX_TIMEOUT = 600
 
 
 TEMPLATE_PACKAGE_DIRNAME = "template_package"
+TEMPLATE_REWRITE_DIRNAME = "template_rewrite"
+
+
+def apply_template_prompt(ctx: Ctx, sb: Path, src: Path, templates: dict) -> str:
+    """The TEMPLATE-FIRST rewrite prompt: copy the journal's templates, fill them.
+
+    Venue-agnostic by construction: the file names and the venue label come from
+    the resolved profile/templates, and every rule is about the SHAPE of the job
+    (copy the template, replace its placeholders with the submission's content,
+    change nothing else), never about a journal's vocabulary.
+    """
+    main = Path(templates.get("main") or "")
+    supp = Path(templates.get("supplementary") or "")
+    docs = sorted(p.name for p in Path(src).glob("*.docx")) or ["(no .docx in source/)"]
+    prof = venue_profile_of(ctx, required=False)
+    label = (prof.label if prof is not None else venue_id_of(ctx))
+    supp_line = ("venue_template/word/" + supp.name) if supp else \
+        "(the venue ships no separate supplementary template)"
+    supp_src = supp_line if supp else "the main template (no separate one ships)"
+    return f"""TEMPLATE-FIRST REWRITE -- fill {label}'s own Word templates with this submission's content
+
+The deliverable of THIS session is the ENTIRE submission package authored INSIDE
+the journal's official Word templates. The files you hand back ARE copies of the
+templates: their styles, theme, fonts, numbering, page geometry, headers/footers,
+front-matter block and section skeleton are the journal's own. Your job is to
+REPLACE the templates' placeholder/sample content with the actual content of
+`source/` -- never the other way round, and never by restyling a copy of the
+source.
+
+READ (read-only, hash-verified):
+  * venue_template/word/{main.name}  -- the journal's MAIN-TEXT template (fill it)
+  * {supp_line}
+  * source/ -- the package whose content you carry over:
+{chr(10).join('      - ' + n for n in docs)}
+    (figures, tables, data and the cover letter included; copy them into out/
+    unchanged unless the venue's own template covers them)
+
+WRITE (only inside out/):
+  1. COPY each template you need (a byte copy; the staged copies are read-only)
+     and edit the COPY:
+       - the main text     <- venue_template/word/{main.name}
+       - the supplementary <- {supp_src}
+       - a cover letter has no journal template: keep the source letter (styled
+         with the same styles) unless the venue's template covers it
+  2. REPLACE every placeholder / sample element with the matching content from
+     `source/`: article title, author list, affiliations, the correspondence
+     block, keywords, abstract, every section and subsection (KEEP the
+     template's Heading styles and their numbering), figures/tables and their
+     captions, the declaration/statement blocks the template carries, the
+     reference list, and the supplementary items.
+  3. DELETE the template's own guide text and samples: every sentence that
+     teaches the author how to use the template, and every sample name,
+     laboratory, affiliation, email, keyword, citation and caption placeholder.
+     The template's STRUCTURE and FURNITURE stay; its PROSE does not.
+  4. CARRY THE SOURCE COMPLETELY: every section, paragraph, citation, figure and
+     table reference, number and statement of the source must appear in the
+     output. Never invent, summarize, merge or drop content. Rewording is allowed
+     only where the template's structure demands it (for example folding a
+     separate "Lead contact"/"Corresponding author" line into the correspondence
+     block as "<Name>, lead contact").
+  5. Keep the template's first-page block, running head/logo, page numbers and
+     even/odd furniture exactly as the template defines them.
+  6. Render each output and LOOK at it (the visual-inspection rule below).The
+     code side then re-checks the package for leftover template prose and for
+     content coverage against `source/`.
+  7. Write `out/REPLACEMENT_LEDGER.md`: one row per template placeholder or
+     sample element -- what it was, what replaced it (file + section), and any
+     template element you deliberately KEPT because the venue's structure
+     requires it.
+
+@@VISUAL_INSPECTION_RULE@@
+
+@@DOCX_CLI_RULE@@
+""" .replace("@@VISUAL_INSPECTION_RULE@@", visual_inspection_block("out/VISUAL_CHECK.md")) \
+    .replace("@@DOCX_CLI_RULE@@", docx_cli_block())
+
+
+def _docx_paragraph_texts(path: Path) -> list:
+    """The non-empty paragraph texts of one DOCX, whitespace-normalized."""
+    mod = _format_module()
+    if mod is None:
+        return []
+    try:
+        with zipfile.ZipFile(path) as z:
+            xml = z.read("word/document.xml").decode("utf-8", "replace")
+    except (OSError, zipfile.BadZipFile, KeyError):
+        return []
+    out = []
+    for _p0, _p1, frag in mod.paragraphs(xml):
+        text = re.sub(r"\s+", " ", mod.text_of(frag)).strip()
+        if text:
+            out.append(text)
+    return out
+
+
+def _docx_hf_signature(path: Path) -> dict:
+    """What header/footer furniture one DOCX actually carries.
+
+    {roles: [(kind, type), ...] from the LAST sectPr, parts: [part names],
+     logo: a drawing/pict in some header/footer, page: a PAGE field there}.
+    """
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = z.namelist()
+            doc = z.read("word/document.xml").decode("utf-8", "replace")
+            hf = {n: z.read(n).decode("utf-8", "replace") for n in names
+                  if re.search(r"word/(header|footer)\w*\.xml$", n)}
+    except (OSError, zipfile.BadZipFile, KeyError):
+        return {}
+    sects = _SECT_RE.findall(doc) if "_SECT_RE" in globals() else \
+        re.findall(r"<w:sectPr(?=[\s>])[^>]*>[\s\S]*?</w:sectPr>", doc)
+    roles, seen = [], set()
+    for m in re.finditer(r'<w:(header|footer)Reference w:type="(\w+)"',
+                         sects[-1] if sects else ""):
+        key = (m.group(1), m.group(2))
+        if key not in seen:
+            seen.add(key)
+            roles.append(key)
+    return {"roles": sorted(roles), "parts": sorted(hf),
+            "logo": any("<w:drawing" in x or "<w:pict" in x or "<v:imagedata" in x
+                        for x in hf.values()),
+            "page": any("PAGE" in x for x in hf.values())}
+
+
+def _hf_gap(want: dict, got: dict) -> dict:
+    """What the template's furniture has that the output lacks ({} when complete)."""
+    if not want:
+        return {}
+    missing_roles = [r for r in want.get("roles") or [] if r not in (got.get("roles") or [])]
+    gap = {}
+    if missing_roles:
+        gap["missing_roles"] = missing_roles
+    if want.get("logo") and not got.get("logo"):
+        gap["logo_missing"] = True
+    if want.get("page") and not got.get("page"):
+        gap["page_field_missing"] = True
+    return gap
+
+
+def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
+    """Verify a template-first rewrite session (venue-agnostic verifiers).
+
+    Two questions decide it:
+      * COVERAGE -- every paragraph of the source package's actual content
+        appears in the outputs;
+      * TEMPLATE PROSE -- none of the template's own guide sentences/sample
+        elements survives (the templates were COPIED and FILLED), while the
+        template's style set is still present in every output.
+    """
+    out = sb / "out"
+    if not out.is_dir():
+        return {"ok": False, "errors": ["out/ is missing: the session produced no package"]}
+    src_docs = sorted(p for p in Path(src).glob("*.docx") if not _is_aux_doc(p.name))
+    out_docs = sorted(p for p in out.glob("*.docx") if not _is_aux_doc(p.name))
+    if not out_docs:
+        return {"ok": False, "errors": ["out/ carries no .docx deliverable"]}
+    errs, warns = [], []
+    out_text = {p.name: " \u241f ".join(_docx_paragraph_texts(p)).lower() for p in out_docs}
+    joined = " \u241f ".join(out_text.values())
+    leftover = []
+    for role in sorted(templates or {}):
+        tpl = templates.get(role)
+        for text in (_docx_paragraph_texts(Path(tpl)) if tpl else []):
+            if len(text.split()) >= 6 and text.lower() in joined:
+                leftover.append({"role": role, "text": text[:120]})
+    if leftover:
+        errs.append(f"{len(leftover)} template guide sentence(s) survive in the outputs "
+                    f"(the templates must be FILLED, not paraphrased): "
+                    + "; ".join(repr(l["text"][:60]) for l in leftover[:3]))
+    missing, checked = [], 0
+    for doc in src_docs:
+        target = next((p for p in out_docs if p.name == doc.name), None) or \
+            next((p for p in out_docs
+                  if (re.search(r"supp", p.name, re.I) and re.search(r"supp", doc.name, re.I))
+                  or (re.search(r"cover", p.name, re.I)
+                      and re.search(r"cover", doc.name, re.I))), None)
+        hay = out_text.get(target.name) if target is not None else joined
+        for text in _docx_paragraph_texts(doc):
+            if len(text.split()) < 5:
+                continue
+            checked += 1
+            if text.lower() not in hay:
+                missing.append({"source": doc.name, "text": text[:120]})
+    covered = checked - len(missing)
+    ratio = (covered / checked) if checked else 1.0
+    if checked and ratio < 0.95:
+        errs.append(f"content coverage {covered}/{checked} ({ratio:.0%}) is below 95%: the source "
+                    f"content must be carried over completely "
+                    f"(e.g. missing {missing[0]['text'][:70]!r})")
+    elif missing:
+        warns.append(f"{len(missing)} source paragraph(s) not found verbatim in the outputs "
+                     f"(allowed only for re-wraps the template's structure demands): "
+                     + "; ".join(m["text"][:50] for m in missing[:3]))
+    style_gap = []
+    for doc in out_docs:
+        try:
+            with zipfile.ZipFile(doc) as z:
+                have = set(re.findall(r'w:styleId="([^"]+)"',
+                                      z.read("word/styles.xml").decode("utf-8", "replace")))
+        except (OSError, zipfile.BadZipFile, KeyError):
+            style_gap.append({"file": doc.name, "error": "no readable word/styles.xml"})
+            continue
+        tpl_for_doc = template_for_package_file(doc, templates or {})
+        for tpl in ([tpl_for_doc] if tpl_for_doc
+                    else [Path(v) for v in (templates or {}).values()]):
+            try:
+                with zipfile.ZipFile(tpl) as z:
+                    want = set(re.findall(r'w:styleId="([^"]+)"',
+                                          z.read("word/styles.xml").decode("utf-8", "replace")))
+            except (OSError, zipfile.BadZipFile, KeyError):
+                continue
+            gone = sorted(want - have)
+            if gone:
+                style_gap.append({"file": doc.name, "template": Path(tpl).name,
+                                  "missing_styles": gone[:8]})
+    if style_gap:
+        errs.append("the outputs do not carry the template's styles: " + json.dumps(style_gap)[:300])
+    # The template's HEADERS/FOOTERS (logo, running head, page numbers, odd/even
+    # furniture) are part of the deliverable: every output must carry the roles
+    # the template it was built from defines.
+    hf_gap = []
+    for doc in out_docs:
+        tpl = template_for_package_file(doc, templates or {})
+        if not tpl:
+            continue
+        gap = _hf_gap(_docx_hf_signature(Path(tpl)), _docx_hf_signature(doc))
+        if gap:
+            hf_gap.append({"file": doc.name, "template": Path(tpl).name, **gap})
+    if hf_gap:
+        errs.append("the outputs do not carry the template's headers/footers: "
+                    + json.dumps(hf_gap)[:300])
+    if not any(p.match("*[Ll][Ee][Dd][Gg][Ee][Rr]*.md") for p in out.iterdir() if p.is_file()):
+        errs.append("out/REPLACEMENT_LEDGER.md is missing: record every template placeholder and "
+                    "what replaced it")
+    return {"ok": not errs, "errors": errs, "warnings": warns,
+            "coverage": {"checked": checked, "covered": covered, "ratio": round(ratio, 4),
+                         "missing_samples": missing[:8]},
+            "template_prose_left": leftover[:8],
+            "headers_footers": {p.name: _docx_hf_signature(p) for p in out_docs},
+            "documents": [p.name for p in out_docs]}
 
 
 def template_for_package_file(path: Path, templates: dict):
@@ -10973,12 +11213,20 @@ def rebuild_package_from_templates(templates: dict, src: Path, dest: Path,
         tpl = template_for_package_file(p, templates)
         rep = mod.apply_word_template(p, target, tpl, containers=containers) if tpl else \
             {"ok": False, "error": "no matching Word template for this document"}
-        if rep.get("ok"):
+        gap = _hf_gap(_docx_hf_signature(tpl), _docx_hf_signature(target)) if rep.get("ok") else {}
+        if rep.get("ok") and not gap:
             files.append({"file": p.relative_to(src).as_posix(), "kind": "docx-rebuilt",
                           "ok": True, "text_unchanged": rep.get("text_unchanged"),
                           "template": rep.get("template"),
+                          "headers_footers": _docx_hf_signature(target),
                           "headings_retagged": rep.get("headings_retagged"),
                           "changes": rep.get("changes")})
+        elif rep.get("ok") and gap:
+            files.append({"file": p.relative_to(src).as_posix(),
+                          "kind": "docx-rebuilt-incomplete", "ok": False,
+                          "template": rep.get("template"),
+                          "error": "the rebuild did not carry the template's "
+                                   "headers/footers: " + json.dumps(gap)})
         else:
             shutil.copy2(p, target)
             files.append({"file": p.relative_to(src).as_posix(),
@@ -17504,6 +17752,7 @@ VISUAL_TEMPLATE_DIR = "visual_template"
 VISUAL_CACHE_DIRNAME = ".visual_cache"
 VISUAL_PAGE_DPI = 110
 VISUAL_MAX_RENDER_ATTEMPTS = 2
+VISUAL_TEMPLATE_RENDER_TIMEOUT = 300
 
 
 def mcp_server_spec(name: str) -> dict:
@@ -17706,7 +17955,8 @@ def _child_output(raw) -> str:
     return raw or ""
 
 
-def render_docx_visual(docx: Path, out_dir: Path, renderer=None) -> dict:
+def render_docx_visual(docx: Path, out_dir: Path, renderer=None,
+                       timeout: float = 900) -> dict:
     """Render ONE DOCX to PDF + page PNGs under `out_dir`.
 
     `renderer` pins ONE renderer (tests, retries); None tries the whole choice
@@ -17743,20 +17993,20 @@ def render_docx_visual(docx: Path, out_dir: Path, renderer=None) -> dict:
         shutil.copy2(docx, src)
         proc = None
         if name.startswith("mcp:"):
-            conv = mcp_convert_docx_to_pdf(exe, src, timeout=900)
+            conv = mcp_convert_docx_to_pdf(exe, src, timeout=timeout)
             if not conv.get("ok"):
                 return {"ok": False, "renderer": name, "error": conv.get("error")}
             pdf = Path(conv["pdf"])
         elif name == "word":
             proc = subprocess.run([str(exe), str(src)], capture_output=True,
-                                  timeout=900, cwd=str(tmp))
+                                  timeout=timeout, cwd=str(tmp))
             pdf = src.with_suffix(".pdf")
         else:
             profile = tmp / "lo_profile"
             proc = subprocess.run([str(exe), "--headless",
                                    f"-env:UserInstallation=file://{profile}",
                                    "--convert-to", "pdf", "--outdir", str(tmp), str(src)],
-                                  capture_output=True, timeout=900)
+                                  capture_output=True, timeout=timeout)
             pdf = tmp / (src.stem + ".pdf")
         if not pdf.is_file() or pdf.stat().st_size == 0:
             detail = (_child_output(getattr(proc, "stderr", None))
@@ -17839,7 +18089,8 @@ def seed_template_visuals(ctx: Ctx, sb: Path) -> dict:
             for stale in list(cache.glob("*.pdf")) + list(cache.glob("*.png")):
                 with contextlib.suppress(OSError):
                     stale.unlink()
-            r = render_docx_visual(path, cache, None)
+            r = render_docx_visual(path, cache, None,
+                                    timeout=VISUAL_TEMPLATE_RENDER_TIMEOUT)
             rec = {"ok": r.get("ok"), "renderer": r.get("renderer"), "choice": choice,
                    "pages": r.get("pages", 0), "pdf": r.get("pdf"),
                    "pngs": r.get("pngs") or [], "error": r.get("error"),
@@ -28016,6 +28267,112 @@ def default_template_package_source(ctx: Ctx):
     return None
 
 
+def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> None:
+    """`apply-template --agent`: one LLM session that fills the journal's templates.
+
+    The sandbox mirrors the pipeline's stages: the venue's templates are staged
+    READ-ONLY, the source package is copied read-only beside them, and the prompt
+    tells the agent to copy a template and replace its placeholders with the
+    source content. The postcheck verifies the outcome code-side (template guide
+    prose gone, source content covered, template styles still present) and the
+    report lands in the root's reports/.
+    """
+    agent = str(getattr(args, "agent", None) or "").strip()
+    sb = ctx.root / TEMPLATE_REWRITE_DIRNAME
+    if sb.is_dir() and any(sb.iterdir()) and not bool(getattr(args, "force", False)) \
+            and agent == "manual" and (sb / PROMPT_FILE).is_file():
+        # Re-running `--agent manual` on an existing session CHECKS it: the
+        # operator (or an agent run by hand) has filled out/, and this invocation
+        # reports the code-side verdict instead of wiping the work.
+        report = template_rewrite_postcheck(sb, src, templates)
+        report.update({"venue": venue_id_of(ctx), "source": str(src), "sandbox": str(sb),
+                       "agent": "manual", "agent_rc": None})
+        write_json_atomic(ctx.reports_dir / "template_rewrite.json", report)
+        print(f"[apply-template] checked the existing session {sb}: "
+              f"coverage {report['coverage']['covered']}/{report['coverage']['checked']} "
+              f"({report['coverage']['ratio']:.0%}), template guide sentences left "
+              f"{len(report['template_prose_left'])}, headers/footers "
+              f"{'ok' if not any('headers/footers' in e for e in report['errors']) else 'MISSING'}")
+        if not report["ok"]:
+            die("the template-first rewrite did not pass its postcheck: "
+                + "; ".join(report["errors"])[:400])
+        print("[apply-template] the package in out/ passed the code-side postcheck")
+        return
+    if sb.exists() and any(sb.iterdir()):
+        if not bool(getattr(args, "force", False)):
+            die(f"{sb} exists and is not empty: pass --force to rebuild the session sandbox")
+        rmtree_force(sb)
+    sb.mkdir(parents=True, exist_ok=True)
+    stage_venue_template(ctx, sb)
+    srcdir = sb / "source"
+    srcdir.mkdir(exist_ok=True)
+    for f in template_package_files(src):
+        if f.suffix.lower() != ".docx":
+            continue
+        shutil.copy2(f, srcdir / f.name)
+        with contextlib.suppress(OSError):
+            os.chmod(srcdir / f.name, 0o444)
+    (sb / "out").mkdir(exist_ok=True)
+    text = apply_template_prompt(ctx, sb, srcdir, templates)
+    (sb / PROMPT_FILE).write_text(text, encoding="utf-8")
+    try:
+        # Best-effort: the rendered template pages let the agent compare visually.
+        # A renderer that is missing or slow must never block the session setup --
+        # the prompt says to fall back to the venue_template/ file itself.
+        seed_template_visuals(ctx, sb)
+    except Exception as e:                                        # noqa: BLE001
+        print(f"[apply-template] note: the venue template render could not be seeded "
+              f"({type(e).__name__}: {e}); the prompt tells the agent to compare against "
+              f"venue_template/ instead")
+    print(f"[apply-template] template-first session sandbox: {sb}")
+    print(f"[apply-template] prompt: {sb / PROMPT_FILE}  (copy the journal templates, then "
+          f"replace every placeholder with the source content)")
+    print(f"[apply-template] templates staged read-only: "
+          + ", ".join(Path(v).name for v in sorted(templates.values())))
+    print(f"[apply-template] source package (read-only): {src}")
+    if agent == "manual":
+        print(f"[apply-template] manual mode: run the prompt yourself and fill {sb / 'out'}, "
+              f"then re-run `apply-template --root {ctx.root} --agent manual` to CHECK it "
+              f"(the postcheck reads {sb / 'out'})")
+        return
+    cmd = resolve_agent_cmd(agent, getattr(args, "agent_cmd", None))
+    rec = {"id": TEMPLATE_REWRITE_DIRNAME, "kind": "template-rewrite", "status": "running",
+           "sandbox": str(sb), "round": 0}
+    res = _execute_attempt_in(sb, rec, cmd,
+                              int(getattr(args, "timeout", DEFAULTS.get("timeout", 14400)) or 14400))
+    print(f"[apply-template] agent: {agent} rc={res.get('rc')} in {res.get('dur', 0):.0f}s "
+          f"(log: {res.get('log')})")
+    if res.get("error"):
+        print(f"[apply-template] WARNING: {res['error']}")
+    report = template_rewrite_postcheck(sb, src, templates)
+    report.update({"venue": venue_id_of(ctx), "source": str(src), "sandbox": str(sb),
+                   "agent": agent, "agent_rc": res.get("rc")})
+    write_json_atomic(ctx.reports_dir / "template_rewrite.json", report)
+    (ctx.reports_dir / "template_rewrite.md").write_text(
+        "# Template-first rewrite\n\n"
+        + f"- venue: `{report['venue']}`\n- source: `{report['source']}`\n"
+        + f"- sandbox: `{report['sandbox']}`\n- agent: `{report['agent']}` "
+          f"(rc={report.get('agent_rc')})\n"
+        + f"- documents: {', '.join(report['documents'])}\n"
+        + f"- coverage: {report['coverage']['covered']}/{report['coverage']['checked']} "
+          f"({report['coverage']['ratio']:.0%}) source paragraph(s) found verbatim\n"
+        + f"- template guide sentences left: {len(report['template_prose_left'])}\n"
+        + ("\n".join("- ERROR: " + e for e in report["errors"])
+           + "\n" if report["errors"] else "- errors: none\n")
+        + ("\n".join("- WARNING: " + w for w in report["warnings"])
+           + "\n" if report["warnings"] else ""),
+        encoding="utf-8")
+    print(f"[apply-template] coverage: {report['coverage']['covered']}/"
+          f"{report['coverage']['checked']} ({report['coverage']['ratio']:.0%}) source "
+          f"paragraph(s) verbatim; template guide sentences left: "
+          f"{len(report['template_prose_left'])}")
+    print(f"[apply-template] report: {(ctx.reports_dir / 'template_rewrite.md')}")
+    if not report["ok"]:
+        die("the template-first rewrite did not pass its postcheck: "
+            + "; ".join(report["errors"])[:400])
+    print("[apply-template] the package in out/ passed the code-side postcheck; it is NOT yet "
+          "judged: run the review/revise stages (or a full `run`) when you want it in the round.")
+
 def cmd_apply_template(args) -> None:
     """Rebuild a whole submission package inside the venue's Word templates."""
     ctx = Ctx(Path(args.root))
@@ -28030,6 +28387,13 @@ def cmd_apply_template(args) -> None:
     if src is None:
         die("no package to rebuild: the root has no final_clean_version/ and no completed "
             "round's round<r>_winner/ -- name one with --source <dir>")
+    prof = venue_profile_of(ctx, required=False)
+    journal = journal_of(ctx) or (prof.default_journal if prof is not None else "")
+    print(f"[apply-template] venue: {venue_id_of(ctx)}"
+          + (f" ({journal})" if journal else " (no journal configured)"))
+    if str(getattr(args, "agent", None) or "").strip():
+        _template_rewrite_session(ctx, args, src, templates)
+        return
     dest = Path(args.dest).expanduser() if args.dest else ctx.root / TEMPLATE_PACKAGE_DIRNAME
     report = rebuild_package_from_templates(templates, src, dest, force=bool(args.force),
                                             containers=venue_containers(ctx))
@@ -28037,10 +28401,6 @@ def cmd_apply_template(args) -> None:
         if report.get("error"):
             die(report["error"])
         die("the rebuild left files un-restyled: " + ", ".join(report.get("failed") or []))
-    prof = venue_profile_of(ctx, required=False)
-    journal = journal_of(ctx) or (prof.default_journal if prof is not None else "")
-    print(f"[apply-template] venue: {venue_id_of(ctx)}"
-          + (f" ({journal})" if journal else " (no journal configured)"))
     print(f"[apply-template] rebuilt {report['documents_rebuilt']} document(s) and copied "
           f"{report['files_copied']} other file(s):")
     for f in report["files"]:
@@ -33105,6 +33465,16 @@ def build_parser() -> argparse.ArgumentParser:
                           f"<root>/{TEMPLATE_PACKAGE_DIRNAME}/)")
     pat.add_argument("--force", action="store_true",
                      help="replace a non-empty destination")
+    pat.add_argument("--agent", nargs="?", const="codex", default=None, metavar="NAME",
+                     help="TEMPLATE-FIRST REWRITE: stage the journal's templates read-only + the "
+                          "source package + a prompt that says 'copy the template, replace its "
+                          "placeholders with the source content' and run one agent session "
+                          "(default name: codex; `manual` stages the prompt only). Without "
+                          "--agent the command does the deterministic code-side rebuild instead")
+    pat.add_argument("--agent-cmd", default=None,
+                     help="JSON argv for the agent command, e.g. '[\"codex\",\"exec\"]'")
+    pat.add_argument("--timeout", type=int, default=None,
+                     help="agent session timeout in seconds (default: the run's timeout)")
     pat.set_defaults(func=cmd_apply_template)
     return p
 

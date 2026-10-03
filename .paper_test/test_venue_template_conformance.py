@@ -746,6 +746,89 @@ def test_apply_template_package():
           and not any("template_report" in n for n in names), str(names))
 
 
+def _furnished_template(path: Path, guide: str, *, main: bool = True) -> None:
+    """A template with a first-page logo header + a PAGE footer + guide prose."""
+    body = (para("Title", "Article Title")
+            + para(None, "First Author1, Second Author2*, Third Author1,2")
+            + para(None, "* Correspondence: Corresponding Authoremail@uni.edu")
+            + f"<w:p>{_run(guide, sz=22, space=True)}</w:p>"
+            + para("Heading1", "Introduction") + para("Heading1", "Methods")
+            + para("Heading2", "A subsection") + para("Heading2", "Another subsection"))
+    doc = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+           '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+           'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+           f'<w:body>{body}<w:sectPr>'
+           '<w:headerReference w:type="first" r:id="rIdH1"/>'
+           '<w:footerReference w:type="default" r:id="rIdF1"/>'
+           '<w:pgSz w:w="12240" w:h="15840"/><w:titlePg/></w:sectPr></w:body></w:document>')
+    logo = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            '<w:p><w:r><w:drawing/></w:r></w:p></w:hdr>')
+    footer = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+              '<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+              '<w:p><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>'
+              '</w:p></w:ftr>')
+    ct_extra = ('<Override PartName="/word/header1.xml" ContentType="application/vnd.'
+                'openxmlformats-officedocument.wordprocessingml.header+xml"/>'
+                '<Override PartName="/word/footer1.xml" ContentType="application/vnd.'
+                'openxmlformats-officedocument.wordprocessingml.footer+xml"/>')
+    rels_extra = ('<Relationship Id="rIdH1" Type="http://schemas.openxmlformats.org/'
+                  'officeDocument/2006/relationships/header" Target="header1.xml"/>'
+                  '<Relationship Id="rIdF1" Type="http://schemas.openxmlformats.org/'
+                  'officeDocument/2006/relationships/footer" Target="footer1.xml"/>')
+    full_docx(path, doc, ct_extra=ct_extra, rels_extra=rels_extra,
+              extra={"word/header1.xml": logo, "word/footer1.xml": footer})
+
+
+def test_template_rewrite_postcheck():
+    """The template-first (LLM) session's verifiers: prose gone, content covered,
+    template styles AND headers/footers carried."""
+    tmp = scratch("paper_tpl_rewrite_")
+    tpl = tmp / "template.docx"
+    _furnished_template(tpl, "You may insert up to 5 heading levels into your manuscript as can "
+                             "be seen in the Styles tab of this template.")
+    pkg = tmp / "pkg"
+    pkg.mkdir()
+    _package_docx(pkg / "mainText.docx", "Introduction")
+    sb = tmp / "session"
+    (sb / "out").mkdir(parents=True)
+    good = fmt.apply_word_template(pkg / "mainText.docx", sb / "out" / "mainText.docx", tpl)
+    check("the simulated compliant agent output keeps the template's furniture",
+          good.get("ok") and _hf_roles(sb / "out" / "mainText.docx")
+          == [("footer", "default"), ("footer", "first"), ("header", "first")],
+          str(_hf_roles(sb / "out" / "mainText.docx")))
+    (sb / "out" / "REPLACEMENT_LEDGER.md").write_text("| placeholder | replacement |\n",
+                                                      encoding="utf-8")
+    rep = nb.template_rewrite_postcheck(sb, pkg, {"main": tpl})
+    check("a filled template passes: source content covered, guide prose gone, styles kept",
+          rep.get("ok") is True and rep["coverage"]["ratio"] >= 0.95
+          and not rep["template_prose_left"], str(rep)[:260])
+    # the failure mode the operator reported: the template copied but NOT filled
+    shutil.copy(tpl, sb / "out" / "mainText.docx")
+    rep2 = nb.template_rewrite_postcheck(sb, pkg, {"main": tpl})
+    check("an UNFILLED template copy fails on leftover guide prose and missing content",
+          rep2.get("ok") is False
+          and any("guide sentence" in e for e in rep2["errors"])
+          and any("coverage" in e for e in rep2["errors"]), str(rep2["errors"])[:260])
+    # headers/footers dropped from an otherwise filled output
+    fmt.apply_word_template(pkg / "mainText.docx", sb / "out" / "mainText.docx", tpl)
+    with zipfile.ZipFile(sb / "out" / "mainText.docx") as z:
+        items = [(i, z.read(i.filename)) for i in z.infolist()]
+    doc = {i.filename: d for i, d in items}["word/document.xml"].decode("utf-8", "replace")
+    doc = re.sub(r'<w:(?:header|footer)Reference[^>]*/>', "", doc)
+    with zipfile.ZipFile(sb / "out" / "mainText.docx", "w", zipfile.ZIP_DEFLATED) as z:
+        for i, d in items:
+            z.writestr(i, doc.encode("utf-8") if i.filename == "word/document.xml" else d)
+    rep3 = nb.template_rewrite_postcheck(sb, pkg, {"main": tpl})
+    check("an output that lost the template's headers/footers is rejected",
+          rep3.get("ok") is False
+          and any("headers/footers" in e for e in rep3["errors"]), str(rep3["errors"])[:260])
+
+
+def _hf_roles(path: Path) -> list:
+    return sorted(nb._docx_hf_signature(path).get("roles") or [])
+
+
 def test_mcp_first_render_chain():
     """The orchestrator's own template renders use the operator's FIRST choice:
     the docx-converter MCP tool, then docx2pdf.sh, then LibreOffice."""
@@ -945,6 +1028,7 @@ def main() -> int:
         test_even_odd_furniture()
         test_foreign_containers_are_venue_data()
         test_apply_template_package()
+        test_template_rewrite_postcheck()
         test_mcp_first_render_chain()
         test_visual_template_render_and_comparison()
     finally:
