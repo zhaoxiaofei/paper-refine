@@ -2838,6 +2838,15 @@ and statement placement; no prose was copied). Two tiers, with different authori
     the unnumbered "Abstract" heading with its paragraph. Fold a separate "Lead contact" /
     "Corresponding author" line into that block instead of leaving it as its own paragraph, and
     never keep the old publisher's "Highlights"/"Summary"/"Motivation" containers.
+  * WHAT THE TEMPLATE DOES NOT PIN, THE VENUE'S OWN GUIDELINES DECIDE; WHERE THOSE ARE SILENT,
+    ESTABLISHED ACADEMIC CONVENTION DECIDES. Consult the journal's official author guidelines
+    for anything the template leaves open (table font size, spacing INSIDE a table, caption
+    size, list indentation, ...), and if neither the template nor the guidelines state it,
+    follow the field's standard practice -- e.g. table text one step smaller than the body
+    text, single-spaced inside the table, the caption in the body font at body size, a table
+    that breaks across pages repeating its header row -- and record the choice in the package's
+    report. Never invent a requirement the journal does not state, and never leave a style the
+    template does not pin unset.
   * CONTAINER HEADINGS THAT BELONG TO ANOTHER PUBLISHER'S TEMPLATE (for example "Lead contact",
     "Resource availability", "Materials availability", "Method details", or a bare "Key
     resources" heading) are not part of this venue's structure: fold their content into the
@@ -10958,6 +10967,14 @@ WRITE (only inside out/):
      block as "<Name>, lead contact").
   5. Keep the template's first-page block, running head/logo, page numbers and
      even/odd furniture exactly as the template defines them.
+     STYLES THE TEMPLATE DOES NOT PIN: follow the journal's own official author
+     guidelines first (they are the authority for anything the template leaves
+     open -- table font size, spacing inside a table, caption size, list
+     indentation ...); where the guidelines are silent, follow established
+     academic convention (for example table text one step smaller than the body
+     text, single-spaced inside the table, captions in the body font at body
+     size). Never invent a requirement the journal does not state, and never
+     leave such a style unset.
   6. Render each output and LOOK at it (the visual-inspection rule below).The
      code side then re-checks the package for leftover template prose and for
      content coverage against `source/`.
@@ -14766,7 +14783,7 @@ def corpus_sources(ctx: Ctx, r: int, vid: str) -> list:
     corpus; see CORPUS_EXCLUDE_TOP.
     """
     if vid == ORIGINAL_ID:
-        return [(ctx.pristine, "", ())]
+        return [(working_original_dir(ctx), "", ())]
     if is_fresh_vid(vid):
         rec = ctx.run(rid_for_fresh(r, vid))
         if rec is None:
@@ -15009,7 +15026,7 @@ def _record_revision_token(rec: dict, dirp: Path, warns: list) -> None:
 def recorded_content_fingerprint(ctx: Ctx, r: int, vid: str):
     """The fingerprint recorded when the version was produced (no I/O)."""
     if vid == ORIGINAL_ID:
-        return ctx.state.get("original_content_fingerprint")
+        return working_original_fingerprint(ctx)
     if is_fresh_vid(vid):
         return (ctx.run(rid_for_fresh(r, vid)) or {}).get("content_fingerprint")
     return (find_pin(ctx, vid) or {}).get("content_fingerprint")
@@ -15029,7 +15046,7 @@ def effective_content_fingerprint(ctx: Ctx, r: int, vid: str) -> str:
 def recorded_version_digest(ctx: Ctx, r: int, vid: str):
     """The digest recorded when the version's run/pin completed (no I/O)."""
     if vid == ORIGINAL_ID:
-        return ctx.state.get("original_digest")
+        return working_original_digest(ctx)
     if is_fresh_vid(vid):
         rec = ctx.run(rid_for_fresh(r, vid))
         return (rec or {}).get("corpus_digest")
@@ -15151,7 +15168,7 @@ def _view_digest(ctx: Ctx, r: int, vid: str) -> list:
     metadata and therefore is not byte-identical to its source corpus.
     """
     if vid == ORIGINAL_ID:
-        return content_multiset([ctx.pristine])
+        return content_multiset([working_original_dir(ctx)])
     return sorted(sha256_files([p for _rel, p in corpus_files_for_view(ctx, r, vid)]))
 
 
@@ -16058,7 +16075,7 @@ def materialize_a1(ctx: Ctx, r: int) -> dict:
     sb = ctx.runs_dir / rid
     sb.mkdir(parents=True, exist_ok=True)
     base, nr = sb / "base", sb / PRISTINE_DIR
-    src_id, src_dir = ORIGINAL_ID, ctx.pristine
+    src_id, src_dir = ORIGINAL_ID, working_original_dir(ctx)
     if r > 1:
         prev = ctx.round_rec(r - 1)
         pin = find_pin(ctx, prev.get("pin_id"))
@@ -16076,7 +16093,7 @@ def materialize_a1(ctx: Ctx, r: int) -> dict:
                                f"champion though it is marked done (the pin record is missing; "
                                f"restore it from a state.json backup)")
         src_id, src_dir = pin["id"], pinned_docs_dir(ctx, pin)
-    want = (ctx.state.get("original_digest") if src_id == ORIGINAL_ID
+    want = (working_original_digest(ctx) if src_id == ORIGINAL_ID
             else (find_pin(ctx, src_id) or {}).get("digest"))
     if base.exists() and want and corpus_tree_digest(base) != want:
         # An earlier round was re-run and its champion changed: a stale base copy
@@ -16616,7 +16633,7 @@ def build_field(ctx: Ctx, r: int) -> tuple:
     corpus_content_set_fingerprint for why the name/bookkeeping-sensitive
     integrity digest is not used here). Returns (entries, dropped) where each
     entry is {"id", "digest", "fingerprint", "kind", ...}."""
-    entries = [{"id": ORIGINAL_ID, "digest": ctx.state.get("original_digest"),
+    entries = [{"id": ORIGINAL_ID, "digest": working_original_digest(ctx),
                 "kind": "original"}]
     for pin in sorted(ctx.state.get("pinned") or [], key=lambda p: int(p.get("round") or 0)):
         if int(pin.get("round") or 0) < int(r):
@@ -28249,6 +28266,129 @@ def latest_add_venue_sandbox(dest: Path, vid: str):
     return cands[-1] if cands else None
 
 
+def template_stage_record(ctx: Ctx) -> dict:
+    """The recorded, PASSED template-first stage for this root ({} when none)."""
+    st = (ctx.state or {}).get("template_stage") or {}
+    if not isinstance(st, dict) or not st.get("ok") or not st.get("dir"):
+        return {}
+    return st if (ctx.root / str(st["dir"])).is_dir() else {}
+
+
+def working_original_dir(ctx: Ctx) -> Path:
+    """The corpus round 1 starts from.
+
+    A transfer-mode root whose template-first stage passed starts from THAT
+    package (the submission authored inside the journal's own templates); every
+    other root keeps the pristine original. The pristine copy stays the root's
+    read-only EVIDENCE and the `non_revised/` view either way.
+    """
+    st = template_stage_record(ctx)
+    return (ctx.root / str(st["dir"])) if st else ctx.pristine
+
+
+def working_original_digest(ctx: Ctx):
+    st = template_stage_record(ctx)
+    return st.get("digest") or (ctx.state or {}).get("original_digest")
+
+
+def working_original_fingerprint(ctx: Ctx):
+    st = template_stage_record(ctx)
+    return st.get("content_fingerprint") or (ctx.state or {}).get("original_content_fingerprint")
+
+
+def _stage_template_rewrite_sandbox(ctx: Ctx, src: Path, templates: dict,
+                                    force: bool = False) -> Path:
+    """Create/refresh the template-first session sandbox (templates + source read-only)."""
+    sb = ctx.root / TEMPLATE_REWRITE_DIRNAME
+    if sb.exists() and any(sb.iterdir()):
+        if not force:
+            return sb
+        rmtree_force(sb)
+    sb.mkdir(parents=True, exist_ok=True)
+    stage_venue_template(ctx, sb)
+    srcdir = sb / "source"
+    srcdir.mkdir(exist_ok=True)
+    for f in template_package_files(src):
+        if f.suffix.lower() != ".docx":
+            continue
+        shutil.copy2(f, srcdir / f.name)
+        with contextlib.suppress(OSError):
+            os.chmod(srcdir / f.name, 0o444)
+    (sb / "out").mkdir(exist_ok=True)
+    (sb / PROMPT_FILE).write_text(apply_template_prompt(ctx, sb, srcdir, templates),
+                                  encoding="utf-8")
+    try:
+        seed_template_visuals(ctx, sb)
+    except Exception as e:                                            # noqa: BLE001
+        print(f"[template-stage] note: the venue template render could not be seeded "
+              f"({type(e).__name__}: {e}); the prompt says to compare against venue_template/")
+    return sb
+
+
+def _record_template_stage(ctx: Ctx, sb: Path, agent: str) -> dict:
+    """Record a PASSED template-first stage and make it round 1's working original."""
+    out = sb / "out"
+    ctx.state["template_stage"] = {
+        "ok": True, "dir": out.relative_to(ctx.root).as_posix(),
+        "digest": corpus_tree_digest(out),
+        "content_fingerprint": corpus_content_set_fingerprint([(out, "", ())]),
+        "agent": agent, "checked": utcnow(),
+    }
+    ctx.save_state()
+    return ctx.state["template_stage"]
+
+
+def _ensure_template_stage_for_run(ctx: Ctx, args) -> None:
+    """TRANSFER MODE: author the submission inside the journal's templates FIRST.
+
+    The stage is staged and run like `apply-template --agent`; its code-side
+    postcheck gates the whole run, and a passing package becomes round 1's
+    working original (the a1 base, the field's `original` view and every
+    `vs_original` comparison read it). `--no-template-stage` opts out.
+    """
+    if template_stage_record(ctx):
+        print("[run] template-first stage: already recorded (state.json)")
+        return
+    templates = venue_word_templates(ctx)
+    if not templates:
+        print("[run] template-first stage: the venue ships no Word template -- skipping")
+        return
+    if not any(p.suffix.lower() == ".docx" for p in template_package_files(ctx.pristine)):
+        print("[run] template-first stage: the corpus carries no .docx -- skipping "
+              "(nothing to author in the journal's Word template)")
+        return
+    if bool(getattr(args, "no_template_stage", False)):
+        print("[run] template-first stage: skipped by --no-template-stage")
+        return
+    sb = _stage_template_rewrite_sandbox(ctx, ctx.pristine, templates, force=True)
+    print(f"[run] template-first stage: {sb} (copy the journal's templates, replace their "
+          f"placeholders with this submission's content)")
+    agent = str(getattr(args, "agent", None) or DEFAULTS.get("agent", "codex"))
+    if agent == "manual":
+        die(f"transfer mode authors the submission INSIDE the journal's templates before any "
+            f"other stage: fill {sb / 'out'} using {sb / PROMPT_FILE}, then re-run `run` "
+            f"(or check it with `apply-template --root {ctx.root} --agent manual`)")
+    cmd = resolve_agent_cmd(agent, getattr(args, "agent_cmd", None))
+    rec = {"id": TEMPLATE_REWRITE_DIRNAME, "kind": "template-rewrite", "status": "running",
+           "sandbox": str(sb), "round": 0}
+    timeout = int(getattr(args, "timeout", DEFAULTS.get("timeout", 14400)) or 14400)
+    res = _execute_attempt_in(sb, rec, cmd, timeout)
+    print(f"[run] template-first stage: agent {agent} rc={res.get('rc')} in "
+          f"{res.get('dur', 0):.0f}s (log: {res.get('log')})")
+    report = template_rewrite_postcheck(sb, ctx.pristine, templates)
+    report.update({"venue": venue_id_of(ctx), "source": str(ctx.pristine), "sandbox": str(sb),
+                   "agent": agent, "agent_rc": res.get("rc")})
+    write_json_atomic(ctx.reports_dir / "template_rewrite.json", report)
+    if not report.get("ok"):
+        die("the template-first stage did not pass its postcheck: "
+            + "; ".join(report["errors"])[:400])
+    rec_stage = _record_template_stage(ctx, sb, agent)
+    print(f"[run] template-first stage: PASSED -- coverage "
+          f"{report['coverage']['covered']}/{report['coverage']['checked']} "
+          f"({report['coverage']['ratio']:.0%}), round 1 now starts from "
+          f"{rec_stage['dir']} (digest {str(rec_stage['digest'])[:12]})")
+
+
 def default_template_package_source(ctx: Ctx):
     """The package `apply-template` rebuilds when no --source is given.
 
@@ -28810,6 +28950,9 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             f"       Restore {ctx.pristine} (e.g. from your own copy of the corpus) or start a "
             f"fresh pipeline root with `setup`.")
     print(f"[run] pristine original: {detail}")
+
+    if journal_mode_of(ctx) == JOURNAL_MODE_TRANSFER:
+        _ensure_template_stage_for_run(ctx, args)
 
     perrs = pinned_integrity(ctx)
     if perrs:
@@ -33160,6 +33303,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help=f"cap on a single backoff wait in seconds (default: "
                          f"{DEFAULTS['retry_backoff_max']})")
     run_opts.add_argument("--agent", choices=["codex", "claude", "manual"], default=DEFAULTS["agent"])
+    run_opts.add_argument("--no-template-stage", action="store_true",
+                          help="transfer mode only: do NOT author the package inside the "
+                               "journal's Word templates before the round (the default is to "
+                               "run that stage first, since it defines the submission the "
+                               "round starts from)")
     run_opts.add_argument("--agent-cmd", default=None,
                     help="JSON argv list overriding the agent command")
     run_opts.add_argument("--judge-agent", choices=["codex", "claude", "manual"], default=None,

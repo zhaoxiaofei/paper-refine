@@ -829,6 +829,71 @@ def _hf_roles(path: Path) -> list:
     return sorted(nb._docx_hf_signature(path).get("roles") or [])
 
 
+def test_transfer_mode_runs_the_template_stage_first():
+    """Transfer mode: authoring in the journal's templates is stage 0 by default.
+
+    The stage gates the run (manual mode stops with the instruction and stages
+    nothing else), can be opted out of, and a PASSED stage becomes round 1's
+    working original -- the a1 base and every vs_original comparison read it.
+    """
+    tmp = scratch("paper_tpl_transfer_")
+    root = tmp / "root"
+    (root / "non_revised").mkdir(parents=True)
+    _package_docx(root / "non_revised" / "mainText.docx", "Introduction")
+    off = root / "venue_profiles" / "fake-venue.official"
+    off.mkdir(parents=True)
+    _furnished_template(off / "Fake_Template.docx",
+                        "Fill this template with your own manuscript content, please.")
+    (root / "venue_profiles" / "fake-venue.json").write_text(json.dumps({
+        "id": "fake-venue", "label": "Fake Venue", "journals": ["Fake Journal"],
+        "default_journal": "Fake Journal"}), encoding="utf-8")
+    (root / "reports").mkdir()
+    ctx = nb.Ctx(root)
+    ctx.cfg = {"venue": "fake-venue", "revision_mode": "transfer", "rounds": 1}
+    ctx.state = {"version": nb.STATE_VERSION, "runs": {}, "rounds": {}, "pinned": [], "log": [],
+                 "source_manifest": {"files": {}, "count": 0}, "original_digest": "d0",
+                 "config": ctx.cfg}
+    check("with no passed stage the working original is still the pristine corpus",
+          nb.template_stage_record(ctx) == {}
+          and nb.working_original_dir(ctx) == ctx.pristine)
+    class Args:
+        no_template_stage = False
+        agent = "manual"
+        agent_cmd = None
+        timeout = 5
+    import contextlib as _ctxlib
+    import io as _io
+    err = _io.StringIO()
+    code = 0
+    try:
+        with _ctxlib.redirect_stderr(err), _ctxlib.redirect_stdout(_io.StringIO()):
+            nb._ensure_template_stage_for_run(ctx, Args())
+    except SystemExit as e:
+        code = int(e.code or 0)
+    check("transfer mode stops at the template stage and tells the operator to fill it",
+          code == 1 and "templates before any other stage" in err.getvalue()
+          and (root / "template_rewrite" / "out").is_dir()
+          and (root / "template_rewrite" / "PROMPT.md").is_file(),
+          err.getvalue()[-200:])
+    class Skip(Args):
+        no_template_stage = True
+    nb._ensure_template_stage_for_run(ctx, Skip())     # must not raise
+    check("--no-template-stage opts out", True)
+    # a passed stage changes the working original
+    out = root / "template_rewrite" / "out"
+    _package_docx(out / "mainText.docx", "Introduction")
+    ctx.state["template_stage"] = {"ok": True, "dir": "template_rewrite/out",
+                                   "digest": "d-template", "content_fingerprint": "fp"}
+    check("a PASSED stage becomes round 1's working original (base, field, views)",
+          nb.working_original_dir(ctx) == out
+          and nb.working_original_digest(ctx) == "d-template"
+          and nb.working_original_fingerprint(ctx) == "fp"
+          and nb.recorded_version_digest(ctx, 1, nb.ORIGINAL_ID) == "d-template"
+          and nb.recorded_content_fingerprint(ctx, 1, nb.ORIGINAL_ID) == "fp"
+          and nb.corpus_sources(ctx, 1, nb.ORIGINAL_ID) == [(out, "", ())],
+          str(nb.corpus_sources(ctx, 1, nb.ORIGINAL_ID)))
+
+
 def test_mcp_first_render_chain():
     """The orchestrator's own template renders use the operator's FIRST choice:
     the docx-converter MCP tool, then docx2pdf.sh, then LibreOffice."""
@@ -1029,6 +1094,7 @@ def main() -> int:
         test_foreign_containers_are_venue_data()
         test_apply_template_package()
         test_template_rewrite_postcheck()
+        test_transfer_mode_runs_the_template_stage_first()
         test_mcp_first_render_chain()
         test_visual_template_render_and_comparison()
     finally:

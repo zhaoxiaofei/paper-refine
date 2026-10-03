@@ -280,6 +280,23 @@ python paper_pipeline.py apply-template --root ./paper_rounds --agent manual    
 python paper_pipeline.py apply-template --root ./paper_rounds --agent --agent-cmd '["myagent"]'
 ```
 
+**Transfer mode runs that stage FIRST.** A root configured with `--revision-mode transfer` and a
+venue that ships Word templates starts every `run` with the template-first stage, before the
+feedback/round stages: the sandbox is staged and (unless `--agent manual`, which stops with the
+instruction to fill it) the agent session runs, and the code-side postcheck gates the whole run.
+The passing package becomes **round 1's working original** — the `a1` base the rewrites start
+from, the field's `original` view and every `vs_original` comparison read it — while the true
+pristine manuscript stays the root's read-only evidence (`non_revised/`). `--no-template-stage`
+opts out (the historical transfer behaviour). A corpus without any `.docx` skips the stage (there
+is nothing to author in a Word template).
+
+**Style precedence: template → venue guidelines → academic convention.** Anything the official
+template does not pin (table font size, spacing inside a table, caption size, list indentation,
+…) follows the journal's own official author guidelines; where those are silent, established
+academic convention decides — e.g. table text one step smaller than the body text, single-spaced
+inside the table, captions in the body font at body size. The agents are told never to invent a
+requirement the journal does not state and never to leave such a style unset.
+
 **Official journal templates and venue exemplars.** When the venue publishes
 its own Word/LaTeX template (most do — e.g. Frontiers' Word/LaTeX template zips
 linked from its author guidelines), those files live in
