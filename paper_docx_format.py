@@ -322,6 +322,104 @@ def docx_style_ids(path: Path) -> list:
     return sorted(set(re.findall(r'w:styleId="([^"]+)"', xml)))
 
 
+def docx_front_matter_report(path: Path, template: Path = None) -> dict:
+    """Template-conformance facts about a DOCX's front matter and headings.
+
+    Used by the venue-template scanner to name the layout gaps a review/rewrite
+    session must dispose: the first-page logo header, the page-number footer,
+    the Title/AuthorList/Abstract/Keywords front matter, sub-sub-sections
+    (Heading 3) and the Cell Press container headings.
+    """
+    try:
+        with zipfile.ZipFile(path) as pkg:
+            names = set(pkg.namelist())
+            doc = pkg.read("word/document.xml").decode("utf-8", "replace")
+            rels = (pkg.read("word/_rels/document.xml.rels").decode("utf-8", "replace")
+                    if "word/_rels/document.xml.rels" in names else "")
+            hf_parts = {n: pkg.read(n) for n in names
+                        if n.startswith(("word/header", "word/footer")) and n.endswith(".xml")}
+    except (OSError, zipfile.BadZipFile, KeyError):
+        return {}
+    rel_map = {m.group(1): (m.group(2).lower(), m.group(3))
+               for m in _RELS_RE.finditer(rels)}
+    sects = _SECT_RE.findall(doc)
+    sect = sects[-1] if sects else ""
+    refs = {}
+    for m in re.finditer(r'<w:(header|footer)Reference w:type="(\w+)" r:id="([^"]+)"', sect):
+        refs[(m.group(1), m.group(2))] = m.group(3)
+
+    def part(kind: str, typ: str) -> str:
+        rid = refs.get((kind, typ))
+        k, target = rel_map.get(rid, ("", ""))
+        if k == kind and target and not target.startswith("http"):
+            return target
+        return ""
+
+    first_header = part("header", "first") or part("header", "default")
+    logo = False
+    if first_header:
+        name = f"word/{first_header}" if not first_header.startswith("word/") else first_header
+        if name in hf_parts:
+            hx = hf_parts[name].decode("utf-8", "replace")
+            logo = bool(re.search(r"<w:drawing|<w:pict|<v:imagedata|<a:blip", hx))
+    styles, texts = [], []
+    for p in paragraphs(doc):
+        t = text_of(p[2]).strip()
+        if t:
+            texts.append(t)
+            styles.append(elem_val(ppr_of(p[2]), "pStyle") or "")
+    title_style = styles[0] if styles else ""
+    author_style = next((styles[i] for i in range(1, min(4, len(styles)))
+                         if "," in texts[i] or " and " in texts[i]), "")
+    abstract_style = next((styles[i] for i, t in enumerate(texts)
+                           if t.lower() == "abstract"), "")
+    keywords_style = next((styles[i] for i, t in enumerate(texts)
+                           if t.lower().startswith("keywords")), "")
+    roles = template_style_roles(Path(template)) if template is not None else {}
+    heading_level_of = {sid: lvl for lvl, sid in (roles.get("headings") or {}).items()}
+    depth = int(roles.get("max_heading_level") or 2)
+    deep = sum(1 for s in styles if heading_level_of.get(s, 0) > depth)
+    containers = [t for t, s in zip(texts, styles)
+                  if t in _FRONT_MATTER_CONTAINERS and (s.startswith("Heading") or not s)]
+    out = {"title_style": title_style, "author_style": author_style,
+           "abstract_style": abstract_style, "keywords_style": keywords_style,
+           "first_header": bool(first_header), "logo_header": logo,
+           "first_footer": bool(part("footer", "first") or part("footer", "default")),
+           "deep_headings": deep,
+           "heading3": sum(1 for s in styles if heading_level_of.get(s) == 3),
+           "container_headings": containers}
+    if template is None:
+        return out
+    title_id = roles.get("title")
+    author_id = roles.get("author")
+    rows = []
+    if not logo:
+        rows.append("the venue's first-page header/logo is missing")
+    if not out["first_footer"]:
+        rows.append("the venue's page-number footer is missing")
+    if title_id and title_style != title_id:
+        rows.append("the article title is not in the template's title style (centered)")
+    if author_id and author_style != author_id:
+        rows.append("the author list is not in the template's front-matter style (bold)")
+    if abstract_style and abstract_style in heading_level_of:
+        rows.append("Abstract is a numbered heading; the template keeps it as unnumbered "
+                    "front matter")
+    if any(t.strip().lower() == "keywords" for t in texts):
+        rows.append("Keywords are a separate heading; the template uses one 'Keywords: ...' line")
+    h1_id = (roles.get("headings") or {}).get(1)
+    if h1_id and not any(s == h1_id for s in styles):
+        rows.append("no section heading uses the template's Heading 1 style")
+    if deep:
+        rows.append(f"{deep} heading(s) sit deeper than the template's own heading depth "
+                    f"-- flatten them")
+    for container in containers:
+        rows.append(f"source-template container heading {container!r} is not part of the "
+                    f"venue's structure")
+    out["rows"] = rows
+    out["roles"] = {k: v for k, v in roles.items() if k != "headings"}
+    return out
+
+
 def _tri_state(node) -> bool | None:
     """True/False for an OOXML on/off toggle, None when the element is absent."""
     if node is None:
@@ -3535,6 +3633,50 @@ _DIRECT_FORMAT_PATTERNS = (
     r"<w:szCs(?=[\s/>])[^>]*/>",
 )
 _SECT_RE = re.compile(r"<w:sectPr(?=[\s>])[\s\S]*?</w:sectPr>")
+_RELS_RE = re.compile(r'<Relationship Id="([^"]+)"[^>]*Type="[^"]*/([a-zA-Z]+)"'
+                      r'[^>]*Target="([^"]+)"')
+_FRONT_MATTER_CONTAINERS = ("Lead contact", "Resource availability", "Materials availability",
+                            "Method details", "Key resources", "Key resources table")
+_SIMPLE_PAGE_FOOTER = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+    '<w:p><w:pPr><w:jc w:val="right"/></w:pPr>'
+    '<w:fldSimple w:instr=" PAGE \\* Arabic "><w:r><w:t>1</w:t></w:r></w:fldSimple>'
+    '</w:p></w:ftr>')
+
+
+def _set_para_style(para: str, style: str) -> str:
+    """Force `w:pStyle` on a paragraph fragment (insert or replace)."""
+    m = re.search(r"<w:pPr(?=[\s/>])[^>]*/>|<w:pPr(?=[\s>])[^>]*>[\s\S]*?</w:pPr>", para)
+    if m:
+        block = m.group(0)
+        if block.rstrip().endswith("/>"):
+            new = (block[:block.rfind("/>")].rstrip() + ">"
+                   + f'<w:pStyle w:val="{style}"/>' + "</w:pPr>")
+        elif "<w:pStyle" in block:
+            new = re.sub(r"<w:pStyle(?=[\s>])[^>]*/>", f'<w:pStyle w:val="{style}"/>',
+                         block, count=1)
+        else:
+            om = re.match(r"<w:pPr(?=[\s>])[^>]*>", block)
+            new = block[:om.end()] + f'<w:pStyle w:val="{style}"/>' + block[om.end():]
+        return para.replace(block, new, 1)
+    om = re.match(r"<w:p(?=[\s>])[^>]*>", para)
+    return para[:om.end()] + f'<w:pPr><w:pStyle w:val="{style}"/></w:pPr>' + para[om.end():]
+
+
+def _set_para_text(para: str, text: str) -> str:
+    """Replace the visible text, keeping the FIRST run's properties."""
+    spans = list(re.finditer(r"<w:t(?:\s[^>]*)?>(.*?)</w:t>", para, re.S))
+    if not spans:
+        return para
+    out, pos = [], 0
+    for i, m in enumerate(spans):
+        out.append(para[pos:m.start()])
+        inner = (text if i == 0 else "").replace("&", "&amp;").replace("<", "&lt;")
+        out.append(f"<w:t>{inner}</w:t>")
+        pos = m.end()
+    out.append(para[pos:])
+    return "".join(out)
 
 
 def _style_index(styles_xml: str) -> tuple:
@@ -3617,6 +3759,299 @@ def _adopt_page_geometry(doc_xml: str, template_doc_xml: str) -> tuple:
     return doc_xml[:m_sects[-1].start()] + body + doc_xml[m_sects[-1].end():], True
 
 
+def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> dict:
+    """Copy the template's first/default header and its page-number footer.
+
+    The FIRST-page footer is synthesized as a simple PAGE field: Word rejects
+    the template's own VML text-box footer part when it is referenced as the
+    first-page footer, while accepting it as the default one.
+    """
+    try:
+        tdoc = tpkg.read("word/document.xml").decode("utf-8", "replace")
+        trels = (tpkg.read("word/_rels/document.xml.rels").decode("utf-8", "replace")
+                 if "word/_rels/document.xml.rels" in tnames else "")
+    except (KeyError, OSError):
+        return {}
+    rel_map = {m.group(1): (m.group(2).lower(), m.group(3))
+               for m in _RELS_RE.finditer(trels)}
+    refs = {"header": {}, "footer": {}}
+    sect = _SECT_RE.findall(tdoc)
+    for m in re.finditer(r'<w:(header|footer)Reference w:type="(\w+)" r:id="([^"]+)"',
+                         sect[-1] if sect else ""):
+        refs[m.group(1)][m.group(2)] = m.group(3)
+    header_default = refs["header"].get("default") or refs["header"].get("first") \
+        or refs["header"].get("even")
+    header_first = refs["header"].get("first") or header_default
+    footer_default = refs["footer"].get("default") or refs["footer"].get("first") \
+        or refs["footer"].get("even")
+    if not (header_default or footer_default):
+        return {}
+    copied, issued = [], {}
+
+    def copy_part(src_name: str, dest_name: str) -> bool:
+        full = f"word/{src_name}"
+        if full not in tnames:
+            return False
+        parts[f"word/{dest_name}"] = tpkg.read(full)
+        copied.append(dest_name)
+        rels_name = f"word/_rels/{src_name}.rels"
+        if rels_name in tnames:
+            rxml = tpkg.read(rels_name).decode("utf-8", "replace")
+            for rm in list(_RELS_RE.finditer(rxml)):
+                if rm.group(2).lower() != "image":
+                    continue
+                media = rm.group(3)
+                media_name = Path(media).name
+                dest_media = f"venue_{media_name}"
+                if f"word/media/{dest_media}" not in parts:
+                    if f"word/{media}" in tnames:
+                        parts[f"word/media/{dest_media}"] = tpkg.read(f"word/{media}")
+                rxml = rxml.replace(f'Target="{media}"', f'Target="{dest_media}"')
+            parts[f"word/_rels/{dest_name}.rels"] = rxml.encode("utf-8")
+        hdr = tpkg.read(full).decode("utf-8", "replace")
+        issued[dest_name] = bool(re.search(r"<w:drawing|<w:pict|<v:imagedata|<a:blip", hdr))
+        return True
+
+    out = {}
+    if header_default:
+        kind, target = rel_map.get(header_default, ("", ""))
+        if kind == "header" and target and copy_part(target, "header_venue_default.xml"):
+            out["header_default"] = "header_venue_default.xml"
+    if header_first:
+        kind, target = rel_map.get(header_first, ("", ""))
+        if kind == "header" and target:
+            dest = ("header_venue_default.xml" if target == rel_map.get(header_default, ("", ""))[1]
+                    else "header_venue_first.xml")
+            if dest in copied or copy_part(target, dest):
+                out["header_first"] = dest
+    if footer_default:
+        kind, target = rel_map.get(footer_default, ("", ""))
+        if kind == "footer" and target and copy_part(target, "footer_venue_default.xml"):
+            out["footer_default"] = "footer_venue_default.xml"
+    parts["word/footer_venue_first.xml"] = _SIMPLE_PAGE_FOOTER.encode("utf-8")
+    copied.append("footer_venue_first.xml")
+    out["footer_first"] = "footer_venue_first.xml"
+    out["logo"] = bool(issued.get(out.get("header_first", ""), False))
+    out["copied"] = copied
+    # content-type overrides for the new parts + media defaults
+    ct = parts.get("[Content_Types].xml", b"").decode("utf-8", "replace")
+    for name in copied:
+        kind = "header" if name.startswith("header") else "footer"
+        if f'PartName="/word/{name}"' not in ct:
+            ct = ct.replace("</Types>",
+                            f'<Override PartName="/word/{name}" ContentType="application/vnd.'
+                            f'openxmlformats-officedocument.wordprocessingml.{kind}+xml"/>'
+                            f'</Types>')
+    for media in [n for n in parts if n.startswith("word/media/venue_")]:
+        ext = Path(media).suffix.lstrip(".").lower()
+        ctype = {"jpeg": "image/jpeg", "jpg": "image/jpeg", "png": "image/png",
+                 "gif": "image/gif", "emf": "image/x-emf", "wmf": "image/x-wmf"}.get(ext)
+        if ctype and f'Extension="{ext}"' not in ct:
+            ct = ct.replace("</Types>", f'<Default Extension="{ext}" ContentType="{ctype}"/>'
+                                       f'</Types>')
+    parts["[Content_Types].xml"] = ct.encode("utf-8")
+    # document relationships (fresh ids)
+    rels = parts.get("word/_rels/document.xml.rels", b"").decode("utf-8", "replace")
+    used = set(re.findall(r'Id="([^"]+)"', rels))
+    n = 2001
+    for key, dest in (("header_default", out.get("header_default")),
+                      ("header_first", out.get("header_first")),
+                      ("footer_default", out.get("footer_default")),
+                      ("footer_first", out.get("footer_first"))):
+        if not dest:
+            continue
+        while f"rId{n}" in used:
+            n += 1
+        rid = f"rId{n}"
+        used.add(rid)
+        n += 1
+        kind = "header" if key.startswith("header") else "footer"
+        rels = rels.replace("</Relationships>",
+                            f'<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/'
+                            f'officeDocument/2006/relationships/{kind}" Target="{dest}"/>'
+                            f'</Relationships>')
+        out[key + "_rid"] = rid
+    parts["word/_rels/document.xml.rels"] = rels.encode("utf-8")
+    return out
+
+
+def template_style_roles(template: Path) -> dict:
+    """The style ids a TEMPLATE uses for its front matter and heading levels.
+
+    Venue-agnostic: the roles are read from the template's own styles.xml
+    (`title`, `author list`/`authors`, the styles whose aliases cover both
+    keywords and abstract, `heading 1..5`, `caption`), and the deepest heading
+    level the template's own document actually uses at least twice becomes the
+    level cap -- a template that never nests sub-sub-sections does not get them
+    imposed on the manuscript.
+    """
+    try:
+        with zipfile.ZipFile(template) as tpkg:
+            styles = tpkg.read("word/styles.xml").decode("utf-8", "replace")
+            doc = tpkg.read("word/document.xml").decode("utf-8", "replace")
+    except (OSError, zipfile.BadZipFile, KeyError):
+        return {}
+    roles = {"headings": {}}
+    try:
+        root = ET.fromstring(styles)
+    except ET.ParseError:
+        return {}
+    for st in root.iter(W + "style"):
+        sid = str(st.get(W + "styleId") or "")
+        if not sid:
+            continue
+        name_el = st.find(W + "name")
+        name = str(name_el.get(W + "val")) if name_el is not None else sid
+        keys = {re.sub(r"[^a-z0-9]+", "", name.lower())}
+        aliases_el = st.find(W + "aliases")
+        if aliases_el is not None and aliases_el.get(W + "val"):
+            keys |= {re.sub(r"[^a-z0-9]+", "", a.lower())
+                     for a in str(aliases_el.get(W + "val")).split(",")}
+        if "title" in keys and "title" not in roles:
+            roles["title"] = sid
+        if keys & {"authorlist", "authors", "author"} and "author" not in roles:
+            roles["author"] = sid
+        if "keywords" in keys and "abstract" in keys and "author" not in roles:
+            roles["author"] = sid          # the front-matter style by its aliases
+        for level in range(1, 6):
+            if f"heading{level}" in keys:
+                roles["headings"].setdefault(level, sid)
+        if "caption" in keys and "caption" not in roles:
+            roles["caption"] = sid
+    used = {}
+    for m in re.finditer(r'<w:pStyle w:val="([^"]+)"', doc):
+        used[m.group(1)] = used.get(m.group(1), 0) + 1
+    depth = 0
+    for level, sid in roles["headings"].items():
+        if used.get(sid, 0) >= 2:
+            depth = max(depth, level)
+    roles["max_heading_level"] = depth or 2
+    return roles
+
+
+def _front_matter_styles(doc_xml: str, roles: dict) -> tuple:
+    """(xml, info): template front matter + the template's heading depth.
+
+    Title on the first paragraph, AuthorList on the author line (bold),
+    Abstract/Keywords as unnumbered front matter, headings deeper than the
+    template's own depth demoted one level, and direct indents/spacing/
+    alignment removed from all styled paragraphs so the template's styles own
+    the typography. All ids come from the template.
+    """
+    title_id = roles.get("title") or ""
+    author_id = roles.get("author") or ""
+    headings = dict(roles.get("headings") or {})
+    depth = int(roles.get("max_heading_level") or 2)
+    info = {"title": False, "authors": False, "abstract": False, "keywords": False,
+            "deep_headings_demoted": 0}
+    if not (title_id or author_id or headings):
+        return doc_xml, info
+    paras = paragraphs(doc_xml)
+    entries = [(i, p) for i, p in enumerate(paras) if text_of(p[2]).strip()]
+    if not entries:
+        return doc_xml, info
+    edits = []
+
+    def style_para(idx, style):
+        p0, p1, frag = paras[idx]
+        edits.append((p0, p1, _strip_direct_props(_set_para_style(frag, style), strip_num=True)))
+
+    if title_id:
+        style_para(entries[0][0], title_id)
+        info["title"] = True
+    if author_id:
+        for idx, p in entries[1:4]:
+            t = text_of(p[2]).strip()
+            if len(t) < 400 and "@" not in t and ("," in t or " and " in t):
+                style_para(idx, author_id)
+                info["authors"] = True
+                break
+    kw_heading = None
+    kw_pending = False
+    for idx, p in entries:
+        t = text_of(p[2]).strip()
+        low = t.lower()
+        if low == "abstract":
+            style_para(idx, author_id or "AuthorList")
+            info["abstract"] = True
+        elif low == "keywords":
+            kw_heading = idx
+            style_para(idx, author_id or "AuthorList")
+            kw_pending = True
+        elif low.startswith("keywords:") or low.startswith("keywords :"):
+            style_para(idx, author_id or "AuthorList")
+            info["keywords"] = True
+        elif kw_pending:
+            # The template uses ONE "Keywords: ..." line; styling the heading and
+            # the list keeps the TEXT byte-identical (the merge itself is a
+            # content edit the review/rewrite sessions are told to make).
+            style_para(idx, author_id or "AuthorList")
+            info["keywords"] = True
+            kw_pending = False
+    deep = {sid: level for level, sid in headings.items() if level > depth}
+    for idx, p in enumerate(paras):
+        pstyle = elem_val(ppr_of(p[2]), "pStyle")
+        if pstyle in deep:
+            level = deep[pstyle]
+            target = headings.get(level - 1) or headings.get(depth)
+            if target:
+                p0, p1, frag = p
+                edits.append((p0, p1, _strip_direct_props(
+                    _set_para_style(frag, target), strip_num=False)))
+                info["deep_headings_demoted"] += 1
+    styled = {sid for sid in (title_id, author_id, roles.get("caption"),
+                              *headings.values()) if sid}
+    for idx, p in enumerate(paras):
+        if elem_val(ppr_of(p[2]), "pStyle") in styled:
+            p0, p1, frag = p
+            new = _strip_direct_props(frag, strip_num=(elem_val(ppr_of(frag), "pStyle") ==
+                                                       "AuthorList"))
+            if new != frag:
+                edits.append((p0, p1, new))
+    if edits:
+        doc_xml = apply_edits(doc_xml, edits)
+    return doc_xml, info
+
+
+def _strip_direct_props(frag: str, strip_num: bool = False) -> str:
+    for pat in (r"<w:ind(?=[\s/>])[^>]*/>", r"<w:spacing(?=[\s/>])[^>]*/>",
+                r"<w:jc(?=[\s/>])[^>]*/>"):
+        frag = re.sub(pat, "", frag)
+    if strip_num:
+        frag = re.sub(r"<w:numPr>[\s\S]*?</w:numPr>", "", frag, count=1)
+    return frag
+
+
+def _apply_front_refs(doc_xml: str, front: dict) -> tuple:
+    """(xml, applied): point the document's sectPr at the venue headers/footers."""
+    sects = _SECT_RE.findall(doc_xml)
+    if not sects:
+        return doc_xml, False
+    sect = sects[-1]
+    body = re.sub(r"<w:(?:header|footer)Reference[^>]*/>", "", sect)
+    body = re.sub(r"<w:titlePg[^>]*/>", "", body)
+    om = re.match(r"<w:sectPr(?=[\s>])[^>]*>", body)
+    refs = ""
+    for key, tag, typ in (("header_default_rid", "headerReference", "default"),
+                          ("header_first_rid", "headerReference", "first"),
+                          ("footer_default_rid", "footerReference", "default"),
+                          ("footer_first_rid", "footerReference", "first")):
+        if front.get(key):
+            refs += f'<w:{tag} w:type="{typ}" r:id="{front[key]}"/>'
+    if refs:
+        root = re.search(r"<w:document\b[^>]*>", doc_xml)
+        if root and "xmlns:r=" not in root.group(0):
+            doc_xml = doc_xml.replace(
+                root.group(0), root.group(0)[:-1] + ' xmlns:r="http://schemas.'
+                'openxmlformats.org/officeDocument/2006/relationships">', 1)
+    body = body[:om.end()] + refs + body[om.end():]
+    if "<w:titlePg" not in body:
+        body = (body.replace("<w:docGrid", "<w:titlePg/><w:docGrid", 1)
+                if "<w:docGrid" in body else
+                body.replace("</w:sectPr>", "<w:titlePg/></w:sectPr>", 1))
+    return doc_xml.replace(sect, body, 1), True
+
+
 def apply_word_template(src: Path, out: Path, template: Path) -> dict:
     """Restyle one DOCX into the venue's official Word template.
 
@@ -3681,6 +4116,8 @@ def apply_word_template(src: Path, out: Path, template: Path) -> dict:
 
             remapped = stripped = 0
             page_ok = False
+            front_info = {}
+            roles = template_style_roles(template)
             for name in sorted(parts):
                 if not doc_part_re.fullmatch(name):
                     continue
@@ -3708,8 +4145,15 @@ def apply_word_template(src: Path, out: Path, template: Path) -> dict:
                     new_xml = apply_edits(new_xml, edits)
                 if name == "word/document.xml":
                     new_xml, page_ok = _adopt_page_geometry(new_xml, tpl_doc)
+                    new_xml, front_info = _front_matter_styles(new_xml, roles)
                 if new_xml != xml:
                     parts[name] = new_xml.encode("utf-8")
+            front_parts = _template_front_parts(tpkg, parts, tnames)
+            if front_parts:
+                doc_xml = parts["word/document.xml"].decode("utf-8", "replace")
+                doc_xml, refs_ok = _apply_front_refs(doc_xml, front_parts)
+                if refs_ok:
+                    parts["word/document.xml"] = doc_xml.encode("utf-8")
             with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
                 for name, data in parts.items():
                     z.writestr(name, data)
@@ -3734,10 +4178,27 @@ def apply_word_template(src: Path, out: Path, template: Path) -> dict:
         changes.append(f"removed {stripped} direct formatting propert(ies)")
     if page_ok:
         changes.append("adopted the template page geometry")
+    if front_info.get("title"):
+        changes.append("front matter: article title -> Title (centered)")
+    if front_info.get("authors"):
+        changes.append("front matter: author line -> AuthorList (bold)")
+    if front_info.get("abstract"):
+        changes.append("front matter: Abstract -> unnumbered AuthorList")
+    if front_info.get("keywords"):
+        changes.append("front matter: Keywords -> the template's front-matter style")
+    if front_info.get("deep_headings_demoted"):
+        changes.append(f"demoted {front_info['deep_headings_demoted']} heading(s) deeper than "
+                       f"the template's own depth")
+    if front_parts:
+        changes.append("copied the venue's first-page header (logo), default header and "
+                       "page-number footers")
     return {"file": str(src), "template": str(template), "ok": bool(text_ok),
             "text_unchanged": bool(text_ok), "changes": changes,
             "styles_copied": copied, "style_refs_remapped": remapped,
-            "direct_format_removed": stripped, "page_geometry": page_ok}
+            "direct_format_removed": stripped, "page_geometry": page_ok,
+            "front_matter": front_info,
+            "template_roles": {k: v for k, v in (roles or {}).items() if k != "headings"},
+            "front_parts": {k: v for k, v in (front_parts or {}).items() if k != "copied"}}
 
 
 def validate_latex(path: Path, workdir: Path = None, timeout: int = 300) -> dict:

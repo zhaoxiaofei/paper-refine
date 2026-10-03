@@ -246,12 +246,145 @@ def test_prompt_wiring():
         check(f"the {name} prompt carries the venue template block", marker in text)
 
 
+FULL_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Times New Roman"/><w:sz w:val="24"/></w:rPr></w:rPrDefault></w:docDefaults>
+<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+<w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:b/></w:rPr></w:style>
+<w:style w:type="paragraph" w:styleId="Subtitle"><w:name w:val="Subtitle"/><w:rPr><w:b/></w:rPr></w:style>
+<w:style w:type="paragraph" w:customStyle="1" w:styleId="AuthorList"><w:name w:val="Author List"/><w:aliases w:val="Keywords,Abstract"/><w:basedOn w:val="Subtitle"/></w:style>
+<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr></w:style>
+<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr></w:style>
+<w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:pPr><w:outlineLvl w:val="2"/></w:pPr></w:style>
+<w:style w:type="paragraph" w:styleId="Caption"><w:name w:val="caption"/></w:style>
+</w:styles>"""
+
+
+def full_docx(path: Path, doc_xml: str, *, styles=FULL_STYLES, extra=None, ct_extra="",
+              rels_extra=""):
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("[Content_Types].xml", CT.replace("</Types>", ct_extra + "</Types>"))
+        z.writestr("_rels/.rels", RELS)
+        z.writestr("word/document.xml", doc_xml)
+        z.writestr("word/styles.xml", styles)
+        z.writestr("word/_rels/document.xml.rels", RELS.replace(
+            "</Relationships>", rels_extra + "</Relationships>"))
+        for name, data in (extra or {}).items():
+            z.writestr(name, data)
+
+
+def para(style, text):
+    ppr = f"<w:pPr><w:pStyle w:val=\"{style}\"/></w:pPr>" if style else ""
+    return f"<w:p>{ppr}<w:r><w:t>{text}</w:t></w:r></w:p>"
+
+
+def test_generalized_template_restyle():
+    """The pass is template-driven: any journal's template supplies the roles."""
+    tmp = scratch("paper_tpl_generic_")
+    tpl = tmp / "template.docx"
+    body = (para("Title", "Journal sample title") + para(None, "First Author, Second Author")
+            + para("AuthorList", "Abstract") + para("Heading1", "Introduction")
+            + para("Heading2", "First subsection") + para("Heading2", "Second subsection"))
+    doc = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+           '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+           'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+           f'<w:body>{body}<w:sectPr>'
+           '<w:headerReference w:type="first" r:id="rIdH1"/>'
+           '<w:headerReference w:type="default" r:id="rIdH2"/>'
+           '<w:footerReference w:type="default" r:id="rIdF1"/>'
+           '<w:pgSz w:w="12240" w:h="15840"/>'
+           '<w:pgMar w:top="1138" w:right="1181" w:bottom="1138" w:left="1282" '
+           'w:header="283" w:footer="510" w:gutter="0"/><w:titlePg/>'
+           '</w:sectPr></w:body></w:document>')
+    logo = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            '<w:p><w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml">'
+            '<v:imagedata r:id="rIdImg"/></v:shape></w:pict></w:r></w:p></w:hdr>')
+    blank = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+             '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+             '<w:p/></w:hdr>')
+    footer = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+              '<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+              '<w:p><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>'
+              '</w:p></w:ftr>')
+    ct_extra = ('<Override PartName="/word/header1.xml" ContentType="application/vnd.'
+                'openxmlformats-officedocument.wordprocessingml.header+xml"/>'
+                '<Override PartName="/word/header2.xml" ContentType="application/vnd.'
+                'openxmlformats-officedocument.wordprocessingml.header+xml"/>'
+                '<Override PartName="/word/footer1.xml" ContentType="application/vnd.'
+                'openxmlformats-officedocument.wordprocessingml.footer+xml"/>'
+                '<Default Extension="png" ContentType="image/png"/>')
+    rels_extra = ('<Relationship Id="rIdH1" Type="http://schemas.openxmlformats.org/'
+                  'officeDocument/2006/relationships/header" Target="header1.xml"/>'
+                  '<Relationship Id="rIdH2" Type="http://schemas.openxmlformats.org/'
+                  'officeDocument/2006/relationships/header" Target="header2.xml"/>'
+                  '<Relationship Id="rIdF1" Type="http://schemas.openxmlformats.org/'
+                  'officeDocument/2006/relationships/footer" Target="footer1.xml"/>')
+    h1_rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+               '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/'
+               'relationships"><Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/'
+               'officeDocument/2006/relationships/image" Target="media/logo.png"/>'
+               '</Relationships>')
+    full_docx(tpl, doc, ct_extra=ct_extra, rels_extra=rels_extra,
+              extra={"word/header1.xml": logo, "word/header2.xml": blank,
+                     "word/footer1.xml": footer,
+                     "word/_rels/header1.xml.rels": h1_rels,
+                     "word/media/logo.png": b"\x89PNG\r\n\x1a\n"})
+    roles = fmt.template_style_roles(tpl)
+    check("the template's roles are derived from its own styles (any journal)",
+          roles.get("title") == "Title" and roles.get("author") == "AuthorList"
+          and roles.get("headings", {}).get(2) == "Heading2"
+          and roles.get("max_heading_level") == 2, str(roles))
+    man = tmp / "manuscript.docx"
+    man_body = (para(None, "A title of the manuscript") + para(None, "Ann Author, Bob Author")
+                + para("Heading1", "Abstract") + para("Heading2", "Keywords")
+                + para(None, "keyword1; keyword2") + para("Heading2", "Lead contact")
+                + para("Heading3", "Deep subsection") + para("Heading1", "Introduction")
+                + para(None, "Body text."))
+    man_doc = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+               '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+               f'<w:body>{man_body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>'
+               '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" '
+               'w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>')
+    full_docx(man, man_doc)
+    before = fmt.docx_front_matter_report(man, tpl)
+    check("the pre-pass report names the logo/footer/front-matter gaps",
+          any("logo" in r for r in before.get("rows") or [])
+          and any("footer" in r for r in before.get("rows") or [])
+          and any("title" in r for r in before.get("rows") or [])
+          and any("deeper" in r for r in before.get("rows") or []),
+          str(before.get("rows")))
+    out = tmp / "out.docx"
+    rep = fmt.apply_word_template(man, out, tpl)
+    check("the generalized restyle keeps the text identical",
+          rep.get("ok") is True and rep.get("text_unchanged") is True, str(rep.get("error")))
+    with zipfile.ZipFile(out) as z:
+        names = set(z.namelist())
+        docx = z.read("word/document.xml").decode("utf-8", "replace")
+    check("the venue's first-page header (logo) and page-number footers are copied",
+          "word/header_venue_first.xml" in names and "word/media/venue_logo.png" in names
+          and "word/footer_venue_first.xml" in names
+          and 'w:type="first"' in docx, str(sorted(n for n in names if "venue" in n)))
+    after = fmt.docx_front_matter_report(out, tpl)
+    check("Title/AuthorList front matter is applied from the template's roles",
+          after.get("title_style") == "Title" and after.get("author_style") == "AuthorList"
+          and after.get("abstract_style") == "AuthorList", str(after))
+    check("a heading deeper than the template's own depth is flattened",
+          "Heading3" not in docx and rep.get("front_matter", {}).get("deep_headings_demoted") == 1,
+          str(rep.get("front_matter")))
+    check("the post-pass report no longer names the logo/footer gaps",
+          not any("logo" in r or "footer" in r for r in after.get("rows") or []),
+          str(after.get("rows")))
+
+
 def main() -> int:
     try:
         test_resolution_and_staging()
         test_restyler()
         test_normalizer_and_conformance()
         test_prompt_wiring()
+        test_generalized_template_restyle()
     finally:
         cleanup()
     print()

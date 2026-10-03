@@ -237,10 +237,16 @@ opts out): the template's styles/theme/font table/numbering replace the
 manuscript's, style references are remapped by style name, the template's page
 geometry is adopted, and the direct font/size/spacing overrides that would hide
 those styles are removed — with the document text proven byte-identical or the
-original file kept. The template files are also staged read-only into every
-producing/reviewing sandbox as `venue_template/`, and all prompts (review,
-rewrite, revise, integrate, audit, judge) carry the architecture/formatting
-mandate. `venue_profiles/<venue-id>.manuscripts/` (recent OA articles, or
+  original file kept. The template files are also staged read-only into every
+  producing/reviewing sandbox as `venue_template/`, and all prompts (review,
+  rewrite, revise, integrate, audit, judge) carry the architecture/formatting
+  mandate. The pass is **template-driven for every journal**: the front-matter
+  style roles (title, author list, abstract/keywords), the heading-depth cap,
+  the first-page header (logo) and the page-number footers are read from the
+  template's own parts, not from a built-in list, so a journal whose template
+  renders differently gets that rendering; the code-side scan reports what the
+  agents must still fix (front-matter styles, sub-sub-sections, container
+  headings imported from another publisher's template). `venue_profiles/<venue-id>.manuscripts/` (recent OA articles, or
 structure-only transcriptions) adds a second, **advisory** tier used only for
 what the template leaves open. Both feed the pinned
 `venue_profiles/<venue-id>.templates/` pack (every input and output

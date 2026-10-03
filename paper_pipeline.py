@@ -2137,6 +2137,13 @@ def _docx_style_ids(path: Path) -> list:
     return fn(path) if fn is not None else []
 
 
+def _docx_front_matter_report(path: Path, template: Path = None) -> dict:
+    """Front-matter/header/footer facts for one DOCX (see the formatter module)."""
+    mod = _format_module()
+    fn = getattr(mod, "docx_front_matter_report", None)
+    return fn(path, template) if fn is not None else {}
+
+
 def scan_template_conformance(sources: list, requirements: dict,
                               word_template: Path = None,
                               word_template_supplementary: Path = None) -> dict:
@@ -2283,6 +2290,7 @@ def scan_template_conformance(sources: list, requirements: dict,
                 label_rows.append(f"{label} numbering has gaps: {gaps}")
     # Word template styles: every corpus .docx must carry the template's ids.
     word_styles_missing = []
+    front_rows = []
     if word_template is not None:
         main_ids = set(_docx_style_ids(Path(word_template)))
         supp_ids = (set(_docx_style_ids(Path(word_template_supplementary)))
@@ -2294,8 +2302,15 @@ def scan_template_conformance(sources: list, requirements: dict,
                 if missing:
                     word_styles_missing.append({"document": doc, "missing": missing[:12],
                                                 "missing_count": len(missing)})
+                want_tpl = (word_template_supplementary
+                            if supp_ids and "supp" in Path(doc).name.lower()
+                            else word_template)
+                fm = _docx_front_matter_report(path, want_tpl)
+                for row in (fm or {}).get("rows") or []:
+                    front_rows.append(f"{doc}: {row}")
     conforms = (bool(req) and not missing_sections and not missing_statements and class_ok
-                and not order_rows and not label_rows and not word_styles_missing)
+                and not order_rows and not label_rows and not word_styles_missing
+                and not front_rows)
     return {"official": bool(req), "required": {"documentclass": want_class,
                                                 "mandatory_sections": mandatory,
                                                 "statements": statements},
@@ -2305,6 +2320,7 @@ def scan_template_conformance(sources: list, requirements: dict,
             "order_rows": order_rows, "label_rows": label_rows,
             "word_styles_missing": word_styles_missing,
             "word_template_ok": not word_styles_missing,
+            "front_matter_rows": front_rows,
             "conforms": conforms,
             "note": ("advisory, code-side: a row names a requirement the official template "
                      "demands and the corpus does not show; the review disposes it"
@@ -2782,6 +2798,19 @@ and statement placement; no prose was copied). Two tiers, with different authori
     the template's own file. A read-only copy is staged in `venue_template/` and every produced
     .docx is restyled into the template's styles by the code-side normalizer before the
     postcheck -- keep those styles and never re-copy the previous venue's.
+  * THE FIRST PAGE, THE TYPE SCALE AND THE HEADING DEPTH COME FROM THE TEMPLATE: use its title
+    style (as centered as the template renders it), its author-list/front-matter style (as bold
+    as the template renders it), the affiliation/correspondence block it carries, ONE
+    "Keywords: ..." line and the template's UNNUMBERED abstract front matter; section numbering
+    starts with the first body section. Do not create heading levels deeper than the template's
+    own document uses (never a sub-sub-section such as 2.2.1 when the template stops at 2.2).
+    The template's first-page header (logo) and its page-number footer are part of the
+    deliverable, not decoration.
+  * CONTAINER HEADINGS THAT BELONG TO ANOTHER PUBLISHER'S TEMPLATE (for example "Lead contact",
+    "Resource availability", "Materials availability", "Method details", or a bare "Key
+    resources" heading) are not part of this venue's structure: fold their content into the
+    template's own sections (Methods subsections, Statements, or the tables/figures area) and
+    place each table caption immediately before its table.
 @@TRANSFER@@
 
 @@NORM@@
@@ -11691,6 +11720,7 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
                                     f"required {conf['required']['documentclass']!r}"}])
                         + [{"row": r} for r in conf.get("order_rows") or []]
                         + [{"row": r} for r in conf.get("label_rows") or []]
+                        + [{"row": r} for r in conf.get("front_matter_rows") or []]
                         + [{"row": f"{m['missing_count']} template style(s) missing from "
                                    f"{m['document']}: {', '.join(m['missing'][:6])}"}
                            for m in conf.get("word_styles_missing") or []])
