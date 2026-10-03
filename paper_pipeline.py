@@ -3656,7 +3656,7 @@ DEFAULT_FORMAT_FIX = "auto"
 # integration stage (the pipeline's "merge from the other versions" step), and
 # `a`/`w`/`i` are the short spellings used in the round plan.
 ONLY_STAGES = ("rewrite", "review", "audit", "revise", "integrate", "judge",
-               "feedback", "concerns", "response", "author-submission")
+               "feedback", "concerns", "response", "conform")
 ONLY_ALIASES = {"w": "rewrite", "rewrites": "rewrite", "r": "review", "reviews": "review",
                 "aud": "audit", "audits": "audit", "auditor": "audit", "verify": "audit",
                 "a": "revise", "a2": "revise", "revises": "revise", "revision": "revise",
@@ -3664,9 +3664,10 @@ ONLY_ALIASES = {"w": "rewrite", "rewrites": "rewrite", "r": "review", "reviews":
                 "merge": "integrate", "merges": "integrate", "j": "judge", "judges": "judge",
                 "fb": "feedback", "feedbacks": "feedback",
                 "concern": "concerns",
-                "applytemplate": "author-submission", "apply_template": "author-submission",
-                "apply-template": "author-submission", "template": "author-submission",
-                "author": "author-submission", "template-author": "author-submission",
+                "applytemplate": "conform", "apply_template": "conform",
+                "apply-template": "conform", "author-submission": "conform",
+                "authorsubmission": "conform", "template-author": "conform",
+                "author": "conform", "template": "conform",
                 "resp": "response", "responses": "response", "response-to-reviewers": "response"}
 # The auditor sits between the reviewer and the reviser: it disposes the frozen
 # review's findings (confirm / drop-with-evidence) and attacks the reviewer's
@@ -13535,7 +13536,7 @@ def parse_only_stage(token: str, item: str) -> str:
     if name not in ONLY_STAGES:
         die(f"--only: unknown stage {item!r}; choose from {', '.join(ONLY_STAGES)} "
             f"(aliases: merge=integrate, w=rewrite, a/a2=revise, j=judge, "
-            f"fb=feedback, resp=response, apply-template/author=author-submission)")
+            f"fb=feedback, resp=response, apply-template/author-submission=conform)")
     return name
 
 
@@ -13696,8 +13697,8 @@ class OnlySpec:
         # their own classes.
         if vid in ("audit", "feedback", "concerns", "response"):
             return vid
-        if vid in ("author-submission", "apply-template", "template"):
-            return "author-submission"
+        if vid in ("conform", "template", "author-submission", "apply-template"):
+            return "conform"
         if vid.startswith("w"):
             return "rewrite"
         if vid.startswith("a"):
@@ -28560,7 +28561,7 @@ def _record_template_stage(ctx: Ctx, sb: Path, agent: str) -> dict:
 def _ensure_template_stage_for_run(ctx: Ctx, args) -> None:
     """TRANSFER MODE: author the submission inside the journal's templates FIRST.
 
-    The stage is staged and run like `apply-template --agent`; its code-side
+    The stage is staged and run like `conform --agent`; its code-side
     postcheck gates the whole run, and a passing package becomes round 1's
     working original (the a1 base, the field's `original` view and every
     `vs_original` comparison read it). `--no-template-stage` opts out.
@@ -28586,7 +28587,7 @@ def _ensure_template_stage_for_run(ctx: Ctx, args) -> None:
     if agent == "manual":
         die(f"transfer mode authors the submission INSIDE the journal's templates before any "
             f"other stage: fill {sb / 'out'} using {sb / PROMPT_FILE}, then re-run `run` "
-            f"(or check it with `author-submission --root {ctx.root} --agent manual`)")
+            f"(or check it with `conform --root {ctx.root} --agent manual`)")
     cmd = resolve_agent_cmd(agent, getattr(args, "agent_cmd", None))
     rec = {"id": TEMPLATE_REWRITE_DIRNAME, "kind": "template-rewrite", "status": "running",
            "sandbox": str(sb), "round": 0}
@@ -28609,7 +28610,7 @@ def _ensure_template_stage_for_run(ctx: Ctx, args) -> None:
 
 
 def default_template_package_source(ctx: Ctx):
-    """The package `apply-template` rebuilds when no --source is given.
+    """The package `conform` rebuilds when no --source is given.
 
     The published final package when the root has one (`final_clean_version/`),
     else the most recent complete round's `round<r>_winner/`, else None.
@@ -28627,7 +28628,7 @@ def default_template_package_source(ctx: Ctx):
 
 
 def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> None:
-    """`apply-template --agent`: one LLM session that fills the journal's templates.
+    """`conform --agent`: one LLM session that fills the journal's templates.
 
     The sandbox mirrors the pipeline's stages: the venue's templates are staged
     READ-ONLY, the source package is copied read-only beside them, and the prompt
@@ -28647,7 +28648,7 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
         report.update({"venue": venue_id_of(ctx), "source": str(src), "sandbox": str(sb),
                        "agent": "manual", "agent_rc": None})
         write_json_atomic(ctx.reports_dir / "template_rewrite.json", report)
-        print(f"[author-submission] checked the existing session {sb}: "
+        print(f"[conform] checked the existing session {sb}: "
               f"coverage {report['coverage']['covered']}/{report['coverage']['checked']} "
               f"({report['coverage']['ratio']:.0%}), template guide sentences left "
               f"{len(report['template_prose_left'])}, headers/footers "
@@ -28655,7 +28656,7 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
         if not report["ok"]:
             die("the template-first rewrite did not pass its postcheck: "
                 + "; ".join(report["errors"])[:400])
-        print("[author-submission] the package in out/ passed the code-side postcheck")
+        print("[conform] the package in out/ passed the code-side postcheck")
         return
     if sb.exists() and any(sb.iterdir()):
         if not bool(getattr(args, "force", False)):
@@ -28680,18 +28681,18 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
         # the prompt says to fall back to the venue_template/ file itself.
         seed_template_visuals(ctx, sb)
     except Exception as e:                                        # noqa: BLE001
-        print(f"[author-submission] note: the venue template render could not be seeded "
+        print(f"[conform] note: the venue template render could not be seeded "
               f"({type(e).__name__}: {e}); the prompt tells the agent to compare against "
               f"venue_template/ instead")
-    print(f"[author-submission] template-first session sandbox: {sb}")
-    print(f"[author-submission] prompt: {sb / PROMPT_FILE}  (copy the journal templates, then "
+    print(f"[conform] template-first session sandbox: {sb}")
+    print(f"[conform] prompt: {sb / PROMPT_FILE}  (copy the journal templates, then "
           f"replace every placeholder with the source content)")
-    print(f"[author-submission] templates staged read-only: "
+    print(f"[conform] templates staged read-only: "
           + ", ".join(Path(v).name for v in sorted(templates.values())))
-    print(f"[author-submission] source package (read-only): {src}")
+    print(f"[conform] source package (read-only): {src}")
     if agent == "manual":
-        print(f"[author-submission] manual mode: run the prompt yourself and fill {sb / 'out'}, "
-              f"then re-run `author-submission --root {ctx.root} --agent manual` to CHECK it "
+        print(f"[conform] manual mode: run the prompt yourself and fill {sb / 'out'}, "
+              f"then re-run `conform --root {ctx.root} --agent manual` to CHECK it "
               f"(the postcheck reads {sb / 'out'})")
         return
     cmd = resolve_agent_cmd(agent, getattr(args, "agent_cmd", None))
@@ -28699,10 +28700,10 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
            "sandbox": str(sb), "round": 0}
     res = _execute_attempt_in(sb, rec, cmd,
                               int(getattr(args, "timeout", DEFAULTS.get("timeout", 14400)) or 14400))
-    print(f"[author-submission] agent: {agent} rc={res.get('rc')} in {res.get('dur', 0):.0f}s "
+    print(f"[conform] agent: {agent} rc={res.get('rc')} in {res.get('dur', 0):.0f}s "
           f"(log: {res.get('log')})")
     if res.get("error"):
-        print(f"[author-submission] WARNING: {res['error']}")
+        print(f"[conform] WARNING: {res['error']}")
     report = template_rewrite_postcheck(sb, src, templates)
     report.update({"venue": venue_id_of(ctx), "source": str(src), "sandbox": str(sb),
                    "agent": agent, "agent_rc": res.get("rc")})
@@ -28721,15 +28722,15 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
         + ("\n".join("- WARNING: " + w for w in report["warnings"])
            + "\n" if report["warnings"] else ""),
         encoding="utf-8")
-    print(f"[author-submission] coverage: {report['coverage']['covered']}/"
+    print(f"[conform] coverage: {report['coverage']['covered']}/"
           f"{report['coverage']['checked']} ({report['coverage']['ratio']:.0%}) source "
           f"paragraph(s) verbatim; template guide sentences left: "
           f"{len(report['template_prose_left'])}")
-    print(f"[author-submission] report: {(ctx.reports_dir / 'template_rewrite.md')}")
+    print(f"[conform] report: {(ctx.reports_dir / 'template_rewrite.md')}")
     if not report["ok"]:
         die("the template-first rewrite did not pass its postcheck: "
             + "; ".join(report["errors"])[:400])
-    print("[author-submission] the package in out/ passed the code-side postcheck; it is NOT yet "
+    print("[conform] the package in out/ passed the code-side postcheck; it is NOT yet "
           "judged: run the review/revise stages (or a full `run`) when you want it in the round.")
 
 def cmd_apply_template(args) -> None:
@@ -28748,7 +28749,7 @@ def cmd_apply_template(args) -> None:
             "round's round<r>_winner/ -- name one with --source <dir>")
     prof = venue_profile_of(ctx, required=False)
     journal = journal_of(ctx) or (prof.default_journal if prof is not None else "")
-    print(f"[author-submission] venue: {venue_id_of(ctx)}"
+    print(f"[conform] venue: {venue_id_of(ctx)}"
           + (f" ({journal})" if journal else " (no journal configured)"))
     if str(getattr(args, "agent", None) or "").strip():
         _template_rewrite_session(ctx, args, src, templates)
@@ -28760,17 +28761,17 @@ def cmd_apply_template(args) -> None:
         if report.get("error"):
             die(report["error"])
         die("the rebuild left files un-restyled: " + ", ".join(report.get("failed") or []))
-    print(f"[author-submission] rebuilt {report['documents_rebuilt']} document(s) and copied "
+    print(f"[conform] rebuilt {report['documents_rebuilt']} document(s) and copied "
           f"{report['files_copied']} other file(s):")
     for f in report["files"]:
         if f["kind"] == "docx-rebuilt":
             print(f"  [docx] {f['file']}  (template: {Path(str(f.get('template') or '')).name}, "
                   f"text preserved={f.get('text_unchanged')}, "
                   f"headings retagged={len(f.get('headings_retagged') or [])})")
-    print(f"[author-submission] package: {report['dest']}")
-    print(f"[author-submission] report:  {report['dest']}.template_report.md "
+    print(f"[conform] package: {report['dest']}")
+    print(f"[conform] report:  {report['dest']}.template_report.md "
           f"(+ .json; written BESIDE the package, never inside it)")
-    print(f"[author-submission] the source package is untouched; every rebuilt document's text is "
+    print(f"[conform] the source package is untouched; every rebuilt document's text is "
           f"proven byte-identical to its source ({DOCX_FORMAT_MODULE} self-verification)")
 
 
@@ -29100,9 +29101,10 @@ def only_is_template_stage_only(spec) -> bool:
     stages = set(getattr(spec, "stages", ()) or ())
     pairs = getattr(spec, "pairs", {}) or {}
     stages |= {s for v in pairs.values() for s in (v or ())}
-    stages = {("author-submission" if s == "apply-template" else s) for s in stages}
+    stages = {("conform" if s in ("apply-template", "author-submission", "template") else s)
+              for s in stages}
     sessions = getattr(spec, "sessions", {}) or {}
-    return stages == {"author-submission"} and not any(sessions.values())
+    return stages == {"conform"} and not any(sessions.values())
 
 
 def validate_only_selectors(ctx: Ctx, only) -> None:
@@ -29185,7 +29187,8 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     _only_probe = parse_only_spec(getattr(args, "only", None))
     if only_is_template_stage_only(_only_probe):
         if journal_mode_of(ctx) != JOURNAL_MODE_TRANSFER:
-            die("--only author-submission (formerly apply-template) is a TRANSFER-mode stage: "
+            die("--only conform (formerly template/author-submission/apply-template) is a "
+                f"TRANSFER-mode stage: "
                 f"this root's revision mode is "
                 f"{journal_mode_of(ctx)!r}")
         _ensure_template_stage_for_run(ctx, args)
@@ -33839,7 +33842,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="actually delete; without it prune only reports what it would remove")
     pp.set_defaults(func=cmd_prune)
 
-    pat = sub.add_parser("author-submission", parents=[common], aliases=["apply-template"],
+    pat = sub.add_parser("conform", parents=[common],
+                         aliases=["template", "author-submission", "apply-template"],
                          help="AUTHOR the WHOLE submission inside the venue's official Word "
                               "templates: with --agent the LLM copies the templates and "
                               "replaces their placeholders with the real content (keeping "
