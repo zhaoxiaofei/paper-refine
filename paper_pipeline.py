@@ -1985,6 +1985,10 @@ def stage_venue_template(ctx: "Ctx", sb: Path) -> dict:
                 target = dst / role / q.name
                 if not target.is_file() or sha256_file(target) != sha256_file(q):
                     target.parent.mkdir(parents=True, exist_ok=True)
+                    if target.is_file():
+                        # the previously staged copy is 0444: an UPDATED venue
+                        # template must still be re-stageable (copy2 would raise)
+                        make_writable(target)
                     shutil.copy2(q, target)
                 with contextlib.suppress(OSError):
                     os.chmod(target, 0o444)
@@ -4636,7 +4640,25 @@ def lenient_word_limit(base: int, factor: float) -> int:
     return math.floor(float(base) * float(factor) + 1e-9)
 
 
-_DEFAULT_VENUE_OBJ = VenueProfile(BUILTIN_VENUE_PROFILES[DEFAULT_VENUE], origin="built-in")
+def _builtin_default_venue_object() -> VenueProfile:
+    """The module-level default profile, constructed without ever bricking the CLI.
+
+    An invalid SHIPPED default profile -- e.g. one an `add-venue` run wrote
+    before this guard existed -- must not make every command, including
+    `set-venue`/`status`, die at import. Fall back to the embedded literal and
+    say why so the operator can repair the file.
+    """
+    try:
+        return VenueProfile(BUILTIN_VENUE_PROFILES[DEFAULT_VENUE], origin="built-in")
+    except (VenueProfileError, ValueError, KeyError, TypeError) as e:
+        print(f"[venue] WARNING: the default profile does not validate ({e}); using the "
+              f"built-in fallback rules. Repair {VENUE_PROFILES_DIRNAME}/"
+              f"{DEFAULT_VENUE}{VENUE_PROFILE_SUFFIX} (or the venue store copy).",
+              file=sys.stderr)
+        return VenueProfile(copy.deepcopy(_DEFAULT_VENUE_PROFILE), origin="built-in")
+
+
+_DEFAULT_VENUE_OBJ = _builtin_default_venue_object()
 _DEFAULT_LIMITS = _DEFAULT_VENUE_OBJ.length_limits()
 DEFAULT_ARTICLE_ABSTRACT_WORDS = _DEFAULT_LIMITS["abstract"]["base"]
 DEFAULT_ARTICLE_MAIN_TEXT_WORDS = _DEFAULT_LIMITS["main text"]["base"]
@@ -10738,8 +10760,9 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
     if mod is None:
         return {"files": [], "rows": [], "by_rule": {}, "high": 0, "medium": 0, "low": 0,
                 "unavailable": f"{DOCX_FORMAT_MODULE} not found next to the pipeline script"}
-    policy = dict(getattr(mod, "POLICY_DEFAULTS", {}) or {})
-    policy.update(policy or {})
+    resolved = dict(getattr(mod, "POLICY_DEFAULTS", {}) or {})
+    resolved.update(policy or {})
+    policy = resolved
     docs, rows = [], []
     for src, prefix, excluded in sources:
         if not src.is_dir():
@@ -11113,13 +11136,14 @@ WRITE (only inside out/):
      let the template override the guidelines for something it leaves open, and
      never leave such a style unset.
   6. Render each output and LOOK at it (the visual-inspection rule below), then
-     SELF-CHECK, at minimum: the Frontiers logo is in the first-page header; the
-     footer furniture is there on odd AND even pages (the template's own, e.g.
-     its colored/`This is a provisional file...` even-page footer); affiliation
-     numbers (and other superscripts) are still superscript; the styles/theme
-     are the template's. The code side re-checks the package for leftover
-     template prose, content coverage, the template's styles, its header/footer
-     roles, its protected furniture parts and the superscript runs.
+     SELF-CHECK, at minimum: the template's own first-page header furniture (its
+     logo, when the template carries one) is present; the footer furniture is
+     there on odd AND even pages (the template's own -- never another journal's,
+     whatever it says); affiliation numbers (and other superscripts) are still
+     superscript; the styles/theme are the template's. The code side re-checks
+     the package for leftover template prose, content coverage, the template's
+     styles, its header/footer roles, its protected furniture parts and the
+     superscript runs.
   7. Write `out/REPLACEMENT_LEDGER.md`: one row per template placeholder or
      sample element -- the style it carried, what replaced it (file + section),
      how many copies the real content needed, and any template element you
@@ -11462,8 +11486,14 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
     if not out_docs:
         return {"ok": False, "errors": ["out/ carries no .docx deliverable"]}
     errs, warns = [], []
+    # Discover the ledger ONCE and use that path for both the existence check and
+    # the parse: the check was case-insensitive while the parser was hardcoded to
+    # out/REPLACEMENT_LEDGER.md, so a lower-case `replacement_ledger.md` passed
+    # the existence check and then silently contributed zero exceptions.
+    ledger = next((p for p in sorted(out.iterdir())
+                   if p.is_file() and p.match("*[Ll][Ee][Dd][Gg][Ee][Rr]*.md")), None)
     exceptions, exception_problems = _template_ledger_exceptions(
-        out / "REPLACEMENT_LEDGER.md")
+        ledger if ledger is not None else out / "REPLACEMENT_LEDGER.md")
     mapping, _used_out, map_errs = _match_source_output_docs(src_docs, out_docs,
                                                              templates or {})
     errs.extend(map_errs)
@@ -11488,6 +11518,17 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
                 exception_problems.append(
                     f"a declared re-wrap's OUTPUT paragraph is not in the outputs: "
                     f"{e['output'][:70]!r}")
+            elif e["output"] and out_counter[e["output"]] <= src_counter.get(e["output"], 0):
+                # A re-wrap must carry the dropped paragraph into OUTPUT text the
+                # source did not already provide. Pointing at a paragraph that is
+                # present in the source and not duplicated lets one declaration
+                # excuse a real drop on the source side and a real addition on the
+                # output side at once: content is lost and the gate still passes.
+                exception_problems.append(
+                    f"a declared re-wrap's OUTPUT paragraph is already fully accounted for by "
+                    f"the source package (it occurs {out_counter[e['output']]}x in the outputs "
+                    f"and {src_counter.get(e['output'], 0)}x in the source), so it cannot carry "
+                    f"the dropped paragraph: {e['output'][:70]!r}")
         elif e["output"] not in out_counter:
             exception_problems.append(
                 f"a declared addition is not in the outputs: {e['output'][:70]!r}")
@@ -11517,6 +11558,10 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
             missing.append({"text": text[:120], "source_count": want_n,
                             "output_count": have_n, "unaccounted": deficit})
     checked = sum(src_counter.values())
+    if checked == 0:
+        errs.append("no paragraph could be read from the source package's .docx file(s): the "
+                    "exact-parity gate would pass vacuously (an empty or unreadable source "
+                    "document is never a valid template-fill result)")
     missing_occurrences = sum(m["unaccounted"] for m in missing)
     covered = checked - missing_occurrences
     ratio = (covered / checked) if checked else 1.0
@@ -11653,7 +11698,7 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
     if invented:
         errs.append("the outputs use paragraph styles the template does not define "
                     "(never invent a style): " + json.dumps(invented)[:300])
-    if not any(p.match("*[Ll][Ee][Dd][Gg][Ee][Rr]*.md") for p in out.iterdir() if p.is_file()):
+    if ledger is None:
         errs.append("out/REPLACEMENT_LEDGER.md is missing: record every template placeholder and "
                     "what replaced it")
     return {"ok": not errs, "errors": errs, "warnings": warns,
@@ -11700,6 +11745,23 @@ def template_package_files(src: Path) -> list:
             continue
         out.append(p)
     return out
+
+
+def _stage_source_package(srcdir: Path, src: Path) -> None:
+    """Copy the WHOLE package into the session's read-only `source/`, paths kept.
+
+    The prompt tells the agent that `source/` is the package it carries into
+    `out/` -- figures, tables and data included. Copying only `.docx` by
+    basename left those files unreachable (and silently overwrote two nested
+    same-named documents), so they could never reach the output package that
+    becomes round 1's working original.
+    """
+    for f in template_package_files(src):
+        dest = srcdir / f.relative_to(src)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(f, dest)
+        with contextlib.suppress(OSError):
+            os.chmod(dest, 0o444)
 
 
 def rebuild_package_from_templates(templates: dict, src: Path, dest: Path,
@@ -12184,7 +12246,10 @@ def corpus_text_documents(sources: list) -> list:
                 continue
             try:
                 with zipfile.ZipFile(p) as z:
-                    xml = z.read("word/document.xml").decode("utf-8")
+                    # errors="replace", like every other reader: a legacy byte
+                    # must not throw a UnicodeDecodeError straight past the
+                    # unreadable-package guard and abort the whole scan.
+                    xml = z.read("word/document.xml").decode("utf-8", "replace")
             except (zipfile.BadZipFile, KeyError, OSError):
                 continue
             rows = []
@@ -16461,13 +16526,17 @@ def move_failed_sandbox(ctx: Ctx, rec: dict) -> Path:
     else:
         if dest.exists():
             dest = unique_path(dest)
+        # Record the path the rename will ACTUALLY use before writing
+        # record.json: unique_path() may have renamed it, and the post-write
+        # update below used to reach only the in-memory dict, leaving the
+        # archived record pointing at the pre-collision name.
+        record["moved_to"] = str(dest.relative_to(ctx.root))
         try:
             sb.rename(dest)
         except OSError:
             shutil.copytree(sb, dest)
             rmtree_force(sb, ignore_errors=True)
         write_json_atomic(dest / "record.json", record)
-        record["moved_to"] = str(dest.relative_to(ctx.root))
     if entry is not None:
         entry["archived"] = True
         entry["archive"] = str(dest.relative_to(ctx.root))
@@ -17375,7 +17444,12 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
         # A scoped (major/minor) revision consumes the CONCERNS run's finding
         # list, not a general review: pointing this check at the review run
         # would mark every scoped revision stale on every re-run.
-        rev_rec = ctx.run(rid_concerns(r) if journal_is_scoped(ctx) else rid_review(r))
+        # With --review-split the revise sandbox holds SESSION B's frozen review
+        # (materialize_revise copies rid_review_b), so hashing session A's dir
+        # made every revise arm look stale on every re-entry.
+        rev_rid = (rid_concerns(r) if journal_is_scoped(ctx)
+                   else rid_review_b(r) if review_split_of(ctx) != "off" else rid_review(r))
+        rev_rec = ctx.run(rev_rid)
         if rev_rec is None or rev_rec.get("status") != "done":
             probs.append("upstream review/concerns run is not done")
         else:
@@ -17518,7 +17592,11 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
         rid = rid_for_fresh(r, vid)
         consumers = [rid_for_fresh(r, integrate_vid(j + 1))
                      for j, src in enumerate(pool) if src != vid]
-        dependents[rid] = consumers + judge_ids
+        # APPEND, never overwrite: the resubmit-mode branch above already
+        # declared the response letter a dependent of every pool member (it
+        # describes the final package), and a plain assignment would discard it
+        # so a retried arm left a stale letter behind.
+        dependents[rid] = dependents.get(rid, []) + consumers + judge_ids
     for iid in integrate_ids:
         dependents[iid] = list(judge_ids)
     reset_ids = []
@@ -19254,6 +19332,12 @@ STRUCTURED_OUTPUT_JSON = {
     "revise": ("_pipeline_done.json", "revised/revision_report.json"),
     "integrate": ("_pipeline_done.json", "integrated/revision_report.json"),
     "judge": ("_pipeline_done.json", "scores.json"),
+    # The journal stages are part of the same safety net as every other kind:
+    # their machine-readable ledgers must be parse-checked (and counted by the
+    # attempt-management helpers) instead of being invisible to them.
+    "feedback": ("_pipeline_done.json", JOURNAL_CONCERNS_JSON_REL),
+    "concerns": ("_pipeline_done.json", JOURNAL_CONCERNS_JSON_REL),
+    "response": ("_pipeline_done.json", JOURNAL_RESPONSE_MAP_REL),
 }
 STRUCTURED_OUTPUT_ROOTS = {
     "review": ("review",),
@@ -19261,6 +19345,9 @@ STRUCTURED_OUTPUT_ROOTS = {
     "revise": ("revised", "code"),
     "integrate": ("integrated", "code"),
     "judge": ("judge_review",),
+    "feedback": ("concerns",),
+    "concerns": ("concerns",),
+    "response": ("response",),
 }
 
 
@@ -22376,6 +22463,27 @@ def postcheck_review(ctx: Ctx, rec: dict):
                      "be verified")
     _check_pristine_copy(ctx, rec, pristine_dirname(ctx.sandbox_of(rec)), errs)
     errs.extend(input_mismatches(ctx, rec))
+    # SPLIT REVIEW: this is part B, so the two sessions' findings are merged into
+    # ONE frozen list here (A's ids must survive; the union must dispose every
+    # check id both sessions were given). This lives in the REVIEW postcheck: the
+    # dispatcher routes a revise record to postcheck_revise, so the guard can
+    # never fire there and the merge would never run at all.
+    if not errs and review_split_of(ctx) != "off" and rec.get("id") == rid_review_b(
+            int(rec.get("round") or 1)):
+        try:
+            m = merge_review_parts(ctx, rec)
+            rec["review_merge"] = m
+            a_ids = set(frozen_finding_ids(ctx, ctx.run(rid_review(int(rec["round"]))) or {}))
+            merged_ids = set(frozen_finding_ids(ctx, rec))
+            missing = sorted(a_ids - merged_ids)
+            if missing:
+                errs.append(f"the split-review merge lost {len(missing)} finding id(s) from "
+                            f"session A: {', '.join(missing[:5])}")
+            print(f"[review] split merge: {m['from_a']} finding(s) from session A + "
+                  f"{m['from_b']} from session B -> {len(merged_ids)} frozen id(s)"
+                  + (f"; id remap {m['id_remap']}" if m["id_remap"] else ""))
+        except Exception as e:                                        # noqa: BLE001
+            errs.append(f"the split-review merge failed ({type(e).__name__}: {e})")
     return (not errs), errs, warns, None
 
 
@@ -22525,25 +22633,6 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     # HARD check: Phase 2 must not touch the frozen review/ copy.
     _check_pristine_copy(ctx, rec, pristine_dirname(ctx.sandbox_of(rec)), errs)
     errs.extend(input_mismatches(ctx, rec))
-    # SPLIT REVIEW: this is part B, so the two sessions' findings are merged into
-    # ONE frozen list here (A's ids must survive; the union must dispose every
-    # check id both sessions were given).
-    if not errs and review_split_of(ctx) != "off" and rec.get("id") == rid_review_b(
-            int(rec["round"])):
-        try:
-            m = merge_review_parts(ctx, rec)
-            rec["review_merge"] = m
-            a_ids = set(frozen_finding_ids(ctx, ctx.run(rid_review(int(rec["round"]))) or {}))
-            merged_ids = set(frozen_finding_ids(ctx, rec))
-            missing = sorted(a_ids - merged_ids)
-            if missing:
-                errs.append(f"the split-review merge lost {len(missing)} finding id(s) from "
-                            f"session A: {', '.join(missing[:5])}")
-            print(f"[review] split merge: {m['from_a']} finding(s) from session A + "
-                  f"{m['from_b']} from session B -> {len(merged_ids)} frozen id(s)"
-                  + (f"; id remap {m['id_remap']}" if m["id_remap"] else ""))
-        except Exception as e:                                        # noqa: BLE001
-            errs.append(f"the split-review merge failed ({type(e).__name__}: {e})")
     if journal_is_scoped(ctx):
         # A major/minor revision may change the manuscript ONLY where a reviewer
         # concern requires it: every changed file must be named in the revision
@@ -24233,6 +24322,11 @@ WHAT YOU READ:
     exactly once: {', '.join(ids) if ids else '(none)'}
   * feedback/text/ — the reviewers' own wording (quote verbatim; never invent a
     reviewer or a sentence).
+  * feedback/ORIGINAL_SUBMISSION.md (and feedback/original_submission/, when it
+    is present) — EVIDENCE ONLY: the manuscript version the previous journal's
+    editors/reviewers actually saw. It is NOT the current submission (`target/`
+    is), its text is never quoted as what the authors changed, and it is never
+    a `changes` target; use it only to resolve what a reviewer's quote refers to.
 
 WRITE:
   * response/RESPONSE_TO_REVIEWERS.md — one block per concern:
@@ -24605,6 +24699,9 @@ def postcheck_response(ctx: Ctx, rec: dict):
     sb = ctx.sandbox_of(rec)
     r = int(rec.get("round") or 1)
     errs, warns = [], []
+    # The letter session receives the reviewer-visible manuscript beside the
+    # letter; like every other journal stage it must not edit, drop or add it.
+    errs.extend(original_submission_staging_problems(ctx, sb))
     marker = marker_json(sb, rec["kind"])
     _marker_checks(rec, marker, "response", errs, warns, sb=sb)
     errs.extend(structured_output_problems(ctx, rec))
@@ -29015,12 +29112,7 @@ def _stage_template_rewrite_sandbox(ctx: Ctx, src: Path, templates: dict,
     stage_venue_template(ctx, sb)
     srcdir = sb / "source"
     srcdir.mkdir(exist_ok=True)
-    for f in template_package_files(src):
-        if f.suffix.lower() != ".docx":
-            continue
-        shutil.copy2(f, srcdir / f.name)
-        with contextlib.suppress(OSError):
-            os.chmod(srcdir / f.name, 0o444)
+    _stage_source_package(srcdir, src)
     (sb / "out").mkdir(exist_ok=True)
     (sb / PROMPT_FILE).write_text(apply_template_prompt(ctx, sb, srcdir, templates),
                                   encoding="utf-8")
@@ -29035,9 +29127,13 @@ def _stage_template_rewrite_sandbox(ctx: Ctx, src: Path, templates: dict,
 def _record_template_stage(ctx: Ctx, sb: Path, agent: str) -> dict:
     """Record a PASSED template-first stage and make it round 1's working original."""
     out = sb / "out"
+    # The digest must use the SAME corpus rule materialize_a1 re-computes
+    # (`manifest_for_sources`), not the whole-tree digest: the prompt requires
+    # out/VISUAL_CHECK.md, which that rule strips as bookkeeping, so mixing the
+    # two made every compliant stage fail the A1 digest comparison.
     ctx.state["template_stage"] = {
         "ok": True, "dir": out.relative_to(ctx.root).as_posix(),
-        "digest": corpus_tree_digest(out),
+        "digest": manifest_digest(manifest_for_sources([(out, "", ())])),
         "content_fingerprint": corpus_content_set_fingerprint([(out, "", ())]),
         "agent": agent, "checked": utcnow(),
     }
@@ -29153,12 +29249,7 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
     stage_venue_template(ctx, sb)
     srcdir = sb / "source"
     srcdir.mkdir(exist_ok=True)
-    for f in template_package_files(src):
-        if f.suffix.lower() != ".docx":
-            continue
-        shutil.copy2(f, srcdir / f.name)
-        with contextlib.suppress(OSError):
-            os.chmod(srcdir / f.name, 0o444)
+    _stage_source_package(srcdir, src)
     (sb / "out").mkdir(exist_ok=True)
     text = apply_template_prompt(ctx, sb, srcdir, templates)
     (sb / PROMPT_FILE).write_text(text, encoding="utf-8")
@@ -29351,6 +29442,18 @@ def cmd_add_venue(args) -> None:
             print(f"[add-venue] WARNING: {res['error']}")
     # The agent works in a sandbox that can only write inside itself; the
     # orchestrator publishes the staged store layout into the shared store.
+    # VALIDATE BEFORE PUBLISH: a bad agent-written profile must never replace
+    # the store's copy (the shipped default is read at import, so publishing an
+    # invalid one could brick every later command, including the repair tools).
+    staged_profile = next((r / f"{vid}{VENUE_PROFILE_SUFFIX}" for r in (sb / "store", sb)
+                           if (r / f"{vid}{VENUE_PROFILE_SUFFIX}").is_file()), None)
+    if staged_profile is not None:
+        try:
+            VenueProfile(json.loads(staged_profile.read_text(encoding="utf-8")),
+                         origin="add-venue", path=staged_profile)
+        except (OSError, ValueError, VenueProfileError) as e:
+            die(f"add-venue: the staged profile {staged_profile.name} does not validate "
+                f"({e}); nothing was published to {dest}", code=1)
     pub = publish_add_venue_staging(sb, dest, vid)
     print(f"[add-venue] staged artifacts published: profile={pub['profile'] or 'MISSING'}, "
           f"README={pub['readme']}, official files={pub['official_files']}, "

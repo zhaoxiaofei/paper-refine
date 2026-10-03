@@ -143,8 +143,25 @@ def unesc(text: str) -> str:
     literal made the punctuation rules blind to them.
     """
     text = xml_unescape(text or "")
-    text = re.sub(r"&#x([0-9a-fA-F]+);", lambda m: chr(int(m.group(1), 16)), text)
-    return re.sub(r"&#(\d+);", lambda m: chr(int(m.group(1))), text)
+
+    def charref(m, base):
+        """The decoded character, or the literal reference when it is not valid.
+
+        A hand-edited/LLM-edited `&#x110000;` (or an absurd decimal) raised
+        ValueError/OverflowError straight out of the scanner: the scan never
+        parses the XML, so nothing caught it and one bad reference took the
+        whole formatting run down. Invalid references stay literal.
+        """
+        try:
+            cp = int(m.group(1), base)
+        except (ValueError, OverflowError):
+            return m.group(0)
+        if 0 <= cp <= 0x10FFFF and not (0xD800 <= cp <= 0xDFFF):
+            return chr(cp)
+        return m.group(0)
+
+    text = re.sub(r"&#x([0-9a-fA-F]+);", lambda m: charref(m, 16), text)
+    return re.sub(r"&#(\d+);", lambda m: charref(m, 10), text)
 
 
 def load_policy(path) -> dict:
@@ -2491,7 +2508,8 @@ def rewrite_text_spans(para: str, edits: list) -> tuple:
         body = mm.group(0)
         if re.search(r"<w:(?:drawing|pict|object|br|cr|tab|ptab|fldChar|instrText|"
                      r"noBreakHyphen|sym|commentReference|footnoteReference|"
-                     r"endnoteReference)(?=[\s/>])", body):
+                     r"endnoteReference|delText|softHyphen|footnoteRef|"
+                     r"annotationRef)(?=[\s/>])", body):
             return body
         if re.search(r"<w:t(?:\s[^>]*)?>[^<]", body):
             return body
@@ -3148,7 +3166,15 @@ def insert_into_ppr(para: str, element: str, after=("pStyle", "keepNext", "keepL
         if m:
             pos = max(pos, m.end())
     if pos == 0:
-        pos = len("<w:pPr>")
+        # Anchor at the END of the `w:pPr` open tag, not at a fixed offset: Word
+        # writes attributes on it (`<w:pPr w:rsidR="...">`), and splicing a child
+        # in after a fixed `len("<w:pPr>")` corrupts the tag. A self-closing
+        # `w:pPr` has to be expanded before the child can go inside it.
+        m = re.match(r"<w:pPr(?=[\s>])[^>]*>", ppr)
+        if m and m.group(0).rstrip().endswith("/>"):
+            head = m.group(0).rstrip()[:-2].rstrip() + ">"
+            return para.replace(ppr, head + element + "</w:pPr>", 1)
+        pos = m.end() if m else len("<w:pPr>")
     return para.replace(ppr, ppr[:pos] + element + ppr[pos:], 1)
 
 
@@ -3542,6 +3568,14 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
         styles = parse_styles(pkg)
     xml_before = parts["word/document.xml"].decode("utf-8")
     xml_after, changes, meta = fix_document(xml_before, styles, policy)
+    try:
+        ET.fromstring(xml_after)
+        xml_wellformed, xml_detail = True, ""
+    except ET.ParseError as e:
+        # The byte-level splices must never unbalance the document. `docx
+        # validate` is optional, so the parse check is the always-on fence: a
+        # malformed output must fail the fixer's own verification, not ship.
+        xml_wellformed, xml_detail = False, str(e)
     parts_new = dict(parts)
     parts_new["word/document.xml"] = xml_after.encode("utf-8")
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
@@ -3593,12 +3627,14 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
         "mechanical_findings_after": len([r for r in after_rows if r["fix"] == "mechanical"]),
         "remaining_mechanical_rules": remaining,
         "schema_ok": schema[0], "schema_detail": schema[1],
+        "xml_wellformed": xml_wellformed, "xml_detail": xml_detail,
     }
     ok = bool(same_parts
               and (verified["text_identical"] or verified["text_diff_only_quotes"]
                    or (verified["text_stage_diff_only_quotes"]
                        and verified["text_diff_only_recorded_edits"]))
               and not remaining
+              and xml_wellformed
               and schema[0] is not False)
     return {"source": str(src), "output": str(out), "changes": changes, "verified": verified, "ok": ok}
 
@@ -4448,7 +4484,20 @@ def _front_matter_styles(doc_xml: str, roles: dict, tpl_doc: str = "") -> tuple:
             if new != frag:
                 edits.append((p0, p1, new))
     if edits:
-        doc_xml = apply_edits(doc_xml, edits)
+        # `apply_edits` is only correct for DISJOINT spans. Two passes here (the
+        # front-matter roles, then the styled-paragraph strip) can append an edit
+        # for the SAME paragraph twice -- e.g. an Abstract heading already styled
+        # AuthorList, or a demoted deep heading -- and the second replacement is
+        # computed from the unedited fragment, so splicing it at the original
+        # offsets removes the text the first replacement inserted. Keep the FIRST
+        # (richer: style + template layout) edit per span.
+        seen_spans, deduped = set(), []
+        for e in edits:
+            if (e[0], e[1]) in seen_spans:
+                continue
+            seen_spans.add((e[0], e[1]))
+            deduped.append(e)
+        doc_xml = apply_edits(doc_xml, deduped)
     return doc_xml, info
 
 
@@ -4552,6 +4601,99 @@ def _with_even_odd_headers(parts: dict) -> bool:
     return True
 
 
+def _merge_source_lists(parts: dict, src_numbering: str, doc_part_re) -> dict:
+    """Keep the source's list definitions that the template does not define.
+
+    `apply_word_template` swaps the template's `word/numbering.xml` in; a
+    paragraph whose DIRECT `w:numPr` names a source numId the template does not
+    define then points at nothing and Word silently drops its bullet/number.
+    Copy those definitions into the template's part under fresh ids (fresh
+    abstractNum/num/picture-bullet ids, so nothing can collide) and rewrite the
+    document's references. Returns {old numId: new numId} for what it carried;
+    a numId the template DOES define keeps the template's definition.
+    """
+    tpl_numbering = parts.get("word/numbering.xml", b"").decode("utf-8", "replace")
+    if not tpl_numbering or "</w:numbering>" not in tpl_numbering:
+        return {}
+    doc_names = [n for n in sorted(parts) if doc_part_re.fullmatch(n)]
+    referenced = set()
+    for name in doc_names:
+        referenced |= set(re.findall(r'<w:numId(?=[\s/>])[^>]*w:val="(\d+)"',
+                                     parts[name].decode("utf-8", "replace")))
+    defined = set(re.findall(r'<w:num(?=[\s/>])[^>]*w:numId="(\d+)"', tpl_numbering))
+    missing = sorted(referenced - defined, key=lambda s: (len(s), s))
+    if not missing:
+        return {}
+    both = tpl_numbering + src_numbering
+    next_abs = max((int(x) for x in re.findall(r'w:abstractNumId="(\d+)"', both)), default=0) + 1
+    next_num = max((int(x) for x in re.findall(r'<w:num(?=[\s/>])[^>]*w:numId="(\d+)"', both)),
+                   default=0) + 1
+    next_pic = max((int(x) for x in re.findall(r'w:numPicBulletId="(\d+)"', both)), default=0) + 1
+    abs_map, abs_blocks, num_blocks, pic_blocks = {}, [], [], []
+    num_map = {}
+    for old_num in missing:
+        num_block = re.search(
+            rf'<w:num(?=[\s/>])[^>]*w:numId="{re.escape(old_num)}"[\s\S]*?</w:num>', src_numbering)
+        if not num_block:
+            continue
+        abs_ref = re.search(r'<w:abstractNumId(?=[\s/>])[^>]*w:val="(\d+)"', num_block.group(0))
+        if not abs_ref:
+            continue
+        old_abs = abs_ref.group(1)
+        if old_abs not in abs_map:
+            abs_block = re.search(
+                rf'<w:abstractNum(?=[\s/>])[^>]*w:abstractNumId="{re.escape(old_abs)}"'
+                r'[\s\S]*?</w:abstractNum>', src_numbering)
+            if not abs_block:
+                continue
+            new_abs = str(next_abs)
+            next_abs += 1
+            block = re.sub(rf'w:abstractNumId="{re.escape(old_abs)}"',
+                           f'w:abstractNumId="{new_abs}"', abs_block.group(0), count=1)
+            # a picture-bullet level references a numPicBullet element that must
+            # travel with the copied list (schema order: numPicBullet, abstractNum, num)
+            pic_map = {}
+            for pid in sorted(set(re.findall(
+                    r'<w:lvlPicBulletId(?=[\s/>])[^>]*w:val="(\d+)"', block))):
+                pic = re.search(
+                    rf'<w:numPicBullet(?=[\s/>])[^>]*w:numPicBulletId="{re.escape(pid)}"'
+                    r'[\s\S]*?</w:numPicBullet>', src_numbering)
+                if not pic:
+                    continue
+                new_pid = str(next_pic)
+                next_pic += 1
+                pic_map[pid] = new_pid
+                pic_blocks.append(re.sub(rf'w:numPicBulletId="{re.escape(pid)}"',
+                                         f'w:numPicBulletId="{new_pid}"', pic.group(0), count=1))
+            for pid, new_pid in pic_map.items():
+                block = re.sub(rf'(<w:lvlPicBulletId(?=[\s/>])[^>]*w:val="){re.escape(pid)}(")',
+                               rf'\g<1>{new_pid}\g<2>', block)
+            abs_map[old_abs] = new_abs
+            abs_blocks.append(block)
+        new_num = str(next_num)
+        next_num += 1
+        carried = re.sub(r'(<w:abstractNumId(?=[\s/>])[^>]*w:val=")[^"]*(")',
+                         rf'\g<1>{abs_map[old_abs]}\g<2>', num_block.group(0), count=1)
+        carried = re.sub(r'(<w:num(?=[\s/>])[^>]*w:numId=")[^"]*(")',
+                         rf'\g<1>{new_num}\g<2>', carried, count=1)
+        num_blocks.append(carried)
+        num_map[old_num] = new_num
+    if not num_map:
+        return {}
+    parts["word/numbering.xml"] = tpl_numbering.replace(
+        "</w:numbering>",
+        "".join(pic_blocks) + "".join(abs_blocks) + "".join(num_blocks) + "</w:numbering>", 1
+    ).encode("utf-8")
+    for name in doc_names:
+        xml = parts[name].decode("utf-8", "replace")
+        new_xml = re.sub(
+            r'(<w:numId(?=[\s/>])[^>]*w:val=")(\d+)(")',
+            lambda m: m.group(1) + num_map.get(m.group(2), m.group(2)) + m.group(3), xml)
+        if new_xml != xml:
+            parts[name] = new_xml.encode("utf-8")
+    return num_map
+
+
 def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> dict:
     """Restyle one DOCX into the venue's official Word template.
 
@@ -4578,6 +4720,7 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
                                  "(word/styles.xml / word/document.xml missing)"}
             parts = {i.filename: spkg.read(i.filename) for i in spkg.infolist()}
             src_styles = parts.get("word/styles.xml", b"").decode("utf-8", "replace")
+            src_numbering = parts.get("word/numbering.xml", b"").decode("utf-8", "replace")
             tpl_styles = tpkg.read("word/styles.xml").decode("utf-8", "replace")
             s_by_id, _s_names = _style_index(src_styles)
             t_by_id, t_by_name = _style_index(tpl_styles)
@@ -4619,7 +4762,7 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
                                                 "".join(kept_styles) + "</w:styles>")
                 parts["word/styles.xml"] = tpl_styles.encode("utf-8")
 
-            remapped = stripped = 0
+            remapped = stripped = carried_lists = 0
             page_ok = False
             front_info = {}
             headings_retagged = []
@@ -4661,6 +4804,8 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
                     new_xml, front_info = _front_matter_styles(new_xml, roles, tpl_doc)
                 if new_xml != xml:
                     parts[name] = new_xml.encode("utf-8")
+            if "word/numbering.xml" in copied and src_numbering:
+                carried_lists = len(_merge_source_lists(parts, src_numbering, doc_part_re))
             front_parts = _template_front_parts(tpkg, parts, tnames)
             if front_parts:
                 doc_xml = parts["word/document.xml"].decode("utf-8", "replace")
@@ -4683,12 +4828,18 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
     try:
         text_ok = _text(src) == _text(out)
         with zipfile.ZipFile(out) as z:
-            for name in ("word/document.xml", "word/styles.xml"):
+            check_parts = ["word/document.xml", "word/styles.xml"]
+            if "word/numbering.xml" in copied or carried_lists:
+                check_parts.append("word/numbering.xml")
+            for name in check_parts:
                 ET.fromstring(z.read(name))
     except (OSError, zipfile.BadZipFile, ET.ParseError, KeyError) as e:
         return {"file": str(src), "ok": False, "error": f"verification failed: {e}"}
     changes = [f"copied {len(copied)} template part(s)",
                f"remapped {remapped} style reference(s)"]
+    if carried_lists:
+        changes.append(f"carried {carried_lists} source list definition(s) the template "
+                       f"does not define")
     if stripped:
         changes.append(f"removed {stripped} direct formatting propert(ies)")
     if page_ok:

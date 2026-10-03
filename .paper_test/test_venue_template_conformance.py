@@ -399,8 +399,9 @@ def test_generalized_template_restyle():
 def _run(text, sz=None, bold=False, space=False):
     rpr = ""
     if bold or sz:
+        sz_xml = f'<w:sz w:val="{sz}"/>' if sz else ""
         rpr = (f"<w:rPr>{'<w:b/>' if bold else ''}"
-               f"{f'<w:sz w:val=\"{sz}\"/>' if sz else ''}</w:rPr>")
+               f"{sz_xml}</w:rPr>")
     keep = ' xml:space="preserve"' if space else ""
     return f"<w:r>{rpr}<w:t{keep}>{text}</w:t></w:r>"
 
@@ -929,7 +930,23 @@ def test_template_rewrite_postcheck():
     rep_add2 = nb.template_rewrite_postcheck(sb2, pkg2, {"main": tpl})
     check("a declared addition is accounted for and passes",
           rep_add2.get("ok") is True, str(rep_add2["errors"])[:240])
-    # a declared re-wrap excuses a short line the template folds into a block
+    # a declared re-wrap excuses a short line the template folds into a block --
+    # the declared output must be TEXT THE SOURCE DID NOT ALREADY CARRY, or the
+    # declaration would excuse a drop without preserving anything
+    fmt.apply_word_template(pkg2 / "mainText.docx", sb2 / "out" / "mainText.docx", tpl)
+    _drop_docx_paragraph(sb2 / "out" / "mainText.docx", "A short unique line")
+    _add_docx_paragraph(sb2 / "out" / "mainText.docx", "A short unique line, lead contact.")
+    ledger.write_text(
+        "| placeholder | replacement |\n\n```json\n"
+        '{"exceptions": [{"kind": "rewrap", "source": "A short unique line", '
+        '"output": "A short unique line, lead contact.", '
+        '"reason": "folded into the correspondence block"}]}\n```\n', encoding="utf-8")
+    rep_rw = nb.template_rewrite_postcheck(sb2, pkg2, {"main": tpl})
+    check("a declared re-wrap into NEW output text passes",
+          rep_rw.get("ok") is True, str(rep_rw["errors"])[:240])
+    # ... and pointing the declaration at a paragraph that was already in the
+    # source (and stays in the output) cannot excuse the drop: one declaration
+    # would otherwise be used as both the dropped source and the 'new' output.
     fmt.apply_word_template(pkg2 / "mainText.docx", sb2 / "out" / "mainText.docx", tpl)
     _drop_docx_paragraph(sb2 / "out" / "mainText.docx", "A short unique line")
     ledger.write_text(
@@ -937,9 +954,49 @@ def test_template_rewrite_postcheck():
         '{"exceptions": [{"kind": "rewrap", "source": "A short unique line", '
         '"output": "Paragraph number 1 carries enough words to be checked.", '
         '"reason": "folded into the correspondence block"}]}\n```\n', encoding="utf-8")
-    rep_rw = nb.template_rewrite_postcheck(sb2, pkg2, {"main": tpl})
-    check("a declared re-wrap passes while an unaccounted drop does not",
-          rep_rw.get("ok") is True, str(rep_rw["errors"])[:240])
+    rep_rw2 = nb.template_rewrite_postcheck(sb2, pkg2, {"main": tpl})
+    check("a re-wrap declared into text the source already carries is rejected",
+          rep_rw2.get("ok") is False
+          and any("already fully accounted for" in e for e in rep_rw2["errors"]),
+          str(rep_rw2["errors"])[:240])
+    # the ledger is discovered by ONE rule: the existence check and the parser
+    # must agree on the file, lower-case included
+    fmt.apply_word_template(pkg2 / "mainText.docx", sb2 / "out" / "mainText.docx", tpl)
+    _drop_docx_paragraph(sb2 / "out" / "mainText.docx", "A short unique line")
+    _add_docx_paragraph(sb2 / "out" / "mainText.docx", "A short unique line, lead contact.")
+    (sb2 / "out" / "REPLACEMENT_LEDGER.md").unlink()
+    (sb2 / "out" / "replacement_ledger.md").write_text(
+        "| placeholder | replacement |\n\n```json\n"
+        '{"exceptions": [{"kind": "rewrap", "source": "A short unique line", '
+        '"output": "A short unique line, lead contact.", '
+        '"reason": "folded into the correspondence block"}]}\n```\n', encoding="utf-8")
+    rep_led = nb.template_rewrite_postcheck(sb2, pkg2, {"main": tpl})
+    check("a lower-case ledger file is parsed, not merely counted as present",
+          rep_led.get("ok") is True, str(rep_led["errors"])[:240])
+    (sb2 / "out" / "replacement_ledger.md").unlink()
+    rep_noled = nb.template_rewrite_postcheck(sb2, pkg2, {"main": tpl})
+    check("a genuinely missing ledger is reported as missing",
+          rep_noled.get("ok") is False
+          and any("is missing" in e for e in rep_noled["errors"]),
+          str(rep_noled["errors"])[:240])
+    # a source package whose only paragraph is whitespace cannot pass vacuously:
+    # the gate would report ratio 1.0 with checked == 0
+    blank = tmp / "pkg_blank"
+    blank.mkdir()
+    full_docx(blank / "mainText.docx",
+              '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+              '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+              '<w:body><w:p><w:r><w:t xml:space="preserve">   </w:t></w:r></w:p>'
+              '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>')
+    sb_blank = tmp / "session_blank"
+    (sb_blank / "out").mkdir(parents=True)
+    fmt.apply_word_template(blank / "mainText.docx", sb_blank / "out" / "mainText.docx", tpl)
+    (sb_blank / "out" / "REPLACEMENT_LEDGER.md").write_text("| placeholder | replacement |\n",
+                                                            encoding="utf-8")
+    rep_blank = nb.template_rewrite_postcheck(sb_blank, blank, {"main": tpl})
+    check("a source with no readable paragraph cannot pass vacuously",
+          rep_blank.get("ok") is False and rep_blank["coverage"]["checked"] == 0
+          and any("vacuous" in e for e in rep_blank["errors"]), str(rep_blank)[:220])
 
 
 def _rewrite_docx_document(path: Path, edit) -> None:
@@ -984,6 +1041,9 @@ def test_transfer_mode_runs_the_template_stage_first():
     root = tmp / "root"
     (root / "non_revised").mkdir(parents=True)
     _package_docx(root / "non_revised" / "mainText.docx", "Introduction")
+    (root / "non_revised" / "figs").mkdir()
+    (root / "non_revised" / "figs" / "fig1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (root / "non_revised" / "data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
     off = root / "venue_profiles" / "fake-venue.official"
     off.mkdir(parents=True)
     _furnished_template(off / "Fake_Template.docx",
@@ -1019,6 +1079,18 @@ def test_transfer_mode_runs_the_template_stage_first():
           and (root / "template_rewrite" / "out").is_dir()
           and (root / "template_rewrite" / "PROMPT.md").is_file(),
           err.getvalue()[-200:])
+    # the staged source/ must carry the WHOLE package -- the prompt tells the
+    # agent to copy figures/tables/data into out/, which becomes round 1's base
+    staged = root / "template_rewrite" / "source"
+    check("the staged source/ carries non-docx package files with their paths",
+          (staged / "figs" / "fig1.png").is_file()
+          and (staged / "data.csv").is_file(),
+          str(sorted(p.relative_to(staged).as_posix()
+                     for p in staged.rglob("*") if p.is_file())))
+    prompt_text = (root / "template_rewrite" / "PROMPT.md").read_text(encoding="utf-8")
+    check("the venue-agnostic template prompt names no other journal's furniture",
+          "Frontiers" not in prompt_text and "Fake Venue" in prompt_text,
+          prompt_text[prompt_text.find("SELF-CHECK") - 80:][:200])
     class Skip(Args):
         no_template_stage = True
     nb._ensure_template_stage_for_run(ctx, Skip())     # must not raise
@@ -1036,6 +1108,25 @@ def test_transfer_mode_runs_the_template_stage_first():
           and nb.recorded_content_fingerprint(ctx, 1, nb.ORIGINAL_ID) == "fp"
           and nb.corpus_sources(ctx, 1, nb.ORIGINAL_ID) == [(out, "", ())],
           str(nb.corpus_sources(ctx, 1, nb.ORIGINAL_ID)))
+    # The recorded digest must use the SAME corpus rule materialize_a1 re-computes.
+    # The prompt requires out/VISUAL_CHECK.md; the A1 rule strips it as bookkeeping,
+    # so a whole-tree digest made every compliant stage fail "does not match its
+    # source" before round 1 could start.
+    (out / "VISUAL_CHECK.md").write_text("# visual check\n", encoding="utf-8")
+    rec = nb._record_template_stage(ctx, root / "template_rewrite", "manual")
+    check("a passed stage's digest uses the rule A1 re-computes (bookkeeping stripped)",
+          rec["digest"] == nb.manifest_digest(nb.manifest_for_sources([(out, "", ())]))
+          and "VISUAL_CHECK.md" in nb.corpus_tree_manifest(out)["files"]
+          and "VISUAL_CHECK.md" not in nb.manifest_for_sources([(out, "", ())])["files"],
+          f"{rec['digest'][:12]} vs "
+          f"{nb.manifest_digest(nb.manifest_for_sources([(out, '', ())]))[:12]}")
+    a1_err, a1 = "", None
+    try:
+        a1 = nb.materialize_a1(ctx, 1)
+    except Exception as e:                                            # noqa: BLE001
+        a1_err = f"{type(e).__name__}: {e}"
+    check("the passed template stage can seed round 1 (materialize_a1 does not raise)",
+          a1 is not None and a1.get("status") == "done", a1_err[:200])
 
 
 def test_mcp_first_render_chain():

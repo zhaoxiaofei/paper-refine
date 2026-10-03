@@ -393,6 +393,20 @@ check("J3 a patched / different copy says so, naming both digests",
       "NOT the copy recorded at setup" in note and "0" * 16 in note and "/somewhere/else.py" in note,
       note[:160])
 
+print()
+print("== K. an archive-name collision records the path it actually used ==")
+ctx_k = build_root(scratch("paper_hist_k_"))
+rec_k = nb.materialize_review(ctx_k, 1)
+nb.bump_attempt(rec_k)
+# only one `_try*_failed` dir exists, so the next archive name is `_try2_failed`;
+# pre-create it to force unique_path() to rename the archive
+(ctx_k.runs_dir / f"{rec_k['id']}_try2_failed").mkdir()
+dest_k = nb.move_failed_sandbox(ctx_k, rec_k)
+record_k = json.loads((dest_k / "record.json").read_text(encoding="utf-8"))
+check("K1 a collided archive name is renamed AND record.json names the renamed path",
+      dest_k.name.endswith("-2") and record_k["moved_to"] == f"runs/{dest_k.name}",
+      f"{dest_k.name} / {record_k['moved_to']}")
+
 for d in TMPDIRS:
     shutil.rmtree(d, ignore_errors=True)
 

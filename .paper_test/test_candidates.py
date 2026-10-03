@@ -262,6 +262,63 @@ def test_b2_adapter_refuses_input_as_out():
           f"rc={proc.returncode} exists={base.exists()} stdout={proc.stdout.strip()[:70]!r}")
 
 
+def test_b3_published_python_redlines_is_used():
+    """The published package imports as `python_redlines`, not `redlines`."""
+    if importlib.util.find_spec("python_redlines") is None \
+            or importlib.util.find_spec("python_redlines_docxodus") is None:
+        print("[skip] B3 python-redlines[docxodus] is not installed here")
+        return
+    tmp = tmpdir("b3")
+    ns = W_NS
+
+    def make_docx(path: Path, text: str) -> None:
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("[Content_Types].xml",
+                       '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                       '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                       '<Default Extension="rels" ContentType="application/vnd.openxmlformats-'
+                       'package.relationships+xml"/><Default Extension="xml" ContentType='
+                       '"application/xml"/><Override PartName="/word/document.xml" ContentType='
+                       '"application/vnd.openxmlformats-officedocument.wordprocessingml.document.'
+                       'main+xml"/><Override PartName="/word/styles.xml" ContentType="application/'
+                       'vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>')
+            z.writestr("_rels/.rels",
+                       '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                       '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/'
+                       'relationships"><Relationship Id="rId1" Type="http://schemas.'
+                       'openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+                       'Target="word/document.xml"/></Relationships>')
+            z.writestr("word/document.xml",
+                       '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                       f'<w:document xmlns:w="{ns}"><w:body><w:p><w:r><w:t>{text}</w:t></w:r>'
+                       '</w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>'
+                       "</w:body></w:document>")
+            z.writestr("word/styles.xml",
+                       f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                       f'<w:styles xmlns:w="{ns}"><w:docDefaults><w:rPrDefault><w:rPr>'
+                       '<w:rFonts w:ascii="Times New Roman"/><w:sz w:val="24"/></w:rPr>'
+                       '</w:rPrDefault></w:docDefaults>'
+                       '<w:style w:type="paragraph" w:styleId="Normal">'
+                       '<w:name w:val="Normal"/></w:style></w:styles>')
+            z.writestr("word/_rels/document.xml.rels",
+                       '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                       '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/'
+                       'relationships"/>')
+
+    base, revised, out = tmp / "base.docx", tmp / "revised.docx", tmp / "out.docx"
+    make_docx(base, "The quick brown fox jumps over the lazy dog.")
+    make_docx(revised, "The quick red fox jumps over the lazy dog.")
+    (tmp / "nofake").mkdir()
+    proc = run_adapter(tmp, tmp / "nofake", base, revised, out)
+    check("B3 the adapter uses the published python_redlines package (not 'not importable')",
+          proc.returncode == 0 and out.is_file() and out.stat().st_size > 0
+          and "not importable" not in proc.stderr,
+          f"rc={proc.returncode} err={proc.stderr[-200:]!r}")
+    if out.is_file():
+        with zipfile.ZipFile(out) as z:
+            check("B3 the redline output is a readable DOCX package", z.testzip() is None)
+
+
 # =====================================================================
 # C1 -- reconcile_inputs must treat a pruned sandbox as unverifiable
 # =====================================================================
@@ -509,6 +566,7 @@ def main() -> int:
     test_b1_adapter_stale_output()
     test_b1_adapter_absent_output_still_fails()
     test_b2_adapter_refuses_input_as_out()
+    test_b3_published_python_redlines_is_used()
     print("\n== C1: prune then run ==")
     test_c1_pruned_sandboxes_do_not_block_run()
     test_c1_edited_sandbox_is_still_blocking()

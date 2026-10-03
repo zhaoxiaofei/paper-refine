@@ -38,6 +38,7 @@ import sys
 import tempfile
 import zipfile
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
 spec = importlib.util.spec_from_file_location("paper_docx_format", str(WS / "paper_docx_format.py"))
@@ -659,6 +660,234 @@ def test_fix_default(docx: Path):
     return out
 
 
+def test_ppr_splice_keeps_xml_wellformed():
+    print()
+    print("== fix: a `w:pPr` carrying attributes is spliced INSIDE the tag ==")
+    tmp = scratch("paper_fmt_ppr_")
+    para = ('<w:p><w:pPr w:rsidR="00A1B2C3" w:rsidP="00D4E5F6">'
+            '<w:jc w:val="center"/></w:pPr><w:r><w:t>Fig. 1 | Benchmark.</w:t></w:r></w:p>')
+    got = fmt.insert_into_ppr(para, "<w:keepNext/>")
+    open_tag = '<w:pPr w:rsidR="00A1B2C3" w:rsidP="00D4E5F6">'
+    check("the element lands inside an attributed w:pPr (no `<w:pPr <w:keepNext/>w:rsidR=` splice)",
+          open_tag in got and "<w:pPr <" not in got
+          and got.index("<w:keepNext/>") < got.index("</w:pPr>")
+          and got.count("<w:pPr") == 1 and got.count("</w:pPr>") == 1, got[:160])
+    try:
+        ET.fromstring('<w:body xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/'
+                      '2006/main">' + got + "</w:body>")
+        wellformed = True
+    except ET.ParseError as e:
+        wellformed = False
+        got = f"{got}  --  {e}"
+    check("the spliced paragraph is well-formed XML", wellformed, got[:200])
+    # a SELF-CLOSING attributed `w:pPr` (Word writes those too) must be expanded
+    para2 = ('<w:p><w:pPr w:rsidR="00A1B2C3"/><w:r><w:t>Fig. 2 | Second legend.</w:t>'
+             "</w:r></w:p>")
+    got2 = fmt.insert_into_ppr(para2, "<w:spacing w:line=\"240\"/>")
+    try:
+        ET.fromstring('<w:body xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/'
+                      '2006/main">' + got2 + "</w:body>")
+        wf2 = True
+    except ET.ParseError as e:
+        wf2 = False
+        got2 = f"{got2}  --  {e}"
+    check("a self-closing attributed w:pPr is expanded, not split",
+          wf2 and got2.index("<w:pPr") == got2.index("<w:pPr w:rsidR")
+          and "<w:spacing" in got2 and got2.count("</w:pPr>") == 1, got2[:160])
+    # end-to-end: a legend whose pPr carries attributes gets its spacing spliced
+    # in inside the tag, and the package's document.xml stays well-formed
+    src, out = tmp / "in.docx", tmp / "out.docx"
+    doc = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+           '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+           "<w:body>"
+           "<w:p><w:r><w:t>Abstract</w:t></w:r></w:p>"
+           '<w:p><w:pPr w:rsidR="00A1B2C3"><w:jc w:val="center"/></w:pPr>'
+           "<w:r><w:t>Fig. 1 | Benchmark overview.</w:t></w:r></w:p>"
+           "</w:body></w:document>")
+    with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml",
+                   '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/'
+                   '2006/content-types"><Default Extension="xml" ContentType="application/xml"/>'
+                   '<Override PartName="/word/document.xml" ContentType="application/vnd.'
+                   'openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+        z.writestr("_rels/.rels", '<?xml version="1.0"?><Relationships xmlns="http://schemas.'
+                                  'openxmlformats.org/package/2006/relationships"/>')
+        z.writestr("word/document.xml", doc)
+        z.writestr("word/styles.xml",
+                   '<?xml version="1.0"?><w:styles xmlns:w="http://schemas.'
+                   'openxmlformats.org/wordprocessingml/2006/main"/>')
+    real_validate = fmt.validate_package
+    fmt.validate_package = lambda path: (None, "docx CLI not on PATH: schema check skipped")
+    try:
+        rep = fmt.fix_package(src, out, fmt.load_policy(None))
+    finally:
+        fmt.validate_package = real_validate
+    with zipfile.ZipFile(out) as z:
+        fixed = z.read("word/document.xml").decode("utf-8")
+    try:
+        ET.fromstring(fixed)
+        pkg_wellformed = True
+    except ET.ParseError as e:
+        pkg_wellformed = False
+        fixed = f"{fixed}  --  {e}"
+    check("the fixed package is well-formed XML (the legend spacing is applied, not skipped)",
+          pkg_wellformed and '<w:pPr w:rsidR="00A1B2C3">' in fixed
+          and "<w:spacing" in fixed and fixed.index("<w:spacing") < fixed.index("</w:pPr>"),
+          fixed[fixed.find("<w:pPr"):fixed.find("<w:pPr") + 160])
+    check("the fixer's verification gates on well-formedness (a corrupt splice cannot ship)",
+          rep["verified"].get("xml_wellformed") is True and rep["ok"] is True, str(rep["verified"])[:200])
+    # negative: the always-on fence must fail a corrupt output even when the
+    # optional `docx` CLI is absent
+    real_fix_document = fmt.fix_document
+    fmt.fix_document = lambda xml, styles, policy: (
+        xml.replace("<w:jc w:val=\"center\"/>", "<w:pPr <w:jc w:val=\"center\"/>"),
+        ["corrupt for the test"], {})
+    try:
+        bad = fmt.fix_package(src, tmp / "bad.docx", fmt.load_policy(None))
+    finally:
+        fmt.fix_document = real_fix_document
+    check("a malformed splice fails the fixer's own verification",
+          bad["ok"] is False and bad["verified"].get("xml_wellformed") is False
+          and "xml_detail" in bad["verified"], str(bad["verified"])[:200])
+
+
+def test_charrefs_out_of_range_do_not_raise():
+    print()
+    print("== scan: an out-of-range character reference cannot abort the run ==")
+    for ref in ("&#x110000;", "&#999999999999;", "&#xD800;"):
+        try:
+            got = fmt.unesc(ref)
+            ok = got == ref
+        except Exception as e:                                        # noqa: BLE001
+            ok, got = False, f"{type(e).__name__}: {e}"
+        check(f"the invalid character reference {ref} stays literal", ok, str(got))
+    tmp = scratch("paper_fmt_charref_")
+    bad = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+           f'<w:document xmlns:w="{P[1:-1]}"><w:body>'
+           '<w:p><w:r><w:t>Bad reference &#x110000; in the text.</w:t></w:r></w:p>'
+           '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>')
+    make_package(tmp / "badref.docx", bad)
+    try:
+        info = fmt.scan_paths([tmp], fmt.load_policy(None))
+        scan_ok, scan_detail = isinstance(info.get("rows"), list), f"{len(info['rows'])} row(s)"
+    except Exception as e:                                            # noqa: BLE001
+        scan_ok, scan_detail = False, f"{type(e).__name__}: {e}"
+    check("a package carrying an invalid character reference still scans", scan_ok, scan_detail)
+
+
+def test_front_matter_same_span_edits():
+    print()
+    print("== fix: the front-matter pass never stacks two edits on one span ==")
+    xml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+           '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+           "<w:body>"
+           "<w:p><w:r><w:t>A package title</w:t></w:r></w:p>"
+           '<w:p><w:pPr><w:pStyle w:val="AuthorList"/><w:numPr><w:ilvl w:val="0"/>'
+           '<w:numId w:val="1"/></w:numPr><w:ind w:firstLine="480"/></w:pPr>'
+           "<w:r><w:t>Abstract</w:t></w:r></w:p>"
+           "<w:p><w:r><w:t>This following paragraph must survive the front-matter pass.</w:t>"
+           "</w:r></w:p></w:body></w:document>")
+    out, info = fmt._front_matter_styles(xml, {"title": "Title", "author": "AuthorList",
+                                               "headings": {1: "Heading1"}})
+    try:
+        ET.fromstring(out)
+        wellformed = True
+        detail = ""
+    except ET.ParseError as e:
+        wellformed = False
+        detail = f"{e} :: {out[-200:]}"
+    check("an already-styled Abstract heading does not corrupt the following paragraph",
+          wellformed and "must survive the front-matter pass" in out
+          and "<w:numPr>" not in out and info.get("abstract") is True, detail)
+
+
+def test_tracked_deletion_survives_text_edits():
+    print()
+    print("== fix: a text-level edit never drops a tracked-deletion run ==")
+    tmp = scratch("paper_fmt_del_")
+    doc = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+           '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+           '<w:body><w:p><w:del w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z">'
+           "<w:r><w:delText>withdrawn sentence</w:delText></w:r></w:del>"
+           '<w:r><w:t xml:space="preserve">We follow the benchmark '
+           "(Smith, 2020, Nature) closely.</w:t></w:r></w:p>"
+           '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>')
+    src = make_package(tmp / "in.docx", doc)
+    rep = fmt.fix_package(src, tmp / "out.docx", fmt.load_policy(None))
+    with zipfile.ZipFile(tmp / "out.docx") as z:
+        fixed = z.read("word/document.xml").decode("utf-8")
+    check("the citation edit still happens and the tracked deletion survives",
+          "(Smith, 2020) closely" in fixed and "delText" in fixed
+          and "withdrawn sentence" in fixed and rep["ok"] is True,
+          fixed[fixed.find("<w:body>"):][:260])
+
+
+def test_template_list_numbering():
+    print()
+    print("== template: a source list the template does not define cannot dangle ==")
+    tmp = scratch("paper_fmt_num_")
+
+    def package(path: Path, num_id: str, extra: str = "") -> None:
+        doc = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+               '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/'
+               '2006/main"><w:body>'
+               '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/>'
+               f'<w:numId w:val="{num_id}"/></w:numPr></w:pPr>'
+               '<w:r><w:t>List item text</w:t></w:r></w:p>'
+               '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>'
+               "</w:body></w:document>")
+        styles = ('<?xml version="1.0"?><w:styles xmlns:w="http://schemas.openxmlformats.org/'
+                  'wordprocessingml/2006/main"><w:style w:type="paragraph" '
+                  'w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>')
+        numbering = ('<?xml version="1.0"?><w:numbering xmlns:w="http://schemas.'
+                     'openxmlformats.org/wordprocessingml/2006/main">'
+                     f'<w:abstractNum w:abstractNumId="{num_id}"><w:lvl w:ilvl="0">'
+                     '<w:numFmt w:val="bullet"/></w:lvl></w:abstractNum>'
+                     f'<w:num w:numId="{num_id}"><w:abstractNumId w:val="{num_id}"/></w:num>'
+                     + extra + "</w:numbering>")
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", CONTENT_TYPES)
+            z.writestr("_rels/.rels", RELS)
+            z.writestr("word/_rels/document.xml.rels", DOC_RELS)
+            z.writestr("word/document.xml", doc)
+            z.writestr("word/styles.xml", styles)
+            z.writestr("word/numbering.xml", numbering)
+            z.writestr("docProps/core.xml", CORE)
+            z.writestr("docProps/app.xml", APP)
+
+    def refs_and_defs(path: Path) -> tuple:
+        with zipfile.ZipFile(path) as z:
+            doc = z.read("word/document.xml").decode("utf-8", "replace")
+            num = z.read("word/numbering.xml").decode("utf-8", "replace")
+        refs = set(re.findall(r'<w:numId(?=[\s/>])[^>]*w:val="(\d+)"', doc))
+        defined = set(re.findall(r'<w:num(?=[\s/>])[^>]*w:numId="(\d+)"', num))
+        return refs, defined
+
+    # source has numId 42; the template only defines numId 1
+    src, tpl, out = tmp / "src.docx", tmp / "tpl.docx", tmp / "out.docx"
+    package(src, "42")
+    package(tpl, "1", '<w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0">'
+                      '<w:numFmt w:val="bullet"/></w:lvl></w:abstractNum>')
+    rep = fmt.apply_word_template(src, out, tpl)
+    refs, defined = refs_and_defs(out)
+    check("a source list the template does not define is carried, not left dangling",
+          rep.get("ok") is True and refs and refs <= defined and "42" not in refs,
+          f"ok={rep.get('ok')} refs={refs} defined={defined} {rep.get('error', '')}")
+    check("the carried list keeps the paragraph text and is reported",
+          "List item text" in zipfile.ZipFile(out).read("word/document.xml").decode("utf-8")
+          and any("carried 1 source list" in c for c in rep.get("changes") or []),
+          str(rep.get("changes")))
+    # a numId the template DOES define keeps the template's definition (no copy)
+    same = tmp / "same.docx"
+    package(src, "1")
+    rep_same = fmt.apply_word_template(src, same, tpl)
+    refs_same, defined_same = refs_and_defs(same)
+    check("a numId the template defines keeps the template's own definition",
+          rep_same.get("ok") is True and refs_same == {"1"} and defined_same == {"1"}
+          and not any("source list" in c for c in rep_same.get("changes") or []),
+          f"{refs_same} {defined_same} {rep_same.get('changes')}")
+
+
 def test_fix_extended(docx: Path):
     print()
     print("== fix: extended policy (unlink fields, align sizes, curly quotes) ==")
@@ -776,6 +1005,34 @@ def test_pipeline_wiring():
           str({k: pol.get(k) for k in ("url_style", "max_em_dashes_per_1000")}))
     check("defaults are kept for keys the operator did not override",
           pol["journal_italics"] == "refs-only" and pol["caption_line"] == 240)
+    # a legacy (non-UTF-8) byte inside word/document.xml must not blow past the
+    # unreadable-package guard and abort the whole corpus scan
+    tmp_bad = scratch("paper_fmt_badenc_")
+    with zipfile.ZipFile(tmp_bad / "mainText.docx", "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("word/document.xml",
+                   b'<?xml version="1.0"?><w:document xmlns:w="http://schemas.'
+                   b'openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r>'
+                   b"<w:t>caf\xe9 results</w:t></w:r></w:p></w:body></w:document>")
+        z.writestr("word/styles.xml",
+                   b'<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/'
+                   b'2006/main"/>')
+    try:
+        docs_bad = nb.corpus_text_documents([(tmp_bad, "", ())])
+        enc_ok, enc_detail = bool(docs_bad) and docs_bad[0][1], str(docs_bad)[:120]
+    except UnicodeDecodeError as e:                                    # noqa: PERF203
+        enc_ok, enc_detail = False, f"UnicodeDecodeError: {e}"
+    check("a non-UTF-8 document.xml is read with replacement, not thrown",
+          enc_ok, enc_detail)
+    # the scanner must APPLY the policy it is handed: the old
+    # `policy.update(policy or {})` self-merge discarded the argument entirely
+    tmp_pol = scratch("paper_fmt_pol_")
+    make_package(tmp_pol / "submission.docx")
+    with_pol = nb.scan_format_in_sources([(tmp_pol, "", ())],
+                                          policy={"url_style": "keep-links"})
+    fixes = {r["rule"]: r["fix"] for r in with_pol["rows"]
+             if r["rule"] in ("FMT-T7a", "FMT-T7b")}
+    check("scan_format_in_sources applies the policy it is given (keep-links -> policy, not fix)",
+          bool(fixes) and all(v == "policy" for v in fixes.values()), str(fixes))
     # the decide gate flag exists and the report builder accepts the new kwargs
     import inspect
     sig = inspect.signature(nb.build_decision_report)
@@ -963,6 +1220,11 @@ def main() -> int:
     try:
         docx = test_scan()
         test_fix_default(docx)
+        test_ppr_splice_keeps_xml_wellformed()
+        test_front_matter_same_span_edits()
+        test_charrefs_out_of_range_do_not_raise()
+        test_tracked_deletion_survives_text_edits()
+        test_template_list_numbering()
         test_journal_emphasis()
         test_text_consistency_rules()
         test_layout_budget_rules()

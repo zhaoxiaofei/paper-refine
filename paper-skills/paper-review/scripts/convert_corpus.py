@@ -518,7 +518,11 @@ def convert_one(path: str, rel: str) -> dict:
     status = "not-attempted"
     if ext in (".md", ".txt", ".tex", ".ltx", ".bib", ".csv", ".tsv"):
         text, notes = plain_copy(path)
-        status = "converted" if text else "converted-empty"
+        # A decode failure (plain_copy reports it in `notes`) is a FAILED
+        # conversion, not an empty document: otherwise the "N files could not be
+        # converted" warning never counts it and an unreadable file looks like a
+        # legitimately empty editable one.
+        status = "converted" if text else ("converted-empty" if not notes else "failed")
     elif ext == ".rtf":
         text, notes = rtf_to_text(path)
         status = "converted" if text else "converted-empty"

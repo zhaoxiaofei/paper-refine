@@ -362,6 +362,40 @@ def test_codex_exec_mcp_approval():
           nb.agent_argv("claude") == nb.AGENT_PRESETS["claude"])
 
 
+def test_refusal_messages_evaluate():
+    """The server's refusal paths must EVALUATE, not throw a tagged-template TypeError.
+
+    Two adjacent template literals with no `+` between them parse as a function
+    call on a string, so the refusal itself raises before it can be returned.
+    The real server needs the MCP SDK (not shipped), so the expressions are
+    extracted from index.js and evaluated with Node directly.
+    """
+    node = shutil.which("node")
+    if not node:
+        skip("MCP refusal messages evaluate", "node is not installed")
+        return
+    src = (WS / "mcp-docx-converter" / "index.js").read_text(encoding="utf-8")
+    refusals = []
+    for m in re.finditer(r"text:\s*", src):
+        rest = src[m.end():]
+        if not rest.lstrip().startswith("`refused"):
+            continue
+        end = rest.find("}]")
+        if end != -1:
+            refusals.append(rest[:end].rstrip().rstrip("}").strip())
+    ok, detail = bool(refusals), ""
+    for expr in refusals:
+        js = ("const docxPath='/tmp/x.docx'; const abs='/tmp/x.docx'; try { console.log(String("
+              + expr + ")); } catch (e) { console.log('THROWS '+e.message); process.exit(3); }")
+        proc = subprocess.run([node, "-e", js], capture_output=True, text=True)
+        if proc.returncode != 0:
+            ok = False
+            detail = f"{expr[:50]} -> {(proc.stdout + proc.stderr).strip()[:160]}"
+            break
+    check("MCP refusal messages evaluate (no adjacent-template TypeError)",
+          ok, detail or f"{len(refusals)} refusal message(s) evaluated")
+
+
 def test_live_server_if_available():
     print()
     print("== the live docx-converter server (handshake; conversion opt-in) ==")
@@ -412,6 +446,7 @@ def main() -> int:
     sections = (("probe", test_config_probe),
                 ("probe", test_probe_order_and_summary),
                 ("prompts", test_prompts_prefer_the_mcp_tool),
+                ("refusals", test_refusal_messages_evaluate),
                 ("codex-exec", test_codex_exec_mcp_approval),
                 ("live", test_live_server_if_available))
     try:

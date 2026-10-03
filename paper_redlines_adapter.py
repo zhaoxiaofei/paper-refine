@@ -18,7 +18,9 @@ Usage: paper_redlines_adapter.py BASE.docx REVISED.docx OUT.docx
 """
 
 import os
+import shutil
 import sys
+import tempfile
 
 
 def fail(msg, code):
@@ -50,6 +52,46 @@ def clear_out(out_path):
         fail("cannot clear the stale output file %s: %s" % (out_path, exc), 6)
 
 
+def try_engine_api(mod, base, revised, out):
+    """Write OUT with the published package's engine API; True when it did.
+
+    `python-redlines` imports as `python_redlines` and exposes
+    `DocxodusEngine`/`XmlPowerToolsEngine` whose `run_redline()` RETURNS the
+    redline bytes -- there is no `redlines` module and no class named
+    `DocxRedlines`, so the old name probes could never match the installed
+    package. The engine extracts its binary lazily; a read-only user cache (CI /
+    sandboxed homes) makes that fail, so retry with a writable temp root.
+    """
+    for eng_name in ("DocxodusEngine", "XmlPowerToolsEngine"):
+        cls = getattr(mod, eng_name, None)
+        if cls is None:
+            continue
+        tmp_cache = None
+        for use_tmp in (False, True):
+            cache = None
+            if use_tmp:
+                if tmp_cache is None:
+                    tmp_cache = tempfile.mkdtemp(prefix="paper-redlines-")
+                cache = tmp_cache
+            try:
+                data, _stdout, _stderr = (cls(cache) if cache else cls()).run_redline(
+                    "paper-refine", base, revised)
+            except Exception as exc:                                # noqa: BLE001
+                print("python_redlines.%s failed: %s" % (eng_name, exc), file=sys.stderr)
+                continue
+            if data:
+                with open(out, "wb") as fh:
+                    fh.write(data)
+                if wrote(out):
+                    if tmp_cache:
+                        shutil.rmtree(tmp_cache, ignore_errors=True)
+                    print("python-redlines:%s.run_redline" % eng_name)
+                    return True
+        if tmp_cache:
+            shutil.rmtree(tmp_cache, ignore_errors=True)
+    return False
+
+
 def main(argv):
     if len(argv) != 3:
         fail(__doc__.strip(), 2)
@@ -64,11 +106,26 @@ def main(argv):
         if os.path.exists(out) and os.path.samefile(out, path):
             fail("refusing to use an input file as OUT: %s" % path, 2)
     clear_out(out)
+    real = None
     try:
-        import redlines
-    except ImportError as exc:
-        fail("python-redlines is not importable: %s\nInstall it with "
-             "`pip install \"python-redlines[docxodus]\"`." % exc, 4)
+        import python_redlines as real          # the published package's name
+    except ImportError:
+        real = None
+    if real is not None and try_engine_api(real, base, revised, out):
+        return 0
+    # Keep probing the historical `redlines` module name too: an operator may
+    # supply their own shim (or the unrelated text-diff package may be present),
+    # and the old class/function/CLI probes below are how those get wired.
+    redlines = real
+    try:
+        import redlines as _legacy
+    except ImportError:
+        _legacy = None
+    if _legacy is not None:
+        redlines = _legacy
+    if redlines is None:
+        fail("python-redlines is not importable: no module named 'python_redlines' (nor a "
+             "'redlines' shim)\nInstall it with `pip install \"python-redlines[docxodus]\"`.", 4)
 
     _cache = {}
 

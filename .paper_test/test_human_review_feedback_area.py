@@ -237,7 +237,23 @@ def main() -> int:
           "original_submission" in nb.feedback_prompt(ctx, sb, 1, [])
           and "original_submission" in nb.journal_review_block(ctx, sb)
           and "original_submission" in nb.journal_rewrite_block(ctx)
-          and "original_submission" in nb.journal_revise_block(ctx))
+          and "original_submission" in nb.journal_revise_block(ctx)
+          and "original_submission" in nb.response_prompt(
+              ctx, sb, 1, "the final package", {"concerns": []}))
+    # ... and the response postcheck must verify the staged copy like every
+    # other journal postcheck does, not trust it after materialization
+    ctx.state = {"version": nb.STATE_VERSION, "runs": {}, "rounds": {}, "pinned": [], "log": [],
+                 "config": ctx.cfg}
+    rec_resp = ctx.register("r1_response", "response", 1, "runs/r1_response")
+    (ctx.root / "runs" / "r1_response").mkdir(parents=True, exist_ok=True)
+    real_staging = nb.original_submission_staging_problems
+    nb.original_submission_staging_problems = lambda c, s: ["SENTINEL: staged evidence modified"]
+    try:
+        _ok, resp_errs, _warns, _x = nb.postcheck_response(ctx, rec_resp)
+    finally:
+        nb.original_submission_staging_problems = real_staging
+    check("HF5 postcheck_response verifies the staged reviewer-visible copy",
+          any("SENTINEL" in e for e in resp_errs), str(resp_errs)[:200])
     check("HF5 the staged copy verifies clean",
           nb.original_submission_staging_problems(ctx, sb) == [])
     nb._write_journal_feedback_inputs(ctx, sb)          # a retry re-stages it

@@ -457,6 +457,133 @@ def test_judge_inputs_are_revalidated():
           f"reset={reset[:4]}... statuses={[ctx.run(x)['status'] for x in judge_ids[:3]]}")
 
 
+def test_response_depends_on_every_pool_member():
+    """A pool member's reset must also reset the response letter.
+
+    The letter describes the final package, so a stale letter must not survive a
+    member's retry. The pool loop used to overwrite each member's dependents
+    list, discarding the `j_response` dependency added for resubmit mode.
+    """
+    tmp = tmpdir("r6d")
+    root = setup_root(tmp)
+    ctx = np.Ctx(root)
+    ctx.load()
+    ctx.cfg["audit"] = "off"
+    ctx.cfg["revision_mode"] = "resubmit"          # a response letter is required
+    ctx.cfg["rewrites"], ctx.cfg["revises"] = [1], [1]
+    r = 1
+    np.materialize_a1(ctx, r)
+    # the journal stages need the concern ledger: a done, fresh feedback run
+    fb_sb = ctx.runs_dir / np.rid_feedback(r)
+    np.ensure_copy(ctx.sandbox_of(ctx.run(np.rid_a1(r))) / "base", fb_sb / "base")
+    np.ensure_pristine_input(ctx, fb_sb / np.pristine_dirname(fb_sb))
+    write(fb_sb / "concerns" / "JF_concerns.json", "{}\n")
+    fb = ctx.register(np.rid_feedback(r), "feedback", r, f"runs/{np.rid_feedback(r)}")
+    fb["status"] = "done"
+    np.materialize_rewrite(ctx, r, 1)
+    w1 = ctx.run(np.rid_for_fresh(r, "w1"))
+    write(ctx.sandbox_of(w1) / "rewritten" / "manuscript.md", "# rewritten\n")
+    w1["status"] = "done"
+    w1["corpus_digest"] = np.recompute_corpus_digest(ctx, r, "w1")
+    w1["content_fingerprint"] = np.corpus_content_fingerprint(ctx, r, "w1")
+    resp_sb = ctx.runs_dir / np.rid_response(r)
+    write(resp_sb / "response" / "RESPONSE.md", "dear editor\n")
+    resp = ctx.register(np.rid_response(r), "response", r, f"runs/{np.rid_response(r)}")
+    resp["status"] = "done"
+    ctx.save_state()
+    healthy = np.revalidate_round_inputs(ctx, r)
+    check("R6 a healthy round leaves the response letter alone", not healthy, str(healthy))
+    # the round base changed underneath w1 (an in-round retry of the upstream)
+    write(ctx.sandbox_of(ctx.run(np.rid_a1(r))) / "base" / "extra.md", "new upstream content\n")
+    ctx.save_state()
+    reset = np.revalidate_round_inputs(ctx, r)
+    check("R6 resetting a pool member also resets the response letter",
+          np.rid_for_fresh(r, "w1") in reset and np.rid_response(r) in reset
+          and ctx.run(np.rid_response(r))["status"] == "stale",
+          f"reset={reset}")
+
+
+def test_split_review_uses_session_b_and_merges_in_review():
+    """--review-split: the revise sandbox holds B's review, and the merge runs
+    in the REVIEW postcheck (part B) -- not in postcheck_revise, which the
+    dispatcher never routes a review record to. The merge itself must keep A's
+    rows, remap B's id collisions and drop B's duplicate of an A finding."""
+    import inspect
+    tmp = tmpdir("r6e")
+    root = setup_root(tmp)
+    ctx = np.Ctx(root)
+    ctx.load()
+    ctx.cfg["audit"] = "off"
+    ctx.cfg["review_split"] = "phases"
+    ctx.cfg["rewrites"], ctx.cfg["revises"] = [1], [1]
+    r = 1
+    np.materialize_a1(ctx, r)
+    np.materialize_review(ctx, r)                       # session A
+    a = ctx.run(np.rid_review(r))
+    write(ctx.sandbox_of(a) / "review" / "findings.json",
+          '{"findings": ['
+          '{"id": "FA-1", "location": "p1", "evidence": "one two three four five six"},'
+          '{"id": "SAME", "location": "p2", "evidence": "shared defect quote here"}]}\n')
+    a["status"] = "done"
+    np.materialize_review(ctx, r, "b")                  # session B
+    b = ctx.run(np.rid_review_b(r))
+    write(ctx.sandbox_of(b) / "review" / "findings.json",
+          '{"findings": ['
+          '{"id": "SAME", "location": "p3", "evidence": "another defect quote"},'
+          '{"id": "DUP", "location": "p2", "evidence": "shared defect quote here"}]}\n')
+    b["status"] = "done"
+    merged = np.merge_review_parts(ctx, b)              # what postcheck_review runs
+    merged_ids = sorted(str(f.get("id")) for f in
+                        (json.loads((ctx.sandbox_of(b) / "review" / "findings.json")
+                                    .read_text(encoding="utf-8")).get("findings") or []))
+    check("R6 the split merge keeps A's rows, remaps B's collision and drops B's duplicate",
+          merged_ids == ["B-SAME", "FA-1", "SAME"]
+          and merged.get("from_a") == 2 and merged.get("from_b") == 1
+          and merged.get("id_remap") == {"SAME": "B-SAME"}
+          and merged.get("deduped_b") == ["DUP"],
+          f"ids={merged_ids} merge={merged}")
+    np.materialize_revise(ctx, r, "a2")
+    rev = ctx.run(np.rid_for_fresh(r, "a2"))
+    probs = np._input_freshness_problems(ctx, rev)
+    check("R6 a split round's revise sandbox is revalidated against session B",
+          not probs, str(probs))
+    review_src = inspect.getsource(np.postcheck_review)
+    revise_src = inspect.getsource(np.postcheck_revise)
+    check("R6 the split-review merge runs from the REVIEW postcheck (part B)",
+          "merge_review_parts" in review_src and "merge_review_parts" not in revise_src,
+          f"review={'merge_review_parts' in review_src} "
+          f"revise={'merge_review_parts' in revise_src}")
+
+
+def test_journal_stages_are_in_the_attempt_safety_net():
+    """The three journal kinds need the same structured-output contract rows as
+    every other stage: otherwise a truncated ledger is invisible to (a) the
+    shared parse gate and (b) the manual-mode/crash-recovery helpers."""
+    tmp = tmpdir("r6f")
+    root = tmp / "root"
+    root.mkdir()
+    ctx = np.Ctx(root)
+    ctx.state = {"version": np.STATE_VERSION, "runs": {}, "rounds": {}, "pinned": [],
+                 "log": [], "config": {}}
+    ledger = ctx.runs_dir / "r1_concerns"
+    write(ledger / "concerns" / "JF_concerns.json", '{"concerns": [')
+    rec = ctx.register("r1_concerns", "concerns", 1, "runs/r1_concerns")
+    files = [rel for rel, _p in np.structured_output_files(ledger, rec)]
+    check("R13 the concerns ledger is a contract structured output",
+          "concerns/JF_concerns.json" in files, str(files))
+    probs = np.structured_output_problems(ctx, rec)
+    check("R13 a truncated concerns ledger is caught by the shared parse gate",
+          any("JF_concerns.json" in p for p in probs), str(probs)[:200])
+    resp = ctx.runs_dir / "r1_response"
+    write(resp / "response" / "response_map.json", '{"rows": [')
+    rec2 = ctx.register("r1_response", "response", 1, "runs/r1_response")
+    check("R13 the response map is a contract structured output",
+          "response/response_map.json" in
+          [rel for rel, _p in np.structured_output_files(resp, rec2)])
+    check("R13 a truncated response map is caught by the shared parse gate",
+          any("response_map.json" in p for p in np.structured_output_problems(ctx, rec2)))
+
+
 # =====================================================================
 # R7-R11 -- the skill-pack scripts
 # =====================================================================
@@ -541,6 +668,23 @@ def test_xlsx_lock_is_binary_bucket():
           inv.get("data.xlsx.lock") == "read-only/binary", f"statuses={inv}")
 
 
+def test_undecodable_text_is_a_failure_not_an_empty_success():
+    """A file whose declared encoding cannot be decoded is a FAILED conversion.
+
+    `plain_copy` reports the decode failure in `notes`, but the plain-text
+    branch ignored the notes and recorded `converted-empty`, so the "N files
+    could not be converted" warning never counted it.
+    """
+    tmp = tmpdir("r12")
+    work, proc = run_convert_corpus(tmp, {"broken.txt": b"\xff\xfe\x41"})   # UTF-16LE, odd length
+    inv = {e["path"]: e for e in json.loads((work / "inventory.json").read_text())}
+    row = inv.get("broken.txt") or {}
+    check("R12 an undecodable text file is 'failed', not a silent converted-empty",
+          row.get("status") == "failed" and bool(row.get("notes")), str(row)[:200])
+    check("R12 the conversion warning counts it", "could not be converted" in proc.stdout,
+          proc.stdout[-200:])
+
+
 def test_acronym_definition_attribution():
     tmp = tmpdir("r10")
     work = tmp / "work"
@@ -580,12 +724,16 @@ def main() -> int:
     test_stale_downstream_inputs_are_reset()
     test_healthy_round_is_not_reset()
     test_judge_inputs_are_revalidated()
+    test_response_depends_on_every_pool_member()
+    test_split_review_uses_session_b_and_merges_in_review()
+    test_journal_stages_are_in_the_attempt_safety_net()
     print("\n== R7 extract_occurrences variants ==")
     test_sci_exponent_variants()
     print("\n== R8/A convert_corpus ==")
     test_flattened_corpus_name_collision_keeps_both_documents()
     test_shared_strings_entities_decoded()
     test_xlsx_lock_is_binary_bucket()
+    test_undecodable_text_is_a_failure_not_an_empty_success()
     print("\n== R10 extract_acronyms ==")
     test_acronym_definition_attribution()
     print()

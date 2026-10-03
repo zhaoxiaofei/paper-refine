@@ -626,6 +626,82 @@ def test_missing_invalid_inconsistent():
 # VC5 — changing the venue of a root that already ran; profiles win/lose
 # =====================================================================
 
+def test_venue_template_restaging_updates_a_readonly_copy():
+    """An operator who updates a venue's .official file must be able to re-stage:
+    the previously staged copy is mode 0444, so copy2 onto it raised."""
+    print()
+    print("== VC6: an updated venue template can be re-staged into an existing sandbox ==")
+    tmp = scratch("paper_venue_restage_")
+    root = tmp / "root"
+    off = root / "venue_profiles" / "restage.official"
+    off.mkdir(parents=True)
+    (off / "Template.docx").write_bytes(b"v1")
+    write(root / "venue_profiles" / "restage.json",
+          json.dumps({"id": "restage", "label": "Restage", "journals": ["Restage"]}))
+    ctx = nb.Ctx(root)
+    ctx.cfg = {"venue": "restage"}
+    ctx.state = {"version": nb.STATE_VERSION, "runs": {}, "rounds": {}, "pinned": [], "log": [],
+                 "config": ctx.cfg}
+    sb = tmp / "sb"
+    sb.mkdir()
+    first = nb.stage_venue_template(ctx, sb)
+    (off / "Template.docx").write_bytes(b"v2")
+    try:
+        second = nb.stage_venue_template(ctx, sb)
+        ok, detail = True, str(second)
+    except Exception as e:                                            # noqa: BLE001
+        ok, detail = False, f"{type(e).__name__}: {e}"
+    staged = sb / "venue_template" / "word" / "Template.docx"
+    check("VC6 re-staging a changed venue template replaces the read-only copy",
+          ok and first and staged.is_file()
+          and nb.sha256_file(staged) == nb.sha256_file(off / "Template.docx"),
+          detail[:200])
+
+
+def test_add_venue_validates_before_publishing():
+    """`add-venue` must never replace the store's profile with an invalid one.
+
+    The shipped default profile is normalized at import time, so publishing a
+    profile that fails validation could make every later command -- including
+    set-venue/status, the tools that would repair it -- die before main().
+    """
+    print()
+    print("== VC5: add-venue validates before publishing, and a bad default cannot brick the CLI ==")
+    tmp = scratch("paper_venue_addpub_")
+    store = tmp / "profiles"
+    sb = tmp / "sb"
+    (sb / "store").mkdir(parents=True)
+    write(sb / "store" / "badvenue.json",
+          json.dumps({"id": "badvenue", "length_limits": {"abstract": {"base": "many"}}}))
+    args = type("A", (), {"venue": "badvenue", "profiles_dir": str(store), "publish_only": True,
+                          "from_sandbox": str(sb), "journal": None, "article_type": None,
+                          "no_download": True, "agent": "manual", "agent_cmd": None,
+                          "timeout": 5})()
+    code = 0
+    try:
+        nb.cmd_add_venue(args)
+    except SystemExit as e:
+        code = int(e.code or 0)
+    check("VC5 an invalid staged profile is refused with exit 1", code == 1)
+    check("VC5 ... and nothing is published into the store",
+          not (store / "badvenue.json").exists() and not (store / "README.md").exists(),
+          str(sorted(p.name for p in store.iterdir())) if store.is_dir() else "no store")
+    # the import-time default object must tolerate an invalid shipped profile
+    real = nb.BUILTIN_VENUE_PROFILES[nb.DEFAULT_VENUE]
+    nb.BUILTIN_VENUE_PROFILES[nb.DEFAULT_VENUE] = {
+        "id": nb.DEFAULT_VENUE, "length_limits": {"abstract": {"base": "many"}}}
+    try:
+        obj = nb._builtin_default_venue_object()
+        fallback_ok = isinstance(obj, nb.VenueProfile) and bool(obj.length_limits())
+    except Exception as e:                                            # noqa: BLE001
+        fallback_ok = False
+        obj = f"{type(e).__name__}: {e}"
+    finally:
+        nb.BUILTIN_VENUE_PROFILES[nb.DEFAULT_VENUE] = real
+    check("VC5 an invalid default profile falls back to the embedded rules instead of crashing",
+          fallback_ok, str(obj)[:160])
+
+
 def test_force_and_snapshot_precedence():
     print()
     print("== VC5: mid-flight changes, --force and the snapshot ==")
@@ -947,6 +1023,8 @@ def main() -> int:
         test_configuration_and_persistence()
         test_custom_profile()
         test_missing_invalid_inconsistent()
+        test_venue_template_restaging_updates_a_readonly_copy()
+        test_add_venue_validates_before_publishing()
         test_force_and_snapshot_precedence()
         test_scans_and_prompts()
         test_skill_script()

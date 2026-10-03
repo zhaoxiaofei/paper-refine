@@ -63,7 +63,7 @@ serveStdio(() => {
           || !existsSync(docxPath)) {
         return {
           content: [{ type: 'text', text: `refused: docxPath must be an existing absolute .docx `
-                                          `file: ${docxPath}` }],
+                                          + `file: ${docxPath}` }],
           isError: true,
         };
       }
@@ -72,7 +72,7 @@ serveStdio(() => {
           && !ALLOWED_ROOTS.some((r) => abs === r || abs.startsWith(r + path.sep))) {
         return {
           content: [{ type: 'text', text: `refused: ${abs} is outside `
-                                          `DOCX_MCP_ALLOWED_ROOTS` }],
+                                          + `DOCX_MCP_ALLOWED_ROOTS` }],
           isError: true,
         };
       }
