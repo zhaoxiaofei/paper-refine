@@ -644,6 +644,54 @@ def _package_docx(path: Path, heading: str) -> None:
                      '</w:body></w:document>'))
 
 
+def test_foreign_containers_are_venue_data():
+    """The formatter carries NO journal's vocabulary: container names are data.
+
+    A venue profile declares the other publisher's block headings its own
+    submission must not keep (`foreign_container_headings`); the formatter's
+    default is empty, so a venue that declares none gets no container rule.
+    """
+    tmp = scratch("paper_tpl_containers_")
+    tpl = tmp / "template.docx"
+    full_docx(tpl, ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/'
+                    '2006/main"><w:body>' + para("Heading1", "Introduction")
+                    + para("Heading2", "Methods") +
+                    '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>'
+                    '</w:body></w:document>'))
+    man = tmp / "manuscript.docx"
+    body = (f"<w:p>{_run('A title', sz=32, bold=True)}</w:p>"
+            f"<w:p>{_run('word ' * 30, sz=22, space=True)}</w:p>"
+            f"<w:p>{_run('Lead contact', sz=28, bold=True)}</w:p>"
+            f"<w:p>{_run('word ' * 30, sz=22, space=True)}</w:p>"
+            f"<w:p>{_run('Introduction', sz=28, bold=True)}</w:p>")
+    full_docx(man, ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/'
+                    '2006/main"><w:body>' + body +
+                    '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>'
+                    '</w:body></w:document>'))
+    plain = fmt.docx_front_matter_report(man, tpl)
+    with_venue = fmt.docx_front_matter_report(man, tpl, containers=("Lead contact",))
+    check("with no venue list the formatter reports NO foreign-container heading",
+          not any("container heading" in r for r in plain.get("rows") or []),
+          str(plain.get("rows")))
+    check("a venue that declares its own foreign blocks gets the row",
+          any("'Lead contact'" in r for r in with_venue.get("rows") or []),
+          str(with_venue.get("rows")))
+    check("the retag also skips what the VENUE declares foreign (and tags it otherwise)",
+          [t for _i, t, _s in fmt.heading_like_paragraphs(
+              zipfile.ZipFile(man).read("word/document.xml").decode("utf-8", "replace"),
+              containers=("Lead contact",))] == ["Introduction"]
+          and "Lead contact" in [t for _i, t, _s in fmt.heading_like_paragraphs(
+              zipfile.ZipFile(man).read("word/document.xml").decode("utf-8", "replace"))])
+    prof = nb.VenueProfile({"id": "probe-venue", "label": "Probe",
+                            "foreign_container_headings": ["Lead contact"]})
+    check("the venue profile validates and carries the field",
+          prof.data["foreign_container_headings"] == ["Lead contact"]
+          and nb.VenueProfile({"id": "probe-venue-2", "label": "Probe 2"}
+                              ).data["foreign_container_headings"] == [])
+
+
 def test_apply_template_package():
     """`apply-template`: the WHOLE package rebuilt inside the venue's templates."""
     tmp = scratch("paper_tpl_pkg_")
@@ -895,6 +943,7 @@ def main() -> int:
         test_generalized_template_restyle()
         test_heading_retag()
         test_even_odd_furniture()
+        test_foreign_containers_are_venue_data()
         test_apply_template_package()
         test_mcp_first_render_chain()
         test_visual_template_render_and_comparison()

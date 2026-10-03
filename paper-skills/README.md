@@ -259,10 +259,10 @@ paper-skills/
   library writes happen only in `apply` mode, one field of one existing item,
   under rule E2's propose-then-verify protocol. No mode creates or deletes
   library items, and paper-review never writes.
-- **Length rule** (M19, always on): the venue profile's limits apply relaxed
-  by the profile's own margins — the default nature-biotechnology profile:
-  abstract ≤ 150 words +10% (≤ 165) and main text ≤ 3,000 words +25% (≤ 3,750,
-  excluding abstract, Methods, references and figure legends). Words are
+- **Length rule** (M19, always on): the venue profile the run resolved supplies
+  the limits, relaxed by that profile's own margins (run prompt and
+  `venue_profiles/<id>.json`; the pipeline assumes no journal — a profile that
+  declares no limit is counted with no cap). Words are
   maximal runs of non-space characters with a newline treated as space
   (`scripts/count_words.py`); over-cap sections are
   reported and compressed by removing redundancy, repeated statistics and

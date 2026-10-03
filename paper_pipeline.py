@@ -1072,6 +1072,12 @@ _DEFAULT_VENUE_PROFILE = {
                            "words by the operator's default",
              },
          },
+         # Another publisher's block headings are DATA this profile declares (the
+         # formatter's own default is empty, so the engine carries no venue's
+         # vocabulary).
+         "foreign_container_headings": ["Lead contact", "Resource availability",
+                                        "Materials availability", "Method details",
+                                        "Key resources", "Key resources table"],
          "captions": {
              "published_limit": None,
              "default_cap": 0,
@@ -1456,6 +1462,11 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
     # invalid string silently became an empty list instead of failing).
     formats = _profile_str_list(submission.get("formats"), "submission.formats",
                                 problems) or []
+    # Another publisher's block headings ("Lead contact", "Key resources", ...)
+    # are DATA a venue declares, never pipeline knowledge: the formatter reads
+    # this list through `venue_containers()` and its own default is empty.
+    foreign = _profile_str_list(out.get("foreign_container_headings"),
+                                "foreign_container_headings", problems) or []
 
     if problems:
         raise VenueProfileError(f"{origin}: " + "; ".join(problems))
@@ -1485,6 +1496,7 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
         "default_journal": str(out.get("default_journal") or "").strip(),
         "length_limits": clean_limits,
         "captions": clean_captions,
+        "foreign_container_headings": foreign,
         "submission": {
             "pdf_accepted": pdf_accepted,
             "formats": formats,
@@ -2148,16 +2160,17 @@ def _docx_style_ids(path: Path) -> list:
     return fn(path) if fn is not None else []
 
 
-def _docx_front_matter_report(path: Path, template: Path = None) -> dict:
+def _docx_front_matter_report(path: Path, template: Path = None, containers=()) -> dict:
     """Front-matter/header/footer facts for one DOCX (see the formatter module)."""
     mod = _format_module()
     fn = getattr(mod, "docx_front_matter_report", None)
-    return fn(path, template) if fn is not None else {}
+    return fn(path, template, containers) if fn is not None else {}
 
 
 def scan_template_conformance(sources: list, requirements: dict,
                               word_template: Path = None,
-                              word_template_supplementary: Path = None) -> dict:
+                              word_template_supplementary: Path = None,
+                              containers=()) -> dict:
     """Code-side official-template conformance rows over a corpus.
 
     `sources` is the same [(dir, prefix, excluded_top)] shape the other scans
@@ -2316,7 +2329,7 @@ def scan_template_conformance(sources: list, requirements: dict,
                 want_tpl = (word_template_supplementary
                             if supp_ids and "supp" in Path(doc).name.lower()
                             else word_template)
-                fm = _docx_front_matter_report(path, want_tpl)
+                fm = _docx_front_matter_report(path, want_tpl, containers)
                 for row in (fm or {}).get("rows") or []:
                     front_rows.append(f"{doc}: {row}")
     conforms = (bool(req) and not missing_sections and not missing_statements and class_ok
@@ -2922,6 +2935,20 @@ def venue_word_templates(ctx: "Ctx") -> dict:
 def _ctx_cfg(ctx) -> dict:
     cfg = getattr(ctx, "cfg", None)
     return cfg if isinstance(cfg, dict) else {}
+
+
+def venue_containers(ctx: "Ctx") -> tuple:
+    """The foreign-publisher block headings THIS venue declares (may be empty).
+
+    A profile lists the other publisher's blocks its own submission must not
+    keep ("Lead contact", "Key resources", ...). The formatter stays agnostic:
+    it only ever sees this tuple, and a venue that declares none gets no
+    container rule at all.
+    """
+    prof = venue_profile_of(ctx, required=False)
+    if prof is None:
+        return ()
+    return tuple(str(c) for c in (prof.data.get("foreign_container_headings") or ()) if str(c))
 
 
 def venue_id_of(ctx=None) -> str:
@@ -10698,7 +10725,8 @@ def _fmt_corpus_files(dirp: Path) -> list:
     return out
 
 
-def fix_docx_in_place(path: Path, policy: dict, template: Path = None) -> dict:
+def fix_docx_in_place(path: Path, policy: dict, template: Path = None,
+                      containers=()) -> dict:
     """Repair one corpus DOCX in place, or leave it untouched and say why.
 
     The fixer's own verification decides: a file is replaced only when the
@@ -10735,7 +10763,8 @@ def fix_docx_in_place(path: Path, policy: dict, template: Path = None) -> dict:
     if template is not None:
         tpl_tmp = path.with_name(f".{path.name}.papertpl{os.getpid()}.tmp")
         try:
-            template_report = mod.apply_word_template(base, tpl_tmp, Path(template))
+            template_report = mod.apply_word_template(base, tpl_tmp, Path(template),
+                                                      containers=containers)
         except Exception as e:                                    # noqa: BLE001
             template_report = {"file": path.name, "ok": False,
                                "error": f"{type(e).__name__}: {e}"}
@@ -10788,7 +10817,8 @@ def fix_docx_in_place(path: Path, policy: dict, template: Path = None) -> dict:
 
 
 def normalize_formatting_in_dir(dirp: Path, policy: dict, label: str,
-                                warns=None, artifacts_dir=None, template=None) -> dict:
+                                warns=None, artifacts_dir=None, template=None,
+                                containers=()) -> dict:
     """Repair every corpus DOCX in `dirp` and record a machine-readable artifact.
 
     Called by `setup` (the pristine copy), by every package-producing stage's
@@ -10818,7 +10848,7 @@ def normalize_formatting_in_dir(dirp: Path, policy: dict, label: str,
         return Path(template)
 
     for f in _fmt_corpus_files(dirp):
-        rep = fix_docx_in_place(f, policy, template=template_for(f))
+        rep = fix_docx_in_place(f, policy, template=template_for(f), containers=containers)
         per_file.append(rep)
         if rep.get("applied"):
             applied.append(rep)
@@ -10898,7 +10928,7 @@ def template_package_files(src: Path) -> list:
 
 
 def rebuild_package_from_templates(templates: dict, src: Path, dest: Path,
-                                   force: bool = False) -> dict:
+                                   force: bool = False, containers=()) -> dict:
     """Rebuild a WHOLE submission package inside the venue's own Word templates.
 
     Every package DOCX is restyled into the journal's template by
@@ -10941,7 +10971,7 @@ def rebuild_package_from_templates(templates: dict, src: Path, dest: Path,
             files.append({"file": p.relative_to(src).as_posix(), "kind": "copied"})
             continue
         tpl = template_for_package_file(p, templates)
-        rep = mod.apply_word_template(p, target, tpl) if tpl else \
+        rep = mod.apply_word_template(p, target, tpl, containers=containers) if tpl else \
             {"ok": False, "error": "no matching Word template for this document"}
         if rep.get("ok"):
             files.append({"file": p.relative_to(src).as_posix(), "kind": "docx-rebuilt",
@@ -11051,7 +11081,8 @@ def _format_fix_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, warns: list,
     try:
         rec["format_fix"] = normalize_formatting_in_dir(
             pkg_dir, pre_judge_format_policy(ctx), rec["id"], warns=warns,
-            artifacts_dir=ctx.sandbox_of(rec), template=venue_word_templates(ctx) or None)
+            artifacts_dir=ctx.sandbox_of(rec), template=venue_word_templates(ctx) or None,
+            containers=venue_containers(ctx))
     except Exception as e:                                            # noqa: BLE001
         rec["format_fix"] = {"label": rec["id"], "error": f"{type(e).__name__}: {e}"}
         warns.append(f"FORMAT-FIX: the code-side formatting normalization could not run "
@@ -11868,7 +11899,8 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
                 word_tpl = _w.get("main")
                 conf = scan_template_conformance([(corpus_dir, "", CORPUS_EXCLUDE_TOP)], req,
                                                  word_template=word_tpl,
-                                                 word_template_supplementary=_w.get("supplementary"))
+                                                 word_template_supplementary=_w.get("supplementary"),
+                                                 containers=venue_containers(ctx))
                 ev["official_template"] = conf
                 write_json_atomic(work / "OFFICIAL_TEMPLATE.json", conf)
                 rows = ([{"row": f"mandatory section missing: {s}"} for s in
@@ -27116,7 +27148,8 @@ def cmd_setup(args) -> None:
         setup_warns = []
         format_fix_report = normalize_formatting_in_dir(
             ctx.pristine, pre_judge_format_policy(ctx), "original", warns=setup_warns,
-            artifacts_dir=ctx.reports_dir, template=venue_word_templates(ctx) or None)
+            artifacts_dir=ctx.reports_dir, template=venue_word_templates(ctx) or None,
+            containers=venue_containers(ctx))
         for w in setup_warns:
             print(f"[setup] {w}")
     ctx.state = {"version": STATE_VERSION, "runs": {}, "rounds": {}, "pinned": [], "log": [],
@@ -27998,13 +28031,16 @@ def cmd_apply_template(args) -> None:
         die("no package to rebuild: the root has no final_clean_version/ and no completed "
             "round's round<r>_winner/ -- name one with --source <dir>")
     dest = Path(args.dest).expanduser() if args.dest else ctx.root / TEMPLATE_PACKAGE_DIRNAME
-    report = rebuild_package_from_templates(templates, src, dest, force=bool(args.force))
+    report = rebuild_package_from_templates(templates, src, dest, force=bool(args.force),
+                                            containers=venue_containers(ctx))
     if not report.get("ok"):
         if report.get("error"):
             die(report["error"])
         die("the rebuild left files un-restyled: " + ", ".join(report.get("failed") or []))
-    print(f"[apply-template] venue: {venue_id_of(ctx)} "
-          f"({venue_profile_of(ctx, required=False).journal if venue_profile_of(ctx, required=False) else ''})")
+    prof = venue_profile_of(ctx, required=False)
+    journal = journal_of(ctx) or (prof.default_journal if prof is not None else "")
+    print(f"[apply-template] venue: {venue_id_of(ctx)}"
+          + (f" ({journal})" if journal else " (no journal configured)"))
     print(f"[apply-template] rebuilt {report['documents_rebuilt']} document(s) and copied "
           f"{report['files_copied']} other file(s):")
     for f in report["files"]:
@@ -29566,7 +29602,8 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
                   else normalize_formatting_in_dir(tmp, format_policy_of(ctx),
                                                    FINAL_CLEAN_DIRNAME, warns=None,
                                                    artifacts_dir=ctx.reports_dir,
-                                                   template=venue_word_templates(ctx) or None))
+                                                   template=venue_word_templates(ctx) or None,
+                                                   containers=venue_containers(ctx)))
     manifest = corpus_dir_manifest(tmp)
     final_digest = manifest_digest(manifest)
     if dst.is_dir() and corpus_tree_digest(dst) == final_digest:

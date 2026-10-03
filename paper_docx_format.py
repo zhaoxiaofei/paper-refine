@@ -345,7 +345,7 @@ def _template_uses_even_odd(template: Path) -> bool:
                           sects[-1] if sects else ""))
 
 
-def docx_front_matter_report(path: Path, template: Path = None) -> dict:
+def docx_front_matter_report(path: Path, template: Path = None, containers=()) -> dict:
     """Template-conformance facts about a DOCX's front matter and headings.
 
     Used by the venue-template scanner to name the layout gaps a review/rewrite
@@ -406,8 +406,9 @@ def docx_front_matter_report(path: Path, template: Path = None) -> dict:
     heading_level_of = {sid: lvl for lvl, sid in (roles.get("headings") or {}).items()}
     depth = int(roles.get("max_heading_level") or 2)
     deep = sum(1 for s in styles if heading_level_of.get(s, 0) > depth)
-    containers = [t for t, s in zip(texts, styles)
-                  if t in _FRONT_MATTER_CONTAINERS and (s.startswith("Heading") or not s)]
+    container_rows = [t for t, s in zip(texts, styles)
+                      if t in tuple(containers or _FOREIGN_CONTAINERS_DEFAULT)
+                      and (s.startswith("Heading") or not s)]
     out = {"title_style": title_style, "author_style": author_style,
            "abstract_style": abstract_style, "keywords_style": keywords_style,
            "first_header": bool(first_header), "logo_header": logo,
@@ -418,7 +419,7 @@ def docx_front_matter_report(path: Path, template: Path = None) -> dict:
            "even_odd": "evenAndOddHeaders" in settings,
            "deep_headings": deep,
            "heading3": sum(1 for s in styles if heading_level_of.get(s) == 3),
-           "container_headings": containers}
+           "container_headings": container_rows}
     if template is None:
         return out
     title_id = roles.get("title")
@@ -470,7 +471,7 @@ def docx_front_matter_report(path: Path, template: Path = None) -> dict:
                 re.search(r"<w:spacing\b", ppr_of(a) or "") for a in affs[:2]):
             rows.append("the affiliation lines do not carry the template's before=240/after=0 "
                         "spacing")
-    for container in containers:
+    for container in container_rows:
         rows.append(f"source-template container heading {container!r} is not part of the "
                     f"venue's structure")
     out["rows"] = rows
@@ -3693,8 +3694,11 @@ _DIRECT_FORMAT_PATTERNS = (
 _SECT_RE = re.compile(r"<w:sectPr(?=[\s>])[\s\S]*?</w:sectPr>")
 _RELS_RE = re.compile(r'<Relationship Id="([^"]+)"[^>]*Type="[^"]*/([a-zA-Z]+)"'
                       r'[^>]*Target="([^"]+)"')
-_FRONT_MATTER_CONTAINERS = ("Lead contact", "Resource availability", "Materials availability",
-                            "Method details", "Key resources", "Key resources table")
+# Another publisher's block headings ("Lead contact", "Key resources", ...) are
+# VENUE DATA, never pipeline knowledge: the calling venue profile passes its own
+# `foreign_container_headings` list and this default is empty, so the formatter
+# carries no journal's vocabulary and stays venue-agnostic.
+_FOREIGN_CONTAINERS_DEFAULT = ()
 _SIMPLE_PAGE_FOOTER = (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
     '<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
@@ -4095,7 +4099,7 @@ def _body_run_size(doc_xml: str):
     return int(sizes.most_common(1)[0][0])
 
 
-def heading_like_paragraphs(doc_xml: str) -> list:
+def heading_like_paragraphs(doc_xml: str, containers=()) -> list:
     """[(paragraph index, text, size)] of DIRECTLY-formatted section headings.
 
     A manuscript written in Word often carries its section headings as direct
@@ -4140,7 +4144,7 @@ def heading_like_paragraphs(doc_xml: str) -> list:
             continue
         low = text.lower()
         if low.startswith(_HEADING_SKIP_PREFIXES) \
-                or low in {c.lower() for c in _FRONT_MATTER_CONTAINERS}:
+                or low in {c.lower() for c in (containers or _FOREIGN_CONTAINERS_DEFAULT)}:
             continue
         pstyle = elem_val(ppr_of(frag), "pStyle")
         if pstyle and pstyle != "Normal":
@@ -4162,7 +4166,7 @@ def heading_like_paragraphs(doc_xml: str) -> list:
     return out
 
 
-def _retag_headings(doc_xml: str, roles: dict) -> tuple:
+def _retag_headings(doc_xml: str, roles: dict, containers=()) -> tuple:
     """(xml, retagged): tag directly-formatted headings with the template's styles.
 
     The paragraph STYLE IS the only thing changed -- the text stays byte-identical,
@@ -4175,7 +4179,7 @@ def _retag_headings(doc_xml: str, roles: dict) -> tuple:
     headings = dict(roles.get("headings") or {})
     if not headings:
         return doc_xml, []
-    cands = heading_like_paragraphs(doc_xml)
+    cands = heading_like_paragraphs(doc_xml, containers)
     if not cands:
         return doc_xml, []
     depth = max(1, int(roles.get("max_heading_level") or 2))
@@ -4548,7 +4552,7 @@ def _with_even_odd_headers(parts: dict) -> bool:
     return True
 
 
-def apply_word_template(src: Path, out: Path, template: Path) -> dict:
+def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> dict:
     """Restyle one DOCX into the venue's official Word template.
 
     The template's styles/theme/font table/numbering REPLACE the manuscript's
@@ -4631,7 +4635,7 @@ def apply_word_template(src: Path, out: Path, template: Path) -> dict:
                     # Heading STYLE first, then strip: a source heading that only
                     # carries direct formatting must not be flattened into body
                     # text by the strip below.
-                    new_xml, headings_retagged = _retag_headings(new_xml, roles)
+                    new_xml, headings_retagged = _retag_headings(new_xml, roles, containers)
                     retag_styles = {t["style"] for t in headings_retagged}
                 # A paragraph whose style exists in the template follows that
                 # style: drop the direct geometry/typography that would hide it.

@@ -315,6 +315,14 @@
   "journal_patterns": [],
   "accepts_any_journal": false,
   "default_journal": "Nature Biotechnology",
+  "foreign_container_headings": [
+    "Lead contact",
+    "Resource availability",
+    "Materials availability",
+    "Method details",
+    "Key resources",
+    "Key resources table"
+  ],
   "length_limits": {
     "source": "https://www.nature.com/nbt/content (checked 2026-10-01), Article format: abstract <= 150 words, unreferenced; main text <= 3,000 words excluding abstract, Methods, references and figure legends",
     "abstract": {

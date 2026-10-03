@@ -21,7 +21,7 @@ type -- use the profile and type of the run you are in.
 - `ZOTERO_SKILL` = `/mnt/d/software/plugins/plugins/zotero/skills/zotero/scripts/zotero.py` (override or absent → manual instructions)
 - `ZOT_CLI` = `zot` (pyzotero-cli) and the `$zotero-use` skill — reference resolution and, under the operator's Zotero policy, guarded citation-field edits (rule E2)
 
-If both findings files are missing AND no findings are in the current conversation: **STOP and ask the user to run paper-review (identify_issues) first.** Explicit paths the user gives override defaults. All output in English. Length rules inherited from the review (check id M19): the VENUE PROFILE's limits apply relaxed by the profile's own margins — for the default nature-biotechnology Article profile, abstract ≤ 165 words (150 +10%) and main text ≤ 3,750 words (3,000 +25%, excluding abstract, Methods, references and figure legends); another profile replaces these numbers (they are stated in the prompt of the run, and in `venue_profiles/<id>.json`): an over-cap section is brought within the cap by removing redundancy, repeated statistics and non-meaning-bearing hedging ONLY, never by deleting scientific content and never by stripping a hedge that carries the claim's own strength (that is an overclaim, not a shortening), and text within the cap is never cut for length. An incompressible section goes to MANUAL_STEPS.md. The cover letter's persuading part is measured against the user's configured 300-500-word preference (the default profile's venue publishes no cover-letter limit) and is a Minor formatting item; the letter's TOTAL content (salutation, body, disclosures and signature) is capped at 650 words by default (the operator's cap, also a Minor formatting item, never a gate); figure-legend word counts (M18) are recorded but never cut when no proxy cap is configured.
+If both findings files are missing AND no findings are in the current conversation: **STOP and ask the user to run paper-review (identify_issues) first.** Explicit paths the user gives override defaults. All output in English. Length rules inherited from the review (check id M19): the VENUE PROFILE's limits apply relaxed by the profile's own margins — the profile the run resolved states the numbers (run prompt and `venue_profiles/<id>.json`; the pipeline assumes no journal — a profile that declares no limit is counted with no cap; e.g. the shipped default profile's Article type sets abstract ≤ 150 words +10% (≤ 165) and main text ≤ 3,000 +25% (≤ 3,750)): an over-cap section is brought within the cap by removing redundancy, repeated statistics and non-meaning-bearing hedging ONLY, never by deleting scientific content and never by stripping a hedge that carries the claim's own strength (that is an overclaim, not a shortening), and text within the cap is never cut for length. An incompressible section goes to MANUAL_STEPS.md. The cover letter's persuading part is measured against the user's configured 300-500-word preference (the profile the run resolved publishes no cover-letter limit) and is a Minor formatting item; the letter's TOTAL content (salutation, body, disclosures and signature) is capped at 650 words by default (the operator's cap, also a Minor formatting item, never a gate); figure-legend word counts (M18) are recorded but never cut when no proxy cap is configured.
 
 ## Mission
 
@@ -236,11 +236,9 @@ governs it like any other precision edit; it never licenses restructuring
 around the corrected value.
 
 **Scoped exception — M19 length compression.** An abstract or main text over
-the pipeline's relaxed caps (abstract ≤ 165 words = 150 +10%; main text ≤ 3,750
-words = 3,000 +25%, excluding abstract, Methods, references and figure legends,
-for the default Nature Biotechnology Article profile; another content type uses
-its own base numbers with the same margins, and another venue profile carries
-the numbers its own guidelines state) is brought within the cap by removing redundancy,
+the run's venue-profile caps (the profile the pipeline resolved states the numbers:
+run prompt and `venue_profiles/<id>.json`; the pipeline assumes no journal, and a
+profile that declares no limit is counted with no cap) is brought within the cap by removing redundancy,
 repeated statistics and hedging that carries no meaning ONLY. A hedge that carries the claim's
 own strength — a limitation, an uncertainty the evidence supports, a result
 reported as uncertain because it is — is CONTENT: stripping it turns an accurate claim into an

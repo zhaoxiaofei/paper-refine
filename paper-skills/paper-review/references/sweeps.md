@@ -680,7 +680,7 @@ Fig. 1 legend, study has no spike-in) and F-046 (TODO note in Methods).
 
 **Purpose:** the target venue's formatting guide requires a figure legend
 not to exceed "the word limit of the article type" but publishes no number (the
-default Nature Biotechnology profile: checked against its submission
+run's venue profile (the profile the pipeline resolved for this submission; its own limits and statement vocabulary are authoritative): checked against its submission
 guidelines, 2026-09-19). M18 therefore ALWAYS
 enumerates every legend's word count; the orchestration pipeline may add a proxy
 cap (`--caption-limit N`, default 0 = no cap) to turn a count into a reportable
@@ -715,7 +715,7 @@ on its own.
 
 **Purpose:** the venue profile's own length limits apply, relaxed by the
 profile's own margins — this replaces the former blanket "abstract/main-text
-length is exempt" standing exemption. For the default Nature Biotechnology **Article** profile the base
+length is exempt" standing exemption. For the run's venue profile's selected article type the base
 limits are abstract ≤ 150 words and main text ≤ 3,000 words, with the main text
 EXCLUDING the abstract, Methods, references and figure legends; this pipeline
 allows **abstract +10% (≤ 165 words)** and **main text +25% (≤ 3,750 words)**.

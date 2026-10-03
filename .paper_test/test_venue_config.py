@@ -747,8 +747,15 @@ def test_skill_script():
     proc = subprocess.run([sys.executable, str(script), str(tmp / "ms.md"), "--json"],
                           capture_output=True, text=True)
     default = json.loads(proc.stdout)
-    check("VC7 without a profile it uses the default Article caps",
-          default["caps"] == {"abstract": 165, "main text": 3750}, str(default["caps"]))
+    check("VC7 without a profile the script assumes NO journal: counts only, no cap",
+          default["caps"] == {"abstract": None, "main text": None}, str(default["caps"]))
+    proc = subprocess.run([sys.executable, str(script), str(tmp / "ms.md"), "--json",
+                           "--venue-profile",
+                           str(WS / "venue_profiles" / "nature-biotechnology.json")],
+                          capture_output=True, text=True)
+    nbt = json.loads(proc.stdout)
+    check("VC7 with the shipped nature-biotechnology profile it uses ITS Article caps",
+          nbt["caps"] == {"abstract": 165, "main text": 3750}, str(nbt["caps"]))
     proc = subprocess.run([sys.executable, str(script), str(tmp / "ms.md"), "--json",
                            "--venue-profile", str(WS / "venue_profiles" / "generic.json")],
                           capture_output=True, text=True)

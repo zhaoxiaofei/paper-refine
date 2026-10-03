@@ -22,11 +22,9 @@ governs it like any other precision edit; it never licenses restructuring
 around the corrected value.
 
 **Scoped exception — M19 length compression.** An abstract or main text over
-the pipeline's relaxed caps (abstract ≤ 165 words = 150 +10%; main text ≤ 3,750
-words = 3,000 +25%, excluding abstract, Methods, references and figure legends,
-for the default Nature Biotechnology Article profile; another content type uses
-its own base numbers with the same margins, and another venue profile carries
-the numbers its own guidelines state) is brought within the cap by removing redundancy,
+the run's venue-profile caps (the profile the pipeline resolved states the numbers:
+run prompt and `venue_profiles/<id>.json`; the pipeline assumes no journal, and a
+profile that declares no limit is counted with no cap) is brought within the cap by removing redundancy,
 repeated statistics and hedging that carries no meaning ONLY. A hedge that carries the claim's
 own strength — a limitation, an uncertainty the evidence supports, a result
 reported as uncertain because it is — is CONTENT: stripping it turns an accurate claim into an

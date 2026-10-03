@@ -24,9 +24,7 @@ The cover letter is counted twice: its PERSUADING part against the user's
 300-500-word preference, and its TOTAL content (salutation, body, disclosures
 and signature) against the operator's 650-word default cap.
 
-The default caps are the relaxed limits of the pipeline's DEFAULT venue profile
-and its default article type (nature-biotechnology Article): abstract <= 165
-words (150 +10%) and main text <= 3,750 words (3,000 +25%). Pass
+This script assumes NO journal: without a profile it only COUNTS (no cap). Pass
 `--venue-profile venue_profiles/<id>.json` to read the limits from the profile
 the run is configured with (the pipeline's prompts state the same numbers), plus
 `--article-type <id>` to use that type's own entry from the profile's
@@ -34,7 +32,7 @@ the run is configured with (the pipeline's prompts state the same numbers), plus
 the profile's `default_article_type` is used. A type the profile carries no
 numbers for -- and a profile that declares no limit -- produces counts with no
 cap (`cap: null`, never "over the cap"). `--base-abstract` / `--base-main-text`
-override the bases with the default margins.
+set the bases for a profile-less use (they default to no cap).
 """
 from __future__ import annotations
 
@@ -386,8 +384,12 @@ def main(argv=None) -> int:
     ap.add_argument("files", nargs="+")
     ap.add_argument("--section", choices=["auto", "whole", "abstract", "main-text", "cover-letter"],
                     default="auto")
-    ap.add_argument("--base-abstract", type=int, default=150)
-    ap.add_argument("--base-main-text", type=int, default=3000)
+    ap.add_argument("--base-abstract", type=int, default=None,
+                    help="article-type abstract base for a profile-less use "
+                         "(default: no cap)")
+    ap.add_argument("--base-main-text", type=int, default=None,
+                    help="article-type main-text base for a profile-less use "
+                         "(default: no cap)")
     ap.add_argument("--venue-profile", metavar="FILE",
                     help="venue profile JSON (venue_profiles/<id>.json): take the abstract/"
                          "main-text base and margins and the cover-letter preference from its "
@@ -402,7 +404,7 @@ def main(argv=None) -> int:
     rel_abstract, rel_main = ABSTRACT_RELAXATION, MAIN_TEXT_RELAXATION
     cover_min, cover_max = COVER_LETTER_MIN, COVER_LETTER_MAX
     cover_total_max = COVER_LETTER_TOTAL_MAX
-    venue = "nature-biotechnology (the default profile)"
+    venue = "(no venue profile: counts only, no cap)"
     if args.venue_profile:
         try:
             profile = json.loads(Path(args.venue_profile).read_text(encoding="utf-8"))
