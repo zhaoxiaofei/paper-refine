@@ -327,14 +327,16 @@ def test_stub_round_sessions():
     check("the judge wave materialized", len(judge_ids) == len(field), str(judge_ids))
     first = ctx.sandbox_of(ctx.run(judge_ids[0]))
     # BLINDING: a judge sandbox must hold ONLY the blinded packages (plus the
-    # prompt, the run's own marker and the public stateless tool its prompt names)
-    # -- no orchestrator scan, no digest, no review artifacts, no evidence pack.
+    # prompt, the run's own marker, the public stateless tool its prompt names and
+    # the venue-level template render, which is identical for every session and
+    # derived from no package) -- no orchestrator scan, no digest, no review
+    # artifacts, no evidence pack.
     leaked = []
     for p in first.rglob("*"):
         if not p.is_file():
             continue
         rel = p.relative_to(first).as_posix()
-        if rel.startswith(("target/", "field/", "original/")) \
+        if rel.startswith(("target/", "field/", "original/", nb.VISUAL_TEMPLATE_DIR + "/")) \
                 or rel in ("PROMPT.md", nb.DOCX_FORMAT_MODULE):
             continue
         leaked.append(rel)

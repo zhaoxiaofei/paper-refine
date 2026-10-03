@@ -244,9 +244,28 @@ those styles are removed — with the document text proven byte-identical or the
   style roles (title, author list, abstract/keywords), the heading-depth cap,
   the first-page header (logo) and the page-number footers are read from the
   template's own parts, not from a built-in list, so a journal whose template
-  renders differently gets that rendering; the code-side scan reports what the
+  renders differently gets that rendering. The template's own page furniture is
+  carried role by role -- first, odd (default) and EVEN pages, with the
+  `w:evenAndOddHeaders` switch the template relies on -- so a running head the
+  template defines for even pages only appears there, and the first-page logo
+  keeps its media relationship (a target rewritten without its `media/` prefix
+  renders as an empty frame). A footer that is only the template's own
+  typesetting prose (Frontiers' red "provisional file" note) is never stamped
+  into the manuscript: the plain page-number footer stands in for that role,
+  and the substitution is reported in the run's template report. The code-side
+  scan reports what the
   agents must still fix (front-matter styles, sub-sub-sections, container
-  headings imported from another publisher's template). `venue_profiles/<venue-id>.manuscripts/` (recent OA articles, or
+  headings imported from another publisher's template). When the venue ships a
+  Word template, the orchestrator also **renders it once per root** (Word via
+  `docx2pdf.sh` first, LibreOffice as the fallback: PDF + page images + a
+  `manifest.json` naming the renderer and each template document's page count,
+  cached by template digest) and seeds that render into every producing/
+  reviewing/judging sandbox as `visual_template/`. The visual-inspection record
+  must then compare the agent's own render against it -- title page, header/logo,
+  footers, heading depth, caption placement -- and name each template document
+  and its page count; a record that ignores a render the machine could make is
+  rejected, and a template nobody could render leaves the record's own
+  "not visually verified" escape hatch in charge. `venue_profiles/<venue-id>.manuscripts/` (recent OA articles, or
 structure-only transcriptions) adds a second, **advisory** tier used only for
 what the template leaves open. Both feed the pinned
 `venue_profiles/<venue-id>.templates/` pack (every input and output

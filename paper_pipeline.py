@@ -427,7 +427,14 @@ CODE-SIDE CHECKS (in addition to what the prompts ask the agents to do)
                           revised/VISUAL_CHECK.md, rewritten/VISUAL_CHECK.md,
                           integrated/VISUAL_CHECK.md) or explicitly declared
                           impossible with a manual step. Reading a .docx is not
-                          a visual inspection (text carries no layout).
+                          a visual inspection (text carries no layout). When the
+                          venue ships an official Word template, the orchestrator
+                          renders it ONCE per root (Word first, LibreOffice as
+                          the fallback) into each session's `visual_template/`
+                          (PDF + page images + renderer/page manifest) so every
+                          agent compares its own render side by side with the
+                          template's, and the recorded pass must name each
+                          template document and its rendered page count.
     * review contract     submission_dir must resolve to base/, every check id
                           M1-M17, J1-J5 plus M18-M30 (the always-active length/
                           caption/formatting checks, the adopted rewrite-parity
@@ -703,6 +710,7 @@ import stat
 import statistics
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -2841,8 +2849,10 @@ def venue_norm_block(venue_id, root=None, transfer: bool = False) -> str:
     word = files.get("word") or {}
     latex = files.get("latex") or {}
     if word or latex:
-        lines = ["", "TEMPLATE FILES FOR THIS RUN (producer/reviewer sandboxes carry a "
-                     "read-only `venue_template/` copy; the venue's own files are named here):"]
+        lines = ["", "TEMPLATE FILES FOR THIS RUN (the producing/reviewing sandboxes carry a "
+                     "read-only `venue_template/` copy of the venue's own files, and their render "
+                     "-- when this machine could make one -- is staged for the visual pass under "
+                     "`visual_template/`):"]
         if word.get("main"):
             lines.append(f"  * Word (.docx): venue_template/word/{Path(word['main']).name}"
                          + (f"; supplementary: venue_template/word/"
@@ -2859,6 +2869,11 @@ def venue_norm_block(venue_id, root=None, transfer: bool = False) -> str:
                      "theme by the code-side normalizer before the postcheck. Keep the template's "
                      "heading styles, statement names, and figure/table label order; do not "
                      "reintroduce the previous venue's styles.")
+        if word.get("main"):
+            lines.append("  * `visual_template/<role>/` holds the templates' own PDF and page "
+                         "images (`manifest.json` names the renderer and each document's page "
+                         "count): compare your render side by side with them and name each "
+                         "template document and its page count in the visual-inspection record.")
         text += "\n" + "\n".join(lines)
     return text + f"\n\n(pack: {pack} -- {VENUE_NORM_FILE} sha256 {digest[:16]})"
 
@@ -6006,6 +6021,18 @@ VISUAL_INSPECTION_RULE = """VISUAL INSPECTION — RENDER FIRST, THEN LOOK (a DOC
     into the work directory of your OWN OUT (`OUT/work/`, e.g. `judge_review/work/`) first, and
     point the converter at THAT copy, so the read-only views stay byte-identical. A PDF or
     image that appears inside a read-only view is treated as tampering and fails the run.
+  * THE VENUE TEMPLATE IS ALREADY RENDERED FOR YOU: when the venue ships an official template
+    and this machine could render it, `visual_template/` holds the template's own PDF, its page
+    images and a `manifest.json` naming the renderer used and each template document's page
+    count. LOOK at `visual_template/<role>/<name>.pdf` side by side with your own render and
+    record a **Template comparison** section in @@VISUAL_ARTIFACT@@: title page (title alignment,
+    author list, affiliations/correspondence), running head/logo, footers and page numbers,
+    heading depth and numbering, figure/table caption placement and legibility, and the
+    front-page budget. Name each template document and its page count in that section -- the
+    orchestrator checks that the comparison was actually made. If `visual_template/` is absent
+    or its manifest records a render error, compare against the read-only `venue_template/` file
+    itself (extract its structure) and say in the artifact that the visual template render was
+    unavailable.
   * What to look for, page by page: fonts too small/large for their part of the manuscript,
     justified main text (must be left-aligned), overlapping or clipped text/figures, tables that
     overflow or break badly, figures/tables split across pages, orphaned headings, uneven
@@ -12056,7 +12083,10 @@ def evidence_pack_block(where: str) -> str:
         # rows afterwards and never seeds them.
         return """BLINDING RULE (read first) -- you are handed the blinded packages and NOTHING else: no
    findings or reviews from other sessions, no change ledger, no orchestrator measurements, no
-   digests or version tokens, no pre-computed check rows, and no history of any package. Your
+   digests or version tokens, no pre-computed check rows, and no history of any package. (ONE
+   venue-level exception: when the venue ships an official template, `visual_template/` holds
+   that template's own render -- identical for every session and every package, derived from
+   nothing in the field, so it names no provenance; see the visual-inspection rule.) Your
    session identifier, your sandbox path and the number of opponents are the only session facts
    you get; they are opaque and deliberately carry no ordering, age or origin information. Judge
    each package on its CONTENT alone: names, timestamps and document metadata were stripped from
@@ -15705,6 +15735,7 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
             ensure_copy(fb / "feedback", sb / "feedback")
     (sb / REWRITTEN_DIR).mkdir(exist_ok=True)
     stage_venue_template(ctx, sb)
+    seed_template_visuals(ctx, sb)
     seed_evidence_pack(ctx, sb, sb / "base", "stage")
     note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / "PROMPT.md"
@@ -15775,6 +15806,7 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
             inputs["review_a"] = hash_manifest(sb / "review_a")
     (sb / REVIEW_DIR).mkdir(exist_ok=True)
     stage_venue_template(ctx, sb)
+    seed_template_visuals(ctx, sb)
     # Seed the M20 formatting sweep: the code-side OOXML scan IS the enumeration
     # (text-only converters cannot see layout/character formatting), so the
     # orchestrator writes the rows before the agent starts and the prompt asks
@@ -15831,6 +15863,7 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
     ensure_copy(ctx.sandbox_of(rev_rec) / REVIEW_DIR, sb / REVIEW_DIR)
     (sb / "audit").mkdir(exist_ok=True)
     stage_venue_template(ctx, sb)
+    seed_template_visuals(ctx, sb)
     seed_evidence_pack(ctx, sb, sb / "base", "audit")
     note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / "PROMPT.md"
@@ -15904,6 +15937,7 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
         aud_manifest = hash_manifest(sb / "audit")
     (sb / REVISED_DIR).mkdir(exist_ok=True)
     stage_venue_template(ctx, sb)
+    seed_template_visuals(ctx, sb)
     seed_evidence_pack(ctx, sb, sb / "base", "stage")
     note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / "PROMPT.md"
@@ -15972,6 +16006,7 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
     ensure_pristine_input(ctx, sb / PRISTINE_DIR)
     (sb / INTEGRATED_DIR).mkdir(exist_ok=True)
     stage_venue_template(ctx, sb)
+    seed_template_visuals(ctx, sb)
     seed_evidence_pack(ctx, sb, sb / "self", "stage")
     note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / "PROMPT.md"
@@ -16110,10 +16145,12 @@ def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
             # sessions). The judge derives its own M18/M19/M20 rows from the
             # blinded packages with the same public tool; the orchestrator only
             # verifies those rows afterwards (postcheck_judge), never seeds them.
-            # The judge gets the venue's template RULES as prompt text (identical
-            # for every session and every target/opponent) but no staged file:
-            # the no-orchestrator-artifact rule stays intact, and the style-level
-            # conformance is measured by code, not by the panel.
+            # The judge gets the venue's template RULES as prompt text and the
+            # venue's own template RENDER (both identical for every session and
+            # every target/opponent). That is the one venue-level exception to
+            # "no orchestrator artifact": nothing derived from target/field is
+            # seeded, so provenance stays blinded.
+            seed_template_visuals(ctx, sb)
             prompt = sb / "PROMPT.md"
             if not prompt.is_file():
                 _copy_session_tools(sb, stamp=view_stamp)
@@ -17250,6 +17287,171 @@ def render_evidence_files(render_roots) -> list:
     return out
 
 
+VISUAL_TEMPLATE_DIR = "visual_template"
+VISUAL_CACHE_DIRNAME = ".visual_cache"
+VISUAL_PAGE_DPI = 110
+VISUAL_MAX_RENDER_ATTEMPTS = 2
+
+
+def visual_renderer_choice() -> tuple:
+    """(name, executable) for the best layout-faithful DOCX->PDF renderer here."""
+    here = Path(__file__).resolve().parent
+    for cand in (here / "docx2pdf.sh", shutil.which("docx2pdf.sh")):
+        if cand and Path(cand).is_file() and os.access(str(cand), os.X_OK):
+            return "word", Path(cand)
+    for exe in ("soffice", "libreoffice"):
+        p = shutil.which(exe)
+        if p:
+            return "libreoffice", Path(p)
+    return "none", None
+
+
+def _pdf_page_count(pdf: Path) -> int:
+    exe = shutil.which("pdfinfo")
+    if exe:
+        try:
+            out = subprocess.run([exe, str(pdf)], capture_output=True, timeout=60).stdout
+            m = re.search(rb"^Pages:\s*(\d+)", out or b"", re.M)
+            if m:
+                return int(m.group(1))
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return 0
+
+
+def _child_output(raw) -> str:
+    """A child process's stdout/stderr as text, never fatal on a non-UTF-8 locale.
+
+    The renderers this pipeline drives are Windows-interop shims; their
+    diagnostics arrive in the console's own code page, and decoding those as
+    strict UTF-8 must not turn a rendered PDF into a failed session.
+    """
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", "replace")
+    return raw or ""
+
+
+def render_docx_visual(docx: Path, out_dir: Path, renderer=None) -> dict:
+    """Render ONE DOCX to PDF + page PNGs under `out_dir`.
+
+    Word (docx2pdf.sh) is preferred because pagination, fonts and headers/
+    footers differ between Word and LibreOffice; the renderer actually used is
+    recorded so the agents and the decision report can state it.
+    """
+    name, exe = renderer or visual_renderer_choice()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if name == "none" or exe is None:
+        return {"ok": False, "renderer": "none", "error": "no DOCX->PDF renderer on PATH"}
+    tmp = Path(tempfile.mkdtemp(prefix="vrender_", dir=str(out_dir)))
+    try:
+        src = tmp / docx.name
+        shutil.copy2(docx, src)
+        if name == "word":
+            proc = subprocess.run([str(exe), str(src)], capture_output=True,
+                                  timeout=900, cwd=str(tmp))
+            pdf = src.with_suffix(".pdf")
+        else:
+            profile = tmp / "lo_profile"
+            proc = subprocess.run([str(exe), "--headless",
+                                   f"-env:UserInstallation=file://{profile}",
+                                   "--convert-to", "pdf", "--outdir", str(tmp), str(src)],
+                                  capture_output=True, timeout=900)
+            pdf = tmp / (src.stem + ".pdf")
+        if not pdf.is_file() or pdf.stat().st_size == 0:
+            detail = (_child_output(proc.stderr) + _child_output(proc.stdout)) \
+                .strip().replace("\n", " ")[:200]
+            return {"ok": False, "renderer": name,
+                    "error": f"the renderer produced no PDF: {detail}"}
+        final_pdf = out_dir / (docx.stem + ".pdf")
+        shutil.move(str(pdf), str(final_pdf))
+        pages = _pdf_page_count(final_pdf)
+        pngs = []
+        if shutil.which("pdftoppm"):
+            prefix = out_dir / docx.stem
+            subprocess.run(["pdftoppm", "-r", str(VISUAL_PAGE_DPI), "-png",
+                            str(final_pdf), str(prefix)],
+                           capture_output=True, timeout=600)
+            pngs = sorted(p.name for p in out_dir.glob(docx.stem + "-*.png"))
+            pages = pages or len(pngs)
+        return {"ok": True, "renderer": name, "pdf": final_pdf.name,
+                "pages": pages or 0, "pngs": pngs}
+    except (OSError, subprocess.SubprocessError) as e:                  # noqa: BLE001
+        return {"ok": False, "renderer": name, "error": f"{type(e).__name__}: {e}"}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _cached_visual_render(cache: Path, renderer_name: str) -> tuple:
+    """(reusable cached record or None, render attempts already made).
+
+    A successful render is reused. A FAILED one is retried until
+    VISUAL_MAX_RENDER_ATTEMPTS: one flaked Word/COM call must not silently
+    disable the template comparison for the whole root, and a renderer that
+    cannot work here must not be re-driven once per session either.
+    """
+    try:
+        stored = json.loads((cache / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, 0
+    if not isinstance(stored, dict) or stored.get("renderer") != renderer_name:
+        return None, 0
+    try:
+        attempts = int(stored.get("attempts") or 1)
+    except (TypeError, ValueError):
+        attempts = 1
+    if stored.get("ok") or attempts >= VISUAL_MAX_RENDER_ATTEMPTS:
+        return stored, attempts
+    return None, attempts
+
+
+def seed_template_visuals(ctx: Ctx, sb: Path) -> dict:
+    """Render the venue's official Word templates into `sb/visual_template/`.
+
+    Cached per root by template digest, so one Word render serves every session.
+    Venue-level and identical for every session -- no provenance, so the judge
+    sandboxes may receive it (unlike package renders, which stay blinding-safe
+    because the judge renders its own target/field views).
+    """
+    tpls = venue_word_templates(ctx)
+    if not tpls:
+        return {}
+    renderer = visual_renderer_choice()
+    manifest = {"renderer": renderer[0], "documents": []}
+    out = sb / VISUAL_TEMPLATE_DIR
+    for role, path in sorted(tpls.items()):
+        try:
+            digest = sha256_file(path)
+        except OSError:
+            continue
+        cache = ctx.root / VISUAL_CACHE_DIRNAME / digest[:2] / digest
+        rec, attempts = _cached_visual_render(cache, renderer[0])
+        if rec is None:
+            cache.mkdir(parents=True, exist_ok=True)
+            # a retry after a failed attempt must not inherit its partial pages
+            for stale in list(cache.glob("*.pdf")) + list(cache.glob("*.png")):
+                with contextlib.suppress(OSError):
+                    stale.unlink()
+            r = render_docx_visual(path, cache, renderer)
+            rec = {"ok": r.get("ok"), "renderer": r.get("renderer"), "pages": r.get("pages", 0),
+                   "pdf": r.get("pdf"), "pngs": r.get("pngs") or [], "error": r.get("error"),
+                   "source": str(path), "sha256": digest, "attempts": attempts + 1}
+            write_json_atomic(cache / "manifest.json", rec)
+        dest = out / role
+        dest.mkdir(parents=True, exist_ok=True)
+        if rec.get("pdf") and (cache / rec["pdf"]).is_file():
+            shutil.copy2(cache / rec["pdf"], dest / rec["pdf"])
+        for png in rec.get("pngs") or []:
+            if (cache / png).is_file():
+                shutil.copy2(cache / png, dest / Path(png).name)
+        manifest["documents"].append({
+            "role": role, "source": Path(path).name, "sha256": digest,
+            "renderer": rec.get("renderer"), "pages": rec.get("pages"),
+            "pdf": rec.get("pdf"), "ok": rec.get("ok"), "error": rec.get("error")})
+    if manifest["documents"]:
+        write_json_atomic(out / "manifest.json", manifest)
+    return manifest
+
+
 def word_docs_present(paths) -> bool:
     for p in paths:
         try:
@@ -17264,7 +17466,7 @@ def word_docs_present(paths) -> bool:
 
 
 def check_visual_artifact(path: Path, label: str, errs: list, warns: list,
-                          render_roots=None) -> None:
+                          render_roots=None, sandbox: Path = None) -> None:
     """The visual pass must be RECORDED -- and EVIDENCED.
 
     A .docx cannot be visually inspected by reading it (see VISUAL_INSPECTION_RULE),
@@ -17311,6 +17513,29 @@ def check_visual_artifact(path: Path, label: str, errs: list, warns: list,
     if "not visually verified" in text:
         warns.append(f"{label}: the agent reports that (some) documents were NOT visually "
                      f"verified -- the human gate must complete those pages")
+    if sandbox is not None and "not visually verified" not in text:
+        tpl_manifest = sandbox / VISUAL_TEMPLATE_DIR / "manifest.json"
+        if tpl_manifest.is_file():
+            try:
+                tpl = json.loads(tpl_manifest.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                tpl = {}
+            docs = [d for d in (tpl.get("documents") or []) if d.get("ok")]
+            if docs:
+                missing = []
+                for d in docs:
+                    name = str(d.get("source") or "").lower()
+                    pages = str(d.get("pages") or "")
+                    if name and name not in text:
+                        missing.append(name)
+                    elif pages and pages not in text:
+                        missing.append(f"{name} ({pages} page(s))")
+                if "template" not in text:
+                    missing.append("a template-comparison section")
+                if missing:
+                    errs.append(f"{label}: the code-seeded venue-template render is present "
+                                f"(renderer {tpl.get('renderer')}), but the artifact does not "
+                                f"compare against it: missing {', '.join(missing[:4])}")
 
 
 def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
@@ -20925,7 +21150,7 @@ def postcheck_review(ctx: Ctx, rec: dict):
     if word_docs_present([sb / "base"]):
         check_visual_artifact(sb / VISUAL_ARTIFACT_REVIEW,
                               f"the visual-inspection record {VISUAL_ARTIFACT_REVIEW}",
-                              errs, warns, render_roots=[sb / REVIEW_DIR])
+                              errs, warns, sandbox=sb, render_roots=[sb / REVIEW_DIR])
     if not any((sb / rel).exists() for rel in DISCOVERY_RELS):
         warns.append("no discovery-round artifact under review/round2/ -- the D0-D5 phase cannot "
                      "be verified")
@@ -21047,7 +21272,7 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     if word_docs_present([rev]):
         check_visual_artifact(rev / "VISUAL_CHECK.md",
                               f"the visual-inspection record {VISUAL_ARTIFACT_REVISED}",
-                              errs, warns, render_roots=[rev])
+                              errs, warns, sandbox=sb, render_roots=[rev])
     # RESIDUALS: a `searchable` hand-off marker the pipeline could already answer
     # must not ship (the reviewer of a real run saw one carried into a submitted
     # cover letter although the answer was a recorded lookup away), and a number
@@ -21267,7 +21492,7 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
     if word_docs_present([out]):
         check_visual_artifact(out / "VISUAL_CHECK.md",
                               f"the visual-inspection record {VISUAL_ARTIFACT_INTEGRATED}",
-                              errs, warns, render_roots=[out])
+                              errs, warns, sandbox=sb, render_roots=[out])
     residual = placeholder_residual_report(ctx, sb, [(out, "", ())],
                                            "integrate", enforce=True, errs=errs, warns=warns)
     prov = number_provenance_report(sb, [(out, "", ())])
@@ -21382,7 +21607,7 @@ def postcheck_rewrite(ctx: Ctx, rec: dict):
     if word_docs_present([out]):
         check_visual_artifact(out / "VISUAL_CHECK.md",
                               f"the visual-inspection record {VISUAL_ARTIFACT_REWRITTEN}",
-                              errs, warns, render_roots=[out])
+                              errs, warns, sandbox=sb, render_roots=[out])
     rec["residual"] = placeholder_residual_report(ctx, sb, [(out, "", ())],
                                                   "rewrite", enforce=True, errs=errs, warns=warns)
     # W-11/W-12: the arm's declared LEVEL, the language pass, and the
@@ -22225,7 +22450,7 @@ def postcheck_judge(ctx: Ctx, rec: dict):
     if word_docs_present([sb / "target", sb / "field", sb / "original"]):
         check_visual_artifact(jr / "artifacts" / "VIS_visual.md",
                               f"the visual-inspection record {VISUAL_ARTIFACT_JUDGE}",
-                              errs, warns, render_roots=[jr])
+                              errs, warns, sandbox=sb, render_roots=[jr])
     _r = int(rec["round"])
     _seed = judge_view_seed_for(ctx, _r, rec.get("target_id"), rec.get("judge_index"))
     _check_pristine_copy(
@@ -23576,7 +23801,7 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
         if word_docs_present([sb / "base"]):
             check_visual_artifact(sb / VISUAL_ARTIFACT_REVIEW,
                                   f"the visual-inspection record {VISUAL_ARTIFACT_REVIEW}",
-                                  errs, warns, render_roots=[sb / REVIEW_DIR])
+                                  errs, warns, sandbox=sb, render_roots=[sb / REVIEW_DIR])
     elif kind == "audit":
         aj = sb / "audit" / "audit.json"
         if not aj.is_file():
@@ -23655,7 +23880,7 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
                   INTEGRATED_DIR: VISUAL_ARTIFACT_INTEGRATED}.get(pkg)
         if visual and d.is_dir() and word_docs_present([d]):
             check_visual_artifact(sb / visual, f"the visual-inspection record {visual}",
-                                  errs, warns, render_roots=[d])
+                                  errs, warns, sandbox=sb, render_roots=[d])
     elif kind == "judge":
         sj = scores_json_of(sb, kind)
         jr = sb / "judge_review"
@@ -23685,7 +23910,7 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
         if word_docs_present([sb / "target", sb / "field", sb / "original"]):
             check_visual_artifact(jr / "artifacts" / "VIS_visual.md",
                                   f"the visual-inspection record {VISUAL_ARTIFACT_JUDGE}",
-                                  errs, warns, render_roots=[jr])
+                                  errs, warns, sandbox=sb, render_roots=[jr])
     return (not errs), errs, warns
 
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -244,6 +245,13 @@ def test_prompt_wiring():
             ("judge", nb.judge_prompt(sandbox, "r1_judge_x_j1", 1, "t", 1, 1, ["l1"],
                                       venue_norm=marker))):
         check(f"the {name} prompt carries the venue template block", marker in text)
+        check(f"the {name} prompt requires the seeded template render comparison",
+              "visual_template/" in text
+              and "Template comparison" in text
+              and "checks that the comparison was actually made" in text)
+    judge = nb.judge_prompt(sandbox, "r1_judge_x_j1", 1, "t", 1, 1, ["l1"], venue_norm=marker)
+    check("the judge's blinding rule names the venue-level template-render exception",
+          "venue-level exception" in judge and "identical for every session" in judge)
 
 
 FULL_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -366,6 +374,11 @@ def test_generalized_template_restyle():
           "word/header_venue_first.xml" in names and "word/media/venue_logo.png" in names
           and "word/footer_venue_first.xml" in names
           and 'w:type="first"' in docx, str(sorted(n for n in names if "venue" in n)))
+    with zipfile.ZipFile(out) as z:
+        hrels = z.read("word/_rels/header_venue_first.xml.rels").decode("utf-8", "replace")
+    check("the copied logo relationship stays relative to the header part "
+          "(Target='media/venue_logo.png', not a bare file name)",
+          'Target="media/venue_logo.png"' in hrels, hrels)
     after = fmt.docx_front_matter_report(out, tpl)
     check("Title/AuthorList front matter is applied from the template's roles",
           after.get("title_style") == "Title" and after.get("author_style") == "AuthorList"
@@ -378,6 +391,259 @@ def test_generalized_template_restyle():
           str(after.get("rows")))
 
 
+def test_even_odd_furniture():
+    """A template whose headers/footers alternate by page parity keeps ALL roles.
+
+    Frontiers' own Word templates do exactly this: the logo on the first page,
+    a running head (Supplementary_Material.docx) or nothing on odd/even pages,
+    the page number on odd ones and the typeset-provisional note on even ones.
+    The pass must carry the even-typed parts AND the `w:evenAndOddHeaders`
+    setting, must not stamp the template's prose into the manuscript, and must
+    keep the produced file one Word actually opens (an AlternateContent
+    text-box footer re-roled to first/even corrupts the package).
+    """
+    tmp = scratch("paper_tpl_evenodd_")
+    tpl = tmp / "template.docx"
+    body = para("Title", "Sample title") + para("Heading1", "Introduction")
+    doc = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+           '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+           'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+           f'<w:body>{body}<w:sectPr>'
+           '<w:headerReference w:type="first" r:id="rIdH1"/>'
+           '<w:headerReference w:type="default" r:id="rIdH2"/>'
+           '<w:headerReference w:type="even" r:id="rIdH3"/>'
+           '<w:footerReference w:type="default" r:id="rIdF1"/>'
+           '<w:footerReference w:type="even" r:id="rIdF2"/>'
+           '<w:pgSz w:w="12240" w:h="15840"/><w:titlePg/>'
+           '</w:sectPr></w:body></w:document>')
+    head = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            '{}</w:hdr>')
+    logo = head.format('<w:p><w:r><w:drawing/></w:r></w:p>')
+    blank = head.format("<w:p/>")
+    running = head.format('<w:p><w:r><w:t>Running head</w:t></w:r></w:p>')
+    box_footer = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                  '<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+                  'xmlns:v="urn:schemas-microsoft-com:vml">'
+                  '<w:p><w:r><w:pict><v:shape><v:textbox><w:txbxContent>'
+                  '<w:p><w:r><w:t>{}</w:t></w:r>'
+                  '<w:fldSimple w:instr=" PAGE "><w:r><w:t>3</w:t></w:r></w:fldSimple>'
+                  '</w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p></w:ftr>')
+    settings = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                '<w:defaultTabStop w:val="420"/>'
+                '<w:evenAndOddHeaders/><w:characterSpacingControl w:val="doNotCompress"/>'
+                '</w:settings>')
+    ct_extra = "".join(
+        f'<Override PartName="/word/{name}" ContentType="application/vnd.openxmlformats-'
+        f'officedocument.wordprocessingml.{kind}+xml"/>'
+        for name, kind in (("header1.xml", "header"), ("header2.xml", "header"),
+                           ("header3.xml", "header"), ("footer1.xml", "footer"),
+                           ("footer2.xml", "footer"), ("settings.xml", "settings")))
+    rels_extra = "".join(
+        f'<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/officeDocument/'
+        f'2006/relationships/{kind}" Target="{target}"/>'
+        for rid, kind, target in (("rIdH1", "header", "header1.xml"),
+                                  ("rIdH2", "header", "header2.xml"),
+                                  ("rIdH3", "header", "header3.xml"),
+                                  ("rIdF1", "footer", "footer1.xml"),
+                                  ("rIdF2", "footer", "footer2.xml"),
+                                  ("rIdS1", "settings", "settings.xml")))
+    full_docx(tpl, doc, ct_extra=ct_extra, rels_extra=rels_extra,
+              extra={"word/header1.xml": logo, "word/header2.xml": blank,
+                     "word/header3.xml": running,
+                     "word/footer1.xml": box_footer.format(""),
+                     "word/footer2.xml": box_footer.format(
+                         "This is a provisional file, not the final typeset article"),
+                     "word/settings.xml": settings})
+    check("the template is detected as parity-furnished",
+          fmt._template_uses_even_odd(tpl) is True)
+    man = tmp / "manuscript.docx"
+    man_doc = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+               '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+               f'<w:body>{para(None, "A title")}{para(None, "Ann Author")}'
+               '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>'
+               '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" '
+               'w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>')
+    man_settings = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                    '<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/'
+                    '2006/main"><w:zoom w:percent="100"/>'
+                    '<w:defaultTabStop w:val="420"/>'
+                    '<w:characterSpacingControl w:val="doNotCompress"/></w:settings>')
+    full_docx(man, man_doc,
+              ct_extra='<Override PartName="/word/settings.xml" ContentType="application/vnd.'
+                       'openxmlformats-officedocument.wordprocessingml.settings+xml"/>',
+              rels_extra='<Relationship Id="rIdS9" Type="http://schemas.openxmlformats.org/'
+                         'officeDocument/2006/relationships/settings" Target="settings.xml"/>',
+              extra={"word/settings.xml": man_settings})
+    before = fmt.docx_front_matter_report(man, tpl)
+    check("the pre-pass report names the missing parity setting",
+          any("evenAndOddHeaders" in r for r in before.get("rows") or []),
+          str(before.get("rows")))
+    out = tmp / "out.docx"
+    rep = fmt.apply_word_template(man, out, tpl)
+    fp = rep.get("front_parts") or {}
+    check("the even-typed header role is carried and the parity switch is set",
+          rep.get("ok") is True and fp.get("even_odd") is True
+          and fp.get("header_even") == "header_venue_even.xml"
+          and fp.get("footer_even") == "footer_venue_even.xml",
+          str(fp))
+    with zipfile.ZipFile(out) as z:
+        docx = z.read("word/document.xml").decode("utf-8", "replace")
+        sett = z.read("word/settings.xml").decode("utf-8", "replace")
+        even_head = z.read("word/header_venue_even.xml").decode("utf-8", "replace")
+        even_foot = z.read("word/footer_venue_even.xml").decode("utf-8", "replace")
+        def_foot = z.read("word/footer_venue_default.xml").decode("utf-8", "replace")
+    refs = re.findall(r'<w:(header|footer)Reference w:type="(\w+)"', docx)
+    check("the produced document references first, default AND even furniture",
+          sorted(refs) == sorted([("header", "default"), ("header", "first"),
+                                  ("header", "even"), ("footer", "default"),
+                                  ("footer", "first"), ("footer", "even")]), str(refs))
+    check("the parity setting lands where the schema puts it",
+          "<w:defaultTabStop w:val=\"420\"/><w:evenAndOddHeaders/>"
+          "<w:characterSpacingControl" in sett, sett[-260:])
+    check("the even running head is carried", "Running head" in even_head)
+    check("the template's even-footer PROSE is not stamped into the manuscript",
+          "provisional" not in even_foot.lower() and "PAGE" in even_foot
+          and fp.get("footer_replaced") == ["even"], str(fp.get("footer_replaced")))
+    check("the template's default text-box footer is still carried as the default",
+          "txbxContent" in def_foot and "PAGE" in def_foot)
+    after = fmt.docx_front_matter_report(out, tpl)
+    check("the post-pass report no longer names the parity gap",
+          not any("evenAndOddHeaders" in r for r in after.get("rows") or []),
+          str(after.get("rows")))
+
+
+def test_visual_template_render_and_comparison():
+    """The venue's own templates are RENDERED into each session sandbox, and the
+    recorded visual pass must compare against that render (page count + names)."""
+    tmp = scratch("paper_tpl_visual_")
+    root = tmp / "root"
+    root.mkdir()
+    build_fake_official(root)
+    build_fake_pack(root)
+
+    class Ctx:
+        pass
+
+    ctx = Ctx()
+    ctx.root = root
+    ctx.cfg = {"venue": "fake-venue"}
+    sb = tmp / "sandbox"
+    sb.mkdir()
+    # A fake Word: handed a .docx copy, it writes a (stand-in) PDF next to it.
+    fake = tmp / "docx2pdf.sh"
+    fake.write_text('#!/bin/sh\nprintf \'%%PDF-1.4\\n%% fake render\\n\' > "${1%.*}.pdf"\n',
+                    encoding="utf-8")
+    os.chmod(fake, 0o755)
+    real_choice, real_pages = nb.visual_renderer_choice, nb._pdf_page_count
+    page_calls = {"n": 0}
+
+    def fake_choice():
+        return ("word", fake)
+
+    def fake_page_count(_pdf):
+        page_calls["n"] += 1
+        return 4
+
+    nb.visual_renderer_choice = fake_choice
+    nb._pdf_page_count = fake_page_count
+    try:
+        man = nb.seed_template_visuals(ctx, sb)
+        docs = {d["role"]: d for d in man.get("documents") or []}
+        check("the venue's Word templates are rendered into the sandbox",
+              man.get("renderer") == "word" and set(docs) == {"main", "supplementary"}
+              and all(d.get("ok") and d.get("pages") == 4 for d in docs.values()),
+              str(man)[:300])
+        check("the template render (PDF + manifest) lands under visual_template/",
+              (sb / "visual_template" / "main" / "Fake_Template.pdf").is_file()
+              and (sb / "visual_template" / "supplementary"
+                   / "Fake_Supplementary_Material.pdf").is_file()
+              and (sb / "visual_template" / "manifest.json").is_file())
+        check("one render per template digest is cached under the root",
+              (root / ".visual_cache").is_dir()
+              and list((root / ".visual_cache").rglob("manifest.json")))
+        calls = page_calls["n"]
+        nb.seed_template_visuals(ctx, sb)
+        check("a second materialization reuses the cached render (no re-render)",
+              page_calls["n"] == calls, f"{calls} -> {page_calls['n']}")
+        check("the prompt names the seeded render as the comparison basis",
+              "visual_template/" in nb.venue_norm_block("fake-venue", root))
+    finally:
+        nb.visual_renderer_choice, nb._pdf_page_count = real_choice, real_pages
+
+    # The cache's failure policy: retry once, then reuse the recorded failure.
+    cache = tmp / "cache"
+    cache.mkdir()
+    nb.write_json_atomic(cache / "manifest.json",
+                         {"renderer": "word", "ok": False, "attempts": 1,
+                          "error": "transient"})
+    rec, attempts = nb._cached_visual_render(cache, "word")
+    check("a failed cached render is retried once (a flake must not win)",
+          rec is None and attempts == 1, f"{rec} / {attempts}")
+    nb.write_json_atomic(cache / "manifest.json",
+                         {"renderer": "word", "ok": False, "attempts": 2,
+                          "error": "still failing"})
+    rec, attempts = nb._cached_visual_render(cache, "word")
+    check("a twice-failed render is reused instead of re-driven per session",
+          isinstance(rec, dict) and rec.get("ok") is False and attempts == 2, f"{rec}")
+    nb.write_json_atomic(cache / "manifest.json", {"renderer": "word", "ok": True, "pages": 4})
+    rec, attempts = nb._cached_visual_render(cache, "word")
+    check("a successful cached render is always reused",
+          isinstance(rec, dict) and rec.get("ok") is True)
+    check("a cache written by another renderer is not reused",
+          nb._cached_visual_render(cache, "libreoffice") == (None, 0))
+
+    # The record gate: with the template render seeded, the visual artifact must
+    # name each template document with its page count and report the comparison.
+    target = sb / "target"
+    target.mkdir()
+    (target / "rendered.pdf").write_bytes(b"%PDF-1.4\n")
+    art = sb / "VISUAL_CHECK.md"
+    art.write_text(
+        "Rendered every page with the fake Word renderer and looked at them.\n\n"
+        "Template comparison: Fake_Template.docx (4 page(s)) vs the manuscript, and "
+        "Fake_Supplementary_Material.docx (4 page(s)) for the supplement -- title centred, "
+        "author list bold, logo header and page-number footer present.\n", encoding="utf-8")
+    errs, warns = [], []
+    nb.check_visual_artifact(art, "the visual record", errs, warns,
+                             render_roots=[target], sandbox=sb)
+    check("a record that compares against the template render passes", not errs, str(errs))
+    art.write_text("Rendered every page with the fake Word renderer and looked at them. "
+                   "The title is left-aligned.\n", encoding="utf-8")
+    errs, warns = [], []
+    nb.check_visual_artifact(art, "the visual record", errs, warns,
+                             render_roots=[target], sandbox=sb)
+    check("a record that ignores the seeded template render fails",
+          any("does not compare against it" in e for e in errs), str(errs))
+    art.write_text("Template comparison against Fake_Template.docx and its 4 page(s): the "
+                   "manuscript title is centred; Fake_Supplementary_Material.docx matches too.\n",
+                   encoding="utf-8")
+    errs, warns = [], []
+    nb.check_visual_artifact(art, "the visual record", errs, warns,
+                             render_roots=[target], sandbox=sb)
+    check("the gate is satisfied once the record names every template document + page count",
+          not errs, str(errs))
+
+    # A template whose render FAILED (no renderer here) cannot be compared
+    # against, so the gate stays open -- the record's own honesty rules apply.
+    sb2 = tmp / "sandbox2"
+    (sb2 / "visual_template").mkdir(parents=True)
+    (sb2 / "target").mkdir()
+    (sb2 / "target" / "rendered.pdf").write_bytes(b"%PDF-1.4\n")
+    nb.write_json_atomic(sb2 / "visual_template" / "manifest.json",
+                         {"renderer": "none",
+                          "documents": [{"role": "main", "source": "Fake_Template.docx",
+                                         "ok": False, "pages": 0, "error": "no renderer"}]})
+    art2 = sb2 / "VISUAL_CHECK.md"
+    art2.write_text("Rendered every page with the docx CLI and looked at them.\n",
+                    encoding="utf-8")
+    errs, warns = [], []
+    nb.check_visual_artifact(art2, "the visual record", errs, warns,
+                             render_roots=[sb2 / "target"], sandbox=sb2)
+    check("an unrenderable template does not gate the visual record", not errs, str(errs))
+
+
 def main() -> int:
     try:
         test_resolution_and_staging()
@@ -385,6 +651,8 @@ def main() -> int:
         test_normalizer_and_conformance()
         test_prompt_wiring()
         test_generalized_template_restyle()
+        test_even_odd_furniture()
+        test_visual_template_render_and_comparison()
     finally:
         cleanup()
     print()

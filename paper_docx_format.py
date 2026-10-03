@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import posixpath
 import re
 import shutil
 import subprocess
@@ -322,6 +323,28 @@ def docx_style_ids(path: Path) -> list:
     return sorted(set(re.findall(r'w:styleId="([^"]+)"', xml)))
 
 
+def _template_uses_even_odd(template: Path) -> bool:
+    """True when the template's furniture depends on page parity.
+
+    Either its settings.xml turns the parity switch on, or its own document
+    references an even-typed header/footer part.
+    """
+    try:
+        with zipfile.ZipFile(template) as tpkg:
+            names = set(tpkg.namelist())
+            settings = (tpkg.read("word/settings.xml").decode("utf-8", "replace")
+                        if "word/settings.xml" in names else "")
+            doc = tpkg.read("word/document.xml").decode("utf-8", "replace") \
+                if "word/document.xml" in names else ""
+    except (OSError, zipfile.BadZipFile, KeyError):
+        return False
+    if "evenAndOddHeaders" in settings:
+        return True
+    sects = _SECT_RE.findall(doc)
+    return bool(re.search(r'<w:(?:header|footer)Reference w:type="even"',
+                          sects[-1] if sects else ""))
+
+
 def docx_front_matter_report(path: Path, template: Path = None) -> dict:
     """Template-conformance facts about a DOCX's front matter and headings.
 
@@ -336,6 +359,8 @@ def docx_front_matter_report(path: Path, template: Path = None) -> dict:
             doc = pkg.read("word/document.xml").decode("utf-8", "replace")
             rels = (pkg.read("word/_rels/document.xml.rels").decode("utf-8", "replace")
                     if "word/_rels/document.xml.rels" in names else "")
+            settings = (pkg.read("word/settings.xml").decode("utf-8", "replace")
+                        if "word/settings.xml" in names else "")
             hf_parts = {n: pkg.read(n) for n in names
                         if n.startswith(("word/header", "word/footer")) and n.endswith(".xml")}
     except (OSError, zipfile.BadZipFile, KeyError):
@@ -385,6 +410,7 @@ def docx_front_matter_report(path: Path, template: Path = None) -> dict:
            "abstract_style": abstract_style, "keywords_style": keywords_style,
            "first_header": bool(first_header), "logo_header": logo,
            "first_footer": bool(part("footer", "first") or part("footer", "default")),
+           "even_odd": "evenAndOddHeaders" in settings,
            "deep_headings": deep,
            "heading3": sum(1 for s in styles if heading_level_of.get(s) == 3),
            "container_headings": containers}
@@ -412,6 +438,9 @@ def docx_front_matter_report(path: Path, template: Path = None) -> dict:
     if deep:
         rows.append(f"{deep} heading(s) sit deeper than the template's own heading depth "
                     f"-- flatten them")
+    if _template_uses_even_odd(Path(template)) and not out["even_odd"]:
+        rows.append("the template's even-page header/footer cannot render: the document does "
+                    "not set <w:evenAndOddHeaders/>")
     for container in containers:
         rows.append(f"source-template container heading {container!r} is not part of the "
                     f"venue's structure")
@@ -3760,16 +3789,29 @@ def _adopt_page_geometry(doc_xml: str, template_doc_xml: str) -> tuple:
 
 
 def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> dict:
-    """Copy the template's first/default header and its page-number footer.
+    """Copy the template's whole header/footer role map into the package.
 
-    The FIRST-page footer is synthesized as a simple PAGE field: Word rejects
-    the template's own VML text-box footer part when it is referenced as the
-    first-page footer, while accepting it as the default one.
+    Every role the template defines -- first, default (odd) and EVEN -- is
+    carried, together with the `w:evenAndOddHeaders` parity setting the
+    template relies on: a template whose furniture alternates by page parity
+    (Frontiers: the page number on odd pages and its typeset-provisional note on
+    even ones; a running head defined for even pages only) loses half of its
+    furniture when only first+default are copied.
+
+    The FIRST-page footer is always a plain synthetic PAGE field, and an EVEN
+    footer that is not plain pagination -- a VML/DrawingML text box, or a part
+    carrying the template's own typesetting prose ("This is a provisional
+    file...") -- is replaced by the same plain footer. Word refuses a template
+    text-box footer re-roled to first/even ("the file appears to be corrupted"
+    on open), and the pipeline takes STRUCTURE from a template, never its
+    prose. Every substitution is reported in `footer_replaced`.
     """
     try:
         tdoc = tpkg.read("word/document.xml").decode("utf-8", "replace")
         trels = (tpkg.read("word/_rels/document.xml.rels").decode("utf-8", "replace")
                  if "word/_rels/document.xml.rels" in tnames else "")
+        tset = (tpkg.read("word/settings.xml").decode("utf-8", "replace")
+                if "word/settings.xml" in tnames else "")
     except (KeyError, OSError):
         return {}
     rel_map = {m.group(1): (m.group(2).lower(), m.group(3))
@@ -3779,12 +3821,7 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
     for m in re.finditer(r'<w:(header|footer)Reference w:type="(\w+)" r:id="([^"]+)"',
                          sect[-1] if sect else ""):
         refs[m.group(1)][m.group(2)] = m.group(3)
-    header_default = refs["header"].get("default") or refs["header"].get("first") \
-        or refs["header"].get("even")
-    header_first = refs["header"].get("first") or header_default
-    footer_default = refs["footer"].get("default") or refs["footer"].get("first") \
-        or refs["footer"].get("even")
-    if not (header_default or footer_default):
+    if not (refs["header"] or refs["footer"]):
         return {}
     copied, issued = [], {}
 
@@ -3800,37 +3837,105 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
             for rm in list(_RELS_RE.finditer(rxml)):
                 if rm.group(2).lower() != "image":
                     continue
+                # The relationship target is RELATIVE TO THE HEADER/FOOTER PART
+                # (`word/`), so the rewritten target must keep the media
+                # directory: `media/logo.png` -> `media/venue_logo.png`, never a
+                # bare `venue_logo.png` (which resolves to word/venue_logo.png,
+                # a missing part -- the logo then renders as an empty frame).
                 media = rm.group(3)
-                media_name = Path(media).name
-                dest_media = f"venue_{media_name}"
-                if f"word/media/{dest_media}" not in parts:
-                    if f"word/{media}" in tnames:
-                        parts[f"word/media/{dest_media}"] = tpkg.read(f"word/{media}")
-                rxml = rxml.replace(f'Target="{media}"', f'Target="{dest_media}"')
+                src_media = posixpath.normpath(posixpath.join("word", media))
+                if not src_media.startswith("word/") or ".." in Path(src_media).parts:
+                    continue
+                dest_media = posixpath.join(posixpath.dirname(src_media),
+                                            f"venue_{posixpath.basename(media)}")
+                if dest_media not in parts and src_media in tnames:
+                    parts[dest_media] = tpkg.read(src_media)
+                rel_target = posixpath.relpath(dest_media, "word")
+                rxml = rxml.replace(f'Target="{media}"', f'Target="{rel_target}"')
             parts[f"word/_rels/{dest_name}.rels"] = rxml.encode("utf-8")
         hdr = tpkg.read(full).decode("utf-8", "replace")
         issued[dest_name] = bool(re.search(r"<w:drawing|<w:pict|<v:imagedata|<a:blip", hdr))
         return True
 
-    out = {}
-    if header_default:
-        kind, target = rel_map.get(header_default, ("", ""))
-        if kind == "header" and target and copy_part(target, "header_venue_default.xml"):
-            out["header_default"] = "header_venue_default.xml"
-    if header_first:
-        kind, target = rel_map.get(header_first, ("", ""))
-        if kind == "header" and target:
-            dest = ("header_venue_default.xml" if target == rel_map.get(header_default, ("", ""))[1]
-                    else "header_venue_first.xml")
-            if dest in copied or copy_part(target, dest):
-                out["header_first"] = dest
-    if footer_default:
-        kind, target = rel_map.get(footer_default, ("", ""))
-        if kind == "footer" and target and copy_part(target, "footer_venue_default.xml"):
-            out["footer_default"] = "footer_venue_default.xml"
-    parts["word/footer_venue_first.xml"] = _SIMPLE_PAGE_FOOTER.encode("utf-8")
-    copied.append("footer_venue_first.xml")
-    out["footer_first"] = "footer_venue_first.xml"
+    def target_of(kind: str, role: str) -> str:
+        rid = refs[kind].get(role)
+        k, target = rel_map.get(rid, ("", "")) if rid else ("", "")
+        return target if k == kind and target and f"word/{target}" in tnames else ""
+
+    by_target = {}
+
+    def carry(kind: str, role: str, dest: str) -> str:
+        """Copy the template part for one role (deduped by source part)."""
+        target = target_of(kind, role)
+        if not target:
+            return ""
+        if target in by_target:
+            return by_target[target]
+        if copy_part(target, dest):
+            by_target[target] = dest
+            return dest
+        return ""
+
+    def synthesize(dest: str) -> str:
+        parts[f"word/{dest}"] = _SIMPLE_PAGE_FOOTER.encode("utf-8")
+        copied.append(dest)
+        issued[dest] = False
+        return dest
+
+    def footer_part_is_plain_pagination(role: str) -> bool:
+        """Pagination only: a PAGE field, no text box and no visible prose.
+
+        Word accepts the template's AlternateContent (VML/DrawingML text-box)
+        footer as the DEFAULT footer, but refuses the very same part in the
+        first/even roles ("the file appears to be corrupted" on open), and a
+        role-tagged part is what the schema asks for -- so only plain
+        pagination parts are re-roled.
+        """
+        target = target_of("footer", role)
+        if not target:
+            return False
+        xml = tpkg.read(f"word/{target}").decode("utf-8", "replace")
+        if not re.search(r'<w:instrText[^>]*>[^<]*\bPAGE\b'
+                         r'|<w:fldSimple[^>]*w:instr="[^"]*\bPAGE\b', xml, re.I):
+            return False
+        if re.search(r"<w:txbxContent|<wps:wsp|<w:pict\b", xml):
+            return False
+        visible = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", xml))
+        return not re.search(r"[A-Za-z]", visible)
+
+    out = {"footer_replaced": []}
+    for role, dest in (("first", "header_venue_first.xml"),
+                       ("default", "header_venue_default.xml"),
+                       ("even", "header_venue_even.xml")):
+        # A template with a single header uses it on every page, first included.
+        part = carry("header", role, dest) if role != "first" \
+            else (carry("header", "first", dest) or carry("header", "default", dest))
+        if part:
+            out[f"header_{role}"] = part
+    for role, dest in (("first", "footer_venue_first.xml"),
+                       ("default", "footer_venue_default.xml"),
+                       ("even", "footer_venue_even.xml")):
+        target = target_of("footer", role)
+        # first: always the plain synthetic page number (a re-roled template
+        # text box corrupts the file); even: only plain pagination (the
+        # template's typeset-provisional prose must not reach the manuscript);
+        # default: the template's own part, as before.
+        if not target or role == "first":
+            keep = False
+        elif role == "even":
+            keep = footer_part_is_plain_pagination(role)
+        else:
+            keep = True
+        part = carry("footer", role, dest) if keep else ""
+        if not keep and target:
+            out["footer_replaced"].append(role)
+        if not part and (role == "first" or target):
+            # pagination the manuscript must have; first page included
+            part = synthesize(dest)
+        if part:
+            out[f"footer_{role}"] = part
+    out["even_odd"] = ("evenAndOddHeaders" in tset
+                       or any(k.startswith(("header_even", "footer_even")) for k in out))
     out["logo"] = bool(issued.get(out.get("header_first", ""), False))
     out["copied"] = copied
     # content-type overrides for the new parts + media defaults
@@ -3856,8 +3961,10 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
     n = 2001
     for key, dest in (("header_default", out.get("header_default")),
                       ("header_first", out.get("header_first")),
+                      ("header_even", out.get("header_even")),
                       ("footer_default", out.get("footer_default")),
-                      ("footer_first", out.get("footer_first"))):
+                      ("footer_first", out.get("footer_first")),
+                      ("footer_even", out.get("footer_even"))):
         if not dest:
             continue
         while f"rId{n}" in used:
@@ -4034,8 +4141,10 @@ def _apply_front_refs(doc_xml: str, front: dict) -> tuple:
     refs = ""
     for key, tag, typ in (("header_default_rid", "headerReference", "default"),
                           ("header_first_rid", "headerReference", "first"),
+                          ("header_even_rid", "headerReference", "even"),
                           ("footer_default_rid", "footerReference", "default"),
-                          ("footer_first_rid", "footerReference", "first")):
+                          ("footer_first_rid", "footerReference", "first"),
+                          ("footer_even_rid", "footerReference", "even")):
         if front.get(key):
             refs += f'<w:{tag} w:type="{typ}" r:id="{front[key]}"/>'
     if refs:
@@ -4050,6 +4159,65 @@ def _apply_front_refs(doc_xml: str, front: dict) -> tuple:
                 if "<w:docGrid" in body else
                 body.replace("</w:sectPr>", "<w:titlePg/></w:sectPr>", 1))
     return doc_xml.replace(sect, body, 1), True
+
+
+def _with_even_odd_headers(parts: dict) -> bool:
+    """Make `word/settings.xml` carry `w:evenAndOddHeaders` (the parity switch).
+
+    A template that defines even-page headers/footers only renders them when the
+    document turns this setting on. The element is inserted where the schema --
+    and the templates themselves -- put it: immediately before
+    `w:characterSpacingControl`, or before the first later element present.
+    Returns True when the setting was added (the package is modified in place).
+    """
+    ct = parts.get("[Content_Types].xml", b"").decode("utf-8", "replace")
+    settings = parts.get("word/settings.xml")
+    if settings is None:
+        parts["word/settings.xml"] = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/'
+            '2006/main"><w:evenAndOddHeaders/></w:settings>').encode("utf-8")
+        if 'PartName="/word/settings.xml"' not in ct:
+            ct = ct.replace(
+                "</Types>", '<Override PartName="/word/settings.xml" ContentType='
+                            '"application/vnd.openxmlformats-officedocument.wordprocessingml.'
+                            'settings+xml"/></Types>')
+            parts["[Content_Types].xml"] = ct.encode("utf-8")
+        rels = parts.get("word/_rels/document.xml.rels", b"").decode("utf-8", "replace")
+        if "relationships/settings" not in rels:
+            used = set(re.findall(r'Id="([^"]+)"', rels))
+            n = 3001
+            while f"rId{n}" in used:
+                n += 1
+            rels = rels.replace(
+                "</Relationships>",
+                f'<Relationship Id="rId{n}" Type="http://schemas.openxmlformats.org/'
+                f'officeDocument/2006/relationships/settings" Target="settings.xml"/>'
+                f"</Relationships>")
+            parts["word/_rels/document.xml.rels"] = rels.encode("utf-8")
+        return True
+    text = settings.decode("utf-8", "replace")
+    if "evenAndOddHeaders" in text:
+        return False
+    element = "<w:evenAndOddHeaders/>"
+    anchors = [i for i in (text.find("<w:characterSpacingControl"),
+                           text.find("<w:footnotePr"),
+                           text.find("<w:endnotePr"),
+                           text.find("<w:compat"),
+                           text.find("<w:rsids"))
+               if i != -1]
+    if anchors:
+        i = min(anchors)
+        text = text[:i] + element + text[i:]
+    else:
+        i = text.find("<w:defaultTabStop")
+        j = text.find("/>", i) if i != -1 else -1
+        if j != -1:
+            text = text[:j + 2] + element + text[j + 2:]
+        else:
+            text = text.replace("</w:settings>", element + "</w:settings>", 1)
+    parts["word/settings.xml"] = text.encode("utf-8")
+    return True
 
 
 def apply_word_template(src: Path, out: Path, template: Path) -> dict:
@@ -4154,6 +4322,8 @@ def apply_word_template(src: Path, out: Path, template: Path) -> dict:
                 doc_xml, refs_ok = _apply_front_refs(doc_xml, front_parts)
                 if refs_ok:
                     parts["word/document.xml"] = doc_xml.encode("utf-8")
+                if front_parts.get("even_odd"):
+                    _with_even_odd_headers(parts)
             with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
                 for name, data in parts.items():
                     z.writestr(name, data)
@@ -4192,6 +4362,11 @@ def apply_word_template(src: Path, out: Path, template: Path) -> dict:
     if front_parts:
         changes.append("copied the venue's first-page header (logo), default header and "
                        "page-number footers")
+        if front_parts.get("even_odd"):
+            changes.append("enabled the template's odd/even (evenAndOddHeaders) page furniture")
+        for role in front_parts.get("footer_replaced") or []:
+            changes.append(f"replaced the template's {role}-page footer with the plain "
+                           f"page-number footer")
     return {"file": str(src), "template": str(template), "ok": bool(text_ok),
             "text_unchanged": bool(text_ok), "changes": changes,
             "styles_copied": copied, "style_refs_remapped": remapped,
