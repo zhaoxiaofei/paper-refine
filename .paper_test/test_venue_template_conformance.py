@@ -391,6 +391,91 @@ def test_generalized_template_restyle():
           str(after.get("rows")))
 
 
+def _run(text, sz=None, bold=False, space=False):
+    rpr = ""
+    if bold or sz:
+        rpr = (f"<w:rPr>{'<w:b/>' if bold else ''}"
+               f"{f'<w:sz w:val=\"{sz}\"/>' if sz else ''}</w:rPr>")
+    keep = ' xml:space="preserve"' if space else ""
+    return f"<w:r>{rpr}<w:t{keep}>{text}</w:t></w:r>"
+
+
+def test_heading_retag():
+    """Headings the source only DIRECT-formatted get the template's heading styles.
+
+    The manuscript this pipeline exists for writes its sections as bold lines one
+    point above the body size with no paragraph style at all; the normalizer's
+    direct-format strip used to flatten them into body text, leaving the
+    template's Heading 1/2 defined but unused. The retag runs BEFORE the strip,
+    tags exactly the heading-like paragraphs, and every exclusion (title, front
+    matter, captions, lists, table cells) stays untouched.
+    """
+    tmp = scratch("paper_tpl_retag_")
+    tpl = tmp / "template.docx"
+    tpl_body = (para("Heading1", "Introduction") + para("Heading1", "Methods")
+                + para("Heading2", "A subsection") + para("Heading2", "Another subsection"))
+    full_docx(tpl, ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/'
+                    '2006/main"><w:body>' + tpl_body +
+                    '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>'
+                    '<w:pgMar w:top="1138" w:right="1181" w:bottom="1138" w:left="1282" '
+                    'w:header="283" w:footer="510" w:gutter="0"/></w:sectPr>'
+                    '</w:body></w:document>'))
+    man = tmp / "manuscript.docx"
+    body = "".join([
+        f"<w:p>{_run('A directly formatted manuscript', sz=32, bold=True)}</w:p>",
+        f"<w:p>{_run('Ann Author, Bob Author', sz=22)}</w:p>",
+        f"<w:p>{_run('Abstract', sz=28, bold=True)}</w:p>",
+        f"<w:p>{_run('word ' * 30, sz=22, space=True)}</w:p>",
+        f"<w:p>{_run('Introduction', sz=28, bold=True)}</w:p>",
+        f"<w:p>{_run('word ' * 40, sz=22, space=True)}</w:p>",
+        f"<w:p>{_run('Sub-analysis of the primary cohort', sz=24, bold=True)}</w:p>",
+        f"<w:p>{_run('Figure 1 | a directly formatted caption', sz=24, bold=True)}</w:p>",
+        '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>'
+        + _run("First numbered item", sz=24, bold=True) + "</w:p>",
+        '<w:tbl><w:tr><w:tc><w:p>' + _run("Reagent", sz=24, bold=True)
+        + "</w:p></w:tc></w:tr></w:tbl>",
+    ])
+    full_docx(man, ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/'
+                    '2006/main"><w:body>' + body +
+                    '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>'
+                    '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" '
+                    'w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>'
+                    '</w:body></w:document>'))
+    cands = [t for _i, t, _s in fmt.heading_like_paragraphs(
+        zipfile.ZipFile(man).read("word/document.xml").decode("utf-8", "replace"))]
+    check("only the real section headings are candidates (title/front matter, caption, "
+          "list item and table cell excluded)",
+          cands == ["Introduction", "Sub-analysis of the primary cohort"], str(cands))
+    out = tmp / "out.docx"
+    rep = fmt.apply_word_template(man, out, tpl)
+    retagged = rep.get("headings_retagged") or []
+    check("the headings are tagged with the template's heading styles, level by size",
+          [(t["text"], t["level"], t["style"]) for t in retagged]
+          == [("Introduction", 1, "Heading1"),
+              ("Sub-analysis of the primary cohort", 2, "Heading2")], str(retagged))
+    with zipfile.ZipFile(out) as z:
+        docx = z.read("word/document.xml").decode("utf-8", "replace")
+    by_text = {}
+    for m in re.finditer(r"<w:p\b[\s\S]*?</w:p>", docx):
+        frag = m.group(0)
+        by_text["".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", frag)).strip()[:40]] = frag
+    check("the retag survives into the package, and every direct size is stripped so the "
+          "template styles own the typography",
+          re.findall(r'<w:pStyle w:val="([^"]+)"', by_text["Introduction"]) == ["Heading1"]
+          and re.findall(r'<w:pStyle w:val="([^"]+)"',
+                         by_text["Sub-analysis of the primary cohort"]) == ["Heading2"]
+          and 'w:sz w:val=' not in docx and rep.get("text_unchanged") is True)
+    check("the caption, list item and table cell keep no heading style",
+          all(not re.findall(r'<w:pStyle w:val="([^"]+)"', by_text[k])
+              for k in ("Figure 1 | a directly formatted caption", "First numbered item",
+                        "Reagent")),
+          str({k: re.findall(r'<w:pStyle w:val="([^"]+)"', by_text[k])
+               for k in ("Figure 1 | a directly formatted caption", "First numbered item",
+                         "Reagent")}))
+
+
 def test_even_odd_furniture():
     """A template whose headers/footers alternate by page parity keeps ALL roles.
 
@@ -740,6 +825,7 @@ def main() -> int:
         test_normalizer_and_conformance()
         test_prompt_wiring()
         test_generalized_template_restyle()
+        test_heading_retag()
         test_even_odd_furniture()
         test_mcp_first_render_chain()
         test_visual_template_render_and_comparison()

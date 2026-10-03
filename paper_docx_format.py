@@ -4036,6 +4036,134 @@ def template_style_roles(template: Path) -> dict:
     return roles
 
 
+_HEADING_MAX_CHARS = 90
+_HEADING_MAX_WORDS = 12
+_HEADING_SKIP_PREFIXES = ("figure ", "fig. ", "fig ", "table ", "supplementary figure",
+                          "supplementary table", "extended data ", "box ")
+
+
+def _body_run_size(doc_xml: str):
+    """The document's dominant run size (its body-text size), or None.
+
+    Weighted by TEXT, over the long paragraphs that actually carry the prose: a
+    short document's figure legends, tables and captions can outnumber its body
+    runs, and their small sizes must not become the body baseline (that would
+    turn every bold line above them into a "heading").
+    """
+    weights = Counter()
+    for _p0, _p1, frag in paragraphs(doc_xml):
+        if len(text_of(frag).split()) < 25:
+            continue
+        for run in re.findall(r"<w:r\b[\s\S]*?</w:r>", frag):
+            t = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", run))
+            for s in re.findall(r'<w:sz w:val="(\d+)"', run):
+                weights[int(s)] += len(t)
+    if weights:
+        return weights.most_common(1)[0][0]
+    sizes = Counter(re.findall(r'<w:sz w:val="(\d+)"', doc_xml))
+    if not sizes:
+        return None
+    return int(sizes.most_common(1)[0][0])
+
+
+def heading_like_paragraphs(doc_xml: str) -> list:
+    """[(paragraph index, text, size)] of DIRECTLY-formatted section headings.
+
+    A manuscript written in Word often carries its section headings as direct
+    formatting -- a short bold line one or two points larger than the body text,
+    with NO paragraph style at all. The template's Heading 1..N styles cannot
+    apply to such a paragraph until it is tagged, and the normalizer's own
+    direct-format strip (which exists so the template's typography shows) would
+    otherwise flatten the heading into body text. Pure detection: the retag pass
+    and the conformance report read the same rows.
+
+    Deliberately conservative: only unstyled/Normal paragraphs whose every
+    non-empty run is bold, whose size is at least 1 pt above the document's
+    dominant run size, whose text is a short single line without a terminal
+    period/comma/semicolon, and that are not captions, lists, table cells, front
+    matter or a known foreign-publisher container heading.
+    """
+    body = _body_run_size(doc_xml)
+    if body is None:
+        return []
+    paras = list(paragraphs(doc_xml))
+    tables = [(m.start(), m.end()) for m in re.finditer(r"<w:tbl\b[\s\S]*?</w:tbl>", doc_xml)]
+    entries = [i for i, p in enumerate(paras) if text_of(p[2]).strip()]
+    skip = set(entries[:1])                       # the article title
+    for i in entries[1:4]:                        # the author line
+        t = text_of(paras[i][2]).strip()
+        if len(t) < 400 and "@" not in t and ("," in t or " and " in t):
+            skip.add(i)
+            break
+    for i in entries:                             # abstract / keywords front matter
+        low = text_of(paras[i][2]).strip().lower()
+        if low == "abstract" or low.startswith("keywords"):
+            skip.add(i)
+    out = []
+    for i, (p0, p1, frag) in enumerate(paras):
+        if i in skip or any(a <= p0 < b for a, b in tables):
+            continue
+        text = text_of(frag).strip()
+        if not text or len(text) > _HEADING_MAX_CHARS \
+                or len(text.split()) > _HEADING_MAX_WORDS:
+            continue
+        if not text[0].isalpha() or text[-1] in ".,;":
+            continue
+        low = text.lower()
+        if low.startswith(_HEADING_SKIP_PREFIXES) \
+                or low in {c.lower() for c in _FRONT_MATTER_CONTAINERS}:
+            continue
+        pstyle = elem_val(ppr_of(frag), "pStyle")
+        if pstyle and pstyle != "Normal":
+            continue
+        if "<w:numPr" in frag:
+            continue
+        sizes, all_bold, has_text = [], True, False
+        for run in re.findall(r"<w:r\b[\s\S]*?</w:r>", frag):
+            if not "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", run)).strip():
+                continue
+            has_text = True
+            if not re.search(r"<w:b/>|<w:b w:val=\"(?:1|true|on)\"", run):
+                all_bold = False
+                break
+            sizes += [int(s) for s in re.findall(r'<w:sz w:val="(\d+)"', run)]
+        if not (has_text and all_bold and sizes) or max(sizes) < body + 2:
+            continue
+        out.append((i, text, max(sizes)))
+    return out
+
+
+def _retag_headings(doc_xml: str, roles: dict) -> tuple:
+    """(xml, retagged): tag directly-formatted headings with the template's styles.
+
+    The paragraph STYLE IS the only thing changed -- the text stays byte-identical,
+    and the normalizer's direct-format strip that follows removes the local
+    font/size/spacing so the template's Heading 1..N own the typography (and its
+    automatic numbering comes along). The largest heading size becomes level 1,
+    the next level 2, and so on, capped at the depth the template's own document
+    uses. Every retag is reported so a review session can correct a mis-tag.
+    """
+    headings = dict(roles.get("headings") or {})
+    if not headings:
+        return doc_xml, []
+    cands = heading_like_paragraphs(doc_xml)
+    if not cands:
+        return doc_xml, []
+    depth = max(1, int(roles.get("max_heading_level") or 2))
+    level_of = {size: min(i + 1, depth)
+                for i, size in enumerate(sorted({s for _i, _t, s in cands}, reverse=True))}
+    paras = list(paragraphs(doc_xml))
+    edits, done = [], []
+    for i, text, size in cands:
+        style = headings.get(level_of[size]) or headings.get(depth)
+        if not style:
+            continue
+        p0, p1, frag = paras[i]
+        edits.append((p0, p1, _set_para_style(frag, style)))
+        done.append({"text": text[:80], "level": level_of[size], "style": style})
+    return (apply_edits(doc_xml, edits) if edits else doc_xml), done
+
+
 def _front_matter_styles(doc_xml: str, roles: dict) -> tuple:
     """(xml, info): template front matter + the template's heading depth.
 
@@ -4228,9 +4356,14 @@ def apply_word_template(src: Path, out: Path, template: Path) -> dict:
     still lands on the template's Heading 1/2, Title, Caption, ...), the
     template's page geometry is adopted, and the direct fonts/sizes/spacing/
     indentation that would otherwise override the styles are dropped on
-    styled paragraphs. Content, media, fields, headers/footers and relationships
-    are preserved; the document TEXT must be byte-identical (reported as
-    `text_unchanged`, and the caller keeps the original when it is not).
+    styled paragraphs. A heading the source only DIRECT-formatted (a short bold
+    line above the body size, no paragraph style) is first retagged onto the
+    template's Heading 1..N (`headings_retagged`), so the strip below cannot
+    flatten it into body text and the template's heading styles -- and their
+    numbering -- actually apply. Content, media, fields, headers/footers and
+    relationships are preserved; the document TEXT must be byte-identical
+    (reported as `text_unchanged`, and the caller keeps the original when it is
+    not).
     """
     try:
         with zipfile.ZipFile(src) as spkg, zipfile.ZipFile(template) as tpkg:
@@ -4285,6 +4418,7 @@ def apply_word_template(src: Path, out: Path, template: Path) -> dict:
             remapped = stripped = 0
             page_ok = False
             front_info = {}
+            headings_retagged = []
             roles = template_style_roles(template)
             for name in sorted(parts):
                 if not doc_part_re.fullmatch(name):
@@ -4292,6 +4426,13 @@ def apply_word_template(src: Path, out: Path, template: Path) -> dict:
                 xml = parts[name].decode("utf-8", "replace")
                 new_xml, n = _remap_style_refs(xml, mapping)
                 remapped += n
+                retag_styles = set()
+                if name == "word/document.xml":
+                    # Heading STYLE first, then strip: a source heading that only
+                    # carries direct formatting must not be flattened into body
+                    # text by the strip below.
+                    new_xml, headings_retagged = _retag_headings(new_xml, roles)
+                    retag_styles = {t["style"] for t in headings_retagged}
                 # A paragraph whose style exists in the template follows that
                 # style: drop the direct geometry/typography that would hide it.
                 edits = []
@@ -4303,7 +4444,7 @@ def apply_word_template(src: Path, out: Path, template: Path) -> dict:
                     # (Normal/theme) once its direct font/size/spacing overrides
                     # are gone; a paragraph with an unmapped custom style is left
                     # alone (there is no template equivalent to fall back to).
-                    if pstyle and pstyle not in mapped_ids:
+                    if pstyle and pstyle not in mapped_ids and pstyle not in retag_styles:
                         continue
                     stripped_para, k = _strip_direct_format(para)
                     if k:
@@ -4359,6 +4500,9 @@ def apply_word_template(src: Path, out: Path, template: Path) -> dict:
     if front_info.get("deep_headings_demoted"):
         changes.append(f"demoted {front_info['deep_headings_demoted']} heading(s) deeper than "
                        f"the template's own depth")
+    if headings_retagged:
+        changes.append(f"tagged {len(headings_retagged)} directly-formatted heading(s) with the "
+                       f"template's heading styles")
     if front_parts:
         changes.append("copied the venue's first-page header (logo), default header and "
                        "page-number footers")
@@ -4371,6 +4515,7 @@ def apply_word_template(src: Path, out: Path, template: Path) -> dict:
             "text_unchanged": bool(text_ok), "changes": changes,
             "styles_copied": copied, "style_refs_remapped": remapped,
             "direct_format_removed": stripped, "page_geometry": page_ok,
+            "headings_retagged": headings_retagged,
             "front_matter": front_info,
             "template_roles": {k: v for k, v in (roles or {}).items() if k != "headings"},
             "front_parts": {k: v for k, v in (front_parts or {}).items() if k != "copied"}}

@@ -247,7 +247,14 @@ opts out): the template's styles/theme/font table/numbering replace the
 manuscript's, style references are remapped by style name, the template's page
 geometry is adopted, and the direct font/size/spacing overrides that would hide
 those styles are removed — with the document text proven byte-identical or the
-  original file kept. The template files are also staged read-only into every
+  original file kept. Section headings the SOURCE only direct-formatted (a short
+  bold line one or two points above the body text, with no paragraph style at
+  all — how Word-written manuscripts usually carry them) are **retagged onto the
+  template's Heading 1..N before that strip**, by size, so the template's heading
+  styles and their automatic numbering actually apply instead of the heading
+  collapsing into plain body text; the retag is reported per paragraph
+  (`headings_retagged`) and excludes the title, the front matter, captions,
+  lists, table cells and known foreign-publisher container headings. The template files are also staged read-only into every
   producing/reviewing sandbox as `venue_template/`, and all prompts (review,
   rewrite, revise, integrate, audit, judge) carry the architecture/formatting
   mandate. The pass is **template-driven for every journal**: the front-matter
