@@ -159,6 +159,10 @@ def test_resolution_and_staging():
     check("the venue block names the template files and the conformance mandate",
           "TEMPLATE FILES FOR THIS RUN" in block and "Fake_Template.docx" in block
           and "ARCHITECTURE AND FORMATTING FOLLOW THE TEMPLATE" in block)
+    check("the venue block tells every role to READ the templates and use them",
+          "READ THE TEMPLATE FILES YOURSELF" in block
+          and "the REVIEW and the AUDIT" in block and "the JUDGE" in block
+          and "visual_template/" in block)
 
 
 def test_restyler():

@@ -2838,15 +2838,17 @@ and statement placement; no prose was copied). Two tiers, with different authori
     the unnumbered "Abstract" heading with its paragraph. Fold a separate "Lead contact" /
     "Corresponding author" line into that block instead of leaving it as its own paragraph, and
     never keep the old publisher's "Highlights"/"Summary"/"Motivation" containers.
-  * WHAT THE TEMPLATE DOES NOT PIN, THE VENUE'S OWN GUIDELINES DECIDE; WHERE THOSE ARE SILENT,
-    ESTABLISHED ACADEMIC CONVENTION DECIDES. Consult the journal's official author guidelines
-    for anything the template leaves open (table font size, spacing INSIDE a table, caption
-    size, list indentation, ...), and if neither the template nor the guidelines state it,
-    follow the field's standard practice -- e.g. table text one step smaller than the body
-    text, single-spaced inside the table, the caption in the body font at body size, a table
-    that breaks across pages repeating its header row -- and record the choice in the package's
-    report. Never invent a requirement the journal does not state, and never leave a style the
-    template does not pin unset.
+  * STYLE AND ARCHITECTURE FALL BACK IN LEVELS -- move to the NEXT level only for what the
+    current level leaves UNSPECIFIED: (1) the TEMPLATE files above are the first authority;
+    (2) anything they do not pin follows the journal's/venue's OFFICIAL GUIDELINES on its own
+    website (the run's profile records the source it was built from -- see the pack's
+    `sources`/`guidelines_source` -- and the prompt's guideline note); (3) anything still
+    unstated at that level follows ESTABLISHED ACADEMIC CONVENTION -- e.g. table text one step
+    smaller than the body text, single-spaced inside the table, the caption in the body font at
+    body size, a table that breaks across pages repeating its header row. Record which level
+    each such choice came from in the package's report. Never invent a requirement no level
+    states, never let level (1) override level (2) for something the template leaves open, and
+    never leave a style unset.
   * CONTAINER HEADINGS THAT BELONG TO ANOTHER PUBLISHER'S TEMPLATE (for example "Lead contact",
     "Resource availability", "Materials availability", "Method details", or a bare "Key
     resources" heading) are not part of this venue's structure: fold their content into the
@@ -2885,7 +2887,18 @@ def venue_norm_block(venue_id, root=None, transfer: bool = False) -> str:
         lines = ["", "TEMPLATE FILES FOR THIS RUN (the producing/reviewing sandboxes carry a "
                      "read-only `venue_template/` copy of the venue's own files, and their render "
                      "-- when this machine could make one -- is staged for the visual pass under "
-                     "`visual_template/`):"]
+                     "`visual_template/`):",
+                     "  * READ THE TEMPLATE FILES YOURSELF -- they are this run's authority for "
+                     "architecture and formatting, whatever your role: the REVIEW and the AUDIT "
+                     "dispose every template-conformance row (OFFICIAL_TEMPLATE.md) against "
+                     "these files and never invent a rule they do not state; the REWRITE, "
+                     "REVISE and INTEGRATE agents keep the template's styles, numbering, "
+                     "bullets/indentation and furniture while they edit content; the JUDGE "
+                     "compares the package's own render with `visual_template/` side by side "
+                     "(title page, running head/logo, footers, heading depth, caption placement) "
+                     "in its visual record. Every decision must be checkable against these "
+                     "files: a claim about a \"journal rule\" that neither the template nor the "
+                     "venue's official guidelines states is a defect of the claim."]
         if word.get("main"):
             lines.append(f"  * Word (.docx): venue_template/word/{Path(word['main']).name}"
                          + (f"; supplementary: venue_template/word/"
@@ -2898,6 +2911,13 @@ def venue_norm_block(venue_id, root=None, transfer: bool = False) -> str:
                          + ("; bibliography style: "
                             + ", ".join(Path(p).name for p in latex.get("bst") or [])
                             if latex.get("bst") else ""))
+        try:
+            _prof = load_venue_profile(venue_id, root=root)
+            _source = str((_prof.data.get("prompt") or {}).get("guidelines_source") or "").strip()
+        except VenueProfileError:
+            _source = ""
+        if _source:
+            lines.append(f"  * The venue's official guidance this run records: {_source}")
         lines.append("  * Every produced .docx is restyled into the Word template's styles and "
                      "theme by the code-side normalizer before the postcheck. Keep the template's "
                      "heading styles, statement names, and figure/table label order; do not "
@@ -3636,7 +3656,7 @@ DEFAULT_FORMAT_FIX = "auto"
 # integration stage (the pipeline's "merge from the other versions" step), and
 # `a`/`w`/`i` are the short spellings used in the round plan.
 ONLY_STAGES = ("rewrite", "review", "audit", "revise", "integrate", "judge",
-               "feedback", "concerns", "response", "apply-template")
+               "feedback", "concerns", "response", "author-submission")
 ONLY_ALIASES = {"w": "rewrite", "rewrites": "rewrite", "r": "review", "reviews": "review",
                 "aud": "audit", "audits": "audit", "auditor": "audit", "verify": "audit",
                 "a": "revise", "a2": "revise", "revises": "revise", "revision": "revise",
@@ -3644,8 +3664,9 @@ ONLY_ALIASES = {"w": "rewrite", "rewrites": "rewrite", "r": "review", "reviews":
                 "merge": "integrate", "merges": "integrate", "j": "judge", "judges": "judge",
                 "fb": "feedback", "feedbacks": "feedback",
                 "concern": "concerns",
-                "applytemplate": "apply-template", "apply_template": "apply-template",
-                "template": "apply-template",
+                "applytemplate": "author-submission", "apply_template": "author-submission",
+                "apply-template": "author-submission", "template": "author-submission",
+                "author": "author-submission", "template-author": "author-submission",
                 "resp": "response", "responses": "response", "response-to-reviewers": "response"}
 # The auditor sits between the reviewer and the reviser: it disposes the frozen
 # review's findings (confirm / drop-with-evidence) and attacks the reviewer's
@@ -10998,14 +11019,16 @@ WRITE (only inside out/):
      block as "<Name>, lead contact").
   5. Keep the template's first-page block, running head/logo, page numbers and
      even/odd furniture exactly as the template defines them.
-     STYLES THE TEMPLATE DOES NOT PIN: follow the journal's own official author
-     guidelines first (they are the authority for anything the template leaves
+     FALL BACK IN LEVELS, moving to the next level ONLY for what the current
+     one leaves unspecified: (1) the template itself; (2) the journal's own
+     official author guidelines on its website (anything the template leaves
      open -- table font size, spacing inside a table, caption size, list
-     indentation ...); where the guidelines are silent, follow established
-     academic convention (for example table text one step smaller than the body
-     text, single-spaced inside the table, captions in the body font at body
-     size). Never invent a requirement the journal does not state, and never
-     leave such a style unset.
+     indentation ...); (3) established academic convention (for example table
+     text one step smaller than the body text, single-spaced inside the table,
+     captions in the body font at body size). Record which level each choice
+     came from in the ledger. Never invent a requirement no level states, never
+     let the template override the guidelines for something it leaves open, and
+     never leave such a style unset.
   6. Render each output and LOOK at it (the visual-inspection rule below), then
      SELF-CHECK, at minimum: the Frontiers logo is in the first-page header; the
      footer furniture is there on odd AND even pages (the template's own, e.g.
@@ -13512,7 +13535,7 @@ def parse_only_stage(token: str, item: str) -> str:
     if name not in ONLY_STAGES:
         die(f"--only: unknown stage {item!r}; choose from {', '.join(ONLY_STAGES)} "
             f"(aliases: merge=integrate, w=rewrite, a/a2=revise, j=judge, "
-            f"fb=feedback, resp=response, template=apply-template)")
+            f"fb=feedback, resp=response, apply-template/author=author-submission)")
     return name
 
 
@@ -13671,8 +13694,10 @@ class OnlySpec:
         # Exact stage names win over the single-letter prefixes below: "audit"
         # must not be read as "a" (revise), and the journal chain's stages are
         # their own classes.
-        if vid in ("audit", "feedback", "concerns", "response", "apply-template"):
+        if vid in ("audit", "feedback", "concerns", "response"):
             return vid
+        if vid in ("author-submission", "apply-template", "template"):
+            return "author-submission"
         if vid.startswith("w"):
             return "rewrite"
         if vid.startswith("a"):
@@ -28561,7 +28586,7 @@ def _ensure_template_stage_for_run(ctx: Ctx, args) -> None:
     if agent == "manual":
         die(f"transfer mode authors the submission INSIDE the journal's templates before any "
             f"other stage: fill {sb / 'out'} using {sb / PROMPT_FILE}, then re-run `run` "
-            f"(or check it with `apply-template --root {ctx.root} --agent manual`)")
+            f"(or check it with `author-submission --root {ctx.root} --agent manual`)")
     cmd = resolve_agent_cmd(agent, getattr(args, "agent_cmd", None))
     rec = {"id": TEMPLATE_REWRITE_DIRNAME, "kind": "template-rewrite", "status": "running",
            "sandbox": str(sb), "round": 0}
@@ -28622,7 +28647,7 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
         report.update({"venue": venue_id_of(ctx), "source": str(src), "sandbox": str(sb),
                        "agent": "manual", "agent_rc": None})
         write_json_atomic(ctx.reports_dir / "template_rewrite.json", report)
-        print(f"[apply-template] checked the existing session {sb}: "
+        print(f"[author-submission] checked the existing session {sb}: "
               f"coverage {report['coverage']['covered']}/{report['coverage']['checked']} "
               f"({report['coverage']['ratio']:.0%}), template guide sentences left "
               f"{len(report['template_prose_left'])}, headers/footers "
@@ -28630,7 +28655,7 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
         if not report["ok"]:
             die("the template-first rewrite did not pass its postcheck: "
                 + "; ".join(report["errors"])[:400])
-        print("[apply-template] the package in out/ passed the code-side postcheck")
+        print("[author-submission] the package in out/ passed the code-side postcheck")
         return
     if sb.exists() and any(sb.iterdir()):
         if not bool(getattr(args, "force", False)):
@@ -28655,18 +28680,18 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
         # the prompt says to fall back to the venue_template/ file itself.
         seed_template_visuals(ctx, sb)
     except Exception as e:                                        # noqa: BLE001
-        print(f"[apply-template] note: the venue template render could not be seeded "
+        print(f"[author-submission] note: the venue template render could not be seeded "
               f"({type(e).__name__}: {e}); the prompt tells the agent to compare against "
               f"venue_template/ instead")
-    print(f"[apply-template] template-first session sandbox: {sb}")
-    print(f"[apply-template] prompt: {sb / PROMPT_FILE}  (copy the journal templates, then "
+    print(f"[author-submission] template-first session sandbox: {sb}")
+    print(f"[author-submission] prompt: {sb / PROMPT_FILE}  (copy the journal templates, then "
           f"replace every placeholder with the source content)")
-    print(f"[apply-template] templates staged read-only: "
+    print(f"[author-submission] templates staged read-only: "
           + ", ".join(Path(v).name for v in sorted(templates.values())))
-    print(f"[apply-template] source package (read-only): {src}")
+    print(f"[author-submission] source package (read-only): {src}")
     if agent == "manual":
-        print(f"[apply-template] manual mode: run the prompt yourself and fill {sb / 'out'}, "
-              f"then re-run `apply-template --root {ctx.root} --agent manual` to CHECK it "
+        print(f"[author-submission] manual mode: run the prompt yourself and fill {sb / 'out'}, "
+              f"then re-run `author-submission --root {ctx.root} --agent manual` to CHECK it "
               f"(the postcheck reads {sb / 'out'})")
         return
     cmd = resolve_agent_cmd(agent, getattr(args, "agent_cmd", None))
@@ -28674,10 +28699,10 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
            "sandbox": str(sb), "round": 0}
     res = _execute_attempt_in(sb, rec, cmd,
                               int(getattr(args, "timeout", DEFAULTS.get("timeout", 14400)) or 14400))
-    print(f"[apply-template] agent: {agent} rc={res.get('rc')} in {res.get('dur', 0):.0f}s "
+    print(f"[author-submission] agent: {agent} rc={res.get('rc')} in {res.get('dur', 0):.0f}s "
           f"(log: {res.get('log')})")
     if res.get("error"):
-        print(f"[apply-template] WARNING: {res['error']}")
+        print(f"[author-submission] WARNING: {res['error']}")
     report = template_rewrite_postcheck(sb, src, templates)
     report.update({"venue": venue_id_of(ctx), "source": str(src), "sandbox": str(sb),
                    "agent": agent, "agent_rc": res.get("rc")})
@@ -28696,15 +28721,15 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
         + ("\n".join("- WARNING: " + w for w in report["warnings"])
            + "\n" if report["warnings"] else ""),
         encoding="utf-8")
-    print(f"[apply-template] coverage: {report['coverage']['covered']}/"
+    print(f"[author-submission] coverage: {report['coverage']['covered']}/"
           f"{report['coverage']['checked']} ({report['coverage']['ratio']:.0%}) source "
           f"paragraph(s) verbatim; template guide sentences left: "
           f"{len(report['template_prose_left'])}")
-    print(f"[apply-template] report: {(ctx.reports_dir / 'template_rewrite.md')}")
+    print(f"[author-submission] report: {(ctx.reports_dir / 'template_rewrite.md')}")
     if not report["ok"]:
         die("the template-first rewrite did not pass its postcheck: "
             + "; ".join(report["errors"])[:400])
-    print("[apply-template] the package in out/ passed the code-side postcheck; it is NOT yet "
+    print("[author-submission] the package in out/ passed the code-side postcheck; it is NOT yet "
           "judged: run the review/revise stages (or a full `run`) when you want it in the round.")
 
 def cmd_apply_template(args) -> None:
@@ -28723,7 +28748,7 @@ def cmd_apply_template(args) -> None:
             "round's round<r>_winner/ -- name one with --source <dir>")
     prof = venue_profile_of(ctx, required=False)
     journal = journal_of(ctx) or (prof.default_journal if prof is not None else "")
-    print(f"[apply-template] venue: {venue_id_of(ctx)}"
+    print(f"[author-submission] venue: {venue_id_of(ctx)}"
           + (f" ({journal})" if journal else " (no journal configured)"))
     if str(getattr(args, "agent", None) or "").strip():
         _template_rewrite_session(ctx, args, src, templates)
@@ -28735,17 +28760,17 @@ def cmd_apply_template(args) -> None:
         if report.get("error"):
             die(report["error"])
         die("the rebuild left files un-restyled: " + ", ".join(report.get("failed") or []))
-    print(f"[apply-template] rebuilt {report['documents_rebuilt']} document(s) and copied "
+    print(f"[author-submission] rebuilt {report['documents_rebuilt']} document(s) and copied "
           f"{report['files_copied']} other file(s):")
     for f in report["files"]:
         if f["kind"] == "docx-rebuilt":
             print(f"  [docx] {f['file']}  (template: {Path(str(f.get('template') or '')).name}, "
                   f"text preserved={f.get('text_unchanged')}, "
                   f"headings retagged={len(f.get('headings_retagged') or [])})")
-    print(f"[apply-template] package: {report['dest']}")
-    print(f"[apply-template] report:  {report['dest']}.template_report.md "
+    print(f"[author-submission] package: {report['dest']}")
+    print(f"[author-submission] report:  {report['dest']}.template_report.md "
           f"(+ .json; written BESIDE the package, never inside it)")
-    print(f"[apply-template] the source package is untouched; every rebuilt document's text is "
+    print(f"[author-submission] the source package is untouched; every rebuilt document's text is "
           f"proven byte-identical to its source ({DOCX_FORMAT_MODULE} self-verification)")
 
 
@@ -29075,8 +29100,9 @@ def only_is_template_stage_only(spec) -> bool:
     stages = set(getattr(spec, "stages", ()) or ())
     pairs = getattr(spec, "pairs", {}) or {}
     stages |= {s for v in pairs.values() for s in (v or ())}
+    stages = {("author-submission" if s == "apply-template" else s) for s in stages}
     sessions = getattr(spec, "sessions", {}) or {}
-    return stages == {"apply-template"} and not any(sessions.values())
+    return stages == {"author-submission"} and not any(sessions.values())
 
 
 def validate_only_selectors(ctx: Ctx, only) -> None:
@@ -29159,7 +29185,8 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     _only_probe = parse_only_spec(getattr(args, "only", None))
     if only_is_template_stage_only(_only_probe):
         if journal_mode_of(ctx) != JOURNAL_MODE_TRANSFER:
-            die("--only apply-template is a TRANSFER-mode stage: this root's revision mode is "
+            die("--only author-submission (formerly apply-template) is a TRANSFER-mode stage: "
+                f"this root's revision mode is "
                 f"{journal_mode_of(ctx)!r}")
         _ensure_template_stage_for_run(ctx, args)
         die(f"the template-first stage is {'done' if template_stage_record(ctx) else 'pending'}; "
@@ -33812,13 +33839,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="actually delete; without it prune only reports what it would remove")
     pp.set_defaults(func=cmd_prune)
 
-    pat = sub.add_parser("apply-template", parents=[common],
-                         help="rebuild a WHOLE submission package inside the venue's official "
-                              "Word templates: styles/theme/fonts, front matter (bold "
-                              "'* Correspondence:' block, its own spacing), heading styles, "
-                              "first-page logo and page-number footers; every non-DOCX file is "
-                              "copied as is and every restyled document's text must stay "
-                              "byte-identical")
+    pat = sub.add_parser("author-submission", parents=[common], aliases=["apply-template"],
+                         help="AUTHOR the WHOLE submission inside the venue's official Word "
+                              "templates: with --agent the LLM copies the templates and "
+                              "replaces their placeholders with the real content (keeping "
+                              "every template style, header, footer and bullet); without "
+                              "--agent the same job is done by the code-side pass. "
+                              "`apply-template` remains as an alias")
     pat.add_argument("--source", default=None, metavar="DIR",
                      help="the package to rebuild (default: <root>/final_clean_version/, else "
                           "the last complete round's round<r>_winner/)")

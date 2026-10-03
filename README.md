@@ -233,13 +233,13 @@ python paper_pipeline.py set-article-type --show         # current venue / type 
 python paper_pipeline.py set-venue --show                # current venue, journal, resolved limits
 python paper_pipeline.py set-venue --show --json         # the same, machine-readable
 python paper_pipeline.py status --root ./paper_rounds      # prints venue, journal and limits too
-python paper_pipeline.py apply-template --root ./paper_rounds   # rebuild a WHOLE package in the journal's Word templates
+python paper_pipeline.py author-submission --root ./paper_rounds   # rebuild a WHOLE package in the journal's Word templates
 ```
 
-**Rebuilding a whole package in the journal's templates (`apply-template`).** When you want the
+**Authoring/rebuilding a whole package in the journal's templates (`author-submission`, formerly `apply-template`).** When you want the
 submission itself -- every DOCX, the cover letter and the supplementary material, plus the figures
 and data files -- rewritten into the journal-provided Word templates without re-running the agents,
-`apply-template` does exactly that on a package directory: it resolves the venue's official
+`author-submission` does exactly that on a package directory: it resolves the venue's official
 `venue_profiles/<venue>.official/` templates (main and supplementary), restyles every package DOCX
 into them with the same code-side pass the runs use (styles/theme/font table/numbering, page
 geometry, the front-matter block including the BOLD `* Correspondence:` label and its own spacing,
@@ -251,15 +251,15 @@ the report lands BESIDE the package (`<dest>.template_report.json`/`.md`), never
 source package is never modified:
 
 ```bash
-python paper_pipeline.py apply-template --root ./paper_rounds                 # -> <root>/template_package/
-python paper_pipeline.py apply-template --root ./paper_rounds --source ./paper_rounds/final_clean_version --dest ./submission_word
-python paper_pipeline.py apply-template --root ./paper_rounds --source ./paper_rounds/runs/r1_w1/rewritten --force
+python paper_pipeline.py author-submission --root ./paper_rounds                 # -> <root>/template_package/
+python paper_pipeline.py author-submission --root ./paper_rounds --source ./paper_rounds/final_clean_version --dest ./submission_word
+python paper_pipeline.py author-submission --root ./paper_rounds --source ./paper_rounds/runs/r1_w1/rewritten --force
 ```
 
 With no `--source` it rebuilds `<root>/final_clean_version/`, else the last complete round's
 `round<r>_winner/`.
 
-**`apply-template --agent` — the LLM fills the journal's own templates.** With `--agent`
+**`author-submission --agent` — the LLM fills the journal's own templates.** With `--agent`
 (default name `codex`; `manual` stages only) the command does not restyle anything: it stages a
 session sandbox — the journal's DOCX templates read-only in `venue_template/`, the source package
 read-only in `source/`, an empty `out/` — and writes the prompt that says exactly: *copy the
@@ -275,9 +275,9 @@ even/odd furniture) must be carried by every output. The report lands in
 and marks a document failed if its rebuild lost them:
 
 ```bash
-python paper_pipeline.py apply-template --root ./paper_rounds --agent            # one codex session
-python paper_pipeline.py apply-template --root ./paper_rounds --agent manual     # stage the prompt only
-python paper_pipeline.py apply-template --root ./paper_rounds --agent --agent-cmd '["myagent"]'
+python paper_pipeline.py author-submission --root ./paper_rounds --agent            # one codex session
+python paper_pipeline.py author-submission --root ./paper_rounds --agent manual     # stage the prompt only
+python paper_pipeline.py author-submission --root ./paper_rounds --agent --agent-cmd '["myagent"]'
 ```
 
 **Transfer mode runs that stage FIRST.** A root configured with `--revision-mode transfer` and a

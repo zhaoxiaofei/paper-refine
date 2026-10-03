@@ -114,13 +114,15 @@ def test_only_vocabulary():
           spec5 is not None and spec5.stages == {"rewrite", "feedback"}, str(spec5.stages))
     check("a scoped-mode stage list is accepted",
           nb.parse_only_spec("concerns,revise").stages == {"concerns", "revise"})
-    tmpl = nb.parse_only_spec("1:apply-template")
-    check("--only accepts the template-first stage (bare and round-qualified)",
-          tmpl is not None and tmpl.pairs.get(1) == {"apply-template"}
-          and nb.parse_only_spec("template").stages == {"apply-template"}
+    tmpl = nb.parse_only_spec("1:author-submission")
+    check("--only accepts the author-submission stage (bare and round-qualified)",
+          tmpl is not None and tmpl.pairs.get(1) == {"author-submission"}
+          and nb.parse_only_spec("template").stages == {"author-submission"}
+          and nb.parse_only_spec("1:apply-template").pairs.get(1) == {"author-submission"}
           and nb.only_is_template_stage_only(tmpl)
-          and nb.only_is_template_stage_only(nb.parse_only_spec("apply-template"))
-          and not nb.only_is_template_stage_only(nb.parse_only_spec("apply-template,review")))
+          and nb.only_is_template_stage_only(nb.parse_only_spec("author-submission"))
+          and not nb.only_is_template_stage_only(
+              nb.parse_only_spec("author-submission,review")))
 
 
 def test_only_in_transfer_mode():
