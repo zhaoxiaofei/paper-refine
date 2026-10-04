@@ -1345,6 +1345,91 @@ EMPTY_LENGTH_LIMITS = {"source": "", "abstract": {"base": None, "relaxation": No
                        "main_text": {"base": None, "relaxation": None},
                        "cover_letter": {"min": None, "max": None, "total_max": None, "source": ""}}
 EMPTY_CAPTIONS = {"published_limit": None, "default_cap": 0, "source": ""}
+# The venue's DISPLAY-ITEM rules (the formatter's `policy["tables"]` and
+# `policy["figures"]`, rules FMT-TB1..3 / FMT-FG1..3): where a table or a figure
+# belongs, which side of it carries its caption, and the items the venue itself
+# treats differently. An EMPTY block means "this profile declares no rule for
+# that kind" -- the scan then reports none, and no stage is gated on one (a rule
+# no level of the authority chain states is never invented). The two blocks have
+# the SAME schema, so they share one validator.
+DISPLAY_PLACEMENTS = ("end", "inline", "any")
+DISPLAY_CAPTION_SIDES = ("before", "after", "any")
+EMPTY_TABLES = {"source": "", "note": "", "placement": "", "caption": "", "special": []}
+EMPTY_FIGURES = {"source": "", "note": "", "placement": "", "caption": "", "special": []}
+
+
+def _declares_display_rule(block: dict) -> bool:
+    """Does a `tables`/`figures` block state a rule (not just a source/note)?
+
+    A block that carries only a `source`/`note` states no rule, so nothing is
+    checked or gated on it; a `placement` or a `caption` value (or a
+    special-item entry) is a rule the stages enforce.
+    """
+    return bool((block or {}).get("placement") or (block or {}).get("caption")
+                or (block or {}).get("special"))
+
+
+def _clean_display_rules(raw, prefix: str, problems: list):
+    """Validate one venue TABLE/FIGURE policy block; None means "declares none".
+
+    The block is DATA, exactly like the caption policy: the pipeline renders it
+    into the prompts and hands it to the formatter as `policy["tables"]` /
+    `policy["figures"]`, and the formatter checks exactly what it states.
+    `special` entries exist for the items a publisher genuinely treats
+    differently (a Cell Press-style key-resources table that lives inside the
+    methods and carries no "Table N." label; a front-matter figure such as a
+    graphical abstract that is not part of the numbered figure sequence); each
+    entry overrides only the fields it sets.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        problems.append(f"{prefix} must be an object, or null when the venue profile declares "
+                        f"no rule for that kind (got {type(raw).__name__})")
+        return None
+    placement = str(raw.get("placement") or "").strip().lower()
+    if placement and placement not in DISPLAY_PLACEMENTS:
+        problems.append(f"{prefix}.placement {placement!r} is not one of "
+                        f"{', '.join(DISPLAY_PLACEMENTS)}")
+    caption = str(raw.get("caption") or "").strip().lower()
+    if caption and caption not in DISPLAY_CAPTION_SIDES:
+        problems.append(f"{prefix}.caption {caption!r} is not one of "
+                        f"{', '.join(DISPLAY_CAPTION_SIDES)}")
+    specials, seen = [], set()
+    for i, entry in enumerate(raw.get("special") or []):
+        if not isinstance(entry, dict):
+            problems.append(f"{prefix}.special[{i}] must be an object")
+            continue
+        match = str(entry.get("match") or "").strip()
+        if not match:
+            problems.append(f"{prefix}.special[{i}].match is required (a regular expression "
+                            f"over the item's context: the text above it, its section heading "
+                            f"or, for a table, its first-row header)")
+            continue
+        try:
+            re.compile(match)
+        except re.error as e:
+            problems.append(f"{prefix}.special[{i}].match {match!r} is not a regular "
+                            f"expression: {e}")
+        if match.lower() in seen:
+            problems.append(f"{prefix}.special: duplicate match {match!r}")
+        seen.add(match.lower())
+        s_placement = str(entry.get("placement") or "").strip().lower()
+        if s_placement and s_placement not in DISPLAY_PLACEMENTS:
+            problems.append(f"{prefix}.special[{i}].placement {s_placement!r} is not one of "
+                            f"{', '.join(DISPLAY_PLACEMENTS)}")
+        s_caption = str(entry.get("caption") or "").strip().lower()
+        if s_caption and s_caption not in DISPLAY_CAPTION_SIDES + ("none",):
+            problems.append(f"{prefix}.special[{i}].caption {s_caption!r} is not one of "
+                            f"{', '.join(DISPLAY_CAPTION_SIDES + ('none',))}")
+        specials.append({"match": match, "placement": s_placement, "caption": s_caption,
+                         "source": str(entry.get("source") or "").strip(),
+                         "note": str(entry.get("note") or "").strip()})
+    return {"source": str(raw.get("source") or "").strip(),
+            "note": str(raw.get("note") or "").strip(),
+            "placement": placement if placement in DISPLAY_PLACEMENTS else "",
+            "caption": caption if caption in DISPLAY_CAPTION_SIDES else "",
+            "special": specials}
 
 
 def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
@@ -1468,6 +1553,8 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
     # this list through `venue_containers()` and its own default is empty.
     foreign = _profile_str_list(out.get("foreign_container_headings"),
                                 "foreign_container_headings", problems) or []
+    clean_tables = _clean_display_rules(out.get("tables"), "tables", problems)
+    clean_figures = _clean_display_rules(out.get("figures"), "figures", problems)
 
     if problems:
         raise VenueProfileError(f"{origin}: " + "; ".join(problems))
@@ -1497,6 +1584,8 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
         "default_journal": str(out.get("default_journal") or "").strip(),
         "length_limits": clean_limits,
         "captions": clean_captions,
+        "tables": clean_tables or copy.deepcopy(EMPTY_TABLES),
+        "figures": clean_figures or copy.deepcopy(EMPTY_FIGURES),
         "foreign_container_headings": foreign,
         "submission": {
             "pdf_accepted": pdf_accepted,
@@ -1623,6 +1712,26 @@ class VenueProfile:
     @property
     def caption_default(self) -> int:
         return int(self.captions.get("default_cap") or 0)
+
+    @property
+    def tables(self) -> dict:
+        """The venue's table rule (EMPTY_TABLES when the profile declares none)."""
+        return self.data.get("tables") or EMPTY_TABLES
+
+    @property
+    def figures(self) -> dict:
+        """The venue's figure rule (EMPTY_FIGURES when the profile declares none)."""
+        return self.data.get("figures") or EMPTY_FIGURES
+
+    @property
+    def declares_table_rule(self) -> bool:
+        """Does this profile state where captioned tables belong, and how?"""
+        return _declares_display_rule(self.tables)
+
+    @property
+    def declares_figure_rule(self) -> bool:
+        """Does this profile state where captioned figures belong, and how?"""
+        return _declares_display_rule(self.figures)
 
     @property
     def length_limits_source(self) -> str:
@@ -3009,11 +3118,55 @@ def venue_id_of(ctx=None) -> str:
     return vid or DEFAULT_VENUE
 
 
-def _snapshot_profile(cfg: dict, venue_id: str):
-    """The profile snapshot recorded in the config, when it matches the id."""
+# The display-rule inheritance (`_snapshot_profile`) reads the venue's profile
+# file when a snapshot predates the `tables`/`figures` fields. That lookup runs
+# ONCE per (root, venue, missing fields) per process: `format_policy_of` is on
+# every scan and every stage postcheck, and re-reading + re-parsing the profile
+# JSON on each call measurably slowed whole rounds down. A profile file edited
+# in the MIDDLE of one command is therefore not picked up by an already-cached
+# lookup -- re-run the command, as with every other recorded-rule change.
+_DISPLAY_RULE_INHERIT_CACHE: dict = {}
+
+
+def _inherited_display_rules(venue_id: str, root, missing: tuple) -> dict:
+    """The shipped profile's display rules a pre-schema snapshot may inherit."""
+    key = (str(root), venue_id, missing)
+    if key in _DISPLAY_RULE_INHERIT_CACHE:
+        return _DISPLAY_RULE_INHERIT_CACHE[key]
+    inherited: dict = {}
+    try:
+        fresh = load_venue_profile(venue_id, root=root)
+    except VenueProfileError:
+        fresh = None          # no readable file: the snapshot keeps running rule-free
+    if fresh is not None:
+        if "tables" in missing and fresh.declares_table_rule:
+            inherited["tables"] = copy.deepcopy(fresh.tables)
+        if "figures" in missing and fresh.declares_figure_rule:
+            inherited["figures"] = copy.deepcopy(fresh.figures)
+    _DISPLAY_RULE_INHERIT_CACHE[key] = inherited
+    return inherited
+
+
+def _snapshot_profile(cfg: dict, venue_id: str, root=None):
+    """The profile snapshot recorded in the config, when it matches the id.
+
+    A snapshot recorded BEFORE the `tables`/`figures` schema existed carries no
+    display rule at all, and the recorded snapshot normally wins over the files
+    on disk. That would leave a root created earlier with no rule forever, so
+    those fields -- and only those -- are inherited from the venue's own profile
+    file, each one only when the snapshot does not carry its key at all (a
+    snapshot that carries an explicit block, including an empty one, is
+    authoritative, and re-recording with `set-venue` keeps working as before).
+    """
     snapshot = cfg.get("venue_profile")
     if not isinstance(snapshot, dict):
         return None
+    missing = tuple(k for k in ("tables", "figures") if k not in snapshot)
+    if missing:
+        inherited = _inherited_display_rules(venue_id, root, missing)
+        if inherited:
+            snapshot = dict(snapshot)
+            snapshot.update(inherited)
     try:
         prof = VenueProfile(snapshot, origin="recorded snapshot")
     except VenueProfileError:
@@ -3038,7 +3191,7 @@ def venue_profile_of(ctx=None, required: bool = True):
     cfg = _ctx_cfg(ctx)
     venue_id = venue_id_of(ctx)
     root = getattr(ctx, "root", None)
-    prof = _snapshot_profile(cfg, venue_id)
+    prof = _snapshot_profile(cfg, venue_id, root=root)
     if prof is None:
         try:
             prof = load_venue_profile(venue_id, root=root)
@@ -3112,6 +3265,29 @@ def venue_status_lines(ctx) -> list:
             lines.append(f"limits (M19):  abstract <= {limits['abstract'].get('cap')}, "
                          f"main text <= {limits['main text'].get('cap')} "
                          f"({prof.length_limits_source})")
+        for key, label, rules in (("tables", "tables", "FMT-TB"), ("figures", "figures",
+                                                                   "FMT-FG")):
+            block = prof.data.get(key) or {}
+            if not _declares_display_rule(block):
+                lines.append(f"{label} ({rules}): this venue profile declares no {label} rule "
+                             f"(counts are reported; no placement/caption is gated)")
+                continue
+            bits = []
+            if block.get("placement") == "end":
+                bits.append(f"{label}: together at the end of the manuscript")
+            elif block.get("placement") == "inline":
+                bits.append(f"{label}: in the body, where cited")
+            if block.get("caption") in ("before", "after"):
+                bits.append(f"caption {block['caption']} the {label[:-1]}")
+            elif block.get("caption") == "any":
+                bits.append(f"caption side not pinned ({label[:-1]})")
+            n_special = len(block.get("special") or [])
+            if n_special:
+                bits.append(f"{n_special} special {label[:-1]}(s) this venue exempts")
+            if not bits:
+                bits.append("no placement/caption pinned")
+            lines.append(f"{label} ({rules}): " + "; ".join(bits)
+                         + f"  ({block.get('source') or 'venue profile'})")
     missing = 'not set -- the prompts say "the target journal"; run `set-journal <name>`'
     lines.append(f"journal:       {journal or '(' + missing + ')'}")
     return lines
@@ -5453,7 +5629,11 @@ M20_REVIEW_SWEEP = f"""3c. The PIPELINE-MANDATED OOXML formatting sweep M20 (alw
    like the skill's sweeps. The mechanical rows are REPAIRED by the orchestrator before the
    candidate is fingerprinted ({M20_FIX_CMD}); the editorial rows (em-dash reduction, quote
    style, journal-italic policy) are findings for the revision/integration arms. M20 is
-   never a gate by itself and never makes a version ineligible."""
+   never a gate by itself and never makes a version ineligible -- EXCEPT the venue's own TABLE
+   rule (FMT-TB1..FMT-TB3, below): a package-producing stage's postcheck fails while one of its
+   rows is present, because the venue profile itself declared that rule.
+
+@@DISPLAY_RULE@@"""
 M20_REVISE_RULE = f"""OOXML formatting uniformity (check id M20; see the formatting sweep): the
      mechanical defects (break-only paragraph/blank page, legend spacing, heading keepNext,
      running head on the title page, unintended italics outside Zotero fields, mixed
@@ -5464,19 +5644,25 @@ M20_REVISE_RULE = f"""OOXML formatting uniformity (check id M20; see the formatt
      ONE treatment. Re-scan with `{M20_SCAN_CMD}` before finishing, dispose every M20 row of the
      review artifact, and record each formatting edit in CHANGELOG.md under M20. Formatting
      changes are allowed here without touching meaning (this is the formatting exception to E1);
-     never change scientific content for a formatting row."""
+     never change scientific content for a formatting row.
+
+@@DISPLAY_RULE@@"""
 M20_INTEGRATE_RULE = f"""OOXML formatting (check id M20) is a difference class of its own: the
      orchestrator normalizes the mechanical rows on the integrated package, and the editorial rows
      (em-dash density, mixed quotation marks, journal-italic policy, email/URL treatment) are
      ported from a donor when the donor is the consistent one -- never merge two documents that
      disagree on treatment. Re-scan with `{M20_SCAN_CMD}` and record the formatting state in
-     integrated/CHANGELOG.md under M20."""
+     integrated/CHANGELOG.md under M20.
+
+@@DISPLAY_RULE@@"""
 M20_REWRITE_RULE = f"""OOXML formatting (check id M20) is REPORTED here, not fixed: a rewrite must
      not introduce a break-only paragraph, a second URL/email treatment, a different legend
      spacing or a new quotation style; keep the base's formatting conventions. Re-scan your own
      package with `{M20_SCAN_CMD}` before finishing. If the base already carries formatting
      defects, surface them in rewritten/REWRITE_REPORT.md under "PROBLEMS SURFACED" -- the
-     revision/integration stages and the orchestrator's normalizer own the fix."""
+     revision/integration stages and the orchestrator's normalizer own the fix.
+
+@@DISPLAY_RULE@@"""
 M20_JUDGE_SWEEP = """PLUS the pipeline-mandated OOXML formatting sweep M20 (derive it yourself:
    you are handed NO orchestrator artifact -- scan your own blinded views with
    `python paper_docx_format.py scan target/` (and field/<label>/ when a comparison needs it) and
@@ -5491,17 +5677,128 @@ M20_JUDGE_SWEEP = """PLUS the pipeline-mandated OOXML formatting sweep M20 (deri
    read was built, so do not manufacture differences out of them. The TEXT-level consistency rows
    (citation dialect, US/UK spelling, attributive hyphenation) are deliberately NOT pre-normalized:
    a corpus that completed a convention where the other did not is a real CONSISTENCY-tier
-   difference (second in the priority order) and is scored as one."""
+   difference (second in the priority order) and is scored as one.
+
+@@DISPLAY_RULE@@"""
 
 
-def apply_m20(text: str) -> str:
+def apply_m20(text: str, profile=None) -> str:
     for token, block in (("@@M20_REVIEW_SWEEP@@", M20_REVIEW_SWEEP),
                          ("@@M20_REVISE_RULE@@", M20_REVISE_RULE),
                          ("@@M20_JUDGE_SWEEP@@", M20_JUDGE_SWEEP),
                          ("@@M20_INTEGRATE_RULE@@", M20_INTEGRATE_RULE),
                          ("@@M20_REWRITE_RULE@@", M20_REWRITE_RULE)):
         text = text.replace(token, block)
-    return text
+    # The venue's DISPLAY rules come AFTER the blocks above (each of them carries
+    # the @@DISPLAY_RULE@@ token), so one substitution fills them all.
+    return text.replace("@@DISPLAY_RULE@@", display_rule_text(profile))
+
+
+def display_rule_text(profile=None) -> str:
+    """The venue's DISPLAY rules (tables + figures) for a prompt.
+
+    Rendered from the profile, never invented: a kind the profile declares no
+    rule for renders the report-only wording (nothing is gated for it and the
+    code-side scan emits no rows for it), and a kind it does declare states
+    where those items belong, which side carries the caption, and which items
+    the venue itself treats differently (a key-resources table inside the
+    methods, a graphical abstract that is not part of the numbered sequence).
+    """
+    prof = _as_profile(profile)
+    blocks = [display_kind_rule_text(prof, "table", prof.data.get("tables") or {}),
+              display_kind_rule_text(prof, "figure", prof.data.get("figures") or {})]
+    return "\n".join(blocks)
+
+
+def display_kind_rule_text(prof, kind: str, block: dict) -> str:
+    """One kind's block of the display-rule prompt text (see display_rule_text)."""
+    plural = kind + "s"
+    rules = "FMT-TB1..FMT-TB3" if kind == "table" else "FMT-FG1..FMT-FG3"
+    r1, r2, r3 = (("FMT-TB1", "FMT-TB2", "FMT-TB3") if kind == "table"
+                  else ("FMT-FG1", "FMT-FG2", "FMT-FG3"))
+    if not _declares_display_rule(block):
+        return (f"{plural.upper()} — the venue profile declares NO {kind} rule "
+                f"(check ids {rules}):\n"
+                f"  * Nothing is gated on {kind} placement or captioning for this venue, and the "
+                f"code-side scan emits no {rules} rows; the venue's own template and author "
+                f"guidelines govern, and the review records what it finds against them. A {kind} "
+                f"that carries no caption at all is still a defect an editor raises: report it "
+                f"(or give the {kind} its own caption paragraph when the venue's own structure "
+                f"has a slot for one) -- never invent, delete or combine {kind} content.")
+    lines = [f"{plural.upper()} — THE VENUE'S OWN RULE (check ids {rules}; code-side scanned):"]
+    src = f" Source: {block.get('source')}" if block.get("source") else ""
+    placement = str(block.get("placement") or "")
+    if placement == "end":
+        area = "tables area" if kind == "table" else "figure/legend area"
+        lines.append(
+            f"  * WHERE {plural.upper()} BELONG: at the END of the manuscript, together in the "
+            f"{area} (with the other {plural}, not scattered through the body). A {kind} "
+            f"that appears before that area is the finding {r3} -- move it"
+            + ("" if kind == "figure" else " (with its caption)")
+            + f" into the {area} beside the other {plural}." + src)
+    elif placement == "inline":
+        lines.append(
+            f"  * WHERE {plural.upper()} BELONG: in the body, where the text cites them; this "
+            f"venue does not collect {plural} into an end-of-manuscript area, and the code checks "
+            f"no placement for it." + src)
+    else:
+        lines.append(f"  * WHERE {plural.upper()} BELONG: the venue states no placement rule; "
+                     f"the code checks none." + src)
+    caption = str(block.get("caption") or "")
+    label_examples = ("\"Table 1.\", \"Table S1.\", \"TABLE 2 |\"" if kind == "table"
+                      else "\"Figure 2 |\", \"Fig. 2.\", \"Figure S1\", \"Extended Data "
+                           "Figure 3 |\"")
+    if caption == "before":
+        lines.append(
+            f"  * THE CAPTION: every {kind} carries its own caption paragraph IMMEDIATELY BEFORE "
+            f"it (labelled as the venue labels its {plural} -- {label_examples}). A {kind} with "
+            f"no caption is {r1}; a caption on the other side of the {kind} is {r2}.")
+    elif caption == "after":
+        lines.append(
+            f"  * THE CAPTION: every {kind} carries its own caption paragraph IMMEDIATELY AFTER "
+            f"it (the legend-below-the-figure layout). A {kind} with no caption is {r1}; a "
+            f"caption on the other side is {r2}.")
+    elif kind == "figure":
+        lines.append(
+            "  * THE CAPTION: the venue does not pin the caption's side -- a figure's legend may "
+            "live in the legends area at the end, so no caption is required next to the image; "
+            "the collect/keep-labels rule still applies (every legend carries its label).")
+    else:
+        lines.append(
+            f"  * THE CAPTION: the venue does not pin the caption's side; a {kind} that carries "
+            f"no caption at all is still {r1}.")
+    specials = block.get("special") or []
+    if specials:
+        lines.append(
+            f"  * THE VENUE'S OWN EXCEPTIONS: this venue genuinely treats SOME {plural} "
+            f"differently, and the code knows them by the text above the item, the section "
+            f"heading over it"
+            + (" or its first-row header" if kind == "table" else "")
+            + ". They are EXEMPT from the rule above exactly as stated and must not be forced "
+              "into the general shape:")
+        for s in specials:
+            bits = []
+            if s.get("placement"):
+                bits.append(f"placement: {s['placement']}")
+            if s.get("caption"):
+                bits.append("caption: none (no caption needed)" if s["caption"] == "none"
+                            else f"caption: {s['caption']}")
+            lines.append(f"      - {s['match']!r}" + (f" ({'; '.join(bits)})" if bits else "")
+                         + (f" -- {s.get('note')}" if s.get("note") else "")
+                         + (f" [source: {s['source']}]" if s.get("source") else ""))
+        if block.get("note"):
+            lines.append(f"  * {block['note']}")
+    elif block.get("note"):
+        lines.append(f"  * NO SPECIAL {plural.upper()}: {block['note']}")
+    lines.append(
+        f"  * HOW THIS IS CHECKED: the pipeline's code-side scan of the manuscript reports these "
+        f"as {r1}/{r2}/{r3} rows (with the item's shape and the text above it) in "
+        f"`FORMAT_SCAN.json` and the M20 artifact; the review disposes every row, and a "
+        f"package-producing stage must DELIVER a package with none of them -- its postcheck "
+        f"fails while one is present. The same rules are written into your session as "
+        f"`format_policy.json` at the sandbox root; pass it to your own scans with "
+        f"`python paper_docx_format.py scan <dir> --policy format_policy.json`.")
+    return "\n".join(lines)
 
 
 # ---- M25-M29 + J5: THE REWRITE-PARITY CHECKS (review/audit/revise) ----------
@@ -8827,7 +9124,7 @@ the surface, and the revisers may not change a claim here."""
     text = apply_hierarchy_reconcile(text, "review")
     text = render_venue_tokens(text, prof)
     text = apply_m19(text, prof)
-    text = apply_m20(text)
+    text = apply_m20(text, prof)
     text += DISPOSITION_MANDATE
     text = text.replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("review"))
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
@@ -8876,7 +9173,7 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
     text = text.replace("@@AUDIT_BLOCK@@", audit_block)
     text = render_venue_tokens(text, prof)
     text = apply_m19(text, prof)
-    text = apply_m20(text)
+    text = apply_m20(text, prof)
     text = text.replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("stage"))
     text = text.replace("@@LANGUAGE_PASS_RULE@@",
                         LANGUAGE_PASS_RULE.replace("@@R6_PATH@@", "revised/work/R6_language.md"))
@@ -8956,7 +9253,7 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE))
     text = render_venue_tokens(text, prof)
     text = apply_m19(text, prof)
-    text = apply_m20(text)
+    text = apply_m20(text, prof)
     text = text.replace("@@LANGUAGE_PASS_RULE@@",
                         LANGUAGE_PASS_RULE.replace("@@R6_PATH@@", "integrated/work/R6_language.md"))
     text = text.replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("stage"))
@@ -9004,7 +9301,7 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE))
     text = render_venue_tokens(text, prof)
     text = apply_m19(text, prof)
-    text = apply_m20(text)
+    text = apply_m20(text, prof)
     text = text.replace("@@LANGUAGE_PASS_RULE@@",
                         LANGUAGE_PASS_RULE.replace("@@R6_PATH@@", "rewritten/work/R6_language.md"))
     text = text.replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("stage"))
@@ -9061,7 +9358,7 @@ def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index
             "comparisons the sheet asks for.\n", 1)
     text = render_venue_tokens(text, prof)
     text = apply_m19(text, prof)
-    text = apply_m20(text)
+    text = apply_m20(text, prof)
     text = text.replace("@@WRITING_RUBRIC@@", WRITING_RUBRIC)
     text = text.replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("judge"))
     text = text.replace("@@JUDGE_SELFCHECK@@", judge_selfcheck_block(run_id))
@@ -10780,11 +11077,53 @@ def _format_module():
 
 
 def format_policy_of(ctx: Ctx) -> dict:
-    """The formatting policy: module defaults + pipeline_config.json overrides."""
+    """The formatting policy: module defaults + the venue's table rule + config.
+
+    The venue's DISPLAY rules (`tables` and `figures`) ride in the same policy
+    dict the formatter reads, so the code-side scan checks exactly what the
+    venue profile declares and a profile that declares none for a kind gets no
+    rows for it. An operator's own `format_policy.tables` / `.figures` in
+    `pipeline_config.json` wins over the profile's block, exactly like every
+    other policy key.
+    """
     mod = _format_module()
     policy = dict(getattr(mod, "POLICY_DEFAULTS", {}) or {}) if mod else {}
-    policy.update((ctx.cfg or {}).get("format_policy") or {})
+    configured = (ctx.cfg or {}).get("format_policy") or {}
+    policy.update(configured)
+    for key, block in _venue_display_blocks(ctx).items():
+        if key not in configured:
+            policy[key] = copy.deepcopy(block)
     return policy
+
+
+def _venue_display_blocks(ctx: Ctx) -> dict:
+    """The venue's declared `tables`/`figures` blocks, memoized for this ctx.
+
+    `format_policy_of` runs on every scan and every stage postcheck, and
+    resolving the venue profile (parse + deep-copy + validate the recorded
+    snapshot) is not free; the memo keeps that cost off the hot path and is
+    invalidated whenever the config object, its recorded snapshot, the venue id
+    or the article type changes (the identity-based key a `set-venue`/
+    `set-article-type` in one process replaces).
+    """
+    cfg = _ctx_cfg(ctx)
+    key = (id(cfg), id(cfg.get("venue_profile")), venue_id_of(ctx),
+           str(cfg.get("article_type") or ""))
+    cached = getattr(ctx, "_venue_display_blocks", None)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    blocks: dict = {}
+    prof = venue_profile_of(ctx, required=False)
+    if prof is not None:
+        for name in ("tables", "figures"):
+            block = prof.data.get(name) or {}
+            if _declares_display_rule(block):
+                blocks[name] = copy.deepcopy(block)
+    try:
+        ctx._venue_display_blocks = (key, blocks)
+    except Exception:                                       # noqa: BLE001 -- stub ctx
+        pass
+    return blocks
 
 
 # The three TEXT-level consistency rules (citation dialect, US/UK spelling,
@@ -10875,6 +11214,10 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                 # cannot carry \qty{}{}), and it is the rule the operator asked
                 # for by name: a value+unit outside siunitx is a finding-tier row.
                 text_rows += mod.latex_number_rows("\n".join(paras))
+                # The venue's table-caption rule over a LaTeX float (placement
+                # is the renderer's, so the text scan checks the caption only).
+                text_rows += mod.display_rule_rows_from_text("\n".join(paras), policy,
+                                                             prefix + rel)
             for r in text_rows:
                 rows.append({"rule": r["rule"], "severity": r["severity"],
                              "document": prefix + rel, "location": "document",
@@ -11210,6 +11553,9 @@ WRITE (only inside out/):
      came from in the ledger. Never invent a requirement no level states, never
      let the template override the guidelines for something it leaves open, and
      never leave such a style unset.
+
+{display_rule_text(prof)}
+
   6. Render each output and LOOK at it (the visual-inspection rule below), then
      SELF-CHECK, at minimum: the template's own first-page header furniture (its
      logo, when the template carries one) is present; the footer furniture is
@@ -11293,6 +11639,9 @@ leaves open:
      than the body text, single-spaced inside the table, captions in the body
      font at body size).
 Never invent a requirement no level states, and never leave such a style unset.
+
+{display_rule_text(prof)}
+
 {venue_norm_for(ctx)}
 
 READ (read-only, hash-verified):
@@ -11687,7 +12036,8 @@ def _match_source_output_docs(src_docs: list, out_docs: list, templates: dict,
     return mapping, used, errs
 
 
-def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
+def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
+                               policy: dict = None) -> dict:
     """Verify a template-first rewrite session (venue-agnostic verifiers).
 
     Two questions decide it:
@@ -12021,6 +12371,15 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
         errs.append("out/REPLACEMENT_LEDGER.md is missing: record every "
                     + ("template placeholder and what replaced it" if templates else
                        "formatting decision and every parity exception"))
+    # The venue's own TABLE rule (rules FMT-TB1..FMT-TB3): the package this
+    # stage hands back BECOMES round 1's working original, so a table the venue
+    # profile declares must already be captioned and placed the venue's way --
+    # this is the one stage whose output every later round inherits. The check
+    # is silent when the profile declares no table rule.
+    if policy is not None:
+        errs.extend(display_rule_errors(
+            scan_format_in_sources([(out, "", ())], policy=policy),
+            "template-first stage"))
     return {"ok": not errs, "errors": errs, "warnings": warns,
             "coverage": {"mode": "exact-multiset", "checked": checked, "covered": covered,
                          "ratio": round(ratio, 4), "missing_samples": missing[:8],
@@ -13013,6 +13372,24 @@ def seed_provenance_pack(ctx: Ctx, sb: Path, sources: list, ev: dict,
     return result
 
 
+def seed_format_policy_file(ctx: Ctx, sb: Path) -> Path:
+    """Write the venue's formatting policy (its DISPLAY rules) into a session.
+
+    The scanner the sessions run themselves (`python paper_docx_format.py scan
+    <dir> --policy format_policy.json`) cannot know a venue's table/figure rule:
+    it is profile DATA, so it travels with the sandbox. The file sits at the
+    sandbox ROOT (never inside `review/`, which `leftovers_present` reads as
+    agent work), carries only the `tables`/`figures` blocks, and is identical
+    for every session of a root -- it is venue-level, not derived from any
+    package, so handing it to a judge blinds nothing.
+    """
+    p = sb / "format_policy.json"
+    policy = format_policy_of(ctx)
+    write_json_atomic(p, {"tables": copy.deepcopy(policy.get("tables") or {}),
+                          "figures": copy.deepcopy(policy.get("figures") or {})})
+    return p
+
+
 def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict:
     """Write the code-side evidence pack into one session sandbox.
 
@@ -13035,6 +13412,7 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
     work.mkdir(parents=True, exist_ok=True)
     ev = code_side_evidence(ctx, corpus_dir, f"{sb.name}:{where}")
     write_json_atomic(work / "FORMAT_SCAN.json", ev.get("format") or {})
+    seed_format_policy_file(ctx, sb)
     # Provenance / identifier / concept packs: the numbers ledger (with the
     # sources the CODE could prove), the verified identifiers, the glossary
     # scaffold and the placeholder lookups. Seeded for every non-judge session;
@@ -13354,7 +13732,8 @@ def seeded_evidence_paths(sb: Path) -> set:
     """
     rels = ["EVIDENCE_PACK.md", "work/CODE_SCANS.json", "work/FORMAT_SCAN.json",
             "work/EVIDENCE_PACK.md", "work/PROVENANCE.json",
-            "work/OFFICIAL_TEMPLATE.json", "work/OFFICIAL_TEMPLATE.md"]
+            "work/OFFICIAL_TEMPLATE.json", "work/OFFICIAL_TEMPLATE.md",
+            "format_policy.json"]
     # The provenance pack is seeded into EVERY non-judge layout, so the review
     # sandbox's copies live under review/work/ and the stage sandboxes' under
     # work/; `leftovers_present` must treat both as inputs, or a freshly
@@ -17518,6 +17897,11 @@ def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
             # "no orchestrator artifact": nothing derived from target/field is
             # seeded, so provenance stays blinded.
             seed_template_visuals(ctx, sb)
+            # The venue's TABLE rule (venue-level, identical for every session,
+            # nothing derived from target/field) so the judge can derive its own
+            # M20 table rows with the public scanner: `scan <dir> --policy
+            # format_policy.json`.
+            seed_format_policy_file(ctx, sb)
             prompt = sb / "PROMPT.md"
             if not prompt.is_file():
                 _copy_session_tools(sb, stamp=view_stamp)
@@ -19611,6 +19995,15 @@ def archive_review_outputs(ctx: Ctx, r: int) -> Path:
             shutil.copy2(p, dst / name)
         except OSError:
             continue
+    # The CSV export of the same findings rides beside the archive (one row per
+    # finding, with the review's own evidence/explanation as the verbal
+    # description), so an operator gets the round's defect list without parsing
+    # JSON. Best-effort, like the archive itself.
+    try:
+        if any((dst / name).is_file() for name, _src in REVIEW_FINDINGS_SOURCES):
+            write_round_review_findings(ctx, r)
+    except OSError:
+        pass
     return dst
 
 
@@ -22520,14 +22913,22 @@ def scan_regression_problems(ctx: Ctx, before_sources: list, after_sources: list
     family that was already present is reported as a warning, because a stage
     legitimately trades rows inside a family (splitting one sentence can create
     a shorter one elsewhere).
+
+    This is ALSO where the venue's own TABLE rule is enforced (rules FMT-TB1
+    ..FMT-TB3): a rule the venue profile declares is not a regression question
+    -- a delivered package may not carry a table whose caption or placement
+    breaks the venue's own declaration, whether or not the package it started
+    from did. The check is skipped (nothing is invented) when the profile
+    declares no table rule.
     """
     mod = _format_module()
     if mod is None:
         return [], []
     policy = format_policy_of(ctx)
+    before_info = scan_format_in_sources(before_sources, policy=policy)
+    after_info = scan_format_in_sources(after_sources, policy=policy)
 
-    def counts(sources) -> Counter:
-        info = scan_format_in_sources(sources, policy=policy)
+    def counts(info) -> Counter:
         c = Counter()
         for r in info.get("rows") or []:
             rule = str(r.get("rule") or "")
@@ -22538,9 +22939,14 @@ def scan_regression_problems(ctx: Ctx, before_sources: list, after_sources: list
                 c[rule] += 1
         return c
 
-    before, after = counts(before_sources), counts(after_sources)
+    before, after = counts(before_info), counts(after_info)
     errs, warns = [], []
     for rule in sorted(set(before) | set(after)):
+        if rule in DISPLAY_RULE_IDS:
+            # The venue's table/figure rule is enforced by `display_rule_errors`
+            # below, with the item named and the right fix; the generic "shorten
+            # the sentence / use siunitx" advice would be wrong for it.
+            continue
         if after[rule] <= before[rule]:
             continue
         if before[rule] == 0:
@@ -22552,7 +22958,36 @@ def scan_regression_problems(ctx: Ctx, before_sources: list, after_sources: list
         else:
             warns.append(f"{label}: {rule} rows grew {before[rule]} -> {after[rule]} between the "
                          f"input and the delivered package")
+    errs.extend(display_rule_errors(after_info, label))
     return errs, warns
+
+
+# The code-side rule ids of the venue's DISPLAY rules (paper_docx_format): the
+# rows a profile-declared table/figure rule produces, and the only rows the
+# pipeline gates a delivered package on through this module.
+DISPLAY_RULE_IDS = ("FMT-TB1", "FMT-TB2", "FMT-TB3",
+                    "FMT-FG1", "FMT-FG2", "FMT-FG3")
+
+
+def display_rule_errors(info: dict, label: str) -> list:
+    """The venue's declared DISPLAY rules, enforced on one scan's output (pure).
+
+    One error per FMT-TB*/FMT-FG* row the scan of the DELIVERED package found:
+    the profile declared the rule, so the package may not carry it. A profile
+    that declares no rule for a kind produces no rows for it, so nothing is
+    invented and nothing is gated.
+    """
+    errs = []
+    for r in info.get("rows") or []:
+        rule = str(r.get("rule") or "")
+        if rule not in DISPLAY_RULE_IDS:
+            continue
+        noun = "table" if rule.startswith("FMT-TB") else "figure"
+        errs.append(
+            f"{label}: the venue's own {noun} rule is not met -- {rule} "
+            f"({r.get('document')}: {r.get('location')}; {r.get('evidence')}). "
+            f"{str(r.get('detail') or '').strip()}")
+    return errs
 
 
 # The columns that MAKE a table the integration ledger (rather than the session's
@@ -23666,6 +24101,83 @@ def build_issue_census(observations, field_ids, sessions_expected=None,
                     "peer_opps": len(c["peer_opps"]),
                     "sessions_expected": n_sessions}
     return out
+
+
+def build_issue_ledger_rows(observations, field_ids, dedup: str = "off",
+                            dedup_threshold: float = None) -> list:
+    """The LONG FORM of the issue census: one row per defect mention the panel filed.
+
+    `observations` is the same iterable of `(session_id, target_vid, opponent_vid,
+    comparison)` the census counts (`build_issue_census`); this function returns
+    the rows themselves instead of the counts, with every field the census
+    attributes by -- so `reports/round<r>_defects.csv` answers "WHICH defects
+    does each version carry, and what does each one say" beside the census's
+    "how many". Attribution follows the census EXACTLY:
+
+      * the version a row is attributed to is the one whose defect it names --
+        the TARGET for its `introduced` rows, the OPPONENT for the `resolved`
+        rows of the comparison it was filed in;
+      * `source` is `own` when that version was the session's sweep target and
+        `peer` when it was the comparison's opponent;
+      * a row repeated inside ONE session for the same version is kept ONCE (the
+        per-(session, version, tier, severity, check, normalized evidence) key),
+        and with the OPT-IN `dedup="location"` mode a row matching an earlier
+        accepted row (same defect class, same line number, >= 7-word excerpt with
+        token-set Jaccard >= threshold) is kept but marked `counted: false`, so
+        the file lists every mention while the `counted` column still adds up to
+        the census (`counted="yes"` rows == the census's `total`).
+
+    The rows come out in reading order (session, then the order the sheet filed
+    them) and carry the meta an operator asks about per defect: the target and
+    peer version, the section of the sheet (`side`), the frozen check id, the
+    defect class (`tier`), the severity rung, and the sheet's own evidence
+    sentence as the verbal description.
+    """
+    field_ids = [str(v) for v in field_ids]
+    mode = str(dedup or "off").strip().lower()
+    if mode not in DEDUP_MODES:
+        mode = "off"
+    known = set(field_ids)
+    seen, accepted = {}, {}
+    rows = []
+    for sess, target, opp, comp in observations:
+        items = ledger_items(comp)
+        if not items:
+            continue
+        target, opp = str(target), str(opp)
+        for side, tier, severity, evidence, check, _ai in items:
+            vid = target if side == "introduced" else opp
+            if vid not in known or tier not in BASIS_TIERS or severity not in SEVERITIES:
+                continue
+            bucket = seen.setdefault((sess, vid), set())
+            key = _issue_row_key(tier, severity, evidence, check)
+            if key in bucket:
+                continue                    # the sheet repeats it in this session
+            bucket.add(key)
+            src = "own" if vid == target else "peer"
+            counted, merged_into = True, ""
+            if mode == "location":
+                class_id = dedup_class_id(check)
+                loc = dedup_location_of(evidence)
+                entries = accepted.setdefault((vid, src), [])
+                for kept_class, kept_loc, kept_sess in entries:
+                    if dedup_rows_match(class_id, loc, kept_class, kept_loc,
+                                        threshold=dedup_threshold):
+                        counted, merged_into = False, str(kept_sess)
+                        break
+                else:
+                    entries.append((class_id, loc, sess))
+            rows.append({
+                "session": str(sess), "target_version": target, "peer_version": opp,
+                "version": vid, "source": src, "side": side, "check": check,
+                "tier": tier, "severity": severity,
+                "evidence": " ".join(str(evidence or "").split()),
+                "comparison_score": comp.get("score"),
+                "comparison_basis": (str(comp.get("basis")) if comp.get("basis") else ""),
+                "dedup_mode": mode,
+                "counted": "yes" if counted else "no",
+                "merged_into": merged_into})
+    return rows
 
 
 def derived_comparison_basis(comp: dict):
@@ -26151,9 +26663,17 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
                                 sessions_expected=sum(per_judges.values()),
                                 dedup=dedup_mode_of(ctx),
                                 dedup_threshold=DEDUP_FUZZY_THRESHOLD)
+    # The census's LONG FORM: the very rows it counted, with their meta and the
+    # sheet's own evidence sentence (reports/round<r>_defects.csv). Same
+    # observations, same attribution and the same dedup rules -- the two readers
+    # of one dataset.
+    issue_rows = build_issue_ledger_rows(census_obs, field_ids,
+                                         dedup=dedup_mode_of(ctx),
+                                         dedup_threshold=DEDUP_FUZZY_THRESHOLD)
     return {"round": int(r), "field": field_ids, "field_size": k,
             "scores_per_version": expected, "stats": stats, "diagnostics": diags,
             "score_rows": score_rows, "issue_census": census,
+            "issue_rows": issue_rows,
             "base_id": A1_ID, "base_rep": base_rep,
             "generated": utcnow()}
 
@@ -28232,11 +28752,16 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
         _im = write_round_issue_matrix(ctx, r, agg)
         _icm = write_round_issue_cumulative(ctx, r, agg)
         _ida = write_round_dedup_audit(ctx, r, agg)
+        _df = write_round_defects(ctx, r, agg)
         print(f"[run] r{r} issue census: {_ic.relative_to(ctx.root).as_posix()} "
               f"({sum((v.get('total') or 0) for v in (agg.get('issue_census') or {}).values())} "
               f"issue row(s) attributed across {len(agg.get('issue_census') or {})} version(s)); "
               f"severity_tier_category matrix + prefix sums -> "
-              f"{_im.name}, {_icm.name}; dedup audit ({dedup_mode_of(ctx)}) -> {_ida.name}")
+              f"{_im.name}, {_icm.name}; dedup audit ({dedup_mode_of(ctx)}) -> {_ida.name}; "
+              f"defect list -> {_df.relative_to(ctx.root).as_posix()} "
+              f"({len(agg.get('issue_rows') or [])} defect row(s), "
+              f"{sum(1 for x in (agg.get('issue_rows') or []) if x.get('counted') == 'yes')} "
+              f"counted)")
     except OSError as e:
         print(f"[run] r{r} WARNING: could not write the round's issue census: {e}")
     # A shrunk panel must never produce a champion: if any field member is
@@ -29581,6 +30106,14 @@ def _stage_template_rewrite_sandbox(ctx: Ctx, src: Path, templates: dict,
     (sb / "out").mkdir(exist_ok=True)
     (sb / PROMPT_FILE).write_text(apply_template_prompt(ctx, sb, srcdir, templates),
                                   encoding="utf-8")
+    # The venue's display rules travel with the session: the agent's own
+    # `paper_docx_format.py scan --policy format_policy.json` must check the
+    # same rules the pipeline's postcheck enforces.
+    try:
+        seed_format_policy_file(ctx, sb)
+    except Exception as e:                                            # noqa: BLE001
+        print(f"[template-stage] note: the venue's format policy could not be seeded "
+              f"({type(e).__name__}: {e})")
     try:
         seed_template_visuals(ctx, sb)
     except Exception as e:                                            # noqa: BLE001
@@ -29645,7 +30178,8 @@ def _ensure_template_stage_for_run(ctx: Ctx, args) -> None:
         # (`--agent manual` told them to do exactly that). Rebuilding it with
         # force=True deleted the hand-filled out/ and never recorded the stage,
         # so `run` looped forever and the operator's work was lost.
-        report = template_rewrite_postcheck(sb, ctx.pristine, templates)
+        report = template_rewrite_postcheck(sb, ctx.pristine, templates,
+                                            policy=format_policy_of(ctx))
         report.update({"venue": venue_id_of(ctx), "source": str(ctx.pristine), "sandbox": str(sb),
                        "agent": "manual", "agent_rc": None})
         write_json_atomic(ctx.reports_dir / "template_rewrite.json", report)
@@ -29681,7 +30215,8 @@ def _ensure_template_stage_for_run(ctx: Ctx, args) -> None:
     res = _execute_attempt_in(sb, rec, cmd, timeout)
     print(f"[run] template-first stage: agent {agent} rc={res.get('rc')} in "
           f"{res.get('dur', 0):.0f}s (log: {res.get('log')})")
-    report = template_rewrite_postcheck(sb, ctx.pristine, templates)
+    report = template_rewrite_postcheck(sb, ctx.pristine, templates,
+                                        policy=format_policy_of(ctx))
     report.update({"venue": venue_id_of(ctx), "source": str(ctx.pristine), "sandbox": str(sb),
                    "agent": agent, "agent_rc": res.get("rc")})
     write_json_atomic(ctx.reports_dir / "template_rewrite.json", report)
@@ -29731,7 +30266,8 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
         # Re-running `--agent manual` on an existing session CHECKS it: the
         # operator (or an agent run by hand) has filled out/, and this invocation
         # reports the code-side verdict instead of wiping the work.
-        report = template_rewrite_postcheck(sb, src, templates)
+        report = template_rewrite_postcheck(sb, src, templates,
+                                            policy=format_policy_of(ctx))
         report.update({"venue": venue_id_of(ctx), "source": str(src), "sandbox": str(sb),
                        "agent": "manual", "agent_rc": None})
         write_json_atomic(ctx.reports_dir / "template_rewrite.json", report)
@@ -29757,7 +30293,8 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
             # that contract before adopting out/ as round 1's working original:
             # recording a foreign package would silently replace the original
             # the a1 base and every later vs_original comparison read.
-            run_report = template_rewrite_postcheck(sb, ctx.pristine, templates)
+            run_report = template_rewrite_postcheck(sb, ctx.pristine, templates,
+                                                    policy=format_policy_of(ctx))
             if run_report.get("ok"):
                 rec_stage = _record_template_stage(ctx, sb, "manual")
                 print(f"[conform] recorded as the template-first stage: round 1 now starts from "
@@ -29821,7 +30358,8 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
           f"(log: {res.get('log')})")
     if res.get("error"):
         print(f"[conform] WARNING: {res['error']}")
-    report = template_rewrite_postcheck(sb, src, templates)
+    report = template_rewrite_postcheck(sb, src, templates,
+                                        policy=format_policy_of(ctx))
     report.update({"venue": venue_id_of(ctx), "source": str(src), "sandbox": str(sb),
                    "agent": agent, "agent_rc": res.get("rc")})
     write_json_atomic(ctx.reports_dir / "template_rewrite.json", report)
@@ -30959,6 +31497,150 @@ def _issue_file_agg(ctx: Ctx, r: int, agg: dict = None) -> tuple:
     return r, agg
 
 
+# The columns of the round's DEFECT LIST (the census's long form): one row per
+# defect mention the panel filed, carrying the meta an operator asks about
+# per defect -- the version it belongs to, who found it (own sweep vs peer
+# comparison), the sheet it came from and the target/opponent of that
+# comparison, the frozen check id, the defect class (`tier`), the severity rung,
+# and the sheet's own evidence sentence as the verbal description. `counted`
+# separates the mentions the census counted (`yes`) from the ones the OPT-IN
+# `dedup_mode` "location" merged into an earlier row (`no`, with `merged_into`
+# naming the kept row's session), so the two files stay consistent.
+DEFECT_LIST_FIELDS = ("run", "round", "defect_id", "version", "source", "side",
+                      "target_version", "peer_version", "session", "judge_index",
+                      "check", "tier", "severity", "evidence",
+                      "dedup_mode", "counted", "merged_into",
+                      "comparison_score", "comparison_basis")
+
+
+def defect_list_rows(ctx: Ctx, r: int, agg: dict) -> list:
+    """The flat rows of one round's defect list (see DEFECT_LIST_FIELDS)."""
+    rows = agg.get("issue_rows")
+    if rows is None:
+        # A round aggregated by a pipeline OLDER than this report carries no
+        # row list; re-deriving it from the round's judge sheets (the same
+        # observations the census uses) keeps the file available for it.
+        rows = _defect_rows_by_reaggregation(ctx, r)
+    field_order = {str(v): i for i, v in enumerate(agg.get("field") or [])}
+    session_index = {}
+    for rec in ctx.runs(kind="judge", round_no=int(r)):
+        session_index[str(rec.get("id"))] = rec.get("judge_index")
+    out = []
+    for i, row in enumerate(rows, 1):
+        out.append({
+            "run": ctx.root.name, "round": int(r),
+            "defect_id": f"r{int(r)}-D{i:04d}",
+            "version": row.get("version"), "source": row.get("source"),
+            "side": row.get("side"), "target_version": row.get("target_version"),
+            "peer_version": row.get("peer_version"),
+            "session": row.get("session"),
+            "judge_index": session_index.get(str(row.get("session"))),
+            "check": row.get("check"), "tier": row.get("tier"),
+            "severity": row.get("severity"), "evidence": row.get("evidence"),
+            "dedup_mode": row.get("dedup_mode"),
+            "counted": row.get("counted"), "merged_into": row.get("merged_into"),
+            "comparison_score": row.get("comparison_score"),
+            "comparison_basis": row.get("comparison_basis")})
+    out.sort(key=lambda x: (field_order.get(str(x["version"]), 10 ** 6),
+                            str(x["version"]),
+                            -SEVERITIES.index(str(x["severity"]))
+                            if str(x["severity"]) in SEVERITIES else 0,
+                            BASIS_TIERS.index(str(x["tier"]))
+                            if str(x["tier"]) in BASIS_TIERS else len(BASIS_TIERS),
+                            str(x["target_version"]), str(x["peer_version"]),
+                            str(x["session"])))
+    for i, row in enumerate(out, 1):
+        row["defect_id"] = f"r{int(r)}-D{i:04d}"
+    return out
+
+
+def _defect_rows_by_reaggregation(ctx: Ctx, r: int) -> list:
+    """Re-derive one round's defect rows from its judge sheets (never invents)."""
+    field = [str(v) for v in (ctx.round_rec(int(r)).get("field") or [])]
+    if not field:
+        return []
+    return list(aggregate_round(ctx, int(r), field).get("issue_rows") or [])
+
+
+def write_round_defects(ctx: Ctx, r: int, agg: dict = None) -> Path:
+    """`reports/round<r>_defects.csv`: EVERY defect the round's panel filed.
+
+    The issue census answers "how many issues of each class does each version
+    still carry"; this file answers "WHICH ones, on which version, found against
+    which comparison, and what does the sheet say about it" -- one row per
+    defect mention, with the version it is attributed to, its source (own/peer),
+    the comparison's target and opponent, the frozen check id, the defect class
+    (`tier`), the severity rung, and the sheet's own evidence sentence as the
+    verbal description. `counted`/`merged_into` keep the file consistent with
+    the census under the OPT-IN `dedup_mode` "location". Rows are ordered by the
+    version (field order), then severity (fatal first), then defect class in the
+    scoring priority order.
+    """
+    r, agg = _issue_file_agg(ctx, r, agg)
+    rows = defect_list_rows(ctx, r, agg)
+    p = ctx.reports_dir / f"round{r}_defects.csv"
+    tmp = p.with_suffix(".csv.tmp")
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(DEFECT_LIST_FIELDS))
+        w.writeheader()
+        w.writerows(rows)
+    os.replace(tmp, p)
+    return p
+
+
+# The columns of the round's REVIEW-FINDINGS list: the review pass's own frozen
+# findings (reports/round<r>_review/findings.json + findings_extra.json),
+# flattened to one row per finding with the verbal description the review wrote.
+# The judge-panel defect list (round<r>_defects.csv) answers "which defects does
+# each VERSION carry"; this file answers "what did the ROUND's review report",
+# with the finding id the revision ledger and the audit dispositions use.
+REVIEW_FINDINGS_FIELDS = ("run", "round", "finding_id", "source", "category", "check",
+                          "severity", "status", "location", "evidence", "explanation")
+REVIEW_FINDINGS_SOURCES = (("findings.json", "review"), ("findings_extra.json", "discovery"))
+
+
+def review_findings_rows(ctx: Ctx, r: int) -> list:
+    """The archived review findings of one round, flattened ([] when none)."""
+    arch = ctx.reports_dir / f"round{int(r)}_review"
+    rows = []
+    for name, source in REVIEW_FINDINGS_SOURCES:
+        data = read_json(arch / name, revive=False, lenient=True)
+        if not isinstance(data, dict):
+            continue
+        for f in data.get("findings") or []:
+            if not isinstance(f, dict):
+                continue
+            rows.append({
+                "run": ctx.root.name, "round": int(r),
+                "finding_id": str(f.get("id") or ""), "source": source,
+                "category": f.get("category"), "check": str(f.get("check") or ""),
+                "severity": str(f.get("severity") or ""),
+                "status": str(f.get("status") or ""),
+                "location": str(f.get("location") or ""),
+                "evidence": str(f.get("evidence") or ""),
+                "explanation": str(f.get("explanation") or "")})
+    return rows
+
+
+def write_round_review_findings(ctx: Ctx, r: int) -> Path:
+    """`reports/round<r>_review_findings.csv`: the review's findings, one row each.
+
+    Written from the ARCHIVED review deliverables (the round's review is archived
+    beside it), so it works for a round whose sandbox was already pruned; a
+    round with no archived review writes a header-only file (the file's shape is
+    stable, and an empty file is the honest "nothing was reviewed").
+    """
+    rows = review_findings_rows(ctx, r)
+    p = ctx.reports_dir / f"round{int(r)}_review_findings.csv"
+    tmp = p.with_suffix(".csv.tmp")
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(REVIEW_FINDINGS_FIELDS))
+        w.writeheader()
+        w.writerows(rows)
+    os.replace(tmp, p)
+    return p
+
+
 ISSUE_MATRIX_META_FIELDS = ("run", "round", "version")
 
 
@@ -31075,13 +31757,15 @@ def issue_census_table(agg: dict) -> list:
 
 
 def backfill_round_raw_scores(ctx: Ctx) -> list:
-    """Write `reports/round<r>_raw_scores.csv` / `_issue_census.csv` for decided rounds.
+    """Write the round report files (`raw_scores`, `issue_census`, `defects`, ...).
 
     A round decided before this report existed (or by an older copy of the
     pipeline) still has its judge sheets in state, so re-aggregating it costs one
     re-read and hands the operator the same file every later round gets
-    automatically. Only MISSING files are written -- the run-time writer owns the
-    content of the rest.
+    automatically -- including `reports/round<r>_defects.csv`, the census's long
+    form (every defect mention with its version, source, class, severity and the
+    sheet's own evidence sentence). Only MISSING files are written -- the
+    run-time writer owns the content of the rest.
     """
     out = []
     for r in range(1, ctx.rounds_count() + 1):
@@ -31092,13 +31776,24 @@ def backfill_round_raw_scores(ctx: Ctx) -> list:
                              (f"round{r}_issue_census.csv", write_round_issue_census),
                              (f"round{r}_issue_matrix.csv", write_round_issue_matrix),
                              (f"round{r}_issue_cumulative.csv", write_round_issue_cumulative),
-                             (f"round{r}_dedup_audit.json", write_round_dedup_audit)):
+                             (f"round{r}_dedup_audit.json", write_round_dedup_audit),
+                             (f"round{r}_defects.csv", write_round_defects)):
             if (ctx.reports_dir / name).is_file():
                 continue
             try:
                 out.append(writer(ctx, r))
             except Exception as e:                               # noqa: BLE001
                 print(f"[run] r{r} WARNING: could not write reports/{name}: {e}")
+        # The review's own finding list (verbal descriptions included) is only
+        # written when the round actually has an archived review.
+        if not (ctx.reports_dir / f"round{r}_review_findings.csv").is_file() \
+                and any((ctx.reports_dir / f"round{r}_review" / name).is_file()
+                        for name, _src in REVIEW_FINDINGS_SOURCES):
+            try:
+                out.append(write_round_review_findings(ctx, r))
+            except Exception as e:                               # noqa: BLE001
+                print(f"[run] r{r} WARNING: could not write "
+                      f"reports/round{r}_review_findings.csv: {e}")
     if out:
         print("[run] raw scores written for round(s) decided before this report existed: "
               + ", ".join(f"reports/{p.name}" for p in out))
@@ -32864,10 +33559,12 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
             _imp = write_round_issue_matrix(ctx, r, agg)
             _icup = write_round_issue_cumulative(ctx, r, agg)
             _idap = write_round_dedup_audit(ctx, r, agg)
+            _dfp = write_round_defects(ctx, r, agg)
             print(f"[decide] round {r} issue census -> {_icp.relative_to(ctx.root)}"
                   f"; severity_tier_category matrix -> {_imp.relative_to(ctx.root)}"
                   f"; prefix sums -> {_icup.relative_to(ctx.root)}"
-                  f"; dedup audit -> {_idap.relative_to(ctx.root)}")
+                  f"; dedup audit -> {_idap.relative_to(ctx.root)}"
+                  f"; defects -> {_dfp.relative_to(ctx.root)}")
         except OSError as e:
             print(f"[decide] round {r} WARNING: could not write its issue census: {e}")
         # The same guard `run` applies before deciding a round: a shrunk panel must

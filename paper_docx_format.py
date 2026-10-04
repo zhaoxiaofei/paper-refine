@@ -41,6 +41,16 @@ sessions (`number_ledger`, `key_term_rows`, `identifier_rows`,
 two-sided on purpose: `claim_strength_rows` (check id J3) enumerates the `under`
 (hedge) AND `over` (maximal claim) directions of every claim-bearing paragraph,
 so a review cannot report the loud direction and leave the quiet one unexamined.
+
+The scan also applies the VENUE's own display-item rules when the policy
+declares them: `policy["tables"]` / `policy["figures"]` state where those items
+belong and which side carries their caption (a venue profile's rules, rendered
+into `format_policy.json` by the pipeline), and the scan reports
+`FMT-TB1..FMT-TB3` for a table and `FMT-FG1..FMT-FG3` for a figure -- no
+caption / caption on the wrong side / item before its area -- with
+`policy[...].special` naming the items the venue itself treats differently
+(a key-resources table inside the methods, a graphical abstract). A policy that
+declares no rule for a kind reports nothing for it.
 """
 from __future__ import annotations
 
@@ -91,6 +101,12 @@ POLICY_DEFAULTS = {
     "strip_proofing_markers": True,
     "unlink_zotero_fields": False,
     "blank_page_tolerance": 0,
+    # The venue's TABLE rule (see DISPLAY_PLACEMENTS / display_item_rows):
+    # {} = this format policy declares no table rule, so the scan reports none.
+    "tables": {},
+    # The venue's FIGURE rule (see display_item_rows / FIGURE_CAPTION_RE): {} =
+    # this format policy declares no figure rule, so the scan reports none.
+    "figures": {},
 }
 
 JOURNAL_RE = re.compile(
@@ -107,6 +123,12 @@ URL_RE = re.compile(
 
 PARA_TOKENS = re.compile(r"<w:p(?=[\s/>])|</w:p>")
 RUN_TOKENS = re.compile(r"<w:r(?=[\s/>])|</w:r>")
+# The BODY walker's tokens: the two block-level children of `<w:body>` a table
+# rule has to see in DOCUMENT ORDER (a `w:p` holds no `w:tbl`, and a nested
+# table inside a cell is part of its outer table).
+BODY_BLOCK_TOKENS = re.compile(r"<w:(p|tbl)(?=[\s/>])")
+ROW_TOKENS = re.compile(r"<w:tr(?=[\s/>])|</w:tr>")
+CELL_TOKENS = re.compile(r"<w:tc(?=[\s/>])|</w:tc>")
 TEXT_RE = re.compile(r"<w:t(?:\s[^>]*)?>.*?</w:t>", re.S)
 RUN_RE = re.compile(r"<w:r(?=[\s/>]).*?</w:r>|<w:r(?=[\s/>])[^>]*/>", re.S)
 FIELD_CHAR_RE = re.compile(r"<w:fldChar[^>]*w:fldCharType=\"(\w+)\"[^>]*/?>")
@@ -848,6 +870,18 @@ FINDING_TIER_RULES = {
     "FMT-T8f",   # indentation convention broken between sibling paragraphs/captions
     "FMT-T8g",   # the front page is split by a rendered page break (keywords on page 2)
     "FMT-T8h",   # the cover letter exceeds its two-page budget
+    # The venue's own TABLE rule (declared in the profile, never invented here):
+    # a table without its caption, a caption on the wrong side, a table before
+    # the tables area. An editor/copyeditor raises all three, so they are
+    # findings the review must dispose and a producing stage must fix.
+    "FMT-TB1",   # the table carries no caption
+    "FMT-TB2",   # the caption sits on the other side than the venue requires
+    "FMT-TB3",   # the table appears before the tables area
+    # The same rule for FIGURES (a graphical abstract and the like are the
+    # profile's `figures.special` entries, never a silent exemption here).
+    "FMT-FG1",   # the figure carries no caption / legend next to it
+    "FMT-FG2",   # the caption sits on the other side than the venue requires
+    "FMT-FG3",   # the figure (or its collected legend) appears before the figures area
 }
 
 
@@ -2646,6 +2680,461 @@ KEYWORDS_RE = re.compile(r"^\s*(?:keywords?|key\s+words)\s*[:\-–—]", re.I)
 LIST_LIKE_RE = re.compile(r"^\s*(?:[\(\[]?[a-z0-9]{1,3}[\)\].、]|[-•*·])\s+", re.I)
 PAGE_BREAK_RE = re.compile(r"<w:lastRenderedPageBreak(?=[\s/>])[^>]*/>")
 
+# ---- the venue's DISPLAY-ITEM rules (tables FMT-TB1..3, figures FMT-FG1..3) --
+# Where a display item belongs and what labels it is a DECIDED venue fact, so it
+# comes from the venue profile through the format policy (`policy["tables"]` /
+# `policy["figures"]`), never from this module: a venue whose template says
+# "tables at the end of the manuscript, caption immediately before the table"
+# gets exactly that check, a venue whose guidelines say "figure legends should be
+# placed at the end of the manuscript" gets the figure counterpart, and a venue
+# that declares no rule for one kind gets NO rows for it (a rule no venue stated
+# is never invented here). Both policy blocks have the same shape:
+#   {"source": ..., "placement": "end"|"inline"|"any",
+#    "caption": "before"|"after"|"any", "note": ...,
+#    "special": [{"match": <regex>, "placement": ..., "caption": ...,
+#                 "source": ..., "note": ...}]}
+# `special` is the escape hatch the checks need to stay honest: a publisher can
+# genuinely treat ONE item differently -- a key-resources/STAR-Methods table that
+# lives inside the methods with no "Table N." label, or a front-matter figure
+# such as a graphical abstract that is not part of the numbered figure sequence
+# -- and the profile names it by the text above the item, its own section heading
+# or (tables only) its first-row header. A special entry overrides only the
+# fields it states; the rest of the venue rule still applies to that item.
+#
+# The items are found where a reader sees them in the document BODY:
+#   * a table is a `<w:tbl>` block; its caption is the adjacent paragraph that
+#     starts with a table label ("Table 3 | ...", "Table 3. ...", "Table 3");
+#   * a figure is a paragraph carrying an embedded drawing/picture, or a
+#     COLLECTED legend -- a paragraph that starts with a figure label
+#     ("Figure 2 | ...", "Fig. 2. ...", "Figure S1 ...") and is NOT attached to
+#     an embedded image (the legends-collected-at-the-end layout the venue
+#     guidelines ask for). Its caption is the adjacent label paragraph, or the
+#     legend paragraph itself.
+# Three findings can come out of one item:
+#   *1 -- the item carries no caption at all (only when the venue pins the
+#         caption to one side of the item: a venue that collects legends
+#         elsewhere declares `caption: "any"`, and then a figure is not
+#         captioned next to its image by design);
+#   *2 -- the caption sits on the other side of the item than the venue
+#         requires (e.g. after a table whose captions belong before it);
+#   *3 -- the item appears BEFORE the item's area (the venue's own
+#         tables/figures heading, else the first captioned item of that kind)
+#         although the venue puts them at the end.
+# All of them are finding-tier: an editor or a copyeditor raises them, so the
+# review must dispose them and a package-producing stage must fix them.
+DISPLAY_PLACEMENTS = ("end", "inline", "any")
+DISPLAY_CAPTION_SIDES = ("before", "after", "any")
+TABLES_HEADING_RE = re.compile(r"^\s*(?:list\s+of\s+)?tables?\s*:?\s*$", re.I)
+FIGURES_HEADING_RE = re.compile(
+    r"^\s*(?:list\s+of\s+figures?|figures?|figure\s+titles?\s+and\s+legends?|"
+    r"figure\s+legends?|captions?)\s*:?\s*$", re.I)
+# "Table 3. Title", "Table 3 | Title", "Table 3: Title", "Table S3 -- Title",
+# "TABLE 4 - Title" are captions; "Table 3 shows ..." is prose, not a caption
+# (the separator right after the number is what tells them apart). The figure
+# patterns below are the same rule for "Figure 2 |", "Fig. 2.", "Figure S1",
+# "Extended Data Figure 3 |", "Supplementary Fig. 4:".
+_CAPTION_LABEL_RE = (r"(?:supplementary\s+|extended\s+data\s+|supp\s+)?%s\.?\s*")
+DISPLAY_CAPTION_NUM_RE = r"(?:S?\d+[A-Za-z]?|[IVXLC]+)"
+TABLE_CAPTION_RE = re.compile(
+    r"^\s*" + (_CAPTION_LABEL_RE % "tables?") + DISPLAY_CAPTION_NUM_RE
+    + r"\s*(?:\||:|\u2014|\u2013|-|\.)(?=\s|$)", re.I)
+TABLE_CAPTION_BARE_RE = re.compile(
+    r"^\s*" + (_CAPTION_LABEL_RE % "tables?") + DISPLAY_CAPTION_NUM_RE + r"\s*$", re.I)
+FIGURE_CAPTION_RE = re.compile(
+    r"^\s*" + (_CAPTION_LABEL_RE % "fig(?:ure)?s?") + DISPLAY_CAPTION_NUM_RE
+    + r"\s*(?:\||:|\u2014|\u2013|-|\.)(?=\s|$)", re.I)
+FIGURE_CAPTION_BARE_RE = re.compile(
+    r"^\s*" + (_CAPTION_LABEL_RE % "fig(?:ure)?s?") + DISPLAY_CAPTION_NUM_RE + r"\s*$",
+    re.I)
+# An EMBEDDED figure, as the OOXML body shows it (the header/footer furniture --
+# the journal's logo -- lives in its own part and is never seen here).
+FIGURE_DRAWING_RE = re.compile(r"<w:(?:drawing|pict|object)(?=[\s/>])")
+# The venue's manuscript rule is about the MANUSCRIPT: a supplementary-material
+# file, a cover letter or a feedback/response document has its own conventions
+# (supplementary figures and tables legitimately sit inside their own file), so
+# the display rules never run on one. "supp" in the name is the same test the
+# M19 length scan uses for the same reason; the feedback/response names mirror
+# the pipeline's `is_non_manuscript_rel` (authors' replies are not the letter).
+DISPLAY_SKIP_NAME_RE = re.compile(
+    r"cover|response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point|feedback|referee|"
+    r"reviewers?|decision[-_ ]?(?:letter|notice)|highlight|eTOC|graphical[-_ ]?abstract",
+    re.I)
+DISPLAY_TABLE_RULES = ("FMT-TB1", "FMT-TB2", "FMT-TB3")
+DISPLAY_FIGURE_RULES = ("FMT-FG1", "FMT-FG2", "FMT-FG3")
+DISPLAY_KINDS = {
+    "table": {"policy_key": "tables", "noun": "table",
+              "rules": DISPLAY_TABLE_RULES, "heading_re": TABLES_HEADING_RE,
+              "caption_re": TABLE_CAPTION_RE, "caption_bare_re": TABLE_CAPTION_BARE_RE},
+    "figure": {"policy_key": "figures", "noun": "figure",
+               "rules": DISPLAY_FIGURE_RULES, "heading_re": FIGURES_HEADING_RE,
+               "caption_re": FIGURE_CAPTION_RE, "caption_bare_re": FIGURE_CAPTION_BARE_RE},
+}
+
+
+def display_rules_apply(doc_name: str) -> bool:
+    """Does the venue's display rule apply to this document?
+
+    The rule is about the MANUSCRIPT body: a supplementary-material file, a
+    cover letter or a feedback/response document is skipped (see
+    DISPLAY_SKIP_NAME_RE), exactly as the M19 length scan skips supplementary
+    text. The docx and the text-source paths both call this one test.
+    """
+    base = str(doc_name or "").replace("\\", "/").rsplit("/", 1)[-1]
+    if not base:
+        return True
+    if DISPLAY_SKIP_NAME_RE.search(base):
+        return False
+    return "supp" not in base.lower()
+
+
+def element_span(xml: str, start: int, tag: str) -> tuple:
+    """(start, end) of the whole `<w:tag ...>` element whose open tag is at `start`.
+
+    A hand-edited package can carry an unmatched tag; the span then runs to the
+    end of the document instead of raising (the scanner must never take the
+    formatting run down).
+    """
+    tag_end = xml.find(">", start)
+    if tag_end == -1:
+        return start, len(xml)
+    if xml[tag_end - 1] == "/":
+        return start, tag_end + 1
+    depth = 0
+    for m in re.finditer(rf"<w:{tag}(?=[\s/>])|</w:{tag}\s*>", xml[start:]):
+        if m.group(0).startswith("</"):
+            depth -= 1
+            if depth <= 0:
+                return start, start + m.end()
+        else:
+            depth += 1
+    return start, len(xml)
+
+
+def body_block_spans(xml: str) -> list:
+    """[('p'|'tbl', start, end, frag)] of the document body, in document order.
+
+    Only the block-level children of the body are walked: the paragraphs inside
+    a table cell are part of that table, and a nested table is part of its outer
+    table, so neither is returned as a body block of its own.
+    """
+    out, pos = [], 0
+    for m in BODY_BLOCK_TOKENS.finditer(xml):
+        if m.start() < pos:
+            continue
+        s, e = element_span(xml, m.start(), m.group(1))
+        out.append((m.group(1), s, e, xml[s:e]))
+        pos = e
+    return out
+
+
+def table_shape(frag: str) -> tuple:
+    """(rows, columns) of one `<w:tbl>`: rows counted, columns = max cells."""
+    rows = _spans(frag, ROW_TOKENS)
+    cols = 0
+    for _r0, _r1, row in rows:
+        cols = max(cols, len(_spans(row, CELL_TOKENS)))
+    return len(rows), cols
+
+
+def table_first_row_cells(frag: str) -> list:
+    """The text of the first row's cells (the table's own header, if any)."""
+    rows = _spans(frag, ROW_TOKENS)
+    if not rows:
+        return []
+    return [" ".join(text_of(c[2]).split()) for c in _spans(rows[0][2], CELL_TOKENS)]
+
+
+def display_policy(policy: dict, kind: str) -> dict:
+    """The venue's rule for one display kind (empty when none is declared)."""
+    cfg = DISPLAY_KINDS[kind]
+    raw = (policy or {}).get(cfg["policy_key"])
+    if not isinstance(raw, dict):
+        return {}
+    placement = str(raw.get("placement") or "").strip().lower()
+    caption = str(raw.get("caption") or "").strip().lower()
+    specials = []
+    for entry in raw.get("special") or []:
+        if not isinstance(entry, dict):
+            continue
+        match = str(entry.get("match") or "").strip()
+        if not match:
+            continue
+        specials.append({
+            "match": match,
+            "placement": str(entry.get("placement") or "").strip().lower(),
+            "caption": str(entry.get("caption") or "").strip().lower(),
+            "source": str(entry.get("source") or "").strip(),
+            "note": str(entry.get("note") or "").strip()})
+    out = {"source": str(raw.get("source") or "").strip(),
+           "placement": placement if placement in DISPLAY_PLACEMENTS else "",
+           "caption": caption if caption in DISPLAY_CAPTION_SIDES else "",
+           "note": str(raw.get("note") or "").strip(),
+           "special": specials}
+    if not (out["placement"] or out["caption"] or out["special"]):
+        return {}
+    return out
+
+
+def display_caption_text(text, kind: str) -> str:
+    """`text` when it is a caption line of `kind` ("Table 3. ..."), else ""."""
+    cfg = DISPLAY_KINDS[kind]
+    t = " ".join(str(text or "").split())
+    if not t:
+        return ""
+    return t if (cfg["caption_re"].match(t) or cfg["caption_bare_re"].match(t)) else ""
+
+
+def _special_item_match(specials: list, candidates: list):
+    """The first `special` entry one of whose regexes matches an item's context."""
+    for entry in specials or ():
+        pat = str((entry or {}).get("match") or "")
+        if not pat:
+            continue
+        try:
+            rx = re.compile(pat, re.I)
+        except re.error:
+            rx = re.compile(re.escape(pat), re.I)
+        for cand in candidates:
+            if cand and rx.search(cand):
+                return entry
+    return None
+
+
+def display_item_rows(xml: str, policy: dict, doc: str, kind: str) -> tuple:
+    """(rows, inventory) for one venue display rule over one document body.
+
+    `rows` are the findings the venue's DECLARED rule implies for `kind`
+    ([] when the policy declares no rule for it -- the module never invents one,
+    and a document the rule does not cover -- see `display_rules_apply` -- gets
+    nothing at all). `inventory` carries one dict per item (index, kind, shape,
+    first-row header for a table, the caption found and its side, the section it
+    sits in, whether it is inside the item's area, and the special-item
+    exemption that applied) so the scan artifact and the pipeline's gate can
+    name the item, not just the rule.
+    """
+    cfg = DISPLAY_KINDS[kind]
+    pol = display_policy(policy, kind)
+    if not display_rules_apply(doc):
+        return [], []
+    blocks = body_block_spans(xml)
+    texts, styles = {}, {}
+    for i, (tag, _s, _e, frag) in enumerate(blocks):
+        if tag != "p":
+            continue
+        t = " ".join(text_of(frag).split())
+        styles[i] = elem_val(ppr_of(frag), "pStyle") or ""
+        if t:
+            texts[i] = t
+
+    def attach(i, step):
+        """(block index, text) of the nearest non-empty paragraph attached to the
+        item on one side; stops at a table (a caption belongs to the item it
+        touches, never to the one two blocks away)."""
+        j = i + step
+        while 0 <= j < len(blocks) and blocks[j][0] == "p":
+            if j in texts:
+                return j, texts[j]
+            j += step
+        return None, ""
+
+    def section_of(i):
+        j = i - 1
+        while j >= 0:
+            st = styles.get(j) or ""
+            if st.startswith("Heading") and texts.get(j):
+                return texts[j]
+            j -= 1
+        return ""
+
+    def caption_adjacent(i):
+        """(block index, text, side) of the item's caption paragraph, or Nones."""
+        own = texts.get(i, "")
+        if display_caption_text(own, kind):
+            # An image and its legend can share one paragraph in Word ("self"):
+            # the caption is then neither before nor after, but it IS there.
+            return i, own, "self"
+        for step, side in ((-1, "before"), (+1, "after")):
+            j, t = attach(i, step)
+            if display_caption_text(t, kind):
+                return j, t, side
+        return None, "", ""
+
+    # The ITEMS: a table block for a table; an image paragraph and every
+    # COLLECTED legend (a caption paragraph not attached to an image) for a
+    # figure.
+    items = []                                  # (block index, frag, item kind)
+    if kind == "table":
+        items = [(i, frag, "object")
+                 for i, (tag, _s, _e, frag) in enumerate(blocks) if tag == "tbl"]
+    else:
+        for i, (tag, _s, _e, frag) in enumerate(blocks):
+            if tag == "p" and FIGURE_DRAWING_RE.search(frag):
+                items.append((i, frag, "image"))
+        attached = set()
+        for i, _frag, _k in items:
+            cap_i, _t, _side = caption_adjacent(i)
+            if cap_i is not None:
+                attached.add(cap_i)
+        image_blocks = {i for i, _frag, _k in items}
+        for i in sorted(texts):
+            if i in attached or i in image_blocks \
+                    or not display_caption_text(texts[i], kind):
+                continue
+            items.append((i, blocks[i][3], "legend"))
+        items.sort(key=lambda x: x[0])
+    if not items:
+        return [], []
+
+    # The ITEM AREA: the venue's own tables/figures heading before the last item
+    # when the document carries one, else the area starts at the first item that
+    # carries a caption of its own (either side; for a figure that is its first
+    # attached legend caption or its first collected legend). A document with
+    # neither has no verifiable area, so the placement rule cannot be checked
+    # there (the caption rule still can).
+    last_item_block = items[-1][0]
+    anchor = None
+    for i, t in texts.items():
+        if i < last_item_block and cfg["heading_re"].match(t):
+            anchor = i if anchor is None else max(anchor, i)
+    if anchor is None:
+        for block_i, _frag, item_kind in items:
+            if item_kind == "legend":
+                anchor = block_i
+                break
+            cap_i, _t, _side = caption_adjacent(block_i)
+            if cap_i is not None:
+                anchor = min(block_i, cap_i)
+                break
+    inventory, rows = [], []
+    for n, (block_i, frag, item_kind) in enumerate(items, 1):
+        prev_t = attach(block_i, -1)[1]
+        if item_kind == "legend":
+            cap_t, cap_side = texts.get(block_i, ""), "self"
+        else:
+            _cap_i, cap_t, cap_side = caption_adjacent(block_i)
+        caption = cap_t if display_caption_text(cap_t, kind) else ""
+        caption_side = cap_side if caption else ""
+        row_count, col_count = (table_shape(frag) if kind == "table" else (0, 0))
+        header = table_first_row_cells(frag) if kind == "table" else []
+        section = section_of(block_i)
+        special = _special_item_match(pol.get("special") or (),
+                                      [prev_t, section, " | ".join(header)])
+        want_placement = (special or {}).get("placement") or pol.get("placement") or ""
+        want_caption = (special or {}).get("caption") or pol.get("caption") or ""
+        in_area = (anchor is None) or (block_i >= anchor)
+        loc = f"{cfg['noun']} {n} (block {block_i}"
+        if item_kind == "legend":
+            loc += ", collected legend"
+        if section:
+            loc += f", section {section[:40]!r}"
+        if prev_t:
+            loc += f", above: {prev_t[:60]!r}"
+        loc += ")"
+        entry = {"index": n, "kind": kind, "item": item_kind, "block": block_i,
+                 "rows": row_count, "columns": col_count,
+                 "header": " | ".join(header)[:160], "caption": caption[:200],
+                 "caption_side": caption_side, "section": section[:80],
+                 "in_area": bool(in_area), "special": (special or {}).get("match") or "",
+                 "wants_placement": want_placement, "wants_caption": want_caption,
+                 "document": doc}
+        inventory.append(entry)
+        if not pol:
+            continue
+        # `none` (a SPECIAL item the venue itself exempts from captioning) and
+        # `any` both mean "no caption rule applies to this item".
+        if want_caption in ("before", "after") and item_kind != "legend":
+            if not caption:
+                rows.append({
+                    "rule": cfg["rules"][0], "severity": "medium", "document": doc,
+                    "location": loc,
+                    "evidence": f"the {cfg['noun']} has no caption"
+                                + (f" (above it: {prev_t[:60]!r})" if prev_t else ""),
+                    "detail": f"the venue requires a {cfg['noun']} caption on the "
+                              f"{want_caption} side of the {cfg['noun']}; give this "
+                              f"{cfg['noun']} its own caption paragraph (and cite/edit it like "
+                              f"the venue's other {cfg['noun']}s), or move it to the venue's "
+                              f"own slot for it"})
+            elif caption_side != want_caption and caption_side != "self":
+                # A caption inside the item's OWN paragraph ("self", e.g. an
+                # image and its legend in one paragraph) is with the item on
+                # either reading of the venue's side rule.
+                rows.append({
+                    "rule": cfg["rules"][1], "severity": "low", "document": doc,
+                    "location": loc,
+                    "evidence": f"the caption sits {caption_side} the {cfg['noun']}: "
+                                f"{caption[:80]!r}",
+                    "detail": f"the venue sets the caption {want_caption} the {cfg['noun']}; "
+                              f"move the caption paragraph to the {want_caption} side"})
+        if want_placement == "end" and not in_area:
+            rows.append({
+                "rule": cfg["rules"][2], "severity": "medium", "document": doc,
+                "location": loc,
+                "evidence": f"the {cfg['noun']} appears before the document's "
+                            f"{cfg['noun']} area"
+                            + (f" ({row_count}x{col_count}; header {entry['header'][:60]!r})"
+                               if row_count else ""),
+                "detail": f"the venue puts {cfg['noun']}s at the end of the manuscript: move "
+                          f"this {cfg['noun']}"
+                          + (" (with its caption)" if item_kind != "legend" else "")
+                          + f" into the {cfg['noun']} area with the other {cfg['noun']}s -- or, "
+                          f"when the venue declares this {cfg['noun']} special (e.g. a "
+                          f"graphical abstract), record it in the venue profile's "
+                          f"`{cfg['policy_key']}.special` instead of moving it"})
+    for r in rows:
+        r["fix"] = _fix_kind(r["rule"], policy or {})
+        r["protected"] = False
+        r["tier"] = tier_of(r["rule"])
+    return rows, inventory
+
+
+def table_conformance_rows(xml: str, policy: dict, doc: str) -> tuple:
+    """(rows, inventory) of the venue's TABLE rule over one document body."""
+    return display_item_rows(xml, policy, doc, "table")
+
+
+def figure_conformance_rows(xml: str, policy: dict, doc: str) -> tuple:
+    """(rows, inventory) of the venue's FIGURE rule over one document body."""
+    return display_item_rows(xml, policy, doc, "figure")
+
+
+def display_rule_rows_from_text(text: str, policy: dict, doc: str) -> list:
+    r"""The display CAPTION rules over one LaTeX/plain-text source.
+
+    Placement is not read from a text source: its pagination and float placement
+    are the renderer's, and this scanner never guesses them. A caption-less
+    float of a kind the venue requires captions for is reported; a caption that
+    is not the caption the venue wants (wrong side of `\begin`/`\end`) is not
+    modelled in LaTeX, where the caption lives inside the float by construction.
+    """
+    if not display_rules_apply(doc):
+        return []
+    out = []
+    kinds = {
+        "table": r"table|table\*|longtable|sidewaystable",
+        "figure": r"figure|figure\*|sidewaysfigure|wrapfigure",
+    }
+    for kind, envs in kinds.items():
+        cfg = DISPLAY_KINDS[kind]
+        pol = display_policy(policy, kind)
+        if not pol or pol.get("caption") not in ("before", "after"):
+            continue
+        for m in re.finditer(r"\\begin\{(" + envs + r")\}([\s\S]*?)\\end\{\1\}", text):
+            body = m.group(2)
+            if re.search(r"\\caption\s*[\[{]", body):
+                continue
+            line = text[:m.start()].count("\n") + 1
+            if any(s.get("match") and re.search(s["match"], body, re.I)
+                   for s in pol.get("special") or ()):
+                continue
+            out.append({"rule": cfg["rules"][0], "severity": "medium", "document": doc,
+                        "location": f"line {line} (\\begin{{{m.group(1)}}})",
+                        "evidence": f"the {cfg['noun']} float carries no \\caption",
+                        "detail": f"the venue requires a {cfg['noun']} caption; add the float's "
+                                  f"own \\caption{{...}}",
+                        "fix": _fix_kind(cfg["rules"][0], policy or {}), "protected": False,
+                        "tier": tier_of(cfg["rules"][0])})
+    return out
+
 
 def paragraph_first_line_indent(frag: str) -> int:
     """The paragraph's own first-line indent in twips (0 = none).
@@ -3069,11 +3558,24 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str) -> dict:
     if _fm_row:
         rows.append(_fm_row)
 
+    # ---- the venue's DISPLAY rules (FMT-TB1..3 tables, FMT-FG1..3 figures) ---
+    # The venue's rules come from `policy["tables"]`/`policy["figures"]` (the
+    # profile's own blocks): a kind with no block contributes no rows, and one
+    # with a block names the exact item so the review and the producing arms do
+    # not have to guess. Neither runs on a supplementary/cover/response document
+    # (`display_rules_apply`): the rule is about the manuscript body.
+    table_rows, table_inventory = table_conformance_rows(xml, policy, doc)
+    figure_rows, figure_inventory = figure_conformance_rows(xml, policy, doc)
+    rows.extend(table_rows)
+    rows.extend(figure_rows)
+
     return {"rows": rows, "paras": len(paras), "words": words, "legend_idx": legend_idx,
             "fields": [f[2][:60] for f in franges],
             "style_survey": style_survey(xml, styles),
             "treatments": {k: sorted(v) for k, v in treatments.items()},
-            "title_block_end": title_block_end}
+            "title_block_end": title_block_end,
+            "tables": table_inventory,
+            "figures": figure_inventory}
 
 
 def analyse_package(path: Path, policy: dict) -> dict:

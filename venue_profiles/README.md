@@ -37,10 +37,10 @@ for the values the profile supplied, and keeps the values you chose.
 
 | id | what it is |
 |---|---|
-| `nature-biotechnology` | **Nature Biotechnology** (Nature Portfolio / Springer Nature), the pipeline's **default** venue, whose numbers are now every one of them quoted from the journal's own pages (Content Types — https://www.nature.com/nbt/content — and the Matters Arising page, checked 2026-10-01): Article abstract <= 150 words and main text <= 3,000 words excluding abstract, Methods, references and figure legends (keeping the +10%/+25% margins the pipeline started with, so the promoted caps stay 165/3,750), Brief Communication abstract <= 70 words (3 sentences) with 1,000–1,500 words of main text including abstract/references/legends, Resource 100–150-word abstract and <= 3,000 words, Review 3,000–4,000, Perspective <= 3,000, Correspondence 300–800, Matters Arising "ideally not exceed 1,200" and Feature <= 3,000, all applied with no further margin (relaxation 1.0) — while Analysis (published on nature.com but absent from the Content Types page) and the non-primary types (Comment, News & Views, Book Review, Patent Article, Careers and Recruitment, Primer) deliberately carry no numbers, so selecting them counts and reports against the venue's own table instead of borrowing the Article caps. |
+| `nature-biotechnology` | **Nature Biotechnology** (Nature Portfolio / Springer Nature), the pipeline's **default** venue, whose numbers are now every one of them quoted from the journal's own pages (Content Types — https://www.nature.com/nbt/content — and the Matters Arising page, checked 2026-10-01): Article abstract <= 150 words and main text <= 3,000 words excluding abstract, Methods, references and figure legends (keeping the +10%/+25% margins the pipeline started with, so the promoted caps stay 165/3,750), Brief Communication abstract <= 70 words (3 sentences) with 1,000–1,500 words of main text including abstract/references/legends, Resource 100–150-word abstract and <= 3,000 words, Review 3,000–4,000, Perspective <= 3,000, Correspondence 300–800, Matters Arising "ideally not exceed 1,200" and Feature <= 3,000, all applied with no further margin (relaxation 1.0) — while Analysis (published on nature.com but absent from the Content Types page) and the non-primary types (Comment, News & Views, Book Review, Patent Article, Careers and Recruitment, Primer) deliberately carry no numbers, so selecting them counts and reports against the venue's own table instead of borrowing the Article caps. The profile also declares the venue's table rule (`tables`): the formatting guide's "Please include tables at the end of your text document", captioned before the table, with no special tables. It declares NO figure rule: that page says nothing about where figure legends belong, so nothing is invented for them. |
 | `generic` | a venue-agnostic profile: one `Article` type that states no limits, no legend cap and no format rule of its own. Every stage still enumerates the counts and names the limit the *target journal's own* guidelines state. |
-| `example-journal` | an **illustrative template** showing the fields the other shipped profiles do not exercise: three article types with different caps (Research Article 275/6000, Review 220/9600, Letter to the Editor with no abstract cap and an 880-word main text), a published legend limit, no cover-letter preference and an explicit journal list. Its numbers are placeholders: copy the file, replace them with the ones your venue's guidelines state, cite them in `source`, and install it with `set-venue <id> --profile <file>`. |
-| `frontiers-in-immunology` | Frontiers in Immunology (Frontiers). A single-journal Frontiers profile: the Article-types page carries the per-type maximum word counts (Original Research 12,000; Review 12,000; Mini Review 3,000; Brief Research Report 4,000; Case Report 3,000; Opinion 2,000; General Commentary 1,000; Conceptual Analysis 8,000; ...), and the profile applies each type's own maximum with no margin (relaxation 1.0). Frontiers publishes no separate abstract word limit, no legend word limit and no cover-letter limit, so those are counted without a cap; the submission system's 200-word scope statement is carried as the venue-level cover-letter preference on top of the operator's 650-word TOTAL-content cap. Frontiers requires an editable Word or LaTeX manuscript, so submission.pdf_accepted is false. |
+| `example-journal` | an **illustrative template** showing the fields the other shipped profiles do not exercise: three article types with different caps (Research Article 275/6000, Review 220/9600, Letter to the Editor with no abstract cap and an 880-word main text), a published legend limit, no cover-letter preference and an explicit journal list. Its numbers are placeholders: copy the file, replace them with the ones your venue's guidelines state, cite them in `source`, and install it with `set-venue <id> --profile <file>`. It also carries the two illustrative `special` entries the other shipped profiles do not exercise: a key-resources table that stays inside the methods without a "Table N." label, and a graphical abstract exempted from the numbered-figure rule. |
+| `frontiers-in-immunology` | Frontiers in Immunology (Frontiers). A single-journal Frontiers profile: the Article-types page carries the per-type maximum word counts (Original Research 12,000; Review 12,000; Mini Review 3,000; Brief Research Report 4,000; Case Report 3,000; Opinion 2,000; General Commentary 1,000; Conceptual Analysis 8,000; ...), and the profile applies each type's own maximum with no margin (relaxation 1.0). Frontiers publishes no separate abstract word limit, no legend word limit and no cover-letter limit, so those are counted without a cap; the submission system's 200-word scope statement is carried as the venue-level cover-letter preference on top of the operator's 650-word TOTAL-content cap. Frontiers requires an editable Word or LaTeX manuscript, so submission.pdf_accepted is false. The profile also declares the venue's table rule (`tables`), quoted from the journal's own Word/LaTeX template ("Tables should be inserted at the end of the manuscript") and its Author guidelines ("Table captions must be placed immediately before the table"): tables at the end, caption before, and NO special table -- a table inherited from another publisher's template behaves like any other table. Its `figures` block is quoted from the same template's Figures section ("Figure legends should be placed at the end of the manuscript"; figures are submitted individually and embedded by the venue) with `caption: any`, because the manuscript carries the LABELLED LEGENDS, not captions beside images; a front-matter image another publisher's template added (a graphical abstract) is not exempt, since this venue names no special figure. |
 
 `set-venue --list` prints every venue the running pipeline can see, with the
 file it came from.
@@ -86,6 +86,7 @@ documentation.
 | `captions.published_limit` | int or `null` | the venue's own published legend limit, when there is one. |
 | `captions.default_cap` | int | the legend cap used when `setup` was run without `--caption-limit`; `0` = counts only. |
 | `captions.source` | string | what the venue says about legend length (quoted in the M18 rule). |
+| `tables`, `figures` | object or absent | the venue's table / figure rules (see below; one shared schema). Absent = the profile declares no rule for that kind: the code-side scan emits no rows for it and no stage is gated on one. |
 | `submission.pdf_accepted` | bool or `null` | whether the venue accepts a submitted PDF. |
 | `submission.formats` | list of strings | accepted formats, for the record. |
 | `submission.pdf_note` | string | the sentence the derived-outputs rule uses about a submitted PDF. |
@@ -94,6 +95,49 @@ documentation.
 | `prompt.requirements` | string | "judged against **the Example Journal author guidelines and submission requirements**". |
 | `prompt.requirement_authority` | string | "unless such formatting is required or recommended by **the Example Journal guidelines**". |
 | `prompt.guidelines_source` | string | the guidelines source the review is told to read. |
+
+### `tables` and `figures`
+
+Where a table or a figure belongs and what labels it is a DECIDED venue fact, so
+it is profile data (venue-level, like `captions`), never a pipeline assumption.
+The two blocks share ONE schema and one validator; a profile may declare either,
+both or neither:
+
+| field | type | meaning |
+|---|---|---|
+| `source` | string | where the rule comes from (the venue's own template sentence and/or author guidelines, with the retrieval date). Rendered into every prompt and quoted in `status`. |
+| `note` | string | free-text context, e.g. that the venue declares NO special item and what happens to a previous publisher's furniture. |
+| `placement` | `"end"` \| `"inline"` \| `"any"` | `end` = the items (a table; a figure legend, or the figure itself when it is embedded) belong together in that kind's area at the end of the manuscript; `inline`/`any` = not pinned (no placement check). |
+| `caption` | `"before"` \| `"after"` \| `"any"` | which side of the item carries its caption paragraph. `any` means the venue does not pin it — the right choice when the guidelines collect figure legends at the end, so an image is not expected to carry its legend next to it. |
+| `special` | list | the items THIS venue genuinely treats differently. Each entry: `match` (a regular expression over the item's context — the nearest paragraph above it, its section heading or, for a table, its first-row header), and optionally `placement` (`inline` = leave it where it is), `caption` (`"none"` = this item needs no caption) plus `source`/`note`. An entry overrides only the fields it states. |
+
+The pipeline hands the blocks to the formatter as `policy["tables"]` /
+`policy["figures"]`, so `paper_docx_format.py scan` reports exactly what they
+declare — `FMT-TB1`/`FMT-TB2`/`FMT-TB3` and `FMT-FG1`/`FMT-FG2`/`FMT-FG3` (no
+caption / caption on the wrong side / item before its area) — in
+`FORMAT_SCAN.json` and the M20 artifact, and a package-producing stage
+(rewrite/revise/integrate and the template-first `conform`) FAILS while its
+delivered package still carries one of those rows. The check runs on the
+manuscript body only: a supplementary-material, cover-letter or
+feedback/response document has its own conventions and is skipped. Every
+session's sandbox also carries the blocks as `format_policy.json`, so the
+session's own `python paper_docx_format.py scan <dir> --policy
+format_policy.json` checks the same rules. With no block for a kind the scan
+emits no rows for it and nothing is gated: a rule no level of the authority
+chain states is never invented.
+
+`figures.special` is where a front-matter item the venue numbers outside the
+figure sequence belongs — a graphical abstract, a graphical table of contents —
+so the numbered-figure rule neither renumbers it nor moves it; the shipped
+`example-journal` profile carries that entry (and a key-resources
+`tables.special` entry) as a working, explicitly illustrative example.
+
+One compatibility note: a root recorded before these fields existed has a
+profile snapshot without `tables`/`figures` keys. Such a snapshot inherits the
+shipped profile file's blocks (and ONLY those; every other recorded rule still
+wins), each one only when the snapshot does not carry its key at all. A
+snapshot that carries its own key — including an empty block — is
+authoritative, and `set-venue` re-records it as usual.
 
 ### `article_types[]`
 

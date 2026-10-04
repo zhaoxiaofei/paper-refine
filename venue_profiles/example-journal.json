@@ -88,6 +88,36 @@
     ],
     "pdf_note": "Example Journal accepts PDF initial submissions (illustrative placeholder), and a reader or editor may open exactly that PDF"
   },
+  "tables": {
+    "source": "illustrative placeholder (this profile's numbers and rules are placeholders, not a real journal's requirements)",
+    "note": "Illustrative: a table follows the rule unless the entry below matches it.",
+    "placement": "end",
+    "caption": "before",
+    "special": [
+      {
+        "match": "^(?:key\\s+resources|reagent\\s+or\\s+resource)\\b",
+        "placement": "inline",
+        "caption": "none",
+        "source": "illustrative placeholder",
+        "note": "shows how a publisher's key-resources table stays inside its methods, uncaptioned, without the numbered-table rule being applied to it"
+      }
+    ]
+  },
+  "figures": {
+    "source": "illustrative placeholder (this profile's numbers and rules are placeholders, not a real journal's requirements)",
+    "note": "Illustrative: figure legends are collected at the end of the manuscript, and the graphical abstract is a front-matter item that is not part of the numbered figure sequence.",
+    "placement": "end",
+    "caption": "any",
+    "special": [
+      {
+        "match": "^graphical\\s+abstract\\b",
+        "placement": "inline",
+        "caption": "none",
+        "source": "illustrative placeholder",
+        "note": "shows how a front-matter figure -- a graphical abstract, a graphical table of contents -- is exempted from the numbered-figure caption/placement rule instead of being renumbered or moved"
+      }
+    ]
+  },
   "prompt": {
     "subject": "an Example Journal research-article submission",
     "editor": "an Example Journal editor or reviewer",

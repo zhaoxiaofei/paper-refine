@@ -227,6 +227,80 @@ def test_census_is_reported_never_ranked(tmp, ctx, agg):
           and not any("critical_remaining" in str(x) for x in (model.get("tiebreaks") or [])))
 
 
+def test_defect_list_file(tmp, ctx, agg):
+    """`reports/round<r>_defects.csv`: the census's long form, one row per defect.
+
+    The file must answer "WHICH defects" beside the census's "how many": every
+    mention carries the version it is attributed to, its source (own/peer), the
+    comparison's target and opponent, the frozen check id, the defect class
+    (tier) and severity, and the sheet's own evidence sentence. `counted=yes`
+    rows must add up to the census, so the two files can never drift apart.
+    """
+    print()
+    print("== the defect list: every defect the panel filed, with its meta ==")
+    p = np.write_round_defects(ctx, 2, agg)
+    with open(p, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    check("the file exists in reports/ with the documented columns",
+          p == ctx.reports_dir / "round2_defects.csv"
+          and list(rows[0]) == list(np.DEFECT_LIST_FIELDS), str(list(rows[0])))
+    counted = {}
+    for r in rows:
+        if r["counted"] == "yes":
+            counted[r["version"]] = counted.get(r["version"], 0) + 1
+    census = agg["issue_census"]
+    check("the counted rows add up to the census, version by version",
+          counted == {v: census[v]["total"] for v in FIELD}, str(counted))
+    check("every row names a session's judge index, a check id and a class",
+          all(r["judge_index"] == "1" and r["check"] and r["tier"] in np.BASIS_TIERS
+              and r["severity"] in np.SEVERITIES for r in rows),
+          str(rows[0]))
+    check("a resolved row belongs to the comparison's OPPONENT (peer source)",
+          all(r["version"] == r["peer_version"] and r["source"] == "peer"
+              for r in rows if r["side"] == "resolved"))
+    check("an introduced row belongs to the comparison's TARGET (own source)",
+          all(r["version"] == r["target_version"] and r["source"] == "own"
+              for r in rows if r["side"] == "introduced"))
+    repeated = [r for r in rows if r["evidence"] == DEFECT_ORIG["evidence"]
+                and r["version"] == "orig"]
+    sess_of = {np.rid_judge(2, np.judge_target_token(2, sheet["target"]), 1): name
+               for name, sheet in SHEETS.items()}
+    check("the defect the panel filed in three sessions appears three times, and the "
+          "repeat inside ONE session only once",
+          len(repeated) == 3
+          and sorted(sess_of.get(r["session"]) for r in repeated)
+          == sorted(["sess_a", "sess_b", "sess_c"]),
+          str([(r["session"], r["source"]) for r in repeated]))
+    check("the ordering follows the field (version), then severity (fatal first)",
+          [r["version"] for r in rows] == sorted([r["version"] for r in rows],
+                                                 key=FIELD.index)
+          and rows[0]["severity"] == "major" and rows[-1]["severity"] == "minor",
+          str([(r["version"], r["severity"]) for r in rows]))
+    check("the defect ids are stable, zero-padded and unique",
+          [r["defect_id"] for r in rows] == [f"r2-D{i:04d}" for i in range(1, len(rows) + 1)])
+    # The opt-in location mode: a row merged into an earlier session's row stays
+    # visible with counted=no, so the file lists EVERY mention while the counted
+    # column still equals the census (the same structured-key fixture the census
+    # suite uses for the merge itself).
+    ev = ("line 42: the treated group showed a higher median than the control "
+          "group in every cohort")
+    obs = [("sess_1", "orig", "p1", comp("v1", 0, introduced=[row(
+                "correctness", "major", ev, "M4")])),
+           ("sess_2", "orig", "p2", comp("v1", 0, introduced=[row(
+                "correctness", "major", ev, "M4")]))]
+    led = np.build_issue_ledger_rows(obs, ["orig"], dedup="location")
+    cens = np.build_issue_census(obs, ["orig"], dedup="location")["orig"]
+    merged = [r for r in led if r["counted"] == "no"]
+    check("with dedup=location the merged row is kept, marked, and names the kept session",
+          len(led) == 2 and len(merged) == 1
+          and merged[0]["merged_into"] == "sess_1"
+          and merged[0]["session"] == "sess_2" and merged[0]["dedup_mode"] == "location",
+          str([(r["session"], r["counted"], r["merged_into"]) for r in led]))
+    check("the defect list's counted rows add up to the census in the same mode",
+          sum(1 for r in led if r["counted"] == "yes") == cens["total"] == 1,
+          f"{sum(1 for r in led if r['counted'] == 'yes')} vs {cens['total']}")
+
+
 def test_direction_flips(tmp):
     print()
     print("== panel quality: a flip is BOTH sides claiming to be better ==")
@@ -627,6 +701,7 @@ def main() -> int:
     test_direction_flips(tmp)
     test_member_table_columns(tmp, ctx, agg)
     test_census_file_and_table(tmp, ctx, agg)
+    test_defect_list_file(tmp, ctx, agg)
     test_location_dedup_optin(tmp)
     test_severity_lattice_and_any_class(tmp)
     test_dedup_mode_cli(tmp)

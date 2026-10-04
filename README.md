@@ -95,6 +95,8 @@ Everything lives under the root you passed to `setup`:
 | `reports/decision.json` | the same decision, machine-readable; its `score_model_doc` defines the scoring and ranking contract |
 | `reports/round<r>_raw_scores.csv` | every directed score the panel produced, with the sheet it came from |
 | `reports/round<r>_issue_census.csv` | how many defects of each tier and severity every version carries (`own` vs `peer`), plus the sibling matrices the ranking walks |
+| `reports/round<r>_defects.csv` | WHICH defects: one row per defect the panel filed, with the version it belongs to, the comparison's target/opponent, the check id, the defect class, the severity and the sheet's own evidence sentence |
+| `reports/round<r>_review_findings.csv` | the round's review findings (id, check, category, severity, location, evidence, explanation), one row each |
 | `round<r>_winner/` | the champion of each round (content-addressed: identical content is never re-run) |
 | `final_clean_version/` | the champion corpus, renamed for the next run's `--source`; ALWAYS built, certified or not |
 | `final_clean_version.readme.md` | the package's status document (sibling of the directory): certification verdict, blockers/notes, champion + digests, and the reuse hint |
@@ -236,6 +238,31 @@ The **cover letter** has two separate budgets, both reported (never gates): its
 (`cover_letter.total_max`; a profile may override it). Over the total cap, the
 fix is to trim the non-persuading boilerplate first, never a claim about the
 work.
+
+**Tables and figures are venue facts too (`tables`, `figures`).** A profile may
+state where a kind of display item belongs (`placement`: `end` = together in
+that kind's area at the end of the manuscript, `inline`/`any` = not pinned),
+which side of the item carries its caption (`caption`: `before`/`after`/`any` --
+for a figure `any` is the right choice when the guidelines collect the LEGENDS
+at the end, as Frontiers does) and the source of that rule. The code-side scan
+(`paper_docx_format.py scan`) then reports, per item, **FMT-TB1/FG1** (no
+caption), **FMT-TB2/FG2** (caption on the wrong side) and **FMT-TB3/FG3** (the
+item appears before its area); the rows land in `FORMAT_SCAN.json` / the M20
+artifact, the review disposes them, and a package-producing stage (including the
+template-first `conform` stage) FAILS while its delivered package still carries
+one -- the producing agent names the fix and retries. The checks look at the
+manuscript body only (a supplementary, cover-letter or feedback/response
+document has its own conventions), a profile that declares no rule for a kind
+gets no rows and no gate for it (nothing is invented), and
+`tables.special`/`figures.special` are the honest exception lists for the items
+a publisher really does treat differently -- matched on the text above the item,
+its section heading or (tables) its first-row header, e.g. a Cell Press-style
+key-resources table that lives inside its methods with no "Table N." label, or a
+graphical abstract that is not part of the numbered figure sequence (the
+illustrative `example-journal` profile carries both). The shipped Frontiers
+profile declares both rules, Nature Biotechnology declares its table rule only
+(its guide says nothing about figure legends), and `generic` deliberately
+declares neither.
 
 ```bash
 python paper_pipeline.py set-venue --list                # venues this pipeline can see
@@ -1558,6 +1585,22 @@ third, `reports/round<r>_dedup_audit.json`, records every merge the opt-in
 `raw_own`/`raw_peer` and `merged_own`/`merged_peer` in the CSV say what was
 merged away).
 
+**The defect list: WHICH defects, on which version.** The census counts; beside
+it `run`/`decide` write the long form, `reports/round<r>_defects.csv`: ONE row
+per defect mention the panel filed, carrying the version the row is attributed
+to, whether its own sweep or a peer comparison filed it (`source` +
+`side` + the comparison's `target_version`/`peer_version`), the judging session
+and its judge index, the frozen `check` id, the defect class (`tier`, the six
+scored classes), the `severity` rung (minor/major/critical/fatal) and the
+sheet's own `evidence` sentence as the verbal description. The rows obey the
+same attribution and per-session dedup rules as the census, and with the opt-in
+`dedup_mode=location` a merged row stays visible with `counted=no` and
+`merged_into` naming the kept row's session -- so `counted=yes` rows always add
+up to the census's `total`. The round's REVIEW findings (the review pass's own
+defect list, with its `explanation` text) are exported beside it as
+`reports/round<r>_review_findings.csv` whenever the round has an archived
+review.
+
 The panel-quality diagnostic that reads the same pairs has one fixed rule:
 `direction_flips` lists the pairs where BOTH sides claim to be better (both own
 medians positive, or both negative -- negated into one frame they do not
@@ -1842,7 +1885,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 57 suites (a few
+any failure. They are independent, so run them in parallel — 58 suites (a few
 minutes on a 20-core box; ~5.5 min sequentially):
 
 ```bash

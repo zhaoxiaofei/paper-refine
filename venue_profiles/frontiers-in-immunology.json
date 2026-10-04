@@ -50,6 +50,20 @@
     "default_cap": 0,
     "source": "Frontiers Author guidelines, 'Captions' and 'Tables' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'Captions should be preceded by the appropriate label, for example Figure 1. Figure captions should be placed at the end of the manuscript'; 'Table captions must be placed immediately before the table ... Please use only a single paragraph for the caption'. The guidelines publish no legend WORD limit, so published_limit is null and the stages count legends without a cap (default_cap 0)"
   },
+  "tables": {
+    "source": "Frontiers' OWN template files (venue_template/word/Frontiers_Template.docx and venue_template/latex/frontiers.tex, 'Tables' section, checked 2026-10-04): 'Tables should be inserted at the end of the manuscript.' Frontiers Author guidelines, 'Captions' and 'Tables' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'Table captions must be placed immediately before the table ... Please use only a single paragraph for the caption' and 'Captions should be preceded by the appropriate label, for example Figure 1.'",
+    "note": "This venue declares NO special table. In particular, a table inherited from another publisher's template (a Cell Press / STAR-Methods 'key resources' reagent table, whose heading and lack of a 'Table N.' label are that publisher's convention, not this venue's) is NOT a Frontiers special table: it must be captioned like every other table and moved into the tables area at the end -- or, when its content fits there better, carried into the supplementary material. Fold the foreign container heading itself into the venue's own section structure.",
+    "placement": "end",
+    "caption": "before",
+    "special": []
+  },
+  "figures": {
+    "source": "Frontiers' OWN template files (venue_template/word/Frontiers_Template.docx and venue_template/latex/frontiers.tex, 'Figures' section, checked 2026-10-04): 'Frontiers requires figures to be submitted individually, in the same order as they are referred to in the manuscript. Figures will then be automatically embedded at the bottom of the submitted manuscript. ... Figure legends should be placed at the end of the manuscript.' Frontiers Author guidelines, 'Captions' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'Captions should be preceded by the appropriate label, for example Figure 1. Figure captions should be placed at the end of the manuscript.'",
+    "note": "The figure the manuscript DOCUMENT carries is its legend: the labels ('Figure 1 | ...', 'Figure S1 ...') belong together in the figure-legends area at the end of the manuscript, and the figures themselves are separate submission files the venue embeds at the bottom. This venue names NO special figure of its own, so a front-matter image inherited from another publisher's template (a graphical abstract, a graphical table of contents) is NOT exempt here: the venue's own structure has no unnumbered front-matter figure, so carry it out of the manuscript body the venue's way (a separate/supplementary file) or declare in the session's ledger what was done with it.",
+    "placement": "end",
+    "caption": "any",
+    "special": []
+  },
   "submission": {
     "pdf_accepted": false,
     "formats": [

@@ -347,6 +347,13 @@
     "default_cap": 0,
     "source": "https://www.nature.com/nbt/submission-guidelines/aip-and-formatting (checked 2026-10-01), 'Figure legends': 'Ensure the legend does not exceed the word limit of the article type.' Nature Biotechnology publishes no legend word count of its own, so published_limit is null and the stages count legends without a cap (default_cap 0)."
   },
+  "tables": {
+    "source": "Nature Biotechnology formatting guide, '2 - Tables' (https://www.nature.com/nbt/for-authors/formatting-guide, checked 2026-10-04): 'Please include tables at the end of your text document. Complex tables can be submitted as a separate Excel file.' The guide does not state which side of a table carries its title/legend, so the caption side follows established academic convention (level 3 of this pipeline's fallback chain): a table's own title/legend sits immediately before the table.",
+    "note": "This venue declares NO special table: every table of the main text follows the rule (the guide's own exception -- a complex table shipped as a separate Excel file -- is a separate FILE, not a differently shaped table in the manuscript).",
+    "placement": "end",
+    "caption": "before",
+    "special": []
+  },
   "submission": {
     "pdf_accepted": true,
     "formats": [

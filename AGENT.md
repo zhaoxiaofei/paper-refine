@@ -73,6 +73,13 @@ the profiles shipped next to the script → the built-in fallback inside
    authoritative; profile files are only a lookup for roots that have no
    snapshot. `set-venue` re-records it, and refuses (without `--force`) once the
    root has run records.
+   One narrow exception, for a field that did not exist when a snapshot was
+   recorded: a snapshot with NO `tables`/`figures` key inherits the venue's
+   shipped block of that kind (and ONLY those blocks; every other recorded rule
+   still wins), so a root created before the display rules existed still gets
+   its venue's rules. A snapshot that carries the key -- including an empty
+   block -- is authoritative, as are operator overrides in
+   `format_policy.tables` / `.figures`.
 5. **Backward compatibility is a test.** `test_venue_config.py` asserts that a
    config without `venue`/`journal` behaves exactly like the old default.
 6. The skill ids `$paper-review` / `$paper-revise` and the file names `paper_*.py` are
@@ -116,6 +123,24 @@ the profiles shipped next to the script → the built-in fallback inside
    `.paper_test/test_human_review_feedback_area.py` pin the contract. Never
    extend a scan or a packaging step without routing it through
    `is_evidence_rel` / `is_non_manuscript_rel`.
+9. **A table's or a figure's caption and its place in the manuscript are VENUE FACTS too.**
+   The profile carries them in its `tables` and `figures` blocks (`placement`, `caption`,
+   `special`, `source`, `note`; one shared schema); `format_policy_of` injects the blocks
+   into the formatter policy, the formatter's scan emits `FMT-TB1..3` / `FMT-FG1..3`
+   (no caption / caption on the wrong side / item before its area) rows from exactly what
+   they declare, the prompts render `display_rule_text(profile)`, and a package-producing
+   stage (rewrite / revise / integrate and the template-first `conform`) FAILS while its
+   delivered package still carries one of those rows (`display_rule_errors`). A profile
+   with no block for a kind gets no rows and no gate for it -- never invent a rule -- and
+   `special` must stay an exception list, not a blanket exemption: it names the items the
+   venue itself treats differently (a key-resources table inside the methods; a graphical
+   abstract that is not in the numbered figure sequence), matched on the text above the
+   item, its section heading or (tables only) its first-row header, and overrides only the
+   fields it states. The checks run on the MANUSCRIPT body, never on a supplementary,
+   cover-letter or feedback/response document. Every session sandbox carries the blocks as
+   `format_policy.json`, so the session's own `paper_docx_format.py scan <dir> --policy
+   format_policy.json` checks the same rules the postcheck enforces. Pinned by
+   `.paper_test/test_display_rules.py`.
 
 ## Commands you will use
 
