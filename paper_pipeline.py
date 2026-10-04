@@ -29413,12 +29413,38 @@ def _ensure_template_stage_for_run(ctx: Ctx, args) -> None:
     if not templates:
         print("[run] template-first stage: the venue ships no Word template -- conforming to "
               "the journal's own author guidelines, then to academic convention")
+    agent = str(getattr(args, "agent", None) or DEFAULTS.get("agent", "codex"))
+    sb = ctx.root / TEMPLATE_REWRITE_DIRNAME
+    if agent == "manual" and sb.is_dir() and any(sb.iterdir()) and (sb / PROMPT_FILE).is_file():
+        # Re-entering the stage by hand CHECKS the session the operator filled
+        # (`--agent manual` told them to do exactly that). Rebuilding it with
+        # force=True deleted the hand-filled out/ and never recorded the stage,
+        # so `run` looped forever and the operator's work was lost.
+        report = template_rewrite_postcheck(sb, ctx.pristine, templates)
+        report.update({"venue": venue_id_of(ctx), "source": str(ctx.pristine), "sandbox": str(sb),
+                       "agent": "manual", "agent_rc": None})
+        write_json_atomic(ctx.reports_dir / "template_rewrite.json", report)
+        cov = report.get("coverage") or {}
+        print(f"[run] template-first stage: checked the existing session {sb}: coverage "
+              f"{cov.get('covered', 0)}/{cov.get('checked', 0)} "
+              f"({cov.get('ratio', 0.0):.0%}), template guide sentences left "
+              f"{len(report.get('template_prose_left') or [])}")
+        if not report.get("ok"):
+            die(f"{mode} mode conforms the submission before any other stage: fill "
+                f"{sb / 'out'} using {sb / PROMPT_FILE}, then re-run `run` (or check it with "
+                f"`conform --root {ctx.root} --agent manual`). Its postcheck still reports: "
+                + "; ".join(report["errors"])[:400])
+        rec_stage = _record_template_stage(ctx, sb, "manual")
+        print(f"[run] template-first stage: PASSED -- coverage "
+              f"{report['coverage']['covered']}/{report['coverage']['checked']} "
+              f"({report['coverage']['ratio']:.0%}), round 1 now starts from "
+              f"{rec_stage['dir']} (digest {str(rec_stage['digest'])[:12]})")
+        return
     sb = _stage_template_rewrite_sandbox(ctx, ctx.pristine, templates, force=True)
     action = ("copy the journal's templates, replace their placeholders with this submission's "
               "content" if templates else
               "re-author the whole package to the journal's guidelines and academic convention")
     print(f"[run] template-first stage: {sb} ({action})")
-    agent = str(getattr(args, "agent", None) or DEFAULTS.get("agent", "codex"))
     if agent == "manual":
         die(f"{mode} mode conforms the submission before any other stage: fill {sb / 'out'} "
             f"using {sb / PROMPT_FILE}, then re-run `run` (or check it with "
@@ -29484,19 +29510,54 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
         report.update({"venue": venue_id_of(ctx), "source": str(src), "sandbox": str(sb),
                        "agent": "manual", "agent_rc": None})
         write_json_atomic(ctx.reports_dir / "template_rewrite.json", report)
+        cov = report.get("coverage") or {}
         print(f"[conform] checked the existing session {sb}: "
-              f"coverage {report['coverage']['covered']}/{report['coverage']['checked']} "
-              f"({report['coverage']['ratio']:.0%}), template guide sentences left "
-              f"{len(report['template_prose_left'])}, headers/footers "
+              f"coverage {cov.get('covered', 0)}/{cov.get('checked', 0)} "
+              f"({cov.get('ratio', 0.0):.0%}), template guide sentences left "
+              f"{len(report.get('template_prose_left') or [])}, headers/footers "
               f"{'ok' if not any('headers/footers' in e for e in report['errors']) else 'MISSING'}")
         if not report["ok"]:
             die("the template-first rewrite did not pass its postcheck: "
                 + "; ".join(report["errors"])[:400])
         print("[conform] the package in out/ passed the code-side postcheck")
+        # In transfer/init the conform stage is part of the RUN: a passing check
+        # records it so the next `run` starts round 1 from out/ instead of
+        # rebuilding (and losing) the session. The standalone `continue`-mode
+        # session stays a staging aid: nothing is recorded there.
+        if journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_INIT) \
+                and not template_stage_record(ctx):
+            # The check above ran against THIS session's `source/`, which a
+            # `conform --source X` may have staged from ANY package. The RUN's
+            # gate is defined against the root's own submission, so re-verify
+            # that contract before adopting out/ as round 1's working original:
+            # recording a foreign package would silently replace the original
+            # the a1 base and every later vs_original comparison read.
+            run_report = template_rewrite_postcheck(sb, ctx.pristine, templates)
+            if run_report.get("ok"):
+                rec_stage = _record_template_stage(ctx, sb, "manual")
+                print(f"[conform] recorded as the template-first stage: round 1 now starts from "
+                      f"{rec_stage['dir']} (digest {str(rec_stage['digest'])[:12]})")
+            else:
+                print(f"[conform] NOT recorded as this root's template-first stage: the session "
+                      f"conforms its own source/, not the root's submission ({ctx.pristine}); "
+                      f"its postcheck against the root reports: "
+                      + "; ".join(run_report.get("errors") or [])[:300])
         return
     if sb.exists() and any(sb.iterdir()):
         if not bool(getattr(args, "force", False)):
             die(f"{sb} exists and is not empty: pass --force to rebuild the session sandbox")
+        if is_within(Path(src), sb):
+            # `conform` defaults `--source` to the session's own read-only
+            # `source/` copy when the root has no final_clean_version/winner
+            # (that is what makes the run banner's check command work). The
+            # rebuild deletes the sandbox BEFORE re-staging, so staging from a
+            # path inside it would silently produce an EMPTY session (and wipe
+            # the operator's filled out/ for nothing). Re-stage from the root's
+            # own input instead, and say so: the operator sees which package
+            # the rebuilt session carries.
+            print(f"[conform] note: --force rebuilds {sb} and the source {src} lives inside it; "
+                  f"re-staging from the root's input {ctx.pristine} instead")
+            src = ctx.pristine
         rmtree_force(sb)
     sb.mkdir(parents=True, exist_ok=True)
     stage_venue_template(ctx, sb)
@@ -29580,6 +29641,14 @@ def cmd_apply_template(args) -> None:
               f"the agent session follows the journal's own author guidelines, then academic "
               f"convention")
     src = Path(args.source).expanduser() if args.source else default_template_package_source(ctx)
+    if src is None:
+        # A staged transfer/init session is checked against its OWN read-only
+        # `source/` copy: `conform --root ... --agent manual` (the check the run
+        # banner names) had no package to resolve on a root that has not
+        # finished a round yet, so the advertised check could never run.
+        staged = ctx.root / TEMPLATE_REWRITE_DIRNAME / "source"
+        if staged.is_dir() and any(staged.iterdir()):
+            src = staged
     if src is None:
         die("no package to rebuild: the root has no final_clean_version/ and no completed "
             "round's round<r>_winner/ -- name one with --source <dir>")

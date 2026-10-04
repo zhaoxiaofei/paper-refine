@@ -285,6 +285,104 @@ def test_review_split_keeps_journal_stages_fresh():
           "r1_response" in reset and ctx2.run("r1_response")["status"] == "stale", str(reset))
 
 
+def test_init_manual_conform_stage_reentry():
+    """C01: a MANUAL init conform session can be finished and recorded.
+
+    `run --agent manual` stages the session and stops with the instruction to
+    fill `out/`; the operator's re-run must CHECK the filled session and record
+    it as round 1's working original -- never rebuild the sandbox with
+    force=True, which deleted the hand-filled `out/` and left the run looping
+    forever. The check command the banner names (`conform --agent manual`) must
+    resolve the session's own staged `source/` on a root with no final package,
+    a `--source` session must never be adopted as the ROOT's stage, and
+    `--force` must not re-stage from inside the sandbox it deletes.
+    """
+    def make_docx(path: Path, text: str) -> None:
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("word/document.xml",
+                       '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.'
+                       'org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>' + text +
+                       '</w:t></w:r></w:p></w:body></w:document>')
+            z.writestr("word/styles.xml",
+                       '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/'
+                       '2006/main"/>')
+
+    def setup_init_root(base: Path, text: str) -> Path:
+        src = base / "src"
+        (src / "raw_data").mkdir(parents=True)
+        (src / "manuscript.txt").write_text("Abstract\n" + text + "\n", encoding="utf-8")
+        make_docx(src / "mainText.docx", text)
+        root = base / "root"
+        r = run_cli("setup", "--source", str(src), "--root", str(root), "--rounds", "1",
+                    "--rewrites", "0", "--revises", "1", "--judges", "1", "--venue", "generic",
+                    "--journal", "Journal of Tests", "--revision-mode", "init")
+        check("C01 init setup succeeds", r.returncode == 0, (r.stdout + r.stderr)[-200:])
+        return root
+
+    tmp = scratch("paper_jr_manual_")
+    root = setup_init_root(tmp / "a", "The root submission introduction")
+    sb = root / "template_rewrite"
+    r1 = run_cli("run", "--root", str(root), "--only", "conform", "--agent", "manual",
+                 "--retries", "0")
+    check("C01 the manual conform stage stages the session and stops with instructions",
+          r1.returncode != 0 and (sb / "PROMPT.md").is_file() and (sb / "out").is_dir()
+          and "before any other stage" in (r1.stdout + r1.stderr),
+          (r1.stdout + r1.stderr)[-200:])
+    marker = sb / "out" / "OPERATOR_WORK.txt"
+    marker.write_text("hand-filled, still incomplete\n", encoding="utf-8")
+    r2 = run_cli("run", "--root", str(root), "--only", "conform", "--agent", "manual",
+                 "--retries", "0")
+    check("C01 re-entering an UNFILLED manual session checks it and keeps the operator's work",
+          r2.returncode != 0 and marker.is_file()
+          and (sb / "source" / "mainText.docx").is_file()
+          and not (json.loads((root / "state.json").read_text(encoding="utf-8"))
+                   .get("template_stage")),
+          (r2.stdout + r2.stderr)[-200:])
+    # The operator fills out/: carry the staged source into it and record the
+    # ledger the postcheck requires.
+    shutil.copy(sb / "source" / "mainText.docx", sb / "out" / "mainText.docx")
+    (sb / "out" / "REPLACEMENT_LEDGER.md").write_text("# ledger: no parity exceptions\n",
+                                                      encoding="utf-8")
+    r3 = run_cli("run", "--root", str(root), "--only", "conform", "--agent", "manual",
+                 "--retries", "0")
+    st = (json.loads((root / "state.json").read_text(encoding="utf-8"))
+          .get("template_stage") or {})
+    check("C01 the filled manual session is checked, recorded; round 1 starts from out/",
+          r3.returncode == 3 and st.get("dir") == "template_rewrite/out"
+          and marker.is_file() and "PASSED" in (r3.stdout + r3.stderr),
+          (r3.stdout + r3.stderr)[-260:])
+    r4 = run_cli("conform", "--root", str(root), "--agent", "manual")
+    check("C01 `conform --agent manual` (the banner's check) works without a final package",
+          r4.returncode == 0 and "passed the code-side postcheck" in (r4.stdout + r4.stderr),
+          (r4.stdout + r4.stderr)[-200:])
+
+    root2 = setup_init_root(tmp / "b", "A second root submission")
+    foreign = tmp / "b" / "foreign"
+    foreign.mkdir()
+    make_docx(foreign / "foreignManuscript.docx", "A completely different manuscript")
+    r5 = run_cli("conform", "--root", str(root2), "--source", str(foreign), "--agent", "manual")
+    out2 = root2 / "template_rewrite" / "out"
+    shutil.copy(foreign / "foreignManuscript.docx", out2 / "foreignManuscript.docx")
+    (out2 / "REPLACEMENT_LEDGER.md").write_text("# ledger: no parity exceptions\n",
+                                                encoding="utf-8")
+    check("C01 a `--source` session stages from that package", r5.returncode == 0,
+          (r5.stdout + r5.stderr)[-200:])
+    r6 = run_cli("conform", "--root", str(root2), "--agent", "manual")
+    check("C01 a `--source` package is never adopted as the ROOT's template stage",
+          r6.returncode == 0
+          and "passed the code-side postcheck" in (r6.stdout + r6.stderr)
+          and not (json.loads((root2 / "state.json").read_text(encoding="utf-8"))
+                   .get("template_stage"))
+          and "NOT recorded" in (r6.stdout + r6.stderr),
+          (r6.stdout + r6.stderr)[-260:])
+    r7 = run_cli("conform", "--root", str(root2), "--agent", "manual", "--force")
+    staged = root2 / "template_rewrite" / "source"
+    check("C01 --force re-stages from the root's input, never an emptied source/",
+          r7.returncode == 0 and (staged / "mainText.docx").is_file(),
+          str(sorted(p.relative_to(staged).as_posix()
+                     for p in staged.rglob("*") if p.is_file())))
+
+
 def main() -> int:
     print("== J1: option 3 (major revision) -- scoped edits + response + package ==")
     tmp = scratch("paper_jr_major_")
@@ -651,6 +749,7 @@ def main() -> int:
     test_review_split_keeps_journal_stages_fresh()
     test_scoped_prune_keeps_a_published_winner()
     test_leaving_a_scoped_mode_restores_the_default_plan()
+    test_init_manual_conform_stage_reentry()
 
     print()
     if FAILS:
