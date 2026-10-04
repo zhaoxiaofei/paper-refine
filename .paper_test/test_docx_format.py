@@ -877,6 +877,31 @@ def test_template_list_numbering():
           "List item text" in zipfile.ZipFile(out).read("word/document.xml").decode("utf-8")
           and any("carried 1 source list" in c for c in rep.get("changes") or []),
           str(rep.get("changes")))
+    # ECMA-376 CT_Numbering is a strict sequence: every abstractNum BEFORE
+    # every num. A template that already defines a num (the case above) made the
+    # old append-at-end splice emit `abstractNum, num, abstractNum, num`, which
+    # `docx validate` refuses ("abstractNum: This element is not expected").
+    with zipfile.ZipFile(out) as z:
+        num_xml = z.read("word/numbering.xml").decode("utf-8", "replace")
+    order = [m.group(1) for m in re.finditer(r"<w:(numPicBullet|abstractNum|num|"
+                                             r"numIdMacAtCleanup)(?=[\s/>])", num_xml)]
+    check("the merged numbering part keeps the ECMA-376 child order",
+          order == sorted(order, key=lambda t: ("numPicBullet", "abstractNum", "num",
+                                                "numIdMacAtCleanup").index(t)),
+          str(order))
+    # Reordering must not drop non-element content (comments/whitespace).
+    commented = ('<?xml version="1.0"?><w:numbering xmlns:w="http://schemas.'
+                 'openxmlformats.org/wordprocessingml/2006/main">'
+                 "<!-- keep this comment -->"
+                 '<w:num w:numId="9"><w:abstractNumId w:val="9"/></w:num>'
+                 '<w:abstractNum w:abstractNumId="9"><w:lvl w:ilvl="0"/></w:abstractNum>'
+                 "</w:numbering>")
+    reordered = fmt._reorder_numbering_groups(commented, "", "", "")
+    order2 = [m.group(1) for m in re.finditer(r"<w:(numPicBullet|abstractNum|num|"
+                                              r"numIdMacAtCleanup)(?=[\s/>])", reordered)]
+    check("reordering keeps comments and the ECMA-376 order",
+          "<!-- keep this comment -->" in reordered
+          and order2 == ["abstractNum", "num"], f"{order2} {reordered[:120]}")
     # a numId the template DOES define keeps the template's definition (no copy)
     same = tmp / "same.docx"
     package(src, "1")
@@ -916,6 +941,151 @@ def test_fix_extended(docx: Path):
     check("after aligning: heading size drift is gone", "FMT-T3b" not in after, f"{sorted(after)}")
     check("after quote normalisation: the mixed-quote row is gone", "FMT-T1" not in after)
     check("curly quotes were actually applied", "\u2019" in fixed or "\u201c" in fixed)
+
+
+def _mini_paragraph_docx(runs: list) -> str:
+    """One paragraph carrying `runs`, each as its own `<w:t>` (as Word splits them)."""
+    ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    body = "".join(f'<w:r><w:t xml:space="preserve">{t}</w:t></w:r>' for t in runs)
+    return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<w:document {ns}><w:body><w:p>{body}</w:p></w:body></w:document>')
+
+
+def test_quote_normalisation_spans_runs():
+    """Curly quotes: a quotation split across runs must not invert.
+
+    Reproduced before the fix: `He said "hello` + ` there"` became
+    'He said \u201chello there\u201c' (the closing quote an opening one) and
+    `the dog's bones and 'quoted' him.` became '\u2018quoted\u2018'. The run's
+    open/close state used to restart at every `<w:t>` and a `'` was keyed to the
+    DOUBLE-quote parity; the quote-free text-identity verifier cannot see either.
+    """
+    print()
+    print("== quotes: a quotation split across runs does not invert ==")
+    policy = dict(fmt.POLICY_DEFAULTS)
+    policy["quote_style"] = "curly"
+    cases = [
+        (["He said \"hello", ' there" to him.'],
+         "He said \u201chello there\u201d to him."),
+        (["He said ", '"', "hello there", '"', " to him."],
+         "He said \u201chello there\u201d to him."),
+        (["the dog's bones and 'quoted' him."],
+         "the dog\u2019s bones and \u2018quoted\u2019 him."),
+        (['He said "it\'s fine" today.'],
+         "He said \u201cit\u2019s fine\u201d today."),
+        (["the dogs' bones are here"], "the dogs\u2019 bones are here"),
+        # Brackets/dashes open a quote; a period closes it; nested quotes open
+        # both pairs. `("quoted")` must not become `(\u201dquoted\u201d)`.
+        (['He said ("quoted") here.'], "He said (\u201cquoted\u201d) here."),
+        (["He said (", '"quoted', '"', ") here."],
+         "He said (\u201cquoted\u201d) here."),
+        (['He said "\'hi\'" to her.'],
+         "He said \u201c\u2018hi\u2019\u201d to her."),
+        (['He said "stop." Then left.'], "He said \u201cstop.\u201d Then left."),
+        (["The word\u2014\"quoted\"\u2014appears."],
+         "The word\u2014\u201cquoted\u201d\u2014appears."),
+    ]
+    for runs, want in cases:
+        xml = _mini_paragraph_docx(runs)
+        new, _changes, _meta = fmt.fix_document(xml, {}, policy)
+        got = fmt.text_of(new)
+        check(f"quote conversion of {runs!r} is {want!r}", got == want, f"got {got!r}")
+    # Two paragraphs must not share quote state: each starts fresh.
+    ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    two = ('<?xml version="1.0"?>'
+           f'<w:document {ns}><w:body>'
+           "<w:p><w:r><w:t>She said 'a'.</w:t></w:r></w:p>"
+           "<w:p><w:r><w:t>He said 'b'.</w:t></w:r></w:p>"
+           "</w:body></w:document>")
+    new2, _c, _m = fmt.fix_document(two, {}, policy)
+    check("each paragraph opens its own quote",
+          fmt.text_of(new2) == "She said \u2018a\u2019.He said \u2018b\u2019.",
+          repr(fmt.text_of(new2)))
+    # A straight-quote pass must remain a plain un-code.
+    straight = dict(fmt.POLICY_DEFAULTS, quote_style="straight")
+    xml3 = _mini_paragraph_docx(["\u201ccurly\u201d and \u2018single\u2019"])
+    new3, _c, _m = fmt.fix_document(xml3, {}, straight)
+    check("straight mode re-codes curly quotes",
+          fmt.text_of(new3) == "\"curly\" and 'single'", repr(fmt.text_of(new3)))
+
+
+def test_lookup_404_is_a_verified_negative():
+    """An HTTP 404 from the identifier APIs is `absent`, not a lookup error.
+
+    The verdict vocabulary defines `absent` as "the query was answered and the
+    thing does not exist" -- the verdict the residual hand-off gate needs to
+    stop nagging about a placeholder that was already answered. A blanket
+    `except` recorded Crossref/GitHub/HGNC 404s as `error`, so those kinds could
+    never produce `absent`.
+    """
+    print()
+    print("== lookup: an HTTP 404 is a verified negative ==")
+    import urllib.request
+    import urllib.error
+    real = urllib.request.urlopen
+
+    def fake_404(req, timeout=None):
+        raise urllib.error.HTTPError("https://example.invalid/works/x", 404,
+                                     "Not Found", {}, None)
+
+    urllib.request.urlopen = fake_404
+    try:
+        res = fmt.lookup_kind("doi", "10.9999/does-not-exist", timeout=5)
+    finally:
+        urllib.request.urlopen = real
+    check("a 404 DOI lookup is 'absent'", res.get("verdict") == "absent", str(res)[:200])
+    # A transport failure that is NOT a 404 stays an error.
+    def fake_fail(req, timeout=None):
+        raise urllib.error.URLError("no network")
+
+    urllib.request.urlopen = fake_fail
+    try:
+        res2 = fmt.lookup_kind("doi", "10.9999/does-not-exist", timeout=5)
+    finally:
+        urllib.request.urlopen = real
+    check("a transport failure stays an error", res2.get("verdict") == "error",
+          str(res2)[:200])
+    # GitHub also 404s a PRIVATE repository (it hides its existence), so a
+    # repo/commit 404 cannot claim a verified negative.
+    urllib.request.urlopen = fake_404
+    try:
+        res3 = fmt.lookup_kind("repository", "owner/maybe-private", timeout=5)
+    finally:
+        urllib.request.urlopen = real
+    check("a repository 404 stays an error (private repos 404 too)",
+          res3.get("verdict") == "error", str(res3)[:200])
+
+
+def test_tab_scan_ignores_tab_stop_definitions():
+    """FMT-S7 counts literal tab characters, never `<w:tab>`-stop definitions.
+
+    Reproduced before the fix: `<w:tabs><w:tab w:val="left" w:pos="720"/></w:tabs>`
+    (a paragraph's tab-stop DEFINITION) produced "1 literal tab character(s)".
+    A real run-level `<w:tab/>` must still be reported.
+    """
+    print()
+    print("== scan: FMT-S7 does not count tab-stop definitions ==")
+    policy = dict(fmt.POLICY_DEFAULTS)
+    ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    defined = ('<?xml version="1.0"?>'
+               f'<w:document {ns}><w:body><w:p><w:pPr><w:tabs>'
+               '<w:tab w:val="left" w:pos="720"/></w:tabs></w:pPr>'
+               "<w:r><w:t>Name</w:t></w:r></w:p></w:body></w:document>")
+    rows = fmt.analyse_document(defined, {}, policy, "t.docx")["rows"]
+    check("a tab-stop definition alone raises no FMT-S7",
+          not [r for r in rows if r["rule"] == "FMT-S7"], str(rows[:1]))
+    literal = ('<?xml version="1.0"?>'
+               f'<w:document {ns}><w:body><w:p><w:r><w:tab/><w:t>Name</w:t></w:r>'
+               "</w:p></w:body></w:document>")
+    rows2 = fmt.analyse_document(literal, {}, policy, "t2.docx")["rows"]
+    check("a real run-level tab is still reported",
+          any(r["rule"] == "FMT-S7" for r in rows2), str(rows2[:2]))
+    with_text = ('<?xml version="1.0"?>'
+                 f'<w:document {ns}><w:body><w:p><w:r><w:t xml:space="preserve">'
+                 "a\tb</w:t></w:r></w:p></w:body></w:document>")
+    rows3 = fmt.analyse_document(with_text, {}, policy, "t3.docx")["rows"]
+    check("a literal tab character in the text is still reported",
+          any(r["rule"] == "FMT-S7" for r in rows3), str(rows3[:2]))
 
 
 def test_render_blank_page_if_available():
@@ -1231,6 +1401,9 @@ def main() -> int:
         test_quality_engines()
         test_deliverable_validation()
         test_fix_extended(docx)
+        test_quote_normalisation_spans_runs()
+        test_lookup_404_is_a_verified_negative()
+        test_tab_scan_ignores_tab_stop_definitions()
         test_cli()
         test_pipeline_wiring()
         test_setup_normalization()

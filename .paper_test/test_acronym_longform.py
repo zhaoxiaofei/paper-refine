@@ -479,6 +479,28 @@ check("E14 the sweep's 'no long-form re-use detected' row is not an instance",
       f"errs={str(errs8)[:160]}")
 
 print()
+print("== F: a real expansion whose acronym has a letter no word covers ==")
+# MELBAC? no: MALBAC's B has no word in "multiple annealing loop-based
+# amplification cycling", and the greedy initials walk stopped at it, so the
+# definition was dropped, the row read "defined at first use: never" and the
+# M1b audit was silently skipped for the token. DNTR-seq (5/7 letters) is the
+# docstring's own example of an expansion that must be KEPT.
+_rows_f, _md_f, _dirs_f, _p_f = sweep(
+    {"manuscript.txt": (
+        "MALBAC (multiple annealing loop-based amplification cycling) was used to "
+        "amplify the genome, and MALBAC remains our method here.\n\n"
+        "DNTR-seq (direct nuclear tagmentation and RNA sequencing) profiled the "
+        "cells; DNTR-seq was repeated once.\n")},
+    "initials")
+_malbac = _rows_f.get("MALBAC") or {}
+_dntr = _rows_f.get("DNTR-seq") or {}
+check("F1 MALBAC's real expansion is recognised",
+      bool(_malbac) and _malbac.get("defined_at_first_use") != "never"
+      and bool(_malbac.get("expansions")), json.dumps(_malbac)[:200])
+check("F2 DNTR-seq's docstring expansion is recognised",
+      bool(_dntr) and bool(_dntr.get("expansions")), json.dumps(_dntr)[:200])
+
+print()
 if FAILS:
     print(f"{len(FAILS)} FAILURE(S): " + "; ".join(FAILS))
     sys.exit(1)

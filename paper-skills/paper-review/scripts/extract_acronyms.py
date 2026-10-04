@@ -443,13 +443,22 @@ def _initials_ok(tok, words):
     the acronym's letters must appear, in order, as the initials of the
     candidate's words (an all-caps word such as RNA contributes all its
     letters; hyphenated compounds contribute a letter per part; the usual
-    joining words are skipped). Requiring the first letter to match and >= 75%
-    of the acronym to be covered rejects the junk that a loose clause capture
-    produces -- "independent modality" can never be scWGS, "reference genome"
-    can never be hg19, "number of base pairs with copy number" can never be CN
-    -- while keeping every real expansion (copy-number -> CN, single-cell
-    whole-genome sequencing -> scWGS, direct nuclear tagmentation and RNA
-    sequencing -> DNTR-seq, Pearson correlation coefficient -> PCC).
+    joining words are skipped). Requiring the first letter to match and >= 70%
+    of the acronym's letters to be covered rejects the junk that a loose
+    clause capture produces -- "independent modality" can never be scWGS,
+    "reference genome" can never be hg19, "number of base pairs with copy
+    number" can never be CN -- while keeping every real expansion
+    (copy-number -> CN, single-cell whole-genome sequencing -> scWGS, direct
+    nuclear tagmentation and RNA sequencing -> DNTR-seq, Pearson correlation
+    coefficient -> PCC).
+
+    The coverage is the LENGTH OF THE LONGEST COMMON SUBSEQUENCE of the
+    candidate's initials and the acronym (not a greedy left-to-right walk):
+    a skipped letter inside the acronym -- MALBAC's B carries no word
+    ("multiple annealing loop-based amplification cycling" is the real
+    expansion) -- must not stop the scan, or the definition is dropped, the
+    token is reported "never" defined and the M1b long-form audit is silently
+    skipped for it.
     """
     want = [c for c in str(tok).lower() if c.isalnum()]
     if not want:
@@ -466,11 +475,23 @@ def _initials_ok(tok, words):
                 letters.append(part[0].lower())
     if not letters or letters[0] != want[0]:
         return False
-    i = 0
+    # Longest common subsequence of `want` and `letters` (the acronym's letters
+    # covered, in order, by the initials). Skipping a `want` letter is
+    # deliberate: the acronym may contain a letter no candidate word initials
+    # (MALBAC's B, covered by no word of "multiple annealing loop-based
+    # amplification cycling"), while the greedy walk above stopped at it.
+    prev = [0] * (len(want) + 1)
     for c in letters:
-        if i < len(want) and c == want[i]:
-            i += 1
-    return i >= max(1, int(0.75 * len(want) + 0.999))
+        cur = [0] * (len(want) + 1)
+        for j in range(1, len(want) + 1):
+            cur[j] = prev[j - 1] + 1 if c == want[j - 1] else max(prev[j], cur[j - 1])
+        prev = cur
+    # 70% coverage: the same bar for the expansions the docstring names
+    # (DNTR-seq = 5/7 = 0.71; MALBAC = 5/6 = 0.83) while the first-letter gate
+    # and the loose-clause ceiling keep the "can never be" junk out (scWGS:
+    # first letter differs; hg19: 1/4; CN from a 7-word clause: first letter
+    # differs).
+    return prev[len(want)] >= max(1, int(0.70 * len(want) + 0.999))
 
 
 def _term_window_before(raw, pos, limit=5):

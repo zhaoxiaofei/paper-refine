@@ -525,7 +525,15 @@ def convert_one(path: str, rel: str) -> dict:
         status = "converted" if text else ("converted-empty" if not notes else "failed")
     elif ext == ".rtf":
         text, notes = rtf_to_text(path)
-        status = "converted" if text else "converted-empty"
+        # An unreadable file is a FAILED conversion: rtf_to_text returns an
+        # "rtf-unreadable: ..." note and no text, and recording that as a
+        # legitimately empty editable file kept it out of the "N files could
+        # not be converted" warning while the sweeps saw "(empty file)". But
+        # rtf_to_text also appends an informational note on SUCCESS, so the
+        # readable-but-empty document must stay `converted-empty` -- the same
+        # shape the .xlsx branch below uses.
+        status = "converted" if text else (
+            "converted-empty" if any("unreadable" not in n for n in notes) else "failed")
     elif ext == ".docx":
         text, notes = docx_to_text(path)
         status = "converted" if text else ("converted-empty" if not notes else "failed")

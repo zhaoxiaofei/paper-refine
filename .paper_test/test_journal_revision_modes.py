@@ -117,6 +117,174 @@ def submission_files(root: Path) -> list:
         if d.is_dir() else []
 
 
+def test_integrator_reset_reaches_the_response_letter():
+    """A retried integration run must also reset the response letter.
+
+    `revalidate_round_inputs` declared the letter a dependent of every
+    integration run (the letter describes the package those runs produced), but
+    the judge-dependency loop then OVERWROTE each integration run's dependent
+    list, so a stale letter stayed `done` after its package was rebuilt. Same
+    bug the pool-member loop documents one branch below.
+    """
+    print()
+    print("== J10: an integrator reset resets the response letter ==")
+    tmp = scratch("paper_jr_integ_")
+    src = build_source(tmp)
+    root = tmp / "root"
+    r = run_cli("setup", "--source", str(src), "--root", str(root),
+                "--rounds", "1", "--rewrites", "1", "--revises", "1",
+                "--integrators", "0x1", "--judges", "1",
+                "--revision-mode", "resubmit", "--journal", "iScience")
+    check("J10 setup succeeds", r.returncode == 0, r.stderr[-200:])
+    r = run_cli("run", "--root", str(root),
+                "--agent-cmd", json.dumps([sys.executable, str(STUB)]),
+                "--judge-agent-cmd", json.dumps([sys.executable, str(STUB_JUDGE)]),
+                "--timeout", "300", "--retries", "0")
+    check("J10 the round completes with an integration arm", r.returncode == 0,
+          r.stdout[-300:])
+    ctx = nb.Ctx(root)
+    ctx.load()
+    i1 = ctx.sandbox_of(ctx.run("r1_i1"))
+    donor = sorted(p.name for p in (i1 / "others").iterdir() if p.name != "a1")[0]
+    target = i1 / "others" / donor / "manuscript.txt"
+    target.write_text(target.read_text(encoding="utf-8") + "\nTAMPER\n", encoding="utf-8")
+    reset = nb.revalidate_round_inputs(ctx, 1)
+    check("J10 the tampered integrator resets",
+          "r1_i1" in reset and ctx.run("r1_i1")["status"] == "stale", str(reset))
+    check("J10 the response letter resets with it",
+          "r1_response" in reset and ctx.run("r1_response")["status"] == "stale", str(reset))
+
+
+def test_scoped_prune_keeps_a_published_winner():
+    """`prune --yes` must never delete a completed round's published winner.
+
+    In a scoped mode the round record pointed INSIDE the revision sandbox, so
+    prune removed it and the next `run` died in pinned_integrity; the scoped
+    winner is now published under --root like every other round, and the small
+    journal-stage sandboxes the submission is rebuilt from are preserved.
+    """
+    print()
+    print("== J12: prune keeps the scoped round's published winner ==")
+    tmp = scratch("paper_jr_prune_")
+    src = build_source(tmp)
+    root = tmp / "root"
+    r = run_cli("setup", "--source", str(src), "--root", str(root),
+                "--revision-mode", "major", "--journal", "iScience")
+    check("J12 setup succeeds", r.returncode == 0, r.stderr[-200:])
+    r = run_cli("run", "--root", str(root),
+                "--agent-cmd", json.dumps([sys.executable, str(STUB)]),
+                "--judge-agent-cmd", json.dumps([sys.executable, str(STUB_JUDGE)]),
+                "--timeout", "300", "--retries", "0")
+    check("J12 the scoped round completes", r.returncode == 0, r.stdout[-300:])
+    rec = json.loads((root / "state.json").read_text(encoding="utf-8"))["rounds"]["1"]
+    check("J12 the winner is published under --root",
+          rec.get("winner_dir") == "round1_winner"
+          and (root / "round1_winner").is_dir()
+          and (root / "round1_winner" / "manuscript.txt").is_file(),
+          str(rec.get("winner_dir")))
+    r = run_cli("prune", "--root", str(root), "--yes", "--keep-latest", "0")
+    check("J12 prune completes", r.returncode == 0, r.stdout[-200:])
+    check("J12 the published winner survives the prune",
+          (root / "round1_winner" / "manuscript.txt").is_file())
+    r = run_cli("run", "--root", str(root),
+                "--agent-cmd", json.dumps([sys.executable, str(STUB)]),
+                "--timeout", "300", "--retries", "0")
+    check("J12 a completed root still runs after the prune",
+          r.returncode == 0 and (root / "runs" / "r1_a2_revise").is_dir(),
+          (r.stdout + r.stderr)[-300:])
+
+
+def test_leaving_a_scoped_mode_restores_the_default_plan():
+    """`set-revision-mode continue` must restore the historical plan.
+
+    Switching to major/minor rewrote rounds/rewrites/revises/integrators and
+    audit=off; switching back only recorded the mode, leaving a root on the
+    scoped plan whose `journal_is_scoped` was already false -- neither the
+    documented default workflow nor a scoped revision.
+    """
+    print()
+    print("== J13: leaving a scoped mode restores the default plan ==")
+    tmp = scratch("paper_jr_restore_")
+    src = build_source(tmp)
+    root = tmp / "root"
+    r = run_cli("setup", "--source", str(src), "--root", str(root), "--rounds", "3")
+    check("J13 setup succeeds", r.returncode == 0, r.stderr[-200:])
+    r = run_cli("set-revision-mode", "major", "--root", str(root))
+    cfg = json.loads((root / "pipeline_config.json").read_text(encoding="utf-8"))
+    check("J13 major normalises the plan",
+          r.returncode == 0 and cfg["rounds"] == 1 and list(cfg["rewrites"]) == [0]
+          and cfg["audit"] == "off", json.dumps({k: cfg.get(k) for k in
+                                                 ("rounds", "rewrites", "audit")}))
+    r = run_cli("set-revision-mode", "continue", "--root", str(root))
+    cfg = json.loads((root / "pipeline_config.json").read_text(encoding="utf-8"))
+    check("J13 continue restores the historical plan",
+          r.returncode == 0 and cfg["revision_mode"] == "continue"
+          and cfg["rounds"] == 3 and list(cfg["rewrites"]) != [0]
+          and cfg["audit"] != "off",
+          json.dumps({k: cfg.get(k) for k in ("revision_mode", "rounds", "rewrites", "audit")}))
+
+
+def test_review_split_keeps_journal_stages_fresh():
+    """`--review-split` must not drop the journal stages from the order.
+
+    The split branch REPLACED the freshness order instead of inserting review
+    session B, so a stale feedback/concerns/response sandbox was never
+    revalidated in a split run, and the letter stayed `done`.
+    """
+    print()
+    print("== J11: --review-split keeps the journal stages in the freshness order ==")
+    tmp = scratch("paper_jr_split_")
+    src = build_source(tmp)
+    root = tmp / "root"
+    r = run_cli("setup", "--source", str(src), "--root", str(root),
+                "--rounds", "1", "--rewrites", "1", "--revises", "1",
+                "--integrators", "0x0", "--judges", "1",
+                "--revision-mode", "resubmit", "--journal", "iScience",
+                "--review-split", "phases")
+    check("J11 setup succeeds", r.returncode == 0, r.stderr[-200:])
+    ctx = nb.Ctx(root)
+    ctx.load()
+    check("J11 the split is recorded", nb.review_split_of(ctx) == "phases",
+          str(nb.review_split_of(ctx)))
+    # A1 is the real base; make it done so the journal stages have a current
+    # upstream to be compared against.
+    nb.materialize_a1(ctx, 1)
+    a1 = ctx.run(nb.rid_a1(1))
+    a1["status"] = "done"
+    a1_sb = ctx.sandbox_of(a1)
+
+    # Synthetic done sandboxes for the stages the check reads.
+    def done(rid: str, dirs: list) -> Path:
+        sb = ctx.root / "runs" / rid
+        for d in dirs:
+            (sb / d).mkdir(parents=True, exist_ok=True)
+            (sb / d / "a.txt").write_text("content", encoding="utf-8")
+        ctx.state.setdefault("runs", {})[rid] = {
+            "id": rid, "kind": rid.split("_", 1)[1], "round": 1, "status": "done",
+            "sandbox": f"runs/{rid}", "attempts": 1, "created": nb.utcnow()}
+        return sb
+    fb = done("r1_feedback", ["concerns"])
+    shutil.copytree(a1_sb / "base", fb / "base")
+    resp = done("r1_response", ["concerns"])
+    done("r1_review", ["base"])
+    done("r1_review_b", ["review"])
+    done("r1_w1", ["base"])
+    (resp / "concerns" / "a.txt").write_text("content", encoding="utf-8")
+    ctx.save_state()
+    # Drift ONLY the feedback's base: its own freshness check compares it with
+    # a1's current base, and the response letter must follow it.
+    (a1_sb / "base" / "extra.md").write_text("changed upstream\n", encoding="utf-8")
+    ctx2 = nb.Ctx(root)
+    ctx2.load()
+    check("J11 the drifted feedback sandbox starts done",
+          ctx2.run("r1_feedback")["status"] == "done", str(ctx2.run("r1_feedback")))
+    reset = nb.revalidate_round_inputs(ctx2, 1)
+    check("J11 a split round still revalidates the feedback sandbox",
+          "r1_feedback" in reset and ctx2.run("r1_feedback")["status"] == "stale", str(reset))
+    check("J11 the response letter resets with the drifted feedback",
+          "r1_response" in reset and ctx2.run("r1_response")["status"] == "stale", str(reset))
+
+
 def main() -> int:
     print("== J1: option 3 (major revision) -- scoped edits + response + package ==")
     tmp = scratch("paper_jr_major_")
@@ -478,6 +646,11 @@ def main() -> int:
     except SystemExit:
         refused = True
     check("J7 an explicit missing feedback path is refused", refused)
+
+    test_integrator_reset_reaches_the_response_letter()
+    test_review_split_keeps_journal_stages_fresh()
+    test_scoped_prune_keeps_a_published_winner()
+    test_leaving_a_scoped_mode_restores_the_default_plan()
 
     print()
     if FAILS:

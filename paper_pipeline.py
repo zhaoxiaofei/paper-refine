@@ -11537,7 +11537,8 @@ def _docx_document_role(name: str) -> str:
     return "main"
 
 
-def _match_source_output_docs(src_docs: list, out_docs: list, templates: dict) -> tuple:
+def _match_source_output_docs(src_docs: list, out_docs: list, templates: dict,
+                              src_root: Path = None, out_root: Path = None) -> tuple:
     """Map every source document to the output document that carries it.
 
     The template-first session is told to hand back COPIES OF THE TEMPLATES, so
@@ -11545,39 +11546,64 @@ def _match_source_output_docs(src_docs: list, out_docs: list, templates: dict) -
     source's (`...-mainText.docx`). Matching by exact name, then by the
     main/supplementary/cover role, then by the sole remaining output lets the
     content checks run PER DOCUMENT instead of falling back to the joined text of
-    the whole package. Returns ({source name: output Path}, used output names,
-    errors).
+    the whole package. Documents may sit in subdirectories (a `supp/` folder),
+    so the match prefers the same RELATIVE PATH, then an unambiguous basename,
+    then the role. Returns ({source key: output Path}, used output keys, errors)
+    where the key is the source's relative path when `src_root` is given (a
+    basename otherwise), so sibling documents that share a name cannot collide.
     """
     mapping, used, errs = {}, set(), []
 
-    def assign(doc: Path, cand: Path) -> None:
-        mapping[doc.name] = cand
-        used.add(cand.name)
+    def key_of(root: Path, p: Path) -> str:
+        if root is None:
+            return p.name
+        try:
+            return p.relative_to(root).as_posix()
+        except ValueError:                                  # pragma: no cover
+            return p.as_posix()
 
-    for doc in src_docs:                                    # 1. exact file name
-        cands = [p for p in out_docs if p.name == doc.name and p.name not in used]
-        if len(cands) == 1:
-            assign(doc, cands[0])
-    for doc in src_docs:                                    # 2. advertised role
-        if doc.name in mapping:
+    def assign(doc: Path, cand: Path) -> None:
+        mapping[key_of(src_root, doc)] = cand
+        used.add(key_of(out_root, cand))
+
+    def uniq(cands: list):
+        return cands[0] if len(cands) == 1 else None
+
+    for doc in src_docs:                                    # 1. exact relative path
+        cands = [p for p in out_docs if key_of(out_root, p) not in used
+                 and key_of(out_root, p) == key_of(src_root, doc)]
+        cand = uniq(cands)
+        if cand is not None:
+            assign(doc, cand)
+    for doc in src_docs:                                    # 2. exact file name
+        if key_of(src_root, doc) in mapping:
+            continue
+        cands = [p for p in out_docs if p.name == doc.name and key_of(out_root, p) not in used]
+        cand = uniq(cands)
+        if cand is not None:
+            assign(doc, cand)
+    for doc in src_docs:                                    # 3. advertised role
+        if key_of(src_root, doc) in mapping:
             continue
         role = _docx_document_role(doc.name)
         cands = [p for p in out_docs
-                 if p.name not in used and _docx_document_role(p.name) == role]
+                 if key_of(out_root, p) not in used and _docx_document_role(p.name) == role]
         if not cands and role in ("main", "supp"):
             tpl = templates.get("main" if role == "main" else "supplementary")
             if tpl:
                 cands = [p for p in out_docs
-                         if p.name not in used and p.name == Path(tpl).name]
-        if len(cands) == 1:
-            assign(doc, cands[0])
-    remaining = [doc for doc in src_docs if doc.name not in mapping]
-    rest_out = [p for p in out_docs if p.name not in used]
-    if len(remaining) == 1 and len(rest_out) == 1:          # 3. sole remainder
+                         if key_of(out_root, p) not in used and p.name == Path(tpl).name]
+        cand = uniq(cands)
+        if cand is not None:
+            assign(doc, cand)
+    remaining = [doc for doc in src_docs if key_of(src_root, doc) not in mapping]
+    rest_out = [p for p in out_docs if key_of(out_root, p) not in used]
+    if len(remaining) == 1 and len(rest_out) == 1:          # 4. sole remainder
         assign(remaining[0], rest_out[0])
     for doc in remaining:
-        if doc.name not in mapping:
-            errs.append(f"cannot tell which output document carries {doc.name!r}: copy each "
+        if key_of(src_root, doc) not in mapping:
+            errs.append(f"cannot tell which output document carries "
+                        f"{key_of(src_root, doc)!r}: copy each "
                         f"source document into its template under a name that keeps its "
                         f"main/supplementary/cover role recognizable")
     return mapping, used, errs
@@ -11603,10 +11629,20 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
     out = sb / "out"
     if not out.is_dir():
         return {"ok": False, "errors": ["out/ is missing: the session produced no package"]}
-    src_docs = sorted(p for p in Path(src).glob("*.docx")
-                      if not _is_aux_doc(p.name) and not p.name.startswith("~$"))
-    out_docs = sorted(p for p in out.glob("*.docx")
-                      if not _is_aux_doc(p.name) and not p.name.startswith("~$"))
+    # rglob, not glob: template_package_files() copies the WHOLE tree (figures,
+    # tables, `supp/supp.docx`, ...), and the guideline prompt tells the session
+    # to re-house every document. Reading only the top level let an output that
+    # dropped a nested supplementary document pass with a vacuous 2/2 coverage.
+    # Deeper paths follow shallower ones so an exact `mainText.docx` still wins,
+    # and a session's `out/work/` scratch is never part of the package.
+    def _template_docs(root: Path) -> list:
+        return sorted((p for p in root.rglob("*.docx")
+                       if not _is_aux_doc(p.name) and not p.name.startswith("~$")
+                       and "work" not in p.relative_to(root).parts[:-1]),
+                      key=lambda p: (len(p.relative_to(root).parts), p.as_posix()))
+
+    src_docs = _template_docs(Path(src))
+    out_docs = _template_docs(out)
     if not src_docs:
         return {"ok": False, "errors": [f"{Path(src)} carries no .docx to re-house: the "
                                         f"template-first stage has nothing to fill"]}
@@ -11616,13 +11652,34 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
     # Discover the ledger ONCE and use that path for both the existence check and
     # the parse: the check was case-insensitive while the parser was hardcoded to
     # out/REPLACEMENT_LEDGER.md, so a lower-case `replacement_ledger.md` passed
-    # the existence check and then silently contributed zero exceptions.
-    ledger = next((p for p in sorted(out.iterdir())
-                   if p.is_file() and p.match("*[Ll][Ee][Dd][Gg][Ee][Rr]*.md")), None)
+    # the existence check and then silently contributed zero exceptions. The
+    # canonical name still WINS over any other `*ledger*.md`: an integration- or
+    # revision-shaped package carries its own `DIFF_LEDGER.md`, and sorted order
+    # made that prose file shadow the real exceptions block ("declared_exceptions:
+    # 0" -> a valid package was refused).
+    ledgers = [p for p in sorted(out.iterdir())
+               if p.is_file() and p.match("*[Ll][Ee][Dd][Gg][Ee][Rr]*.md")]
+    ledger = next((p for p in ledgers if p.name.lower() == "replacement_ledger.md"),
+                  ledgers[0] if ledgers else None)
     exceptions, exception_problems = _template_ledger_exceptions(
         ledger if ledger is not None else out / "REPLACEMENT_LEDGER.md")
     mapping, _used_out, map_errs = _match_source_output_docs(src_docs, out_docs,
-                                                             templates or {})
+                                                             templates or {},
+                                                             src_root=Path(src), out_root=out)
+
+    def _src_key(doc: Path) -> str:
+        try:
+            return doc.relative_to(src).as_posix()
+        except ValueError:                                  # pragma: no cover
+            return doc.as_posix()
+
+    # A source document with no output counterpart is a DROPPED document, not a
+    # text-only discrepancy: the parity counters below are package-wide, so a
+    # dropped nested `.docx` whose paragraphs also occur elsewhere could pass.
+    for doc in src_docs:
+        if mapping.get(_src_key(doc)) is None:
+            errs.append(f"{_src_key(doc)!r} has no output document: every "
+                        f"source package document must be re-housed in the template")
     errs.extend(map_errs)
     src_counter, out_counter = Counter(), Counter()
     for doc in src_docs:
@@ -11783,7 +11840,7 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
     # superscript runs as the source had.
     sub_lost = []
     for doc in src_docs:
-        target = mapping.get(doc.name)
+        target = mapping.get(_src_key(doc))
         if target is None:
             continue
         want_sup = _superscripts_by_paragraph(doc)
@@ -11807,7 +11864,7 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
     style_use_gap = []
     if templates:
         for doc in src_docs:
-            target = mapping.get(doc.name)
+            target = mapping.get(_src_key(doc))
             if target is None:
                 continue
             lost = sorted(_style_usage(doc) - _style_usage(target))
@@ -17687,8 +17744,14 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
              + ([j_feedback] if j_feedback else []) + ([j_concerns] if j_concerns else [])
              + ([j_response] if j_response else []))
     if n and review_split_of(ctx) != "off":
-        order = (rewrite_ids + [rid_review(r), rid_review_b(r)] + revise_ids
-                 + integrate_ids)
+        # INSERT session B; keep the journal stages in the order. The previous
+        # assignment REPLACED the whole list, so a `--review-split` run in a
+        # journal mode never revalidated a stale feedback/concerns/response
+        # sandbox: the drift survived and the response letter stayed "done".
+        order = (rewrite_ids + [rid_review(r), rid_review_b(r)] + revise_ids + integrate_ids
+                 + ([j_feedback] if j_feedback else [])
+                 + ([j_concerns] if j_concerns else [])
+                 + ([j_response] if j_response else []))
     judge_ids = [rec["id"] for rec in ctx.runs(kind="judge", round_no=r)]
     # Any arm's content change invalidates every judge session of the round (the
     # panel scores the whole field), and every pool member feeds every
@@ -17713,6 +17776,8 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
                 dependents.setdefault(rid_for_fresh(r, vid), []).append(j_response)
         for iid in integrate_ids:
             dependents.setdefault(iid, []).append(j_response)
+        if j_feedback:
+            dependents.setdefault(j_feedback, []).append(j_response)
     if n and review_split_of(ctx) != "off":
         # B's frozen input is A's review/ output, so resetting A resets B too.
         dependents[rid_review(r)] = [rid_review_b(r)] + dependents[rid_review(r)]
@@ -17729,7 +17794,13 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
         # so a retried arm left a stale letter behind.
         dependents[rid] = dependents.get(rid, []) + consumers + judge_ids
     for iid in integrate_ids:
-        dependents[iid] = list(judge_ids)
+        # APPEND, never overwrite: the resubmit/transfer branch above already
+        # declared the response letter a dependent of every integration run
+        # (the letter describes the package the integrators produced), and a
+        # plain assignment discarded that edge, so a retried integration run
+        # left a stale response letter behind. Same bug the pool-member loop
+        # below documents.
+        dependents[iid] = dependents.get(iid, []) + list(judge_ids)
     reset_ids = []
 
     def reset(rid: str, why: str) -> None:
@@ -24247,8 +24318,11 @@ def materialize_response(ctx: Ctx, r: int, target: Path = None,
     if target is None or not target.is_dir():
         die(f"the response stage has no final package to describe (run {rid}). "
             f"This is an orchestration error -- report it with the root's state.json.")
-    if not (sb / "target").is_dir():
-        copy_into(target, sb / "target", exclude_top=("work",), skip_aux=True)
+    # ensure_copy, not "copy only when absent": a sandbox killed mid-copy left a
+    # PARTIAL target/ that the old guard froze in place -- the letter was then
+    # verified against a truncated package and the truncation was hashed into
+    # the run's input manifest (see ensure_copy's own docstring).
+    ensure_copy(target, sb / "target", exclude_top=("work",), skip_aux=True)
     (sb / "response").mkdir(exist_ok=True)
     ledger = journal_concern_ledger(src_sb)
     note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
@@ -25010,6 +25084,13 @@ def journal_final_target(ctx: Ctx) -> tuple:
             die(f"the {mode} revision has no finished revision run ({rid} is "
                 f"{(rec or {}).get('status', 'missing')}): finish the round before publishing a "
                 f"submission package.")
+        # Prefer the published winner under --root: the run's sandbox is scratch
+        # once the round is complete, and `prune --yes` deletes it, so a later
+        # `run` that re-assembles the submission package must read the winner.
+        rrec = ctx.round_get(1) or {}
+        win_rel = str(rrec.get("winner_dir") or "")
+        if win_rel and (ctx.root / win_rel).is_dir():
+            return ctx.root / win_rel, f"the {mode} revision"
         sb = ctx.sandbox_of(rec)
         return sb / REVISED_DIR, f"the {mode} revision"
     pins = ctx.state.get("pinned") or []
@@ -27814,8 +27895,17 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
             return False, False
         rrec = ctx.round_rec(r)
         rrec["champion"] = a2
-        rrec["winner_dir"] = (f"{rec2.get('sandbox') or ('runs/' + rid_for_fresh(r, a2))}"
-                              f"/{REVISED_DIR}")
+        # Publish the winner UNDER --root like every other round (prune deletes
+        # sandboxes and the contract it prints is "published winners are never
+        # touched"). The old record pointed INSIDE the run's sandbox
+        # (runs/r1_a2_revise/revised), so `prune --yes` destroyed it and the
+        # next `run` died in pinned_integrity ("... is missing"), bricking the
+        # root with no way back except restoring state.json.
+        win_dst = winner_dir_of(ctx, r)
+        win_dst.mkdir(parents=True, exist_ok=True)
+        build_corpus_dir(ctx, r, a2, win_dst)
+        rrec["winner_dir"] = win_dst.name
+        rrec["winner_digest"] = corpus_tree_digest(win_dst)
         rrec["journal_mode"] = journal_mode_of(ctx)
         rrec["scoped"] = True
         rrec["field"] = [A1_ID, a2]
@@ -29830,6 +29920,7 @@ def cmd_set_revision_mode(args) -> None:
         print(f"[set-revision-mode] note: mode {mode_arg!r} reads no journal feedback; "
               f"--journal-feedback/--journal-feedback-from are ignored")
     with ctx.lock("set-revision-mode"):
+        _prev_mode = journal_mode_of(ctx)
         ctx.cfg["revision_mode"] = mode_arg
         if named and info["feedback"]:
             ctx.cfg["journal_feedback"] = named
@@ -29852,6 +29943,18 @@ def cmd_set_revision_mode(args) -> None:
                 forced.append("integrators=0")
             ctx.cfg["audit"] = "off"
             forced.append("audit=off")
+        elif _prev_mode in (JOURNAL_MODE_MAJOR, JOURNAL_MODE_MINOR):
+            # Leaving a scoped mode restores the historical plan the mode
+            # replaced. Without this the root kept `rounds=1`, `rewrites=[0]`,
+            # `integrators=[0]`, `review_scope=[formatting-writing]` and
+            # `audit=off` while `journal_is_scoped` was already false -- neither
+            # the documented default three-round workflow nor a scoped revision.
+            for _key in ("rounds", "rewrites", "revises", "review_scope", "integrators"):
+                _default = DEFAULTS[_key]
+                ctx.cfg[_key] = list(_default) if isinstance(_default, list) else _default
+                forced.append(f"{_key}={ctx.cfg[_key]} (the default plan)")
+            ctx.cfg["audit"] = DEFAULT_AUDIT
+            forced.append(f"audit={DEFAULT_AUDIT} (the default)")
         ctx.state["config"] = ctx.cfg
         write_json_atomic(ctx.cfg_path, ctx.cfg)
         ctx.log("set-revision-mode", detail=mode_arg)
@@ -33577,6 +33680,21 @@ def cmd_prune(args) -> None:
 def _cmd_prune_locked(ctx: Ctx, args) -> None:
     R = ctx.rounds_count()
     keep_from = max(1, R - max(0, int(args.keep_latest)) + 1)
+    # The journal-facing runs (the feedback/concerns ledger, the response
+    # letter, and the scoped revision whose published winner they describe) are
+    # what a later `run` re-reads to rebuild `journal_submission/`; they are
+    # also small. Deleting them left a completed transfer/resubmit/scoped root
+    # that `run` could never finalize again. `decide` needs only state.json.
+    keep_ids = set()
+    for r in range(1, R + 1):
+        rrec = ctx.round_get(r) or {}
+        if str(rrec.get("status")) != "done":
+            continue
+        for rid in (rid_feedback(r), rid_concerns(r), rid_response(r)):
+            if ctx.run(rid) is not None:
+                keep_ids.add(rid)
+        if rrec.get("scoped") and rrec.get("journal_mode"):
+            keep_ids.add(rid_for_fresh(r, revise_vid(1)))
     targets, skipped_open, archives = [], [], []
     for rec in ctx.runs():
         r = int(rec.get("round") or 0)
@@ -33584,6 +33702,8 @@ def _cmd_prune_locked(ctx: Ctx, args) -> None:
             continue
         if not round_is_done(ctx, r):
             skipped_open.append(rec["id"])
+            continue
+        if rec["id"] in keep_ids:
             continue
         sb = ctx.sandbox_of(rec)
         if sb.is_dir():
@@ -33598,6 +33718,9 @@ def _cmd_prune_locked(ctx: Ctx, args) -> None:
     print(f"[prune] keeping sandboxes of the last {args.keep_latest} round(s) "
           f"(rounds {keep_from}..{R}); pins, published winners, reports and state.json are "
           f"never touched")
+    if keep_ids:
+        print(f"[prune] {len(keep_ids)} journal-stage sandbox(es) are kept: a completed root "
+              f"re-reads them to rebuild journal_submission/")
     if skipped_open:
         print(f"[prune] {len(skipped_open)} run(s) belong to rounds that are not complete and "
               f"are never pruned: {', '.join(skipped_open[:6])}"

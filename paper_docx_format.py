@@ -1779,7 +1779,18 @@ def lookup_kind(kind: str, query: str, timeout: int = 30) -> dict:
             out["errors"].append(f"unknown lookup kind {kind!r}")
     except Exception as e:                                            # noqa: BLE001
         out["errors"].append(f"{type(e).__name__}: {e}")
-        out["verdict"] = "error"
+        # Crossref/HGNC answer "no such entity" with HTTP 404: that is the
+        # VERIFIED NEGATIVE the verdict vocabulary calls `absent` (what "not
+        # posted" is made of) -- recording it as a lookup ERROR left every
+        # unknown DOI/accession/gene in the residual-hand-off list and made
+        # `lookup_kind` unable to ever return `absent` for those kinds. GitHub
+        # is deliberately excluded: it answers 404 for PRIVATE repositories
+        # too, so a repo/commit 404 cannot claim nonexistence and stays an
+        # `error` (the same caveat the reachable-private branch documents).
+        if getattr(e, "code", None) == 404 and kind not in ("repository", "repo", "commit"):
+            out["verdict"] = "absent"
+        else:
+            out["verdict"] = "error"
     return out
 
 
@@ -3009,7 +3020,21 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str) -> dict:
     if n_proof:
         row("FMT-S5", "low", "document", f"{n_proof} proofing marker(s) (w:proofErr)",
             "the file was last saved with unaccepted spelling/grammar marks")
-    n_tabs = len(re.findall(r"<w:tab[^>]*/>", xml)) + full.count("\t")
+    # A literal tab is a run-level `<w:tab/>` or a TAB character in the text.
+    # `<w:tab w:val=".." w:pos=".."/>` inside `<w:pPr><w:tabs>` DEFINES a tab
+    # stop -- counting it reported "1 literal tab character" on paragraphs that
+    # carry no tab at all (the `<w:tab[^>]*/>` regex cannot tell them apart).
+    n_tabs, _tab_depth = 0, 0
+    for _tok in re.finditer(r"<w:tabs(?=[\s/>])[^>]*>|</w:tabs>|<w:tab(?=[\s/>])[^>]*/>",
+                            xml):
+        _raw = _tok.group(0)
+        if _raw.startswith("</"):
+            _tab_depth = max(0, _tab_depth - 1)
+        elif _raw.startswith("<w:tabs"):
+            _tab_depth += 0 if _raw.endswith("/>") else 1
+        elif not _tab_depth:
+            n_tabs += 1
+    n_tabs += full.count("\t")
     if n_tabs:
         row("FMT-S7", "low", "document", f"{n_tabs} literal tab character(s)",
             "tabs used for layout; prefer paragraph indentation/spacing")
@@ -3451,28 +3476,73 @@ def fix_document(xml: str, styles: dict, policy: dict) -> tuple:
 
     # 8. quotes / proofing markers ---------------------------------------------
     if policy["quote_style"] in ("straight", "curly"):
-        def conv(mm):
+        # Characters after which a straight quote OPENS. Anything else closes
+        # (letters/digits/.,:;!?)]} and the closing curly quotes). The openers
+        # are whitespace, brackets, dashes and the opening curly quotes -- a
+        # `("quoted")` must not become `(”quoted”)`, and a nested `"'...'"`
+        # must open both.
+        quote_openers = frozenset(" \t\n\r\f\v([{<\u2012\u2013\u2014\u2015\u2018\u201c-")
+
+        # A quotation can span several `<w:t>` runs -- Word splits them freely
+        # (a spell-check boundary, a language change, a deleted revision) -- so
+        # the open/close decision needs the last visible character BEFORE this
+        # run, not a flag that restarts at run 1. Restarting per run turned the
+        # closing quote of a two-run `"hello` + ` there"` into an opening one,
+        # and keying `'` off the `"` state flipped a quoted phrase inside-out
+        # (`'quoted'` -> '\u2018quoted\u2018'); the text-identity verifier strips
+        # quotes before comparing, so that corruption shipped silently.
+        def conv(mm, prev_open):
             raw = mm.group(0)
             open_tag = raw[:raw.find(">") + 1]
             close_tag = raw[raw.rfind("<"):]
             text = unesc(raw[raw.find(">") + 1:raw.rfind("<")])
             if policy["quote_style"] == "curly":
+                # An apostrophe inside a word is always a right single quote.
                 text = re.sub(r"(?<=\w)'(?=\w)", "\u2019", text)
-                out, open_dq = [], True
+                out = []
                 for ch in text:
-                    if ch == '"':
-                        out.append("\u201c" if open_dq else "\u201d")
-                        open_dq = not open_dq
-                    elif ch == "'":
-                        out.append("\u2018" if open_dq else "\u2019")
+                    if ch in "\"'":
+                        opening = prev_open
+                        out.append(("\u201c" if ch == '"' else "\u2018") if opening
+                                   else ("\u201d" if ch == '"' else "\u2019"))
+                        # An OPENING quote leaves the next quote free to open
+                        # again (nested quotes); a closing one does not.
+                        prev_open = opening
                     else:
                         out.append(ch)
+                        prev_open = ch in quote_openers
                 text = "".join(out)
             else:
                 text = (text.replace("\u2019", "'").replace("\u2018", "'")
                         .replace("\u201c", '"').replace("\u201d", '"'))
-            return open_tag + esc(text) + close_tag
-        new = TEXT_RE.sub(conv, xml)
+                if text:
+                    prev_open = text[-1] in quote_openers
+            return open_tag + esc(text) + close_tag, prev_open
+
+        def _paragraph(xml_frag: str) -> str:
+            """Normalize one paragraph's text runs with state across runs."""
+            prev_open = True
+            pieces, pos = [], 0
+            for mm in TEXT_RE.finditer(xml_frag):
+                gap = xml_frag[pos:mm.start()]
+                # A tab or a line break starts a new visual line: the next
+                # quote opens. (Both live OUTSIDE `<w:t>`, so the text scan
+                # alone would keep the previous character's state.)
+                if re.search(r"<w:(?:tab|br|cr)(?=[\s/>])", gap):
+                    prev_open = True
+                pieces.append(gap)
+                new_frag, prev_open = conv(mm, prev_open)
+                pieces.append(new_frag)
+                pos = mm.end()
+            pieces.append(xml_frag[pos:])
+            return "".join(pieces)
+
+        pieces, pos = [], 0
+        for pm in re.finditer(r"<w:p(?=[\s/>])[\s\S]*?</w:p>", xml):
+            pieces.append(_paragraph(xml[pos:pm.end()]))
+            pos = pm.end()
+        pieces.append(_paragraph(xml[pos:]))
+        new = "".join(pieces)
         if new != xml:
             xml = new
             changes.append(f"normalized quotation marks (policy: {policy['quote_style']})")
@@ -4601,6 +4671,56 @@ def _with_even_odd_headers(parts: dict) -> bool:
     return True
 
 
+_NUMBERING_GROUP_RE = re.compile(
+    r"<w:(numPicBullet|abstractNum|num|numIdMacAtCleanup)(?=[\s/>])")
+
+
+def _reorder_numbering_groups(xml: str, pics: str, abstracts: str, nums: str) -> str:
+    """Rebuild `word/numbering.xml` with the carried blocks in schema order.
+
+    CT_Numbering is a strict sequence (`numPicBullet*`, `abstractNum*`,
+    `num*`, `numIdMacAtCleanup?`); splicing the carried definitions before
+    `</w:numbering>` leaves an `abstractNum` after the template's own `num`
+    whenever the template already defined one, and Word/`docx validate` refuses
+    the part. Each existing top-level block keeps its bytes; only the group
+    order changes, and the three carried groups join their own group.
+    """
+    close_at = xml.rfind("</w:numbering>")
+    open_m = re.search(r"<w:numbering(?=[\s/>])[^>]*>", xml)
+    if close_at == -1 or not open_m:
+        return xml
+    inner = xml[open_m.end():close_at]
+    entries, other = [], []
+    pos = 0
+    for m in _NUMBERING_GROUP_RE.finditer(inner):
+        if m.start() > pos:
+            other.append(inner[pos:m.start()])
+        open_end = (m.end() if inner[m.end() - 1:m.end()] == ">"
+                    else inner.find(">", m.end()) + 1)
+        if inner[open_end - 2:open_end] == "/>":
+            end = open_end
+        else:
+            close = inner.find(f"</w:{m.group(1)}>", open_end)
+            end = close + len(f"</w:{m.group(1)}>") if close != -1 else open_end
+        entries.append((m.group(1), inner[m.start():end]))
+        pos = end
+    if pos < len(inner):
+        other.append(inner[pos:])
+    groups = {k: [] for k in ("numPicBullet", "abstractNum", "num", "numIdMacAtCleanup")}
+    for tag, block in entries:
+        groups[tag].append(block)
+    # Anything that is not a numbering group (comments, whitespace) is kept,
+    # appended at the end: XML comments are legal between the sequence
+    # children, and silently dropping them would be a data loss of its own.
+    return (xml[:open_m.end()]
+            + "".join(groups["numPicBullet"]) + pics
+            + "".join(groups["abstractNum"]) + abstracts
+            + "".join(groups["num"]) + nums
+            + "".join(groups["numIdMacAtCleanup"])
+            + "".join(other)
+            + xml[close_at:])
+
+
 def _merge_source_lists(parts: dict, src_numbering: str, doc_part_re) -> dict:
     """Keep the source's list definitions that the template does not define.
 
@@ -4680,10 +4800,15 @@ def _merge_source_lists(parts: dict, src_numbering: str, doc_part_re) -> dict:
         num_map[old_num] = new_num
     if not num_map:
         return {}
-    parts["word/numbering.xml"] = tpl_numbering.replace(
-        "</w:numbering>",
-        "".join(pic_blocks) + "".join(abs_blocks) + "".join(num_blocks) + "</w:numbering>", 1
-    ).encode("utf-8")
+    # ECMA-376 requires the numbering part's children in schema order:
+    # numPicBullet*, abstractNum*, num*, numIdMacAtCleanup?. Appending the three
+    # groups at the end is only correct when the template has no w:num yet --
+    # a template that already defines one made the merged part run
+    # `abstractNum, num, abstractNum, num`, and `docx validate` rejected it
+    # ("abstractNum: This element is not expected. Expected is num").
+    parts["word/numbering.xml"] = _reorder_numbering_groups(
+        parts["word/numbering.xml"].decode("utf-8", "replace"),
+        "".join(pic_blocks), "".join(abs_blocks), "".join(num_blocks)).encode("utf-8")
     for name in doc_names:
         xml = parts[name].decode("utf-8", "replace")
         new_xml = re.sub(

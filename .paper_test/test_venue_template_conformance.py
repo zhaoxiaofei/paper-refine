@@ -852,6 +852,18 @@ def test_template_rewrite_postcheck():
           rep4.get("ok") is False
           and any("not derived from the templates" in e for e in rep4["errors"]),
           str(rep4["errors"])[:260])
+    # The canonical ledger must win over another `*ledger*.md` in out/. An
+    # integration-shaped package carries its own prose DIFF_LEDGER.md, which
+    # sorts BEFORE REPLACEMENT_LEDGER.md; discovery used to take the first match
+    # and parse the prose file, refusing a valid package with
+    # "declared_exceptions: 0".
+    fmt.apply_word_template(pkg / "mainText.docx", sb / "out" / "mainText.docx", tpl)
+    (sb / "out" / "DIFF_LEDGER.md").write_text("# Diff ledger\n\nProse only.\n",
+                                               encoding="utf-8")
+    rep_led = nb.template_rewrite_postcheck(sb, pkg, {"main": tpl})
+    check("a prose DIFF_LEDGER.md does not shadow REPLACEMENT_LEDGER.md",
+          rep_led.get("ok") is True and rep_led.get("coverage", {}).get("declared_exceptions") == 0,
+          str(rep_led.get("errors"))[:260])
     # a dropped superscript (affiliation marker) is rejected
     fmt.apply_word_template(pkg / "mainText.docx", sb / "out" / "mainText.docx", tpl)
     with zipfile.ZipFile(sb / "out" / "mainText.docx") as z:
@@ -979,6 +991,32 @@ def test_template_rewrite_postcheck():
           rep_noled.get("ok") is False
           and any("is missing" in e for e in rep_noled["errors"]),
           str(rep_noled["errors"])[:240])
+    # A nested supplementary document is part of the package: the source tree is
+    # copied whole, so a TOP-LEVEL-only glob let an output that dropped
+    # supp/supp.docx pass the parity gate with a vacuous coverage.
+    nested_src = tmp / "pkg_nested"
+    (nested_src / "supp").mkdir(parents=True)
+    _package_docx(nested_src / "mainText.docx", "Introduction")
+    _package_docx(nested_src / "supp" / "supp.docx", "Supplementary Methods")
+    nested_sb = tmp / "session_nested"
+    (nested_sb / "out").mkdir(parents=True)
+    fmt.apply_word_template(nested_src / "mainText.docx",
+                            nested_sb / "out" / "mainText.docx", tpl)
+    (nested_sb / "out" / "REPLACEMENT_LEDGER.md").write_text(
+        "| placeholder | replacement |\n", encoding="utf-8")
+    rep_nested = nb.template_rewrite_postcheck(nested_sb, nested_src, {"main": tpl})
+    check("a dropped nested supplementary document is rejected, not hidden by the top-level glob",
+          rep_nested.get("ok") is False
+          and any("supp/supp.docx" in e or "has no output document" in e
+                  for e in rep_nested["errors"]),
+          str(rep_nested["errors"])[:260])
+    # Keeping it in place (the compliant session) passes again.
+    (nested_sb / "out" / "supp").mkdir()
+    fmt.apply_word_template(nested_src / "supp" / "supp.docx",
+                            nested_sb / "out" / "supp" / "supp.docx", tpl)
+    rep_nested_ok = nb.template_rewrite_postcheck(nested_sb, nested_src, {"main": tpl})
+    check("the nested document re-housed under its own path passes",
+          rep_nested_ok.get("ok") is True, str(rep_nested_ok["errors"])[:260])
     # a source package whose only paragraph is whitespace cannot pass vacuously:
     # the gate would report ratio 1.0 with checked == 0
     blank = tmp / "pkg_blank"

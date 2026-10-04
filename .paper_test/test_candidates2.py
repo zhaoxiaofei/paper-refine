@@ -503,6 +503,104 @@ def test_response_depends_on_every_pool_member():
           f"reset={reset}")
 
 
+def test_integrator_reset_reaches_the_response_letter():
+    """A retried integration run must reset the response letter too.
+
+    `revalidate_round_inputs` records the letter as a dependent of every
+    integration run, then the judge-dependency loop OVERWROTE each integration
+    run's dependent list. A stale letter survived the package being rebuilt.
+    """
+    tmp = tmpdir("r6g")
+    root = setup_root(tmp)
+    ctx = np.Ctx(root)
+    ctx.load()
+    ctx.cfg["audit"] = "off"
+    ctx.cfg["revision_mode"] = "resubmit"          # a response letter is required
+    ctx.cfg["rewrites"], ctx.cfg["revises"] = [0], [1]
+    ctx.cfg["integrators"] = [0x1]                 # select i1 (base a1)
+    r = 1
+    np.materialize_a1(ctx, r)
+    a1 = ctx.run(np.rid_a1(r))
+    a1["status"] = "done"
+    fb_sb = ctx.runs_dir / np.rid_feedback(r)
+    np.ensure_copy(ctx.sandbox_of(a1) / "base", fb_sb / "base")
+    np.ensure_pristine_input(ctx, fb_sb / np.pristine_dirname(fb_sb))
+    write(fb_sb / "concerns" / "JF_concerns.json", "{}\n")
+    fb = ctx.register(np.rid_feedback(r), "feedback", r, f"runs/{np.rid_feedback(r)}")
+    fb["status"] = "done"
+    # a done review (the revise arms consume its frozen output)
+    np.materialize_review(ctx, r)
+    rev = ctx.run(np.rid_review(r))
+    write(ctx.sandbox_of(rev) / "review" / "findings.json", '{"findings": []}\n')
+    rev["status"] = "done"
+    # a done revise member (the pool is a1 + a2)
+    np.materialize_revise(ctx, r, "a2")
+    a2 = ctx.run(np.rid_for_fresh(r, "a2"))
+    write(ctx.sandbox_of(a2) / "revised" / "manuscript.md", "# revised\n")
+    a2["status"] = "done"
+    a2["corpus_digest"] = np.recompute_corpus_digest(ctx, r, "a2")
+    a2["content_fingerprint"] = np.corpus_content_fingerprint(ctx, r, "a2")
+    # the integration run itself
+    np.materialize_integrate(ctx, r, 1)
+    i1 = ctx.run(np.rid_for_fresh(r, "i1"))
+    write(ctx.sandbox_of(i1) / "integrated" / "manuscript.md", "# integrated\n")
+    i1["status"] = "done"
+    i1["corpus_digest"] = np.recompute_corpus_digest(ctx, r, "i1")
+    i1["content_fingerprint"] = np.corpus_content_fingerprint(ctx, r, "i1")
+    resp_sb = ctx.runs_dir / np.rid_response(r)
+    write(resp_sb / "response" / "RESPONSE.md", "dear editor\n")
+    resp = ctx.register(np.rid_response(r), "response", r, f"runs/{np.rid_response(r)}")
+    resp["status"] = "done"
+    ctx.save_state()
+    healthy = np.revalidate_round_inputs(ctx, r)
+    check("R6 a healthy integration round leaves the response letter alone",
+          np.rid_response(r) not in healthy, str(healthy))
+    # the integration run's donor copy changed underneath it
+    donor = ctx.sandbox_of(i1) / "others" / "a2" / "manuscript.md"
+    donor.write_text(donor.read_text(encoding="utf-8") + "\nchanged donor\n", encoding="utf-8")
+    ctx.save_state()
+    reset = np.revalidate_round_inputs(ctx, r)
+    check("R6 resetting an integration run resets the response letter",
+          np.rid_for_fresh(r, "i1") in reset and np.rid_response(r) in reset
+          and ctx.run(np.rid_response(r))["status"] == "stale",
+          f"reset={reset}")
+
+
+def test_response_target_copy_is_repaired_not_frozen():
+    """A partial `target/` copy must be rebuilt, not frozen in place.
+
+    `materialize_response` copied the final package only when `target/` was
+    absent (`if not is_dir(): copy_into`). A sandbox killed mid-copy left a
+    truncated target that was then frozen, hashed into the run's input manifest
+    and used to "verify" the letter against the wrong package.
+    """
+    tmp = tmpdir("r6h")
+    root = setup_root(tmp, rounds=1)
+    ctx = np.Ctx(root)
+    ctx.load()
+    ctx.cfg["revision_mode"] = "major"
+    ctx.cfg["journal_feedback"], ctx.cfg["journal_feedback_from"] = ["x"], ""
+    # a done scoped revision whose revised/ is the final package
+    rev_sb = ctx.runs_dir / "r1_a2_revise"
+    write(rev_sb / "revised" / "manuscript.md", "# full revision\n")
+    write(rev_sb / "revised" / "CHANGELOG.md", "changes\n")
+    rev = ctx.register("r1_a2_revise", "revise", 1, "runs/r1_a2_revise")
+    rev["status"] = "done"
+    # the concerns source the response sandbox copies
+    con_sb = ctx.runs_dir / "r1_concerns"
+    write(con_sb / "concerns" / "JF_concerns.json", '{"concerns": []}\n')
+    crec = ctx.register("r1_concerns", "concerns", 1, "runs/r1_concerns")
+    crec["status"] = "done"
+    # a PARTIAL target/ left by an interrupted session
+    resp_sb = ctx.runs_dir / "r1_response"
+    write(resp_sb / "target" / "manuscript.md", "# full revision\n")
+    ctx.save_state()
+    np.materialize_response(ctx, 1)
+    got = sorted(p.name for p in (resp_sb / "target").iterdir() if p.is_file())
+    check("R6 a partial response target/ is rebuilt from the final package",
+          got == ["CHANGELOG.md", "manuscript.md"], str(got))
+
+
 def test_split_review_uses_session_b_and_merges_in_review():
     """--review-split: the revise sandbox holds B's review, and the merge runs
     in the REVIEW postcheck (part B) -- not in postcheck_revise, which the
@@ -685,6 +783,43 @@ def test_undecodable_text_is_a_failure_not_an_empty_success():
           proc.stdout[-200:])
 
 
+def test_unreadable_rtf_is_a_failure_not_an_empty_success():
+    """An unreadable .rtf is a FAILED conversion, like every other format.
+
+    `rtf_to_text` returns an "rtf-unreadable: ..." note and no text; the RTF
+    branch recorded `converted-empty`, so the file stayed `editable: true`, the
+    "N files could not be converted" warning never counted it and the sweeps
+    read a "(empty file)" instead of the failure.
+    """
+    tmp = tmpdir("r13")
+    sub, work = tmp / "sub", tmp / "work"
+    p = sub / "locked.rtf"
+    write(p, "{\\rtf1\\ansi Hello.\\par}\n")
+    p.chmod(0)
+    try:
+        proc = subprocess.run([sys.executable, str(SCRIPTS / "convert_corpus.py"),
+                               "--submission", str(sub), "--work", str(work)],
+                              capture_output=True, text=True, timeout=180, cwd="/tmp")
+    finally:
+        p.chmod(0o644)
+    inv = {e["path"]: e for e in json.loads((work / "inventory.json").read_text())}
+    row = inv.get("locked.rtf") or {}
+    check("R13 an unreadable .rtf is 'failed' and not editable",
+          row.get("status") == "failed" and row.get("editable") is False, str(row)[:220])
+    check("R13 the conversion warning counts the unreadable .rtf",
+          "could not be converted" in proc.stdout, proc.stdout[-200:])
+    # A READABLE but empty document is not a failure: rtf_to_text appends an
+    # informational note on success, so only the unreadability marker may
+    # demote it to `failed`.
+    tmp2 = tmpdir("r13b")
+    work2, _proc2 = run_convert_corpus(tmp2, {"empty.rtf": "{\\rtf1\\ansi}"})
+    inv2 = {e["path"]: e for e in json.loads((work2 / "inventory.json").read_text())}
+    row2 = inv2.get("empty.rtf") or {}
+    check("R13 a readable but empty .rtf stays 'converted-empty' and editable",
+          row2.get("status") == "converted-empty" and row2.get("editable") is True,
+          str(row2)[:220])
+
+
 def test_acronym_definition_attribution():
     tmp = tmpdir("r10")
     work = tmp / "work"
@@ -725,6 +860,8 @@ def main() -> int:
     test_healthy_round_is_not_reset()
     test_judge_inputs_are_revalidated()
     test_response_depends_on_every_pool_member()
+    test_integrator_reset_reaches_the_response_letter()
+    test_response_target_copy_is_repaired_not_frozen()
     test_split_review_uses_session_b_and_merges_in_review()
     test_journal_stages_are_in_the_attempt_safety_net()
     print("\n== R7 extract_occurrences variants ==")
@@ -734,6 +871,7 @@ def main() -> int:
     test_shared_strings_entities_decoded()
     test_xlsx_lock_is_binary_bucket()
     test_undecodable_text_is_a_failure_not_an_empty_success()
+    test_unreadable_rtf_is_a_failure_not_an_empty_success()
     print("\n== R10 extract_acronyms ==")
     test_acronym_definition_attribution()
     print()
