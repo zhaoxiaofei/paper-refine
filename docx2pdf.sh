@@ -97,6 +97,10 @@ try {
     \$word = New-Object -ComObject Word.Application
     \$word.Visible = \$false
     \$word.DisplayAlerts = 0
+    # msoAutomationSecurityForceDisable = 3. Word's automation default is
+    # msoAutomationSecurityLow ("macros are enabled"), so opening an untrusted
+    # submission here would run its macro payload on the operator's host.
+    \$word.AutomationSecurity = 3
 
     \$doc = \$word.Documents.Open(\$docx, \$false, \$true)   # read-only
     try {

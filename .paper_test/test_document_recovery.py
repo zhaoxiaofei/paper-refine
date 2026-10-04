@@ -400,6 +400,41 @@ def main() -> int:
           agg["stats"]["a2"]["n"] == 2, f"n={agg['stats']['a2']['n']}")
     shutil.rmtree(tmp, ignore_errors=True)
 
+    # ---- D12: siblings that differ only by a version letter -----------
+    # `_doc_key` strips ANY trailing single letter, so Dataset-a.csv and
+    # Dataset-b.csv collapse to one key. The family skip then read the dropped
+    # sibling as "survived under another name" (no restore, no warning) and the
+    # document-set check named the SURVIVING file as missing.
+    print("== D12: sibling documents sharing a stripped key are not merged ==")
+    tmp = scratch("paper_rec_d12_")
+    base = tmp / "base"
+    (base / "raw_data").mkdir(parents=True)
+    (base / "Dataset-a.csv").write_text("alpha-body\n", encoding="utf-8")
+    (base / "Dataset-b.csv").write_text("beta-body\n", encoding="utf-8")
+    sb = tmp / "sandbox"
+    (sb / "rewritten").mkdir(parents=True)          # kind=rewrite writes rewritten/
+    (sb / "rewritten" / "Dataset-b.csv").write_text("beta-body-EDITED\n", encoding="utf-8")
+
+    class _Ctx:
+        def sandbox_of(self, _rec):
+            return sb
+
+    pre = nb.document_set_check([(base, "", ())], [(sb / "rewritten", "", ())])
+    check("D12 document_set names the DROPPED sibling, not the surviving one",
+          pre["missing"] == ["Dataset-a.csv"] and not pre["added"],
+          json.dumps({k: pre[k] for k in ("missing", "added")}))
+    warns = []
+    info = nb.backfill_missing_files(_Ctx(), {"id": "r1_w1", "kind": "rewrite"},
+                                     [(base, "", ())], warns)
+    check("D12 the dropped sibling is restored from the base",
+          info["restored"] == ["Dataset-a.csv"]
+          and (sb / "rewritten" / "Dataset-a.csv").read_text(encoding="utf-8") == "alpha-body\n",
+          str(info))
+    check("D12 it is not excused as 'survived under another name'",
+          info["survived_under_other_name"] == [], str(info["survived_under_other_name"]))
+    check("D12 the restore is reported", any("Dataset-a.csv" in w for w in warns), str(warns))
+    shutil.rmtree(tmp, ignore_errors=True)
+
     for tmp in tmpdirs:
         shutil.rmtree(tmp, ignore_errors=True)
 

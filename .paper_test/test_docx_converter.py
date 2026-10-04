@@ -21,6 +21,7 @@ Asserts:
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import os
 import random
@@ -362,6 +363,40 @@ def test_codex_exec_mcp_approval():
           nb.agent_argv("claude") == nb.AGENT_PRESETS["claude"])
 
 
+# =====================================================================
+# Converter safety: macros stay disabled, and the server cap honours the caller
+# =====================================================================
+
+def test_converter_safety_and_timeout_parity():
+    """docx2pdf.sh must not run macros; the MCP cap must not undercut the caller.
+
+    Word's automation default is msoAutomationSecurityLow, i.e. macros in the
+    opened document are ENABLED: converting an untrusted submission would run
+    its payload on the operator's host. And the server's own 180 s kill made a
+    slow-but-valid Word render fail before the orchestrator's 900 s budget, so
+    the first-choice renderer silently degraded to a lower-fidelity fallback.
+    """
+    print()
+    print("== converter safety: no macro execution, no truncated render budget ==")
+    sh = (WS / "docx2pdf.sh").read_text(encoding="utf-8")
+    disable = sh.find(r"\$word.AutomationSecurity = 3")
+    open_doc = sh.find(r"\$word.Documents.Open(")
+    check("docx2pdf.sh forces msoAutomationSecurityForceDisable before Documents.Open",
+          disable >= 0 and open_doc >= 0 and disable < open_doc,
+          f"AutomationSecurity@{disable} Documents.Open@{open_doc}")
+    index = WS / "mcp-docx-converter" / "index.js"
+    src = index.read_text(encoding="utf-8")
+    m = re.search(r"timeout:\s*(\d[\d_]*)\s*,\s*maxBuffer", src)
+    check("the MCP conversion call declares an explicit timeout", bool(m),
+          m.group(0) if m else "no `timeout: N, maxBuffer` in index.js")
+    if m:
+        cap_ms = int(m.group(1).replace("_", ""))
+        budget_s = inspect.signature(nb.render_docx_visual).parameters["timeout"].default
+        check("the MCP server cap is not below the orchestrator's render budget",
+              cap_ms >= int(budget_s) * 1000,
+              f"server {cap_ms} ms vs render_docx_visual {budget_s} s")
+
+
 def test_refusal_messages_evaluate():
     """The server's refusal paths must EVALUATE, not throw a tagged-template TypeError.
 
@@ -446,6 +481,7 @@ def main() -> int:
     sections = (("probe", test_config_probe),
                 ("probe", test_probe_order_and_summary),
                 ("prompts", test_prompts_prefer_the_mcp_tool),
+                ("safety", test_converter_safety_and_timeout_parity),
                 ("refusals", test_refusal_messages_evaluate),
                 ("codex-exec", test_codex_exec_mcp_approval),
                 ("live", test_live_server_if_available))

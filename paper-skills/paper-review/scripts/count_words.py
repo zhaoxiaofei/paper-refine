@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -102,7 +103,12 @@ def count_words(text: str) -> int:
 
 def lenient_cap(base: int, factor: float) -> int:
     """Largest integer word count within `base` relaxed by `factor`."""
-    return int(float(base) * float(factor))
+    # floor(base*factor), tolerant of the float representation error that made
+    # "100 words +15%" 114.99999999999999 -> 114 instead of 115. This must stay
+    # identical to paper_pipeline.lenient_word_limit(): an agent trimming to a
+    # cap one word stricter than the orchestrator's turns a boundary document
+    # into a spurious M19 finding.
+    return math.floor(float(base) * float(factor) + 1e-9)
 
 
 def _strip_latex(text: str) -> str:

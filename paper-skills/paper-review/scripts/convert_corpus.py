@@ -429,32 +429,34 @@ def rtf_to_text(path: str) -> tuple:
                 except ValueError:
                     pass
                 i += 3
-            elif nxt == "u":
+            elif nxt == "u" and re.match(r"u-?\d", raw[i:]):
+                # ONLY `\uNNNN` (the RTF unicode escape). A control word that
+                # merely STARTS with `u` (`\ul`, `\ulnone`, `\up6`, `\uc1`) must
+                # fall through to the generic control-word path below and be
+                # consumed whole -- matching `u` and advancing one character
+                # leaked the tail ("ul" -> "l") into the corpus text.
                 m = re.match(r"u(-?\d+)\D?", raw[i:])
-                if m:
-                    code = int(m.group(1))
-                    if code < 0:
-                        code += 65536
-                    if skip_depth is None:
-                        try:
-                            if 0xD800 <= code <= 0xDBFF:
-                                if pending_high is not None:
-                                    out.append(chr(pending_high))
-                                pending_high = code
-                            elif 0xDC00 <= code <= 0xDFFF and pending_high is not None:
-                                out.append(chr(0x10000 + ((pending_high - 0xD800) << 10)
-                                               + (code - 0xDC00)))
-                                pending_high = None
-                            else:
-                                if pending_high is not None:
-                                    out.append(chr(pending_high))
-                                    pending_high = None
-                                out.append(chr(code))
-                        except ValueError:
+                code = int(m.group(1))
+                if code < 0:
+                    code += 65536
+                if skip_depth is None:
+                    try:
+                        if 0xD800 <= code <= 0xDBFF:
+                            if pending_high is not None:
+                                out.append(chr(pending_high))
+                            pending_high = code
+                        elif 0xDC00 <= code <= 0xDFFF and pending_high is not None:
+                            out.append(chr(0x10000 + ((pending_high - 0xD800) << 10)
+                                           + (code - 0xDC00)))
                             pending_high = None
-                    i += len(m.group(0))
-                else:
-                    i += 1
+                        else:
+                            if pending_high is not None:
+                                out.append(chr(pending_high))
+                                pending_high = None
+                            out.append(chr(code))
+                    except ValueError:
+                        pending_high = None
+                i += len(m.group(0))
             else:
                 m = re.match(r"([A-Za-z]+)(-?\d+)?[ ]?", raw[i:])
                 if m:

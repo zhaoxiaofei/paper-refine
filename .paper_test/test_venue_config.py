@@ -118,6 +118,57 @@ def all_prompts(venue=None) -> dict:
 # VC1 — the profiles themselves
 # =====================================================================
 
+def _bare_checkout(tmp: Path, profile_text: str) -> Path:
+    """A temp copy of the script + the shipped profile JSONs (no corpora)."""
+    bare = tmp / "bare"
+    (bare / "venue_profiles").mkdir(parents=True)
+    shutil.copy2(WS / "paper_pipeline.py", bare / "paper_pipeline.py")
+    for p in sorted((WS / "venue_profiles").glob("*.json")):
+        shutil.copy2(p, bare / "venue_profiles" / p.name)
+    (bare / "venue_profiles" / "nature-biotechnology.json").write_text(
+        profile_text, encoding="utf-8")
+    return bare
+
+
+def run_bare(bare: Path, *argv):
+    return subprocess.run([sys.executable, str(bare / "paper_pipeline.py"), *map(str, argv)],
+                          capture_output=True, text=True, cwd=str(bare))
+
+
+def test_malformed_shipped_profile_leaves_the_cli_usable():
+    """One bad hand edit of the shipped default profile must not kill the CLI.
+
+    `_builtin_default_venue_object()` guards the IMPORT, but the module-level
+    compatibility constants (`LENGTH_RULE = length_rule_text()` and friends) went
+    through `default_venue_profile()`, which re-validated the RAW shipped data
+    and raised before argparse ran: `--help`, `status` and the `set-venue`
+    repair path all died. A second, milder shape (a profile that VALIDATES but
+    lacks `label`) crashed `set-venue --list` on the eager `setdefault` default.
+    """
+    print()
+    print("== VC9: a malformed shipped default profile leaves the CLI usable ==")
+    shapes = (
+        ("invalid article_types", '{"id": "nature-biotechnology", "article_types": []}\n'),
+        ("no display fields", '{"id": "nature-biotechnology", "bad_field": true}\n'),
+    )
+    for label, text in shapes:
+        bare = _bare_checkout(scratch(f"paper_venue_broken_{label.replace(' ', '_')}_"), text)
+        proc = run_bare(bare, "--help")
+        out = proc.stdout + proc.stderr
+        check(f"VC9 {label}: --help still runs", proc.returncode == 0 and "usage:" in out,
+              out[-200:])
+        lst = run_bare(bare, "set-venue", "--list")
+        lou = lst.stdout + lst.stderr
+        check(f"VC9 {label}: set-venue --list still lists every venue",
+              lst.returncode == 0 and "generic" in lou and "example-journal" in lou,
+              lou[-200:])
+        st = run_bare(bare, "status", "--root", bare / "noroot")
+        sout = st.stdout + st.stderr
+        check(f"VC9 {label}: status reports its own error, not an import traceback",
+              "Traceback" not in sout and "VenueProfileError" not in sout,
+              sout[-200:])
+
+
 def test_profiles():
     print()
     print("== VC1: the shipped profiles, the built-ins and their numbers ==")
@@ -1019,6 +1070,7 @@ def main() -> int:
     try:
         test_profiles()
         test_every_shipped_profile_is_valid()
+        test_malformed_shipped_profile_leaves_the_cli_usable()
         test_frontiers_immunology_profile()
         test_configuration_and_persistence()
         test_custom_profile()

@@ -1146,6 +1146,42 @@ def test_cli():
     check("`fix` refuses to overwrite its input", same.returncode == 2, same.stderr[-120:])
 
 
+def test_unreadable_docx_reports_fmt_x1():
+    """One unreadable package document must degrade to FMT-X1, not kill the scan.
+
+    `analyse_package` catches BadZipFile/KeyError/ParseError/UnicodeDecodeError
+    but not OSError, so a Windows lock, a chmod 000 file or an agent-created
+    DIRECTORY named `x.docx` escaped the FMT-X1 row the module defines for
+    exactly this shape and aborted the whole code-side scan that the evidence
+    pack and `decide --format-gate` depend on.
+    """
+    print()
+    print("== an unreadable .docx degrades to FMT-X1 ==")
+    tmp = scratch("paper_fmt_unreadable_")
+    pkg = tmp / "pkg"
+    pkg.mkdir()
+    (pkg / "dir.docx").mkdir()
+    if os.geteuid() != 0:
+        locked = pkg / "locked.docx"
+        locked.write_bytes(b"x")
+        locked.chmod(0)
+    scan = subprocess.run([sys.executable, str(WS / "paper_docx_format.py"), "scan",
+                           str(pkg), "--json", str(tmp / "scan.json")],
+                          capture_output=True, text=True)
+    for p in pkg.iterdir():
+        if p.is_file():
+            p.chmod(0o644)
+    rows = json.loads((tmp / "scan.json").read_text(encoding="utf-8"))["rows"] \
+        if (tmp / "scan.json").is_file() else []
+    docs = {r.get("document") for r in rows if r.get("rule") == "FMT-X1"}
+    check("a directory named x.docx reports FMT-X1 instead of aborting the scan",
+          scan.returncode == 0 and "dir.docx" in docs,
+          (scan.stderr or scan.stdout)[-200:])
+    if os.geteuid() != 0:
+        check("a chmod-000 .docx reports FMT-X1 instead of aborting the scan",
+              "locked.docx" in docs, str(sorted(docs)))
+
+
 def test_pipeline_wiring():
     print()
     print("== pipeline wiring: scan wrapper, policy overrides, gate flag ==")
@@ -1405,6 +1441,7 @@ def main() -> int:
         test_lookup_404_is_a_verified_negative()
         test_tab_scan_ignores_tab_stop_definitions()
         test_cli()
+        test_unreadable_docx_reports_fmt_x1()
         test_pipeline_wiring()
         test_setup_normalization()
         test_stage_normalization()

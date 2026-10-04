@@ -43,6 +43,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
@@ -406,6 +407,90 @@ record_k = json.loads((dest_k / "record.json").read_text(encoding="utf-8"))
 check("K1 a collided archive name is renamed AND record.json names the renamed path",
       dest_k.name.endswith("-2") and record_k["moved_to"] == f"runs/{dest_k.name}",
       f"{dest_k.name} / {record_k['moved_to']}")
+
+print()
+print("== L. run-log stamping, locale-safe prompts, and timeout cleanup ==")
+
+# L1: the per-invocation log must carry the stamped lines the console shows.
+root_l = root_j2 / "root"
+proc_l = subprocess.run([sys.executable, str(WS / "paper_pipeline.py"), "prune",
+                         "--root", str(root_l), "--keep-latest", "1"],
+                        capture_output=True, text=True)
+console_lines = [ln for ln in proc_l.stdout.splitlines() if "[prune] root: " in ln]
+logfiles = sorted((root_l / "reports").glob("prune-*.log"))
+log_lines = [ln for ln in logfiles[0].read_text(encoding="utf-8").splitlines()
+             if "[prune] root: " in ln] if logfiles else []
+check("L1 the run log carries the same stamped line the console printed",
+      bool(console_lines) and log_lines and log_lines[0] == console_lines[0],
+      f"rc={proc_l.returncode} console={console_lines[:1]} log={log_lines[:1]} "
+      f"stderr={(proc_l.stderr or '')[-160:]!r} logs={[p.name for p in logfiles]}")
+
+# L2: an agent prompt must not depend on the operator's locale encoding.
+child_l2 = scratch("paper_hist_l2_") / "child.py"
+write(child_l2, (
+    "import importlib.util, json, sys, tempfile\n"
+    "from pathlib import Path\n"
+    "spec = importlib.util.spec_from_file_location('pp2', sys.argv[1])\n"
+    "pp = importlib.util.module_from_spec(spec); sys.modules['pp2'] = pp\n"
+    "spec.loader.exec_module(pp)\n"
+    "sb = Path(tempfile.mkdtemp())\n"
+    "(sb / 'PROMPT.md').write_text('an em dash \u2014 and a \u4e2d\u6587 name\\n',"
+    " encoding='utf-8')\n"
+    "out = sb / 'got.txt'\n"
+    "cmd = [sys.executable, '-c', \"import sys; open(sys.argv[1],'wb')"
+    ".write(sys.stdin.buffer.read())\", str(out)]\n"
+    "res = pp._execute_attempt_in(sb, {'id': 'r1_l2'}, cmd, 60)\n"
+    "print(json.dumps({'rc': res['rc'], 'error': res['error'],\n"
+    "                  'got': out.read_text(encoding='utf-8') if out.exists() else None}))\n"))
+env_l2 = dict(os.environ, LC_ALL="C", PYTHONCOERCECLOCALE="0", PYTHONUTF8="0")
+proc_l2 = subprocess.run([sys.executable, str(child_l2), str(WS / "paper_pipeline.py")],
+                         capture_output=True, text=True, env=env_l2)
+try:
+    payload_l2 = json.loads(proc_l2.stdout.strip().splitlines()[-1])
+except (ValueError, IndexError):
+    payload_l2 = {}
+check("L2 a non-ASCII prompt is delivered under a non-UTF-8 locale",
+      payload_l2.get("rc") == 0 and payload_l2.get("error") is None
+      and str(payload_l2.get("got") or "").startswith("an em dash"),
+      json.dumps(payload_l2, ensure_ascii=False)[:180] + (proc_l2.stderr or "")[-120:])
+
+# L3: a timed-out session must take its whole process group with it.
+tmp_l3 = scratch("paper_hist_l3_")
+sb_l3 = tmp_l3 / "sb"
+sb_l3.mkdir()
+write(sb_l3 / "PROMPT.md", "hi\n")
+pidfile_l3 = sb_l3 / "grandchild.pid"
+write(sb_l3 / "child.sh",
+      "#!/bin/sh\nsleep 987654 & echo $! > \"%s\"\nsleep 987654\n" % pidfile_l3)
+res_l3 = nb._execute_attempt_in(sb_l3, {"id": "r1_l3"}, ["/bin/sh", str(sb_l3 / "child.sh")], 1)
+
+
+def _proc_running(pid: int):
+    """True while `pid` is more than a zombie (Linux /proc; falls back to kill)."""
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split(") ", 1)[1].split()[0]
+        return state not in ("Z", "X")
+    except (OSError, IndexError):
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+
+grandchild = int(pidfile_l3.read_text(encoding="utf-8").strip()) if pidfile_l3.is_file() else 0
+deadline = time.time() + 5
+while grandchild and time.time() < deadline and _proc_running(grandchild):
+    time.sleep(0.1)
+leaked = bool(grandchild) and _proc_running(grandchild)
+if leaked:                                        # never leak the probe process
+    try:
+        os.kill(grandchild, 9)
+    except OSError:
+        pass
+check("L3 a timed-out agent session leaves no descendant behind",
+      (res_l3.get("error") or "").startswith("TIMEOUT") and grandchild and not leaked,
+      f"error={res_l3.get('error')!r} grandchild={grandchild} leaked={leaked}")
 
 for d in TMPDIRS:
     shutil.rmtree(d, ignore_errors=True)

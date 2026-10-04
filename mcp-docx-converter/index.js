@@ -77,8 +77,13 @@ serveStdio(() => {
         };
       }
       const pdf = abs.replace(/\.docx$/i, '.pdf');
+      // 900_000 matches the orchestrator's render budget
+      // (paper_pipeline.render_docx_visual(timeout=900)); a smaller server-side
+      // cap would kill a slow-but-valid Word conversion before the caller's
+      // own timeout and silently downgrade the render to a lower-fidelity
+      // fallback.
       const run = () => execFileAsync(CONVERTER, [abs],
-                                      { timeout: 180_000, maxBuffer: 4 * 1024 * 1024 });
+                                      { timeout: 900_000, maxBuffer: 4 * 1024 * 1024 });
       const previous = inFlight.get(pdf) ?? Promise.resolve();
       const next = previous.catch(() => {}).then(run);
       inFlight.set(pdf, next);

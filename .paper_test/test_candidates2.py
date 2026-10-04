@@ -695,6 +695,62 @@ def test_sci_exponent_variants():
     bad = [p for p, want in probes.items() if got[p] != want]
     check("R7 scientific-notation variants written with a one-digit exponent are found",
           not bad, f"pattern={pat.pattern} mismatches={bad}")
+    # R7b: a term written with a SPACE must also match its hyphenated spelling
+    # (and a double space); `copy number` never matched `copy-number` because
+    # the interchange regex was only built when the GIVEN term had a hyphen.
+    eo3 = load("eo3", SCRIPTS / "extract_occurrences.py")
+    term = eo3.variant_pattern("copy number", "term")
+    probes = {"copy number": True, "copy-number": True, "copy  number": True,
+              "Copy-Number": True}
+    got = {p: bool(term.search(f"the {p} assay")) for p in probes}
+    bad = [p for p, want in probes.items() if got[p] != want]
+    check("R7b a space-written term matches hyphen and double-space spellings",
+          not bad, f"pattern={term.pattern} mismatches={bad}")
+    hyphen = eo3.variant_pattern("scRNA-seq", "term")
+    check("R7b a hyphen-written term keeps matching the hyphenless spelling",
+          bool(hyphen.search("scRNAseq")) and bool(hyphen.search("scRNA seq")),
+          hyphen.pattern)
+
+
+def test_lenient_cap_matches_the_orchestrator():
+    """The agents' cap and the orchestrator's cap must be the same integer.
+
+    `int(base*factor)` truncated 100*1.15 = 114.99999999999999 to 114 while
+    paper_pipeline.lenient_word_limit() returns 115 -- a boundary document then
+    got a spurious M19 finding from whichever side counted it.
+    """
+    cw = load("cw2", SCRIPTS / "count_words.py")
+    bad = []
+    for base in (100, 150, 250, 3000, 5000, 37):
+        for factor in (1.05, 1.10, 1.15, 1.20, 1.25, 1.333):
+            a, b = cw.lenient_cap(base, factor), np.lenient_word_limit(base, factor)
+            if a != b:
+                bad.append((base, factor, a, b))
+    check("R7c lenient_cap() agrees with lenient_word_limit() at every boundary",
+          not bad, str(bad[:4]))
+    check("R7c 100 words +15% relaxes to 115 (not 114)", cw.lenient_cap(100, 1.15) == 115)
+
+
+def test_rtf_control_word_tails_do_not_leak():
+    """`\\ul`/`\\ulnone`/`\\up6` are control WORDS, not `\\uNNNN` escapes.
+
+    The `nxt == "u"` branch advanced a single character when the digits did not
+    follow, so the word's tail landed in the corpus text ("\\ul" -> "l",
+    "\\ulnone" -> "lnone", "\\up6" -> "p6") for every RTF submission.
+    """
+    cc = load("cc2", SCRIPTS / "convert_corpus.py")
+    tmp = tmpdir("rtfctl")
+    write(tmp / "t.rtf",
+          r"{\rtf1\ansi This is \ul underlined\ulnone  and \up6 sup\up0 normal.\par}")
+    text, _notes = cc.rtf_to_text(str(tmp / "t.rtf"))
+    check("A1 RTF control-word tails never leak into the text",
+          text == "This is underlined and supnormal.", repr(text))
+    write(tmp / "u.rtf", r"{\rtf1\ansi Test \u-10179?\u-8700? done}")
+    uni, _notes = cc.rtf_to_text(str(tmp / "u.rtf"))
+    check("A1 the \\uNNNN escape still decodes", "\U0001F604" in uni, repr(uni))
+    write(tmp / "meta.rtf", r"{\rtf1\ansi{\fonttbl{\f0 Arial;}}Hello \ul bold\ulnone  world\par}")
+    meta, _notes = cc.rtf_to_text(str(tmp / "meta.rtf"))
+    check("A1 font-table groups are still skipped", meta == "Hello bold world", repr(meta))
 
 
 def run_convert_corpus(tmp: Path, files: dict) -> tuple:
@@ -866,12 +922,14 @@ def main() -> int:
     test_journal_stages_are_in_the_attempt_safety_net()
     print("\n== R7 extract_occurrences variants ==")
     test_sci_exponent_variants()
+    test_lenient_cap_matches_the_orchestrator()
     print("\n== R8/A convert_corpus ==")
     test_flattened_corpus_name_collision_keeps_both_documents()
     test_shared_strings_entities_decoded()
     test_xlsx_lock_is_binary_bucket()
     test_undecodable_text_is_a_failure_not_an_empty_success()
     test_unreadable_rtf_is_a_failure_not_an_empty_success()
+    test_rtf_control_word_tails_do_not_leak()
     print("\n== R10 extract_acronyms ==")
     test_acronym_definition_attribution()
     print()

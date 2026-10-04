@@ -117,6 +117,35 @@ def submission_files(root: Path) -> list:
         if d.is_dir() else []
 
 
+def test_response_postcheck_verifies_its_input_manifest():
+    """The response stage must byte-verify the package copy its letter cites.
+
+    `postcheck_response` was the only content postcheck that did not call
+    `input_mismatches()`, so a letter session could rewrite
+    `runs/<r>_response/target/` -- the copy the letter's change/new-data
+    citations are checked against -- and the attempt still passed (ok=True,
+    the run marked done), while the shipped `journal_submission/` described a
+    package that was never verified.
+    """
+    print()
+    print("== J11: the response postcheck verifies its recorded input manifest ==")
+    tmp = scratch("paper_jr_respinput_")
+    root = setup_and_run(tmp, "resubmit")
+    ctx = nb.Ctx(root)
+    ctx.load()
+    rec = ctx.run("r1_response")
+    ok, errs, _w, _x = nb.postcheck_response(ctx, rec)
+    check("J11 the pristine response attempt passes", ok, str(errs)[:200])
+    victim = ctx.sandbox_of(rec) / "target" / "manuscript.txt"
+    check("J11 the response sandbox carries the staged target/", victim.is_file(), str(victim))
+    victim.write_text("TAMPERED BY THE LETTER SESSION\n", encoding="utf-8")
+    check("J11 input_mismatches names the rewritten target/",
+          any("target/ was modified" in e for e in nb.input_mismatches(ctx, rec)),
+          str(nb.input_mismatches(ctx, rec)))
+    ok2, errs2, _w2, _x2 = nb.postcheck_response(ctx, rec)
+    check("J11 the tampered response attempt fails", not ok2 and errs2, str(errs2)[:200])
+
+
 def test_integrator_reset_reaches_the_response_letter():
     """A retried integration run must also reset the response letter.
 
@@ -747,6 +776,7 @@ def main() -> int:
 
     test_integrator_reset_reaches_the_response_letter()
     test_review_split_keeps_journal_stages_fresh()
+    test_response_postcheck_verifies_its_input_manifest()
     test_scoped_prune_keeps_a_published_winner()
     test_leaving_a_scoped_mode_restores_the_default_plan()
     test_init_manual_conform_stage_reentry()

@@ -295,6 +295,18 @@ def test_docs_counts_and_cross_references():
     check("the CLI help no longer claims the clean copy is written only when certified",
           "only for a CERTIFIED champion" not in readme
           and "only for a CERTIFIED champion" not in _pipeline_help())
+    # The docs must not contradict the code they describe: the attempt-history
+    # table kept a removed 60-message cap, and the CLI list that editing agents
+    # read first (AGENT.md) was missing `conform`/its aliases.
+    check("the README's attempts_log row matches _attempt_messages (no removed message cap)",
+          len(nb._attempt_messages([f"m{i}" for i in range(80)])) == 80
+          and "60 messages each" not in readme and "no message-count cap" in readme)
+    agent_md = (WS / "AGENT.md").read_text(encoding="utf-8")
+    usage = re.search(r"^\s*\{([a-z0-9,\-]+)\}\s*$", _pipeline_help(), re.MULTILINE)
+    commands = usage.group(1).split(",") if usage else []
+    missing = [c for c in commands if f"`{c}`" not in agent_md]
+    check("AGENT.md's CLI list names every subcommand the parser offers",
+          bool(commands) and not missing, f"missing={missing}")
 
 
 def _pipeline_help() -> str:

@@ -140,6 +140,21 @@ def test_payload_exclusions():
     (tmp / "ms-a.before-after.docx").write_bytes(b"another auxiliary")
     check("RT3 the token survives report/aux/scratch edits",
           script_token(tmp) == tok and nb.revision_token_for_dir(tmp)["token"] == tok)
+    # RT3b: the pipeline's own completion signals are bookkeeping too. A
+    # misplaced `_pipeline_done.json`/`scores.json` inside a package must not
+    # enter the token -- and the two implementations must agree either way,
+    # or the orchestrator warns about a token the agents computed correctly.
+    (tmp / "_pipeline_done.json").write_text('{"stage": "revise", "status": "complete"}\n',
+                                             encoding="utf-8")
+    (tmp / "scores.json").write_text('{"rows": []}\n', encoding="utf-8")
+    check("RT3b a package carrying completion signals keeps its token",
+          script_token(tmp) == tok and nb.revision_token_for_dir(tmp)["token"] == tok)
+    check("RT3b both implementations still agree with a completion signal inside",
+          script_token(tmp) == nb.revision_token_for_dir(tmp)["token"],
+          f"{script_token(tmp)} vs {nb.revision_token_for_dir(tmp)['token']}")
+    check("RT3b the signal is not counted as a payload file",
+          nb.revision_token_for_dir(tmp)["files"] == 4,
+          str(nb.revision_token_for_dir(tmp)))
 
 
 def test_matching_and_recording():

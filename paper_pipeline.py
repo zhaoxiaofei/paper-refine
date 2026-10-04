@@ -709,6 +709,7 @@ import queue
 import random
 import re
 import shutil
+import signal
 import stat
 import statistics
 import subprocess
@@ -1749,10 +1750,16 @@ def available_venue_profiles(root=None) -> dict:
                                           "origin": origin, "path": str(path),
                                           "default_journal": profile.default_journal})
     for vid, data in BUILTIN_VENUE_PROFILES.items():
-        found.setdefault(vid, {"id": vid, "label": data["label"],
-                               "description": data["description"],
-                               "origin": "built-in", "path": None,
-                               "default_journal": data["default_journal"]})
+        # NOT setdefault(): its default argument is evaluated EAGERLY, so a
+        # shipped profile whose id is already in `found` could still raise
+        # KeyError from a missing display field -- on `set-venue --list`, the
+        # command whose job is to show the profiles and name the one to repair.
+        if vid in found:
+            continue
+        found[vid] = {"id": vid, "label": data.get("label") or vid,
+                      "description": data.get("description") or "",
+                      "origin": "built-in", "path": None,
+                      "default_journal": data.get("default_journal") or ""}
     return found
 
 
@@ -1798,8 +1805,17 @@ def unknown_venue_message(venue_id, root=None) -> str:
 
 
 def default_venue_profile() -> VenueProfile:
-    """The profile a call that has no root at hand uses (the built-in default)."""
-    return VenueProfile(BUILTIN_VENUE_PROFILES[DEFAULT_VENUE], origin="built-in")
+    """The profile a call that has no root at hand uses (the built-in default).
+
+    This returns the GUARDED object, not a fresh
+    `VenueProfile(BUILTIN_VENUE_PROFILES[...])`: that construction re-validated
+    the raw shipped data and made one bad hand edit of
+    `venue_profiles/<default>.json` brick every command at import (the
+    module-level LENGTH_RULE/STANDING_EXEMPTIONS constants call this function),
+    including the `set-venue` path that exists to repair it. The guard falls
+    back to the embedded literal and warns.
+    """
+    return _DEFAULT_VENUE_OBJ
 
 
 # =====================================================================
@@ -9159,7 +9175,8 @@ class RunLogStream:
     each ATTEMPT's diagnostics; this keeps the INVOCATION's console, line for
     line, next to the reports it produced -- including the retry/backoff lines,
     the judge-panel advisories and the `[repair] ...` decisions that belong to no
-    single attempt. Installed OUTSIDE `TimestampedStream`, so the file carries the
+    single attempt. Installed INSIDE `TimestampedStream` (see `install_run_log`):
+    the tee sits between the stamper and the terminal, so the file carries the
     same stamped lines the operator saw.
     """
 
@@ -9247,15 +9264,26 @@ def start_run_log(cmd: str, root, argv=None) -> Path:
 
 
 def install_run_log(path: Path) -> None:
-    """Mirror both console streams into `path` (see `RunLogStream`)."""
+    """Mirror both console streams into `path` (see `RunLogStream`).
+
+    The tee goes INSIDE `TimestampedStream`: the stamper writes through the log
+    stream, so the file receives the stamped lines that reach the console. The
+    old order (log stream outermost) wrote the raw text to the file and the
+    console-only stamps never reached it.
+    """
     if not path or not str(path):
         return
     for name in ("stdout", "stderr"):
         stream = getattr(sys, name, None)
-        if isinstance(stream, RunLogStream):
+        if stream is None:
+            continue
+        stamper = stream if isinstance(stream, TimestampedStream) else None
+        inner = getattr(stamper, "_stream", stream) if stamper is not None else stream
+        if isinstance(inner, RunLogStream):
             continue
         try:
-            setattr(sys, name, RunLogStream(stream, path))
+            logged = RunLogStream(inner, path)
+            setattr(sys, name, TimestampedStream(logged) if stamper is not None else logged)
         except Exception:                                        # noqa: BLE001
             pass
 
@@ -13480,17 +13508,26 @@ def document_set_check(base_sources: list, cand_sources: list) -> dict:
                 return True
         return False
 
-    missing, content_only = [], []
+    missing, content_only, unmatched = [], [], []
     for key, entries in sorted(base.items()):
         for rel, dig in entries:
             if take(lambda k, r, d, key=key, dig=dig: k == key and d == dig):
                 continue                        # renamed file, bytes unchanged
-            if take(lambda k, r, d, key=key: k == key):
+            if take(lambda k, r, d, key=key, rel=rel: k == key and r == rel):
                 continue                        # survived under the same name, edited
             if take(lambda k, r, d, dig=dig: d == dig):
                 content_only.append(rel)         # moved/renamed, bytes preserved
                 continue
-            missing.append(rel)
+            unmatched.append((key, rel))
+    # A version-stripped key can stand in for a document name ONLY after every
+    # exact-name pairing is done. When several base documents share a key
+    # (Dataset-a.csv / Dataset-b.csv), pairing the first one by key consumes the
+    # surviving sibling's slot and reports the WRONG file as lost -- the same
+    # collision the byte/digest steps above exist to prevent.
+    for key, rel in unmatched:
+        if take(lambda k, r, d, key=key: k == key):
+            continue                            # rename family (...-b.docx -> ...-c.docx)
+        missing.append(rel)
     duplicates = {}
     base_names = {key: {r for r, _d in entries} for key, entries in base.items()}
     for key, entries in sorted(cand.items()):
@@ -20248,14 +20285,38 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
     out_dir = output_dir_of(rec)
     cand_files = _candidate_corpus_files(sb, out_dir)
     cand_digests = set()
-    cand_doc_keys = set()
     for key, p in cand_files:
         try:
             cand_digests.add(sha256_file(p))
         except OSError:
             pass
-        if p.suffix.lower() in EDITABLE_DOC_EXTS and not is_bookkeeping_name(p.name):
-            cand_doc_keys.add(_doc_key(key))
+    # Rename-family bookkeeping (see the family skip in the main loop). A
+    # candidate document can stand in for ONE base document whose name changed,
+    # but only if it is not itself the exact-name survivor of another base
+    # document under the same version-stripped key: when several base documents
+    # collapse to one key (Dataset-a.csv / Dataset-b.csv), the surviving sibling
+    # must not absorb the slot of the one that was dropped.
+    base_doc_names = set()
+    for bsrc, bprefix, bexcluded in base_sources:
+        if not bsrc.is_dir():
+            continue
+        for q in sorted(bsrc.rglob("*")):
+            if not q.is_file() or _is_aux_doc(q.name) or _is_derived_name(q.name) \
+                    or is_bookkeeping_name(q.name):
+                continue
+            brel = q.relative_to(bsrc).as_posix()
+            if (bexcluded and brel.split("/", 1)[0] in bexcluded) \
+                    or brel.split("/", 1)[0] in CORPUS_EXCLUDE_TOP \
+                    or _candidate_dest(sb, bprefix + brel, out_dir) is None:
+                continue
+            if q.suffix.lower() in EDITABLE_DOC_EXTS:
+                base_doc_names.add(bprefix + brel)
+    cand_free_keys: dict = {}
+    for key, p in cand_files:
+        if p.suffix.lower() in EDITABLE_DOC_EXTS and not is_bookkeeping_name(p.name) \
+                and key not in base_doc_names:
+            fam_key = _doc_key(key)
+            cand_free_keys[fam_key] = cand_free_keys.get(fam_key, 0) + 1
     # Base-side digests, for the compiled-PDF twin test.
     base_digs = {}
     for src_dir, prefix, _excluded in base_sources:
@@ -20376,9 +20437,12 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
             if dig in cand_digests:
                 survived_other_name.append(rel)
                 continue                  # bytes survive under another name: a rename
-            if p.suffix.lower() in EDITABLE_DOC_EXTS and _doc_key(rel) in cand_doc_keys:
-                survived_other_name.append(rel)
-                continue                  # rename family (...-b.docx -> ...-c.docx)
+            if p.suffix.lower() in EDITABLE_DOC_EXTS:
+                fam = _doc_key(rel)
+                if cand_free_keys.get(fam, 0) > 0:
+                    cand_free_keys[fam] -= 1
+                    survived_other_name.append(rel)
+                    continue              # rename family (...-b.docx -> ...-c.docx)
             if p.suffix.lower() == ".pdf":
                 twin = _editable_twin_in_base(src_dir, rel_in)
                 if twin is not None:
@@ -24936,6 +25000,7 @@ def postcheck_response(ctx: Ctx, rec: dict):
     if not isinstance(data, dict):
         errs.append(f"{JOURNAL_RESPONSE_MAP_REL} is missing/unparsable (the letter's "
                     f"machine-readable map)")
+        errs.extend(input_mismatches(ctx, rec))
         return (not errs), errs, warns, None
     rows = [x for x in (data.get("rows") or []) if isinstance(x, dict)]
     got = [str(x.get("id") or "") for x in rows]
@@ -24998,6 +25063,10 @@ def postcheck_response(ctx: Ctx, rec: dict):
                         f"'addressed' answer must cite the new data file(s)")
         if cid and letter and cid not in letter:
             errs.append(f"response letter does not mention concern {cid!r}")
+    # Like every sibling postcheck: the response session must not rewrite the
+    # read-only package copy its letter is verified against (target/), or the
+    # change citations can "exist" in a package that was never checked.
+    errs.extend(input_mismatches(ctx, rec))
     return (not errs), errs, warns, None
 
 
@@ -26957,6 +27026,45 @@ def _coerce_text(s) -> str:
     return str(s)
 
 
+def _terminate_agent_tree(proc: subprocess.Popen) -> None:
+    """Kill an agent session's WHOLE process group (see _execute_attempt_in).
+
+    A timeout used to kill only the direct child: a codex/claude helper, a
+    shell wrapping a build or a PowerShell/Word COM helper kept running, kept
+    consuming CPU/quota and could keep writing into the sandbox after it had
+    been renamed aside and a fresh attempt started. The session is started with
+    `start_new_session=True`, so SIGTERM (then SIGKILL) to its process group
+    reaches every descendant that did not deliberately leave the group.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except OSError:
+        pgid = None
+    try:
+        if pgid:
+            os.killpg(pgid, signal.SIGTERM)
+        else:
+            proc.terminate()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        if pgid:
+            os.killpg(pgid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
                         prompt_name: str = PROMPT_FILE, log_name: str = "_agent.log",
                         archive_marker: bool = True) -> dict:
@@ -26981,16 +27089,30 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
     rec["last_attempt_started"] = started_at
     rc, out, err, exc = None, "", "", None
     try:
-        proc = subprocess.run(cmd, input=prompt, cwd=str(sb), capture_output=True,
-                              text=True, timeout=(timeout or None))
-        rc, out, err = proc.returncode, proc.stdout or "", proc.stderr or ""
-    except subprocess.TimeoutExpired as e:
-        rc, exc = None, f"TIMEOUT after {timeout}s"
-        out, err = _coerce_text(e.stdout), _coerce_text(e.stderr)
+        # Popen + a process GROUP, not subprocess.run: a timeout must kill the
+        # agent's descendants too (see _terminate_agent_tree).
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, cwd=str(sb), text=True,
+                                encoding="utf-8", errors="replace",
+                                start_new_session=True)
     except FileNotFoundError as e:
+        proc = None
         rc, exc = None, f"agent executable not found: {e}"
     except Exception as e:  # noqa: BLE001
+        proc = None
         rc, exc = None, f"execution error: {e}"
+    if proc is not None:
+        try:
+            out, err = proc.communicate(input=prompt, timeout=(timeout or None))
+            rc, exc = proc.returncode, None
+        except subprocess.TimeoutExpired as e:
+            _terminate_agent_tree(proc)
+            rc, exc = None, f"TIMEOUT after {timeout}s"
+            out, err = _coerce_text(e.stdout), _coerce_text(e.stderr)
+        except Exception as e:  # noqa: BLE001
+            _terminate_agent_tree(proc)
+            rc, exc = None, f"execution error: {e}"
+        out, err = _coerce_text(out), _coerce_text(err)
     dur = time.time() - t0
     try:
         with open(logf, "a", encoding="utf-8") as f:

@@ -3087,7 +3087,7 @@ def analyse_package(path: Path, policy: dict) -> dict:
                               pkg.read("docProps/app.xml").decode("utf-8", "replace"))
                 if m:
                     app_pages = int(m.group(1))
-    except (zipfile.BadZipFile, KeyError, ET.ParseError, UnicodeDecodeError) as e:
+    except (zipfile.BadZipFile, KeyError, ET.ParseError, UnicodeDecodeError, OSError) as e:
         row = {"rule": "FMT-X1", "severity": "high", "document": path.name, "location": "-",
                "evidence": f"{type(e).__name__}: {e}", "detail": "unreadable DOCX package",
                "fix": "manual", "protected": False}

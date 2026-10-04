@@ -40,7 +40,13 @@ from pathlib import Path
 
 REPORTS = {"changelog.md", "manual_steps.md", "revision_report.md",
            "revision_report.json", "diff_ledger.md", "rewrite_report.md",
-           "visual_check.md"}
+           "visual_check.md",
+           # The pipeline's own completion signals: a misplaced
+           # `_pipeline_done.json`/`scores.json` INSIDE a package must not
+           # travel into the content fingerprint either (keep this in step with
+           # paper_pipeline.BOOKKEEPING_FILES -- the two implementations must
+           # compute the same token for the same package).
+           "_pipeline_done.json", "scores.json"}
 AUX_SUFFIXES = (".tracked.docx", ".before-after.docx")
 
 # "-a" / "_v2" / "_V2" / "-4f3a9c1" at the very end of a stem (the version slot).

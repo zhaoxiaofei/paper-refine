@@ -109,10 +109,15 @@ def variant_pattern(term, mode):
         # the ",digit" guard the value 5 also matched inside "5,000".
         return re.compile(r"(?<![\w.])(" + "|".join(sorted(set(pats), key=len, reverse=True))
                           + r")(?![\w]|,\d)")
-    # term mode: allow hyphen/space interchange, case-insensitive, optional 's'
-    base = re.escape(term)
-    hyphen_ins = base.replace(r"\-", r"[\s\-]?")
-    pat = r"(?i)\b" + hyphen_ins + r"(?:es|s)?\b"
+    # term mode: allow hyphen/space interchange, case-insensitive, optional 's'.
+    # EVERY inter-word separator in the given term becomes the same class, so a
+    # term written with a space also matches its hyphenated spelling and a
+    # double space -- the old literal `-` replacement only fired when the term
+    # itself contained a hyphen ("copy number" never matched "copy-number").
+    # The class is `*` (not `+`) so the hyphenless spelling the old code
+    # accepted for hyphenated terms ("scRNA-seq" ~ "scRNAseq") keeps matching.
+    parts = [re.escape(p) for p in re.split(r"[\s\-]+", term.strip()) if p]
+    pat = r"(?i)\b" + r"[\s\-]*".join(parts) + r"(?:es|s)?\b"
     return re.compile(pat)
 
 
