@@ -1037,6 +1037,186 @@ def test_template_rewrite_postcheck():
           and any("vacuous" in e for e in rep_blank["errors"]), str(rep_blank)[:220])
 
 
+def test_template_postcheck_evidence_and_drops():
+    """The rewrite's DOCUMENT set is the submission, never the evidence areas;
+    and a template-forced deletion is declarable instead of unaccountable."""
+    tmp = scratch("paper_tpl_evidence_")
+    tpl = tmp / "template.docx"
+    _furnished_template(tpl, "You may insert up to 5 heading levels into your "
+                             "manuscript as can be seen in the Styles tab of this template.")
+    pkg = tmp / "pkg"
+    (pkg / "human_review_feedback" / "original_submission").mkdir(parents=True)
+    (pkg / "raw_data").mkdir()
+    _package_docx(pkg / "mainText.docx", "Introduction")
+    # The previous journal's submission and a raw-data document: the new
+    # journal's package need not re-house either (renames, dropped files).
+    _package_docx(pkg / "human_review_feedback" / "original_submission" / "old_MainText.docx",
+                  "A heading only the previous journal's version carried")
+    _package_docx(pkg / "raw_data" / "old_supp.docx", "Raw-data notes")
+    sb = tmp / "session"
+    (sb / "out").mkdir(parents=True)
+    fmt.apply_word_template(pkg / "mainText.docx", sb / "out" / "mainText.docx", tpl)
+    (sb / "out" / "REPLACEMENT_LEDGER.md").write_text("| placeholder | replacement |\n",
+                                                      encoding="utf-8")
+    rep = nb.template_rewrite_postcheck(sb, pkg, {"main": tpl})
+    check("evidence-area documents (human_review_feedback/, raw_data/) are not documents "
+          "to re-house, and their paragraphs are not parity sources",
+          rep.get("ok") is True, str(rep.get("errors"))[:260])
+
+    # ---- a source paragraph the venue's structure does not carry ----
+    tmp2 = scratch("paper_tpl_drop_")
+    tpl2 = tmp2 / "template.docx"
+    _furnished_template(tpl2, "Guide text that must not survive in the outputs.")
+    pkg2 = tmp2 / "pkg"
+    pkg2.mkdir()
+    lines = ["A submission metrics note the new venue does not carry",
+             "Paragraph number 1 carries enough words to be checked.",
+             "Paragraph number 2 carries enough words to be checked."]
+    body = "".join(para(None, t) for t in lines)
+    full_docx(pkg2 / "mainText.docx",
+              '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+              '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+              "<w:body>" + body
+              + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>'
+              "</w:body></w:document>")
+    sb2 = tmp2 / "session"
+    (sb2 / "out").mkdir(parents=True)
+    fmt.apply_word_template(pkg2 / "mainText.docx", sb2 / "out" / "mainText.docx", tpl2)
+    ledger = sb2 / "out" / "REPLACEMENT_LEDGER.md"
+    ledger.write_text("| placeholder | replacement |\n", encoding="utf-8")
+    base = nb.template_rewrite_postcheck(sb2, pkg2, {"main": tpl2})
+    check("the untampered source passes before anything is dropped",
+          base.get("ok") is True, str(base.get("errors"))[:240])
+    _drop_docx_paragraph(sb2 / "out" / "mainText.docx", "A submission metrics note")
+    rep_und = nb.template_rewrite_postcheck(sb2, pkg2, {"main": tpl2})
+    check("a source line the venue does not carry fails until it is declared",
+          rep_und.get("ok") is False and any("coverage" in e for e in rep_und["errors"]),
+          str(rep_und.get("errors"))[:240])
+    # The spelling a session actually tried (a re-wrap with an empty output) is
+    # refused, and the refusal has to name the kind that is meant.
+    ledger.write_text(
+        "| placeholder | replacement |\n\n```json\n"
+        '{"exceptions": [{"kind": "rewrap", '
+        '"source": "A submission metrics note the new venue does not carry", '
+        '"output": "", "reason": "no template slot"}]}\n```\n', encoding="utf-8")
+    rep_empty = nb.template_rewrite_postcheck(sb2, pkg2, {"main": tpl2})
+    check("a re-wrap with an empty output is rejected with the `drop` spelling named",
+          rep_empty.get("ok") is False
+          and any('"kind": "drop"' in e for e in rep_empty["errors"]),
+          str(rep_empty.get("errors"))[:260])
+    ledger.write_text(
+        "| placeholder | replacement |\n\n```json\n"
+        '{"exceptions": [{"kind": "drop", '
+        '"source": "A submission metrics note the new venue does not carry", '
+        '"reason": "the venue carries no submission-metrics note"}]}\n```\n',
+        encoding="utf-8")
+    rep_drop = nb.template_rewrite_postcheck(sb2, pkg2, {"main": tpl2})
+    check("a declared, reasoned drop of a source line passes exact parity",
+          rep_drop.get("ok") is True, str(rep_drop.get("errors"))[:240])
+    ledger.write_text(
+        "| placeholder | replacement |\n\n```json\n"
+        '{"exceptions": [{"kind": "drop", '
+        '"source": "Paragraph number 1 carries enough words to be checked.", '
+        '"reason": "not actually dropped"}]}\n```\n', encoding="utf-8")
+    rep_bad = nb.template_rewrite_postcheck(sb2, pkg2, {"main": tpl2})
+    check("a drop declared for a paragraph the outputs still carry is rejected",
+          rep_bad.get("ok") is False
+          and any("declared drop is not needed" in e for e in rep_bad["errors"]),
+          str(rep_bad.get("errors"))[:240])
+
+
+def test_template_postcheck_foreign_source_styles():
+    """A style the source carries from ANOTHER journal's template is required
+    back only when the target template's own documents use it."""
+    tmp = scratch("paper_tpl_foreign_style_")
+    tpl = tmp / "template.docx"
+    _furnished_template(tpl, "Guide sentence that must not survive.")
+    pkg = tmp / "pkg"
+    pkg.mkdir()
+    _package_docx(pkg / "mainText.docx", "Introduction")
+    # The old journal's caption style: the target template DEFINES `Caption`
+    # but never uses it in its own body, so it cannot be demanded back (the
+    # `invented` rule would flag the output for using a style the template's
+    # grammar does not).
+    _rewrite_docx_document(
+        pkg / "mainText.docx",
+        lambda xml: xml.replace("<w:sectPr>",
+                                para("Caption", "A caption line the old journal styled") +
+                                "<w:sectPr>"))
+    sb = tmp / "session"
+    (sb / "out").mkdir(parents=True)
+    fmt.apply_word_template(pkg / "mainText.docx", sb / "out" / "mainText.docx", tpl)
+    (sb / "out" / "REPLACEMENT_LEDGER.md").write_text("| placeholder | replacement |\n",
+                                                      encoding="utf-8")
+    _rewrite_docx_document(sb / "out" / "mainText.docx",
+                           lambda xml: xml.replace('<w:pStyle w:val="Caption"/>', "", 1))
+    rep = nb.template_rewrite_postcheck(sb, pkg, {"main": tpl})
+    check("a source style the template defines but never uses is not required back",
+          rep.get("ok") is True, str(rep.get("errors"))[:260])
+    # ... while a style the template's own body DOES use stays required.
+    _rewrite_docx_document(sb / "out" / "mainText.docx",
+                           lambda xml: xml.replace('<w:pStyle w:val="ListParagraph"/>', "", 1))
+    rep2 = nb.template_rewrite_postcheck(sb, pkg, {"main": tpl})
+    check("a template-used style the source carries is still required",
+          rep2.get("ok") is False
+          and any("no longer USE the styles" in e for e in rep2["errors"]),
+          str(rep2.get("errors"))[:260])
+
+
+def test_template_postcheck_superscript_residue():
+    """Empty superscript runs are field residue, not citation markers: only
+    superscript runs that CARRY TEXT count against the source."""
+    frag = ('<w:p><w:r><w:t>See here</w:t></w:r>'
+            '<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:t>8</w:t></w:r>'
+            '<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr>'
+            '<w:t xml:space="preserve"></w:t></w:r>'
+            '<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr>'
+            '<w:t xml:space="preserve"> </w:t></w:r></w:p>')
+    counter = getattr(nb, "_superscript_run_count", lambda f: f.count("superscript"))
+    check("an empty superscript run is not a marker",
+          counter(frag) == 1, str(counter(frag)))
+    tmp = scratch("paper_tpl_sup_residue_")
+    tpl = tmp / "template.docx"
+    _furnished_template(tpl, "A guide sentence long enough to be checked here.")
+    pkg = tmp / "pkg"
+    pkg.mkdir()
+    sup = ('<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:t>8</w:t></w:r>')
+    empty_sup = ('<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr>'
+                 '<w:t xml:space="preserve"></w:t></w:r>')
+    body = ('<w:p><w:pPr></w:pPr>'
+            '<w:r><w:t xml:space="preserve">The six studies contribute 30 datasets</w:t></w:r>'
+            + sup + empty_sup + empty_sup +
+            '<w:r><w:t xml:space="preserve">, whose variants were curated.</w:t></w:r></w:p>')
+    full_docx(pkg / "mainText.docx",
+              '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+              '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+              "<w:body>" + body
+              + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>'
+              "</w:body></w:document>")
+    sb = tmp / "session"
+    (sb / "out").mkdir(parents=True)
+    fmt.apply_word_template(pkg / "mainText.docx", sb / "out" / "mainText.docx", tpl)
+    (sb / "out" / "REPLACEMENT_LEDGER.md").write_text("| placeholder | replacement |\n",
+                                                      encoding="utf-8")
+    # A session that rebuilds the runs keeps the visible marker and drops the
+    # empty residue: the source's THREE superscript runs are really ONE.
+    _rewrite_docx_document(
+        sb / "out" / "mainText.docx",
+        lambda xml: xml.replace(empty_sup, ""))
+    rep = nb.template_rewrite_postcheck(sb, pkg, {"main": tpl})
+    check("dropping empty superscript residue is not a lost marker",
+          rep.get("ok") is True, str(rep.get("errors"))[:260])
+    # ... while dropping the VISIBLE marker is still caught.
+    _rewrite_docx_document(
+        sb / "out" / "mainText.docx",
+        lambda xml: xml.replace('<w:rPr><w:vertAlign w:val="superscript"/></w:rPr>', "", 1))
+    rep2 = nb.template_rewrite_postcheck(sb, pkg, {"main": tpl})
+    check("a dropped VISIBLE superscript marker is still rejected",
+          rep2.get("ok") is False
+          and any("superscript" in e for e in rep2["errors"]),
+          str(rep2.get("errors"))[:260])
+
+
 def _rewrite_docx_document(path: Path, edit) -> None:
     """Apply edit(document_xml) -> document_xml to one DOCX; other parts untouched."""
     with zipfile.ZipFile(path) as z:
@@ -1454,6 +1634,9 @@ def main() -> int:
         test_foreign_containers_are_venue_data()
         test_apply_template_package()
         test_template_rewrite_postcheck()
+        test_template_postcheck_evidence_and_drops()
+        test_template_postcheck_foreign_source_styles()
+        test_template_postcheck_superscript_residue()
         test_transfer_mode_runs_the_template_stage_first()
         test_init_mode_conform_stage()
         test_mcp_first_render_chain()

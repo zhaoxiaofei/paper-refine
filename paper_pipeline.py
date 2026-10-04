@@ -11189,11 +11189,12 @@ WRITE (only inside out/):
   4. CARRY THE SOURCE COMPLETELY -- the code side now verifies this EXACTLY:
      every non-empty source paragraph, SHORT LINES INCLUDED, must appear in the
      outputs at least as many times as it appears in the source, unless you
-     declare it as a re-wrap in step 7. Never invent, summarize, merge or drop
-     content. Rewording is allowed only where the template's structure demands
-     it (for example folding a separate "Lead contact"/"Corresponding author"
-     line into the correspondence block as "<Name>, lead contact"), and every
-     such paragraph must be declared in the ledger's machine-readable block.
+     declare it in step 7 (as a re-wrap, or -- only for what the venue's own
+     structure has no place for -- as a drop). Never invent, summarize, merge or
+     drop content. Rewording is allowed only where the template's structure
+     demands it (for example folding a separate "Lead contact"/"Corresponding
+     author" line into the correspondence block as "<Name>, lead contact"), and
+     every such paragraph must be declared in the ledger's machine-readable block.
      The reverse direction is checked too: no output paragraph of 5+ words may
      be absent from the source unless it is declared (as an addition, or as a
      re-wrap's declared output).
@@ -11235,12 +11236,20 @@ WRITE (only inside out/):
           "reason": "<the template element/structure that forces the re-wrap>"}},
          {{"kind": "addition",
           "output": "<verbatim output paragraph not present in the source>",
-          "reason": "<why the venue's structure requires it>"}}
+          "reason": "<why the venue's structure requires it>"}},
+         {{"kind": "drop",
+          "source": "<verbatim source paragraph this package does not carry anywhere>",
+          "reason": "<the template element/structure that leaves no slot for it>"}}
        ]}}
        ```
-     `{{"exceptions": []}}` when nothing needed re-wrapping or adding. A missing,
-     empty or non-matching declaration FAILS the code-side check: the ledger is
-     the machine-readable accounting, not prose commentary.
+     `drop` is for a source paragraph the venue's own structure genuinely has no
+     place for -- a previous journal's submission-metrics note, a structural
+     heading the template replaces. It is NEVER a way to drop the paper's
+     content: quote the paragraph, name the structure that leaves no slot, and
+     the checker verifies the outputs really do not carry it.
+     `{{"exceptions": []}}` when nothing needed re-wrapping, adding or dropping.
+     A missing, empty or non-matching declaration FAILS the code-side check: the
+     ledger is the machine-readable accounting, not prose commentary.
 
 @@VISUAL_INSPECTION_RULE@@
 
@@ -11459,6 +11468,31 @@ def _out_part_hashes(docx: Path) -> set:
     return hashes
 
 
+_SUP_RUN_RE = re.compile(r"<w:r\b[^>]*>([\s\S]*?)</w:r>")
+_SUP_ALIGN_RE = re.compile(r'<w:vertAlign\b[^>]*w:val="superscript"')
+_SUP_TEXT_RE = re.compile(r"<w:t\b[^>]*>([\s\S]*?)</w:t>")
+
+
+def _superscript_run_count(frag: str) -> int:
+    """How many superscript RUNS THAT CARRY TEXT one paragraph fragment holds.
+
+    An empty (or whitespace-only) superscript run is a formatting residue -- a
+    Zotero field whose result text was lost, a leftover `\\nosupersub{}` -- not
+    a citation or affiliation marker. Counting the runs themselves made a
+    package that preserved every VISIBLE marker fail ("source_superscripts": 4
+    against "output_superscripts": 1) on three empty runs, and a run whose text
+    merely contains the word "superscript" would have been counted too.
+    """
+    n = 0
+    for m in _SUP_RUN_RE.finditer(frag or ""):
+        run = m.group(1)
+        if not _SUP_ALIGN_RE.search(run):
+            continue
+        if any(t.strip() for t in _SUP_TEXT_RE.findall(run)):
+            n += 1
+    return n
+
+
 def _superscripts_by_paragraph(path: Path) -> dict:
     """{normalized paragraph text: superscript-run count} for one DOCX."""
     mod = _format_module()
@@ -11472,7 +11506,7 @@ def _superscripts_by_paragraph(path: Path) -> dict:
         return out
     for _p0, _p1, frag in mod.paragraphs(xml):
         text = re.sub(r"\s+", " ", mod.text_of(frag)).strip().lower()
-        n = frag.count("superscript")
+        n = _superscript_run_count(frag)
         if text and n:
             out[text] = max(out.get(text, 0), n)
     return out
@@ -11501,6 +11535,16 @@ def _template_ledger_exceptions(ledger: Path) -> tuple:
          "output": "<replacement paragraph>", "reason": "<template element>"}
         {"kind": "addition", "output": "<new output paragraph>",
          "reason": "<why the venue's structure requires it>"}
+        {"kind": "drop",     "source": "<source paragraph>",
+         "reason": "<the venue's structure that leaves no slot for it>"}
+
+    `drop` is the escape hatch for a source paragraph the target venue's own
+    structure genuinely has no place for (a previous journal's submission
+    metrics line, a structural heading the template replaces): it excuses ONE
+    occurrence of that paragraph from the parity multiset, and only when the
+    output really does not carry it. A source paragraph with a replacement is a
+    `rewrap` (its output must be NEW text the source did not already carry), not
+    a drop.
 
     Returns (exceptions, problems). A missing ledger yields no exceptions and no
     problem here -- the caller already fails the stage when the ledger is absent.
@@ -11536,8 +11580,9 @@ def _template_ledger_exceptions(ledger: Path) -> tuple:
                 problems.append(f"exceptions[{i}] is not an object")
                 continue
             kind = str(row.get("kind") or "").strip().lower()
-            if kind not in ("rewrap", "addition"):
-                problems.append(f"exceptions[{i}]: kind {kind!r} is not 'rewrap' or 'addition'")
+            if kind not in ("rewrap", "addition", "drop"):
+                problems.append(f"exceptions[{i}]: kind {kind!r} is not 'rewrap', 'addition' or "
+                                f"'drop'")
                 continue
             entry = {"kind": kind,
                      "source": _template_norm_para(row.get("source")),
@@ -11546,10 +11591,15 @@ def _template_ledger_exceptions(ledger: Path) -> tuple:
             if not entry["reason"]:
                 problems.append(f"exceptions[{i}] ({kind}) has no reason")
             if kind == "rewrap" and (not entry["source"] or not entry["output"]):
-                problems.append(f"exceptions[{i}] (rewrap) needs both `source` and `output`")
+                problems.append(f"exceptions[{i}] (rewrap) needs both `source` and `output` -- a "
+                                f"paragraph the venue's structure does not carry is declared as "
+                                f'{{"kind": "drop", "source": ..., "reason": ...}}')
                 continue
             if kind == "addition" and not entry["output"]:
                 problems.append(f"exceptions[{i}] (addition) needs `output`")
+                continue
+            if kind == "drop" and not entry["source"]:
+                problems.append(f"exceptions[{i}] (drop) needs `source`")
                 continue
             out.append(entry)
     return out, problems
@@ -11643,9 +11693,11 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
     Two questions decide it:
       * PARITY -- the source package's paragraph MULTISET is carried over
         exactly (every non-empty paragraph, short lines included, at least as
-        many times as in the source), except for re-wraps the session declares
-        in the machine-readable block of out/REPLACEMENT_LEDGER.md; and no
-        content-bearing output paragraph (>= TEMPLATE_LEDGER_ADD_MIN_WORDS
+        many times as in the source), except for the exceptions the session
+        declares in the machine-readable block of out/REPLACEMENT_LEDGER.md
+        (`rewrap` -- a declared replacement -- or `drop` -- a paragraph the
+        venue's own structure has no slot for, which must really be gone); and
+        no content-bearing output paragraph (>= TEMPLATE_LEDGER_ADD_MIN_WORDS
         words) exists that is neither in the source nor declared as an
         addition. A 95% threshold or a blanket allowance for short paragraphs
         is NOT enough: this package becomes the pipeline's `original`, so a
@@ -11653,21 +11705,47 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
       * TEMPLATE PROSE -- none of the template's own guide sentences/sample
         elements survives (the templates were COPIED and FILLED), while the
         template's style set is still present in every output.
+
+    The DOCUMENT set is the submission's own `.docx` files: the corpus's
+    evidence areas (the previous journal's `original_submission/` under
+    `human_review_feedback/`, `raw_data/`) are read-only INPUTS, not documents
+    to re-house, and a new journal's package need not even match the old one's
+    file names (see `_template_docs`).
     """
     out = sb / "out"
     if not out.is_dir():
         return {"ok": False, "errors": ["out/ is missing: the session produced no package"]}
     # rglob, not glob: template_package_files() copies the WHOLE tree (figures,
-    # tables, `supp/supp.docx`, ...), and the guideline prompt tells the session
-    # to re-house every document. Reading only the top level let an output that
-    # dropped a nested supplementary document pass with a vacuous 2/2 coverage.
-    # Deeper paths follow shallower ones so an exact `mainText.docx` still wins,
-    # and a session's `out/work/` scratch is never part of the package.
+    # tables, a package's own `supp/supp.docx`, ...), and the prompt tells the
+    # session to re-house every package document. Reading only the top level let
+    # an output that dropped a nested supplementary document pass with a vacuous
+    # 2/2 coverage. Deeper paths follow shallower ones so an exact
+    # `mainText.docx` still wins, and a session's `out/work/` scratch is never
+    # part of the package.
     def _template_docs(root: Path) -> list:
-        return sorted((p for p in root.rglob("*.docx")
-                       if not _is_aux_doc(p.name) and not p.name.startswith("~$")
-                       and "work" not in p.relative_to(root).parts[:-1]),
-                      key=lambda p: (len(p.relative_to(root).parts), p.as_posix()))
+        """The rewrite's DOCUMENT set: every submission .docx, and only those.
+
+        rglob (not glob) because the package's own `supp/` folder is part of it
+        -- but the corpus's EVIDENCE areas (`human_review_feedback/` with the
+        previous journal's `original_submission/`, `raw_data/`, legacy
+        `raw_figs/`) and feedback/response documents are the authors' INPUTS,
+        exactly as `is_non_manuscript_rel` defines for every other corpus scan.
+        A new journal's package need not match the old one's file set (renames,
+        files the new venue does not require), so requiring each of those
+        documents to be re-housed -- or counting their paragraphs in the parity
+        multiset -- failed a compliant session.
+        """
+        out = []
+        for p in root.rglob("*.docx"):
+            if not p.is_file() or _is_aux_doc(p.name) or p.name.startswith("~$"):
+                continue
+            rel = p.relative_to(root)
+            if "work" in rel.parts[:-1]:
+                continue
+            if is_non_manuscript_rel(rel.as_posix()):
+                continue
+            out.append(p)
+        return sorted(out, key=lambda p: (len(p.relative_to(root).parts), p.as_posix()))
 
     src_docs = _template_docs(Path(src))
     out_docs = _template_docs(out)
@@ -11720,6 +11798,7 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
     joined = " \u241f ".join(out_text.values())
     rewraps = [e for e in exceptions if e["kind"] == "rewrap"]
     additions = [e for e in exceptions if e["kind"] == "addition"]
+    drops = [e for e in exceptions if e["kind"] == "drop"]
     for e in exceptions:
         if e["kind"] == "rewrap":
             if e["source"] and e["source"] not in src_counter:
@@ -11741,6 +11820,20 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
                     f"the source package (it occurs {out_counter[e['output']]}x in the outputs "
                     f"and {src_counter.get(e['output'], 0)}x in the source), so it cannot carry "
                     f"the dropped paragraph: {e['output'][:70]!r}")
+        elif e["kind"] == "drop":
+            if e["source"] and e["source"] not in src_counter:
+                exception_problems.append(
+                    f"a declared drop's SOURCE paragraph is not in the source package: "
+                    f"{e['source'][:70]!r}")
+            elif e["source"] and out_counter.get(e["source"], 0) >= src_counter[e["source"]]:
+                # A drop has to point at a paragraph that is actually gone: a
+                # declaration against text the outputs still carry excuses
+                # nothing (the parity counter already credits it) and hides a
+                # mis-specified re-wrap, whose replacement must be NEW text.
+                exception_problems.append(
+                    f"a declared drop is not needed: the paragraph occurs "
+                    f"{out_counter.get(e['source'], 0)}x in the outputs and "
+                    f"{src_counter[e['source']]}x in the source: {e['source'][:70]!r}")
         elif e["output"] not in out_counter:
             exception_problems.append(
                 f"a declared addition is not in the outputs: {e['output'][:70]!r}")
@@ -11761,11 +11854,13 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
     declared_rewrap_sources = Counter(e["source"] for e in rewraps if e["source"])
     declared_rewrap_outputs = Counter(e["output"] for e in rewraps if e["output"])
     declared_additions = Counter(e["output"] for e in additions if e["output"])
+    declared_drops = Counter(e["source"] for e in drops if e["source"])
     missing = []
     for text in sorted(src_counter):
         want_n = src_counter[text]
         have_n = out_counter.get(text, 0)
-        deficit = want_n - have_n - declared_rewrap_sources.get(text, 0)
+        deficit = (want_n - have_n - declared_rewrap_sources.get(text, 0)
+                   - declared_drops.get(text, 0))
         if deficit > 0:
             missing.append({"text": text[:120], "source_count": want_n,
                             "output_count": have_n, "unaccounted": deficit})
@@ -11782,7 +11877,8 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
                     f"paragraph occurrence(s) are missing or reworded and no matching re-wrap is "
                     f"declared in out/REPLACEMENT_LEDGER.md (e.g. {missing[0]['text'][:70]!r}); "
                     f"every source paragraph -- short ones included -- must appear in the "
-                    f"outputs at least as many times as in the source, or be declared")
+                    f"outputs at least as many times as in the source, or be declared as a "
+                    f"re-wrap or drop")
     unaccounted_additions, short_additions = [], 0
     for text in sorted(out_counter):
         extra = (out_counter[text] - src_counter.get(text, 0)
@@ -11884,9 +11980,14 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
         errs.append("superscript runs were dropped (affiliation numbers / footnote markers): "
                     + json.dumps(sub_lost[:4])[:300])
     # STYLE PRESERVATION: every style the SOURCE content uses must still be used
-    # by the output (the placeholders' styles carry the content), and the output
-    # may not invent a style the template does not define. This is a
-    # TEMPLATE-conformance rule: without an official template the guideline
+    # by the output for the styles the TEMPLATE'S OWN documents use (the
+    # placeholders' styles carry the content), and the output may not invent a
+    # style the template does not define. A source package authored for ANOTHER
+    # journal carries that journal's style names (a `Bibliography` reference
+    # style, its own title style, a style the template defines but never uses):
+    # demanding those back would contradict the `invented` check below -- the
+    # output would have to use a style the template's own grammar does not. This
+    # is a TEMPLATE-conformance rule: without an official template the guideline
     # chain may legitimately restyle the content, so only the content parity
     # checks above apply.
     style_use_gap = []
@@ -11895,13 +11996,15 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict) -> dict:
             target = mapping.get(_src_key(doc))
             if target is None:
                 continue
-            lost = sorted(_style_usage(doc) - _style_usage(target))
+            tpl_for_doc = template_for_package_file(target, templates or {})
+            required = _style_usage(Path(tpl_for_doc)) if tpl_for_doc else set()
+            lost = sorted((_style_usage(doc) - _style_usage(target)) & required)
             if lost:
                 style_use_gap.append({"file": doc.name, "styles_lost": lost[:8]})
         if style_use_gap:
-            errs.append("the outputs no longer USE the styles the source content carried (each "
-                        "placeholder keeps its style while its text is replaced, and surplus "
-                        "samples are duplicated/deleted, never re-tagged): "
+            errs.append("the outputs no longer USE the styles this source content carried in "
+                        "the template (each placeholder keeps its style while its text is "
+                        "replaced, and surplus samples are duplicated/deleted, never re-tagged): "
                         + json.dumps(style_use_gap)[:300])
     invented = []
     for doc in out_docs:

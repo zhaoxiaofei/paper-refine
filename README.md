@@ -286,9 +286,14 @@ replacement in `out/REPLACEMENT_LEDGER.md`*. One agent session runs on it (`--ag
 `--timeout`). The deliverable is then verified code-side, venue-agnostically with an EXACT
 paragraph-multiset parity check: every non-empty source paragraph, short lines included, must
 appear in the outputs at least as many times as in the source, unless the session declares a
-machine-readable `rewrap` exception (verbatim source + replacement + reason) in a fenced
-`json` block of `out/REPLACEMENT_LEDGER.md`; a content-bearing (≥ 5-word) output paragraph absent
-from the source must be declared as an `addition`. The former 95 % coverage floor, the 5-word
+machine-readable exception (verbatim paragraphs + reason) in a fenced `json` block of
+`out/REPLACEMENT_LEDGER.md`: `rewrap` (a source paragraph and its replacement) or -- only for a
+source paragraph the target venue's own structure has no place for -- `drop`; a content-bearing
+(≥ 5-word) output paragraph absent from the source must be declared as an `addition`. The
+document set the parity is measured over is the submission's own DOCX files: the corpus's
+evidence areas (`human_review_feedback/`, including the previous journal's
+`original_submission/`, and `raw_data/`) are inputs whose file set a new journal's package need
+not match, so they are never required to be re-housed. The former 95 % coverage floor, the 5-word
 source cutoff and the joined-text fallback are gone, because this package becomes the pipeline's
 `original`. None of the template's own guide sentences may survive (the template was *filled*,
 not paraphrased), the template's style set must still be present, and the template's
