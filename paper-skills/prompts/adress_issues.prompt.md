@@ -527,6 +527,47 @@ L3 logic jumps · L4 coherence · L5 unexplained prerequisites · L6 redundancy 
 L7 non-academic wording · L8 non-written register · L9 stiff/translated phrasing ·
 L10 grammar · L11 typos/punctuation. Iterate at most twice, then stop and report.
 
+## E9b — The whitespace/grammar/typography sweep (every package-producing stage)
+
+The mechanical half of this pass is repaired by the orchestrator's normalizer
+when the package is fingerprinted; do NOT fight it and do NOT re-introduce it:
+
+* a stray empty paragraph that the venue's own template does NOT prescribe
+  (`FMT-S8` a blank line attached to a heading, `FMT-S6` a run beyond the cap).
+  TEMPLATE-PRESCRIBED BLANKS STAY: the spacer the journal's Word template
+  carries above the title, and every slot named in `format_policy.json`, is
+  intended — never delete one and never "normalize" it away;
+* a space that renders at the start or end of a visual line (`FMT-P4`: the
+  correspondence e-mail one space to the right, a dangling trailing space);
+* a doubled article/preposition (`FMT-G1`);
+* an embedded image delivered off its own width-to-height ratio (`FMT-IM1`) —
+  the orchestrator restores the ratio from the image's own pixels; never
+  hand-resize an image, your extent would be overwritten.
+
+The half the orchestrator reports but does not edit is YOURS — one targeted
+edit per instance, ledgered under the M20 row, never a blanket replacement:
+
+* doubled spaces, space-before-punctuation and bracket spacing where the
+  review did NOT record an equation/notation exception (an intentional
+  alignment like `G(y)  =  ...` stays);
+* zero-width/bidi marks the review marked safe to remove;
+* a possible lowercase sentence start (`FMT-G2`) the review confirmed — unless
+  the token is a unit, gene, chemical or species name, which the review
+  records as its disposition;
+* a missing space after punctuation (`FMT-G3`) where the token is not a
+  subscript/notation;
+* mixed direct fonts (`FMT-T10a`) and spacing/indentation/alignment drift
+  inside one paragraph style (`FMT-T10b..T10d`): align the outlier to the
+  paragraph style (remove the direct override) or apply the convention
+  consistently, and a heading-level jump (`FMT-T10e`): demote/restore the
+  missing level.
+
+Re-run `python paper_docx_format.py scan <package dir> --policy
+format_policy.json` after the edits; the package you deliver must show no
+mechanical row and no new editorial instance. Record the pass in
+`work/R6_language.md` as its own steps (`W1 whitespace`, `W2 fonts/paragraphs`,
+`W3 headings`) with ONE row per edit and the usual coverage table.
+
 ## E10 — The integration difference ledger (one row per difference, both levels)
 
 When merging donors into a copy, `integrated/DIFF_LEDGER.md` carries:

@@ -5639,7 +5639,19 @@ M20_REVIEW_SWEEP = f"""3c. The PIPELINE-MANDATED OOXML formatting sweep M20 (alw
    (Zotero bibliography/citation fields are field-protected: report them as style-level items,
    fixable through the CSL style or by unlinking the fields in the submission copy), missing or
    inconsistent journal italics, mixed hyperlink/plain URL and email treatments, mixed
-   straight/curly quotation marks and em-dash density. Give M20 its own coverage row, exactly
+   straight/curly quotation marks and em-dash density; the whitespace/grammar/skeleton families:
+   a stray empty paragraph that is NOT prescribed by the venue's own template (FMT-S8 a blank
+   line attached to a heading, FMT-S6 a run beyond the cap), a space that renders at the start
+   or end of a visual line (FMT-P4: the correspondence e-mail one space to the right, a
+   dangling trailing space), doubled spaces / bracket spacing / zero-width marks (FMT-P3), a
+   doubled word (FMT-G1), a possible lowercase sentence start (FMT-G2), a missing space after
+   punctuation (FMT-G3), mixed direct fonts or spacing/indentation/alignment drift inside one
+   style (FMT-T10a..T10d), a heading-level jump (FMT-T10e), and an embedded image rescaled off
+   its own width-to-height ratio (FMT-IM1). TEMPLATE-PRESCRIBED BLANKS ARE NOT DEFECTS: the
+   policy carries the journal template's own empty-paragraph slots and anything before the
+   first non-empty paragraph (the spacer the template carries above the title), so those blanks
+   are never reported or deleted -- dispose such a row as `OK -- template-prescribed slot`,
+   never rewrite the template's own chrome. Give M20 its own coverage row, exactly
    like the skill's sweeps. The mechanical rows are REPAIRED by the orchestrator before the
    candidate is fingerprinted ({M20_FIX_CMD}); the editorial rows (em-dash reduction, quote
    style, journal-italic policy) are findings for the revision/integration arms. M20 is
@@ -5651,36 +5663,72 @@ M20_REVIEW_SWEEP = f"""3c. The PIPELINE-MANDATED OOXML formatting sweep M20 (alw
 M20_REVISE_RULE = f"""OOXML formatting uniformity (check id M20; see the formatting sweep): the
      mechanical defects (break-only paragraph/blank page, legend spacing, heading keepNext,
      running head on the title page, unintended italics outside Zotero fields, mixed
-     hyperlink/plain URL+email treatments, proofing markers) are normalized automatically on the
-     package you deliver -- do not fight them, and do not re-introduce them. Fix the EDITORIAL
-     rows yourself: rewrite parenthetical em-dashes as commas/parentheses, make the quotation
-     style uniform, keep journal titles italic only in the reference list, and keep emails/URLs in
-     ONE treatment. Re-scan with `{M20_SCAN_CMD}` before finishing, dispose every M20 row of the
-     review artifact, and record each formatting edit in CHANGELOG.md under M20. Formatting
-     changes are allowed here without touching meaning (this is the formatting exception to E1);
-     never change scientific content for a formatting row.
+     hyperlink/plain URL+email treatments, proofing markers, a stray empty paragraph that is not
+     template-prescribed (FMT-S6/FMT-S8), a space that renders at the start/end of a line
+     (FMT-P4), a doubled word (FMT-G1), and an embedded image rescaled off its own aspect ratio
+     (FMT-IM1)) are normalized automatically on the
+     package you deliver -- do not fight them, and do not re-introduce them. TEMPLATE-PRESCRIBED
+     BLANKS STAY: never delete an empty paragraph the venue's own template carries (the spacer
+     above the title, a placeholder slot between two headings; `format_policy.json` names them).
+     Fix the EDITORIAL rows yourself: rewrite parenthetical em-dashes as commas/parentheses, make
+     the quotation style uniform, keep journal titles italic only in the reference list, keep
+     emails/URLs in ONE treatment; clean the real doubled spaces / space-before-punctuation /
+     bracket-spacing / zero-width instances the scan reports (the review's `OK` dispositions name
+     the equation and notation exceptions -- leave those exactly as recorded); fix any possible
+     lowercase sentence start the scan or the review flagged; align mixed direct fonts and
+     spacing/indentation/alignment drift to the paragraph style, and repair heading-level jumps.
+     Do not fix an image by hand: the orchestrator restores the aspect ratio from the image's own
+     pixels and a hand-resized extent will be overwritten. Re-scan with `{M20_SCAN_CMD}` before
+     finishing, dispose every M20 row of the review artifact, and record each formatting edit in
+     CHANGELOG.md under M20. Formatting changes are allowed here without touching meaning (this
+     is the formatting exception to E1); never change scientific content for a formatting row.
 
 @@DISPLAY_RULE@@"""
 M20_INTEGRATE_RULE = f"""OOXML formatting (check id M20) is a difference class of its own: the
      orchestrator normalizes the mechanical rows on the integrated package, and the editorial rows
-     (em-dash density, mixed quotation marks, journal-italic policy, email/URL treatment) are
-     ported from a donor when the donor is the consistent one -- never merge two documents that
-     disagree on treatment. Re-scan with `{M20_SCAN_CMD}` and record the formatting state in
-     integrated/CHANGELOG.md under M20.
+     (em-dash density, mixed quotation marks, journal-italic policy, email/URL treatment, doubled
+     spaces and bracket spacing, a possible lowercase sentence start, mixed direct fonts,
+     paragraph spacing/indentation/alignment drift, heading-level jumps) are ported from a donor
+     when the donor is the consistent one -- never merge two documents that disagree on treatment.
+     Stray empty paragraphs and spaces that render at a line edge are the normalizer's job, but
+     YOU must not re-introduce them, and a template-prescribed blank (the venue template's own
+     slots in `format_policy.json`) is never a difference and never gets deleted. An embedded
+     image off its own width-to-height ratio (FMT-IM1) is restored by the
+     orchestrator; port the image file and its extents together or not at all. Re-scan with
+     `{M20_SCAN_CMD}` and record the formatting state in integrated/CHANGELOG.md under M20.
 
 @@DISPLAY_RULE@@"""
 M20_REWRITE_RULE = f"""OOXML formatting (check id M20) is REPORTED here, not fixed: a rewrite must
      not introduce a break-only paragraph, a second URL/email treatment, a different legend
-     spacing or a new quotation style; keep the base's formatting conventions. Re-scan your own
-     package with `{M20_SCAN_CMD}` before finishing. If the base already carries formatting
-     defects, surface them in rewritten/REWRITE_REPORT.md under "PROBLEMS SURFACED" -- the
-     revision/integration stages and the orchestrator's normalizer own the fix.
+     spacing or a new quotation style, a stray empty paragraph (FMT-S6/FMT-S8), a space at a
+     line edge (FMT-P4), a
+     doubled word or an off-ratio image size (FMT-IM1); keep the base's formatting conventions (a
+     template-prescribed blank is a convention, not a defect). Re-scan your own package with
+     `{M20_SCAN_CMD}` before finishing. If the base already carries formatting defects, surface
+     them in rewritten/REWRITE_REPORT.md under "PROBLEMS SURFACED" -- the revision/integration
+     stages and the orchestrator's normalizer own the fix.
 
 @@DISPLAY_RULE@@"""
 M20_JUDGE_SWEEP = """PLUS the pipeline-mandated OOXML formatting sweep M20 (derive it yourself:
    you are handed NO orchestrator artifact -- scan your own blinded views with
    `python paper_docx_format.py scan target/` (and field/<label>/ when a comparison needs it) and
-   record the rows in judge_review/artifacts/M20_formatting.md). Formatting differences are a LOW-priority,
+   record the rows in judge_review/artifacts/M20_formatting.md; pass --policy format_policy.json
+   when it is at your sandbox root). The scan covers the classes the text-only corpus drops:
+   break-only paragraphs, header-on-title-page, tracked changes/proofing marks, legend spacing,
+   heading keepNext/style drift, italics and URL/email treatments, quotation marks, em-dash
+   density, PLUS the whitespace/grammar/skeleton families: a stray empty paragraph that is NOT
+   template-prescribed (a blank line attached to a heading, a run beyond the cap; FMT-S6/S8), a
+   space rendering at the start or end of a line (FMT-P4), doubled spaces / bracket spacing /
+   zero-width marks (FMT-P3), a doubled word (FMT-G1), a possible lowercase sentence start
+   (FMT-G2), a missing space after punctuation (FMT-G3), mixed direct fonts and
+   spacing/indentation/alignment drift inside one style (FMT-T10a..T10d), a heading-level jump
+   (FMT-T10e) and an embedded image delivered off its own width-to-height ratio (FMT-IM1).
+   TEMPLATE-PRESCRIBED BLANKS ARE NOT DIFFERENCES: the venue template's own empty-paragraph
+   slots (and anything before the first non-empty paragraph, the spacer above the title) are
+   intended; never score a version down for keeping them, and never expect a version to delete
+   them. A RESIDUAL mechanical row (the orchestrator's normalizer failed or a version re-introduced
+   it) is a real defect of the version that carries it, not a difference to ignore.
+   Formatting differences are a LOW-priority,
    formatting-tier difference class: a version whose formatting is UNIFORM (one URL/email
    treatment, consistent quotation marks, consistent legend spacing, no blank page) may be
    preferred to one that is not by at most +/-1, and formatting never decides a comparison on its
@@ -5688,7 +5736,8 @@ M20_JUDGE_SWEEP = """PLUS the pipeline-mandated OOXML formatting sweep M20 (deri
    decide only when every other tier (including writing) is zero; it can never outweigh a
    correctness, preservation, completeness, consistency or writing difference. Mechanical defects
    have already been normalized by the orchestrator before the view you
-   read was built, so do not manufacture differences out of them. The TEXT-level consistency rows
+   read was built, so do not manufacture differences out of them (but a residual row IS such a
+   difference -- report it). The TEXT-level consistency rows
    (citation dialect, US/UK spelling, attributive hyphenation) are deliberately NOT pre-normalized:
    a corpus that completed a convention where the other did not is a real CONSISTENCY-tier
    difference (second in the priority order) and is scored as one.
@@ -6312,7 +6361,10 @@ defect the same way; only the deliverable differs):
     cosmetic formatting row -- content missing from the delivered artifact is @@T_COMPLETENESS@@
     (one displaced page/figure = minor, several pages or a whole section = major, an artifact with
     no usable copy of its content = fatal), and an artifact that is corrupt or not what the authors believe they
-    submitted is @@T_CORRECTNESS@@. A ONE-OFF stray empty line, a spacing slip, an
+    submitted is @@T_CORRECTNESS@@. A figure embedded at a size whose width-to-height ratio does
+    not match its own image file is artifact damage too: the delivered figure no longer shows the
+    geometry its source encodes (a visibly distorted figure is at least major; a distortion that
+    changes the apparent data is correctness-tier). A ONE-OFF stray empty line, a spacing slip, an
     italic/quotation treatment or a mixed URL style is COSMETIC (0) -- it becomes
     @@T_CONSISTENCY@@ when the same convention is broken repeatedly instead -- and a
     @@T_FORMATTING@@ row is graded by the same four rungs (a cosmetic slip that is filed at all
@@ -7656,6 +7708,21 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
    an `AU-` id and the full finding shape (location, category, check, severity, evidence quote,
    problem). Do not merely restate the reviewer's rows: add the finding the reviewer should have
    written. Rows the reviewer disposed with a rule-specific reason stand.
+2b. RE-DERIVE THE FORMATTING/WHITESPACE STATE YOURSELF. Run the public scanner on base/ with the
+   venue policy (`python paper_docx_format.py scan base --policy format_policy.json`) and check
+   the MECHANICAL classes the review's seeded work/FORMAT_SCAN.json records: break-only
+   paragraph/blank page, stray empty paragraph (FMT-S6/S8: a blank line attached to a heading, a
+   run beyond the cap), a space rendering at the start/end of a visual line (FMT-P4), a doubled word, an embedded
+   image off its own width-to-height ratio (FMT-IM1). The orchestrator repairs these before the review, so
+   a row that is STILL present in base/ is a real defect the revisers must fix -- raise it as
+   your own `AU-` finding (check `M20`) with the rule id in the evidence. Also attack the
+   EDITORIAL formatting rows the reviewer closed: for a doubled space / space-before-punctuation
+   / bracket-spacing / zero-width mark / possible lowercase sentence start / mixed direct font /
+   paragraph spacing, indentation or alignment drift / heading-level jump, "no journal rule" and
+   "editorial preference" are boilerplate, while "equation spacing is intentional" or "the
+   venue template prescribes this blank slot" is a rule-specific reason. A blank the venue
+   template's own slots (format_policy.json) prescribe -- the spacer above the title, a
+   placeholder between two headings -- is INTENDED: never raise it as a finding.
 3. CHECK THE COVERAGE GAPS the reviewer cannot see: a row whose disposition cell is EMPTY; a
    `searchable` hand-off marker that was carried forward although work/PLACEHOLDER_LOOKUP.json
    answers it (verdict found/absent) or work/IDENTIFIERS.md verifies/refutes the locator; a number
@@ -11139,6 +11206,13 @@ def format_policy_of(ctx: Ctx) -> dict:
     rows for it. An operator's own `format_policy.tables` / `.figures` in
     `pipeline_config.json` wins over the profile's block, exactly like every
     other policy key.
+
+    The policy also carries the venue TEMPLATE's own blank-paragraph slots
+    (`empty_paragraph_slots`), derived from the journal's official Word
+    template(s), so the stray-empty-paragraph rule can tell a template spacer
+    (the blank the template carries above the title, a placeholder between two
+    headings) from an author's extra blank line. No template -> no slots, and
+    the rule still exempts anything before the first non-empty paragraph.
     """
     mod = _format_module()
     policy = dict(getattr(mod, "POLICY_DEFAULTS", {}) or {}) if mod else {}
@@ -11147,7 +11221,39 @@ def format_policy_of(ctx: Ctx) -> dict:
     for key, block in _venue_display_blocks(ctx).items():
         if key not in configured:
             policy[key] = copy.deepcopy(block)
+    if "empty_paragraph_slots" not in configured:
+        policy["empty_paragraph_slots"] = _venue_empty_paragraph_slots(ctx)
     return policy
+
+
+def _venue_empty_paragraph_slots(ctx: Ctx) -> list:
+    """The signature triples of the venue templates' own empty paragraphs.
+
+    Memoized like `_venue_display_blocks`: reading the small template packages
+    is cheap but `format_policy_of` runs on every scan and postcheck. A venue
+    with no official Word template contributes no slots.
+    """
+    cfg = _ctx_cfg(ctx)
+    key = (id(cfg), id(cfg.get("venue_profile")), venue_id_of(ctx))
+    cached = getattr(ctx, "_venue_empty_slots", None)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    slots = []
+    mod = _format_module()
+    fn = getattr(mod, "empty_paragraph_slots_from_template", None) if mod else None
+    if fn is not None:
+        try:
+            for p in (venue_word_templates(ctx) or {}).values():
+                for sig in fn(p) or []:
+                    if sig not in slots:
+                        slots.append(sig)
+        except Exception:                                     # noqa: BLE001 -- never gate setup
+            slots = []
+    try:
+        ctx._venue_empty_slots = (key, slots)
+    except Exception:                                         # noqa: BLE001 -- stub ctx
+        pass
+    return slots
 
 
 def _venue_display_blocks(ctx: Ctx) -> dict:
@@ -11373,6 +11479,30 @@ def fix_docx_in_place(path: Path, policy: dict, template: Path = None,
             base = tpl_tmp
             changes.append("venue template: "
                            + "; ".join(template_report.get("changes") or []))
+            # The template step owns the typography and strips the direct
+            # font/size/spacing overrides that hid the template's styles -- which
+            # can remove a mechanical repair the pass above had just applied
+            # (the legend-spacing policy vs the template's own Caption style).
+            # Re-run the mechanical pass ON the restyled package so the file the
+            # pipeline delivers satisfies the template AND the policy, and let
+            # the second pass's verification be the one the report carries.
+            redo = path.with_name(f".{path.name}.paperfmt2{os.getpid()}.tmp")
+            try:
+                rep2 = mod.fix_package(base, redo, policy)
+            except Exception as e:                                # noqa: BLE001
+                rep2 = {"ok": False, "changes": [],
+                        "error": f"{type(e).__name__}: {e}"}
+            if rep2.get("changes") and rep2.get("ok"):
+                base = redo
+                changes.extend(rep2.get("changes") or [])
+                rep = rep2
+            else:
+                with contextlib.suppress(OSError):
+                    redo.unlink()
+                if rep2.get("changes"):
+                    changes.append("the post-template mechanical pass could not be "
+                                   "verified and was skipped ("
+                                   + str(rep2.get("error") or "verification failed") + ")")
         else:
             with contextlib.suppress(OSError):
                 tpl_tmp.unlink()
@@ -12804,9 +12934,17 @@ def _seed_review_format_artifact(ctx: Ctx, sb: Path) -> dict:
         "",
         "Mechanical rows (break-only paragraph/blank page, legend spacing, heading keepNext, "
         "running head on the title page, unintended italics outside Zotero fields, mixed "
-        f"hyperlink/plain URL+email treatments, proofing markers) are repaired by the orchestrator "
-        f"before judging (`{M20_FIX_CMD}`); the editorial rows (em-dash density, quotation style, "
-        "journal-italic policy) are findings for the revision/integration arms.",
+        "hyperlink/plain URL+email treatments, proofing markers, a stray empty paragraph that is "
+        "not template-prescribed, a space at a visual line edge, a doubled word, an image "
+        f"delivered off its own aspect ratio) are repaired by the orchestrator before judging "
+        f"(`{M20_FIX_CMD}`); the editorial rows (em-dash density, quotation style, "
+        "journal-italic policy, doubled spaces / bracket spacing / zero-width marks, a possible "
+        "lowercase sentence start, missing space after punctuation, mixed direct fonts, "
+        "paragraph spacing/indentation/alignment drift, heading-level jumps) are findings for "
+        "the revision/integration arms. The venue template's own blank-paragraph slots travel in "
+        "`format_policy.json`: a blank the template prescribes (the spacer above the title, a "
+        "placeholder between two headings) is never a row here, and dispositioning one as "
+        "`OK — template-prescribed slot` is the correct close.",
         "",
         "DISPOSITION BAR — a `tier=finding` row is a defect an editor or a copyeditor would "
         "raise, so its disposition must be about THAT row's own bar: a finding id, or "
@@ -13433,12 +13571,21 @@ def seed_format_policy_file(ctx: Ctx, sb: Path) -> Path:
     <dir> --policy format_policy.json`) cannot know a venue's table/figure rule:
     it is profile DATA, so it travels with the sandbox. The file sits at the
     sandbox ROOT (never inside `review/`, which `leftovers_present` reads as
-    agent work), carries only the `tables`/`figures` blocks, and is identical
-    for every session of a root -- it is venue-level, not derived from any
-    package, so handing it to a judge blinds nothing.
+    agent work), carries only venue-level data (the `tables`/`figures` blocks,
+    the template's `empty_paragraph_slots`, the image-aspect tolerance), and is
+    identical for every session of a root -- it is venue-level, not derived
+    from any package, so handing it to a judge blinds nothing.
     """
     p = sb / "format_policy.json"
     policy = format_policy_of(ctx)
+    # The venue template's own blank-paragraph slots travel too: the session's
+    # own scan must exempt exactly the blanks the journal's template prescribes
+    # (the spacer above the title, a placeholder slot between two headings),
+    # never flag them as stray.
+    body = {"tables": copy.deepcopy(policy.get("tables") or {}),
+            "figures": copy.deepcopy(policy.get("figures") or {}),
+            "empty_paragraph_slots": copy.deepcopy(policy.get("empty_paragraph_slots") or []),
+            "image_aspect_tolerance": policy.get("image_aspect_tolerance", 0.02)}
     # tmp + rename, NOT write_json_atomic's extra fsync: this file is a pure
     # INPUT every session reads, and the pipeline seeds one per session
     # materialization. On this box each fsync costs ~0.08 s (measured: the
@@ -13448,9 +13595,7 @@ def seed_format_policy_file(ctx: Ctx, sb: Path) -> Path:
     # truncated file, and the content is reproducible from the profile.
     tmp = tmp_path_for(p)
     try:
-        tmp.write_text(json.dumps({"tables": copy.deepcopy(policy.get("tables") or {}),
-                                   "figures": copy.deepcopy(policy.get("figures") or {})},
-                                  ensure_ascii=False), encoding="utf-8")
+        tmp.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, p)
     except BaseException:
         with contextlib.suppress(OSError):

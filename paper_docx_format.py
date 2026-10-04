@@ -51,6 +51,25 @@ caption / caption on the wrong side / item before its area -- with
 `policy[...].special` naming the items the venue itself treats differently
 (a key-resources table inside the methods, a graphical abstract). A policy that
 declares no rule for a kind reports nothing for it.
+
+The same policy carries the VENUE TEMPLATE's own blank-line slots
+(`policy["empty_paragraph_slots"]`, derived from the journal's official Word
+template by the pipeline): an empty paragraph whose (own, previous, next) style
+signature is one of them is template chrome (a spacer before the title, a
+placeholder between two headings) and is never reported or deleted. Stray empty
+paragraphs that are NOT prescribed -- a lone blank line between a section head
+and its first subsection, a run longer than `max_empty_paragraph_run` -- are
+`FMT-S8`/`FMT-S6` and the fixer deletes them. The text-hygiene family catches
+what a text-only corpus cannot see: a space that renders at the start or end of
+a visual line (the correspondence e-mail one space to the right, a dangling
+trailing space) is `FMT-P4` and mechanical; doubled spaces, bracket spacing and
+zero-width marks are `FMT-P3`; a doubled word is `FMT-G1`; a possible lowercase
+sentence start is `FMT-G2`; a missing space after punctuation is `FMT-G3`. The
+style-convention family (`FMT-T10a`..`FMT-T10e`) reports mixed direct fonts,
+spacing/indent/alignment drift inside one style, and heading numbering/level
+anomalies for the editing arms. Embedded images are checked against their own
+pixels: a figure rescaled without its aspect ratio is `FMT-IM1` and the fixer
+restores the ratio in `wp:extent`/`a:ext` (and the VML size).
 """
 from __future__ import annotations
 
@@ -59,6 +78,7 @@ import json
 import posixpath
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -98,6 +118,18 @@ POLICY_DEFAULTS = {
     "url_style": "plain",               # plain | keep-links
     "max_em_dashes_per_1000": 2.0,
     "max_empty_paragraph_run": 1,
+    # Empty paragraphs the VENUE's own template prescribes -- signature
+    # triples [own style, previous non-empty style, next non-empty style],
+    # styles normalised to `H1`..`H9` when they are heading styles. Derived
+    # from the official Word template by the pipeline (one list for the main
+    # and the supplementary template) and carried into every session's
+    # `format_policy.json`; [] means "nothing is known to be prescribed", and
+    # an empty paragraph BEFORE the first non-empty paragraph (the title-page
+    # spacer above a title) is always exempt.
+    "empty_paragraph_slots": [],
+    # An embedded image whose delivered width/height ratio differs from its own
+    # pixel ratio by more than this is `FMT-IM1` and is corrected.
+    "image_aspect_tolerance": 0.02,
     "strip_proofing_markers": True,
     "unlink_zotero_fields": False,
     "blank_page_tolerance": 0,
@@ -244,7 +276,11 @@ def has_drawing(frag: str) -> bool:
 
 
 def ppr_of(frag: str) -> str | None:
-    m = re.search(r"<w:pPr(?=[\s>]).*?</w:pPr>|<w:pPr(?=[\s>])[^>]*/>", frag, re.S)
+    # The self-closing form comes FIRST: `python-docx` writes an empty
+    # properties element as `<w:pPr/>`, and the old single-lookahead pattern
+    # matched it as "no pPr at all" -- every later insertion then ADDED a
+    # second `<w:pPr>` (invalid OOXML) instead of filling the existing one.
+    m = re.search(r"<w:pPr(?=[\s/>])[^>]*/>|<w:pPr(?=[\s/>]).*?</w:pPr>", frag, re.S)
     return m.group(0) if m else None
 
 
@@ -260,7 +296,7 @@ def first_section_props(xml: str) -> str | None:
 
 
 def rpr_of(frag: str) -> str | None:
-    m = re.search(r"<w:rPr(?=[\s>]).*?</w:rPr>|<w:rPr(?=[\s>])[^>]*/>", frag, re.S)
+    m = re.search(r"<w:rPr(?=[\s/>])[^>]*/>|<w:rPr(?=[\s/>]).*?</w:rPr>", frag, re.S)
     return m.group(0) if m else None
 
 
@@ -792,6 +828,33 @@ SPELLING_PAIRS = (("tumour", "tumor"), ("tumours", "tumors"), ("tumoural", "tumo
                   ("modelling", "modeling"), ("labelled", "labeled"),
                   ("catalogue", "catalog"), ("acknowledgement", "acknowledgment"))
 
+
+def spelling_minority_targets(prose_texts: list) -> dict:
+    """{minority_form: target_form} for every mixed US/UK spelling pair.
+
+    The document's own majority decides. On an exact count tie the form that
+    occurs FIRST in the document is the target -- a deterministic choice, so a
+    1:1 mix (`modelling` x1 vs `modeling` x1) no longer produces a mechanical
+    row the fixer cannot clear (that tie made the whole file's repairs fail
+    their self-verification and the original was kept).
+    """
+    blob = "\n".join(prose_texts)
+    out = {}
+    for a, b in SPELLING_PAIRS:
+        ca = len(re.findall(rf"\b{re.escape(a)}\b", blob, re.I))
+        cb = len(re.findall(rf"\b{re.escape(b)}\b", blob, re.I))
+        if not (ca and cb):
+            continue
+        if ca != cb:
+            out[a if ca < cb else b] = a if ca > cb else b
+            continue
+        first_a = re.search(rf"\b{re.escape(a)}\b", blob, re.I)
+        first_b = re.search(rf"\b{re.escape(b)}\b", blob, re.I)
+        pa = first_a.start() if first_a else len(blob)
+        pb = first_b.start() if first_b else len(blob)
+        out[b if pa <= pb else a] = a if pa <= pb else b
+    return out
+
 # Hyphenated compounds whose ATTRIBUTIVE use must be hyphenated. The noun use
 # ("the copy number of a locus") is correct without a hyphen and is untouched.
 HYPHEN_COMPOUNDS = (("copy-number", "copy number"), ("single-cell", "single cell"),
@@ -870,6 +933,11 @@ FINDING_TIER_RULES = {
     "FMT-T8f",   # indentation convention broken between sibling paragraphs/captions
     "FMT-T8g",   # the front page is split by a rendered page break (keywords on page 2)
     "FMT-T8h",   # the cover letter exceeds its two-page budget
+    # Text hygiene and embedded-artifact integrity: a doubled word is a typo an
+    # editor raises, and an image delivered off its own aspect ratio changes the
+    # geometry the figure shows.
+    "FMT-G1",    # a doubled article/preposition ("the the")
+    "FMT-IM1",   # an embedded image rescaled without its aspect ratio
     # The venue's own TABLE rule (declared in the profile, never invented here):
     # a table without its caption, a caption on the wrong side, a table before
     # the tables area. An editor/copyeditor raises all three, so they are
@@ -2417,13 +2485,17 @@ def variant_rows(paras: list, is_ref: list) -> list:
     rows = []
     prose = [(i, t) for i, t in enumerate(paras)
              if not (i < len(is_ref) and is_ref[i])]
+    targets = spelling_minority_targets([t for _i, t in prose])
     for a, b in SPELLING_PAIRS:
         ca = sum(len(re.findall(rf"\b{re.escape(a)}\b", t, re.I)) for _i, t in prose)
         cb = sum(len(re.findall(rf"\b{re.escape(b)}\b", t, re.I)) for _i, t in prose)
         if ca and cb:
+            target = targets.get(a) or targets.get(b) or ""
             rows.append({"rule": "FMT-T8d", "severity": "medium",
                          "evidence": f"spelling variants in body text: {a!r} x{ca} and "
-                                     f"{b!r} x{cb}",
+                                     f"{b!r} x{cb}"
+                                     + (f" (tie; the first occurrence wins: {target!r})"
+                                        if ca == cb and target else ""),
                          "detail": "one spelling per submission (policy "
                                    "term_spelling='dominant' normalizes the minority form "
                                    "outside the reference list)", "protected": False})
@@ -2628,6 +2700,11 @@ def style_survey(xml: str, styles: dict) -> dict:
 def _fix_kind(rule: str, policy: dict) -> str:
     if rule in ("FMT-S1", "FMT-T2a", "FMT-T2b", "FMT-T3a"):
         return "mechanical"
+    if rule in ("FMT-S6", "FMT-S8",          # stray empty paragraphs (template-aware)
+                "FMT-P4",                    # a space at a visual line edge
+                "FMT-G1",                    # a doubled article/preposition
+                "FMT-IM1"):                  # an image rescaled off its own ratio
+        return "mechanical"
     if rule == "FMT-S3":
         return "mechanical" if policy["title_page_header"] == "suppress" else "policy"
     if rule == "FMT-S5":
@@ -2661,7 +2738,8 @@ def _fix_kind(rule: str, policy: dict) -> str:
 
 MECHANICAL_RULES = {"FMT-S1", "FMT-S3", "FMT-S5", "FMT-T1", "FMT-T2a", "FMT-T2b",
                     "FMT-T3a", "FMT-T3b", "FMT-T6a", "FMT-T6b", "FMT-T6c", "FMT-T6f",
-                    "FMT-T6g", "FMT-T7a", "FMT-T7b", "FMT-T8a", "FMT-T8d", "FMT-T8e"}
+                    "FMT-T6g", "FMT-T7a", "FMT-T7b", "FMT-T8a", "FMT-T8d", "FMT-T8e",
+                    "FMT-S6", "FMT-S8", "FMT-P4", "FMT-G1", "FMT-IM1"}
 
 
 # ---- layout consistency and page budgets (rules FMT-T8f/T8g/T8h) ----------
@@ -3266,7 +3344,736 @@ def cover_letter_page_row(path: Path, pages, source: str) -> dict:
             "fix": "manual", "protected": False}
 
 
-def analyse_document(xml: str, styles: dict, policy: dict, doc: str) -> dict:
+# ---- stray empty paragraphs (template-aware) --------------------------------
+# A text-only corpus cannot see a blank paragraph at all (the converter keeps
+# only non-empty lines), so a stray blank line between "Materials and Methods"
+# and its first subsection shipped through two rounds. The rule below separates
+# the blanks a VENUE TEMPLATE prescribes (its own empty paragraphs -- the
+# front-matter spacer above the title, a placeholder slot between two headings)
+# from the ones an author or a converter introduced. Prescribed slots travel in
+# `policy["empty_paragraph_slots"]`: signature triples of (own style, previous
+# non-empty paragraph's style, next non-empty paragraph's style), heading styles
+# normalised to `H1`..`H9` so a template's `Heading 1` matches a manuscript's
+# `Heading1`.
+
+_HEADING_STYLE_RE = re.compile(r"heading[\s_-]*([1-9])\b", re.I)
+
+
+def _para_style(para: str) -> str:
+    return elem_val(ppr_of(para), "pStyle") or ""
+
+
+def _style_kind(style: str) -> str:
+    """`H<n>` for a heading style id, '' otherwise (style ids are venue data)."""
+    m = _HEADING_STYLE_RE.search(style or "")
+    return f"H{m.group(1)}" if m else ""
+
+
+def _style_key(style: str) -> str:
+    return _style_kind(style) or (style or "")
+
+
+def empty_paragraph_slots_from_template(template) -> list:
+    """The signature triples of the EMPTY paragraphs one template prescribes.
+
+    `template` is a .docx path or a `word/document.xml` string. The signature
+    normalises heading styles to their level (H1..H9) and leaves other styles
+    by id; the pipeline puts the union of a venue's main and supplementary
+    templates into `format_policy.empty_paragraph_slots`.
+    """
+    if isinstance(template, (str, Path)) and not str(template).lstrip().startswith("<"):
+        try:
+            with zipfile.ZipFile(template) as pkg:
+                xml = pkg.read("word/document.xml").decode("utf-8", "replace")
+        except (OSError, zipfile.BadZipFile, KeyError):
+            return []
+    else:
+        xml = str(template)
+    paras = paragraphs(xml)
+    texts = [text_of(p[2]).strip() for p in paras]
+    styles = [_style_key(_para_style(p[2])) for p in paras]
+    slots = []
+    for idx in range(len(paras)):
+        if texts[idx] or has_drawing(paras[idx][2]):
+            continue
+        prev_style = next((styles[j] for j in range(idx - 1, -1, -1) if texts[j]), "")
+        next_style = next((styles[j] for j in range(idx + 1, len(styles)) if texts[j]), "")
+        key = [styles[idx], prev_style, next_style]
+        if key not in slots:
+            slots.append(key)
+    return slots
+
+
+def prescribed_empty_indices(paras: list, policy: dict) -> set:
+    """Indices of empty paragraphs the venue/template prescribes (never touched).
+
+    An empty paragraph BEFORE the first non-empty paragraph of the body is
+    always prescribed: that is the title-page spacer the journal's own Word
+    template carries above the article title, and the operator asked for it to
+    survive. Everything else needs a signature match against
+    `policy["empty_paragraph_slots"]`; with no slots recorded nothing else is
+    exempt.
+    """
+    slots = set()
+    for s in policy.get("empty_paragraph_slots") or []:
+        try:
+            if len(s) == 3:
+                slots.add(tuple(str(x) for x in s))
+        except TypeError:
+            continue
+    texts = [text_of(p[2]).strip() for p in paras]
+    styles = [_style_key(_para_style(p[2])) for p in paras]
+    first_nonempty = next((i for i, t in enumerate(texts) if t), len(paras))
+    out = set()
+    for idx, (_, _, para) in enumerate(paras):
+        if texts[idx] or has_drawing(para):
+            continue
+        if idx < first_nonempty:
+            out.add(idx)
+            continue
+        if not slots:
+            continue
+        prev_style = next((styles[j] for j in range(idx - 1, -1, -1) if texts[j]), "")
+        next_style = next((styles[j] for j in range(idx + 1, len(styles)) if texts[j]), "")
+        if (styles[idx], prev_style, next_style) in slots:
+            out.add(idx)
+    return out
+
+
+def stray_empty_paragraph_groups(paras: list, policy: dict) -> tuple:
+    """([(indices_to_delete, kind)], prescribed_indices).
+
+    Two classes are stray: a blank line ATTACHED to a heading (immediately
+    before or after it -- the heading's own style carries the spacing, and this
+    is the "extra blank line between 2 Materials and Methods and 2.1 Study
+    design" case), and a run of empty paragraphs longer than
+    `max_empty_paragraph_run` (only the non-prescribed excess is deleted; a
+    template-prescribed spacer counts as one of the allowed blanks). `kind` is
+    "heading" or "run".
+    """
+    prescribed = prescribed_empty_indices(paras, policy)
+    texts = [text_of(p[2]).strip() for p in paras]
+    is_empty = [not texts[i] and not has_drawing(paras[i][2])
+                and not PAGEBREAK_RE.search(paras[i][2])       # FMT-S1 owns breaks
+                for i in range(len(paras))]
+
+    def heading_adjacent(i: int) -> bool:
+        prev_style = next((_para_style(paras[j][2]) for j in range(i - 1, -1, -1)
+                           if texts[j]), "")
+        next_style = next((_para_style(paras[j][2]) for j in range(i + 1, len(texts))
+                           if texts[j]), "")
+        return bool(_style_kind(prev_style) or _style_kind(next_style))
+
+    keep = max(0, int(policy.get("max_empty_paragraph_run", 1)))
+    groups = []
+    i = 0
+    while i < len(paras):
+        if not is_empty[i]:
+            i += 1
+            continue
+        j = i
+        while j < len(paras) and is_empty[j]:
+            j += 1
+        run = list(range(i, j))
+        free = [k for k in run if k not in prescribed]
+        if free:
+            if any(heading_adjacent(k) for k in free):
+                groups.append((free, "heading"))
+            else:
+                room = max(0, keep - (len(run) - len(free)))
+                drop = free[room:]
+                if drop:
+                    groups.append((drop, "run"))
+        i = j
+    return groups, prescribed
+
+
+def stray_empty_paragraph_rows(paras: list, policy: dict, doc: str) -> list:
+    """FMT-S8 (blank attached to a heading) / FMT-S6 (run beyond the cap)."""
+    groups, _prescribed = stray_empty_paragraph_groups(paras, policy)
+    rows = []
+    for drop, kind in groups:
+        lo, hi = drop[0], drop[-1]
+        if kind == "heading":
+            rows.append({"rule": "FMT-S8", "severity": "low",
+                         "document": doc, "location": (f"p{lo}" if lo == hi else f"p{lo}-p{hi}"),
+                         "evidence": ("a stray empty paragraph attached to a heading "
+                                      "(the heading style already carries the spacing)"
+                                      if lo == hi else
+                                      f"{len(drop)} stray empty paragraphs attached to a "
+                                      "heading (the heading style already carries the spacing)"),
+                         "detail": ("a blank line next to a section heading renders as an extra "
+                                    "empty line; delete it unless the journal's own template "
+                                    "prescribes that exact slot"),
+                         "fix": "mechanical", "protected": False, "tier": tier_of("FMT-S8")})
+        else:
+            rows.append({"rule": "FMT-S6", "severity": "low",
+                         "document": doc, "location": (f"p{lo}" if lo == hi else f"p{lo}-p{hi}"),
+                         "evidence": (f"{len(drop)} extra consecutive empty paragraph(s) "
+                                      f"(cap {policy.get('max_empty_paragraph_run', 1)})"),
+                         "detail": "stray empty paragraphs shift pagination and create blank space",
+                         "fix": "mechanical", "protected": False, "tier": tier_of("FMT-S6")})
+    return rows
+
+
+# ---- text hygiene: spaces at line edges, doubled spacing, doubled words -----
+# All spans are offsets into the paragraph's TEXT (`text_of`), so the fixer can
+# rewrite them through `rewrite_text_spans` and record exactly what changed.
+
+_TEXT_EDGE_TOKENS = re.compile(
+    r"<w:t(?:\s[^>]*)?>.*?</w:t>|<w:br(?=[\s/>])[^>]*/>|<w:cr(?=[\s/>])[^>]*/>|"
+    r"<w:tab(?=[\s/>])[^>]*/>", re.S)
+
+# Articles and prepositions where a doubled word is a typo. "in" is deliberately
+# absent: "studies in in vitro systems" is a valid construction, and a
+# mechanical rule must never rewrite it.
+_DOUBLED_WORDS = ("the", "a", "an", "of", "and", "or", "but", "for", "with", "at",
+                  "by", "on", "to", "is", "are", "was", "were", "it")
+_DOUBLED_WORD_RE = re.compile(r"\b(" + "|".join(_DOUBLED_WORDS) + r")\s+\1\b", re.I)
+_DOUBLE_SPACE_RE = re.compile(r"(?<=\S) {2,}(?=\S)")
+_SPACE_BEFORE_PUNCT_RE = re.compile(r" +(?=[,.;:!?])")
+_SPACE_AFTER_OPEN_RE = re.compile(r"(?<=[([])[ \t]+")
+_ZERO_WIDTH_RE = re.compile("[\u200b\u200e\u200f\u2060\ufeff]")
+_MATH_LINE_RE = re.compile(r"[=∑∈∉∕√±×÷≤≥≈∝∫∞]")
+_MISSING_SPACE_RE = re.compile(r"(?<![A-Za-z0-9/])([a-z]{2,}),([a-z]{2,})\b")
+
+
+def visual_text_lines(para: str) -> list:
+    """[(start, end)] text-space spans of a paragraph's rendered lines.
+
+    `w:br`/`w:cr` start a new line; `w:tab` starts a new alignment field, and a
+    space right after one is redundant either way.
+    """
+    lines, start, offset = [], 0, 0
+    for m in _TEXT_EDGE_TOKENS.finditer(para):
+        tok = m.group(0)
+        if tok.startswith("<w:t"):
+            offset += len(unesc(tok[tok.find(">") + 1:tok.rfind("<")]))
+        else:
+            lines.append((start, offset))
+            start = offset
+    lines.append((start, offset))
+    return lines
+
+
+def hygiene_spans(para: str) -> list:
+    """[span dicts] of every text-hygiene edit in one paragraph.
+
+    `fix` says who owns the edit: FMT-P4 (a space at a line edge) and FMT-G1
+    (a doubled article/preposition) are mechanical and the fixer applies them;
+    FMT-P3 (doubled spaces, bracket spacing, zero-width marks), FMT-G2 (a
+    possible lowercase sentence start) and FMT-G3 (a missing space after
+    punctuation) are reported for the editing arms, because mathematics,
+    notation and subscripts legitimately carry those shapes.
+    """
+    out = []
+    text = text_of(para)
+    if not text.strip():
+        return out
+    for s, e in visual_text_lines(para):
+        seg = text[s:e]
+        if not seg:
+            continue
+        lead = len(seg) - len(seg.lstrip())
+        trail = len(seg) - len(seg.rstrip())
+        if lead and lead == len(seg):
+            out.append({"rule": "FMT-P4", "fix": "mechanical", "start": s, "end": e,
+                        "repl": "",
+                        "evidence": "a whitespace-only line inside the paragraph",
+                        "detail": "delete the stray spaces; the paragraph break already "
+                                  "renders the line"})
+            continue
+        if lead:
+            out.append({"rule": "FMT-P4", "fix": "mechanical", "start": s, "end": s + lead,
+                        "repl": "",
+                        "evidence": f"a leading space at the start of a line: {seg[:48]!r}",
+                        "detail": "a space after a line break or at a paragraph start "
+                                  "renders as an unintended indent"})
+        if trail:
+            out.append({"rule": "FMT-P4", "fix": "mechanical", "start": e - trail, "end": e,
+                        "repl": "",
+                        "evidence": f"a trailing space at the end of a line: {seg[-48:]!r}",
+                        "detail": "a dangling space at the end of a visual line; delete it"})
+    if not _MATH_LINE_RE.search(text):
+        for m in _DOUBLE_SPACE_RE.finditer(text):
+            out.append({"rule": "FMT-P3", "fix": "editorial", "start": m.start(),
+                        "end": m.end(), "repl": " ",
+                        "evidence": f"double space: {text[max(0, m.start()-30):m.end()+30]!r}",
+                        "detail": "use one space between words; when the spacing is "
+                                  "intentional alignment, record that in the disposition"})
+        for m in _SPACE_BEFORE_PUNCT_RE.finditer(text):
+            out.append({"rule": "FMT-P3", "fix": "editorial", "start": m.start(),
+                        "end": m.end(), "repl": "",
+                        "evidence": f"space before punctuation: "
+                                    f"{text[max(0, m.start()-30):m.end()+30]!r}",
+                        "detail": "no space belongs before a punctuation mark"})
+        for m in _SPACE_AFTER_OPEN_RE.finditer(text):
+            out.append({"rule": "FMT-P3", "fix": "editorial", "start": m.start(),
+                        "end": m.end(), "repl": "",
+                        "evidence": f"space after an opening bracket: "
+                                    f"{text[max(0, m.start()-30):m.end()+30]!r}",
+                        "detail": "no space belongs right after '(' or '['"})
+    for m in _ZERO_WIDTH_RE.finditer(text):
+        out.append({"rule": "FMT-P3", "fix": "editorial", "start": m.start(), "end": m.end(),
+                    "repl": "",
+                    "evidence": f"zero-width/bidi mark at offset {m.start()}",
+                    "detail": "an invisible control character; remove it unless the text "
+                              "is RTL and the mark is meaningful"})
+    for m in _DOUBLED_WORD_RE.finditer(text):
+        out.append({"rule": "FMT-G1", "fix": "mechanical", "start": m.start(), "end": m.end(),
+                    "repl": m.group(1),
+                    "evidence": f"doubled word: {text[max(0, m.start()-30):m.end()+30]!r}",
+                    "detail": "the same article/preposition twice in a row"})
+    for m in _MISSING_SPACE_RE.finditer(text):
+        out.append({"rule": "FMT-G3", "fix": "editorial", "start": max(0, m.end() - 1),
+                    "end": max(0, m.end() - 1), "repl": None,
+                    "evidence": f"missing space after punctuation: "
+                                f"{text[max(0, m.start()-30):m.end()+30]!r}",
+                    "detail": "insert one space after the comma unless the token is a "
+                              "subscript or notation"})
+    return out
+
+
+def hygiene_rows(paras: list, is_ref: list, doc: str) -> list:
+    """One row per text-hygiene instance (references and empty paragraphs skipped)."""
+    rows = []
+    for idx, (_, _, para) in enumerate(paras):
+        if idx < len(is_ref) and is_ref[idx]:
+            continue
+        text = text_of(para)
+        if not text.strip():
+            continue
+        for sp in hygiene_spans(para):
+            rows.append({"rule": sp["rule"], "severity": "low", "document": doc,
+                         "location": f"p{idx}", "evidence": sp["evidence"],
+                         "detail": sp["detail"], "fix": sp["fix"],
+                         "protected": False, "tier": tier_of(sp["rule"])})
+    return rows
+
+
+# A conservative capitalization check: a lowercase word after a sentence-ending
+# mark, restricted to words that almost never start a sentence in lowercase and
+# skipping the abbreviation tails that end with a period. It reports (the arms
+# decide); it never edits.
+_SENTENCE_START_WORDS = frozenset(
+    "the this these those it they we he she you i in on at for with by from as that "
+    "which who whose is are was were be been being have has had not no all any each "
+    "every more most other such than then there here when where while if because "
+    "however thus therefore and but or so also can could may might must should would "
+    "will do does did both few many some our their its his her your my one two three".split())
+_ABBREV_TAILS = ("e.g.", "i.e.", "cf.", "vs.", "etc.", "al.", "fig.", "figs.", "eq.",
+                 "eqs.", "ref.", "refs.", "sec.", "no.", "approx.", "ca.", "dr.",
+                 "prof.", "st.", "mr.", "ms.", "mrs.", "v.", "vol.", "pp.", "ed.",
+                 "eds.", "min.", "max.", "inc.", "ltd.", "co.", "univ.", "dept.",
+                 "ave.", "suppl.")
+
+
+def capitalization_rows(paras: list, is_ref: list, doc: str) -> list:
+    """FMT-G2: a possible lowercase sentence start the arms should look at."""
+    rows = []
+    for idx, (_, _, para) in enumerate(paras):
+        if idx < len(is_ref) and is_ref[idx]:
+            continue
+        text = text_of(para)
+        if len(text) < 40:
+            continue
+        for m in re.finditer(r"(?<=[.!?])\s+([a-z]{2,})\b", text):
+            word = m.group(1)
+            if word not in _SENTENCE_START_WORDS:
+                continue
+            before = text[:m.start()].rstrip()
+            tail = before[-24:].lower()
+            if any(tail.endswith(a) for a in _ABBREV_TAILS):
+                continue
+            if re.search(r"(?:^|[^A-Za-z])[A-Za-z]\.$", before):
+                continue                     # an initial ("J. zhang" is a name)
+            rows.append({"rule": "FMT-G2", "severity": "low", "document": doc,
+                         "location": f"p{idx}",
+                         "evidence": f"possible lowercase sentence start: "
+                                     f"{text[max(0, m.start()-40):m.end()+40]!r}",
+                         "detail": "capitalize the first word of the sentence unless the "
+                                   "lowercase token is a unit, gene, chemical or species name "
+                                   "(then record that in the disposition)",
+                         "fix": "editorial", "protected": False, "tier": tier_of("FMT-G2")})
+    return rows
+
+
+# ---- style conventions: fonts, paragraph formatting, heading levels ---------
+# The classes a copy editor fixes by hand. The scanner enumerates the objective
+# outliers inside one paragraph style (a direct font override, direct spacing /
+# indentation / alignment on some paragraphs and not others) and a heading-level
+# jump, so the review disposes each row and the revision/integration arms align
+# the package; nothing here is edited mechanically (a gene name in a monospace
+# font and a deliberately centred line are legitimate).
+
+_FONT_RPR_RE = re.compile(r"<w:rFonts(?=[\s/>])[^>]*/>")
+
+
+def _run_font(run: str) -> str:
+    """The run's DIRECT font family ('' when the run inherits it)."""
+    rpr = rpr_of(run)
+    m = _FONT_RPR_RE.search(rpr or "")
+    if not m:
+        return ""
+    return attr(m.group(0), "ascii") or attr(m.group(0), "hAnsi") or ""
+
+
+def _headings_in(paras: list) -> list:
+    """[(idx, level)] for paragraphs whose style is a heading."""
+    out = []
+    for idx, (_, _, para) in enumerate(paras):
+        kind = _style_kind(_para_style(para))
+        if kind:
+            out.append((idx, int(kind[1:])))
+    return out
+
+
+def style_convention_rows(paras: list, styles: dict, doc: str) -> list:
+    """FMT-T10a..e: direct formatting drift and heading-level anomalies."""
+    rows = []
+    # (a) more than one DIRECT font among the letter-bearing plain runs of one
+    # paragraph (subscripts, character styles and non-letter runs excluded).
+    for idx, (_, _, para) in enumerate(paras):
+        if len(text_of(para).split()) < 6:
+            continue
+        fonts = {}
+        for _, _, run in runs(para):
+            rtext = text_of(run)
+            if not re.search(r"[A-Za-z]{2,}", rtext):
+                continue
+            rpr = rpr_of(run)
+            if elem_val(rpr, "vertAlign") or elem_val(rpr, "rStyle"):
+                continue
+            font = _run_font(run)
+            if font:
+                fonts.setdefault(font, []).append(rtext[:20])
+        if len(fonts) > 1:
+            names = ", ".join(f"{f!r} x{len(v)}" for f, v in sorted(fonts.items()))
+            rows.append({"rule": "FMT-T10a", "severity": "low", "document": doc,
+                         "location": f"p{idx}",
+                         "evidence": f"one paragraph carries {len(fonts)} direct fonts: {names}",
+                         "detail": "keep one font convention per paragraph (the template's "
+                                   "style owns the family); a deliberate monospace token is "
+                                   "the exception to record",
+                         "fix": "editorial", "protected": False, "tier": tier_of("FMT-T10a")})
+    # (b..d) direct spacing / indentation / alignment overrides that only SOME
+    # paragraphs of one style carry: the style owns the typography.
+    groups = defaultdict(list)
+    headings = _headings_in(paras)
+    first_heading = headings[0][0] if headings else 0
+    for idx, (_, _, para) in enumerate(paras):
+        text = text_of(para).strip()
+        # Front matter, headings, legends, captions and short table cells are
+        # their own layout families: their spacing is policy/template-owned
+        # (the venue's legend-spacing rule is applied mechanically), so they are
+        # not "drift" in the body prose's convention.
+        if (not text or idx < first_heading or len(text.split()) < 8
+                or not para.strip() or LEGEND_RE.match(text)
+                or TABLE_CAPTION_RE.match(text) or FIGURE_CAPTION_RE.match(text)):
+            continue
+        if _para_style(para) == "Caption":
+            continue
+        style = _para_style(para) or "(body)"
+        ppr = ppr_of(para)
+        groups[style].append((idx, ppr or ""))
+    checks = (("FMT-T10b", "spacing", "vertical paragraph spacing",
+               "horizontal-and-vertical spacing"),
+              ("FMT-T10c", "ind", "indentation",
+               "indentation"),
+              ("FMT-T10d", "jc", "alignment", "alignment"))
+    for style, members in sorted(groups.items()):
+        if len(members) < 4:
+            continue
+        for rule, tag, label, what in checks:
+            direct = [idx for idx, ppr in members if elem(ppr, tag)]
+            if not direct or len(direct) == len(members):
+                continue                    # none, or every paragraph carries one
+            if direct[-1] - direct[0] + 1 == len(direct):
+                continue                    # one contiguous block (deliberate front matter)
+            listed = ", ".join(f"p{i}" for i in direct[:4])
+            if len(direct) > 4:
+                listed += f", +{len(direct) - 4} more"
+            sigs = Counter(elem(ppr, tag) for idx, ppr in members if elem(ppr, tag))
+            example = sigs.most_common(1)[0][0][:120]
+            rows.append({"rule": rule, "severity": "low", "document": doc,
+                         "location": f"p{direct[0]}",
+                         "evidence": (f"style {style!r}: {len(members)} paragraph(s), "
+                                      f"{len(direct)} carry a direct {label} ({listed}); "
+                                      f"e.g. {example!r}"),
+                         "detail": (f"the same style renders with two different "
+                                    f"{what} conventions; let the style own it (remove the "
+                                    "direct override) or apply it consistently"),
+                         "fix": "editorial", "protected": False, "tier": tier_of(rule)})
+    # (e) a heading level jump (H1 -> H3 skips a level).
+    prev = None
+    for idx, level in _headings_in(paras):
+        if prev is not None and level > prev + 1:
+            rows.append({"rule": "FMT-T10e", "severity": "low", "document": doc,
+                         "location": f"p{idx}",
+                         "evidence": (f"heading level {level} follows level {prev} "
+                                      f"({'->'.join(f'H{n}' for n in (prev, level))})"),
+                         "detail": ("a heading level may not be skipped; demote it to the "
+                                    "missing level or restore the intermediate heading"),
+                         "fix": "editorial", "protected": False, "tier": tier_of("FMT-T10e")})
+        prev = level
+    return rows
+
+
+# ---- embedded-image geometry: the delivered aspect ratio vs the pixels ------
+# A figure rescaled without keeping its ratio is a real defect (it changes the
+# plotted geometry): the supplementary figures of the 2026-10-04 run were shown
+# at 1.199 and 1.333 while their PNGs are 1.749 and 1.596. The scanner resolves
+# every `wp:extent`/VML size to its media part and compares the delivered ratio
+# with the image's own; the fixer keeps the width and restores the height.
+
+_IMAGE_EXT_RE = re.compile(r"\.(?:png|jpe?g|gif|bmp|tiff?|svg|emf|wmf)$", re.I)
+
+
+def image_pixel_size(data: bytes):
+    """(width, height) of PNG/JPEG/GIF/BMP/TIFF/SVG/EMF/WMF bytes, or None.
+
+    Vector art carries its own aspect ratio too: an SVG's `viewBox`/width+
+    height, an EMF header's `rclFrame` and a placeable WMF's bounding box. The
+    unit does not matter (only the ratio is compared).
+    """
+    try:
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            w, h = struct.unpack(">II", data[16:24])
+            return (w, h) if w and h else None
+        if data[:6] in (b"GIF87a", b"GIF89a"):
+            w, h = struct.unpack("<HH", data[6:10])
+            return (w, h) if w and h else None
+        if data[:2] == b"\xff\xd8":
+            i = 2
+            while i + 9 < len(data):
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = data[i + 1]
+                if marker == 0xFF or 0xD0 <= marker <= 0xD8 or marker == 0x01:
+                    i += 2
+                    continue
+                if marker == 0xD9:
+                    break
+                seglen = struct.unpack(">H", data[i + 2:i + 4])[0]
+                if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                              0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                    h, w = struct.unpack(">HH", data[i + 5:i + 9])
+                    return (w, h) if w and h else None
+                i += 2 + seglen
+            return None
+        if data[:2] == b"BM":
+            w, h = struct.unpack("<ii", data[18:26])
+            return (abs(w), abs(h)) if w and h else None
+        if data[:4] == b"\x01\x00\x00\x00" and len(data) >= 40:
+            # EMF header: rclFrame (0.01 mm units) at offset 24.
+            left, top, right, bottom = struct.unpack("<4i", data[24:40])
+            w, h = right - left, bottom - top
+            return (w, h) if w > 0 and h > 0 else None
+        if data[:4] == b"\xd7\xcd\xc6\x9a" and len(data) >= 14:
+            # Placeable WMF: bounding box (device units) at offset 6.
+            left, top, right, bottom = struct.unpack("<4h", data[6:14])
+            w, h = right - left, bottom - top
+            return (w, h) if w > 0 and h > 0 else None
+        if data[:5] == b"<?xml" or data[:4] == b"<svg" or b"<svg" in data[:200]:
+            head = data[:4000].decode("utf-8", "replace")
+            box = re.search(r'viewBox\s*=\s*"([-\d.eE\s,]+)"', head)
+            if box:
+                nums = [float(x) for x in re.split(r"[\s,]+", box.group(1).strip()) if x]
+                if len(nums) == 4 and nums[2] > 0 and nums[3] > 0:
+                    return (nums[2], nums[3])
+            wm = re.search(r'\bwidth\s*=\s*"([\d.]+)', head)
+            hm = re.search(r'\bheight\s*=\s*"([\d.]+)', head)
+            if wm and hm and float(wm.group(1)) > 0 and float(hm.group(1)) > 0:
+                return (float(wm.group(1)), float(hm.group(1)))
+            return None
+        if data[:4] in (b"II*\x00", b"MM\x00*"):
+            endian = "<" if data[:2] == b"II" else ">"
+            off = struct.unpack(endian + "I", data[4:8])[0]
+            if off + 2 > len(data):
+                return None
+            count = struct.unpack(endian + "H", data[off:off + 2])[0]
+            w = h = 0
+            for k in range(count):
+                base = off + 2 + 12 * k
+                if base + 12 > len(data):
+                    break
+                tag, typ = struct.unpack(endian + "HH", data[base:base + 4])
+                raw = data[base + 8:base + 12]
+                value = (struct.unpack(endian + "H", raw[:2])[0] if typ == 3
+                         else struct.unpack(endian + "I", raw)[0])
+                if tag == 256:
+                    w = value
+                elif tag == 257:
+                    h = value
+            return (w, h) if w and h else None
+    except (struct.error, IndexError, ValueError, TypeError):
+        return None
+    return None
+
+
+def media_pixel_sizes(pkg: zipfile.ZipFile) -> dict:
+    """{'media/image1.png': (w, h), ...} for every image part in a package."""
+    out = {}
+    for name in pkg.namelist():
+        if "/media/" not in name or not _IMAGE_EXT_RE.search(name):
+            continue
+        try:
+            size = image_pixel_size(pkg.read(name))
+        except (KeyError, OSError, zipfile.BadZipFile):
+            size = None
+        if not size:
+            continue
+        out[name] = size
+        out[name.split("/", 1)[1] if "/" in name else name] = size
+    return out
+
+
+def part_rels(pkg: zipfile.ZipFile, part: str) -> dict:
+    """{rId: media target} for one part's relationship file (images only)."""
+    relname = posixpath.join(posixpath.dirname(part), "_rels",
+                             posixpath.basename(part) + ".rels")
+    if relname not in pkg.namelist():
+        return {}
+    out = {}
+    xml = pkg.read(relname).decode("utf-8", "replace")
+    for m in re.finditer(r"<Relationship(?=[\s/>])[^>]*/>", xml):
+        attrs = dict(re.findall(r'([A-Za-z]+)="([^"]*)"', m.group(0)))
+        if attrs.get("Id") and attrs.get("Type", "").endswith("/image"):
+            out[attrs["Id"]] = attrs.get("Target", "").lstrip("/").replace("\\", "/")
+    return out
+
+
+def _pixel_size_for(sizes: dict, target: str):
+    t = (target or "").lstrip("/").replace("\\", "/")
+    for key in (t, "word/" + t, t.split("/", 1)[1] if "/" in t else t):
+        if key in sizes:
+            return sizes[key]
+    base = t.rsplit("/", 1)[-1]
+    hits = {v for k, v in sizes.items() if k.rsplit("/", 1)[-1] == base}
+    return next(iter(hits)) if len(hits) == 1 else None
+
+
+def _attr_any(frag: str, name: str):
+    m = re.search(rf'\b{name}="([^"]*)"', frag)
+    return m.group(1) if m else None
+
+
+def _ratio_fixes(block: str, expected: float) -> list:
+    """[(start, end, new)] byte-level fixes restoring one drawing's ratio."""
+    fixes = []
+    for m in re.finditer(r"<(?:wp:extent|a:ext)(?=[\s/>])[^>]*/>", block):
+        tag = m.group(0)
+        cx, cy = _attr_any(tag, "cx"), _attr_any(tag, "cy")
+        if not (cx and cy):
+            continue
+        try:
+            cxi, cyi = int(cx), int(cy)
+        except ValueError:
+            continue
+        if cyi <= 0:
+            continue
+        new_cy = max(1, round(cxi / expected))
+        if new_cy == cyi:
+            continue
+        fixes.append((m.start(), m.end(),
+                      re.sub(r'\bcy="[^"]*"', f'cy="{new_cy}"', tag, count=1)))
+    for m in re.finditer(r"<v:shape(?=[\s/>])[^>]*>", block):
+        tag = m.group(0)
+        style = re.search(r'style="([^"]*)"', tag)
+        if not style:
+            continue
+        width = re.search(r"width:\s*([0-9.]+)([a-z%]+)", style.group(1), re.I)
+        height = re.search(r"height:\s*([0-9.]+)([a-z%]+)", style.group(1), re.I)
+        if not (width and height) or width.group(2).lower() != height.group(2).lower():
+            continue
+        want = round(float(width.group(1)) / expected, 2)
+        if abs(want - float(height.group(1))) < 0.01:
+            continue
+        new_style = style.group(1)[:height.start()] + \
+            f"height:{want:g}{height.group(2)}" + style.group(1)[height.end():]
+        fixes.append((m.start(), m.end(), tag.replace(style.group(1), new_style, 1)))
+    return fixes
+
+
+def drawing_geometry_rows(part_xml: str, rels: dict, sizes: dict, doc: str,
+                          policy: dict, location_prefix: str = "p") -> tuple:
+    """(rows, fixes) for every distorted embedded image in one XML part.
+
+    `fixes` are (start, end, new) against `part_xml`; the scanner uses the rows
+    only, the fixer applies the fixes.
+    """
+    tol = float(policy.get("image_aspect_tolerance", 0.02) or 0.02)
+    rows, fixes = [], []
+    for idx, (p0, _p1, para) in enumerate(paragraphs(part_xml)):
+        for m in re.finditer(r"<w:(?:drawing|pict)(?=[\s/>]).*?</w:(?:drawing|pict)>",
+                             para, re.S):
+            block = m.group(0)
+            # A 90/270-degree rotation swaps the displayed axes: the extent
+            # cannot be compared with the source ratio directly, so skip a
+            # deliberately rotated drawing instead of "repairing" it.
+            xfrm = re.search(r"<a:xfrm(?=[\s/>])[^>]*>", block)
+            if xfrm:
+                rot = _attr_any(xfrm.group(0), "rot")
+                try:
+                    if rot and int(rot) % 10800000 != 0:
+                        continue
+                except ValueError:
+                    continue
+            emb = re.search(r'r:(?:embed|id|link)="([^"]+)"', block)
+            if not emb:
+                continue
+            target = rels.get(emb.group(1))
+            size = _pixel_size_for(sizes, target) if target else None
+            if not size:
+                continue
+            pw, ph = size
+            expected = pw / ph
+            cx = cy = None
+            unit = "EMU"
+            emit = re.search(r"<wp:extent(?=[\s/>])[^>]*/>", block)
+            if emit:
+                cx, cy = _attr_any(emit.group(0), "cx"), _attr_any(emit.group(0), "cy")
+            if not (cx and cy):
+                vm = re.search(r"<v:shape(?=[\s/>])[^>]*>", block)
+                if vm:
+                    style = re.search(r'style="([^"]*)"', vm.group(0))
+                    wm = re.search(r"width:\s*([0-9.]+)([a-z%]+)",
+                                   style.group(1) if style else "", re.I)
+                    hm = re.search(r"height:\s*([0-9.]+)([a-z%]+)",
+                                   style.group(1) if style else "", re.I)
+                    if wm and hm and wm.group(2).lower() == hm.group(2).lower():
+                        cx, cy = float(wm.group(1)), float(hm.group(1))
+                        unit = wm.group(2)
+            try:
+                cxf, cyf = float(cx), float(cy)
+            except (TypeError, ValueError):
+                continue
+            if cyf <= 0:
+                continue
+            ratio = cxf / cyf
+            err = abs(ratio - expected) / expected
+            if err <= tol:
+                continue
+            label = (target or "image").rsplit("/", 1)[-1]
+            drawn = (f"{cxf:,.0f} x {cyf:,.0f} {unit}" if float(cxf).is_integer()
+                     else f"{cxf:g} x {cyf:g} {unit}")
+            rows.append({"rule": "FMT-IM1", "severity": "medium", "document": doc,
+                         "location": f"{location_prefix}{idx}",
+                         "evidence": (f"image {label}: {pw:g}x{ph:g} px (ratio {expected:.4f}) "
+                                      f"delivered at {drawn} "
+                                      f"(ratio {ratio:.4f}; {err * 100:.1f}% off)"),
+                         "detail": ("resizing an image must preserve its aspect ratio; keep "
+                                    "the width and set the height from the image's own "
+                                    "pixels"),
+                         "fix": "mechanical", "protected": False, "tier": tier_of("FMT-IM1")})
+            for s, e, new in _ratio_fixes(block, expected):
+                fixes.append((p0 + m.start() + s, p0 + m.start() + e, new))
+    return rows, fixes
+
+
+def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
+                     sizes: dict = None, rels: dict = None) -> dict:
     rows = []
     paras = paragraphs(xml)
     franges = field_ranges(xml)
@@ -3310,22 +4117,10 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str) -> dict:
                     f"heading runs sz={sorted(direct)} vs style {style} sz={want}",
                     "direct run sizes contradict the heading style definition")
 
-    run_len, run_start = 0, None
-    for idx in range(len(paras) + 1):
-        if idx < len(paras):
-            _, _, para = paras[idx]
-            empty = not text_of(para).strip() and not has_drawing(para)
-        else:
-            empty = False
-        if empty:
-            run_len += 1
-            run_start = idx if run_start is None else run_start
-        else:
-            if run_len > policy["max_empty_paragraph_run"] and run_start is not None:
-                row("FMT-S6", "low", f"p{run_start}-p{run_start + run_len - 1}",
-                    f"{run_len} consecutive empty paragraphs",
-                    "stray empty paragraphs shift pagination and create blank space")
-            run_len, run_start = 0, None
+    # Stray empty paragraphs: template-prescribed blanks (the front-matter spacer
+    # above the title, a slot the journal's own template carries) are exempt; a
+    # blank attached to a heading is FMT-S8, a run beyond the cap is FMT-S6.
+    rows.extend(stray_empty_paragraph_rows(paras, policy, doc))
 
     # ---- legends --------------------------------------------------------------
     legend_idx = [i for i, (_, _, p) in enumerate(paras) if LEGEND_RE.match(text_of(p))]
@@ -3484,11 +4279,21 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str) -> dict:
     if spaced:
         row("FMT-P2", "low", "document", f"{spaced} spaced hyphen(s) used as a dash",
             "use a comma or a spaced en-dash instead of ' - '")
-    for label, n in (("double spaces", len(re.findall(r"\S {2,}\S", full))),
-                     ("space before punctuation", len(re.findall(r"\s+[,.;:!?]", full))),
-                     ("zero-width/bidi marks", len(re.findall("[\u200b\u200e\u200f\ufeff]", full)))):
-        if n:
-            row("FMT-P3", "low", "document", f"{n} {label}", "text hygiene", )
+    # Per-instance text hygiene: FMT-P4 (a space at a line edge) and FMT-G1 (a
+    # doubled article/preposition) are mechanical and the fixer applies them;
+    # FMT-P3 (doubled spaces, bracket spacing, zero-width marks), FMT-G2
+    # (possible lowercase sentence start) and FMT-G3 (missing space after
+    # punctuation) are reported for the editing arms.
+    is_ref_para = [elem_val(ppr_of(p[2]), "pStyle") == "Bibliography" for p in paras]
+    rows.extend(hygiene_rows(paras, is_ref_para, doc))
+    rows.extend(capitalization_rows(paras, is_ref_para, doc))
+    # Fonts, paragraph formatting and heading levels: the copy-editor classes
+    # the editing arms align (FMT-T10a..e; report-only, like the text rules).
+    rows.extend(style_convention_rows(paras, styles, doc))
+    # Embedded-image geometry: a figure rescaled without its own aspect ratio.
+    if sizes is not None:
+        geo_rows, _geo_fixes = drawing_geometry_rows(xml, rels or {}, sizes, doc, policy)
+        rows.extend(geo_rows)
 
     # ---- header / title page / tracked changes --------------------------------
     first_sect = first_section_props(xml)
@@ -3580,10 +4385,20 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str) -> dict:
 
 def analyse_package(path: Path, policy: dict) -> dict:
     app_pages = None
+    sizes, doc_rels, aux_parts, aux_xml = {}, {}, [], {}
     try:
         with zipfile.ZipFile(path) as pkg:
             styles = parse_styles(pkg)
             xml = pkg.read("word/document.xml").decode("utf-8")
+            # Embedded-image geometry: the image parts' own pixels, resolved
+            # through each part's relationship file (document + header/footer,
+            # where the logo lives).
+            sizes = media_pixel_sizes(pkg)
+            doc_rels = part_rels(pkg, "word/document.xml")
+            for name in sorted(pkg.namelist()):
+                if re.match(r"word/(?:header|footer)\d*\.xml$", name):
+                    aux_parts.append((name, part_rels(pkg, name)))
+                    aux_xml[name] = pkg.read(name).decode("utf-8", "replace")
             if "docProps/app.xml" in pkg.namelist():
                 m = re.search(r"<Pages>(\d+)</Pages>",
                               pkg.read("docProps/app.xml").decode("utf-8", "replace"))
@@ -3595,7 +4410,12 @@ def analyse_package(path: Path, policy: dict) -> dict:
                "fix": "manual", "protected": False}
         return {"file": str(path), "rows": [row], "by_rule": {"FMT-X1": 1},
                 "high": 1, "medium": 0, "low": 0, "documents": {}}
-    res = analyse_document(xml, styles, policy, path.name)
+    res = analyse_document(xml, styles, policy, path.name, sizes=sizes, rels=doc_rels)
+    for name, rels in aux_parts:
+        aux_rows, _aux_fixes = drawing_geometry_rows(
+            aux_xml.get(name, ""), rels, sizes, path.name, policy,
+            location_prefix=f"{posixpath.basename(name)} p")
+        res["rows"].extend(aux_rows)
     # The cover letter's two-page budget: a rendered PDF beside the .docx is
     # authoritative; without one, the cached Pages value is reported (and the
     # row says which source it came from -- the cache can be stale).
@@ -3697,7 +4517,7 @@ def insert_into_ppr(para: str, element: str, after=("pStyle", "keepNext", "keepL
         # writes attributes on it (`<w:pPr w:rsidR="...">`), and splicing a child
         # in after a fixed `len("<w:pPr>")` corrupts the tag. A self-closing
         # `w:pPr` has to be expanded before the child can go inside it.
-        m = re.match(r"<w:pPr(?=[\s>])[^>]*>", ppr)
+        m = re.match(r"<w:pPr(?=[\s/>])[^>]*>", ppr)
         if m and m.group(0).rstrip().endswith("/>"):
             head = m.group(0).rstrip()[:-2].rstrip() + ">"
             return para.replace(ppr, head + element + "</w:pPr>", 1)
@@ -3726,7 +4546,8 @@ def _unlink_fields(xml: str) -> tuple:
     return apply_edits(xml, edits), removed
 
 
-def fix_document(xml: str, styles: dict, policy: dict) -> tuple:
+def fix_document(xml: str, styles: dict, policy: dict,
+                 sizes: dict = None, rels: dict = None) -> tuple:
     """(new_xml, changes) — byte-level edits; rules run in dependency order."""
     changes = []
 
@@ -3756,6 +4577,23 @@ def fix_document(xml: str, styles: dict, policy: dict) -> tuple:
         else:
             changes.append(f"removed the trailing break-only paragraph p{idx}")
         xml = apply_edits(xml, edits)
+
+    # 2b. stray empty paragraphs (template-aware) --------------------------------
+    # A blank line attached to a heading, or a run beyond the cap, that the
+    # venue's own template does NOT prescribe. Deleting an empty paragraph does
+    # not change the document text (the fixer's verification compares non-empty
+    # paragraph texts), and the prescribed blanks -- the front-matter spacer
+    # above the title, the template's own placeholder slots -- are never in the
+    # group.
+    groups, _prescribed = stray_empty_paragraph_groups(paragraphs(xml), policy)
+    drop = sorted({i for indices, _kind in groups for i in indices})
+    if drop:
+        plist = paragraphs(xml)
+        edits = [(plist[i][0], plist[i][1], "") for i in drop if i < len(plist)]
+        xml = apply_edits(xml, edits)
+        changes.append(f"deleted {len(edits)} stray empty paragraph(s): a blank line "
+                       f"next to a heading or beyond the max_empty_paragraph_run cap "
+                       f"(template-prescribed blanks kept)")
 
     # 3. legend spacing ----------------------------------------------------------
     want_sp = (f'<w:spacing w:before="{policy["caption_space"]}" '
@@ -4064,82 +4902,109 @@ def fix_document(xml: str, styles: dict, policy: dict) -> tuple:
     # paragraph had been deleted above (and mismatched quotes whenever
     # quote_style also fired).
     text_stage_xml = xml
-    text_edits, cit_n, spell_n, hy_n = [], 0, 0, 0
+    text_edits, cit_n, spell_n, hy_n, hyg_n = [], 0, 0, 0, 0
     want_cit = policy["citation_journal_names"] == "drop"
     want_spell = policy["term_spelling"] == "dominant"
     want_hy = policy["term_hyphenation"] == "dominant"
-    if want_cit or want_spell or want_hy:
-        bodies = []
-        for idx, (p0, p1, para) in enumerate(paragraphs(xml)):
-            if elem_val(ppr_of(para), "pStyle") == "Bibliography":
-                continue
-            bodies.append((idx, p0, p1, para, text_of(para)))
-        blob = "\n".join(b[4] for b in bodies)
-        spell_target = {}
+    # This block ALWAYS runs: text hygiene is mechanical and unconditional, and
+    # the three consistency rules below are policy-gated (`keep` pre-judge).
+    bodies = []
+    for idx, (p0, p1, para) in enumerate(paragraphs(xml)):
+        if elem_val(ppr_of(para), "pStyle") == "Bibliography":
+            continue
+        bodies.append((idx, p0, p1, para, text_of(para)))
+    blob = "\n".join(b[4] for b in bodies)
+    spell_target = (spelling_minority_targets([b[4] for b in bodies])
+                    if want_spell else {})
+    hy_target = set()
+    if want_hy:
+        for hy, split in HYPHEN_COMPOUNDS:
+            if re.search(rf"\b{re.escape(hy)}(?=\s+[A-Za-z])", blob):
+                hy_target.add((hy, split))
+    edits = []
+    for idx, p0, p1, para, text in bodies:
+        spans = []
+        # Text hygiene: a space at a line edge (FMT-P4) and a doubled
+        # article/preposition (FMT-G1) are mechanical. Both are recorded
+        # below like every other text edit, so the fixer's verification can
+        # prove that nothing beyond them moved.
+        hygiene = [(sp["start"], sp["end"], sp["repl"])
+                   for sp in hygiene_spans(para) if sp["fix"] == "mechanical"]
+        spans.extend(hygiene)
+        if want_cit:
+            for m in CIT_YEAR_JOURNAL.finditer(text):
+                spans.append((m.end(2), m.end(3), ""))
+            for m in CIT_JOURNAL_YEAR.finditer(text):
+                spans.append((m.end(1), m.end(2), ""))
         if want_spell:
-            for a, b in SPELLING_PAIRS:
-                ca = len(re.findall(rf"\b{re.escape(a)}\b", blob, re.I))
-                cb = len(re.findall(rf"\b{re.escape(b)}\b", blob, re.I))
-                if ca and cb:
-                    spell_target[a if ca < cb else b] = a if ca > cb else b
-        hy_target = set()
+            for minority, majority in spell_target.items():
+                for m in re.finditer(rf"\b{re.escape(minority)}\b", text, re.I):
+                    rep = (majority.capitalize()
+                           if m.group(0)[:1].isupper() else majority)
+                    spans.append((m.start(), m.end(), rep))
         if want_hy:
-            for hy, split in HYPHEN_COMPOUNDS:
-                if re.search(rf"\b{re.escape(hy)}(?=\s+[A-Za-z])", blob):
-                    hy_target.add((hy, split))
-        edits = []
-        for idx, p0, p1, para, text in bodies:
-            spans = []
-            if want_cit:
-                for m in CIT_YEAR_JOURNAL.finditer(text):
-                    spans.append((m.end(2), m.end(3), ""))
-                for m in CIT_JOURNAL_YEAR.finditer(text):
-                    spans.append((m.end(1), m.end(2), ""))
-            if want_spell:
-                for minority, majority in spell_target.items():
-                    for m in re.finditer(rf"\b{re.escape(minority)}\b", text, re.I):
-                        rep = (majority.capitalize()
-                               if m.group(0)[:1].isupper() else majority)
-                        spans.append((m.start(), m.end(), rep))
-            if want_hy:
-                for hy, split in hy_target:
-                    for m in re.finditer(rf"\b{re.escape(split)}(?=\s+[A-Za-z])", text):
-                        spans.append((m.start(), m.end(), hy))
-            if not spans:
-                continue
-            new_para, applied = rewrite_text_spans(para, spans)
-            if new_para == para:
-                continue
-            edits.append((p0, p1, new_para))
-            for s, e, removed, repl in applied:
-                text_edits.append((idx, s, e, repl))
-                if repl == "":
-                    cit_n += 1
-                elif repl in {h for h, _s in hy_target}:
-                    hy_n += 1
-                else:
-                    spell_n += 1
-        if edits:
-            xml = apply_edits(xml, edits)
-            bits = []
-            if cit_n:
-                bits.append(f"dropped the redundant journal name from {cit_n} citation(s)")
-            if spell_n:
-                bits.append(f"normalized {spell_n} spelling variant(s)")
-            if hy_n:
-                bits.append(f"hyphenated {hy_n} attributive compound(s)")
-            if bits:
-                changes.append("text consistency: " + "; ".join(bits))
+            for hy, split in hy_target:
+                for m in re.finditer(rf"\b{re.escape(split)}(?=\s+[A-Za-z])", text):
+                    spans.append((m.start(), m.end(), hy))
+        if not spans:
+            continue
+        new_para, applied = rewrite_text_spans(para, spans)
+        if new_para == para:
+            continue
+        edits.append((p0, p1, new_para))
+        hygiene_set = set(hygiene)
+        for s, e, removed, repl in applied:
+            text_edits.append((idx, s, e, repl))
+            if (s, e, repl) in hygiene_set:
+                hyg_n += 1
+            elif repl == "":
+                cit_n += 1
+            elif repl in {h for h, _s in hy_target}:
+                hy_n += 1
+            else:
+                spell_n += 1
+    if edits:
+        xml = apply_edits(xml, edits)
+        bits = []
+        if cit_n:
+            bits.append(f"dropped the redundant journal name from {cit_n} citation(s)")
+        if spell_n:
+            bits.append(f"normalized {spell_n} spelling variant(s)")
+        if hy_n:
+            bits.append(f"hyphenated {hy_n} attributive compound(s)")
+        if hyg_n:
+            bits.append(f"cleaned {hyg_n} stray-space/doubled-word hygiene instance(s)")
+        if bits:
+            changes.append("text consistency: " + "; ".join(bits))
+
+    # 10. embedded-image aspect ratio ------------------------------------------
+    # The fix runs LAST (it is computed against the final XML); only the
+    # drawing's geometry attributes change, never its text.
+    if sizes is not None:
+        _geo_rows, geo_fixes = drawing_geometry_rows(xml, rels or {}, sizes,
+                                                     "stage", policy)
+        if geo_fixes:
+            xml = apply_edits(xml, geo_fixes)
+            changes.append(f"restored the aspect ratio of {len(geo_fixes)} embedded "
+                           f"image extent(s) from the image's own pixels")
 
     return xml, changes, {"text_edits": text_edits, "text_stage_xml": text_stage_xml}
 
 
 def fix_package(src: Path, out: Path, policy: dict) -> dict:
+    sizes, doc_rels, aux = {}, {}, {}
     with zipfile.ZipFile(src) as pkg:
         parts = {i.filename: pkg.read(i.filename) for i in pkg.infolist()}
         styles = parse_styles(pkg)
+        sizes = media_pixel_sizes(pkg)
+        doc_rels = part_rels(pkg, "word/document.xml")
+        for name in sorted(pkg.namelist()):
+            if re.match(r"word/(?:header|footer)\d*\.xml$", name):
+                aux[name] = (pkg.read(name).decode("utf-8", "replace"),
+                             part_rels(pkg, name))
     xml_before = parts["word/document.xml"].decode("utf-8")
-    xml_after, changes, meta = fix_document(xml_before, styles, policy)
+    xml_after, changes, meta = fix_document(xml_before, styles, policy,
+                                            sizes=sizes, rels=doc_rels)
     try:
         ET.fromstring(xml_after)
         xml_wellformed, xml_detail = True, ""
@@ -4150,6 +5015,12 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
         xml_wellformed, xml_detail = False, str(e)
     parts_new = dict(parts)
     parts_new["word/document.xml"] = xml_after.encode("utf-8")
+    for name, (axml, arels) in aux.items():
+        _arows, afixes = drawing_geometry_rows(axml, arels, sizes, src.name, policy)
+        if afixes:
+            parts_new[name] = apply_edits(axml, afixes).encode("utf-8")
+            changes.append(f"restored the aspect ratio of {len(afixes)} embedded "
+                           f"image extent(s) in {posixpath.basename(name)}")
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         for name, data in parts_new.items():
             z.writestr(name, data)
@@ -4181,8 +5052,10 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
     with zipfile.ZipFile(out) as pkg:
         same_parts = all(pkg.read(n) == d for n, d in parts_new.items())
         styles_after = parse_styles(pkg)
-    before_rows = analyse_document(xml_before, styles, policy, src.name)["rows"]
-    after_rows = analyse_document(xml_after, styles_after, policy, src.name)["rows"]
+    before_rows = analyse_document(xml_before, styles, policy, src.name,
+                                   sizes=sizes, rels=doc_rels)["rows"]
+    after_rows = analyse_document(xml_after, styles_after, policy, src.name,
+                                  sizes=sizes, rels=doc_rels)["rows"]
     mech_before = {r["rule"] for r in before_rows if r["rule"] in MECHANICAL_RULES and r["fix"] == "mechanical"}
     mech_after = {r["rule"] for r in after_rows if r["fix"] == "mechanical"}
     remaining = sorted(mech_before & mech_after)

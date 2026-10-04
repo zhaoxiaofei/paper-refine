@@ -1203,7 +1203,8 @@ formatting used to be invisible to every stage. The pipeline now handles it:
 Policy overrides (`setup --format-policy policy.json`): `journal_italics`,
 `quote_style`, `caption_line`, `caption_space`, `title_page_header`,
 `url_style`, `max_em_dashes_per_1000`, `unlink_zotero_fields`,
-`align_heading_sizes`, `blank_page_tolerance`.
+`align_heading_sizes`, `blank_page_tolerance`, `max_empty_paragraph_run`,
+`empty_paragraph_slots`, `image_aspect_tolerance`.
 
 Stand-alone use (never edits in place unless you pass `--out` yourself):
 
@@ -1217,6 +1218,44 @@ Findings inside Zotero fields (the bibliography, citation fields) are reported
 `field-protected`: Word cannot restyle a field result persistently. Fix the CSL
 style, or set `"unlink_zotero_fields": true` in the policy for a submission copy
 where the reference list becomes plain text.
+
+### Whitespace, grammar artifacts and embedded-image geometry (M20)
+
+The text-only corpus also hides blank paragraphs and the spaces at a visual
+line's edges — a correspondence e-mail one space to the right of its line, a
+dangling trailing space — and the *size* an image is drawn at. Those classes
+shipped through two rounds of a real run:
+
+* **Stray empty paragraphs.** `FMT-S8` is a blank line attached to a heading
+  (the "extra empty line between *2 Materials and Methods* and *2.1 Study
+  design*" case) and `FMT-S6` is a run of empties beyond
+  `max_empty_paragraph_run`; the fixer deletes the non-prescribed blanks.
+  **Template-prescribed blanks are never touched**: `format_policy.json`
+  carries the journal Word template's own empty-paragraph slots
+  (`empty_paragraph_slots`, signature triples of own/previous/next style
+  derived by the pipeline from the official template), and anything before the
+  first non-empty paragraph (the spacer the template carries above the title)
+  is exempt by construction.
+* **Text hygiene.** `FMT-P4` (a space that renders at the start or end of a
+  visual line) and `FMT-G1` (a doubled article/preposition) are mechanical and
+  repaired with the other text edits (recorded, so the fixer's verification
+  still proves nothing else moved). `FMT-P3` (doubled spaces, bracket spacing,
+  zero-width marks), `FMT-G2` (a possible lowercase sentence start) and
+  `FMT-G3` (a missing space after punctuation) are reported for the editing
+  arms, because equations (`G(y)  =  ...`) and notation (`N/Ab,c`) legitimately
+  carry those shapes — the review records the exception, the revise/integrate
+  arms fix the real ones.
+* **Fonts, paragraphs, headings.** `FMT-T10a` mixed direct fonts, `FMT-T10b`
+  vertical paragraph spacing, `FMT-T10c` indentation and `FMT-T10d` alignment
+  drift inside one paragraph style, and `FMT-T10e` a heading-level jump are
+  enumerated for the editing arms (nothing is auto-edited: a monospace gene
+  name or a deliberately centred line is legitimate).
+* **Embedded images keep their aspect ratio.** `FMT-IM1` compares every
+  `wp:extent`/VML size (document and headers/footers) with the image part's own
+  source ratio (PNG/JPEG/GIF/BMP/TIFF pixels; SVG viewBox/width+height; EMF
+  `rclFrame`; placeable-WMF bounding box — stdlib parsers) and the fixer keeps
+  the width and restores the height — two supplementary figures of the
+  2026-10-04 run were delivered 31% and 16% off their true ratio.
 
 ### Journal / emphasis consistency (M20, rules FMT-T6c–T6g)
 
@@ -1895,7 +1934,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 59 suites (a few
+any failure. They are independent, so run them in parallel — 60 suites (a few
 minutes on a 20-core box; ~5.5 min sequentially):
 
 ```bash

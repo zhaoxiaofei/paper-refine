@@ -821,6 +821,26 @@ rule | severity | location | evidence | fix kind | disposition.
   rewrites; never a mechanical replacement of meaning-bearing text)
 - a layout defect the renderer shows but the XML scan cannot (overlap, clipping,
   misaligned columns) → finding from the visual pass
+- whitespace/grammar/skeleton rows (each one per instance, reported for the
+  editing arms): a stray empty paragraph that is NOT prescribed by the venue's
+  own template — `FMT-S8` a blank line attached to a heading (the "extra empty
+  line between 2 Materials and Methods and 2.1 Study design" case), `FMT-S6` a
+  run of empties beyond the cap — the fixer deletes the non-prescribed blanks;
+  a space that renders at the start or end of a visual line (`FMT-P4`, e.g.
+  the correspondence e-mail one space to the right, a dangling trailing space)
+  and a doubled article/preposition (`FMT-G1`) are mechanical too; doubled
+  spaces / bracket spacing / zero-width marks (`FMT-P3`), a possible lowercase
+  sentence start (`FMT-G2`) and a missing space after punctuation (`FMT-G3`)
+  are reported for the arms (equation and notation spacing is a legitimate
+  exception to record); mixed direct fonts or spacing/indentation/alignment
+  drift inside one style (`FMT-T10a..T10d`), a heading-level jump (`FMT-T10e`)
+  are reported for the arms (advisory rows); an embedded image delivered off
+  its own width-to-height ratio (`FMT-IM1`) → finding.
+  TEMPLATE-PRESCRIBED BLANKS ARE NOT DEFECTS: the policy carries the
+  journal template's own empty-paragraph slots (the spacer the template carries
+  above the title, a placeholder between two headings) and anything before the
+  first non-empty paragraph; dispose such a row as `OK — template-prescribed
+  slot` and never delete the template's own chrome.
 
 **Artifact:** `review/artifacts/M20_formatting.md` (the seeded table, every row
 disposed) plus `review/work/FORMAT_SCAN.json`.

@@ -161,6 +161,21 @@ the profiles shipped next to the script → the built-in fallback inside
     `final_clean_version.readme.md` must always say which one it was: "skipped" may never
     print as "verified", and the within-invocation freshness checks that decide what an
     agent READS are never skipped. Pinned by `.paper_test/test_skip_hash.py`.
+12. **Whitespace, grammar artifacts and embedded-image geometry are ONE policy-driven
+    class.** `format_policy_of` injects the venue template's own blank-paragraph slots
+    (`empty_paragraph_slots`, derived from the official Word template(s) by
+    `paper_docx_format.empty_paragraph_slots_from_template`) and `seed_format_policy_file`
+    writes them into every session's `format_policy.json`, so a session's own scan and the
+    postcheck agree on what is prescribed. A blank the template carries -- the spacer above
+    the title, a placeholder between two headings -- is NEVER reported or deleted; the stray
+    blanks (`FMT-S8` attached to a heading, `FMT-S6` beyond `max_empty_paragraph_run`), the
+    line-edge spaces (`FMT-P4`), the doubled word (`FMT-G1`) and an image drawn off its own
+    pixel ratio (`FMT-IM1`) are mechanical and repaired before fingerprinting. Text-hygiene
+    repairs are RECORDED text edits (like the citation/spelling edits) so the fixer's
+    `text_diff_only_recorded_edits` verification still proves nothing else moved; a
+    spelling-pair TIE is broken by the first occurrence, never left as an unfixable
+    mechanical row (that tie used to reject every other repair of the file). Pinned by
+    `.paper_test/test_format_hygiene.py`.
 
 ## Commands you will use
 

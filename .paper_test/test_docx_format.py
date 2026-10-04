@@ -739,7 +739,7 @@ def test_ppr_splice_keeps_xml_wellformed():
     # negative: the always-on fence must fail a corrupt output even when the
     # optional `docx` CLI is absent
     real_fix_document = fmt.fix_document
-    fmt.fix_document = lambda xml, styles, policy: (
+    fmt.fix_document = lambda xml, styles, policy, **_kw: (
         xml.replace("<w:jc w:val=\"center\"/>", "<w:pPr <w:jc w:val=\"center\"/>"),
         ["corrupt for the test"], {})
     try:

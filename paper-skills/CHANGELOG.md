@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.28 — whitespace/typography artifacts, template-prescribed blanks, embedded-image geometry (2026-10-05)
+
+Two real defects shipped through the 2026-10-04 rounds: a correspondence
+e-mail one space to the right of its line (a leading space after `w:br`), a
+stray empty paragraph between "2 Materials and Methods" and "2.1 Study design"
+-- both invisible to the text-only corpus -- and two supplementary figures
+delivered 31% / 16% off their own pixel ratio after the template rewrite.
+The M20 family now covers them end to end:
+
+- `paper_docx_format.py` scans `FMT-P4` (a space rendering at the start/end of
+  a visual line), `FMT-S8` (a blank line attached to a heading) and `FMT-G1`
+  (a doubled article/preposition) as mechanical, and the fixer repairs them
+  with recorded text edits (`text_diff_only_recorded_edits` still proves
+  nothing else moved); `FMT-S6` (a run beyond `max_empty_paragraph_run`) is
+  mechanical too. `FMT-IM1` compares every `wp:extent`/VML size in the
+  document AND its headers/footers with the image part's own pixels
+  (PNG/JPEG/GIF/BMP/TIFF, stdlib) and restores the ratio from the width.
+- **Template-prescribed blanks are never touched.** The pipeline derives the
+  venue Word template's own empty-paragraph slots
+  (`empty_paragraph_slots`: own/previous/next style signatures) into
+  `format_policy_of`, writes them into every session's `format_policy.json`,
+  and the scan exempts them and anything before the first non-empty paragraph
+  (the spacer the template carries above the title). Only the non-prescribed
+  blanks are reported and deleted.
+- The reported-but-editorial half (`FMT-P3` doubled spaces / bracket spacing /
+  zero-width marks, `FMT-G2` a possible lowercase sentence start, `FMT-G3` a
+  missing space after punctuation, `FMT-T10a..T10e` mixed direct fonts,
+  paragraph spacing/indentation/alignment drift and a heading-level jump) is
+  named in the review sweep, the auditor's new "re-derive the formatting
+  state" step, the E9b fix rule, the integration/rewrite rules and the judge's
+  M20 sweep; a residual mechanical row is a real defect of the version that
+  carries it, and a template-prescribed blank is never a difference.
+- A spelling-pair TIE now resolves by the form that occurs first
+  (`modelling` x1 vs `modeling` x1), so the mechanical FMT-T8d row is
+  clearable; the tie used to make the fixer's self-verification fail and
+  silently discard EVERY other repair of that file.
+- `ppr_of`/`rpr_of` recognise self-closing `<w:pPr/>`/`<w:rPr/>` (python-docx
+  writes the former): the old lookahead treated it as "no properties element"
+  and inserted a SECOND `w:pPr` -- invalid OOXML -- which made `docx validate`
+  reject the repaired main text and the file keep its defects.
+- The template restyle now re-runs the mechanical pass on the restyled package
+  (the restyle strips direct spacing, which had silently removed the legend
+  spacing the first pass applied).
+
 ## 0.27 — the built-in default profile tracks the shipped file; slow test suites split for parallel runs (2026-10-01)
 
 - `_shipped_default_venue_profile()` loads `venue_profiles/<default>.json` at
