@@ -567,7 +567,21 @@ USAGE
     python paper_pipeline.py redline --root ./paper_rounds [--round R] [--tool auto]
     python paper_pipeline.py decide --root ./paper_rounds   # also writes final_clean_version/
     python paper_pipeline.py retry  --root ./paper_rounds --run r2_review
+    python paper_pipeline.py retry  --root ./paper_rounds --runs 1:judge,2:feedback,2:review
     python paper_pipeline.py prune  --root ./paper_rounds --keep-latest 1 [--yes]
+
+    `retry --runs <selection>` takes the SAME grammar as `run --only` (rounds,
+    stage classes, ROUND:STAGE, single sessions and judge selectors), so the
+    two commands select the same part of the pipeline: `--runs 1:review` resets
+    round 1's review, `--runs r1_w2` one session, `--runs 1` the whole round.
+    `--run`, `--runs` and `--all-failed` are mutually exclusive.
+
+    Every command also accepts `--skip-hash`: it skips the integrity
+    VERIFICATION passes for THIS invocation (the pristine copy, pinned
+    champions, published winners, frozen run inputs, judge-view digests and the
+    a1 base digest). Digests are still RECORDED, so a later invocation without
+    the flag verifies the same chain; status/decision.json/the published
+    readme say the checks were SKIPPED, never that they were verified.
 
     A completed round's sandboxes are scratch (the judge sheets are stored in
     state.json), and every judge session copies the whole field: `prune` is the
@@ -9747,6 +9761,46 @@ def configure_hash_cache_for_command(cmd: str, root) -> str:
     return ""
 
 
+# ---- --skip-hash: the operator's switch for the VERIFICATION passes ---------
+# `--skip-hash` skips the integrity VERIFICATION passes -- the audits that
+# re-read bytes and compare them with what a finished root recorded: the
+# pristine copy, the pinned champions, the published winners, every completed
+# run's frozen inputs, the judge-view digests and the a1 base digest. On a big,
+# trusted root that is most of the wall time of `status`/`run`/`decide`.
+#
+# It NEVER skips RECORDING a digest: state.json, the pins, the content
+# fingerprints and every run's own corpus_digest are still computed, so content
+# addressing, deduplication and the pins stay intact, and a later invocation
+# WITHOUT the flag verifies exactly the same chain. The within-invocation
+# FRESHNESS checks (does this sandbox still match the upstream it is about to
+# hand to an agent?) are not skipped either: they decide what an agent reads,
+# not what an audit believes. The flag is per invocation, OFF by default, and
+# every report says the checks were SKIPPED -- never that they were verified.
+SKIP_HASH_CHECKS = False
+
+
+def hash_checks_skipped() -> bool:
+    """True while this invocation runs with `--skip-hash`."""
+    return bool(SKIP_HASH_CHECKS)
+
+
+def hash_skip_note() -> str:
+    """The report line for a `--skip-hash` invocation ("" while verifying)."""
+    if not SKIP_HASH_CHECKS:
+        return ""
+    return ("--skip-hash: the integrity VERIFICATION passes were SKIPPED (the pristine copy, "
+            "pinned champions, published winners, frozen run inputs, judge-view digests and the "
+            "a1 base digest). Digests are still RECORDED, so a later invocation without the flag "
+            "verifies the same chain.")
+
+
+def configure_hash_checks(skip: bool) -> str:
+    """Turn the verification passes off for THIS invocation; returns the note."""
+    global SKIP_HASH_CHECKS
+    SKIP_HASH_CHECKS = bool(skip)
+    return hash_skip_note()
+
+
 def sha256_file(p: Path) -> str:
     """SHA-256 of one file, reusing this process's cached digest when the
     file's full stat identity is unchanged (see the block comment above)."""
@@ -13385,8 +13439,23 @@ def seed_format_policy_file(ctx: Ctx, sb: Path) -> Path:
     """
     p = sb / "format_policy.json"
     policy = format_policy_of(ctx)
-    write_json_atomic(p, {"tables": copy.deepcopy(policy.get("tables") or {}),
-                          "figures": copy.deepcopy(policy.get("figures") or {})})
+    # tmp + rename, NOT write_json_atomic's extra fsync: this file is a pure
+    # INPUT every session reads, and the pipeline seeds one per session
+    # materialization. On this box each fsync costs ~0.08 s (measured: the
+    # fsynced version added 24 fsyncs and ~4 s to one round of the scheduling
+    # suite -- the same latency the seeded evidence tables avoid, see
+    # `_seed_write`). The atomic rename still guarantees a reader never sees a
+    # truncated file, and the content is reproducible from the profile.
+    tmp = tmp_path_for(p)
+    try:
+        tmp.write_text(json.dumps({"tables": copy.deepcopy(policy.get("tables") or {}),
+                                   "figures": copy.deepcopy(policy.get("figures") or {})},
+                                  ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, p)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
     return p
 
 
@@ -14572,7 +14641,7 @@ def die(msg: str, code: int = 1):
     sys.exit(code)
 
 
-def parse_only_rounds(text: str, item: str) -> set:
+def parse_only_rounds(text: str, item: str, flag: str = "--only") -> set:
     """Parse the round side of an `--only` item: "2", "1-3" or "1,2,4" -> set.
 
     `text` is the raw (un-normalized) round side, `item` the whole item for the
@@ -14587,27 +14656,27 @@ def parse_only_rounds(text: str, item: str) -> set:
         if m:
             lo, hi = int(m.group(1)), int(m.group(2))
             if lo < 1 or hi < 1:
-                die(f"--only: round ordinals are 1-based, got {item!r}")
+                die(f"{flag}: round ordinals are 1-based, got {item!r}")
             if hi < lo:
-                die(f"--only: empty round range {chunk!r} in {item!r}")
+                die(f"{flag}: empty round range {chunk!r} in {item!r}")
             rounds.update(range(lo, hi + 1))
             continue
         if not chunk.isdigit():
-            die(f"--only: {chunk!r} in {item!r} is not a round ordinal (1, 2, ... "
+            die(f"{flag}: {chunk!r} in {item!r} is not a round ordinal (1, 2, ... "
                 f"or a range like 1-3)")
         if int(chunk) < 1:
-            die(f"--only: round ordinals are 1-based, got {item!r}")
+            die(f"{flag}: round ordinals are 1-based, got {item!r}")
         rounds.add(int(chunk))
     if not rounds:
-        die(f"--only: {item!r} names no round")
+        die(f"{flag}: {item!r} names no round")
     return rounds
 
 
-def parse_only_stage(token: str, item: str) -> str:
+def parse_only_stage(token: str, item: str, flag: str = "--only") -> str:
     """Resolve one stage name or alias, or die with the accepted list."""
     name = ONLY_ALIASES.get(token, token)
     if name not in ONLY_STAGES:
-        die(f"--only: unknown stage {item!r}; choose from {', '.join(ONLY_STAGES)} "
+        die(f"{flag}: unknown stage {item!r}; choose from {', '.join(ONLY_STAGES)} "
             f"(aliases: merge=integrate, w=rewrite, a/a2=revise, j=judge, "
             f"fb=feedback, resp=response, apply-template/author-submission=conform)")
     return name
@@ -14661,12 +14730,12 @@ class OnlySpec:
         self.judge_run_ids = []
         self.raw = ""            # the item text as typed, for the run log
 
-    def validate(self, rounds_count: int) -> "OnlySpec":
+    def validate(self, rounds_count: int, flag: str = "--only") -> "OnlySpec":
         """Reject round ordinals the pipeline does not have."""
         R = max(1, int(rounds_count))
         unknown = sorted(r for r in self.rounds if r > R or r < 1)
         if unknown:
-            die(f"--only: round(s) {', '.join(str(r) for r in unknown)} do not exist: this "
+            die(f"{flag}: round(s) {', '.join(str(r) for r in unknown)} do not exist: this "
                 f"pipeline is configured with --rounds {R} (rounds are 1-based)")
         return self
 
@@ -14879,7 +14948,7 @@ class OnlySpec:
                     or self.sessions or self.judge_selectors or self.judge_run_ids)
 
 
-def parse_only_spec(raw) -> OnlySpec:
+def parse_only_spec(raw, flag: str = "--only") -> OnlySpec:
     """Parse `run --only` into an OnlySpec (None/empty/`all` = everything).
 
     Round ordinals and stage names combine as described on OnlySpec. Accepted
@@ -14912,12 +14981,12 @@ def parse_only_spec(raw) -> OnlySpec:
         # of one round run (see OnlySpec.judge_selectors).
         sel = re.fullmatch(r"r?(\d+)\s*[_:/.-]\s*judge\s*[_:/.-]\s*(.+)", token)
         if sel:
-            _add_judge_selector(spec, int(sel.group(1)), sel.group(2), part)
+            _add_judge_selector(spec, int(sel.group(1)), sel.group(2), part, flag)
             continue
         # `r1_judge1` / `1_judge2`: judge index k of every version of one round.
         sel = re.fullmatch(r"r?(\d+)\s*[_:/.-]\s*judge\s*(\d+)\s*$", token)
         if sel:
-            _add_judge_selector(spec, int(sel.group(1)), f"j{int(sel.group(2))}", part)
+            _add_judge_selector(spec, int(sel.group(1)), f"j{int(sel.group(2))}", part, flag)
             continue
         # `r1_w2` / `r1_a2` / `r1_i1` / `r1_review` / `r1_review_b` / `r1_audit`:
         # ONE session of one round. A `_j<k>` tail makes it a judge session
@@ -14929,42 +14998,42 @@ def parse_only_spec(raw) -> OnlySpec:
         if sel:
             session = sel.group(2) + sel.group(3)
             if re.fullmatch(r"[_:/.-]j\d+", sel.group(3)):
-                _add_judge_selector(spec, int(sel.group(1)), session, part)
+                _add_judge_selector(spec, int(sel.group(1)), session, part, flag)
             elif re.fullmatch(r"a\d+", session):
                 # `r1_a2` names the round's a2 ARM (the id the round plan and
                 # `agents` use), while `r1_reviser2` keeps the friendly count.
-                _add_session_id(spec, int(sel.group(1)), session, part)
+                _add_session_id(spec, int(sel.group(1)), session, part, flag)
             else:
-                _add_session_token(spec, int(sel.group(1)), session, part)
+                _add_session_token(spec, int(sel.group(1)), session, part, flag)
             continue
         # `r1_a2_revise`: the exact RUN ID `agents` prints for a revise arm (the
         # others -- `r1_w1`, `r1_i1`, `r1_review`, `r1_audit` -- are already
         # session ids, so only the revise arm needs the suffix).
         sel = re.fullmatch(r"r(\d+)\s*[_:/.-]\s*(a\d+)[_:/.-]revise", token)
         if sel:
-            _add_session_id(spec, int(sel.group(1)), sel.group(2), part)
+            _add_session_id(spec, int(sel.group(1)), sel.group(2), part, flag)
             continue
         m = re.fullmatch(r"([0-9][0-9,\-\s]*)\s*[:/.]\s*(.+?)\s*", token)
         if m and re.match(r"^\s*\d", m.group(1)):
             # `ROUND[:.]STAGE` (or `ROUND:all`): a per-round stage selection; the
             # stage side may itself name one session (`2:w2`, `2:rewriter1`) or
             # carry judge sessions (`2:judge_i1_j1`, `2:judge1`).
-            rounds = parse_only_rounds(m.group(1), part)
+            rounds = parse_only_rounds(m.group(1), part, flag)
             stage_token = m.group(2).strip()
             st = re.fullmatch(r"judge\s*[_:/.-]\s*(.+)", stage_token)
             if st:
                 for r in rounds:
-                    _add_judge_selector(spec, r, st.group(1), part)
+                    _add_judge_selector(spec, r, st.group(1), part, flag)
                 continue
             if stage_token in ("all", "everything", "*"):
                 stages = set()
             elif stage_token in ONLY_ALIASES or stage_token in ONLY_STAGES:
                 # A stage name always wins over a session spelling: `2:a2` stays
                 # round 2's revise stage (the documented `a`/`a2` alias).
-                stages = {parse_only_stage(stage_token, part)}
+                stages = {parse_only_stage(stage_token, part, flag)}
             elif re.fullmatch(r"(?:judge|j)\d+", stage_token):       # `2:judge1`
                 for r in rounds:
-                    _add_judge_selector(spec, r, stage_token, part)
+                    _add_judge_selector(spec, r, stage_token, part, flag)
                 continue
             elif re.fullmatch(r"(?:w\d+|a\d+|i\d+|rewriter\d+|reviser\d+|revise\d+|"
                               r"integrator\d+|integrate\d+)(?:[_:/.-]j\d+)?", stage_token):
@@ -14972,27 +15041,27 @@ def parse_only_spec(raw) -> OnlySpec:
                 is_arm = re.fullmatch(r"a\d+", stage_token)     # `2:a3` = the a3 ARM
                 for r in rounds:
                     if is_judge:
-                        _add_judge_selector(spec, r, stage_token, part)
+                        _add_judge_selector(spec, r, stage_token, part, flag)
                     elif is_arm:
-                        _add_session_id(spec, r, stage_token, part)
+                        _add_session_id(spec, r, stage_token, part, flag)
                     else:
-                        _add_session_token(spec, r, stage_token, part)
+                        _add_session_token(spec, r, stage_token, part, flag)
                 continue
             else:
-                stages = {parse_only_stage(stage_token, part)}
+                stages = {parse_only_stage(stage_token, part, flag)}
             spec.rounds |= rounds
             for r in rounds:
                 spec.pairs.setdefault(r, set()).update(stages)
             continue
         if re.fullmatch(r"[0-9][0-9,\-\s]*", token):
-            bare = parse_only_rounds(token, part)
+            bare = parse_only_rounds(token, part, flag)
             spec.rounds |= bare
             spec.rounds_in_full |= bare      # a round in FULL (every step of its DAG)
             continue
         # `judge1` / `j1` / `judge_1`: judge index 1 of every version of every
         # round that has it.
         if re.fullmatch(r"(?:judge|j)[_:/.-]?\d+", token):
-            _add_judge_selector(spec, None, token, part)
+            _add_judge_selector(spec, None, token, part, flag)
             continue
         # The exact RUN ID `agents` prints for a judge session
         # (`judge_t497f106d_j1`): the token is salted and carries no round by
@@ -15004,7 +15073,7 @@ def parse_only_spec(raw) -> OnlySpec:
         # `w2_j1` / `i1_j2` / `a2_j1` / `orig_j2`: a judge session named WITHOUT a
         # round applies to every round that has that version.
         if re.fullmatch(r"(?:a\d+|w\d+|i\d+|orig)[_:/.-]j\d+", token):
-            _add_judge_selector(spec, None, token, part)
+            _add_judge_selector(spec, None, token, part, flag)
             continue
         # `w2` / `rewriter2` / `integrator1` / `reviser1` / `reviewer`: ONE
         # producing session, in every round that has it. `a2` alone stays the
@@ -15012,13 +15081,14 @@ def parse_only_spec(raw) -> OnlySpec:
         # revise spelling must be `reviser1`.
         if re.fullmatch(r"(?:w\d+|i\d+|rewriter\d+|writer\d+|reviser\d+|revise\d+|"
                         r"integrator\d+|integrate\d+|reviewer|review_b)", token):
-            _add_session_token(spec, None, token, part)
+            _add_session_token(spec, None, token, part, flag)
             continue
-        spec.stages.add(parse_only_stage(token, part))
+        spec.stages.add(parse_only_stage(token, part, flag))
     return spec if spec else None
 
 
-def _add_judge_selector(spec: "OnlySpec", r, session: str, part: str) -> None:
+def _add_judge_selector(spec: "OnlySpec", r, session: str, part: str,
+                        flag: str = "--only") -> None:
     """Record one JUDGE-session selector on an OnlySpec (`r` None = every round).
 
     The round's judge stage is implied (the selector is a WHITELIST of its
@@ -15026,8 +15096,8 @@ def _add_judge_selector(spec: "OnlySpec", r, session: str, part: str) -> None:
     `--only r1_judge_w2_j1` never looks at the other rounds.
     """
     if r is not None and int(r) < 1:
-        die(f"--only: {part!r} names round {r}; rounds are 1-based")
-    sel = _judge_selector_token(session, part)
+        die(f"{flag}: {part!r} names round {r}; rounds are 1-based")
+    sel = _judge_selector_token(session, part, flag)
     if r is not None:
         spec.rounds.add(int(r))
     spec.judge_selectors.setdefault(None if r is None else int(r), []).append(sel)
@@ -15043,7 +15113,8 @@ def _add_judge_run_id(spec: "OnlySpec", run_id: str, part: str) -> None:
     spec.judge_run_ids.append((str(run_id), part))
 
 
-def resolve_judge_run_ids(ctx: Ctx, only, label: str = "[run]", sink=None) -> None:
+def resolve_judge_run_ids(ctx: Ctx, only, label: str = "[run]", sink=None,
+                          flag: str = "--only") -> None:
     """Turn `--only judge_<token>_j<k>` items into the selectors they name.
 
     `agents` prints each judge session as its run id, and the token in it is
@@ -15065,7 +15136,7 @@ def resolve_judge_run_ids(ctx: Ctx, only, label: str = "[run]", sink=None) -> No
         m = re.fullmatch(r"judge_([0-9a-z]+?)(?:_j(\d+))?", str(tok))
         hit = index.get(m.group(1)) if m else None
         if hit is None:
-            die(f"--only: {part!r} is not a judge session of this root. The ids `agents` prints "
+            die(f"{flag}: {part!r} is not a judge session of this root. The ids `agents` prints "
                 f"are accepted (e.g. `judge_{JUDGE_TOKEN_PREFIX}1a2b3c4d_j1`); run `agents --root "
                 f"{ctx.root}` to see the ones that exist here.")
         r, vid = hit
@@ -15074,7 +15145,7 @@ def resolve_judge_run_ids(ctx: Ctx, only, label: str = "[run]", sink=None) -> No
         sel = f"{vid}" + (f"_j{m.group(2)}" if m.group(2) else "")
         only.judge_selectors.setdefault(r, []).append(sel)
         only.rounds.add(int(r))
-        line = (f"{label} --only {part!r}: judge run id -> round {r}, version {vid}"
+        line = (f"{label} {flag} {part!r}: judge run id -> round {r}, version {vid}"
                 + (f", judge {m.group(2)}" if m.group(2) else " (that version's whole panel)"))
         if sink is None:
             print(line)
@@ -15083,7 +15154,8 @@ def resolve_judge_run_ids(ctx: Ctx, only, label: str = "[run]", sink=None) -> No
     only.judge_run_ids = []
 
 
-def _add_session_token(spec: "OnlySpec", r, session: str, part: str) -> None:
+def _add_session_token(spec: "OnlySpec", r, session: str, part: str,
+                       flag: str = "--only") -> None:
     """Record one session selector on an OnlySpec (`r` None = every round that has it).
 
     A token is a producing session's id (`w2`, `a2`, `i1`, `review`, `review_b`,
@@ -15091,14 +15163,15 @@ def _add_session_token(spec: "OnlySpec", r, session: str, part: str) -> None:
     `OnlySpec._token_stage`).
     """
     if r is not None and int(r) < 1:
-        die(f"--only: {part!r} names round {r}; rounds are 1-based")
-    session = _session_token(session, part)
+        die(f"{flag}: {part!r} names round {r}; rounds are 1-based")
+    session = _session_token(session, part, flag)
     if r is not None:
         spec.rounds.add(int(r))
     spec.sessions.setdefault(None if r is None else int(r), []).append(session)
 
 
-def _add_session_id(spec: "OnlySpec", r, session_id: str, part: str) -> None:
+def _add_session_id(spec: "OnlySpec", r, session_id: str, part: str,
+                    flag: str = "--only") -> None:
     """Record one session by its EXACT pipeline id (`a2`, `w1`, `i3`, `review`...).
 
     This is the spelling the round plan, the run ids and `agents` use, so nothing
@@ -15107,11 +15180,11 @@ def _add_session_id(spec: "OnlySpec", r, session_id: str, part: str) -> None:
     """
     sid = str(session_id).strip("_:/.-").lower()
     if sid == "a1":
-        die(f"--only: {part!r} names a1, the round base COPY -- it has no agent session "
+        die(f"{flag}: {part!r} names a1, the round base COPY -- it has no agent session "
             f"(use `reviser1` for the first reviser, which edits a1 into a2)")
     if not re.fullmatch(r"(?:w\d+|a\d+|i\d+|review|review_b|audit|feedback|concerns|response)",
                         sid):
-        die(f"--only: {part!r} is not a session this pipeline knows (use a stage name, or a "
+        die(f"{flag}: {part!r} is not a session this pipeline knows (use a stage name, or a "
             f"session such as `rewriter1`, `reviser1`, `integrator1`, `review`, `audit`, `w2`, "
             f"`w2_j1`, `r1_w2`, `r1_judge_w2_j1`)")
     if r is not None:
@@ -15119,7 +15192,7 @@ def _add_session_id(spec: "OnlySpec", r, session_id: str, part: str) -> None:
     spec.sessions.setdefault(None if r is None else int(r), []).append(sid)
 
 
-def _judge_selector_token(raw: str, part: str) -> str:
+def _judge_selector_token(raw: str, part: str, flag: str = "--only") -> str:
     """Normalize one JUDGE-session selector (`integrator2_j1` -> `i2_j1`).
 
     `judge1`/`j1` is judge index 1 of every version; a version id without an
@@ -15149,11 +15222,11 @@ def _judge_selector_token(raw: str, part: str) -> str:
         return vid + (f"_j{j}" if j else "")
     if re.fullmatch(r"orig(?:[_:/.-]j\d+)?", tok):
         return tok
-    die(f"--only: {part!r} is not a judge session this pipeline knows (use `judge` for the whole "
+    die(f"{flag}: {part!r} is not a judge session this pipeline knows (use `judge` for the whole "
         f"stage, or a session such as `r1_judge_w2_j1`, `w2_j1`, `integrator2_j1` or `judge1`)")
 
 
-def _session_token(raw: str, part: str) -> str:
+def _session_token(raw: str, part: str, flag: str = "--only") -> str:
     """Normalize one session token: `rewriter2` -> `w2`, `reviser1` -> `a2`, ...
 
     The friendly class+index spellings the operator is most likely to type are
@@ -15162,7 +15235,7 @@ def _session_token(raw: str, part: str) -> str:
     """
     tok = str(raw).strip().strip("_:/.-").lower().replace(" ", "")
     if not tok:
-        die(f"--only: {part!r} names no session (use a stage name, or a session such as "
+        die(f"{flag}: {part!r} names no session (use a stage name, or a session such as "
             f"`rewriter1`, `integrator2`, `w2`, `r1_w2` or `r1_judge_w2_j1`)")
     m = re.fullmatch(r"(rewriter|writer|w)(\d+)", tok)
     if m:
@@ -15180,12 +15253,12 @@ def _session_token(raw: str, part: str) -> str:
         return "review_b" if m.group(2) else "review"
     if re.fullmatch(r"(?:a1|w\d+|a\d+|i\d+|orig|audit|feedback|concerns|response)", tok):
         if tok == "a1":
-            die(f"--only: {part!r} names a1, the round base COPY -- it has no agent session "
+            die(f"{flag}: {part!r} names a1, the round base COPY -- it has no agent session "
                 f"(use `reviser1` for the first reviser, which edits a1 into a2)")
         if tok == "orig":
-            die(f"--only: {part!r} names the pristine original, which has no agent session")
+            die(f"{flag}: {part!r} names the pristine original, which has no agent session")
         return tok
-    die(f"--only: {part!r} is not a session this pipeline knows (use a stage name, or a session "
+    die(f"{flag}: {part!r} is not a session this pipeline knows (use a stage name, or a session "
         f"such as `rewriter1`, `reviser1`, `integrator1`, `review`, `audit`, `w2`, `w2_j1`, "
         f"`r1_w2`, `r1_judge_w2_j1`)")
 
@@ -15965,6 +16038,10 @@ class Ctx:
 
 def pristine_integrity(ctx: Ctx) -> tuple:
     """(ok, detail) for the master copy of the original corpus."""
+    if hash_checks_skipped():
+        # `--skip-hash`: the copy is NOT verified. Report that as such -- never
+        # as "ok" (see the block comment on SKIP_HASH_CHECKS).
+        return True, "not verified (--skip-hash)"
     stored = ctx.source_manifest
     if not isinstance(stored, dict):
         return False, "no setup-time manifest recorded in state.json"
@@ -15987,6 +16064,8 @@ def pinned_integrity(ctx: Ctx) -> list:
     (<root>/round<R>_winner/): both must still hash to the digest the round
     recorded, otherwise the chain the decision rests on is broken.
     """
+    if hash_checks_skipped():
+        return []               # not verified; the reports say so (hash_skip_note)
     errs = []
     for pin in ctx.state.get("pinned") or []:
         docs = pinned_docs_dir(ctx, pin)
@@ -16037,6 +16116,8 @@ def pinned_integrity(ctx: Ctx) -> list:
 
 def input_mismatches(ctx: Ctx, rec: dict) -> list:
     """Byte-identity check of every read-only input recorded for a run sandbox."""
+    if hash_checks_skipped():
+        return []               # not verified (--skip-hash)
     sb = ctx.sandbox_of(rec)
     im = rec.get("inputs_manifest") or {}
     errs = []
@@ -17844,17 +17925,18 @@ def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
                 # left alone for the postcheck/operator to dispose of.
                 view_seed = judge_view_seed_for(ctx, r, vid, j)
                 problems = []
-                if judge_view_digest(sb / "target") != expected_view_digest(
-                        ctx, r, vid, f"{view_seed}|target"):
-                    problems.append("target/")
-                if judge_view_digest(sb / "original") != expected_view_digest(
-                        ctx, r, ORIGINAL_ID, f"{view_seed}|original"):
-                    problems.append("original/")
-                for label, w in (existing.get("label_map") or {}).items():
-                    if judge_view_digest(sb / "field" / label) != expected_view_digest(
-                            ctx, r, w, f"{view_seed}|{label}"):
-                        problems.append(f"field/{label}/")
-                        break
+                if not hash_checks_skipped():
+                    if judge_view_digest(sb / "target") != expected_view_digest(
+                            ctx, r, vid, f"{view_seed}|target"):
+                        problems.append("target/")
+                    if judge_view_digest(sb / "original") != expected_view_digest(
+                            ctx, r, ORIGINAL_ID, f"{view_seed}|original"):
+                        problems.append("original/")
+                    for label, w in (existing.get("label_map") or {}).items():
+                        if judge_view_digest(sb / "field" / label) != expected_view_digest(
+                                ctx, r, w, f"{view_seed}|{label}"):
+                            problems.append(f"field/{label}/")
+                            break
                 if problems and not leftovers_present(ctx, existing):
                     print(f"[warn] {rid}: read-only view(s) {', '.join(problems)} do not match "
                           f"their corpora (interrupted copy?); rebuilding the sandbox instead of "
@@ -18696,6 +18778,8 @@ def _check_pristine_copy(ctx: Ctx, rec: dict, area: str, errs: list,
     CONTENTS matches the expected TRANSFORMED view (`expected`, computed with
     the session's view seed: rewritten references, sanitized metadata).
     """
+    if hash_checks_skipped():
+        return                  # not verified (--skip-hash)
     p = area_dir(ctx.sandbox_of(rec), area)
     if not p.is_dir():
         errs.append(f"{area}/ copy is missing from the sandbox")
@@ -21073,7 +21157,9 @@ def postcheck_a1(ctx: Ctx, rec: dict):
     want = (ctx.state.get("original_digest") if src_id == ORIGINAL_ID
             else (find_pin(ctx, src_id) or {}).get("digest"))
     got = recompute_corpus_digest(ctx, rec["round"], A1_ID)
-    if want and got != want:
+    # The DIGEST is still recorded below; only its verification is skipped
+    # (`--skip-hash`), never the recording.
+    if want and got != want and not hash_checks_skipped():
         errs.append(f"base/ is not byte-identical to its source ({src_id}).")
     rec["corpus_digest"] = got
     # The round base's own hand-off markers (report-only; see the placeholder
@@ -27541,6 +27627,10 @@ def run_input_problems(ctx: Ctx, rec: dict) -> list:
     here made `prune` permanently block every later `run` (the affected runs are
     already `done`, so there was no failing run for `retry` to reset either).
     """
+    if hash_checks_skipped():
+        # `--skip-hash`: neither `reconcile_inputs` nor `evidence_integrity` can
+        # see drift; both report the skip through hash_skip_note().
+        return []
     if not ctx.sandbox_of(rec).is_dir():
         return []
     probs = input_mismatches(ctx, rec)
@@ -30815,7 +30905,7 @@ def only_is_template_stage_only(spec) -> bool:
     return stages == {"conform"} and not any(sessions.values())
 
 
-def validate_only_selectors(ctx: Ctx, only) -> None:
+def validate_only_selectors(ctx: Ctx, only, flag: str = "--only") -> None:
     """Refuse an `--only` SESSION item this plan cannot satisfy.
 
     Two namespaces, each validated against the plan before anything starts:
@@ -30841,13 +30931,13 @@ def validate_only_selectors(ctx: Ctx, only) -> None:
         missing = [tok for tok in only.sessions[None]
                    if not any(tok in planned[r] for r in planned)]
         if missing:
-            die(f"--only: no round of this pipeline runs session(s) {', '.join(missing)}; "
+            die(f"{flag}: no round of this pipeline runs session(s) {', '.join(missing)}; "
                 f"round 1 plans {', '.join(planned[1])} (the revise arms are numbered from a2, "
                 f"so `reviser1` is a2)")
     for r in sorted(k for k in only.sessions if k is not None):
         for tok in only.sessions[r]:
             if tok not in planned[r]:
-                die(f"--only: round {r} plans no session {tok!r}; it runs "
+                die(f"{flag}: round {r} plans no session {tok!r}; it runs "
                     f"{', '.join(planned[r])} (the revise arms are numbered from a2, so "
                     f"`reviser1` is a2, `reviser2` a3, ...)")
     keys = {k for k in only.judge_selectors if k is not None}
@@ -30863,7 +30953,7 @@ def validate_only_selectors(ctx: Ctx, only) -> None:
             parse_judges_enabled(spec, R, lambda rr: judgeable_ids(ctx, rr),
                                  lambda rr: round_judges(ctx, rr))
         except ValueError as e:
-            die(f"--only: {e}")
+            die(f"{flag}: {e}")
 
 
 def cmd_run(args) -> None:
@@ -33012,12 +33102,17 @@ def cmd_status(args) -> None:
                         "and run build-venue-templates)")
     print(f"venue norm:    {_vpack_note}")
     pok, pdetail = pristine_integrity(ctx)
-    print(f"pristine:      {'ok' if pok else 'CHANGED'} ({pdetail})")
+    if hash_checks_skipped():
+        print("pristine:      not verified (--skip-hash)")
+    else:
+        print(f"pristine:      {'ok' if pok else 'CHANGED'} ({pdetail})")
     perrs = pinned_integrity(ctx)
-    print(f"pinned:        {'ok' if not perrs else 'CHANGED'} "
+    print(f"pinned:        "
+          f"{'not verified (--skip-hash)' if hash_checks_skipped() else ('ok' if not perrs else 'CHANGED')} "
           f"({len(ctx.state.get('pinned') or [])} pinned version(s))")
     for e in perrs:
         print(f"  - {e}")
+    print(f"hash checks:   {'SKIPPED (--skip-hash: digests recorded, verification not run)' if hash_checks_skipped() else 'verified'}")
     print(f"config:        rounds={ctx.rounds_count()} "
           f"judges/version={judges_config_note(ctx)} "
           f"integrators/round={integrators_config_note(ctx)}")
@@ -33721,6 +33816,8 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     final_clean_json = {k: v for k, v in final_clean.items() if k != "action"}
     integrity = {"pristine_ok": pok, "pristine_detail": pdetail, "pinned_errors": perrs,
                  "evidence_not_verifiable": list(evid_missing),
+                 "hash_checks": "skipped" if hash_checks_skipped() else "verified",
+                 "hash_checks_note": hash_skip_note() or None,
                  "recovery": advisories["recovery"],
                  "visual_not_verified": advisories["visual_not_verified"]}
     # CERTIFICATION: ONE verdict that the process exit code, decision.json and
@@ -33732,6 +33829,13 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         gate_problems, rounds_data, chain_ok, panel_gaps, final_regression, provisional,
         bool(getattr(args, "require_complete", False)), final["round"], R,
         final_clean, final_clean.get("skipped"))
+    # `--skip-hash`: the verification passes did NOT run, so the verdict says so
+    # -- a NOTE, never a blocker (skipping is the operator's explicit choice) and
+    # never the word "verified". `certified` keeps its meaning: "nothing THIS
+    # invocation could check blocks the answer".
+    certification["hash_checks"] = "skipped" if hash_checks_skipped() else "verified"
+    if hash_checks_skipped():
+        certification["notes"] = list(certification.get("notes") or []) + [hash_skip_note()]
     cert_blockers = certification["blockers"]
     cert_notes = certification["notes"]
     # The status document is a SIBLING of the directory and is written on every
@@ -34755,6 +34859,116 @@ def _cmd_prune_locked(ctx: Ctx, args) -> None:
     print(f"[prune] reclaimed ~{freed / 1e9:.2f} GB")
 
 
+# `retry --runs`: the SAME selection grammar as `run --only`.
+#
+# Targets are reset in the round plan's own dependency order within each round
+# (and by ascending round): a target whose upstream is still done is
+# re-materialized at reset time, and the rest are left stale for the next
+# `run`'s staging loop -- so resetting a downstream BEFORE the upstream it
+# consumes would rebuild it from input that is about to be replaced.
+RETRY_KIND_RANK = {"a1": 0, "feedback": 1, "concerns": 1, "rewrite": 2, "review": 2,
+                   "audit": 3, "revise": 4, "response": 5, "integrate": 6, "judge": 7}
+
+
+def _judge_selection_for_retry(ctx: Ctx, r: int, spec: str):
+    """{(version, judge index)} a judge selector names in round `r`; None = every.
+
+    `spec` is an `--only` judge selector (`w2_j1`, `1_judge_i1_j1`, ...) as
+    `OnlySpec.judge_spec_for()` renders it. Unlike the run loop's tolerant
+    `judge_selection`, a selector that names NO session of this round is a hard
+    error here ("" -- no selector at all -- is the only way to say "every
+    session"): `retry` must never reset MORE sessions than the operator named,
+    and an empty set would otherwise read as "the whole panel".
+    """
+    spec = str(spec or "").strip()
+    if not spec:
+        return None
+    try:
+        triples = parse_judges_enabled(spec, config_rounds(ctx),
+                                       lambda rr: judgeable_ids(ctx, rr),
+                                       lambda rr: round_judges(ctx, rr))
+    except ValueError as e:
+        die(f"--runs: {e}")
+    picked = {(str(v), int(k)) for rr, v, k in triples if int(rr) == int(r)}
+    if not picked:
+        where = f"`agents --root {ctx.root}`" if getattr(ctx, "root", None) else "`agents`"
+        die(f"--runs: the judge selection {spec!r} names no judge session of round {r} "
+            f"(that round judges {', '.join(judgeable_ids(ctx, r)) or 'no version'}); run {where} "
+            f"to see the judge sessions that exist")
+    return picked
+
+
+def retry_targets_for_selection(ctx: Ctx, only) -> tuple:
+    """(run records, notes) the `--only`-grammar selection names for `retry`.
+
+    One selection, evaluated per round with the SAME predicates the run loop
+    uses (`OnlySpec.entry_selected`, `stage_selected`, `judge_spec_for`):
+
+      * a bare round (`1`, `1-2`) or `all` selects every planned session of the
+        round, its a1 base and its judge wave;
+      * a stage class (`review`, `1:feedback`) selects that stage's sessions;
+      * a session token (`r1_w2`, `rewriter1`) selects that one session;
+      * a judge item (`1:judge`, `1:judge_w2_j1`, `judge_<token>_j<k>`) selects
+        the judge records it names (`resolve_judge_run_ids` has already turned a
+        judge RUN ID into its selector when this runs).
+
+    Records that do not exist yet are reported in `notes` -- never invented:
+    `retry` resets what exists, it does not start what has not run.
+    """
+    targets, notes, seen = [], [], set()
+
+    def add(rec) -> None:
+        if rec is None or rec.get("id") in seen:
+            return
+        seen.add(rec.get("id"))
+        targets.append(rec)
+
+    for r in range(1, ctx.rounds_count() + 1):
+        if not only.covers_round(r):
+            continue
+        planned = round_run_plan(ctx, r)
+        whole_round = (only.all_stages or int(r) in getattr(only, "rounds_in_full", set())
+                       or (int(r) in getattr(only, "pairs", {}) and not only.pairs[int(r)]))
+        if whole_round:
+            # A round in full (`1`, `1-2`, `all`, `2:all`) includes its base, like
+            # `run --only 1` materializes it.
+            add(ctx.run(rid_a1(r)))
+        planned_stages = {plan_stage_of(e) for e in planned}
+        for stage in sorted(only.classes_for(r) - planned_stages - {"judge"}):
+            # A stage the ROOT's plan does not have (a journal-mode stage on a
+            # `continue` root, a stage the round's counts switch off): name it,
+            # so an empty selection is never a silent no-op.
+            notes.append(f"r{r}: this round plans no {stage!r} stage (nothing to reset for it)")
+        for entry in planned:
+            if not only.entry_selected(r, entry):
+                continue
+            rec = ctx.run(entry["id"])
+            if rec is None:
+                notes.append(f"r{r}: {entry['id']} is selected but has no run record yet "
+                             f"(nothing to reset)")
+            else:
+                add(rec)
+        # The judge wave is not a plan entry: it is materialized per session.
+        if not only.stage_selected(r, "judge"):
+            continue
+        spec = only.judge_spec_for(r)
+        picked = _judge_selection_for_retry(ctx, r, spec)
+        found = 0
+        for rec in ctx.runs(kind="judge", round_no=r):
+            if picked and (str(rec.get("target_id")),
+                           int(rec.get("judge_index") or 0)) not in picked:
+                continue
+            add(rec)
+            found += 1
+        if not found:
+            notes.append(f"r{r}: the judge selection {spec or '(the whole configured panel)'} "
+                         f"matches no judge run of this root (nothing to reset)")
+    targets.sort(key=lambda rec: (int(rec.get("round") or 0),
+                                  RETRY_KIND_RANK.get(str(rec.get("kind") or ""), 99),
+                                  str(rec.get("id") or "")))
+    return targets, notes
+
+
 def cmd_retry(args) -> None:
     ctx = Ctx(Path(args.root).resolve(),
               strict_venue=bool(getattr(args, "strict_venue", False)))
@@ -34764,18 +34978,49 @@ def cmd_retry(args) -> None:
 
 
 def _cmd_retry_locked(ctx: Ctx, args) -> None:
+    given = [name for name, on in (("--run", getattr(args, "run", None) is not None),
+                                   ("--runs", getattr(args, "runs", None) is not None),
+                                   ("--all-failed", bool(getattr(args, "all_failed", False))))
+             if on]
+    if len(given) > 1:
+        die(f"specify ONE of --run <ID>, --runs <SELECTION> or --all-failed (got "
+            f"{', '.join(given)})")
     if args.run:
         rec = ctx.run(args.run)
         if rec is None:
             die(f"unknown run id: {args.run}")
         targets = [rec]
+    elif getattr(args, "runs", None) is not None:
+        # `--runs` takes the SAME selection grammar as `run --only` (rounds,
+        # stages, ROUND:STAGE, single sessions, judge selectors and judge run
+        # ids), so the operator can reset exactly the part of the pipeline an
+        # equivalent `run --only` invocation would have driven.
+        only = parse_only_spec(args.runs, flag="--runs")
+        if only is None or not only:
+            die("--runs: the selection names nothing; pass rounds, stages or sessions "
+                "(e.g. `--runs 1:review,1:feedback`; the grammar is the one documented for "
+                "`run --only`)")
+        only.validate(ctx.rounds_count(), flag="--runs")
+        resolve_judge_run_ids(ctx, only, label="[retry]", flag="--runs")
+        validate_only_selectors(ctx, only, flag="--runs")
+        targets, notes = retry_targets_for_selection(ctx, only)
+        print(f"[retry] selection: {only.label()} -- {only.describe()}")
+        _ids = [str(rec["id"]) for rec in targets]
+        print(f"[retry] runs ({len(_ids)}): " + ", ".join(_ids[:12])
+              + (f" ... (+{len(_ids) - 12} more)" if len(_ids) > 12 else ""))
+        for note in notes:
+            print(f"[retry] note: {note}")
+        if not targets:
+            print(f"[retry] --runs {only.label()!r} selects no existing run of this root "
+                  f"(nothing was reset).")
+            return
     elif args.all_failed:
         targets = [r for r in ctx.runs() if r["status"] in ("failed", "stale")]
         if not targets:
             print("No failed or stale runs to reset.")
             return
     else:
-        die("specify --run <ID> or --all-failed")
+        die("specify --run <ID>, --runs <SELECTION> or --all-failed")
 
     # 1. Invalidate first and PERSIST it, before anything can fail. Invalidating
     #    a completed round archives its published winner and drops its pins; if
@@ -34917,7 +35162,7 @@ USAGE_EXAMPLES = """usage:
           [--retry-backoff 30] [--retry-backoff-max 600]
           [--agent codex|claude|manual] [--agent-cmd '<json argv>']
           [--judge-agent codex|claude|manual] [--judge-agent-cmd '<json argv>']
-          [--poll S]
+          [--poll S] [--skip-hash]
           drive rounds 1..R as a DEPENDENCY GRAPH: every session starts as soon
           as its inputs exist (the M rewrites and the round's review start
           together; a revise starts when the review marker exists; an
@@ -34958,7 +35203,7 @@ USAGE_EXAMPLES = """usage:
           corpus byte-for-byte (no scratch, no auxiliaries, no self-written
           reports), ready to seed the NEXT pipeline run with
           `paper_pipeline.py setup --source <root>/final_clean_version`.
-  status  --root <dir>
+  status  --root <dir> [--skip-hash]
           integrity, per-round progress and the per-run table.
           It also prints the venue, the journal and the resolved length limits.
   trend   [--root <dir>] [--roots <dir> ...] [--out FILE.md] [--csv FILE.csv]
@@ -35011,7 +35256,7 @@ USAGE_EXAMPLES = """usage:
           needs no document hashing (a few sha256 calls over the plan), so it
           takes well under a second on any root.
   decide  --root <dir> [--package-winner] [--require-complete]
-          [--require-clean-captions]
+          [--require-clean-captions] [--skip-hash]
           recompute every completed round in code, verify the pinned chain,
           write reports/DECISION_REPORT.md + decision.json + raw_scores.csv,
           and publish <root>/final_clean_version/ (the champion corpus without
@@ -35033,6 +35278,7 @@ USAGE_EXAMPLES = """usage:
           5 broken evidence / recomputed champion differs from the stored one /
           an incomplete judge panel (never certified).
   retry   --root <dir> --run <ID> [--all-failed]
+  retry   --root <dir> --runs <SELECTION>              (same grammar as --only)
           reset one run (the failed attempt's artifacts are archived under
           runs/<run>_try<N>_failed/ keeps its whole sandbox -- deliverables,
           transcript and record.json -- and the attempt's record stays in
@@ -35041,6 +35287,15 @@ USAGE_EXAMPLES = """usage:
           persists the invalidation, and rebuilds sandboxes IN DEPENDENCY ORDER:
           a run whose upstream output is gone is left stale for the staging loop
           instead of being materialized out of order.
+          --runs takes the SAME selection grammar as `run --only`, resolved to
+          the runs it names: --runs 1:review,1:feedback resets round 1's review
+          and feedback sessions, --runs 1:judge,2:feedback,2:review round 1's
+          judge wave plus round 2's feedback and review, --runs r1_w2 one
+          session, --runs 1 the whole round (its base, every planned session and
+          its judge wave). Targets are reset in the plan's dependency order, a
+          stage/session the root's plan has no runs for says so instead of
+          silently resetting nothing, and --run, --runs and --all-failed are
+          mutually exclusive.
   prune   --root <dir> [--keep-latest 1] [--yes]
           delete the SANDBOXES of completed rounds to reclaim disk (every judge
           session copies the whole field + original: a 2-round run can exceed
@@ -35106,6 +35361,7 @@ round-3 review scoped to formatting and writing
   #    (resets that run; invalidates that round and every later round, then the
   #     next `run` rebuilds them in dependency order)
   python paper_pipeline.py retry --root ./paper_rounds --run r2_a2_revise
+  python paper_pipeline.py retry --root ./paper_rounds --runs 1:judge,2:review
   python paper_pipeline.py run   --root ./paper_rounds
 
   What the example produces:
@@ -35117,6 +35373,20 @@ round-3 review scoped to formatting and writing
     ./paper_rounds/reports/              DECISION_REPORT.md, decision.json,
                                        raw_scores.csv, round<r>.json
     ./paper_rounds/final/                with --package-winner
+
+integrity verification and --skip-hash:
+  every command accepts --skip-hash. It skips the integrity VERIFICATION
+  passes for THIS invocation -- the pristine copy, the pinned champions, the
+  published winners, every completed run's frozen inputs, the judge-view
+  digests and the a1 base digest -- which are usually the bulk of a big root's
+  status/run/decide time. Digests are still RECORDED (state.json, the pins, the
+  fingerprints and every run's own corpus_digest), so a later invocation
+  WITHOUT the flag verifies the same chain, and the reports say the checks were
+  SKIPPED: `status` prints "not verified (--skip-hash)", decision.json carries
+  integrity.hash_checks + certification.hash_checks ("verified" | "skipped")
+  with a note, and final_clean_version.readme.md carries it too. NOT skipped:
+  the within-invocation freshness checks that decide what an agent READS, and
+  the raw_data/ + human_review_feedback/ read-only enforcement.
 
 agent backends:
   --agent codex (default) `codex exec -`, plus a `-c` override per MCP server
@@ -35165,6 +35435,17 @@ def build_parser() -> argparse.ArgumentParser:
                         help="refuse to run when the root's venue/journal configuration is "
                              "missing or inconsistent (default: report it and continue). An "
                              "unknown venue id is always an error")
+    common.add_argument("--skip-hash", action="store_true",
+                        help="skip the integrity VERIFICATION passes for this invocation (the "
+                             "pristine copy, pinned champions, published winners, frozen run "
+                             "inputs, judge-view digests and the a1 base digest) -- usually the "
+                             "bulk of a big root's status/run/decide time. Digests are still "
+                             "RECORDED (state.json, pins, fingerprints and every run's own "
+                             "corpus_digest), a later invocation without the flag verifies the "
+                             "same chain, and every report says the checks were SKIPPED. NOT "
+                             "skipped: the within-invocation freshness checks that decide what "
+                             "an agent reads, and the raw_data/human_review_feedback read-only "
+                             "enforcement")
 
     ps = sub.add_parser("setup", parents=[common], help="initialize the pipeline root")
     ps.add_argument("--source", required=True,
@@ -35726,6 +36007,13 @@ def build_parser() -> argparse.ArgumentParser:
     prt = sub.add_parser("retry", parents=[common],
                          help="rebuild a failed/stale run's sandbox and reset it")
     prt.add_argument("--run", default=None, help="specific run id, e.g. r2_a2_review")
+    prt.add_argument("--runs", metavar="SELECTION", default=None,
+                     help="reset the runs an equivalent `run --only SELECTION` invocation "
+                          "selects: the SAME grammar (rounds, stages, ROUND:STAGE, single "
+                          "sessions, judge selectors and judge run ids), e.g. "
+                          "`--runs 1:review,1:feedback` or `--runs 1:judge,2:feedback,2:review`. "
+                          "Mutually exclusive with --run and --all-failed; a selection that "
+                          "names no existing run says so and resets nothing")
     prt.add_argument("--all-failed", action="store_true",
                      help="reset every failed or stale run")
     prt.set_defaults(func=cmd_retry)
@@ -35794,6 +36082,11 @@ def main() -> None:
                                             getattr(args, "root", None))
     if note:
         print(f"[{args.cmd}] note: {note}")
+    # `--skip-hash`: the verification passes are per INVOCATION (the global is
+    # process-wide, so `run-decide` keeps it across both phases).
+    skip_note = configure_hash_checks(bool(getattr(args, "skip_hash", False)))
+    if skip_note:
+        print(f"[{args.cmd}] WARNING: {skip_note}")
     args.func(args)
 
 

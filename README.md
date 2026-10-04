@@ -144,7 +144,8 @@ the base's from this round's review) or to the arm's own marker. A `-` now means
 | `build-venue-templates --venue ID` | re-derive that pack from the exemplars (`<venue-id>.manuscripts/`) without an agent |
 | `set-revision-mode continue\|init\|transfer\|resubmit\|major\|minor` | switch the revision mode (`none` still accepted as the pre-rename spelling of `continue`) |
 | `set-tiebreak-defect-floor N` / `set-dedup-mode off\|location` | calibration of the selection key |
-| `retry --run ID` / `prune --keep-latest N` | re-run one session / reclaim disk from old sandboxes |
+| `retry --run ID` / `retry --runs SELECTION` / `prune --keep-latest N` | reset one session, or the same subset `run --only` would drive / reclaim disk from old sandboxes |
+| `--skip-hash` (any command) | skip the integrity VERIFICATION passes for this invocation (digests are still recorded; every report says they were skipped) |
 
 ## Requirements
 
@@ -941,6 +942,15 @@ invocation; everything else is left pending, and a round whose other stages have
 not run stays incomplete until they do. Resume at any time with a later `run`,
 another `--only`, or `retry --run <ID>` (which resets one run so a COMPLETED
 stage can run again).
+
+`retry --runs <selection>` takes the SAME grammar, resolved to run records:
+`retry --runs 1:review,1:feedback` resets round 1's review and feedback
+sessions, `retry --runs 1:judge,2:feedback,2:review` round 1's judge wave and
+round 2's feedback + review, `retry --runs r1_w2` one session and
+`retry --runs 1` the whole round (its base, every planned session and its judge
+wave). The targets are reset in the round plan's dependency order, a selection
+the root's plan has no sessions for says so instead of resetting nothing
+silently, and `--run`/`--runs`/`--all-failed` are mutually exclusive.
 
 The four **journal revision modes** use the same grammar: `feedback`,
 `concerns`, `review`, `audit`, `revise`, `integrate` and `response` are all
@@ -1885,7 +1895,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 58 suites (a few
+any failure. They are independent, so run them in parallel — 59 suites (a few
 minutes on a 20-core box; ~5.5 min sequentially):
 
 ```bash
@@ -1963,6 +1973,19 @@ compatibility for a root with no `venue`/`article_type` key.
 ## Notes
 
 * `--root` and `--source` must not be nested; `setup` refuses a non-empty root.
+* `--skip-hash` (accepted by every command) skips the integrity VERIFICATION
+  passes for that ONE invocation — the pristine copy, the pinned champions, the
+  published winners, every completed run's frozen inputs, the judge-view digests
+  and the a1 base digest. Digests are still RECORDED (state.json, the pins, the
+  fingerprints and every run's own `corpus_digest`), so a later invocation
+  without the flag verifies the same chain; `status`, `decision.json`'s
+  `integrity`/`certification` blocks and `final_clean_version.readme.md` all say
+  the checks were SKIPPED, and `certification.hash_checks` records `verified`
+  or `skipped`. NOT skipped: the within-invocation freshness checks that decide
+  what an agent reads, and the `raw_data/`/`human_review_feedback/` read-only
+  enforcement (which restores a stage's write and reports it). The flag is for
+  a big root you trust (or to get past a chain you intend to repair), not for a
+  decision you mean to sign as verified.
 * The pipeline never edits the operator's `--source`; every copy it makes
   (`non_revised/`, `base/`, pins, winners) is digest-verified, and the
   corpus's read-only `raw_data/` directory (see "The input and evidence areas") is

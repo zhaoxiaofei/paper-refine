@@ -141,6 +141,26 @@ the profiles shipped next to the script → the built-in fallback inside
    `format_policy.json`, so the session's own `paper_docx_format.py scan <dir> --policy
    format_policy.json` checks the same rules the postcheck enforces. Pinned by
    `.paper_test/test_display_rules.py`.
+10. **`run --only` and `retry --runs` are ONE selection language.** `OnlySpec`
+    (`parse_only_spec`, `entry_selected`, `stage_selected`, `judge_spec_for`,
+    `resolve_judge_run_ids`) is the single parser, and `retry --runs` resolves the same
+    selection to RUN RECORDS with the same predicates the run loop uses
+    (`retry_targets_for_selection`) -- never a second grammar, and never a reset of more
+    runs than the operator named. Targets are ordered by round and by the plan's stage
+    rank (a1 -> feedback/concerns -> rewrite/review -> audit -> revise -> response ->
+    integrate -> judge), because `retry` re-materializes a target whose upstream is still
+    done and leaves the rest stale for the next `run`. Pinned by
+    `.paper_test/test_stage_subset.py`.
+11. **`--skip-hash` skips VERIFICATION, never RECORDING.** The switch (`configure_hash_checks`,
+    `hash_checks_skipped`) short-circuits `pristine_integrity`, `pinned_integrity`,
+    `input_mismatches`, `run_input_problems`, `_check_pristine_copy`, the judge-view digest
+    comparison and the a1 digest COMPARISON -- while every digest those paths record
+    (state.json, pins, fingerprints, `corpus_digest`) is still computed, so the next
+    invocation without the flag verifies the same chain. `status`, `decision.json`'s
+    `integrity` and `certification` (`hash_checks: verified|skipped`) and the published
+    `final_clean_version.readme.md` must always say which one it was: "skipped" may never
+    print as "verified", and the within-invocation freshness checks that decide what an
+    agent READS are never skipped. Pinned by `.paper_test/test_skip_hash.py`.
 
 ## Commands you will use
 
@@ -155,6 +175,11 @@ python paper_pipeline.py set-article-type --list
 python paper_pipeline.py set-article-type brief-communication
 python paper_pipeline.py set-article-type --show [--json]
 python paper_pipeline.py status --root ./paper_rounds      # venue + journal + limits
+
+# run/reset a subset with ONE grammar; skip the verification passes when asked
+python paper_pipeline.py run   --root ./paper_rounds --only 1:review,1:feedback
+python paper_pipeline.py retry --root ./paper_rounds --runs 1:judge,2:feedback,2:review
+python paper_pipeline.py decide --root ./paper_rounds --skip-hash
 
 # create a root for a specific venue in one step
 python paper_pipeline.py setup --source ./non_revised --root ./paper_rounds \

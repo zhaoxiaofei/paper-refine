@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""`run --only <stages>`: run a subset of the round's stages in one invocation.
+"""`run --only <stages>` / `retry --runs <selection>`: the subset grammar.
 
 Run:  python3 .paper_test/test_stage_subset.py
 
 The pipeline's resumable round plan lets an operator run only the stages they
 need -- e.g. re-run just the review, just the revise sessions, just the
 integrations ("merge from the other versions"), or only the judge wave -- and
-resume the rest in a later invocation. `retry --run <ID>` remains the way to
-force a COMPLETED stage to run again.
+resume the rest in a later invocation. Forcing a COMPLETED stage to run again
+is `retry`: `--run <ID>` names one run, `--all-failed` every failed/stale one,
+and `--runs <SELECTION>` takes the SAME grammar as `run --only` (rounds, stage
+classes, ROUND:STAGE, single sessions, judge selectors and judge run ids), so
+the two commands select the same part of the pipeline.
 
 The end-to-end part drives the real CLI with the repo's stub agent, so the
 assertions are about actual run records, not about the parser alone.
@@ -78,6 +81,18 @@ def run_only(root: Path, only: str, *extra):
                "--agent-cmd", json.dumps([sys.executable, str(STUB)]),
                "--judge-agent-cmd", json.dumps([sys.executable, str(STUB_JUDGE)]),
                "--retries", "0", *extra)
+
+
+def run_root(root: Path, *extra):
+    """A plain `run` (every stage, every round) with the repo's stub agents."""
+    return cli("run", "--root", str(root),
+               "--agent-cmd", json.dumps([sys.executable, str(STUB)]),
+               "--judge-agent-cmd", json.dumps([sys.executable, str(STUB_JUDGE)]),
+               "--retries", "0", *extra)
+
+
+def retry_runs(root: Path, *args):
+    return cli("retry", "--root", str(root), *args)
 
 
 def statuses(root: Path) -> dict:
@@ -231,11 +246,138 @@ def test_multiple_stages_and_errors():
           help_out.stdout[-200:])
 
 
+def test_retry_runs_selection():
+    """`retry --runs <SELECTION>`: the `--only` grammar, resolved to RUN RECORDS.
+
+    The command must reset exactly the runs an equivalent `run --only` would
+    have driven (never more), in the round plan's dependency order, and it must
+    leave a resumable root behind: a plain `run` afterwards re-drives the reset
+    sessions and re-decides the round.
+    """
+    print()
+    print("== retry --runs: the --only grammar selects the runs to reset ==")
+    tmp = scratch("paper_retry_runs_")
+    root = make_root(tmp)
+    p = run_root(root)
+    state = json.loads((root / "state.json").read_text(encoding="utf-8"))
+    check("the fixture round completes before the retries",
+          p.returncode == 0
+          and (state.get("rounds", {}).get("1") or {}).get("status") == "done",
+          (p.stdout + p.stderr)[-200:])
+    help_out = cli("retry", "--help")
+    check("`retry --help` documents --runs with the --only grammar and an example",
+          "--runs SELECTION" in help_out.stdout and "run --only" in help_out.stdout
+          and "1:review,1:feedback" in help_out.stdout
+          and "1:judge,2:feedback,2:review" in help_out.stdout,
+          help_out.stdout[-300:])
+    # ONE stage of one round.
+    p = retry_runs(root, "--runs", "1:review")
+    out = p.stdout + p.stderr
+    check("retry --runs 1:review selects exactly r1_review and resets it",
+          p.returncode == 0 and "[retry] runs (1): r1_review" in out
+          and "r1_review" in out
+          and statuses(root).get("r1_review", ("?",))[0] != "done",
+          out[-260:])
+    check("the round was invalidated (retry's documented round semantics)",
+          (json.loads((root / "state.json").read_text(encoding="utf-8"))
+           .get("rounds", {}).get("1") or {}).get("status") == "pending")
+    # ONE session, by the id `agents` prints.
+    p = retry_runs(root, "--runs", "r1_audit")
+    out = p.stdout + p.stderr
+    check("retry --runs r1_audit (a session id) selects exactly that run",
+          p.returncode == 0 and "[retry] runs (1): r1_audit" in out,
+          out[-200:])
+    p = retry_runs(root, "--runs", "r1_w1")
+    check("a session this round's plan does not have is refused (same message as --only)",
+          p.returncode == 1 and "plans no session" in (p.stdout + p.stderr),
+          (p.stdout + p.stderr)[-200:])
+    # The whole JUDGE wave, then ONE judge session by its version+index.
+    p = retry_runs(root, "--runs", "1:judge")
+    out = p.stdout + p.stderr
+    judge_ids = [line.split(": ", 1)[1].split(", ")
+                 for line in out.splitlines() if "[retry] runs (" in line]
+    picked = judge_ids[0] if judge_ids else []
+    check("retry --runs 1:judge selects the whole judge wave of round 1",
+          p.returncode == 0 and picked and all(i.startswith("judge_") for i in picked),
+          str(picked[:4]))
+    p = retry_runs(root, "--runs", "r1_judge_orig_j1")
+    out = p.stdout + p.stderr
+    check("retry --runs r1_judge_orig_j1 selects ONE judge session",
+          p.returncode == 0 and "[retry] runs (1): " in out
+          and "judge_" in out.split("[retry] runs (1): ", 1)[1].split("\n", 1)[0],
+          out[-200:])
+    # A round in full: dependency order, the base first and the judges last.
+    p = retry_runs(root, "--runs", "1")
+    out = p.stdout + p.stderr
+    line = next((l for l in out.splitlines() if "[retry] runs (" in l), "")
+    order = [x.strip() for x in line.split(": ", 1)[1].split(",")] if ": " in line else []
+    check("retry --runs 1 selects the whole round in dependency order",
+          p.returncode == 0 and order[:2] == ["r1_a1", "r1_review"]
+          and order[-1].startswith("judge_") and "r1_a2_revise" in order
+          and "r1_i1" in order,
+          str(order))
+    # Error handling: the grammars fail the same way, and the selectors are
+    # mutually exclusive.
+    both = retry_runs(root, "--run", "r1_review", "--runs", "1:review")
+    check("--run and --runs together are refused (exit 1)",
+          both.returncode == 1 and "specify ONE of" in (both.stdout + both.stderr),
+          (both.stdout + both.stderr)[-200:])
+    bad = retry_runs(root, "--runs", "1:bogus")
+    check("an unknown stage fails with the same message as `run --only`",
+          bad.returncode == 1 and "unknown stage" in (bad.stdout + bad.stderr)
+          and "integrate" in (bad.stdout + bad.stderr),
+          (bad.stdout + bad.stderr)[-200:])
+    empty = retry_runs(root, "--runs", "")
+    check("an empty selection is refused",
+          empty.returncode == 1 and "names nothing" in (empty.stdout + empty.stderr),
+          (empty.stdout + empty.stderr)[-200:])
+    beyond = retry_runs(root, "--runs", "1,2")
+    check("a round this root does not have is refused",
+          beyond.returncode == 1 and "do not exist" in (beyond.stdout + beyond.stderr),
+          (beyond.stdout + beyond.stderr)[-200:])
+    none_yet = retry_runs(root, "--runs", "1:concerns")
+    check("a stage this root's plan has no sessions for names the fact and resets nothing",
+          none_yet.returncode == 0 and "plans no" in (none_yet.stdout + none_yet.stderr)
+          and "selects no existing run" in (none_yet.stdout + none_yet.stderr),
+          (none_yet.stdout + none_yet.stderr)[-260:])
+    # A roundless judge selector that names no session of ONE round must die
+    # there, never fall back to "every judge of that round" (the empty set is
+    # the run loop's "whole panel" sentinel; `retry` must not reset more than
+    # the operator named).
+    real = (nb.judgeable_ids, nb.round_judges, nb.config_rounds)
+    probe_ctx = nb.Ctx(root)
+    nb.judgeable_ids = lambda ctx, r: {1: ["orig"], 2: ["orig", "w2"]}[int(r)]
+    nb.round_judges = lambda ctx, r: 1
+    nb.config_rounds = lambda ctx: 2
+    try:
+        positive = nb._judge_selection_for_retry(probe_ctx, 2, "w2_j1")
+        try:
+            nb._judge_selection_for_retry(probe_ctx, 1, "w2_j1")
+            guarded = False
+        except SystemExit as e:
+            guarded = e.code == 1
+    finally:
+        nb.judgeable_ids, nb.round_judges, nb.config_rounds = real
+    check("a judge selector resolves to the sessions it names",
+          positive == {("w2", 1)}, str(positive))
+    check("a judge selector that names no session of a round is refused there", guarded)
+    # The root is still resumable: a plain `run` re-drives the reset sessions
+    # and completes the round again.
+    p = run_root(root)
+    state = json.loads((root / "state.json").read_text(encoding="utf-8"))
+    check("the root the selection reset is resumable (a plain `run` completes it)",
+          p.returncode == 0
+          and (state.get("rounds", {}).get("1") or {}).get("status") == "done"
+          and bool(state.get("pinned")),
+          (p.stdout + p.stderr)[-200:])
+
+
 def main() -> int:
     try:
         test_parser()
         test_end_to_end()
         test_multiple_stages_and_errors()
+        test_retry_runs_selection()
     finally:
         cleanup()
     print()
