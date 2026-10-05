@@ -307,6 +307,27 @@ touching this area:
   but never rank.
   `.paper_test/test_grading_scheme.py` (B2) and `test_issue_census.py` pin the
   cell order, the adaptive stop, the files and the rates.
+* **Cross-judge conflicts are surfaced, not averaged away** (2026-10-05):
+  independent sessions can contradict each other about the same comparison or
+  claim, so `run`/`run-decide`/`decide` (and the standalone `conflicts`
+  command) audit each round's sheets and write
+  `reports/round<r>_judge_conflicts.{md,json}` plus the cumulative
+  `reports/JUDGE_CONFLICTS_TODO.md` as REQUIRED MANUAL CHECKS: opposite scores
+  for one comparison, a claim one session files as `resolved` and another as
+  `introduced`, different numbers quoted for the same claim, and
+  clean-vs-findings check dispositions. Every round's judge wave is followed by
+  its own audit (two rounds -> two audits; `decide` only back-fills a round
+  with no audit yet). The mechanical pass always runs and the LLM auditor is ON
+  by default and lightweight: `PAPER_CONFLICT_AGENT_CMD` points it at a cheap
+  CLI/model, else the `codex-lite` preset (codex at low reasoning effort) runs;
+  `run` records the backend it used and `decide` reuses it, a custom/stub judge
+  backend is reused as the auditor, and `--conflict-agent[-cmd]` overrides all
+  of that (`--no-conflict-agent` keeps the deterministic check only). Its
+  answer is schema-checked and merged, never trusted blindly. Conflicts are
+  advisory for the decision, but the affected
+  comparisons' numbers must not be cited until a human has resolved the listed
+  checks and re-judged the unsupported session (`retry --run <ID>`).
+  `.paper_test/test_judge_conflicts.py` pins the classes.
 * **Official templates are AUTHORITATIVE; derived structure is ADVISORY**
   (2026-10-01): `venue_profiles/<id>.official/` holds the journal's own
   Word/LaTeX template files (+ source/license/retrieval manifest) and

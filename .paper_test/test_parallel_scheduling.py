@@ -138,13 +138,14 @@ def test_dag_scheduling():
     # given more headroom: the case must still show "no barrier on the rewrites",
     # not measure how fast this machine can postcheck an extra session.
     # The windows the assertions depend on must survive a LOADED box: with
-    # `.paper_test/run_all.py` running 8 suites at once, a 0.3 s session could start
-    # after its sibling had already finished (overlap assertion) or the revise's
-    # own chain (review + audit + two postchecks) could outlast a 3 s rewrite --
-    # both failed for the machine's load, not for a scheduling barrier. The slow
-    # rewrites are therefore 6 s and the phases whose PARALLELISM is asserted are
-    # 1.5 s / 1.0 s, so the suite measures the graph, not the CPU.
-    sleeps = {"PAPER_TIMING_SLEEP_W": 8.0,     # rewrites: the slowest production arm
+    # `.paper_test/run_all.py` running 16 suites at once (the operator's `-j 16`),
+    # a 0.3 s session could start after its sibling had already finished (overlap
+    # assertion) or the revise's own chain (review + audit + two postchecks) could
+    # outlast a 3 s rewrite -- both failed for the machine's load, not for a
+    # scheduling barrier. The slow rewrites are therefore 20 s and the phases
+    # whose PARALLELISM is asserted are 1.5 s / 1.0 s, so the suite measures the
+    # graph, not the CPU.
+    sleeps = {"PAPER_TIMING_SLEEP_W": 20.0,    # rewrites: the slowest production arm
               "PAPER_TIMING_SLEEP_R": 0.6,     # review: finishes long before them
               "PAPER_TIMING_SLEEP_AU": 0.4,    # auditor: between the review and the revise
               "PAPER_TIMING_SLEEP_V": 0.5,     # revise

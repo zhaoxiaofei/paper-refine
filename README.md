@@ -96,6 +96,7 @@ Everything lives under the root you passed to `setup`:
 | `reports/round<r>_raw_scores.csv` | every directed score the panel produced, with the sheet it came from |
 | `reports/round<r>_issue_census.csv` | how many defects of each tier and severity every version carries (`own` vs `peer`), plus the sibling matrices the ranking walks |
 | `reports/round<r>_defects.csv` | WHICH defects: one row per defect the panel filed, with the version it belongs to, the comparison's target/opponent, the check id, the defect class, the severity and the sheet's own evidence sentence |
+| `reports/round<r>_judge_conflicts.md` (+ `.json`) | the round's cross-judge conflicts (opposite scores, a claim one judge files as `resolved` and another as `introduced`, different numbers for the same fact, clean-vs-findings check dispositions), each a REQUIRED MANUAL CHECK; the cumulative `reports/JUDGE_CONFLICTS_TODO.md` collects every round's open items |
 | `reports/round<r>_review_findings.csv` | the round's review findings (id, check, category, severity, location, evidence, explanation), one row each |
 | `round<r>_winner/` | the champion of each round (content-addressed: identical content is never re-run) |
 | `final_clean_version/` | the champion corpus, renamed for the next run's `--source`; ALWAYS built, certified or not |
@@ -1657,6 +1658,33 @@ cancel). Opposite signs are the consistent reading and are not flagged; before
 the fix the condition was inverted, so the report listed every agreeing pair as
 a disagreement.
 
+**Cross-judge conflicts: what the panel could not settle.** Independent
+sessions can contradict each other about the same object, and the aggregation
+keeps both judgments instead of silently averaging them away. `run`,
+`run-decide` and `decide` therefore audit every round's judge sheets (the
+`conflicts` command refreshes the audit on demand) and write each contradiction
+as a REQUIRED MANUAL CHECK to `reports/round<r>_judge_conflicts.md` (checkbox
+items) and `.json` (machine-readable), plus the cumulative
+`reports/JUDGE_CONFLICTS_TODO.md`. The mechanical pass flags opposite integers
+for the same comparison (or a strong asymmetry between the two directions), a
+claim one session files as `resolved` and another as `introduced`, different
+numbers quoted for the same claim (a judge citing merely MORE numbers is not a
+contradiction), and one session marking a check `clean` while another files
+findings for it. Each round's judge wave is followed by ITS OWN audit (two
+rounds produce two audits; `decide` only back-fills a round that has no audit
+yet). The LLM auditor is ON by default and lightweight:
+`PAPER_CONFLICT_AGENT_CMD` can point it at a cheap CLI/model, otherwise the
+`codex-lite` preset runs (codex at low reasoning effort); `run` records the
+backend it used in `state.json` and a later `decide` reuses it, a custom/stub
+judge backend is reused as the auditor, and `--conflict-agent` /
+`--conflict-agent-cmd` override all of that (`--no-conflict-agent` keeps the
+deterministic check only). The auditor reads the same sheets and can add
+semantic conflicts the token rules miss; its answer is schema-checked and
+merged, never trusted blindly. Conflicts are advisory: they do not block
+the decision, but the affected comparisons' numbers must not be cited until a
+human has resolved the listed checks and re-judged the unsupported session
+with `retry --run <ID>`.
+
 **Reading improvement across many runs: `trend`.** A round's integer compares its
 champion against THAT round's own input, so the reference moves with the chain and
 the per-round numbers cannot be read as one trajectory (and the champion is the
@@ -1934,7 +1962,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 60 suites (a few
+any failure. They are independent, so run them in parallel — 61 suites (a few
 minutes on a 20-core box; ~5.5 min sequentially):
 
 ```bash

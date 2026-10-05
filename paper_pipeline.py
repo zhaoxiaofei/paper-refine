@@ -569,12 +569,33 @@ USAGE
     python paper_pipeline.py retry  --root ./paper_rounds --run r2_review
     python paper_pipeline.py retry  --root ./paper_rounds --runs 1:judge,2:feedback,2:review
     python paper_pipeline.py prune  --root ./paper_rounds --keep-latest 1 [--yes]
+    python paper_pipeline.py conflicts --root ./paper_rounds [--round R] [--no-agent]
+        # cross-judge conflict audit -> reports/round<R>_judge_conflicts.md
+        # + the cumulative reports/JUDGE_CONFLICTS_TODO.md manual TODO list
 
     `retry --runs <selection>` takes the SAME grammar as `run --only` (rounds,
     stage classes, ROUND:STAGE, single sessions and judge selectors), so the
     two commands select the same part of the pipeline: `--runs 1:review` resets
     round 1's review, `--runs r1_w2` one session, `--runs 1` the whole round.
     `--run`, `--runs` and `--all-failed` are mutually exclusive.
+
+    Cross-judge conflicts: `run`/`run-decide`/`decide` also audit the round's
+    judge sheets for contradictions between independent sessions -- opposite
+    integers for the same comparison, a claim one judge files as `resolved` and
+    another as `introduced`, different numbers quoted for the same source fact,
+    or one session marking a check clean while another files findings.  Each
+    conflict is written as a REQUIRED MANUAL CHECK to
+    reports/round<R>_judge_conflicts.{md,json} and the cumulative
+    reports/JUDGE_CONFLICTS_TODO.md.  Each round's judge wave is followed by ITS
+    OWN audit (two rounds -> two audits; `decide` back-fills a round that has no
+    audit yet).  The mechanical pass always runs and the LLM auditor is ON by
+    default and lightweight: PAPER_CONFLICT_AGENT_CMD can point it at a cheap
+    CLI/model, else the `codex-lite` preset (codex at low reasoning effort) runs;
+    `run` records the backend it used and a later `decide` reuses it, a
+    custom/stub judge backend is reused as the auditor, and
+    `--conflict-agent`/`--conflict-agent-cmd` override all of that
+    (`--no-conflict-agent` keeps the deterministic pass only; the standalone
+    `conflicts` command refreshes the audit on demand).
 
     Every command also accepts `--skip-hash`: it skips the integrity
     VERIFICATION passes for THIS invocation (the pristine copy, pinned
@@ -3406,7 +3427,13 @@ AGENT_PRESETS = {
     # because an MCP tool call the operator is never asked about is denied
     # outright in a non-interactive session (see MCP_APPROVALS).
     "codex": ["codex", "exec", "-"],
+    # The cross-judge conflict audit is a small, bounded task: its default
+    # backend is the same CLI at the cheapest reasoning effort, so the audit is
+    # lightweight without needing a second model configuration.
+    "codex-lite": ["codex", "exec", "-c", 'model_reasoning_effort="low"', "-"],
 }
+# Choices for --conflict-agent (the audit is lightweight by default).
+CONFLICT_AGENT_CHOICES = ("codex-lite", "codex", "claude", "manual")
 
 MARKER_FILE = "_pipeline_done.json"
 SCORES_FILE = "scores.json"
@@ -28774,6 +28801,7 @@ def round_redlines(ctx: Ctx, r: int, enabled: bool) -> None:
 def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
                 manual: bool, nowait: bool, poll: int,
                 judge_cmd=None, judge_manual: bool = None, judge_timeout=None,
+                conflict_cmd=None, conflict_agent: bool = True,
                 retry_backoff: int = 0, retry_backoff_max: int = 0,
                 redline: bool = True, only=None) -> tuple:
     """Drive ONE round.
@@ -28999,6 +29027,44 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
               f"counted)")
     except OSError as e:
         print(f"[run] r{r} WARNING: could not write the round's issue census: {e}")
+    # Cross-judge conflicts: two independent sessions can contradict each other
+    # about the same comparison or the same claim.  The aggregation keeps both
+    # judgments on purpose, so the disagreements are written here as REQUIRED
+    # MANUAL CHECKS (never silently averaged away).  This runs ONCE PER ROUND,
+    # right after the judge wave: the deterministic pass always runs and the
+    # lightweight LLM auditor (PAPER_CONFLICT_AGENT_CMD, else the codex-lite
+    # preset) is ON by default; an explicit --conflict-agent[-cmd], the backend
+    # a previous round recorded, or a custom/stub judge backend take precedence.
+    try:
+        _audit_cmd, _audit_src = resolve_round_audit_cmd(
+            conflict_cmd, conflict_agent, judge_cmd, judge_manual,
+            ctx.state.get("conflict_agent") or {})
+        # Record the backend the audit actually uses so a later `decide` reuses
+        # the SAME one by default (a real run records codex-lite, a stub run
+        # records the stub) instead of resolving an unrelated default.
+        ctx.state["conflict_agent"] = {
+            "cmd": ([str(x) for x in _audit_cmd]
+                    if (conflict_agent and _audit_cmd) else None),
+            "source": _audit_src,
+            "recorded": utcnow(),
+        }
+        ctx.save_state()
+        _cf = write_round_judge_conflicts(
+            ctx, r, agg=agg,
+            agent_cmd=(_audit_cmd if conflict_agent else None),
+            timeout=(judge_timeout or timeout))
+        _cc = _cf.get("counts") or {}
+        print(f"[run] r{r} judge conflicts: {_cc.get('total', 0)} flagged for manual review "
+              f"({_cc.get('blocker', 0)} blocker, {_cc.get('major', 0)} major, "
+              f"{_cc.get('minor', 0)} minor) -> reports/round{r}_judge_conflicts.md")
+        if _cc.get("total"):
+            print(f"[run] r{r} NOTE: the judge panel contradicts itself on "
+                  f"{_cc.get('total')} item(s); resolve the manual checks in "
+                  f"reports/round{r}_judge_conflicts.md (and the cumulative "
+                  f"reports/JUDGE_CONFLICTS_TODO.md) before citing this round's numbers.")
+        write_judge_conflicts_todo(ctx)
+    except Exception as e:                                           # noqa: BLE001
+        print(f"[run] r{r} WARNING: the judge-conflict audit failed: {e}")
     # A shrunk panel must never produce a champion: if any field member is
     # missing directed scores (a judge sheet that silently dropped a comparison,
     # a stale judge run, a whole version's sheets), stop BEFORE selecting and
@@ -31208,6 +31274,30 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     if not judge_manual and shutil.which(judge_cmd[0]) is None:
         die(f"judge agent executable not found on PATH: {judge_cmd[0]!r}\n"
             f"       fix --judge-agent-cmd/--judge-agent or drop the override")
+    # The optional cross-judge conflict audit (see write_round_judge_conflicts):
+    # ON by default with a lightweight backend; an explicit --conflict-agent[-cmd]
+    # wins, a recorded backend is reused, a custom/stub judge backend stays the
+    # auditor, and --no-conflict-agent / --conflict-agent manual disable it.
+    _conflict_choice = getattr(args, "conflict_agent", None)
+    if getattr(args, "no_conflict_agent", False):
+        conflict_cmd = None
+        conflict_audit_on = False
+    elif getattr(args, "conflict_agent_cmd", None):
+        conflict_cmd = resolve_agent_cmd(_conflict_choice or "codex-lite",
+                                         args.conflict_agent_cmd)
+        conflict_audit_on = True
+    elif _conflict_choice == "manual":
+        conflict_cmd = None
+        conflict_audit_on = False
+    elif _conflict_choice:
+        conflict_cmd = resolve_agent_cmd(_conflict_choice, None, use_env=False)
+        conflict_audit_on = True
+    else:
+        conflict_cmd = None
+        conflict_audit_on = True
+    if conflict_cmd is not None and shutil.which(str(conflict_cmd[0])) is None:
+        die(f"conflict-audit agent executable not found on PATH: {conflict_cmd[0]!r}\n"
+            f"       fix --conflict-agent-cmd/--conflict-agent or pass --no-conflict-agent")
     # C24 (recorded, not changed): producers and judges may be the SAME backend,
     # which makes the panel a self-consistency instrument. The operator kept one
     # Codex backend on 2026-09-21; the least the pipeline owes the reader is to
@@ -31328,6 +31418,8 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                                      retries=retries, manual=manual, nowait=args.no_wait,
                                      poll=args.poll, judge_cmd=judge_cmd,
                                      judge_manual=judge_manual, judge_timeout=judge_timeout,
+                                     conflict_cmd=conflict_cmd,
+                                     conflict_agent=conflict_audit_on,
                                      retry_backoff=retry_backoff,
                                      retry_backoff_max=retry_backoff_max,
                                      redline=not getattr(args, "no_redline", False),
@@ -31386,6 +31478,8 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                                  retries=retries, manual=manual, nowait=args.no_wait,
                                  poll=args.poll, judge_cmd=judge_cmd,
                                  judge_manual=judge_manual, judge_timeout=judge_timeout,
+                                 conflict_cmd=conflict_cmd,
+                                 conflict_agent=conflict_audit_on,
                                  retry_backoff=retry_backoff,
                                  retry_backoff_max=retry_backoff_max,
                                  redline=not getattr(args, "no_redline", False),
@@ -31821,6 +31915,989 @@ def write_round_defects(ctx: Ctx, r: int, agg: dict = None) -> Path:
         w.writerows(rows)
     os.replace(tmp, p)
     return p
+
+
+# ======================================================================================
+# Cross-judge conflict audit: surface contradictions between independent judges
+# ======================================================================================
+# The judge panel is deliberately independent: two sessions per version, and the
+# same comparison is judged in BOTH directions by different sessions.  That is
+# what makes the panel robust, but it also means two sessions can CONTRADICT each
+# other about a hard fact: one files a claim as `resolved` while its partner files
+# the same claim as `introduced`; one quotes 173-1,307 from a source table while
+# the other quotes 508-1,307; or the two directions of one comparison disagree in
+# sign.  The aggregation keeps both judgments on purpose (it must not invent an
+# adjudication in code), so the disagreement is surfaced as a REQUIRED MANUAL
+# CHECK in:
+#
+#   reports/round<r>_judge_conflicts.json   machine-readable conflicts
+#   reports/round<r>_judge_conflicts.md     per-round manual TODO list
+#   reports/JUDGE_CONFLICTS_TODO.md         cumulative TODO list over rounds
+#
+# The mechanical pass below is deterministic and always runs.  When an agent
+# backend is available (`--conflict-agent-cmd`, `--agent-cmd`, PAPER_AGENT_CMD,
+# or the run/run-decide `--agent`), an optional LLM pass reads the same opinions
+# plus the mechanical candidates and can add semantic conflicts the token rules
+# miss; its answer is schema-checked and merged, never trusted blindly.  The
+# audit never blocks a decision by itself -- it says which items a HUMAN must
+# verify before the panel's numbers are cited.
+JUDGE_CONFLICT_KINDS = ("score_disagreement", "direction_conflict", "claim_inversion",
+                        "numeric_contradiction", "check_disposition", "other")
+JUDGE_CONFLICT_SEVERITIES = ("blocker", "major", "minor")
+_JUDGE_CONFLICT_SEV_RANK = {"blocker": 0, "major": 1, "minor": 2}
+_JUDGE_CONFLICT_STOPWORDS = {
+    "the", "and", "that", "with", "from", "this", "than", "then", "into", "onto",
+    "for", "was", "were", "are", "its", "their", "they", "them", "has", "have",
+    "had", "not", "but", "one", "two", "both", "same", "also", "only", "more",
+    "less", "over", "under", "about", "target", "opponent", "version", "state",
+    "states", "stated", "says", "shows", "show", "which", "where", "while",
+    "when", "does", "did", "per", "vs", "any", "all",
+}
+_JUDGE_CONFLICT_TOKEN_RE = re.compile(r"[a-z][a-z0-9_.\-/]{2,}")
+_JUDGE_CONFLICT_NUMBER_RE = re.compile(r"(?<![\w.])(\d[\d,]*(?:\.\d+)?)")
+
+
+def _conflict_numbers(text, floor: float = 10.0) -> set:
+    """Quantitative numbers in a claim/message; ids and panel letters are skipped.
+
+    The floor drops the small integers that come from check ids and figure
+    letters ("M4", "Fig. 3d"), while keeping cell counts, read lengths and
+    percentages (36, 50, 152, 170, 508, 1,307, ...).
+    """
+    out = set()
+    for m in _JUDGE_CONFLICT_NUMBER_RE.finditer(str(text or "")):
+        tok = m.group(1).rstrip(",").replace(",", "")
+        try:
+            v = float(tok)
+        except ValueError:
+            continue
+        if v >= float(floor):
+            out.add(v if v != int(v) else int(v))
+    return out
+
+
+def _conflict_tokens(text) -> set:
+    toks = {t for t in _JUDGE_CONFLICT_TOKEN_RE.findall(str(text or "").lower())
+            if t not in _JUDGE_CONFLICT_STOPWORDS}
+    toks |= {F"#{v}" for v in _conflict_numbers(text)}
+    return toks
+
+
+def _conflict_similarity(a, b) -> float:
+    ta, tb = _conflict_tokens(a), _conflict_tokens(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / float(len(ta | tb))
+
+
+def _conflict_item_text(item) -> str:
+    if not isinstance(item, dict):
+        return ""
+    return " ".join(str(item.get("evidence") or "").split())
+
+
+def _conflict_item_cell(item) -> str:
+    if not isinstance(item, dict):
+        return "?"
+    return (F"{item.get('check') or '?'} "
+            F"{item.get('tier') or '?'}/{item.get('severity') or '?'}")
+
+
+def _conflict_item_severity(item) -> int:
+    return {"minor": 1, "major": 2, "critical": 3, "fatal": 4}.get(
+        str((item or {}).get("severity") or "").lower(), 0)
+
+
+def _conflict_items_similar(a, b) -> bool:
+    """True when two ledger items are about the same claim (not just same words)."""
+    ta, tb = _conflict_tokens(_conflict_item_text(a)), _conflict_tokens(_conflict_item_text(b))
+    if not ta or not tb:
+        return False
+    inter = ta & tb
+    sim = len(inter) / float(len(ta | tb))
+    shared_numbers = _conflict_numbers(_conflict_item_text(a)) & \
+        _conflict_numbers(_conflict_item_text(b))
+    if sim >= 0.30:
+        return True
+    # A claim quoted with the same distinctive numbers and several shared terms
+    # is the same claim even when the two judges phrase it differently.
+    return len(inter) >= 4 and len(shared_numbers) >= 2
+
+
+_JUDGE_CONFLICT_MANUAL = {
+    "score_disagreement": (
+        "Open each cited judge sheet (runs/<id>/scores.json) and the sources its "
+        "ledger rows point at; decide which integer the evidence supports. If a "
+        "sheet is wrong, fix the underlying text/data and `retry --run <ID>` so the "
+        "panel is re-judged; if both readings are defensible, record the resolution "
+        "in the round's manual notes before citing the panel's numbers."),
+    "direction_conflict": (
+        "The two directions of the same comparison disagree after negating one "
+        "side. Re-read both sheets' ledgers and the pristine original; verify that "
+        "the comparison was scored in the same frame (target vs opponent) and that "
+        "no ledger row was filed on the wrong side. Re-judge the sheet whose frame "
+        "is wrong (`retry --run <ID>`)."),
+    "claim_inversion": (
+        "One judge says the target FIXED this claim while another says the target "
+        "INTRODUCED it. Open both packages at the cited location and the cited "
+        "source artifact, decide which side the text/data support, then re-judge "
+        "the losing session after correcting the claim."),
+    "numeric_contradiction": (
+        "The same claim is quoted with different numbers in two judge sessions. "
+        "Recompute the value from the cited producer table/column (file, column, "
+        "filter); treat any range that cannot be reproduced as unverified, then "
+        "re-judge the sheet that cites it (`retry --run <ID>`)."),
+    "check_disposition": (
+        "One session marks this check clean while another reports findings (or "
+        "could not judge it). Inspect the check's own artifact in both sheets, "
+        "decide whether the check was actually run, and re-judge the session whose "
+        "disposition is unsupported."),
+    "other": ("Two judge sessions disagree; inspect the cited sheets and the source "
+              "artifacts, resolve which statement the evidence supports, and re-judge "
+              "the unsupported sheet (`retry --run <ID>`)."),
+}
+
+
+def detect_round_judge_conflicts(opinions: list) -> list:
+    """Mechanical cross-judge conflicts from one round's opinions (pure).
+
+    `opinions` is the list returned by round_judge_opinions(): one dict per
+    resolved directed comparison (judge run, target, opponent, score, ledger
+    items, checks).  Returns conflicts in the manual-TODO schema.
+    """
+    conflicts = []
+    by_pair = {}
+    for op in opinions or []:
+        if not isinstance(op, dict):
+            continue
+        target, opponent = op.get("target"), op.get("opponent")
+        if not target or not opponent:
+            continue
+        by_pair.setdefault((str(target), str(opponent)), []).append(op)
+
+    def _subject(text) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()[:80]
+
+    def add(kind, member, opponent, judges, severity, summary, evidence,
+            manual=None, subject=""):
+        conflicts.append({
+            "kind": kind,
+            "severity": severity if severity in JUDGE_CONFLICT_SEVERITIES else "major",
+            "member": str(member),
+            "opponent": str(opponent),
+            "judges": sorted({str(j) for j in judges if j}),
+            "subject": str(subject or ""),
+            "summary": " ".join(str(summary or "").split())[:400],
+            "evidence": evidence or [],
+            "manual_check": " ".join(
+                str(manual or _JUDGE_CONFLICT_MANUAL.get(kind, _JUDGE_CONFLICT_MANUAL["other"]))
+                .split())[:800],
+            "origin": "mechanical",
+        })
+
+    def score_evidence(ops):
+        return [{"judge_run": str(o.get("judge_run") or ""), "side": "score",
+                 "text": (F"{int(o['score']):+d} (basis {o.get('basis') or '?'}): "
+                          F"{' '.join(str(o.get('reason') or '').split())[:180]}")}
+                for o in ops if is_int(o.get("score"))]
+
+    # 1. Same directed comparison, different integers from independent sessions.
+    for (member, opponent), ops in sorted(by_pair.items()):
+        runs = sorted({str(o.get("judge_run")) for o in ops if o.get("judge_run")})
+        scores = [int(o["score"]) for o in ops if is_int(o.get("score"))]
+        if len(runs) < 2 or len(scores) < 2 or len(set(scores)) < 2:
+            continue
+        diff = max(scores) - min(scores)
+        has_neg, has_pos = any(s < 0 for s in scores), any(s > 0 for s in scores)
+        severity = "blocker" if (has_neg and has_pos) else ("major" if diff >= 2 else "minor")
+        add("score_disagreement", member, opponent, runs, severity,
+            F"independent judges scored {member} vs {opponent} differently: "
+            + ", ".join(F"{o.get('judge_run')}={int(o['score']):+d}"
+                        for o in ops if is_int(o.get("score"))),
+            score_evidence(ops))
+
+    # 2. Same claim treated as resolved by one judge and introduced by another.
+    for (member, opponent), ops in sorted(by_pair.items()):
+        for i, a in enumerate(ops):
+            for b in ops:
+                if b is a or a.get("judge_run") == b.get("judge_run"):
+                    continue
+                for ri in a.get("resolved") or []:
+                    for ij in b.get("introduced") or []:
+                        if not _conflict_items_similar(ri, ij):
+                            continue
+                        tier = str(ri.get("tier") or ij.get("tier") or "").lower()
+                        hi = max(_conflict_item_severity(ri), _conflict_item_severity(ij))
+                        severity = ("blocker" if tier == "correctness" and hi >= 2
+                                    else "major" if hi >= 2 else "minor")
+                        add("claim_inversion", member, opponent,
+                            [a.get("judge_run"), b.get("judge_run")], severity,
+                            (F"{a.get('judge_run')} files the claim as RESOLVED for "
+                             F"{member} while {b.get('judge_run')} files it as INTRODUCED: "
+                             F"{_conflict_item_text(ri)[:140]}"),
+                            [{"judge_run": str(a.get("judge_run") or ""), "side": "resolved",
+                              "text": F"{_conflict_item_cell(ri)}: "
+                                      F"{_conflict_item_text(ri)[:220]}"},
+                             {"judge_run": str(b.get("judge_run") or ""), "side": "introduced",
+                              "text": F"{_conflict_item_cell(ij)}: "
+                                      F"{_conflict_item_text(ij)[:220]}"}],
+                            subject="claim:" + _subject(_conflict_item_text(ri)))
+
+    # 3. Same claim quoted with different numbers (e.g. 173-1,307 vs 508-1,307).
+    for (member, opponent), ops in sorted(by_pair.items()):
+        for i, a in enumerate(ops):
+            for b in ops[i + 1:]:
+                if a.get("judge_run") == b.get("judge_run"):
+                    continue
+                texts_a = [_conflict_item_text(x) for x in
+                           (a.get("resolved") or []) + (a.get("introduced") or [])]
+                texts_b = [_conflict_item_text(x) for x in
+                           (b.get("resolved") or []) + (b.get("introduced") or [])]
+                texts_a.append(str(a.get("reason") or ""))
+                texts_b.append(str(b.get("reason") or ""))
+                candidates = []
+                for ta in texts_a:
+                    for tb in texts_b:
+                        sim = _conflict_similarity(ta, tb)
+                        if sim >= 0.25:
+                            candidates.append((sim, ta, tb))
+                candidates.sort(reverse=True, key=lambda x: x[0])
+                chosen = None
+                for sim, ta, tb in candidates:
+                    nums_a, nums_b = _conflict_numbers(ta), _conflict_numbers(tb)
+                    if not (nums_a and nums_b) or nums_a == nums_b:
+                        continue
+                    # One side citing MORE numbers is detail, not contradiction;
+                    # only an exclusive number on BOTH sides is a real conflict.
+                    if nums_a <= nums_b or nums_b <= nums_a:
+                        continue
+                    if not (nums_a & nums_b) and len(nums_a) < 2 and len(nums_b) < 2:
+                        continue
+                    chosen = (sim, ta, tb, nums_a, nums_b)
+                    break
+                if chosen is None:
+                    continue
+                sim, ta, tb, nums_a, nums_b = chosen
+                severity = "major" if (len(nums_a) >= 2 and len(nums_b) >= 2) else "minor"
+                add("numeric_contradiction", member, opponent,
+                    [a.get("judge_run"), b.get("judge_run")], severity,
+                    (F"the same claim is quoted with different numbers by "
+                     F"{a.get('judge_run')} and {b.get('judge_run')}: "
+                     F"{sorted(nums_a)} vs {sorted(nums_b)}"),
+                    [{"judge_run": str(a.get("judge_run") or ""), "side": "evidence",
+                      "text": ta[:220]},
+                     {"judge_run": str(b.get("judge_run") or ""), "side": "evidence",
+                      "text": tb[:220]}],
+                    subject="numbers:" + "+".join(str(x) for x in sorted(nums_a | nums_b)))
+
+    # 4. The same comparison judged in both directions, with a sign/gap conflict
+    #    after negating one side into the other's frame.
+    pair_names = sorted({tuple(sorted((m, o))) for (m, o) in by_pair})
+    for a, b in pair_names:
+        ops_ab, ops_ba = by_pair.get((a, b), []), by_pair.get((b, a), [])
+        scores_ab = [int(o["score"]) for o in ops_ab if is_int(o.get("score"))]
+        scores_ba = [-int(o["score"]) for o in ops_ba if is_int(o.get("score"))]
+        if not scores_ab or not scores_ba:
+            continue
+        med_ab = float(statistics.median(scores_ab))
+        med_ba = float(statistics.median(scores_ba))
+        sign_conflict = (med_ab > 0 > med_ba) or (med_ba > 0 > med_ab)
+        if not sign_conflict and abs(med_ab - med_ba) < 2:
+            continue
+        if sign_conflict:
+            severity = "major" if min(abs(med_ab), abs(med_ba)) >= 2 else "minor"
+        else:
+            severity = "major"
+        add("direction_conflict", a, b,
+            [o.get("judge_run") for o in ops_ab + ops_ba], severity,
+            (F"the two directions of {a} vs {b} disagree: {a}-vs-{b} median "
+             F"{med_ab:+.1f} vs the negated {b}-vs-{a} median {med_ba:+.1f}"),
+            score_evidence(ops_ab + ops_ba))
+
+    # 5. Same comparison, one judge marks a check clean and another files findings
+    #    (or could not judge it).
+    for (member, opponent), ops in sorted(by_pair.items()):
+        runs = sorted({str(o.get("judge_run")) for o in ops if o.get("judge_run")})
+        if len(runs) < 2:
+            continue
+        check_ids = set()
+        for o in ops:
+            check_ids.update((o.get("checks") or {}).keys())
+        conflicting, evidence = [], []
+        for cid in sorted(check_ids):
+            disp = {}
+            for o in ops:
+                raw = (o.get("checks") or {}).get(cid)
+                if raw is None:
+                    continue
+                disp[str(o.get("judge_run"))] = str(raw).strip().split()[0].lower()
+            vals = set(disp.values())
+            if "clean" in vals and (vals & {"findings", "unable"}):
+                conflicting.append((cid, vals))
+                evidence.extend({"judge_run": j, "side": "checks", "text": F"{cid}: {v}"}
+                                for j, v in sorted(disp.items()))
+        if conflicting:
+            add("check_disposition", member, opponent, runs, "minor",
+                " / ".join(F"{cid} is clean in one judge's sheet but "
+                           + "/".join(sorted(v for v in vals if v != "clean"))
+                           + " in another's" for cid, vals in conflicting),
+                evidence)
+    return conflicts
+
+
+def _merge_judge_conflicts(mechanical: list, llm: list) -> list:
+    """Merge the LLM answer into the mechanical list, one row per real conflict."""
+    def base_of(c) -> tuple:
+        return (c.get("kind"), str(c.get("member")), str(c.get("opponent")),
+                tuple(sorted(set(c.get("judges") or []))))
+
+    def merge_into(old, c):
+        if len(str(c.get("summary") or "")) > len(str(old.get("summary") or "")):
+            old["summary"] = c["summary"]
+        if len(str(c.get("manual_check") or "")) > len(str(old.get("manual_check") or "")):
+            old["manual_check"] = c["manual_check"]
+        if c.get("subject") and not old.get("subject"):
+            old["subject"] = c["subject"]
+        seen = {(e.get("judge_run"), e.get("side"), e.get("text"))
+                for e in old.get("evidence") or []}
+        for e in c.get("evidence") or []:
+            k = (e.get("judge_run"), e.get("side"), e.get("text"))
+            if k not in seen:
+                old.setdefault("evidence", []).append(e)
+                seen.add(k)
+        if _JUDGE_CONFLICT_SEV_RANK.get(c.get("severity"), 9) < \
+                _JUDGE_CONFLICT_SEV_RANK.get(old.get("severity"), 9):
+            old["severity"] = c["severity"]
+
+    merged, index = [], {}
+    for c in list(mechanical or []) + list(llm or []):
+        if not isinstance(c, dict):
+            continue
+        base = base_of(c)
+        subject = str(c.get("subject") or "")
+        key = base + (subject,)
+        if key in index:
+            merge_into(merged[index[key]], c)
+            continue
+        # An LLM row (no subject) attaches to the unique same-base conflict when
+        # there is one; two mechanical subjects for the same base stay separate.
+        candidates = [i for i, x in enumerate(merged)
+                      if base_of(x) == base and (not x.get("subject") or not subject)]
+        if candidates and (not subject or len(candidates) == 1):
+            merge_into(merged[candidates[0]], c)
+            continue
+        index[key] = len(merged)
+        merged.append(dict(c))
+    merged.sort(key=lambda c: (_JUDGE_CONFLICT_SEV_RANK.get(c.get("severity"), 9),
+                               str(c.get("kind")), str(c.get("member")),
+                               str(c.get("opponent"))))
+    return merged
+
+
+def _judge_conflict_counts(conflicts: list) -> dict:
+    counts = {sev: 0 for sev in JUDGE_CONFLICT_SEVERITIES}
+    for c in conflicts or []:
+        sev = str(c.get("severity") or "major")
+        counts[sev] = counts.get(sev, 0) + 1
+    counts["total"] = sum(counts.get(s, 0) for s in JUDGE_CONFLICT_SEVERITIES)
+    return counts
+
+
+def round_judge_opinions(ctx: Ctx, r: int) -> list:
+    """Every resolved directed comparison of one round's (newest) judge sheets.
+
+    Mirrors aggregate_round's sheet selection: the newest valid sheet per
+    (target, judge index), opponents resolved through the run's label_map.  The
+    returned dicts carry the raw ledger items and `checks` dispositions, which
+    the aggregated score rows drop.
+    """
+    r = int(r)
+    rrec = ctx.round_rec(r)
+    field = {str(v) for v in (rrec.get("field") or [])}
+    # Mirror aggregate_round's panel: a round with a judge-session selection
+    # (--only r1_judge_w2_j1) judges only those sessions, and a judge index
+    # outside the configured 1..judges range is a stale sheet, not a conflict.
+    judges = int(round_judges(ctx, r))
+    selection = judge_selection(ctx, r)
+    sheets = []
+    for rec in ctx.runs(kind="judge", round_no=r):
+        if rec.get("status") != "done":
+            continue
+        j = rec.get("judge_index")
+        if not is_int(j) or not (1 <= int(j) <= judges):
+            continue
+        if selection and (str(rec.get("target_id") or ""), int(j)) not in selection:
+            continue
+        sheets.append(rec)
+    newest = {}
+    for rec in sorted(sheets, key=lambda x: (str(x.get("finished") or x.get("created") or ""),
+                                             str(x.get("id")))):
+        newest[(rec.get("target_id"), rec.get("judge_index"))] = rec
+    opinions = []
+    for _slot, rec in sorted(newest.items(),
+                             key=lambda kv: (str(kv[0][0]), str(kv[0][1]))):
+        target = str(rec.get("target_id"))
+        if target not in field:
+            continue
+        sj = rec.get("scores")
+        if not isinstance(sj, dict):
+            continue
+        lm = rec.get("label_map") or {}
+        for comp in sj.get("comparisons") or []:
+            if not isinstance(comp, dict):
+                continue
+            label = comp.get("opponent_label")
+            score = comp.get("score")
+            opp = lm.get(_norm_opponent_label(label))
+            if opp is None or str(opp) not in field or opp == target or not is_int(score):
+                continue
+            if not (SCORE_MIN <= score <= SCORE_MAX):
+                continue
+            opinions.append({
+                "judge_run": str(rec.get("id") or ""),
+                "judge_index": int(rec.get("judge_index")),
+                "target": target,
+                "opponent": str(opp),
+                "opponent_label": label,
+                "score": int(score),
+                "basis": comp.get("basis"),
+                "reason": str(comp.get("reason") or ""),
+                "resolved": [it for it in (comp.get("resolved") or [])
+                             if isinstance(it, dict)],
+                "introduced": [it for it in (comp.get("introduced") or [])
+                               if isinstance(it, dict)],
+                "checks": comp.get("checks") if isinstance(comp.get("checks"), dict) else {},
+            })
+    return opinions
+
+
+def _normalize_llm_conflicts(data) -> list:
+    """Schema-check the LLM's conflicts.json (bad rows are dropped, never trusted)."""
+    out = []
+    if not isinstance(data, dict):
+        return out
+    for c in data.get("conflicts") or []:
+        if not isinstance(c, dict):
+            continue
+        kind = str(c.get("kind") or "other").strip().lower()
+        if kind not in JUDGE_CONFLICT_KINDS:
+            kind = "other"
+        severity = str(c.get("severity") or "major").strip().lower()
+        if severity not in JUDGE_CONFLICT_SEVERITIES:
+            severity = "major"
+        member = str(c.get("member") or c.get("target") or "").strip()
+        opponent = str(c.get("opponent") or "").strip()
+        summary = " ".join(str(c.get("summary") or "").split())[:400]
+        manual = " ".join(str(c.get("manual_check") or "").split())[:800]
+        evidence = []
+        for q in c.get("quotes") or []:
+            if isinstance(q, dict):
+                evidence.append({
+                    "judge_run": str(q.get("judge_run") or q.get("judge") or ""),
+                    "side": str(q.get("side") or "evidence"),
+                    "text": " ".join(str(q.get("text") or q.get("evidence") or "").split())[:300]})
+            elif isinstance(q, str):
+                evidence.append({"judge_run": "", "side": "evidence",
+                                 "text": " ".join(q.split())[:300]})
+        if not summary and not evidence:
+            continue
+        if not manual:
+            manual = _JUDGE_CONFLICT_MANUAL.get(kind, _JUDGE_CONFLICT_MANUAL["other"])
+        out.append({
+            "kind": kind, "severity": severity, "member": member, "opponent": opponent,
+            "judges": [str(j) for j in (c.get("judge_runs") or c.get("judges") or []) if j],
+            "subject": str(c.get("subject") or ""),
+            "summary": summary, "evidence": evidence, "manual_check": manual,
+            "origin": "llm",
+        })
+    return out
+
+
+def _judge_conflict_agent_prompt(r: int) -> str:
+    return F"""You are the pipeline's cross-judge CONFLICT AUDITOR for round {int(r)}.
+
+The pipeline has just collected the round's independent judge sessions. Two judges
+can legitimately differ by a point, but they can also CONTRADICT each other about a
+hard fact: the same comparison scored with opposite signs; the same claim filed as
+`resolved` by one session and `introduced` by another; different numbers quoted for
+the same source table/sentence; or one session marking a check `clean` while another
+files findings for it.
+
+Inputs in this directory:
+  * judge_opinions.json       every resolved directed comparison of the round:
+                              judge_run, judge_index, target, opponent, score, basis,
+                              reason, resolved[]/introduced[] ledger items and checks{{}}.
+                              Ledger items carry {{check, tier, severity, evidence}}.
+  * candidate_conflicts.json  the mechanical pass's candidate conflicts (same schema
+                              as the output). Treat them as candidates, not truth.
+
+TASK
+1. Verify each candidate against judge_opinions.json.
+2. Find any ADDITIONAL genuine conflict the mechanical rules miss (e.g. two judges
+   citing different producer files for the same claim, one treating a change as an
+   improvement and the other as a regression, or evidence that cannot both be true).
+3. Do NOT report benign wording differences, a one-point difference with the same
+   sign, or a difference that the two ledgers themselves explain. If there is no
+   genuine conflict, return an empty list.
+4. Never invent evidence: quote only the judge sheets' own text and name the judge
+   run ids exactly as they appear in judge_opinions.json.
+
+Write `conflicts.json` in this directory with EXACTLY this schema (no extra text):
+{{
+  "conflicts": [
+    {{
+      "kind": "score_disagreement|direction_conflict|claim_inversion|numeric_contradiction|check_disposition|other",
+      "severity": "blocker|major|minor",
+      "member": "<version id the conflict is about>",
+      "opponent": "<other version id>",
+      "judge_runs": ["<run id>", "..."],
+      "summary": "<<= 40 words: what the two judges say that cannot both be true>",
+      "quotes": [
+        {{"judge_run": "<run id>", "side": "score|resolved|introduced|checks|evidence",
+          "text": "<<= 40 words of the sheet's own text>"}}
+      ],
+      "manual_check": "<<= 50 words: exactly what a human must verify, and where>"
+    }}
+  ]
+}}
+
+`severity` is `blocker` when a correctness- or preservation-level disagreement
+flips a comparison, `major` for a factual conflict that changes a reported value,
+and `minor` for a same-sign or bookkeeping conflict. Write only `conflicts.json`;
+do not modify any other file.
+"""
+
+
+def run_judge_conflict_agent(ctx: Ctx, r: int, payload: dict, cmd: list,
+                             timeout: int = None) -> tuple:
+    """Run the optional LLM conflict audit; returns (conflicts, info).
+
+    The session is a small, self-contained sandbox next to the round's reports.
+    Its answer is only accepted when it parses and follows the schema; any other
+    outcome is recorded in `info` and the mechanical conflicts remain the answer.
+    """
+    # NB: NOT "judge_conflict_*" -- instrumentation/tests classify sandboxes by
+    # name and a "judge_" prefix would read as a judge session.  The audit is a
+    # separate, lightweight session.
+    sb = ctx.reports_dir / F"conflict_check_round{int(r)}"
+    sb.mkdir(parents=True, exist_ok=True)
+    write_json_atomic(sb / "judge_opinions.json", payload)
+    write_json_atomic(sb / "candidate_conflicts.json",
+                      {"conflicts": payload.get("candidate_conflicts") or []})
+    write_text_atomic(sb / "PROMPT.md", _judge_conflict_agent_prompt(r))
+    answer = sb / "conflicts.json"
+    try:
+        if answer.exists():
+            answer.unlink()
+    except OSError:
+        pass
+    rec = {"id": F"conflict_round{int(r)}", "kind": "conflicts", "attempts_done": 0}
+    seconds = max(60, min(int(timeout) if timeout else 900, 1800))
+    res = _execute_attempt_in(sb, rec, [str(x) for x in cmd], seconds,
+                              prompt_name="PROMPT.md", log_name="_agent.log",
+                              archive_marker=False)
+    info = {"used": True, "command": [str(x) for x in cmd], "rc": res.get("rc"),
+            "error": res.get("error"), "duration": round(float(res.get("dur") or 0.0), 1),
+            "sandbox": str(sb)}
+    data = read_json(answer, revive=False, lenient=True)
+    if not isinstance(data, dict):
+        info["error"] = info.get("error") or "the agent wrote no parseable conflicts.json"
+        info["ok"] = False
+        return [], info
+    conflicts = _normalize_llm_conflicts(data)
+    info["conflicts"] = len(conflicts)
+    info["ok"] = True
+    return conflicts, info
+
+
+def judge_conflicts_markdown(data: dict) -> str:
+    """The per-round MANUAL TODO list (checkbox items) for the report files."""
+    r = int(data.get("round") or 0)
+    conflicts = data.get("conflicts") or []
+    counts = data.get("counts") or _judge_conflict_counts(conflicts)
+    lines = [
+        F"# Judge-conflict manual checks — round {r}",
+        "",
+        F"Generated {data.get('generated')}; {counts.get('total', 0)} conflict(s) flagged: "
+        F"{counts.get('blocker', 0)} blocker, {counts.get('major', 0)} major, "
+        F"{counts.get('minor', 0)} minor.",
+        "",
+        "The judge panel is independent on purpose: its sessions are allowed to disagree, "
+        "and the aggregation keeps both judgments. These items are therefore REQUIRED "
+        "MANUAL CHECKS — the panel's numbers for the affected comparisons must not be "
+        "cited until a human has resolved them. Each item names the judge runs, the "
+        "conflicting statements, and what to verify.",
+        "",
+        F"Machine-readable form: `reports/round{r}_judge_conflicts.json`. "
+        "After fixing a sheet's input, re-judge it with `retry --run <ID>` and re-decide.",
+        "",
+    ]
+    if not conflicts:
+        lines.append("No cross-judge conflicts were detected for this round.")
+        return "\n".join(lines) + "\n"
+    group = None
+    for c in conflicts:
+        g = "minor" if c.get("severity") == "minor" else "major"
+        if g != group:
+            group = g
+            lines.append("## " + ("Blocking and major conflicts — resolve before citing "
+                                  "the panel's numbers" if g == "major" else
+                                  "Minor conflicts — process/bookkeeping disagreements"))
+            lines.append("")
+        lines.append(F"### {c.get('id')} — {c.get('kind')} ({c.get('severity')})")
+        lines.append("")
+        lines.append(F"- [ ] **Manual check required**: {c.get('manual_check')}")
+        lines.append(F"- Comparison: `{c.get('member')}` vs `{c.get('opponent')}`")
+        lines.append("- Judges: " + ", ".join(F"`{j}`" for j in (c.get("judges") or [])))
+        lines.append(F"- Conflict: {c.get('summary')}")
+        evidence = c.get("evidence") or []
+        if evidence:
+            lines.append("- Evidence:")
+            for e in evidence:
+                who = F"`{e.get('judge_run')}` " if e.get("judge_run") else ""
+                lines.append(F"    - {who}[{e.get('side')}]: {e.get('text')}")
+        lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def write_judge_conflicts_todo(ctx: Ctx) -> Path:
+    """`reports/JUDGE_CONFLICTS_TODO.md`: every round's open manual checks."""
+    lines = [
+        "# Judge conflicts — manual TODO list",
+        "",
+        F"Root: `{ctx.root}`. Compiled from `reports/round<r>_judge_conflicts.json`.",
+        "",
+    ]
+    total = 0
+    for r in range(1, ctx.rounds_count() + 1):
+        data = read_json(ctx.reports_dir / F"round{r}_judge_conflicts.json",
+                         revive=False, lenient=True)
+        if not isinstance(data, dict):
+            continue
+        conflicts = data.get("conflicts") or []
+        total += len(conflicts)
+        counts = data.get("counts") or _judge_conflict_counts(conflicts)
+        lines.append(F"## Round {r} — {counts.get('total', len(conflicts))} conflict(s)")
+        lines.append("")
+        if not conflicts:
+            lines.append("None detected.")
+            lines.append("")
+            continue
+        major = [c for c in conflicts if c.get("severity") != "minor"]
+        minor = [c for c in conflicts if c.get("severity") == "minor"]
+        if major:
+            lines.append("Blocking/major checks (resolve first):")
+            lines.append("")
+        for c in major:
+            lines.append(F"- [ ] **{c.get('id')}** [{c.get('kind')}/{c.get('severity')}] "
+                         F"`{c.get('member')}` vs `{c.get('opponent')}` — "
+                         F"{c.get('summary')}")
+            lines.append(F"      verify: {c.get('manual_check')}")
+        if minor:
+            lines.append("")
+            lines.append(F"Minor process/bookkeeping checks ({len(minor)}):")
+            lines.append("")
+        for c in minor:
+            lines.append(F"- [ ] **{c.get('id')}** [{c.get('kind')}/{c.get('severity')}] "
+                         F"`{c.get('member')}` vs `{c.get('opponent')}` — "
+                         F"{c.get('summary')}")
+            lines.append(F"      verify: {c.get('manual_check')}")
+        lines.append("")
+    lines.append(F"**{total} manual check(s) across the decided round(s).**")
+    p = ctx.reports_dir / "JUDGE_CONFLICTS_TODO.md"
+    write_text_atomic(p, "\n".join(lines) + "\n")
+    return p
+
+
+def write_round_judge_conflicts(ctx: Ctx, r: int, agg: dict = None, agent_cmd: list = None,
+                                timeout: int = None, use_agent: bool = True,
+                                force: bool = False) -> dict:
+    """Audit one round's judge sheets and write the manual-check files.
+
+    Deterministic conflicts are always computed.  When `agent_cmd` is given (and
+    `use_agent` is true), the optional LLM auditor runs in
+    `reports/conflict_check_round<r>/` and its schema-checked conflicts are
+    merged.  Re-running with the same judge sheets is a no-op unless `force` is
+    set, so `run` and `decide` do not pay for the agent twice.
+    """
+    r = int(r)
+    opinions = round_judge_opinions(ctx, r)
+    mechanical = detect_round_judge_conflicts(opinions)
+    payload = {
+        "run": ctx.root.name, "round": r, "generated": utcnow(),
+        "field": [str(v) for v in ((agg or {}).get("field")
+                                   or ctx.round_rec(r).get("field") or [])],
+        "opinions": opinions, "candidate_conflicts": mechanical,
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(_json_safe(opinions), sort_keys=True, ensure_ascii=False)
+        .encode("utf-8")).hexdigest()[:16]
+    json_path = ctx.reports_dir / F"round{r}_judge_conflicts.json"
+    existing = read_json(json_path, revive=False, lenient=True)
+    agent_info = {"used": False, "reason": "no agent backend"}
+    if isinstance(existing, dict) and existing.get("input_fingerprint") == fingerprint \
+            and not force:
+        already_llm = bool((existing.get("agent") or {}).get("ok"))
+        if not (agent_cmd and use_agent and not already_llm):
+            return existing
+    llm_conflicts = []
+    if agent_cmd and use_agent:
+        try:
+            llm_conflicts, agent_info = run_judge_conflict_agent(
+                ctx, r, payload, agent_cmd, timeout=timeout)
+        except Exception as e:                                       # noqa: BLE001
+            agent_info = {"used": False, "error": F"{type(e).__name__}: {e}"}
+    conflicts = _merge_judge_conflicts(mechanical, llm_conflicts)
+    for i, c in enumerate(conflicts, 1):
+        c["id"] = F"C{r}-{i:03d}"
+    counts = _judge_conflict_counts(conflicts)
+    data = {
+        "run": ctx.root.name, "round": r, "generated": utcnow(),
+        "input_fingerprint": fingerprint,
+        "judges": sorted({o.get("judge_run") for o in opinions if o.get("judge_run")}),
+        "opinions": len(opinions),
+        "counts": counts, "conflicts": conflicts,
+        "agent": agent_info,
+    }
+    write_json_atomic(json_path, data)
+    write_text_atomic(ctx.reports_dir / F"round{r}_judge_conflicts.md",
+                      judge_conflicts_markdown(data))
+    return data
+
+
+PAPER_CONFLICT_AGENT_ENV = "PAPER_CONFLICT_AGENT_CMD"
+
+
+def _conflict_agent_cmd_from_env(name: str):
+    """Parse a JSON argv list from `name` (None when unset or invalid)."""
+    raw = os.environ.get(name)
+    if not raw:
+        return None
+    try:
+        argv = json.loads(raw)
+    except json.JSONDecodeError:
+        print(F"[conflicts] WARNING: {name} is not a JSON argv list; ignoring it")
+        return None
+    if not isinstance(argv, list) or not argv:
+        print(F"[conflicts] WARNING: {name} must be a non-empty JSON argv list; ignoring it")
+        return None
+    return [str(x) for x in argv]
+
+
+def _conflict_cmd_usable(cmd) -> bool:
+    if not cmd:
+        return False
+    if shutil.which(str(cmd[0])) is None:
+        print(F"[conflicts] note: agent executable {cmd[0]!r} is not on PATH; running the "
+              F"deterministic conflict check only")
+        return False
+    return True
+
+
+def _looks_like_preset_cmd(cmd) -> bool:
+    """True for the shipped codex/claude CLI invocations (not a stub or wrapper)."""
+    try:
+        return bool(cmd) and os.path.basename(str(cmd[0])) in ("codex", "claude")
+    except Exception:                                                # noqa: BLE001
+        return False
+
+
+def resolve_round_audit_cmd(conflict_cmd, conflict_agent: bool, judge_cmd,
+                            judge_manual: bool, recorded: dict):
+    """(cmd, source) for ONE round's conflict audit (see drive_round).
+
+    Precedence: an explicit --conflict-agent[-cmd] wins; otherwise the backend
+    a previous round recorded is reused; a custom/stub judge backend is reused
+    as the auditor; otherwise the LIGHTWEIGHT default runs (the judge backend is
+    only the fallback when no lightweight backend is available).  A manual judge
+    wave keeps the deterministic pass unless the operator configured an
+    audit-specific backend (--conflict-agent-cmd or PAPER_CONFLICT_AGENT_CMD).
+    """
+    if not conflict_agent:
+        return None, "disabled"
+    if conflict_cmd is not None:
+        return conflict_cmd, "conflict-agent"
+    recorded = recorded or {}
+    recorded_cmd = recorded.get("cmd")
+    if recorded.get("source") not in ("manual", "disabled") \
+            and isinstance(recorded_cmd, list) and recorded_cmd:
+        return [str(x) for x in recorded_cmd], "recorded"
+    if judge_manual:
+        # Manual judge mode starts no agents for the panel; the audit stays
+        # deterministic unless the operator configured an audit-specific
+        # backend for it (PAPER_CONFLICT_AGENT_CMD -- a general PAPER_AGENT_CMD
+        # or --agent manual is deliberately not enough).
+        dedicated = _conflict_agent_cmd_from_env(PAPER_CONFLICT_AGENT_ENV)
+        if dedicated and _conflict_cmd_usable(dedicated):
+            return dedicated, "conflict-agent-env"
+        return None, "manual"
+    if (not judge_manual) and not _looks_like_preset_cmd(judge_cmd):
+        # A custom judge backend (an operator CLI, a test stub) is the audit
+        # backend too -- never silently replace it with codex.
+        return judge_cmd, "judge-backend"
+    light = default_conflict_agent_cmd()
+    if light is not None:
+        return light, "lightweight-default"
+    if not judge_manual:
+        return judge_cmd, "judge-backend"
+    return None, "manual"
+
+
+def default_conflict_agent_cmd():
+    """The lightweight default backend for the conflict audit (None when unusable).
+
+    PAPER_CONFLICT_AGENT_CMD (point it at a cheap CLI/model) wins, then the
+    `codex-lite` preset (codex at low reasoning effort); PAPER_AGENT_CMD is only
+    the fallback when no lightweight codex is available, so pointing the
+    production agent at a heavy model does not make the audit heavy.  Never
+    raises: an unusable backend returns None so the mechanical pass carries on.
+    """
+    cmd = _conflict_agent_cmd_from_env(PAPER_CONFLICT_AGENT_ENV)
+    if cmd:
+        return cmd if _conflict_cmd_usable(cmd) else None
+    try:
+        cmd = resolve_agent_cmd("codex-lite", None, use_env=False)
+    except SystemExit:
+        cmd = None
+    if cmd and _conflict_cmd_usable(cmd):
+        return cmd
+    cmd = _conflict_agent_cmd_from_env("PAPER_AGENT_CMD")
+    return cmd if (cmd and _conflict_cmd_usable(cmd)) else None
+
+
+def conflict_agent_cmd_from_args(args, ctx: Ctx = None) -> list:
+    """The LLM backend for the conflict audit (None = mechanical check only).
+
+    The auditor is ON by default.  An explicit
+    --conflict-agent/--conflict-agent-cmd wins, then the audit-specific
+    PAPER_CONFLICT_AGENT_CMD, then the backend `run` recorded
+    (`state["conflict_agent"]`), then the lightweight default
+    (PAPER_AGENT_CMD or the codex-lite preset); a run/run-decide production
+    backend is the next fallback and a legacy agent-driven root's configured
+    agent the last one.  --no-conflict-agent (or a run recorded as manual /
+    disabled) keeps the deterministic pass only.
+    """
+    if getattr(args, "no_conflict_agent", False):
+        return None
+    explicit = getattr(args, "conflict_agent_cmd", None)
+    agent = getattr(args, "conflict_agent", None)
+    cmd = None
+    if explicit:
+        try:
+            cmd = resolve_agent_cmd(agent or "codex-lite", explicit)
+        except SystemExit:
+            print("[conflicts] WARNING: --conflict-agent-cmd could not be resolved; running the "
+                  "deterministic conflict check only")
+            return None
+    elif agent == "manual":
+        return None
+    elif agent:
+        try:
+            cmd = resolve_agent_cmd(agent, getattr(args, "agent_cmd", None))
+        except SystemExit:
+            cmd = None
+    else:
+        # Audit-specific lightweight command, then the run's recorded backend,
+        # then the generic lightweight default, then the run/run-decide
+        # production backend, then a legacy agent-driven root's agent.
+        cmd = _conflict_agent_cmd_from_env(PAPER_CONFLICT_AGENT_ENV)
+        if cmd is not None and not _conflict_cmd_usable(cmd):
+            cmd = None
+        if cmd is None and ctx is not None:
+            recorded = (ctx.state.get("conflict_agent") or {})
+            if recorded.get("source") in ("manual", "disabled"):
+                return None
+            recorded_cmd = recorded.get("cmd")
+            if isinstance(recorded_cmd, list) and recorded_cmd:
+                cmd = [str(x) for x in recorded_cmd]
+        if cmd is None and ctx is not None:
+            # A legacy manual-mode root starts no agents; the audit stays
+            # deterministic unless the operator configured an audit-specific
+            # backend (checked above).
+            provider = ctx.state.get("judge_provider") or {}
+            if provider.get("judge_manual"):
+                return None
+        if cmd is None:
+            cmd = default_conflict_agent_cmd()
+        if cmd is None:
+            prod_agent = getattr(args, "agent", None)
+            if prod_agent and prod_agent != "manual":
+                try:
+                    cmd = resolve_agent_cmd(prod_agent, getattr(args, "agent_cmd", None))
+                except SystemExit:
+                    cmd = None
+        if cmd is None and ctx is not None:
+            # A root driven by an agent before this feature existed has no
+            # conflict_agent record; the recorded judge provider proves the root
+            # was agent-driven, and a hand-built fixture stays deterministic.
+            provider = ctx.state.get("judge_provider") or {}
+            if provider and not provider.get("judge_manual"):
+                try:
+                    cmd = resolve_agent_cmd(DEFAULTS.get("agent", "codex"), None)
+                except SystemExit:
+                    cmd = None
+    if not cmd or not _conflict_cmd_usable(cmd):
+        return None
+    return [str(x) for x in cmd]
+
+
+def cmd_conflicts(args) -> None:
+    """`conflicts`: audit every round's judge panels and write the manual TODO list."""
+    ctx = Ctx(Path(args.root).resolve(),
+              strict_venue=bool(getattr(args, "strict_venue", False)))
+    ctx.load()
+    with ctx.lock("conflicts"):
+        if getattr(args, "round", None) is not None \
+                and not (1 <= int(args.round) <= ctx.rounds_count()):
+            die(F"--round must be in 1..{ctx.rounds_count()} (got {args.round})")
+        cmd = None
+        explicit_cmd = args.conflict_agent_cmd or args.agent_cmd
+        manual_off = (args.conflict_agent == "manual"
+                      or (args.agent == "manual" and not explicit_cmd))
+        if not getattr(args, "no_agent", False) and not manual_off:
+            if explicit_cmd:
+                try:
+                    cmd = resolve_agent_cmd(args.conflict_agent or args.agent,
+                                            explicit_cmd)
+                except SystemExit:
+                    cmd = None
+            elif args.conflict_agent:
+                try:
+                    cmd = resolve_agent_cmd(args.conflict_agent, None, use_env=False)
+                except SystemExit:
+                    cmd = None
+            else:
+                # Default run: reuse the backend `run` recorded (a real run
+                # records its lightweight auditor, a stub run the stub), else
+                # the lightweight default (PAPER_CONFLICT_AGENT_CMD / codex-lite).
+                recorded = (ctx.state.get("conflict_agent") or {})
+                recorded_cmd = recorded.get("cmd")
+                if recorded.get("source") not in ("manual", "disabled") \
+                        and isinstance(recorded_cmd, list) and recorded_cmd:
+                    cmd = [str(x) for x in recorded_cmd]
+                else:
+                    cmd = default_conflict_agent_cmd()
+            if cmd is not None and not _conflict_cmd_usable(cmd):
+                cmd = None
+        print("[conflicts] audit backend: "
+              + (" ".join(cmd) if cmd else "none (deterministic check only)"))
+        rounds = ([int(args.round)] if getattr(args, "round", None)
+                  else [r for r in range(1, ctx.rounds_count() + 1)
+                        if round_judge_opinions(ctx, r)])
+        if not rounds:
+            print("[conflicts] no round with judge sheets; nothing to audit")
+            return
+        for r in rounds:
+            data = write_round_judge_conflicts(ctx, r, agent_cmd=cmd,
+                                               timeout=getattr(args, "timeout", None),
+                                               force=bool(getattr(args, "force", False)))
+            counts = data.get("counts") or {}
+            print(F"[conflicts] round {r}: {counts.get('total', 0)} conflict(s) "
+                  F"({counts.get('blocker', 0)} blocker, {counts.get('major', 0)} major, "
+                  F"{counts.get('minor', 0)} minor) -> "
+                  F"reports/round{r}_judge_conflicts.md")
+        p = write_judge_conflicts_todo(ctx)
+        print(F"[conflicts] manual TODO list -> {p.relative_to(ctx.root).as_posix()}")
 
 
 # The columns of the round's REVIEW-FINDINGS list: the review pass's own frozen
@@ -33807,6 +34884,23 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
                   f"; defects -> {_dfp.relative_to(ctx.root)}")
         except OSError as e:
             print(f"[decide] round {r} WARNING: could not write its issue census: {e}")
+        # Cross-judge conflicts: flag every contradiction between the round's
+        # independent judge sessions as a REQUIRED MANUAL CHECK.  The mechanical
+        # pass always runs; the LLM pass is ON by default and reuses the
+        # lightweight backend `run` recorded (or PAPER_CONFLICT_AGENT_CMD /
+        # codex-lite, or an explicit --conflict-agent[-cmd]).
+        try:
+            _cfd = write_round_judge_conflicts(
+                ctx, r, agg=agg,
+                agent_cmd=conflict_agent_cmd_from_args(args, ctx),
+                timeout=getattr(args, "timeout", None))
+            _cfc = _cfd.get("counts") or {}
+            print(f"[decide] round {r} judge conflicts -> "
+                  f"reports/round{r}_judge_conflicts.md "
+                  f"({_cfc.get('total', 0)} conflict(s): {_cfc.get('blocker', 0)} blocker, "
+                  f"{_cfc.get('major', 0)} major, {_cfc.get('minor', 0)} minor)")
+        except Exception as e:                                       # noqa: BLE001
+            print(f"[decide] round {r} WARNING: judge-conflict audit failed: {e}")
         # The same guard `run` applies before deciding a round: a shrunk panel must
         # never be certified. `run` refuses to decide; `decide` must refuse to sign.
         gaps = [vid for vid in agg["field"]
@@ -33839,6 +34933,12 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
                             "pin": find_pin(ctx, rrec.get("pin_id")) or {},
                             "winner": find_winner(ctx, r), "stored": rrec,
                             "mismatch": mismatch})
+    try:
+        _cfp = write_judge_conflicts_todo(ctx)
+        print(f"[decide] judge-conflict manual TODO list -> "
+              f"{_cfp.relative_to(ctx.root).as_posix()}")
+    except OSError as e:
+        print(f"[decide] WARNING: could not write the judge-conflict TODO list: {e}")
     if not rounds_data:
         print("No completed rounds yet; nothing to decide.")
         for p in problems:
@@ -35851,6 +36951,21 @@ def build_parser() -> argparse.ArgumentParser:
                                   "problems (exit 5). Unsourced numbers stay advisory")
     decide_opts.add_argument("--non-residual-gate", dest="residual_gate", action="store_false",
                              help="record the residual items instead of failing the decision")
+    # Shared by run / run-decide / decide: the optional LLM cross-judge conflict
+    # audit (the deterministic pass and the manual TODO files always run).
+    conflict_opts = argparse.ArgumentParser(add_help=False)
+    conflict_opts.add_argument("--conflict-agent", choices=list(CONFLICT_AGENT_CHOICES),
+                               default=None,
+                               help="backend for the cross-judge conflict audit, ON by default "
+                                    "with a lightweight backend (PAPER_CONFLICT_AGENT_CMD, else "
+                                    "codex-lite); run records the backend it used and decide "
+                                    "reuses it ('manual' keeps the deterministic check only)")
+    conflict_opts.add_argument("--conflict-agent-cmd", default=None,
+                               help="JSON argv list for the conflict audit only (wins over "
+                                    "--conflict-agent)")
+    conflict_opts.add_argument("--no-conflict-agent", action="store_true",
+                               help="skip the LLM cross-judge conflict audit; the deterministic "
+                                    "conflict check and the manual TODO files are still written")
     run_opts = argparse.ArgumentParser(add_help=False)   # shared by run / run-decide
     run_opts.add_argument("--jobs", type=int, default=DEFAULTS["jobs"],
                     help=f"concurrent agent sessions (default: {DEFAULTS['jobs']})")
@@ -35918,10 +37033,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_opts.add_argument("--no-wait", action="store_true",
                     help="manual mode: print the prompts for runs whose dependencies are "
                          "satisfied and exit without waiting")
-    pr = sub.add_parser("run", parents=[common, run_opts], help="execute pending rounds")
+    pr = sub.add_parser("run", parents=[common, run_opts, conflict_opts],
+                        help="execute pending rounds")
     pr.set_defaults(func=cmd_run)
 
-    prd = sub.add_parser("run-decide", parents=[common, run_opts, decide_opts],
+    prd = sub.add_parser("run-decide", parents=[common, run_opts, decide_opts, conflict_opts],
                          help="run the pending rounds, then decide in series")
     prd.set_defaults(func=cmd_run_decide)
 
@@ -35990,7 +37106,29 @@ def build_parser() -> argparse.ArgumentParser:
                           "judge:[…], …]}")
     pag.set_defaults(func=cmd_agents)
 
-    pd = sub.add_parser("decide", parents=[common, decide_opts],
+    pcf = sub.add_parser("conflicts", parents=[common],
+                         help="audit each round's judge panel for cross-judge conflicts and "
+                              "write the manual TODO list")
+    pcf.add_argument("--round", type=int, default=None, metavar="R",
+                     help="audit only this round (default: every round that has judge sheets)")
+    pcf.add_argument("--agent", choices=list(CONFLICT_AGENT_CHOICES), default="codex-lite",
+                     help="backend for the LLM conflict audit (default: codex-lite, the "
+                          "lightweight low-effort session; manual = deterministic check only)")
+    pcf.add_argument("--agent-cmd", default=None,
+                     help="JSON argv list overriding the agent command")
+    pcf.add_argument("--conflict-agent", choices=list(CONFLICT_AGENT_CHOICES), default=None,
+                     help="override --agent for the conflict audit only")
+    pcf.add_argument("--conflict-agent-cmd", default=None,
+                     help="JSON argv list for the conflict audit only")
+    pcf.add_argument("--timeout", type=int, default=None,
+                     help="LLM conflict-audit timeout seconds (default: 900, capped at 1800)")
+    pcf.add_argument("--no-agent", action="store_true",
+                     help="skip the LLM audit; run only the deterministic conflict check")
+    pcf.add_argument("--force", action="store_true",
+                     help="re-run the LLM audit even when the judge sheets are unchanged")
+    pcf.set_defaults(func=cmd_conflicts)
+
+    pd = sub.add_parser("decide", parents=[common, decide_opts, conflict_opts],
                         help="recompute rounds, verify pins, write the decision report and "
                              "publish <root>/final_clean_version/")
     pd.set_defaults(func=cmd_decide)
