@@ -6,7 +6,7 @@ waiting on stub agents, LibreOffice, pdflatex and sleeps. They are independent
 (each builds its own root under `tempfile.mkdtemp`, and the fixed paths they use
 are per-suite), so they can run at once:
 
-    python3 .paper_test/run_all.py                 # GNU parallel, jobs = #cores
+    python3 .paper_test/run_all.py                 # GNU parallel, jobs = min(20, #cores)
     python3 .paper_test/run_all.py -j 4            # cap the parallelism
     python3 .paper_test/run_all.py -j 1            # exactly the old sequential loop
     python3 .paper_test/run_all.py --only test_pipeline.py test_docx_format.py
@@ -38,6 +38,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 WS = HERE.parent
 RUN_ONE = HERE / "run_one.sh"
+# The 20-core dev box asked for ALL its cores by default; the effective default
+# is still capped by the CPU count and the suite count (see `main()`).
+DEFAULT_JOBS = 20
 
 
 def suites() -> list:
@@ -114,9 +117,9 @@ def summary_line(suite: str, rc: int, secs: float, width: int) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Run the .paper_test suites in parallel.")
-    ap.add_argument("-j", "--jobs", type=int, default=0,
-                    help="parallel sessions (default: min(CPU count, 8) -- see the docstring; "
-                         "`-j 1` is the old sequential loop)")
+    ap.add_argument("-j", "--jobs", type=int, default=DEFAULT_JOBS,
+                    help=f"parallel sessions (default: {DEFAULT_JOBS}, capped by the CPU count "
+                         f"and the suite count; `-j 1` is the old sequential loop)")
     ap.add_argument("--only", nargs="+", metavar="SUITE",
                     help="run these suites only (names with or without .py)")
     ap.add_argument("--engine", choices=("auto", "parallel", "python"), default="auto",
@@ -149,12 +152,12 @@ def main() -> int:
         engine = "parallel" if parallel_available() else "python"
     if engine == "parallel" and not parallel_available():
         sys.exit("--engine parallel was asked for, but `parallel` is not on PATH")
-    # Measured on the 20-core dev box: 8 jobs run the whole set in ~108 s and 20
-    # jobs in ~110 s -- the heavy suites (stub rounds, LibreOffice, pdflatex) keep
-    # every core busy either way, and the extra sessions only add contention (and
-    # with it the chance of a timing suite reporting a load flake). `-j N` overrides.
-    jobs = args.jobs if args.jobs > 0 else min(os.cpu_count() or 1, 8, len(todo))
-    jobs = max(1, min(jobs, len(todo)))
+    # The operator asked the 20-core dev box to use ALL 20 cores by default
+    # (`-j 20`). The default is capped by the CPU count and the suite count so a
+    # smaller box is not oversubscribed; `-j N` overrides, `-j 1` is the old
+    # sequential loop.
+    jobs = args.jobs if args.jobs > 0 else DEFAULT_JOBS
+    jobs = max(1, min(jobs, os.cpu_count() or jobs, len(todo)))
     rundir = run_dir_under(args.logs)
     python = os.environ.get("PAPER_TEST_PYTHON") or sys.executable
 

@@ -276,6 +276,31 @@ def main() -> int:
               nb.original_submission_staging_problems(ctx, sb)))
 
     print()
+    print("== HF6: an article-type-named MANUSCRIPT is never the journal's letter ==")
+    tmp2 = scratch("paper_hf_lte_")
+    src2 = tmp2 / "src"
+    src2.mkdir()
+    # The submission of a `letter-to-the-editor` run (no human_review_feedback/
+    # area, so the legacy name heuristic runs) plus the real reviewer report.
+    (src2 / "letter-to-the-editor.docx").write_bytes(b"PK\x03\x04stub")
+    (src2 / "reviewer_report.txt").write_text(
+        "Reviewer 1:\n\nToo short for the claim.\n", encoding="utf-8")
+    ctx2 = nb.Ctx(tmp2 / "root")
+    ctx2.pristine = src2
+    ctx2.cfg = {"revision_mode": "transfer", "journal": "Example Journal",
+                "rounds": 1, "judges": [1], "rewrites": [1], "revises": [1]}
+    hits2 = [label for _p, label in nb.journal_feedback_files(ctx2)]
+    check("HF6 the reviewer report is the feedback",
+          any(h.endswith("reviewer_report.txt") for h in hits2), str(hits2))
+    check("HF6 the letter-to-the-editor MANUSCRIPT is not read as the journal's letter",
+          not any("letter-to-the-editor" in h for h in hits2), str(hits2))
+    check("HF6 the feedback-name predicate keeps the genuine names",
+          nb.is_journal_feedback_name("editor_decision_letter.docx") is True
+          and nb.is_journal_feedback_name("referee_comments.pdf") is True
+          and nb.is_journal_feedback_name("letter-to-the-editor.docx") is False
+          and nb.is_journal_feedback_name("editorial.docx") is False)
+
+    print()
     if FAILS:
         print(f"{len(FAILS)} CHECK(S) FAILED:")
         for f in FAILS:

@@ -841,6 +841,16 @@ rule | severity | location | evidence | fix kind | disposition.
   above the title, a placeholder between two headings) and anything before the
   first non-empty paragraph; dispose such a row as `OK — template-prescribed
   slot` and never delete the template's own chrome.
+- a cover letter formatted in the venue's MANUSCRIPT template (`FMT-CL1`: it
+  uses the manuscript template's Title/Author-List front-matter styles, or
+  carries its logo header/page-number footer furniture, while the venue ships
+  NO cover-letter template of its own) → finding; a cover letter is a letter,
+  not a manuscript, and its authority is the journal's own cover-letter
+  guidance, then academic convention. An `OK` disposition is valid ONLY with
+  the journal's own template/guideline text quoted that REQUIRES this
+  formatting (its source and what it requires) — "the run carries the letter
+  in the journal's styles" is the PIPELINE's convention, not the journal's, and
+  the pipeline's disposition gate fails that closure.
 
 **Artifact:** `review/artifacts/M20_formatting.md` (the seeded table, every row
 disposed) plus `review/work/FORMAT_SCAN.json`.

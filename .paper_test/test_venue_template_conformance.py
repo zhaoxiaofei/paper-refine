@@ -657,6 +657,81 @@ def _package_docx(path: Path, heading: str) -> None:
                      '</w:body></w:document>'))
 
 
+def test_two_section_manuscript_gets_the_page_one_furniture():
+    """The venue's page-1 furniture and geometry reach the section that governs page 1.
+
+    A manuscript with a title-page section break carries the first `w:sectPr`
+    in a paragraph and the body's at the end of `w:body`; Word renders page 1
+    from the FIRST one. The restyler wrote the template's logo header, page
+    footer, `w:titlePg` and page geometry into the LAST section only, and the
+    conformance report read that same section -- so a delivered package whose
+    page 1 was not the journal's layout reported no gap.
+    """
+    print()
+    print("== the venue's page-1 furniture goes to the section that governs page 1 ==")
+    tmp = scratch("paper_tpl_two_section_")
+    tpl = tmp / "template.docx"
+    _furnished_template(tpl, "You may insert up to 5 heading levels into your manuscript as can "
+                             "be seen in the Styles tab of this template.")
+    man = tmp / "two-section.docx"
+    author_sect = ('<w:pgSz w:w="10000" w:h="14000"/>'
+                   '<w:pgMar w:top="2000" w:right="2000" w:bottom="2000" w:left="2000" '
+                   'w:header="720" w:footer="720" w:gutter="0"/>')
+    title_section = (f"<w:p><w:pPr><w:sectPr>{author_sect}</w:sectPr></w:pPr>"
+                     "<w:r><w:t>Title page paragraph</w:t></w:r></w:p>")
+    full_docx(man, ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/'
+                    '2006/main"><w:body>'
+                    + para("Title", "A title of the manuscript")
+                    + para(None, "Ann Author, Bob Author") + title_section
+                    + para(None, "Introduction body paragraph.")
+                    + f"<w:sectPr>{author_sect}</w:sectPr></w:body></w:document>"))
+    out = tmp / "out.docx"
+    rep = fmt.apply_word_template(man, out, tpl)
+    check("the two-section restyle succeeds and keeps the text",
+          rep.get("ok") is True and rep.get("text_unchanged") is True, str(rep)[:200])
+    with zipfile.ZipFile(out) as z:
+        xml = z.read("word/document.xml").decode("utf-8", "replace")
+    sects = re.findall(r"<w:sectPr(?=[\s>])[^>]*>.*?</w:sectPr>", xml, re.S)
+    check("the template's page geometry reaches EVERY section (page 1 included)",
+          len(sects) == 2 and all('<w:pgSz w:w="12240" w:h="15840"/>' in s
+                                  for s in sects), str(sects)[:300])
+    check("the venue's first-page header/titlePg is in the FIRST section",
+          'w:type="first"' in sects[0] and "<w:titlePg" in sects[0],
+          sects[0][:240])
+    check("a later section carries the running furniture but NOT the title-page flag",
+          'w:type="first"' not in sects[1] and "<w:titlePg" not in sects[1]
+          and 'w:type="default"' in sects[1], sects[1][:240])
+    want = nb._docx_hf_signature(tpl)
+    got = nb._docx_hf_signature(out)
+    check("the header/footer signature reads the section that governs page 1",
+          all(r in (got.get("roles") or []) for r in want.get("roles") or [])
+          and nb._hf_gap(want, got) == {}, str(got) + " | " + str(nb._hf_gap(want, got)))
+    check("the conformance report no longer shows a first-page furniture gap",
+          not any(("logo" in r or "footer" in r)
+                  for r in fmt.docx_front_matter_report(out, tpl).get("rows") or []),
+          str(fmt.docx_front_matter_report(out, tpl).get("rows")))
+    # The regression the fix closes: last-section-only furniture (the shape the
+    # old writer produced) must NOT satisfy the signature/report.
+    old_shape = tmp / "old-shape.docx"
+    full_docx(old_shape, ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                          '<w:document xmlns:w="http://schemas.openxmlformats.org/'
+                          'wordprocessingml/2006/main"><w:body>'
+                          + para(None, "Title page paragraph")
+                          + f"<w:sectPr>{author_sect}</w:sectPr>"
+                          + para(None, "Body text.")
+                          + '<w:sectPr><w:headerReference w:type="first" r:id="rIdH1"/>'
+                            '<w:footerReference w:type="default" r:id="rIdF1"/>'
+                            '<w:pgSz w:w="12240" w:h="15840"/><w:titlePg/></w:sectPr>'
+                          '</w:body></w:document>'))
+    old_gap = nb._hf_gap(want, nb._docx_hf_signature(old_shape))
+    check("last-section-only furniture no longer satisfies the signature",
+          bool(old_gap), str(old_gap))
+    check("and the report names the missing first-page logo on that shape",
+          any("logo" in r for r in fmt.docx_front_matter_report(old_shape, tpl).get("rows") or []),
+          str(fmt.docx_front_matter_report(old_shape, tpl).get("rows")))
+
+
 def test_foreign_containers_are_venue_data():
     """The formatter carries NO journal's vocabulary: container names are data.
 
@@ -759,6 +834,263 @@ def test_apply_template_package():
           and not any("template_report" in n for n in names), str(names))
 
 
+def test_cover_letter_guideline_fallback():
+    """A cover letter is a LETTER: the manuscript template never styles it.
+
+    Operator report: the journal's manuscript template (built for manuscript
+    preparation) was restyled onto the cover letters, so the recipient block and
+    salutation carried the article's Title/Author-List front matter. The rule
+    now: a venue that publishes a cover-letter template gets that template
+    applied; with none, the letter follows the journal's own cover-letter
+    guidance and then academic convention -- never the manuscript template.
+    """
+    tmp = scratch("paper_tpl_cover_")
+    root = tmp / "root"
+    off = build_fake_official(root)
+    build_fake_pack(root)
+    pkg = tmp / "pkg"
+    pkg.mkdir()
+    _package_docx(pkg / "mainText.docx", "Introduction")
+    _package_docx(pkg / "coverLetter.docx", "Dear Editors,")
+
+    class Ctx:
+        pass
+
+    ctx = Ctx()
+    ctx.root = root
+    ctx.cfg = {"venue": "fake-venue"}
+    tpls = nb.venue_word_templates(ctx)
+    check("a venue without a cover-letter template resolves no cover role",
+          "cover" not in tpls, str(tpls))
+    check("the template resolver never hands a letter the manuscript template",
+          nb.template_for_package_file(pkg / "coverLetter.docx", tpls) is None
+          and Path(nb.template_for_package_file(pkg / "mainText.docx", tpls)).name
+          == "Fake_Template.docx",
+          str({k: Path(v).name for k, v in tpls.items()}))
+
+    # The code-side normalizer leaves the letter alone (no manuscript restyle).
+    norm = nb.normalize_formatting_in_dir(pkg, dict(fmt.POLICY_DEFAULTS), "cover_probe",
+                                          warns=[], artifacts_dir=tmp, template=tpls)
+    per = {d["file"]: d for d in norm["documents"]}
+    check("the normalizer restyles no cover letter with the manuscript template",
+          "template" not in per.get("coverLetter.docx", {})
+          and (per.get("mainText.docx", {}).get("template") or {}).get("ok") is True,
+          str({k: ("template" in v) for k, v in per.items()}))
+    with zipfile.ZipFile(pkg / "coverLetter.docx") as z:
+        letter_styles = z.read("word/styles.xml").decode("utf-8", "replace")
+    check("the letter keeps its own (non-template) style set",
+          "Georgia" not in letter_styles, letter_styles[:160])
+
+    # `conform`: the letter is carried as authored instead of failing the rebuild.
+    dest = tmp / "out"
+    rep = nb.rebuild_package_from_templates(tpls, pkg, dest)
+    letter = [f for f in rep["files"] if f["file"] == "coverLetter.docx"]
+    check("the package rebuild carries the letter as authored (not a failure)",
+          rep.get("ok") is True and letter and letter[0]["kind"] == "copied"
+          and letter[0].get("ok") is True
+          and "cover-letter template" in (letter[0].get("note") or ""),
+          str(letter)[:240])
+
+    # The conformance scan never measures the letter against the manuscript.
+    req = nb.official_template_requirements("fake-venue", root)
+    before = nb.scan_template_conformance([(pkg, "", ())], req,
+                                          word_template=tpls.get("main"))
+    check("the conformance scan demands no manuscript styles from a letter",
+          not any(m["document"] == "coverLetter.docx"
+                  for m in before.get("word_styles_missing") or [])
+          and not any("coverLetter.docx" in r for r in before.get("front_matter_rows") or []),
+          str(before.get("word_styles_missing")) + str(before.get("front_matter_rows")))
+
+    # The template-first prompt sends the letter down the guideline chain.
+    corpus = tmp / "src"
+    corpus.mkdir()
+    shutil.copy2(pkg / "mainText.docx", corpus / "mainText.docx")
+    shutil.copy2(pkg / "coverLetter.docx", corpus / "coverLetter.docx")
+    prompt = nb.apply_template_prompt(ctx, tmp / "sb", corpus, tpls)
+    check("the template-first prompt forbids the manuscript template on the letter",
+          "NO cover-letter template ships" in prompt
+          and "academic convention" in prompt
+          and "styled with the same styles" not in prompt, prompt[:0])
+    ctx_front = Ctx()
+    ctx_front.root = root
+    ctx_front.cfg = {"venue": "frontiers-in-immunology"}
+    prompt_front = nb.apply_template_prompt(ctx_front, tmp / "sb3", corpus, tpls)
+    check("the prompt carries the venue's RECORDED cover-letter guidance "
+          "(the operator's Frontiers case)",
+          "Scope statement" in prompt_front and "at most 200 words" in prompt_front,
+          prompt_front[:0])
+
+    # A journal that DOES publish a cover-letter template: that file is the one
+    # the letter is rebuilt into (and the manuscript template stays on the rest).
+    build_docx(off / "Cover_Letter_Template.docx", font="Courier New", size="22",
+               sid="CoverLetterBody", name="cover letter body",
+               text="Cover letter sample")
+    files = nb.official_template_files("fake-venue", root)
+    check("a journal-published cover-letter template resolves as its own role",
+          Path((files.get("word") or {}).get("cover", "")).name == "Cover_Letter_Template.docx"
+          and Path((files.get("word") or {}).get("main", "")).name == "Fake_Template.docx",
+          str(files.get("word")))
+    tpls2 = nb.venue_word_templates(ctx)
+    check("the cover-letter template is what a letter is rebuilt into",
+          Path(nb.template_for_package_file(pkg / "coverLetter.docx", tpls2)).name
+          == "Cover_Letter_Template.docx",
+          str({k: Path(v).name for k, v in tpls2.items()}))
+    dest2 = tmp / "out2"
+    rep2 = nb.rebuild_package_from_templates(tpls2, pkg, dest2)
+    letter2 = [f for f in rep2["files"] if f["file"] == "coverLetter.docx"]
+    check("with a cover-letter template the rebuild uses it (text kept)",
+          rep2.get("ok") is True and letter2 and letter2[0]["kind"] == "docx-rebuilt"
+          and Path(str(letter2[0].get("template") or "")).name == "Cover_Letter_Template.docx"
+          and letter2[0].get("text_unchanged") is True, str(letter2)[:240])
+    after = nb.scan_template_conformance([(dest2, "", ())], req,
+                                         word_template=tpls2.get("main"),
+                                         word_template_cover=tpls2.get("cover"))
+    check("a letter rebuilt into the cover template satisfies the conformance scan",
+          not any(m["document"] == "coverLetter.docx"
+                  for m in after.get("word_styles_missing") or []),
+          str(after.get("word_styles_missing")))
+    prompt2 = nb.apply_template_prompt(ctx, tmp / "sb2", corpus, tpls2)
+    check("with a cover-letter template the prompt names the file to fill",
+          "Cover_Letter_Template.docx" in prompt2
+          and "COVER-LETTER template" in prompt2, prompt2[:0])
+
+
+def test_cover_letter_manuscript_stamp_gate():
+    """A letter stamped with the manuscript front matter is rejected/warned.
+
+    The operator's report: the journal's manuscript template (Title / Author
+    List front matter) was applied to the cover letters. When the venue ships
+    no cover-letter template, the letter must not carry those style ids: the
+    deterministic rebuild warns about it, and the template-first postcheck
+    fails until the letter is restyled as a plain submission letter.
+    """
+    tmp = scratch("paper_tpl_stamp_")
+    tpl = tmp / "template.docx"
+    _furnished_template(tpl, "You may insert up to 5 heading levels into your manuscript as can "
+                             "be seen in the Styles tab of this template.")
+    check("the manuscript template's front-matter style ids are read from its own styles",
+          nb._manuscript_front_matter_styles(tpl) == {"Title", "AuthorList"},
+          str(nb._manuscript_front_matter_styles(tpl)))
+    pkg = tmp / "pkg"
+    pkg.mkdir()
+    _package_docx(pkg / "coverLetter.docx", "Dear Editors,")
+    dest = tmp / "out"
+    rep = nb.rebuild_package_from_templates({"main": tpl}, pkg, dest)
+    check("the deterministic rebuild warns when the letter carries the manuscript stamp",
+          rep.get("ok") is True
+          and any("front-matter style" in w for w in rep.get("warnings") or []),
+          str(rep.get("warnings")))
+    sb = tmp / "session"
+    (sb / "out").mkdir(parents=True)
+    shutil.copy2(pkg / "coverLetter.docx", sb / "out" / "coverLetter.docx")
+    (sb / "out" / "REPLACEMENT_LEDGER.md").write_text("| placeholder | replacement |\n",
+                                                      encoding="utf-8")
+    rep2 = nb.template_rewrite_postcheck(sb, pkg, {"main": tpl})
+    check("the template-first postcheck rejects a letter stamped with the manuscript template",
+          rep2.get("ok") is False
+          and any("MANUSCRIPT template's front-matter styles" in e for e in rep2["errors"]),
+          str(rep2.get("errors"))[:260])
+
+
+def test_cover_letter_defect_gates():
+    """The FMT-CL1 policy block, the disposition gate and the judge gate.
+
+    The scan must seed FMT-CL1 deterministically from the venue's own template;
+    the review's disposition gate must accept an OK closure ONLY with the
+    journal's own template/guideline text quoted that requires the formatting;
+    and a judge whose blinded target carries the row must record it and cannot
+    close it OK without that override.
+    """
+    tmp = scratch("paper_tpl_clgate_")
+    root = tmp / "root"
+    off = root / "venue_profiles" / "fake-venue.official"
+    off.mkdir(parents=True)
+    _furnished_template(off / "Fake_Template.docx",
+                        "You may insert up to 5 heading levels into your manuscript as can be "
+                        "seen in the Styles tab of this template.")
+
+    class Ctx:
+        pass
+
+    ctx = Ctx()
+    ctx.root = root
+    ctx.cfg = {"venue": "fake-venue"}
+    block = nb._venue_cover_letter_block(ctx)
+    check("the policy block carries the manuscript template's front-matter styles and furniture",
+          block.get("manuscript_front_matter_styles") == ["AuthorList", "Title"]
+          and bool(block.get("manuscript_furniture_hashes"))
+          and block.get("cover_template") == ""
+          and block.get("manuscript_template") == "Fake_Template.docx",
+          str(block)[:240])
+    corpus = tmp / "corpus"
+    corpus.mkdir()
+    _package_docx(corpus / "coverLetter.docx", "Dear Editors,")
+    scan_policy = fmt.load_policy(None)
+    scan_policy["cover_letter"] = block
+    rows = [r for r in nb.scan_format_in_sources([(corpus, "", ())],
+                                                 policy=scan_policy)["rows"]
+            if r["rule"] == "FMT-CL1"]
+    check("the code-side scan seeds FMT-CL1 for the stamped letter",
+          len(rows) == 1 and rows[0]["document"] == "coverLetter.docx"
+          and rows[0]["tier"] == "finding", str(rows)[:220])
+
+    def row(disp):
+        return {"rule": "FMT-CL1", "tier": "finding", "severity": "high",
+                "location": "document",
+                "evidence": "the cover letter was formatted in the MANUSCRIPT template",
+                "fix kind": "editorial", "disposition": disp}
+
+    bad = nb.disposition_artifact_problems([row(
+        "OK — the venue ships no cover-letter template, so the run carries the letter in the "
+        "journal's own styles")])
+    check("an OK closure without the journal override fails the disposition gate",
+          any("quotes no journal override" in p for p in bad), str(bad)[:240])
+    good = nb.disposition_artifact_problems([row(
+        "OK — the journal's Author guidelines (https://example.org/author-guidelines) require "
+        "the cover letter to use the manuscript template's title block")])
+    check("an OK closure that quotes the journal's requirement passes", not good, str(good))
+    filed = nb.disposition_artifact_problems([row("F-042 — M20 finding: restyle the letter")])
+    check("filing the finding passes the disposition gate", not filed, str(filed))
+
+    sb = tmp / "judge"
+    target = [{"rule": "FMT-CL1", "document": "coverLetter.docx",
+               "evidence": "letter formatted in the manuscript template"}]
+    probs = nb.judge_cover_letter_artifact_problems(sb, target)
+    check("a judge who never records the target's FMT-CL1 fails",
+          any("does not record" in p for p in probs), str(probs)[:200])
+    art = sb / "judge_review" / "artifacts"
+    art.mkdir(parents=True)
+    (art / "M20_formatting.md").write_text(
+        "| rule | severity | evidence | disposition |\n|---|---|---|---|\n"
+        "| FMT-CL1 | high | letter in the manuscript template | OK — the run carries the "
+        "letter in the journal's styles |\n", encoding="utf-8")
+    probs2 = nb.judge_cover_letter_artifact_problems(sb, target)
+    check("a judge's OK closure without the override fails",
+          any("quotes no journal override" in p for p in probs2), str(probs2)[:200])
+    (art / "M20_formatting.md").write_text(
+        "| rule | severity | evidence | disposition |\n|---|---|---|---|\n"
+        "| FMT-CL1 | high | letter in the manuscript template | F-007: target defect; the "
+        "opponent is clean (formatting tier) |\n", encoding="utf-8")
+    probs3 = nb.judge_cover_letter_artifact_problems(sb, target)
+    check("a judge who records the row as a defect passes", not probs3, str(probs3))
+
+    sb2 = tmp / "review_sb"
+    (sb2 / "base").mkdir(parents=True)
+    shutil.copy2(corpus / "coverLetter.docx", sb2 / "base" / "coverLetter.docx")
+    art2 = sb2 / "review" / "artifacts"
+    art2.mkdir(parents=True)
+    (art2 / "M20_formatting.md").write_text("| rule | disposition |\n|---|---|\n",
+                                            encoding="utf-8")
+    surv = nb.cover_letter_row_survival_problems(ctx, sb2)
+    check("a review table that DELETED the code-proven FMT-CL1 row fails",
+          any("cannot be deleted" in p for p in surv), str(surv)[:220])
+    (art2 / "M20_formatting.md").write_text(
+        "| rule | disposition |\n|---|---|\n| FMT-CL1 | F-042: restyle the letter |\n",
+        encoding="utf-8")
+    check("the row being present clears the survival gate",
+          not nb.cover_letter_row_survival_problems(ctx, sb2))
+
+
 def _furnished_template(path: Path, guide: str, *, main: bool = True) -> None:
     """A template with a first-page logo header + a PAGE footer + guide prose."""
     body = (para("Title", "Article Title")
@@ -792,6 +1124,117 @@ def _furnished_template(path: Path, guide: str, *, main: bool = True) -> None:
                   'officeDocument/2006/relationships/footer" Target="footer1.xml"/>')
     full_docx(path, doc, ct_extra=ct_extra, rels_extra=rels_extra,
               extra={"word/header1.xml": logo, "word/footer1.xml": footer})
+
+
+def test_article_type_named_manuscript_keeps_the_manuscript_role():
+    """A document named for the run's OWN article type is the MANUSCRIPT.
+
+    `letter-to-the-editor` (the example profile's shipped type) and `editorial`
+    (the Frontiers profile's) collide with the feedback and cover-letter name
+    heuristics: the manuscript was skipped by every written-surface scan, the
+    template-first stage refused a package whose only DOCX carried the name
+    ("carries no .docx to re-house"), and a document that legitimately used the
+    venue's template was charged the high-severity FMT-CL1 ("the cover letter
+    was formatted in the manuscript template"). The name is a manuscript only
+    for the SELECTED article type: in any other run a "letter to the editor"
+    document keeps its cover-letter reading.
+    """
+    print()
+    print("== a document named for the run's article type is the manuscript ==")
+    for name in ("letter-to-the-editor.docx", "Letter_to_the_Editor.docx",
+                 "letter-to-the-editor-v2.docx", "editorial.docx"):
+        check(f"{name} is submission text, not journal feedback",
+              nb.is_non_manuscript_rel(name) is False, name)
+    for name in ("reviewer_report.docx", "referee_comments.pdf", "feedback.docx",
+                 "editor_comments.docx", "decision_letter.docx",
+                 "response_to_reviewers.docx"):
+        check(f"{name} stays out of the submission text",
+              nb.is_non_manuscript_rel(name) is True, name)
+
+    tmp = scratch("paper_tpl_lte_role_")
+    root = tmp / "root"
+    vp = root / "venue_profiles"
+    vp.mkdir(parents=True)
+    shutil.copy2(WS / "venue_profiles" / "example-journal.json",
+                 vp / "example-journal.json")
+    off = vp / "example-journal.official"
+    off.mkdir()
+    _furnished_template(off / "Journal_Template.docx",
+                        "You may insert up to 5 heading levels into your manuscript as can "
+                        "be seen in the Styles tab of this template.")
+
+    class Ctx:
+        pass
+
+    ctx = Ctx()
+    ctx.root = root
+    ctx.cfg = {"venue": "example-journal", "article_type": "letter-to-the-editor"}
+    names = nb.article_type_manuscript_names(ctx)
+    check("the run's own article-type spelling is the manuscript name",
+          names == ["letter to the editor"], str(names))
+    check("the role flip is per run: without the type the name is a cover letter",
+          nb.docx_document_role("letter-to-the-editor.docx") == "cover"
+          and nb.docx_document_role("letter-to-the-editor.docx", names) == "main"
+          and nb.docx_document_role("cover_letter_to_editor.docx", names) == "cover"
+          and nb.docx_document_role("main_letter.docx", names) == "cover",
+          str(names))
+    tpls = nb.venue_word_templates(ctx)
+    check("the article-type name resolves the venue's MAIN template",
+          nb.template_for_package_file(Path("letter-to-the-editor.docx"), tpls) is None
+          and Path(nb.template_for_package_file(Path("letter-to-the-editor.docx"),
+                                                tpls, names)).name == "Journal_Template.docx",
+          str({k: Path(v).name for k, v in tpls.items()}))
+
+    pkg = tmp / "pkg"
+    pkg.mkdir()
+    _package_docx(pkg / "letter-to-the-editor.docx", "Introduction")
+    dest = tmp / "out"
+    rep = nb.rebuild_package_from_templates(tpls, pkg, dest, manuscript_names=names)
+    rebuilt = [f for f in rep["files"] if f["file"] == "letter-to-the-editor.docx"]
+    check("conform restyles the article-type-named manuscript into that template",
+          rep.get("ok") is True and rebuilt and rebuilt[0]["kind"] == "docx-rebuilt"
+          and rebuilt[0].get("text_unchanged") is True, str(rebuilt)[:240])
+    # The conformance scan DEMANDS the manuscript template's styles from it: a
+    # package document that does not carry them is reported (as a cover letter
+    # with no cover template it would be skipped entirely).
+    scanpkg = tmp / "scanpkg"
+    scanpkg.mkdir()
+    full_docx(scanpkg / "letter-to-the-editor.docx",
+              '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+              '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+              '<w:body>' + para(None, "Dear Editor,") + para(None, "Body text.")
+              + '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr></w:body></w:document>',
+              styles=styles_xml("Georgia", "24", "BodyText", "Body Text"))
+    req = nb.official_template_requirements("example-journal", root)
+    conf = nb.scan_template_conformance([(scanpkg, "", ())], req,
+                                        word_template=tpls.get("main"),
+                                        manuscript_names=names)
+    skipped = nb.scan_template_conformance([(scanpkg, "", ())], req,
+                                           word_template=tpls.get("main"))
+    check("the conformance scan measures it against the manuscript template",
+          any(m["document"] == "letter-to-the-editor.docx"
+              for m in conf.get("word_styles_missing") or [])
+          and not any(m["document"] == "letter-to-the-editor.docx"
+                      for m in skipped.get("word_styles_missing") or []),
+          str(conf.get("word_styles_missing")) + " | " + str(skipped.get("word_styles_missing")))
+    # The template-first stage, with the real run policy (its cover-letter block
+    # carries the article-type spelling), CHECKED the document instead of
+    # refusing a package that does carry a .docx.
+    sb = tmp / "session"
+    (sb / "out").mkdir(parents=True)
+    fmt.apply_word_template(pkg / "letter-to-the-editor.docx",
+                            sb / "out" / "letter-to-the-editor.docx", tpls["main"])
+    (sb / "out" / "REPLACEMENT_LEDGER.md").write_text("| placeholder | replacement |\n",
+                                                      encoding="utf-8")
+    post = nb.template_rewrite_postcheck(sb, pkg, tpls, policy=nb.format_policy_of(ctx))
+    check("the template-first stage checks the article-type manuscript, never refuses it",
+          post.get("documents") == ["letter-to-the-editor.docx"]
+          and not any("carries no .docx to re-house" in e for e in post.get("errors") or []),
+          str(post.get("errors"))[:240])
+    check("the policy block carries the article-type spelling for the letter rules",
+          (nb.format_policy_of(ctx).get("cover_letter") or {})
+          .get("manuscript_article_type_names") == ["letter to the editor"],
+          str(nb.format_policy_of(ctx).get("cover_letter")))
 
 
 def test_template_rewrite_postcheck():
@@ -1631,8 +2074,13 @@ def main() -> int:
         test_generalized_template_restyle()
         test_heading_retag()
         test_even_odd_furniture()
+        test_two_section_manuscript_gets_the_page_one_furniture()
         test_foreign_containers_are_venue_data()
         test_apply_template_package()
+        test_cover_letter_guideline_fallback()
+        test_cover_letter_manuscript_stamp_gate()
+        test_cover_letter_defect_gates()
+        test_article_type_named_manuscript_keeps_the_manuscript_role()
         test_template_rewrite_postcheck()
         test_template_postcheck_evidence_and_drops()
         test_template_postcheck_foreign_source_styles()

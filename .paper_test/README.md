@@ -15,7 +15,8 @@ The suites are independent (each builds its own root under `tempfile.mkdtemp`,
 and the fixed `/tmp` paths are per-suite), so run them in parallel:
 
 ```bash
-python3 .paper_test/run_all.py             # GNU parallel, 8 jobs: ~110 s (sequential: ~5.5 min)
+python3 .paper_test/run_all.py             # GNU parallel, 20 jobs by default
+                                           # (capped by the CPU count and the suite count)
 python3 .paper_test/run_all.py -j 4        # cap the parallelism
 python3 .paper_test/run_all.py -j 1        # exactly the old sequential loop
 python3 .paper_test/run_all.py --only test_pipeline test_docx_format
@@ -26,8 +27,8 @@ python3 .paper_test/run_all.py --logs /tmp/paper-logs   # keep logs/status/timin
 `run_all.py` drives every suite through `run_one.sh`, which gives it a private
 `TMPDIR`, captures its output to `<logs>/<suite>.log`, and records its exit
 status and wall time under `<logs>/status/`. A suite that fails is re-run ALONE
-once: a timing-sensitive suite that only failed because eight others were
-competing is reported as `flaky` (and named), while a suite that fails alone too
+once: a timing-sensitive suite that only failed because the other suites were
+competing with it is reported as `flaky` (and named), while a suite that fails alone too
 is a real failure whose `[FAIL]` lines are quoted. Exit status is 0 when nothing
 really failed, 1 otherwise.
 

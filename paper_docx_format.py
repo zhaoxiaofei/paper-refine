@@ -69,11 +69,18 @@ style-convention family (`FMT-T10a`..`FMT-T10e`) reports mixed direct fonts,
 spacing/indent/alignment drift inside one style, and heading numbering/level
 anomalies for the editing arms. Embedded images are checked against their own
 pixels: a figure rescaled without its aspect ratio is `FMT-IM1` and the fixer
-restores the ratio in `wp:extent`/`a:ext` (and the VML size).
+restores the ratio in `wp:extent`/`a:ext` (and the VML size). `policy
+["cover_letter"]` carries the venue MANUSCRIPT template's front-matter style
+ids and its header/footer part hashes plus the venue's cover-letter template
+when one ships: a cover letter that uses those styles or carries those parts
+while the venue ships no cover-letter template is `FMT-CL1` -- a letter
+formatted as a manuscript, cleared only by the journal's own template/guideline
+text quoted that REQUIRES the formatting.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import posixpath
 import re
@@ -442,8 +449,11 @@ def docx_front_matter_report(path: Path, template: Path = None, containers=()) -
         return {}
     rel_map = {m.group(1): (m.group(2).lower(), m.group(3))
                for m in _RELS_RE.finditer(rels)}
+    # The section that governs page 1 decides the FIRST-PAGE furniture (see
+    # `first_section_props`): reading the last one let a two-section manuscript
+    # whose page 1 was not the venue's layout report no gap at all.
     sects = _SECT_RE.findall(doc)
-    sect = sects[-1] if sects else ""
+    sect = first_section_props(doc) or (sects[-1] if sects else "")
     refs = {}
     for m in re.finditer(r'<w:(header|footer)Reference w:type="(\w+)" r:id="([^"]+)"', sect):
         refs[(m.group(1), m.group(2))] = m.group(3)
@@ -933,6 +943,12 @@ FINDING_TIER_RULES = {
     "FMT-T8f",   # indentation convention broken between sibling paragraphs/captions
     "FMT-T8g",   # the front page is split by a rendered page break (keywords on page 2)
     "FMT-T8h",   # the cover letter exceeds its two-page budget
+    # The cover letter formatted in the MANUSCRIPT template (Title/Author-List
+    # front matter, logo header, page furniture) although the venue ships no
+    # cover-letter template: the reported operator failure. The journal's own
+    # guideline/template text that REQUIRES that formatting is the only override
+    # the disposition gate accepts.
+    "FMT-CL1",
     # Text hygiene and embedded-artifact integrity: a doubled word is a typo an
     # editor raises, and an image delivered off its own aspect ratio changes the
     # geometry the figure shows.
@@ -1805,7 +1821,12 @@ def lookup_kind(kind: str, query: str, timeout: int = 30) -> dict:
                 out["hits"] = [{"source": "github", "title": d.get("full_name"),
                                 "date": d.get("pushed_at"), "private": bool(d.get("private")),
                                 "license": (d.get("license") or {}).get("spdx_id")}]
-                out["verdict"] = "absent" if d.get("private") else "found"
+                # A REACHABLE repository EXISTS even when it is private: this
+                # vocabulary's `absent` is "the query was answered and the thing
+                # does NOT exist" (a verified negative, what "not posted" is made
+                # of), so a 200 answer that names the repo is `found` -- the hit
+                # itself carries `private: true` for the session to dispose.
+                out["verdict"] = "found"
             else:
                 out["verdict"] = "absent"
             m = re.search(r"/(?:tree|commit)/([0-9a-fA-F]{7,40})", str(query))
@@ -1888,7 +1909,9 @@ def lookup_kind(kind: str, query: str, timeout: int = 30) -> dict:
         # `lookup_kind` unable to ever return `absent` for those kinds. GitHub
         # is deliberately excluded: it answers 404 for PRIVATE repositories
         # too, so a repo/commit 404 cannot claim nonexistence and stays an
-        # `error` (the same caveat the reachable-private branch documents).
+        # `error` -- a reachable private repository is `found` with
+        # `private: true` in its hit, and only an answered query with no hit at
+        # all is `absent`.
         if getattr(e, "code", None) == 404 and kind not in ("repository", "repo", "commit"):
             out["verdict"] = "absent"
         else:
@@ -3344,6 +3367,134 @@ def cover_letter_page_row(path: Path, pages, source: str) -> dict:
             "fix": "manual", "protected": False}
 
 
+# --------------------------------------------------------------------------
+# Cover letter vs the MANUSCRIPT template (FMT-CL1)
+#
+# A journal's official Word template is built for MANUSCRIPT preparation: its
+# Title/Author-List front matter, its logo header and its page-number footers
+# style an article, not a letter. A cover letter adopts such a template only
+# when the JOURNAL ITSELF ships a cover-letter template
+# (`policy["cover_letter"].cover_template`); with none, the letter follows the
+# journal's own cover-letter guidance and then academic convention. The
+# pipeline derives the manuscript template's own front-matter style ids and its
+# header/footer part hashes into the policy, so the scan can PROVE -- instead
+# of guessing -- that the letter was formatted in the manuscript template. The
+# row clears only with the journal's own template/guideline text quoted that
+# REQUIRES the formatting; the pipeline's disposition gate enforces that.
+# --------------------------------------------------------------------------
+
+# A letter by name: "cover letter", "coverLetter", "letter to the editor", ...
+# A response/rebuttal/decision document also carries "letter" and is NOT a
+# cover letter.
+COVER_LETTER_NAME_RE = re.compile(r"cover|letter", re.I)
+NON_COVER_LETTER_NAME_RE = re.compile(
+    r"response|repl(?:y|ies)|rebuttal|point[\s_-]?by[\s_-]?point|"
+    r"decision[\s_-]?(?:letter|notice)|referee|reviewer", re.I)
+
+
+def _names_the_article_type(name: str, type_names=()) -> bool:
+    """Is this DOCX name one of the run's own article-type spellings?
+
+    `letter-to-the-editor.docx` names the MANUSCRIPT of a run whose selected
+    article type is `letter-to-the-editor`; a trailing version token (`-v2`,
+    ` 2`) is ignored and the match is on the FULL name, so `main_letter.docx`
+    and `letter_to_the_editor_comments.docx` are not the type's name. The
+    spellings come from the run's own policy, so in every OTHER run a
+    "letter to the editor" name stays the cover letter it looks like.
+    """
+    if not type_names:
+        return False
+    stem = Path(str(name or "")).stem
+    norm = re.sub(r"[^a-z0-9]+", " ", stem.lower()).strip()
+    if not norm:
+        return False
+    for t in type_names:
+        t = re.sub(r"[^a-z0-9]+", " ", str(t or "").lower()).strip()
+        if not t:
+            continue
+        if norm == t:
+            return True
+        if norm.startswith(t + " ") \
+                and re.fullmatch(r"(?:v|rev|version|revision|draft)? ?\d{1,3}",
+                                 norm[len(t) + 1:]):
+            return True
+    return False
+
+
+def is_cover_letter_doc(name: str, article_type_names=()) -> bool:
+    """Does this document NAME advertise a cover letter (not a reply letter)?
+
+    `article_type_names` are the run's own article-type spellings: a document
+    named for the selected type is that type's manuscript, never the letter.
+    """
+    base = str(name or "").replace("\\", "/").rsplit("/", 1)[-1]
+    if _names_the_article_type(base, article_type_names):
+        return False
+    return bool(COVER_LETTER_NAME_RE.search(base)) \
+        and not NON_COVER_LETTER_NAME_RE.search(base)
+
+
+def cover_letter_stamp_rows(path: Path, policy: dict) -> list:
+    """FMT-CL1: the cover letter was formatted in the MANUSCRIPT template.
+
+    Two signals, both read from the venue policy the pipeline derives from the
+    journal's OWN Word template: the letter USES the manuscript template's
+    front-matter style ids (`cover_letter.manuscript_front_matter_styles`), or
+    it carries one of the manuscript template's header/footer parts
+    byte-identically (`cover_letter.manuscript_furniture_hashes`). Skipped when
+    the venue ships a cover-letter template of its own (that file governs the
+    letter) and when the venue has no Word template to compare against.
+    """
+    cv = (policy or {}).get("cover_letter")
+    if not isinstance(cv, dict) or not cv:
+        return []
+    if str(cv.get("cover_template") or "").strip():
+        return []
+    if not is_cover_letter_doc(path.name, cv.get("manuscript_article_type_names") or ()):
+        return []
+    want_styles = {str(s).strip() for s in
+                   (cv.get("manuscript_front_matter_styles") or []) if str(s).strip()}
+    want_parts = {str(h).strip().lower() for h in
+                  (cv.get("manuscript_furniture_hashes") or []) if str(h).strip()}
+    if not want_styles and not want_parts:
+        return []
+    used_styles, carried = set(), []
+    try:
+        with zipfile.ZipFile(path) as pkg:
+            xml = pkg.read("word/document.xml").decode("utf-8", "replace")
+            used_styles = set(re.findall(r'<w:pStyle w:val="([^"]+)"', xml))
+            if want_parts:
+                for name in pkg.namelist():
+                    if not re.match(r"word/(?:header|footer)\w*\.xml$", name):
+                        continue
+                    if hashlib.sha256(pkg.read(name)).hexdigest() in want_parts:
+                        carried.append(posixpath.basename(name))
+    except (OSError, zipfile.BadZipFile, KeyError):
+        return []
+    hits = sorted(used_styles & want_styles)
+    if not hits and not carried:
+        return []
+    template = str(cv.get("manuscript_template") or "the venue's manuscript template")
+    bits = []
+    if hits:
+        bits.append("it uses the manuscript template's front-matter style(s) "
+                    + ", ".join(repr(h) for h in hits))
+    if carried:
+        bits.append("it carries the manuscript template's own header/footer part(s) "
+                    + ", ".join(sorted(set(carried))[:3]))
+    return [{"rule": "FMT-CL1", "severity": "high", "document": path.name,
+             "location": "document",
+             "evidence": (f"the cover letter was formatted in the MANUSCRIPT template "
+                          f"({template}): " + "; ".join(bits)),
+             "detail": ("a cover letter is a submission letter, not a manuscript: when the "
+                        "venue ships no cover-letter template it follows the journal's own "
+                        "cover-letter guidance and then academic convention, so the manuscript "
+                        "template's Title/Author-List front matter and its logo/page furniture "
+                        "must not appear. An OK disposition is valid ONLY with the journal's own "
+                        "template or guideline text quoted that REQUIRES this formatting"),
+             "fix": "editorial", "protected": False, "tier": tier_of("FMT-CL1")}]
+
+
 # ---- stray empty paragraphs (template-aware) --------------------------------
 # A text-only corpus cannot see a blank paragraph at all (the converter keeps
 # only non-empty lines), so a stray blank line between "Materials and Methods"
@@ -4430,6 +4581,11 @@ def analyse_package(path: Path, policy: dict) -> dict:
             pages, src = app_pages, "the cached docProps/app.xml value -- render to confirm"
         if pages and pages > 2:
             res["rows"].append(cover_letter_page_row(path, pages, src))
+    # The cover letter formatted in the MANUSCRIPT template (FMT-CL1): the venue
+    # policy carries the manuscript template's own front-matter style ids and
+    # header/footer part hashes, so a stamped letter is a deterministic row --
+    # never only an agent's visual impression.
+    res["rows"].extend(cover_letter_stamp_rows(path, policy))
     counts = Counter(r["rule"] for r in res["rows"])
     return {"file": str(path), "rows": res["rows"], "by_rule": dict(counts),
             "high": sum(1 for r in res["rows"] if r["severity"] == "high"),
@@ -5267,7 +5423,15 @@ def _remap_style_refs(xml: str, mapping: dict) -> tuple:
 
 
 def _adopt_page_geometry(doc_xml: str, template_doc_xml: str) -> tuple:
-    """(xml, applied): give the manuscript the template's last sectPr geometry."""
+    """(xml, applied): give EVERY manuscript section the template's geometry.
+
+    The template's own (single) sectPr is the SOURCE. Page 1 is governed by the
+    FIRST `w:sectPr` in document order (see `first_section_props`) and a
+    title-page break splits the body into sections, so writing only the LAST one
+    left page 1 -- and every middle section -- in the author's geometry: the
+    delivered package was not the journal's layout, while the conformance
+    report, which read the same last section, showed no gap.
+    """
     t_sects = list(_SECT_RE.finditer(template_doc_xml or ""))
     m_sects = list(_SECT_RE.finditer(doc_xml))
     if not t_sects or not m_sects:
@@ -5284,22 +5448,27 @@ def _adopt_page_geometry(doc_xml: str, template_doc_xml: str) -> tuple:
     geo = {k: v for k, v in geo.items() if v}
     if not geo:
         return doc_xml, False
-    body = m_sects[-1].group(0)
-    for tag in ("pgSz", "pgMar", "cols", "docGrid"):
-        el = elem(body, tag)
-        new_el = geo.get(tag)
-        if el and new_el:
-            body = body.replace(el, new_el, 1)
-        elif new_el:
-            pos = body.rfind("</w:sectPr>")
-            idx = order.index(tag)
-            for m in re.finditer(r"<w:([A-Za-z]+)(?=[\s/>])", body):
-                name = m.group(1)
-                if name in order and order.index(name) > idx:
-                    pos = min(pos, m.start())
-                    break
-            body = body[:pos] + new_el + body[pos:]
-    return doc_xml[:m_sects[-1].start()] + body + doc_xml[m_sects[-1].end():], True
+
+    def adopt(body: str) -> str:
+        for tag in ("pgSz", "pgMar", "cols", "docGrid"):
+            el = elem(body, tag)
+            new_el = geo.get(tag)
+            if el and new_el:
+                body = body.replace(el, new_el, 1)
+            elif new_el:
+                pos = body.rfind("</w:sectPr>")
+                idx = order.index(tag)
+                for m in re.finditer(r"<w:([A-Za-z]+)(?=[\s/>])", body):
+                    name = m.group(1)
+                    if name in order and order.index(name) > idx:
+                        pos = min(pos, m.start())
+                        break
+                body = body[:pos] + new_el + body[pos:]
+        return body
+
+    for m in reversed(m_sects):                     # backwards: offsets stay valid
+        doc_xml = doc_xml[:m.start()] + adopt(m.group(0)) + doc_xml[m.end():]
+    return doc_xml, True
 
 
 def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> dict:
@@ -5956,15 +6125,20 @@ def _strip_direct_props(frag: str, strip_num: bool = False) -> str:
 
 
 def _apply_front_refs(doc_xml: str, front: dict) -> tuple:
-    """(xml, applied): point the document's sectPr at the venue headers/footers."""
-    sects = _SECT_RE.findall(doc_xml)
+    """(xml, applied): point the document's sections at the venue headers/footers.
+
+    Page 1 is governed by the FIRST `w:sectPr` (see `first_section_props`), so
+    the template's first-page furniture -- `w:titlePg`, the "first" role and the
+    default/even fallbacks -- lands THERE. Every later section gets the
+    template's default/even roles but NOT `w:titlePg`: its pages continue the
+    run with the venue's running head / page-number footer instead of repeating
+    the title page's logo header. Writing only the LAST section (the old
+    behaviour) left page 1 in the author's own furniture.
+    """
+    sects = list(_SECT_RE.finditer(doc_xml))
     if not sects:
         return doc_xml, False
-    sect = sects[-1]
-    body = re.sub(r"<w:(?:header|footer)Reference[^>]*/>", "", sect)
-    body = re.sub(r"<w:titlePg[^>]*/>", "", body)
-    om = re.match(r"<w:sectPr(?=[\s>])[^>]*>", body)
-    refs = ""
+    refs_all, refs_body = "", ""
     for key, tag, typ in (("header_default_rid", "headerReference", "default"),
                           ("header_first_rid", "headerReference", "first"),
                           ("header_even_rid", "headerReference", "even"),
@@ -5972,19 +6146,29 @@ def _apply_front_refs(doc_xml: str, front: dict) -> tuple:
                           ("footer_first_rid", "footerReference", "first"),
                           ("footer_even_rid", "footerReference", "even")):
         if front.get(key):
-            refs += f'<w:{tag} w:type="{typ}" r:id="{front[key]}"/>'
-    if refs:
-        root = re.search(r"<w:document\b[^>]*>", doc_xml)
+            ref = f'<w:{tag} w:type="{typ}" r:id="{front[key]}"/>'
+            refs_all += ref
+            if typ != "first":
+                refs_body += ref
+    out = doc_xml
+    for idx in range(len(sects) - 1, -1, -1):       # backwards: offsets stay valid
+        m = sects[idx]
+        body = re.sub(r"<w:(?:header|footer)Reference[^>]*/>", "", m.group(0))
+        body = re.sub(r"<w:titlePg[^>]*/>", "", body)
+        om = re.match(r"<w:sectPr(?=[\s>])[^>]*>", body)
+        body = body[:om.end()] + (refs_all if idx == 0 else refs_body) + body[om.end():]
+        if idx == 0 and "<w:titlePg" not in body:
+            body = (body.replace("<w:docGrid", "<w:titlePg/><w:docGrid", 1)
+                    if "<w:docGrid" in body else
+                    body.replace("</w:sectPr>", "<w:titlePg/></w:sectPr>", 1))
+        out = out[:m.start()] + body + out[m.end():]
+    if refs_all:
+        root = re.search(r"<w:document\b[^>]*>", out)
         if root and "xmlns:r=" not in root.group(0):
-            doc_xml = doc_xml.replace(
+            out = out.replace(
                 root.group(0), root.group(0)[:-1] + ' xmlns:r="http://schemas.'
                 'openxmlformats.org/officeDocument/2006/relationships">', 1)
-    body = body[:om.end()] + refs + body[om.end():]
-    if "<w:titlePg" not in body:
-        body = (body.replace("<w:docGrid", "<w:titlePg/><w:docGrid", 1)
-                if "<w:docGrid" in body else
-                body.replace("</w:sectPr>", "<w:titlePg/></w:sectPr>", 1))
-    return doc_xml.replace(sect, body, 1), True
+    return out, True
 
 
 def _with_even_odd_headers(parts: dict) -> bool:

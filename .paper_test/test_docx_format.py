@@ -29,6 +29,7 @@ package still validates, and a re-scan shows every mechanical finding gone.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 import re
@@ -1054,6 +1055,38 @@ def test_lookup_404_is_a_verified_negative():
         urllib.request.urlopen = real
     check("a repository 404 stays an error (private repos 404 too)",
           res3.get("verdict") == "error", str(res3)[:200])
+    # ... while a repository the API ANSWERS about is `found` even when it is
+    # private: the thing exists, and the hit itself carries `private: true`.
+    # `absent` would make the session write a false "not posted" sentence.
+    import json as _json
+
+    class _Canned:
+        def __init__(self, data):
+            self._data = data
+
+        def read(self):
+            return self._data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_private(req, timeout=None):
+        return _Canned(_json.dumps({"full_name": "lab/private-repo", "private": True,
+                                    "pushed_at": "2026-01-01T00:00:00Z",
+                                    "license": {"spdx_id": "MIT"}}).encode())
+
+    urllib.request.urlopen = fake_private
+    try:
+        res4 = fmt.lookup_kind("repository", "lab/private-repo", timeout=5)
+    finally:
+        urllib.request.urlopen = real
+    check("a reachable private repository is 'found', with private: true in the hit",
+          res4.get("verdict") == "found"
+          and (res4.get("hits") or [{}])[0].get("private") is True,
+          str(res4)[:200])
 
 
 def test_tab_scan_ignores_tab_stop_definitions():
@@ -1422,6 +1455,89 @@ def test_review_m20_seeding():
           not any("M20" in e for e in errs2), str(errs2[:1]))
 
 
+def test_cover_letter_stamp_rule():
+    """FMT-CL1: the cover letter formatted in the MANUSCRIPT template.
+
+    The pipeline derives the manuscript template's front-matter style ids and
+    its header/footer part hashes into the policy, so a letter that carries
+    them is a DETERMINISTIC row -- the reported operator failure ("these
+    letters used the manuscript template") -- instead of an agent-only visual
+    impression. The rule stands down when the venue ships a cover-letter
+    template of its own, and a response/decision letter is never a cover
+    letter.
+    """
+    print()
+    print("== FMT-CL1: cover letter stamped with the manuscript template ==")
+    tmp = scratch("paper_fmt_cl_")
+    stamped = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+               f'<w:document xmlns:w="{P[1:-1]}"><w:body>'
+               '<w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr>'
+               '<w:r><w:t>MOE Key Laboratory of Bioinformatics</w:t></w:r></w:p>'
+               '<w:p><w:r><w:t>Dear Editors,</w:t></w:r></w:p>'
+               '</w:body></w:document>')
+    plain = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+             f'<w:document xmlns:w="{P[1:-1]}"><w:body>'
+             '<w:p><w:r><w:t>Dear Editors,</w:t></w:r></w:p>'
+             '</w:body></w:document>')
+    make_package(tmp / "coverLetter.docx", stamped)
+    make_package(tmp / "plainLetter.docx", plain)
+    with zipfile.ZipFile(tmp / "plainLetter.docx") as z:
+        header_hash = hashlib.sha256(z.read("word/header1.xml")).hexdigest()
+    policy = fmt.load_policy(None)
+    policy["cover_letter"] = {"manuscript_template": "Journal_Template.docx",
+                              "manuscript_front_matter_styles": ["Title", "Author List"],
+                              "manuscript_furniture_hashes": [],
+                              "cover_template": ""}
+    info = fmt.scan_paths([tmp], policy)
+    hits = [r for r in info["rows"] if r["rule"] == "FMT-CL1"]
+    check("a letter using the manuscript template's Title style is FMT-CL1",
+          len(hits) == 1 and hits[0]["document"] == "coverLetter.docx"
+          and hits[0]["tier"] == "finding" and hits[0]["severity"] == "high",
+          str(hits[:1])[:240])
+    check("the FMT-CL1 rule is finding-tier and names the manuscript template",
+          fmt.tier_of("FMT-CL1") == "finding"
+          and "Journal_Template.docx" in hits[0]["evidence"], hits[0]["evidence"])
+    check("a plain letter with no manuscript styles is not FMT-CL1",
+          all(r["document"] != "plainLetter.docx" for r in hits), str(hits)[:200])
+    # The furniture signal: the letter carries the manuscript template's own
+    # header part byte-identically (the restyler copies it into the letter).
+    policy2 = dict(policy)
+    policy2["cover_letter"] = dict(policy["cover_letter"],
+                                   manuscript_front_matter_styles=[],
+                                   manuscript_furniture_hashes=[header_hash])
+    hits2 = [r for r in fmt.scan_paths([tmp], policy2)["rows"] if r["rule"] == "FMT-CL1"]
+    check("a letter carrying the manuscript template's header part is FMT-CL1",
+          sorted(r["document"] for r in hits2) == ["coverLetter.docx", "plainLetter.docx"]
+          and any("header/footer" in r["evidence"] for r in hits2), str(hits2)[:200])
+    # A journal-published cover-letter template governs the letter: no row.
+    policy3 = dict(policy)
+    policy3["cover_letter"] = dict(policy["cover_letter"],
+                                   cover_template="Cover_Letter_Template.docx")
+    check("the rule stands down when the venue ships its own cover-letter template",
+          not [r for r in fmt.scan_paths([tmp], policy3)["rows"] if r["rule"] == "FMT-CL1"])
+    check("a response/decision letter is never read as a cover letter",
+          fmt.is_cover_letter_doc("coverLetter.docx")
+          and fmt.is_cover_letter_doc("letter_to_the_editor.docx")
+          and not fmt.is_cover_letter_doc("response_to_reviewers_letter.docx")
+          and not fmt.is_cover_letter_doc("decision_letter.docx"))
+    # The run's OWN article type can itself be a "letter" type: a Letter to the
+    # Editor MANUSCRIPT carries the manuscript template's front matter
+    # legitimately. The policy (built from the run's article type) names it, so
+    # FMT-CL1 stands down for that document -- while in any other run the same
+    # name keeps its cover-letter reading.
+    make_package(tmp / "letter_to_the_editor.docx", stamped)
+    policy4 = dict(policy)
+    policy4["cover_letter"] = dict(policy["cover_letter"],
+                                   manuscript_article_type_names=["letter to the editor"])
+    hits4 = [r for r in fmt.scan_paths([tmp], policy4)["rows"] if r["rule"] == "FMT-CL1"]
+    check("the selected article type's own document is not FMT-CL1",
+          sorted(r["document"] for r in hits4) == ["coverLetter.docx"], str(hits4)[:200])
+    check("without that article type the same name is still a cover letter",
+          fmt.is_cover_letter_doc("letter_to_the_editor.docx")
+          and not fmt.is_cover_letter_doc("letter_to_the_editor.docx",
+                                          ["letter to the editor"]))
+
+
 def main() -> int:
     try:
         docx = test_scan()
@@ -1446,6 +1562,7 @@ def main() -> int:
         test_setup_normalization()
         test_stage_normalization()
         test_review_m20_seeding()
+        test_cover_letter_stamp_rule()
         test_render_blank_page_if_available()
     finally:
         cleanup()

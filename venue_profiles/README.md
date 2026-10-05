@@ -348,7 +348,7 @@ A venue MAY ship THREE sibling directories of its profile:
 
 | directory | what it holds |
 |---|---|
-| `<venue-id>.official/` | the journal's OWN template files (Word `.docx`/`.dotx`, LaTeX `.tex`/`.cls`/`.sty`) + a `manifest.json` with source URL/license/retrieval. **AUTHORITATIVE**: its class file, mandatory sections and declaration wording win over everything the code infers. |
+| `<venue-id>.official/` | the journal's OWN template files (Word `.docx`/`.dotx` -- the manuscript template, an optional supplementary template, and, when the journal publishes one, a cover-letter template whose file name carries "cover"/"letter"; LaTeX `.tex`/`.cls`/`.sty`) + a `manifest.json` with source URL/license/retrieval. **AUTHORITATIVE**: its class file, mandatory sections and declaration wording win over everything the code infers. A cover letter is restyled only into a cover-letter template; with none it follows the journal's cover-letter guidance and then academic convention, never the manuscript template. |
 | `<venue-id>.manuscripts/` | recently published OA articles of the venue (or their structure-only transcriptions). Read ONLY for structure; never treated as submission text and never shipped in a package. |
 | `<venue-id>.templates/` | the DERIVED, pinned pack: `structure.json`, `venue_architecture.md`, `word-template.md`, `latex-template.tex` and `MANIFEST.json` (sha256 of every input exemplar and every output; no timestamps, so two builds are byte-identical). |
 

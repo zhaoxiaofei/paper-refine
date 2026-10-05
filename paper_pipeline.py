@@ -2067,19 +2067,107 @@ def venue_official_dirs(venue_id, root=None, profiles_dir=None) -> list:
     return out
 
 
+def _normalized_type_spellings(texts) -> list:
+    """Article-type names normalized for DOCX-name matching (deduped, ordered)."""
+    out = []
+    for text in texts:
+        norm = re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
+        if norm and norm not in out:
+            out.append(norm)
+    return out
+
+
+def _normalized_article_type_names(profile) -> list:
+    """The selected article type's own name spellings (normalized), or [].
+
+    `letter-to-the-editor` normalizes to `letter to the editor`, `editorial`
+    to itself: the spellings a run's own documents may legitimately carry.
+    """
+    if profile is None:
+        return []
+    label = ""
+    for tid, tlabel, _carries in profile.article_types():
+        if tid == profile.article_type_id:
+            label = tlabel
+            break
+    return _normalized_type_spellings((profile.article_type_id, label))
+
+
+def article_type_manuscript_names(ctx=None) -> list:
+    """The run's selected article type as DOCX-name spellings ([] when unset)."""
+    prof = venue_profile_of(ctx, required=False)
+    if prof is not None:
+        return _normalized_article_type_names(prof)
+    # A root whose venue profile is unavailable still records its article type.
+    return _normalized_type_spellings((str(_ctx_cfg(ctx).get("article_type") or ""),))
+
+
+def _name_is_article_type_manuscript(name, type_names=()) -> bool:
+    """True when a DOCX name IS one of the selected article type's spellings.
+
+    `letter-to-the-editor.docx` / `Letter_to_the_Editor.docx` name the
+    MANUSCRIPT of a `letter-to-the-editor` run; a trailing version token
+    (`-v2`, ` 2`) is ignored. Deliberately a FULL-name match: `main_letter.docx`
+    or `letter_to_the_editor_comments.docx` are not the article type's name.
+    """
+    if not type_names:
+        return False
+    stem = Path(str(name or "")).stem
+    norm = re.sub(r"[^a-z0-9]+", " ", stem.lower()).strip()
+    if not norm:
+        return False
+    for t in type_names:
+        t = re.sub(r"[^a-z0-9]+", " ", str(t or "").lower()).strip()
+        if not t:
+            continue
+        if norm == t:
+            return True
+        if norm.startswith(t + " ") \
+                and re.fullmatch(r"(?:v|rev|version|revision|draft)? ?\d{1,3}",
+                                 norm[len(t) + 1:]):
+            return True
+    return False
+
+
+def docx_document_role(name, manuscript_names=()) -> str:
+    """The submission role a package DOCX name advertises: main/supp/cover.
+
+    ONE rule for the whole pipeline: the template resolver (which template a
+    DOCX may adopt), the package verifier and the code-side normalizer all read
+    the role the same way. A cover letter is a LETTER, not a manuscript: the
+    manuscript template must never be applied to one (see
+    `template_for_package_file`). `manuscript_names` are the run's OWN
+    article-type spellings (`article_type_manuscript_names`): a document named
+    for the selected type is that type's MANUSCRIPT, so a `letter-to-the-editor`
+    document is a letter ONLY in a run whose article type is not
+    `letter-to-the-editor` (a cover letter keeps its `cover` spelling there).
+    """
+    stem = Path(str(name)).stem.lower()
+    if "supp" in stem:
+        return "supp"
+    if "cover" in stem:
+        return "cover"
+    if _name_is_article_type_manuscript(stem, manuscript_names):
+        return "main"
+    if "letter" in stem:
+        return "cover"
+    return "main"
+
+
 def official_template_files(venue_id, root=None, profiles_dir=None) -> dict:
     """The venue's OWN deliverable templates, resolved per format.
 
-    Returns `{"official_dir", "word": {"main", "supplementary"}, "latex":
-    {"sample", "cls": [...], "bst": [...]}, "sha256": {path: digest}}`; an empty
-    dict when the venue ships no `.official` corpus. The ROOT's copy wins (setup
-    copies the whole venue_profiles/ tree into the root), so a root-local update
-    is what runs.
+    Returns `{"official_dir", "word": {"main", "supplementary", "cover"},
+    "latex": {"sample", "cls": [...], "bst": [...]}, "sha256": {path: digest}}`;
+    an empty dict when the venue ships no `.official` corpus. The ROOT's copy
+    wins (setup copies the whole venue_profiles/ tree into the root), so a
+    root-local update is what runs.
 
     Roles are resolved from the file names the journals use (a Word template
-    with "template" in its name and a supplementary sibling; a LaTeX sample
-    `.tex` plus the `.cls`/`.bst` it needs). Nothing outside `.official` is
-    consulted, and the files are never modified.
+    with "template" in its name, a supplementary sibling, and -- when a journal
+    publishes one -- a cover-letter template such as `Cover_Letter.docx`; a
+    LaTeX sample `.tex` plus the `.cls`/`.bst` it needs). Nothing outside
+    `.official` is consulted, and the files are never modified.
     """
     vid = str(venue_id or "").strip().lower()
     dirs = venue_official_dirs(vid, root, profiles_dir)
@@ -2092,12 +2180,13 @@ def official_template_files(venue_id, root=None, profiles_dir=None) -> dict:
             continue
         low = p.name.lower()
         if p.suffix.lower() in (".docx", ".dotx"):
-            if "supp" in low and "supplementary" not in word:
-                word["supplementary"] = p
-            elif "supp" not in low and "main" not in word:
-                word["main"] = p
-            elif "main" not in word:
-                word["main"] = p
+            role = docx_document_role(p.name)
+            if role == "cover":
+                word.setdefault("cover", p)
+            elif role == "supp":
+                word.setdefault("supplementary", p)
+            else:
+                word.setdefault("main", p)
         elif p.suffix.lower() in (".tex", ".ltx"):
             if "supp" not in low and "sample" not in latex:
                 latex["sample"] = p
@@ -2111,7 +2200,8 @@ def official_template_files(venue_id, root=None, profiles_dir=None) -> dict:
     if not word.get("main") or "template" not in Path(word["main"]).name.lower():
         cands = [p for p in sorted(d.rglob("*"))
                  if p.is_file() and p.suffix.lower() in (".docx", ".dotx")
-                 and "template" in p.name.lower() and "supp" not in p.name.lower()]
+                 and "template" in p.name.lower()
+                 and docx_document_role(p.name) == "main"]
         if cands:
             word["main"] = cands[0]
     files = {}
@@ -2334,7 +2424,8 @@ def _docx_front_matter_report(path: Path, template: Path = None, containers=()) 
 def scan_template_conformance(sources: list, requirements: dict,
                               word_template: Path = None,
                               word_template_supplementary: Path = None,
-                              containers=()) -> dict:
+                              word_template_cover: Path = None,
+                              containers=(), manuscript_names=()) -> dict:
     """Code-side official-template conformance rows over a corpus.
 
     `sources` is the same [(dir, prefix, excluded_top)] shape the other scans
@@ -2343,7 +2434,8 @@ def scan_template_conformance(sources: list, requirements: dict,
     mandatory section (by heading/title text), the statement sections, the
     ARCHITECTURE order (section sequence and figure/table caption sequence) and,
     when a Word template is given, whether each .docx carries the template's
-    style ids.
+    style ids. A cover letter is measured against `word_template_cover` only:
+    with none, it is skipped -- the manuscript template does not cover a letter.
     """
     req = requirements or {}
     mandatory = [str(s) for s in (req.get("mandatory_sections") or []) if str(s).strip()]
@@ -2476,23 +2568,36 @@ def scan_template_conformance(sources: list, requirements: dict,
             gaps = sorted(set(range(1, max(first) + 1)) - set(first))
             if gaps:
                 label_rows.append(f"{label} numbering has gaps: {gaps}")
-    # Word template styles: every corpus .docx must carry the template's ids.
+    # Word template styles: every corpus .docx must carry the ids of the
+    # template that governs ITS role (main / supplementary / cover letter).
     word_styles_missing = []
     front_rows = []
-    if word_template is not None:
-        main_ids = set(_docx_style_ids(Path(word_template)))
+    if word_template is not None or word_template_supplementary is not None \
+            or word_template_cover is not None:
+        main_ids = set(_docx_style_ids(Path(word_template))) if word_template else set()
         supp_ids = (set(_docx_style_ids(Path(word_template_supplementary)))
                     if word_template_supplementary is not None else set())
-        if main_ids:
+        cover_ids = (set(_docx_style_ids(Path(word_template_cover)))
+                     if word_template_cover is not None else set())
+        if main_ids or supp_ids or cover_ids:
             for doc, path in sorted(docx_paths.items()):
-                want = supp_ids if (supp_ids and "supp" in Path(doc).name.lower()) else main_ids
+                role = docx_document_role(doc, manuscript_names)
+                if role == "cover":
+                    if word_template_cover is None:
+                        continue        # no cover-letter template: not a gap
+                    want, want_tpl = cover_ids, word_template_cover
+                elif role == "supp":
+                    want = supp_ids or main_ids
+                    want_tpl = (word_template_supplementary
+                                if supp_ids else word_template)
+                else:
+                    want, want_tpl = main_ids, word_template
+                if not want or want_tpl is None:
+                    continue
                 missing = sorted(want - set(_docx_style_ids(path)))
                 if missing:
                     word_styles_missing.append({"document": doc, "missing": missing[:12],
                                                 "missing_count": len(missing)})
-                want_tpl = (word_template_supplementary
-                            if supp_ids and "supp" in Path(doc).name.lower()
-                            else word_template)
                 fm = _docx_front_matter_report(path, want_tpl, containers)
                 for row in (fm or {}).get("rows") or []:
                     front_rows.append(f"{doc}: {row}")
@@ -2877,6 +2982,14 @@ def build_venue_templates(venue_id, root=None, profiles_dir=None, exemplar_dir=N
         off_archives.extend(p for p in sorted(d.rglob("*.zip")) if p.is_file())
     off_records, off_skipped = [], []
     for p in off_files:
+        if p.suffix.lower() in VENUE_EXEMPLAR_DOCX_SUFFIXES \
+                and docx_document_role(p.name) == "cover":
+            # A cover-letter template is a deliverable, not a manuscript
+            # skeleton: parsing its salutation/recipient lines as "mandatory
+            # sections" would corrupt the venue's requirements.
+            off_skipped.append({"file": p.name,
+                                "why": "cover-letter template (not a manuscript skeleton)"})
+            continue
         rec = extract_official_template(p)
         if rec.get("skipped"):
             off_skipped.append({"file": p.name, "why": rec["skipped"]})
@@ -2984,8 +3097,16 @@ and statement placement; no prose was copied). Two tiers, with different authori
     section/subsection set and their ORDER, the declaration blocks, the figure/table labels and
     their order, and the fonts, paragraph spacing, indentation and heading styles all come from
     the template's own file. A read-only copy is staged in `venue_template/` and every produced
-    .docx is restyled into the template's styles by the code-side normalizer before the
-    postcheck -- keep those styles and never re-copy the previous venue's.
+    manuscript / supplementary .docx is restyled into the template's styles by the code-side
+    normalizer before the postcheck -- keep those styles and never re-copy the previous
+    venue's. (The cover letter is the exception: see the next bullet.)
+  * THE COVER LETTER IS NOT A MANUSCRIPT DOCUMENT: the manuscript template's front matter and
+    styles cover the manuscript. When the venue ships its own cover-letter template the letter is
+    built in that file; when it ships none, the letter follows the journal's own cover-letter /
+    scope-statement guidance (the profile records the source) and then established academic
+    convention for a submission letter (recipient block, date, salutation, body, closing and
+    signature) -- the manuscript template is NEVER applied to it, and its styles are never
+    demanded of it.
   * THE FIRST PAGE, THE TYPE SCALE AND THE HEADING DEPTH COME FROM THE TEMPLATE: use its title
     style (as centered as the template renders it), its author-list/front-matter style (as bold
     as the template renders it), the affiliation/correspondence block it carries, ONE
@@ -3069,7 +3190,16 @@ def venue_norm_block(venue_id, root=None, transfer: bool = False) -> str:
             lines.append(f"  * Word (.docx): venue_template/word/{Path(word['main']).name}"
                          + (f"; supplementary: venue_template/word/"
                             f"{Path(word['supplementary']).name}" if word.get("supplementary")
-                            else ""))
+                            else "")
+                         + (f"; cover letter: venue_template/word/"
+                            f"{Path(word['cover']).name}" if word.get("cover") else ""))
+        lines.append(
+            "  * THE MANUSCRIPT TEMPLATES DO NOT COVER THE COVER LETTER. When the "
+            "venue ships a cover-letter template it is restyled into it; otherwise the "
+            "letter follows the journal's own cover-letter / scope-statement guidance "
+            "(the profile records it) and then established academic convention for a "
+            "submission letter -- never the manuscript template's Title/Author/Abstract "
+            "front matter.")
         if latex.get("sample"):
             lines.append(f"  * LaTeX: venue_template/latex/{Path(latex['sample']).name}"
                          + ("; class: " + ", ".join(Path(p).name for p in latex.get("cls") or [])
@@ -3080,14 +3210,18 @@ def venue_norm_block(venue_id, root=None, transfer: bool = False) -> str:
         try:
             _prof = load_venue_profile(venue_id, root=root)
             _source = str((_prof.data.get("prompt") or {}).get("guidelines_source") or "").strip()
+            _cguide = cover_letter_guidance_clause(cover_letter_guidance(_prof))
         except VenueProfileError:
-            _source = ""
+            _source, _cguide = "", ""
         if _source:
             lines.append(f"  * The venue's official guidance this run records: {_source}")
-        lines.append("  * Every produced .docx is restyled into the Word template's styles and "
-                     "theme by the code-side normalizer before the postcheck. Keep the template's "
-                     "heading styles, statement names, and figure/table label order; do not "
-                     "reintroduce the previous venue's styles.")
+        if _cguide:
+            lines.append(f"  * The cover letter's recorded guideline basis: {_cguide}")
+        lines.append("  * Every produced MANUSCRIPT / SUPPLEMENTARY .docx is restyled into its "
+                     "Word template's styles and theme by the code-side normalizer before the "
+                     "postcheck -- the cover letter is NOT, unless this venue ships a cover-letter "
+                     "template. Keep the template's heading styles, statement names, and figure/"
+                     "table label order; do not reintroduce the previous venue's styles.")
         if word.get("main"):
             lines.append("  * `visual_template/<role>/` holds the templates' own PDF and page "
                          "images (`manifest.json` names the renderer and each document's page "
@@ -3106,11 +3240,14 @@ def venue_norm_for(ctx: "Ctx") -> str:
 
 
 def venue_word_templates(ctx: "Ctx") -> dict:
-    """{"main": Path, "supplementary": Path} of the venue's official Word templates.
+    """The venue's official Word templates: {"main", "supplementary", "cover"}.
 
     Empty when the venue ships no `.official` Word template; passed to the
     formatter so every produced .docx is restyled into the journal's own
-    template instead of merely being described to the agents.
+    template instead of merely being described to the agents. A venue that
+    ships no cover-letter template simply has no "cover" entry: the normalizer
+    then leaves the letter to the guideline/academic-convention chain and never
+    applies the manuscript template to it.
     """
     root = getattr(ctx, "root", None)
     if root is None:
@@ -3120,10 +3257,9 @@ def venue_word_templates(ctx: "Ctx") -> dict:
     res = official_template_files(venue_id_of(ctx), root)
     word = res.get("word") or {}
     out = {}
-    if word.get("main"):
-        out["main"] = Path(word["main"])
-    if word.get("supplementary"):
-        out["supplementary"] = Path(word["supplementary"])
+    for key in ("main", "supplementary", "cover"):
+        if word.get(key):
+            out[key] = Path(word[key])
     return out
 
 
@@ -3649,6 +3785,29 @@ JOURNAL_MODES = {
 JOURNAL_FEEDBACK_NAME_RE = re.compile(
     r"feedback|referee|reviewers?|editors?|editorial|decision[_ \-]*(?:letter|notice|email)",
     re.I)
+# ... but the venue's OWN article-type vocabulary collides with those words: the
+# shipped example profile's `letter-to-the-editor` and the Frontiers profile's
+# `editorial` are MANUSCRIPTS the authors wrote. A name that IS such a type
+# (optionally with a version token) is never the journal's feedback, wherever
+# it sits -- the same reason a "cover"-spelled letter is carved out below.
+ARTICLE_TYPE_MANUSCRIPT_NAME_RE = re.compile(
+    r"^(?:letter[\s_-]+(?:to|for)[\s_-]+the[\s_-]+editor|editorial)"
+    r"(?:[\s_-]+(?:v|rev|version|revision|draft)?[\s_-]*\d{1,3})?$", re.I)
+
+
+def is_journal_feedback_name(name) -> bool:
+    """Does this file NAME advertise the journal's own feedback/decision letter?
+
+    A name that IS one of the venue article types the authors write
+    (`letter-to-the-editor`, `editorial`) is their MANUSCRIPT, never the
+    editors' letter, wherever it sits.
+    """
+    base = str(name or "").replace("\\", "/").rsplit("/", 1)[-1]
+    if ARTICLE_TYPE_MANUSCRIPT_NAME_RE.match(Path(base).stem):
+        return False
+    return bool(JOURNAL_FEEDBACK_NAME_RE.search(base))
+
+
 # A file the AUTHORS wrote ("response_to_reviewers.docx", "rebuttal.md",
 # "point-by-point.docx", or a "cover_letter_to_editor.docx") is a submission
 # document, not the journal's feedback: the auto-detection must never read one
@@ -3785,7 +3944,7 @@ def journal_feedback_files(ctx: Ctx) -> list:
             continue
         if is_original_submission_rel(p.relative_to(ctx.pristine).as_posix()):
             continue
-        if JOURNAL_FEEDBACK_NAME_RE.search(p.name) \
+        if is_journal_feedback_name(p.name) \
                 and not JOURNAL_AUTHORED_REPLY_RE.search(p.name):
             found.append((p, p.relative_to(ctx.pristine).as_posix()))
     return found
@@ -5157,6 +5316,39 @@ def _cover_preference_clause(profile: VenueProfile) -> str:
     return f"{lo}-{hi} words"
 
 
+def cover_letter_guidance(profile=None) -> dict:
+    """The venue's RECORDED cover-letter guidance, in one shape every prompt reads.
+
+    `preference` is the persuading-part range/one-sided bound ("" when the
+    profile states none), `total_max` the operator's total-content cap (None
+    when unset), and `source` the profile's own quoted basis -- the guideline
+    text a cover letter falls back to when the venue ships no cover-letter
+    template. Never invented: every field comes from the resolved profile.
+    """
+    prof = _as_profile(profile)
+    try:
+        lim = prof.length_limits().get("cover letter") or {}
+    except Exception:                                          # noqa: BLE001 -- never gate
+        lim = {}
+    return {"preference": _cover_preference_clause(prof),
+            "total_max": lim.get("total_max"),
+            "source": str(lim.get("source") or "").strip()}
+
+
+def cover_letter_guidance_clause(guide: dict) -> str:
+    """One readable sentence-fragment of `cover_letter_guidance` ("" when empty)."""
+    guide = guide or {}
+    bits = []
+    if guide.get("preference"):
+        bits.append(f"the persuading part is {guide['preference']}")
+    if guide.get("total_max") is not None:
+        bits.append(f"its TOTAL content (salutation, body, disclosures and signature) "
+                    f"must stay within {guide['total_max']} words (the operator's cap)")
+    if guide.get("source"):
+        bits.append(f"the recorded basis: {guide['source']}")
+    return "; ".join(bits)
+
+
 def length_rule_text(profile=None) -> str:
     """The M19 length rule, rendered from the venue profile (see M19 below).
 
@@ -5686,6 +5878,15 @@ M20_REVIEW_SWEEP = f"""3c. The PIPELINE-MANDATED OOXML formatting sweep M20 (alw
    rule (FMT-TB1..FMT-TB3, below): a package-producing stage's postcheck fails while one of its
    rows is present, because the venue profile itself declared that rule.
 
+   FMT-CL1 -- THE COVER LETTER FORMATTED IN THE MANUSCRIPT TEMPLATE -- is not a row you may
+   wave through: the scan proves it from the venue's own template (the letter uses the
+   manuscript template's Title/Author-List styles, or carries its header/footer parts) and the
+   venue ships no cover-letter template to justify it. Dispose it with a finding (M20), or
+   close it `OK` ONLY by quoting the journal's own template/guideline text that REQUIRES the
+   letter to be formatted that way (its source and what it requires). "The run carries the
+   letter in the journal's styles" is the PIPELINE talking, not the journal: the postcheck
+   fails that closure.
+
 @@DISPLAY_RULE@@"""
 M20_REVISE_RULE = f"""OOXML formatting uniformity (check id M20; see the formatting sweep): the
      mechanical defects (break-only paragraph/blank page, legend spacing, heading keepNext,
@@ -5710,6 +5911,14 @@ M20_REVISE_RULE = f"""OOXML formatting uniformity (check id M20; see the formatt
      CHANGELOG.md under M20. Formatting changes are allowed here without touching meaning (this
      is the formatting exception to E1); never change scientific content for a formatting row.
 
+     FMT-CL1 (the cover letter formatted in the MANUSCRIPT template) is a defect you FIX: when
+     the venue ships no cover-letter template, restyle the letter as a plain submission letter
+     (recipient block, date, salutation, body, closing, signature) and drop the manuscript
+     template's Title/Author-List front matter, logo header and page furniture. Fix it only when
+     the journal's own template/guideline text REQUIRES that formatting -- and then quote that
+     text in MANUAL_STEPS.md/CHANGELOG.md. The postcheck fails a delivered package that still
+     carries the row.
+
 @@DISPLAY_RULE@@"""
 M20_INTEGRATE_RULE = f"""OOXML formatting (check id M20) is a difference class of its own: the
      orchestrator normalizes the mechanical rows on the integrated package, and the editorial rows
@@ -5724,6 +5933,13 @@ M20_INTEGRATE_RULE = f"""OOXML formatting (check id M20) is a difference class o
      orchestrator; port the image file and its extents together or not at all. Re-scan with
      `{M20_SCAN_CMD}` and record the formatting state in integrated/CHANGELOG.md under M20.
 
+     FMT-CL1 (a cover letter formatted in the MANUSCRIPT template) is a defect of the version
+     that carries it, whether or not the donors share it: when the venue ships no cover-letter
+     template, PORT the plain-letter styling (no manuscript Title/Author front matter, no
+     manuscript logo header/page furniture) and prove the row is gone in the re-scan. Keep the
+     defect only when the journal's own template/guideline text quotes a requirement for that
+     formatting, and record the quote under M20 in CHANGELOG.md.
+
 @@DISPLAY_RULE@@"""
 M20_REWRITE_RULE = f"""OOXML formatting (check id M20) is REPORTED here, not fixed: a rewrite must
      not introduce a break-only paragraph, a second URL/email treatment, a different legend
@@ -5734,6 +5950,12 @@ M20_REWRITE_RULE = f"""OOXML formatting (check id M20) is REPORTED here, not fix
      `{M20_SCAN_CMD}` before finishing. If the base already carries formatting defects, surface
      them in rewritten/REWRITE_REPORT.md under "PROBLEMS SURFACED" -- the revision/integration
      stages and the orchestrator's normalizer own the fix.
+
+     FMT-CL1 (the cover letter formatted in the MANUSCRIPT template) is one of the defects to
+     SURFACE in rewritten/REWRITE_REPORT.md under "PROBLEMS SURFACED" with the rule id and the
+     letter's file name; do not copy the manuscript template's front matter onto the letter, and
+     do not silently inherit it from the base either -- the revision/integration stages restyle
+     it as a plain submission letter.
 
 @@DISPLAY_RULE@@"""
 M20_JUDGE_SWEEP = """PLUS the pipeline-mandated OOXML formatting sweep M20 (derive it yourself:
@@ -5755,6 +5977,14 @@ M20_JUDGE_SWEEP = """PLUS the pipeline-mandated OOXML formatting sweep M20 (deri
    intended; never score a version down for keeping them, and never expect a version to delete
    them. A RESIDUAL mechanical row (the orchestrator's normalizer failed or a version re-introduced
    it) is a real defect of the version that carries it, not a difference to ignore.
+   FMT-CL1 (a cover letter formatted in the MANUSCRIPT template: it uses the manuscript
+   template's Title/Author-List styles or carries its header/footer parts while the venue ships
+   no cover-letter template) is such a defect of the version that carries it, whether or not the
+   opponent carries it too: RECORD the row in judge_review/artifacts/M20_formatting.md and say
+   in the comparison's M20 check whether each side carries it and how it weighs in the
+   formatting tier. An `OK` closure of that row is valid ONLY with the journal's own
+   template/guideline text quoted that REQUIRES this formatting; "the run carries the letter in
+   the journal's styles" is not an override and the postcheck fails it.
    Formatting differences are a LOW-priority,
    formatting-tier difference class: a version whose formatting is UNIFORM (one URL/email
    treatment, consistent quotation marks, consistent legend spacing, no blank page) may be
@@ -7750,6 +7980,11 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
    venue template prescribes this blank slot" is a rule-specific reason. A blank the venue
    template's own slots (format_policy.json) prescribe -- the spacer above the title, a
    placeholder between two headings -- is INTENDED: never raise it as a finding.
+   AN FMT-CL1 ROW (the cover letter formatted in the MANUSCRIPT template) closed `OK` is the
+   same class of boilerplate UNLESS the reviewer quoted the journal's own template/guideline
+   text that REQUIRES the letter to be formatted that way: "the run carries the letter in the
+   journal's styles" is the pipeline's rule, not the journal's. Attack such a closure and add
+   an `AU-` finding (check `M20`) naming the rule id and the letter.
 3. CHECK THE COVERAGE GAPS the reviewer cannot see: a row whose disposition cell is EMPTY; a
    `searchable` hand-off marker that was carried forward although work/PLACEHOLDER_LOOKUP.json
    answers it (verdict found/absent) or work/IDENTIFIERS.md verifies/refutes the locator; a number
@@ -10977,8 +11212,15 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
     return rows
 
 
-def _is_cover_letter_lines(lines: list, name: str = "") -> bool:
-    """A cover-letter document: by name, or by an opening salutation."""
+def _is_cover_letter_lines(lines: list, name: str = "", manuscript_names=()) -> bool:
+    """A cover-letter document: by name, or by an opening salutation.
+
+    `manuscript_names` are the run's own article-type spellings: a Letter to
+    the Editor MANUSCRIPT opens with the same salutation a cover letter does,
+    so the selected type's own document name outranks the salutation test.
+    """
+    if _name_is_article_type_manuscript(name, manuscript_names):
+        return False
     if "cover" in (name or "").lower():
         return True
     for raw in lines[:12]:
@@ -11056,6 +11298,10 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
     prof = _as_profile(profile)
     limits = prof.length_limits()
     source = prof.length_limits_source
+    # A document named for the run's OWN article type is that type's
+    # manuscript: its opening salutation (a Letter to the Editor) must not
+    # divert the count to the cover-letter preference.
+    manuscript_names = _normalized_article_type_names(prof)
     overrides = corpus_source_overrides(sources)
     rows, unparsed, skipped, rendered, docs = [], [], [], [], set()
     for i, (src, prefix, excluded) in enumerate(sources):
@@ -11111,7 +11357,7 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
                 continue
             else:
                 continue
-            if _is_cover_letter_lines(lines, p.name):
+            if _is_cover_letter_lines(lines, p.name, manuscript_names):
                 docs.add(doc)
                 rows.append(_cover_letter_row(lines, doc, limits=limits, profile=prof))
                 continue
@@ -11240,6 +11486,11 @@ def format_policy_of(ctx: Ctx) -> dict:
     (the blank the template carries above the title, a placeholder between two
     headings) from an author's extra blank line. No template -> no slots, and
     the rule still exempts anything before the first non-empty paragraph.
+
+    `cover_letter` carries the cover-letter rule's DATA: the manuscript
+    template's own front-matter style ids and header/footer part hashes, plus
+    the venue's cover-letter template when it ships one. The scan's FMT-CL1 rule
+    uses it to PROVE that a letter was formatted in the manuscript template.
     """
     mod = _format_module()
     policy = dict(getattr(mod, "POLICY_DEFAULTS", {}) or {}) if mod else {}
@@ -11250,7 +11501,60 @@ def format_policy_of(ctx: Ctx) -> dict:
             policy[key] = copy.deepcopy(block)
     if "empty_paragraph_slots" not in configured:
         policy["empty_paragraph_slots"] = _venue_empty_paragraph_slots(ctx)
+    if "cover_letter" not in configured:
+        policy["cover_letter"] = _venue_cover_letter_block(ctx)
     return policy
+
+
+def _venue_cover_letter_block(ctx: Ctx) -> dict:
+    """The cover-letter rule's data, derived from the venue's OWN templates.
+
+    `{}` when the venue ships no Word template (nothing to compare against);
+    `{"manuscript_template", "manuscript_front_matter_styles",
+    "manuscript_furniture_hashes", "cover_template"}` otherwise. A venue that
+    ships its own cover-letter template puts its name in `cover_template` and
+    the scan's FMT-CL1 rule stands down: that file governs the letter.
+    Memoized like the other venue-level blocks (it opens the template package).
+    """
+    cfg = _ctx_cfg(ctx)
+    # The block now also carries the SELECTED article type's name spellings, so
+    # the key includes the recorded type (`set-article-type` rewrites it).
+    key = (id(cfg), id(cfg.get("venue_profile")), venue_id_of(ctx),
+           str(cfg.get("article_type") or ""))
+    cached = getattr(ctx, "_venue_cover_block", None)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    block: dict = {}
+    try:
+        tpls = venue_word_templates(ctx) or {}
+        main = tpls.get("main")
+        cover = tpls.get("cover")
+        styles = sorted(_manuscript_front_matter_styles(Path(main))) if main else []
+        hashes = []
+        if main:
+            for name, digest in (_protected_template_parts(Path(main)) or {}).items():
+                # Only the header/footer parts: a journal logo, a running head or
+                # a page-number footer copied byte-identically is proof of the
+                # manuscript-template restyle, while theme/fontTable bytes are
+                # too generic (two default-theme documents can share them).
+                if re.match(r"word/(header|footer)\w*\.xml$", name):
+                    hashes.append(digest)
+        if styles or hashes or cover:
+            block = {"manuscript_template": Path(main).name if main else "",
+                     "manuscript_front_matter_styles": styles,
+                     "manuscript_furniture_hashes": sorted(set(hashes)),
+                     "cover_template": Path(cover).name if cover else "",
+                     # The selected article type's own name spellings: a
+                     # document named for the type is that type's MANUSCRIPT,
+                     # never the cover letter the FMT-CL1 rule hunts for.
+                     "manuscript_article_type_names": article_type_manuscript_names(ctx)}
+    except Exception:                                         # noqa: BLE001 -- never gate setup
+        block = {}
+    try:
+        ctx._venue_cover_block = (key, block)
+    except Exception:                                         # noqa: BLE001 -- stub ctx
+        pass
+    return block
 
 
 def _venue_empty_paragraph_slots(ctx: Ctx) -> list:
@@ -11584,23 +11888,40 @@ def normalize_formatting_in_dir(dirp: Path, policy: dict, label: str,
     corpus but a top-level JSON would become submission content.
 
     `template` is the venue's OWN Word template: a path, or
-    `{"main": path, "supplementary": path}` so a supplementary-material file is
-    restyled into the journal's supplementary template. Every restyle keeps the
+    `{"main": path, "supplementary": path, "cover": path}` so a supplementary-
+    material file is restyled into the journal's supplementary template and a
+    cover letter ONLY into a cover-letter template. Every restyle keeps the
     document text byte-identical or the original file is kept and the failure is
-    recorded.
+    recorded. A cover letter whose venue ships no cover-letter template is left
+    as authored: it follows the journal's guidelines and academic convention,
+    never the manuscript template.
     """
     info_before = scan_format_in_sources([(dirp, "", ())], policy=policy)
     per_file, applied, failed = [], [], []
+    # The run's OWN article-type spellings (the policy carries them): a
+    # document named for the selected type is that type's manuscript.
+    manuscript_names = list(((policy or {}).get("cover_letter") or {})
+                            .get("manuscript_article_type_names") or [])
 
     def template_for(f: Path):
         if template is None:
             return None
         if isinstance(template, dict):
+            role = docx_document_role(f.name, manuscript_names)
+            if role == "cover":
+                cover = template.get("cover")
+                return Path(cover) if cover else None
             supp = template.get("supplementary")
-            if supp and re.search(r"(?:^|[_\-.])supp", f.stem, re.I):
+            if supp and role == "supp":
                 return supp
             return template.get("main")
-        return Path(template)
+        p = Path(template)
+        # A single template path: it may be the cover-letter template itself,
+        # but a manuscript template must never be applied to a cover letter.
+        if docx_document_role(f.name, manuscript_names) == "cover" \
+                and docx_document_role(p.name) != "cover":
+            return None
+        return p
 
     for f in _fmt_corpus_files(dirp):
         rep = fix_docx_in_place(f, policy, template=template_for(f), containers=containers)
@@ -11662,6 +11983,11 @@ def apply_template_prompt(ctx: Ctx, sb: Path, src: Path, templates: dict) -> str
     (copy the template, replace its placeholders with the submission's content,
     change nothing else), never about a journal's vocabulary.
 
+    The manuscript templates cover the manuscript. A cover letter follows a
+    cover-letter template only when the journal publishes one; with none, the
+    prompt sends it down the journal-guideline -> academic-convention chain (the
+    manuscript template's front matter is for the manuscript, not the letter).
+
     A venue with no official template gets the guideline/convention variant:
     the authority chain starts at the journal's own author guidelines instead of
     a template file.
@@ -11669,13 +11995,31 @@ def apply_template_prompt(ctx: Ctx, sb: Path, src: Path, templates: dict) -> str
     if not templates:
         return apply_guideline_conform_prompt(ctx, src)
     main = Path(templates.get("main") or "")
-    supp = Path(templates.get("supplementary") or "")
+    # `Path("")` is Path(".") and truthy: an absent role must stay None so the
+    # "ships no ... template" wording is what the prompt carries.
+    supp = Path(templates["supplementary"]) if templates.get("supplementary") else None
+    cover = Path(templates["cover"]) if templates.get("cover") else None
     docs = sorted(p.name for p in Path(src).glob("*.docx")) or ["(no .docx in source/)"]
     prof = venue_profile_of(ctx, required=False)
     label = (prof.label if prof is not None else venue_id_of(ctx))
+    guide_clause = (cover_letter_guidance_clause(cover_letter_guidance(prof))
+                    if prof is not None else "")
+    guide_line = (f"    The venue profile records: {guide_clause}\n") if guide_clause else ""
     supp_line = ("venue_template/word/" + supp.name) if supp else \
         "(the venue ships no separate supplementary template)"
     supp_src = supp_line if supp else "the main template (no separate one ships)"
+    cover_line = (("  * venue_template/word/" + cover.name
+                   + "  -- the journal's COVER-LETTER template (fill it)\n") if cover else
+                  "  * NO cover-letter template ships with this venue: author the cover letter\n"
+                  "    under the authority chain of step 5 -- the journal's own cover-letter /\n"
+                  "    scope-statement guidance (recorded in the venue profile) first, then\n"
+                  "    established academic convention for a submission letter. Never use the\n"
+                  "    MAIN-TEXT template for it: its Title/Author/Abstract front matter is for\n"
+                  "    the manuscript, not the letter\n") + guide_line
+    cover_src = (("venue_template/word/" + cover.name) if cover else
+                 "the source letter, a plain submission letter: recipient block, date, salutation,\n"
+                 "         body, closing and signature -- the letter's own convention (never the\n"
+                 "         manuscript's Title/Author List/Abstract styles)")
     return f"""TEMPLATE-FIRST REWRITE -- fill {label}'s own Word templates with this submission's content
 
 The deliverable of THIS session is the ENTIRE submission package authored INSIDE
@@ -11684,11 +12028,14 @@ templates: their styles, theme, fonts, numbering, page geometry, headers/footers
 front-matter block and section skeleton are the journal's own. Your job is to
 REPLACE the templates' placeholder/sample content with the actual content of
 `source/` -- never the other way round, and never by restyling a copy of the
-source.
+source. ONE exception: a cover letter is not a manuscript document -- see the
+cover-letter rule below (a cover-letter template, or the guideline/convention
+chain when this venue ships none).
 
 READ (read-only, hash-verified):
   * venue_template/word/{main.name}  -- the journal's MAIN-TEXT template (fill it)
   * {supp_line}
+{cover_line.rstrip()}
   * source/ -- the package whose content you carry over:
 {chr(10).join('      - ' + n for n in docs)}
     (figures, tables, data and the cover letter included; copy them into out/
@@ -11728,8 +12075,11 @@ WRITE (only inside out/):
          kind of content.
        - the main text     <- venue_template/word/{main.name}
        - the supplementary <- {supp_src}
-       - a cover letter has no journal template: keep the source letter (styled
-         with the same styles) unless the venue's template covers it
+       - a cover letter    <- {cover_src}
+         (a letter, never a manuscript: when this venue ships no cover-letter
+         template, do NOT copy the main template's front-matter styles onto the
+         letter -- keep the letter's own text byte-identical and give it the
+         plain layout of a submission letter)
   2. REPLACE every placeholder / sample element with the matching content from
      `source/`: article title, author list, affiliations, the correspondence
      block, keywords, abstract, every section and subsection (KEEP the
@@ -11763,7 +12113,13 @@ WRITE (only inside out/):
      captions in the body font at body size). Record which level each choice
      came from in the ledger. Never invent a requirement no level states, never
      let the template override the guidelines for something it leaves open, and
-     never leave such a style unset.
+     never leave such a style unset. THE COVER LETTER IS THE ONE DOCUMENT THE
+     MANUSCRIPT TEMPLATE DOES NOT COVER: when no cover-letter template ships,
+     the letter's authority chain starts at level (2) -- the journal's own
+     cover-letter / scope-statement guidance (the venue profile records it) --
+     and falls to level (3), the academic convention of a submission letter
+     (recipient block, date, salutation, body, closing and signature), never to
+     the manuscript template's Title/Author/Abstract front matter.
 
 {display_rule_text(prof)}
 
@@ -11772,7 +12128,10 @@ WRITE (only inside out/):
      logo, when the template carries one) is present; the footer furniture is
      there on odd AND even pages (the template's own -- never another journal's,
      whatever it says); affiliation numbers (and other superscripts) are still
-     superscript; the styles/theme are the template's. The code side re-checks
+     superscript; the styles/theme are the template's; and -- unless a cover-
+     letter template ships -- the cover letter still LOOKS like a letter (no
+     manuscript Title/Author/Abstract front matter, logo header or running
+     head). The code side re-checks
      the package for leftover template prose, content coverage, the template's
      styles, its header/footer roles, its protected furniture parts and the
      superscript runs.
@@ -11832,6 +12191,10 @@ def apply_guideline_conform_prompt(ctx: Ctx, src: Path) -> str:
         guideline_lines.append(f"  * guidelines: {prompt['guidelines_source']}")
     if str(prompt.get("requirements") or "").strip():
         guideline_lines.append(f"  * requirements: {prompt['requirements']}")
+    cguide = (cover_letter_guidance_clause(cover_letter_guidance(prof))
+              if prof is not None else "")
+    if cguide:
+        guideline_lines.append(f"  * cover letter: {cguide}")
     guidelines = ("\n".join(guideline_lines) if guideline_lines
                   else "  * (this profile records no guideline text: use established academic "
                        "convention)")
@@ -11849,6 +12212,10 @@ leaves open:
   2. established academic convention (for example table text one step smaller
      than the body text, single-spaced inside the table, captions in the body
      font at body size).
+The COVER LETTER follows the same chain: the guidelines' cover-letter /
+scope-statement rules first, then the academic convention of a submission
+letter (recipient block, date, salutation, body, closing and signature) --
+there is no manuscript template to copy onto it.
 Never invent a requirement no level states, and never leave such a style unset.
 
 {display_rule_text(prof)}
@@ -11920,8 +12287,12 @@ def _docx_paragraph_texts(path: Path) -> list:
 def _docx_hf_signature(path: Path) -> dict:
     """What header/footer furniture one DOCX actually carries.
 
-    {roles: [(kind, type), ...] from the LAST sectPr, parts: [part names],
-     logo: a drawing/pict in some header/footer, page: a PAGE field there}.
+    {roles: [(kind, type), ...] from the sectPr that governs page 1 (the FIRST
+     in document order), parts: [part names], logo: a drawing/pict in some
+     header/footer, page: a PAGE field there}. The first-page sectPr is the one
+     the template's furniture lands in (`_apply_front_refs`) and the one the
+     delivered page 1 renders from; reading the last one reported no gap on a
+     two-section manuscript whose page 1 was not the venue's layout.
     """
     try:
         with zipfile.ZipFile(path) as z:
@@ -11935,7 +12306,7 @@ def _docx_hf_signature(path: Path) -> dict:
         re.findall(r"<w:sectPr(?=[\s>])[^>]*>[\s\S]*?</w:sectPr>", doc)
     roles, seen = [], set()
     for m in re.finditer(r'<w:(header|footer)Reference w:type="(\w+)"',
-                         sects[-1] if sects else ""):
+                         sects[0] if sects else ""):
         key = (m.group(1), m.group(2))
         if key not in seen:
             seen.add(key)
@@ -11972,6 +12343,23 @@ def _style_usage(docx: Path) -> set:
     except (OSError, zipfile.BadZipFile, KeyError):
         return set()
     return {sid for sid in re.findall(r'<w:pStyle w:val="([^"]+)"', xml) if sid}
+
+
+def _manuscript_front_matter_styles(template: Path) -> set:
+    """The manuscript template's own Title/Author-List style ids ({} when unreadable).
+
+    A cover letter the venue ships no cover-letter template for must never
+    carry these: they style an article's front page, not a letter.
+    """
+    mod = _format_module()
+    fn = getattr(mod, "template_style_roles", None)
+    if fn is None:
+        return set()
+    try:
+        roles = fn(Path(template))
+    except Exception:                                          # noqa: BLE001 -- never gate
+        return set()
+    return {str(sid) for sid in (roles.get("title"), roles.get("author")) if sid}
 
 
 def _defined_styles(docx: Path) -> set:
@@ -12165,18 +12553,9 @@ def _template_ledger_exceptions(ledger: Path) -> tuple:
     return out, problems
 
 
-def _docx_document_role(name: str) -> str:
-    """The submission role a package DOCX name advertises: main/supp/cover."""
-    stem = Path(str(name)).stem.lower()
-    if "supp" in stem:
-        return "supp"
-    if "cover" in stem or "letter" in stem:
-        return "cover"
-    return "main"
-
-
 def _match_source_output_docs(src_docs: list, out_docs: list, templates: dict,
-                              src_root: Path = None, out_root: Path = None) -> tuple:
+                              src_root: Path = None, out_root: Path = None,
+                              manuscript_names=()) -> tuple:
     """Map every source document to the output document that carries it.
 
     The template-first session is told to hand back COPIES OF THE TEMPLATES, so
@@ -12223,9 +12602,10 @@ def _match_source_output_docs(src_docs: list, out_docs: list, templates: dict,
     for doc in src_docs:                                    # 3. advertised role
         if key_of(src_root, doc) in mapping:
             continue
-        role = _docx_document_role(doc.name)
+        role = docx_document_role(doc.name, manuscript_names)
         cands = [p for p in out_docs
-                 if key_of(out_root, p) not in used and _docx_document_role(p.name) == role]
+                 if key_of(out_root, p) not in used
+                 and docx_document_role(p.name, manuscript_names) == role]
         if not cands and role in ("main", "supp"):
             tpl = templates.get("main" if role == "main" else "supplementary")
             if tpl:
@@ -12265,7 +12645,9 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
         silent drop or reword would corrupt every later round;
       * TEMPLATE PROSE -- none of the template's own guide sentences/sample
         elements survives (the templates were COPIED and FILLED), while the
-        template's style set is still present in every output.
+        template's style set is still present in every output the template
+        governs -- a cover letter with no cover-letter template keeps its own
+        letter styling and is not measured against the manuscript's.
 
     The DOCUMENT set is the submission's own `.docx` files: the corpus's
     evidence areas (the previous journal's `original_submission/` under
@@ -12276,6 +12658,10 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
     out = sb / "out"
     if not out.is_dir():
         return {"ok": False, "errors": ["out/ is missing: the session produced no package"]}
+    # The run's own article-type spellings (from the policy the caller built
+    # with ctx): a `letter-to-the-editor` manuscript is not a cover letter.
+    manuscript_names = list(((policy or {}).get("cover_letter") or {})
+                            .get("manuscript_article_type_names") or [])
     # rglob, not glob: template_package_files() copies the WHOLE tree (figures,
     # tables, a package's own `supp/supp.docx`, ...), and the prompt tells the
     # session to re-house every package document. Reading only the top level let
@@ -12332,7 +12718,8 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
         ledger if ledger is not None else out / "REPLACEMENT_LEDGER.md")
     mapping, _used_out, map_errs = _match_source_output_docs(src_docs, out_docs,
                                                              templates or {},
-                                                             src_root=Path(src), out_root=out)
+                                                             src_root=Path(src), out_root=out,
+                                                             manuscript_names=manuscript_names)
 
     def _src_key(doc: Path) -> str:
         try:
@@ -12472,27 +12859,50 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
         except (OSError, zipfile.BadZipFile, KeyError):
             style_gap.append({"file": doc.name, "error": "no readable word/styles.xml"})
             continue
-        tpl_for_doc = template_for_package_file(doc, templates or {})
-        for tpl in ([tpl_for_doc] if tpl_for_doc
-                    else [Path(v) for v in (templates or {}).values()]):
-            try:
-                with zipfile.ZipFile(tpl) as z:
-                    want = set(re.findall(r'w:styleId="([^"]+)"',
-                                          z.read("word/styles.xml").decode("utf-8", "replace")))
-            except (OSError, zipfile.BadZipFile, KeyError):
-                continue
-            gone = sorted(want - have)
-            if gone:
-                style_gap.append({"file": doc.name, "template": Path(tpl).name,
-                                  "missing_styles": gone[:8]})
+        tpl_for_doc = template_for_package_file(doc, templates or {}, manuscript_names)
+        if tpl_for_doc is None:
+            # A cover letter with no cover-letter template is authored to the
+            # guideline/convention chain: the manuscript template's styles are
+            # not a requirement for it.
+            continue
+        try:
+            with zipfile.ZipFile(tpl_for_doc) as z:
+                want = set(re.findall(r'w:styleId="([^"]+)"',
+                                      z.read("word/styles.xml").decode("utf-8", "replace")))
+        except (OSError, zipfile.BadZipFile, KeyError):
+            continue
+        gone = sorted(want - have)
+        if gone:
+            style_gap.append({"file": doc.name, "template": Path(tpl_for_doc).name,
+                              "missing_styles": gone[:8]})
     if style_gap:
         errs.append("the outputs do not carry the template's styles: " + json.dumps(style_gap)[:300])
+    # A cover letter the template does NOT govern must not be STAMPED with the
+    # manuscript template's front matter: the reported failure was the journal's
+    # manuscript template (title/author-list styles) applied to the letter.
+    letter_stamp = []
+    main_tpl = (templates or {}).get("main")
+    if main_tpl and not (templates or {}).get("cover"):
+        stamp_styles = _manuscript_front_matter_styles(Path(main_tpl))
+        if stamp_styles:
+            for doc in out_docs:
+                if docx_document_role(doc.name, manuscript_names) != "cover":
+                    continue
+                carried = sorted(_style_usage(doc) & stamp_styles)
+                if carried:
+                    letter_stamp.append({"file": doc.name, "manuscript_styles": carried})
+    if letter_stamp:
+        errs.append("the cover letter carries the MANUSCRIPT template's front-matter styles "
+                    "(this venue ships no cover-letter template): the letter's authority is the "
+                    "journal's cover-letter guidance / academic convention, never the manuscript "
+                    "template -- restyle it as a plain submission letter: "
+                    + json.dumps(letter_stamp)[:300])
     # The template's HEADERS/FOOTERS (logo, running head, page numbers, odd/even
     # furniture) are part of the deliverable: every output must carry the roles
     # the template it was built from defines.
     hf_gap = []
     for doc in out_docs:
-        tpl = template_for_package_file(doc, templates or {})
+        tpl = template_for_package_file(doc, templates or {}, manuscript_names)
         if not tpl:
             continue
         gap = _hf_gap(_docx_hf_signature(Path(tpl)), _docx_hf_signature(doc))
@@ -12506,7 +12916,7 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
     # part name -- a copied template keeps the names; a re-style may rename them).
     derived_gap = []
     for doc in out_docs:
-        tpl = template_for_package_file(doc, templates or {})
+        tpl = template_for_package_file(doc, templates or {}, manuscript_names)
         if not tpl:
             continue
         want = _protected_template_parts(Path(tpl))
@@ -12557,7 +12967,7 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
             target = mapping.get(_src_key(doc))
             if target is None:
                 continue
-            tpl_for_doc = template_for_package_file(target, templates or {})
+            tpl_for_doc = template_for_package_file(target, templates or {}, manuscript_names)
             required = _style_usage(Path(tpl_for_doc)) if tpl_for_doc else set()
             lost = sorted((_style_usage(doc) - _style_usage(target)) & required)
             if lost:
@@ -12569,7 +12979,7 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
                         + json.dumps(style_use_gap)[:300])
     invented = []
     for doc in out_docs:
-        tpl = template_for_package_file(doc, templates or {})
+        tpl = template_for_package_file(doc, templates or {}, manuscript_names)
         if not tpl:
             continue
         extra = sorted(_style_usage(doc) - _defined_styles(Path(tpl)))
@@ -12608,10 +13018,23 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
             "documents": [p.name for p in out_docs]}
 
 
-def template_for_package_file(path: Path, templates: dict):
-    """The venue Word template one package DOCX should be rebuilt in."""
+def template_for_package_file(path: Path, templates: dict, manuscript_names=()):
+    """The venue Word template one package DOCX should be rebuilt in.
+
+    A cover letter adopts ONLY a cover-letter template (`templates["cover"]`).
+    When the venue ships none, this returns None and the letter keeps the
+    styling it was authored with -- its authority chain is the journal's own
+    cover-letter guidance, then academic convention, never the manuscript
+    template (which exists for the manuscript, not the letter).
+    `manuscript_names` is `article_type_manuscript_names(ctx)`: the selected
+    article type's own document name is its manuscript, not a letter.
+    """
+    role = docx_document_role(path.name, manuscript_names)
+    if role == "cover":
+        cover = templates.get("cover")
+        return Path(cover) if cover else None
     supp = templates.get("supplementary")
-    if supp and re.search(r"(?:^|[_\-.])supp", Path(path).stem, re.I):
+    if supp and role == "supp":
         return Path(supp)
     main = templates.get("main")
     return Path(main) if main else None
@@ -12655,7 +13078,8 @@ def _stage_source_package(srcdir: Path, src: Path) -> None:
 
 
 def rebuild_package_from_templates(templates: dict, src: Path, dest: Path,
-                                   force: bool = False, containers=()) -> dict:
+                                   force: bool = False, containers=(),
+                                   manuscript_names=()) -> dict:
     """Rebuild a WHOLE submission package inside the venue's own Word templates.
 
     Every package DOCX is restyled into the journal's template by
@@ -12664,12 +13088,18 @@ def rebuild_package_from_templates(templates: dict, src: Path, dest: Path,
     keywords/abstract, with the template's own paragraph spacing and the bold
     `* Correspondence:` label), its first-page logo header and page-number
     footers with the template's odd/even parity, and the template's Heading 1..N
-    for section headings the source only direct-formatted. The manuscript TEXT of
-    every restyled file must stay byte-identical or THAT file is copied unchanged
-    and reported as failed. Every non-DOCX file is copied byte-for-byte; `work/`
-    and tracked-change auxiliaries are left out. The report is written BESIDE the
+    for section headings the source only direct-formatted. A COVER LETTER is
+    restyled only into the venue's cover-letter template; with none, it is
+    copied as authored because it follows the journal's guidelines and academic
+    convention, never the manuscript template. The manuscript TEXT of every
+    restyled file must stay byte-identical or THAT file is copied unchanged and
+    reported as failed. Every non-DOCX file is copied byte-for-byte; `work/` and
+    tracked-change auxiliaries are left out. The report is written BESIDE the
     package (`<dest>.template_report.json` / `.md`), never inside it -- a
     submission package must not carry pipeline artifacts.
+
+    `manuscript_names` is `article_type_manuscript_names(ctx)`: the selected
+    article type's own document name is its manuscript, not a letter.
     """
     mod = _format_module()
     if mod is None:
@@ -12697,7 +13127,28 @@ def rebuild_package_from_templates(templates: dict, src: Path, dest: Path,
             shutil.copy2(p, target)
             files.append({"file": p.relative_to(src).as_posix(), "kind": "copied"})
             continue
-        tpl = template_for_package_file(p, templates)
+        tpl = template_for_package_file(p, templates, manuscript_names)
+        if tpl is None and docx_document_role(p.name, manuscript_names) == "cover":
+            # The venue ships no cover-letter template: the letter follows the
+            # guideline/academic-convention chain, so it is carried as authored
+            # -- NOT an error, and never restyled with the manuscript template.
+            note = ("cover letter: no cover-letter template for this venue; kept as "
+                    "authored (journal guidelines, then academic convention)")
+            warning = ""
+            if templates.get("main"):
+                carried = sorted(_manuscript_front_matter_styles(Path(templates["main"]))
+                                 & _style_usage(p))
+                if carried:
+                    warning = ("the letter still carries the manuscript template's front-matter "
+                               f"style(s) {', '.join(carried)}: restyle it as a plain submission "
+                               "letter")
+            shutil.copy2(p, target)
+            entry = {"file": p.relative_to(src).as_posix(), "kind": "copied",
+                     "ok": True, "note": note}
+            if warning:
+                entry["warning"] = warning
+            files.append(entry)
+            continue
         rep = mod.apply_word_template(p, target, tpl, containers=containers) if tpl else \
             {"ok": False, "error": "no matching Word template for this document"}
         gap = _hf_gap(_docx_hf_signature(tpl), _docx_hf_signature(target)) if rep.get("ok") else {}
@@ -12725,7 +13176,9 @@ def rebuild_package_from_templates(templates: dict, src: Path, dest: Path,
               "templates": {k: str(v) for k, v in templates.items()},
               "documents_rebuilt": len(rebuilt), "files_copied":
                   sum(1 for f in files if f["kind"] == "copied"),
-              "failed": [f["file"] for f in failed], "files": files}
+              "failed": [f["file"] for f in failed],
+              "warnings": [f"{f['file']}: {f['warning']}" for f in files if f.get("warning")],
+              "files": files}
     write_json_atomic(dest.parent / (dest.name + ".template_report.json"), report)
     (dest.parent / (dest.name + ".template_report.md")).write_text(
         template_package_md(report), encoding="utf-8")
@@ -12739,7 +13192,8 @@ def template_package_md(report: dict) -> str:
          f"- templates: " + ", ".join(f"{k}=`{v}`" for k, v in report["templates"].items()),
          f"- rebuilt documents: {report['documents_rebuilt']}",
          f"- other files copied: {report['files_copied']}",
-         f"- failures: {', '.join(report['failed']) if report['failed'] else 'none'}", ""]
+         f"- failures: {', '.join(report['failed']) if report['failed'] else 'none'}",
+         f"- warnings: {len(report.get('warnings') or [])}", ""]
     for f in report["files"]:
         if f["kind"] == "docx-rebuilt":
             L.append(f"- `{f['file']}`: template text preserved="
@@ -12747,6 +13201,10 @@ def template_package_md(report: dict) -> str:
                      f"{len(f.get('headings_retagged') or [])}")
         elif f["kind"] == "docx-kept-original":
             L.append(f"- `{f['file']}`: KEPT ORIGINAL -- {f.get('error')}")
+        elif f.get("note"):
+            L.append(f"- `{f['file']}`: carried as authored -- {f['note']}")
+        if f.get("warning"):
+            L.append(f"- `{f['file']}`: WARNING -- {f['warning']}")
     return "\n".join(L) + "\n"
 
 
@@ -12980,6 +13438,14 @@ def _seed_review_format_artifact(ctx: Ctx, sb: Path) -> dict:
         "defect does not need a journal rule to exist), and the SAME sentence repeated across "
         "many rows is treated as an undisposed row by the postcheck and by "
         "`decide --residual-gate`.",
+        "",
+        "FMT-CL1 (the cover letter formatted in the MANUSCRIPT template: it uses the manuscript "
+        "template's Title/Author-List styles or carries its header/footer parts although the "
+        "venue ships no cover-letter template) can be closed `OK` ONLY with the journal's own "
+        "template/guideline text quoted that REQUIRES this formatting (its source and what it "
+        "requires). \"The run carries the letter in the journal's styles\" is the pipeline's "
+        "rule, not the journal's: the postcheck fails that closure. Otherwise dispose it with a "
+        "finding (M20).",
         "",
         "| # | rule | tier | severity | location | evidence | fix kind | disposition |",
         "|---|---|---|---|---|---|---|---|",
@@ -13612,6 +14078,10 @@ def seed_format_policy_file(ctx: Ctx, sb: Path) -> Path:
     body = {"tables": copy.deepcopy(policy.get("tables") or {}),
             "figures": copy.deepcopy(policy.get("figures") or {}),
             "empty_paragraph_slots": copy.deepcopy(policy.get("empty_paragraph_slots") or []),
+            # The cover-letter rule's data travels too: the scan the session runs
+            # itself must be able to prove a letter was formatted in the
+            # manuscript template (FMT-CL1), exactly like the postcheck does.
+            "cover_letter": copy.deepcopy(policy.get("cover_letter") or {}),
             "image_aspect_tolerance": policy.get("image_aspect_tolerance", 0.02)}
     # tmp + rename, NOT write_json_atomic's extra fsync: this file is a pure
     # INPUT every session reads, and the pipeline seeds one per session
@@ -13687,7 +14157,9 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
                 conf = scan_template_conformance([(corpus_dir, "", CORPUS_EXCLUDE_TOP)], req,
                                                  word_template=word_tpl,
                                                  word_template_supplementary=_w.get("supplementary"),
-                                                 containers=venue_containers(ctx))
+                                                 word_template_cover=_w.get("cover"),
+                                                 containers=venue_containers(ctx),
+                                                 manuscript_names=article_type_manuscript_names(ctx))
                 ev["official_template"] = conf
                 write_json_atomic(work / "OFFICIAL_TEMPLATE.json", conf)
                 rows = ([{"row": f"mandatory section missing: {s}"} for s in
@@ -14405,7 +14877,7 @@ def is_non_manuscript_rel(rel: str) -> bool:
     # its name says "to_editor"; only its "cover" spelling protects it here.
     if re.search(r"cover", base, re.I):
         return False
-    return bool(JOURNAL_FEEDBACK_NAME_RE.search(base))
+    return is_journal_feedback_name(base)
 
 
 def make_writable(path: Path, *, directory: bool = None) -> bool:
@@ -19818,6 +20290,45 @@ def check_visual_artifact(path: Path, label: str, errs: list, warns: list,
                                 f"compare against it: missing {', '.join(missing[:4])}")
 
 
+def cover_letter_row_survival_problems(ctx: Ctx, sb: Path) -> list:
+    """The review table cannot DELETE a code-proven FMT-CL1 row.
+
+    The disposition gate forbids closing the row `OK` without the journal's own
+    quoted override; this closes the remaining escape -- dropping the row. The
+    same policy the seed used is re-applied to `base/`, so every letter the
+    code proves is manuscript-template-formatted still needs a row in the M20
+    table, whatever the reviewer writes in it.
+    """
+    if ctx is None:
+        return []
+    try:
+        policy = format_policy_of(ctx)
+        info = scan_format_in_sources([(sb / "base", "", CORPUS_EXCLUDE_TOP)], policy=policy)
+    except Exception:                                          # noqa: BLE001 -- never gate on scan
+        return []
+    want = {str(r.get("document") or "").strip()
+            for r in (info.get("rows") or [])
+            if str(r.get("rule") or "").upper() in COVER_LETTER_STAMP_RULES}
+    want = {w for w in want if w}
+    if not want:
+        return []
+    path = sb / REVIEW_DIR / "artifacts" / "M20_formatting.md"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return [f"{REVIEW_DIR}/artifacts/M20_formatting.md is missing: the code-side scan "
+                f"proves {len(want)} FMT-CL1 cover-letter row(s) "
+                f"({', '.join(sorted(want)[:3])}) the review must dispose"]
+    n_rows = sum(1 for ln in text.splitlines()
+                 if ln.strip().startswith("|") and "FMT-CL1" in ln.upper())
+    if n_rows >= len(want):
+        return []
+    return [f"{REVIEW_DIR}/artifacts/M20_formatting.md carries {n_rows} FMT-CL1 row(s) for "
+            f"the {len(want)} the code-side scan proves ({', '.join(sorted(want)[:3])}): a "
+            f"seeded row cannot be deleted -- dispose every cover letter the scan flags (an "
+            f"M20 finding, or OK with the journal's own quoted override)"]
+
+
 def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                           scope: str = "full") -> None:
     """Verify the review deliverables the prompt promises the orchestrator checks.
@@ -20065,6 +20576,12 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                     f"recorded reason -- in the row's own `disposition` cell and/or in the M1 "
                     f"coverage row, which then names M1b and says why -- the defect must not "
                     f"vanish between the artifact and the findings.")
+    # 3g. A CODE-PROVEN FMT-CL1 ROW CANNOT BE DELETED. The disposition gate
+    #     forbids closing the cover-letter-stamp row OK without the journal's
+    #     own quoted override; this re-runs the same scan that seeded it, so the
+    #     row must still be in the table the reviewer disposed.
+    if want_parity_artifacts:
+        errs.extend(cover_letter_row_survival_problems(ctx, sb))
 
 
 # The M1b table's own column names and row-number headers. A session that
@@ -21380,6 +21897,24 @@ DISPOSITION_STRUCTURAL_EXEMPT_RE = re.compile(
 # contract under the placeholder/ledger layouts' own name.
 DISPOSITION_COLUMNS = ("disposition", "resolution")
 
+# The cover-letter stamp row (FMT-CL1): a letter formatted in the MANUSCRIPT
+# template is a defect the venue ships no cover-letter template to justify. An
+# OK closure is valid ONLY with the journal's own template/guideline text
+# quoted that REQUIRES this formatting -- a real run closed exactly this row
+# with "the run carries the letter in the journal's own styles" (the pipeline's
+# rule, not the journal's) and shipped the defect. This gate is what makes the
+# reviewer (and any other disposing agent) treat it as a defect.
+COVER_LETTER_STAMP_RULES = {"FMT-CL1"}
+COVER_LETTER_OVERRIDE_CITE_RE = re.compile(
+    r"https?://|venue_template/|\.docx\b|\.dotx\b|author guidelines|"
+    r"author instructions|instructions to authors|guide[ -]?lines", re.I)
+COVER_LETTER_OVERRIDE_REQUIRE_RE = re.compile(
+    r"\b(?:requires?|required|mandates?|mandatory|specif(?:y|ies|ied)|instructs?|"
+    r"states?|says|asks? for|calls for|directs?)\b", re.I)
+COVER_LETTER_OK_CLOSE_RE = re.compile(
+    r"^\s*(?:ok\b|okay\b|ok\s*[—–\-:]|acceptable\b|no change\b|pass(?:es)?\b|clean\b)",
+    re.I)
+
 
 def _split_table_cells(text: str) -> list:
     """Split one table line on its UNESCAPED pipes (a `\\|` is cell content).
@@ -21609,6 +22144,30 @@ def disposition_artifact_problems(rows: list, widths=None, header_width: int = 0
                             f"id: that is a boilerplate closure, not a disposition"
                             + (f" -- rows: {', '.join(where)}" if where else "")
                             + (f" (and {n - len(where)} more)" if where and n > len(where) else ""))
+    # A COVER-LETTER STAMP row can be closed OK only with the journal's own
+    # text: FMT-CL1 says the letter was formatted in the MANUSCRIPT template,
+    # which is a defect unless the journal requires that formatting -- and the
+    # disposition must quote that requirement. The pipeline's own convention
+    # ("the run carries the letter in the journal's styles") is not an override.
+    for r in filled:
+        rule = str(r.get("rule") or "").strip().upper()
+        if rule not in COVER_LETTER_STAMP_RULES:
+            continue
+        disp = str(r.get(key) or "").strip()
+        if not COVER_LETTER_OK_CLOSE_RE.match(disp):
+            continue
+        if COVER_LETTER_OVERRIDE_CITE_RE.search(disp) \
+                and COVER_LETTER_OVERRIDE_REQUIRE_RE.search(disp):
+            continue
+        where = str(r.get("location") or r.get("#") or "").strip()
+        problems.append(
+            f"{rule} row" + (f" ({where})" if where else "")
+            + " is closed with OK but quotes no journal override: a cover letter formatted "
+              "in the MANUSCRIPT template may be closed OK ONLY when the journal's own "
+              "template/guideline text that REQUIRES this formatting is quoted in the "
+              "disposition (its source and what it requires); \"the run carries the letter "
+              "in the journal's styles\" is the pipeline's rule, not the journal's -- file "
+              "the M20 finding, or quote the override")
     return problems
 
 
@@ -21697,6 +22256,60 @@ def artifact_quality_report(review_dir: Path) -> dict:
             if problems:
                 report.setdefault(rel, []).extend(problems)
     return report
+
+
+def judge_cover_letter_artifact_problems(sb: Path, target_rows: list) -> list:
+    """The judge's own M20 artifact must CATCH AND CONSIDER the target's FMT-CL1.
+
+    A judge compares versions, but a cover letter formatted in the MANUSCRIPT
+    template is a formatting defect of the version that carries it whether or
+    not the opponent carries it too. When the orchestrator's scan of the blinded
+    target finds FMT-CL1 (the code-side proof is in `judge_evidence`), the
+    judge's M20 artifact has to record the row; an OK closure needs the journal's
+    own template/guideline text quoted that REQUIRES the formatting (the same
+    bar the review's disposition gate enforces).
+    """
+    problems = []
+    rel = "judge_review/artifacts/M20_formatting.md"
+    path = sb / rel
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+    except OSError:
+        raw = ""
+    if "FMT-CL1" not in raw.upper():
+        problems.append(
+            f"{rel} does not record the target's {len(target_rows)} FMT-CL1 row(s) "
+            f"(a cover letter formatted in the MANUSCRIPT template): catch and consider "
+            f"it -- state whether the compared versions carry it and how it weighs in the "
+            f"formatting tier -- instead of leaving it out")
+        return problems
+    # Prefer the parsed table cells; a free-form note still gets the OK gate on
+    # its own line. An OK closure without the journal's quoted override is the
+    # disposition the pipeline exists to forbid.
+    candidates = []
+    for block in parse_markdown_blocks(path):
+        for r in block["rows"]:
+            cells = [str(v or "") for v in r.values()]
+            if any("FMT-CL1" in c.upper() for c in cells):
+                disp = " ".join(str(r.get(k) or "") for k in
+                                ("disposition", "resolution", "verdict", "decision",
+                                 "audit", "notes", "note")).strip()
+                candidates.append(disp or " | ".join(cells))
+    if not candidates:
+        candidates = [ln.strip() for ln in raw.splitlines() if "FMT-CL1" in ln.upper()]
+    for text in candidates:
+        if not COVER_LETTER_OK_CLOSE_RE.match(text):
+            continue
+        if COVER_LETTER_OVERRIDE_CITE_RE.search(text) \
+                and COVER_LETTER_OVERRIDE_REQUIRE_RE.search(text):
+            continue
+        problems.append(
+            f"{rel}: the FMT-CL1 row is closed with OK but quotes no journal override -- "
+            f"a cover letter formatted in the MANUSCRIPT template is a defect unless the "
+            f"journal's own template/guideline text requires it, and that text must be "
+            f"quoted in the row; otherwise consider it a formatting-tier defect of the "
+            f"version that carries it")
+    return problems
 
 
 def artifact_quality_notes(review_dir: Path) -> dict:
@@ -24849,6 +25462,13 @@ def postcheck_judge(ctx: Ctx, rec: dict):
                 f"auditable; the orchestrator's scan of target/ is recorded in "
                 f"reports/judge_evidence_{rec['id']}.json. Nothing was seeded into the sandbox "
                 f"(the judge stays blind).")
+        # A cover letter formatted in the MANUSCRIPT template (FMT-CL1) is a
+        # target defect the judge must catch and consider, whatever the other
+        # versions carry; an OK closure needs the journal's own quoted override.
+        cl_target = [r for r in ((ev.get("format") or {}).get("rows") or [])
+                     if str(r.get("rule") or "").upper() in COVER_LETTER_STAMP_RULES]
+        if cl_target:
+            errs.extend(judge_cover_letter_artifact_problems(sb, cl_target))
     except Exception as e:                                            # noqa: BLE001
         warns.append(f"BLIND JUDGE GROUNDING: the code-side scan of the blinded target failed "
                      f"({type(e).__name__}: {e})")
@@ -29360,7 +29980,7 @@ def cmd_setup(args) -> None:
             if not q.is_file():
                 die(f"--journal-feedback {item!r} does not exist (looked for {q}).")
         if not journal_feedback:
-            hits = [p for p in files if JOURNAL_FEEDBACK_NAME_RE.search(p.name)]
+            hits = [p for p in files if is_journal_feedback_name(p.name)]
             if hits:
                 print(f"[setup] journal feedback auto-detected in --source: "
                       + ", ".join(sorted(p.name for p in hits)[:4])
@@ -30725,7 +31345,8 @@ def cmd_apply_template(args) -> None:
         return
     dest = Path(args.dest).expanduser() if args.dest else ctx.root / TEMPLATE_PACKAGE_DIRNAME
     report = rebuild_package_from_templates(templates, src, dest, force=bool(args.force),
-                                            containers=venue_containers(ctx))
+                                            containers=venue_containers(ctx),
+                                            manuscript_names=article_type_manuscript_names(ctx))
     if not report.get("ok"):
         if report.get("error"):
             die(report["error"])

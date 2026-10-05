@@ -286,12 +286,19 @@ python paper_pipeline.py conform --root ./paper_rounds   # rebuild a WHOLE packa
 submission itself -- every DOCX, the cover letter and the supplementary material, plus the figures
 and data files -- rewritten into the journal-provided Word templates without re-running the agents,
 `conform` does exactly that on a package directory: it resolves the venue's official
-`venue_profiles/<venue>.official/` templates (main and supplementary), restyles every package DOCX
-into them with the same code-side pass the runs use (styles/theme/font table/numbering, page
+`venue_profiles/<venue>.official/` templates (main, supplementary, and -- when the journal
+publishes one -- a cover-letter template), restyles every MANUSCRIPT and SUPPLEMENTARY package
+DOCX into them with the same code-side pass the runs use (styles/theme/font table/numbering, page
 geometry, the front-matter block including the BOLD `* Correspondence:` label and its own spacing,
 the first-page logo and page-number footers, the template's odd/even page furniture, and the
 template's `Heading 1..N` for section headings the source only direct-formatted), and copies every
-other file byte-for-byte. `work/` scratch and `*.tracked.docx` auxiliaries stay out. Each rebuilt
+other file byte-for-byte. A COVER LETTER is rebuilt only into the journal's own cover-letter
+template; when the journal ships none, the letter is carried as authored and follows the venue
+profile's cover-letter guidance, then academic convention for a submission letter -- the
+manuscript template, whose front matter is built for a manuscript, is never applied to it (a
+letter that still carries the manuscript template's Title/Author-List styles is reported as a
+warning in the rebuild report).
+`work/` scratch and `*.tracked.docx` auxiliaries stay out. Each rebuilt
 document's TEXT must stay byte-identical to its source or that file is kept unchanged and reported;
 the report lands BESIDE the package (`<dest>.template_report.json`/`.md`), never inside it. The
 source package is never modified:
@@ -311,7 +318,10 @@ session sandbox — the journal's DOCX templates read-only in `venue_template/`,
 read-only in `source/`, an empty `out/` — and writes the prompt that says exactly: *copy the
 template, then replace every placeholder/sample element with the actual content of `source/`, keep
 the template's styles, structure, first-page block and headers/footers, and record every
-replacement in `out/REPLACEMENT_LEDGER.md`*. One agent session runs on it (`--agent-cmd`,
+replacement in `out/REPLACEMENT_LEDGER.md`* — except the cover letter, which is filled into the
+journal's own cover-letter template when one ships and otherwise follows the journal's
+cover-letter guidance, then academic convention, never the manuscript template). One agent session
+runs on it (`--agent-cmd`,
 `--timeout`). The deliverable is then verified code-side, venue-agnostically with an EXACT
 paragraph-multiset parity check: every non-empty source paragraph, short lines included, must
 appear in the outputs at least as many times as in the source, unless the session declares a
@@ -327,7 +337,10 @@ source cutoff and the joined-text fallback are gone, because this package become
 `original`. None of the template's own guide sentences may survive (the template was *filled*,
 not paraphrased), the template's style set must still be present, and the template's
 **header/footer roles** (first-page logo, page-number footer, even/odd furniture) must be carried
-by every output. The report lands in
+by every output the template governs (a cover letter with no cover-letter template is carried as
+authored and is not measured against the manuscript's styles or furniture; it must not carry the
+manuscript template's Title/Author-List front-matter styles, which the postcheck FAILS on). The
+report lands in
 `reports/template_rewrite.{md,json}`. The deterministic mode verifies the same header/footer roles
 and marks a document failed if its rebuild lost them:
 
@@ -363,13 +376,18 @@ linked from its author guidelines), those files live in
 `venue_profiles/<venue-id>.official/` and are **authoritative**: the derived
 skeletons keep the journal's class file and section skeleton, mark its
 mandatory sections, and keep the template's own wording for the declaration
-blocks, and every produced `.docx` is **restyled into the official Word
-template by the code-side normalizer** (default on; `PAPER_VENUE_TEMPLATES=0`
+blocks, and every produced manuscript / supplementary `.docx` is **restyled
+into the official Word template by the code-side normalizer** (default on;
+`PAPER_VENUE_TEMPLATES=0`
 opts out): the template's styles/theme/font table/numbering replace the
 manuscript's, style references are remapped by style name, the template's page
 geometry is adopted, and the direct font/size/spacing overrides that would hide
 those styles are removed — with the document text proven byte-identical or the
-  original file kept. Section headings the SOURCE only direct-formatted (a short
+  original file kept. The COVER LETTER is the one package document that is not a
+  manuscript: it is restyled only into a cover-letter template the journal itself
+  publishes; with none it follows the journal's cover-letter guidance and then
+  established academic convention for a submission letter, never the manuscript
+  template. Section headings the SOURCE only direct-formatted (a short
   bold line one or two points above the body text, with no paragraph style at
   all — how Word-written manuscripts usually carry them) are **retagged onto the
   template's Heading 1..N before that strip**, by size, so the template's heading
@@ -1318,6 +1336,7 @@ found in the cover letter, the main text and the supplementary alike:
 | `FMT-T8f` | sibling paragraphs or sibling captions disagree on first-line indentation (`Fig. 4` indented while `Fig. 1/2/3/5` are not) | finding: pick one convention and align the minority with the majority (front matter — title/abstract/keywords — is its own family and never counted as a body outlier) |
 | `FMT-T8g` | Word's own `w:lastRenderedPageBreak` record shows the front matter split: the keywords line starts page 2 | finding: the front page must hold title, authors, affiliations, abstract and keywords together; shorten the front matter or trim abstract lines (never the science) |
 | `FMT-T8h` | the cover letter renders to more than two pages (a PDF beside the `.docx` is authoritative; the cached `docProps/app.xml` count is the fallback and can be stale) | finding: trim the non-persuading boilerplate first (statement blocks, reviewer lists, restated affiliations), never a claim about the work |
+| `FMT-CL1` | the cover letter was formatted in the venue's MANUSCRIPT template: it uses the manuscript template's Title/Author-List front-matter styles, or carries its logo header/page-number footer parts, while the venue ships **no cover-letter template** (the policy derives the styles/hashes from the journal's own `.official/` template) | finding, and the one row no stage may wave through: the review postcheck FAILS an `OK` closure that does not quote the journal's own template/guideline text REQUIRING that formatting (and FAILS a table that deleted the row); the auditor attacks such closures; revise/integrate must restyle the letter as a plain submission letter (rewrite surfaces it); a judge whose blinded target carries the row must record it in its M20 artifact and cannot close it `OK` without that quoted override. The rule stands down when the journal ships a cover-letter template |
 
 Guard rails: the reference list is never rewritten (its titles are quotations),
 URLs/DOIs/e-mails are masked, `Table S1` inside `Supplementary Table S1` is not a
@@ -1966,9 +1985,10 @@ any failure. They are independent, so run them in parallel — 61 suites (a few
 minutes on a 20-core box; ~5.5 min sequentially):
 
 ```bash
-python3 .paper_test/run_all.py          # GNU parallel (8 jobs by default); falls back
-                                      # to a thread pool when `parallel` is missing
-python3 .paper_test/run_all.py -j 16    # more sessions (measured: no faster, more load)
+python3 .paper_test/run_all.py          # GNU parallel (20 jobs by default, capped by the
+                                      # CPU count and the suite count); falls back to a
+                                      # thread pool when `parallel` is missing
+python3 .paper_test/run_all.py -j 4     # cap the parallelism on a smaller box
 python3 .paper_test/run_all.py -j 1     # the old sequential loop, for a bisect
 python3 .paper_test/run_all.py --only test_pipeline test_docx_format   # a subset
 ```

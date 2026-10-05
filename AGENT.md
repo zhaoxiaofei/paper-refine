@@ -13,7 +13,7 @@ it are local artefacts, not committed).
 
 | path | what it is |
 |---|---|
-| `paper_pipeline.py` | the orchestrator (single file, stdlib only). CLI: `setup`, `run`, `run-decide`, `decide`, `status`, `trend`, `agents`/`sessions`, `selfcheck`, `set-venue`, `set-journal`, `set-article-type`, `set-revision-mode`, `set-tiebreak-defect-floor`, `set-dedup-mode`, `add-venue`, `build-venue-templates`, `retry`, `prune`, `redline`, `conform` (aliases `template`, `author-submission`, `apply-template`). |
+| `paper_pipeline.py` | the orchestrator (single file, stdlib only). CLI: `setup`, `run`, `run-decide`, `decide`, `status`, `trend`, `agents`/`sessions`, `conflicts`, `selfcheck`, `set-venue`, `set-journal`, `set-article-type`, `set-revision-mode`, `set-tiebreak-defect-floor`, `set-dedup-mode`, `add-venue`, `build-venue-templates`, `retry`, `prune`, `redline`, `conform` (aliases `template`, `author-submission`, `apply-template`). |
 | `paper_docx_format.py` | the optional companion: code-side OOXML style/formatting scan/fix (`scan`/`fix`/`check-pdf`). |
 | `paper_redlines_adapter.py` | optional tracked-changes `.docx` bridge. |
 | `venue_profiles/` | the venue profiles (the submission rule sets) **and their schema documentation** — start at `venue_profiles/README.md`. |
@@ -176,6 +176,27 @@ the profiles shipped next to the script → the built-in fallback inside
     spelling-pair TIE is broken by the first occurrence, never left as an unfixable
     mechanical row (that tie used to reject every other repair of the file). Pinned by
     `.paper_test/test_format_hygiene.py`.
+13. **A cover letter is a LETTER, not a manuscript document.** The journal's manuscript
+    Word template is applied only to the manuscript / supplementary DOCX; a cover letter is
+    restyled only into a cover-letter template the journal itself publishes (a `.docx`/
+    `.dotx` in `<venue>.official/` whose name carries "cover"/"letter", resolved as the
+    `word["cover"]` role). With none, `template_for_package_file` and
+    `normalize_formatting_in_dir` resolve no template for it, `conform` carries it as
+    authored (warning when it still uses the manuscript template's Title/Author-List
+    styles), the conformance scan demands no manuscript styles/front matter from it, the
+    template-first postcheck FAILS such a stamped letter, and every prompt sends it down
+    the journal-guideline -> academic-convention chain. The defect is PROVEN in code:
+    `format_policy_of` derives the manuscript template's front-matter style ids and its
+    header/footer part hashes into the policy, and the OOXML scan reports **FMT-CL1**
+    (finding tier) on every letter that carries them (the rule stands down when the
+    journal ships its own cover-letter template). Every agent class must act on it: the
+    review's disposition gate fails an `OK` closure without the journal's own quoted
+    override and fails a table that DELETED the row; the auditor attacks such closures;
+    the revise/integrate arms must restyle the letter (the rewrite arm surfaces it); and
+    a judge whose blinded target carries the row must record it in its M20 artifact and
+    cannot close it `OK` without that override. Pinned by
+    `.paper_test/test_venue_template_conformance.py` and
+    `.paper_test/test_docx_format.py`.
 
 ## Commands you will use
 
@@ -202,7 +223,7 @@ python paper_pipeline.py setup --source ./non_revised --root ./paper_rounds \
 
 # validation (see README.md -> Tests for the full list)
 python3 -m py_compile paper_pipeline.py paper_docx_format.py
-python3 .paper_test/run_all.py -j 8            # every suite, offline
+python3 .paper_test/run_all.py                 # every suite, offline (20 jobs by default)
 python3 .paper_test/run_one.sh test_venue_config.py
 ```
 
