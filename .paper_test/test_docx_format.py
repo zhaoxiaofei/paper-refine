@@ -1089,6 +1089,51 @@ def test_lookup_404_is_a_verified_negative():
           str(res4)[:200])
 
 
+def test_accession_lookup_uses_the_matching_ncbi_database():
+    """A GSE/GSM/PRJNA/SAMN id is searched in ITS archive, not only SRA.
+
+    `db=sra` answers 0 for a real GEO series (live check: GSE118588 has 22
+    hits in `db=gds` and 0 in `db=sra`) and a 0 count sets the verdict to
+    `absent` -- the verified negative the session writes as "not yet
+    deposited". The requested db is pinned per prefix here, without network.
+    """
+    print()
+    print("== lookup: an accession is searched in the archive that indexes it ==")
+    import urllib.request
+    seen = []
+    real = urllib.request.urlopen
+
+    class _Canned:
+        def __init__(self, data):
+            self._data = data
+
+        def read(self):
+            return self._data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake(req, timeout=None):
+        seen.append(req.full_url if hasattr(req, "full_url") else str(req))
+        return _Canned(json.dumps({"esearchresult": {"count": "3"}}).encode())
+
+    urllib.request.urlopen = fake
+    try:
+        for acc, db in (("GSE118588", "gds"), ("GSM118588", "gds"),
+                        ("PRJNA480684", "bioproject"), ("SAMN07652403", "biosample"),
+                        ("SRP150111", "sra"), ("ERR123456", "sra")):
+            res = fmt.lookup_kind("accession", acc, timeout=5)
+            check(f"{acc} is looked up in db={db}",
+                  f"db={db}&" in seen[-1] and res.get("verdict") == "found"
+                  and (res.get("hits") or [{}])[0].get("source") == "ncbi-" + db,
+                  seen[-1] + " | " + str(res)[:110])
+    finally:
+        urllib.request.urlopen = real
+
+
 def test_tab_scan_ignores_tab_stop_definitions():
     """FMT-S7 counts literal tab characters, never `<w:tab>`-stop definitions.
 
@@ -1555,6 +1600,7 @@ def main() -> int:
         test_fix_extended(docx)
         test_quote_normalisation_spans_runs()
         test_lookup_404_is_a_verified_negative()
+        test_accession_lookup_uses_the_matching_ncbi_database()
         test_tab_scan_ignores_tab_stop_definitions()
         test_cli()
         test_unreadable_docx_reports_fmt_x1()

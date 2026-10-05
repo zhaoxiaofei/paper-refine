@@ -340,6 +340,24 @@ def test_policy_and_prompts():
     src = (WS / "venue_profiles" / "frontiers-in-immunology.json").read_text(encoding="utf-8")
     (root / "venue_profiles" / "frontiers-in-immunology.json").write_text(src,
                                                                          encoding="utf-8")
+    # The venue's official Word template is LOCAL downloaded data
+    # (`venue_profiles/*` is gitignored), so a clean checkout has no
+    # `<venue>.official/` pack at all -- and the check below then saw an empty
+    # slot list and failed. Build the minimal template the derivation needs
+    # under the root's own venue_profiles/, which wins over the script's copy,
+    # so this suite is hermetic on any machine.
+    official = root / "venue_profiles" / "frontiers-in-immunology.official"
+    official.mkdir(parents=True)
+    tpl_doc = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+               '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/'
+               '2006/main"><w:body>'
+               '<w:p><w:r><w:t>Article title</w:t></w:r></w:p>'
+               '<w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr></w:p>'
+               '<w:p><w:r><w:t>Body text.</w:t></w:r></w:p>'
+               '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>'
+               '</w:body></w:document>')
+    with zipfile.ZipFile(official / "Frontiers_Template.docx", "w") as z:
+        z.writestr("word/document.xml", tpl_doc)
     ctx = np.Ctx(root)
     ctx.cfg = {"venue": "frontiers-in-immunology"}
     slots = np.format_policy_of(ctx).get("empty_paragraph_slots") or []

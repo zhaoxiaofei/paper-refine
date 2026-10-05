@@ -247,6 +247,43 @@ def test_b1_adapter_absent_output_still_fails():
           proc.returncode == 5, f"rc={proc.returncode}")
 
 
+def test_b1b_adapter_write_failure_is_not_a_traceback():
+    """The adapter's own contract: a failed write exits 6, never a traceback.
+
+    `clear_out` maps an uncleared OUT to exit 6, but the backend's write path
+    opened OUT raw: an OUT in a read-only directory escaped as an uncaught
+    PermissionError (exit 1 + traceback) instead of the documented exit 6.
+    """
+    tmp = tmpdir("b1c")
+    # The published package imports as `python_redlines`; its engine API is the
+    # path that writes the returned bytes itself.
+    pkg = tmp / "fakepyredlines"
+    write(pkg / "python_redlines.py",
+          "class DocxodusEngine:\n"
+          "    def __init__(self, cache=None):\n        pass\n"
+          "    def run_redline(self, name, base, revised):\n"
+          "        return b'PK-fake-redline', '', ''\n")
+    base, revised = tmp / "base.docx", tmp / "revised.docx"
+    write(base, b"base")
+    write(revised, b"revised")
+    ro = tmp / "ro"
+    ro.mkdir()
+    ro.chmod(0o500)
+    if os.geteuid() == 0:
+        print("[skip] B1c a read-only directory cannot block root; "
+              "write-failure path not exercised")
+        ro.chmod(0o700)
+        return
+    try:
+        proc = run_adapter(tmp, pkg, base, revised, ro / "out.docx")
+    finally:
+        ro.chmod(0o700)
+    check("B1c an unwritable OUT exits 6 with a message, never a traceback",
+          proc.returncode == 6 and "Traceback" not in proc.stderr
+          and "cannot write output" in proc.stderr,
+          f"rc={proc.returncode} stderr={proc.stderr.strip()[:160]!r}")
+
+
 def test_b2_adapter_refuses_input_as_out():
     """OUT is written (and now cleared first), so an input path must be refused
     instead of being destroyed when no backend can produce a redline."""
@@ -565,6 +602,7 @@ def main() -> int:
     print("\n== B1: paper_redlines_adapter.py ==")
     test_b1_adapter_stale_output()
     test_b1_adapter_absent_output_still_fails()
+    test_b1b_adapter_write_failure_is_not_a_traceback()
     test_b2_adapter_refuses_input_as_out()
     test_b3_published_python_redlines_is_used()
     print("\n== C1: prune then run ==")

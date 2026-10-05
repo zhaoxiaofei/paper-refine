@@ -52,6 +52,21 @@ def clear_out(out_path):
         fail("cannot clear the stale output file %s: %s" % (out_path, exc), 6)
 
 
+def write_out(out_path, data):
+    """Write the redline bytes, exiting 6 instead of raising on an OSError.
+
+    A backend that returned bytes is not yet a usable result: OUT can live in
+    a read-only directory (or on a full disk), and the module's contract is
+    that every failure path prints a message and exits with a documented code
+    -- never a traceback.
+    """
+    try:
+        with open(out_path, "wb") as fh:
+            fh.write(data)
+    except OSError as exc:
+        fail("cannot write output %s: %s" % (out_path, exc), 6)
+
+
 def try_engine_api(mod, base, revised, out):
     """Write OUT with the published package's engine API; True when it did.
 
@@ -80,8 +95,7 @@ def try_engine_api(mod, base, revised, out):
                 print("python_redlines.%s failed: %s" % (eng_name, exc), file=sys.stderr)
                 continue
             if data:
-                with open(out, "wb") as fh:
-                    fh.write(data)
+                write_out(out, data)
                 if wrote(out):
                     if tmp_cache:
                         shutil.rmtree(tmp_cache, ignore_errors=True)
@@ -196,8 +210,7 @@ def main(argv):
             except Exception:                                  # noqa: BLE001
                 continue
             if isinstance(res, (bytes, bytearray)):
-                with open(out, "wb") as fh:
-                    fh.write(res)
+                write_out(out, res)
             if wrote(out):
                 print("python-redlines:%s" % fn_name)
                 return 0

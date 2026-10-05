@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Run every `.paper_test/test_*.py` suite, in parallel.
 
-Sequential, the suites take about five and a half minutes and most of that is
-waiting on stub agents, LibreOffice, pdflatex and sleeps. They are independent
-(each builds its own root under `tempfile.mkdtemp`, and the fixed paths they use
-are per-suite), so they can run at once:
+Sequential, the full set takes tens of minutes (measured: the slowest suites
+alone run for 3-4 minutes, waiting on stub agents, LibreOffice, pdflatex and
+sleeps); with the default parallelism it finishes in a few minutes. They are
+independent (each builds its own root under `tempfile.mkdtemp`, and the fixed
+paths they use are per-suite), so they can run at once:
 
     python3 .paper_test/run_all.py                 # GNU parallel, jobs = min(20, #cores)
     python3 .paper_test/run_all.py -j 4            # cap the parallelism

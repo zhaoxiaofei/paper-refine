@@ -123,7 +123,12 @@ def test_only_vocabulary():
           and nb.parse_only_spec("1:apply-template").pairs.get(1) == {"conform"}
           and nb.only_is_template_stage_only(tmpl)
           and nb.only_is_template_stage_only(nb.parse_only_spec("apply-template"))
-          and not nb.only_is_template_stage_only(nb.parse_only_spec("conform,review")))
+          and not nb.only_is_template_stage_only(nb.parse_only_spec("conform,review"))
+          # A judge selector is a session too: the spec runs the template
+          # stage AND that judge session, so it is not "template stage only".
+          and not nb.only_is_template_stage_only(nb.parse_only_spec("conform,w1_j1"))
+          and not nb.only_is_template_stage_only(nb.parse_only_spec("conform,r1_judge_w2_j1"))
+          and nb.only_is_template_stage_only(nb.parse_only_spec("conform")))
 
 
 def test_only_in_transfer_mode():

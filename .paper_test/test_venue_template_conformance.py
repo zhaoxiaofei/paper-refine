@@ -732,6 +732,89 @@ def test_two_section_manuscript_gets_the_page_one_furniture():
           str(fmt.docx_front_matter_report(old_shape, tpl).get("rows")))
 
 
+def test_two_section_template_keeps_its_first_page_logo():
+    """A template that splits its title page off keeps the logo in section 1.
+
+    The furniture harvest read every role from the template's LAST `w:sectPr`
+    only, so a title-page template whose section 1 declares the logo (`first`)
+    and whose body section declares only the running head (`default`) lost the
+    logo: the running head was re-roled into `header_venue_first.xml` and the
+    change log still claimed "copied the venue's first-page header (logo)".
+    Page 1 is governed by the FIRST section, so its `first` role must come from
+    there (the running roles keep the last-section preference).
+    """
+    print()
+    print("== a two-section template keeps its first-page logo ==")
+    tmp = scratch("paper_tpl_two_sect_tpl_")
+    tpl = tmp / "template.docx"
+    logo = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            '<w:p><w:r><w:drawing/></w:r><w:r><w:t>LOGO</w:t></w:r></w:p></w:hdr>')
+    running = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+               '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+               '<w:p><w:r><w:t>Running head</w:t></w:r></w:p></w:hdr>')
+    ct_extra = ('<Override PartName="/word/header1.xml" ContentType="application/vnd.'
+                'openxmlformats-officedocument.wordprocessingml.header+xml"/>'
+                '<Override PartName="/word/header2.xml" ContentType="application/vnd.'
+                'openxmlformats-officedocument.wordprocessingml.header+xml"/>')
+    rels_extra = ('<Relationship Id="rIdH1" Type="http://schemas.openxmlformats.org/'
+                  'officeDocument/2006/relationships/header" Target="header1.xml"/>'
+                  '<Relationship Id="rIdH2" Type="http://schemas.openxmlformats.org/'
+                  'officeDocument/2006/relationships/header" Target="header2.xml"/>')
+    geo = ('<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" '
+           'w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>')
+    tpl_doc = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+               '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/'
+               'main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/'
+               'relationships"><w:body>'
+               '<w:p><w:pPr><w:sectPr><w:headerReference w:type="first" r:id="rIdH1"/>'
+               + geo + '</w:sectPr></w:pPr><w:r><w:t>Template title page</w:t></w:r></w:p>'
+               '<w:p><w:r><w:t>Template body</w:t></w:r></w:p>'
+               '<w:sectPr><w:headerReference w:type="default" r:id="rIdH2"/>'
+               + geo + '</w:sectPr></w:body></w:document>')
+    full_docx(tpl, tpl_doc, ct_extra=ct_extra, rels_extra=rels_extra,
+              extra={"word/header1.xml": logo, "word/header2.xml": running})
+    man = tmp / "manuscript.docx"
+    full_docx(man, ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/'
+                    '2006/main"><w:body>' + para(None, "A title")
+                    + para(None, "Body text.")
+                    + f"<w:sectPr>{geo}</w:sectPr>"
+                    '</w:body></w:document>'))
+    out = tmp / "out.docx"
+    rep = fmt.apply_word_template(man, out, tpl)
+    check("the two-section template restyle succeeds and keeps the text",
+          rep.get("ok") is True and rep.get("text_unchanged") is True, str(rep)[:200])
+    with zipfile.ZipFile(out) as z:
+        names = set(z.namelist())
+        first = (z.read("word/header_venue_first.xml").decode("utf-8", "replace")
+                 if "word/header_venue_first.xml" in names else "")
+        default = (z.read("word/header_venue_default.xml").decode("utf-8", "replace")
+                   if "word/header_venue_default.xml" in names else "")
+    check("the first-page header comes from the template's FIRST section (the logo)",
+          "LOGO" in first and "<w:drawing" in first, first[:160])
+    check("the running head stays the default header, not the first-page one",
+          "Running head" in default and "Running head" not in first,
+          f"first={first[:80]!r} default={default[:80]!r}")
+    check("front_parts records the logo it actually copied",
+          (rep.get("front_parts") or {}).get("logo") is True,
+          str(rep.get("front_parts")))
+    check("the change log names the logo only because it was copied",
+          any("first-page header (logo)" in c for c in rep.get("changes") or []),
+          str(rep.get("changes")))
+    # Negative control: the same restyle against a template WITHOUT a logo
+    # header must not claim one.
+    tpl2 = tmp / "template-no-logo.docx"
+    full_docx(tpl2, tpl_doc.replace('<w:headerReference w:type="first" r:id="rIdH1"/>', ""),
+              ct_extra=ct_extra, rels_extra=rels_extra,
+              extra={"word/header1.xml": logo, "word/header2.xml": running})
+    out2 = tmp / "out2.docx"
+    rep2 = fmt.apply_word_template(man, out2, tpl2)
+    check("a template with no logo header is not reported as having one",
+          not any("(logo)" in c for c in rep2.get("changes") or []),
+          str(rep2.get("changes")))
+
+
 def test_foreign_containers_are_venue_data():
     """The formatter carries NO journal's vocabulary: container names are data.
 
@@ -2075,6 +2158,7 @@ def main() -> int:
         test_heading_retag()
         test_even_odd_furniture()
         test_two_section_manuscript_gets_the_page_one_furniture()
+        test_two_section_template_keeps_its_first_page_logo()
         test_foreign_containers_are_venue_data()
         test_apply_template_package()
         test_cover_letter_guideline_fallback()

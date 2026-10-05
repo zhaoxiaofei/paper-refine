@@ -1982,7 +1982,8 @@ its four integration runs never started.
 
 Every suite is offline and prints one line per check; exit status is non-zero on
 any failure. They are independent, so run them in parallel — 61 suites (a few
-minutes on a 20-core box; ~5.5 min sequentially):
+minutes at the default parallelism on a 20-core box; tens of minutes
+sequentially):
 
 ```bash
 python3 .paper_test/run_all.py          # GNU parallel (20 jobs by default, capped by the

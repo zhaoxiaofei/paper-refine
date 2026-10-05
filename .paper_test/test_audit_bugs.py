@@ -607,6 +607,40 @@ def test_damaged_state_is_reported():
           "r1_x" in (out + err) and "sandbox" in (out + err), (out + err)[-160:])
 
 
+def test_zero_judges_config_is_refused():
+    """H. `judges: [0]` in a hand-edited config must not certify a round.
+
+    `setup` refuses `--judges 0`, but nothing re-checked the loaded config. A
+    hand-edited `pipeline_config.json` with `"judges": [0]` ran a whole round
+    with no judge session, counted 0 of 0 expected scores as a COMPLETE panel,
+    and `decide` reported CERTIFIED -- an unjudged manuscript certified as the
+    panel's winner.
+    """
+    print()
+    print("== H. a hand-edited judges:0 config is refused at load ==")
+    tmp = scratch("paper_bug_h_")
+    root = tmp / "root"
+    (root / "runs").mkdir(parents=True)
+    (root / "pipeline_config.json").write_text(json.dumps(
+        {"rounds": 1, "judges": [0], "rewrites": [1], "revises": [1],
+         "integrators": [0], "source": str(tmp)}))
+    ctx = nb.Ctx(root)
+    code = None
+    import io
+    old_out, old_err = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
+    try:
+        ctx.load()
+    except SystemExit as e:
+        code = e.code
+    finally:
+        out, err = sys.stdout.getvalue(), sys.stderr.getvalue()
+        sys.stdout, sys.stderr = old_out, old_err
+    check("H load() refuses a judges:0 config cleanly", code == 1, str(code))
+    check("H the message names --judges and the minimum",
+          "--judges must be >= 1" in (out + err), (out + err)[-200:])
+
+
 def main() -> int:
     sections = (("A", test_judge_views_share_one_timestamp),
                 ("B", test_partial_copies_are_repaired),
@@ -617,7 +651,8 @@ def main() -> int:
                 ("F", test_judge_token_collision_is_refused),
                 ("F", test_same_second_archives_do_not_overwrite),
                 ("F", test_oversized_agent_json_is_refused),
-                ("G", test_damaged_state_is_reported))
+                ("G", test_damaged_state_is_reported),
+                ("H", test_zero_judges_config_is_refused))
     try:
         for name, fn in sections:
             try:

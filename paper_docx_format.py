@@ -1653,6 +1653,29 @@ GITHUB_RE = re.compile(r"https?://github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+"
                        r"(?:/(?:tree|commit)/[0-9a-fA-F]{7,40})?")
 
 
+# ACCESSION_RE recognises ids that live in three different NCBI archives. A
+# lookup that always searched `db=sra` answered 0 for the GEO/BioProject/
+# BioSample ids (a real `GSE...` series is invisible there), and a 0 count sets
+# `verdict` to `absent` -- the VERIFIED NEGATIVE the seeded
+# `PLACEHOLDER_LOOKUP.md` turns into "not yet deposited". Each prefix is
+# therefore resolved to the database that actually indexes it.
+ACCESSION_DATABASES = (
+    ("GSE", "gds"), ("GSM", "gds"),                 # GEO series / sample
+    ("PRJNA", "bioproject"),                        # NCBI BioProject
+    ("SAMN", "biosample"), ("SAMD", "biosample"),   # NCBI BioSample
+)
+ACCESSION_DEFAULT_DB = "sra"                        # SRP/SRR, ERP/ERS/ERR
+
+
+def accession_database(accession: str) -> str:
+    """The NCBI eutils database (`db=`) that indexes this accession id."""
+    up = str(accession or "").strip().upper()
+    for prefix, db in ACCESSION_DATABASES:
+        if up.startswith(prefix):
+            return db
+    return ACCESSION_DEFAULT_DB
+
+
 def _text_docs(docs) -> list:
     """Normalise [[(name, rows)], [(name, str)]] to [(name, text blob)]."""
     out = []
@@ -1800,11 +1823,12 @@ def lookup_kind(kind: str, query: str, timeout: int = 30) -> dict:
                                       or [[None]])[0] or [None])[0]}]
             out["verdict"] = "found"
         elif kind == "accession":
+            db = accession_database(query)
             d = json.loads(fetch("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-                                 "?db=sra&retmode=json&term=" + q))
+                                 "?db=" + db + "&retmode=json&term=" + q))
             n = int((d.get("esearchresult") or {}).get("count") or 0)
             if n:
-                out["hits"] = [{"source": "ncbi-sra", "count": n, "title": str(query)}]
+                out["hits"] = [{"source": "ncbi-" + db, "count": n, "title": str(query)}]
                 out["verdict"] = "found"
             else:
                 out["verdict"] = "absent"
@@ -5501,9 +5525,24 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
                for m in _RELS_RE.finditer(trels)}
     refs = {"header": {}, "footer": {}}
     sect = _SECT_RE.findall(tdoc)
-    for m in re.finditer(r'<w:(header|footer)Reference w:type="(\w+)" r:id="([^"]+)"',
-                         sect[-1] if sect else ""):
-        refs[m.group(1)][m.group(2)] = m.group(3)
+    ref_re = r'<w:(header|footer)Reference w:type="(\w+)" r:id="([^"]+)"'
+
+    def harvest(xml: str, roles: tuple) -> None:
+        for m in re.finditer(ref_re, xml):
+            if m.group(2) in roles and m.group(2) not in refs[m.group(1)]:
+                refs[m.group(1)][m.group(2)] = m.group(3)
+
+    # Page 1 is governed by the FIRST section (`_apply_front_refs` writes the
+    # "first" role there), while the running head/footer belong to the
+    # template's body section. Reading every role from sect[-1] copied the
+    # running head into the first-page role -- the logo header of a template
+    # that splits its title page off was left behind while the change log
+    # still claimed it had been copied.
+    for role, order in (("first", sect),
+                        ("default", list(reversed(sect))),
+                        ("even", list(reversed(sect)))):
+        for one in order:
+            harvest(one, (role,))
     if not (refs["header"] or refs["footer"]):
         return {}
     copied, issued = [], {}
@@ -6543,8 +6582,19 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
         changes.append(f"tagged {len(headings_retagged)} directly-formatted heading(s) with the "
                        f"template's heading styles")
     if front_parts:
-        changes.append("copied the venue's first-page header (logo), default header and "
-                       "page-number footers")
+        # Describe what was actually copied: a template with no logo header
+        # still made the old line claim "first-page header (logo)".
+        got = []
+        if front_parts.get("logo"):
+            got.append("first-page header (logo)")
+        elif front_parts.get("header_first"):
+            got.append("first-page header")
+        if front_parts.get("header_default"):
+            got.append("default header")
+        if any(front_parts.get(k) for k in ("footer_first", "footer_default", "footer_even")):
+            got.append("page-number footers")
+        changes.append("copied the venue's " + ", ".join(got)
+                       if got else "copied the venue's front-page furniture")
         if front_parts.get("even_odd"):
             changes.append("enabled the template's odd/even (evenAndOddHeaders) page furniture")
         for role in front_parts.get("footer_replaced") or []:

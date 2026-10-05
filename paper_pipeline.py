@@ -11122,13 +11122,20 @@ def _tex_length_lines(text: str) -> list:
 
 
 def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
-                           abstract_end: int = None, limits: dict = None) -> list:
+                           abstract_end: int = None, limits: dict = None,
+                           whole_doc_as_main: bool = False) -> list:
     """M19 rows (abstract and/or main text) for one document's text lines.
 
     ``caption_spans`` are (start, end) line spans of the document's captions and
     ``abstract_end`` an explicit end index (LaTeX's ``\\end{abstract}``); only
     the captions inside the main-text span are subtracted, because only those
     words are inside the text this row counts.
+
+    ``whole_doc_as_main`` is for a document the run's OWN article type names
+    (`Correspondence.docx`, `letter-to-the-editor.docx`): a letter-format
+    manuscript carries no Abstract/Introduction heading, but the venue's cap
+    for that type still applies, so its whole text is counted instead of being
+    skipped as unshaped.
     """
     limits = limits or length_limits()
     n = len(lines)
@@ -11163,7 +11170,20 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
             main_start = i + 1
             break
     if abs_start is None and main_start is None:
-        return []                    # not manuscript-shaped: skip, never guess
+        if not whole_doc_as_main:
+            return []                # not manuscript-shaped: skip, never guess
+        caption_words = sum(count_caption_words(" ".join(lines[max(a, 0):min(b, n)]))
+                            for a, b in (caption_spans or []) if a < n and b > 0)
+        words = max(0, count_words(" ".join(lines)) - caption_words)
+        main_cap = limits["main text"].get("cap")
+        return [{"document": doc, "section": "main text", "words": words,
+                 "base": limits["main text"].get("base"),
+                 "relaxation": limits["main text"].get("relaxation"),
+                 "cap": main_cap,
+                 "over_limit": main_cap is not None and words > main_cap,
+                 "note": "no Abstract/Introduction heading found: this document carries the "
+                         "selected article type's own name, so the whole text is counted "
+                         "against the main-text cap"}]
     rows = []
     if abs_start is not None:
         words = count_words(" ".join(lines[abs_start:abs_end]))
@@ -11362,7 +11382,10 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
                 rows.append(_cover_letter_row(lines, doc, limits=limits, profile=prof))
                 continue
             found = _length_rows_for_lines(lines, doc, caption_spans=caption_spans,
-                                           abstract_end=abstract_end, limits=limits)
+                                           abstract_end=abstract_end, limits=limits,
+                                           whole_doc_as_main=bool(
+                                               _name_is_article_type_manuscript(
+                                                   p.name, manuscript_names)))
             if not found:
                 skipped.append(doc)
                 continue
@@ -16317,6 +16340,24 @@ class Ctx:
         if cfg is None and need_cfg:
             die(f"missing/corrupt {self.cfg_path}  (run `setup` first)")
         self.cfg = cfg or {}
+        if cfg is not None:
+            # `setup` validates `--judges` (>= 1 per round), but a hand-edited
+            # `pipeline_config.json` used to slip past that. With judges=[0]
+            # every version's expected directed-score count is 0, so the panel
+            # gate called an UNJUDGED round "complete" and `decide` certified
+            # it with 0 scores/version and no judge session at all.
+            try:
+                _rounds = max(1, int(cfg.get("rounds") or 1))
+            except (TypeError, ValueError):
+                _rounds = 1
+            _judges = parse_round_counts(
+                cfg.get("judges") if cfg.get("judges") is not None else DEFAULTS["judges"],
+                _rounds, "--judges")
+            if any(j < 1 for j in _judges):
+                die(f"pipeline_config.json: --judges must be >= 1 per round, got {_judges}.\n"
+                    f"       {self.cfg_path}\n"
+                    f"       A round with no judge can never be certified; edit the config "
+                    f"or re-run `setup` with --judges N (N >= 1).")
         if self.state_path.exists():
             st, problem = load_state_file(self.state_path)
             if st is None:
@@ -31734,7 +31775,14 @@ def only_is_template_stage_only(spec) -> bool:
     stages = {("conform" if s in ("apply-template", "author-submission", "template") else s)
               for s in stages}
     sessions = getattr(spec, "sessions", {}) or {}
-    return stages == {"conform"} and not any(sessions.values())
+    # A judge selector (`conform,w1_j1`, `conform,r1_judge_w2_j1`) is a
+    # session too: the items are a UNION, so such a selection must run the
+    # template stage AND the named judge session, never short-circuit to the
+    # template-stage-only exit just because `sessions` is empty.
+    judge_selectors = getattr(spec, "judge_selectors", {}) or {}
+    judge_run_ids = getattr(spec, "judge_run_ids", None) or []
+    return (stages == {"conform"} and not any(sessions.values())
+            and not any(judge_selectors.values()) and not judge_run_ids)
 
 
 def validate_only_selectors(ctx: Ctx, only, flag: str = "--only") -> None:

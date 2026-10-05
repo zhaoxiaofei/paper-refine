@@ -293,6 +293,23 @@ def test_scanner():
     check("LT4 a PDF-only package is reported as needing manual counting",
           pdf_info["needs_manual"] and "not verified" in nb.length_note(pdf_info),
           str(pdf_info)[:200])
+    # A letter-format manuscript (the venue's Correspondence type) has no
+    # Abstract/Introduction heading. The scan used to skip it as "unshaped",
+    # silently never applying the type's own 800-word cap; the document that
+    # carries the SELECTED article type's name is the manuscript, so its whole
+    # text is counted against that cap.
+    prof = nb.load_venue_profile("nature-biotechnology")
+    prof.article_type_id = "correspondence"
+    letter = scratch("paper_len_letter_")
+    write(letter / "correspondence.md",
+          "To the Editor\n\n" + ("word " * 900).strip() + "\n\nSincerely,\nA. Author\n")
+    letter_info = nb.scan_lengths_in_sources([(letter, "", ())], profile=prof)
+    lrow = next((r for r in letter_info["rows"] if r["section"] == "main text"), None)
+    check("LT4 a letter-type manuscript with no Abstract/Introduction is still "
+          "counted against its own cap",
+          lrow is not None and lrow["words"] >= 900 and lrow["cap"] == 800
+          and lrow["over_limit"] is True,
+          str(letter_info)[:220])
 
 
 # =====================================================================

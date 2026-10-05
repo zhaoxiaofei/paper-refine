@@ -2,8 +2,10 @@
 
 Self-contained repro/regression suites for `paper_pipeline.py`,
 `paper_redlines_adapter.py` and the `paper-skills/` pack. They need nothing but
-Python 3 (standard library) and take a few seconds each; every suite prints one
-`[ok ]`/`[FAIL]` line per check and exits non-zero if any check fails.
+Python 3 (standard library); a suite takes seconds to a few minutes (the slowest
+ones wait on stub-agent sleeps, LibreOffice and pdflatex), and every suite
+prints one `[ok ]`/`[FAIL]` line per check and exits non-zero if any check
+fails.
 
 The round the suites exercise — base, rewrites, review, revises, integrations,
 judging, pinning — is diagrammed in
