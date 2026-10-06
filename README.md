@@ -1689,7 +1689,11 @@ for the same comparison (or a strong asymmetry between the two directions), a
 claim one session files as `resolved` and another as `introduced`, different
 numbers quoted for the same claim (a judge citing merely MORE numbers is not a
 contradiction), and one session marking a check `clean` while another files
-findings for it. Each round's judge wave is followed by ITS OWN audit (two
+findings for it. The audit reads the same member list the aggregation used --
+a round that is still running carries no `field` in its record yet -- and it
+refuses to write a `0 conflicts` report when the panel's sheets are done but no
+directed comparison could be extracted, instead of reporting an empty input as
+a clean panel. Each round's judge wave is followed by ITS OWN audit (two
 rounds produce two audits; `decide` only back-fills a round that has no audit
 yet). The LLM auditor is ON by default and lightweight:
 `PAPER_CONFLICT_AGENT_CMD` can point it at a cheap CLI/model, otherwise the

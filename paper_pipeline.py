@@ -32972,17 +32972,27 @@ def _judge_conflict_counts(conflicts: list) -> dict:
     return counts
 
 
-def round_judge_opinions(ctx: Ctx, r: int) -> list:
+def round_judge_opinions(ctx: Ctx, r: int, field=None) -> list:
     """Every resolved directed comparison of one round's (newest) judge sheets.
 
     Mirrors aggregate_round's sheet selection: the newest valid sheet per
     (target, judge index), opponents resolved through the run's label_map.  The
     returned dicts carry the raw ledger items and `checks` dispositions, which
     the aggregated score rows drop.
+
+    `field` is the round's field the CALLER aggregated (aggregate_round's list)
+    and must be passed whenever the round record may not carry one yet: a
+    `run`'s conflict audit executes BEFORE finalize_round() writes `field` into
+    the round record, so reading the record alone made the audit treat every
+    comparison as out-of-field and certify an empty panel as "0 conflicts"
+    (2026-10-06, neohetero-04to05-1006-0354-47c5306 round 1: 16 sheets and 112
+    comparisons -> 0 opinions).  `None` falls back to the record's own field.
     """
     r = int(r)
     rrec = ctx.round_rec(r)
-    field = {str(v) for v in (rrec.get("field") or [])}
+    if field is None:
+        field = rrec.get("field")
+    field_ids = {str(v) for v in (field or [])}
     # Mirror aggregate_round's panel: a round with a judge-session selection
     # (--only r1_judge_w2_j1) judges only those sessions, and a judge index
     # outside the configured 1..judges range is a stale sheet, not a conflict.
@@ -33006,7 +33016,7 @@ def round_judge_opinions(ctx: Ctx, r: int) -> list:
     for _slot, rec in sorted(newest.items(),
                              key=lambda kv: (str(kv[0][0]), str(kv[0][1]))):
         target = str(rec.get("target_id"))
-        if target not in field:
+        if target not in field_ids:
             continue
         sj = rec.get("scores")
         if not isinstance(sj, dict):
@@ -33018,7 +33028,7 @@ def round_judge_opinions(ctx: Ctx, r: int) -> list:
             label = comp.get("opponent_label")
             score = comp.get("score")
             opp = lm.get(_norm_opponent_label(label))
-            if opp is None or str(opp) not in field or opp == target or not is_int(score):
+            if opp is None or str(opp) not in field_ids or opp == target or not is_int(score):
                 continue
             if not (SCORE_MIN <= score <= SCORE_MAX):
                 continue
@@ -33290,12 +33300,28 @@ def write_round_judge_conflicts(ctx: Ctx, r: int, agg: dict = None, agent_cmd: l
     set, so `run` and `decide` do not pay for the agent twice.
     """
     r = int(r)
-    opinions = round_judge_opinions(ctx, r)
+    round_field = [str(v) for v in ((agg or {}).get("field")
+                                    or ctx.round_rec(r).get("field") or [])]
+    opinions = round_judge_opinions(ctx, r, field=round_field)
+    # Never certify an empty audit as "0 conflicts": a root whose judge sheets
+    # are done but whose directed comparisons cannot be extracted (missing
+    # field / label_map / scores) must fail loudly instead of writing the same
+    # report as a panel that genuinely agreed.  The 2026-10-06 regression in
+    # `run` did exactly that: the round's `field` was not written yet, every
+    # comparison was dropped, and a full 16-sheet panel was reported clean.
+    if not opinions:
+        done_sheets = [rec for rec in ctx.runs(kind="judge", round_no=r)
+                       if rec.get("status") == "done"]
+        if done_sheets:
+            raise RuntimeError(
+                F"round {r}: {len(done_sheets)} judge sheet(s) are done but no "
+                F"directed comparison could be extracted (field carries "
+                F"{len(round_field)} member(s); check the runs' scores/label_map); "
+                F"refusing to write a 0-conflict report from an empty audit input")
     mechanical = detect_round_judge_conflicts(opinions)
     payload = {
         "run": ctx.root.name, "round": r, "generated": utcnow(),
-        "field": [str(v) for v in ((agg or {}).get("field")
-                                   or ctx.round_rec(r).get("field") or [])],
+        "field": round_field,
         "opinions": opinions, "candidate_conflicts": mechanical,
     }
     fingerprint = hashlib.sha256(
@@ -33556,10 +33582,17 @@ def cmd_conflicts(args) -> None:
         if not rounds:
             print("[conflicts] no round with judge sheets; nothing to audit")
             return
+        failed = []
         for r in rounds:
-            data = write_round_judge_conflicts(ctx, r, agent_cmd=cmd,
-                                               timeout=getattr(args, "timeout", None),
-                                               force=bool(getattr(args, "force", False)))
+            try:
+                data = write_round_judge_conflicts(
+                    ctx, r, agent_cmd=cmd, timeout=getattr(args, "timeout", None),
+                    force=bool(getattr(args, "force", False)))
+            except Exception as e:                                   # noqa: BLE001
+                failed.append(r)
+                print(F"[conflicts] round {r}: the audit could not run: "
+                      F"{type(e).__name__}: {e}")
+                continue
             counts = data.get("counts") or {}
             print(F"[conflicts] round {r}: {counts.get('total', 0)} conflict(s) "
                   F"({counts.get('blocker', 0)} blocker, {counts.get('major', 0)} major, "
@@ -33567,6 +33600,10 @@ def cmd_conflicts(args) -> None:
                   F"reports/round{r}_judge_conflicts.md")
         p = write_judge_conflicts_todo(ctx)
         print(F"[conflicts] manual TODO list -> {p.relative_to(ctx.root).as_posix()}")
+        if failed:
+            die(F"the conflict audit failed for round(s) "
+                F"{', '.join(str(x) for x in failed)}; no fresh report was written "
+                F"for them (see the message above)")
 
 
 # The columns of the round's REVIEW-FINDINGS list: the review pass's own frozen

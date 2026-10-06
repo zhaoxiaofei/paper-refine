@@ -75,6 +75,16 @@ class FakeCtx:
     def round_rec(self, r):
         return {"field": list(self._field)}
 
+    def round_get(self, r):
+        return {}
+
+
+class PendingCtx(FakeCtx):
+    """A round mid-`run`: finalize_round() has not written `field` yet."""
+
+    def round_rec(self, r):
+        return {}
+
 
 J1_TEXT = ("Methods: 'several hundred to more than a thousand evaluable cells "
            "per sample'; source data show 173-1,307 (v1 states 'approximately "
@@ -238,6 +248,30 @@ def main():
             check("out-of-range judge sheets are ignored by the audit",
                   [o["judge_run"] for o in all_ops] == ["j1", "j2"],
                   [o["judge_run"] for o in all_ops])
+            # The run-time regression of 2026-10-06: `run` audits the round
+            # BEFORE finalize_round() writes `field`, so a record-only field
+            # turns a full panel into an empty audit ("0 conflicts").  The
+            # caller's aggregated field must be honoured.
+            pending = PendingCtx([judge_sheet_run("j1", "i1", 1),
+                                  judge_sheet_run("j2", "i1", 2)])
+            check("a pending round record alone yields no opinions",
+                  pc.round_judge_opinions(pending, 1) == [],
+                  pc.round_judge_opinions(pending, 1))
+            pending_ops = pc.round_judge_opinions(pending, 1, field=["i1", "i2"])
+            check("the caller's field extracts the pending round's opinions",
+                  [o["judge_run"] for o in pending_ops] == ["j1", "j2"],
+                  [o["judge_run"] for o in pending_ops])
+            # ... and an extraction that still comes back empty while the
+            # panel's sheets are done must fail loudly, never write the same
+            # report a genuinely agreeing panel would get.
+            try:
+                pc.write_round_judge_conflicts(pending, 1, agg={"field": []},
+                                               agent_cmd=None, use_agent=False)
+                check("an empty audit with done sheets refuses to write", False,
+                      "write_round_judge_conflicts returned normally")
+            except RuntimeError as e:
+                check("an empty audit with done sheets refuses to write",
+                      "empty audit input" in str(e), str(e))
         finally:
             pc.judge_selection, pc.round_judges = orig_sel, orig_round_judges
         os.environ["PAPER_CONFLICT_AGENT_CMD"] = json.dumps(recorded)
