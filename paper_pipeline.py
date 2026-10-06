@@ -817,7 +817,7 @@ from pathlib import Path
 # each either a single integer or a per-round list; they default to [2, 1] and
 # [1, 1]. Every prompt also documents the optional `docx` CLI (including
 # `docx diff`), which the visual-tool probe includes; the cmd-line defaults are
-# --rounds 2 and --jobs 255. state.json is version 3 (the arm set changed).
+# --rounds 3 and --jobs 255. state.json is version 3 (the arm set changed).
 # Carried over from 2.1.0: the figure-caption rule is an opt-in SUGGESTION
 # (default 0) that is never enforced, median ties are broken by the arithmetic
 # mean of the same score list, MANUAL_STEPS.md is reported but not ranked on,
@@ -826,7 +826,7 @@ from pathlib import Path
 # ("*.tracking-<token>.<ext>" / "*.logging-<token>.<ext>") are
 # neutralised everywhere they could be mistaken for manuscript defects, and
 # copied-but-unchanged input files are exempted from structured-output
-# validation by content instead of by path. state.json stays version 2.
+# validation by content instead of by path. (2.1.0 kept state.json at version 2.)
 # 3.1.0: judge contract v2 (graded basis), panel de-duplication by
 # (target, judge index), and the provenance-free digest tie-break. A round
 # decided by an earlier version recomputes a champion only if its ranking key
@@ -10360,8 +10360,9 @@ def manifest_digest(m) -> str:
 def corpus_tree_manifest(dirp: Path) -> dict:
     """Manifest of a VERSION CORPUS: the read-only auxiliaries are left out.
 
-    A difference-tracking auxiliary -- "<name>.tracking-original|previous.<ext>",
-    its "<name>.logging-<token>.<ext>" fallback -- is a derived copy, not
+    A difference-tracking auxiliary -- "<name>.tracking-<baseline>.<ext>"
+    (baseline = original | a1 | w<k> | a<k> | winner<r>), its
+    "<name>.logging-<baseline>.<ext>" fallback -- is a derived copy, not
     submission content (see AUX_FILES_RULE). Every version corpus --
     the pristine reference, the round bases, the judge targets, the pins and the
     published winners -- is defined by this same rule, so a pin can never
@@ -10835,7 +10836,7 @@ def corpus_source_overrides(sources: list) -> list:
         ks = set()
         if not src.is_dir():
             return ks
-        for p in sorted(src.rglob("*")):
+        for p in _iter_tree_files(src, follow_dir_links=True):
             if not p.is_file() or _is_aux_doc(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
@@ -17016,7 +17017,12 @@ def manifest_for_sources(sources: list) -> dict:
     for src, prefix, excluded in sources:
         if not src.is_dir():
             continue
-        for p in sorted(src.rglob("*")):
+        # follow_dir_links: a sandbox package may carry an evidence area
+        # (raw_data/, raw_figs/, human_review_feedback/) as a symlink to the
+        # root's canonical copy (see ensure_pristine_input). The digest a run
+        # records must see the SAME files the pin materializes, or pin_champion
+        # dies on its own "internal inconsistency" check.
+        for p in _iter_tree_files(src, follow_dir_links=True):
             if not p.is_file() or _is_aux_doc(p.name):
                 continue
             if p.name.strip().lower() in CORPORA_STRIP_BOOKKEEPING:
@@ -17060,7 +17066,7 @@ def corpus_content_set_fingerprint(sources: list) -> str:
     for i, (src, prefix, excluded) in enumerate(sources):
         if not src.is_dir():
             continue
-        for p in sorted(src.rglob("*")):
+        for p in _iter_tree_files(src, follow_dir_links=True):
             if not p.is_file() or _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
@@ -17105,7 +17111,7 @@ def _payload_files_of_dir(dirp: Path) -> list:
     out = []
     if not dirp.is_dir():
         return out
-    for p in sorted(dirp.rglob("*")):
+    for p in _iter_tree_files(dirp, follow_dir_links=True):
         if not p.is_file():
             continue
         rel = p.relative_to(dirp)
@@ -21271,7 +21277,7 @@ def _candidate_corpus_files(sb: Path, out_dir: str = REVISED_DIR) -> list:
     for d, is_package in ((sb / out_dir, True), (sb / CODE_DIR, False)):
         if not d.is_dir():
             continue
-        for p in sorted(d.rglob("*")):
+        for p in _iter_tree_files(d, follow_dir_links=True):
             if not p.is_file() or _is_aux_doc(p.name):
                 continue
             rel = p.relative_to(d).as_posix()
@@ -25372,6 +25378,23 @@ def _norm_check_id(raw) -> str:
     return cid
 
 
+def _frozen_check_id(raw) -> str:
+    """`_norm_check_id()` mapped onto the FROZEN vocabulary's spelling.
+
+    The frozen ids are zero-pad-free (`M1`..`M24` + `J1`..`J4`; see
+    JUDGE_COVERAGE_CHECKS),
+    while the defect-ledger dedup CLASS ids are explicitly padded (`M01`; see
+    dedup_class_id) and the CLI/prompt text cites `M01`/`M02` as "the normalized
+    check id". A judge that writes the padded spelling into its coverage map
+    must therefore be read as the same check -- failing a 20-40 minute session
+    for a missing `M1` when `M01` is present would be an id-spelling trap of the
+    same kind the FMT-*/Q1-Q12 mappings above exist to close.
+    """
+    cid = _norm_check_id(raw)
+    m = _NUMERIC_CHECK_RE.match(cid)
+    return f"M{int(m.group(1))}" if m else cid
+
+
 def judge_coverage_problems(comp: dict, where: str, strict: bool) -> tuple:
     """(errors, warnings) for one comparison's per-opponent check coverage.
 
@@ -25391,7 +25414,7 @@ def judge_coverage_problems(comp: dict, where: str, strict: bool) -> tuple:
         return out_e, out_w
     have, seen = {}, set()
     for raw_id, raw_val in checks.items():
-        cid = _norm_check_id(raw_id)
+        cid = _frozen_check_id(raw_id)
         if cid in seen:
             out_w.append(f"{where}.checks lists {cid!r} twice")
         seen.add(cid)
@@ -25495,7 +25518,7 @@ def judge_basis_problems(comp: dict, where: str, strict: bool) -> tuple:
             if len(norm[2].split()) > EVIDENCE_MAX_WORDS:
                 out_w.append(f"{where}.{side}[{k}].evidence is {len(norm[2].split())} words "
                              f"(schema: <={EVIDENCE_MAX_WORDS})")
-            cid = _norm_check_id(item.get("check")) if isinstance(item, dict) else ""
+            cid = _frozen_check_id(item.get("check")) if isinstance(item, dict) else ""
             if cid in LENGTH_GUARD_CHECKS and (norm[0] != "formatting" or norm[1] != "minor"):
                 emit(f"{prefix}{where}.{side}[{k}]: a length/caption row (`{cid}`) is a "
                      f"formatting-tier MINOR row -- length may enter a comparison by at most +-1 "
@@ -39750,8 +39773,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     ptrk = sub.add_parser("track", parents=[common],
                           help="write the per-version difference-tracking copies "
-                               "(<name>.tracking-original|previous.<ext>, or their "
-                               "logging-* fallbacks) and the persistent PDF renders")
+                               "(<name>.tracking-<baseline>.<ext>, or their "
+                               "logging-<baseline>.<ext> fallbacks) and the persistent "
+                               "PDF renders")
     ptrk.add_argument("--round", type=int, default=None, help="only this round (default: all)")
     ptrk.add_argument("--version", default="all",
                       help="one version id (a1/w1/a2/i1/...), a comma-separated list of them, "
@@ -39887,10 +39911,11 @@ def build_parser() -> argparse.ArgumentParser:
     psj.set_defaults(func=cmd_set_journal)
 
     psm = sub.add_parser("set-revision-mode", parents=[common],
-                         help="select the revision mode (none / init / option 1 transfer / "
+                         help="select the revision mode (continue / init / option 1 transfer / "
                               "2 resubmit / 3 major / 4 minor), or show the current one")
     psm.add_argument("mode", nargs="?", default=None, metavar="MODE",
-                     help="none (the historical workflow) | init (conform into the venue's own "
+                     help="continue (the pipeline's own review/revise rounds; the legacy "
+                          "spelling `none` is still accepted) | init (conform into the venue's own "
                           "Word template before round 1, then the pipeline's own rounds; no "
                           "journal feedback) | transfer (option 1: new journal, no response "
                           "letter) | resubmit (option 2: same journal, response letter) | "

@@ -825,8 +825,14 @@ client the converter uses, and pre-approves it for the non-interactive stage
 sessions.
 
 ```bash
+npm ci --prefix /path/to/repo/mcp-docx-compare    # Node >= 20; node_modules/ is gitignored
 codex mcp add docx-compare -- node /path/to/repo/mcp-docx-compare/index.js
 ```
+
+Both shipped MCP servers (`mcp-docx-compare/`, `mcp-docx-converter/`) need that
+`npm ci` step before they can start: `node_modules/` is never vendored, so a
+fresh clone that skips it fails with `Cannot find module
+'@modelcontextprotocol/server'`.
 
 ```bash
 python paper_pipeline.py track --root ./paper_rounds            # re-run tracking + PDFs

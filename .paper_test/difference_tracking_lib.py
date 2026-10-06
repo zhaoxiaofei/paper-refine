@@ -361,23 +361,34 @@ def test_tracking_pass_outputs():
           str([c.get("baseline_note") for c in by_version[(2, "a2")]["comparisons"]]))
     # file placement: beside the documents and mirrored under <root>/tracking/
     w1 = ctx.root / "runs/r1_w1/rewritten"
-    check("the copies sit beside the candidate documents",
+    check("the .docx copies sit beside the candidate documents",
           (w1 / "manuscript-a.tracking-original.docx").is_file()
-          and (w1 / "manuscript-a.tracking-a1.docx").is_file()
-          and (w1 / "main.tracking-original.tex").is_file()
-          and (w1 / "refs.tracking-a1.bib").is_file(),
+          and (w1 / "manuscript-a.tracking-a1.docx").is_file(),
           str(sorted(p.name for p in w1.iterdir())))
+    if shutil.which("latexdiff"):
+        check("the .tex/.bib copies sit beside the candidate documents",
+              (w1 / "main.tracking-original.tex").is_file()
+              and (w1 / "refs.tracking-a1.bib").is_file(),
+              str(sorted(p.name for p in w1.iterdir())))
+    else:
+        skip("the .tex/.bib copies sit beside the candidate documents",
+             "latexdiff is not on PATH: the pass writes the uniform .logging-* fallbacks")
     check("a1 is the raw input copy: its copies live under tracking/ only",
           not (ctx.root / "runs/r1_a1/base/manuscript-a.tracking-original.docx").exists()
           and (ctx.root / "tracking/r1_a1/original/manuscript-a.tracking-original.docx").is_file())
     win2 = ctx.root / "round2_winner"
-    check("the winner directory carries its own marked-up copies",
+    check("the winner directory carries its own marked-up .docx copies",
           (win2 / "manuscript-a.tracking-original.docx").is_file()
-          and (win2 / "manuscript-a.tracking-winner1.docx").is_file()
-          and (win2 / "main.tracking-winner1.tex").is_file())
-    check("the tracking tree mirrors the winners under their own key",
-          (ctx.root / "tracking/round2_winner/winner1/main.tracking-winner1.tex")
-          .is_file())
+          and (win2 / "manuscript-a.tracking-winner1.docx").is_file())
+    if shutil.which("latexdiff"):
+        check("the winner directory carries its own marked-up .tex copy",
+              (win2 / "main.tracking-winner1.tex").is_file())
+        check("the tracking tree mirrors the winners under their own key",
+              (ctx.root / "tracking/round2_winner/winner1/main.tracking-winner1.tex")
+              .is_file())
+    else:
+        skip("the winner directory carries its own marked-up .tex copy",
+             "latexdiff is not on PATH: the pass writes the uniform .logging-* fallbacks")
     check("the manifest and README are written",
           (ctx.root / "tracking/manifest.json").is_file()
           and (ctx.root / "tracking/README.md").is_file())
@@ -556,6 +567,11 @@ def test_identical_baselines_are_tracked_once():
     both produce a named copy, but the difference tool runs ONCE (the second
     copy is taken from the first, so a Word/COM round trip is not repeated)."""
     print()
+    if not shutil.which("latexdiff"):
+        skip("identical baselines are compared once",
+             "latexdiff is not on PATH: the digest-gated reuse needs a real tool result "
+             "(without it every pair writes its own .logging-* fallback)")
+        return
     print("== identical baselines (round-1 a1 == original) are compared once ==")
     tmp = scratch("paper_track_memo_")
     source = build_source(tmp)

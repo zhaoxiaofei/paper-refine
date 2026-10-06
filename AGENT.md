@@ -207,7 +207,7 @@ the profiles shipped next to the script → the built-in fallback inside
     same copies into every published `round<r>_winner/`. The baseline token
     NAMES WHAT THE COPY IS COMPARED AGAINST: `original` (the pre-conformed
     submission), `a1` (the round base), `w<k>`/`a<k>` (the version an
-    integration own `self/` member reworked) or `winner<r>` (a published round
+    integration's own `self/` member reworked) or `winner<r>` (a published round
     winner) -- there is no generic "previous" token. `.docx` pairs go through
     the `docx-compare` MCP tool (Word's own `CompareDocuments`) FIRST, then the
     redline chain; `.tex`/`.bib` pairs go through `latexdiff`. The LaTeX/DOCX

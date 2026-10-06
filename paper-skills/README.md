@@ -1,6 +1,6 @@
 # paper-review + paper-revise — Codex Skills for Manuscript Submissions (any venue or journal)
 
-**Package version:** 0.28 (whitespace/typography artifacts, template-prescribed blanks, embedded-image geometry; see CHANGELOG.md) — distributed as the directory
+**Package version:** 0.30 (tracking copies are named for their baseline; no back-compat aliases; see CHANGELOG.md) — distributed as the directory
 `paper-skills-v03`. The version lives here, not in the skill frontmatter. If more
 than one copy of this package is installed, check this line and retire the
 older copies (`paper-skills-v01/`, `paper-skills-v02/`): Codex registers skills by

@@ -815,6 +815,14 @@ all_unable = {c: "unable -- the corpus is image-only" for c in np.JUDGE_COVERAGE
 e_cov3, w_cov3 = np.judge_coverage_problems(gcomp(0, "none", checks=all_unable), "c0", True)
 check("F4 an all-`unable` map is reported as a non-judgment",
       not e_cov3 and any("judged nothing" in x for x in w_cov3), str(w_cov3[:1])[:160])
+padded = {c: "clean -- unit fixture" for c in np.JUDGE_COVERAGE_CHECKS}
+padded["M01"] = padded.pop("M1")
+e_cov4, w_cov4 = np.judge_coverage_problems(gcomp(0, "none", checks=padded), "c0", True)
+check("F4 the zero-padded M01 spelling is accepted as the frozen M1",
+      not e_cov4 and not [w for w in w_cov4 if "not a frozen check id" in w],
+      f"{e_cov4} {w_cov4}")
+check("F4 the dedup class id still normalizes to the padded form",
+      np.dedup_class_id("M1") == "M01" == np.dedup_class_id("M01"))
 
 # F5: the review-path classes with no coverage row get a scoring bridge.
 check("F5 the judge prompt bridges M25-M29/J5 into the frozen ids",

@@ -13,7 +13,19 @@ content digests of every PAYLOAD file in DIR. Payload = every file except:
     *.logging-<token>.<ext> fallbacks, where <token> names the baseline the copy
     was compared against (`original`, a version id such as a1/w2/a3, or a
     published round winner such as winner1);
+  * (for the naming evidence only) any name inside a READ-ONLY evidence area --
+    raw_data/, legacy raw_figs/, human_review_feedback/: those areas keep the
+    ORIGINAL file names, so a 7-hex token in one of them belongs to the run
+    that produced the source corpus, never to this package (keep in step with
+    paper_pipeline.revision_token_for_dir, whose `hex_tokens`/`tokens_seen`
+    apply the same rule while the token VALUE still hashes every payload file);
   * the process scratch: work/ at the top level.
+
+The walk descends into symlinked DIRECTORIES (see `tree_files`), exactly like
+paper_pipeline._iter_tree_files(follow_dir_links=True): a sandbox package
+carries its evidence areas as relative symlinks to the root's canonical copy,
+so the payload -- and therefore the token -- must be identical whether an
+evidence area is a real directory or a link.
 
 File NAMES do not enter the hash, and existing version tokens inside file
 contents are normalized to "<VERSION>" before hashing. That makes the token
@@ -37,6 +49,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -57,6 +70,10 @@ REPORTS = {"changelog.md", "manual_steps.md", "revision_report.md",
 AUX_NAME_RE = re.compile(r"\.(?:tracking|logging)-(?:original|winner[0-9]+|[awi][0-9]+)"
                          r"\.(?:docx|tex|bib)$", re.IGNORECASE)
 
+# Keep in step with paper_pipeline.EVIDENCE_DIRNAMES: the READ-ONLY input areas
+# whose file names are never this package's naming evidence.
+EVIDENCE_DIRS = {"raw_data", "raw_figs", "human_review_feedback"}
+
 # "-a" / "_v2" / "_V2" / "-4f3a9c1" at the very end of a stem (the version slot).
 TOKEN_RE = re.compile(r"^(?P<base>.*?)[-_](?P<tok>[0-9a-f]{7}|[A-Za-z]|[vV]\d+)$")
 HEX7_RE = re.compile(r"[0-9a-f]{7}")
@@ -72,10 +89,44 @@ def is_payload(p: Path, root: Path) -> bool:
     return True
 
 
+def tree_files(root: Path) -> list:
+    """Every file under `root`, descending into symlinked DIRECTORIES.
+
+    Keep in step with paper_pipeline._iter_tree_files(follow_dir_links=True): a
+    sandbox package carries its READ-ONLY evidence areas (raw_data/, raw_figs/,
+    human_review_feedback/) as symlinks to the root's canonical copy (see
+    ensure_pristine_input), and the payload must see the same files whether the
+    area is linked or copied. An ancestor-inode set keeps a link cycle finite.
+    """
+    if not root.is_dir():
+        return []
+    out = []
+
+    def dir_key(p: Path):
+        try:
+            st = os.stat(p)
+        except OSError:
+            return None
+        return (st.st_dev, st.st_ino)
+
+    def walk(d: Path, ancestors: frozenset) -> None:
+        for p in sorted(d.iterdir()):
+            if p.is_dir():
+                key = dir_key(p)
+                if key is None or key in ancestors:
+                    continue
+                walk(p, ancestors | {key})
+            elif p.is_file():
+                out.append(p)
+
+    walk(root, frozenset())
+    return out
+
+
 def payload_files(root: Path) -> list:
     if not root.is_dir():
         return []
-    return sorted(p for p in root.rglob("*") if p.is_file() and is_payload(p, root))
+    return sorted(p for p in tree_files(root) if p.is_file() and is_payload(p, root))
 
 
 def filename_token(name: str):
@@ -83,6 +134,12 @@ def filename_token(name: str):
     stem = Path(name).stem
     m = TOKEN_RE.match(stem)
     return m.group("tok") if m else None
+
+
+def is_evidence_rel(rel: str) -> bool:
+    """True when a package-relative path lives inside a READ-ONLY evidence area."""
+    top = str(rel or "").replace("\\", "/").lstrip("/").split("/", 1)[0]
+    return top in EVIDENCE_DIRS
 
 
 def content_token_free(data: bytes, tokens) -> bytes:
@@ -114,7 +171,8 @@ def revision_token(root: Path) -> dict:
     if not root.is_dir():
         raise SystemExit(f"error: not a directory: {root}")
     files = payload_files(root)
-    tokens = [t for t in (filename_token(p.name) for p in files) if t]
+    named = [(p.relative_to(root).as_posix(), filename_token(p.name)) for p in files]
+    tokens = [t for _rel, t in named if t]
     digs = []
     skipped = []
     for p in files:
@@ -132,7 +190,11 @@ def revision_token(root: Path) -> dict:
         return {"token": "", "files": 0, "tokens_seen": [],
                 "consistent": False, "notes": ["no payload file found"]}
     token = hashlib.sha256("\n".join(sorted(digs)).encode("utf-8")).hexdigest()[:7]
-    hex_tokens = sorted({t for t in tokens if HEX7_RE.fullmatch(t)})
+    # A name inside a READ-ONLY evidence area is NOT this package's naming
+    # evidence (its token belongs to the corpus the evidence came from); it
+    # still takes part in the content hash above, exactly like the pipeline.
+    hex_tokens = sorted({t for rel, t in named
+                         if t and HEX7_RE.fullmatch(t) and not is_evidence_rel(rel)})
     consistent = bool(hex_tokens) and all(t == token for t in hex_tokens)
     notes = []
     if skipped:
@@ -143,7 +205,8 @@ def revision_token(root: Path) -> dict:
     elif not consistent:
         notes.append(f"filename token(s) {hex_tokens} do not match the content-derived token "
                      f"{token}")
-    return {"token": token, "files": len(files), "tokens_seen": sorted(set(tokens)),
+    return {"token": token, "files": len(files),
+            "tokens_seen": sorted({t for rel, t in named if t and not is_evidence_rel(rel)}),
             "hex_tokens": hex_tokens, "consistent": consistent, "notes": notes}
 
 

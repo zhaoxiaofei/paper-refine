@@ -312,31 +312,51 @@ def test_docxcompare_script():
                        capture_output=True, text=True)
     check("a non-.docx input -> exit 2", p.returncode == 2 and ".docx" in p.stderr,
           f"rc={p.returncode} {p.stderr[:80]}")
-    p = subprocess.run([str(script), str(docx), str(docx2), str(docx)],
-                       capture_output=True, text=True)
-    check("an output that IS an input is refused (the input must survive)",
-          p.returncode == 2 and "refusing to overwrite an input" in p.stderr
-          and docx.is_file(), f"rc={p.returncode} {p.stderr[:120]}")
+    # The remaining checks exercise the Word path, which needs a Windows shell
+    # (WSL/Git Bash). On a plain Linux box docxcompare.sh stops at its own
+    # "powershell.exe not found" guard first, so SKIP them there: this suite
+    # must still run (and exit 0) with nothing but Python 3, like every other
+    # suite -- .paper_test/README.md promises exactly that.
+    word_shell = bool(shutil.which("powershell.exe")) and bool(
+        shutil.which("wslpath") or shutil.which("cygpath"))
+    if word_shell:
+        p = subprocess.run([str(script), str(docx), str(docx2), str(docx)],
+                           capture_output=True, text=True)
+        check("an output that IS an input is refused (the input must survive)",
+              p.returncode == 2 and "refusing to overwrite an input" in p.stderr
+              and docx.is_file(), f"rc={p.returncode} {p.stderr[:120]}")
+    else:
+        skip("an output that IS an input is refused (the input must survive)",
+             "no powershell.exe + wslpath/cygpath here: docxcompare.sh refuses to run "
+             "without a Windows Word shell")
     # a PowerShell that writes nothing must never look like success, and a stale
     # output must not survive it
     fake_powershell(tmp, "none")
     out = tmp / "redline.docx"
     out.write_bytes(b"PK stale")
     env = dict(os.environ, PATH=f"{tmp}:{os.environ.get('PATH', '')}")
-    p = subprocess.run([str(script), str(docx), str(docx2), str(out)],
-                       capture_output=True, text=True, env=env)
-    check("a converter that writes nothing FAILS and leaves no stale output",
-          p.returncode != 0 and not out.exists(), f"rc={p.returncode} {p.stderr[:120]}")
+    if word_shell:
+        p = subprocess.run([str(script), str(docx), str(docx2), str(out)],
+                           capture_output=True, text=True, env=env)
+        check("a converter that writes nothing FAILS and leaves no stale output",
+              p.returncode != 0 and not out.exists(), f"rc={p.returncode} {p.stderr[:120]}")
+    else:
+        skip("a converter that writes nothing FAILS and leaves no stale output",
+             "no powershell.exe + wslpath/cygpath here: the fake Word shell cannot run")
     # a PowerShell that writes the file makes the script succeed
     fake_powershell(tmp, "write")
     quoted = tmp / "it's quoted"
     quoted.mkdir()
     out2 = quoted / "redline.docx"
-    p = subprocess.run([str(script), str(docx), str(docx2), str(out2)],
-                       capture_output=True, text=True, env=env)
-    check("a written comparison is reported as success (quote-safe path)",
-          p.returncode == 0 and out2.is_file() and "Redline written" in p.stdout,
-          f"rc={p.returncode} {p.stdout[-120:]} {p.stderr[-120:]}")
+    if word_shell:
+        p = subprocess.run([str(script), str(docx), str(docx2), str(out2)],
+                           capture_output=True, text=True, env=env)
+        check("a written comparison is reported as success (quote-safe path)",
+              p.returncode == 0 and out2.is_file() and "Redline written" in p.stdout,
+              f"rc={p.returncode} {p.stdout[-120:]} {p.stderr[-120:]}")
+    else:
+        skip("a written comparison is reported as success (quote-safe path)",
+             "no powershell.exe + wslpath/cygpath here: the fake Word shell cannot run")
 
 
 # =====================================================================

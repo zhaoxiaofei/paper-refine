@@ -171,6 +171,33 @@ def test_tamper_detection_and_enforcement(tmp: Path, root: Path, ctx):
     files = dict(nb.corpus_dir_view_files(pkg))
     check("corpus walks follow the linked evidence area",
           any(r.endswith("table.csv") for r in files), str(files))
+    # ... and so must the walks that define a version's IDENTITY. A package
+    # that carries the link onward must produce the SAME digest whether it is
+    # recorded from the package or recomputed from the materialized pin -- the
+    # regression: manifest_for_sources() used rglob, so the recorded digest
+    # omitted raw_data/ and pin_champion() died on "internal inconsistency".
+    recorded = nb.manifest_digest(nb.manifest_for_sources([(pkg, "", ())]))
+    recorded_files = nb.manifest_for_sources([(pkg, "", ())]).get("files") or {}
+    check("the corpus identity manifest follows the linked evidence area",
+          recorded_files.get("raw_data/table.csv") is not None, str(sorted(recorded_files)))
+    check("the revision token counts the linked evidence area",
+          nb.revision_token_for_dir(pkg)["files"] == 2,
+          str(nb.revision_token_for_dir(pkg)))
+    cand_sb = tmp / "cand_sb"
+    (cand_sb / "revised").mkdir(parents=True)
+    os.symlink(os.path.relpath(ctx.pristine / "raw_data", cand_sb / "revised"),
+               cand_sb / "revised" / "raw_data")
+    check("the candidate-file scan sees the linked evidence area",
+          any(key.startswith("raw_data/") for key, _p in
+              nb._candidate_corpus_files(cand_sb, out_dir="revised")),
+          str(nb._candidate_corpus_files(cand_sb, out_dir="revised")))
+    materialized = tmp / "pkg_materialized"
+    nb.copy_into(pkg, materialized, skip_aux=True, strip_bookkeeping=True)
+    check("the materialized corpus hashes exactly like the recorded manifest",
+          nb.manifest_digest(nb.corpus_dir_manifest(materialized)) == recorded
+          and "raw_data/table.csv" in (nb.corpus_dir_manifest(materialized).get("files") or {}),
+          f"{recorded[:12]} vs "
+          f"{nb.manifest_digest(nb.corpus_dir_manifest(materialized))[:12]}")
 
 
 def test_prune_keeps_the_store(tmp: Path, root: Path, ctx):

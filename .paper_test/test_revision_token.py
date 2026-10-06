@@ -182,6 +182,51 @@ def test_matching_and_recording():
           warns2 and "token mismatch" in warns2[0], str(warns2))
 
 
+def test_evidence_area_names_are_not_naming_evidence():
+    print()
+    print("== RT6: a 7-hex name inside a READ-ONLY evidence area is not naming evidence ==")
+    tmp = make_package(scratch("paper_rtok_ev_"))
+    (tmp / "raw_data").mkdir()
+    (tmp / "raw_data" / "results-deadbee.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+    script_info = json.loads(run_script(tmp, "--json").stdout)
+    pipe_info = nb.revision_token_for_dir(tmp)
+    check("RT6 both implementations compute the same token",
+          script_info["token"] == pipe_info["token"],
+          f"{script_info['token']} vs {pipe_info['token']}")
+    check("RT6 both count the evidence file in the content hash",
+          script_info["files"] == pipe_info["files"] == 5,
+          f"{script_info['files']} vs {pipe_info['files']}")
+    check("RT6 both treat the evidence-area name as NO naming evidence",
+          script_info["hex_tokens"] == pipe_info["hex_tokens"] == []
+          and script_info["tokens_seen"] == pipe_info["tokens_seen"] == ["a"]
+          and "deadbee" not in pipe_info["tokens_seen"]
+          and script_info["consistent"] == pipe_info["consistent"] is False,
+          f"{script_info} vs {pipe_info}")
+    # ...while a token in a WRITABLE path is still naming evidence, in both.
+    (tmp / "ms-a.md").rename(tmp / "ms-deadbee.md")
+    script_info = json.loads(run_script(tmp, "--json").stdout)
+    pipe_info = nb.revision_token_for_dir(tmp)
+    check("RT6 a 7-hex name OUTSIDE the evidence area is still naming evidence",
+          script_info["hex_tokens"] == pipe_info["hex_tokens"] == ["deadbee"]
+          and script_info["tokens_seen"] == pipe_info["tokens_seen"] == ["a", "deadbee"]
+          and script_info["consistent"] is False and pipe_info["consistent"] is False,
+          f"{script_info} vs {pipe_info}")
+    # ...and the SAME evidence area carried as the RELATIVE SYMLINK every
+    # sandbox package really has (see ensure_pristine_input): the pipeline's
+    # payload walk follows it, so the shipped tool must follow it too, or the
+    # token it prints for a real sandbox package diverges from the pipeline's.
+    real = tmp.parent / (tmp.name + "_raw_data_real")     # outside the package
+    (tmp / "raw_data").rename(real)
+    os.symlink(os.path.relpath(real, tmp), tmp / "raw_data")
+    linked_script = json.loads(run_script(tmp, "--json").stdout)
+    linked_pipe = nb.revision_token_for_dir(tmp)
+    check("RT6 a LINKED evidence area hashes like the real one, in both",
+          linked_script["token"] == linked_pipe["token"] == script_info["token"]
+          and linked_script["files"] == linked_pipe["files"] == 5
+          and linked_script["hex_tokens"] == linked_pipe["hex_tokens"] == ["deadbee"],
+          f"{linked_script} vs {linked_pipe}")
+
+
 def test_prompts():
     print()
     print("== RT5: the prompts state the content-hash rule ==")
@@ -207,7 +252,8 @@ def test_prompts():
 
 def main() -> int:
     for fn in (test_agreement_and_identity, test_stability_and_verification,
-               test_payload_exclusions, test_matching_and_recording, test_prompts):
+               test_payload_exclusions, test_matching_and_recording,
+               test_evidence_area_names_are_not_naming_evidence, test_prompts):
         try:
             fn()
         except Exception as e:                                   # noqa: BLE001

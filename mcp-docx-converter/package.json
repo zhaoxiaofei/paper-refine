@@ -13,7 +13,7 @@
     "@modelcontextprotocol/server": "^2.0.0",
     "zod": "^4.6.5"
   },
-  "description": "",
+  "description": "MCP server wrapping docx2pdf.sh: Word-fidelity DOCX to PDF conversion (Word COM through PowerShell, with the documented converter fallbacks).",
   "type": "module",
   "engines": {
     "node": ">=20"
