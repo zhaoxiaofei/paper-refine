@@ -273,7 +273,7 @@ RULES CARRIED INTO EVERY PROMPT (AND WHERE THEY COME FROM)
       (`author_placeholders`), and the count is a diagnostic that ranks nothing.
     * AUXILIARY FILES -- the difference-tracking copies ARE NOT SUBMISSION
       CONTENT: every "<name>.tracking-original|previous|prev-winner.<ext>" /
-      "<name>.logging-original.<ext>" / "<name>.log-previous.<ext>" /
+      "<name>.logging-original.<ext>" / "<name>.logging-previous.<ext>" /
       "<name>.logging-prev-winner.<ext>" (and the two pre-rename spellings
       "*.tracked.docx" / "*.before-after.docx") is excluded from every
       judged/pinned corpus rule (corpus_manifest/build_corpus_dir), so the
@@ -421,7 +421,7 @@ CODE-SIDE CHECKS (in addition to what the prompts ask the agents to do)
     * auxiliary files     the difference-tracking copies
                           ("*.tracking-original|previous|prev-winner.<ext>",
                           their "*.logging-original.<ext>" /
-                          "*.log-previous.<ext>" / "*.logging-prev-winner.<ext>"
+                          "*.logging-previous.<ext>" / "*.logging-prev-winner.<ext>"
                           fallbacks, and the pre-rename *.tracked.docx/
                           *.before-after.docx spellings) are left out of every
                           judged/pinned corpus (the pipeline writes its own
@@ -519,7 +519,7 @@ CODE-SIDE CHECKS (in addition to what the prompts ask the agents to do)
                           "<name>.tracking-previous.<ext>" for the comparison
                           against the version it was derived from, or the
                           "<name>.logging-original.<ext>" /
-                          "<name>.log-previous.<ext>" fallback log when the tool
+                          "<name>.logging-previous.<ext>" fallback log when the tool
                           failed; every PUBLISHED winner gets the same against
                           the original and, from round 2 on, against the previous
                           winner ("<name>.tracking-prev-winner.<ext>" /
@@ -759,7 +759,7 @@ DIRECTORY LAYOUT CREATED UNDER --root
                                     "<name>.tracking-<baseline>.<ext>" (real
                                     Word/latexdiff copies) or the
                                     "<name>.logging-original.<ext>" /
-                                    "<name>.log-previous.<ext>" fallback logs,
+                                    "<name>.logging-previous.<ext>" fallback logs,
                                     plus manifest.json and README.md. The same
                                     copies also sit BESIDE the candidate
                                     documents in the run sandbox.
@@ -4373,7 +4373,7 @@ CAPTION_SUSPECT_RE = re.compile(
 #                                     of "<name>.<ext>" against its PREVIOUS
 #                                     version (the E5 auxiliary; for .docx the
 #                                     Word-native compare is the first choice)
-#   "<name>.log-previous.<ext>"       the E5 fallback marker copy, used when the
+#   "<name>.logging-previous.<ext>"   the E5 fallback marker copy, used when the
 #                                     real tracked copy could not be produced
 #   "<name>.tracking-original.<ext>"  the ORCHESTRATOR's real tracked copy
 #                                     against the pristine original
@@ -4396,10 +4396,10 @@ EDITABLE_DOC_EXTS = (".doc", ".docx", ".tex", ".ltx", ".bib", ".md", ".txt", ".x
 # without changing any version's identity.
 TRACKING_BASELINES = ("original", "previous", "prev-winner")
 TRACKING_EXTS = (".docx", ".tex", ".bib")
-# The fallback spelling of each baseline (the "logging" family). `prev-winner`
-# uses the long spelling: its baseline is the previous ROUND's published winner,
-# not the version a single document was edited from.
-TRACKING_FALLBACK_PREFIX = {"original": "logging-original", "previous": "log-previous",
+# The fallback spelling of each baseline: ONE uniform `logging-*` family, so the
+# real copies (`tracking-*`) and their fallbacks (`logging-*`) differ by exactly
+# one token and the verb form is the same everywhere.
+TRACKING_FALLBACK_PREFIX = {"original": "logging-original", "previous": "logging-previous",
                             "prev-winner": "logging-prev-winner"}
 TRACKING_AUX_SUFFIXES = tuple(
     f".tracking-{base}{ext}" for base in TRACKING_BASELINES for ext in TRACKING_EXTS) + \
@@ -4408,7 +4408,11 @@ TRACKING_AUX_SUFFIXES = tuple(
 # The pre-rename spellings stay recognized: a package an older skill (or an
 # older pipeline) wrote must keep every one of its guarantees -- they are
 # auxiliaries, never submission content. Nothing writes them any more.
-LEGACY_AUXILIARY_DOC_SUFFIXES = (".tracked.docx", ".before-after.docx")
+# `.log-previous.*` is the same carve-out for the SHORT-LIVED spelling of the
+# fallback (the family is `logging-*` since 2026-10-07): a root created in
+# between must not see its own fallback copies become submission content.
+LEGACY_AUXILIARY_DOC_SUFFIXES = (".tracked.docx", ".before-after.docx") + tuple(
+    f".log-previous{ext}" for ext in TRACKING_EXTS)
 AUXILIARY_DOC_SUFFIXES = TRACKING_AUX_SUFFIXES + LEGACY_AUXILIARY_DOC_SUFFIXES
 # Trailing version token on a basename stem: the CURRENT content-hash token
 # ("-4f3a9c1"/"_4f3a9c1", 7 lowercase hex characters) or the LEGACY version
@@ -6446,7 +6450,7 @@ def apply_hierarchy_reconcile(text: str, where: str) -> str:
 # hygiene/completeness defect of the very version that complied), and the
 # difference-tracking auxiliaries -- the current
 # "*.tracking-original|previous.<ext>" / "*.logging-original.<ext>" /
-# "*.log-previous.<ext>" family and the pre-rename "*.tracked.docx" spelling --
+# "*.logging-previous.<ext>" family and the pre-rename "*.tracked.docx" spelling --
 # (which the M6 sweep reads as "residual tracked changes" and a judge could read
 # as a duplicate sibling, and which the pipeline itself writes next to every
 # tracked document).
@@ -6871,13 +6875,13 @@ PLACEHOLDER_RULE_JUDGE = """PLACEHOLDER TEXT IN A PACKAGE (handle exactly this w
 
 AUX_FILES_RULE = """PIPELINE AUXILIARY FILES — "<name>.tracking-original.<ext>",
 "<name>.tracking-previous.<ext>", "<name>.tracking-prev-winner.<ext>", their fallbacks
-"<name>.logging-original.<ext>", "<name>.log-previous.<ext>" and
+"<name>.logging-original.<ext>", "<name>.logging-previous.<ext>" and
 "<name>.logging-prev-winner.<ext>", and the pre-rename "<name>.tracked.docx" /
 "<name>.before-after.docx" spellings:
   * Every one of those names is an AUXILIARY difference-tracking copy of "<name>.<ext>" written by
     the document-editing tooling or by the orchestrator, not a document of its own. For .docx the
     real copy is Word tracked changes between the document and its baseline; for .tex/.bib it is a
-    latexdiff copy; the matching ".logging-*" / ".log-*" file is the documented fallback log used
+    latexdiff copy; the matching ".logging-*" file is the documented fallback log used
     when the real tracked copy could not be produced reliably. "_previous_" means the baseline is
     the version this one was derived from, "_original_" means the pristine submission, and
     "_prev-winner_" belongs to a published winner compared with the winner published before it.
@@ -10388,7 +10392,7 @@ def corpus_tree_manifest(dirp: Path) -> dict:
     """Manifest of a VERSION CORPUS: the read-only auxiliaries are left out.
 
     A difference-tracking auxiliary -- "<name>.tracking-original|previous.<ext>",
-    its "<name>.logging-original.<ext>"/"<name>.log-previous.<ext>" fallback, or
+    its "<name>.logging-original.<ext>"/"<name>.logging-previous.<ext>" fallback, or
     the pre-rename "<name>.tracked.docx"/"<name>.before-after.docx" spelling --
     is a derived copy, not submission content (see AUX_FILES_RULE). Every version
     corpus --
@@ -13194,7 +13198,7 @@ def template_package_files(src: Path) -> list:
 
     `work/` is the pipeline's own scratch and the
     `*.tracking-original|previous.<ext>` / `*.logging-original.<ext>` /
-    `*.log-previous.<ext>` auxiliaries (and the pre-rename spellings) are
+    `*.logging-previous.<ext>` auxiliaries (and the pre-rename spellings) are
     difference-tracking copies -- neither belongs to a submission, so the rebuilt
     package leaves them out (the same rule the corpus builder and the judges
     apply). Everything else -- figures, tables, data,
@@ -14793,7 +14797,7 @@ def tracking_aux_suffix(baseline: str, ext: str, fallback: bool = False) -> str:
 
     `original` + `.docx` -> ".tracking-original.docx" (or ".logging-original.docx"
     when `fallback`); `previous` + `.tex` -> ".tracking-previous.tex" (or
-    ".log-previous.tex"); `prev-winner` + `.bib` -> ".tracking-prev-winner.bib"
+    ".logging-previous.tex"); `prev-winner` + `.bib` -> ".tracking-prev-winner.bib"
     (or ".logging-prev-winner.bib"). This is the ONLY place the spellings are
     built, so a reader and a writer can never drift apart.
     """
@@ -15321,7 +15325,7 @@ def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
     process scratch, e.g. revised/work/, out of its submission corpus).
     skip_aux: leave out the difference-tracking auxiliaries
     ("*.tracking-original|previous.<ext>", "*.logging-original.<ext>",
-    "*.log-previous.<ext>" and the pre-rename spellings) -- set by every call that
+    "*.logging-previous.<ext>" and the pre-rename spellings) -- set by every call that
     materializes a VERSION CORPUS (base, judge target, pin, published winner), so
     the corpus the judges score is exactly the corpus that is pinned. A raw
     sandbox copy (a read-only input) keeps every file.
@@ -30649,7 +30653,7 @@ def cmd_setup(args) -> None:
              if zotero != "off" else ""))
     print(f"[setup] corpus rule:             the "
           f"\"*.tracking-original|previous|prev-winner.<ext>\" / \"*.logging-original.<ext>\" / "
-          f"\"*.log-previous.<ext>\" / \"*.logging-prev-winner.<ext>\" auxiliaries (and the "
+          f"\"*.logging-previous.<ext>\" / \"*.logging-prev-winner.<ext>\" auxiliaries (and the "
           f"pre-rename *.tracked.docx/*.before-after.docx spellings) are excluded from every "
           f"judged/pinned corpus (the pipeline writes its own copies under {REDLINE_DIRNAME}/, "
           f"{TRACKING_DIRNAME}/ and {PDF_DIRNAME}/)")
@@ -37623,7 +37627,7 @@ def _cmd_redline_locked(ctx: Ctx, args) -> None:
 #     <name>.tracking-original.<ext>   real tracked copy vs the pristine original
 #     <name>.logging-original.<ext>    its fallback log when the tool failed
 #     <name>.tracking-previous.<ext>   real tracked copy vs the previous version
-#     <name>.log-previous.<ext>        its fallback log when the tool failed
+#     <name>.logging-previous.<ext>        its fallback log when the tool failed
 #     (.ext in .docx / .tex / .bib)
 #
 # Every PUBLISHED winner (`round<r>_winner/`) is tracked in place too: against
@@ -37810,7 +37814,7 @@ def _before_after_lines(base: Path, cand: Path) -> list:
 
 def write_docx_logging_fallback(base: Path, cand: Path, out: Path, baseline: str,
                                 reason: str) -> dict:
-    """The `.logging-*` / `.log-*` fallback for a `.docx` pair (never raises).
+    """The `.logging-*` fallback for a `.docx` pair (never raises).
 
     When the revised copy is readable the fallback is a COPY of it whose changed
     paragraphs carry bracketed `[BEFORE: ...]` / `[AFTER: ...]` markers plus a
@@ -37886,7 +37890,7 @@ def write_docx_logging_fallback(base: Path, cand: Path, out: Path, baseline: str
 
 def write_text_logging_fallback(base: Path, cand: Path, out: Path, baseline: str,
                                 reason: str) -> dict:
-    """The `.logging-*` / `.log-*` fallback for a `.tex`/`.bib` pair (never raises).
+    """The `.logging-*` fallback for a `.tex`/`.bib` pair (never raises).
 
     Every emitted line is commented out, so the file is inert if a build tool
     picks it up; the content is a unified before/after diff the reader can
@@ -38042,7 +38046,7 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
             "candidate document and its baseline: real Word tracked changes for .docx (the "
             "docx-compare MCP tool / redline chain), a latexdiff copy for .tex/.bib.",
             "When the difference tool failed, the sibling <name>.logging-original.<ext>, "
-            "<name>.log-previous.<ext> or <name>.logging-prev-winner.<ext> carries a readable "
+            "<name>.logging-previous.<ext> or <name>.logging-prev-winner.<ext> carries a readable "
             "before/after log instead.",
             "Every copy here is an AUXILIARY: it is excluded from every judged/pinned corpus, "
             "fingerprint and revision token, and the pass starts no agent session.",
@@ -38269,7 +38273,7 @@ def tracking_readme(manifest: dict) -> str:
          "| `<name>.tracking-original.ext` | real tracked copy vs the pristine original |",
          "| `<name>.logging-original.ext` | the fallback log when that comparison failed |",
          "| `<name>.tracking-previous.ext` | real tracked copy vs the previous version |",
-         "| `<name>.log-previous.ext` | the fallback log when that comparison failed |",
+         "| `<name>.logging-previous.ext` | the fallback log when that comparison failed |",
          "| `<name>.tracking-prev-winner.ext` | winner's real tracked copy vs the previous "
          "round's winner |",
          "| `<name>.logging-prev-winner.ext` | the fallback log when that comparison failed |", "",
@@ -39219,7 +39223,7 @@ USAGE_EXAMPLES = """usage:
           (latexdiff), against the pre-conformed original AND the version each
           arm was derived from, plus every published winner against the original
           and the previous round's winner. A failed compare writes the readable
-          <name>.logging-* / <name>.log-* fallback instead, never a fake tracked
+          <name>.logging-* fallback instead, never a fake tracked
           copy. The same run compiles/converts the versions to PDF under
           <root>/pdfs/ (latexmk; the docx-converter chain for DOCX). Both passes
           start NO agent session and cannot change a corpus, a pin or a decision;

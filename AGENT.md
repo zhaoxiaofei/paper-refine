@@ -202,8 +202,10 @@ the profiles shipped next to the script → the built-in fallback inside
 14. **Difference tracking and the PDF renders are AUXILIARY, CODE-ONLY passes.**
     After each round, `round_tracking()` (never fatal, started by `run` unless
     `--no-track`) writes the `<name>.tracking-original|previous|prev-winner.<ext>`
-    family (or the `logging-original` / `log-previous` / `logging-prev-winner`
-    fallback log when the tool failed) beside the candidate documents, mirrors it
+    family (or the `logging-original` / `logging-previous` / `logging-prev-winner`
+    fallback log when the tool failed -- one uniform `logging-*` family, with the
+    short-lived `log-previous.<ext>` spelling recognized only as a legacy
+    auxiliary) beside the candidate documents, mirrors it
     under `<root>/tracking/`, and writes the same family into every published
     `round<r>_winner/` (original + previous winner). `.docx` pairs go through the
     `docx-compare` MCP tool (Word's own `CompareDocuments`) FIRST, then the

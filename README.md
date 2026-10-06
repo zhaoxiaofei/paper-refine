@@ -795,9 +795,14 @@ documents (and mirrored under `<root>/tracking/r<R>_<version>/`, with
 | `<name>.tracking-original.ext` | real tracked copy against the pre-conformed original (`non_revised/`, the copy `setup --source` made) |
 | `<name>.logging-original.ext` | the readable before/after log written when that comparison FAILED (never a file that only looks like tracked changes) |
 | `<name>.tracking-previous.ext` | real tracked copy against the version this one was derived from: the round base for a rewrite (pre-rewritten) and for a revise (pre-reviewed), the integration's own `self/` member for an integrated candidate |
-| `<name>.log-previous.ext` | that comparison's fallback log |
+| `<name>.logging-previous.ext` | that comparison's fallback log |
 | `<name>.tracking-prev-winner.ext` | a published `round<r>_winner/` tracked against `round<r-1>_winner/` (r > 1) |
 | `<name>.logging-prev-winner.ext` | that comparison's fallback log |
+
+The fallback family is uniformly `logging-*` (same verb form as `tracking-*`).
+The short-lived `log-previous.<ext>` spelling from the first cut of this feature
+is still recognized as an auxiliary -- nothing writes it any more -- so a root
+created in between keeps a stable corpus identity.
 
 A `.docx` pair is compared by **Word's own engine first**: the `docx-compare`
 MCP tool (`compare_docx`) drives `docxcompare.sh` -> PowerShell ->
@@ -1500,7 +1505,7 @@ closed by construction:
 | file names / labels | every view is a salted per-view permutation of `d01/`, `f0001<ext>` placeholders, so the same document has a different name in `target/`, in each `field/<label>/` and in `original/`; the label → version map lives only in the run record |
 | run ids | `judge_<token>_j<k>` is an opaque token derived from (round, target, salt): no round prefix, no arm name, not recomputable without the root secret |
 | timestamps / modes | one mtime and one mode for the whole session, identical across all its views (nothing to order the packages by) |
-| auxiliary files | difference-tracking auxiliaries (`*.tracking-original.*`, `*.tracking-previous.*`, `*.tracking-prev-winner.*`, their `logging-original`/`log-previous`/`logging-prev-winner` fallbacks, and the pre-rename `*.tracked.docx`, `*.before-after.docx`), the pipeline's bookkeeping/report files (`CHANGELOG.md`, `MANUAL_STEPS.md`, `REVISION_REPORT.md`, `revision_report.json`, `DIFF_LEDGER.md`, `VISUAL_CHECK.md`), the `work/` scratch and Word's `~$name.docx` owner file never reach a view |
+| auxiliary files | difference-tracking auxiliaries (`*.tracking-original.*`, `*.tracking-previous.*`, `*.tracking-prev-winner.*`, their uniform `logging-original`/`logging-previous`/`logging-prev-winner` fallbacks, the short-lived `*.log-previous.*`, and the pre-rename `*.tracked.docx`, `*.before-after.docx`), the pipeline's bookkeeping/report files (`CHANGELOG.md`, `MANUAL_STEPS.md`, `REVISION_REPORT.md`, `revision_report.json`, `DIFF_LEDGER.md`, `VISUAL_CHECK.md`), the `work/` scratch and Word's `~$name.docx` owner file never reach a view |
 | derived outputs | a judge is handed the SOURCES, never what can be compiled from them: the build by-products of an editable source (`.aux`, `.log`, `.toc`, `.synctex.gz`, …) are dropped -- a build log names the machine, its absolute paths and the exact build date, and a package an agent went over loses them while the untouched original keeps them, so their mere PRESENCE would say which package was worked on -- and so is any other derived file whose editable source ships beside it: a compiled `.bbl` next to its `.bib`, a rendered PDF next to its `.docx`/`.doc`/`.tex`/`.ltx` (same stem, version tokens ignored). The judge can compile or render the source itself. A derived file with NO source in the package stays, because it is then the only copy of the content: with no `.bib` shipped, a `.bbl` is the reference list |
 | Word/PDF metadata | OOXML views are canonicalized (sorted entries, one fixed zip timestamp, core/app/custom properties blanked, `rsid`/`paraId`/`textId`/proofing/last-rendered-page markers and tracked-change author+date attributes stripped, tracked changes accepted, `docProps/thumbnail*` dropped, Word's cached Pages/Words/Characters zeroed); a PDF's `/Info`, `/ID` and uncompressed XMP identifying values are blanked in place |
 | prompt / session | the judge prompt carries no round, arm, stage or provenance vocabulary (`round`, `arm`, `revise`, `integration`, `champion`, … all absent -- asserted by `test_judge_blinding.py`), no bookkeeping file name, and no hand-off marker token; the placeholder rule is stated in provenance-neutral wording |

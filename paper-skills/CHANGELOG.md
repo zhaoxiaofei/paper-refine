@@ -7,11 +7,15 @@ actually tracks, and the Word-native compare engine becomes the first choice
 for producing it:
 
 - `<name>.tracked.docx` is now `<name>.tracking-previous.docx` and the
-  `<name>.before-after.docx` fallback is now `<name>.log-previous.docx`; the
+  `<name>.before-after.docx` fallback is now `<name>.logging-previous.docx`; the
   `.tex`/`.bib` siblings are `<name>.tracking-previous.tex|.bib` (a `latexdiff`
-  copy) and `<name>.log-previous.tex|.bib` (the fallback log). The old two
-  spellings stay recognized as auxiliaries so packages written before the
-  rename keep every guarantee.
+  copy) and `<name>.logging-previous.tex|.bib` (the fallback log). The fallback
+  family is uniformly `logging-*` (`logging-original` / `logging-previous` /
+  `logging-prev-winner`) so the real copies and their fallbacks differ by exactly
+  one token and one verb form. The old two spellings -- and the short-lived
+  `log-previous.<ext>` spelling of the first cut of this feature -- stay
+  recognized as auxiliaries, so packages written in between keep every guarantee;
+  nothing writes them any more.
 - E5 now names the pipeline's Word-native compare engine
   (`docxcompare.sh` / the `docx-compare` MCP tool wrapping
   `Word.Application.CompareDocuments`) as the FIRST mechanism to produce the

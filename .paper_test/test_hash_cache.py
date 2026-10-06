@@ -277,7 +277,7 @@ def test_decide_end_to_end():
           not any(n.lower() in ("changelog.md", "manual_steps.md", "revision_report.md",
                                 "revision_report.json", "diff_ledger.md", "rewrite_report.md")
                   or n.endswith((".tracked.docx", ".before-after.docx",
-                                 ".tracking-previous.docx", ".log-previous.docx"))
+                                 ".tracking-previous.docx", ".logging-previous.docx"))
                   for n in files),
           str(files))
     check("HC6 decision.json records the clean version and its digest",

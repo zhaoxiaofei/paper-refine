@@ -10,9 +10,10 @@ content digests of every PAYLOAD file in DIR. Payload = every file except:
     REVISION_REPORT.md, revision_report.json, DIFF_LEDGER.md, REWRITE_REPORT.md,
     VISUAL_CHECK.md;
   * the difference-tracking auxiliaries: *.tracking-original.<ext>,
-    *.tracking-previous.<ext>, *.tracking-prev-winner.<ext> and their
-    *.logging-original.<ext> / *.log-previous.<ext> / *.logging-prev-winner.<ext>
-    fallbacks (and the pre-rename *.tracked.docx / *.before-after.docx spellings);
+    *.tracking-previous.<ext>, *.tracking-prev-winner.<ext> and their uniform
+    *.logging-original.<ext> / *.logging-previous.<ext> /
+    *.logging-prev-winner.<ext> fallbacks (plus the pre-rename *.tracked.docx /
+    *.before-after.docx spellings and the short-lived *.log-previous.<ext>);
   * the process scratch: work/ at the top level.
 
 File NAMES do not enter the hash, and existing version tokens inside file
@@ -56,8 +57,12 @@ AUX_SUFFIXES = tuple(
     f".tracking-{base}{ext}" for base in ("original", "previous", "prev-winner")
     for ext in (".docx", ".tex", ".bib")) + (
     ".logging-original.docx", ".logging-original.tex", ".logging-original.bib",
-    ".log-previous.docx", ".log-previous.tex", ".log-previous.bib",
+    ".logging-previous.docx", ".logging-previous.tex", ".logging-previous.bib",
     ".logging-prev-winner.docx", ".logging-prev-winner.tex", ".logging-prev-winner.bib",
+    # the short-lived legacy spelling of the previous-fallback (superseded by
+    # the uniform "logging-" family on 2026-10-07; kept so a root created in
+    # between keeps the same token)
+    ".log-previous.docx", ".log-previous.tex", ".log-previous.bib",
     ".tracked.docx", ".before-after.docx")
 
 # "-a" / "_v2" / "_V2" / "-4f3a9c1" at the very end of a stem (the version slot).

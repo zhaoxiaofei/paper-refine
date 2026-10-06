@@ -8,7 +8,7 @@ is tracked against the pre-conformed original (`non_revised/`) and against the
 version it was derived from, into
 
     <name>.tracking-original.<ext> / <name>.logging-original.<ext>
-    <name>.tracking-previous.<ext> / <name>.log-previous.<ext>
+    <name>.tracking-previous.<ext> / <name>.logging-previous.<ext>
     <name>.tracking-prev-winner.<ext> / <name>.logging-prev-winner.<ext>
 
 for .docx (Word's own compare engine via the docx-compare MCP tool, then the
@@ -101,16 +101,18 @@ BIB = "@article{a,\n  title={One},\n  year={2020}\n}\n"
 NON_AUX = ("manuscript.docx", "main.tex", "refs.bib", "notes.md", "fig1.png")
 AUX_SAMPLES = (
     "manuscript.tracking-original.docx", "manuscript.logging-original.docx",
-    "manuscript.tracking-previous.docx", "manuscript.log-previous.docx",
+    "manuscript.tracking-previous.docx", "manuscript.logging-previous.docx",
     "manuscript.tracking-prev-winner.docx", "manuscript.logging-prev-winner.docx",
     "main.tracking-original.tex", "main.tracking-previous.tex",
     "main.tracking-prev-winner.tex", "main.logging-original.tex",
-    "main.log-previous.tex", "main.logging-prev-winner.tex",
+    "main.logging-previous.tex", "main.logging-prev-winner.tex",
     "refs.tracking-original.bib", "refs.tracking-previous.bib",
     "refs.tracking-prev-winner.bib", "refs.logging-original.bib",
-    "refs.log-previous.bib", "refs.logging-prev-winner.bib",
-    # the pre-rename spellings stay recognized
+    "refs.logging-previous.bib", "refs.logging-prev-winner.bib",
+    # the pre-rename spellings (and the short-lived `log-previous` fallback)
+    # stay recognized
     "manuscript.tracked.docx", "manuscript.before-after.docx",
+    "manuscript.log-previous.docx", "main.log-previous.tex", "refs.log-previous.bib",
 )
 
 
@@ -199,8 +201,17 @@ def test_name_family_and_aux_rule():
           and nb.tracking_aux_suffix("prev-winner", ".bib") == ".tracking-prev-winner.bib")
     check("the fallbacks follow the requested spellings",
           nb.tracking_aux_suffix("original", ".docx", True) == ".logging-original.docx"
-          and nb.tracking_aux_suffix("previous", ".docx", True) == ".log-previous.docx"
+          and nb.tracking_aux_suffix("previous", ".docx", True) == ".logging-previous.docx"
           and nb.tracking_aux_suffix("prev-winner", ".tex", True) == ".logging-prev-winner.tex")
+    check("the fallback family is uniformly `logging-*`",
+          all(s.startswith(".logging-") for s in nb.TRACKING_AUX_SUFFIXES
+              if s not in [f".tracking-{b}{e}" for b in ("original", "previous", "prev-winner")
+                           for e in (".docx", ".tex", ".bib")]),
+          str([s for s in nb.TRACKING_AUX_SUFFIXES if s.startswith(".log")]))
+    check("the short-lived `log-previous` spelling is only a LEGACY auxiliary",
+          ".log-previous.docx" in nb.LEGACY_AUXILIARY_DOC_SUFFIXES
+          and ".log-previous.docx" not in nb.TRACKING_AUX_SUFFIXES
+          and nb._is_aux_doc("doc.log-previous.docx"))
     check("every one of the 18 suffixes is registered as an auxiliary",
           all(nb._is_aux_doc("doc" + s) for s in nb.TRACKING_AUX_SUFFIXES)
           and len(nb.TRACKING_AUX_SUFFIXES) == 18,
@@ -488,6 +499,37 @@ def test_latexdiff_and_fallbacks():
 # E. DO NOT add LLM usage: instrument every agent choke point
 # =====================================================================
 
+def test_fallback_names_are_uniformly_logging():
+    """A failed comparison must be reported under the uniform `logging-*` name
+    (never the short-lived `log-previous` spelling)."""
+    print()
+    print("== a failed comparison writes the uniform `logging-*` fallback ==")
+    tmp = scratch("paper_track_fbname_")
+    source = build_source(tmp)
+    ctx = build_root(tmp, source, rounds=1)
+    saved = nb.latexdiff_one_pair
+    nb.latexdiff_one_pair = lambda *a, **k: {
+        "ok": False, "tool": "latexdiff",
+        "attempts": [{"backend": "latexdiff", "cmd": [], "rc": 1, "ok": False,
+                      "detail": "forced failure (test)"}]}
+    try:
+        mf = nb.run_difference_tracking(ctx, rounds=[1], versions=["w1"], quiet=True)
+    finally:
+        nb.latexdiff_one_pair = saved
+    entry = mf["versions"][0]
+    tex_rows = [c for c in entry["comparisons"] if c["ext"] == ".tex"]
+    check("the failed .tex comparisons report the logging fallback",
+          tex_rows and all(c.get("ok") and c.get("fallback") for c in tex_rows),
+          str([(c["baseline"], c.get("fallback"), c.get("tool")) for c in tex_rows]))
+    names = [Path(c["fallback_out"]).name for c in tex_rows]
+    check("the fallback files carry the `logging-*` family (never `log-previous`)",
+          all(n.startswith("main.logging-") for n in names)
+          and not any("log-previous" in n for n in names), str(names))
+    check("the fallback sits under the baseline directory with the right name",
+          (ctx.root / "tracking/r1_w1/original/main.logging-original.tex").is_file()
+          and (ctx.root / "tracking/r1_w1/previous/main.logging-previous.tex").is_file())
+
+
 def test_tool_none_writes_no_copy():
     print()
     print("== --tool none reports only (no copy, no logging fallback) ==")
@@ -732,6 +774,7 @@ def main():
     test_tracking_pass_outputs()
     test_redline_reuse_is_digest_gated()
     test_latexdiff_and_fallbacks()
+    test_fallback_names_are_uniformly_logging()
     test_tool_none_writes_no_copy()
     test_no_agent_session_is_started()
     test_pdf_pass_is_persistent_and_nonfatal()

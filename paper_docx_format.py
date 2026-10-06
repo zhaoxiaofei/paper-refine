@@ -4621,8 +4621,8 @@ def analyse_package(path: Path, policy: dict) -> dict:
 def scan_paths(paths: list, policy: dict) -> dict:
     """Scan the corpus documents under `paths`.
 
-    Difference-tracking auxiliaries (`*.tracking-original|previous.<ext>`, the
-    `*.logging-original.<ext>` / `*.log-previous.<ext>` fallbacks, and the
+    Difference-tracking auxiliaries (`*.tracking-original|previous|prev-winner.<ext>`,
+    the uniform `*.logging-*.<ext>` fallbacks, and the
     pre-rename `*.tracked.docx` / `*.before-after.docx` spellings) and the stage
     scratch under any `work/` directory are NOT corpus content (the pipeline
     strips both from every judged/pinned corpus), so they are skipped: scanning
@@ -6644,7 +6644,10 @@ def validate_latex(path: Path, workdir: Path = None, timeout: int = 300) -> dict
                 shutil.copytree(path.parent, target_dir,
                                 ignore=shutil.ignore_patterns(
                                     "work", "*.tracking-original.*", "*.tracking-previous.*",
-                                    "*.logging-original.*", "*.log-previous.*",
+                                    "*.tracking-prev-winner.*",
+                                    "*.logging-original.*", "*.logging-previous.*",
+                                    "*.logging-prev-winner.*",
+                                    "*.log-previous.*",   # the short-lived legacy spelling
                                     "*.tracked.docx", "*.before-after.docx"))
             proc = subprocess.run(argv + [path.name], cwd=str(target_dir),
                                   capture_output=True, text=True, timeout=timeout)
@@ -6704,7 +6707,9 @@ def _is_aux_name(name: str) -> bool:
     The suffix rule has to match THE PIPELINE'S (`AUXILIARY_DOC_SUFFIXES`): the
     scanner and the corpus builder must agree on which files are submission
     content, or a scan of a package reports rows on files the pipeline itself
-    wrote. The pre-rename spellings stay recognized for older packages.
+    wrote. The pre-rename spellings (including the short-lived `.log-previous.`
+    fallback, superseded by the uniform `.logging-previous.`) stay recognized
+    for older packages.
     """
     low = name.lower()
     if low.endswith((".tracked.docx", ".before-after.docx")):
@@ -6712,8 +6717,9 @@ def _is_aux_name(name: str) -> bool:
     for ext in (".docx", ".tex", ".bib"):
         if low.endswith((f".tracking-original{ext}", f".tracking-previous{ext}",
                          f".tracking-prev-winner{ext}",
-                         f".logging-original{ext}", f".log-previous{ext}",
-                         f".logging-prev-winner{ext}")):
+                         f".logging-original{ext}", f".logging-previous{ext}",
+                         f".logging-prev-winner{ext}",
+                         f".log-previous{ext}")):     # the short-lived legacy spelling
             return True
     return False
 

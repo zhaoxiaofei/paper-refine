@@ -354,7 +354,7 @@ def test_skill_names_the_compare_engine():
           "docxcompare.sh" in flat and "docx-compare" in flat and "FIRST choice" in flat,
           flat[:200])
     check("E5 emits the renamed auxiliary family",
-          ".tracking-previous.docx" in flat and ".log-previous.docx" in flat
+          ".tracking-previous.docx" in flat and ".logging-previous.docx" in flat
           and "latexdiff" in flat)
     check("SKILL.md / the prompt carry the renamed E5 rule",
           "tracking-previous" in skill and "tracking-previous" in prompt)

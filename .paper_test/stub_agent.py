@@ -20,8 +20,8 @@ def np_aux(path: Path) -> bool:
     return any(n.endswith(f".tracking-{base}{ext}") for base in ("original", "previous",
                                                                  "prev-winner")
                for ext in (".docx", ".tex", ".bib")) \
-        or any(n.endswith(f".{fb}{ext}") for fb in ("logging-original", "log-previous",
-                                                   "logging-prev-winner")
+        or any(n.endswith(f".{fb}{ext}") for fb in ("logging-original", "logging-previous",
+                                                   "logging-prev-winner", "log-previous")
                for ext in (".docx", ".tex", ".bib"))
 
 
