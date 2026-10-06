@@ -167,8 +167,9 @@ def main():
     check("report renders checkbox items", "- [ ]" in md and "C2-001" in md)
     check("report names the blocker severity", "blocker" in md)
 
-    # The LLM auditor is ON by default: `decide` reuses the backend `run`
-    # recorded, unless the operator disables it or forces manual mode.
+    # The LLM auditor is OFF by default: `decide` runs it only for an explicit
+    # --conflict-agent[-cmd] / PAPER_CONFLICT_AGENT_CMD this invocation, and the
+    # backend `run` recorded stays diagnostic (never re-enables the pass).
     recorded = [sys.executable, "-c", "pass"]
     fake_ctx = types.SimpleNamespace(state={"conflict_agent": {
         "cmd": recorded, "source": "judge-backend"}})

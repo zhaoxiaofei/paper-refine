@@ -24,10 +24,10 @@ ROUND MODEL
 -----------
     for r in 1..R:                 # R = 3 by default, exactly R rounds (unless
                                    # setup pre-registered --stop-after-no-progress K)
-                                   # (the default schedule: M=[2,0,0], N=[1,1,1]
-                                   # and round 3's review scoped to formatting and
-                                   # writing only -- no later rewrites, no second
-                                   # full content review)
+                                   # (the default schedule: M=[2,0,0], N=[1,1,1],
+                                   # review_scope [full, full, full] and round 3 a
+                                   # final review-audit-revise round -- no later
+                                   # rewrites, no round-3 integration arm)
         A1_r  = the round's base  (round 1: a byte-identical copy of the
                                    pristine original; round r > 1: the
                                    byte-identical pinned champion of r-1)
@@ -141,7 +141,7 @@ RETRY POLICY / PANEL INTEGRITY
     `retry --run <judge id>` and re-decide with the full panel.
 
 THE SCORE SET (2*judges*(|field|-1) DIRECTED SCORES PER VERSION; 4*(|field|-1)
-AND 24 AT |field| = 7 WITH THE DEFAULT 2 JUDGES)
+AND 28 AT |field| = 8 WITH THE DEFAULT 2 JUDGES)
 ---------------------------------------------------------------------------
     Each round has a field of versions. For version V, `judges` independent
     sessions each score V against EVERY other field member in V's own
@@ -203,8 +203,10 @@ STAGING DEPENDENCY ORDER (a DAG: every run starts as soon as its inputs exist)
           exists -- it does NOT wait for the rewrites (or for its sibling
           revise sessions).
     (iv)  runs/r<R>_i1..iK/     the integration runs selected by the round's
-          --integrators mask (default: all K = 1+M+N; self/ = one pool member,
-          others/<id>/ = every other member). They start once the WHOLE pool
+          --integrators mask (default [0xFFFFFFFF, 0xFFFFFFFF, 0x0]: every pool
+          member in rounds 1-2, none in the final review-audit-revise round;
+          self/ = one pool member, others/<id>/ = every other member). They
+          start once the WHOLE pool
           (a1, every rewrite, every revision) is done, and run in parallel with
           each other.
     (v)   build field_r, materialize `judges` judge sandboxes per field member,
@@ -592,14 +594,15 @@ USAGE
     reports/round<R>_judge_conflicts.{md,json} and the cumulative
     reports/JUDGE_CONFLICTS_TODO.md.  Each round's judge wave is followed by ITS
     OWN audit (two rounds -> two audits; `decide` back-fills a round that has no
-    audit yet).  The mechanical pass always runs and the LLM auditor is ON by
-    default and lightweight: PAPER_CONFLICT_AGENT_CMD can point it at a cheap
-    CLI/model, else the `codex-lite` preset (codex at low reasoning effort) runs;
-    `run` records the backend it used and a later `decide` reuses it, a
-    custom/stub judge backend is reused as the auditor, and
-    `--conflict-agent`/`--conflict-agent-cmd` override all of that
-    (`--no-conflict-agent` keeps the deterministic pass only; the standalone
-    `conflicts` command refreshes the audit on demand).
+    audit yet).  The mechanical pass (origin=mechanical) always runs; the LLM
+    pass is OFF by default (2026-10-06) and runs for ONE invocation only when
+    the operator asks for it -- `--conflict-agent`/`--conflict-agent-cmd`, or
+    PAPER_CONFLICT_AGENT_CMD, otherwise the lightweight `codex-lite` preset
+    (codex at low reasoning effort).  The backend `run` records is diagnostic
+    and never turns the pass back on; `--no-conflict-agent` and
+    `--conflict-agent manual` keep the deterministic pass only, and the
+    standalone `conflicts` command (its --agent defaults to manual) refreshes
+    the audit on demand.
 
     Every command also accepts `--skip-hash`: it skips the integrity
     VERIFICATION passes for THIS invocation (the pristine copy, pinned
@@ -18253,18 +18256,20 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
     prompt = sb / "PROMPT.md"
     if not prompt.is_file():
         _copy_session_tools(sb)
-        prompt.write_text(rewrite_prompt(sb, rid, r, index=int(k), total=m,
-                                         caption_limit=caption_limit_of(ctx),
-                                         zotero=zotero_mode_of(ctx),
-                                         prior_failure=note,
-                                         level=rewrite_level_of(k, m),
-                                         venue=venue_profile_of(ctx),
-                                         journal_block=(journal_rewrite_block(ctx)
-                                                        if journal_mode_of(ctx) in
-                                                        (JOURNAL_MODE_TRANSFER,
-                                                         JOURNAL_MODE_RESUBMIT) else ""),
-                                         venue_norm=venue_norm_for(ctx)),
-                          encoding="utf-8")
+        # write_text_atomic: the existence check above is the "already
+        # materialized" marker, so a crash mid-write must never leave a
+        # truncated PROMPT.md behind for a later invocation to trust.
+        write_text_atomic(prompt, rewrite_prompt(sb, rid, r, index=int(k), total=m,
+                                                caption_limit=caption_limit_of(ctx),
+                                                zotero=zotero_mode_of(ctx),
+                                                prior_failure=note,
+                                                level=rewrite_level_of(k, m),
+                                                venue=venue_profile_of(ctx),
+                                                journal_block=(journal_rewrite_block(ctx)
+                                                               if journal_mode_of(ctx) in
+                                                               (JOURNAL_MODE_TRANSFER,
+                                                                JOURNAL_MODE_RESUBMIT) else ""),
+                                                venue_norm=venue_norm_for(ctx)))
     rec = ctx.register(rid, "rewrite", r, f"runs/{rid}", upstream_run_id=rid_a1(r),
                        source_id=A1_ID, produces=vid)
     rec["rewrite_level"] = rewrite_level_of(k, m)
@@ -18329,24 +18334,24 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
     if not prompt.is_file():
         _copy_session_tools(sb)
         scope = round_review_scope(ctx, r)
-        prompt.write_text(review_prompt(sb, rid, r, caption_limit=caption_limit_of(ctx),
-                                        zotero=zotero_mode_of(ctx),
-                                        prior_round=(sb / "prior_round").is_dir(),
-                                        prior_failure=note,
-                                        journal_block=(journal_review_block(ctx, sb)
-                                                       if journal_mode_of(ctx) in
-                                                       (JOURNAL_MODE_TRANSFER,
-                                                        JOURNAL_MODE_RESUBMIT) else ""),
-                                        # A scoped round is ONE review pass by
-                                        # definition; the complementary-split
-                                        # machinery would contradict its scope.
-                                        split=(part if split_mode != "off" and scope == "full"
-                                               else None),
-                                        split_mode=split_mode,
-                                        scope=scope,
-                                        venue=venue_profile_of(ctx),
-                                        venue_norm=venue_norm_for(ctx)),
-                          encoding="utf-8")
+        write_text_atomic(prompt, review_prompt(sb, rid, r,
+                                               caption_limit=caption_limit_of(ctx),
+                                               zotero=zotero_mode_of(ctx),
+                                               prior_round=(sb / "prior_round").is_dir(),
+                                               prior_failure=note,
+                                               journal_block=(journal_review_block(ctx, sb)
+                                                              if journal_mode_of(ctx) in
+                                                              (JOURNAL_MODE_TRANSFER,
+                                                               JOURNAL_MODE_RESUBMIT) else ""),
+                                               # A scoped round is ONE review pass by
+                                               # definition; the complementary-split
+                                               # machinery would contradict its scope.
+                                               split=(part if split_mode != "off"
+                                                      and scope == "full" else None),
+                                               split_mode=split_mode,
+                                               scope=scope,
+                                               venue=venue_profile_of(ctx),
+                                               venue_norm=venue_norm_for(ctx)))
     rec = ctx.register(rid, "review", r, f"runs/{rid}",
                        upstream_run_id=rid_a1(r), source_id=a1.get("source_id"))
     rec["inputs_manifest"] = inputs
@@ -18391,10 +18396,10 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
     prompt = sb / "PROMPT.md"
     if not prompt.is_file():
         _copy_session_tools(sb)
-        prompt.write_text(audit_prompt(sb, rid, r, prior_failure=note,
-                                       zotero=zotero_mode_of(ctx),
-                                       venue=venue_profile_of(ctx),
-                                       venue_norm=venue_norm_for(ctx)), encoding="utf-8")
+        write_text_atomic(prompt, audit_prompt(sb, rid, r, prior_failure=note,
+                                              zotero=zotero_mode_of(ctx),
+                                              venue=venue_profile_of(ctx),
+                                              venue_norm=venue_norm_for(ctx)))
     rec = ctx.register(rid, "audit", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=a1.get("source_id"))
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
@@ -18465,15 +18470,17 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     prompt = sb / "PROMPT.md"
     if not prompt.is_file():
         _copy_session_tools(sb)
-        prompt.write_text(revise_prompt(sb, rid, r, index=int(str(vid)[1:]) - 1, total=n,
-                                        caption_limit=caption_limit_of(ctx),
-                                        zotero=zotero_mode_of(ctx),
-                                        prior_failure=note, audit=audit_enabled(ctx),
-                                        venue=venue_profile_of(ctx),
-                                        journal_block=(journal_revise_block(ctx)
-                                                       if journal_has_feedback(ctx) else ""),
-                                        venue_norm=venue_norm_for(ctx)),
-                          encoding="utf-8")
+        write_text_atomic(prompt, revise_prompt(sb, rid, r, index=int(str(vid)[1:]) - 1,
+                                               total=n,
+                                               caption_limit=caption_limit_of(ctx),
+                                               zotero=zotero_mode_of(ctx),
+                                               prior_failure=note,
+                                               audit=audit_enabled(ctx),
+                                               venue=venue_profile_of(ctx),
+                                               journal_block=(journal_revise_block(ctx)
+                                                              if journal_has_feedback(ctx)
+                                                              else ""),
+                                               venue_norm=venue_norm_for(ctx)))
     rec = ctx.register(rid, "revise", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=A1_ID, produces=vid)
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
@@ -18533,12 +18540,12 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
     prompt = sb / "PROMPT.md"
     if not prompt.is_file():
         _copy_session_tools(sb)
-        prompt.write_text(integrate_prompt(sb, rid, r, self_id, other_ids,
-                                           caption_limit=caption_limit_of(ctx),
-                                           zotero=zotero_mode_of(ctx),
-                                           prior_failure=note,
-                                           venue=venue_profile_of(ctx),
-                                           venue_norm=venue_norm_for(ctx)), encoding="utf-8")
+        write_text_atomic(prompt, integrate_prompt(sb, rid, r, self_id, other_ids,
+                                                  caption_limit=caption_limit_of(ctx),
+                                                  zotero=zotero_mode_of(ctx),
+                                                  prior_failure=note,
+                                                  venue=venue_profile_of(ctx),
+                                                  venue_norm=venue_norm_for(ctx)))
     rec = ctx.register(rid, "integrate", r, f"runs/{rid}", self_id=self_id,
                        other_ids=other_ids, pool_ids=pool, produces=vid,
                        field_ids=other_ids)
@@ -18681,19 +18688,19 @@ def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
             prompt = sb / "PROMPT.md"
             if not prompt.is_file():
                 _copy_session_tools(sb, stamp=view_stamp)
-                prompt.write_text(judge_prompt(sb, rid, r, token, j, judges, labels,
-                                           # C26: the panel balances the reading order
-                                           # (half of it reads the field before the
-                                           # target) so no first-read anchor can
-                                           # decide a pair on its own; a single
-                                           # judge keeps the target-first order.
-                                           field_first=(judges > 1 and j % 2 == 0),
-                                           caption_limit=caption_limit_of(ctx),
-                                           zotero=zotero_mode_of(ctx),
-                                           venue=venue_profile_of(ctx),
-                                           dedup_mode=dedup_mode_of(ctx),
-                                           venue_norm=venue_norm_for(ctx)),
-                                  encoding="utf-8")
+                write_text_atomic(prompt, judge_prompt(
+                    sb, rid, r, token, j, judges, labels,
+                    # C26: the panel balances the reading order
+                    # (half of it reads the field before the
+                    # target) so no first-read anchor can
+                    # decide a pair on its own; a single
+                    # judge keeps the target-first order.
+                    field_first=(judges > 1 and j % 2 == 0),
+                    caption_limit=caption_limit_of(ctx),
+                    zotero=zotero_mode_of(ctx),
+                    venue=venue_profile_of(ctx),
+                    dedup_mode=dedup_mode_of(ctx),
+                    venue_norm=venue_norm_for(ctx)))
             # One timestamp for the WHOLE judge sandbox (views, prompt and the
             # public tool alike): a listing must not be able to order the
             # session's own files, and the "whole wave is equalized" guarantee
@@ -19040,7 +19047,13 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
     j_feedback = rid_feedback(r) if jmode in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_RESUBMIT) else None
     j_concerns = rid_concerns(r) if journal_is_scoped(ctx) else None
     j_response = rid_response(r) if ctx.run(rid_response(r)) is not None else None
-    order = ((rewrite_ids + ([rid_review(r)] if n else []) + revise_ids + integrate_ids)
+    # review -> AUDIT -> revise: the auditor freezes a COPY of the review and
+    # every reviser consumes the auditor's disposition, so a reset upstream must
+    # reach the audit sandbox too (it is not an arm of the pool, so nothing else
+    # in this function would ever look at it).
+    audit_ids = [rid_audit(r)] if ctx.run(rid_audit(r)) is not None else []
+    order = ((rewrite_ids + ([rid_review(r)] if n else []) + audit_ids + revise_ids
+              + integrate_ids)
              + ([j_feedback] if j_feedback else []) + ([j_concerns] if j_concerns else [])
              + ([j_response] if j_response else []))
     if n and review_split_of(ctx) != "off":
@@ -19048,7 +19061,8 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
         # assignment REPLACED the whole list, so a `--review-split` run in a
         # journal mode never revalidated a stale feedback/concerns/response
         # sandbox: the drift survived and the response letter stayed "done".
-        order = (rewrite_ids + [rid_review(r), rid_review_b(r)] + revise_ids + integrate_ids
+        order = (rewrite_ids + [rid_review(r), rid_review_b(r)] + audit_ids + revise_ids
+                 + integrate_ids
                  + ([j_feedback] if j_feedback else [])
                  + ([j_concerns] if j_concerns else [])
                  + ([j_response] if j_response else []))
@@ -19057,7 +19071,10 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
     # panel scores the whole field), and every pool member feeds every
     # integration run that takes it as a donor.
     dependents = {rid_a1(r): rewrite_ids + ([rid_review(r)] if n else []),
-                  rid_review(r): list(revise_ids)}
+                  rid_review(r): list(audit_ids) + list(revise_ids)}
+    for _aid in audit_ids:
+        # The revisers' sandboxes carry the auditor's `audit/` copy.
+        dependents[_aid] = list(revise_ids)
     if j_feedback:
         dependents.setdefault(rid_a1(r), []).append(j_feedback)
         dependents[j_feedback] = (list(rewrite_ids) + ([rid_review(r)] if n else []))
@@ -19081,7 +19098,7 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
     if n and review_split_of(ctx) != "off":
         # B's frozen input is A's review/ output, so resetting A resets B too.
         dependents[rid_review(r)] = [rid_review_b(r)] + dependents[rid_review(r)]
-        dependents[rid_review_b(r)] = list(revise_ids)
+        dependents[rid_review_b(r)] = list(audit_ids) + list(revise_ids)
     for k_idx, vid in enumerate(pool):
         if vid == A1_ID:
             continue
@@ -19943,7 +19960,8 @@ def mcp_stdio_tool_call(spec: dict, tool: str, arguments: dict,
         return {"ok": False, "error": "the MCP server entry names no command"}
     try:
         proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, text=True, bufsize=1)
+                                stderr=subprocess.DEVNULL, text=True, bufsize=1,
+                                encoding="utf-8", errors="replace")
     except OSError as e:
         return {"ok": False, "error": f"the MCP server would not start: {e}"}
     lines = queue.Queue()
@@ -25847,8 +25865,8 @@ def materialize_feedback(ctx: Ctx, r: int) -> dict:
     prompt = sb / "PROMPT.md"
     if not prompt.is_file():
         _copy_session_tools(sb)
-        prompt.write_text((feedback_prompt(ctx, sb, r, seed) + note + shared_blocks()),
-                          encoding="utf-8")
+        write_text_atomic(prompt,
+                          feedback_prompt(ctx, sb, r, seed) + note + shared_blocks())
     rec = ctx.register(rid, "feedback", r, f"runs/{rid}", produces=rid)
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True)}
@@ -25873,8 +25891,8 @@ def materialize_concerns(ctx: Ctx, r: int) -> dict:
     prompt = sb / "PROMPT.md"
     if not prompt.is_file():
         _copy_session_tools(sb)
-        prompt.write_text((concerns_prompt(ctx, sb, r, seed) + note + shared_blocks()),
-                          encoding="utf-8")
+        write_text_atomic(prompt,
+                          concerns_prompt(ctx, sb, r, seed) + note + shared_blocks())
     rec = ctx.register(rid, "concerns", r, f"runs/{rid}", produces=rid)
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True)}
@@ -25936,10 +25954,9 @@ def materialize_response(ctx: Ctx, r: int, target: Path = None,
     prompt = sb / "PROMPT.md"
     if not prompt.is_file():
         _copy_session_tools(sb)
-        prompt.write_text((response_prompt(ctx, sb, r,
-                                           target_label or target.parent.name,
-                                           ledger) + note + shared_blocks()),
-                          encoding="utf-8")
+        write_text_atomic(prompt,
+                          response_prompt(ctx, sb, r, target_label or target.parent.name,
+                                          ledger) + note + shared_blocks())
     ledger_rid = rid_concerns(r) if journal_is_scoped(ctx) else rid_feedback(r)
     rec = ctx.register(rid, "response", r, f"runs/{rid}", upstream_run_id=ledger_rid,
                        target_dir=target.relative_to(ctx.root).as_posix()
@@ -30984,7 +31001,7 @@ def _merge_readme_row(staged: Path, dest: Path, vid: str,
         synthesized = True
     row = rows[0]
     if not dest.is_file():
-        dest.write_text(row + "\n", encoding="utf-8")
+        write_text_atomic(dest, row + "\n")
         return "created"
     lines = dest.read_text(encoding="utf-8").splitlines()
     for i, ln in enumerate(lines):
@@ -30992,7 +31009,7 @@ def _merge_readme_row(staged: Path, dest: Path, vid: str,
             if ln == row:
                 return "unchanged"
             lines[i] = row
-            dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            write_text_atomic(dest, "\n".join(lines) + "\n")
             return "updated"
     # Insert at the END of the "Shipped profiles" table -- the table the README
     # documents as the venue list. The file carries several tables, and a row
@@ -31017,7 +31034,7 @@ def _merge_readme_row(staged: Path, dest: Path, vid: str,
         lines.append(row)
     else:
         lines.insert(anchor + 1, row)
-    dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_text_atomic(dest, "\n".join(lines) + "\n")
     return "synthesized" if synthesized else "appended"
 
 
@@ -32839,10 +32856,12 @@ def resolve_defect_audit_cmd(args, judge_cmd, judge_manual: bool,
 
     The audit is ON by default with a real agent backend, but never silently on a
     backend that cannot run it: an explicit --defect-audit[-cmd] wins, then
-    PAPER_DEFECT_AUDIT_CMD, then the backend a previous round recorded, then the
-    lightweight default (codex-lite, else PAPER_AGENT_CMD) WHEN the judge backend
-    is an agent preset.  A manual judge wave and a custom/stub judge backend stay
-    off unless the operator asks for the audit explicitly.
+    PAPER_DEFECT_AUDIT_CMD, then -- when the judge backend IS an agent preset --
+    the backend a previous round recorded, then the lightweight default
+    (codex-lite, else PAPER_AGENT_CMD).  A manual judge wave and a custom/stub
+    judge backend stay off unless the operator asks for the audit explicitly, and
+    the recorded backend is DIAGNOSTIC: like the conflict audit's, it never turns
+    the audit back on for a backend that must not run it.
     """
     if getattr(args, "no_defect_audit", False):
         return None, "disabled"
@@ -32867,6 +32886,12 @@ def resolve_defect_audit_cmd(args, judge_cmd, judge_manual: bool,
         if _conflict_cmd_usable(env_cmd):
             return env_cmd, "defect-audit-env"
         return None, "unusable-env"
+    if judge_manual:
+        return None, "manual"
+    if not _looks_like_preset_cmd(judge_cmd):
+        # A custom/stub judge backend is usually a test harness or a foreign CLI:
+        # do not spawn a second protocol on it unless the operator opts in.
+        return None, "custom-backend"
     recorded = recorded or {}
     recorded_cmd = recorded.get("cmd")
     if recorded.get("source") == "disabled":
@@ -32876,12 +32901,6 @@ def resolve_defect_audit_cmd(args, judge_cmd, judge_manual: bool,
     if recorded.get("source") not in ("manual", "disabled", "unavailable") \
             and isinstance(recorded_cmd, list) and recorded_cmd:
         return [str(x) for x in recorded_cmd], "recorded"
-    if judge_manual:
-        return None, "manual"
-    if not _looks_like_preset_cmd(judge_cmd):
-        # A custom/stub judge backend is usually a test harness or a foreign CLI:
-        # do not spawn a second protocol on it unless the operator opts in.
-        return None, "custom-backend"
     light = default_defect_audit_cmd()
     if light is not None:
         return light, "lightweight-default"
@@ -33050,7 +33069,10 @@ def _audited_dedup_payload(ctx: Ctx, r: int, agg: dict, labelled: list) -> dict:
         if str(item.get("counted") or "yes").strip().lower() == "no":
             continue
         vid = str(item.get("version"))
-        excerpt = " ".join(str(item.get("evidence") or "").split())[:200].lower()
+        # The merge records store the KEPT excerpt through the location
+        # tokenizer (`line 42: quote` -> `line 42 quote`), so this side must be
+        # normalized the same way or the `line N: <quote>` form never matches.
+        excerpt = " ".join(dedup_location_of(item.get("evidence"))[1])[:200]
         kept.setdefault((vid, str(item.get("session"))), []).append(excerpt)
     merges = []
     for m in base.get("merges") or []:
@@ -33119,9 +33141,14 @@ def write_round_defect_audit(ctx: Ctx, r: int, agg: dict = None,
             and existing.get("ok"):
         verdicts = {}
         for v in existing.get("verdicts") or []:
-            if isinstance(v, dict) and v.get("defect_id"):
-                verdicts[str(v["defect_id"])] = (str(v.get("label") or "TP"),
-                                                 str(v.get("reason") or ""))
+            if not isinstance(v, dict) or not v.get("defect_id"):
+                continue
+            label = str(v.get("label") or "").strip().upper()
+            if label not in DEFECT_AUDIT_LABELS:
+                continue            # a label-less stored row stays UNLABELLED: it is
+                # never silently promoted to TP (the writer only stores labelled
+                # rows, so this is the hand-edited/stale-metadata path).
+            verdicts[str(v["defect_id"])] = (label, str(v.get("reason") or ""))
         labelled = apply_defect_audit(rows, verdicts)
         audited = audited_defect_agg(ctx, r, agg, labelled)
         # Self-healing reuse: rewrite the (deterministic) TP-only family from the
@@ -36169,9 +36196,9 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
             print(f"[decide] round {r} WARNING: the LLM defect audit failed: {e}")
         # Cross-judge conflicts: flag every contradiction between the round's
         # independent judge sessions as a REQUIRED MANUAL CHECK.  The mechanical
-        # pass always runs; the LLM pass is ON by default and reuses the
-        # lightweight backend `run` recorded (or PAPER_CONFLICT_AGENT_CMD /
-        # codex-lite, or an explicit --conflict-agent[-cmd]).
+        # pass always runs; the LLM pass is OFF by default and runs only for an
+        # explicit --conflict-agent[-cmd] or PAPER_CONFLICT_AGENT_CMD this
+        # invocation (the backend `run` recorded stays diagnostic).
         try:
             _cfd = write_round_judge_conflicts(
                 ctx, r, agg=agg,
@@ -37884,7 +37911,7 @@ review-audit-revise-and-judge round 3 (full review, no rewrite, no integration)
   #    <setup --source>/<doc>.docx -> revised/<doc>.docx
   python paper_pipeline.py redline --root ./paper_rounds --round 2
 
-  # 4. final answer + human-facing report (the round-2 champion), optionally
+  # 4. final answer + human-facing report (the round-3 champion), optionally
   #    copying the winner into <root>/final/:
   python paper_pipeline.py decide --root ./paper_rounds --package-winner
 
@@ -37898,8 +37925,9 @@ review-audit-revise-and-judge round 3 (full review, no rewrite, no integration)
   What the example produces:
     ./paper_rounds/non_revised/          pristine copy (never written)
     ./paper_rounds/round1_winner/        round-1 champion (documents at top level)
-    ./paper_rounds/round2_winner/        round-2 champion = the final answer
-    ./paper_rounds/pinned/               content-addressed pins of both champions
+    ./paper_rounds/round2_winner/        round-2 champion
+    ./paper_rounds/round3_winner/        round-3 champion = the final answer
+    ./paper_rounds/pinned/               content-addressed pin of every champion
     ./paper_rounds/redlines/             tracked-changes docx + manifest.json
     ./paper_rounds/reports/              DECISION_REPORT.md, decision.json,
                                        raw_scores.csv, round<r>.json

@@ -477,12 +477,93 @@ def test_live_server_if_available():
           f"{pdf} {pdf.stat().st_size if pdf.is_file() else '-'} bytes")
 
 
+# =====================================================================
+# The stdio client: the server's (UTF-8) answer must decode under any locale
+# =====================================================================
+# docx2pdf.sh's server answers in Chinese ("转换成功！..."), i.e. multibyte UTF-8
+# beyond ASCII. `Popen(text=True)` without an explicit encoding decodes the
+# child's stdout with the PARENT's preferred encoding, so a non-UTF-8 locale
+# (LC_ALL=C) kills the reader thread and a correct answer is reported as "did
+# not answer"; the agent-execution Popen in the same module already pins
+# encoding="utf-8". This drives the REAL client against a stub server in a child
+# process whose default encoding is not UTF-8.
+FAKE_MCP_SERVER = r'''
+import json, sys
+# The real server is Node: its stdio is UTF-8 whatever the locale says.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except ValueError:
+        continue
+    if msg.get("id") is None:
+        continue
+    if msg.get("method") == "initialize":
+        out = {"jsonrpc": "2.0", "id": msg["id"],
+               "result": {"protocolVersion": "2025-06-18", "capabilities": {},
+                          "serverInfo": {"name": "stub", "version": "1"}}}
+    else:
+        out = {"jsonrpc": "2.0", "id": msg["id"],
+               "result": {"content": [{"type": "text", "text": "转换成功！输出信息:\nok"}]}}
+    sys.stdout.write(json.dumps(out, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+'''
+
+MCP_CLIENT_CHILD = r'''
+import importlib.util, json, locale, sys
+from pathlib import Path
+ws, server, report = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+out = {"encoding": locale.getpreferredencoding(False)}
+spec = importlib.util.spec_from_file_location("nb_child", str(ws / "paper_pipeline.py"))
+nb = importlib.util.module_from_spec(spec)
+sys.modules["nb_child"] = nb
+spec.loader.exec_module(nb)
+rep = nb.mcp_stdio_tool_call({"command": sys.executable, "args": [str(server)]},
+                             "convert_docx_to_pdf", {"docxPath": "/tmp/x.docx"}, timeout=20)
+text = "".join(str(c.get("text") or "") for c in (rep.get("result") or {}).get("content") or []
+               if isinstance(c, dict))
+out.update({"ok": bool(rep.get("ok")), "error": rep.get("error"), "chars": len(text),
+            "kept": "转换成功" in text})
+report.write_text(json.dumps(out, ensure_ascii=True), encoding="utf-8")
+'''
+
+
+def test_mcp_client_decodes_utf8_answer():
+    print("== the stdio client decodes the server's UTF-8 answer under a C locale ==")
+    tmp = scratch("paper_mcp_locale_")
+    # Both scripts go through FILES: the C-locale child cannot even decode a
+    # non-ASCII `-c` argument, and Python source is UTF-8 by default.
+    server, child, report = tmp / "stub_server.py", tmp / "client_child.py", tmp / "report.json"
+    server.write_text(FAKE_MCP_SERVER, encoding="utf-8")
+    child.write_text(MCP_CLIENT_CHILD, encoding="utf-8")
+    env = dict(os.environ, LC_ALL="C", LANG="C", PYTHONCOERCECLOCALE="0", PYTHONUTF8="0")
+    res = subprocess.run([sys.executable, str(child), str(WS), str(server), str(report)],
+                         env=env, capture_output=True, text=True, timeout=120)
+    if res.returncode != 0 or not report.is_file():
+        check("the C-locale client child ran", False,
+              (res.stderr or res.stdout or "")[-300:])
+        return
+    got = json.loads(report.read_text(encoding="utf-8"))
+    if str(got.get("encoding") or "").lower().replace("-", "").replace("_", "") in (
+            "utf8", "utf8mode", "cp65001"):
+        # macOS and UTF-8-mode builds cannot be forced into a non-UTF-8 default
+        skip("the client decodes a non-ASCII answer under a C locale",
+             f"this box's C locale still decodes as {got.get('encoding')!r}")
+        return
+    check("a correct (Chinese) server answer is not lost to a decode error",
+          got.get("ok") is True and got.get("kept") is True, json.dumps(got))
+
+
 def main() -> int:
     sections = (("probe", test_config_probe),
                 ("probe", test_probe_order_and_summary),
                 ("prompts", test_prompts_prefer_the_mcp_tool),
                 ("safety", test_converter_safety_and_timeout_parity),
                 ("refusals", test_refusal_messages_evaluate),
+                ("mcp-client", test_mcp_client_decodes_utf8_answer),
                 ("codex-exec", test_codex_exec_mcp_approval),
                 ("live", test_live_server_if_available))
     try:

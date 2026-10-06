@@ -87,6 +87,7 @@ documentation.
 | `captions.default_cap` | int | the legend cap used when `setup` was run without `--caption-limit`; `0` = counts only. |
 | `captions.source` | string | what the venue says about legend length (quoted in the M18 rule). |
 | `tables`, `figures` | object or absent | the venue's table / figure rules (see below; one shared schema). Absent = the profile declares no rule for that kind: the code-side scan emits no rows for it and no stage is gated on one. |
+| `foreign_container_headings` | list of strings | headings that belong to ANOTHER publisher's template ("Lead contact", "Key resources", …) and that this venue does not use. Validated by the loader and read through `venue_containers()` by the formatter; absent = the empty list, so a profile that does not declare them flags nothing. |
 | `submission.pdf_accepted` | bool or `null` | whether the venue accepts a submitted PDF. |
 | `submission.formats` | list of strings | accepted formats, for the record. |
 | `submission.pdf_note` | string | the sentence the derived-outputs rule uses about a submitted PDF. |

@@ -224,7 +224,7 @@ python paper_pipeline.py setup --source ./non_revised --root ./paper_rounds \
 # validation (see README.md -> Tests for the full list)
 python3 -m py_compile paper_pipeline.py paper_docx_format.py
 python3 .paper_test/run_all.py                 # every suite, offline (20 jobs by default)
-python3 .paper_test/run_one.sh test_venue_config.py
+sh .paper_test/run_one.sh test_venue_config.py
 ```
 
 ## When a stage prompt is written

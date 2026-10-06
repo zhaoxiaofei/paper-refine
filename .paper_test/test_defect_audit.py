@@ -143,6 +143,22 @@ def main() -> int:
     got = pd.resolve_defect_audit_cmd(plain, ["codex"], False,
                                       {"cmd": None, "source": "disabled"})
     check("a recorded --no-defect-audit stays off", got == (None, "disabled"), got)
+    # A recorded backend is DIAGNOSTIC: it must never re-enable the audit on a
+    # manual wave or a custom/stub backend (the docstring, the README and the
+    # commit that shipped this feature all promise "opt in explicitly").
+    recorded_cmd = ["codex", "exec", "-"]
+    got = pd.resolve_defect_audit_cmd(plain, None, True,
+                                      {"cmd": recorded_cmd, "source": "lightweight-default"})
+    check("a recorded backend does not re-enable the audit on a manual wave",
+          got == (None, "manual"), got)
+    got = pd.resolve_defect_audit_cmd(plain, stub_judge, False,
+                                      {"cmd": recorded_cmd, "source": "lightweight-default"})
+    check("a recorded backend does not re-enable the audit on a custom/stub backend",
+          got == (None, "custom-backend"), got)
+    got = pd.resolve_defect_audit_cmd(plain, ["codex", "exec", "-"], False,
+                                      {"cmd": recorded_cmd, "source": "lightweight-default"})
+    check("a recorded backend is still reused for an agent-preset judge backend",
+          got == (recorded_cmd, "recorded"), got)
     saved = os.environ.pop("PAPER_DEFECT_AUDIT_CMD", None)
     try:
         os.environ["PAPER_DEFECT_AUDIT_CMD"] = json.dumps([sys.executable, "-c", "pass"])
@@ -197,8 +213,45 @@ def main() -> int:
         check("the audited agg keeps the recorded score rows and stats",
               audited["score_rows"] is agg["score_rows"]
               and audited["stats"] is agg["stats"])
-        check("the audited census counts only the TP rows", total(audited["issue_census"]) == 2,
-              total(audited["issue_census"]))
+        check("the audited census counts only the TP rows",
+              total(audited["issue_census"]) == 2, total(audited["issue_census"]))
+        # The audited dedup file lists the merges whose KEPT row is a TP. The
+        # judge sheets quote `line N: <quote>` (the documented location-dedup
+        # format), so the matcher must normalize both sides the same way.
+        dedup_obs = [
+            ("judge_d1", "a", "b", {
+                "score": 1, "basis": "correctness",
+                "introduced": [{"check": "M4", "tier": "correctness", "severity": "minor",
+                                "evidence": "line 42: the treated group showed a higher "
+                                            "median than the control group"}],
+                "resolved": []}),
+            ("judge_d2", "a", "b", {
+                "score": 1, "basis": "correctness",
+                "introduced": [{"check": "M4", "tier": "correctness", "severity": "minor",
+                                "evidence": "line 42: the treated group showed a higher "
+                                            "median than the control arm"}],
+                "resolved": []}),
+        ]
+        d_agg = {"field": ["a", "b"],
+                 "issue_rows": pd.build_issue_ledger_rows(dedup_obs, ["a", "b"],
+                                                          dedup="location"),
+                 "issue_census": pd.build_issue_census(dedup_obs, ["a", "b"],
+                                                       sessions_expected=2,
+                                                       dedup="location")}
+        d_rows = pd.defect_list_rows(ctx, 1, d_agg)
+        check("the location-dedup fixture merges one duplicate",
+              [r["counted"] for r in d_rows] == ["yes", "no"] and len(d_rows) == 2, d_rows)
+        d_labelled = pd.apply_defect_audit(d_rows, {r["defect_id"]: ("TP", "stub")
+                                                    for r in d_rows})
+        d_payload = pd._audited_dedup_payload(ctx, 1, d_agg, d_labelled)
+        check("the audited dedup file keeps the merge when its kept row is a TP",
+              d_payload.get("merged_rows") == 1 and len(d_payload.get("merges") or []) == 1,
+              d_payload.get("merged_rows"))
+        d_kept_fp = pd.apply_defect_audit(d_rows, {
+            d_rows[0]["defect_id"]: ("FP", "stub"), d_rows[1]["defect_id"]: ("TP", "stub")})
+        d_payload_fp = pd._audited_dedup_payload(ctx, 1, d_agg, d_kept_fp)
+        check("a merged row whose KEPT row is an FP is not listed",
+              d_payload_fp.get("merged_rows") == 0, d_payload_fp.get("merged_rows"))
         # The audited TABLE must re-read defects@K / the severity totals from the
         # audited census, not from the ranking rows `select_champion` wrote.
         sel = {"champion": "a",
@@ -269,6 +322,18 @@ def main() -> int:
             agent_cmd=[sys.executable, "-c", "raise SystemExit(3)"], timeout=60)
         check("a stored audit is reused without running the agent again",
               again.get("reused") and again.get("ok") and again.get("tp") == 2, again)
+        # A stored verdict with NO label must stay unlabelled: the README says
+        # "unlabelled rows are never silently treated as TP", so reuse must not
+        # invent a TP for a row the auditor never labelled.
+        meta["verdicts"][0]["label"] = ""
+        (ctx.reports_dir / "round1_defect_audit.json").write_text(
+            json.dumps(meta), encoding="utf-8")
+        again2 = pd.write_round_defect_audit(
+            ctx, 1, agg=agg,
+            agent_cmd=[sys.executable, "-c", "raise SystemExit(3)"], timeout=60)
+        check("a stored verdict with no label is never silently relabelled TP",
+              again2.get("tp") == 2 and again2.get("incomplete") == 1,
+              (again2.get("tp"), again2.get("incomplete")))
         off_res = pd.write_round_defect_audit(ctx, 1, agg=agg, agent_cmd=None,
                                               use_agent=False)
         check("a disabled audit writes nothing and mutates nothing",

@@ -400,6 +400,53 @@ def test_healthy_round_is_not_reset():
     check("R6 (regression guard) a healthy round is left alone", not reset, f"reset={reset}")
 
 
+def test_audit_is_revalidated():
+    """review -> AUDIT -> revise: an in-round review retry must reset the AUDIT.
+
+    The auditor consumes a frozen COPY of review/ and its disposition is what
+    every reviser acts on, so revalidating the review (and the revisers) while
+    the auditor keeps its superseded copy leaves the round deciding on findings
+    the round no longer contains.
+    """
+    tmp = tmpdir("r6d")
+    root = setup_root(tmp)
+    ctx = np.Ctx(root)
+    ctx.load()
+    r = 1
+    np.materialize_a1(ctx, r)
+    ctx.cfg["audit"] = "on"
+    ctx.cfg["rewrites"], ctx.cfg["revises"] = [1], [1]   # pool: a1, w1, a2
+    np.materialize_rewrite(ctx, r, 1)
+    w1 = ctx.run(np.rid_for_fresh(r, "w1"))
+    write(ctx.sandbox_of(w1) / "rewritten" / "manuscript.md", "# rewritten\n")
+    w1["status"] = "done"
+    w1["corpus_digest"] = np.recompute_corpus_digest(ctx, r, "w1")
+    w1["content_fingerprint"] = np.corpus_content_fingerprint(ctx, r, "w1")
+    np.materialize_review(ctx, r)
+    review = ctx.run(np.rid_review(r))
+    write(ctx.sandbox_of(review) / "review" / "findings.json", "{}")
+    review["status"] = "done"
+    np.materialize_audit(ctx, r)
+    audit = ctx.run(np.rid_audit(r))
+    write(ctx.sandbox_of(audit) / "audit" / "AUDIT.md", "# audit of the first review\n")
+    audit["status"] = "done"
+    ctx.save_state()
+    # The operator retries the REVIEW: its findings change under the frozen
+    # audit copy, so the auditor must be rebuilt before any reviser reads it.
+    np.reset_run_record(review)
+    np.rebuild_sandbox(ctx, review)
+    write(ctx.sandbox_of(review) / "review" / "findings.json", '{"changed": true}')
+    review["status"] = "done"
+    ctx.save_state()
+    if not hasattr(np, "revalidate_round_inputs"):
+        check("R7 an in-round review retry resets the AUDIT sandbox", False, "missing function")
+        return
+    reset = np.revalidate_round_inputs(ctx, r)
+    check("R7 an in-round review retry resets the AUDIT sandbox",
+          np.rid_audit(r) in reset and audit.get("status") == "stale",
+          f"reset={reset} audit_status={audit.get('status')}")
+
+
 def test_judge_inputs_are_revalidated():
     """A judge sandbox built from a since-retried version must be reset too."""
     tmp = tmpdir("r6c")
@@ -914,6 +961,7 @@ def main() -> int:
     print("\n== R6 in-round retry freshness ==")
     test_stale_downstream_inputs_are_reset()
     test_healthy_round_is_not_reset()
+    test_audit_is_revalidated()
     test_judge_inputs_are_revalidated()
     test_response_depends_on_every_pool_member()
     test_integrator_reset_reaches_the_response_letter()

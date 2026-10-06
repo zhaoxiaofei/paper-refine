@@ -7,6 +7,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import * as z from 'zod/v4';
+import { allowedRoots, containsPath } from './containment.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -39,10 +40,9 @@ function resolveConverter() {
 const CONVERTER = resolveConverter();
 // Optional containment: DOCX_MCP_ALLOWED_ROOTS is a PATH-delimiter-separated
 // list of roots the tool may read/convert. Unset = only the shape checks below.
-const ALLOWED_ROOTS = (process.env.DOCX_MCP_ALLOWED_ROOTS || '')
-  .split(path.delimiter)
-  .filter(Boolean)
-  .map((r) => path.resolve(r));
+// The roots (and every requested file, below) are REALPATH-resolved: a symlink
+// inside an allowed root must not smuggle a target outside it.
+const ALLOWED_ROOTS = allowedRoots(process.env.DOCX_MCP_ALLOWED_ROOTS);
 // Concurrent calls for the same output PDF are serialized, so one call's
 // startup cleanup can never delete another call's finished render.
 const inFlight = new Map();
@@ -68,8 +68,7 @@ serveStdio(() => {
         };
       }
       const abs = path.resolve(docxPath);
-      if (ALLOWED_ROOTS.length
-          && !ALLOWED_ROOTS.some((r) => abs === r || abs.startsWith(r + path.sep))) {
+      if (!containsPath(abs, ALLOWED_ROOTS)) {
         return {
           content: [{ type: 'text', text: `refused: ${abs} is outside `
                                           + `DOCX_MCP_ALLOWED_ROOTS` }],
