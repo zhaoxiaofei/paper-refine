@@ -12,7 +12,8 @@ repo's stub agents:
   * `setup --integrators 0x5` (a per-round 32-bit mask) selects which pool
     members run an integration: bit (k-1) belongs to the k-th pool member
     [a1, w1..wM, a2..a{1+N}]. A clear bit means no session, no judge row and no
-    chance to win; the default 0xFFFFFFFF keeps every applicable agent.
+    chance to win; the default is 0xFFFFFFFF,0xFFFFFFFF,0x0 -- rounds 1-2 keep
+    every applicable agent and the final review-audit-revise round stages none.
   * `setup --judges 1,2` sets the number of judge sessions per version PER
     ROUND, and the panel expectation follows the round's own count.
 """

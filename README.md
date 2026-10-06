@@ -96,6 +96,7 @@ Everything lives under the root you passed to `setup`:
 | `reports/round<r>_raw_scores.csv` | every directed score the panel produced, with the sheet it came from |
 | `reports/round<r>_issue_census.csv` | how many defects of each tier and severity every version carries (`own` vs `peer`), plus the sibling matrices the ranking walks |
 | `reports/round<r>_defects.csv` | WHICH defects: one row per defect the panel filed, with the version it belongs to, the comparison's target/opponent, the check id, the defect class, the severity and the sheet's own evidence sentence |
+| `reports/round<r>_auditedTP_*.csv` (+ `round<r>_defect_audit.json`) | the LLM defect audit's DIAGNOSTIC TP-only family: the audited defect list, the census/matrix/cumulative re-counted over the TP rows, the round's score rows under the audited name, and the audit's own record. Never read by the champion selection |
 | `reports/round<r>_judge_conflicts.md` (+ `.json`) | the round's cross-judge conflicts (opposite scores, a claim one judge files as `resolved` and another as `introduced`, different numbers for the same fact, clean-vs-findings check dispositions), each a REQUIRED MANUAL CHECK; the cumulative `reports/JUDGE_CONFLICTS_TODO.md` collects every round's open items |
 | `reports/round<r>_review_findings.csv` | the round's review findings (id, check, category, severity, location, evidence, explanation), one row each |
 | `round<r>_winner/` | the champion of each round (content-addressed: identical content is never re-run) |
@@ -563,7 +564,12 @@ Useful flags: `--venue ID`, `--journal NAME`, `--article-type ID`
 `--caption-limit N` (default: the venue profile's own),
 `--jobs N`, `--agent {codex,claude,manual}`, `--agent-cmd JSON`, `--retries N`,
 `--poll S` (manual mode), `--no-redline`, `run --only 1,2` (only rounds 1 and
-2; see *Running only some of the steps*). Setup-time policy flags:
+2; see *Running only some of the steps*). Opt-in audits:
+`--defect-audit {codex-lite,codex,claude,manual}`, `--defect-audit-cmd JSON`,
+`--no-defect-audit` and `--conflict-agent {…}`, `--conflict-agent-cmd JSON`,
+`--no-conflict-agent` select the two optional LLM audits (the defect audit is
+on by default with an agent backend; the conflict LLM pass is off by default).
+Setup-time policy flags:
 `--audit {off,on}` (the auditor stage), `--placeholder-lookup {off,online}`
 (resolve searchable hand-off markers before the sessions run),
 `--strict-artifacts [on|fix|off]` (what a boilerplate or unfilled decision table
@@ -768,21 +774,23 @@ K = 1+M+N integrations + the judge panel`:
 
 **The default schedule is three rounds** (`--rounds 3`), with two judge sessions
 per version (`--judges 2`) and per-round stage counts
-`--rewrites 2,0,0` / `--revises 1,1,1` / `--review-scope full,full,formatting-writing`:
+`--rewrites 2,0,0` / `--revises 1,1,1` / `--review-scope full,full,full` /
+`--integrators 0xFFFFFFFF,0xFFFFFFFF,0x0`:
 
 | round | rewrites | review | audit | revise | integrations | judges |
 |---|---|---|---|---|---|---|
 | round 1 | `w1`, `w2` (structural + sentence) | full sweep set | on | `a2` | `i1`–`i4` (one per pool member) | 2/version |
 | round 2 | none | full sweep set | on | `a2` | `i1`, `i2` | 2/version |
-| round 3 | none | **formatting-and-writing only** | on | `a2` | `i1`, `i2` | 2/version |
+| round 3 | none | full sweep set | on | `a2` | **none** (review-audit-revise + judge only) | 2/version |
 
 The rewrites are a round-1 device: they supply the alternative organizations
-the later integrations draw on. Rounds 2 and 3 drop them so the pool is the
-incumbent plus the revised candidate(s), and the final round's review stops
-re-litigating content: it runs only the surface checks and the prose/architecture
-passes (`--review-scope formatting-writing`, see below), records every content
-check as "out of scope" in its coverage table, and hands the surface findings to
-the auditor and the reviser.
+the later integrations draw on. Round 2 drops them and integrates the incumbent
+plus the revised candidate. Round 3 is the final **review-audit-revise** round:
+it keeps the full review scope, stages no rewrite and no integration arm
+(its `--integrators` entry is `0x0`), and the panel judges the incumbents plus
+the revised candidate -- the last round never spends sessions on a
+submission-version merge. A scoped polish round is still available when an
+operator asks for one (`--review-scope ...,formatting-writing`, see below).
 
 The round is also drawn as a diagram —
 [`media/paper-refine-one-revision-round.png`](media/paper-refine-one-revision-round.png)
@@ -1169,8 +1177,8 @@ extended by repeating its last element; a longer one is truncated):
   carries its own round's `2*judges*(|field|-1)` directed scores, and the
   decision report prints the per-round counts. Bump the final round when the
   earlier rounds are for triage, or lower it to make a long run affordable.
-* `setup --review-scope full,full,formatting-writing` (the default) is a
-  **per-round review scope**: `full` runs the whole frozen sweep set; the
+* `setup --review-scope full,full,full` (the default) is a
+  **per-round review scope**: `full` runs the whole frozen sweep set; the opt-in
   `formatting-writing` scope runs only the surface sweeps (M1, M3, M6–M12, M17,
   M18, M19, M20, M24, M26) and the prose/architecture passes J3/J5, and records
   every other check id as `out of scope -- this round's review is the
@@ -1181,9 +1189,10 @@ extended by repeating its last element; a longer one is truncated):
   of the round's pool `[a1, w1..wM, a2..a{1+N}]`, so in a round with M=2, N=1
   (`pool = a1, w1, w2, a2`): `0x5` = bits 0 and 2 = only `i1` (a1 reworked) and
   `i3` (w2 reworked) run; `0x0` runs no integration at all and the round's
-  field is the pool alone; the default `0xFFFFFFFF` means **every applicable
-  agent** (bits beyond the pool size are ignored, so the default keeps selecting
-  the whole pool whatever M and N are). A skipped arm costs no session, is never
+  field is the pool alone. The default is `0xFFFFFFFF,0xFFFFFFFF,0x0`: rounds
+  1-2 select **every applicable agent** (bits beyond the pool size are ignored,
+  so `0xFFFFFFFF` keeps selecting the whole pool whatever M and N are) and
+  round 3 stages no integration. A skipped arm costs no session, is never
   judged and can never win — the round's recorded plan, the run log and
   `DECISION_REPORT.md` all name the arms the mask left out.
 
@@ -1695,18 +1704,48 @@ refuses to write a `0 conflicts` report when the panel's sheets are done but no
 directed comparison could be extracted, instead of reporting an empty input as
 a clean panel. Each round's judge wave is followed by ITS OWN audit (two
 rounds produce two audits; `decide` only back-fills a round that has no audit
-yet). The LLM auditor is ON by default and lightweight:
-`PAPER_CONFLICT_AGENT_CMD` can point it at a cheap CLI/model, otherwise the
-`codex-lite` preset runs (codex at low reasoning effort); `run` records the
-backend it used in `state.json` and a later `decide` reuses it, a custom/stub
-judge backend is reused as the auditor, and `--conflict-agent` /
-`--conflict-agent-cmd` override all of that (`--no-conflict-agent` keeps the
-deterministic check only). The auditor reads the same sheets and can add
-semantic conflicts the token rules miss; its answer is schema-checked and
-merged, never trusted blindly. Conflicts are advisory: they do not block
+yet). The LLM conflict auditor is OFF by default: only the mechanical conflicts
+are written, and every row keeps `origin: mechanical`. `--conflict-agent
+{codex-lite|codex|claude}` / `--conflict-agent-cmd JSON` (or the audit-specific
+`PAPER_CONFLICT_AGENT_CMD`) turn the LLM pass on for that invocation; its
+semantic candidates are schema-checked and merged, never trusted blindly
+(`--no-conflict-agent` and `--conflict-agent manual` keep it off). The separate
+LLM defect audit below is the default LLM pass -- it audits the same sheets from
+the defect side (TP/FP) without touching the conflicts. Conflicts are advisory:
+they do not block
 the decision, but the affected comparisons' numbers must not be cited until a
 human has resolved the listed checks and re-judged the unsupported session
 with `retry --run <ID>`.
+
+**LLM defect audit (diagnostic): which of the filed defects are real.**
+`run`, `run-decide` and `decide` can audit every round's
+`reports/round<r>_defects.csv` with a lightweight LLM session and label each
+defect row `TP` (the cited version really carries it) or `FP` (the claim is
+contradicted, unfounded or attributed to the wrong version). The auditor reads
+`defects.json` (the exact rows), `judge_opinions.json` (the sheets' ledgers) and
+`judge_runs.json` (each session's `v1..vN` label map) in
+`reports/defect_audit_round<r>/`; its `audit.json` is schema-checked and
+unlabelled rows are never silently treated as TP. The labels drive a TP-only
+DIAGNOSTIC file family, never the ranking:
+`round<r>_auditedTP_defects.csv` (the TP rows plus `audit_label`/`audit_reason`),
+`round<r>_auditedTP_issue_census.csv`, `round<r>_auditedTP_issue_matrix.csv`,
+`round<r>_auditedTP_issue_cumulative.csv`, `round<r>_auditedTP_raw_scores.csv`
+(the score rows are not audited, so this file repeats them under the audited
+name) and `round<r>_auditedTP_dedup_audit.json`, with the audit's own record in
+`round<r>_defect_audit.json`. The round's normal member table is printed as
+before, and a SECOND table then shows the same scores with `defects@K` and the
+severity totals re-counted over the TP rows only. **The champion selection
+still reads the non-audited aggregation**: the audited dict is a copy, `sel` is
+computed before it, and neither the pin nor the winner is touched. The audit is
+ON by default with a real agent backend (the judge-side `codex`/`claude`
+preset); `--defect-audit {codex-lite|codex|claude}`, `--defect-audit-cmd JSON`
+or `PAPER_DEFECT_AUDIT_CMD` choose/force a backend, and `--no-defect-audit`
+(or `--defect-audit manual`) writes only the non-audited reports. A manual or
+custom/stub judge backend does not silently get a second protocol -- opt in
+explicitly. A stored audit is reused when the defect rows are unchanged, so a
+`run` + `decide` pair pays for the audit once. `.paper_test/test_defect_audit.py`
+pins the schema check, the backend policy, the census re-count and the
+no-mutation invariant.
 
 **Reading improvement across many runs: `trend`.** A round's integer compares its
 champion against THAT round's own input, so the reference moves with the chain and
@@ -1985,7 +2024,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 61 suites (a few
+any failure. They are independent, so run them in parallel — 62 suites (a few
 minutes at the default parallelism on a 20-core box; tens of minutes
 sequentially):
 

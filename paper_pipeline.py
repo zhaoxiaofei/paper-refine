@@ -77,10 +77,11 @@ ROUND MODEL
     a list shorter than --rounds is extended by repeating its last element. The
     defaults are R = 3 rounds, M = [2, 0, 0] (the two from-scratch rewrites are
     staged in round 1 only), N = [1, 1, 1], `--judges 2` everywhere and the
-    per-round review scope [full, full, formatting-writing] (round 3 is the
-    final polish pass, not a second full content review). WHICH
+    per-round review scope [full, full, full]. WHICH
     integrations run is a per-round 32-bit mask (`setup --integrators`,
-    default 0xFFFFFFFF = every applicable agent): bit (k-1) belongs to the k-th
+    default [0xFFFFFFFF, 0xFFFFFFFF, 0x0] -- rounds 1-2 integrate every
+    applicable agent, the final review-audit-revise round integrates none): bit
+    (k-1) belongs to the k-th
     member of the round's pool [a1, w1..wM, a2..a{1+N}], and a clear bit means
     that member's integration arm does not exist at all (no session, no judge
     panel row, no chance to win). `run --only` selects a subset per invocation,
@@ -165,7 +166,10 @@ AND 24 AT |field| = 7 WITH THE DEFAULT 2 JUDGES)
     (the base always merges into the pin or the original). The default plan
     gives 8 members in round 1 ({original, w1, w2, a2, i1..i4}), 5 in round 2
     ({original, the round-1 pin, a2, i1, i2} -- M = 0, so the pool is the base
-    plus the revised candidate) and the same shape in round 3. V-vs-W and W-vs-V are
+    plus the revised candidate). Round 3 has M = 0 and integrators 0x0: no
+    integration arm exists, and its field is only the incumbents (the original
+    and the earlier pins, after content dedup) plus the revised candidate.
+    V-vs-W and W-vs-V are
     independent judgments from independent sessions, which is why the ranking
     LEADS on the round's reported DEFECT PREFIX (the issue census accumulated in
     severity_tier_category order until the cleanest version reaches the
@@ -983,14 +987,18 @@ DEFAULTS = {
     "venue": DEFAULT_VENUE, # the submission-requirement set the stages enforce
     "journal": "",          # the target journal (free text; "" = profile default)
     "zotero": DEFAULT_ZOTERO_MODE,   # Zotero tooling policy: off|read|edit|apply
-    # The default three-round SCHEDULE: round 1 stages the two from-scratch
-    # rewrites; rounds 2 and 3 have none (M = 0), so their pool is the base plus
-    # the revised candidate(s), integrated, and judged. Round 3's review is the
-    # FORMATTING-AND-WRITING-ONLY scope (see REVIEW_SCOPE_VALUES).
+    # The default three-round SCHEDULE (2026-10-06): round 1 stages the two
+    # from-scratch rewrites; rounds 2 and 3 have none (M = 0). Rounds 1-2 run the
+    # FULL review and every pool member's integration arm; round 3 is the final
+    # REVIEW-AUDIT-REVISE round: full review scope, no rewrite and NO integration
+    # arm (integrators mask 0), so the panel judges the incumbents plus the
+    # revised candidate without a submission-version merge pass.
     "rewrites": [2, 0, 0],  # M per round: rewritten candidates (list or one int)
     "revises": [1, 1, 1],   # N per round: reviewed-and-then-revised candidates
-    "review_scope": ["full", "full", "formatting-writing"],  # per-round review scope
-    "integrators": [INTEGRATOR_ALL],  # bitmask per round: which pool members integrate
+    "review_scope": ["full", "full", "full"],  # per-round review scope
+    # Bitmask per round: which pool members integrate. Rounds 1-2 integrate the
+    # whole pool; round 3 stages no integration run at all.
+    "integrators": [INTEGRATOR_ALL, INTEGRATOR_ALL, 0],
     "timeout": 4 * 3600,    # per-run timeout (manual mode: none)
     "retries": 2,           # automatic retries per failed run (2 = three attempts)
     "retry_backoff": 30,    # base seconds for the exponential retry backoff (0 = no wait)
@@ -9861,7 +9869,8 @@ class RunLogStream:
         return getattr(self._stream, name)
 
 
-LOGGING_COMMANDS = ("setup", "run", "run-decide", "decide", "retry", "prune", "redline")
+LOGGING_COMMANDS = ("setup", "run", "run-decide", "decide", "retry", "prune", "redline",
+                    "conflicts")
 # The path of the invocation's run log (set by `main`, recorded by
 # `save_state`): a root accumulates the console of its invocations, so the
 # retry/backoff lines and the judge advisories of an old run are still readable.
@@ -29463,6 +29472,7 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
                 manual: bool, nowait: bool, poll: int,
                 judge_cmd=None, judge_manual: bool = None, judge_timeout=None,
                 conflict_cmd=None, conflict_agent: bool = True,
+                defect_cmd=None,
                 retry_backoff: int = 0, retry_backoff_max: int = 0,
                 redline: bool = True, only=None) -> tuple:
     """Drive ONE round.
@@ -29688,14 +29698,41 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
               f"counted)")
     except OSError as e:
         print(f"[run] r{r} WARNING: could not write the round's issue census: {e}")
+    # The LLM defect audit (diagnostic): labels every defect row TP/FP and writes
+    # the audited TP-only report family.  It NEVER feeds the ranking below -- the
+    # champion is selected from `agg` exactly as before, and `sel`/the pin read
+    # the non-audited census only.
+    defect_audit = {"used": False, "reason": "not started"}
+    try:
+        defect_audit = write_round_defect_audit(
+            ctx, r, agg=agg, agent_cmd=defect_cmd,
+            timeout=(judge_timeout or timeout))
+        if defect_audit.get("used"):
+            if defect_audit.get("ok"):
+                _dst = " (reused)" if defect_audit.get("reused") else ""
+                _extra = (f"; {defect_audit['incomplete']} unlabelled"
+                          if defect_audit.get("incomplete") else "")
+                print(f"[run] r{r} LLM defect audit{_dst}: "
+                      f"{defect_audit.get('tp', 0)} TP / {defect_audit.get('fp', 0)} FP "
+                      f"of {defect_audit.get('rows', 0)} defect row(s){_extra} -> "
+                      f"reports/round{r}_auditedTP_defects.csv "
+                      f"(+ audited census/matrix/cumulative/raw scores)")
+            else:
+                print(f"[run] r{r} WARNING: the LLM defect audit produced no verdict "
+                      f"({defect_audit.get('reason')}); no audited files were written")
+        else:
+            print(f"[run] r{r} note: the LLM defect audit is off "
+                  f"({defect_audit.get('reason')})")
+    except Exception as e:                                           # noqa: BLE001
+        print(f"[run] r{r} WARNING: the LLM defect audit failed: {e}")
     # Cross-judge conflicts: two independent sessions can contradict each other
     # about the same comparison or the same claim.  The aggregation keeps both
     # judgments on purpose, so the disagreements are written here as REQUIRED
     # MANUAL CHECKS (never silently averaged away).  This runs ONCE PER ROUND,
-    # right after the judge wave: the deterministic pass always runs and the
-    # lightweight LLM auditor (PAPER_CONFLICT_AGENT_CMD, else the codex-lite
-    # preset) is ON by default; an explicit --conflict-agent[-cmd], the backend
-    # a previous round recorded, or a custom/stub judge backend take precedence.
+    # right after the judge wave: the deterministic pass always runs, while the
+    # LLM pass is OFF by default (the LLM defect audit above covers that ground)
+    # and runs only for an explicit --conflict-agent[-cmd] or
+    # PAPER_CONFLICT_AGENT_CMD this invocation.
     try:
         _audit_cmd, _audit_src = resolve_round_audit_cmd(
             conflict_cmd, conflict_agent, judge_cmd, judge_manual,
@@ -29769,6 +29806,19 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
     rows = round_member_table_rows(ctx, r, field, agg, sel, champ_rep)
     print()
     print(_tbl(rows[1:], rows[0]))
+    # The audited member table is a DIAGNOSTIC view: the same score columns and
+    # the same champion note, but the defect counts re-counted over the LLM
+    # auditor's TP rows.  The champion selection above never reads it.
+    if defect_audit.get("ok") and defect_audit.get("audited"):
+        try:
+            arows = round_member_table_rows(ctx, r, field, defect_audit["audited"],
+                                            audited_table_sel(sel), champ_rep)
+            print()
+            print(f"[run] r{r} member table -- LLM-audited defects (TP-only; "
+                  f"diagnostic; the champion row above is unchanged)")
+            print(_tbl(arows[1:], arows[0]))
+        except Exception as e:                                       # noqa: BLE001
+            print(f"[run] r{r} WARNING: could not print the audited member table: {e}")
     _tb = (sel or {}).get("tiebreak") or {}
     print(f"[run] ranking key: the cumulative defect count over the "
           f"adaptive severity_tier_category prefix (fatal->critical->major->minor, tier order, "
@@ -31944,9 +31994,9 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         die(f"judge agent executable not found on PATH: {judge_cmd[0]!r}\n"
             f"       fix --judge-agent-cmd/--judge-agent or drop the override")
     # The optional cross-judge conflict audit (see write_round_judge_conflicts):
-    # ON by default with a lightweight backend; an explicit --conflict-agent[-cmd]
-    # wins, a recorded backend is reused, a custom/stub judge backend stays the
-    # auditor, and --no-conflict-agent / --conflict-agent manual disable it.
+    # OFF by default (the LLM defect audit below covers the same ground); an
+    # explicit --conflict-agent[-cmd] or PAPER_CONFLICT_AGENT_CMD turns the LLM
+    # pass on, and the mechanical pass always runs.
     _conflict_choice = getattr(args, "conflict_agent", None)
     if getattr(args, "no_conflict_agent", False):
         conflict_cmd = None
@@ -31962,11 +32012,29 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         conflict_cmd = resolve_agent_cmd(_conflict_choice, None, use_env=False)
         conflict_audit_on = True
     else:
-        conflict_cmd = None
-        conflict_audit_on = True
+        _env_conflict = _conflict_agent_cmd_from_env(PAPER_CONFLICT_AGENT_ENV)
+        conflict_cmd = _env_conflict if (_env_conflict
+                                         and _conflict_cmd_usable(_env_conflict)) else None
+        conflict_audit_on = conflict_cmd is not None
     if conflict_cmd is not None and shutil.which(str(conflict_cmd[0])) is None:
         die(f"conflict-audit agent executable not found on PATH: {conflict_cmd[0]!r}\n"
             f"       fix --conflict-agent-cmd/--conflict-agent or pass --no-conflict-agent")
+    # The LLM defect audit (diagnostic; see write_round_defect_audit): ON by
+    # default when the judge backend is a real agent, off for manual/custom
+    # backends unless --defect-audit[-cmd] / PAPER_DEFECT_AUDIT_CMD asks for it.
+    defect_cmd, defect_src = resolve_defect_audit_cmd(
+        args, judge_cmd, judge_manual, ctx.state.get("defect_audit") or {})
+    if defect_cmd is not None and shutil.which(str(defect_cmd[0])) is None:
+        print(f"[defect-audit] WARNING: {defect_cmd[0]!r} is not on PATH; skipping the "
+              f"LLM defect audit")
+        defect_cmd, defect_src = None, "unavailable"
+    # Record the backend the defect audit actually resolves (diagnostic only):
+    # a later `decide` reuses the same one for the fingerprint-matched re-check.
+    ctx.state["defect_audit"] = {
+        "cmd": ([str(x) for x in defect_cmd] if defect_cmd else None),
+        "source": defect_src,
+        "recorded": utcnow(),
+    }
     # C24 (recorded, not changed): producers and judges may be the SAME backend,
     # which makes the panel a self-consistency instrument. The operator kept one
     # Codex backend on 2026-09-21; the least the pipeline owes the reader is to
@@ -32089,6 +32157,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                                      judge_manual=judge_manual, judge_timeout=judge_timeout,
                                      conflict_cmd=conflict_cmd,
                                      conflict_agent=conflict_audit_on,
+                                     defect_cmd=defect_cmd,
                                      retry_backoff=retry_backoff,
                                      retry_backoff_max=retry_backoff_max,
                                      redline=not getattr(args, "no_redline", False),
@@ -32149,6 +32218,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                                  judge_manual=judge_manual, judge_timeout=judge_timeout,
                                  conflict_cmd=conflict_cmd,
                                  conflict_agent=conflict_audit_on,
+                                 defect_cmd=defect_cmd,
                                  retry_backoff=retry_backoff,
                                  retry_backoff_max=retry_backoff_max,
                                  redline=not getattr(args, "no_redline", False),
@@ -32363,7 +32433,7 @@ ROUND_RAW_SCORE_FIELDS = ("round", "member", "credited", "direction", "opponent_
                           "member_mean")
 
 
-def write_round_raw_scores(ctx: Ctx, r: int, agg: dict = None) -> Path:
+def write_round_raw_scores(ctx: Ctx, r: int, agg: dict = None, name: str = None) -> Path:
     """`reports/round<r>_raw_scores.csv`: the exact flat lists behind median/mean.
 
     ONE row per directed score in the member's own frame:
@@ -32400,7 +32470,10 @@ def write_round_raw_scores(ctx: Ctx, r: int, agg: dict = None) -> Path:
     rows.sort(key=lambda x: (order.get(str(x["member"]), 10 ** 6), str(x["member"]),
                              str(x["direction"]) != "own", str(x["source_judge_run"] or ""),
                              str(x["opponent_id"] or "")))
-    p = ctx.reports_dir / f"round{r}_raw_scores.csv"
+    # `name` lets the diagnostic LLM defect audit write its TP-only counterpart
+    # (`round<r>_auditedTP_raw_scores.csv`) with the same writer; the default
+    # keeps every existing caller byte-identical.
+    p = ctx.reports_dir / (name or f"round{r}_raw_scores.csv")
     tmp = p.with_suffix(".csv.tmp")
     with open(tmp, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(ROUND_RAW_SCORE_FIELDS))
@@ -32462,7 +32535,8 @@ def issue_census_rows(ctx: Ctx, r: int, agg: dict) -> list:
     return rows
 
 
-def write_round_issue_census(ctx: Ctx, r: int, agg: dict = None) -> Path:
+def write_round_issue_census(ctx: Ctx, r: int, agg: dict = None,
+                             name: str = None) -> Path:
     """`reports/round<r>_issue_census.csv`: issues per version, tier and severity.
 
     It answers "how many issues of each tier does each version carry, and who
@@ -32476,7 +32550,7 @@ def write_round_issue_census(ctx: Ctx, r: int, agg: dict = None) -> Path:
     rows.
     """
     r, agg = _issue_file_agg(ctx, r, agg)
-    p = ctx.reports_dir / f"round{r}_issue_census.csv"
+    p = ctx.reports_dir / (name or f"round{r}_issue_census.csv")
     tmp = p.with_suffix(".csv.tmp")
     with open(tmp, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(ISSUE_CENSUS_FIELDS))
@@ -32560,7 +32634,7 @@ def _defect_rows_by_reaggregation(ctx: Ctx, r: int) -> list:
     return list(aggregate_round(ctx, int(r), field).get("issue_rows") or [])
 
 
-def write_round_defects(ctx: Ctx, r: int, agg: dict = None) -> Path:
+def write_round_defects(ctx: Ctx, r: int, agg: dict = None, name: str = None) -> Path:
     """`reports/round<r>_defects.csv`: EVERY defect the round's panel filed.
 
     The issue census answers "how many issues of each class does each version
@@ -32576,7 +32650,7 @@ def write_round_defects(ctx: Ctx, r: int, agg: dict = None) -> Path:
     """
     r, agg = _issue_file_agg(ctx, r, agg)
     rows = defect_list_rows(ctx, r, agg)
-    p = ctx.reports_dir / f"round{r}_defects.csv"
+    p = ctx.reports_dir / (name or f"round{r}_defects.csv")
     tmp = p.with_suffix(".csv.tmp")
     with open(tmp, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(DEFECT_LIST_FIELDS))
@@ -32584,6 +32658,519 @@ def write_round_defects(ctx: Ctx, r: int, agg: dict = None) -> Path:
         w.writerows(rows)
     os.replace(tmp, p)
     return p
+
+
+# ======================================================================================
+# LLM defect audit (diagnostic): flag every round<N>_defects.csv row TP or FP and
+# write the TP-only report family.  NEVER ranked: the champion selection always
+# reads the NON-audited aggregation (see `select_champion`'s callers).
+# ======================================================================================
+# The panel's defect list is a set of CLAIMS about the packages.  Some are true
+# defects (TP), some do not survive inspection (FP -- the quoted text is absent,
+# the omission does not exist, the row is attributed to the wrong version, or the
+# claim is otherwise unfounded).  The auditor below asks a lightweight LLM
+# session to label every defect row; the labels then drive DIAGNOSTIC ONLY files:
+#
+#   reports/round<r>_auditedTP_defects.csv          the TP rows (+ audit columns)
+#   reports/round<r>_auditedTP_issue_census.csv     census re-counted over the TP rows
+#   reports/round<r>_auditedTP_issue_matrix.csv     the same matrix over those counts
+#   reports/round<r>_auditedTP_issue_cumulative.csv its prefix sums
+#   reports/round<r>_auditedTP_raw_scores.csv       the round's score rows (scores are
+#                                                   not audited) under the audited name
+#   reports/round<r>_auditedTP_dedup_audit.json     merges whose kept row is a TP
+#   reports/round<r>_defect_audit.json              the audit's own record (verdicts)
+#
+# The audited aggregation is a COPY: `agg` itself is never mutated, `sel` never
+# reads it, and the champion row/pin is selected from the non-audited agg only.
+# An audit that cannot run (no backend) or returns nothing leaves the round
+# exactly as it was, minus a warning.
+PAPER_DEFECT_AUDIT_ENV = "PAPER_DEFECT_AUDIT_CMD"
+DEFECT_AUDIT_LABELS = ("TP", "FP")
+DEFECT_AUDIT_FIELDS = tuple(DEFECT_LIST_FIELDS) + ("audit_label", "audit_reason")
+
+
+def _defect_audit_prompt(r: int, n_rows: int) -> str:
+    return F"""You are the pipeline's DEFECT AUDITOR for round {int(r)}.
+
+The round's judge panel filed {int(n_rows)} defect rows. They are in
+`defects.json` in this directory: one object per row of
+`reports/round{int(r)}_defects.csv`, carrying
+{{defect_id, version, check, tier, severity, side, target_version, peer_version,
+session, judge_index, evidence}}.
+`judge_opinions.json` carries the round's resolved directed comparisons (score,
+basis, reason and the full resolved[]/introduced[] ledgers) if you need the
+surrounding sheet context. `judge_runs.json` maps every judge session id to its
+target and its v1..vN label map, so a `vN` in a ledger resolves to a real
+version. The delivered corpora the judges saw live under `<root>/runs/<session
+id>/` (target/, field/, original/) if your environment can read them.
+
+TASK
+For EVERY defect_id in `defects.json`, decide whether the row is a TRUE POSITIVE
+or a FALSE POSITIVE about the cited `version`:
+  * TP -- the row's claim is supported: the quoted text/number exists where the
+    row says it does, or the described difference (missing punctuation, an
+    unexpanded acronym, a template-order deviation, a stale code-README
+    instruction, a hyphenated page range, a missing figure-legend label, mixed
+    terminology, an unqualified p-value, a missing caveat, a wrong numeric
+    boundary, an understated availability statement, ...) is real.
+  * FP -- the row is contradicted: the cited version contains the text the row
+    says is missing, the claimed omission/defect does not exist, the row is
+    attributed to the wrong version, or the claim is otherwise unfounded.
+A style or architecture observation whose quoted text is really there is a TP
+(the pipeline counts such rows as minor defects); it is not an FP merely because
+you would not have raised it. Never invent evidence. If you cannot verify a row,
+label it TP and say "unverified" in the reason -- a possibly real defect must not
+be dropped silently.
+
+Write `audit.json` in this directory with EXACTLY this schema (no extra text):
+{{
+  "verdicts": [
+    {{"defect_id": "r{int(r)}-D0001", "label": "TP",
+      "reason": "<<= 40 words: what you checked and why the label holds>"}}
+  ]
+}}
+Every defect_id from `defects.json` must appear exactly once, with label "TP" or
+"FP". Write only `audit.json`; do not modify any other file.
+"""
+
+
+def _normalize_defect_audit(data, valid_ids) -> dict:
+    """{defect_id: (label, reason)} from the auditor's audit.json (junk dropped)."""
+    out = {}
+    rows = data.get("verdicts") if isinstance(data, dict) else data
+    if not isinstance(rows, list):
+        return out
+    label_map = {
+        "tp": "TP", "true_positive": "TP", "true positive": "TP", "true": "TP",
+        "pass": "TP", "ok": "TP",
+        "fp": "FP", "false_positive": "FP", "false positive": "FP", "false": "FP",
+        "fail": "FP",
+    }
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        did = str(item.get("defect_id") or item.get("id") or "").strip()
+        if did not in valid_ids or did in out:
+            continue
+        raw = item.get("label", item.get("verdict"))
+        if isinstance(raw, bool):
+            label = "TP" if raw else "FP"
+        else:
+            label = label_map.get(" ".join(str(raw or "").split()).lower())
+        if label is None:
+            continue
+        reason = " ".join(str(item.get("reason") or item.get("basis") or "").split())[:400]
+        out[did] = (label, reason)
+    return out
+
+
+def run_defect_audit_agent(ctx: Ctx, r: int, payload: dict, cmd: list,
+                           timeout: int = None) -> tuple:
+    """Run the LLM defect audit; returns ({defect_id: (label, reason)}, info).
+
+    Mirrors `run_judge_conflict_agent`: the session is a small, self-contained
+    sandbox next to the round's reports, its answer is schema-checked, and any
+    failure is recorded in `info` (never raised into the round).
+    """
+    sb = ctx.reports_dir / F"defect_audit_round{int(r)}"
+    sb.mkdir(parents=True, exist_ok=True)
+    write_json_atomic(sb / "defects.json",
+                      {k: v for k, v in payload.items() if k != "judge_runs"})
+    write_json_atomic(sb / "judge_runs.json", payload.get("judge_runs") or {})
+    # The sheets' own ledgers are context for the auditor; best effort only --
+    # the audit's required input is defects.json.
+    try:
+        opinions = round_judge_opinions(ctx, int(r), field=payload.get("field"))
+    except Exception:                                            # noqa: BLE001
+        opinions = []
+    write_json_atomic(sb / "judge_opinions.json",
+                      {"run": payload.get("run"), "round": int(r),
+                       "generated": utcnow(), "opinions": opinions})
+    write_text_atomic(sb / "PROMPT.md",
+                      _defect_audit_prompt(r, len(payload.get("defects") or [])))
+    answer = sb / "audit.json"
+    try:
+        if answer.exists():
+            answer.unlink()
+    except OSError:
+        pass
+    rec = {"id": F"defect_audit_round{int(r)}", "kind": "defect_audit",
+           "attempts_done": 0}
+    seconds = max(60, min(int(timeout) if timeout else 1800, 3600))
+    res = _execute_attempt_in(sb, rec, [str(x) for x in cmd], seconds,
+                              prompt_name="PROMPT.md", log_name="_agent.log",
+                              archive_marker=False)
+    info = {"used": True, "command": [str(x) for x in cmd], "rc": res.get("rc"),
+            "error": res.get("error"), "duration": round(float(res.get("dur") or 0.0), 1),
+            "sandbox": str(sb)}
+    data = read_json(answer, revive=False, lenient=True)
+    if not isinstance(data, (dict, list)):
+        info["error"] = info.get("error") or "the agent wrote no parseable audit.json"
+        info["ok"] = False
+        return {}, info
+    valid = {str(x.get("defect_id")) for x in (payload.get("defects") or [])
+             if isinstance(x, dict)}
+    verdicts = _normalize_defect_audit(data, valid)
+    info["verdicts"] = len(verdicts)
+    info["ok"] = bool(verdicts)
+    if not verdicts:
+        info["error"] = info.get("error") or "the agent labelled no defect row"
+    return verdicts, info
+
+
+def default_defect_audit_cmd():
+    """The lightweight default backend for the defect audit (None when unusable)."""
+    cmd = _conflict_agent_cmd_from_env(PAPER_DEFECT_AUDIT_ENV)
+    if cmd:
+        return cmd if _conflict_cmd_usable(cmd) else None
+    try:
+        cmd = resolve_agent_cmd("codex-lite", None, use_env=False)
+    except SystemExit:
+        cmd = None
+    if cmd and _conflict_cmd_usable(cmd):
+        return cmd
+    cmd = _conflict_agent_cmd_from_env("PAPER_AGENT_CMD")
+    return cmd if (cmd and _conflict_cmd_usable(cmd)) else None
+
+
+def resolve_defect_audit_cmd(args, judge_cmd, judge_manual: bool,
+                             recorded: dict = None) -> tuple:
+    """(cmd, source) for ONE round's LLM defect audit (None = skip).
+
+    The audit is ON by default with a real agent backend, but never silently on a
+    backend that cannot run it: an explicit --defect-audit[-cmd] wins, then
+    PAPER_DEFECT_AUDIT_CMD, then the backend a previous round recorded, then the
+    lightweight default (codex-lite, else PAPER_AGENT_CMD) WHEN the judge backend
+    is an agent preset.  A manual judge wave and a custom/stub judge backend stay
+    off unless the operator asks for the audit explicitly.
+    """
+    if getattr(args, "no_defect_audit", False):
+        return None, "disabled"
+    explicit = getattr(args, "defect_audit_cmd", None)
+    agent = getattr(args, "defect_audit", None)
+    if explicit:
+        try:
+            return resolve_agent_cmd(agent or "codex-lite", explicit), "defect-audit-cmd"
+        except SystemExit:
+            print("[defect-audit] WARNING: --defect-audit-cmd could not be resolved; "
+                  "skipping the LLM defect audit")
+            return None, "unresolved"
+    if agent == "manual":
+        return None, "manual"
+    if agent:
+        try:
+            return resolve_agent_cmd(agent, None, use_env=False), "defect-audit"
+        except SystemExit:
+            return None, "unresolved"
+    env_cmd = _conflict_agent_cmd_from_env(PAPER_DEFECT_AUDIT_ENV)
+    if env_cmd:
+        if _conflict_cmd_usable(env_cmd):
+            return env_cmd, "defect-audit-env"
+        return None, "unusable-env"
+    recorded = recorded or {}
+    recorded_cmd = recorded.get("cmd")
+    if recorded.get("source") == "disabled":
+        return None, "disabled"        # a previous --no-defect-audit stays off
+    if recorded.get("source") == "manual":
+        return None, "manual"
+    if recorded.get("source") not in ("manual", "disabled", "unavailable") \
+            and isinstance(recorded_cmd, list) and recorded_cmd:
+        return [str(x) for x in recorded_cmd], "recorded"
+    if judge_manual:
+        return None, "manual"
+    if not _looks_like_preset_cmd(judge_cmd):
+        # A custom/stub judge backend is usually a test harness or a foreign CLI:
+        # do not spawn a second protocol on it unless the operator opts in.
+        return None, "custom-backend"
+    light = default_defect_audit_cmd()
+    if light is not None:
+        return light, "lightweight-default"
+    return None, "unavailable"
+
+
+def apply_defect_audit(rows: list, verdicts: dict) -> list:
+    """The defect rows + `audit_label`/`audit_reason` (unlabelled rows stay None)."""
+    out = []
+    for row in rows or []:
+        item = dict(row)
+        label, reason = (verdicts or {}).get(str(row.get("defect_id")), (None, ""))
+        item["audit_label"] = label
+        item["audit_reason"] = reason
+        out.append(item)
+    return out
+
+
+def census_from_filtered_rows(template: dict, rows: list) -> dict:
+    """The census shape re-counted over a SUBSET of one round's defect rows.
+
+    `template` is the non-audited `agg["issue_census"]`; its session and
+    opportunity denominators are kept (the panel did not change), while every
+    count is recomputed from `rows` with the SAME per-(session, version) key
+    `build_issue_census` uses.  Rows marked `counted == "no"` (the opt-in
+    location-dedup merges) stay excluded, exactly as in the original census.
+    """
+    counts, seen = {}, set()
+    for row in rows or []:
+        if str(row.get("counted") or "yes").strip().lower() == "no":
+            continue
+        vid = str(row.get("version"))
+        tier, sev = str(row.get("tier")), str(row.get("severity"))
+        if tier not in BASIS_TIERS or sev not in SEVERITIES:
+            continue
+        key = (str(row.get("session")), vid,
+               _issue_row_key(tier, sev, row.get("evidence"), row.get("check")))
+        if key in seen:
+            continue
+        seen.add(key)
+        src = "own" if str(row.get("source")) == "own" else "peer"
+        bucket = counts.setdefault((vid, tier, sev), {"own": 0, "peer": 0})
+        bucket[src] += 1
+    census = {}
+    for vid, tpl in (template or {}).items():
+        if not isinstance(tpl, dict):
+            census[str(vid)] = tpl
+            continue
+        vid = str(vid)
+        n_sessions = tpl.get("sessions_expected")
+        sev_totals = {s: {"own": 0, "peer": 0, "total": 0, "raw_own": 0,
+                          "raw_peer": 0, "merged_own": 0, "merged_peer": 0}
+                      for s in SEVERITIES}
+        tiers, own_total, peer_total = {}, 0, 0
+        for tier in BASIS_TIERS:
+            per_sev, t_own, t_peer = {}, 0, 0
+            for sev in SEVERITIES:
+                bucket = counts.get((vid, tier, sev)) or {"own": 0, "peer": 0}
+                own, peer = int(bucket.get("own") or 0), int(bucket.get("peer") or 0)
+                n_own_opps = int(tpl.get("own_opps") or 0)
+                n_peer_opps = int(tpl.get("peer_opps") or 0)
+                per_sev[sev] = {
+                    "own": own, "peer": peer, "total": own + peer,
+                    "raw_own": own, "raw_peer": peer,
+                    "merged_own": 0, "merged_peer": 0,
+                    "peer_rate": (round(peer / n_peer_opps, 6) if n_peer_opps else 0.0),
+                    "own_rate": (round(own / n_own_opps, 6) if n_own_opps else 0.0),
+                }
+                sev_totals[sev]["own"] += own
+                sev_totals[sev]["peer"] += peer
+                sev_totals[sev]["raw_own"] += own
+                sev_totals[sev]["raw_peer"] += peer
+                sev_totals[sev]["total"] += own + peer
+                t_own += own
+                t_peer += peer
+            for per_sev_row in per_sev.values():
+                per_sev_row["per_session"] = (
+                    round(per_sev_row["total"] / n_sessions, 4) if n_sessions else None)
+            tier_total = t_own + t_peer
+            tiers[tier] = {"own": t_own, "peer": t_peer, "total": tier_total,
+                           "severities": per_sev,
+                           "per_session": (round(tier_total / n_sessions, 4)
+                                           if n_sessions else None)}
+            own_total += t_own
+            peer_total += t_peer
+        total = own_total + peer_total
+        rate = (round(total / n_sessions, 4) if n_sessions else None)
+        census[vid] = dict(tpl, **{
+            "tiers": tiers,
+            "severities": {s: dict(v, per_session=(round(v["total"] / n_sessions, 4)
+                                                   if n_sessions else None))
+                           for s, v in sev_totals.items()},
+            "own": own_total, "peer": peer_total, "total": total,
+            "raw_own": own_total, "raw_peer": peer_total, "raw_total": total,
+            "merged_own": 0, "merged_peer": 0, "merged": 0,
+            "dedup_audit": [],
+            "per_session": rate, "raw_per_session": rate})
+    return census
+
+
+def audited_defect_agg(ctx: Ctx, r: int, agg: dict, labelled: list) -> dict:
+    """A COPY of `agg` whose defect list/census hold only the auditor's TP rows.
+
+    The score rows, stats, field and every other key are shared with the original
+    aggregation: scores are not audited, so the medians/means the table prints are
+    the recorded ones.  This dict is used ONLY for the diagnostic files and the
+    second member table -- never for `select_champion`/`pin_champion`.
+    """
+    rows = [{k: v for k, v in x.items() if k not in ("audit_label", "audit_reason")}
+            for x in (labelled or []) if x.get("audit_label") == "TP"]
+    out = dict(agg or {})
+    out["issue_rows"] = rows
+    out["issue_census"] = census_from_filtered_rows(
+        (agg or {}).get("issue_census") or {}, rows)
+    return out
+
+
+def audited_table_sel(sel: dict) -> dict:
+    """`sel` with its DEFECT-derived ranking fields stripped.
+
+    The audited member table must show `defects@K` and the severity totals of the
+    TP-only census, but `round_member_table_rows` prefers the ranking row's own
+    `issues`/`defect_prefix_total` (the NON-audited numbers `select_champion`
+    wrote).  This copy keeps the champion, the tie-break cell count and the
+    writing/hand-off metadata while removing exactly those two defect fields, so
+    the table re-reads them from the audited aggregation; the score columns and
+    the champion note are untouched.
+    """
+    out = dict(sel or {})
+    out["ranking"] = [{k: v for k, v in row.items()
+                       if k not in ("issues", "defect_prefix_total")}
+                      if isinstance(row, dict) else row
+                      for row in (sel or {}).get("ranking") or []]
+    return out
+
+
+def write_round_audited_defects(ctx: Ctx, r: int, labelled: list,
+                                name: str = None) -> Path:
+    """`reports/round<r>_auditedTP_defects.csv`: the TP rows + audit columns."""
+    rows = []
+    for item in labelled or []:
+        if item.get("audit_label") != "TP":
+            continue
+        row = {k: item.get(k) for k in DEFECT_LIST_FIELDS}
+        row["defect_id"] = item.get("defect_id")
+        row["audit_label"] = item.get("audit_label")
+        row["audit_reason"] = item.get("audit_reason")
+        rows.append(row)
+    p = ctx.reports_dir / (name or f"round{r}_auditedTP_defects.csv")
+    tmp = p.with_suffix(".csv.tmp")
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(DEFECT_AUDIT_FIELDS))
+        w.writeheader()
+        w.writerows(rows)
+    os.replace(tmp, p)
+    return p
+
+
+def _audited_dedup_payload(ctx: Ctx, r: int, agg: dict, labelled: list) -> dict:
+    """The dedup merges whose KEPT row survived the audit as a TP."""
+    base = dedup_audit_payload(ctx, r, agg)
+    kept = {}
+    for item in labelled or []:
+        if item.get("audit_label") != "TP":
+            continue
+        if str(item.get("counted") or "yes").strip().lower() == "no":
+            continue
+        vid = str(item.get("version"))
+        excerpt = " ".join(str(item.get("evidence") or "").split())[:200].lower()
+        kept.setdefault((vid, str(item.get("session"))), []).append(excerpt)
+    merges = []
+    for m in base.get("merges") or []:
+        key = (str(m.get("version")), str(m.get("kept_session")))
+        needle = " ".join(str(m.get("kept_excerpt") or "").split())[:200].lower()
+        for excerpt in kept.get(key, []):
+            if excerpt[:120] and (excerpt.startswith(needle[:120])
+                                  or needle[:120].startswith(excerpt[:120])):
+                merges.append(m)
+                break
+    out = dict(base)
+    out["audited"] = True
+    out["merged_rows"] = len(merges)
+    out["merges"] = merges
+    return out
+
+
+def write_defect_audit_reports(ctx: Ctx, r: int, agg: dict, labelled: list,
+                               audited: dict = None) -> list:
+    """Write the whole TP-only report family; returns the paths written."""
+    audited = audited if audited is not None else audited_defect_agg(ctx, r, agg, labelled)
+    out = [
+        write_round_audited_defects(ctx, r, labelled),
+        write_round_issue_census(ctx, r, audited,
+                                 name=f"round{int(r)}_auditedTP_issue_census.csv"),
+        write_round_issue_matrix(ctx, r, audited,
+                                 name=f"round{int(r)}_auditedTP_issue_matrix.csv"),
+        write_round_issue_cumulative(ctx, r, audited,
+                                     name=f"round{int(r)}_auditedTP_issue_cumulative.csv"),
+        write_round_raw_scores(ctx, r, audited,
+                               name=f"round{int(r)}_auditedTP_raw_scores.csv"),
+    ]
+    p = ctx.reports_dir / f"round{int(r)}_auditedTP_dedup_audit.json"
+    write_json_atomic(p, _audited_dedup_payload(ctx, r, agg, labelled))
+    out.append(p)
+    return out
+
+
+def write_round_defect_audit(ctx: Ctx, r: int, agg: dict = None,
+                             agent_cmd: list = None, timeout: int = None,
+                             force: bool = False, use_agent: bool = True) -> dict:
+    """Audit one round's defect list and write the TP-only diagnostic family.
+
+    Idempotent: a stored audit with the same input fingerprint is reused (the
+    `run` audit is not paid for twice by a later `decide`).  The audit is
+    diagnostic -- it never changes `agg`, `sel`, a pin or a champion.
+    """
+    r = int(r)
+    if agg is None:
+        field = [str(v) for v in (ctx.round_rec(r).get("field") or [])]
+        agg = aggregate_round(ctx, r, field) if field else {"issue_rows": [], "field": []}
+    rows = defect_list_rows(ctx, r, agg)
+    if not rows:
+        return {"used": False, "reason": "no defect rows to audit", "rows": 0}
+    fingerprint = hashlib.sha256(
+        json.dumps(_json_safe(rows), sort_keys=True, ensure_ascii=False)
+        .encode("utf-8")).hexdigest()[:16]
+    # An explicit disable (--no-defect-audit / agent_cmd None) wins over a stored
+    # audit: the operator asked for no audit in THIS invocation.
+    if not use_agent or agent_cmd is None:
+        return {"used": False, "reason": "the LLM defect audit is off", "rows": len(rows)}
+    meta_path = ctx.reports_dir / f"round{int(r)}_defect_audit.json"
+    existing = read_json(meta_path, revive=False, lenient=True)
+    if isinstance(existing, dict) and not force \
+            and existing.get("input_fingerprint") == fingerprint \
+            and existing.get("ok"):
+        verdicts = {}
+        for v in existing.get("verdicts") or []:
+            if isinstance(v, dict) and v.get("defect_id"):
+                verdicts[str(v["defect_id"])] = (str(v.get("label") or "TP"),
+                                                 str(v.get("reason") or ""))
+        labelled = apply_defect_audit(rows, verdicts)
+        audited = audited_defect_agg(ctx, r, agg, labelled)
+        # Self-healing reuse: rewrite the (deterministic) TP-only family from the
+        # stored verdicts, so a deleted/partial audited file is restored without
+        # paying for another LLM session.
+        files = write_defect_audit_reports(ctx, r, agg, labelled, audited=audited)
+        return {"used": True, "reused": True, "ok": True, "rows": len(rows),
+                "tp": sum(1 for x in labelled if x["audit_label"] == "TP"),
+                "fp": sum(1 for x in labelled if x["audit_label"] == "FP"),
+                "incomplete": sum(1 for x in labelled if not x["audit_label"]),
+                "labelled": labelled, "audited": audited,
+                "agent": existing.get("agent") or {},
+                "files": [str(x) for x in files]}
+    judge_runs = {}
+    for rec in ctx.runs(kind="judge", round_no=r):
+        judge_runs[str(rec.get("id"))] = {
+            "judge_index": rec.get("judge_index"),
+            "target": rec.get("target_id"),
+            "label_map": rec.get("label_map") or {},
+            "sandbox": rec.get("sandbox"),
+        }
+    payload = {"run": ctx.root.name, "round": r, "generated": utcnow(),
+               "field": [str(v) for v in (agg.get("field") or [])],
+               "defects": [_json_safe(x) for x in rows],
+               "judge_runs": _json_safe(judge_runs)}
+    verdicts, info = run_defect_audit_agent(ctx, r, payload, agent_cmd, timeout=timeout)
+    labelled = apply_defect_audit(rows, verdicts)
+    tp = [x for x in labelled if x["audit_label"] == "TP"]
+    fp = [x for x in labelled if x["audit_label"] == "FP"]
+    incomplete = [x for x in labelled if not x["audit_label"]]
+    if not verdicts:
+        return {"used": True, "ok": False, "rows": len(rows), "tp": 0, "fp": 0,
+                "incomplete": len(rows), "labelled": labelled, "agent": info,
+                "reason": info.get("error") or "the audit returned no verdict"}
+    audited = audited_defect_agg(ctx, r, agg, labelled)
+    files = write_defect_audit_reports(ctx, r, agg, labelled, audited=audited)
+    meta = {"run": ctx.root.name, "round": r, "generated": utcnow(),
+            "input_fingerprint": fingerprint, "ok": True,
+            "rows": len(rows), "tp": len(tp), "fp": len(fp),
+            "incomplete": len(incomplete),
+            "agent": info, "files": [str(x) for x in files],
+            "verdicts": [{"defect_id": x["defect_id"], "label": x["audit_label"],
+                          "reason": x["audit_reason"]}
+                         for x in labelled if x["audit_label"]]}
+    write_json_atomic(meta_path, meta)
+    return {"used": True, "reused": False, "ok": True, "rows": len(rows),
+            "tp": len(tp), "fp": len(fp), "incomplete": len(incomplete),
+            "labelled": labelled, "audited": audited, "agent": info,
+            "files": [str(x) for x in files] + [str(meta_path)]}
 
 
 # ======================================================================================
@@ -33401,41 +33988,22 @@ def resolve_round_audit_cmd(conflict_cmd, conflict_agent: bool, judge_cmd,
                             judge_manual: bool, recorded: dict):
     """(cmd, source) for ONE round's conflict audit (see drive_round).
 
-    Precedence: an explicit --conflict-agent[-cmd] wins; otherwise the backend
-    a previous round recorded is reused; a custom/stub judge backend is reused
-    as the auditor; otherwise the LIGHTWEIGHT default runs (the judge backend is
-    only the fallback when no lightweight backend is available).  A manual judge
-    wave keeps the deterministic pass unless the operator configured an
-    audit-specific backend (--conflict-agent-cmd or PAPER_CONFLICT_AGENT_CMD).
+    The LLM conflict pass is OFF by default (2026-10-06): it runs only when the
+    operator asks for it THIS invocation -- --conflict-agent / --conflict-agent-cmd
+    on run/run-decide/decide, or PAPER_CONFLICT_AGENT_CMD.  A recorded backend is
+    still recorded (state.json -> conflict_agent) for diagnostics, but it no
+    longer turns the auditor back on in a later command; `judge_cmd`,
+    `judge_manual` and `recorded` are kept in the signature for compatibility
+    with the call sites and the test suite.
     """
     if not conflict_agent:
         return None, "disabled"
     if conflict_cmd is not None:
         return conflict_cmd, "conflict-agent"
-    recorded = recorded or {}
-    recorded_cmd = recorded.get("cmd")
-    if recorded.get("source") not in ("manual", "disabled") \
-            and isinstance(recorded_cmd, list) and recorded_cmd:
-        return [str(x) for x in recorded_cmd], "recorded"
-    if judge_manual:
-        # Manual judge mode starts no agents for the panel; the audit stays
-        # deterministic unless the operator configured an audit-specific
-        # backend for it (PAPER_CONFLICT_AGENT_CMD -- a general PAPER_AGENT_CMD
-        # or --agent manual is deliberately not enough).
-        dedicated = _conflict_agent_cmd_from_env(PAPER_CONFLICT_AGENT_ENV)
-        if dedicated and _conflict_cmd_usable(dedicated):
-            return dedicated, "conflict-agent-env"
-        return None, "manual"
-    if (not judge_manual) and not _looks_like_preset_cmd(judge_cmd):
-        # A custom judge backend (an operator CLI, a test stub) is the audit
-        # backend too -- never silently replace it with codex.
-        return judge_cmd, "judge-backend"
-    light = default_conflict_agent_cmd()
-    if light is not None:
-        return light, "lightweight-default"
-    if not judge_manual:
-        return judge_cmd, "judge-backend"
-    return None, "manual"
+    dedicated = _conflict_agent_cmd_from_env(PAPER_CONFLICT_AGENT_ENV)
+    if dedicated and _conflict_cmd_usable(dedicated):
+        return dedicated, "conflict-agent-env"
+    return None, "mechanical-default"
 
 
 def default_conflict_agent_cmd():
@@ -33463,14 +34031,12 @@ def default_conflict_agent_cmd():
 def conflict_agent_cmd_from_args(args, ctx: Ctx = None) -> list:
     """The LLM backend for the conflict audit (None = mechanical check only).
 
-    The auditor is ON by default.  An explicit
-    --conflict-agent/--conflict-agent-cmd wins, then the audit-specific
-    PAPER_CONFLICT_AGENT_CMD, then the backend `run` recorded
-    (`state["conflict_agent"]`), then the lightweight default
-    (PAPER_AGENT_CMD or the codex-lite preset); a run/run-decide production
-    backend is the next fallback and a legacy agent-driven root's configured
-    agent the last one.  --no-conflict-agent (or a run recorded as manual /
-    disabled) keeps the deterministic pass only.
+    OFF by default (2026-10-06): `decide` (and the `conflicts` command, which has
+    its own resolver) runs the LLM pass only when the operator asks for it this
+    invocation -- --conflict-agent / --conflict-agent-cmd, or the audit-specific
+    PAPER_CONFLICT_AGENT_CMD.  The backend `run` recorded is diagnostic only and
+    never turns the auditor back on by itself.  --no-conflict-agent and
+    --conflict-agent manual keep the deterministic pass only.
     """
     if getattr(args, "no_conflict_agent", False):
         return None
@@ -33492,45 +34058,53 @@ def conflict_agent_cmd_from_args(args, ctx: Ctx = None) -> list:
         except SystemExit:
             cmd = None
     else:
-        # Audit-specific lightweight command, then the run's recorded backend,
-        # then the generic lightweight default, then the run/run-decide
-        # production backend, then a legacy agent-driven root's agent.
+        # Only the audit-specific environment variable can turn the pass on
+        # without a flag; the recorded backend stays diagnostic.
         cmd = _conflict_agent_cmd_from_env(PAPER_CONFLICT_AGENT_ENV)
         if cmd is not None and not _conflict_cmd_usable(cmd):
             cmd = None
-        if cmd is None and ctx is not None:
-            recorded = (ctx.state.get("conflict_agent") or {})
-            if recorded.get("source") in ("manual", "disabled"):
-                return None
-            recorded_cmd = recorded.get("cmd")
-            if isinstance(recorded_cmd, list) and recorded_cmd:
-                cmd = [str(x) for x in recorded_cmd]
-        if cmd is None and ctx is not None:
-            # A legacy manual-mode root starts no agents; the audit stays
-            # deterministic unless the operator configured an audit-specific
-            # backend (checked above).
-            provider = ctx.state.get("judge_provider") or {}
-            if provider.get("judge_manual"):
-                return None
-        if cmd is None:
-            cmd = default_conflict_agent_cmd()
-        if cmd is None:
-            prod_agent = getattr(args, "agent", None)
-            if prod_agent and prod_agent != "manual":
-                try:
-                    cmd = resolve_agent_cmd(prod_agent, getattr(args, "agent_cmd", None))
-                except SystemExit:
-                    cmd = None
-        if cmd is None and ctx is not None:
-            # A root driven by an agent before this feature existed has no
-            # conflict_agent record; the recorded judge provider proves the root
-            # was agent-driven, and a hand-built fixture stays deterministic.
-            provider = ctx.state.get("judge_provider") or {}
-            if provider and not provider.get("judge_manual"):
-                try:
-                    cmd = resolve_agent_cmd(DEFAULTS.get("agent", "codex"), None)
-                except SystemExit:
-                    cmd = None
+    if not cmd or not _conflict_cmd_usable(cmd):
+        return None
+    return [str(x) for x in cmd]
+
+
+def conflict_cmd_for_command(args, ctx: Ctx = None) -> list:
+    """The LLM backend for the standalone `conflicts` command (None = off).
+
+    Its parser defaults `--agent` to "manual" (the LLM conflict pass is OFF by
+    default), so an explicit ask is any of: --conflict-agent-cmd / --agent-cmd,
+    --conflict-agent <preset>, PAPER_CONFLICT_AGENT_CMD, or a non-manual --agent.
+    `--no-agent` and `--conflict-agent manual` keep the deterministic pass, and
+    the backend `run` recorded is diagnostic only (never re-enables the pass).
+    """
+    if getattr(args, "no_agent", False):
+        return None
+    explicit = getattr(args, "conflict_agent_cmd", None) or getattr(args, "agent_cmd", None)
+    choice = getattr(args, "conflict_agent", None)
+    agent = getattr(args, "agent", None)
+    cmd = None
+    if explicit:
+        try:
+            cmd = resolve_agent_cmd(choice or agent or "codex-lite", explicit)
+        except SystemExit:
+            cmd = None
+    elif choice == "manual":
+        cmd = None
+    elif choice:
+        try:
+            cmd = resolve_agent_cmd(choice, None, use_env=False)
+        except SystemExit:
+            cmd = None
+    else:
+        cmd = _conflict_agent_cmd_from_env(PAPER_CONFLICT_AGENT_ENV)
+        if cmd is not None and not _conflict_cmd_usable(cmd):
+            cmd = None
+        if cmd is None and agent and agent != "manual":
+            # `conflicts --agent <preset>` is itself an explicit ask.
+            try:
+                cmd = resolve_agent_cmd(agent, None, use_env=False)
+            except SystemExit:
+                cmd = None
     if not cmd or not _conflict_cmd_usable(cmd):
         return None
     return [str(x) for x in cmd]
@@ -33545,35 +34119,7 @@ def cmd_conflicts(args) -> None:
         if getattr(args, "round", None) is not None \
                 and not (1 <= int(args.round) <= ctx.rounds_count()):
             die(F"--round must be in 1..{ctx.rounds_count()} (got {args.round})")
-        cmd = None
-        explicit_cmd = args.conflict_agent_cmd or args.agent_cmd
-        manual_off = (args.conflict_agent == "manual"
-                      or (args.agent == "manual" and not explicit_cmd))
-        if not getattr(args, "no_agent", False) and not manual_off:
-            if explicit_cmd:
-                try:
-                    cmd = resolve_agent_cmd(args.conflict_agent or args.agent,
-                                            explicit_cmd)
-                except SystemExit:
-                    cmd = None
-            elif args.conflict_agent:
-                try:
-                    cmd = resolve_agent_cmd(args.conflict_agent, None, use_env=False)
-                except SystemExit:
-                    cmd = None
-            else:
-                # Default run: reuse the backend `run` recorded (a real run
-                # records its lightweight auditor, a stub run the stub), else
-                # the lightweight default (PAPER_CONFLICT_AGENT_CMD / codex-lite).
-                recorded = (ctx.state.get("conflict_agent") or {})
-                recorded_cmd = recorded.get("cmd")
-                if recorded.get("source") not in ("manual", "disabled") \
-                        and isinstance(recorded_cmd, list) and recorded_cmd:
-                    cmd = [str(x) for x in recorded_cmd]
-                else:
-                    cmd = default_conflict_agent_cmd()
-            if cmd is not None and not _conflict_cmd_usable(cmd):
-                cmd = None
+        cmd = conflict_cmd_for_command(args, ctx)
         print("[conflicts] audit backend: "
               + (" ".join(cmd) if cmd else "none (deterministic check only)"))
         rounds = ([int(args.round)] if getattr(args, "round", None)
@@ -33697,7 +34243,8 @@ def _write_issue_matrix_file(path: Path, names: list, rows: list) -> Path:
     return path
 
 
-def write_round_issue_matrix(ctx: Ctx, r: int, agg: dict = None) -> Path:
+def write_round_issue_matrix(ctx: Ctx, r: int, agg: dict = None,
+                             name: str = None) -> Path:
     """`reports/round<r>_issue_matrix.csv` (fileA): rows = versions, columns =
     the severity_tier_category cells in canonical order, values = the reported
     defect counts per cell (peer/own as separate cells). The lattice uses the
@@ -33705,17 +34252,19 @@ def write_round_issue_matrix(ctx: Ctx, r: int, agg: dict = None) -> Path:
     minor; 48 cells), so every artifact speaks one vocabulary."""
     r, agg = _issue_file_agg(ctx, r, agg)
     names, rows = issue_matrix_rows(ctx, r, agg)
-    return _write_issue_matrix_file(ctx.reports_dir / f"round{r}_issue_matrix.csv", names, rows)
+    return _write_issue_matrix_file(
+        ctx.reports_dir / (name or f"round{r}_issue_matrix.csv"), names, rows)
 
 
-def write_round_issue_cumulative(ctx: Ctx, r: int, agg: dict = None) -> Path:
+def write_round_issue_cumulative(ctx: Ctx, r: int, agg: dict = None,
+                                 name: str = None) -> Path:
     """`reports/round<r>_issue_cumulative.csv`: the PREFIX SUMS of fileA, same
     rows and columns: cell k holds the cumulative defect count over the first k
     cells of the canonical order."""
     r, agg = _issue_file_agg(ctx, r, agg)
     names, rows = issue_cumulative_rows(ctx, r, agg)
-    return _write_issue_matrix_file(ctx.reports_dir / f"round{r}_issue_cumulative.csv",
-                                    names, rows)
+    return _write_issue_matrix_file(
+        ctx.reports_dir / (name or f"round{r}_issue_cumulative.csv"), names, rows)
 
 
 def dedup_audit_payload(ctx: Ctx, r: int, agg: dict) -> dict:
@@ -33732,7 +34281,8 @@ def dedup_audit_payload(ctx: Ctx, r: int, agg: dict) -> dict:
             "merges": merges}
 
 
-def write_round_dedup_audit(ctx: Ctx, r: int, agg: dict = None) -> Path:
+def write_round_dedup_audit(ctx: Ctx, r: int, agg: dict = None,
+                            name: str = None) -> Path:
     """`reports/round<r>_dedup_audit.json`: every merge the opt-in mode made.
 
     One record per merged row (version, source, session, defect class, line,
@@ -33741,7 +34291,7 @@ def write_round_dedup_audit(ctx: Ctx, r: int, agg: dict = None) -> Path:
     carries zero merges -- so the report shape does not change with the mode.
     """
     r, agg = _issue_file_agg(ctx, r, agg)
-    p = ctx.reports_dir / f"round{r}_dedup_audit.json"
+    p = ctx.reports_dir / (name or f"round{r}_dedup_audit.json")
     write_json_atomic(p, dedup_audit_payload(ctx, r, agg))
     return p
 
@@ -35590,6 +36140,33 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
                   f"; defects -> {_dfp.relative_to(ctx.root)}")
         except OSError as e:
             print(f"[decide] round {r} WARNING: could not write its issue census: {e}")
+        # The LLM defect audit (diagnostic; the same flags as `run`).  The stored
+        # verdicts are reused when the defect rows are unchanged, so a
+        # `run` + `decide` pair pays for the audit once.
+        try:
+            _prov = ctx.state.get("judge_provider") or {}
+            _jcmd = [str(_prov.get("judge"))] if _prov.get("judge") else None
+            _dcmd, _dsrc = resolve_defect_audit_cmd(
+                args, _jcmd, bool(_prov.get("judge_manual")),
+                ctx.state.get("defect_audit") or {})
+            _da = write_round_defect_audit(
+                ctx, r, agg=agg, agent_cmd=_dcmd,
+                timeout=getattr(args, "timeout", None))
+            if _da.get("used") and _da.get("ok"):
+                _dst = " (reused)" if _da.get("reused") else ""
+                print(f"[decide] round {r} LLM defect audit{_dst}: "
+                      f"{_da.get('tp', 0)} TP / {_da.get('fp', 0)} FP of "
+                      f"{_da.get('rows', 0)} defect row(s) -> "
+                      f"reports/round{r}_auditedTP_defects.csv "
+                      f"(+ audited census/matrix/cumulative/raw scores)")
+            elif _da.get("used"):
+                print(f"[decide] round {r} WARNING: the LLM defect audit produced no "
+                      f"verdict ({_da.get('reason')}); no audited files were written")
+            else:
+                print(f"[decide] round {r} note: the LLM defect audit is off "
+                      f"({_da.get('reason')})")
+        except Exception as e:                                       # noqa: BLE001
+            print(f"[decide] round {r} WARNING: the LLM defect audit failed: {e}")
         # Cross-judge conflicts: flag every contradiction between the round's
         # independent judge sessions as a REQUIRED MANUAL CHECK.  The mechanical
         # pass always runs; the LLM pass is ON by default and reuses the
@@ -37023,8 +37600,8 @@ def _cmd_retry_locked(ctx: Ctx, args) -> None:
 # =====================================================================
 
 USAGE_EXAMPLES = """usage:
-  setup   --source <dir> [--root <dir>] [--rounds 3] [--judges 2] [--review-scope full,full,formatting-writing]
-          [--rewrites M] [--revises N] [--integrators 0xFFFFFFFF]
+  setup   --source <dir> [--root <dir>] [--rounds 3] [--judges 2] [--review-scope full,full,full]
+          [--rewrites M] [--revises N] [--integrators MASK[,MASK…]]
           [--caption-limit N] [--venue ID] [--journal NAME] [--article-type ID]
           [--strict-venue]
           [--zotero off|read|edit|apply]
@@ -37059,23 +37636,25 @@ USAGE_EXAMPLES = """usage:
           feeding N $paper-revise sessions). Each takes either one integer (the
           same count every round) or a comma-separated list with one entry per
           round (--rewrites 2,0,0); a shorter list is extended by repeating its
-          last element. Defaults: --rewrites 2,0,0 and --revises 1,1,1, and the
-          default per-round review scope is full,full,formatting-writing. Every pool
-          member (base, rewrites, revisions) is then reworked once by an
-          INTEGRATION run that sees the WHOLE pool as donors.
+          last element. Defaults: --rewrites 2,0,0, --revises 1,1,1 and the
+          per-round review scope full,full,full. Every pool member (base,
+          rewrites, revisions) is then reworked once by an INTEGRATION run that
+          sees the WHOLE pool as donors -- in the default schedule rounds 1-2
+          integrate, and round 3 is the review-audit-revise round with NO
+          integration.
           --judges is a per-round list too (--judges 2,1): the number of
           independent judge sessions per version in each round, >= 1 per round
           (default 2 everywhere). --review-scope is a per-round list with the
           same rules: "full" or "formatting-writing" (default
-          full,full,formatting-writing).
+          full,full,full).
           --integrators is a per-round 32-BIT MASK (decimal or 0x…; --integrators
           0xF,0x5) selecting which agents of the round run that integration:
           bit (k-1) belongs to the k-th member of the round's pool
           [a1, w1..wM, a2..a{1+N}], a set bit runs that member's integration arm
           i<k>, a clear bit skips it (no session, no judge panel row, no chance
-          to win). The default 0xFFFFFFFF selects every applicable agent, so a
-          round's integrations are only restricted when you say so; 0x0 runs no
-          integration at all.
+          to win). The default is 0xFFFFFFFF,0xFFFFFFFF,0x0: rounds 1-2 select
+          every applicable agent and round 3 stages no integration at all (0x0
+          runs no integration in any round you point it at).
           --caption-limit sets the pipeline's PROXY cap for figure-legend
           length (check id M18; e.g. 300; default: the venue profile's own
           default, 0 for a venue that publishes no legend number). Every
@@ -37266,12 +37845,13 @@ USAGE_EXAMPLES = """usage:
           this script to use that backend (the built-in writer needs nothing).
 
 WORKED EXAMPLE — the default pipeline: THREE rounds, two from-scratch rewrites
-in round 1, integration-and-judge rounds after that, no later rewrites, and the
-round-3 review scoped to formatting and writing
+in round 1, integration-and-judge in round 2, and a final
+review-audit-revise-and-judge round 3 (full review, no rewrite, no integration)
 ------------------------------------------------------------------------------
   # 0. once: create the round root. Three rounds; 2 judge sessions per version;
   #    M=[2,0,0] rewrites, N=[1,1,1] revisions, review scope
-  #    [full, full, formatting-writing]. SOURCE is your pristine submission;
+  #    [full, full, full], integrators [0xFFFFFFFF, 0xFFFFFFFF, 0x0].
+  #    SOURCE is your pristine submission;
   #    --root must be new or empty.
   python paper_pipeline.py setup --source ./non_revised --root ./paper_rounds \\
       --rounds 3 --judges 2
@@ -37446,7 +38026,8 @@ def build_parser() -> argparse.ArgumentParser:
                          f"per round: an integer (--integrators 0x5 applies it to every round) "
                          f"or a comma-separated list with one entry per round (--integrators "
                          f"0xF,0x5; decimal, 0x…/0o…/0b… all accepted; default: "
-                         f"0x{INTEGRATOR_ALL:X}, i.e. every applicable agent). Bit (k-1) belongs "
+                         f"0x{INTEGRATOR_ALL:X},0x{INTEGRATOR_ALL:X},0x0 -- rounds 1-2 integrate "
+                         f"every applicable agent, round 3 stages no integration). Bit (k-1) belongs "
                          f"to the k-th member of the round's pool [a1, w1..wM, a2..a{{1+N}}]: "
                          f"set = that member's integration arm i<k> runs (the base arm i1 with "
                          f"bit 0, w1 with bit 1, …); clear = the arm is not planned, never "
@@ -37468,8 +38049,9 @@ def build_parser() -> argparse.ArgumentParser:
                          f"the surface checks (M1/M3/M6-M12/M17-M20/M24/M26) and the prose/"
                          f"architecture passes J3/J5 and records every other check as out of "
                          f"scope. An integer/list pair, same rules as --rewrites (default: "
-                         f"{','.join(DEFAULTS['review_scope'])}). Use it to make the final round "
-                         f"a polish pass instead of a second full review")
+                         f"{','.join(DEFAULTS['review_scope'])}). Use it (e.g. "
+                         f"--review-scope full,full,formatting-writing) to make a later round a "
+                         f"polish pass instead of another full review")
     ps.add_argument("--dedup-mode", default=None, metavar="MODE",
                     help="off (default) counts every judge sheet's issue rows as separate "
                          "mentions; location additionally merges rows ACROSS sheets when they "
@@ -37658,20 +38240,37 @@ def build_parser() -> argparse.ArgumentParser:
     decide_opts.add_argument("--non-residual-gate", dest="residual_gate", action="store_false",
                              help="record the residual items instead of failing the decision")
     # Shared by run / run-decide / decide: the optional LLM cross-judge conflict
-    # audit (the deterministic pass and the manual TODO files always run).
+    # audit (the deterministic pass and the manual TODO files always run).  The
+    # LLM pass itself is OFF by default -- the LLM defect audit covers the same
+    # ground -- and runs only when asked for here or via PAPER_CONFLICT_AGENT_CMD.
     conflict_opts = argparse.ArgumentParser(add_help=False)
     conflict_opts.add_argument("--conflict-agent", choices=list(CONFLICT_AGENT_CHOICES),
                                default=None,
-                               help="backend for the cross-judge conflict audit, ON by default "
-                                    "with a lightweight backend (PAPER_CONFLICT_AGENT_CMD, else "
-                                    "codex-lite); run records the backend it used and decide "
-                                    "reuses it ('manual' keeps the deterministic check only)")
+                               help="backend for the cross-judge conflict audit; the LLM pass "
+                                    "is OFF by default (only the mechanical conflicts are "
+                                    "written) and this flag (or PAPER_CONFLICT_AGENT_CMD) turns "
+                                    "it on; 'manual' keeps the deterministic check only")
     conflict_opts.add_argument("--conflict-agent-cmd", default=None,
                                help="JSON argv list for the conflict audit only (wins over "
                                     "--conflict-agent)")
     conflict_opts.add_argument("--no-conflict-agent", action="store_true",
                                help="skip the LLM cross-judge conflict audit; the deterministic "
                                     "conflict check and the manual TODO files are still written")
+    # Shared by run / run-decide / decide: the LLM defect audit (diagnostic).
+    # ON by default when the judge backend is a real agent; it labels every
+    # round<N>_defects.csv row TP/FP and writes the auditedTP_* report family.
+    # It never feeds the champion selection.
+    defect_audit_opts = argparse.ArgumentParser(add_help=False)
+    defect_audit_opts.add_argument("--defect-audit", choices=list(CONFLICT_AGENT_CHOICES),
+                                   default=None,
+                                   help="backend for the LLM defect audit (ON by default with "
+                                        "the judge's agent backend; 'manual' skips it)")
+    defect_audit_opts.add_argument("--defect-audit-cmd", default=None,
+                                   help="JSON argv list for the defect audit only (wins over "
+                                        "--defect-audit)")
+    defect_audit_opts.add_argument("--no-defect-audit", action="store_true",
+                                   help="skip the LLM defect audit (no auditedTP_* files are "
+                                        "written; the non-audited reports are unchanged)")
     run_opts = argparse.ArgumentParser(add_help=False)   # shared by run / run-decide
     run_opts.add_argument("--jobs", type=int, default=DEFAULTS["jobs"],
                     help=f"concurrent agent sessions (default: {DEFAULTS['jobs']})")
@@ -37739,11 +38338,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_opts.add_argument("--no-wait", action="store_true",
                     help="manual mode: print the prompts for runs whose dependencies are "
                          "satisfied and exit without waiting")
-    pr = sub.add_parser("run", parents=[common, run_opts, conflict_opts],
+    pr = sub.add_parser("run", parents=[common, run_opts, conflict_opts, defect_audit_opts],
                         help="execute pending rounds")
     pr.set_defaults(func=cmd_run)
 
-    prd = sub.add_parser("run-decide", parents=[common, run_opts, decide_opts, conflict_opts],
+    prd = sub.add_parser("run-decide",
+                         parents=[common, run_opts, decide_opts, conflict_opts, defect_audit_opts],
                          help="run the pending rounds, then decide in series")
     prd.set_defaults(func=cmd_run_decide)
 
@@ -37817,9 +38417,10 @@ def build_parser() -> argparse.ArgumentParser:
                               "write the manual TODO list")
     pcf.add_argument("--round", type=int, default=None, metavar="R",
                      help="audit only this round (default: every round that has judge sheets)")
-    pcf.add_argument("--agent", choices=list(CONFLICT_AGENT_CHOICES), default="codex-lite",
-                     help="backend for the LLM conflict audit (default: codex-lite, the "
-                          "lightweight low-effort session; manual = deterministic check only)")
+    pcf.add_argument("--agent", choices=list(CONFLICT_AGENT_CHOICES), default="manual",
+                     help="backend for the LLM conflict audit (default: manual = the "
+                          "deterministic check only; pass codex-lite/codex/claude, or set "
+                          "PAPER_CONFLICT_AGENT_CMD, to add the LLM pass)")
     pcf.add_argument("--agent-cmd", default=None,
                      help="JSON argv list overriding the agent command")
     pcf.add_argument("--conflict-agent", choices=list(CONFLICT_AGENT_CHOICES), default=None,
@@ -37834,7 +38435,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="re-run the LLM audit even when the judge sheets are unchanged")
     pcf.set_defaults(func=cmd_conflicts)
 
-    pd = sub.add_parser("decide", parents=[common, decide_opts, conflict_opts],
+    pd = sub.add_parser("decide",
+                        parents=[common, decide_opts, conflict_opts, defect_audit_opts],
                         help="recompute rounds, verify pins, write the decision report and "
                              "publish <root>/final_clean_version/")
     pd.set_defaults(func=cmd_decide)

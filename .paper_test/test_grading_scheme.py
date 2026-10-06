@@ -897,11 +897,18 @@ check("F7 a zero claim is cross-checked for a rewrite arm too",
       sum("critical_remaining=0" in w for w in warns_tb) == 1
       and sum("writing_remaining=0" in w for w in warns_tb) == 1, str(warns_tb)[:200])
 
-# F8: the README matches the code's auditor default.
+# F8: the README matches the code's three auditor defaults (2026-10-06): the
+# review auditor stage is on, the LLM cross-judge conflict pass is OFF, and the
+# diagnostic LLM defect audit is on with a real agent backend.  The README must
+# state each one.
 readme_text = (WS / "README.md").read_text(encoding="utf-8")
+readme_flat = " ".join(readme_text.split())
 check("F8 the README states the auditor default the code records",
-      np.DEFAULT_AUDIT == "on" and "on by default" in readme_text
-      and "off by default" not in readme_text)
+      np.DEFAULT_AUDIT == "on"
+      and "The stage is **on by default**" in readme_text
+      and "The LLM conflict auditor is OFF by default" in readme_flat
+      and "The audit is ON by default with a real agent backend" in readme_flat,
+      F"DEFAULT_AUDIT={np.DEFAULT_AUDIT}")
 
 print()
 if FAILS:

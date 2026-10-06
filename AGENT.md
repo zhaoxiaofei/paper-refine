@@ -338,17 +338,28 @@ touching this area:
   `introduced`, different numbers quoted for the same claim, and
   clean-vs-findings check dispositions. Every round's judge wave is followed by
   its own audit (two rounds -> two audits; `decide` only back-fills a round
-  with no audit yet). The mechanical pass always runs and the LLM auditor is ON
-  by default and lightweight: `PAPER_CONFLICT_AGENT_CMD` points it at a cheap
-  CLI/model, else the `codex-lite` preset (codex at low reasoning effort) runs;
-  `run` records the backend it used and `decide` reuses it, a custom/stub judge
-  backend is reused as the auditor, and `--conflict-agent[-cmd]` overrides all
-  of that (`--no-conflict-agent` keeps the deterministic check only). Its
-  answer is schema-checked and merged, never trusted blindly. Conflicts are
-  advisory for the decision, but the affected
+  with no audit yet). The mechanical pass always runs; the LLM conflict pass is
+  OFF by default (only `origin: mechanical` rows are written) and runs only for
+  an explicit `--conflict-agent[-cmd]` or `PAPER_CONFLICT_AGENT_CMD`. Its answer
+  is schema-checked and merged, never trusted blindly. Conflicts are advisory
+  for the decision, but the affected
   comparisons' numbers must not be cited until a human has resolved the listed
   checks and re-judged the unsupported session (`retry --run <ID>`).
   `.paper_test/test_judge_conflicts.py` pins the classes.
+* **The LLM defect audit is diagnostic; the champion never reads it**
+  (2026-10-06): `run`/`run-decide`/`decide` can label every
+  `reports/round<r>_defects.csv` row TP/FP (the auditor's schema-checked answer
+  lives in `reports/defect_audit_round<r>/audit.json` and
+  `round<r>_defect_audit.json`) and write the TP-only file family
+  (`round<r>_auditedTP_{defects.csv,issue_census.csv,issue_matrix.csv,
+  issue_cumulative.csv,raw_scores.csv,dedup_audit.json}`) plus a second member
+  table. It is ON by default with a real agent backend, off for
+  manual/custom backends unless `--defect-audit[-cmd]` / PAPER_DEFECT_AUDIT_CMD
+  asks for it, and `--no-defect-audit` skips it. The audited aggregation is a
+  COPY: `select_champion`, the pin and the winner always read the non-audited
+  `agg`, and the non-audited report files are never rewritten by the audit.
+  `.paper_test/test_defect_audit.py` pins the schema check, the census re-count
+  and that no-mutation invariant.
 * **Official templates are AUTHORITATIVE; derived structure is ADVISORY**
   (2026-10-01): `venue_profiles/<id>.official/` holds the journal's own
   Word/LaTeX template files (+ source/license/retrieval manifest) and

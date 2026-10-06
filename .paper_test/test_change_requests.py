@@ -169,9 +169,12 @@ def test_per_round_counts():
     check("CR2 the documented defaults are M=[2,0,0] and N=[1,1,1]",
           list(nb.DEFAULTS["rewrites"]) == [2, 0, 0] and list(nb.DEFAULTS["revises"]) == [1, 1, 1],
           f"{nb.DEFAULTS['rewrites']} / {nb.DEFAULTS['revises']}")
-    check("CR2 the documented default review scope is full, full, formatting-writing",
-          list(nb.DEFAULTS["review_scope"]) == ["full", "full", "formatting-writing"],
+    check("CR2 the documented default review scope is full, full, full",
+          list(nb.DEFAULTS["review_scope"]) == ["full", "full", "full"],
           str(nb.DEFAULTS["review_scope"]))
+    check("CR2 the documented default integrator masks are all, all, none",
+          list(nb.DEFAULTS["integrators"]) == [nb.INTEGRATOR_ALL, nb.INTEGRATOR_ALL, 0],
+          str(nb.DEFAULTS["integrators"]))
     check("CR2 a single integer applies to every round",
           nb.parse_round_counts(3, 4, "--rewrites") == [3, 3, 3, 3],
           str(nb.parse_round_counts(3, 4, "--rewrites")))
@@ -586,7 +589,8 @@ def test_cli_defaults():
           "default: 255" in (run_subs["jobs"].help or ""))
     check("CR4 usage examples use the new defaults",
           "[--rounds 3]" in nb.USAGE_EXAMPLES and "[--judges 2]" in nb.USAGE_EXAMPLES
-          and "formatting-writing" in nb.USAGE_EXAMPLES and "--jobs 255" in nb.USAGE_EXAMPLES)
+          and "full,full,full" in nb.USAGE_EXAMPLES and "0x0" in nb.USAGE_EXAMPLES
+          and "--jobs 255" in nb.USAGE_EXAMPLES)
 
 
 # =====================================================================
@@ -619,7 +623,8 @@ def run_pipeline(root: Path, source: Path, rounds: int = None, jobs: int = None,
 
 def test_end_to_end_default_plan():
     print()
-    print("== CR1e/CR4 e2e: the default plan (M=[2,0,0], N=[1,1,1], scoped round 3) ==")
+    print("== CR1e/CR4 e2e: the default plan (M=[2,0,0], N=[1,1,1], full round 3, no round-3 "
+          "integration) ==")
     tmp = scratch("paper_cr_e2e_")
     source = tmp / "source"
     write(source / "manuscript-b.md", "title\n")
@@ -634,10 +639,12 @@ def test_end_to_end_default_plan():
     check("CR4 e2e setup recorded the default plan and the 255-job policy",
           cfg.get("rounds") == 3 and cfg.get("rewrites") == [2, 0, 0]
           and cfg.get("revises") == [1, 1, 1]
-          and cfg.get("review_scope") == ["full", "full", "formatting-writing"]
+          and cfg.get("review_scope") == ["full", "full", "full"]
+          and cfg.get("integrators") == [nb.INTEGRATOR_ALL, nb.INTEGRATOR_ALL, 0]
           and cfg.get("judges") == [1, 1, 1]      # the e2e harness pins --judges 1
           and (state.get("run_policy") or {}).get("jobs") == 255,
           f"{cfg.get('rewrites')} {cfg.get('revises')} {cfg.get('review_scope')} "
+          f"{cfg.get('integrators')} "
           f"{(state.get('run_policy') or {}).get('jobs')}")
     runs = state["runs"]
     check("CR1e e2e round 1 staged M=2 rewrites and rounds 2-3 staged none",
@@ -651,14 +658,20 @@ def test_end_to_end_default_plan():
                             "r1_a2_revise", "r2_a2_revise", "r3_a2_revise")),
           str(sorted(k for k in runs if "review" in k or "revise" in k)))
     r3_review_prompt = (root / "runs/r3_review/PROMPT.md").read_text(encoding="utf-8")
-    check("CR1e e2e round 3's review is the formatting-and-writing-only scope",
-          "THIS ROUND'S REVIEW SCOPE: FORMATTING AND WRITING ONLY" in r3_review_prompt
-          and "out of scope" in r3_review_prompt,
+    check("CR1e e2e round 3 keeps the FULL review scope",
+          "FORMATTING AND WRITING ONLY" not in r3_review_prompt,
           str([ln for ln in r3_review_prompt.splitlines()
                if "SCOPE" in ln][:2]))
     check("CR1e e2e rounds 1-2 keep the full review scope",
           "FORMATTING AND WRITING ONLY" not in
           (root / "runs/r1_review/PROMPT.md").read_text(encoding="utf-8"))
+    check("CR1e e2e round 3 stages NO integration run (review-audit-revise + judge only)",
+          not any(re.match(r"r3_i\d+$", k) for k in runs)
+          and runs["r3_a2_revise"]["status"] == "done"
+          and state["rounds"]["3"]
+          .get("plan", {}).get("integrated") == []
+          and state["rounds"]["3"].get("plan", {}).get("integrators") == 0,
+          str({k: v.get("status") for k, v in runs.items() if k.startswith("r3_")}))
     r1 = state["rounds"]["1"]
     r2 = state["rounds"]["2"]
     check("CR1e e2e round 1's field is the default plan's pool + integrations",
@@ -696,8 +709,10 @@ def test_end_to_end_default_plan():
                for k in ("r2_i1", "r2_i2")}))
     manifest = json.loads((root / "redlines/manifest.json").read_text(encoding="utf-8"))
     vids = {v["version"] for v in manifest["versions"]}
+    ctx_red = nb.Ctx(root)
+    ctx_red.load()
     check("CR1e e2e tracked changes cover every candidate of the last round",
-          vids == set(nb.round_candidate_ids(0, 1)), str(sorted(vids)))
+          vids == set(nb.round_candidate_ids_run(ctx_red, 3)), str(sorted(vids)))
     dec = subprocess.run([sys.executable, str(WS / "paper_pipeline.py"), "decide",
                           "--root", str(root)], capture_output=True, text=True, timeout=600)
     check("CR1e e2e decide certifies the run", dec.returncode == 0,

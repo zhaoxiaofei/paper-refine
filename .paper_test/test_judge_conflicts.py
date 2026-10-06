@@ -180,8 +180,9 @@ def main():
         preset = pc.AGENT_PRESETS.get("codex-lite") or []
         check("the lightweight conflict preset exists",
               any("model_reasoning_effort" in str(x) for x in preset), str(preset))
-        check("decide reuses the recorded audit backend by default",
-              pc.conflict_agent_cmd_from_args(plain, fake_ctx) == recorded)
+        check("the LLM conflict pass is OFF by default (recorded backend included)",
+              pc.conflict_agent_cmd_from_args(plain, fake_ctx) is None,
+              pc.conflict_agent_cmd_from_args(plain, fake_ctx))
         off = types.SimpleNamespace(no_conflict_agent=True, conflict_agent=None,
                                     conflict_agent_cmd=None, agent=None, agent_cmd=None)
         check("--no-conflict-agent keeps the deterministic pass",
@@ -197,29 +198,20 @@ def main():
         provider_ctx = types.SimpleNamespace(state={"judge_provider": {
             "judge": "codex", "judge_manual": False}})
         got = pc.conflict_agent_cmd_from_args(plain, provider_ctx)
-        if shutil.which("codex"):
-            check("a legacy agent-driven root defaults to the configured agent",
-                  bool(got) and got[0] == "codex", str(got))
-        else:
-            check("a legacy root without codex stays deterministic", got is None, str(got))
+        check("a legacy agent-driven root stays deterministic by default",
+              got is None, str(got))
         stub_judge = [sys.executable, "stub_judge.py"]
         rc_cmd, rc_src = pc.resolve_round_audit_cmd(None, True, stub_judge, False, {})
-        check("a custom/stub judge backend is the per-round auditor",
-              rc_cmd == stub_judge and rc_src == "judge-backend", F"{rc_cmd}/{rc_src}")
+        check("a custom/stub judge backend does not turn the LLM auditor on",
+              rc_cmd is None and rc_src == "mechanical-default", F"{rc_cmd}/{rc_src}")
         rc_cmd, rc_src = pc.resolve_round_audit_cmd(None, True, stub_judge, False,
                                                     {"cmd": recorded, "source": "recorded"})
-        check("a recorded audit backend is reused per round",
-              rc_cmd == recorded and rc_src == "recorded", F"{rc_cmd}/{rc_src}")
+        check("a recorded backend alone does not re-enable the auditor",
+              rc_cmd is None and rc_src == "mechanical-default", F"{rc_cmd}/{rc_src}")
         codex_judge = ["codex", "exec", "-"]
         rc_cmd, rc_src = pc.resolve_round_audit_cmd(None, True, codex_judge, False, {})
-        if shutil.which("codex"):
-            check("a preset judge backend gets the lightweight per-round auditor",
-                  rc_src == "lightweight-default"
-                  and any("model_reasoning_effort" in str(x) for x in (rc_cmd or [])),
-                  F"{rc_cmd}/{rc_src}")
-        else:
-            check("a preset judge backend falls back to itself without codex",
-                  rc_cmd == codex_judge and rc_src == "judge-backend", F"{rc_cmd}/{rc_src}")
+        check("a preset judge backend stays deterministic without an explicit ask",
+              rc_cmd is None and rc_src == "mechanical-default", F"{rc_cmd}/{rc_src}")
         rc_cmd, rc_src = pc.resolve_round_audit_cmd(recorded, True, stub_judge, False, {})
         check("an explicit conflict backend wins per round",
               rc_cmd == recorded and rc_src == "conflict-agent", F"{rc_cmd}/{rc_src}")
@@ -228,10 +220,30 @@ def main():
               rc_cmd is None and rc_src == "disabled", F"{rc_cmd}/{rc_src}")
         rc_cmd, rc_src = pc.resolve_round_audit_cmd(None, True, codex_judge, True, {})
         check("manual judge mode keeps the per-round auditor deterministic",
-              rc_cmd is None and rc_src == "manual", F"{rc_cmd}/{rc_src}")
+              rc_cmd is None and rc_src == "mechanical-default", F"{rc_cmd}/{rc_src}")
         rc_cmd, rc_src = pc.resolve_round_audit_cmd(recorded, True, None, True, {})
         check("an explicit audit backend still runs in manual judge mode",
               rc_cmd == recorded and rc_src == "conflict-agent", F"{rc_cmd}/{rc_src}")
+        # The standalone `conflicts` command: its --agent now defaults to manual
+        # (LLM off), while any explicit ask turns the pass on.
+        def cargs(**kw):
+            base = dict(no_agent=False, conflict_agent=None, conflict_agent_cmd=None,
+                        agent="manual", agent_cmd=None)
+            base.update(kw)
+            return types.SimpleNamespace(**base)
+        check("conflicts stays deterministic by default",
+              pc.conflict_cmd_for_command(cargs()) is None)
+        check("conflicts --conflict-agent manual stays deterministic",
+              pc.conflict_cmd_for_command(cargs(conflict_agent="manual")) is None)
+        check("conflicts --no-agent wins",
+              pc.conflict_cmd_for_command(cargs(no_agent=True, agent="codex")) is None)
+        check("conflicts --agent-cmd wins over the manual default",
+              pc.conflict_cmd_for_command(cargs(agent_cmd=json.dumps(recorded)))
+              == recorded)
+        if shutil.which("codex"):
+            got = pc.conflict_cmd_for_command(cargs(agent="codex"))
+            check("conflicts --agent codex asks for the LLM pass",
+                  bool(got) and got[0] == "codex", str(got))
         orig_sel, orig_round_judges = pc.judge_selection, pc.round_judges
         try:
             sel_ctx = FakeCtx([judge_sheet_run("j1", "i1", 1),
@@ -278,6 +290,8 @@ def main():
         check("PAPER_CONFLICT_AGENT_CMD is the audit's lightweight default",
               pc.default_conflict_agent_cmd() == recorded
               and pc.conflict_agent_cmd_from_args(plain, None) == recorded)
+        check("conflicts honours PAPER_CONFLICT_AGENT_CMD too",
+              pc.conflict_cmd_for_command(cargs()) == recorded)
         rc_cmd, rc_src = pc.resolve_round_audit_cmd(None, True, None, True, {})
         check("the audit-specific env enables the auditor in manual judge mode",
               rc_cmd == recorded and rc_src == "conflict-agent-env", F"{rc_cmd}/{rc_src}")
