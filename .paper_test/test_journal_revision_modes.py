@@ -437,6 +437,11 @@ def main() -> int:
           not any(f in ("CHANGELOG.md", "REVISION_REPORT.md", "revision_report.json",
                         "DIFF_LEDGER.md", "MANUAL_STEPS.md", "VISUAL_CHECK.md") for f in files),
           str(files))
+    # The winner directory now carries the difference-tracking auxiliaries (the
+    # scoped mode publishes its winner under --root, and the submission is built
+    # FROM that directory), so the submission must still drop the whole family.
+    check("J1 the submission excludes the difference-tracking auxiliaries",
+          not any(nb._is_aux_doc(f.rsplit("/", 1)[-1]) for f in files), str(files))
     sub_manifest = json.loads((root / "journal_submission.json").read_text(encoding="utf-8"))
     check("J1 the package manifest records the mode and the absence of raw_data",
           sub_manifest["mode"] == "major" and sub_manifest["raw_data_included"] is False

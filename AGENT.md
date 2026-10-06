@@ -13,9 +13,11 @@ it are local artefacts, not committed).
 
 | path | what it is |
 |---|---|
-| `paper_pipeline.py` | the orchestrator (single file, stdlib only). CLI: `setup`, `run`, `run-decide`, `decide`, `status`, `trend`, `agents`/`sessions`, `conflicts`, `selfcheck`, `set-venue`, `set-journal`, `set-article-type`, `set-revision-mode`, `set-tiebreak-defect-floor`, `set-dedup-mode`, `add-venue`, `build-venue-templates`, `retry`, `prune`, `redline`, `conform` (aliases `template`, `author-submission`, `apply-template`). |
+| `paper_pipeline.py` | the orchestrator (single file, stdlib only). CLI: `setup`, `run`, `run-decide`, `decide`, `status`, `trend`, `agents`/`sessions`, `conflicts`, `selfcheck`, `set-venue`, `set-journal`, `set-article-type`, `set-revision-mode`, `set-tiebreak-defect-floor`, `set-dedup-mode`, `add-venue`, `build-venue-templates`, `retry`, `prune`, `redline`, `track`, `conform` (aliases `template`, `author-submission`, `apply-template`). |
 | `paper_docx_format.py` | the optional companion: code-side OOXML style/formatting scan/fix (`scan`/`fix`/`check-pdf`). |
 | `paper_redlines_adapter.py` | optional tracked-changes `.docx` bridge. |
+| `docxcompare.sh` + `mcp-docx-compare/` | Word's own comparison engine (`Word.Application.CompareDocuments` through PowerShell COM) -- the FIRST choice whenever two `.docx` files must be tracked (the `docx-compare` MCP tool wraps the script). |
+| `docx2pdf.sh` + `mcp-docx-converter/` | the first-choice DOCX→PDF renderer. |
 | `venue_profiles/` | the venue profiles (the submission rule sets) **and their schema documentation** — start at `venue_profiles/README.md`. |
 | `paper-skills/` | the bundled `paper-review` / `paper-revise` skill packages and the two master prompts. |
 | `media/` | the figures the docs embed: `paper-refine-one-revision-round.png`, one revision round. |
@@ -197,6 +199,24 @@ the profiles shipped next to the script → the built-in fallback inside
     cannot close it `OK` without that override. Pinned by
     `.paper_test/test_venue_template_conformance.py` and
     `.paper_test/test_docx_format.py`.
+14. **Difference tracking and the PDF renders are AUXILIARY, CODE-ONLY passes.**
+    After each round, `round_tracking()` (never fatal, started by `run` unless
+    `--no-track`) writes the `<name>.tracking-original|previous|prev-winner.<ext>`
+    family (or the `logging-original` / `log-previous` / `logging-prev-winner`
+    fallback log when the tool failed) beside the candidate documents, mirrors it
+    under `<root>/tracking/`, and writes the same family into every published
+    `round<r>_winner/` (original + previous winner). `.docx` pairs go through the
+    `docx-compare` MCP tool (Word's own `CompareDocuments`) FIRST, then the
+    redline chain; `.tex`/`.bib` pairs go through `latexdiff`. The LaTeX/DOCX
+    PDFs land under `<root>/pdfs/`. Three rules: (a) the names live in ONE place,
+    `AUXILIARY_DOC_SUFFIXES` (writers use `tracking_aux_suffix()`; the scanner and
+    the skill's `revision_token.py` must keep agreeing -- a test pins all three),
+    so no file of the family may ever be treated as submission content; (b) the
+    pass starts NO agent session and must not be able to change a champion, a
+    score, a pin or an input manifest -- `.paper_test/test_difference_tracking.py`
+    runs a stub round with and without it and compares the recorded end result;
+    (c) compile/convert failures are WARNINGS (recorded in `<root>/pdfs/` and
+    printed), never a failed stage.
 
 ## Commands you will use
 
@@ -216,6 +236,7 @@ python paper_pipeline.py status --root ./paper_rounds      # venue + journal + l
 python paper_pipeline.py run   --root ./paper_rounds --only 1:review,1:feedback
 python paper_pipeline.py retry --root ./paper_rounds --runs 1:judge,2:feedback,2:review
 python paper_pipeline.py decide --root ./paper_rounds --skip-hash
+python paper_pipeline.py track --root ./paper_rounds   # difference copies + persistent PDFs
 
 # create a root for a specific venue in one step
 python paper_pipeline.py setup --source ./non_revised --root ./paper_rounds \

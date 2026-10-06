@@ -129,18 +129,28 @@ to conceal AI use — if generative AI was actually used anywhere, ensure
 disclosure complies with Springer Nature policy. Ask the user to confirm
 actual usage; never assume.
 
-## E5 — Tracked-changes auxiliary files
+## E5 — Difference-tracking auxiliary files
 
-For every edited `.docx`, ALSO emit `<name>.tracked.docx` with real Word
-tracked changes (`w:ins`/`w:del` in the OOXML) covering every edit. Raw-OOXML
-tracked changes are fragile to hand-write — if the available libraries cannot
-produce them reliably, fall back to `<name>.before-after.docx`: a copy whose
-changed paragraphs carry clearly bracketed `[BEFORE: ...]` / `[AFTER: ...]`
-markers, with a first-paragraph note that it is a marker file, not a
-tracked-changes document. Never publish a marker file under the `.tracked.docx`
-name — the author would send a reviewer something that only looks like tracked
-changes. Record the fallback in A3 and in REVISION_REPORT.md. For `.tex`: run
-`latexdiff` original vs revised if available; otherwise note its absence.
+For every edited `.docx`, ALSO emit `<name>.tracking-previous.docx` with real
+Word tracked changes (`w:ins`/`w:del` in the OOXML) covering every edit — the
+tracking is against the version this copy was revised FROM (the previous
+version). Produce it with the Word-native compare engine when you can reach it:
+call the `docxcompare.sh` script (or the `docx-compare` MCP tool, which wraps
+that script through `CompareDocuments` under Word COM automation) with the
+previous and the revised copy; that is the pipeline's FIRST choice. Raw-OOXML
+tracked changes are fragile to hand-write — if neither the Word compare engine
+nor the available libraries can produce them reliably, fall back to
+`<name>.log-previous.docx`: a copy whose changed paragraphs carry clearly
+bracketed `[BEFORE: ...]` / `[AFTER: ...]` markers, with a first-paragraph note
+that it is a marker file, not a tracked-changes document. Never publish a marker
+file under the `.tracking-previous.docx` name — the author would send a reviewer
+something that only looks like tracked changes. Record the fallback in A3 and in
+REVISION_REPORT.md. For `.tex`/`.bib`: run `latexdiff` previous vs revised if
+available (writing `<name>.tracking-previous.tex`/`.bib`); otherwise emit the
+`<name>.log-previous.tex`/`.bib` fallback log and note the absence. The
+orchestrator writes the same family of copies itself — `*.tracking-original.*`
+for the comparison against the pristine submission and `*.tracking-previous.*`
+for the previous version — so never diff these auxiliary names yourself.
 
 ## E6 — Scientific-judgement guard
 

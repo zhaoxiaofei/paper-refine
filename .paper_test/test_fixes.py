@@ -176,8 +176,13 @@ for kind, files, expect_fail in (("revise", ["revision_report.json"], False),
 print()
 print("=" * 70)
 print("F06/F10 - auxiliary names and content fingerprint")
-check("*.before-after.docx is an auxiliary", np._is_aux_doc("x.before-after.docx"))
-check("*.tracked.docx is an auxiliary", np._is_aux_doc("x.tracked.docx"))
+check("*.tracking-previous.docx is an auxiliary", np._is_aux_doc("x.tracking-previous.docx"))
+check("*.log-previous.docx is an auxiliary", np._is_aux_doc("x.log-previous.docx"))
+check("*.tracking-original.tex is an auxiliary", np._is_aux_doc("x.tracking-original.tex"))
+check("*.logging-prev-winner.bib is an auxiliary",
+      np._is_aux_doc("x.logging-prev-winner.bib"))
+check("the pre-rename spellings stay auxiliaries",
+      np._is_aux_doc("x.before-after.docx") and np._is_aux_doc("x.tracked.docx"))
 tmp = Path(tempfile.mkdtemp())
 dir_a = tmp / "a"
 dir_b = tmp / "b"

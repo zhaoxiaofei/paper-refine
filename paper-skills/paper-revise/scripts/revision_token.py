@@ -9,7 +9,10 @@ content digests of every PAYLOAD file in DIR. Payload = every file except:
   * the pipeline's/your own reports: CHANGELOG.md, MANUAL_STEPS.md,
     REVISION_REPORT.md, revision_report.json, DIFF_LEDGER.md, REWRITE_REPORT.md,
     VISUAL_CHECK.md;
-  * the tracked-changes auxiliaries: *.tracked.docx, *.before-after.docx;
+  * the difference-tracking auxiliaries: *.tracking-original.<ext>,
+    *.tracking-previous.<ext>, *.tracking-prev-winner.<ext> and their
+    *.logging-original.<ext> / *.log-previous.<ext> / *.logging-prev-winner.<ext>
+    fallbacks (and the pre-rename *.tracked.docx / *.before-after.docx spellings);
   * the process scratch: work/ at the top level.
 
 File NAMES do not enter the hash, and existing version tokens inside file
@@ -47,7 +50,15 @@ REPORTS = {"changelog.md", "manual_steps.md", "revision_report.md",
            # paper_pipeline.BOOKKEEPING_FILES -- the two implementations must
            # compute the same token for the same package).
            "_pipeline_done.json", "scores.json"}
-AUX_SUFFIXES = (".tracked.docx", ".before-after.docx")
+# Keep in step with paper_pipeline.AUXILIARY_DOC_SUFFIXES (the two
+# implementations MUST derive the same token for the same package).
+AUX_SUFFIXES = tuple(
+    f".tracking-{base}{ext}" for base in ("original", "previous", "prev-winner")
+    for ext in (".docx", ".tex", ".bib")) + (
+    ".logging-original.docx", ".logging-original.tex", ".logging-original.bib",
+    ".log-previous.docx", ".log-previous.tex", ".log-previous.bib",
+    ".logging-prev-winner.docx", ".logging-prev-winner.tex", ".logging-prev-winner.bib",
+    ".tracked.docx", ".before-after.docx")
 
 # "-a" / "_v2" / "_V2" / "-4f3a9c1" at the very end of a stem (the version slot).
 TOKEN_RE = re.compile(r"^(?P<base>.*?)[-_](?P<tok>[0-9a-f]{7}|[A-Za-z]|[vV]\d+)$")

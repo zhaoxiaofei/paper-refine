@@ -271,13 +271,18 @@ RULES CARRIED INTO EVERY PROMPT (AND WHERE THEY COME FROM)
       a defect, never a difference between versions, and never a reason to lose a
       ranking. The orchestrator counts the markers itself and reports them
       (`author_placeholders`), and the count is a diagnostic that ranks nothing.
-    * AUXILIARY FILES -- "*.tracked.docx" / "*.before-after.docx" ARE NOT
-      SUBMISSION CONTENT: the revision skill's auxiliary Word tracked-changes
-      copies (and its documented before/after fallback) are excluded from
-      every judged/pinned corpus rule (corpus_manifest/build_corpus_dir), so they
-      never reach a judge, a pin or the next round's base, and the M6 sweep's
-      "residual tracked changes" row never fires on the pipeline's own output.
-      The pipeline's own tracked-changes copies live under <root>/redlines/.
+    * AUXILIARY FILES -- the difference-tracking copies ARE NOT SUBMISSION
+      CONTENT: every "<name>.tracking-original|previous|prev-winner.<ext>" /
+      "<name>.logging-original.<ext>" / "<name>.log-previous.<ext>" /
+      "<name>.logging-prev-winner.<ext>" (and the two pre-rename spellings
+      "*.tracked.docx" / "*.before-after.docx") is excluded from every
+      judged/pinned corpus rule (corpus_manifest/build_corpus_dir), so the
+      copies never reach a judge, a pin or the next round's base, and the M6
+      sweep's "residual tracked changes" row never fires on the pipeline's own
+      output. The pipeline's own tracked-changes copies live under
+      <root>/redlines/ (per source pair) and <root>/tracking/ (the requested
+      name family, versus the pristine original and versus the previous
+      version).
     * DERIVED BUILD OUTPUTS -- NOT CARRIED, NOT SCORED: ".aux/.blg/.bcf/.log/
       .out/.synctex.gz/.run.xml/.fls/.fdb_latexmk" and friends are by-products of
       a build, not submission content. The revision stage is told to leave them
@@ -413,10 +418,15 @@ CODE-SIDE CHECKS (in addition to what the prompts ask the agents to do)
                           stages must write instead of inventing content is
                           counted and reported per version, and is never scored,
                           never a defect and never a ranking input.
-    * auxiliary files     "*.tracked.docx" and the revision skill's fallback
-                          "*.before-after.docx" are left out of every
+    * auxiliary files     the difference-tracking copies
+                          ("*.tracking-original|previous|prev-winner.<ext>",
+                          their "*.logging-original.<ext>" /
+                          "*.log-previous.<ext>" / "*.logging-prev-winner.<ext>"
+                          fallbacks, and the pre-rename *.tracked.docx/
+                          *.before-after.docx spellings) are left out of every
                           judged/pinned corpus (the pipeline writes its own
-                          tracked-changes copies under <root>/redlines/).
+                          tracked-changes copies under <root>/redlines/ and
+                          <root>/tracking/).
     * visual inspection   "visually inspect the document" is enforced as a
                           RENDER-THEN-LOOK rule: convert Word files to PDF by
                           calling the `docx-converter` MCP tool
@@ -497,10 +507,29 @@ CODE-SIDE CHECKS (in addition to what the prompts ask the agents to do)
                           are exempt.
     * tracked changes     every candidate gets tracked-changes .docx against the
                           round's base, the pristine original and the setup
-                          --source directory (python-redlines[docxodus] ->
-                          docx-trackdiff -> --redline-cmd -> built-in OOXML
-                          writer), with a manifest that names the backend that
-                          actually produced each file.
+                          --source directory (the `docx-compare` MCP tool -- the
+                          Word-native compare engine -- first, then
+                          python-redlines[docxodus] -> docx-trackdiff ->
+                          --redline-cmd -> built-in OOXML writer), with a
+                          manifest that names the backend that actually produced
+                          each file.
+    * difference tracking every candidate ALSO gets, beside each document,
+                          "<name>.tracking-original.<ext>" (docx/tex/bib) for
+                          the comparison against the pristine original and
+                          "<name>.tracking-previous.<ext>" for the comparison
+                          against the version it was derived from, or the
+                          "<name>.logging-original.<ext>" /
+                          "<name>.log-previous.<ext>" fallback log when the tool
+                          failed; every PUBLISHED winner gets the same against
+                          the original and, from round 2 on, against the previous
+                          winner ("<name>.tracking-prev-winner.<ext>" /
+                          "<name>.logging-prev-winner.<ext>"). `.tex`/`.bib`
+                          pairs go through `latexdiff`. The copies are
+                          auxiliaries, never submission content, and the pass
+                          uses no agent. The same round-close pass compiles the
+                          LaTeX sources (`latexmk`) and converts the .docx files
+                          into PDFs under <root>/pdfs/ (persistent; a failure is
+                          a warning, never a failed round).
     * blind judging       a judge's run id and the sheet's target_id are opaque
                           tokens mixed with a per-root random salt, so the token
                           cannot be recomputed from (round, version id); the
@@ -571,6 +600,7 @@ USAGE
     python paper_pipeline.py run-decide --root ./paper_rounds   # run, then decide in series
     python paper_pipeline.py status --root ./paper_rounds
     python paper_pipeline.py redline --root ./paper_rounds [--round R] [--tool auto]
+    python paper_pipeline.py track   --root ./paper_rounds [--round R] [--no-pdf]
     python paper_pipeline.py decide --root ./paper_rounds   # also writes final_clean_version/
     python paper_pipeline.py retry  --root ./paper_rounds --run r2_review
     python paper_pipeline.py retry  --root ./paper_rounds --runs 1:judge,2:feedback,2:review
@@ -724,6 +754,25 @@ DIRECTORY LAYOUT CREATED UNDER --root
                                     from-base/, from-original/,
                                     from-setup-source/, plus manifest.json and
                                     README.md (tool chain + every attempt)
+    tracking/r<R>_<version>/        difference copies in the REQUESTED name
+                                    family: original/ and previous/ hold
+                                    "<name>.tracking-<baseline>.<ext>" (real
+                                    Word/latexdiff copies) or the
+                                    "<name>.logging-original.<ext>" /
+                                    "<name>.log-previous.<ext>" fallback logs,
+                                    plus manifest.json and README.md. The same
+                                    copies also sit BESIDE the candidate
+                                    documents in the run sandbox.
+    tracking/round<R>_winner/       the published winner's copies: original/
+                                    (vs non_revised/) and prev-winner/ (vs
+                                    round<R-1>_winner/), with the same
+                                    manifest.json/README.md. The copies also sit
+                                    inside round<R>_winner/ itself.
+    pdfs/r<R>_<version>/            the compiled .tex (latexmk) and converted
+                                    .docx (Word/MCP first) PDFs of the version,
+                                    beside pdfs/original/ for the pristine
+                                    original, plus manifest.json and README.md
+                                    (persistent: prune never touches them)
     _superseded/                    displaced winner copies (archives)
     pinned/_superseded/             displaced pin copies (archives; nothing the
                                     pipeline produced is ever deleted)
@@ -781,7 +830,8 @@ from pathlib import Path
 # (default 0) that is never enforced, median ties are broken by the arithmetic
 # mean of the same score list, MANUAL_STEPS.md is reported but not ranked on,
 # the round's own base competes (so a round cannot move backwards), the
-# pipeline's own hand-off placeholders and "*.tracked.docx" auxiliaries are
+# pipeline's own hand-off placeholders and the difference-tracking auxiliaries
+# ("*.tracking-*/logging-*", and the pre-rename "*.tracked.docx" spelling) are
 # neutralised everywhere they could be mistaken for manuscript defects, and
 # copied-but-unchanged input files are exempted from structured-output
 # validation by content instead of by path. state.json stays version 2.
@@ -4319,12 +4369,47 @@ CAPTION_SUSPECT_RE = re.compile(
 # Editable submission documents that must survive a rewrite/revision/integration
 # round. Auxiliary files the revision skill emits on purpose are never required
 # and never counted as duplicates:
-#   "<name>.tracked.docx"      the E5 tracked-changes copy
-#   "<name>.before-after.docx" the E5 fallback marker copy (used when real
-#                              tracked changes could not be produced)
+#   "<name>.tracking-previous.<ext>"  a real tracked-changes / latexdiff copy
+#                                     of "<name>.<ext>" against its PREVIOUS
+#                                     version (the E5 auxiliary; for .docx the
+#                                     Word-native compare is the first choice)
+#   "<name>.log-previous.<ext>"       the E5 fallback marker copy, used when the
+#                                     real tracked copy could not be produced
+#   "<name>.tracking-original.<ext>"  the ORCHESTRATOR's real tracked copy
+#                                     against the pristine original
+#                                     (non_revised/), .docx via the
+#                                     docx-compare MCP / redline chain and
+#                                     .tex/.bib via latexdiff
+#   "<name>.logging-original.<ext>"   the fallback log when THAT comparison
+#                                     could not be produced
+#   "<name>.tracking-prev-winner.<ext>"  a published WINNER's real tracked copy
+#                                     against the previous round's winner
+#                                     (round r > 1; `round<r>_winner/`)
+#   "<name>.logging-prev-winner.<ext>"   the fallback log for that comparison
 EDITABLE_DOC_EXTS = (".doc", ".docx", ".tex", ".ltx", ".bib", ".md", ".txt", ".xlsx",
                      ".rtf", ".csv")
-AUXILIARY_DOC_SUFFIXES = (".tracked.docx", ".before-after.docx")
+# The difference-tracking auxiliaries, one suffix per (kind x extension):
+# `original`/`previous`/`prev-winner` x `.docx`/`.tex`/`.bib`, plus each kind's
+# fallback. The suffix is what makes a file an auxiliary EVERYWHERE in the
+# pipeline (corpus digest, pin, judge view, fingerprint, revision token,
+# recovery backfill), so the pipeline may write these copies next to a document
+# without changing any version's identity.
+TRACKING_BASELINES = ("original", "previous", "prev-winner")
+TRACKING_EXTS = (".docx", ".tex", ".bib")
+# The fallback spelling of each baseline (the "logging" family). `prev-winner`
+# uses the long spelling: its baseline is the previous ROUND's published winner,
+# not the version a single document was edited from.
+TRACKING_FALLBACK_PREFIX = {"original": "logging-original", "previous": "log-previous",
+                            "prev-winner": "logging-prev-winner"}
+TRACKING_AUX_SUFFIXES = tuple(
+    f".tracking-{base}{ext}" for base in TRACKING_BASELINES for ext in TRACKING_EXTS) + \
+    tuple(f".{TRACKING_FALLBACK_PREFIX[base]}{ext}" for base in TRACKING_BASELINES
+          for ext in TRACKING_EXTS)
+# The pre-rename spellings stay recognized: a package an older skill (or an
+# older pipeline) wrote must keep every one of its guarantees -- they are
+# auxiliaries, never submission content. Nothing writes them any more.
+LEGACY_AUXILIARY_DOC_SUFFIXES = (".tracked.docx", ".before-after.docx")
+AUXILIARY_DOC_SUFFIXES = TRACKING_AUX_SUFFIXES + LEGACY_AUXILIARY_DOC_SUFFIXES
 # Trailing version token on a basename stem: the CURRENT content-hash token
 # ("-4f3a9c1"/"_4f3a9c1", 7 lowercase hex characters) or the LEGACY version
 # tokens ("-b", "_v2", "-v10", case-insensitive) that older packages carry.
@@ -6359,9 +6444,12 @@ def apply_hierarchy_reconcile(text: str, where: str) -> str:
 # are required to write instead of inventing missing content (which the review
 # skill's M5/M6 sweeps and the judge's frozen sweeps would otherwise report as a
 # hygiene/completeness defect of the very version that complied), and the
-# revision skill's ".tracked.docx" tracked-changes auxiliaries (which the M6
-# sweep reads as "residual tracked changes" and a judge could read as a
-# duplicate sibling).
+# difference-tracking auxiliaries -- the current
+# "*.tracking-original|previous.<ext>" / "*.logging-original.<ext>" /
+# "*.log-previous.<ext>" family and the pre-rename "*.tracked.docx" spelling --
+# (which the M6 sweep reads as "residual tracked changes" and a judge could read
+# as a duplicate sibling, and which the pipeline itself writes next to every
+# tracked document).
 # ---------------------------------------------------------------------
 PLACEHOLDER_TOKEN = "[AUTHOR TO COMPLETE"
 PLACEHOLDER_RE = re.compile(r"\[\s*AUTHOR\s+TO\s+COMPLETE\b", re.IGNORECASE)
@@ -6781,17 +6869,27 @@ PLACEHOLDER_RULE_JUDGE = """PLACEHOLDER TEXT IN A PACKAGE (handle exactly this w
     it -- and is scored exactly as it would be if the package had simply omitted the item with no
     marker at all: the marker never makes a package worse, and never makes it better."""
 
-AUX_FILES_RULE = """PIPELINE AUXILIARY FILES — "*.tracked.docx" and "*.before-after.docx":
-  * Both names are AUXILIARY copies of "<name>.docx" written by the document-editing tooling, not
-    documents of their own: "<name>.tracked.docx" carries real tracked changes, and
-    "<name>.before-after.docx" is the documented fallback marker copy used when tracked changes
-    could not be produced reliably. The orchestrator EXCLUDES every file with either suffix from
-    the judged/pinned submission corpus and generates its own tracked-changes copies under
-    <pipeline root>/redlines/, so these auxiliaries are never manuscript content in this pipeline.
+AUX_FILES_RULE = """PIPELINE AUXILIARY FILES — "<name>.tracking-original.<ext>",
+"<name>.tracking-previous.<ext>", "<name>.tracking-prev-winner.<ext>", their fallbacks
+"<name>.logging-original.<ext>", "<name>.log-previous.<ext>" and
+"<name>.logging-prev-winner.<ext>", and the pre-rename "<name>.tracked.docx" /
+"<name>.before-after.docx" spellings:
+  * Every one of those names is an AUXILIARY difference-tracking copy of "<name>.<ext>" written by
+    the document-editing tooling or by the orchestrator, not a document of its own. For .docx the
+    real copy is Word tracked changes between the document and its baseline; for .tex/.bib it is a
+    latexdiff copy; the matching ".logging-*" / ".log-*" file is the documented fallback log used
+    when the real tracked copy could not be produced reliably. "_previous_" means the baseline is
+    the version this one was derived from, "_original_" means the pristine submission, and
+    "_prev-winner_" belongs to a published winner compared with the winner published before it.
+  * The orchestrator EXCLUDES every file with one of these suffixes from the judged/pinned
+    submission corpus, and it writes its own copies under <pipeline root>/redlines/ and
+    <pipeline root>/tracking/, so these auxiliaries are never manuscript content in this pipeline.
   * Never score, flag, enumerate or "fix" such an auxiliary -- not its presence or absence, not its
     markup, not its contents -- and never treat it as a duplicate of its parent document, as a
     hygiene defect ("residual tracked changes"), or as a difference between versions. If you find
-    one inside a directory you were told to read, it is pipeline bookkeeping: skip it."""
+    one inside a directory you were told to read, it is pipeline bookkeeping: skip it. Do NOT run
+    latexdiff (or any other difference tool) over these copies; the orchestrator has already
+    tracked every difference itself."""
 
 def derived_outputs_rule(profile=None) -> str:
     """The derived-build-outputs rule, with the venue's own PDF stance.
@@ -7757,7 +7855,8 @@ Explicit requirements that override skill defaults where they conflict:
          python3 <paper-revise>/scripts/revision_token.py <the revised/ directory>
 
      The token is the first 7 hex characters of SHA-256 over the sorted content digests of the
-     payload files (your own reports, the *.tracked.docx / *.before-after.docx auxiliaries and the
+     payload files (your own reports, the difference-tracking auxiliaries -- current
+     *.tracking-*/logging-* and the pre-rename *.tracked.docx/*.before-after.docx -- and the
      work/ scratch are excluded; file NAMES do not enter the hash, and existing version-token
      references inside file contents are normalized to "<VERSION>" first, so APPLYING the token
      does not change it). Run the tool BEFORE renaming; then call it again with
@@ -9097,6 +9196,16 @@ def apply_m18(text: str, limit: int) -> str:
 # pre-approved for the non-interactive session (MCP_APPROVALS below).
 DOCX_MCP_SERVER = "docx-converter"
 DOCX_MCP_TOOL = "convert_docx_to_pdf"
+# The machine's Word-native COMPARE MCP service: the FIRST choice whenever the
+# pipeline (or an agent) has to track the differences between two .docx files.
+# The tool wraps `docxcompare.sh`, which drives
+# `Word.Application.CompareDocuments` through COM automation -- the comparison
+# engine of Word itself -- and writes the redline next to the pair it was
+# handed. The redline chain in `redline_one_pair()` probes it first; the
+# fallbacks (python-redlines[docxodus], docx-trackdiff, --redline-cmd, the
+# built-in OOXML writer) are unchanged behind it.
+DOCX_COMPARE_MCP_SERVER = "docx-compare"
+DOCX_COMPARE_MCP_TOOL = "compare_docx"
 VISUAL_TOOL_PROBES = (
     (f"docx-converter MCP tool (`{DOCX_MCP_TOOL}`)", f"mcp:{DOCX_MCP_SERVER}"),
     ("docx2pdf.sh", "docx2pdf.sh"),
@@ -9189,16 +9298,19 @@ def mcp_server_configured(name: str) -> bool:
 # read-only -- the docx-converter declares no annotations at all, which is why
 # every unprompted call to it was denied -- `prompt` always asks, `writes` asks
 # unless the tool is declared read-only, and `approve` never asks. The pipeline
-# has to reach `approve` for the converter, the renderer its prompts mandate
-# FIRST, and it approves nothing else: shell commands stay sandboxed by the CLI
-# and every other MCP server keeps the operator's own policy.
+# has to reach `approve` for the two one-tool document services its prompts
+# mandate FIRST -- the docx-converter renderer and the docx-compare Word-native
+# redline engine -- and it approves nothing else: shell commands stay sandboxed
+# by the CLI and every other MCP server keeps the operator's own policy.
 MCP_APPROVALS = (
     # (server, config key under the server, value) -- spliced into every
     # `codex exec` argv by codex_mcp_overrides(). The SERVER-level key is used
     # rather than `tools.convert_docx_to_pdf.approval_mode`: the converter is a
-    # one-tool server, and the server-level key keeps working if the tool is
-    # ever renamed. Nothing else on this machine is approved by this pipeline.
+    # one-tool server (so is docx-compare), and the server-level key keeps
+    # working if a tool is ever renamed. Nothing else on this machine is
+    # approved by this pipeline.
     (DOCX_MCP_SERVER, "default_tools_approval_mode", "approve"),
+    (DOCX_COMPARE_MCP_SERVER, "default_tools_approval_mode", "approve"),
 )
 
 
@@ -10275,9 +10387,11 @@ def manifest_digest(m) -> str:
 def corpus_tree_manifest(dirp: Path) -> dict:
     """Manifest of a VERSION CORPUS: the read-only auxiliaries are left out.
 
-    A "<name>.tracked.docx" or "<name>.before-after.docx" is the revision
-    skill's auxiliary copy, not submission content (see AUX_FILES_RULE). Every
-    version corpus --
+    A difference-tracking auxiliary -- "<name>.tracking-original|previous.<ext>",
+    its "<name>.logging-original.<ext>"/"<name>.log-previous.<ext>" fallback, or
+    the pre-rename "<name>.tracked.docx"/"<name>.before-after.docx" spelling --
+    is a derived copy, not submission content (see AUX_FILES_RULE). Every version
+    corpus --
     the pristine reference, the round bases, the judge targets, the pins and the
     published winners -- is defined by this same rule, so a pin can never
     disagree with the corpus a judge scored.
@@ -13078,10 +13192,12 @@ def template_for_package_file(path: Path, templates: dict, manuscript_names=()):
 def template_package_files(src: Path) -> list:
     """Every file of a submission package, minus process scratch/auxiliaries.
 
-    `work/` is the pipeline's own scratch and `*.tracked.docx` /
-    `*.before-after.docx` are tracked-changes auxiliaries -- neither belongs to a
-    submission, so the rebuilt package leaves them out (the same rule the corpus
-    builder and the judges apply). Everything else -- figures, tables, data,
+    `work/` is the pipeline's own scratch and the
+    `*.tracking-original|previous.<ext>` / `*.logging-original.<ext>` /
+    `*.log-previous.<ext>` auxiliaries (and the pre-rename spellings) are
+    difference-tracking copies -- neither belongs to a submission, so the rebuilt
+    package leaves them out (the same rule the corpus builder and the judges
+    apply). Everything else -- figures, tables, data,
     bibliography, the author's own notes -- is copied byte-for-byte.
     """
     out = []
@@ -14660,7 +14776,35 @@ def placeholder_info_for(ctx: Ctx, r: int, vid: str):
 # ---------------------------------------------------------------------
 
 def _is_aux_doc(name: str) -> bool:
+    """Is this ONE document a difference-tracking auxiliary (never content)?
+
+    The rule is a NAME SUFFIX rule, deliberately: it has to hold for a file the
+    pipeline just wrote next to its parent document, for a file an agent wrote
+    in a sandbox the pipeline never opened, and for a file inside a pin that a
+    later `status`/`decide` invocation walks. `TRACKING_AUX_SUFFIXES` names the
+    current family (see its definition) and the two pre-rename spellings are
+    kept so older packages keep every guarantee.
+    """
     return name.lower().endswith(AUXILIARY_DOC_SUFFIXES)
+
+
+def tracking_aux_suffix(baseline: str, ext: str, fallback: bool = False) -> str:
+    """The auxiliary suffix for one (baseline, extension) pair.
+
+    `original` + `.docx` -> ".tracking-original.docx" (or ".logging-original.docx"
+    when `fallback`); `previous` + `.tex` -> ".tracking-previous.tex" (or
+    ".log-previous.tex"); `prev-winner` + `.bib` -> ".tracking-prev-winner.bib"
+    (or ".logging-prev-winner.bib"). This is the ONLY place the spellings are
+    built, so a reader and a writer can never drift apart.
+    """
+    base = str(baseline).strip().lower()
+    if base not in TRACKING_BASELINES:
+        raise ValueError(f"unknown tracking baseline: {baseline!r}")
+    if ext not in TRACKING_EXTS:
+        raise ValueError(f"unknown tracking extension: {ext!r}")
+    if fallback:
+        return f".{TRACKING_FALLBACK_PREFIX[base]}{ext}"
+    return f".tracking-{base}{ext}"
 
 
 def _doc_key(rel: str) -> str:
@@ -15175,11 +15319,12 @@ def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
 
     exclude_top: top-level entry names to skip (used to keep a candidate's
     process scratch, e.g. revised/work/, out of its submission corpus).
-    skip_aux: leave out the revision skill's "*.tracked.docx" /
-    "*.before-after.docx" auxiliaries -- set by every call that materializes a
-    VERSION CORPUS (base, judge target, pin, published winner), so the corpus the
-    judges score is exactly the corpus that is pinned. A raw sandbox copy (a
-    read-only input) keeps every file.
+    skip_aux: leave out the difference-tracking auxiliaries
+    ("*.tracking-original|previous.<ext>", "*.logging-original.<ext>",
+    "*.log-previous.<ext>" and the pre-rename spellings) -- set by every call that
+    materializes a VERSION CORPUS (base, judge target, pin, published winner), so
+    the corpus the judges score is exactly the corpus that is pinned. A raw
+    sandbox copy (a read-only input) keeps every file.
     strip_bookkeeping: additionally leave out the pipeline's own mandated
     reports (CHANGELOG.md, MANUAL_STEPS.md, REVISION_REPORT.md,
     revision_report.json, DIFF_LEDGER.md, VISUAL_CHECK.md). Set by the same
@@ -16978,8 +17123,8 @@ def corpus_content_fingerprint(ctx: Ctx, r: int, vid: str) -> str:
 # the package's content (replacing the legacy letter/digit increments): the
 # first 7 hex characters of SHA-256 over the sorted content digests of the
 # payload files, with the payload defined exactly like a version corpus (no
-# work/ scratch, no *.tracked.docx /*.before-after.docx auxiliaries, no
-# self-written reports) and with NAMES ignored. Existing version tokens inside
+# work/ scratch, no difference-tracking auxiliaries -- see AUXILIARY_DOC_SUFFIXES
+# -- and no self-written reports) and with NAMES ignored. Existing version tokens inside
 # file CONTENTS (a repointed LaTeX \addbibresource{refs-4f3a9c1.bib}, say) are
 # normalized to "<VERSION>" before hashing, so applying the token does not
 # change it -- the same algorithm is shipped to the agents as
@@ -17186,7 +17331,7 @@ def corpus_dir_view_files(dirp: Path) -> list:
 
     Slightly narrower than the corpus `build_corpus_dir()` materializes, because
     the judge is the one party that may not even READ what the corpus carries:
-    revision auxiliaries (`*.tracked.docx`, `*.before-after.docx`), the pipeline's
+    difference-tracking auxiliaries (see AUXILIARY_DOC_SUFFIXES), the pipeline's
     own bookkeeping/report files (`CORPORA_STRIP_BOOKKEEPING`), the process
     scratch (`CORPUS_EXCLUDE_TOP`, i.e. `work/`) and every derived output whose
     editable source is in the package (see `_is_view_excluded_file()`: a
@@ -20053,6 +20198,50 @@ def mcp_convert_docx_to_pdf(spec: dict, docx: Path, timeout: float = 300) -> dic
     return {"ok": True, "pdf": pdf}
 
 
+def docx_compare_mcp_spec() -> dict:
+    """The configured `docx-compare` MCP server entry, {} when it is unusable.
+
+    Being configured is not enough: the entry has to name a command that is
+    still on this machine (the same probe `mcp_server_configured` applies). An
+    empty dict sends the redline chain to its next backend and is reported in
+    the manifest, so a missing server is never mistaken for a failed compare.
+    """
+    if not mcp_server_configured(DOCX_COMPARE_MCP_SERVER):
+        return {}
+    spec = mcp_server_spec(DOCX_COMPARE_MCP_SERVER)
+    cmd = str(spec.get("command") or "")
+    if not cmd:
+        return {}
+    present = Path(cmd).exists() if cmd.startswith(("/", "~")) else bool(shutil.which(cmd))
+    return spec if present else {}
+
+
+def mcp_compare_docx(spec: dict, base: Path, revised: Path, out: Path,
+                     timeout: float = 900) -> dict:
+    """Write a Word-native tracked-changes redline through the compare MCP tool.
+
+    The tool drives `docxcompare.sh` -> PowerShell -> `Word.Application
+    .CompareDocuments`; it is handed the real base/revised paths and an explicit
+    output path (`<pipeline-managed auxiliary>.docx`), never an input path as its
+    output. Success is "the tool answered AND `out` is a readable OOXML package"
+    -- the same bar every other redline backend is held to.
+    """
+    rep = mcp_stdio_tool_call(spec, DOCX_COMPARE_MCP_TOOL,
+                              {"originalPath": str(base), "revisedPath": str(revised),
+                               "outputPath": str(out)}, timeout=timeout)
+    if not rep.get("ok"):
+        return {"ok": False, "error": rep.get("error")}
+    result = rep.get("result") or {}
+    if result.get("isError"):
+        text = " ".join(str(c.get("text") or "") for c in result.get("content") or []
+                        if isinstance(c, dict))
+        return {"ok": False, "error": f"the MCP tool reported an error: {text[:300]}"}
+    if not out.is_file() or out.stat().st_size == 0:
+        return {"ok": False,
+                "error": f"the MCP tool returned success but wrote no output at {out}"}
+    return {"ok": True}
+
+
 def visual_renderer_choices() -> list:
     """Every usable DOCX->PDF renderer, in the order the prompts mandate.
 
@@ -20113,7 +20302,7 @@ def _child_output(raw) -> str:
 
 
 def render_docx_visual(docx: Path, out_dir: Path, renderer=None,
-                       timeout: float = 900) -> dict:
+                       timeout: float = 900, page_images: bool = True) -> dict:
     """Render ONE DOCX to PDF + page PNGs under `out_dir`.
 
     `renderer` pins ONE renderer (tests, retries); None tries the whole choice
@@ -20122,6 +20311,10 @@ def render_docx_visual(docx: Path, out_dir: Path, renderer=None,
     Word and LibreOffice. The renderer that actually produced the PDF, and any
     lower-fidelity fallbacks, are recorded so the agents and the decision report
     can state them.
+
+    `page_images=False` skips the page-PNG pass (the persistent PDF store of
+    `run_pdf_conversion()` needs the PDF only; the agents' visual passes keep
+    the default).
     """
     if renderer is None:
         choices = visual_renderer_choices()
@@ -20175,7 +20368,7 @@ def render_docx_visual(docx: Path, out_dir: Path, renderer=None,
         shutil.move(str(pdf), str(final_pdf))
         pages = _pdf_page_count(final_pdf)
         pngs = []
-        if shutil.which("pdftoppm"):
+        if page_images and shutil.which("pdftoppm"):
             prefix = out_dir / docx.stem
             subprocess.run(["pdftoppm", "-r", str(VISUAL_PAGE_DPI), "-png",
                             str(final_pdf), str(prefix)],
@@ -20965,11 +21158,11 @@ EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 def structured_output_files(sb: Path, rec: dict) -> list:
     """(rel, path) of every JSON/XML/DOCX file the run was supposed to WRITE.
 
-    "*.tracked.docx" / "*.before-after.docx" auxiliaries are skipped: they are not
-    submission content
-    anywhere in this pipeline (see AUX_FILES_RULE), so a tracked-changes writer
-    that degrades or emits a marker file must not fail the run. The pipeline's own
-    tracked-changes copies are produced independently under <root>/redlines/.
+    Difference-tracking auxiliaries (see AUXILIARY_DOC_SUFFIXES) are skipped: they
+    are not submission content anywhere in this pipeline (see AUX_FILES_RULE), so a
+    tracked-changes writer that degrades or emits a marker file must not fail the
+    run. The pipeline's own tracked-changes copies are produced independently under
+    <root>/redlines/ and <root>/tracking/.
     """
     kind = rec.get("kind")
     out, seen = [], set()
@@ -21103,9 +21296,9 @@ def _candidate_corpus_files(sb: Path, out_dir: str = REVISED_DIR) -> list:
     The candidate view mirrors corpus_sources(): everything under the run's
     output package (revised/, or rewritten/ for the rewrite arm; minus the
     stage's work/ scratch) plus everything under code/ (prefixed code/, which is
-    how a corpus folds revised analysis code in). Auxiliary
-    .tracked.docx/.before-after.docx are skipped: they are never submission
-    content and never count as "the file survived".
+    how a corpus folds revised analysis code in). The difference-tracking
+    auxiliaries (see AUXILIARY_DOC_SUFFIXES) are skipped: they are never
+    submission content and never count as "the file survived".
     """
     seen, out = set(), []
     for d, is_package in ((sb / out_dir, True), (sb / CODE_DIR, False)):
@@ -21595,7 +21788,7 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
     Exclusions, so recovery never undoes a DELIBERATE exclusion:
       * derived build outputs (.aux/.log/.synctex.gz/... -- the prompts
         prescribe leaving them out of revised/);
-      * the revision skill's auxiliary .tracked.docx/.before-after.docx;
+      * the difference-tracking auxiliaries (see AUXILIARY_DOC_SUFFIXES);
       * the pipeline's own bookkeeping files (the agent regenerates them);
       * revised/work/ scratch.
     Skip-conditions, so recovery never duplicates content:
@@ -29458,15 +29651,19 @@ def wait_futures(running: dict, timeout: float = 0.5):
     return wait(running, timeout=timeout, return_when=FIRST_COMPLETED)
 
 
-def round_redlines(ctx: Ctx, r: int, enabled: bool) -> None:
+def round_redlines(ctx: Ctx, r: int, enabled: bool) -> dict:
     """Tracked-changes copies for one round (an audit aid; never fails the round).
 
     Shared by the standard round close and by the concern-scoped (major/minor)
     close: a real journal revision needs the marked-up copy as much as the
     standard flow does.
+
+    Returns the manifest (None when the pass is disabled or failed) so the
+    difference-tracking pass that follows can REUSE the .docx redlines it
+    produced instead of driving Word/COM a second time.
     """
     if not enabled:
-        return
+        return None
     try:
         mf = run_redlines(ctx, rounds=[r], versions=None, tool="auto",
                           redline_cmd=None, quiet=True)
@@ -29481,8 +29678,55 @@ def round_redlines(ctx: Ctx, r: int, enabled: bool) -> None:
               + (f", {warn_n} with caveats -- READ {REDLINE_DIRNAME}/README.md before "
                  f"trusting them" if warn_n else "")
               + f" -> {REDLINE_DIRNAME}/")
+        return mf
     except Exception as e:                                  # noqa: BLE001
         print(f"[run] round {r} WARNING: tracked-changes generation failed: {e}")
+        return None
+
+
+def round_tracking(ctx: Ctx, r: int, enabled: bool,
+                   redlines_manifest: dict = None) -> None:
+    """Difference-tracking copies + persistent PDFs for one round.
+
+    Both passes are audit aids: they are pure code (no agent session), they
+    never enter a corpus/pin/judge view (see AUXILIARY_DOC_SUFFIXES and the
+    <root>/pdfs/ tree), and a failure here is a WARNING -- never a failed round.
+    """
+    if not enabled:
+        return
+    try:
+        mf = run_difference_tracking(ctx, rounds=[r], versions=None, tool="auto",
+                                     redline_cmd=None, quiet=True,
+                                     redlines_manifest=redlines_manifest)
+        versions = [v for v in mf["versions"] if int(v.get("round") or 0) == r]
+        ok_n = sum(1 for v in versions for c in v["comparisons"]
+                   if c.get("ok") and c.get("tool"))
+        fb_n = sum(1 for v in versions for c in v["comparisons"]
+                   if c.get("ok") and not c.get("tool"))
+        bad_n = sum(1 for v in versions for c in v["comparisons"]
+                    if not c.get("ok"))
+        tools = sorted({c["tool"] for v in versions for c in v["comparisons"]
+                        if c.get("ok") and c.get("tool")})
+        print(f"[run] round {r} difference tracking: {ok_n} tracked copy(ies)"
+              + (f" with {', '.join(tools)}" if tools else "")
+              + (f", {fb_n} logging fallback(s)" if fb_n else "")
+              + (f", {bad_n} pair(s) with NO file (see {TRACKING_DIRNAME}/README.md)"
+                 if bad_n else "")
+              + f" -> {TRACKING_DIRNAME}/")
+    except Exception as e:                                  # noqa: BLE001
+        print(f"[run] round {r} WARNING: difference tracking failed: {e}")
+    try:
+        pm = run_pdf_conversion(ctx, rounds=[r], versions=None, quiet=True)
+        docs = [d for s in pm["sets"] if int(s.get("round") or 0) == r
+                for d in s["documents"]]
+        ok_n = sum(1 for d in docs if d.get("ok"))
+        bad_n = len(docs) - ok_n
+        print(f"[run] round {r} PDF renders: {ok_n} PDF(s) written"
+              + (f", {bad_n} WARNING(S) (non-fatal; see {PDF_DIRNAME}/README.md)"
+                 if bad_n else "")
+              + f" -> {PDF_DIRNAME}/")
+    except Exception as e:                                  # noqa: BLE001
+        print(f"[run] round {r} WARNING: PDF rendering failed: {e}")
 
 
 def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
@@ -29491,7 +29735,7 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
                 conflict_cmd=None, conflict_agent: bool = True,
                 defect_cmd=None,
                 retry_backoff: int = 0, retry_backoff_max: int = 0,
-                redline: bool = True, only=None) -> tuple:
+                redline: bool = True, track: bool = True, only=None) -> tuple:
     """Drive ONE round.
 
     `only` is an OnlySpec (or None): the round's stage filter is the union of
@@ -29612,7 +29856,7 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
         print(f"[run] r{r} {journal_mode_of(ctx)} revision complete: {a2} is the revised "
               f"manuscript (no judge panel: a concern-scoped revision is judged by the journal, "
               f"not by a quality panel)")
-        round_redlines(ctx, r, redline)
+        round_tracking(ctx, r, track, round_redlines(ctx, r, redline))
         return True, False
 
     # (viii) field + judge panel.
@@ -29854,7 +30098,7 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
           f"(same content as the pin; verified)")
     # Tracked-changes copies are an audit aid: a failure here must never fail
     # the round, but it is always reported and recorded in the manifest.
-    round_redlines(ctx, r, redline)
+    round_tracking(ctx, r, track, round_redlines(ctx, r, redline))
     return True, False
 
 
@@ -30403,9 +30647,12 @@ def cmd_setup(args) -> None:
     print(f"[setup] zotero policy:           {zotero}: {_zot_note}"
           + (f" (`zot` {'on PATH' if zot_cli_available() else 'NOT on PATH'})"
              if zotero != "off" else ""))
-    print(f"[setup] corpus rule:             \"*.tracked.docx\" auxiliaries are excluded from "
-          f"every judged/pinned corpus (the pipeline writes its own copies under "
-          f"{REDLINE_DIRNAME}/)")
+    print(f"[setup] corpus rule:             the "
+          f"\"*.tracking-original|previous|prev-winner.<ext>\" / \"*.logging-original.<ext>\" / "
+          f"\"*.log-previous.<ext>\" / \"*.logging-prev-winner.<ext>\" auxiliaries (and the "
+          f"pre-rename *.tracked.docx/*.before-after.docx spellings) are excluded from every "
+          f"judged/pinned corpus (the pipeline writes its own copies under {REDLINE_DIRNAME}/, "
+          f"{TRACKING_DIRNAME}/ and {PDF_DIRNAME}/)")
     _art_note = {
         "on": "an unfilled/boilerplate decision artifact FAILS the attempt",
         "fix": "an unfilled/boilerplate decision artifact first gets ONE scoped repair session "
@@ -32178,6 +32425,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                                      retry_backoff=retry_backoff,
                                      retry_backoff_max=retry_backoff_max,
                                      redline=not getattr(args, "no_redline", False),
+                                     track=not getattr(args, "no_track", False),
                                      only=only)
             ctx.save_state()
             if not ok:
@@ -32239,6 +32487,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                                  retry_backoff=retry_backoff,
                                  retry_backoff_max=retry_backoff_max,
                                  redline=not getattr(args, "no_redline", False),
+                                 track=not getattr(args, "no_track", False),
                                  only=only)
         driven.append(r)
         ctx.save_state()
@@ -34699,8 +34948,8 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     The copy starts byte-identical to the pinned champion's corpus (that
     identity is verified BEFORE the counter increment below). The winner
     directory is already materialized by build_corpus_dir(), which strips the
-    process scratch (work/), the revision skill's "*.tracked.docx" /
-    "*.before-after.docx" auxiliaries and the pipeline's own bookkeeping
+    process scratch (work/), the difference-tracking auxiliaries (see
+    AUXILIARY_DOC_SUFFIXES) and the pipeline's own bookkeeping
     (CHANGELOG.md, MANUAL_STEPS.md, REVISION_REPORT.md, revision_report.json,
     DIFF_LEDGER.md, REWRITE_REPORT.md, VISUAL_CHECK.md). Copying it therefore
     gives exactly the files a new `setup --source <dir>` needs -- necessary and
@@ -36647,41 +36896,69 @@ def cmd_run_decide(args) -> None:
 #                      exists; otherwise non_revised/ and the manifest says so)
 # Pairs are matched like the document-set check (version-token-insensitive name
 # plus content), so "manuscript-o.docx" -> "manuscript-p.docx" is one document.
-# Tool chain: python-redlines[docxodus] (via paper_redlines_adapter.py) ->
-# docx-trackdiff -> --redline-cmd '<json argv with {base} {revised} {out}>' ->
-# the built-in OOXML writer. Every attempt lands in redlines/manifest.json, so a
-# file is never presented as a docxodus redline when it is not one.
+# Tool chain: the docx-compare MCP tool (Word's own CompareDocuments engine,
+# via the docxcompare.sh WSL/Git-Bash shim) -> python-redlines[docxodus] (via
+# paper_redlines_adapter.py) -> docx-trackdiff ->
+# --redline-cmd '<json argv with {base} {revised} {out}>' -> the built-in OOXML
+# writer. Every attempt lands in redlines/manifest.json, so a file is never
+# presented as a Word redline when it is not one.
 # =====================================================================
 
 REDLINE_DIRNAME = "redlines"
 REDLINE_AUTHOR = "paper_pipeline"
-REDLINE_TOOLS = ("auto", "redlines", "docx-trackdiff", "builtin", "none")
+REDLINE_TOOLS = ("auto", "docx-compare", "redlines", "docx-trackdiff", "builtin", "none")
+# The backend NAME every manifest/README row uses for the Word-native compare.
+REDLINE_COMPARE_BACKEND = "docx-compare (Word CompareDocuments via MCP)"
 
 
-def list_docx_files(sources: list) -> list:
-    """[{rel, path, key, digest}] for the .docx files of one corpus view."""
+# The document kinds the difference-tracking pass covers. `.docx` goes through
+# the redline chain (Word's own compare engine first), `.tex`/`.bib` through
+# `latexdiff`; anything else is carried verbatim and never diffed.
+TRACKABLE_EXTS = (".docx", ".tex", ".bib")
+
+
+def list_track_files(sources: list, exts=TRACKABLE_EXTS) -> list:
+    """[{rel, path, key, digest, ext}] for the trackable files of one corpus view."""
     out = []
     overrides = corpus_source_overrides(sources)
     for i, (src, prefix, excluded) in enumerate(sources):
         if not src.is_dir():
             continue
         for p in sorted(src.rglob("*")):
-            if not p.is_file() or p.suffix.lower() != ".docx" or _is_aux_doc(p.name):
+            if not p.is_file() or p.suffix.lower() not in exts or _is_aux_doc(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
             if excluded and rel.split("/", 1)[0] in excluded:
+                continue
+            if is_evidence_rel(rel):
+                # The EVIDENCE areas are read-only inputs, not submission
+                # documents (see is_evidence_rel): a reviewer's report or a data
+                # table is never tracked as a manuscript difference. The
+                # candidate side reaches them through a directory SYMLINK, which
+                # the walk does not follow, so without this filter every
+                # evidence document would read as a base-only file.
                 continue
             full = prefix + rel
             if full in overrides[i]:
                 continue
             out.append({"rel": full, "path": p, "key": _doc_key(full),
-                        "digest": sha256_file(p)})
+                        "digest": sha256_file(p), "ext": p.suffix.lower()})
     return out
 
 
-def match_docx_pairs(base_sources: list, cand_sources: list) -> tuple:
-    """(pairs, unmatched_base, unmatched_candidate) -- 1:1, content-aware."""
-    base, cand = list_docx_files(base_sources), list_docx_files(cand_sources)
+def list_docx_files(sources: list) -> list:
+    """[{rel, path, key, digest}] for the .docx files of one corpus view."""
+    return list_track_files(sources, exts=(".docx",))
+
+
+def match_track_pairs(base_sources: list, cand_sources: list, ext: str) -> tuple:
+    """(pairs, unmatched_base, unmatched_candidate) -- 1:1, content-aware.
+
+    Only documents of the SAME extension are ever paired: a `.docx` revision of
+    a `.tex` source is a different document, not a tracked change.
+    """
+    base = [f for f in list_track_files(base_sources) if f["ext"] == ext]
+    cand = [f for f in list_track_files(cand_sources) if f["ext"] == ext]
     pool, used = list(enumerate(cand)), set()
 
     def take(match):
@@ -36706,8 +36983,14 @@ def match_docx_pairs(base_sources: list, cand_sources: list) -> tuple:
         else:
             basis = "same content, other name"
         pairs.append({"base_rel": b["rel"], "base_path": b["path"],
+                      "base_digest": b["digest"], "cand_digest": c["digest"],
                       "cand_rel": c["rel"], "cand_path": c["path"], "basis": basis})
     return pairs, unmatched, [c["rel"] for i, c in pool if i not in used]
+
+
+def match_docx_pairs(base_sources: list, cand_sources: list) -> tuple:
+    """(pairs, unmatched_base, unmatched_candidate) for `.docx` -- 1:1, content-aware."""
+    return match_track_pairs(base_sources, cand_sources, ".docx")
 
 
 def redline_adapter_path() -> Path:
@@ -36996,11 +37279,17 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
 def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
                      out: Path) -> dict:
     """Create one tracked-changes docx; returns the attempt log (never raises)."""
+    # The Word-native compare engine (Word's own CompareDocuments through the
+    # operator's `docx-compare` MCP server) is the FIRST choice for tracking the
+    # differences between two .docx files. It is probed once per pair: an
+    # unconfigured server is simply not in the chain, while a configured server
+    # whose call fails is recorded and the next backend takes over.
+    compare_spec = docx_compare_mcp_spec()
     if tool == "none":
         order = ()
     elif tool == "auto":
-        order = ["redlines", "docx-trackdiff"] + (["redline-cmd"] if cmd_template else []) \
-            + ["builtin"]
+        order = ["docx-compare"] + ["redlines", "docx-trackdiff"] \
+            + (["redline-cmd"] if cmd_template else []) + ["builtin"]
     elif tool == "builtin":
         # a user-supplied command is a request, not a last-resort fallback
         order = (["redline-cmd"] if cmd_template else []) + ["builtin"]
@@ -37034,6 +37323,29 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
             res = _run_redline_cmd(_argv_from_template(cmd_template, base, revised, out), out)
             res["backend"] = "redline-cmd"
             attempts.append(res)
+        elif backend == "docx-compare":
+            if not compare_spec:
+                # Not an attempt: the machine has no usable compare server, so
+                # the chain moves on. Recorded, so the manifest says why the
+                # first-choice engine was not the one that produced the file.
+                attempts.append({
+                    "backend": REDLINE_COMPARE_BACKEND,
+                    "cmd": ["mcp", DOCX_COMPARE_MCP_SERVER, DOCX_COMPARE_MCP_TOOL],
+                    "rc": None, "ok": False, "skipped": True,
+                    "detail": f"the {DOCX_COMPARE_MCP_SERVER!r} MCP server is not configured/"
+                              f"startable on this machine; the next redline backend was used"})
+                continue
+            res = mcp_compare_docx(compare_spec, base, revised, out)
+            ooxml_ok, ooxml_detail = (docx_is_readable(out) if res.get("ok")
+                                      else (False, "no output file"))
+            detail = ooxml_detail if res.get("ok") else str(res.get("error") or "")[:300]
+            attempts.append({
+                "backend": REDLINE_COMPARE_BACKEND,
+                "cmd": ["mcp", DOCX_COMPARE_MCP_SERVER, DOCX_COMPARE_MCP_TOOL,
+                        str(base), str(revised), str(out)],
+                "rc": 0 if (res.get("ok") and ooxml_ok) else None,
+                "ok": bool(res.get("ok") and ooxml_ok), "detail": detail,
+                "validated_ooxml": bool(ooxml_ok)})
         elif backend == "redlines":
             adapter = redline_adapter_path()
             if not adapter.is_file():
@@ -37092,11 +37404,14 @@ def redline_readme(manifest: dict) -> str:
     L = ["# Tracked changes (redlines)", "",
          f"Generated: {manifest['generated']}  |  requested tool: `{manifest['tool']}`", "",
          "Tool chain (first one that works wins):",
-         "1. `python-redlines[docxodus]` (through `paper_redlines_adapter.py`, which reports the "
+         "1. the `docx-compare` MCP tool -- Microsoft Word's OWN comparison engine "
+         "(`Word.Application.CompareDocuments`, driven by `docxcompare.sh` through COM "
+         "automation) -- when that server is configured on this machine",
+         "2. `python-redlines[docxodus]` (through `paper_redlines_adapter.py`, which reports the "
          "interface it used)",
-         "2. `docx-trackdiff` (CLI, two argument forms, then `python -m docx_trackdiff`)",
-         "3. `--redline-cmd '<json argv with {base} {revised} {out}>'` when you supply one",
-         "4. the built-in OOXML word/paragraph-level tracked-changes writer (stdlib only; "
+         "3. `docx-trackdiff` (CLI, two argument forms, then `python -m docx_trackdiff`)",
+         "4. `--redline-cmd '<json argv with {base} {revised} {out}>'` when you supply one",
+         "5. the built-in OOXML word/paragraph-level tracked-changes writer (stdlib only; "
          "unchanged paragraphs are copied verbatim, a changed paragraph is rebuilt from plain "
          "text).", "",
          "Each row names the backend that actually produced the file; `manifest.json` keeps every "
@@ -37230,6 +37545,12 @@ def run_redlines(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
                     entry["comparisons"].append({
                         "source": label, "base_rel": pair["base_rel"],
                         "revised_rel": pair["cand_rel"], "basis": pair["basis"],
+                        # The pair's two content digests: recorded so a LATER
+                        # pass (the difference-tracking reuse) can prove the
+                        # redline it copies really is the redline of THESE two
+                        # documents before it is presented as one.
+                        "base_digest": pair.get("base_digest"),
+                        "cand_digest": pair.get("cand_digest"),
                         "out": out.relative_to(ctx.root).as_posix(),
                         "tool": result["tool"] if result["ok"] else None,
                         "ok": bool(result["ok"]), "attempts": result["attempts"],
@@ -37289,6 +37610,1025 @@ def _cmd_redline_locked(ctx: Ctx, args) -> None:
     print(f"[redline] summary:  {ctx.root / REDLINE_DIRNAME / 'README.md'}")
     if fail_n and args.tool != "none":
         sys.exit(4)
+
+
+# =====================================================================
+# DIFFERENCE TRACKING (per version, per baseline, per document)
+#
+# Every submission version the pipeline produces is tracked against the
+# PRE-CONFORMED ORIGINAL (the byte-identical copy `setup --source` made into
+# non_revised/) and against the version it was derived FROM (the previous
+# version):
+#
+#     <name>.tracking-original.<ext>   real tracked copy vs the pristine original
+#     <name>.logging-original.<ext>    its fallback log when the tool failed
+#     <name>.tracking-previous.<ext>   real tracked copy vs the previous version
+#     <name>.log-previous.<ext>        its fallback log when the tool failed
+#     (.ext in .docx / .tex / .bib)
+#
+# Every PUBLISHED winner (`round<r>_winner/`) is tracked in place too: against
+# the pristine original, and -- for r > 1 -- against the previous round's winner
+# under the dedicated family
+#     <name>.tracking-prev-winner.<ext> / <name>.logging-prev-winner.<ext>
+#
+# A `.docx` pair goes through redline_one_pair() -- Word's own comparison
+# engine (the `docx-compare` MCP tool) FIRST, then the documented redline chain.
+# A `.tex`/`.bib` pair goes through `latexdiff`. The fallback file is a
+# human-readable before/after log (a marker .docx for a .docx pair) -- never a
+# file that only looks like a real tracked copy.
+#
+# The copies are AUXILIARIES (AUXILIARY_DOC_SUFFIXES): they are written BESIDE
+# the candidate documents (except inside a1's hash-verified input `base/`, which
+# is left byte-identical) and mirrored under <root>/tracking/ with a manifest
+# and a README. They never enter a corpus digest, a pin, a judge view, a
+# fingerprint or the revision token. The pass is PURE CODE: it starts no agent
+# session, so it cannot change a champion, a score or a ranking -- both
+# properties are pinned by `.paper_test/test_difference_tracking.py`.
+# =====================================================================
+
+TRACKING_DIRNAME = "tracking"
+TRACKING_MANIFEST = "manifest.json"
+TRACK_LABEL_ORIGINAL = "original"
+TRACK_LABEL_PREVIOUS = "previous"
+# A published winner's previous-version baseline is the PREVIOUS ROUND's winner;
+# its family carries its own suffix (`tracking-prev-winner`) so a winner's
+# marked-up copy is never confused with a document's own previous-version copy.
+TRACK_LABEL_PREV_WINNER = "prev-winner"
+LATEXDIFF_CMD = "latexdiff"
+LATEXDIFF_TIMEOUT = 600
+
+
+def fresh_package_sources(ctx: Ctx, r: int, vid: str) -> list:
+    """The version's own produced package as corpus sources (code/ excluded).
+
+    `corpus_sources()` folds the stage's `code/` directory in under a prefix;
+    the tracked manuscript differences are the PACKAGE documents, so the
+    prefixed sources are dropped and the result is exactly the directory the
+    stage wrote (`revised/`, `rewritten/`, `integrated/`, or `base/` for a1)
+    with its own `work/` scratch excluded.
+    """
+    return [s for s in corpus_sources(ctx, r, vid) if not s[1]]
+
+
+def tracking_previous_baseline(ctx: Ctx, r: int, vid: str) -> tuple:
+    """(version id, sources) of the version `vid` was derived FROM.
+
+    rewrite   -> the round base (the version before it was rewritten)
+    revise    -> the round base (the version before it was reviewed+revised)
+    integrate -> the integration's own `self/` pool member (the version that
+                 became the integrated one by incorporating the donor strengths)
+    a1/other  -> none: a1 IS the previous version (round 1: the pristine
+                 original; round r>1: a byte-identical copy of the pin), so a
+                 previous-baseline copy would compare it with itself.
+    """
+    arm = arm_of_vid(vid)
+    if arm == "integrate":
+        rec = ctx.run(rid_for_fresh(r, vid)) or {}
+        self_id = str(rec.get("self_id") or A1_ID)
+        return self_id, corpus_sources(ctx, r, self_id)
+    if arm in ("rewrite", "revise"):
+        return A1_ID, corpus_sources(ctx, r, A1_ID)
+    return "", []
+
+
+def tracking_baselines(ctx: Ctx, r: int, vid: str) -> list:
+    """[(label, version id, sources, note)] for one version."""
+    out = [(TRACK_LABEL_ORIGINAL, ORIGINAL_ID, [(ctx.pristine, "", ())],
+            "the pre-conformed original (non_revised/)")]
+    prev_id, prev_sources = tracking_previous_baseline(ctx, r, vid)
+    if prev_id and any(src.is_dir() for src, _p, _e in prev_sources):
+        out.append((TRACK_LABEL_PREVIOUS, prev_id, prev_sources,
+                    "the version this one was derived from"))
+    return out
+
+
+def latexdiff_one_pair(base: Path, cand: Path, out: Path,
+                       timeout: int = LATEXDIFF_TIMEOUT) -> dict:
+    """Write a `latexdiff` copy of one `.tex`/`.bib` pair; never raises."""
+    exe = shutil.which(LATEXDIFF_CMD)
+    if not exe:
+        return {"ok": False, "tool": LATEXDIFF_CMD, "attempts": [
+            {"backend": LATEXDIFF_CMD, "cmd": [LATEXDIFF_CMD, str(base), str(cand)],
+             "rc": None, "ok": False,
+             "detail": f"{LATEXDIFF_CMD} is not on PATH; the logging fallback was written"}]}
+    argv = [exe, "--no-label", str(base), str(cand)]
+    try:
+        proc = subprocess.run(argv, capture_output=True, timeout=timeout)
+        rc = proc.returncode
+        stdout, stderr = proc.stdout or b"", proc.stderr or b""
+        err = stderr.decode("utf-8", "replace").strip().replace("\n", " ")
+    except FileNotFoundError as e:                              # noqa: BLE001
+        rc, stdout, err = None, b"", f"not found: {e}"
+    except subprocess.TimeoutExpired:
+        rc, stdout, err = None, b"", f"timeout after {timeout}s"
+    except OSError as e:                                        # noqa: BLE001
+        rc, stdout, err = None, b"", f"exec error: {e}"
+    ok = bool(rc == 0 and stdout.strip())
+    if ok:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_name(out.name + ".tmp")
+        tmp.write_bytes(stdout)
+        os.replace(tmp, out)
+    else:
+        with contextlib.suppress(OSError):
+            out.unlink()
+    detail = err[:300] if err else ("clean" if ok else "no output")
+    return {"ok": ok, "tool": LATEXDIFF_CMD, "warning": (err[:200] or None) if ok else None,
+            "attempts": [{"backend": LATEXDIFF_CMD, "cmd": argv, "rc": rc, "ok": ok,
+                          "detail": detail}]}
+
+
+def _note_para(text: str):
+    """One plain paragraph element carrying `text`."""
+    p = ET.Element(_w("p"))
+    r = ET.SubElement(p, _w("r"))
+    t = ET.SubElement(r, _w("t"))
+    t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    t.text = str(text)
+    return p
+
+
+def _write_minimal_docx(out: Path, paragraphs: list) -> None:
+    """A minimal, readable OOXML document of plain paragraphs (stdlib only).
+
+    The logging fallback of a `.docx` pair has to be a REAL readable .docx even
+    when the pair itself could not be opened (that is exactly when the fallback
+    fires), so the note cannot be smuggled into a broken package.
+    """
+    def esc(text: str) -> str:
+        return (str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+    body = "".join(f'<w:p><w:r><w:t xml:space="preserve">{esc(t)}</w:t></w:r></w:p>'
+                   for t in paragraphs)
+    ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    document = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                f'<w:document xmlns:w="{ns}"><w:body>{body}</w:body></w:document>')
+    content_types = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/'
+                     'content-types"><Default Extension="rels" ContentType="application/'
+                     'vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" '
+                     'ContentType="application/xml"/><Override PartName="/word/document.xml" '
+                     'ContentType="application/vnd.openxmlformats-officedocument.'
+                     'wordprocessingml.document.main+xml"/></Types>')
+    rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/'
+            'relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/'
+            'officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+            '</Relationships>')
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.name + ".tmp")
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", content_types)
+        z.writestr("_rels/.rels", rels)
+        z.writestr("word/document.xml", document)
+    os.replace(tmp, out)
+
+
+def _before_after_lines(base: Path, cand: Path) -> list:
+    """A bounded plain-text before/after listing of two documents' paragraphs."""
+    lines = []
+    try:
+        base_texts = [_para_text(p) for p in _docx_root(base)[1].iter(_w("p"))]
+        cand_texts = [_para_text(p) for p in _docx_root(cand)[1].iter(_w("p"))]
+    except Exception as e:                                      # noqa: BLE001
+        return [f"[the documents could not be read as OOXML: {type(e).__name__}: {e}]"]
+    sm = difflib.SequenceMatcher(None, base_texts, cand_texts, autojunk=False)
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        for t in base_texts[i1:i2]:
+            if t.strip():
+                lines.append(f"[BEFORE: {t}]")
+        for t in cand_texts[j1:j2]:
+            if t.strip():
+                lines.append(f"[AFTER: {t}]")
+        if len(lines) > 400:
+            lines.append("[... more differences truncated ...]")
+            break
+    return lines or ["[no textual difference found between the two documents]"]
+
+
+def write_docx_logging_fallback(base: Path, cand: Path, out: Path, baseline: str,
+                                reason: str) -> dict:
+    """The `.logging-*` / `.log-*` fallback for a `.docx` pair (never raises).
+
+    When the revised copy is readable the fallback is a COPY of it whose changed
+    paragraphs carry bracketed `[BEFORE: ...]` / `[AFTER: ...]` markers plus a
+    first-paragraph note (the documented before/after fallback the revision
+    skill uses). When it is not readable, a minimal readable .docx carries the
+    note and the reason, so the reader still gets a file they can open.
+    """
+    note = (f"[LOGGING FALLBACK -- not a tracked-changes document] difference tracking "
+            f"against the {baseline} version failed: {reason}")
+    try:
+        cand_raw = cand.read_bytes()
+        _, cand_root = _docx_root(cand)
+        body = cand_root.find(_w("body"))
+        if body is None:
+            raise RuntimeError("the revised document carries no w:body")
+        base_texts = [_para_text(p) for p in _docx_root(base)[1].iter(_w("p"))]
+        cand_paras = list(body.findall(_w("p")))
+        new_body = ET.Element(_w("body"))
+        new_body.append(copy.deepcopy(_note_para(note)))
+        sm = difflib.SequenceMatcher(None, base_texts,
+                                     [_para_text(p) for p in cand_paras], autojunk=False)
+        cursor, emitted = 0, 0
+        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+            if tag == "equal":
+                for p in cand_paras[j1:j2]:
+                    new_body.append(copy.deepcopy(p))
+                cursor = j2
+                continue
+            for t in base_texts[i1:i2]:
+                if t.strip():
+                    new_body.append(copy.deepcopy(_note_para(f"[BEFORE: {t}]")))
+                    emitted += 1
+            for p in cand_paras[j1:j2]:
+                new_body.append(copy.deepcopy(_note_para(f"[AFTER: {_para_text(p)}]")))
+                emitted += 1
+            cursor = j2
+        for p in cand_paras[cursor:]:
+            new_body.append(copy.deepcopy(p))
+        if not emitted:
+            new_body.append(copy.deepcopy(_note_para(
+                "[no textual difference found between the two documents]")))
+        # Keep any trailing non-paragraph body content (a sectPr) so the copy
+        # stays a complete Word document.
+        for child in list(body):
+            if child.tag != _w("p"):
+                new_body.append(copy.deepcopy(child))
+        body.clear()
+        for child in list(new_body):
+            body.append(child)
+        payload = _serialize_document(cand_root, cand_raw)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_name(out.name + ".tmp")
+        with zipfile.ZipFile(cand) as zin, \
+                zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename == "word/document.xml":
+                    data = payload
+                zout.writestr(item, data)
+        os.replace(tmp, out)
+    except Exception as e:                                      # noqa: BLE001
+        try:
+            with contextlib.suppress(OSError):
+                out.with_name(out.name + ".tmp").unlink()
+            _write_minimal_docx(out, [
+                note,
+                f"[the revised document could not be copied: {type(e).__name__}: {e}]"]
+                + _before_after_lines(base, cand))
+        except Exception as e2:                                 # noqa: BLE001
+            return {"ok": False, "error": f"the logging fallback failed too: {e2}"}
+    return {"ok": True, "out": out}
+
+
+def write_text_logging_fallback(base: Path, cand: Path, out: Path, baseline: str,
+                                reason: str) -> dict:
+    """The `.logging-*` / `.log-*` fallback for a `.tex`/`.bib` pair (never raises).
+
+    Every emitted line is commented out, so the file is inert if a build tool
+    picks it up; the content is a unified before/after diff the reader can
+    inspect without any LaTeX toolchain.
+    """
+    def read_lines(p: Path) -> list:
+        try:
+            return p.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as e:                                    # noqa: BLE001
+            return [f"[unreadable: {type(e).__name__}: {e}]"]
+
+    lines = [
+        f"LOGGING FALLBACK -- not a latexdiff copy of {cand.name}",
+        f"difference tracking against the {baseline} version failed: {reason}",
+        "the unified diff below is commented out (both TeX and BibTeX treat a leading % as "
+        "a comment)",
+        "", f"--- {base.name}", f"+++ {cand.name}"]
+    lines += list(difflib.unified_diff(read_lines(base), read_lines(cand),
+                                       fromfile=base.name, tofile=cand.name, lineterm=""))[2:]
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        write_text_atomic(out, "\n".join("% " + ln for ln in lines) + "\n")
+    except OSError as e:                                        # noqa: BLE001
+        return {"ok": False, "error": f"the logging fallback could not be written: {e}"}
+    return {"ok": True, "out": out}
+
+
+def redline_index(manifest: dict) -> dict:
+    """{(round, version, source, revised_rel): comparison} from a redlines manifest."""
+    out = {}
+    for v in (manifest or {}).get("versions") or []:
+        for c in v.get("comparisons") or []:
+            out[(int(v.get("round") or 0), str(v.get("version") or ""),
+                 str(c.get("source") or ""), str(c.get("revised_rel") or ""))] = c
+    return out
+
+
+def _reusable_redline(index: dict, r: int, vid: str, source: str, pair: dict) -> dict:
+    """The already-produced redline for this exact pair, when there is one.
+
+    The round-close call runs `run_redlines()` first, so the docx pairs against
+    the original (and, for the rewrite/revise arms, against the round base) are
+    usually already on disk. Reusing them keeps one Word/COM call per pair
+    instead of two -- and the reuse is GATED ON THE TWO CONTENT DIGESTS: a
+    redline of the same relative name but of DIFFERENT bytes (the integration
+    arms' `from-base` is the round base, not their own `self/` member) must never
+    be copied, because it would show the wrong difference. A manifest written by
+    an older pipeline carries no digests and is therefore never reused.
+    """
+    if not source:
+        return {}
+    rec = index.get((r, vid, source, pair["cand_rel"])) or {}
+    if (rec.get("ok") and rec.get("base_digest") == pair.get("base_digest")
+            and rec.get("cand_digest") == pair.get("cand_digest")):
+        return rec
+    return {}
+
+
+def _track_one_entry(ctx: Ctx, entry: dict, *, out_key: str, r: int, vid: str,
+                     label: str, base_id: str, base_sources: list, note: str, srcs: list,
+                     tool: str, redline_cmd: list, index: dict, in_package: bool,
+                     quiet: bool) -> None:
+    """Track ONE baseline of one entry (a version or a published winner)."""
+    if label in (TRACK_LABEL_PREVIOUS, TRACK_LABEL_PREV_WINNER):
+        entry["previous_baseline"] = base_id
+    if not any(s.is_dir() for s, _p, _e in base_sources):
+        entry["skipped"].append({"baseline": label, "reason": "no base corpus"})
+        return
+    for ext in TRACKABLE_EXTS:
+        pairs, unmatched_base, unmatched_cand = match_track_pairs(base_sources, srcs, ext)
+        for rel in unmatched_base:
+            entry["skipped"].append({
+                "baseline": label, "base_rel": rel,
+                "reason": f"no corresponding {ext} in this version"})
+        for rel in unmatched_cand:
+            entry["skipped"].append({
+                "baseline": label, "revised_rel": rel,
+                "reason": f"new {ext} with no counterpart in the {label} baseline"})
+        for pair in pairs:
+            # Which redlines-tree label may stand in for THIS pair: the original
+            # baseline is `from-original`; a baseline that really is the round
+            # base (a rewrite/revise arm's previous version, or a winner's
+            # previous winner, whose content IS the round base) is `from-base`.
+            # Anything else (an integration's own `self/` member) is compared
+            # fresh -- the digest gate in _reusable_redline would refuse the
+            # mismatched file anyway.
+            reuse = ""
+            if label == TRACK_LABEL_ORIGINAL:
+                reuse = "from-original"
+            elif label == TRACK_LABEL_PREVIOUS and base_id == A1_ID:
+                reuse = "from-base"
+            elif label == TRACK_LABEL_PREV_WINNER:
+                reuse = "from-base"
+            rec = track_one_pair(ctx, r, vid, label, ext, pair, tool,
+                                 redline_cmd, index, out_key=out_key,
+                                 in_package=in_package, base_id=base_id,
+                                 reuse_source=reuse)
+            rec["baseline_note"] = note
+            entry["comparisons"].append(rec)
+            if not quiet:
+                if rec.get("ok") and rec.get("tool"):
+                    result = f"({rec.get('tool')})"
+                elif rec.get("ok"):
+                    result = f"logging fallback ({rec.get('fallback')})"
+                elif rec.get("skipped"):
+                    result = "skipped (tool=none)"
+                else:
+                    result = "FAILED"
+                print(f"  [track] {out_key}: {pair['cand_rel']} <- {label} {result}")
+
+
+def _close_tracking_entry(entry: dict) -> None:
+    """Fill in the status line of one tracking entry."""
+    written = sum(1 for c in entry["comparisons"] if c.get("ok") and c.get("tool"))
+    fallbacks = sum(1 for c in entry["comparisons"] if c.get("ok") and not c.get("tool"))
+    skipped = sum(1 for c in entry["comparisons"] if c.get("skipped"))
+    failed = sum(1 for c in entry["comparisons"] if not c.get("ok") and not c.get("skipped"))
+    entry["status"] = ((f"{written} tracked copy(ies) written"
+                        + (f", {fallbacks} logging fallback(s)" if fallbacks else "")
+                        + (f", {skipped} skipped (tool=none)" if skipped else "")
+                        + (f", {failed} FAILED" if failed else ""))
+                       if entry["comparisons"] else "no trackable document pairs")
+
+
+def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
+                            redline_cmd: list = None, quiet: bool = False,
+                            redlines_manifest: dict = None) -> dict:
+    """Write the per-version difference-tracking copies + manifest.
+
+    `versions=None` means every version of each requested round (the pool --
+    base, rewrites, revisions -- plus the integration arms the round's mask
+    really selected), which is the same set `run_redlines()` resolves. The
+    round's PUBLISHED winner is tracked as well: against the pre-conformed
+    original and, for r > 1, against the previous round's winner.
+    """
+    rounds = [int(r) for r in (rounds or range(1, ctx.rounds_count() + 1))]
+    versions = list(versions) if versions else None
+    out_root = ctx.root / TRACKING_DIRNAME
+    out_root.mkdir(parents=True, exist_ok=True)
+    index = redline_index(redlines_manifest)
+    manifest = {
+        "generated": utcnow(), "pipeline_root": str(ctx.root), "tool": tool,
+        "source_labels": {
+            TRACK_LABEL_ORIGINAL: f"the pre-conformed original ({ctx.pristine.name}/)",
+            TRACK_LABEL_PREVIOUS: ("the version this one was derived from: the round base for "
+                                   "rewrite/revise arms, the integration's own self/ member "
+                                   "for an integrated arm"),
+            TRACK_LABEL_PREV_WINNER: ("the previous round's published winner "
+                                      "(round<r-1>_winner/), for a winner of round r > 1"),
+        },
+        "versions": [], "notes": [
+            "A copy named <name>.tracking-<baseline>.<ext> shows the difference between the "
+            "candidate document and its baseline: real Word tracked changes for .docx (the "
+            "docx-compare MCP tool / redline chain), a latexdiff copy for .tex/.bib.",
+            "When the difference tool failed, the sibling <name>.logging-original.<ext>, "
+            "<name>.log-previous.<ext> or <name>.logging-prev-winner.<ext> carries a readable "
+            "before/after log instead.",
+            "Every copy here is an AUXILIARY: it is excluded from every judged/pinned corpus, "
+            "fingerprint and revision token, and the pass starts no agent session.",
+            "The round's PUBLISHED winner directory (round<r>_winner/) is tracked in place as "
+            "well: every winner tracks the pre-conformed original, and round r > 1 also tracks "
+            "the previous round's winner (its previous version), under the dedicated "
+            "tracking-prev-winner / logging-prev-winner names.",
+        ]}
+    if not index:
+        manifest["notes"].append(
+            "no fresh redlines manifest was supplied: every .docx pair is compared by this "
+            "pass itself (docx-compare MCP first, then the redline chain)")
+    # The manifest ACCUMULATES: re-running one round (or one version) refreshes
+    # that set's rows and keeps the rows of the sets it did not touch -- the
+    # copies themselves persist, so dropping their rows would make the manifest
+    # claim the tree is empty. A full `run` therefore ends with one manifest
+    # covering every round it tracked.
+    stored = read_json(out_root / TRACKING_MANIFEST) or {}
+    prev_versions = {(str(v.get("round")), str(v.get("version"))): v
+                     for v in stored.get("versions") or []}
+    version_order = [k for k in prev_versions]
+
+    def put_version(entry: dict) -> None:
+        key = (str(entry.get("round")), str(entry.get("version")))
+        if key not in prev_versions:
+            version_order.append(key)
+        prev_versions[key] = entry
+
+    def flush_versions() -> None:
+        manifest["versions"] = [prev_versions[k] for k in version_order]
+
+    for r in rounds:
+        round_versions = (versions if versions is not None else round_produced_ids(ctx, r))
+        for vid in round_versions:
+            if not is_fresh_vid(vid):
+                continue
+            srcs = fresh_package_sources(ctx, r, vid)
+            if not any(s.is_dir() for s, _p, _e in srcs):
+                put_version({"round": r, "version": vid, "status": "not materialized",
+                             "comparisons": [], "skipped": []})
+                continue
+            entry = {"round": r, "version": vid, "tool": tool,
+                     "out_dir": f"{TRACKING_DIRNAME}/r{r}_{vid}/",
+                     "previous_baseline": "", "comparisons": [], "skipped": []}
+            for label, base_id, base_sources, note in tracking_baselines(ctx, r, vid):
+                _track_one_entry(ctx, entry, out_key=f"r{r}_{vid}", r=r, vid=vid,
+                                 label=label, base_id=base_id, base_sources=base_sources,
+                                 note=note, srcs=srcs, tool=tool, redline_cmd=redline_cmd,
+                                 index=index, in_package=(arm_of_vid(vid) != "base"),
+                                 quiet=quiet)
+            _close_tracking_entry(entry)
+            put_version(entry)
+        # The round's published winner: tracked in place (round<r>_winner/) and
+        # mirrored under <root>/tracking/round<r>_winner/. Every winner tracks
+        # the pre-conformed original; round r > 1 also tracks the previous
+        # round's winner -- the version it was derived from.
+        wrec = ctx.round_get(r) or {}
+        wname = str(wrec.get("winner_dir") or "")
+        wdir = (ctx.root / wname) if wname else None
+        if wdir is None or not wdir.is_dir():
+            continue
+        entry = {"round": r, "version": f"round{r}_winner", "winner": True, "tool": tool,
+                 "out_dir": f"{TRACKING_DIRNAME}/round{r}_winner/",
+                 "previous_baseline": "", "comparisons": [], "skipped": []}
+        winner_srcs = [(wdir, "", ())]
+        # The reuse lookup runs against the CHAMPION's version id: the winner
+        # directory holds exactly the champion's bytes, so a redline the
+        # round-close redlines pass already produced for that version is valid
+        # here too (and saves a second Word/COM round trip per pair).
+        champ_vid = str(wrec.get("winner_id") or f"round{r}_winner")
+        for label, base_id, base_sources, note in (
+                (TRACK_LABEL_ORIGINAL, ORIGINAL_ID, [(ctx.pristine, "", ())],
+                 "the pre-conformed original (non_revised/)"),
+                (TRACK_LABEL_PREV_WINNER, (f"round{r - 1}_winner" if r > 1 else ""),
+                 ([(winner_dir_of(ctx, r - 1), "", ())] if r > 1 else []),
+                 "the previous round's published winner")):
+            _track_one_entry(ctx, entry, out_key=f"round{r}_winner", r=r,
+                             vid=champ_vid, label=label, base_id=base_id,
+                             base_sources=base_sources, note=note, srcs=winner_srcs,
+                             tool=tool, redline_cmd=redline_cmd, index=index,
+                             in_package=True, quiet=quiet)
+        _close_tracking_entry(entry)
+        put_version(entry)
+    flush_versions()
+    write_json_atomic(out_root / TRACKING_MANIFEST, manifest)
+    write_text_atomic(out_root / "README.md", tracking_readme(manifest))
+    return manifest
+
+
+def track_one_pair(ctx: Ctx, r: int, vid: str, label: str, ext: str, pair: dict,
+                   tool: str, redline_cmd: list, index: dict, out_key: str = None,
+                   in_package: bool = True, base_id: str = "", reuse_source: str = "") -> dict:
+    """Produce ONE tracking copy (+ its logging fallback) for one pair.
+
+    `out_key` is the directory under <root>/tracking/ the copy is mirrored into
+    (`r<R>_<vid>` for a version, `round<R>_winner` for a published winner);
+    `in_package` writes the copy beside the candidate document as well -- false
+    only for a1, whose `base/` is a raw hash-verified input manifest.
+
+    `base_id` names the version the baseline came from (recorded in the manifest)
+    and `reuse_source` is the REDLINES-tree label whose already-produced redline
+    may stand in for this pair -- "from-original" only for the original
+    baseline, "from-base" only when the baseline really is the round base (the
+    rewrite/revise arms, and a winner's previous winner, which IS the round
+    base's content). The reuse itself is digest-gated (see `_reusable_redline`).
+    """
+    base, cand = pair["base_path"], pair["cand_path"]
+    suffix = tracking_aux_suffix(label, ext)
+    fb_suffix = tracking_aux_suffix(label, ext, fallback=True)
+    rel_dir = Path(pair["cand_rel"]).parent
+    persist_root = ctx.root / TRACKING_DIRNAME / (out_key or f"r{r}_{vid}") / label
+    persist_out = persist_root / rel_dir / f"{cand.stem}{suffix}"
+    persist_fallback = persist_root / rel_dir / f"{cand.stem}{fb_suffix}"
+    # The in-package copy: written beside the candidate document, EXCEPT for the
+    # a1 base, whose `base/` is a raw hash-verified input manifest (writing into
+    # it would read as a modified input). a1 keeps its copies under <root>/tracking/.
+    in_pkg_out = (cand.parent / f"{cand.stem}{suffix}") if in_package else None
+    rec = {"baseline": label, "base_version": base_id or None, "ext": ext,
+           "base_rel": pair["base_rel"], "revised_rel": pair["cand_rel"],
+           "basis": pair["basis"], "out": persist_out.relative_to(ctx.root).as_posix(),
+           "in_package": (in_pkg_out.relative_to(ctx.root).as_posix() if in_pkg_out else None),
+           "fallback": None, "fallback_out": None, "tool": None, "ok": False,
+           "attempts": [], "warning": None, "identical": False}
+    if tool == "none":
+        # `--tool none` asks for NO difference tool at all (the same contract as
+        # `redline --tool none`): the row is reported as skipped and no copy --
+        # not even a logging fallback -- is written for the pair.
+        rec["skipped"] = True
+        rec["reason"] = "tool=none: only the manifest/report was requested"
+        return rec
+    if pair["base_digest"] == pair["cand_digest"] and ext == ".docx":
+        # Byte-identical pair: no difference to mark. The built-in writer emits a
+        # valid, mark-free copy (cheap and deterministic), so no Word/COM round
+        # trip is spent on a pair nothing changed.
+        rec["identical"] = True
+        res = redline_one_pair("builtin", [], base, cand, persist_out)
+    elif pair["base_digest"] == pair["cand_digest"]:
+        # A .tex/.bib pair with identical bytes: the tracked copy IS the source.
+        rec["identical"] = True
+        persist_out.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(cand, persist_out)
+        res = {"ok": True, "tool": "identical-copy", "attempts": [
+            {"backend": "identical-copy", "cmd": [], "rc": 0, "ok": True,
+             "detail": "the two documents are byte-identical; the copy carries no marks"}]}
+    elif ext == ".docx":
+        reused = _reusable_redline(index, r, vid, reuse_source, pair)
+        reused_path = (ctx.root / str(reused.get("out"))) if reused.get("out") else None
+        if reused.get("ok") and reused_path and reused_path.is_file():
+            persist_out.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(reused_path, persist_out)
+            res = {"ok": True, "tool": f"{reused.get('tool')} (reused from {REDLINE_DIRNAME}/)",
+                   "warning": reused.get("warning"),
+                   "attempts": [{"backend": "reused-redline", "cmd": [], "rc": 0, "ok": True,
+                                 "detail": f"copied {reused.get('out')}"}]}
+        else:
+            res = redline_one_pair(tool, redline_cmd, base, cand, persist_out)
+    else:
+        res = latexdiff_one_pair(base, cand, persist_out)
+    if res.get("ok"):
+        rec["ok"], rec["tool"] = True, res.get("tool")
+        rec["attempts"], rec["warning"] = res.get("attempts") or [], res.get("warning")
+        if in_pkg_out is not None:
+            try:
+                shutil.copy2(persist_out, in_pkg_out)
+            except OSError as e:                                # noqa: BLE001
+                rec["warning"] = ((rec.get("warning") or "")
+                                  + f"; the in-package copy failed: {e}").strip("; ")
+        return rec
+    # The real comparison failed: write the LOGGING fallback (never a file that
+    # looks like a tracked copy).
+    reason = ""
+    for a in reversed(res.get("attempts") or []):
+        if a.get("detail"):
+            reason = str(a["detail"])[:200]
+            break
+    reason = reason or "the difference tool produced no output"
+    if ext == ".docx":
+        fb = write_docx_logging_fallback(base, cand, persist_fallback, label, reason)
+    else:
+        fb = write_text_logging_fallback(base, cand, persist_fallback, label, reason)
+    rec["attempts"] = res.get("attempts") or []
+    if fb.get("ok"):
+        rec["ok"] = True
+        rec["tool"] = None
+        rec["fallback"] = Path(persist_fallback).name
+        rec["fallback_out"] = persist_fallback.relative_to(ctx.root).as_posix()
+        rec["warning"] = f"difference tracking failed ({reason}); the logging fallback was written"
+        if in_pkg_out is not None:
+            try:
+                shutil.copy2(persist_fallback, in_pkg_out.parent / f"{cand.stem}{fb_suffix}")
+            except OSError as e:                                # noqa: BLE001
+                rec["warning"] += f"; the in-package fallback failed: {e}"
+    else:
+        rec["warning"] = (f"difference tracking failed ({reason}) AND the logging fallback "
+                          f"failed: {fb.get('error')}")
+    return rec
+
+
+def _md_cell(text, limit: int = 160) -> str:
+    """One table/bullet-safe rendering of arbitrary (tool) output.
+
+    A warning or an error message carries a command line or a renderer's stderr:
+    an unescaped `|` would split a markdown table cell and a newline would break
+    the row, so both are neutralized here -- the manifest.json keeps the raw text.
+    """
+    return (str(text or "").replace("|", "\\|").replace("\r", " ").replace("\n", " "))[:limit]
+
+
+def tracking_readme(manifest: dict) -> str:
+    labels = manifest.get("source_labels") or {}
+    L = ["# Difference tracking (versus the original and the previous version)", "",
+         f"Generated: {manifest['generated']}  |  requested tool: `{manifest['tool']}`", "",
+         "Every submission version is tracked twice: against the PRE-CONFORMED ORIGINAL",
+         f"(`{TRACK_LABEL_ORIGINAL}`: {labels.get(TRACK_LABEL_ORIGINAL, '')}) and against the",
+         f"version it was derived from (`{TRACK_LABEL_PREVIOUS}`:",
+         f"{labels.get(TRACK_LABEL_PREVIOUS, '')}).", "",
+         "Every PUBLISHED winner (`round<r>_winner/`) is tracked the same way: against the",
+         f"original (`{TRACK_LABEL_ORIGINAL}`) and, for r > 1, against the previous round's",
+         f"winner (`{TRACK_LABEL_PREV_WINNER}`: {labels.get(TRACK_LABEL_PREV_WINNER, '')}),",
+         "whose copies carry their own suffix so they are never confused with a document's",
+         "own previous-version copy.", "",
+         "File family (`.ext` = `.docx` / `.tex` / `.bib`):", "",
+         "| file | meaning |", "|---|---|",
+         "| `<name>.tracking-original.ext` | real tracked copy vs the pristine original |",
+         "| `<name>.logging-original.ext` | the fallback log when that comparison failed |",
+         "| `<name>.tracking-previous.ext` | real tracked copy vs the previous version |",
+         "| `<name>.log-previous.ext` | the fallback log when that comparison failed |",
+         "| `<name>.tracking-prev-winner.ext` | winner's real tracked copy vs the previous "
+         "round's winner |",
+         "| `<name>.logging-prev-winner.ext` | the fallback log when that comparison failed |", "",
+         "`.docx` pairs use Word's own comparison engine through the `docx-compare` MCP tool",
+         "(`Word.Application.CompareDocuments`) when it is configured, then the documented",
+         "redline chain (python-redlines[docxodus] -> docx-trackdiff -> --redline-cmd -> the",
+         "built-in OOXML writer). `.tex`/`.bib` pairs use `latexdiff`. The copies also sit",
+         "beside the candidate documents inside the run sandbox (a1's hash-verified `base/`",
+         "excepted); this tree is the prune-proof mirror.", "",
+         "Every file here is an AUXILIARY: it is excluded from every corpus digest, pin, judge",
+         "view, fingerprint and revision token, and this pass starts no agent session -- it can",
+         "never change a score, a ranking or a champion.", "",
+         "| round | version | baseline | pair | tool | result |", "|---|---|---|---|---|---|"]
+    for v in manifest["versions"]:
+        for c in v["comparisons"]:
+            result = ("tracked" if c.get("ok") and c.get("tool")
+                      else "LOGGING FALLBACK" if c.get("ok")
+                      else "skipped (tool=none)" if c.get("skipped") else "FAILED")
+            L.append(f"| {v['round']} | {v['version']} | {c['baseline']} | "
+                     f"`{_md_cell(c['base_rel'], 80)}` -> `{_md_cell(c['revised_rel'], 80)}` | "
+                     f"{_md_cell(c.get('tool') or '-')} | {result} |")
+    warn_rows = [(v["round"], v["version"], c) for v in manifest["versions"]
+                 for c in v["comparisons"] if c.get("warning")]
+    if warn_rows:
+        L += ["", "## Caveats", ""]
+        for r, vid, c in warn_rows:
+            L.append(f"- r{r} {vid} `{_md_cell(c['revised_rel'], 80)}` ({c['baseline']}): "
+                     f"{_md_cell(c['warning'], 240)}")
+    skipped = [(v["round"], v["version"], s) for v in manifest["versions"]
+               for s in v["skipped"]]
+    L += ["", "## Skipped", ""]
+    if not skipped:
+        L.append("- (none)")
+    for r, vid, s in skipped:
+        L.append(f"- r{r} {vid}: {s.get('base_rel') or s.get('revised_rel') or ''} "
+                 f"({s.get('baseline')}) -- {s['reason']}")
+    L += ["", "## Notes", ""] + [f"- {n}" for n in manifest.get("notes") or []]
+    L.append("")
+    return "\n".join(L)
+
+
+def cmd_track(args) -> None:
+    ctx = Ctx(Path(args.root).resolve(),
+              strict_venue=bool(getattr(args, "strict_venue", False)))
+    ctx.load(need_cfg=False)
+    with ctx.lock("track"):
+        _cmd_track_locked(ctx, args)
+
+
+def _cmd_track_locked(ctx: Ctx, args) -> None:
+    cmd_template = None
+    if args.redline_cmd:
+        try:
+            cmd_template = json.loads(args.redline_cmd)
+        except ValueError:
+            die("--redline-cmd must be a JSON argv list")
+        if not isinstance(cmd_template, list) or not cmd_template:
+            die("--redline-cmd must be a non-empty JSON argv list with {base}/{revised}/{out}")
+    rounds = [int(args.round)] if args.round else None
+    versions = (None if args.version == "all"
+                else [v.strip() for v in str(args.version).split(",") if v.strip()])
+    if versions is not None and not all(is_fresh_vid(v) for v in versions):
+        bad = [v for v in versions if not is_fresh_vid(v)]
+        die(f"--version takes a round-local candidate version id or a comma-separated list "
+            f"of them, or 'all'; got {', '.join(bad)}")
+    print(f"[track] root={ctx.root} tool={args.tool} rounds={rounds or 'all'} "
+          f"versions={versions or 'all versions of each round'}")
+    manifest = run_difference_tracking(ctx, rounds=rounds, versions=versions, tool=args.tool,
+                                       redline_cmd=cmd_template)
+    tracking_summary(manifest, rounds=rounds)
+    if not getattr(args, "no_pdf", False):
+        pdfs = run_pdf_conversion(ctx, rounds=rounds, versions=versions)
+        pdf_summary(pdfs, rounds=rounds)
+
+
+def tracking_summary(manifest: dict, rounds=None) -> None:
+    """One-line-per-fact summary of a tracking manifest (optionally one round)."""
+    rounds = set(int(r) for r in rounds) if rounds else None
+    versions = [v for v in manifest["versions"]
+                if rounds is None or int(v.get("round") or 0) in rounds]
+    ok_n = sum(1 for v in versions for c in v["comparisons"]
+               if c.get("ok") and c.get("tool"))
+    fb_n = sum(1 for v in versions for c in v["comparisons"]
+               if c.get("ok") and not c.get("tool"))
+    bad_n = sum(1 for v in versions for c in v["comparisons"] if not c.get("ok"))
+    skip_n = sum(1 for v in versions for c in v["comparisons"] if c.get("skipped"))
+    tools = sorted({c["tool"] for v in versions for c in v["comparisons"]
+                    if c.get("ok") and c.get("tool")})
+    print(f"[track] {ok_n} tracked copy(ies) written"
+          + (f" with {', '.join(tools)}" if tools else "")
+          + (f", {fb_n} logging fallback(s)" if fb_n else "")
+          + (f", {skip_n} skipped (tool=none)" if skip_n else "")
+          + (f", {bad_n} FAILED (no file)" if bad_n else ""))
+    root = Path(str(manifest.get("pipeline_root") or "."))
+    print(f"[track] manifest: {root / TRACKING_DIRNAME / TRACKING_MANIFEST}")
+    print(f"[track] summary:  {root / TRACKING_DIRNAME / 'README.md'}")
+
+
+# =====================================================================
+# PERSISTENT PDF RENDERS (LaTeX compile + DOCX conversion)
+#
+# At each round close the version packages are COMPILED/CONVERTED, not just
+# diffed: every LaTeX root (`\documentclass`) is built with
+# `latexmk -pdf -interaction=nonstopmode -halt-on-error` inside a disposable
+# copy, and every `.docx` is converted through the documented renderer chain
+# (the docx-converter MCP tool first, then docx2pdf.sh, then LibreOffice). The
+# PDFs are stored under <root>/pdfs/ (prune never touches them), so they outlive
+# the whole `paper_pipeline.py` run. A compile/conversion failure is a WARNING:
+# it is recorded in the manifest and printed, and it never fails a stage, a
+# round or a decision. The pass starts no agent session.
+# =====================================================================
+
+PDF_DIRNAME = "pdfs"
+PDF_MANIFEST = "manifest.json"
+LATEX_COMPILE_TIMEOUT = 900
+PDF_CONVERT_TIMEOUT = 900
+
+
+def latex_root_documents(dirp: Path) -> list:
+    """Relative paths of the `.tex`/`.ltx` files that are a COMPILE ROOT.
+
+    A root carries `\\documentclass`; a fragment that is only `\\input`-ed by
+    the root is not compiled on its own (it would fail without the preamble),
+    and neither is an auxiliary or a `work/` scratch file.
+    """
+    out = []
+    if not dirp.is_dir():
+        return out
+    for p in sorted(dirp.rglob("*")):
+        if not p.is_file() or p.suffix.lower() not in (".tex", ".ltx"):
+            continue
+        rel = p.relative_to(dirp)
+        if p.name.startswith("~$") or _is_aux_doc(p.name) \
+                or any(part == "work" for part in rel.parts[:-1]) \
+                or is_evidence_rel(rel.as_posix()):
+            continue
+        try:
+            head = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if re.search(r"\\documentclass\b", head):
+            out.append(rel.as_posix())
+    return out
+
+
+def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
+                      timeout: int = LATEX_COMPILE_TIMEOUT) -> dict:
+    """Compile ONE LaTeX root into `out_pdf`; never raises.
+
+    The build runs inside a DISPOSABLE COPY of the package: `latexmk` writes
+    `.aux/.log/.pdf/...` next to its sources, and those by-products must not
+    appear inside a version corpus (a `.pdf` is not an auxiliary suffix, so it
+    would change the corpus digest -- an end result).
+    """
+    exe = shutil.which("latexmk")
+    if not exe:
+        return {"ok": False, "tool": None,
+                "error": "latexmk is not on PATH; the LaTeX sources were not compiled"}
+    src = pkg / rel
+    work = Path(tempfile.mkdtemp(prefix="paper_pdf_"))
+    try:
+        shutil.copytree(pkg, work, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns(
+                            "work", "~$*",
+                            *EVIDENCE_DIRNAMES,
+                            *[f"*{s}" for s in TRACKING_AUX_SUFFIXES],
+                            *[f"*{s}" for s in LEGACY_AUXILIARY_DOC_SUFFIXES]))
+        argv = [exe, "-pdf", "-interaction=nonstopmode", "-halt-on-error", Path(rel).name]
+        proc = subprocess.run(argv, cwd=str((work / rel).parent), capture_output=True,
+                              timeout=timeout)
+        out = (proc.stdout or b"").decode("utf-8", "replace") \
+            + (proc.stderr or b"").decode("utf-8", "replace")
+        pdf = (work / rel).with_suffix(".pdf")
+        ok = bool(proc.returncode == 0 and pdf.is_file() and pdf.stat().st_size > 0)
+        if ok:
+            out_pdf.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(pdf, out_pdf)
+        errors = [ln.strip() for ln in out.splitlines() if ln.startswith("!")][:5]
+        return {"ok": ok, "tool": "latexmk", "pages": _pdf_page_count(out_pdf) if ok else 0,
+                "error": (None if ok else
+                          (errors[0] if errors
+                           else f"latexmk exited {proc.returncode} without a PDF")[:300]),
+                "errors": errors}
+    except (OSError, subprocess.SubprocessError, shutil.Error) as e:    # noqa: BLE001
+        return {"ok": False, "tool": "latexmk", "error": f"{type(e).__name__}: {e}"}
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def convert_docx_to_pdf_persistent(docx: Path, out_dir: Path,
+                                   timeout: int = PDF_CONVERT_TIMEOUT) -> dict:
+    """Convert one DOCX to `<out_dir>/<stem>.pdf`; never raises."""
+    try:
+        res = render_docx_visual(docx, out_dir, None, timeout=timeout, page_images=False)
+        return {"ok": bool(res.get("ok")), "tool": res.get("renderer"),
+                "pages": res.get("pages") or 0, "error": res.get("error"),
+                "fallbacks": res.get("fallbacks")}
+    except Exception as e:                                              # noqa: BLE001
+        return {"ok": False, "tool": None, "error": f"{type(e).__name__}: {e}"}
+
+
+def _pdf_previous_records(stored: dict) -> dict:
+    """{(label, rel): record} of a stored PDF manifest (for idempotent reuse)."""
+    out = {}
+    for s in (stored or {}).get("sets") or []:
+        for d in s.get("documents") or []:
+            out[(str(s.get("label") or ""), str(d.get("rel") or ""))] = d
+    return out
+
+
+def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
+                   previous: dict = None) -> list:
+    """Compile/convert every document of ONE (label, sources) set; never raises."""
+    docs, previous = [], previous or {}
+    pkg_sources = [s for s in sources if not s[1]]
+    for src, _prefix, excluded in pkg_sources:
+        if not src.is_dir():
+            continue
+        # LaTeX roots first (they carry the pages), then the .docx documents.
+        for rel in latex_root_documents(src):
+            digest = sha256_file(src / rel)
+            out_pdf = out_root / Path(rel).with_suffix(".pdf")
+            rec = _reuse_pdf_record(previous, label, rel, digest, out_pdf, "latex")
+            if rec is None:
+                res = compile_latex_pdf(src, rel, out_pdf)
+                rec = {"rel": rel, "kind": "latex", "out": out_pdf.relative_to(ctx.root).as_posix(),
+                       "sha256": digest, "ok": bool(res.get("ok")), "tool": res.get("tool"),
+                       "pages": res.get("pages") or 0, "error": res.get("error")}
+            docs.append(rec)
+        for f in list_track_files(sources, exts=(".docx",)):
+            if f["rel"].split("/", 1)[0] == CODE_DIR:
+                continue
+            docx = f["path"]
+            rel = f["rel"]
+            out_dir = out_root / Path(rel).parent
+            out_pdf = out_dir / (docx.stem + ".pdf")
+            rec = _reuse_pdf_record(previous, label, rel, f["digest"], out_pdf, "docx")
+            if rec is None:
+                res = convert_docx_to_pdf_persistent(docx, out_dir)
+                rec = {"rel": rel, "kind": "docx",
+                       "out": out_pdf.relative_to(ctx.root).as_posix(),
+                       "sha256": f["digest"], "ok": bool(res.get("ok")),
+                       "tool": res.get("tool"), "pages": res.get("pages") or 0,
+                       "error": res.get("error"), "fallbacks": res.get("fallbacks")}
+            docs.append(rec)
+    return docs
+
+
+def _reuse_pdf_record(previous: dict, label: str, rel: str, digest: str,
+                      out_pdf: Path, kind: str) -> dict:
+    """The stored record for an unchanged source, when its PDF is still there."""
+    rec = previous.get((label, rel))
+    if (rec and rec.get("ok") and rec.get("sha256") == digest and rec.get("kind") == kind
+            and out_pdf.is_file() and out_pdf.stat().st_size > 0):
+        fresh = dict(rec)
+        fresh["cached"] = True
+        return fresh
+    return None
+
+
+def run_pdf_conversion(ctx: Ctx, rounds=None, versions=None, include_original: bool = True,
+                       quiet: bool = False) -> dict:
+    """Compile/convert every requested version (and the original) into <root>/pdfs/."""
+    rounds = [int(r) for r in (rounds or range(1, ctx.rounds_count() + 1))]
+    versions = list(versions) if versions else None
+    out_root = ctx.root / PDF_DIRNAME
+    out_root.mkdir(parents=True, exist_ok=True)
+    stored = read_json(out_root / PDF_MANIFEST) or {}
+    previous = _pdf_previous_records(stored)
+    # Like the tracking manifest, this one ACCUMULATES: a `track --round 2`
+    # refreshes round 2's rows and keeps every other recorded set (and its
+    # up-to-date check, so an unchanged source is never re-rendered).
+    prev_sets = {str(s.get("label")): s for s in stored.get("sets") or []}
+    set_order = [str(s.get("label")) for s in stored.get("sets") or []]
+
+    def put_set(entry: dict) -> None:
+        label = str(entry.get("label"))
+        if label not in prev_sets:
+            set_order.append(label)
+        prev_sets[label] = entry
+
+    manifest = {"generated": utcnow(), "pipeline_root": str(ctx.root), "sets": [], "notes": [
+        "PDFs are written by `latexmk -pdf -interaction=nonstopmode -halt-on-error` for LaTeX "
+        "roots (\\documentclass) and by the documented DOCX renderer chain (the docx-converter "
+        "MCP tool first) for .docx documents.",
+        "A compilation/conversion failure is a WARNING: it is recorded here and printed, and it "
+        "never fails a stage, a round or a decision. prune never deletes this tree.",
+    ]}
+    if include_original:
+        label = "original"
+        docs = render_pdf_set(ctx, label, [(ctx.pristine, "", ())], out_root / label, previous)
+        put_set({"label": label, "round": None, "version": None,
+                 "note": f"the pre-conformed original ({ctx.pristine.name}/)",
+                 "documents": docs})
+        if not quiet and docs:
+            _print_pdf_set(label, docs)
+    for r in rounds:
+        for vid in (versions if versions is not None else round_produced_ids(ctx, r)):
+            if not is_fresh_vid(vid):
+                continue
+            srcs = fresh_package_sources(ctx, r, vid)
+            if not any(s.is_dir() for s, _p, _e in srcs):
+                continue
+            label = f"r{r}_{vid}"
+            docs = render_pdf_set(ctx, label, srcs, out_root / label, previous)
+            put_set({"label": label, "round": r, "version": vid, "documents": docs})
+            if not quiet and docs:
+                _print_pdf_set(label, docs)
+    manifest["sets"] = [prev_sets[k] for k in set_order]
+    write_json_atomic(out_root / PDF_MANIFEST, manifest)
+    write_text_atomic(out_root / "README.md", pdf_readme(manifest))
+    return manifest
+
+
+def _print_pdf_set(label: str, docs: list) -> None:
+    for d in docs:
+        if d.get("ok"):
+            print(f"  [pdf] {label}: {d['rel']} -> {d['out']} ({d.get('tool')}"
+                  + (f", {d['pages']} page(s)" if d.get("pages") else "") + ")")
+        else:
+            print(f"  [pdf] WARNING: {label}: {d['rel']} could not be rendered: "
+                  f"{_md_cell(d.get('error'), 200)}")
+
+
+def pdf_readme(manifest: dict) -> str:
+    L = ["# Persistent PDF renders", "",
+         f"Generated: {manifest['generated']}", "",
+         "Every version's LaTeX roots are compiled with",
+         "`latexmk -pdf -interaction=nonstopmode -halt-on-error` in a disposable copy of the",
+         "package (so no build by-product ever lands in the corpus) and every `.docx` is",
+         "converted through the documented renderer chain -- the `docx-converter` MCP tool",
+         "first, then `docx2pdf.sh`, then LibreOffice. A failure is a WARNING, never a failed",
+         "stage: the row says so and the run continues.", "",
+         "`prune` never deletes this tree, so the renders outlive the pipeline run.", "",
+         "| set | document | kind | tool | pages | result |", "|---|---|---|---|---|---|"]
+    for s in manifest["sets"]:
+        for d in s["documents"]:
+            L.append(f"| {s['label']} | `{_md_cell(d['rel'], 80)}` | {d['kind']} | "
+                     f"{_md_cell(d.get('tool') or '-')} | {d.get('pages') or '-'} | "
+                     f"{'ok' if d.get('ok') else 'WARNING: ' + _md_cell(d.get('error'), 140)} |")
+    L += ["", "## Notes", ""] + [f"- {n}" for n in manifest.get("notes") or []]
+    L.append("")
+    return "\n".join(L)
+
+
+def pdf_summary(manifest: dict, rounds=None) -> None:
+    """One-line summary of a PDF manifest (failures are warnings, never errors)."""
+    rounds = set(int(r) for r in rounds) if rounds else None
+    sets = [s for s in manifest["sets"]
+            if rounds is None or int(s.get("round") or 0) in rounds]
+    docs = [d for s in sets for d in s["documents"]]
+    ok_n = sum(1 for d in docs if d.get("ok"))
+    bad_n = len(docs) - ok_n
+    root = Path(str(manifest.get("pipeline_root") or "."))
+    print(f"[pdf] {ok_n} PDF(s) written"
+          + (f", {bad_n} WARNING(S) (see {PDF_DIRNAME}/{PDF_MANIFEST})" if bad_n else "")
+          + f" -> {PDF_DIRNAME}/")
+    print(f"[pdf] manifest: {root / PDF_DIRNAME / PDF_MANIFEST}")
+    print(f"[pdf] summary:  {root / PDF_DIRNAME / 'README.md'}")
 
 
 # =====================================================================
@@ -37366,8 +38706,8 @@ def _cmd_prune_locked(ctx: Ctx, args) -> None:
     total = sum(t[3] for t in targets) + sum(t[3] for t in archives)
     print(f"[prune] root: {ctx.root}")
     print(f"[prune] keeping sandboxes of the last {args.keep_latest} round(s) "
-          f"(rounds {keep_from}..{R}); pins, published winners, reports and state.json are "
-          f"never touched")
+          f"(rounds {keep_from}..{R}); pins, published winners, reports, state.json, the "
+          f"redlines/ and tracking/ copies and the persistent pdfs/ tree are never touched")
     if keep_ids:
         print(f"[prune] {len(keep_ids)} journal-stage sandbox(es) are kept: a completed root "
               f"re-reads them to rebuild journal_submission/")
@@ -37863,13 +39203,28 @@ USAGE_EXAMPLES = """usage:
           write tracked-changes .docx files for every candidate version, once per
           source: non_revised/<doc>.docx -> revised/<doc>.docx AND the setup
           --source copy -> revised/<doc>.docx. TOOL is auto (default) and tries
-          python-redlines[docxodus], then docx-trackdiff, then the built-in
-          OOXML diff; use --redline-cmd '<json argv with {base} {revised} {out}>'
-          for any other CLI. Output: <root>/redlines/ + manifest.json, which
-          records every attempt, the tool that produced each file, and anything
-          skipped (use `--tool none` to only write that report). The docxodus
-          bridge is the companion file paper_redlines_adapter.py: keep it next to
-          this script to use that backend (the built-in writer needs nothing).
+          the docx-compare MCP tool (Word's own CompareDocuments engine, when
+          configured), then python-redlines[docxodus], then docx-trackdiff, then
+          the built-in OOXML diff; use --redline-cmd '<json argv with {base}
+          {revised} {out}>' for any other CLI. Output: <root>/redlines/ +
+          manifest.json, which records every attempt, the tool that produced each
+          file, and anything skipped (use `--tool none` to only write that
+          report). The docxodus bridge is the companion file
+          paper_redlines_adapter.py: keep it next to this script to use that
+          backend (the built-in writer needs nothing).
+  track   --root <dir> [--round R] [--version w1,a2,i1|all] [--tool TOOL] [--no-pdf]
+          write the per-version DIFFERENCE-TRACKING copies -- beside each
+          document and mirrored under <root>/tracking/ -- for .docx (the
+          docx-compare MCP tool first, then the redline chain), .tex/.bib
+          (latexdiff), against the pre-conformed original AND the version each
+          arm was derived from, plus every published winner against the original
+          and the previous round's winner. A failed compare writes the readable
+          <name>.logging-* / <name>.log-* fallback instead, never a fake tracked
+          copy. The same run compiles/converts the versions to PDF under
+          <root>/pdfs/ (latexmk; the docx-converter chain for DOCX). Both passes
+          start NO agent session and cannot change a corpus, a pin or a decision;
+          a compile/conversion failure is a WARNING. `--no-pdf` skips the PDF
+          pass, `run --no-track` skips both passes after each round.
 
 WORKED EXAMPLE — the default pipeline: THREE rounds, two from-scratch rewrites
 in round 1, integration-and-judge in round 2, and a final
@@ -38363,6 +39718,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_opts.add_argument("--no-redline", action="store_true",
                     help="skip the automatic tracked-changes generation after each round "
                          "(the `redline` command still works)")
+    run_opts.add_argument("--no-track", action="store_true",
+                    help="skip the automatic difference-tracking copies and the persistent PDF "
+                         "renders after each round (the `track` command still works)")
     run_opts.add_argument("--no-wait", action="store_true",
                     help="manual mode: print the prompts for runs whose dependencies are "
                          "satisfied and exit without waiting")
@@ -38384,13 +39742,35 @@ def build_parser() -> argparse.ArgumentParser:
                           "of them, or all (default: every candidate of each requested round, "
                           "i.e. the round's rewrites, revisions and integrated candidates)")
     prl.add_argument("--tool", choices=list(REDLINE_TOOLS), default="auto",
-                     help="auto (default): python-redlines[docxodus], then docx-trackdiff, then "
-                          "the built-in OOXML diff; or force one backend; `none` writes only the "
+                     help="auto (default): the docx-compare MCP tool (Word's own compare engine) "
+                          "first, then python-redlines[docxodus], docx-trackdiff and the built-in "
+                          "OOXML diff; or force one backend; `none` writes only the "
                           "manifest/report")
     prl.add_argument("--redline-cmd", default=None,
                      help="JSON argv list for any other tool, with {base} {revised} {out} "
                           "placeholders")
     prl.set_defaults(func=cmd_redline)
+
+    ptrk = sub.add_parser("track", parents=[common],
+                          help="write the per-version difference-tracking copies "
+                               "(<name>.tracking-original|previous.<ext>, or their "
+                               "logging-* fallbacks) and the persistent PDF renders")
+    ptrk.add_argument("--round", type=int, default=None, help="only this round (default: all)")
+    ptrk.add_argument("--version", default="all",
+                      help="one version id (a1/w1/a2/i1/...), a comma-separated list of them, "
+                           "or all (default: every version of each requested round, plus that "
+                           "round's published winner)")
+    ptrk.add_argument("--tool", choices=list(REDLINE_TOOLS), default="auto",
+                      help="the .docx backend(s) to try: auto (default) uses the docx-compare "
+                           "MCP tool (Word's own compare engine) first, then the redline chain; "
+                           "`none` writes no .docx comparison (the logging fallback still "
+                           "carries the reason)")
+    ptrk.add_argument("--redline-cmd", default=None,
+                      help="JSON argv list for any other .docx differ, with {base} {revised} "
+                           "{out} placeholders")
+    ptrk.add_argument("--no-pdf", action="store_true",
+                      help="skip the PDF compile/convert pass (tracking only)")
+    ptrk.set_defaults(func=cmd_track)
 
     pst = sub.add_parser("status", parents=[common], help="show round/run status")
     pst.set_defaults(func=cmd_status)
@@ -38639,7 +40019,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     pp = sub.add_parser("prune", parents=[common],
                         help="delete completed rounds' sandboxes to reclaim disk "
-                             "(pins/winners/reports/state are never touched)")
+                             "(pins, winners, reports, state, redlines/, tracking/ and "
+                             "pdfs/ are never touched)")
     pp.add_argument("--keep-latest", type=int, default=1,
                     help="keep the sandboxes of the last N rounds (default 1)")
     pp.add_argument("--yes", action="store_true",

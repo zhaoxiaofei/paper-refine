@@ -4621,11 +4621,13 @@ def analyse_package(path: Path, policy: dict) -> dict:
 def scan_paths(paths: list, policy: dict) -> dict:
     """Scan the corpus documents under `paths`.
 
-    Revision-skill auxiliaries (`*.tracked.docx`, `*.before-after.docx`) and the
-    stage scratch under any `work/` directory are NOT corpus content (the
-    pipeline strips both from every judged/pinned corpus), so they are skipped:
-    scanning them inflated one real sandbox report to 971 findings and hid the
-    signal. Use `include_scratch=True` to look at them anyway.
+    Difference-tracking auxiliaries (`*.tracking-original|previous.<ext>`, the
+    `*.logging-original.<ext>` / `*.log-previous.<ext>` fallbacks, and the
+    pre-rename `*.tracked.docx` / `*.before-after.docx` spellings) and the stage
+    scratch under any `work/` directory are NOT corpus content (the pipeline
+    strips both from every judged/pinned corpus), so they are skipped: scanning
+    them inflated one real sandbox report to 971 findings and hid the signal.
+    Use `include_scratch=True` to look at them anyway.
     """
     docs = []
     for p in paths:
@@ -4633,8 +4635,7 @@ def scan_paths(paths: list, policy: dict) -> dict:
             continue
         files = sorted(p.rglob("*.docx")) if p.is_dir() else [p]
         for f in files:
-            if f.name.startswith("~$") or f.name.lower().endswith(
-                    (".tracked.docx", ".before-after.docx")):
+            if f.name.startswith("~$") or _is_aux_name(f.name):
                 continue
             if any(part == "work" for part in f.parts[:-1]):
                 continue
@@ -6641,7 +6642,10 @@ def validate_latex(path: Path, workdir: Path = None, timeout: int = 300) -> dict
             target_dir = scratch / path.parent.name if not workdir else scratch
             if not target_dir.is_dir():
                 shutil.copytree(path.parent, target_dir,
-                                ignore=shutil.ignore_patterns("work", "*.tracked.docx"))
+                                ignore=shutil.ignore_patterns(
+                                    "work", "*.tracking-original.*", "*.tracking-previous.*",
+                                    "*.logging-original.*", "*.log-previous.*",
+                                    "*.tracked.docx", "*.before-after.docx"))
             proc = subprocess.run(argv + [path.name], cwd=str(target_dir),
                                   capture_output=True, text=True, timeout=timeout)
         except (OSError, subprocess.SubprocessError, shutil.Error) as e:
@@ -6671,7 +6675,12 @@ def validate_paths(paths: list, json_out: Path = None, timeout: int = 300) -> di
                       if not q.name.startswith("~$") and not _is_aux_name(q.name)
                       and not any(part in EVIDENCE_DIRNAMES for part in q.parts[:-1])]
             files += [q for q in sorted(p.rglob("*.tex")) + sorted(p.rglob("*.ltx"))
-                      if not any(part in EVIDENCE_DIRNAMES for part in q.parts[:-1])]
+                      if not any(part in EVIDENCE_DIRNAMES for part in q.parts[:-1])
+                      # A difference-tracking copy (a latexdiff file, or the
+                      # commented-out logging fallback) is not a document of the
+                      # package: compiling it would report the AUXILIARY as a
+                      # failed deliverable (a fragment's copy has no preamble).
+                      and not _is_aux_name(q.name)]
         elif p.is_file():
             files.append(p)
     results = []
@@ -6690,8 +6699,23 @@ def validate_paths(paths: list, json_out: Path = None, timeout: int = 300) -> di
 
 
 def _is_aux_name(name: str) -> bool:
+    """A difference-tracking auxiliary (see AUX_FILES_RULE in paper_pipeline.py).
+
+    The suffix rule has to match THE PIPELINE'S (`AUXILIARY_DOC_SUFFIXES`): the
+    scanner and the corpus builder must agree on which files are submission
+    content, or a scan of a package reports rows on files the pipeline itself
+    wrote. The pre-rename spellings stay recognized for older packages.
+    """
     low = name.lower()
-    return low.endswith((".tracked.docx", ".before-after.docx"))
+    if low.endswith((".tracked.docx", ".before-after.docx")):
+        return True
+    for ext in (".docx", ".tex", ".bib"):
+        if low.endswith((f".tracking-original{ext}", f".tracking-previous{ext}",
+                         f".tracking-prev-winner{ext}",
+                         f".logging-original{ext}", f".log-previous{ext}",
+                         f".logging-prev-winner{ext}")):
+            return True
+    return False
 
 
 def check_pdf(path: Path, policy: dict) -> dict:

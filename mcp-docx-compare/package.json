@@ -1,0 +1,21 @@
+{
+  "name": "mcp-docx-compare",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "node containment.test.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "zod": "^4.6.5"
+  },
+  "description": "MCP server wrapping docxcompare.sh: Word's native tracked-changes comparison (Word.Application.CompareDocuments through PowerShell COM automation).",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  }
+}

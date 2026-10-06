@@ -887,7 +887,7 @@ def test_apply_template_package():
     (pkg / "figure1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     (pkg / "MANUAL_STEPS.md").write_text("steps\n", encoding="utf-8")
     (pkg / "work" / "scratch.txt").write_text("scratch\n", encoding="utf-8")
-    (pkg / "mainText.tracked.docx").write_bytes((pkg / "mainText.docx").read_bytes())
+    (pkg / "mainText.tracking-previous.docx").write_bytes((pkg / "mainText.docx").read_bytes())
     dest = tmp / "out"
     rep = nb.rebuild_package_from_templates(
         {"main": main_tpl, "supplementary": supp_tpl}, pkg, dest)

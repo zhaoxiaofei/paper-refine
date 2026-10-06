@@ -12,9 +12,17 @@ from pathlib import Path
 
 
 def np_aux(path: Path) -> bool:
-    """Mirror the pipeline's auxiliary-name rule for this stub."""
+    """Mirror the pipeline's auxiliary-name rule for this stub (keep in step
+    with paper_pipeline.AUXILIARY_DOC_SUFFIXES)."""
     n = path.name.lower()
-    return n.endswith((".tracked.docx", ".before-after.docx"))
+    if n.endswith((".tracked.docx", ".before-after.docx")):
+        return True
+    return any(n.endswith(f".tracking-{base}{ext}") for base in ("original", "previous",
+                                                                 "prev-winner")
+               for ext in (".docx", ".tex", ".bib")) \
+        or any(n.endswith(f".{fb}{ext}") for fb in ("logging-original", "log-previous",
+                                                   "logging-prev-winner")
+               for ext in (".docx", ".tex", ".bib"))
 
 
 def digest_tree(d: Path) -> str:
@@ -517,7 +525,9 @@ def do_revision(sb: Path, name: str, round_no: int, stage: str) -> int:
                rows or [{"id": "F-000", "verdict": "none",
                          "rationale": "stub: the frozen review listed no finding",
                          "evidence": "n/a"}])
-    write_docx(out / "manuscript-p.tracked.docx", "tracked changes auxiliary")
+    # The E5 difference-tracking auxiliary, under its current name (the pipeline
+    # excludes the whole family from every corpus).
+    write_docx(out / "manuscript-p.tracking-previous.docx", "tracked changes auxiliary")
     # visual pass: render the first docx to PDF/PNG when a renderer exists
     vis = out / "VISUAL_CHECK.md"
     docx = sorted(out.glob("*.docx"))

@@ -102,6 +102,9 @@ Everything lives under the root you passed to `setup`:
 | `round<r>_winner/` | the champion of each round (content-addressed: identical content is never re-run) |
 | `final_clean_version/` | the champion corpus, renamed for the next run's `--source`; ALWAYS built, certified or not |
 | `final_clean_version.readme.md` | the package's status document (sibling of the directory): certification verdict, blockers/notes, champion + digests, and the reuse hint |
+| `redlines/` | the pipeline's tracked-changes `.docx` per candidate and source pair (`from-base/`, `from-original/`, `from-setup-source/`) |
+| `tracking/` | the requested difference-tracking family (`*.tracking-original.*`, `*.tracking-previous.*`, `*.tracking-prev-winner.*`, or the `logging-*` fallback when a tool failed), mirrored from the version packages and published winners |
+| `pdfs/` | the compiled/converted PDFs per version (LaTeX via `latexmk`, DOCX via Word/MCP) -- persistent: `prune` never touches them |
 
 The selection key is one ordered line: the round's reported **defect prefix**
 (fewer defects wins) → **median** → **mean** → **IQR** → content **digest**. The
@@ -147,6 +150,7 @@ the base's from this round's review) or to the arm's own marker. A `-` now means
 | `set-revision-mode continue\|init\|transfer\|resubmit\|major\|minor` | switch the revision mode (`none` still accepted as the pre-rename spelling of `continue`) |
 | `set-tiebreak-defect-floor N` / `set-dedup-mode off\|location` | calibration of the selection key |
 | `retry --run ID` / `retry --runs SELECTION` / `prune --keep-latest N` | reset one session, or the same subset `run --only` would drive / reclaim disk from old sandboxes |
+| `redline --root ROOT` / `track --root ROOT` | (re)write the tracked-changes `.docx` tree / the difference-tracking copies (`*.tracking-*`) plus the persistent PDF renders |
 | `--skip-hash` (any command) | skip the integrity VERIFICATION passes for this invocation (digests are still recorded; every report says they were skipped) |
 
 ## Requirements
@@ -157,7 +161,9 @@ the base's from this round's review) or to the arm's own marker. A `-` now means
 * Optional, probed at runtime and never required: the `docx` CLI (read/render/
   diff/validate), a .docx→PDF converter (the `docx-converter` MCP tool,
   `docx2pdf.sh` + Word, `docx render`, LibreOffice, `pandoc`), `pdftotext`/
-  `pdftoppm`, and the `zot` CLI for read-only Zotero reference resolution.
+  `pdftoppm`, the `docx-compare` MCP tool / `docxcompare.sh` (Word's own
+  comparison engine for tracked changes), `latexdiff` (LaTeX difference
+  tracking), and the `zot` CLI for read-only Zotero reference resolution.
 
 ## Evidence is not submission text: `raw_data/` and `human_review_feedback/`
 
@@ -299,7 +305,9 @@ profile's cover-letter guidance, then academic convention for a submission lette
 manuscript template, whose front matter is built for a manuscript, is never applied to it (a
 letter that still carries the manuscript template's Title/Author-List styles is reported as a
 warning in the rebuild report).
-`work/` scratch and `*.tracked.docx` auxiliaries stay out. Each rebuilt
+`work/` scratch and the difference-tracking auxiliaries (`*.tracking-original.*`,
+`*.tracking-previous.*`, `*.tracking-prev-winner.*`, their `logging-*` fallbacks and
+the pre-rename `*.tracked.docx` / `*.before-after.docx`) stay out. Each rebuilt
 document's TEXT must stay byte-identical to its source or that file is kept unchanged and reported;
 the report lands BESIDE the package (`<dest>.template_report.json`/`.md`), never inside it. The
 source package is never modified:
@@ -766,6 +774,71 @@ search date) into the document. A gated residual blocks certification; the
 champion corpus is still built into `final_clean_version/`, and
 `final_clean_version.readme.md` records the refusal — see the `certification`
 block above.
+
+## Difference tracking, and the persistent PDFs
+
+After every round the pipeline tracks what actually changed -- with **no agent
+session and no LLM call** -- and renders the versions to PDF. Both passes are
+audit aids: a failure is a warning, never a failed round, and every file they
+write is an **auxiliary** that is excluded from every judged/pinned corpus,
+content fingerprint, revision token and judge view (pinned by
+`.paper_test/test_difference_tracking.py`, which also runs a stub round with and
+without the passes and asserts the champion, the scores, the pins and every
+recorded corpus digest are identical).
+
+**Tracked differences.** For each version the pipeline writes, BESIDE the
+documents (and mirrored under `<root>/tracking/r<R>_<version>/`, with
+`manifest.json` + `README.md`):
+
+| file (`.ext` = `.docx` / `.tex` / `.bib`) | meaning |
+|---|---|
+| `<name>.tracking-original.ext` | real tracked copy against the pre-conformed original (`non_revised/`, the copy `setup --source` made) |
+| `<name>.logging-original.ext` | the readable before/after log written when that comparison FAILED (never a file that only looks like tracked changes) |
+| `<name>.tracking-previous.ext` | real tracked copy against the version this one was derived from: the round base for a rewrite (pre-rewritten) and for a revise (pre-reviewed), the integration's own `self/` member for an integrated candidate |
+| `<name>.log-previous.ext` | that comparison's fallback log |
+| `<name>.tracking-prev-winner.ext` | a published `round<r>_winner/` tracked against `round<r-1>_winner/` (r > 1) |
+| `<name>.logging-prev-winner.ext` | that comparison's fallback log |
+
+A `.docx` pair is compared by **Word's own engine first**: the `docx-compare`
+MCP tool (`compare_docx`) drives `docxcompare.sh` -> PowerShell ->
+`Word.Application.CompareDocuments` (COM automation), the same redline engine
+behind Review > Compare. Only when no compare server is configured (or its call
+fails) does the chain fall back to `python-redlines[docxodus]`, `docx-trackdiff`,
+an operator-supplied `--redline-cmd`, and the built-in OOXML writer. `.tex`/
+`.bib` pairs go through `latexdiff --no-label`. A pair whose bytes are identical
+gets an unmarked copy, never a fake diff. The `redlines/` tree is still written
+(`run_redlines`: from-base / from-original / from-setup-source); the tracking
+pass REUSES the redline it already produced for the same pair instead of driving
+Word twice (the reuse is gated on the pair's two content digests, so a redline of
+the same file name but of different bytes is never presented as this pair's
+difference).
+
+The server is the operator's own: register it once and the pipeline probes it
+from `~/.codex/config.toml`, drives it over the same minimal stdio JSON-RPC
+client the converter uses, and pre-approves it for the non-interactive stage
+sessions.
+
+```bash
+codex mcp add docx-compare -- node /path/to/repo/mcp-docx-compare/index.js
+```
+
+```bash
+python paper_pipeline.py track --root ./paper_rounds            # re-run tracking + PDFs
+python paper_pipeline.py track --root ./paper_rounds --no-pdf   # tracking only
+python paper_pipeline.py run   --root ./paper_rounds --no-track  # skip both passes
+```
+
+**Persistent PDFs.** Every LaTeX root (`\documentclass`) is compiled with
+`latexmk -pdf -interaction=nonstopmode -halt-on-error` and every `.docx` is
+converted through the shared renderer chain (`docx-converter` MCP tool first,
+then `docx2pdf.sh`, then LibreOffice). The PDFs land under
+`<root>/pdfs/<round>_<version>/` (plus `pdfs/original/` and the round's
+`pdfs/r<R>_<vid>/`), with `manifest.json` + `README.md` recording the tool, the
+page count and any warning. The build runs in a disposable copy of the package,
+so no build by-product (`latexmk`'s `.aux/.log/.pdf/...`) ever lands inside a
+corpus, and `prune` never deletes the tree -- the PDFs outlive the run. An
+uncompilable source or an unrenderable document is recorded and printed as a
+WARNING; the run continues and the decision is unaffected.
 
 ## Round model
 
@@ -1427,7 +1500,7 @@ closed by construction:
 | file names / labels | every view is a salted per-view permutation of `d01/`, `f0001<ext>` placeholders, so the same document has a different name in `target/`, in each `field/<label>/` and in `original/`; the label → version map lives only in the run record |
 | run ids | `judge_<token>_j<k>` is an opaque token derived from (round, target, salt): no round prefix, no arm name, not recomputable without the root secret |
 | timestamps / modes | one mtime and one mode for the whole session, identical across all its views (nothing to order the packages by) |
-| auxiliary files | revision auxiliaries (`*.tracked.docx`, `*.before-after.docx`), the pipeline's bookkeeping/report files (`CHANGELOG.md`, `MANUAL_STEPS.md`, `REVISION_REPORT.md`, `revision_report.json`, `DIFF_LEDGER.md`, `VISUAL_CHECK.md`), the `work/` scratch and Word's `~$name.docx` owner file never reach a view |
+| auxiliary files | difference-tracking auxiliaries (`*.tracking-original.*`, `*.tracking-previous.*`, `*.tracking-prev-winner.*`, their `logging-original`/`log-previous`/`logging-prev-winner` fallbacks, and the pre-rename `*.tracked.docx`, `*.before-after.docx`), the pipeline's bookkeeping/report files (`CHANGELOG.md`, `MANUAL_STEPS.md`, `REVISION_REPORT.md`, `revision_report.json`, `DIFF_LEDGER.md`, `VISUAL_CHECK.md`), the `work/` scratch and Word's `~$name.docx` owner file never reach a view |
 | derived outputs | a judge is handed the SOURCES, never what can be compiled from them: the build by-products of an editable source (`.aux`, `.log`, `.toc`, `.synctex.gz`, …) are dropped -- a build log names the machine, its absolute paths and the exact build date, and a package an agent went over loses them while the untouched original keeps them, so their mere PRESENCE would say which package was worked on -- and so is any other derived file whose editable source ships beside it: a compiled `.bbl` next to its `.bib`, a rendered PDF next to its `.docx`/`.doc`/`.tex`/`.ltx` (same stem, version tokens ignored). The judge can compile or render the source itself. A derived file with NO source in the package stays, because it is then the only copy of the content: with no `.bib` shipped, a `.bbl` is the reference list |
 | Word/PDF metadata | OOXML views are canonicalized (sorted entries, one fixed zip timestamp, core/app/custom properties blanked, `rsid`/`paraId`/`textId`/proofing/last-rendered-page markers and tracked-change author+date attributes stripped, tracked changes accepted, `docProps/thumbnail*` dropped, Word's cached Pages/Words/Characters zeroed); a PDF's `/Info`, `/ID` and uncompressed XMP identifying values are blanked in place |
 | prompt / session | the judge prompt carries no round, arm, stage or provenance vocabulary (`round`, `arm`, `revise`, `integration`, `champion`, … all absent -- asserted by `test_judge_blinding.py`), no bookkeeping file name, and no hand-off marker token; the placeholder rule is stated in provenance-neutral wording |
@@ -2011,11 +2084,13 @@ its four integration runs never started.
 
 | path | purpose |
 |---|---|
-| `paper_pipeline.py` | the orchestrator (setup / run / run-decide / decide / retry / status / selfcheck / prune / redline) |
+| `paper_pipeline.py` | the orchestrator (setup / run / run-decide / decide / retry / status / selfcheck / prune / redline / track) |
 | `paper_docx_format.py` | OOXML style/formatting scanner, fixer and blank-page checker |
 | `paper_redlines_adapter.py` | tracked-changes bridge (`python-redlines[docxodus]`) |
 | `docx2pdf.sh` | Word→PDF conversion via PowerShell (WSL/Git Bash) |
+| `docxcompare.sh` | Word→redline comparison via PowerShell (WSL/Git Bash) |
 | `mcp-docx-converter/` | the `docx-converter` MCP tool used as the first-choice renderer |
+| `mcp-docx-compare/` | the `docx-compare` MCP tool (Word's own compare engine, first choice for tracked changes) |
 | `paper-skills/` | the bundled review (`paper-review`) and revision (`paper-revise`) skills + prompts |
 | `venue_profiles/` | the venue profiles (the submission rule sets) + their schema documentation |
 | `media/` | the figures the docs embed — `paper-refine-one-revision-round.png` (shown above) |
@@ -2024,7 +2099,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 63 suites (a few
+any failure. They are independent, so run them in parallel — 65 suites (a few
 minutes at the default parallelism on a 20-core box; tens of minutes
 sequentially):
 

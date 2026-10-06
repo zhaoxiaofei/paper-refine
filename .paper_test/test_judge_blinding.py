@@ -16,8 +16,8 @@ This suite attacks the judge-view transform with:
   * a second corpus that represents the SAME submission after the pipeline has
     processed it (revision token in the file name, the pipeline's formatter has
     re-zipped the docx, CHANGELOG/MANUAL_STEPS/REVISION_REPORT/revision_report/
-    DIFF_LEDGER/VISUAL_CHECK present, work/ scratch, a *.tracked.docx auxiliary
-    and a derived .aux/.log).
+    DIFF_LEDGER/VISUAL_CHECK present, work/ scratch, a *.tracking-previous.docx
+    auxiliary and a derived .aux/.log).
 
 It then asserts that the two judge views expose the same *metadata* surface
 (canonical zip, one timestamp/mode, no properties, no revision marks) and only
@@ -265,7 +265,8 @@ def test_two_provenance_views():
         (rev / name).write_text(text, encoding="utf-8")
     (rev / "work").mkdir()
     (rev / "work" / "scratch.txt").write_text("scratch\n", encoding="utf-8")
-    (rev / "manuscript-abc1234.tracked.docx").write_bytes((rev / "manuscript-abc1234.docx").read_bytes())
+    (rev / "manuscript-abc1234.tracking-previous.docx").write_bytes(
+        (rev / "manuscript-abc1234.docx").read_bytes())
     v_orig, v_rev = tmp / "view_orig", tmp / "view_rev"
     build_view(orig, v_orig)
     build_view(rev, v_rev)

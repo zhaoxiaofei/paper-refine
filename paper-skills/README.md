@@ -130,7 +130,7 @@ Outputs land in `./revised/` (originals untouched, sha256-verified):
 | `CHANGELOG.md` | per finding ID: exact before → after text |
 | `MANUAL_STEPS.md` | everything that needs the author: unverifiable refs, figures to regenerate, scientific-judgement wordings |
 | `REVISION_REPORT.md` + `revision_report.json` | ledger, coverage table with evidence, placeholder list, checksum confirmation |
-| `*.tracked.docx` | auxiliary tracked-changes copy for every edited .docx; when real tracked changes cannot be produced, the fallback is `<name>.before-after.docx` with bracketed `[BEFORE:]`/`[AFTER:]` markers and a first-paragraph note — never a marker file under the `.tracked.docx` name |
+| `*.tracking-previous.<ext>` | auxiliary difference copy for every edited document, tracking it against the previous version: real Word tracked changes for `.docx` (the `docxcompare.sh` script / `docx-compare` MCP tool is the first choice), a `latexdiff` copy for `.tex`/`.bib`; when the real copy cannot be produced, the fallback is `<name>.log-previous.<ext>` with bracketed `[BEFORE:]`/`[AFTER:]` markers (a first-paragraph note in the .docx) — never a marker file under the `.tracking-previous.` name. The orchestrator writes the sibling `*.tracking-original.<ext>` copies against the pristine submission itself |
 | `work/` | A1–A9 artifacts (ledger, edit plan, propagation map, diff log, rescan) |
 
 What the revise skill will never do: invent values, alter scientific claims

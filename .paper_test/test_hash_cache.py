@@ -200,7 +200,8 @@ def test_manifest_identity():
     for i in range(7):
         (tmp / "sub" / f"g{i}.txt").write_text("x" * (10 + i), encoding="utf-8")
     (tmp / "top.txt").write_text("top\n", encoding="utf-8")
-    (tmp / "manuscript.tracked.docx").write_bytes(b"aux")
+    (tmp / "manuscript.tracking-previous.docx").write_bytes(b"aux")
+    (tmp / "manuscript.tracked.docx").write_bytes(b"legacy aux")
     got = nb.hash_manifest(tmp)
     ref = {"files": {p.relative_to(tmp).as_posix():
                      hashlib.sha256(p.read_bytes()).hexdigest()
@@ -211,7 +212,8 @@ def test_manifest_identity():
     check("HC5 a second manifest is identical (cache path)",
           nb.hash_manifest(tmp) == got)
     check("HC5 corpus_tree_manifest still drops the auxiliaries",
-          "manuscript.tracked.docx" not in nb.corpus_tree_manifest(tmp)["files"])
+          "manuscript.tracking-previous.docx" not in nb.corpus_tree_manifest(tmp)["files"]
+          and "manuscript.tracked.docx" not in nb.corpus_tree_manifest(tmp)["files"])
     saved = nb.HASH_WORKERS
     try:
         nb.HASH_WORKERS = 1
@@ -274,7 +276,9 @@ def test_decide_end_to_end():
     check("HC6 the clean version carries no pipeline bookkeeping/auxiliaries",
           not any(n.lower() in ("changelog.md", "manual_steps.md", "revision_report.md",
                                 "revision_report.json", "diff_ledger.md", "rewrite_report.md")
-                  or n.endswith((".tracked.docx", ".before-after.docx")) for n in files),
+                  or n.endswith((".tracked.docx", ".before-after.docx",
+                                 ".tracking-previous.docx", ".log-previous.docx"))
+                  for n in files),
           str(files))
     check("HC6 decision.json records the clean version and its digest",
           (j2.get("final", {}).get("final_clean_version") or {}).get("path") == str(clean)

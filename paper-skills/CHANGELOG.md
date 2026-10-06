@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.29 — difference-tracking auxiliaries renamed, Word-native compare first (2026-10-06)
+
+The revision skill's tracked-changes auxiliary family is renamed to say what it
+actually tracks, and the Word-native compare engine becomes the first choice
+for producing it:
+
+- `<name>.tracked.docx` is now `<name>.tracking-previous.docx` and the
+  `<name>.before-after.docx` fallback is now `<name>.log-previous.docx`; the
+  `.tex`/`.bib` siblings are `<name>.tracking-previous.tex|.bib` (a `latexdiff`
+  copy) and `<name>.log-previous.tex|.bib` (the fallback log). The old two
+  spellings stay recognized as auxiliaries so packages written before the
+  rename keep every guarantee.
+- E5 now names the pipeline's Word-native compare engine
+  (`docxcompare.sh` / the `docx-compare` MCP tool wrapping
+  `Word.Application.CompareDocuments`) as the FIRST mechanism to produce the
+  tracked `.docx`, before any library or raw-OOXML writer. The orchestrator
+  writes the sibling `<name>.tracking-original.<ext>` copies itself (against the
+  pristine submission), so an agent never has to diff an auxiliary name.
+
 ## 0.28 — whitespace/typography artifacts, template-prescribed blanks, embedded-image geometry (2026-10-05)
 
 Two real defects shipped through the 2026-10-04 rounds: a correspondence

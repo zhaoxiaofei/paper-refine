@@ -340,8 +340,13 @@ def test_codex_exec_mcp_approval():
                                             "--dangerously-bypass-approvals-and-sandbox",
                                             "--dangerously-bypass-hook-trust")],
               " ".join(argv))
-        check("only the server named in MCP_APPROVALS is approved",
-              [spec[0] for spec in nb.MCP_APPROVALS] == [nb.DOCX_MCP_SERVER],
+        # Exactly the two documented one-tool document services are approved --
+        # the renderer and the Word-native compare engine -- and nothing else.
+        check("only the two documented document services are approved",
+              [spec[0] for spec in nb.MCP_APPROVALS]
+              == [nb.DOCX_MCP_SERVER, nb.DOCX_COMPARE_MCP_SERVER]
+              and all(spec[1] == "default_tools_approval_mode" and spec[2] == "approve"
+                      for spec in nb.MCP_APPROVALS),
               str(nb.MCP_APPROVALS))
         # an operator-supplied argv is authoritative and must not be rewritten
         explicit = '["codex","exec","-"]'
