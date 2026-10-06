@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The four journal revision modes, end to end (offline stub agents).
 
-Run:  python3 .paper_test/test_journal_revision_modes.py
+Run:  one of the `test_journal_revision_modes_*_*.py` parts.
 
     option 1  transfer   revise for a NEW journal; NO response letter; rewrites allowed
     option 2  resubmit   new submission to the SAME journal; response letter REQUIRED
@@ -412,7 +412,7 @@ def test_init_manual_conform_stage_reentry():
                      for p in staged.rglob("*") if p.is_file())))
 
 
-def main() -> int:
+def test_j1_narrative():
     print("== J1: option 3 (major revision) -- scoped edits + response + package ==")
     tmp = scratch("paper_jr_major_")
     root = setup_and_run(tmp, "major")
@@ -505,6 +505,9 @@ def main() -> int:
           ["marked_changes"] == ["tracked_changes/manuscript.txt"])
 
     print()
+
+
+def test_j2_narrative():
     print("== J2: option 4 (minor revision) ==")
     tmp = scratch("paper_jr_minor_")
     root = setup_and_run(tmp, "minor")
@@ -517,6 +520,9 @@ def main() -> int:
           ["revision_mode"] == "minor")
 
     print()
+
+
+def test_j3_narrative():
     print("== J3: option 1 (transfer) -- rewrites allowed, NO response letter ==")
     tmp = scratch("paper_jr_transfer_")
     root = setup_and_run(tmp, "transfer", rewrites=1, target="Frontiers in Immunology")
@@ -546,6 +552,9 @@ def main() -> int:
     check("J3 the transfer wrote no response run", not (root / "runs" / "r1_response").exists())
 
     print()
+
+
+def test_j4_narrative():
     print("== J4: option 2 (resubmit) -- response letter required ==")
     tmp = scratch("paper_jr_resubmit_")
     root = setup_and_run(tmp, "resubmit")
@@ -564,6 +573,9 @@ def main() -> int:
           )["rows"]) == sorted(c["id"] for c in ledger))
 
     print()
+
+
+def test_j5_narrative():
     print("== J5: the scoped scope guard ==")
     tmp = scratch("paper_jr_scope_")
     sb = tmp / "runs" / "r1_a2_revise"
@@ -594,6 +606,9 @@ def main() -> int:
           not errs, str(errs))
 
     print()
+
+
+def test_j6_narrative():
     print("== J6: the default workflow is unchanged (mode none) ==")
     tmp = scratch("paper_jr_none_")
     src = build_source(tmp)
@@ -668,6 +683,9 @@ def main() -> int:
           (r.stdout + r.stderr)[-200:])
 
     print()
+
+
+def test_j6b_narrative():
     print("== J6b: init -- conform first (guidelines/convention when no template), no feedback ==")
     tmp = scratch("paper_jr_init_")
     src = tmp / "src"
@@ -738,6 +756,9 @@ def main() -> int:
           and not (rsb / "concerns").exists(), revise_prompt[:200])
 
     print()
+
+
+def test_j7_narrative():
     print("== J7: feedback auto-detection and explicit paths ==")
     tmp = scratch("paper_jr_detect_")
     src = tmp / "src"
@@ -779,25 +800,23 @@ def main() -> int:
         refused = True
     check("J7 an explicit missing feedback path is refused", refused)
 
-    test_integrator_reset_reaches_the_response_letter()
-    test_review_split_keeps_journal_stages_fresh()
-    test_response_postcheck_verifies_its_input_manifest()
-    test_scoped_prune_keeps_a_published_winner()
-    test_leaving_a_scoped_mode_restores_the_default_plan()
-    test_init_manual_conform_stage_reentry()
 
+def run_parts(funcs, banner: str) -> int:
+    """Run this part's sections in THIS process (the suite is split so GNU
+    parallel can schedule the independent sections concurrently; every part
+    imports this lib with its own subset)."""
+    try:
+        for fn in funcs:
+            fn()
+    except Exception as e:                                      # noqa: BLE001
+        check("the part's sections completed", False, f"{type(e).__name__}: {e}")
+    finally:
+        cleanup()
     print()
     if FAILS:
         print(f"{len(FAILS)} CHECK(S) FAILED:")
         for f in FAILS:
-            print("  -", f)
+            print(f"  - {f}")
         return 1
-    print("ALL JOURNAL REVISION-MODE CHECKS PASSED")
+    print(banner)
     return 0
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    finally:
-        cleanup()

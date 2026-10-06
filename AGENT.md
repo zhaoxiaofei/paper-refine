@@ -13,7 +13,7 @@ it are local artefacts, not committed).
 
 | path | what it is |
 |---|---|
-| `paper_pipeline.py` | the orchestrator (single file, stdlib only). CLI: `setup`, `run`, `run-decide`, `decide`, `status`, `trend`, `agents`/`sessions`, `conflicts`, `selfcheck`, `set-venue`, `set-journal`, `set-article-type`, `set-revision-mode`, `set-tiebreak-defect-floor`, `set-dedup-mode`, `add-venue`, `build-venue-templates`, `retry`, `prune`, `redline`, `track`, `conform` (aliases `template`, `author-submission`, `apply-template`). |
+| `paper_pipeline.py` | the orchestrator (single file, stdlib only). CLI: `setup`, `run`, `run-decide`, `decide`, `status`, `trend`, `agents`, `conflicts`, `selfcheck`, `set-venue`, `set-journal`, `set-article-type`, `set-revision-mode`, `set-tiebreak-defect-floor`, `set-dedup-mode`, `add-venue`, `build-venue-templates`, `retry`, `prune`, `redline`, `track`, `conform`. |
 | `paper_docx_format.py` | the optional companion: code-side OOXML style/formatting scan/fix (`scan`/`fix`/`check-pdf`). |
 | `paper_redlines_adapter.py` | optional tracked-changes `.docx` bridge. |
 | `docxcompare.sh` + `mcp-docx-compare/` | Word's own comparison engine (`Word.Application.CompareDocuments` through PowerShell COM) -- the FIRST choice whenever two `.docx` files must be tracked (the `docx-compare` MCP tool wraps the script). |
@@ -198,25 +198,27 @@ the profiles shipped next to the script → the built-in fallback inside
     a judge whose blinded target carries the row must record it in its M20 artifact and
     cannot close it `OK` without that override. Pinned by
     `.paper_test/test_venue_template_conformance.py` and
-    `.paper_test/test_docx_format.py`.
+    the `test_docx_format_*_*.py` parts.
 14. **Difference tracking and the PDF renders are AUXILIARY, CODE-ONLY passes.**
     After each round, `round_tracking()` (never fatal, started by `run` unless
-    `--no-track`) writes the `<name>.tracking-original|previous|prev-winner.<ext>`
-    family (or the `logging-original` / `logging-previous` / `logging-prev-winner`
-    fallback log when the tool failed -- one uniform `logging-*` family, with the
-    short-lived `log-previous.<ext>` spelling recognized only as a legacy
-    auxiliary) beside the candidate documents, mirrors it
-    under `<root>/tracking/`, and writes the same family into every published
-    `round<r>_winner/` (original + previous winner). `.docx` pairs go through the
-    `docx-compare` MCP tool (Word's own `CompareDocuments`) FIRST, then the
+    `--no-track`) writes `<name>.tracking-<baseline>.<ext>` (or its
+    `<name>.logging-<baseline>.<ext>` fallback log when the tool failed) beside
+    the candidate documents, mirrors it under `<root>/tracking/`, and writes the
+    same copies into every published `round<r>_winner/`. The baseline token
+    NAMES WHAT THE COPY IS COMPARED AGAINST: `original` (the pre-conformed
+    submission), `a1` (the round base), `w<k>`/`a<k>` (the version an
+    integration own `self/` member reworked) or `winner<r>` (a published round
+    winner) -- there is no generic "previous" token. `.docx` pairs go through
+    the `docx-compare` MCP tool (Word's own `CompareDocuments`) FIRST, then the
     redline chain; `.tex`/`.bib` pairs go through `latexdiff`. The LaTeX/DOCX
     PDFs land under `<root>/pdfs/`. Three rules: (a) the names live in ONE place,
-    `AUXILIARY_DOC_SUFFIXES` (writers use `tracking_aux_suffix()`; the scanner and
-    the skill's `revision_token.py` must keep agreeing -- a test pins all three),
+    `TRACKING_AUX_NAME_RE` / `tracking_aux_suffix()` (the scanner and the
+    skill's `revision_token.py` must keep agreeing -- a test pins all three),
     so no file of the family may ever be treated as submission content; (b) the
     pass starts NO agent session and must not be able to change a champion, a
-    score, a pin or an input manifest -- `.paper_test/test_difference_tracking.py`
-    runs a stub round with and without it and compares the recorded end result;
+    score, a pin or an input manifest --
+    `.paper_test/test_difference_tracking_4_e2e.py` runs a stub round with and without
+    it and compares the recorded end result;
     (c) compile/convert failures are WARNINGS (recorded in `<root>/pdfs/` and
     printed), never a failed stage.
 
@@ -281,7 +283,7 @@ submission: the conform stage runs before round 1 (inside the venue's own Word
 template when one ships, else to the journal's own author guidelines and then
 academic convention) and reads no feedback. The modes are documented in README
 → "Revision modes: continue, init, and the journal modes" and pinned by
-`.paper_test/test_journal_revision_modes.py` + the init section of
+the `test_journal_revision_modes_*_*.py` parts + the init section of
 `.paper_test/test_venue_template_conformance.py`. Two rules matter when
 touching this area:
 
@@ -307,7 +309,7 @@ touching this area:
 * **Retry/rebuild must know the chain.** `upstream_deps` maps
   feedback/concerns → a1, revise → a1 + the recorded review/concerns run, and
   response → its recorded ledger run: without those entries a scoped round can
-  never be rebuilt after a retry (see `.paper_test/test_journal_revision_modes.py`).
+  never be rebuilt after a retry (see `test_journal_revision_modes_7_scoped_prune.py`).
 * **A new venue on a fresh root** goes in with
   `setup --venue-profile FILE` (the file is validated, installed into
   `<root>/venue_profiles/`, and recorded); `set-venue <id> --profile FILE`

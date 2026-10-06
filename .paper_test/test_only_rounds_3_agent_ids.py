@@ -20,4 +20,4 @@ sys.modules["only_rounds_lib"] = lib
 _spec.loader.exec_module(lib)
 
 if __name__ == "__main__":
-    sys.exit(lib.run_parts([lib.test_only_agent_sessions, lib.test_only_accepts_the_printed_ids, lib.test_agents_command], "PART 3 (agent ids) PASSED"))
+    sys.exit(lib.run_parts([lib.test_only_agent_sessions, lib.test_only_accepts_the_printed_ids], "PART 3 (agent ids) PASSED"))

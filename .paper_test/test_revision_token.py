@@ -81,8 +81,8 @@ def make_package(tmp: Path) -> Path:
     (tmp / "refs-a.bib").write_text("@article{x}\n", encoding="utf-8")
     (tmp / "fig1.pdf").write_bytes(b"%PDF-1.4\n")
     (tmp / "CHANGELOG.md").write_text("a self-written report\n", encoding="utf-8")
-    (tmp / "ms-a.tracking-previous.docx").write_bytes(b"auxiliary")
-    (tmp / "ms-a.tracked.docx").write_bytes(b"legacy auxiliary")
+    (tmp / "ms-a.tracking-a1.docx").write_bytes(b"auxiliary")
+    (tmp / "ms-a.logging-winner1.docx").write_bytes(b"winner auxiliary")
     (tmp / "work").mkdir()
     (tmp / "work" / "scratch.txt").write_text("scratch\n", encoding="utf-8")
     return tmp
@@ -138,10 +138,9 @@ def test_payload_exclusions():
     (tmp / "CHANGELOG.md").write_text("a rewritten report with new text\n", encoding="utf-8")
     (tmp / "REVISION_REPORT.md").write_text("more self-written text\n", encoding="utf-8")
     (tmp / "work" / "scratch.txt").write_text("different scratch\n", encoding="utf-8")
-    (tmp / "ms-a.logging-previous.docx").write_bytes(b"another auxiliary")
-    (tmp / "ms-a.before-after.docx").write_bytes(b"legacy auxiliary")
-    (tmp / "ms-a.log-previous.docx").write_bytes(b"short-lived legacy auxiliary")
-    (tmp / "ms-a.logging-prev-winner.bib").write_bytes(b"winner auxiliary")
+    (tmp / "ms-a.logging-a2.docx").write_bytes(b"another auxiliary")
+    (tmp / "ms-a.tracking-w1.docx").write_bytes(b"a third auxiliary")
+    (tmp / "ms-a.logging-winner3.bib").write_bytes(b"winner auxiliary")
     check("RT3 the token survives report/aux/scratch edits",
           script_token(tmp) == tok and nb.revision_token_for_dir(tmp)["token"] == tok)
     # RT3b: the pipeline's own completion signals are bookkeeping too. A

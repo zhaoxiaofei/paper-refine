@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """`run --only ROUNDS`, per-round integrator masks and per-round judge counts.
 
-Run:  python3 .paper_test/test_only_rounds_integrators_judges.py
+Run:  one of the `test_only_rounds_*_*.py` parts.
 
 Three operator-facing additions, each driven through the real CLI with the
 repo's stub agents:

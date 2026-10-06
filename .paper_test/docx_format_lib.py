@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OOXML style/formatting audit + fixer (paper_docx_format.py).
 
-Run:  python3 .paper_test/test_docx_format.py
+Run:  one of the `test_docx_format_*_*.py` parts.
 
 The fixture is a minimal but schema-shaped WordprocessingML package that carries
 every defect the real round-2 final package showed, so the suite pins both the
@@ -1583,44 +1583,36 @@ def test_cover_letter_stamp_rule():
                                           ["letter to the editor"]))
 
 
-def main() -> int:
+
+def part_scan_and_fix():
+    """Part 1's sections, in the original order: `test_scan()` builds the shared
+    fixture whose path `test_fix_default()`/`test_fix_extended()` mutate."""
+    docx = test_scan()
+    test_fix_default(docx)
+    test_ppr_splice_keeps_xml_wellformed()
+    test_front_matter_same_span_edits()
+    test_charrefs_out_of_range_do_not_raise()
+    test_tracked_deletion_survives_text_edits()
+    test_template_list_numbering()
+    test_fix_extended(docx)
+    test_quote_normalisation_spans_runs()
+
+def run_parts(funcs, banner: str) -> int:
+    """Run this part's sections in THIS process (the suite is split so GNU
+    parallel can schedule the independent sections concurrently; every part
+    imports this lib with its own subset)."""
     try:
-        docx = test_scan()
-        test_fix_default(docx)
-        test_ppr_splice_keeps_xml_wellformed()
-        test_front_matter_same_span_edits()
-        test_charrefs_out_of_range_do_not_raise()
-        test_tracked_deletion_survives_text_edits()
-        test_template_list_numbering()
-        test_journal_emphasis()
-        test_text_consistency_rules()
-        test_layout_budget_rules()
-        test_quality_engines()
-        test_deliverable_validation()
-        test_fix_extended(docx)
-        test_quote_normalisation_spans_runs()
-        test_lookup_404_is_a_verified_negative()
-        test_accession_lookup_uses_the_matching_ncbi_database()
-        test_tab_scan_ignores_tab_stop_definitions()
-        test_cli()
-        test_unreadable_docx_reports_fmt_x1()
-        test_pipeline_wiring()
-        test_setup_normalization()
-        test_stage_normalization()
-        test_review_m20_seeding()
-        test_cover_letter_stamp_rule()
-        test_render_blank_page_if_available()
+        for fn in funcs:
+            fn()
+    except Exception as e:                                      # noqa: BLE001
+        check("the part's sections completed", False, f"{type(e).__name__}: {e}")
     finally:
         cleanup()
     print()
     if FAILS:
-        print(f"{len(FAILS)} FORMATTING-CHECK(S) FAILED")
+        print(f"{len(FAILS)} CHECK(S) FAILED:")
         for f in FAILS:
             print(f"  - {f}")
         return 1
-    print("ALL DOCX FORMATTING CHECKS PASSED")
+    print(banner)
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

@@ -176,14 +176,15 @@ for kind, files, expect_fail in (("revise", ["revision_report.json"], False),
 print()
 print("=" * 70)
 print("F06/F10 - auxiliary names and content fingerprint")
-check("*.tracking-previous.docx is an auxiliary", np._is_aux_doc("x.tracking-previous.docx"))
-check("*.logging-previous.docx is an auxiliary", np._is_aux_doc("x.logging-previous.docx"))
+check("*.tracking-a1.docx is an auxiliary", np._is_aux_doc("x.tracking-a1.docx"))
+check("*.logging-w1.docx is an auxiliary", np._is_aux_doc("x.logging-w1.docx"))
 check("*.tracking-original.tex is an auxiliary", np._is_aux_doc("x.tracking-original.tex"))
-check("*.logging-prev-winner.bib is an auxiliary",
-      np._is_aux_doc("x.logging-prev-winner.bib"))
-check("the pre-rename and short-lived spellings stay auxiliaries",
-      np._is_aux_doc("x.before-after.docx") and np._is_aux_doc("x.tracked.docx")
-      and np._is_aux_doc("x.log-previous.docx"))
+check("*.logging-winner2.bib is an auxiliary",
+      np._is_aux_doc("x.logging-winner2.bib"))
+check("the superseded generic spellings are NO LONGER auxiliaries",
+      not np._is_aux_doc("x.before-after.docx") and not np._is_aux_doc("x.tracked.docx")
+      and not np._is_aux_doc("x.tracking-previous.docx")
+      and not np._is_aux_doc("x.log-previous.docx"))
 tmp = Path(tempfile.mkdtemp())
 dir_a = tmp / "a"
 dir_b = tmp / "b"

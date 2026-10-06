@@ -1,21 +1,32 @@
 # Changelog
 
+## 0.30 — tracking copies are named for their baseline; no back-compat aliases (2026-10-07)
+
+- **The file name now names WHAT the copy was compared against.**
+  `<name>.tracking-<baseline>.<ext>` (fallback `<name>.logging-<baseline>.<ext>`)
+  carries an informative `<baseline>` token instead of "previous": `original`
+  for the pre-conformed submission, `a1` for the round base, `w<k>` / `a<k>`
+  for the version an integration reworked (its own `self/` member), and
+  `winner<r>` for the published winner of round r. A reader no longer has to ask
+  "previous to what?".
+- **No back-compat scaffolding.** The old spellings (`*.tracked.docx`,
+  `*.before-after.docx`, `*.tracking-previous.*`, `*.tracking-prev-winner.*`,
+  `*.logging-previous.*`, `*.logging-prev-winner.*`, `*.log-previous.*`) are no
+  longer recognized as auxiliaries -- only the pattern above is -- and the
+  `conform` command's `template` / `author-submission` / `apply-template` aliases
+  (plus `agents`' `sessions` alias) are removed.
+
 ## 0.29 — difference-tracking auxiliaries renamed, Word-native compare first (2026-10-06)
 
 The revision skill's tracked-changes auxiliary family is renamed to say what it
 actually tracks, and the Word-native compare engine becomes the first choice
 for producing it:
 
-- `<name>.tracked.docx` is now `<name>.tracking-previous.docx` and the
-  `<name>.before-after.docx` fallback is now `<name>.logging-previous.docx`; the
-  `.tex`/`.bib` siblings are `<name>.tracking-previous.tex|.bib` (a `latexdiff`
-  copy) and `<name>.logging-previous.tex|.bib` (the fallback log). The fallback
-  family is uniformly `logging-*` (`logging-original` / `logging-previous` /
-  `logging-prev-winner`) so the real copies and their fallbacks differ by exactly
-  one token and one verb form. The old two spellings -- and the short-lived
-  `log-previous.<ext>` spelling of the first cut of this feature -- stay
-  recognized as auxiliaries, so packages written in between keep every guarantee;
-  nothing writes them any more.
+- The tracked-changes auxiliary is no longer `<name>.tracked.docx` (with its
+  `<name>.before-after.docx` fallback): it is
+  `<name>.tracking-<baseline>.<ext>` (fallback
+  `<name>.logging-<baseline>.<ext>`) for `.docx` (real Word tracked changes),
+  `.tex` and `.bib` (a `latexdiff` copy) alike; see 0.30 for the token.
 - E5 now names the pipeline's Word-native compare engine
   (`docxcompare.sh` / the `docx-compare` MCP tool wrapping
   `Word.Application.CompareDocuments`) as the FIRST mechanism to produce the

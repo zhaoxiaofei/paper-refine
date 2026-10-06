@@ -9,11 +9,10 @@ content digests of every PAYLOAD file in DIR. Payload = every file except:
   * the pipeline's/your own reports: CHANGELOG.md, MANUAL_STEPS.md,
     REVISION_REPORT.md, revision_report.json, DIFF_LEDGER.md, REWRITE_REPORT.md,
     VISUAL_CHECK.md;
-  * the difference-tracking auxiliaries: *.tracking-original.<ext>,
-    *.tracking-previous.<ext>, *.tracking-prev-winner.<ext> and their uniform
-    *.logging-original.<ext> / *.logging-previous.<ext> /
-    *.logging-prev-winner.<ext> fallbacks (plus the pre-rename *.tracked.docx /
-    *.before-after.docx spellings and the short-lived *.log-previous.<ext>);
+  * the difference-tracking auxiliaries: *.tracking-<token>.<ext> and their
+    *.logging-<token>.<ext> fallbacks, where <token> names the baseline the copy
+    was compared against (`original`, a version id such as a1/w2/a3, or a
+    published round winner such as winner1);
   * the process scratch: work/ at the top level.
 
 File NAMES do not enter the hash, and existing version tokens inside file
@@ -51,19 +50,12 @@ REPORTS = {"changelog.md", "manual_steps.md", "revision_report.md",
            # paper_pipeline.BOOKKEEPING_FILES -- the two implementations must
            # compute the same token for the same package).
            "_pipeline_done.json", "scores.json"}
-# Keep in step with paper_pipeline.AUXILIARY_DOC_SUFFIXES (the two
-# implementations MUST derive the same token for the same package).
-AUX_SUFFIXES = tuple(
-    f".tracking-{base}{ext}" for base in ("original", "previous", "prev-winner")
-    for ext in (".docx", ".tex", ".bib")) + (
-    ".logging-original.docx", ".logging-original.tex", ".logging-original.bib",
-    ".logging-previous.docx", ".logging-previous.tex", ".logging-previous.bib",
-    ".logging-prev-winner.docx", ".logging-prev-winner.tex", ".logging-prev-winner.bib",
-    # the short-lived legacy spelling of the previous-fallback (superseded by
-    # the uniform "logging-" family on 2026-10-07; kept so a root created in
-    # between keeps the same token)
-    ".log-previous.docx", ".log-previous.tex", ".log-previous.bib",
-    ".tracked.docx", ".before-after.docx")
+# Keep in step with paper_pipeline.TRACKING_AUX_NAME_RE (the two implementations
+# MUST derive the same token for the same package): a difference-tracking
+# auxiliary is "<name>.tracking-<token>.<ext>" or "<name>.logging-<token>.<ext>",
+# where <token> names the baseline (original / a1 / w2 / a3 / winner1 / ...).
+AUX_NAME_RE = re.compile(r"\.(?:tracking|logging)-(?:original|winner[0-9]+|[awi][0-9]+)"
+                         r"\.(?:docx|tex|bib)$", re.IGNORECASE)
 
 # "-a" / "_v2" / "_V2" / "-4f3a9c1" at the very end of a stem (the version slot).
 TOKEN_RE = re.compile(r"^(?P<base>.*?)[-_](?P<tok>[0-9a-f]{7}|[A-Za-z]|[vV]\d+)$")
@@ -75,7 +67,7 @@ def is_payload(p: Path, root: Path) -> bool:
     if rel.parts and rel.parts[0] == "work":
         return False
     name = p.name.lower().strip()
-    if name in REPORTS or name.endswith(AUX_SUFFIXES):
+    if name in REPORTS or AUX_NAME_RE.search(name):
         return False
     return True
 

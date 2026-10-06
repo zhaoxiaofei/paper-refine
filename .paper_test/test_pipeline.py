@@ -428,8 +428,8 @@ def test_corpus_rules():
     sb = ctx.root / "runs/r1_a2_revise"
     rev = sb / "revised"
     make_docx(rev / "manuscript-p.docx", "Figure 1 | A caption.")
-    make_docx(rev / "manuscript-p.tracking-previous.docx", "Figure 1 | A caption.")
-    make_docx(rev / "manuscript-p.tracked.docx", "Figure 1 | A caption.")   # legacy spelling
+    make_docx(rev / "manuscript-p.tracking-a1.docx", "Figure 1 | A caption.")
+    make_docx(rev / "manuscript-p.tracking-original.docx", "Figure 1 | A caption.")
     write(rev / "notes.md", "Data: [AUTHOR TO COMPLETE: accession]\n")
     write(rev / "work/scratch.txt", "scratch\n")
     write(rev / "CHANGELOG.md", "placeholder [AUTHOR TO COMPLETE: funding]\n")
@@ -437,15 +437,16 @@ def test_corpus_rules():
     ctx.state["runs"][rid] = {"id": rid, "kind": "revise", "round": 1, "status": "done",
                               "sandbox": f"runs/{rid}", "corpus_digest": "d", "attempts": 1}
     man = np.corpus_manifest(ctx, 1, "a2")
-    check("*.tracking-previous.docx excluded from the version corpus",
-          "manuscript-p.tracking-previous.docx" not in man["files"]
-          and "manuscript-p.tracked.docx" not in man["files"], str(sorted(man["files"])))
+    check("the baseline-named tracking copies are excluded from the version corpus",
+          "manuscript-p.tracking-a1.docx" not in man["files"]
+          and "manuscript-p.tracking-original.docx" not in man["files"],
+          str(sorted(man["files"])))
     check("revised/work/ still excluded", not any(k.startswith("work/") for k in man["files"]))
     dst = tmp / "corpus_copy"
     np.build_corpus_dir(ctx, 1, "a2", dst)
-    check("build_corpus_dir leaves the auxiliary out",
-          not (dst / "manuscript-p.tracking-previous.docx").exists()
-          and not (dst / "manuscript-p.tracked.docx").exists()
+    check("build_corpus_dir leaves the auxiliaries out",
+          not (dst / "manuscript-p.tracking-a1.docx").exists()
+          and not (dst / "manuscript-p.tracking-original.docx").exists()
           and (dst / "manuscript-p.docx").exists())
     ph = np.scan_placeholders_in_sources(np.corpus_sources(ctx, 1, "a2"))
     check("placeholder scan counts the manuscript markers",

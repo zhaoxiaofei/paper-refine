@@ -864,7 +864,7 @@ def test_foreign_containers_are_venue_data():
 
 
 def test_apply_template_package():
-    """`apply-template`: the WHOLE package rebuilt inside the venue's templates."""
+    """`conform`: the WHOLE package rebuilt inside the venue's templates."""
     tmp = scratch("paper_tpl_pkg_")
     tpl = tmp / "tpl"
     tpl.mkdir()
@@ -887,7 +887,7 @@ def test_apply_template_package():
     (pkg / "figure1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     (pkg / "MANUAL_STEPS.md").write_text("steps\n", encoding="utf-8")
     (pkg / "work" / "scratch.txt").write_text("scratch\n", encoding="utf-8")
-    (pkg / "mainText.tracking-previous.docx").write_bytes((pkg / "mainText.docx").read_bytes())
+    (pkg / "mainText.tracking-a1.docx").write_bytes((pkg / "mainText.docx").read_bytes())
     dest = tmp / "out"
     rep = nb.rebuild_package_from_templates(
         {"main": main_tpl, "supplementary": supp_tpl}, pkg, dest)

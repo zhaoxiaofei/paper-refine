@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Scheduling tests: every round step starts as soon as its inputs exist.
 
-Run:  python3 .paper_test/test_parallel_scheduling.py
+Run:  one of the `test_parallel_scheduling_*_*.py` parts.
 
 The round is a DAG, not a pipeline of barriers:
 
@@ -361,28 +361,22 @@ def test_broken_marker_is_a_failed_attempt():
           all(not re.search(r"_i\d+$", name) for name in spans), str(sorted(spans)))
 
 
-def main() -> int:
-    sections = (("dag", test_dag_scheduling),
-                ("jobs", test_jobs_cap_is_respected),
-                ("order", test_dependency_order_is_never_violated),
-                ("retry", test_retry_policy_survives_the_scheduler),
-                ("hard-fail", test_permanent_failure_keeps_the_round_undecided),
-                ("bad-marker", test_broken_marker_is_a_failed_attempt))
+def run_parts(funcs, banner: str) -> int:
+    """Run this part's sections in THIS process (the suite is split so GNU
+    parallel can schedule the independent sections concurrently; every part
+    imports this lib with its own subset)."""
     try:
-        for name, fn in sections:
-            try:
-                fn()
-            except Exception as e:                                  # noqa: BLE001
-                check(f"{name} section completed", False, f"{type(e).__name__}: {e}")
+        for fn in funcs:
+            fn()
+    except Exception as e:                                      # noqa: BLE001
+        check("the part's sections completed", False, f"{type(e).__name__}: {e}")
     finally:
         cleanup()
     print()
     if FAILS:
-        print(f"{len(FAILS)} FAILURE(S): " + "; ".join(FAILS))
+        print(f"{len(FAILS)} CHECK(S) FAILED:")
+        for f in FAILS:
+            print(f"  - {f}")
         return 1
-    print("ALL SCHEDULING CHECKS PASSED")
+    print(banner)
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

@@ -10,7 +10,7 @@ paths they use are per-suite), so they can run at once:
     python3 .paper_test/run_all.py                 # GNU parallel, jobs = min(20, #cores)
     python3 .paper_test/run_all.py -j 4            # cap the parallelism
     python3 .paper_test/run_all.py -j 1            # exactly the old sequential loop
-    python3 .paper_test/run_all.py --only test_pipeline.py test_docx_format.py
+    python3 .paper_test/run_all.py --only test_pipeline.py test_docx_format_1_scan_fix.py
     python3 .paper_test/run_all.py --engine python # no GNU parallel on this box
 
 Every suite runs through `run_one.sh`, which gives it a private TMPDIR

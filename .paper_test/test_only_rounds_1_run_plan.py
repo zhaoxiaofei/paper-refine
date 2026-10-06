@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""The round plan: --only, integrator masks, judges per round
+"""The round plan: --only ROUND[:STAGE] selects which rounds an invocation drives
 
-Part 1 of the only rounds suite, split out of `only_rounds_lib.py` so GNU parallel can run
-the independent sections concurrently. The shared helpers/fixtures live in
-`only_rounds_lib.py`; this file only selects the functions of this part.
+Part 1 of the only-rounds suite (the integrator mask, the per-round judge counts and
+the judge-session selections live in their own parts). The shared helpers/fixtures
+live in `only_rounds_lib.py`; this file only selects the functions of this part.
 
 Run:  python3 .paper_test/test_only_rounds_1_run_plan.py
 """
@@ -20,4 +20,4 @@ sys.modules["only_rounds_lib"] = lib
 _spec.loader.exec_module(lib)
 
 if __name__ == "__main__":
-    sys.exit(lib.run_parts([lib.test_only_rounds, lib.test_integrator_mask, lib.test_judges_per_round], "PART 1 (round plan) PASSED"))
+    sys.exit(lib.run_parts([lib.test_only_rounds], "PART 1 (round plan) PASSED"))

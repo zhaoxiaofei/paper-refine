@@ -131,26 +131,28 @@ actual usage; never assume.
 
 ## E5 — Difference-tracking auxiliary files
 
-For every edited `.docx`, ALSO emit `<name>.tracking-previous.docx` with real
-Word tracked changes (`w:ins`/`w:del` in the OOXML) covering every edit — the
-tracking is against the version this copy was revised FROM (the previous
-version). Produce it with the Word-native compare engine when you can reach it:
-call the `docxcompare.sh` script (or the `docx-compare` MCP tool, which wraps
-that script through `CompareDocuments` under Word COM automation) with the
-previous and the revised copy; that is the pipeline's FIRST choice. Raw-OOXML
-tracked changes are fragile to hand-write — if neither the Word compare engine
-nor the available libraries can produce them reliably, fall back to
-`<name>.logging-previous.docx`: a copy whose changed paragraphs carry clearly
+For every edited `.docx`, ALSO emit `<name>.tracking-<baseline>.<ext>` with real
+Word tracked changes (`w:ins`/`w:del` in the OOXML) covering every edit, where
+`<baseline>` NAMES THE VERSION the copy was revised FROM: `a1` for a rewrite or
+revision arm (the round base) and the id of your own `self/<version-id>` member
+for an integration (`w1`, `a2`, … — the id is named in your prompt). Produce it
+with the Word-native compare engine when you can reach it: call the
+`docxcompare.sh` script (or the `docx-compare` MCP tool, which wraps that script
+through `CompareDocuments` under Word COM automation) with the baseline and the
+revised copy; that is the pipeline's FIRST choice. Raw-OOXML tracked changes are
+fragile to hand-write — if neither the Word compare engine nor the available
+libraries can produce them reliably, fall back to
+`<name>.logging-<baseline>.<ext>`: a copy whose changed paragraphs carry clearly
 bracketed `[BEFORE: ...]` / `[AFTER: ...]` markers, with a first-paragraph note
 that it is a marker file, not a tracked-changes document. Never publish a marker
-file under the `.tracking-previous.docx` name — the author would send a reviewer
-something that only looks like tracked changes. Record the fallback in A3 and in
-REVISION_REPORT.md. For `.tex`/`.bib`: run `latexdiff` previous vs revised if
-available (writing `<name>.tracking-previous.tex`/`.bib`); otherwise emit the
-`<name>.logging-previous.tex`/`.bib` fallback log and note the absence. The
-orchestrator writes the same family of copies itself — `*.tracking-original.*`
-for the comparison against the pristine submission and `*.tracking-previous.*`
-for the previous version — so never diff these auxiliary names yourself.
+file under the `.tracking-` name — the author would send a reviewer something
+that only looks like tracked changes. Record the fallback in A3 and in
+REVISION_REPORT.md. For `.tex`/`.bib`: run `latexdiff` baseline vs revised if
+available (writing `<name>.tracking-<baseline>.tex`/`.bib`); otherwise emit the
+`<name>.logging-<baseline>.tex`/`.bib` fallback log and note the absence. The
+orchestrator writes the same copies itself after every round — including the
+copies against the pristine submission, whose token is `original` — so never
+diff an auxiliary name yourself.
 
 ## E6 — Scientific-judgement guard
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regression suite for the pool/integration change requests.
 
-Run:  python3 .paper_test/test_change_requests.py
+Run:  one of the `test_change_requests_*_*.py` parts.
 
 Covers four areas plus two end-to-end runs:
 
@@ -768,36 +768,22 @@ def test_end_to_end_custom_plan():
           str(r1.get("plan")))
 
 
-def main() -> int:
-    sections = (("CR1a", test_plan_and_ids),
-                ("CR2", test_per_round_counts),
-                ("CR1b", test_integration_materialization),
-                ("CR1b", test_integration_postcheck),
-                ("CR1c", test_rewrite_and_revise_arms),
-                ("CR1d", test_field_and_selection),
-                ("CR3", test_docx_cli),
-                ("CR4", test_cli_defaults),
-                ("CR1e-default", test_end_to_end_default_plan),
-                ("CR2-e2e", test_end_to_end_custom_plan))
+def run_parts(funcs, banner: str) -> int:
+    """Run this part's sections in THIS process (the suite is split so GNU
+    parallel can schedule the independent sections concurrently; every part
+    imports this lib with its own subset)."""
     try:
-        for name, fn in sections:
-            try:
-                fn()
-            except Exception as e:                              # noqa: BLE001
-                # A baseline tree (PAPER_WS=<pre-change copy>) does not even define
-                # the new symbols: report that as a failure of the section
-                # instead of dying with a traceback, so this file works as a
-                # repro script (red before the change, green after).
-                check(f"{name} section completed", False, f"{type(e).__name__}: {e}")
+        for fn in funcs:
+            fn()
+    except Exception as e:                                      # noqa: BLE001
+        check("the part's sections completed", False, f"{type(e).__name__}: {e}")
     finally:
         cleanup()
     print()
     if FAILS:
-        print(f"{len(FAILS)} FAILURE(S): " + "; ".join(FAILS))
+        print(f"{len(FAILS)} CHECK(S) FAILED:")
+        for f in FAILS:
+            print(f"  - {f}")
         return 1
-    print("ALL CHANGE-REQUEST CHECKS PASSED")
+    print(banner)
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

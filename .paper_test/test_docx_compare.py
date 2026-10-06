@@ -354,14 +354,14 @@ def test_skill_names_the_compare_engine():
           "docxcompare.sh" in flat and "docx-compare" in flat and "FIRST choice" in flat,
           flat[:200])
     check("E5 emits the renamed auxiliary family",
-          ".tracking-previous.docx" in flat and ".logging-previous.docx" in flat
+          ".tracking-<baseline>.<ext>" in flat and ".logging-<baseline>.<ext>" in flat
           and "latexdiff" in flat)
-    check("SKILL.md / the prompt carry the renamed E5 rule",
-          "tracking-previous" in skill and "tracking-previous" in prompt)
+    check("SKILL.md / the prompt carry the E5 baseline-token rule",
+          "tracking-<baseline>" in skill and "tracking-<baseline>" in prompt)
     aux = nb.AUX_FILES_RULE
-    check("the shared auxiliary rule names the new family and the legacy spellings",
-          "tracking-original" in aux and "logging-prev-winner" in aux
-          and "tracked.docx" in aux)
+    check("the shared auxiliary rule names the baseline token scheme",
+          "tracking-<token>" in aux and "logging-<token>" in aux
+          and "NAMES THE BASELINE" in aux)
 
 
 def test_live_server_handshake():

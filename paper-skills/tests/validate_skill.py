@@ -395,8 +395,8 @@ def main():
           "correct the underlying" not in _rr
           and "explicit" in _rr and "propose-then-verify" in _rr
           and "last-modified auto" in _rr and "never create or delete" in _rr)
-    check("D6 difference-tracking fallback has a distinct name",
-          "logging-previous" in rev_rules or "logging-previous" in readme)
+    check("D6 difference-tracking copies name their baseline",
+          "tracking-<baseline>" in rev_rules or "tracking-<baseline>" in readme)
     check("D7 M4 purpose text repaired", "wait," not in sweeps)
     check("D8 M1(h) consistent with format flexibility",
           "flag every non-exempt acronym appearing in abstract/title" not in sweeps)

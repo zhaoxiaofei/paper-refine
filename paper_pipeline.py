@@ -272,17 +272,15 @@ RULES CARRIED INTO EVERY PROMPT (AND WHERE THEY COME FROM)
       ranking. The orchestrator counts the markers itself and reports them
       (`author_placeholders`), and the count is a diagnostic that ranks nothing.
     * AUXILIARY FILES -- the difference-tracking copies ARE NOT SUBMISSION
-      CONTENT: every "<name>.tracking-original|previous|prev-winner.<ext>" /
-      "<name>.logging-original.<ext>" / "<name>.logging-previous.<ext>" /
-      "<name>.logging-prev-winner.<ext>" (and the two pre-rename spellings
-      "*.tracked.docx" / "*.before-after.docx") is excluded from every
+      CONTENT: every "<name>.tracking-<token>.<ext>" (and its
+      "<name>.logging-<token>.<ext>" fallback log) is excluded from every
       judged/pinned corpus rule (corpus_manifest/build_corpus_dir), so the
       copies never reach a judge, a pin or the next round's base, and the M6
       sweep's "residual tracked changes" row never fires on the pipeline's own
       output. The pipeline's own tracked-changes copies live under
-      <root>/redlines/ (per source pair) and <root>/tracking/ (the requested
-      name family, versus the pristine original and versus the previous
-      version).
+      <root>/redlines/ (per source pair) and <root>/tracking/ (one copy per
+      baseline: the pre-conformed original, the version an arm was derived
+      from, or a published round winner -- the token names which).
     * DERIVED BUILD OUTPUTS -- NOT CARRIED, NOT SCORED: ".aux/.blg/.bcf/.log/
       .out/.synctex.gz/.run.xml/.fls/.fdb_latexmk" and friends are by-products of
       a build, not submission content. The revision stage is told to leave them
@@ -419,11 +417,8 @@ CODE-SIDE CHECKS (in addition to what the prompts ask the agents to do)
                           counted and reported per version, and is never scored,
                           never a defect and never a ranking input.
     * auxiliary files     the difference-tracking copies
-                          ("*.tracking-original|previous|prev-winner.<ext>",
-                          their "*.logging-original.<ext>" /
-                          "*.logging-previous.<ext>" / "*.logging-prev-winner.<ext>"
-                          fallbacks, and the pre-rename *.tracked.docx/
-                          *.before-after.docx spellings) are left out of every
+                          ("*.tracking-<token>.<ext>" and their
+                          "*.logging-<token>.<ext>" fallbacks) are left out of every
                           judged/pinned corpus (the pipeline writes its own
                           tracked-changes copies under <root>/redlines/ and
                           <root>/tracking/).
@@ -514,19 +509,17 @@ CODE-SIDE CHECKS (in addition to what the prompts ask the agents to do)
                           manifest that names the backend that actually produced
                           each file.
     * difference tracking every candidate ALSO gets, beside each document,
-                          "<name>.tracking-original.<ext>" (docx/tex/bib) for
-                          the comparison against the pristine original and
-                          "<name>.tracking-previous.<ext>" for the comparison
-                          against the version it was derived from, or the
-                          "<name>.logging-original.<ext>" /
-                          "<name>.logging-previous.<ext>" fallback log when the tool
-                          failed; every PUBLISHED winner gets the same against
-                          the original and, from round 2 on, against the previous
-                          winner ("<name>.tracking-prev-winner.<ext>" /
-                          "<name>.logging-prev-winner.<ext>"). `.tex`/`.bib`
-                          pairs go through `latexdiff`. The copies are
-                          auxiliaries, never submission content, and the pass
-                          uses no agent. The same round-close pass compiles the
+                          "<name>.tracking-<token>.<ext>" (docx/tex/bib) for the
+                          comparison against the pristine original (`original`),
+                          the version it was derived from (`a1`, or the
+                          integration's own `w<k>`/`a<k>` base) or, for a
+                          PUBLISHED winner, the previous round's winner
+                          (`winner<r-1>`); the sibling
+                          "<name>.logging-<token>.<ext>" is the fallback log
+                          written when the tool failed. `.tex`/`.bib` pairs go
+                          through `latexdiff`. The copies are auxiliaries, never
+                          submission content, and the pass uses no agent. The
+                          same round-close pass compiles the
                           LaTeX sources (`latexmk`) and converts the .docx files
                           into PDFs under <root>/pdfs/ (persistent; a failure is
                           a warning, never a failed round).
@@ -754,17 +747,16 @@ DIRECTORY LAYOUT CREATED UNDER --root
                                     from-base/, from-original/,
                                     from-setup-source/, plus manifest.json and
                                     README.md (tool chain + every attempt)
-    tracking/r<R>_<version>/        difference copies in the REQUESTED name
-                                    family: original/ and previous/ hold
-                                    "<name>.tracking-<baseline>.<ext>" (real
-                                    Word/latexdiff copies) or the
-                                    "<name>.logging-original.<ext>" /
-                                    "<name>.logging-previous.<ext>" fallback logs,
+    tracking/r<R>_<version>/        difference copies, ONE DIRECTORY PER
+                                    BASELINE TOKEN (original/, a1/, w1/, a2/,
+                                    ...): "<name>.tracking-<token>.<ext>" (real
+                                    Word/latexdiff copies) or the sibling
+                                    "<name>.logging-<token>.<ext>" fallback log,
                                     plus manifest.json and README.md. The same
                                     copies also sit BESIDE the candidate
                                     documents in the run sandbox.
     tracking/round<R>_winner/       the published winner's copies: original/
-                                    (vs non_revised/) and prev-winner/ (vs
+                                    (vs non_revised/) and winner<R-1>/ (vs
                                     round<R-1>_winner/), with the same
                                     manifest.json/README.md. The copies also sit
                                     inside round<R>_winner/ itself.
@@ -831,7 +823,7 @@ from pathlib import Path
 # mean of the same score list, MANUAL_STEPS.md is reported but not ranked on,
 # the round's own base competes (so a round cannot move backwards), the
 # pipeline's own hand-off placeholders and the difference-tracking auxiliaries
-# ("*.tracking-*/logging-*", and the pre-rename "*.tracked.docx" spelling) are
+# ("*.tracking-<token>.<ext>" / "*.logging-<token>.<ext>") are
 # neutralised everywhere they could be mistaken for manuscript defects, and
 # copied-but-unchanged input files are exempted from structured-output
 # validation by content instead of by path. state.json stays version 2.
@@ -4212,10 +4204,6 @@ ONLY_ALIASES = {"w": "rewrite", "rewrites": "rewrite", "r": "review", "reviews":
                 "merge": "integrate", "merges": "integrate", "j": "judge", "judges": "judge",
                 "fb": "feedback", "feedbacks": "feedback",
                 "concern": "concerns",
-                "applytemplate": "conform", "apply_template": "conform",
-                "apply-template": "conform", "author-submission": "conform",
-                "authorsubmission": "conform", "template-author": "conform",
-                "author": "conform", "template": "conform",
                 "resp": "response", "responses": "response", "response-to-reviewers": "response"}
 # The auditor sits between the reviewer and the reviser: it disposes the frozen
 # review's findings (confirm / drop-with-evidence) and attacks the reviewer's
@@ -4368,52 +4356,35 @@ CAPTION_SUSPECT_RE = re.compile(
 # ---- code-side document-set checking --------------------------------------
 # Editable submission documents that must survive a rewrite/revision/integration
 # round. Auxiliary files the revision skill emits on purpose are never required
-# and never counted as duplicates:
-#   "<name>.tracking-previous.<ext>"  a real tracked-changes / latexdiff copy
-#                                     of "<name>.<ext>" against its PREVIOUS
-#                                     version (the E5 auxiliary; for .docx the
-#                                     Word-native compare is the first choice)
-#   "<name>.logging-previous.<ext>"   the E5 fallback marker copy, used when the
-#                                     real tracked copy could not be produced
-#   "<name>.tracking-original.<ext>"  the ORCHESTRATOR's real tracked copy
-#                                     against the pristine original
-#                                     (non_revised/), .docx via the
-#                                     docx-compare MCP / redline chain and
-#                                     .tex/.bib via latexdiff
-#   "<name>.logging-original.<ext>"   the fallback log when THAT comparison
-#                                     could not be produced
-#   "<name>.tracking-prev-winner.<ext>"  a published WINNER's real tracked copy
-#                                     against the previous round's winner
-#                                     (round r > 1; `round<r>_winner/`)
-#   "<name>.logging-prev-winner.<ext>"   the fallback log for that comparison
+# and never counted as duplicates. The auxiliary is a difference-tracking copy
+# named for the BASELINE it was compared against (see TRACK_TOKEN_RE):
+#
+#   <name>.tracking-<token>.<ext>    real tracked copy (word/latexdiff)
+#   <name>.logging-<token>.<ext>     the fallback log when the tool failed
+#
+# where <token> is `original` (the pre-conformed submission in non_revised/) or
+# the id of the version the copy was compared against -- the round base `a1`,
+# a rewrite `w<k>`, a revision `a<k>`, or `winner<r>` for the published winner
+# of round r.
 EDITABLE_DOC_EXTS = (".doc", ".docx", ".tex", ".ltx", ".bib", ".md", ".txt", ".xlsx",
                      ".rtf", ".csv")
-# The difference-tracking auxiliaries, one suffix per (kind x extension):
-# `original`/`previous`/`prev-winner` x `.docx`/`.tex`/`.bib`, plus each kind's
-# fallback. The suffix is what makes a file an auxiliary EVERYWHERE in the
-# pipeline (corpus digest, pin, judge view, fingerprint, revision token,
-# recovery backfill), so the pipeline may write these copies next to a document
-# without changing any version's identity.
-TRACKING_BASELINES = ("original", "previous", "prev-winner")
+# The extensions a difference-tracking copy is built for.
 TRACKING_EXTS = (".docx", ".tex", ".bib")
-# The fallback spelling of each baseline: ONE uniform `logging-*` family, so the
-# real copies (`tracking-*`) and their fallbacks (`logging-*`) differ by exactly
-# one token and the verb form is the same everywhere.
-TRACKING_FALLBACK_PREFIX = {"original": "logging-original", "previous": "logging-previous",
-                            "prev-winner": "logging-prev-winner"}
-TRACKING_AUX_SUFFIXES = tuple(
-    f".tracking-{base}{ext}" for base in TRACKING_BASELINES for ext in TRACKING_EXTS) + \
-    tuple(f".{TRACKING_FALLBACK_PREFIX[base]}{ext}" for base in TRACKING_BASELINES
-          for ext in TRACKING_EXTS)
-# The pre-rename spellings stay recognized: a package an older skill (or an
-# older pipeline) wrote must keep every one of its guarantees -- they are
-# auxiliaries, never submission content. Nothing writes them any more.
-# `.log-previous.*` is the same carve-out for the SHORT-LIVED spelling of the
-# fallback (the family is `logging-*` since 2026-10-07): a root created in
-# between must not see its own fallback copies become submission content.
-LEGACY_AUXILIARY_DOC_SUFFIXES = (".tracked.docx", ".before-after.docx") + tuple(
-    f".log-previous{ext}" for ext in TRACKING_EXTS)
-AUXILIARY_DOC_SUFFIXES = TRACKING_AUX_SUFFIXES + LEGACY_AUXILIARY_DOC_SUFFIXES
+# The baseline token of a copy: the pre-conformed original, or the id of the
+# version it was compared against (`a1`, `w2`, `a3`, ... -- the pipeline's own
+# version vocabulary) or a published round winner (`winner1`, `winner2`, ...).
+# The token is INFORMATIVE on purpose: "<name>.tracking-a1.docx" says exactly
+# which version the difference was taken against.
+TRACK_TOKEN_ORIGINAL = "original"
+TRACK_TOKEN_RE = re.compile(r"^(?:original|winner[0-9]+|[awi][0-9]+)$", re.IGNORECASE)
+# The full-file rule: `<anything>.tracking-<token>.<ext>` or
+# `<anything>.logging-<token>.<ext>`. A file matching it is an auxiliary
+# EVERYWHERE in the pipeline (corpus digest, pin, judge view, fingerprint,
+# revision token, recovery backfill), which is what lets the pipeline write the
+# copies next to a document without changing any version's identity.
+TRACKING_AUX_NAME_RE = re.compile(
+    r"\.(?:tracking|logging)-(?:original|winner[0-9]+|[awi][0-9]+)"
+    r"\.(?:docx|tex|bib)$", re.IGNORECASE)
 # Trailing version token on a basename stem: the CURRENT content-hash token
 # ("-4f3a9c1"/"_4f3a9c1", 7 lowercase hex characters) or the LEGACY version
 # tokens ("-b", "_v2", "-v10", case-insensitive) that older packages carry.
@@ -6448,9 +6419,8 @@ def apply_hierarchy_reconcile(text: str, where: str) -> str:
 # are required to write instead of inventing missing content (which the review
 # skill's M5/M6 sweeps and the judge's frozen sweeps would otherwise report as a
 # hygiene/completeness defect of the very version that complied), and the
-# difference-tracking auxiliaries -- the current
-# "*.tracking-original|previous.<ext>" / "*.logging-original.<ext>" /
-# "*.logging-previous.<ext>" family and the pre-rename "*.tracked.docx" spelling --
+# difference-tracking auxiliaries -- "*.tracking-<token>.<ext>" and their
+# "*.logging-<token>.<ext>" fallbacks, see TRACKING_AUX_NAME_RE --
 # (which the M6 sweep reads as "residual tracked changes" and a judge could read
 # as a duplicate sibling, and which the pipeline itself writes next to every
 # tracked document).
@@ -6873,19 +6843,18 @@ PLACEHOLDER_RULE_JUDGE = """PLACEHOLDER TEXT IN A PACKAGE (handle exactly this w
     it -- and is scored exactly as it would be if the package had simply omitted the item with no
     marker at all: the marker never makes a package worse, and never makes it better."""
 
-AUX_FILES_RULE = """PIPELINE AUXILIARY FILES — "<name>.tracking-original.<ext>",
-"<name>.tracking-previous.<ext>", "<name>.tracking-prev-winner.<ext>", their fallbacks
-"<name>.logging-original.<ext>", "<name>.logging-previous.<ext>" and
-"<name>.logging-prev-winner.<ext>", and the pre-rename "<name>.tracked.docx" /
-"<name>.before-after.docx" spellings:
+AUX_FILES_RULE = """PIPELINE AUXILIARY FILES — "<name>.tracking-<token>.<ext>" and its fallback
+"<name>.logging-<token>.<ext>":
   * Every one of those names is an AUXILIARY difference-tracking copy of "<name>.<ext>" written by
     the document-editing tooling or by the orchestrator, not a document of its own. For .docx the
     real copy is Word tracked changes between the document and its baseline; for .tex/.bib it is a
-    latexdiff copy; the matching ".logging-*" file is the documented fallback log used
-    when the real tracked copy could not be produced reliably. "_previous_" means the baseline is
-    the version this one was derived from, "_original_" means the pristine submission, and
-    "_prev-winner_" belongs to a published winner compared with the winner published before it.
-  * The orchestrator EXCLUDES every file with one of these suffixes from the judged/pinned
+    latexdiff copy; the matching ".logging-*" file is the documented fallback log used when the
+    real tracked copy could not be produced reliably.
+  * "<token>" NAMES THE BASELINE the copy was compared against, so the file name says what the
+    difference is: "original" is the pre-conformed submission, and every other token is the id of
+    the version the copy was taken against (the manifest records each row's own meaning). Do not
+    infer anything from a token beyond "this document was compared with that version".
+  * The orchestrator EXCLUDES every file whose name matches that pattern from the judged/pinned
     submission corpus, and it writes its own copies under <pipeline root>/redlines/ and
     <pipeline root>/tracking/, so these auxiliaries are never manuscript content in this pipeline.
   * Never score, flag, enumerate or "fix" such an auxiliary -- not its presence or absence, not its
@@ -7860,7 +7829,7 @@ Explicit requirements that override skill defaults where they conflict:
 
      The token is the first 7 hex characters of SHA-256 over the sorted content digests of the
      payload files (your own reports, the difference-tracking auxiliaries -- current
-     *.tracking-*/logging-* and the pre-rename *.tracked.docx/*.before-after.docx -- and the
+     *.tracking-<token>.<ext> / *.logging-<token>.<ext> auxiliaries -- and the
      work/ scratch are excluded; file NAMES do not enter the hash, and existing version-token
      references inside file contents are normalized to "<VERSION>" first, so APPLYING the token
      does not change it). Run the tool BEFORE renaming; then call it again with
@@ -10392,10 +10361,8 @@ def corpus_tree_manifest(dirp: Path) -> dict:
     """Manifest of a VERSION CORPUS: the read-only auxiliaries are left out.
 
     A difference-tracking auxiliary -- "<name>.tracking-original|previous.<ext>",
-    its "<name>.logging-original.<ext>"/"<name>.logging-previous.<ext>" fallback, or
-    the pre-rename "<name>.tracked.docx"/"<name>.before-after.docx" spelling --
-    is a derived copy, not submission content (see AUX_FILES_RULE). Every version
-    corpus --
+    its "<name>.logging-<token>.<ext>" fallback -- is a derived copy, not
+    submission content (see AUX_FILES_RULE). Every version corpus --
     the pristine reference, the round bases, the judge targets, the pins and the
     published winners -- is defined by this same rule, so a pin can never
     disagree with the corpus a judge scored.
@@ -13197,8 +13164,7 @@ def template_package_files(src: Path) -> list:
     """Every file of a submission package, minus process scratch/auxiliaries.
 
     `work/` is the pipeline's own scratch and the
-    `*.tracking-original|previous.<ext>` / `*.logging-original.<ext>` /
-    `*.logging-previous.<ext>` auxiliaries (and the pre-rename spellings) are
+    `*.tracking-<token>.<ext>` / `*.logging-<token>.<ext>` auxiliaries are
     difference-tracking copies -- neither belongs to a submission, so the rebuilt
     package leaves them out (the same rule the corpus builder and the judges
     apply). Everything else -- figures, tables, data,
@@ -14782,33 +14748,30 @@ def placeholder_info_for(ctx: Ctx, r: int, vid: str):
 def _is_aux_doc(name: str) -> bool:
     """Is this ONE document a difference-tracking auxiliary (never content)?
 
-    The rule is a NAME SUFFIX rule, deliberately: it has to hold for a file the
+    The rule is a NAME rule, deliberately: it has to hold for a file the
     pipeline just wrote next to its parent document, for a file an agent wrote
     in a sandbox the pipeline never opened, and for a file inside a pin that a
-    later `status`/`decide` invocation walks. `TRACKING_AUX_SUFFIXES` names the
-    current family (see its definition) and the two pre-rename spellings are
-    kept so older packages keep every guarantee.
+    later `status`/`decide` invocation walks. See `TRACKING_AUX_NAME_RE` for the
+    token vocabulary and `tracking_aux_suffix()` for the one place the names are
+    built.
     """
-    return name.lower().endswith(AUXILIARY_DOC_SUFFIXES)
+    return bool(TRACKING_AUX_NAME_RE.search(name))
 
 
-def tracking_aux_suffix(baseline: str, ext: str, fallback: bool = False) -> str:
-    """The auxiliary suffix for one (baseline, extension) pair.
+def tracking_aux_suffix(token: str, ext: str, fallback: bool = False) -> str:
+    """The auxiliary suffix for one (baseline token, extension) pair.
 
     `original` + `.docx` -> ".tracking-original.docx" (or ".logging-original.docx"
-    when `fallback`); `previous` + `.tex` -> ".tracking-previous.tex" (or
-    ".logging-previous.tex"); `prev-winner` + `.bib` -> ".tracking-prev-winner.bib"
-    (or ".logging-prev-winner.bib"). This is the ONLY place the spellings are
-    built, so a reader and a writer can never drift apart.
+    when `fallback`); `a1` + `.tex` -> ".tracking-a1.tex" (or ".logging-a1.tex");
+    `winner2` + `.bib` -> ".tracking-winner2.bib". This is the ONLY place the
+    names are built, so a reader and a writer can never drift apart.
     """
-    base = str(baseline).strip().lower()
-    if base not in TRACKING_BASELINES:
-        raise ValueError(f"unknown tracking baseline: {baseline!r}")
+    tok = str(token).strip().lower()
+    if not TRACK_TOKEN_RE.match(tok):
+        raise ValueError(f"unknown tracking baseline token: {token!r}")
     if ext not in TRACKING_EXTS:
         raise ValueError(f"unknown tracking extension: {ext!r}")
-    if fallback:
-        return f".{TRACKING_FALLBACK_PREFIX[base]}{ext}"
-    return f".tracking-{base}{ext}"
+    return f".{'logging' if fallback else 'tracking'}-{tok}{ext}"
 
 
 def _doc_key(rel: str) -> str:
@@ -15324,8 +15287,8 @@ def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
     exclude_top: top-level entry names to skip (used to keep a candidate's
     process scratch, e.g. revised/work/, out of its submission corpus).
     skip_aux: leave out the difference-tracking auxiliaries
-    ("*.tracking-original|previous.<ext>", "*.logging-original.<ext>",
-    "*.logging-previous.<ext>" and the pre-rename spellings) -- set by every call that
+    ("*.tracking-<token>.<ext>" and their "*.logging-<token>.<ext>" fallbacks)
+    -- set by every call that
     materializes a VERSION CORPUS (base, judge target, pin, published winner), so
     the corpus the judges score is exactly the corpus that is pinned. A raw
     sandbox copy (a read-only input) keeps every file.
@@ -15506,7 +15469,7 @@ def parse_only_stage(token: str, item: str, flag: str = "--only") -> str:
     if name not in ONLY_STAGES:
         die(f"{flag}: unknown stage {item!r}; choose from {', '.join(ONLY_STAGES)} "
             f"(aliases: merge=integrate, w=rewrite, a/a2=revise, j=judge, "
-            f"fb=feedback, resp=response, apply-template/author-submission=conform)")
+            f"fb=feedback, resp=response)")
     return name
 
 
@@ -15667,7 +15630,7 @@ class OnlySpec:
         # their own classes.
         if vid in ("audit", "feedback", "concerns", "response"):
             return vid
-        if vid in ("conform", "template", "author-submission", "apply-template"):
+        if vid == "conform":
             return "conform"
         if vid.startswith("w"):
             return "rewrite"
@@ -17127,7 +17090,7 @@ def corpus_content_fingerprint(ctx: Ctx, r: int, vid: str) -> str:
 # the package's content (replacing the legacy letter/digit increments): the
 # first 7 hex characters of SHA-256 over the sorted content digests of the
 # payload files, with the payload defined exactly like a version corpus (no
-# work/ scratch, no difference-tracking auxiliaries -- see AUXILIARY_DOC_SUFFIXES
+# work/ scratch, no difference-tracking auxiliaries -- see TRACKING_AUX_NAME_RE
 # -- and no self-written reports) and with NAMES ignored. Existing version tokens inside
 # file CONTENTS (a repointed LaTeX \addbibresource{refs-4f3a9c1.bib}, say) are
 # normalized to "<VERSION>" before hashing, so applying the token does not
@@ -17335,7 +17298,7 @@ def corpus_dir_view_files(dirp: Path) -> list:
 
     Slightly narrower than the corpus `build_corpus_dir()` materializes, because
     the judge is the one party that may not even READ what the corpus carries:
-    difference-tracking auxiliaries (see AUXILIARY_DOC_SUFFIXES), the pipeline's
+    difference-tracking auxiliaries (see TRACKING_AUX_NAME_RE), the pipeline's
     own bookkeeping/report files (`CORPORA_STRIP_BOOKKEEPING`), the process
     scratch (`CORPUS_EXCLUDE_TOP`, i.e. `work/`) and every derived output whose
     editable source is in the package (see `_is_view_excluded_file()`: a
@@ -21162,7 +21125,7 @@ EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 def structured_output_files(sb: Path, rec: dict) -> list:
     """(rel, path) of every JSON/XML/DOCX file the run was supposed to WRITE.
 
-    Difference-tracking auxiliaries (see AUXILIARY_DOC_SUFFIXES) are skipped: they
+    Difference-tracking auxiliaries (see TRACKING_AUX_NAME_RE) are skipped: they
     are not submission content anywhere in this pipeline (see AUX_FILES_RULE), so a
     tracked-changes writer that degrades or emits a marker file must not fail the
     run. The pipeline's own tracked-changes copies are produced independently under
@@ -21301,7 +21264,7 @@ def _candidate_corpus_files(sb: Path, out_dir: str = REVISED_DIR) -> list:
     output package (revised/, or rewritten/ for the rewrite arm; minus the
     stage's work/ scratch) plus everything under code/ (prefixed code/, which is
     how a corpus folds revised analysis code in). The difference-tracking
-    auxiliaries (see AUXILIARY_DOC_SUFFIXES) are skipped: they are never
+    auxiliaries (see TRACKING_AUX_NAME_RE) are skipped: they are never
     submission content and never count as "the file survived".
     """
     seen, out = set(), []
@@ -21792,7 +21755,7 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
     Exclusions, so recovery never undoes a DELIBERATE exclusion:
       * derived build outputs (.aux/.log/.synctex.gz/... -- the prompts
         prescribe leaving them out of revised/);
-      * the difference-tracking auxiliaries (see AUXILIARY_DOC_SUFFIXES);
+      * the difference-tracking auxiliaries (see TRACKING_AUX_NAME_RE);
       * the pipeline's own bookkeeping files (the agent regenerates them);
       * revised/work/ scratch.
     Skip-conditions, so recovery never duplicates content:
@@ -29693,7 +29656,7 @@ def round_tracking(ctx: Ctx, r: int, enabled: bool,
     """Difference-tracking copies + persistent PDFs for one round.
 
     Both passes are audit aids: they are pure code (no agent session), they
-    never enter a corpus/pin/judge view (see AUXILIARY_DOC_SUFFIXES and the
+    never enter a corpus/pin/judge view (see TRACKING_AUX_NAME_RE and the
     <root>/pdfs/ tree), and a failure here is a WARNING -- never a failed round.
     """
     if not enabled:
@@ -30651,10 +30614,9 @@ def cmd_setup(args) -> None:
     print(f"[setup] zotero policy:           {zotero}: {_zot_note}"
           + (f" (`zot` {'on PATH' if zot_cli_available() else 'NOT on PATH'})"
              if zotero != "off" else ""))
-    print(f"[setup] corpus rule:             the "
-          f"\"*.tracking-original|previous|prev-winner.<ext>\" / \"*.logging-original.<ext>\" / "
-          f"\"*.logging-previous.<ext>\" / \"*.logging-prev-winner.<ext>\" auxiliaries (and the "
-          f"pre-rename *.tracked.docx/*.before-after.docx spellings) are excluded from every "
+    print(f"[setup] corpus rule:             the difference-tracking auxiliaries "
+          f"(\"*.tracking-<token>.<ext>\" and their \"*.logging-<token>.<ext>\" fallbacks, "
+          f"<token> = original / a1 / w<k> / a<k> / winner<r>) are excluded from every "
           f"judged/pinned corpus (the pipeline writes its own copies under {REDLINE_DIRNAME}/, "
           f"{TRACKING_DIRNAME}/ and {PDF_DIRNAME}/)")
     _art_note = {
@@ -32084,14 +32046,13 @@ def cmd_set_revision_mode(args) -> None:
 
 
 def only_is_template_stage_only(spec) -> bool:
-    """`--only apply-template` / `--only 1:apply-template`: that stage alone."""
+    """`--only conform` / `--only 1:conform`: that stage alone."""
     if spec is None or getattr(spec, "all_stages", False):
         return False
     stages = set(getattr(spec, "stages", ()) or ())
     pairs = getattr(spec, "pairs", {}) or {}
     stages |= {s for v in pairs.values() for s in (v or ())}
-    stages = {("conform" if s in ("apply-template", "author-submission", "template") else s)
-              for s in stages}
+    stages = set(stages)
     sessions = getattr(spec, "sessions", {}) or {}
     # A judge selector (`conform,w1_j1`, `conform,r1_judge_w2_j1`) is a
     # session too: the items are a UNION, so such a selection must run the
@@ -32183,7 +32144,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     _only_probe = parse_only_spec(getattr(args, "only", None))
     if only_is_template_stage_only(_only_probe):
         if journal_mode_of(ctx) not in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_INIT):
-            die("--only conform (formerly template/author-submission/apply-template) is the "
+            die("--only conform is the "
                 f"template-first stage of the transfer and init revision modes: this root's "
                 f"revision mode is {journal_mode_of(ctx)!r}")
         _ensure_template_stage_for_run(ctx, args)
@@ -34953,7 +34914,7 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     identity is verified BEFORE the counter increment below). The winner
     directory is already materialized by build_corpus_dir(), which strips the
     process scratch (work/), the difference-tracking auxiliaries (see
-    AUXILIARY_DOC_SUFFIXES) and the pipeline's own bookkeeping
+    TRACKING_AUX_NAME_RE) and the pipeline's own bookkeeping
     (CHANGELOG.md, MANUAL_STEPS.md, REVISION_REPORT.md, revision_report.json,
     DIFF_LEDGER.md, REWRITE_REPORT.md, VISUAL_CHECK.md). Copying it therefore
     gives exactly the files a new `setup --source <dir>` needs -- necessary and
@@ -37621,19 +37582,24 @@ def _cmd_redline_locked(ctx: Ctx, args) -> None:
 #
 # Every submission version the pipeline produces is tracked against the
 # PRE-CONFORMED ORIGINAL (the byte-identical copy `setup --source` made into
-# non_revised/) and against the version it was derived FROM (the previous
-# version):
+# non_revised/) and against the version it was derived FROM. The copy's name
+# NAMES THAT BASELINE (`<token>`), so a reader never has to guess what
+# "previous" meant:
 #
-#     <name>.tracking-original.<ext>   real tracked copy vs the pristine original
-#     <name>.logging-original.<ext>    its fallback log when the tool failed
-#     <name>.tracking-previous.<ext>   real tracked copy vs the previous version
-#     <name>.logging-previous.<ext>        its fallback log when the tool failed
+#     <name>.tracking-<token>.<ext>    real tracked copy (word/latexdiff)
+#     <name>.logging-<token>.<ext>     its fallback log when the tool failed
 #     (.ext in .docx / .tex / .bib)
+#
+#     token = original      the pre-conformed submission (non_revised/)
+#             a1            the round base (from round 2: the pinned champion of
+#                           round r-1, published as round<r-1>_winner/)
+#             w<k> / a<k>   the k-th rewrite / revision of this round -- the
+#                           base an integration run reworked (its self/ member)
+#             winner<r>     the published winner of round r
 #
 # Every PUBLISHED winner (`round<r>_winner/`) is tracked in place too: against
 # the pristine original, and -- for r > 1 -- against the previous round's winner
-# under the dedicated family
-#     <name>.tracking-prev-winner.<ext> / <name>.logging-prev-winner.<ext>
+# (`<name>.tracking-winner<r-1>.<ext>`).
 #
 # A `.docx` pair goes through redline_one_pair() -- Word's own comparison
 # engine (the `docx-compare` MCP tool) FIRST, then the documented redline chain.
@@ -37641,23 +37607,17 @@ def _cmd_redline_locked(ctx: Ctx, args) -> None:
 # human-readable before/after log (a marker .docx for a .docx pair) -- never a
 # file that only looks like a real tracked copy.
 #
-# The copies are AUXILIARIES (AUXILIARY_DOC_SUFFIXES): they are written BESIDE
+# The copies are AUXILIARIES (TRACKING_AUX_NAME_RE): they are written BESIDE
 # the candidate documents (except inside a1's hash-verified input `base/`, which
 # is left byte-identical) and mirrored under <root>/tracking/ with a manifest
 # and a README. They never enter a corpus digest, a pin, a judge view, a
 # fingerprint or the revision token. The pass is PURE CODE: it starts no agent
 # session, so it cannot change a champion, a score or a ranking -- both
-# properties are pinned by `.paper_test/test_difference_tracking.py`.
+# properties are pinned by the `.paper_test/test_difference_tracking_*_*.py` parts.
 # =====================================================================
 
 TRACKING_DIRNAME = "tracking"
 TRACKING_MANIFEST = "manifest.json"
-TRACK_LABEL_ORIGINAL = "original"
-TRACK_LABEL_PREVIOUS = "previous"
-# A published winner's previous-version baseline is the PREVIOUS ROUND's winner;
-# its family carries its own suffix (`tracking-prev-winner`) so a winner's
-# marked-up copy is never confused with a document's own previous-version copy.
-TRACK_LABEL_PREV_WINNER = "prev-winner"
 LATEXDIFF_CMD = "latexdiff"
 LATEXDIFF_TIMEOUT = 600
 
@@ -37675,34 +37635,41 @@ def fresh_package_sources(ctx: Ctx, r: int, vid: str) -> list:
 
 
 def tracking_previous_baseline(ctx: Ctx, r: int, vid: str) -> tuple:
-    """(version id, sources) of the version `vid` was derived FROM.
+    """(token, sources, note) of the version `vid` was derived FROM.
 
-    rewrite   -> the round base (the version before it was rewritten)
-    revise    -> the round base (the version before it was reviewed+revised)
-    integrate -> the integration's own `self/` pool member (the version that
-                 became the integrated one by incorporating the donor strengths)
-    a1/other  -> none: a1 IS the previous version (round 1: the pristine
-                 original; round r>1: a byte-identical copy of the pin), so a
-                 previous-baseline copy would compare it with itself.
+    The token is the baseline's id in the pipeline's own vocabulary, so the
+    auxiliary name says what the difference is against:
+
+    rewrite   -> `a1` (the round base = the version before it was rewritten)
+    revise    -> `a1` (the round base = the version before it was reviewed)
+    integrate -> the integration's own `self/` member id, which is a pool id
+                 (`a1`, `w<k>` or `a<k>`) -- the version it reworked
+    a1/other  -> none: a1 IS the previous version (round 1: a copy of the
+                 pristine original; round r>1: a copy of the previous
+                 champion), so a copy against itself would say nothing.
     """
     arm = arm_of_vid(vid)
     if arm == "integrate":
         rec = ctx.run(rid_for_fresh(r, vid)) or {}
         self_id = str(rec.get("self_id") or A1_ID)
-        return self_id, corpus_sources(ctx, r, self_id)
+        return self_id, corpus_sources(ctx, r, self_id), (
+            f"the integration's own base (self/{self_id}: the version this "
+            f"integration reworked)")
     if arm in ("rewrite", "revise"):
-        return A1_ID, corpus_sources(ctx, r, A1_ID)
-    return "", []
+        note = (f"the round base (a1: the pinned champion of round {r - 1}, published as "
+                f"round{r - 1}_winner/)" if r > 1
+                else "the round base (a1: the pristine original's round-1 copy)")
+        return A1_ID, corpus_sources(ctx, r, A1_ID), note
+    return "", [], ""
 
 
 def tracking_baselines(ctx: Ctx, r: int, vid: str) -> list:
-    """[(label, version id, sources, note)] for one version."""
-    out = [(TRACK_LABEL_ORIGINAL, ORIGINAL_ID, [(ctx.pristine, "", ())],
+    """[(token, sources, note)] for one version, original first."""
+    out = [(TRACK_TOKEN_ORIGINAL, [(ctx.pristine, "", ())],
             "the pre-conformed original (non_revised/)")]
-    prev_id, prev_sources = tracking_previous_baseline(ctx, r, vid)
-    if prev_id and any(src.is_dir() for src, _p, _e in prev_sources):
-        out.append((TRACK_LABEL_PREVIOUS, prev_id, prev_sources,
-                    "the version this one was derived from"))
+    token, prev_sources, note = tracking_previous_baseline(ctx, r, vid)
+    if token and any(src.is_dir() for src, _p, _e in prev_sources):
+        out.append((token, prev_sources, note))
     return out
 
 
@@ -37950,44 +37917,40 @@ def _reusable_redline(index: dict, r: int, vid: str, source: str, pair: dict) ->
 
 
 def _track_one_entry(ctx: Ctx, entry: dict, *, out_key: str, r: int, vid: str,
-                     label: str, base_id: str, base_sources: list, note: str, srcs: list,
+                     token: str, base_sources: list, note: str, srcs: list,
                      tool: str, redline_cmd: list, index: dict, in_package: bool,
-                     quiet: bool) -> None:
-    """Track ONE baseline of one entry (a version or a published winner)."""
-    if label in (TRACK_LABEL_PREVIOUS, TRACK_LABEL_PREV_WINNER):
-        entry["previous_baseline"] = base_id
+                     quiet: bool, memo: dict = None) -> None:
+    """Track ONE baseline (token) of one entry (a version or a published winner)."""
+    if token != TRACK_TOKEN_ORIGINAL:
+        entry["previous_baseline"] = token
     if not any(s.is_dir() for s, _p, _e in base_sources):
-        entry["skipped"].append({"baseline": label, "reason": "no base corpus"})
+        entry["skipped"].append({"baseline": token, "reason": "no base corpus"})
         return
     for ext in TRACKABLE_EXTS:
         pairs, unmatched_base, unmatched_cand = match_track_pairs(base_sources, srcs, ext)
         for rel in unmatched_base:
             entry["skipped"].append({
-                "baseline": label, "base_rel": rel,
+                "baseline": token, "base_rel": rel,
                 "reason": f"no corresponding {ext} in this version"})
         for rel in unmatched_cand:
             entry["skipped"].append({
-                "baseline": label, "revised_rel": rel,
-                "reason": f"new {ext} with no counterpart in the {label} baseline"})
+                "baseline": token, "revised_rel": rel,
+                "reason": f"new {ext} with no counterpart in the {token} baseline"})
         for pair in pairs:
             # Which redlines-tree label may stand in for THIS pair: the original
             # baseline is `from-original`; a baseline that really is the round
-            # base (a rewrite/revise arm's previous version, or a winner's
-            # previous winner, whose content IS the round base) is `from-base`.
-            # Anything else (an integration's own `self/` member) is compared
-            # fresh -- the digest gate in _reusable_redline would refuse the
-            # mismatched file anyway.
+            # base (the `a1` token, or a previous winner whose content IS the
+            # round base) is `from-base`. Anything else (an integration's own
+            # `self/` member) is compared fresh -- the digest gate in
+            # _reusable_redline would refuse a mismatched file anyway.
             reuse = ""
-            if label == TRACK_LABEL_ORIGINAL:
+            if token == TRACK_TOKEN_ORIGINAL:
                 reuse = "from-original"
-            elif label == TRACK_LABEL_PREVIOUS and base_id == A1_ID:
+            elif token == A1_ID or token.lower().startswith("winner"):
                 reuse = "from-base"
-            elif label == TRACK_LABEL_PREV_WINNER:
-                reuse = "from-base"
-            rec = track_one_pair(ctx, r, vid, label, ext, pair, tool,
+            rec = track_one_pair(ctx, r, vid, token, ext, pair, tool,
                                  redline_cmd, index, out_key=out_key,
-                                 in_package=in_package, base_id=base_id,
-                                 reuse_source=reuse)
+                                 in_package=in_package, reuse_source=reuse, memo=memo)
             rec["baseline_note"] = note
             entry["comparisons"].append(rec)
             if not quiet:
@@ -37999,7 +37962,7 @@ def _track_one_entry(ctx: Ctx, entry: dict, *, out_key: str, r: int, vid: str,
                     result = "skipped (tool=none)"
                 else:
                     result = "FAILED"
-                print(f"  [track] {out_key}: {pair['cand_rel']} <- {label} {result}")
+                print(f"  [track] {out_key}: {pair['cand_rel']} <- {token} {result}")
 
 
 def _close_tracking_entry(entry: dict) -> None:
@@ -38033,27 +37996,22 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
     index = redline_index(redlines_manifest)
     manifest = {
         "generated": utcnow(), "pipeline_root": str(ctx.root), "tool": tool,
-        "source_labels": {
-            TRACK_LABEL_ORIGINAL: f"the pre-conformed original ({ctx.pristine.name}/)",
-            TRACK_LABEL_PREVIOUS: ("the version this one was derived from: the round base for "
-                                   "rewrite/revise arms, the integration's own self/ member "
-                                   "for an integrated arm"),
-            TRACK_LABEL_PREV_WINNER: ("the previous round's published winner "
-                                      "(round<r-1>_winner/), for a winner of round r > 1"),
-        },
+        "token_scheme": (
+            "<token> is the baseline a copy was compared against: `original` for the "
+            "pre-conformed submission (non_revised/), or the baseline version's id -- the "
+            "round base `a1`, a rewrite `w<k>`, a revision `a<k>` (an integration's own "
+            "self/ member), or `winner<r>` for the published winner of round r"),
         "versions": [], "notes": [
-            "A copy named <name>.tracking-<baseline>.<ext> shows the difference between the "
-            "candidate document and its baseline: real Word tracked changes for .docx (the "
-            "docx-compare MCP tool / redline chain), a latexdiff copy for .tex/.bib.",
-            "When the difference tool failed, the sibling <name>.logging-original.<ext>, "
-            "<name>.logging-previous.<ext> or <name>.logging-prev-winner.<ext> carries a readable "
-            "before/after log instead.",
+            "A copy named <name>.tracking-<token>.<ext> shows the difference between the "
+            "candidate document and the baseline named by <token>: real Word tracked changes "
+            "for .docx (the docx-compare MCP tool / redline chain), a latexdiff copy for "
+            ".tex/.bib. <name>.logging-<token>.<ext> is the readable before/after log written "
+            "instead when the difference tool failed.",
             "Every copy here is an AUXILIARY: it is excluded from every judged/pinned corpus, "
             "fingerprint and revision token, and the pass starts no agent session.",
             "The round's PUBLISHED winner directory (round<r>_winner/) is tracked in place as "
-            "well: every winner tracks the pre-conformed original, and round r > 1 also tracks "
-            "the previous round's winner (its previous version), under the dedicated "
-            "tracking-prev-winner / logging-prev-winner names.",
+            "well: every winner tracks the pre-conformed original, and the winner of round "
+            "r > 1 also tracks the winner of round r-1 (`tracking-winner<r-1>`).",
         ]}
     if not index:
         manifest["notes"].append(
@@ -38078,6 +38036,12 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
     def flush_versions() -> None:
         manifest["versions"] = [prev_versions[k] for k in version_order]
 
+    # {(base_digest, cand_digest, ext): out path} shared by EVERY entry of this
+    # invocation: the round-1 pairs repeat (the `a1` baseline is the pristine
+    # original's byte-identical copy, and a winner directory holds the
+    # champion's bytes), so a pair already produced is copied instead of driving
+    # Word/latexdiff again.
+    memo = {}
     for r in rounds:
         round_versions = (versions if versions is not None else round_produced_ids(ctx, r))
         for vid in round_versions:
@@ -38091,18 +38055,18 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
             entry = {"round": r, "version": vid, "tool": tool,
                      "out_dir": f"{TRACKING_DIRNAME}/r{r}_{vid}/",
                      "previous_baseline": "", "comparisons": [], "skipped": []}
-            for label, base_id, base_sources, note in tracking_baselines(ctx, r, vid):
+            for token, base_sources, note in tracking_baselines(ctx, r, vid):
                 _track_one_entry(ctx, entry, out_key=f"r{r}_{vid}", r=r, vid=vid,
-                                 label=label, base_id=base_id, base_sources=base_sources,
+                                 token=token, base_sources=base_sources,
                                  note=note, srcs=srcs, tool=tool, redline_cmd=redline_cmd,
                                  index=index, in_package=(arm_of_vid(vid) != "base"),
-                                 quiet=quiet)
+                                 quiet=quiet, memo=memo)
             _close_tracking_entry(entry)
             put_version(entry)
         # The round's published winner: tracked in place (round<r>_winner/) and
         # mirrored under <root>/tracking/round<r>_winner/. Every winner tracks
-        # the pre-conformed original; round r > 1 also tracks the previous
-        # round's winner -- the version it was derived from.
+        # the pre-conformed original; the winner of round r > 1 also tracks the
+        # previous round's winner (the `winner<r-1>` token).
         wrec = ctx.round_get(r) or {}
         wname = str(wrec.get("winner_dir") or "")
         wdir = (ctx.root / wname) if wname else None
@@ -38117,17 +38081,18 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
         # round-close redlines pass already produced for that version is valid
         # here too (and saves a second Word/COM round trip per pair).
         champ_vid = str(wrec.get("winner_id") or f"round{r}_winner")
-        for label, base_id, base_sources, note in (
-                (TRACK_LABEL_ORIGINAL, ORIGINAL_ID, [(ctx.pristine, "", ())],
+        for token, base_sources, note in (
+                (TRACK_TOKEN_ORIGINAL, [(ctx.pristine, "", ())],
                  "the pre-conformed original (non_revised/)"),
-                (TRACK_LABEL_PREV_WINNER, (f"round{r - 1}_winner" if r > 1 else ""),
+                ((f"winner{r - 1}" if r > 1 else ""),
                  ([(winner_dir_of(ctx, r - 1), "", ())] if r > 1 else []),
-                 "the previous round's published winner")):
+                 (f"the published winner of round {r - 1} (round{r - 1}_winner/)" if r > 1
+                  else ""))):
             _track_one_entry(ctx, entry, out_key=f"round{r}_winner", r=r,
-                             vid=champ_vid, label=label, base_id=base_id,
+                             vid=champ_vid, token=token,
                              base_sources=base_sources, note=note, srcs=winner_srcs,
                              tool=tool, redline_cmd=redline_cmd, index=index,
-                             in_package=True, quiet=quiet)
+                             in_package=True, quiet=quiet, memo=memo)
         _close_tracking_entry(entry)
         put_version(entry)
     flush_versions()
@@ -38136,9 +38101,10 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
     return manifest
 
 
-def track_one_pair(ctx: Ctx, r: int, vid: str, label: str, ext: str, pair: dict,
+def track_one_pair(ctx: Ctx, r: int, vid: str, token: str, ext: str, pair: dict,
                    tool: str, redline_cmd: list, index: dict, out_key: str = None,
-                   in_package: bool = True, base_id: str = "", reuse_source: str = "") -> dict:
+                   in_package: bool = True, reuse_source: str = "",
+                   memo: dict = None) -> dict:
     """Produce ONE tracking copy (+ its logging fallback) for one pair.
 
     `out_key` is the directory under <root>/tracking/ the copy is mirrored into
@@ -38146,30 +38112,35 @@ def track_one_pair(ctx: Ctx, r: int, vid: str, label: str, ext: str, pair: dict,
     `in_package` writes the copy beside the candidate document as well -- false
     only for a1, whose `base/` is a raw hash-verified input manifest.
 
-    `base_id` names the version the baseline came from (recorded in the manifest)
-    and `reuse_source` is the REDLINES-tree label whose already-produced redline
-    may stand in for this pair -- "from-original" only for the original
-    baseline, "from-base" only when the baseline really is the round base (the
-    rewrite/revise arms, and a winner's previous winner, which IS the round
-    base's content). The reuse itself is digest-gated (see `_reusable_redline`).
+    `token` names the baseline (it is the copy's file-name token and the
+    manifest row's `baseline`); `reuse_source` is the REDLINES-tree label whose
+    already-produced redline may stand in for this pair -- "from-original" only
+    for the original baseline, "from-base" only when the baseline really is the
+    round base. The reuse itself is digest-gated (see `_reusable_redline`).
+
+    `memo` is the entry's {(base_digest, cand_digest, ext): out path} map: the
+    round-1 tracks repeat the SAME comparison twice (against the pristine
+    original and against the round base `a1`, which is its byte-identical copy),
+    so a pair already produced in this entry is copied instead of driving the
+    difference tool again.
     """
     base, cand = pair["base_path"], pair["cand_path"]
-    suffix = tracking_aux_suffix(label, ext)
-    fb_suffix = tracking_aux_suffix(label, ext, fallback=True)
+    suffix = tracking_aux_suffix(token, ext)
+    fb_suffix = tracking_aux_suffix(token, ext, fallback=True)
     rel_dir = Path(pair["cand_rel"]).parent
-    persist_root = ctx.root / TRACKING_DIRNAME / (out_key or f"r{r}_{vid}") / label
+    persist_root = ctx.root / TRACKING_DIRNAME / (out_key or f"r{r}_{vid}") / token
     persist_out = persist_root / rel_dir / f"{cand.stem}{suffix}"
     persist_fallback = persist_root / rel_dir / f"{cand.stem}{fb_suffix}"
     # The in-package copy: written beside the candidate document, EXCEPT for the
     # a1 base, whose `base/` is a raw hash-verified input manifest (writing into
     # it would read as a modified input). a1 keeps its copies under <root>/tracking/.
     in_pkg_out = (cand.parent / f"{cand.stem}{suffix}") if in_package else None
-    rec = {"baseline": label, "base_version": base_id or None, "ext": ext,
+    rec = {"baseline": token, "ext": ext,
            "base_rel": pair["base_rel"], "revised_rel": pair["cand_rel"],
            "basis": pair["basis"], "out": persist_out.relative_to(ctx.root).as_posix(),
            "in_package": (in_pkg_out.relative_to(ctx.root).as_posix() if in_pkg_out else None),
            "fallback": None, "fallback_out": None, "tool": None, "ok": False,
-           "attempts": [], "warning": None, "identical": False}
+           "attempts": [], "warning": None, "identical": False, "reused_from": None}
     if tool == "none":
         # `--tool none` asks for NO difference tool at all (the same contract as
         # `redline --tool none`): the row is reported as skipped and no copy --
@@ -38177,6 +38148,25 @@ def track_one_pair(ctx: Ctx, r: int, vid: str, label: str, ext: str, pair: dict,
         rec["skipped"] = True
         rec["reason"] = "tool=none: only the manifest/report was requested"
         return rec
+    key = (pair["base_digest"], pair["cand_digest"], ext)
+    if memo is not None and memo.get(key):
+        earlier = ctx.root / str(memo[key])
+        if earlier.is_file():
+            persist_out.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(earlier, persist_out)
+            rec["ok"] = True
+            rec["tool"] = "copied-from-identical-baseline"
+            rec["reused_from"] = str(memo[key])
+            rec["attempts"] = [{"backend": "identical-baseline-copy", "cmd": [], "rc": 0,
+                                "ok": True,
+                                "detail": f"the same pair was already tracked as "
+                                          f"{memo[key]}; the copy is byte-identical"}]
+            if in_pkg_out is not None:
+                try:
+                    shutil.copy2(persist_out, in_pkg_out)
+                except OSError as e:                            # noqa: BLE001
+                    rec["warning"] = f"the in-package copy failed: {e}"
+            return rec
     if pair["base_digest"] == pair["cand_digest"] and ext == ".docx":
         # Byte-identical pair: no difference to mark. The built-in writer emits a
         # valid, mark-free copy (cheap and deterministic), so no Word/COM round
@@ -38208,6 +38198,8 @@ def track_one_pair(ctx: Ctx, r: int, vid: str, label: str, ext: str, pair: dict,
     if res.get("ok"):
         rec["ok"], rec["tool"] = True, res.get("tool")
         rec["attempts"], rec["warning"] = res.get("attempts") or [], res.get("warning")
+        if memo is not None:
+            memo.setdefault(key, rec["out"])
         if in_pkg_out is not None:
             try:
                 shutil.copy2(persist_out, in_pkg_out)
@@ -38224,9 +38216,9 @@ def track_one_pair(ctx: Ctx, r: int, vid: str, label: str, ext: str, pair: dict,
             break
     reason = reason or "the difference tool produced no output"
     if ext == ".docx":
-        fb = write_docx_logging_fallback(base, cand, persist_fallback, label, reason)
+        fb = write_docx_logging_fallback(base, cand, persist_fallback, token, reason)
     else:
-        fb = write_text_logging_fallback(base, cand, persist_fallback, label, reason)
+        fb = write_text_logging_fallback(base, cand, persist_fallback, token, reason)
     rec["attempts"] = res.get("attempts") or []
     if fb.get("ok"):
         rec["ok"] = True
@@ -38256,27 +38248,23 @@ def _md_cell(text, limit: int = 160) -> str:
 
 
 def tracking_readme(manifest: dict) -> str:
-    labels = manifest.get("source_labels") or {}
-    L = ["# Difference tracking (versus the original and the previous version)", "",
+    L = ["# Difference tracking (one copy per baseline)", "",
          f"Generated: {manifest['generated']}  |  requested tool: `{manifest['tool']}`", "",
-         "Every submission version is tracked twice: against the PRE-CONFORMED ORIGINAL",
-         f"(`{TRACK_LABEL_ORIGINAL}`: {labels.get(TRACK_LABEL_ORIGINAL, '')}) and against the",
-         f"version it was derived from (`{TRACK_LABEL_PREVIOUS}`:",
-         f"{labels.get(TRACK_LABEL_PREVIOUS, '')}).", "",
-         "Every PUBLISHED winner (`round<r>_winner/`) is tracked the same way: against the",
-         f"original (`{TRACK_LABEL_ORIGINAL}`) and, for r > 1, against the previous round's",
-         f"winner (`{TRACK_LABEL_PREV_WINNER}`: {labels.get(TRACK_LABEL_PREV_WINNER, '')}),",
-         "whose copies carry their own suffix so they are never confused with a document's",
-         "own previous-version copy.", "",
-         "File family (`.ext` = `.docx` / `.tex` / `.bib`):", "",
-         "| file | meaning |", "|---|---|",
-         "| `<name>.tracking-original.ext` | real tracked copy vs the pristine original |",
-         "| `<name>.logging-original.ext` | the fallback log when that comparison failed |",
-         "| `<name>.tracking-previous.ext` | real tracked copy vs the previous version |",
-         "| `<name>.logging-previous.ext` | the fallback log when that comparison failed |",
-         "| `<name>.tracking-prev-winner.ext` | winner's real tracked copy vs the previous "
-         "round's winner |",
-         "| `<name>.logging-prev-winner.ext` | the fallback log when that comparison failed |", "",
+         "Every submission version is tracked against the PRE-CONFORMED ORIGINAL and against",
+         "the version it was derived from; every PUBLISHED winner (`round<r>_winner/`) is",
+         "tracked against the original and (from round 2) against the previous round's winner.",
+         "", "The file name names the BASELINE it was compared against (the token):", "",
+         "| file (`.ext` = `.docx` / `.tex` / `.bib`) | meaning |", "|---|---|",
+         "| `<name>.tracking-original.ext` | vs the pre-conformed submission (`non_revised/`) |",
+         "| `<name>.tracking-a1.ext` | vs the round base `a1` (for round r > 1: the pinned "
+         "champion of round r-1, published as `round<r-1>_winner/`) |",
+         "| `<name>.tracking-w<k>.ext` | vs the k-th rewritten candidate (an integration's own "
+         "base) |",
+         "| `<name>.tracking-a<k>.ext` | vs the k-th revised candidate (an integration's own "
+         "base) |",
+         "| `<name>.tracking-winner<r>.ext` | vs the published winner of round r |",
+         "| `<name>.logging-<token>.ext` | the fallback log whenever that comparison could not "
+         "be produced |", "",
          "`.docx` pairs use Word's own comparison engine through the `docx-compare` MCP tool",
          "(`Word.Application.CompareDocuments`) when it is configured, then the documented",
          "redline chain (python-redlines[docxodus] -> docx-trackdiff -> --redline-cmd -> the",
@@ -38436,11 +38424,12 @@ def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
     work = Path(tempfile.mkdtemp(prefix="paper_pdf_"))
     try:
         shutil.copytree(pkg, work, dirs_exist_ok=True,
-                        ignore=shutil.ignore_patterns(
-                            "work", "~$*",
-                            *EVIDENCE_DIRNAMES,
-                            *[f"*{s}" for s in TRACKING_AUX_SUFFIXES],
-                            *[f"*{s}" for s in LEGACY_AUXILIARY_DOC_SUFFIXES]))
+                        # Name-based, not glob-based: the tracking token space is
+                        # open (a1/w2/winner1/...), so _is_aux_doc() decides.
+                        ignore=lambda _d, names: [
+                            n for n in names
+                            if n == "work" or n.startswith("~$")
+                            or n in EVIDENCE_DIRNAMES or _is_aux_doc(n)])
         argv = [exe, "-pdf", "-interaction=nonstopmode", "-halt-on-error", Path(rel).name]
         proc = subprocess.run(argv, cwd=str((work / rel).parent), capture_output=True,
                               timeout=timeout)
@@ -39222,9 +39211,13 @@ USAGE_EXAMPLES = """usage:
           docx-compare MCP tool first, then the redline chain), .tex/.bib
           (latexdiff), against the pre-conformed original AND the version each
           arm was derived from, plus every published winner against the original
-          and the previous round's winner. A failed compare writes the readable
-          <name>.logging-* fallback instead, never a fake tracked
-          copy. The same run compiles/converts the versions to PDF under
+          and the previous round's winner. The copy's file name NAMES THE
+          BASELINE it was compared against: <name>.tracking-<token>.<ext> with
+          <token> = original / a1 / w<k> / a<k> / winner<r> (the manifest's
+          baseline_note spells out what the token means for that row). A failed
+          compare writes the readable <name>.logging-<token>.<ext> fallback
+          instead, never a fake tracked copy. The same run compiles/converts the
+          versions to PDF under
           <root>/pdfs/ (latexmk; the docx-converter chain for DOCX). Both passes
           start NO agent session and cannot change a corpus, a pin or a decision;
           a compile/conversion failure is a WARNING. `--no-pdf` skips the PDF
@@ -39811,7 +39804,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="the round the marker must name (0 = do not check the round)")
     psc.set_defaults(func=cmd_selfcheck)
 
-    pag = sub.add_parser("agents", parents=[common], aliases=["sessions"],
+    pag = sub.add_parser("agents", parents=[common],
                          help="list the agent session names each round will run (a dry plan)")
     pag.add_argument("--only", metavar="SELECTION",
                      help="preview the sessions an equivalent `run --only SELECTION` invocation "
@@ -40032,13 +40025,11 @@ def build_parser() -> argparse.ArgumentParser:
     pp.set_defaults(func=cmd_prune)
 
     pat = sub.add_parser("conform", parents=[common],
-                         aliases=["template", "author-submission", "apply-template"],
                          help="AUTHOR the WHOLE submission inside the venue's official Word "
                               "templates: with --agent the LLM copies the templates and "
                               "replaces their placeholders with the real content (keeping "
                               "every template style, header, footer and bullet); without "
-                              "--agent the same job is done by the code-side pass. "
-                              "`apply-template` remains as an alias")
+                              "--agent the same job is done by the code-side pass")
     pat.add_argument("--source", default=None, metavar="DIR",
                      help="the package to rebuild (default: <root>/final_clean_version/, else "
                           "the last complete round's round<r>_winner/)")

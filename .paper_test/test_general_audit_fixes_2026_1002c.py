@@ -297,7 +297,7 @@ def test_docs_counts_and_cross_references():
           and "only for a CERTIFIED champion" not in _pipeline_help())
     # The docs must not contradict the code they describe: the attempt-history
     # table kept a removed 60-message cap, and the CLI list that editing agents
-    # read first (AGENT.md) was missing `conform`/its aliases.
+    # read first (AGENT.md) was missing `conform`.
     check("the README's attempts_log row matches _attempt_messages (no removed message cap)",
           len(nb._attempt_messages([f"m{i}" for i in range(80)])) == 80
           and "60 messages each" not in readme and "no message-count cap" in readme)

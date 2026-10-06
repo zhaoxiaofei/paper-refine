@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Difference tracking: naming, coverage, fallbacks -- and the two DO-NOT properties.
 
-Run:  python3 .paper_test/test_difference_tracking.py
+Run:  one of the `test_difference_tracking_*_*.py` parts.
 
 The feature under test (paper_pipeline.py): every version the pipeline produces
 is tracked against the pre-conformed original (`non_revised/`) and against the
-version it was derived from, into
+version it was derived from, into ONE copy per baseline whose file name NAMES
+that baseline:
 
-    <name>.tracking-original.<ext> / <name>.logging-original.<ext>
-    <name>.tracking-previous.<ext> / <name>.logging-previous.<ext>
-    <name>.tracking-prev-winner.<ext> / <name>.logging-prev-winner.<ext>
+    <name>.tracking-<baseline>.<ext> / <name>.logging-<baseline>.<ext>
+
+with <baseline> = `original`, the round base `a1`, a rewrite/revision id
+(`w1`, `a2`, ... -- the version an integration reworked) or a published round
+winner (`winner1`, ...).
 
 for .docx (Word's own compare engine via the docx-compare MCP tool, then the
 redline chain), .tex/.bib (latexdiff). A published round winner is tracked in
@@ -26,7 +29,9 @@ The two properties this suite exists for:
   * DO NOT add LLM usage: the pass starts no agent session (asserted by
     instrumenting every agent choke point and by a control e2e run).
 
-`PAPER_WS` retargets the suite at another copy of the tree.
+Part 1 covers the naming/exclusion rules, part 2 the pass and its fallbacks,
+part 3 the persistent PDF renders, part 4 the DO-NOT end-result comparison against a
+`--no-track` control. `PAPER_WS` retargets the parts at another copy of the tree.
 """
 from __future__ import annotations
 
@@ -61,6 +66,15 @@ def check(name, cond, detail=""):
 
 def skip(name, why):
     print(f"[skip] {name}  -- {why}")
+
+
+def _raises(fn, *args, **kwargs) -> bool:
+    """True when `fn(*args)` raises ValueError (the token/extension guard)."""
+    try:
+        fn(*args, **kwargs)
+    except ValueError:
+        return True
+    return False
 
 
 def scratch(prefix: str) -> Path:
@@ -101,18 +115,22 @@ BIB = "@article{a,\n  title={One},\n  year={2020}\n}\n"
 NON_AUX = ("manuscript.docx", "main.tex", "refs.bib", "notes.md", "fig1.png")
 AUX_SAMPLES = (
     "manuscript.tracking-original.docx", "manuscript.logging-original.docx",
-    "manuscript.tracking-previous.docx", "manuscript.logging-previous.docx",
-    "manuscript.tracking-prev-winner.docx", "manuscript.logging-prev-winner.docx",
-    "main.tracking-original.tex", "main.tracking-previous.tex",
-    "main.tracking-prev-winner.tex", "main.logging-original.tex",
-    "main.logging-previous.tex", "main.logging-prev-winner.tex",
-    "refs.tracking-original.bib", "refs.tracking-previous.bib",
-    "refs.tracking-prev-winner.bib", "refs.logging-original.bib",
-    "refs.logging-previous.bib", "refs.logging-prev-winner.bib",
-    # the pre-rename spellings (and the short-lived `log-previous` fallback)
-    # stay recognized
+    # the baseline token names the version the copy was compared against
+    "manuscript.tracking-a1.docx", "manuscript.logging-a1.docx",
+    "manuscript.tracking-w1.docx", "manuscript.logging-w1.docx",
+    "manuscript.tracking-a2.docx", "manuscript.logging-a2.docx",
+    "manuscript.tracking-winner1.docx", "manuscript.logging-winner1.docx",
+    "main.tracking-original.tex", "main.tracking-a1.tex", "main.tracking-w2.tex",
+    "main.logging-original.tex", "main.logging-a1.tex", "main.logging-w2.tex",
+    "refs.tracking-original.bib", "refs.tracking-a3.bib", "refs.tracking-winner12.bib",
+    "refs.logging-original.bib", "refs.logging-a3.bib", "refs.logging-winner12.bib",
+)
+# The superseded generic spellings are ordinary names now (back-compat was
+# dropped on purpose: only the baseline-named pattern is an auxiliary).
+SUPERSEDED_NAMES = (
     "manuscript.tracked.docx", "manuscript.before-after.docx",
-    "manuscript.log-previous.docx", "main.log-previous.tex", "refs.log-previous.bib",
+    "manuscript.tracking-previous.docx", "manuscript.log-previous.docx",
+    "manuscript.logging-prev-winner.docx", "main.tracking-previous.tex",
 )
 
 
@@ -195,29 +213,28 @@ def build_root(root: Path, source: Path, *, rounds: int = 2) -> "np.Ctx":
 def test_name_family_and_aux_rule():
     print()
     print("== the tracking name family + the auxiliary rule ==")
-    check("the family spells the three baselines x three extensions",
+    check("the suffix builder names the baseline and its extension",
           nb.tracking_aux_suffix("original", ".docx") == ".tracking-original.docx"
-          and nb.tracking_aux_suffix("previous", ".tex") == ".tracking-previous.tex"
-          and nb.tracking_aux_suffix("prev-winner", ".bib") == ".tracking-prev-winner.bib")
-    check("the fallbacks follow the requested spellings",
+          and nb.tracking_aux_suffix("a1", ".tex") == ".tracking-a1.tex"
+          and nb.tracking_aux_suffix("w2", ".bib") == ".tracking-w2.bib"
+          and nb.tracking_aux_suffix("winner3", ".docx") == ".tracking-winner3.docx")
+    check("the fallback differs by exactly the `logging` token",
           nb.tracking_aux_suffix("original", ".docx", True) == ".logging-original.docx"
-          and nb.tracking_aux_suffix("previous", ".docx", True) == ".logging-previous.docx"
-          and nb.tracking_aux_suffix("prev-winner", ".tex", True) == ".logging-prev-winner.tex")
-    check("the fallback family is uniformly `logging-*`",
-          all(s.startswith(".logging-") for s in nb.TRACKING_AUX_SUFFIXES
-              if s not in [f".tracking-{b}{e}" for b in ("original", "previous", "prev-winner")
-                           for e in (".docx", ".tex", ".bib")]),
-          str([s for s in nb.TRACKING_AUX_SUFFIXES if s.startswith(".log")]))
-    check("the short-lived `log-previous` spelling is only a LEGACY auxiliary",
-          ".log-previous.docx" in nb.LEGACY_AUXILIARY_DOC_SUFFIXES
-          and ".log-previous.docx" not in nb.TRACKING_AUX_SUFFIXES
-          and nb._is_aux_doc("doc.log-previous.docx"))
-    check("every one of the 18 suffixes is registered as an auxiliary",
-          all(nb._is_aux_doc("doc" + s) for s in nb.TRACKING_AUX_SUFFIXES)
-          and len(nb.TRACKING_AUX_SUFFIXES) == 18,
-          str(nb.TRACKING_AUX_SUFFIXES))
-    check("the pre-rename spellings stay recognized",
-          nb._is_aux_doc("doc.tracked.docx") and nb._is_aux_doc("doc.before-after.docx"))
+          and nb.tracking_aux_suffix("a1", ".docx", True) == ".logging-a1.docx"
+          and nb.tracking_aux_suffix("winner3", ".tex", True) == ".logging-winner3.tex")
+    check("an unknown baseline token is refused (no typo can invent a name)",
+          _raises(nb.tracking_aux_suffix, "previous", ".docx")
+          and _raises(nb.tracking_aux_suffix, "a1;rm", ".docx")
+          and _raises(nb.tracking_aux_suffix, "a1", ".zip"))
+    check("the whole baseline-named family is registered as an auxiliary",
+          all(nb._is_aux_doc("doc" + nb.tracking_aux_suffix(tok, ext))
+              for tok in ("original", "a1", "w1", "a2", "winner1", "winner12")
+              for ext in (".docx", ".tex", ".bib"))
+          and all(nb._is_aux_doc("doc" + nb.tracking_aux_suffix(tok, ".docx", True))
+                  for tok in ("original", "a1", "winner1")))
+    check("the superseded generic spellings are NOT auxiliaries any more",
+          not any(nb._is_aux_doc(n) for n in SUPERSEDED_NAMES),
+          str([n for n in SUPERSEDED_NAMES if nb._is_aux_doc(n)]))
     check("a normal document is NOT an auxiliary",
           not any(nb._is_aux_doc(n) for n in NON_AUX))
     # the scanner and the corpus builder must agree on the same file set
@@ -225,7 +242,7 @@ def test_name_family_and_aux_rule():
     fmt_mod = importlib.util.module_from_spec(fmt)
     sys.modules["paper_fmt"] = fmt_mod
     fmt.loader.exec_module(fmt_mod)
-    mismatched = [n for n in (list(AUX_SAMPLES) + list(NON_AUX))
+    mismatched = [n for n in (list(AUX_SAMPLES) + list(SUPERSEDED_NAMES) + list(NON_AUX))
                   if nb._is_aux_doc(n) != fmt_mod._is_aux_name(n)]
     check("paper_docx_format._is_aux_name agrees with the pipeline's rule",
           not mismatched, str(mismatched))
@@ -235,9 +252,9 @@ def test_name_family_and_aux_rule():
     rt = importlib.util.module_from_spec(rt_spec)
     sys.modules["paper_rt"] = rt
     rt_spec.loader.exec_module(rt)
-    own = [n for n in (list(AUX_SAMPLES) + list(NON_AUX))
-           if nb._is_aux_doc(n) != any(n.lower().endswith(s) for s in rt.AUX_SUFFIXES)]
-    check("the revision-token script excludes exactly the same suffixes",
+    own = [n for n in (list(AUX_SAMPLES) + list(SUPERSEDED_NAMES) + list(NON_AUX))
+           if nb._is_aux_doc(n) != bool(rt.AUX_NAME_RE.search(n.lower()))]
+    check("the revision-token script excludes exactly the same names",
           not own, str(own))
     # The deliverable validator must not try to compile an auxiliary .tex
     # (a fragment's latexdiff copy has no preamble and would read as a broken
@@ -306,7 +323,7 @@ def test_auxiliaries_never_change_an_identity():
 
 def test_tracking_pass_outputs():
     print()
-    print("== the pass writes original/previous/prev-winner copies ==")
+    print("== the pass writes one copy per named baseline ==")
     tmp = scratch("paper_track_run_")
     source = build_source(tmp)
     ctx = build_root(tmp, source, rounds=2)
@@ -326,7 +343,7 @@ def test_tracking_pass_outputs():
     check("w1 tracks the original AND the round base (its previous version)",
           by_version[(1, "w1")]["previous_baseline"] == "a1"
           and {c["baseline"] for c in by_version[(1, "w1")]["comparisons"]}
-          == {"original", "previous"})
+          == {"original", "a1"})
     check("i1's previous version is its own self/ member (w1)",
           by_version[(1, "i1")]["previous_baseline"] == "w1")
     check("round1_winner tracks only the original (there is no previous winner)",
@@ -334,16 +351,21 @@ def test_tracking_pass_outputs():
           and {c["baseline"] for c in by_version[(1, "round1_winner")]["comparisons"]}
           == {"original"})
     check("round2_winner tracks the original AND round1_winner",
-          by_version[(2, "round2_winner")]["previous_baseline"] == "round1_winner"
+          by_version[(2, "round2_winner")]["previous_baseline"] == "winner1"
           and {c["baseline"] for c in by_version[(2, "round2_winner")]["comparisons"]}
-          == {"original", "prev-winner"})
+          == {"original", "winner1"})
+    check("a round-2 arm's baseline token is the round base `a1` (the round-1 winner)",
+          by_version[(2, "a2")]["previous_baseline"] == "a1"
+          and any(c.get("baseline_note", "").startswith("the round base")
+                  for c in by_version[(2, "a2")]["comparisons"]),
+          str([c.get("baseline_note") for c in by_version[(2, "a2")]["comparisons"]]))
     # file placement: beside the documents and mirrored under <root>/tracking/
     w1 = ctx.root / "runs/r1_w1/rewritten"
     check("the copies sit beside the candidate documents",
           (w1 / "manuscript-a.tracking-original.docx").is_file()
-          and (w1 / "manuscript-a.tracking-previous.docx").is_file()
+          and (w1 / "manuscript-a.tracking-a1.docx").is_file()
           and (w1 / "main.tracking-original.tex").is_file()
-          and (w1 / "refs.tracking-previous.bib").is_file(),
+          and (w1 / "refs.tracking-a1.bib").is_file(),
           str(sorted(p.name for p in w1.iterdir())))
     check("a1 is the raw input copy: its copies live under tracking/ only",
           not (ctx.root / "runs/r1_a1/base/manuscript-a.tracking-original.docx").exists()
@@ -351,10 +373,10 @@ def test_tracking_pass_outputs():
     win2 = ctx.root / "round2_winner"
     check("the winner directory carries its own marked-up copies",
           (win2 / "manuscript-a.tracking-original.docx").is_file()
-          and (win2 / "manuscript-a.tracking-prev-winner.docx").is_file()
-          and (win2 / "main.tracking-prev-winner.tex").is_file())
+          and (win2 / "manuscript-a.tracking-winner1.docx").is_file()
+          and (win2 / "main.tracking-winner1.tex").is_file())
     check("the tracking tree mirrors the winners under their own key",
-          (ctx.root / "tracking/round2_winner/prev-winner/main.tracking-prev-winner.tex")
+          (ctx.root / "tracking/round2_winner/winner1/main.tracking-winner1.tex")
           .is_file())
     check("the manifest and README are written",
           (ctx.root / "tracking/manifest.json").is_file()
@@ -367,9 +389,9 @@ def test_tracking_pass_outputs():
           not any(r.startswith(("raw_data/", "raw_figs/", "human_review_feedback/"))
                   for r in tracked_rels), str(tracked_rels))
     readme = (ctx.root / "tracking/README.md").read_text(encoding="utf-8")
-    check("the README documents the whole family and the no-agent rule",
-          all(s in readme for s in (".tracking-original", ".tracking-previous",
-                                    ".tracking-prev-winner", ".logging-prev-winner",
+    check("the README documents the token scheme and the no-agent rule",
+          all(s in readme for s in (".tracking-original", "tracking-a1",
+                                    "tracking-w<k>", "tracking-winner<r>",
                                     "starts no agent session")))
 
 
@@ -395,10 +417,10 @@ def test_redline_reuse_is_digest_gated():
     check("the integration's previous baseline is its self/ member", 
           entry["previous_baseline"] == "w1")
     prev_rec = next(c for c in entry["comparisons"]
-                    if c["baseline"] == "previous" and c["ext"] == ".docx")
+                    if c["baseline"] == "w1" and c["ext"] == ".docx")
     with zipfile.ZipFile(ctx.root / prev_rec["out"]) as z:
         xml = z.read("word/document.xml").decode("utf-8", "replace")
-    check("the previous copy is the diff against self/ (w1), never the round base",
+    check("the w1-baseline copy is the diff against self/ (w1), never the round base",
           "NEW" in xml and prev_rec["identical"] is False, xml[:200])
     orig_rec = next(c for c in entry["comparisons"]
                     if c["baseline"] == "original" and c["ext"] == ".docx")
@@ -449,7 +471,7 @@ def test_latexdiff_and_fallbacks():
         # (no fake diff, and no failure).
         i1 = next(v for v in mf["versions"] if v["version"] == "i1")
         bib_rec = next(c for c in i1["comparisons"]
-                       if c["revised_rel"] == "refs.bib" and c["baseline"] == "previous")
+                       if c["revised_rel"] == "refs.bib" and c["baseline"] == "w1")
         check("a byte-identical pair yields an identical copy, not a failure",
               (ctx.root / bib_rec["out"]).read_text(encoding="utf-8")
               == (ctx.root / "runs/r1_w1/rewritten/refs.bib").read_text(encoding="utf-8")
@@ -500,8 +522,8 @@ def test_latexdiff_and_fallbacks():
 # =====================================================================
 
 def test_fallback_names_are_uniformly_logging():
-    """A failed comparison must be reported under the uniform `logging-*` name
-    (never the short-lived `log-previous` spelling)."""
+    """A failed comparison must be reported as `<name>.logging-<token>.<ext>`,
+    with the SAME baseline token as the real copy would have carried."""
     print()
     print("== a failed comparison writes the uniform `logging-*` fallback ==")
     tmp = scratch("paper_track_fbname_")
@@ -522,12 +544,52 @@ def test_fallback_names_are_uniformly_logging():
           tex_rows and all(c.get("ok") and c.get("fallback") for c in tex_rows),
           str([(c["baseline"], c.get("fallback"), c.get("tool")) for c in tex_rows]))
     names = [Path(c["fallback_out"]).name for c in tex_rows]
-    check("the fallback files carry the `logging-*` family (never `log-previous`)",
-          all(n.startswith("main.logging-") for n in names)
-          and not any("log-previous" in n for n in names), str(names))
-    check("the fallback sits under the baseline directory with the right name",
+    check("the fallback files carry the `logging-*` family with the baseline token",
+          sorted(names) == ["main.logging-a1.tex", "main.logging-original.tex"], str(names))
+    check("the fallback sits under the baseline-token directory",
           (ctx.root / "tracking/r1_w1/original/main.logging-original.tex").is_file()
-          and (ctx.root / "tracking/r1_w1/previous/main.logging-previous.tex").is_file())
+          and (ctx.root / "tracking/r1_w1/a1/main.logging-a1.tex").is_file())
+
+
+def test_identical_baselines_are_tracked_once():
+    """Round 1's `a1` IS the pristine original's copy: the two baselines must
+    both produce a named copy, but the difference tool runs ONCE (the second
+    copy is taken from the first, so a Word/COM round trip is not repeated)."""
+    print()
+    print("== identical baselines (round-1 a1 == original) are compared once ==")
+    tmp = scratch("paper_track_memo_")
+    source = build_source(tmp)
+    ctx = build_root(tmp, source, rounds=1)
+    runs = []
+    saved = nb.latexdiff_one_pair
+
+    def counting(base, cand, out, **kw):
+        runs.append(str(out))
+        return saved(base, cand, out, **kw)
+
+    nb.latexdiff_one_pair = counting
+    try:
+        mf = nb.run_difference_tracking(ctx, rounds=[1], versions=["w1"], quiet=True)
+    finally:
+        nb.latexdiff_one_pair = saved
+    entry = mf["versions"][0]
+    tex_rows = [c for c in entry["comparisons"] if c["ext"] == ".tex"]
+    check("both .tex baselines have their own copy",
+          sorted(Path(c["out"]).name for c in tex_rows)
+          == ["main.tracking-a1.tex", "main.tracking-original.tex"],
+          str([c["out"] for c in tex_rows]))
+    check("the difference tool ran once per pair, not once per baseline token",
+          len([r for r in runs if r.endswith("/r1_w1/original/main.tracking-original.tex")]) == 1
+          and len([r for r in runs if "/r1_w1/" in r]) == 2,   # main.tex + refs.bib
+          str(runs))
+    memo_row = next(c for c in tex_rows if c.get("reused_from"))
+    check("the second copy records where it came from",
+          memo_row["tool"] == "copied-from-identical-baseline"
+          and Path(memo_row["reused_from"]).name != Path(memo_row["out"]).name,
+          str(memo_row)[:200])
+    check("the copies are byte-identical (same comparison, same bytes)",
+          (ctx.root / tex_rows[0]["out"]).read_bytes()
+          == (ctx.root / tex_rows[1]["out"]).read_bytes())
 
 
 def test_tool_none_writes_no_copy():
@@ -698,7 +760,10 @@ def end_result_state(state: dict) -> dict:
 def run_stub_round(root: Path, source: Path, extra_args: list) -> subprocess.CompletedProcess:
     setup = [sys.executable, str(WS / "paper_pipeline.py"), "setup",
              "--source", str(source), "--root", str(root), "--rounds", "1", "--judges", "1",
-             "--rewrites", "1", "--revises", "1", "--integrators", "1"]
+             "--rewrites", "0", "--revises", "1", "--integrators", "1"]
+    # A SMALL plan on purpose: one revise arm + its integration keeps the two
+    # stub rounds fast while still exercising a fresh arm, an integration arm,
+    # a winner and the tracking/PDF passes over every one of them.
     subprocess.run(setup, capture_output=True, text=True, check=True, timeout=900)
     run = [sys.executable, str(WS / "paper_pipeline.py"), "run", "--root", str(root),
            "--agent-cmd", json.dumps([sys.executable, str(STUB)]),
@@ -751,11 +816,16 @@ def test_end_to_end_end_results_are_unchanged():
                   for k, _p in nb.corpus_files_for_view(ctx_t, 1, "w1")),
           str([k for k, _p in nb.corpus_files_for_view(ctx_t, 1, "w1")]))
     check("the treated run really produced the tracking copies",
-          any((treated / "runs/r1_w1/rewritten").glob("*.tracking-*"))
+          any((treated / "runs/r1_a2_revise/revised").glob("*.tracking-*"))
+          and any((treated / "runs/r1_i1/integrated").glob("*.tracking-*"))
           and (treated / "tracking/manifest.json").is_file()
           and (treated / "pdfs/manifest.json").is_file())
     check("the control run produced none of them",
           not (control / "tracking").exists() and not (control / "pdfs").exists())
+    check("the tracking manifest names the baselines it compared",
+          {c["baseline"] for v in json.loads((treated / "tracking" / "manifest.json")
+                                             .read_text(encoding="utf-8"))["versions"]
+           for c in v["comparisons"]} == {"original", "a1"})
     check("the champion's published winner carries the marked-up copies",
           any((treated / str(st_t["rounds"]["1"]["winner_dir"])).glob("*.tracking-original.*")),
           str(st_t["rounds"]["1"].get("winner_dir")))
@@ -768,27 +838,22 @@ def _diff_hint(a: dict, b: dict) -> str:
     return ""
 
 
-def main():
-    test_name_family_and_aux_rule()
-    test_auxiliaries_never_change_an_identity()
-    test_tracking_pass_outputs()
-    test_redline_reuse_is_digest_gated()
-    test_latexdiff_and_fallbacks()
-    test_fallback_names_are_uniformly_logging()
-    test_tool_none_writes_no_copy()
-    test_no_agent_session_is_started()
-    test_pdf_pass_is_persistent_and_nonfatal()
-    test_end_to_end_end_results_are_unchanged()
-    cleanup()
+def run_parts(funcs, banner: str) -> int:
+    """Run this part's sections in THIS process (the suite is split so GNU
+    parallel can schedule the independent sections concurrently; every part
+    imports this lib with its own subset)."""
+    try:
+        for fn in funcs:
+            fn()
+    except Exception as e:                                      # noqa: BLE001
+        check("the part's sections completed", False, f"{type(e).__name__}: {e}")
+    finally:
+        cleanup()
     print()
     if FAILS:
-        print(f"{len(FAILS)} check(s) FAILED:")
+        print(f"{len(FAILS)} CHECK(S) FAILED:")
         for f in FAILS:
             print(f"  - {f}")
         return 1
-    print("All difference-tracking checks PASSED")
+    print(banner)
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

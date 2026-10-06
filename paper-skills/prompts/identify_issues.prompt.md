@@ -930,10 +930,8 @@ classes before a candidate is fingerprinted, pinned or judged.
 
 **Enumeration:** `review/work/FORMAT_SCAN.json` (the code-side scan of `base/`,
 repeated as rows in `review/artifacts/M20_formatting.md`): every `.docx` of the
-corpus, skipping the difference-tracking auxiliaries (the
-`*.tracking-original|previous.<ext>` / `*.logging-original.<ext>` /
-`*.logging-previous.<ext>` family, and the pre-rename `*.tracked.docx` /
-`*.before-after.docx` spellings) and stage scratch (`work/`). AUDIT that table
+corpus, skipping the difference-tracking auxiliaries (`*.tracking-<baseline>.<ext>`
+/ `*.logging-<baseline>.<ext>`) and stage scratch (`work/`). AUDIT that table
 row by row and ADD every
 formatting defect the scan cannot see (font family/size, justification, line
 spacing, legend placement, table formatting, heading numbering). Columns:

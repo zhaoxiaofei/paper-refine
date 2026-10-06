@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The audit stage's rebuild, the completion signal's location, the self-check.
 
-Run:  python3 .paper_test/test_stage_signals_and_rebuild.py
+Run:  one of the `test_stage_signals_and_rebuild_*_*.py` parts.
 
 Every check FAILS on the pre-fix tree and PASSES on the fixed one. The three
 failures come from root `cnb-13to14-0923-1040-2482bdf` (2026-09-23):
@@ -997,35 +997,22 @@ def test_process_died_after_the_audit_finished():
           "audit/audit.json" in nb.STRUCTURED_OUTPUT_JSON.get("audit", ()))
 
 
-def main() -> int:
-    test_kind_support_tables()
-    test_rebuild_recreates_an_audit_sandbox()
-    test_audit_retry_completes_the_round()
-    test_relocation_semantics()
-    test_misplaced_marker_is_adopted_end_to_end()
-    test_foreign_stray_marker_fails_with_its_path()
-    test_short_rows_are_named()
-    test_selfcheck()
-    test_prompts_state_the_marker_location()
-    test_misplaced_deliverable_is_rescued()
-    test_selfcheck_covers_the_other_stages()
-    test_other_stages_recover_from_a_failed_attempt()
-    test_misplaced_revision_ledger_is_adopted_end_to_end()
-    test_judge_check_ids_the_prompt_names_are_accepted()
-    test_judge_prompt_gets_a_blinding_safe_preflight()
-    test_judge_selfcheck_catches_a_bad_sheet()
-    test_registry_reader_backup_and_compaction()
-    test_process_died_after_the_audit_finished()
-    cleanup()
+def run_parts(funcs, banner: str) -> int:
+    """Run this part's sections in THIS process (the suite is split so GNU
+    parallel can schedule the independent sections concurrently; every part
+    imports this lib with its own subset)."""
+    try:
+        for fn in funcs:
+            fn()
+    except Exception as e:                                      # noqa: BLE001
+        check("the part's sections completed", False, f"{type(e).__name__}: {e}")
+    finally:
+        cleanup()
     print()
     if FAILS:
-        print(f"FAILED {len(FAILS)} check(s):")
+        print(f"{len(FAILS)} CHECK(S) FAILED:")
         for f in FAILS:
             print(f"  - {f}")
         return 1
-    print("all checks passed")
+    print(banner)
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

@@ -12,17 +12,11 @@ from pathlib import Path
 
 
 def np_aux(path: Path) -> bool:
-    """Mirror the pipeline's auxiliary-name rule for this stub (keep in step
-    with paper_pipeline.AUXILIARY_DOC_SUFFIXES)."""
-    n = path.name.lower()
-    if n.endswith((".tracked.docx", ".before-after.docx")):
-        return True
-    return any(n.endswith(f".tracking-{base}{ext}") for base in ("original", "previous",
-                                                                 "prev-winner")
-               for ext in (".docx", ".tex", ".bib")) \
-        or any(n.endswith(f".{fb}{ext}") for fb in ("logging-original", "logging-previous",
-                                                   "logging-prev-winner", "log-previous")
-               for ext in (".docx", ".tex", ".bib"))
+    """Mirror the pipeline's auxiliary-name rule for this stub (keep in step with
+    paper_pipeline.TRACKING_AUX_NAME_RE): *.tracking-<token>.<ext> and its
+    *.logging-<token>.<ext> fallback, with <token> naming the baseline."""
+    return re.search(r"\.(?:tracking|logging)-(?:original|winner[0-9]+|[awi][0-9]+)"
+                     r"\.(?:docx|tex|bib)$", path.name, re.IGNORECASE) is not None
 
 
 def digest_tree(d: Path) -> str:
@@ -81,10 +75,17 @@ def write_docx(p: Path, text: str) -> None:
            f'<w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>')
     p.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(p, "w") as z:
-        z.writestr("[Content_Types].xml",
-                   '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/'
-                   'package/2006/content-types"/>')
-        z.writestr("word/document.xml", doc)
+        # A FIXED zip timestamp: the stub must be byte-deterministic, or every
+        # artifact it writes differs between two runs (zipfile stamps the
+        # current local time by default) and a corpus digest cannot be compared
+        # across roots.
+        for name, data in (("[Content_Types].xml",
+                            '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.'
+                            'org/package/2006/content-types"/>'),
+                           ("word/document.xml", doc)):
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.external_attr = 0o600 << 16
+            z.writestr(info, data)
 
 
 def split_table_cells(text: str) -> list:
@@ -526,8 +527,9 @@ def do_revision(sb: Path, name: str, round_no: int, stage: str) -> int:
                          "rationale": "stub: the frozen review listed no finding",
                          "evidence": "n/a"}])
     # The E5 difference-tracking auxiliary, under its current name (the pipeline
-    # excludes the whole family from every corpus).
-    write_docx(out / "manuscript-p.tracking-previous.docx", "tracked changes auxiliary")
+    # excludes the whole family from every corpus): this arm's baseline is the
+    # round base a1, so the token is a1.
+    write_docx(out / "manuscript-p.tracking-a1.docx", "tracked changes auxiliary")
     # visual pass: render the first docx to PDF/PNG when a renderer exists
     vis = out / "VISUAL_CHECK.md"
     docx = sorted(out.glob("*.docx"))

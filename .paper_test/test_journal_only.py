@@ -115,14 +115,10 @@ def test_only_vocabulary():
     check("a scoped-mode stage list is accepted",
           nb.parse_only_spec("concerns,revise").stages == {"concerns", "revise"})
     tmpl = nb.parse_only_spec("1:conform")
-    check("--only accepts the conform stage (bare and round-qualified; old names alias it)",
+    check("--only accepts the conform stage (bare and round-qualified)",
           tmpl is not None and tmpl.pairs.get(1) == {"conform"}
           and nb.parse_only_spec("conform").stages == {"conform"}
-          and nb.parse_only_spec("template").stages == {"conform"}
-          and nb.parse_only_spec("author-submission").stages == {"conform"}
-          and nb.parse_only_spec("1:apply-template").pairs.get(1) == {"conform"}
           and nb.only_is_template_stage_only(tmpl)
-          and nb.only_is_template_stage_only(nb.parse_only_spec("apply-template"))
           and not nb.only_is_template_stage_only(nb.parse_only_spec("conform,review"))
           # A judge selector is a session too: the spec runs the template
           # stage AND that judge session, so it is not "template stage only".
