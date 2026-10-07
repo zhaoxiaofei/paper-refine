@@ -1052,6 +1052,26 @@ DEFAULTS = {
     "poll": 10,             # manual-mode completion poll interval
 }
 
+# The BUILT-IN round schedule `--round-indices` selects from: one entry per
+# round of the default plan, carrying that round's rewrites / revises /
+# review scope / integration mask. The pipeline's internal rounds stay 1..K;
+# `--round-indices 2 3` makes pipeline round 1 adopt schedule entry 2 and
+# pipeline round 2 adopt entry 3 (so a run can start at a later revision round).
+ROUND_SCHEDULE_LEN = max(len(DEFAULTS[k]) for k in
+                         ("rewrites", "revises", "review_scope", "integrators"))
+
+
+def _schedule_entry(i: int) -> dict:
+    """Schedule entry `i` (1-based); a short default list extends by its last value."""
+    def val(key):
+        seq = DEFAULTS[key]
+        return seq[min(i - 1, len(seq) - 1)]
+    return {"rewrites": int(val("rewrites")), "revises": int(val("revises")),
+            "review_scope": str(val("review_scope")), "integrators": int(val("integrators"))}
+
+
+ROUND_SCHEDULE = tuple(_schedule_entry(i) for i in range(1, ROUND_SCHEDULE_LEN + 1))
+
 
 # =====================================================================
 # VENUES AND JOURNALS
@@ -4751,6 +4771,40 @@ def parse_round_counts(values, rounds: int, flag: str) -> list:
     if len(counts) < rounds:
         counts = counts + [counts[-1]] * (rounds - len(counts))
     return counts[:rounds]
+
+
+def normalize_round_indices(values, schedule_len: int = ROUND_SCHEDULE_LEN) -> list:
+    """Normalize `--round-indices` to ascending 1-based schedule positions.
+
+    Positive values count from the start of the built-in schedule (1 = the
+    first round), negative values from its end (-1 = the last round). The
+    ORDER is the pipeline's run order: the first index maps to pipeline
+    round 1. Duplicates, an out-of-range index, a zero and a descending
+    sequence are errors, because each silently changes which plan a round
+    adopts.
+    """
+    if not values:
+        die("--round-indices needs at least one round index")
+    out = []
+    for v in values:
+        try:
+            i = int(v)
+        except (TypeError, ValueError):
+            die(f"--round-indices takes integers (1-based, or negative from the end), got {v!r}")
+        if i == 0:
+            die("--round-indices is 1-based (or negative from the end); 0 is not a round")
+        pos = i if i > 0 else schedule_len + 1 + i
+        if pos < 1 or pos > schedule_len:
+            die(f"--round-indices {i} is outside the built-in schedule 1..{schedule_len} "
+                f"(negative values count from the end, -1 = {schedule_len})")
+        out.append(pos)
+    if len(set(out)) != len(out):
+        die(f"--round-indices carries a repeated round: {out} "
+            f"(one selected round runs once)")
+    if out != sorted(out):
+        die(f"--round-indices must be listed in ascending run order, got {values} -- "
+            f"the FIRST index maps to the pipeline's round 1")
+    return out
 
 
 def parse_round_masks(values, rounds: int, flag: str) -> list:
@@ -30819,12 +30873,33 @@ def cmd_setup(args) -> None:
     zotero = str(getattr(args, "zotero", DEFAULT_ZOTERO_MODE) or DEFAULT_ZOTERO_MODE).strip().lower()
     if rounds < 1:
         die("--rounds must be >= 1")
+    # ---- --round-indices: run a SUBSET of the built-in round schedule -------
+    # `--round-indices 2 3` runs two rounds whose per-round plan follows the
+    # built-in schedule's entries 2 and 3 (no rewrites); the pipeline's own
+    # round numbers stay 1..K. `--round-indices -1` / `3` runs only the final
+    # schedule round (no rewrites, no integrations).
+    round_indices = (normalize_round_indices(getattr(args, "round_indices", None))
+                     if getattr(args, "round_indices", None) else [])
+    if round_indices:
+        for flag, attr in (("--rewrites", "rewrites"), ("--revises", "revises"),
+                           ("--integrators", "integrators"),
+                           ("--review-scope", "review_scope")):
+            if getattr(args, attr.replace("-", "_"), None) is not None:
+                die(f"--round-indices selects the per-round {flag[2:]} values from the built-in "
+                    f"round schedule; do not pass {flag} with it (pass --judges for the panel "
+                    f"size if you need to)")
+        if int(args.rounds) != len(round_indices):
+            print(f"[setup] note: --round-indices implies --rounds {len(round_indices)} "
+                  f"(was --rounds {args.rounds}); using {len(round_indices)}")
+        rounds = len(round_indices)
     judges_list = parse_round_counts(getattr(args, "judges", None) or DEFAULTS["judges"],
                                      rounds, "--judges")
     if any(j < 1 for j in judges_list):
         die(f"--judges must be >= 1 per round, got {judges_list}")
-    integrators = parse_round_masks(getattr(args, "integrators", None) or DEFAULTS["integrators"],
-                                    rounds, "--integrators")
+    integrators = ([ROUND_SCHEDULE[i - 1]["integrators"] for i in round_indices]
+                   if round_indices else
+                   parse_round_masks(getattr(args, "integrators", None) or
+                                     DEFAULTS["integrators"], rounds, "--integrators"))
     if caption_limit < 0:
         die("--caption-limit must be >= 0 (0 = no caption suggestion at all, the default)")
     _floor_arg = getattr(args, "tiebreak_defect_floor", None)
@@ -30840,10 +30915,14 @@ def cmd_setup(args) -> None:
             f"the default 'off' performs no cross-sheet merging")
     if zotero not in ZOTERO_MODES:
         die(f"--zotero must be one of {', '.join(ZOTERO_MODES)} (got {zotero!r})")
-    rewrites = parse_round_counts(getattr(args, "rewrites", None) or DEFAULTS["rewrites"],
-                                  rounds, "--rewrites")
-    revises = parse_round_counts(getattr(args, "revises", None) or DEFAULTS["revises"],
-                                 rounds, "--revises")
+    rewrites = ([ROUND_SCHEDULE[i - 1]["rewrites"] for i in round_indices]
+                if round_indices else
+                parse_round_counts(getattr(args, "rewrites", None) or DEFAULTS["rewrites"],
+                                   rounds, "--rewrites"))
+    revises = ([ROUND_SCHEDULE[i - 1]["revises"] for i in round_indices]
+               if round_indices else
+               parse_round_counts(getattr(args, "revises", None) or DEFAULTS["revises"],
+                                  rounds, "--revises"))
     # ---- revision modes (init, options 1-4, continue) -----------------------
     # "continue" (the default) leaves every value below exactly as the operator
     # passed it: the historical workflow is unchanged.
@@ -30889,6 +30968,10 @@ def cmd_setup(args) -> None:
     if revision_mode != JOURNAL_MODE_CONTINUE:
         info = JOURNAL_MODES[revision_mode]
         if info["scoped"]:
+            if round_indices:
+                die(f"--round-indices selects the pipeline's round schedule, but revision mode "
+                    f"{revision_mode!r} forces its own single concern-scoped round; drop one of "
+                    f"the two")
             # Major/minor revisions are concern-scoped by definition: no
             # rewrites, ONE revision arm, no integration and ONE round. The
             # values are normalised (not refused) and the normalisation is
@@ -30927,6 +31010,8 @@ def cmd_setup(args) -> None:
     while len(review_scope) < rounds:
         review_scope.append(review_scope[-1])
     review_scope = review_scope[:rounds]
+    if round_indices:
+        review_scope = [ROUND_SCHEDULE[i - 1]["review_scope"] for i in round_indices]
     bad_scope = [x for x in review_scope if x not in REVIEW_SCOPE_VALUES]
     if bad_scope:
         die(f"--review-scope entries must be one of {'|'.join(REVIEW_SCOPE_VALUES)}, "
@@ -31121,6 +31206,11 @@ def cmd_setup(args) -> None:
                "rewrites": rewrites, "revises": revises, "integrators": integrators,
                "review_scope": review_scope,
                "created": utcnow(), "version": VERSION}
+    if round_indices:
+        # Traceability: pipeline round k follows built-in schedule round
+        # round_indices[k-1]. The recorded per-round lists below already carry
+        # the selected plan; this key names WHERE it came from.
+        ctx.cfg["round_indices"] = list(round_indices)
     if revision_mode != JOURNAL_MODE_CONTINUE:
         # Journal revision modes (options 1-4) and `init`. The keys are written
         # ONLY for a non-default mode: a default root keeps the exact config it
@@ -31167,6 +31257,7 @@ def cmd_setup(args) -> None:
                             f"revises={revises} integrators={[hex(x) for x in integrators]} "
                             f"venue={venue_profile.id} journal={journal or '(unset)'} "
                             f"revision_mode={revision_mode} "
+                            f"round_indices={round_indices or '(all)'} "
                             f"files={len(files)} "
                             f"caption_limit={caption_limit} "
                             f"zotero={zotero} "
@@ -31219,6 +31310,11 @@ def cmd_setup(args) -> None:
               f"({venue_profile.length_limits_source})")
     print(f"[setup] rounds:                 {rounds} (FIXED length; the round-{rounds} champion "
           f"is the final answer)")
+    if round_indices:
+        print(f"[setup] round indices:          pipeline round(s) 1..{rounds} follow built-in "
+              f"schedule round(s) {', '.join(str(i) for i in round_indices)} "
+              f"({brief_list(rewrites)} rewrites; {brief_list(integrators, lambda v: hex(v))} "
+              f"integrator mask(s))")
     if revision_mode in (JOURNAL_MODE_MAJOR, JOURNAL_MODE_MINOR):
         print(f"[setup] judge panel:            none -- a {revision_mode} revision is "
               f"concern-scoped, and the journal (not a quality panel) decides next")
@@ -32737,6 +32833,8 @@ def cmd_set_revision_mode(args) -> None:
             if list(ctx.cfg.get("integrators") or []) != [0]:
                 ctx.cfg["integrators"] = [0]
                 forced.append("integrators=0")
+            if ctx.cfg.pop("round_indices", None) is not None:
+                forced.append("round_indices cleared (a scoped revision has one round)")
             ctx.cfg["audit"] = "off"
             forced.append("audit=off")
         elif _prev_mode in (JOURNAL_MODE_MAJOR, JOURNAL_MODE_MINOR):
@@ -36569,6 +36667,10 @@ def cmd_status(args) -> None:
     print(f"config:        rounds={ctx.rounds_count()} "
           f"judges/version={judges_config_note(ctx)} "
           f"integrators/round={integrators_config_note(ctx)}")
+    _round_indices = [int(x) for x in ((ctx.cfg or {}).get("round_indices") or [])]
+    if _round_indices:
+        print(f"round indices: pipeline rounds 1..{len(_round_indices)} follow built-in "
+              f"schedule round(s) {', '.join(str(i) for i in _round_indices)}")
     _jmode = journal_mode_of(ctx)
     _mode_note = revision_mode_note(ctx)
     if _mode_note:
@@ -40683,7 +40785,18 @@ def build_parser() -> argparse.ArgumentParser:
                          "another type's caps. Default: the venue profile's default type")
     ps.add_argument("--rounds", type=int, default=DEFAULTS["rounds"],
                     help=f"number of fixed rounds (default: {DEFAULTS['rounds']}); the round-R "
-                         f"champion is the answer")
+                        f"champion is the answer")
+    ps.add_argument("--round-indices", type=int, nargs="+", default=None, metavar="R",
+                    help="run a SUBSET of the built-in round schedule instead of its first "
+                         "entries: --round-indices 2 3 implies --rounds 2 and makes pipeline "
+                         "rounds 1-2 adopt the schedule's rounds 2 and 3 (no rewrites, round 2 "
+                         "with and round 3 without an integration pass); --round-indices 3 (or "
+                         "-1) runs only the final schedule round (no rewrites, no integrations). "
+                         "Positive values are 1-based positions in the built-in schedule, "
+                         "negative values count from its end (-1 = the last). The per-round "
+                         "rewrites/revises/integrators/review-scope values come from the selected "
+                         "schedule entries -- do not pass those flags with it; --judges still "
+                         "applies")
     ps.add_argument("--judges", default=None,
                     help=f"independent judge sessions per version: an integer (--judges 3 "
                          f"applies it to every round) or a comma-separated list with one entry "

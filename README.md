@@ -580,8 +580,11 @@ numbers become.
 
 Useful flags: `--venue ID`, `--journal NAME`, `--article-type ID`
 (see *Venues and journals*),
-`--rounds N`, `--judges N[,N…]`, `--rewrites M[,M…]`,
-`--revises N[,N…]`, `--integrators MASK[,MASK…]`,
+`--rounds N`, `--round-indices R [R …]` (run a subset of the built-in
+schedule: `2 3` = two rounds following the schedule's rounds 2 and 3, `3`/`-1`
+= only the final round; implies `--rounds`; see *Round model*),
+`--judges N[,N…]`, `--rewrites M[,M…]`, `--revises N[,N…]`,
+`--integrators MASK[,MASK…]`,
 `--caption-limit N` (default: the venue profile's own),
 `--jobs N`, `--agent {codex,claude,manual}`, `--agent-cmd JSON`, `--retries N`,
 `--poll S` (manual mode), `--no-redline`, `run --only 1,2` (only rounds 1 and
@@ -913,6 +916,19 @@ it keeps the full review scope, stages no rewrite and no integration arm
 the revised candidate -- the last round never spends sessions on a
 submission-version merge. A scoped polish round is still available when an
 operator asks for one (`--review-scope ...,formatting-writing`, see below).
+
+**Starting at a later schedule round (`--round-indices`).** The table above is
+also addressable by index: `setup --round-indices 2 3` runs TWO pipeline rounds
+whose per-round plan is the table's round 2 and round 3 (no rewrites; the first
+still integrates, the second does not), and `--round-indices 3` or
+`--round-indices -1` runs only the final table round (no rewrites, no
+integrations). Positive values are 1-based positions in the built-in schedule,
+negatives count from its end (-1 = the last round), duplicates and descending
+orders are refused, and the pipeline's own round numbers stay 1..K --
+`pipeline_config.json` records the mapping as `round_indices`. The selected
+entries own `--rewrites`/`--revises`/`--integrators`/`--review-scope`, so those
+flags are refused with it (`--judges` still applies); a prefix selection
+(`--round-indices 1 2`) is identical to `--rounds 2`.
 
 The round is also drawn as a diagram —
 [`media/paper-refine-one-revision-round.png`](media/paper-refine-one-revision-round.png)
@@ -2191,7 +2207,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 99 suites (a few
+any failure. They are independent, so run them in parallel — 100 suites (a few
 minutes at the default parallelism on a 20-core box; tens of minutes
 sequentially):
 

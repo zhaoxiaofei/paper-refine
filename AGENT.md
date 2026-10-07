@@ -267,6 +267,11 @@ python paper_pipeline.py track --root ./paper_rounds   # difference copies + per
 python paper_pipeline.py setup --source ./non_revised --root ./paper_rounds \
     --venue generic --journal "Journal Name" --article-type article
 
+# start at a later built-in schedule round: two rounds following the schedule's
+# rounds 2 and 3 (no rewrites), or only the final round with --round-indices -1
+python paper_pipeline.py setup --source ./non_revised --root ./paper_rounds \
+    --round-indices 2 3
+
 # validation (see README.md -> Tests for the full list)
 python3 -m py_compile paper_pipeline.py paper_docx_format.py
 python3 .paper_test/run_all.py                 # every suite, offline (20 jobs by default)
