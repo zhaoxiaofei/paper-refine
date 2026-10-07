@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.32 — live Zotero fields are carried across versions, never unlinked (2026-10-07)
+
+- **Rule E2 continuity.** A version may ADD a field, EDIT a field and DELETE a
+  field together with its visible citation text, but it may never delete every
+  field at once, leave a field malformed (an unterminated begin, a missing
+  separate/end, a stray `fldChar`/`instrText`, unparseable citation JSON, a
+  missing or duplicate `citationID`) or replace a field by its visible text.
+  A citation/bibliography position that carries plain text where a live field
+  is missing is re-created from the baseline package's own
+  `citationID`/`itemData`/item URIs; rebuilding a paragraph from its `w:t`
+  text is named as the destructive path.
+- **Review side.** An unlinked citation (visible number/author-year text with
+  no live field behind it) or a malformed field is a preservation/
+  field-continuity finding at its exact location, never `OK`.
+- The orchestrator enforces the same rule: its format-fix keeps every field
+  signature unchanged and every package-producing stage (conform, rewrite,
+  revise, integrate) is audited against its base version before the attempt
+  can pass.
+
 ## 0.31 — tracking copies arrive with the version, and the tracked LaTeX compiles (2026-10-07)
 
 - **Stage-time placement.** The orchestrator now writes a version's

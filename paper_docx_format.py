@@ -27,8 +27,13 @@ Design rules, each one the result of an observed failure:
 * `fix` verifies itself: `w:t` text is unchanged unless the policy asks for
   punctuation normalization, the parts stay byte-identical, the package still
   parses (plus `docx validate` when that CLI is installed), and a re-scan shows
-  every mechanical finding gone. Anything the fixer cannot repair is reported
-  with `fix=style-field|policy|editorial|manual` instead of being "fixed" by
+  every mechanical finding gone. The LIVE-FIELD FENCE additionally requires
+  every Zotero field signature (kind, citationID, instruction, begin/separate/
+  end balance) to come through the repair unchanged -- a fix that would add,
+  remove or unbalance a field fails its own verification and the original file
+  is kept -- unless the policy explicitly asks to unlink fields for a
+  submission copy. Anything the fixer cannot repair is reported with
+  `fix=style-field|policy|editorial|manual` instead of being "fixed" by
   guesswork.
 * a finding inside a Zotero field (`w:fldChar begin ... end` + `ADDIN ZOTERO_*`
   instruction) is a field RESULT: Word cannot restyle it persistently because a
@@ -282,6 +287,20 @@ def has_drawing(frag: str) -> bool:
     return bool(DRAWING_RE.search(frag))
 
 
+def has_field(frag: str) -> bool:
+    """True when the fragment carries complex-field structure.
+
+    A paragraph whose only content is a field run (`w:fldChar` begin/separate/
+    end) or an `w:instrText` has NO `w:t` text and no drawing, but it is not an
+    empty paragraph: deleting it destroys the field it belongs to. A real
+    Zotero bibliography's closing `w:fldChar w:fldCharType="end"` lives alone
+    in the no-text paragraph after the last reference, immediately before the
+    next heading -- exactly the shape the stray-empty-paragraph rule used to
+    delete, leaving the bibliography field unterminated.
+    """
+    return bool(FIELD_CHAR_RE.search(frag) or INSTR_RE.search(frag))
+
+
 def ppr_of(frag: str) -> str | None:
     # The self-closing form comes FIRST: `python-docx` writes an empty
     # properties element as `<w:pPr/>`, and the old single-lookahead pattern
@@ -355,6 +374,306 @@ def in_field(ranges: list, pos: int) -> str:
         if s <= pos < e:
             return instr[:44]
     return ""
+
+
+# ---- live-field inventory and continuity -----------------------------------
+# Word stores a Zotero citation as a complex field: begin -> instrText
+# ("ADDIN ZOTERO_ITEM CSL_CITATION {...}") -> separate -> visible result ->
+# end; the bibliography is one ADDIN ZOTERO_BIBL field whose result spans the
+# whole reference list. The functions below inventory those fields without
+# re-serializing anything, report malformed structure, and compare one
+# version's inventory with its successor's so no stage can silently drop the
+# fields or leave their visible text behind as plain text.
+
+ZOTERO_FIELD_ITEM_INSTR = "ADDIN ZOTERO_ITEM"
+ZOTERO_FIELD_BIBL_INSTR = "ADDIN ZOTERO_BIBL"
+ZOTERO_FIELD_TOKEN_RE = re.compile(
+    r"<w:fldChar\b[^>]*?w:fldCharType=\"(begin|separate|end)\"[^>]*?/?>"
+    r"|<w:instrText\b[^>]*>(.*?)</w:instrText>"
+    r"|<w:t\b[^>]*>(.*?)</w:t>",
+    re.S)
+
+
+def _zotero_field_kind(instr: str) -> str:
+    up = (instr or "").upper()
+    if ZOTERO_FIELD_ITEM_INSTR in up:
+        return "item"
+    if ZOTERO_FIELD_BIBL_INSTR in up:
+        return "bibliography"
+    if "ADDIN ZOTERO_" in up:
+        return "zotero-other"
+    return "other"
+
+
+def _zotero_citation_id(instr: str) -> tuple:
+    """(citationID | None, problem | None) for one ADDIN ZOTERO_ITEM field."""
+    m = re.search(r"CSL_CITATION\s*(\{.*\})\s*$", instr or "", re.S)
+    if not m:
+        return None, "the field instruction carries no CSL_CITATION JSON"
+    try:
+        data = json.loads(m.group(1))
+    except (json.JSONDecodeError, ValueError) as e:
+        return None, f"the citation JSON does not parse ({e})"
+    cid = data.get("citationID")
+    if not isinstance(cid, str) or not cid.strip():
+        return None, "the citation JSON carries no citationID"
+    return cid.strip(), None
+
+
+def _zotero_field_identity(kind: str, instr: str) -> str:
+    """A stable identity for a malformed field, for base-vs-next comparisons."""
+    if kind == "item":
+        cid, _problem = _zotero_citation_id(instr)
+        if cid:
+            return f"citationID {cid!r}"
+    return f"instruction {(instr or '')[:60]!r}"
+
+
+def zotero_field_report(xml: str) -> dict:
+    """Inventory every complex field in one `word/document.xml` string.
+
+    Each field entry carries `kind` (item|bibliography|zotero-other|other),
+    `complete`, `has_separate`, `instr`, `citationID` (item fields),
+    `visible_text` (the field RESULT runs) and byte `begin`/`end`. `errors`
+    names every structural fault -- an unclosed begin, an `end`/`separate` or
+    a Zotero instruction outside any field, a Zotero field without its
+    separate, unparseable citation JSON, a missing or duplicate citationID --
+    so a stage gate can compare one version with the next and refuse to ship a
+    version whose fields got worse.
+    """
+    fields, errors, codes, stack = [], [], Counter(), []
+
+    def fail(code: str, message: str) -> None:
+        errors.append(f"[{code}] {message}")
+        codes[code] += 1
+
+    for m in ZOTERO_FIELD_TOKEN_RE.finditer(xml):
+        raw = m.group(0)
+        if raw.startswith("<w:fldChar"):
+            kind = m.group(1)
+            if kind == "begin":
+                stack.append({"begin": m.start(), "end": None, "instr": [],
+                              "separate": None, "result": []})
+            elif kind == "separate":
+                if stack:
+                    if stack[-1]["separate"] is None:
+                        stack[-1]["separate"] = m.start()
+                else:
+                    fail("separate-outside-field",
+                         f"a field separator at byte {m.start()} is outside any field")
+            else:
+                if stack:
+                    frame = stack.pop()
+                    frame["end"] = m.end()
+                    fields.append(frame)
+                else:
+                    fail("end-outside-field",
+                         f"a field end at byte {m.start()} has no matching begin")
+        elif m.group(2) is not None:
+            text = unesc(m.group(2))
+            if stack:
+                stack[-1]["instr"].append(text)
+            elif "ADDIN ZOTERO_" in text.upper():
+                fail("zotero-instr-outside-field",
+                     f"a Zotero field instruction at byte {m.start()} is not inside a field")
+        elif stack and stack[-1]["separate"] is not None:
+            stack[-1]["result"].append(unesc(m.group(3)))
+    for frame in stack:
+        instr = "".join(frame["instr"]).strip()
+        fail("unclosed-field",
+             f"the {_zotero_field_kind(instr)} field beginning at byte {frame['begin']} "
+             f"has no closing fldChar end "
+             f"({_zotero_field_identity(_zotero_field_kind(instr), instr)})")
+        fields.append(frame)
+
+    out_fields = []
+    for idx, frame in enumerate(fields):
+        instr = "".join(frame["instr"]).strip()
+        kind = _zotero_field_kind(instr)
+        entry = {
+            "index": idx, "kind": kind, "complete": frame["end"] is not None,
+            "has_separate": frame["separate"] is not None,
+            "instr": instr, "citationID": None,
+            "visible_text": "".join(frame["result"]).strip(),
+            "begin": frame["begin"], "end": frame["end"],
+        }
+        if kind != "other" and not entry["has_separate"]:
+            fail("no-separate",
+                 f"the {kind} field at byte {frame['begin']} has no fldChar separate "
+                 f"({_zotero_field_identity(kind, instr)})")
+        if kind == "item":
+            cid, problem = _zotero_citation_id(instr)
+            if problem:
+                fail("bad-citation-json",
+                     f"the citation field at byte {frame['begin']} "
+                     f"(instruction {instr[:60]!r}): {problem}")
+            else:
+                entry["citationID"] = cid
+        out_fields.append(entry)
+
+    ids = [f["citationID"] for f in out_fields
+           if f["kind"] == "item" and f["citationID"]]
+    for cid in sorted({c for c, n in Counter(ids).items() if n > 1}):
+        fail("duplicate-citation-id", f"citationID {cid!r} appears more than once")
+    kinds = Counter(f["kind"] for f in out_fields)
+    zotero_total = (kinds.get("item", 0) + kinds.get("bibliography", 0)
+                    + kinds.get("zotero-other", 0))
+    text = "\n".join(t for t in (text_of(p[2]) for p in paragraphs(xml)) if t.strip())
+    return {
+        "fields": out_fields, "errors": errors, "error_codes": dict(codes),
+        "counts": {"item": kinds.get("item", 0),
+                   "bibliography": kinds.get("bibliography", 0),
+                   "zotero_other": kinds.get("zotero-other", 0),
+                   "zotero": zotero_total, "other": kinds.get("other", 0),
+                   "fields": len(out_fields),
+                   "incomplete": sum(1 for f in out_fields if not f["complete"])},
+        "text": text,
+    }
+
+
+def zotero_field_signature(report: dict) -> list:
+    """The formatter's invariant: which live fields exist and how they are built."""
+    sig = []
+    for f in report.get("fields") or []:
+        if f["kind"] == "other":
+            continue
+        sig.append((f["kind"], f.get("citationID") or "",
+                    " ".join((f.get("instr") or "").split()),
+                    bool(f["complete"]), bool(f.get("has_separate"))))
+    return sorted(sig)
+
+
+def zotero_report_for_docx(path) -> dict:
+    """`zotero_field_report` for a .docx path; an unreadable package reports it."""
+    try:
+        with zipfile.ZipFile(path) as pkg:
+            xml = pkg.read("word/document.xml").decode("utf-8", "replace")
+    except (OSError, zipfile.BadZipFile, KeyError) as e:
+        return {"fields": [], "errors": [f"unreadable DOCX package: {type(e).__name__}: {e}"],
+                "error_codes": {"unreadable-docx": 1},
+                "counts": {"item": 0, "bibliography": 0, "zotero_other": 0, "zotero": 0,
+                           "other": 0, "fields": 0, "incomplete": 0},
+                "text": ""}
+    return zotero_field_report(xml)
+
+
+def zotero_field_continuity_problems(base: dict, out: dict) -> dict:
+    """Compare one DOCX version's field inventory with its successor's.
+
+    This is the pipeline's stage gate. HARD errors:
+      * the successor has a field-integrity fault the predecessor did not have
+        (an unterminated field, a stray field char, unparseable citation JSON,
+        a missing/duplicate citationID);
+      * a predecessor that carried Zotero fields lost every one of them;
+      * a baseline citation or bibliography field disappeared while its visible
+        text is still in the document -- a field replaced by plain text.
+
+    Allowed and reported: new fields, an edited field (same citationID, changed
+    instruction or result) and the deletion of a field together with its visible
+    text (the citation was really removed).
+    """
+    errors, warnings = [], []
+    deleted, added, edited, plain_text = [], [], [], []
+    base_fields = [f for f in base.get("fields") or [] if f["kind"] != "other"]
+    out_fields = [f for f in out.get("fields") or [] if f["kind"] != "other"]
+
+    # Compare the FAULTS, not just their per-code counts: byte offsets change
+    # between versions, but the rest of the message identifies the field (its
+    # kind, citationID and instruction) and the fault. This way "fixed one,
+    # broke another of the same kind" is still a new error.
+    def _err_sig(message: str) -> str:
+        return re.sub(r"byte \d+", "byte #", message)
+
+    base_err_sigs = Counter(_err_sig(e) for e in base.get("errors") or [])
+    out_err_sigs = Counter(_err_sig(e) for e in out.get("errors") or [])
+    new_sigs = out_err_sigs - base_err_sigs
+    inherited_sigs = out_err_sigs & base_err_sigs
+    repaired_sigs = base_err_sigs - out_err_sigs
+    for sig, n in sorted(new_sigs.items()):
+        errors.append(f"{n} NEW field-integrity error(s): {sig} "
+                      f"(the previous version did not carry this fault)")
+    if inherited_sigs:
+        warnings.append(f"{sum(inherited_sigs.values())} field-integrity condition(s) are "
+                        f"inherited from the previous version: "
+                        + "; ".join(s[:90] for s in sorted(inherited_sigs)[:3])
+                        + "; repair the missing structure if you can identify it")
+    if repaired_sigs:
+        warnings.append(f"{sum(repaired_sigs.values())} field-integrity condition(s) from the "
+                        f"previous version are gone in this version")
+
+    if base_fields and not out_fields:
+        errors.append(f"ALL {len(base_fields)} Zotero field(s) were deleted (a version may add, "
+                      f"edit or delete fields, but never remove every live field at once)")
+
+    base_text, out_text = base.get("text") or "", out.get("text") or ""
+
+    def occurrences(hay: str, needle: str) -> int:
+        if not needle:
+            return 0
+        # A numeric citation result ("19", "1,2", "10-12") must not match inside
+        # a larger number ("2019", "100"); non-numeric results count as plain
+        # substrings.
+        pattern = re.escape(needle)
+        if re.fullmatch(r"[0-9][0-9,;\-\u2013\u2014\s]*", needle):
+            pattern = rf"(?<![0-9]){pattern}(?![0-9])"
+        return len(re.findall(pattern, hay))
+
+    base_items = {f["citationID"]: f for f in base_fields
+                  if f["kind"] == "item" and f.get("citationID")}
+    out_items = {f["citationID"]: f for f in out_fields
+                 if f["kind"] == "item" and f.get("citationID")}
+    missing_visible = Counter()
+    for cid, f in base_items.items():
+        if cid in out_items:
+            o = out_items[cid]
+            if (" ".join((f.get("instr") or "").split())
+                    != " ".join((o.get("instr") or "").split())
+                    or (f.get("visible_text") or "") != (o.get("visible_text") or "")):
+                edited.append(cid)
+            continue
+        deleted.append(cid)
+        vis = (f.get("visible_text") or "").strip()
+        if vis:
+            missing_visible[vis] += 1
+    # A NEW field at another location may carry the same visible text (a
+    # re-cited source). Its own result occurrence is a live field, not plain
+    # text, so it is excluded from the count below.
+    added_visible = Counter()
+    for cid, f in out_items.items():
+        if cid in base_items:
+            continue
+        vis = (f.get("visible_text") or "").strip()
+        if vis:
+            added_visible[vis] += 1
+    for vis, gone in sorted(missing_visible.items()):
+        base_n, out_n = occurrences(base_text, vis), occurrences(out_text, vis)
+        if added_visible.get(vis):
+            warnings.append(f"{added_visible[vis]} NEW field(s) carry the visible text {vis!r} "
+                            f"that {gone} missing baseline citation(s) used to carry; keep the "
+                            f"baseline citationID when the same citation is edited in place")
+        if out_n - added_visible.get(vis, 0) > max(0, base_n - gone):
+            plain_text.append({"visible_text": vis, "removed_fields": gone,
+                               "occurrences_before": base_n, "occurrences_after": out_n})
+            errors.append(
+                f"field->plain-text replacement: {gone} citation field(s) with visible text "
+                f"{vis!r} disappeared but that text still occurs {out_n}x in the new version "
+                f"(was {base_n}x); re-create the live field from the baseline's citationID/"
+                f"itemData, or remove the citation text")
+
+    base_bib = [f for f in base_fields if f["kind"] == "bibliography"]
+    out_bib = [f for f in out_fields if f["kind"] == "bibliography"]
+    if base_bib and not out_bib:
+        probe = "".join((" ".join((base_bib[0].get("visible_text") or "").split()))[:160].split())
+        if probe and probe in "".join(out_text.split()):
+            errors.append("the bibliography field disappeared but its reference text is still "
+                          "in the document (field->plain-text replacement); re-create the "
+                          "ADDIN ZOTERO_BIBL field")
+        else:
+            warnings.append("the bibliography field was deleted together with its reference text")
+    added = [cid for cid in out_items if cid not in base_items]
+    return {"errors": errors, "warnings": warnings, "deleted": deleted, "added": added,
+            "edited": edited, "plain_text": plain_text,
+            "baseline_fields": len(base_fields), "output_fields": len(out_fields)}
 
 
 def parse_styles(pkg: zipfile.ZipFile) -> dict:
@@ -3569,7 +3888,7 @@ def empty_paragraph_slots_from_template(template) -> list:
     styles = [_style_key(_para_style(p[2])) for p in paras]
     slots = []
     for idx in range(len(paras)):
-        if texts[idx] or has_drawing(paras[idx][2]):
+        if texts[idx] or has_drawing(paras[idx][2]) or has_field(paras[idx][2]):
             continue
         prev_style = next((styles[j] for j in range(idx - 1, -1, -1) if texts[j]), "")
         next_style = next((styles[j] for j in range(idx + 1, len(styles)) if texts[j]), "")
@@ -3601,7 +3920,7 @@ def prescribed_empty_indices(paras: list, policy: dict) -> set:
     first_nonempty = next((i for i, t in enumerate(texts) if t), len(paras))
     out = set()
     for idx, (_, _, para) in enumerate(paras):
-        if texts[idx] or has_drawing(para):
+        if texts[idx] or has_drawing(para) or has_field(para):
             continue
         if idx < first_nonempty:
             out.add(idx)
@@ -3629,6 +3948,7 @@ def stray_empty_paragraph_groups(paras: list, policy: dict) -> tuple:
     prescribed = prescribed_empty_indices(paras, policy)
     texts = [text_of(p[2]).strip() for p in paras]
     is_empty = [not texts[i] and not has_drawing(paras[i][2])
+                and not has_field(paras[i][2])                # a field run is content
                 and not PAGEBREAK_RE.search(paras[i][2])       # FMT-S1 owns breaks
                 for i in range(len(paras))]
 
@@ -4743,7 +5063,8 @@ def fix_document(xml: str, styles: dict, policy: dict,
         plist = paragraphs(xml)
         target = None
         for idx, (p0, p1, para) in enumerate(plist):
-            if PAGEBREAK_RE.search(para) and not text_of(para).strip() and not has_drawing(para):
+            if PAGEBREAK_RE.search(para) and not text_of(para).strip() \
+                    and not has_drawing(para) and not has_field(para):
                 target = (idx, p0, p1, para)
                 break
         if target is None:
@@ -5205,6 +5526,26 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
         # validate` is optional, so the parse check is the always-on fence: a
         # malformed output must fail the fixer's own verification, not ship.
         xml_wellformed, xml_detail = False, str(e)
+    # LIVE-FIELD FENCE: a mechanical fix must carry every Zotero field over
+    # unchanged. The stray-empty-paragraph rule once deleted the no-text
+    # paragraph holding a Zotero bibliography's closing fldChar end, leaving
+    # the field unterminated; the gate below turns any such change into a
+    # failed self-verification, so the caller keeps the original file.
+    fields_before = zotero_field_report(xml_before)
+    fields_after = zotero_field_report(xml_after)
+    field_problems = zotero_field_continuity_problems(fields_before, fields_after)
+    field_signature_kept = (zotero_field_signature(fields_before)
+                            == zotero_field_signature(fields_after))
+    if policy.get("unlink_zotero_fields"):
+        # Explicit submission-copy policy: the fields are MEANT to become plain
+        # text, so the continuity gate stands down for this one caller.
+        field_errors = []
+    else:
+        field_errors = list(field_problems["errors"])
+        if not field_signature_kept:
+            field_errors.append("a mechanical fix changed which live fields exist (one was "
+                                "added, removed or left unterminated); the formatter must carry "
+                                "every field over unchanged")
     parts_new = dict(parts)
     parts_new["word/document.xml"] = xml_after.encode("utf-8")
     for name, (axml, arels) in aux.items():
@@ -5265,6 +5606,13 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
         "remaining_mechanical_rules": remaining,
         "schema_ok": schema[0], "schema_detail": schema[1],
         "xml_wellformed": xml_wellformed, "xml_detail": xml_detail,
+        "zotero_fields_before": dict(fields_before["counts"]),
+        "zotero_fields_after": dict(fields_after["counts"]),
+        "zotero_field_signature_kept": field_signature_kept,
+        "zotero_field_problems": field_problems["errors"],
+        "zotero_field_warnings": field_problems["warnings"],
+        "zotero_field_deleted": field_problems["deleted"],
+        "zotero_field_plain_text": field_problems["plain_text"],
     }
     ok = bool(same_parts
               and (verified["text_identical"] or verified["text_diff_only_quotes"]
@@ -5272,7 +5620,8 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
                        and verified["text_diff_only_recorded_edits"]))
               and not remaining
               and xml_wellformed
-              and schema[0] is not False)
+              and schema[0] is not False
+              and not field_errors)
     return {"source": str(src), "output": str(out), "changes": changes, "verified": verified, "ok": ok}
 
 

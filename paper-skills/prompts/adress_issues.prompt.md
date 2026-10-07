@@ -303,6 +303,22 @@ record a manual step instead of shipping a possibly corrupted field. Record
 every citation edit in CHANGELOG.md with the item key and the validation
 result.
 
+**Continuity — never unlink, never drop the set.** Every version carries the
+previous version's live fields forward. You may ADD a field, EDIT a field
+(rewriting the whole complex field around the same `citationID`) and DELETE a
+field together with its visible citation text; you may never delete every
+field at once, leave a field malformed (an unterminated begin, a missing
+separate/end, a stray `fldChar`/`instrText`, unparseable citation JSON, a
+missing or duplicate `citationID`) or replace a field by its visible text.
+If the document you received -- or a paragraph you rebuilt -- carries citation
+or bibliography TEXT where a live field is missing, RE-CREATE the field from
+the baseline package's own `citationID`/`itemData`/item URIs with the same
+visible text. Rebuilding a paragraph from its `w:t` text (python-docx, a text
+round-trip, any regex that keeps only text runs) destroys every
+`fldChar`/`instrText` run inside it: use a field-preserving edit, or re-insert
+the whole field afterwards. The pipeline re-checks the delivered package
+against its base and fails the attempt on any violation.
+
 **Library writes (mode `apply` only, on an explicit user request).** Never
 create or delete library items, attachments, collections or tags; never
 bulk-edit; never touch an item the manuscript does not cite; never write when

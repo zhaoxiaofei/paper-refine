@@ -1353,6 +1353,19 @@ Findings inside Zotero fields (the bibliography, citation fields) are reported
 style, or set `"unlink_zotero_fields": true` in the policy for a submission copy
 where the reference list becomes plain text.
 
+**Live Zotero fields are carried from one version to the next.** The formatter
+refuses to apply a repair that would add, remove or unbalance a field (a real
+bug deleted the no-text paragraph holding a bibliography's closing `fldChar`),
+and every package-producing stage — conform, rewrite, revise, integrate — is
+audited against its own base version before the attempt can pass. A version may
+add a field, edit a field and delete a field together with its visible citation
+text; it may never delete every field at once, leave one malformed, or keep a
+citation's visible text after unlinking its field. A citation or bibliography
+position that carries plain text where the base had a live field must be
+re-created from the base version's own `citationID`/`itemData`/item URIs, with
+the same visible text. `unlink_zotero_fields: true` stays the one explicit
+opt-out (a submission copy) and stands the continuity audit down for that pass.
+
 ### Whitespace, grammar artifacts and embedded-image geometry (M20)
 
 The text-only corpus also hides blank paragraphs and the spaces at a visual
@@ -2132,7 +2145,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 97 suites (a few
+any failure. They are independent, so run them in parallel — 98 suites (a few
 minutes at the default parallelism on a 20-core box; tens of minutes
 sequentially):
 

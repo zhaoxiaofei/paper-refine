@@ -7064,6 +7064,7 @@ ZOTERO_CLI_RULE = """ZOTERO REFERENCE TOOLING — the `zot` CLI (pyzotero-cli; t
     survived and the intended insertions/deletions are exactly the ones you made. When the check
     fails, restore the snapshot and write a manual step instead of shipping a possibly corrupted
     field.
+@@ZOTERO_FIELD_CONTINUITY@@
   * EVIDENCE CHAIN: a citation may be edited only when the cited item's own abstract/full text
     (`zot items get`, `zot fulltext get`, or its PDF) supports the sentence it is attached to. A
     sentence that contradicts its cited work may be reworded while the manuscript's own claim,
@@ -7091,15 +7092,44 @@ ZOTERO_STAGE_EDIT_DISABLED = """This run's policy does NOT allow citation-field 
 ZOTERO_STAGE_REVIEW = """YOUR STAGE IDENTIFIES, IT NEVER EDITS: check every citation the corpus makes (does
     the key resolve; does the cited work support the sentence; is support missing) and report each
     problem as a finding; an unreadable or incomplete live field goes to the manual-verification
-    list. Never modify the manuscript and never write to the library."""
+    list. A citation whose visible text has no live field behind it -- or a field left malformed
+    (unterminated, a stray field char, unparseable JSON, a duplicate citationID) -- is a finding of
+    its own: file it as a field-continuity/preservation defect with the exact location. Never
+    modify the manuscript and never write to the library."""
 ZOTERO_STAGE_REWRITE = """YOUR STAGE REWRITES FORM, NOT CONTENT: citations, keys and bibliographic entries
     survive unchanged; you may use the read routes to understand what a citation points at, and
     every citation problem you find is surfaced in REWRITE_REPORT.md ("PROBLEMS SURFACED"), never
-    fixed here. Never write to the library."""
+    fixed here. Rewriting form never means unlinking: every citation stays a LIVE field in your
+    rewritten document, with the same citationID and the whole begin -> instrText -> separate ->
+    result -> end sequence. If a paragraph you re-render loses its field runs (a text-only
+    rebuild), re-insert the complete field from the base package's own field data before saving;
+    never write to the library."""
 ZOTERO_STAGE_JUDGE = """JUDGE SESSIONS ARE READ-ONLY: you may resolve a citation's metadata to check
     whether a candidate's claim matches its cited work, but you never edit a file and never write to
     the library. A citation you cannot check is unverified evidence in your reasoning (say so) --
-    never an automatic defect."""
+    never an automatic defect. A candidate that dropped its baseline citations, left a field
+    malformed, or carries citation text without a live field IS a preservation defect: score it
+    under correctness/preservation and name the field/citation it affects."""
+
+ZOTERO_FIELD_CONTINUITY_RULE = """  * FIELD CONTINUITY (code-enforced): your version carries the base version's live fields forward.
+    You may ADD a field, EDIT a field (rewriting the WHOLE complex field around the same
+    citationID) and DELETE a field together with its visible citation text; you may NOT delete
+    every field at once, leave a field malformed (an unterminated begin, a missing separate or
+    end, a stray fldChar/instrText, unparseable citation JSON, a missing or duplicate
+    citationID), or replace a field by its visible text or any other plain text. After your save
+    the pipeline audits your package against the base with the same field inventory and FAILS the
+    attempt on any of those.
+  * If you find citation or bibliography TEXT where a live field should be (a previous stage
+    unlinked it, or you rebuilt the paragraph), RE-CREATE the field from the base version's own
+    field data -- its citationID, itemData and item URIs, one field per citation location, with
+    the same visible text -- and never leave the plain text in place of a field. Rebuilding a
+    paragraph from its `w:t` text alone (python-docx, a re-serialization, any regex that keeps
+    only text runs) destroys every fldChar/instrText run inside it: use a field-preserving edit, or
+    re-insert the whole field afterwards.
+  * PROVE IT before you finish, against the package you started from:
+      python3 <zotero-use>/scripts/validate_zotero_docx.py <your.docx> --baseline <base.docx> \\
+        --preserve-baseline-citations
+    A check that fails is an attempt that fails; restore the field, never ship the unlinked copy."""
 
 ZOTERO_LIBRARY_READ = """the library is READ-ONLY for this run. Every `zot` call must be a read; never
     run create/update/delete/add-tags/add-doi or a collection-mutating subcommand. A library record
@@ -7156,6 +7186,10 @@ ZOTERO_CLI_RULE_OFF = """ZOTERO TOOLING — SWITCHED OFF for this run:
     manual-verification list / MANUAL_STEPS.md, never into a guess and never into an edit. This
     overrides any earlier sentence in this prompt that mentions the `$zotero-use` skill or the
     `zot` CLI as available tooling."""
+ZOTERO_CLI_RULE_OFF += ("\n(The field-continuity rules below stay in force with the CLI switched "
+                        "off: the bundled validate_zotero_docx.py is an offline, read-only DOCX "
+                        "checker -- it does not use the `zot` CLI or the network.)\n"
+                        + ZOTERO_FIELD_CONTINUITY_RULE)
 
 
 def m18_blocks(limit: int) -> dict:
@@ -9488,7 +9522,8 @@ def zotero_cli_block(role: str, mode: str = DEFAULT_ZOTERO_MODE,
             .replace("@@ZOT_REMOTE@@", zotero_remote_hint())
             .replace("@@ZOTERO_LIBRARY@@", library)
             .replace("@@ZOTERO_LEDGER@@", ledger)
-            .replace("@@ZOTERO_STAGE@@", ZOTERO_STAGE_CLAUSES[stage_key]))
+            .replace("@@ZOTERO_STAGE@@", ZOTERO_STAGE_CLAUSES[stage_key])
+            .replace("@@ZOTERO_FIELD_CONTINUITY@@", ZOTERO_FIELD_CONTINUITY_RULE))
 
 
 VISUAL_ARTIFACT_REVIEW = "review/artifacts/VIS_visual.md"
@@ -11924,6 +11959,7 @@ def fix_docx_in_place(path: Path, policy: dict, template: Path = None,
     changes = list(rep.get("changes") or [])
     template_report = None
     tpl_tmp = None
+    redo = None
     if template is not None:
         tpl_tmp = path.with_name(f".{path.name}.papertpl{os.getpid()}.tmp")
         try:
@@ -11966,6 +12002,24 @@ def fix_docx_in_place(path: Path, policy: dict, template: Path = None,
         else:
             with contextlib.suppress(OSError):
                 tpl_tmp.unlink()
+    if base != path and not policy.get("unlink_zotero_fields"):
+        # FINAL FIELD FENCE: the template restyle runs outside fix_package's own
+        # verification, so the whole chain (mechanical repair + template restyle
+        # + second mechanical pass) is re-checked against the ORIGINAL file
+        # before the swap. A chain that would drop, unlink or malform a live
+        # field is skipped and the original is kept.
+        if hasattr(mod, "zotero_report_for_docx"):
+            cont = mod.zotero_field_continuity_problems(
+                mod.zotero_report_for_docx(path), mod.zotero_report_for_docx(base))
+            if cont["errors"]:
+                for leftover in (tmp, tpl_tmp, redo, base):
+                    if leftover is not None and leftover != path:
+                        with contextlib.suppress(OSError):
+                            leftover.unlink()
+                return {"file": path.name, "changes": changes, "applied": False,
+                        "error": "field-continuity self-check failed (the original file was "
+                                 "kept): " + "; ".join(cont["errors"])[:300],
+                        "verified": rep.get("verified")}
     if base == path and not changes:
         with contextlib.suppress(OSError):
             tmp.unlink()
@@ -11990,7 +12044,7 @@ def fix_docx_in_place(path: Path, policy: dict, template: Path = None,
             return {"file": path.name, "changes": changes, "applied": False,
                     "error": f"the repaired file could not replace the original: {e}",
                     "verified": rep.get("verified")}
-    for leftover in (tmp, tpl_tmp):
+    for leftover in (tmp, tpl_tmp, redo):
         if leftover is not None and leftover != base:
             with contextlib.suppress(OSError):
                 leftover.unlink()
@@ -11998,7 +12052,9 @@ def fix_docx_in_place(path: Path, policy: dict, template: Path = None,
            "verified": {k: (rep.get("verified") or {}).get(k) for k in
                         ("parts_intact", "text_identical", "text_diff_only_quotes",
                          "schema_ok", "mechanical_findings_before",
-                         "mechanical_findings_after")}}
+                         "mechanical_findings_after",
+                         "zotero_fields_before", "zotero_fields_after",
+                         "zotero_field_signature_kept", "zotero_field_warnings")}}
     if template_report is not None:
         out["template"] = template_report
     return out
@@ -12095,6 +12151,98 @@ def normalize_formatting_in_dir(dirp: Path, policy: dict, label: str,
             msg += f"; {tpl_n} restyled into the venue's official Word template"
         warns.append(msg)
     return summary
+
+
+def _docx_field_key(rel: str) -> str:
+    """A DOCX path whose basename carries no version token (see DOC_TOKEN_RE)."""
+    p = Path(rel)
+    stem, dot, ext = p.name.rpartition(".")
+    name = (DOC_TOKEN_RE.sub("", stem) + dot + ext) if dot else DOC_TOKEN_RE.sub("", p.name)
+    parent = "" if p.parent.as_posix() == "." else p.parent.as_posix() + "/"
+    return (parent + name).lower()
+
+
+def zotero_field_continuity_check(base_dir: Path, out_dir: Path, label: str,
+                                  errs: list, warns: list) -> dict:
+    """Every Zotero field of `base_dir` must survive into the version in `out_dir`.
+
+    The stage gate for every agent that produces a DOCX. A version may ADD a
+    field, EDIT a field (same citationID, changed item data/result) and DELETE
+    a field together with its visible citation text; it may never delete every
+    live field at once, leave a field malformed (an unterminated begin, a
+    stray field char, unparseable citation JSON, a missing/duplicate
+    citationID), or replace a field by its plain-text result. A failure is an
+    attempt error, so the retry policy hands the session another go with the
+    exact fields it has to restore.
+
+    Documents are paired by their version-token-free basename, so
+    `...-mainText-181c700.docx` matches `...-mainText-<newtoken>.docx`. A
+    document the agent did not deliver at all is left to the document-set /
+    backfill layer, which restores the base bytes itself.
+    """
+    mod = _format_module()
+    rep = {"label": label, "checked": 0, "documents": [], "errors": 0, "warnings": 0,
+           "fields_before": 0, "fields_after": 0, "deleted": [], "plain_text": []}
+    if mod is None or not hasattr(mod, "zotero_report_for_docx"):
+        rep["skipped"] = f"{DOCX_FORMAT_MODULE} carries no field inventory"
+        return rep
+    if not (base_dir.is_dir() and out_dir.is_dir()):
+        rep["skipped"] = "the base or the output directory is missing"
+        return rep
+    if errs is None:
+        errs = []
+    base_docs = {_docx_field_key(p.relative_to(base_dir).as_posix()): p
+                 for p in _fmt_corpus_files(base_dir)}
+    out_docs = {_docx_field_key(p.relative_to(out_dir).as_posix()): p
+                for p in _fmt_corpus_files(out_dir)}
+    if not base_docs:
+        rep["skipped"] = "the base carries no DOCX"
+        return rep
+    pairs = [(base_docs[k], out_docs[k]) for k in sorted(set(base_docs) & set(out_docs))]
+    rest_base = [base_docs[k] for k in sorted(base_docs) if k not in out_docs]
+    rest_out = [out_docs[k] for k in sorted(out_docs) if k not in base_docs]
+    # A stage may rename a document (a template stage hands back the template's
+    # own file name). Exact name wins, then a unique document role, then the
+    # sole remainder; a document the stage did not deliver at all is left to
+    # the document-set/backfill layer, which restores the base bytes itself.
+    for base in list(rest_base):
+        exact = [o for o in rest_out if o.name.lower() == base.name.lower()]
+        role = docx_document_role(base.name)
+        cands = exact or ([o for o in rest_out
+                           if role and docx_document_role(o.name) == role] if role else [])
+        if len(cands) == 1:
+            pairs.append((base, cands[0]))
+            rest_out.remove(cands[0])
+            rest_base.remove(base)
+    if len(rest_base) == 1 and len(rest_out) == 1:
+        pairs.append((rest_base[0], rest_out[0]))
+    for base, out in pairs:
+        before = mod.zotero_report_for_docx(base)
+        after = mod.zotero_report_for_docx(out)
+        cont = mod.zotero_field_continuity_problems(before, after)
+        rel = out.relative_to(out_dir).as_posix()
+        entry = {"file": rel, "baseline": base.relative_to(base_dir).as_posix(),
+                 "fields_before": cont["baseline_fields"], "fields_after": cont["output_fields"],
+                 "errors": cont["errors"], "warnings": cont["warnings"],
+                 "deleted": cont["deleted"], "added": cont["added"], "edited": cont["edited"],
+                 "plain_text": cont["plain_text"]}
+        rep["checked"] += 1
+        rep["fields_before"] += cont["baseline_fields"]
+        rep["fields_after"] += cont["output_fields"]
+        for msg in cont["errors"]:
+            if not cont["plain_text"]:
+                msg += (" -- restore the whole complex field (begin -> instrText -> separate -> "
+                        "result -> end) from the base version, or delete the citation text with "
+                        "it; see the $zotero-use DOCX reference")
+            errs.append(f"ZOTERO FIELD CONTINUITY: {rel}: {msg}")
+            rep["errors"] += 1
+        rep["plain_text"].extend(cont["plain_text"])
+        for msg in cont["warnings"]:
+            warns.append(f"ZOTERO FIELD CONTINUITY: {rel}: {msg}")
+            rep["warnings"] += 1
+        rep["deleted"].extend(cont["deleted"])
+        rep["documents"].append(entry)
+    return rep
 
 
 VALIDATE_TEX_TIMEOUT = 600
@@ -12215,6 +12363,21 @@ WRITE (only inside out/):
      template's Heading styles and their numbering), figures/tables and their
      captions, the declaration/statement blocks the template carries, the
      reference list, and the supplementary items.
+     CARRY EVERY LIVE ZOTERO FIELD OVER: when you move a citation, its whole
+     complex field (begin -> instrText -> separate -> result -> end) moves with
+     it; when the template's placeholder carried no field, insert the field the
+     source document carries for that citation location. If the text you are
+     placing carries a citation NUMBER or author-year text but no live field
+     (because a previous stage unlinked it, or the template sample had plain
+     text), RE-CREATE the field from the source document's own field data
+     (citationID, itemData, item URIs) -- never leave plain text in a citation
+     position. You may add, edit or individually delete fields, but the output
+     must not delete all fields, make a field malformed, or replace a field by
+     its visible text. The code side audits the output against source/ and fails
+     the attempt on any of those, so run the same check yourself before you
+     finish:
+       python3 <zotero-use>/scripts/validate_zotero_docx.py <your.docx> \\
+         --baseline <the matching source/ document.docx> --preserve-baseline-citations
   3. DELETE the template's own guide text and samples: every sentence that
      teaches the author how to use the template, and every sample name,
      laboratory, affiliation, email, keyword, citation and caption placeholder.
@@ -12363,6 +12526,18 @@ WRITE (only inside out/):
      never regenerate its styles from scratch.
   2. CHANGE FORMATTING ONLY: the text of every paragraph stays as the source
      wrote it. Never invent, summarize, merge or drop content.
+     CARRY EVERY LIVE ZOTERO FIELD OVER UNCHANGED: keep each citation's whole
+     complex field (begin -> instrText -> separate -> result -> end) in place
+     while you restyle around it. If a citation position carries a NUMBER or
+     author-year text with no live field (a previous stage unlinked it), RE-CREATE
+     the field from the source document's own field data (citationID, itemData,
+     item URIs) -- never leave plain text in a citation position. You may add,
+     edit or individually delete fields, but the output must not delete all
+     fields, make a field malformed, or replace a field by its visible text. The
+     code side audits the output against source/ and fails the attempt on any of
+     those; prove it yourself before finishing:
+       python3 <zotero-use>/scripts/validate_zotero_docx.py <your.docx> \\
+         --baseline <the matching source/ document.docx> --preserve-baseline-citations
   3. The code side verifies this EXACTLY: every non-empty source paragraph,
      SHORT LINES INCLUDED, must appear in the outputs at least as many times as
      in the source, unless you declare it as a re-wrap in step 5; and no output
@@ -12864,6 +13039,33 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
             errs.append(f"{_src_key(doc)!r} has no output document: every "
                         f"source package document must be re-housed in the template")
     errs.extend(map_errs)
+    # ZOTERO FIELD CONTINUITY: re-housing a document into the venue template --
+    # or re-authoring it by hand -- may not drop, unlink or malform any live
+    # field of the source document. This package becomes round 1's working
+    # original, so a field lost here would be lost for every later round.
+    zotero_rep = {"checked": 0, "errors": [], "documents": []}
+    mod = _format_module()
+    if mod is not None and hasattr(mod, "zotero_report_for_docx"):
+        for doc in src_docs:
+            target = mapping.get(_src_key(doc))
+            if target is None:
+                continue
+            cont = mod.zotero_field_continuity_problems(
+                mod.zotero_report_for_docx(doc), mod.zotero_report_for_docx(target))
+            if not (cont["baseline_fields"] or cont["output_fields"] or cont["errors"]):
+                continue
+            where = f"{_src_key(doc)} -> {target.relative_to(out).as_posix()}"
+            zotero_rep["checked"] += 1
+            for msg in cont["errors"]:
+                errs.append(f"ZOTERO FIELD CONTINUITY: {where}: {msg}")
+            for msg in cont["warnings"]:
+                warns.append(f"ZOTERO FIELD CONTINUITY: {where}: {msg}")
+            zotero_rep["errors"].extend(cont["errors"])
+            zotero_rep["documents"].append(
+                {"source": _src_key(doc), "output": target.relative_to(out).as_posix(),
+                 "fields_before": cont["baseline_fields"], "fields_after": cont["output_fields"],
+                 "errors": cont["errors"], "deleted": cont["deleted"], "added": cont["added"],
+                 "edited": cont["edited"], "plain_text": cont["plain_text"]})
     src_counter, out_counter = Counter(), Counter()
     for doc in src_docs:
         src_counter.update(_template_norm_para(t) for t in _docx_paragraph_texts(doc))
@@ -13131,6 +13333,7 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
             scan_format_in_sources([(out, "", ())], policy=policy),
             "template-first stage"))
     return {"ok": not errs, "errors": errs, "warnings": warns,
+            "zotero_fields": zotero_rep,
             "coverage": {"mode": "exact-multiset", "checked": checked, "covered": covered,
                          "ratio": round(ratio, 4), "missing_samples": missing[:8],
                          "unaccounted_additions": unaccounted_additions[:8],
@@ -13281,6 +13484,18 @@ def rebuild_package_from_templates(templates: dict, src: Path, dest: Path,
             continue
         rep = mod.apply_word_template(p, target, tpl, containers=containers) if tpl else \
             {"ok": False, "error": "no matching Word template for this document"}
+        if rep.get("ok") and hasattr(mod, "zotero_report_for_docx"):
+            # The restyle may not drop, unlink or malform a live field: with a
+            # broken rebuild the ORIGINAL document (fields intact) is carried
+            # instead -- a field-less template copy would poison every round.
+            cont = mod.zotero_field_continuity_problems(
+                mod.zotero_report_for_docx(p), mod.zotero_report_for_docx(target))
+            if cont["errors"]:
+                with contextlib.suppress(OSError):
+                    target.unlink()
+                rep = {"ok": False,
+                       "error": "the template rebuild would change the live Zotero fields: "
+                                + "; ".join(cont["errors"])[:300]}
         gap = _hf_gap(_docx_hf_signature(tpl), _docx_hf_signature(target)) if rep.get("ok") else {}
         if rep.get("ok") and not gap:
             files.append({"file": p.relative_to(src).as_posix(), "kind": "docx-rebuilt",
@@ -13394,12 +13609,35 @@ def _format_fix_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, warns: list,
     equals the corpus the judges scored") stays true. The artifact is written
     next to the run (`FORMAT_FIX_<stage>.json`) because a top-level JSON inside
     the package would become submission content.
+
+    The ZOTERO FIELD CONTINUITY gate runs on the FINAL bytes whatever the
+    format-fix policy says (including `--format-fix off`): the package this
+    stage hands on must carry every live field of the base version, may edit
+    or delete individual fields with their citation text, and may never drop
+    them all or leave one malformed.
     """
+    sb = ctx.sandbox_of(rec)
+    inp = sb / ("self" if rec.get("kind") == "integrate" else "base")
+    if errs is None:
+        errs = []
+
+    def _field_gate() -> dict:
+        rep = zotero_field_continuity_check(inp, pkg_dir, rec["id"], errs, warns)
+        rec["zotero_fields"] = rep
+        if rep.get("errors"):
+            warns.append(f"ZOTERO FIELD CONTINUITY: {rec['id']}: {rep['errors']} field "
+                         f"error(s) across {rep['checked']} document(s); the attempt fails until "
+                         f"every baseline field is a live, well-formed field in the delivered "
+                         f"package (see zotero_fields in the run record)")
+        return rep
+
     if str((ctx.cfg or {}).get("format_fix") or DEFAULT_FORMAT_FIX) == "off":
         rec["format_fix"] = {"label": rec["id"], "skipped": "format_fix=off"}
+        _field_gate()
         return rec["format_fix"]
     if not pkg_dir.is_dir():
         rec["format_fix"] = {"label": rec["id"], "skipped": f"{pkg_dir.name}/ is missing"}
+        _field_gate()
         return rec["format_fix"]
     try:
         rec["format_fix"] = normalize_formatting_in_dir(
@@ -13410,14 +13648,16 @@ def _format_fix_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, warns: list,
         rec["format_fix"] = {"label": rec["id"], "error": f"{type(e).__name__}: {e}"}
         warns.append(f"FORMAT-FIX: the code-side formatting normalization could not run "
                      f"({type(e).__name__}: {e}); the package is reported, not repaired")
+    # Field continuity is checked on the package as it now stands (after the
+    # repair), against the stage's own base/self input.
+    _field_gate()
     # DELIVERABLE VALIDATION: the package the stage produced must be readable
     # (every DOCX part parses; the `docx` schema check when the CLI exists) and
     # its LaTeX must compile when the package it started from compiled. A failure
     # is an ERROR, so the retry policy gives the session another attempt (the
     # agent prompt asks for the same check, with up to three iterations).
     try:
-        inp = ctx.sandbox_of(rec) / ("self" if rec.get("kind") == "integrate" else "base")
-        rec["validation"] = _validate_stage_package(ctx, rec, pkg_dir, inp, errs or [], warns)
+        rec["validation"] = _validate_stage_package(ctx, rec, pkg_dir, inp, errs, warns)
     except Exception as e:                                            # noqa: BLE001
         warns.append(f"VALIDATION: the deliverable check could not run "
                      f"({type(e).__name__}: {e})")
@@ -13426,7 +13666,6 @@ def _format_fix_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, warns: list,
     # package the stage started from. Regressions are reported (never silently
     # accepted), because the review, the change-ledger and the judge panel all
     # quote these numbers.
-    sb = ctx.sandbox_of(rec)
     input_dir = sb / ("self" if rec.get("kind") == "integrate" else "base")
     try:
         # The produced package's corpus is not just its output directory: the

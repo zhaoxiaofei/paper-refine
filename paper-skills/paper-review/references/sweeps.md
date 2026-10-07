@@ -193,6 +193,14 @@ Point to the specific erroneous word, number, or phrase — never the whole
 passage. If a Zotero live field cannot be read properly, ignore that field and
 tell the user to verify it manually.
 
+A citation whose visible number/author-year text has no live field behind it
+(unlinked by an earlier stage, or rebuilt from plain text), and a field left
+malformed (an unterminated begin/end, a stray `fldChar`/`instrText`,
+unparseable citation JSON, a missing or duplicate `citationID`), is a finding
+in its own right: report it as a preservation/field-continuity defect with the
+exact location. Do not close it as OK, and do not treat the visible number as
+the citation.
+
 A **J5 architecture finding** is the one deliberate exception to the
 one-verbatim-instance shape: its `location` is a SCOPE (document + section +
 paragraph range), its `evidence` is the current vs proposed reading order (a
