@@ -765,6 +765,86 @@ def test_round_close_skips_fresh_stage_copies():
           and not (ctx2.root / "tracking").exists())
 
 
+def test_rewire_and_fallback_regressions():
+    """Rewiring and freshness regressions found by the 2026-10-08 audit."""
+    print()
+    print("== rewiring + logging-fallback regressions ==")
+    # (1) biblatex's \addbibresource REQUIRES the extension, while \bibliography
+    #     omits it: the tracked copy must do the same as the caller's form.
+    tmp = scratch("paper_track_bibext_")
+    src = tmp / "out"
+    bib = src / "refs.tracking-original.bib"
+    write(src / "main.tex",
+          "\\documentclass{article}\n\\begin{document}\n"
+          "\\addbibresource{refs}\n\\bibliography{refs}\n\\end{document}\n")
+    write(bib, BIB)
+    text, rewrites = nb.rewire_tracking_tex(
+        (src / "main.tex").read_text(encoding="utf-8"), src / "main.tex",
+        {"refs.bib": bib})
+    check("\\addbibresource{refs} gains the .bib of the tracked copy",
+          "\\addbibresource{refs.tracking-original.bib}" in text, str(rewrites))
+    check("\\bibliography{refs} keeps omitting it (BibTeX supplies .bib)",
+          "\\bibliography{refs.tracking-original}" in text, str(rewrites))
+    # (2) A copy reused from the invocation memo must be rewired for ITS OWN
+    #     directory: the same unchanged master moved into sections/ may not keep
+    #     the package-root spelling of the previous version's copy.
+    if not shutil.which("latexdiff"):
+        skip("the memo-reuse rewiring check", "latexdiff is not on PATH on this machine")
+    else:
+        tmp = scratch("paper_track_memo_")
+        ctx = build_bib_root(tmp)
+        pristine_master = (tmp / "non_revised" / "main.tex").read_text(encoding="utf-8")
+        write(ctx.root / "runs/r1_w1/rewritten/main.tex", pristine_master)
+        w2 = ctx.root / "runs/r1_w2/rewritten"
+        shutil.copytree(tmp / "non_revised", w2)
+        write(w2 / "sections/main.tex", pristine_master)
+        (w2 / "main.tex").unlink()
+        write(w2 / "sections/intro.tex", "Some INTRODUCTORY text.\n")
+        ctx.state["runs"]["r1_w2"] = {"id": "r1_w2", "kind": "rewrite", "round": 1,
+                                      "status": "done", "sandbox": "runs/r1_w2",
+                                      "corpus_digest": "d", "attempts": 1, "produces": "w2"}
+        nb.run_difference_tracking(ctx, rounds=[1], versions=["w1", "w2"], quiet=True)
+        moved = (w2 / "sections/main.tracking-original.tex").read_text(encoding="utf-8")
+        check("a memo-reused copy's include is relative to ITS OWN directory",
+              "\\input{intro.tracking-original}" in moved
+              and "\\input{sections/intro" not in moved,
+              [ln for ln in moved.splitlines() if "\\input" in ln])
+    # (3) The logging fallback a tool-less machine writes is COMPLETE for that
+    #     machine: it can never carry a PDF (a commented-out diff is not a
+    #     document), so the round-close pass must keep it, not re-drive the tools.
+    tmp = scratch("paper_track_fb_")
+    ctx = build_bib_root(tmp)
+    saved_diff = nb.latexdiff_one_pair
+
+    def no_latexdiff(base, cand, out, **kw):                     # noqa: ARG001
+        return {"ok": False, "attempts": [{"detail": "latexdiff is not installed"}]}
+
+    nb.latexdiff_one_pair = no_latexdiff
+    try:
+        warning = nb.track_after_stage(ctx, ctx.state["runs"]["r1_w1"], quiet=True)
+    finally:
+        nb.latexdiff_one_pair = saved_diff
+    row = next(c for v in (nb.read_json(ctx.root / "tracking/manifest.json")
+                           or {}).get("versions") or [] for c in v["comparisons"]
+               if c["ext"] == ".tex" and c["baseline"] == "original"
+               and c["revised_rel"] == "main.tex")
+    check("the stage hook wrote a logging fallback and no PDF",
+          warning == "" and bool(row.get("fallback")) and not row.get("pdf_ok"),
+          f"{warning!r} {str(row)[:180]}")
+    calls = []
+
+    def counting(base, cand, out, **kw):
+        calls.append(str(out))
+        return saved_diff(base, cand, out, **kw)
+
+    nb.latexdiff_one_pair = counting
+    try:
+        nb.run_difference_tracking(ctx, rounds=[1], versions=["w1"], skip_fresh=True)
+    finally:
+        nb.latexdiff_one_pair = saved_diff
+    check("round close keeps the fallback entry (no tool runs again)", calls == [], str(calls))
+
+
 def test_template_stage_tracking_is_sibling_first():
     """The template-first stage's out/ carries its own tracking copies."""
     print()

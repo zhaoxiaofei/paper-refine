@@ -21,5 +21,6 @@ _spec.loader.exec_module(lib)
 if __name__ == "__main__":
     sys.exit(lib.run_parts([lib.test_stage_hook_tracks_beside_the_version,
                             lib.test_round_close_skips_fresh_stage_copies,
+                            lib.test_rewire_and_fallback_regressions,
                             lib.test_template_stage_tracking_is_sibling_first],
                            "PART 5 (stage-time hooks) PASSED"))

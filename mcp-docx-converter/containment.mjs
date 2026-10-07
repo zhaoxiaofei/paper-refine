@@ -10,13 +10,24 @@ import { realpathSync } from 'node:fs';
 import * as path from 'node:path';
 
 function realOrResolved(p) {
-  try {
-    return realpathSync(p);
-  } catch {
-    // A root that does not exist yet keeps its resolved shape; a TARGET that
-    // cannot be resolved (broken link, racing delete) also falls back, and the
-    // caller refuses it anyway when it is not under a real root.
-    return path.resolve(p);
+  // A path that does not exist yet (the redline OUTPUT, above all) must still
+  // be resolved through its deepest EXISTING ancestor: `realpathSync` alone
+  // fails on it and the lexical fallback would let a symlinked directory inside
+  // an allowed root smuggle the write outside it. A root that does not exist
+  // keeps its resolved shape, and a component that cannot be resolved at all
+  // (broken link, racing delete) keeps the lexical shape too.
+  const abs = path.resolve(p);
+  const tail = [];
+  for (let head = abs; ; ) {
+    try {
+      const real = realpathSync(head);
+      return tail.length ? path.join(real, ...tail) : real;
+    } catch {
+      const parent = path.dirname(head);
+      if (parent === head) return abs;
+      tail.unshift(path.basename(head));
+      head = parent;
+    }
   }
 }
 

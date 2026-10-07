@@ -1058,7 +1058,7 @@ python paper_pipeline.py setup --source ./submission --root ./rounds \
     --revision-mode transfer \
     --journal-feedback-from iScience
 
-# option 3: major revision at the same journal (feedback auto-detected in raw_data/)
+# option 3: major revision at the same journal (feedback auto-detected in human_review_feedback/)
 python paper_pipeline.py setup --source ./submission --root ./rounds \
     --journal iScience --revision-mode major --journal-feedback-from iScience
 python paper_pipeline.py run --root ./rounds

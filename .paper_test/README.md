@@ -21,7 +21,7 @@ python3 .paper_test/run_all.py             # GNU parallel, 20 jobs by default
                                            # (capped by the CPU count and the suite count)
 python3 .paper_test/run_all.py -j 4        # cap the parallelism
 python3 .paper_test/run_all.py -j 1        # exactly the old sequential loop
-python3 .paper_test/run_all.py --only test_pipeline test_docx_format
+python3 .paper_test/run_all.py --only test_pipeline test_docx_format_1_scan_fix
 python3 .paper_test/run_all.py --engine python   # no GNU parallel on this box
 python3 .paper_test/run_all.py --logs /tmp/paper-logs   # keep logs/status/timing
 ```
@@ -139,7 +139,7 @@ python3 .paper_test/test_redesign_v3.py
 python3 .paper_test/test_anonymized_judging.py
 python3 .paper_test/test_docx_converter.py
 python3 .paper_test/test_docx_compare.py
-python3 .paper_test/test_difference_tracking_1_names.py     # parts 2-4 are siblings
+python3 .paper_test/test_difference_tracking_1_names.py     # parts 2-5 are siblings
 python3 .paper_test/test_docx_format_1_scan_fix.py          # parts 2-4 are siblings
 python3 .paper_test/test_stage_subset.py
 python3 .paper_test/test_skip_hash.py

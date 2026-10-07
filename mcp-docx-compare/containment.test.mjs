@@ -2,7 +2,7 @@
 //   node containment.test.mjs
 // Needs no npm install: the module under test imports node: core only.
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { allowedRoots, containsPath } from './containment.mjs';
@@ -57,6 +57,17 @@ try {
   });
   check('a root given as a symlink still allows its real subtree', () => {
     assert.equal(containsPath(insideDoc, allowedRoots(rootLink)), true);
+  });
+  const outLinkDir = path.join(root, 'outdir');
+  symlinkSync(outside, outLinkDir);
+  check('a not-yet-existing OUTPUT under a symlinked directory is refused', () => {
+    const out = path.join(outLinkDir, 'new-redline.docx');
+    assert.equal(existsSync(out), false, 'fixture output already exists');
+    assert.equal(containsPath(out, allowedRoots(root)), false);
+  });
+  check('a not-yet-existing output under a REAL directory is allowed', () => {
+    const out = path.join(root, 'new-redline.docx');
+    assert.equal(containsPath(out, allowedRoots(root)), true);
   });
   check('a PATH-delimiter separated list keeps every root', () => {
     assert.equal(allowedRoots([root, outside].join(path.delimiter)).length, 2);

@@ -4626,7 +4626,7 @@ def scan_paths(paths: list, policy: dict) -> dict:
     scratch under any `work/` directory are NOT corpus content (the pipeline
     strips both from every judged/pinned corpus), so they are skipped: scanning
     them inflated one real sandbox report to 971 findings and hid the signal.
-    Use `include_scratch=True` to look at them anyway.
+    There is deliberately no switch back: they are never corpus content.
     """
     docs = []
     for p in paths:
@@ -5172,6 +5172,18 @@ def fix_document(xml: str, styles: dict, policy: dict,
 
 
 def fix_package(src: Path, out: Path, policy: dict) -> dict:
+    # The scanner reports an unreadable package as a FMT-X1 row and never
+    # raises; the fixer must fail the same way (a clean `ok: false` report the
+    # CLI turns into exit 1) instead of leaking a zip/KeyError traceback.
+    try:
+        with zipfile.ZipFile(src) as probe:
+            probe_names = set(probe.namelist())
+    except (zipfile.BadZipFile, OSError) as e:
+        return {"source": str(src), "output": str(out), "changes": [], "verified": {},
+                "error": f"unreadable DOCX package: {type(e).__name__}: {e}", "ok": False}
+    if "word/document.xml" not in probe_names:
+        return {"source": str(src), "output": str(out), "changes": [], "verified": {},
+                "error": "unreadable DOCX package: no word/document.xml", "ok": False}
     sizes, doc_rels, aux = {}, {}, {}
     with zipfile.ZipFile(src) as pkg:
         parts = {i.filename: pkg.read(i.filename) for i in pkg.infolist()}
@@ -6781,6 +6793,12 @@ def cmd_fix(args) -> int:
         log("error: --out must differ from the input")
         return 2
     rep = fix_package(src, out, policy)
+    if not rep.get("verified"):
+        log(f"error: {rep.get('error') or 'the fix could not be verified'}")
+        if args.json:
+            Path(args.json).write_text(json.dumps(rep, indent=2, ensure_ascii=False),
+                                       encoding="utf-8")
+        return 1
     v = rep["verified"]
     print(f"fixed {src.name} -> {out.name}: {len(rep['changes'])} change(s); "
           f"mechanical findings {v['mechanical_findings_before']} -> {v['mechanical_findings_after']}; "

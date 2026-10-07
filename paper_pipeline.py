@@ -1136,6 +1136,13 @@ _DEFAULT_VENUE_PROFILE = {
     "journal_aliases": ["NBT", "Nat. Biotechnol.", "Nature Biotech",
                         "Nature Biotechnology (NBT)"],
     "default_journal": "Nature Biotechnology",
+    # Another publisher's block headings are DATA this profile declares (the
+    # formatter's own default is empty, so the engine carries no venue's
+    # vocabulary). TOP-LEVEL: `venue_containers()` reads it here, never from an
+    # article type.
+    "foreign_container_headings": ["Lead contact", "Resource availability",
+                                   "Materials availability", "Method details",
+                                   "Key resources", "Key resources table"],
     # The venue's content types. Only `article` carries numbers here (the ones
     # this pipeline has always used, from the venue's content-types table); the
     # other entries exist so a submission can DECLARE its type, and a type with
@@ -1161,12 +1168,6 @@ _DEFAULT_VENUE_PROFILE = {
                            "words by the operator's default",
              },
          },
-         # Another publisher's block headings are DATA this profile declares (the
-         # formatter's own default is empty, so the engine carries no venue's
-         # vocabulary).
-         "foreign_container_headings": ["Lead contact", "Resource availability",
-                                        "Materials availability", "Method details",
-                                        "Key resources", "Key resources table"],
          "captions": {
              "published_limit": None,
              "default_cap": 0,
@@ -38338,12 +38339,16 @@ def tracking_entry_is_fresh(ctx: Ctx, entry: dict, baselines: list, srcs: list) 
                     if not rel or not (ctx.root / str(rel)).is_file():
                         return False
             elif c.get("ext") == ".tex" and c.get("in_package") \
-                    and not c.get("pdf_error") \
+                    and not c.get("fallback") and not c.get("pdf_error") \
                     and not str(c.get("pdf_skipped") or "").startswith("not a LaTeX root"):
                 # A .tex row with NO recorded PDF outcome -- or one skipped for
                 # a reason the current code no longer uses ("the copy carries no
                 # latexdiff markup") -- predates the tracking-PDF step: refresh
-                # it instead of keeping a PDF-less entry.
+                # it instead of keeping a PDF-less entry. A LOGGING-FALLBACK row
+                # is excluded: compile_tracking_pdfs never compiles one (a
+                # commented-out diff is not a document), so judging it by the
+                # missing PDF would make every fallback row permanently stale and
+                # the round-close pass would re-drive the tools it exists to skip.
                 return False
             have[(c.get("baseline"), c.get("ext"), c.get("base_rel"),
                   c.get("revised_rel"))] = (c.get("base_digest"), c.get("cand_digest"))
@@ -38533,7 +38538,11 @@ def rewire_tracking_tex(text: str, tex_path: Path, tracked: dict) -> tuple:
                 new_names.append(name)
                 continue
             new_name = os.path.relpath(str(target), str(base)).replace(os.sep, "/")
-            if not Path(name).suffix:
+            if not Path(name).suffix and cmd != "addbibresource":
+                # LaTeX/BibTeX supply the extension for \input/\include/\bibliography,
+                # so the tracked copy may keep the caller's extension-less spelling;
+                # biblatex's \addbibresource REQUIRES the .bib extension, so a
+                # reference that omitted it must gain it (never lose it).
                 new_name = str(Path(new_name).with_suffix("")).replace(os.sep, "/")
             new_names.append(new_name)
             rewrites.append({"command": cmd, "from": name, "to": new_name})
@@ -38669,11 +38678,11 @@ def track_one_pair(ctx: Ctx, r: int, vid: str, token: str, ext: str, pair: dict,
     for the original baseline, "from-base" only when the baseline really is the
     round base. The reuse itself is digest-gated (see `_reusable_redline`).
 
-    `memo` is the entry's {(base_digest, cand_digest, ext): out path} map: the
-    round-1 tracks repeat the SAME comparison twice (against the pristine
-    original and against the round base `a1`, which is its byte-identical copy),
-    so a pair already produced in this entry is copied instead of driving the
-    difference tool again.
+    `memo` is the entry's {(base_digest, cand_digest, ext, destination dir): out
+    path} map: the round-1 tracks repeat the SAME comparison twice (against the
+    pristine original and against the round base `a1`, which is its
+    byte-identical copy), so a pair already produced for the same destination is
+    copied instead of driving the difference tool again.
     """
     base, cand = pair["base_path"], pair["cand_path"]
     suffix = tracking_aux_suffix(token, ext)
@@ -38707,7 +38716,16 @@ def track_one_pair(ctx: Ctx, r: int, vid: str, token: str, ext: str, pair: dict,
         rec["skipped"] = True
         rec["reason"] = "tool=none: only the manifest/report was requested"
         return rec
-    key = (pair["base_digest"], pair["cand_digest"], ext)
+    # A produced copy is only reusable by a pair that lands in the SAME place:
+    # compile_tracking_pdfs rewires a .tex copy relative to its directory, so the
+    # same digests moved elsewhere (a structural rewrite that moves the master
+    # into a subdirectory) must be produced fresh, never copied pre-rewired.
+    memo_dir = in_pkg_out.parent if in_pkg_out is not None else persist_out.parent
+    try:
+        memo_dir = memo_dir.relative_to(ctx.root).as_posix()
+    except ValueError:                                       # pragma: no cover
+        memo_dir = memo_dir.as_posix()
+    key = (pair["base_digest"], pair["cand_digest"], ext, memo_dir)
     if memo is not None and memo.get(key):
         earlier = ctx.root / str(memo[key])
         if earlier.is_file():
