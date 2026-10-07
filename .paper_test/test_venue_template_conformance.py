@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import zipfile
@@ -151,10 +152,16 @@ def test_resolution_and_staging():
     sb = root / "sandbox"
     sb.mkdir()
     staged = nb.stage_venue_template(ctx, sb)
+    staged_main = sb / "venue_template" / "word" / "Fake_Template.docx"
+    # `os.access(W_OK)` is True for root even on a 0444 file (capabilities bypass
+    # the permission bits), so the read-only property is asserted on the MODE --
+    # which is what the code sets -- and root runs keep the check they cannot
+    # otherwise make.
+    staged_mode = stat.S_IMODE(staged_main.stat().st_mode) if staged_main.is_file() else None
     check("the templates are staged read-only inside a session sandbox",
-          staged and (sb / "venue_template" / "word" / "Fake_Template.docx").is_file()
-          and not os.access(sb / "venue_template" / "word" / "Fake_Template.docx", os.W_OK),
-          str(staged))
+          staged and staged_main.is_file()
+          and (staged_mode is not None and not staged_mode & 0o222),
+          f"{staged} mode={oct(staged_mode) if staged_mode is not None else None}")
     block = nb.venue_norm_block("fake-venue", root)
     check("the venue block names the template files and the conformance mandate",
           "TEMPLATE FILES FOR THIS RUN" in block and "Fake_Template.docx" in block

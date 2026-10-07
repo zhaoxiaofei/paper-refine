@@ -27,7 +27,7 @@ import re
 import sys
 from collections import defaultdict
 
-EVIDENCE_DIRNAMES = ("raw_data", "raw_figs", "human_review_feedback")
+EVIDENCE_DIRNAMES = ("raw_data", "raw_figs", "human_review_feedback", "llm_review_feedback")
 _NON_MANUSCRIPT_RE = re.compile(
     r"feedback|referee|reviewers?|editors?|editorial|decision[_ \-]*(?:letter|notice|email)"
     r"|response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)

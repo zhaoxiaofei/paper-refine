@@ -155,7 +155,14 @@ the base's from this round's review) or to the arm's own marker. A `-` now means
 | `set-tiebreak-defect-floor N` / `set-dedup-mode off\|location` | calibration of the selection key |
 | `retry --run ID` / `retry --runs SELECTION` / `prune --keep-latest N` | reset one session, or the same subset `run --only` would drive / reclaim disk from old sandboxes |
 | `redline --root ROOT` / `track --root ROOT` | (re)write the tracked-changes `.docx` tree / the difference-tracking copies (`*.tracking-*`) plus the persistent PDF renders |
-| `--skip-hash` (any command) | skip the integrity VERIFICATION passes for this invocation (digests are still recorded; every report says they were skipped) |
+| `--zotero off\|read\|edit\|apply` (`setup`; default `edit`) | the Zotero policy every stage prompt repeats: `off` = no Zotero tooling, `read` = resolve citations read-only, `edit` = the revised copy may add/edit/delete citation fields (the library stays read-only), `apply` = as `edit` plus the one allowed library write. Whichever mode is set, the code-side field-continuity gate fails a stage that drops, unlinks or malforms a live field |
+| `--vs-original-rule {median,sign}` (`setup`) | the anti-regression gate's rule: `median` (default) compares a pair's median directed score; `sign` instead requires the exact one-sided sign test over the pair's directed scores to be significant |
+| `--stop-after-no-progress K` (`setup`) | adaptive stop (default 0 = off): once K consecutive rounds pin the round's own base, `run` stops before the next round and `decide` treats the last completed round as the answer; `--rounds` stays the hard cap |
+| `--judge-agent {codex,claude,manual}` / `--judge-agent-cmd JSON` (`run`) | run the judge panel only on a different (e.g. cheaper) backend; defaults to `--agent` / `--agent-cmd` |
+| `--retry-backoff S` / `--retry-backoff-max S` (`run`) | exponential retry wait: base S doubling per failed attempt (default 30s), capped per wait (default 600s); 0 retries immediately |
+| `--no-wait` (`run`, manual mode) | print every currently-runnable prompt at once instead of waiting for each dependency |
+| `--require-clean-captions` (`decide`) | print the suggested-length caption report; kept for CLI compatibility — caption length is advisory, so it never exits non-zero (use exit 4/5 for real problems) |
+| `--skip-hash` (every command except `selfcheck`) | skip the integrity VERIFICATION passes for this invocation (digests are still recorded; every report says they were skipped) |
 
 ## Requirements
 
@@ -168,6 +175,18 @@ the base's from this round's review) or to the arm's own marker. A `-` now means
   `pdftoppm`, the `docx-compare` MCP tool / `docxcompare.sh` (Word's own
   comparison engine for tracked changes), `latexdiff` (LaTeX difference
   tracking), and the `zot` CLI for read-only Zotero reference resolution.
+* Optional: the external `zotero-use` skill (`$ZOTERO_SKILL` / `$zotero-use`)
+  that the Zotero stage prompts name for the interactive `zot` route and for
+  their `validate_zotero_docx.py` proof step. That script is NOT bundled here;
+  when the skill is not installed, the pipeline's own code-side live-field
+  inventory and continuity gate (`paper_docx_format.py`, run by every DOCX
+  stage) is the check that actually enforces field preservation, and the
+  prompts' `PROVE IT` step degrades to that gate.
+* The two DOCX MCP servers (`mcp-docx-compare/`, `mcp-docx-converter/`) read the
+  optional `DOCX_MCP_ALLOWED_ROOTS` environment variable: a PATH-delimiter-
+  separated allowlist of the directories they may read/write. **Unset means no
+  containment** (the tools may touch anything the process can), so set it when
+  an LLM agent drives the servers.
 
 ## Evidence is not submission text: `raw_data/` and the review-feedback areas
 
@@ -554,9 +573,11 @@ with a note, when it does not).
 
 `--strict-venue` (accepted by every subcommand that works on a root: `setup`,
 `run`, `run-decide`, `decide`, `status`, `agents`, `set-venue`, `set-journal`,
-`set-article-type`, `retry`, `prune`, `redline`) makes a missing journal, a
-journal/venue mismatch, a config/snapshot disagreement and an unresolvable
-article type fatal instead of advisory.
+`set-article-type`, `set-dedup-mode`, `set-revision-mode`,
+`set-tiebreak-defect-floor`, `add-venue`, `build-venue-templates`, `conform`,
+`conflicts`, `retry`, `prune`, `redline`, `track`, `trend`) makes a missing
+journal, a journal/venue mismatch, a config/snapshot disagreement and an
+unresolvable article type fatal instead of advisory.
 
 **Adding a venue.** Copy `venue_profiles/example-journal.json`, replace the
 numbers with the ones your venue's own guidelines state, quote the source in
@@ -1520,7 +1541,7 @@ found in the cover letter, the main text and the supplementary alike:
 | `FMT-T9j` | two term families competing for one concept (CN/CNV/CNA, simulate/emulate) | finding: fix one term per concept in `GLOSSARY.md` |
 | `FMT-T8a` | a document mixes citation formats (`(Author et al., 2015, Nature Methods)` vs `(Author et al., Nature Methods, 2015)` vs `(Author et al., 2015)`) | report; with `citation_journal_names="drop"` (default) the redundant journal segment is deleted, leaving one author-year format. Reported only when an odd form cannot be matched safely |
 | `FMT-T8b` | nested parentheses (`(… (BAF))`) | finding-tier — moving the inner item out is a wording decision the revision stage makes; mathematical calls like `T(·,·)` are excluded |
-| `FMT-T8c` | a distinctive term repeated in one short passage (`Nature Biotechnology` five times in a cover letter) | finding-tier redundancy: a proper name ≥3× in one paragraph, or a long content word ≥5×, must be varied or dropped — a writing-quality defect does not need a journal rule to exist. Deliberately narrow: proper names (2–3 capitalized words, no document-structure word) and single long content words |
+| `FMT-T8c` | a distinctive term repeated in one short passage (`Nature Biotechnology` four times in one cover letter) | finding-tier redundancy: a proper name ≥3× in one paragraph *and* ≥4× in the document, or a long content word ≥5× in one paragraph, must be varied or dropped — a writing-quality defect does not need a journal rule to exist. Deliberately narrow: proper names (2–3 capitalized words, no document-structure word) and single long content words |
 | `FMT-T8d` | US/UK spelling variants in body text (`tumour` … `tumor`) | report; `term_spelling="dominant"` (default) normalizes the minority form outside the reference list |
 | `FMT-T8e` | an attributive compound hyphenated in one place and not in another (`copy-number profiles` … `copy number estimate`) | report; `term_hyphenation="dominant"` (default) hyphenates the minority attributive form |
 | `FMT-T8f` | sibling paragraphs or sibling captions disagree on first-line indentation (`Fig. 4` indented while `Fig. 1/2/3/5` are not) | finding: pick one convention and align the minority with the majority (front matter — title/abstract/keywords — is its own family and never counted as a body outlier) |
@@ -2207,7 +2228,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 100 suites (a few
+any failure. They are independent, so run them in parallel — 102 suites (a few
 minutes at the default parallelism on a 20-core box; tens of minutes
 sequentially):
 
