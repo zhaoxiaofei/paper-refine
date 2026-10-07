@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.33 — `llm_review_feedback/`: a pre-filtered LLM review is evidence too (2026-10-07)
+
+- **New evidence area.** A setup `--source` directory may carry an optional
+  `llm_review_feedback/` sibling of `human_review_feedback/` (any file types)
+  with a machine-generated review whose false-positive findings were filtered
+  out upstream. The review converter marks it `area: llm_review_feedback`,
+  gives it the "LLM review feedback (evidence; false positives pre-filtered)"
+  role, never marks it editable, and writes its text to `WORK/evidence/` only —
+  no written-surface sweep, word count or file-role row may read it as
+  submission prose.
+- **Concern standing.** Every remaining LLM finding is a real concern with the
+  same standing as a human reviewer's point: the journal modes stage it under
+  `feedback/llm/` beside the human feedback, seed it with `origin=llm`, verify
+  its quotes verbatim, and answer it in the concern ledger and the response
+  letter. It is never dismissed as model noise and never silently dropped; a
+  row closed `not-applicable`/`disagree` needs the recorded rationale. A
+  corpus whose ONLY feedback is the LLM review still runs the feedback stages.
+- **Judges and reuse.** The blind judges see it under
+  `evidence/llm_review_feedback/` and judge how each version ADDRESSES it like
+  the human concerns. Human-reviewer findings remain filterable through the
+  same recorded-rationale route (`not-applicable`/`disagree`), never silently.
+- **Mode (option 5) and the off-switch.** `--revision-mode llm` consumes the
+  area only (no journal letter, no response letter); when no mode is recorded
+  and the area is present, the orchestrator auto-selects it and records it.
+  Renaming the area to `llm_review_feedback.disabled` (or `.off`) turns the
+  auto-detection off and makes the tree inert -- never read as feedback or
+  evidence, never part of the submission, never shown to a judge; the review
+  converter skips it entirely.
+
 ## 0.32 — live Zotero fields are carried across versions, never unlinked (2026-10-07)
 
 - **Rule E2 continuity.** A version may ADD a field, EDIT a field and DELETE a

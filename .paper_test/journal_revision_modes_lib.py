@@ -431,7 +431,8 @@ def test_j1_narrative():
           "manuscript.txt" in files and "RESPONSE_TO_REVIEWERS.md" in files
           and "response_map.json" in files, str(files))
     check("J1 the submission excludes the raw-data evidence area",
-          not any(f.startswith(("raw_data/", "raw_figs/", "human_review_feedback/"))
+          not any(f.startswith(("raw_data/", "raw_figs/", "human_review_feedback/",
+                                "llm_review_feedback/"))
                   for f in files))
     check("J1 the submission excludes pipeline bookkeeping",
           not any(f in ("CHANGELOG.md", "REVISION_REPORT.md", "revision_report.json",

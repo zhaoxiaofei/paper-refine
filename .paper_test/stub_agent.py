@@ -317,20 +317,22 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
 
 
 def _stub_concerns(sb: Path) -> list:
-    """Deterministic concern rows from feedback/text/ (one per paragraph)."""
-    tdir = sb / "feedback" / "text"
+    """Deterministic concern rows from feedback/text/ + feedback/llm/text/."""
     texts = []
-    if tdir.is_dir():
-        for p in sorted(tdir.glob("*.txt")):
-            texts.append((p.name, p.read_text(encoding="utf-8", errors="replace")))
+    for tdir, author in ((sb / "feedback" / "text", "Reviewer 1"),
+                         (sb / "feedback" / "llm" / "text", "LLM review (pre-filtered)")):
+        if tdir.is_dir():
+            for p in sorted(tdir.glob("*.txt")):
+                texts.append((author, p.name,
+                              p.read_text(encoding="utf-8", errors="replace")))
     rows = []
-    for fname, text in texts:
+    for author, fname, text in texts:
         for para in re.split(r"\n\s*\n", text):
             block = " ".join(para.split())
             if len(block) < 30:
                 continue
             rows.append({"id": f"C{len(rows) + 1}", "source": fname,
-                         "author": "Reviewer 1", "quote": block[:200],
+                         "author": author, "quote": block[:200],
                          "summary": "stub concern", "action": "text",
                          "manuscript_location": None, "disposition": "to-fix",
                          "evidence_needed": ""})
@@ -398,7 +400,7 @@ def do_response(sb: Path, name: str, round_no: int) -> int:
     target = sb / "target"
     skip_names = {"changelog.md", "manual_steps.md", "revision_report.md", "revision_report.json",
                   "diff_ledger.md", "visual_check.md"}
-    evidence_dirs = ("raw_data", "raw_figs", "human_review_feedback")
+    evidence_dirs = ("raw_data", "raw_figs", "human_review_feedback", "llm_review_feedback")
     non_manuscript_re = re.compile(
         r"feedback|referee|reviewers?|editors?|editorial|decision"
         r"|response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)

@@ -14,8 +14,9 @@ and a clean, ready-to-use package.
 **At a glance**
 
 * **You give it** a pristine submission directory — the manuscript files, plus
-  (optionally) a `raw_data/` evidence area and a `human_review_feedback/` area
-  when you are revising against a real editor/reviewer decision.
+  (optionally) a `raw_data/` evidence area, a `human_review_feedback/` area
+  when you are revising against a real editor/reviewer decision, and/or an
+  `llm_review_feedback/` area with a false-positive-filtered LLM review.
 * **It runs** one or more rounds of candidate versions — full rewrites, a
   reviewed-and-revised version, and integrations that merge the pool — judges
   the candidates blindly against each other, and pins the round's champion by
@@ -43,7 +44,9 @@ and a clean, ready-to-use package.
   response letter is written; the rest is the default workflow.
 * **Against a real journal decision.** Put the decision letter and the reviewer
   reports (plus any previous response to reviewers) in the submission's
-  `human_review_feedback/` directory, then pick one of four workflows with
+  `human_review_feedback/` directory — and, when you have one, a
+  false-positive-filtered LLM review in `llm_review_feedback/` beside it — then
+  pick one of four workflows with
   `setup --revision-mode …` (or `set-revision-mode …` on an existing root):
   **1** `transfer` — revise for a NEW journal; no response to reviewers; rewrites
   allowed. **2** `resubmit` — a new submission to the SAME journal; a
@@ -61,7 +64,8 @@ python paper_pipeline.py setup --source /path/to/non_revised --root ./paper_roun
 python paper_pipeline.py setup --source /path/to/non_revised --root ./paper_rounds \
         --venue generic --journal "Journal Name"
 #    revise against a REAL editor/reviewer decision (the feedback lives in the
-#    source's human_review_feedback/ directory; pick one of the four modes):
+#    source's human_review_feedback/ and/or llm_review_feedback/ directory;
+#    pick one of the four modes):
 python paper_pipeline.py setup --source /path/to/non_revised --root ./paper_rounds \
         --revision-mode transfer --journal "Frontiers in Immunology"
 #    ... or start a NEW submission: conform to the venue's template (or its
@@ -165,9 +169,9 @@ the base's from this round's review) or to the arm's own marker. A `-` now means
   comparison engine for tracked changes), `latexdiff` (LaTeX difference
   tracking), and the `zot` CLI for read-only Zotero reference resolution.
 
-## Evidence is not submission text: `raw_data/` and `human_review_feedback/`
+## Evidence is not submission text: `raw_data/` and the review-feedback areas
 
-A submission directory may carry two **read-only evidence areas** beside its
+A submission directory may carry **read-only evidence areas** beside its
 manuscript files:
 
 * **`raw_data/`** — factual evidence (measurements, tables, figures' source
@@ -176,7 +180,7 @@ manuscript files:
   is never shipped in the published package.
 * **`human_review_feedback/`** — the REAL editors'/reviewers' comments (the
   decision letter, the reviewer reports, a previous response to reviewers). The
-  four journal-feedback revision modes read it, and the blind judges may read both
+  four journal-feedback revision modes read it, and the blind judges may read the
   evidence areas (`evidence/raw_data/…`, `evidence/human_review_feedback/…`)
   because correctness and "were the humans' concerns addressed" cannot be
   judged without them. It is never copied into the submission package either.
@@ -187,8 +191,18 @@ manuscript files:
   already answers it (a concern that no longer exists is `already-addressed` or
   `not-applicable`, never a `to-fix` row whose location exists only there), and
   it is never swept, counted or quoted as the authors' current prose.
+* **`llm_review_feedback/`** — an optional machine-generated review of the
+  previous submission whose false-positive findings were filtered out upstream
+  (any file types). The journal modes stage it beside the human feedback
+  (`feedback/llm/…`) and enumerate every remaining finding as a real concern
+  with the same standing as a human reviewer's point; the blind judges read it
+  under `evidence/llm_review_feedback/…` and judge how a version addresses it.
+  A finding is never dismissed merely because a model wrote it, and a row the
+  authors still believe is wrong is closed `not-applicable`/`disagree` with a
+  recorded rationale — never silently dropped. It is read-only evidence, never
+  submission text.
 
-Both areas are hash-pinned, and any stage write into them is restored and
+Every evidence area is hash-pinned, and any stage write into it is restored and
 reported.
 
 To avoid duplicating gigabytes into every sandbox, the pipeline keeps **ONE**
@@ -339,7 +353,7 @@ source paragraph the target venue's own structure has no place for -- `drop`; a 
 (≥ 5-word) output paragraph absent from the source must be declared as an `addition`. The
 document set the parity is measured over is the submission's own DOCX files: the corpus's
 evidence areas (`human_review_feedback/`, including the previous journal's
-`original_submission/`, and `raw_data/`) are inputs whose file set a new journal's package need
+`original_submission/`, `llm_review_feedback/` and `raw_data/`) are inputs whose file set a new journal's package need
 not match, so they are never required to be re-housed. The former 95 % coverage floor, the 5-word
 source cutoff and the joined-text fallback are gone, because this package becomes the pipeline's
 `original`. None of the template's own guide sentences may survive (the template was *filled*,
@@ -670,6 +684,8 @@ snapshot, the figure/table sources), and the judge's blinded view carries them
 too — under the labeled `evidence/raw_data/` directory, with anonymized file
 names (e.g. `evidence/raw_data/f0001.py`, `evidence/raw_data/f0002.csv`) — as
 it also carries the human feedback under `evidence/human_review_feedback/`.
+When the corpus carries the pre-filtered LLM review, it travels the same way
+under `evidence/llm_review_feedback/`.
 
 **M30 — source-hierarchy reconciliation** closes that gap on the
 review → audit → revise path (`sweeps.md` §M30):
@@ -928,6 +944,7 @@ Every corpus the pipeline handles carries one pristine input area and two
 | `non_revised/` (in the root) | the pristine copy of `--source` | read-only: re-hashed at the start of every `run`/`decide`, byte-verified in every sandbox, never written (the operator's `--source` is never touched at all) |
 | `raw_data/` (inside each corpus) | the raw data — figure and table sources, data tables, the analysis snapshot the author's own scripts regenerate; an older corpus may also keep feedback here | read-only: a package CARRIES it, and the pipeline puts the untouched original's copy back after every package-producing stage; NOT submission content |
 | `human_review_feedback/` (inside each corpus) | the REAL editors'/reviewers' comments from the previous submission (decision letters, referee reports), plus any previous response-to-reviewers as context; its child `original_submission/`, when present, is the manuscript version those reviewers actually saw | read-only and NOT submission content like raw_data; the journal modes build the concern ledger and the response letter from it, and a judge may read it (under `evidence/human_review_feedback/` in its view) to score how well a version ADDRESSES the human-raised concerns; `original_submission/` is evidence for resolving a concern and checking whether the current `base/` already answers it — never the submission, a sweep surface or a source of text |
+| `llm_review_feedback/` (inside each corpus, optional) | a machine-generated review of the previous submission whose false positives were filtered out upstream (any file types); every remaining finding is a real concern with the same standing as a human reviewer's point | read-only and NOT submission content like the other evidence areas; the journal modes stage it under `feedback/llm/` and enumerate its findings into the concern ledger (origin kept in `source`/`author`; a row closed `not-applicable`/`disagree` needs the recorded rationale), and a judge may read it under `evidence/llm_review_feedback/` in its view to score how well a version ADDRESSES those findings |
 
 The first two names are this repo's snake_case spellings of older ones —
 `non-revised/` and `raw_figs/` — and **both spellings of each name stay
@@ -956,9 +973,10 @@ The evidence-area rule is enforced, not merely requested:
   dropped one is copied back, one the original does not have is removed, and a
   directory squatting on an original file's path is left alone (the recovery
   layer refuses to delete real work and fails that attempt) — each case is named
-  in a `READ-ONLY raw data:` / `READ-ONLY human review feedback:` warning and
+  in a `READ-ONLY raw data:` / `READ-ONLY human review feedback:` /
+  `READ-ONLY LLM review feedback:` warning and
   counted in the run record (`runs.<id>.raw_data`, and the
-  `human_review_feedback` block beside it);
+  `human_review_feedback` / `llm_review_feedback` blocks beside it);
 * a pinned champion or published winner that carries edits from before the rule
   existed is REPORTED (never rewritten) when `run`/`decide` start; the next
   stage materializes the original's copy, so the deviation cannot reach a new
@@ -981,7 +999,7 @@ reconciliation and the response letter are built from, and it is what lets a
 judge score whether a version answers the human-raised concerns (see the judge
 view: both areas appear under the labeled `evidence/` directory).
 
-## Revision modes: `continue`, `init`, and the journal modes (options 1–4)
+## Revision modes: `continue`, `init`, the journal modes (options 1–4), and `llm` (5)
 
 A root can be driven against a REAL journal decision letter instead of the
 pipeline's own review rounds. `setup --revision-mode <mode>` (or
@@ -997,6 +1015,20 @@ stage. In the four journal modes the feedback file(s) are named with
 `--journal-feedback FILE` (repeatable) or auto-detected in the corpus by name — typically
 `raw_data/iScience_feedback_from_reviewers_and_editors.txt`.
 
+**`llm` (option 5)** is the directory-driven mode: it revises against the
+false-positive-filtered `llm_review_feedback/` area ONLY (no journal decision
+letter, no response letter). When `--revision-mode` is omitted and `--source`
+carries a NON-EMPTY `llm_review_feedback/`, `setup` selects this mode
+automatically and records it in `pipeline_config.json`; the run/status output
+says so. Renaming the directory to `llm_review_feedback.disabled` (or `.off`)
+turns the auto-detection off — the renamed tree is INERT (never read as
+feedback or evidence, never part of the submission, never shown to a judge) —
+and an explicit `--revision-mode continue` (or any other recorded mode)
+overrides the directory. If `human_review_feedback/` is present too, the
+auto-selected `llm` mode reads ONLY the LLM stream and says so loudly; pass an
+explicit journal mode (transfer/resubmit/major/minor) when the human letter
+should drive the revision.
+
 | option | mode | what it is | response to reviewers | rewrites | edits |
 |---|---|---|---|---|---|
 | — | `continue` | the pipeline's own review/revise rounds (the default; the pre-rename spelling was `none`) | **not written** | allowed | the round's full review |
@@ -1005,6 +1037,7 @@ stage. In the four journal modes the feedback file(s) are named with
 | option 2 | `resubmit` | new submission to the **same journal** | **required** | allowed | the round's full review + the concerns |
 | option 3 | `major` | complete a **major revision** at the same journal | **required** | forbidden | **concern-scoped only** — no general review, no audit, no judge panel |
 | option 4 | `minor` | as 3, for a **minor revision** | **required** | forbidden | concern-scoped only |
+| option 5 | `llm` | revise against the pre-filtered `llm_review_feedback/` area only (auto-selected when the area is present and no mode is recorded; rename to `.disabled` to turn it off) | **not written** | allowed | the round's full review + the LLM review's concerns |
 
 How each mode runs:
 
@@ -1020,6 +1053,11 @@ How each mode runs:
   `original_submission/` is never discovered as a letter: it is staged
   READ-ONLY and separately under `feedback/original_submission/`, and every
   journal stage may read it only as the reviewer-visible earlier manuscript.
+  A sibling `llm_review_feedback/` area is read too, when present: its
+  remaining findings were already filtered for false positives, so they are
+  enumerated with the same standing as the human points (staged under
+  `feedback/llm/`, origin kept in the ledger's `source`/`author` columns, and
+  never silently dropped).
 * **Options 1–2** feed the ledger into the normal round: the review reconciles
   every concern (`review/concerns_reconciled.json`) and files a `check: "JF"`
   finding for each unanswered one; the rewrites carry the concern block; the
@@ -1031,6 +1069,13 @@ How each mode runs:
   guard fails the attempt for a changed file the ledger does not name or a
   file added/removed. There is no judge panel and no champion decision —
   `decide` reports the scoped revision instead.
+* **Option 5 (`llm`)** runs like options 1–2 (the normal round with the concern
+  ledger reconciled by the review, rewrites allowed) with two differences: only
+  `llm_review_feedback/` feeds the ledger (a human letter in the same corpus is
+  ignored as a concern source, though it stays evidence for the judges), and no
+  response letter or `journal_submission/` package is produced — there is no
+  journal to submit to. The mode is selected automatically from the directory
+  (see above), or explicitly with `--revision-mode llm`.
 * **Options 2–4** then run a response stage: `RESPONSE_TO_REVIEWERS.md` +
   `response_map.json`, one block/row per concern, every cited file verified to
   exist in the final package, `planned` rows forbidden from claiming results,
@@ -1058,7 +1103,8 @@ python paper_pipeline.py setup --source ./submission --root ./rounds \
     --revision-mode transfer \
     --journal-feedback-from iScience
 
-# option 3: major revision at the same journal (feedback auto-detected in human_review_feedback/)
+# option 3: major revision at the same journal (feedback auto-detected in
+# human_review_feedback/; an llm_review_feedback/ area is read too when present)
 python paper_pipeline.py setup --source ./submission --root ./rounds \
     --journal iScience --revision-mode major --journal-feedback-from iScience
 python paper_pipeline.py run --root ./rounds
@@ -2145,7 +2191,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 98 suites (a few
+any failure. They are independent, so run them in parallel — 99 suites (a few
 minutes at the default parallelism on a 20-core box; tens of minutes
 sequentially):
 
@@ -2234,7 +2280,7 @@ compatibility for a root with no `venue`/`article_type` key.
   `integrity`/`certification` blocks and `final_clean_version.readme.md` all say
   the checks were SKIPPED, and `certification.hash_checks` records `verified`
   or `skipped`. NOT skipped: the within-invocation freshness checks that decide
-  what an agent reads, and the `raw_data/`/`human_review_feedback/` read-only
+  what an agent reads, and the `raw_data/`/review-feedback read-only
   enforcement (which restores a stage's write and reports it). The flag is for
   a big root you trust (or to get past a chain you intend to repair), not for a
   decision you mean to sign as verified.
@@ -2242,8 +2288,8 @@ compatibility for a root with no `venue`/`article_type` key.
   (`non_revised/`, `base/`, pins, winners) is digest-verified, and the
   corpus's read-only `raw_data/` directory (see "The input and evidence areas") is
   restored from that pristine copy whenever a stage touches it.
-* That read-only contract is taken literally: `raw_data/` and
-  `human_review_feedback/` (and everything inside them) may be
+* That read-only contract is taken literally: `raw_data/`,
+  `human_review_feedback/` and `llm_review_feedback/` (and everything inside them) may be
   `chmod -R a-w`, so the pipeline never needs write permission there — `setup`,
   publication of `final_clean_version/`, pruning, retries and the
   restore-from-pristine step all work on a read-only tree, and the modes the

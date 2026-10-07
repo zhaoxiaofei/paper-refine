@@ -1,6 +1,6 @@
 # paper-review + paper-revise — Codex Skills for Manuscript Submissions (any venue or journal)
 
-**Package version:** 0.32 (live Zotero fields are carried across versions: never unlink them, never drop the set, never leave one malformed; see CHANGELOG.md) — distributed as the directory
+**Package version:** 0.33 (`llm_review_feedback/` joins `human_review_feedback/` as pre-filtered evidence with the same concern standing; see CHANGELOG.md) — distributed as the directory
 `paper-skills-v03`. The version lives here, not in the skill frontmatter. If more
 than one copy of this package is installed, check this line and retire the
 older copies (`paper-skills-v01/`, `paper-skills-v02/`): Codex registers skills by

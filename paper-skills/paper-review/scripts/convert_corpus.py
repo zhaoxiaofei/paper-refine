@@ -9,21 +9,24 @@ plain text under WORK/corpus/, and writes:
   WORK/corpus/<rel>.txt — converted plain text (structure-aware)
   WORK/evidence/<rel>.txt — converted text of the raw-data EVIDENCE area
 
-Two directories are EVIDENCE areas, NOT part of the submission: `raw_data/`
-(legacy spelling `raw_figs/`) carries data tables, figure/table sources and the
-analysis snapshot — and an older corpus may also keep the editors'/reviewers'
-feedback there; `human_review_feedback/` (sibling of raw_data/) carries the real
+The EVIDENCE areas are NOT part of the submission: `raw_data/` (legacy spelling
+`raw_figs/`) carries data tables, figure/table sources and the analysis
+snapshot — and an older corpus may also keep the editors'/reviewers' feedback
+there; `human_review_feedback/` (sibling of raw_data/) carries the real
 editors'/reviewers' comments from the previous submission (and any previous
 response-to-reviewers, as context), plus — when present — its child
 `original_submission/` with the manuscript version those reviewers actually
-saw (evidence for resolving a concern, never the current submission). Their files are inventoried with
-`area: raw_data` / `area: human_review_feedback`, are never marked editable, and
-their converted text goes to `WORK/evidence/` — never to `WORK/corpus/` — so no
-submission sweep (M1 acronyms, M4 numbers, M9 file roles, M18/M19 lengths, …)
-can read a data table, a reviewer's sentence or an editor's decision letter as
-if it were the authors' manuscript. The evidence text stays available to the
-review for fact-checking, the M30 producer comparison and the human-concern
-reconciliation.
+saw (evidence for resolving a concern, never the current submission); and
+`llm_review_feedback/` carries a machine-generated review whose false-positive
+findings were filtered out, so its remaining findings have the same standing as
+human concerns. Their files are inventoried with `area: raw_data` /
+`area: human_review_feedback` / `area: llm_review_feedback`, are never marked
+editable, and their converted text goes to `WORK/evidence/` — never to
+`WORK/corpus/` — so no submission sweep (M1 acronyms, M4 numbers, M9 file roles,
+M18/M19 lengths, …) can read a data table, a reviewer's sentence, an editor's
+decision letter or an LLM review as if it were the authors' manuscript. The
+evidence text stays available to the review for fact-checking, the M30 producer
+comparison and the concern reconciliation.
 
 Conversion details that matter downstream:
   * .docx — body paragraphs, plus header/footer and footnote/endnote parts,
@@ -80,11 +83,15 @@ ROLE_PATTERNS = [
 
 RAW_DATA_DIRNAMES = ("raw_data", "raw_figs")
 HUMAN_FEEDBACK_DIR = "human_review_feedback"
+LLM_FEEDBACK_DIR = "llm_review_feedback"
 # The manuscript version the PREVIOUS journal's editors/reviewers actually saw,
 # optionally kept inside the feedback area. It is EVIDENCE (an earlier,
 # reviewer-visible version), never the current submission.
 ORIGINAL_SUBMISSION_DIRNAME = "original_submission"
-EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR,)
+EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR)
+# `<evidence area>.disabled` / `.off` is INERT: not submission content and not
+# readable evidence -- the documented off-switch for `llm_review_feedback/`.
+DISABLED_EVIDENCE_SUFFIXES = ("disabled", "off")
 EVIDENCE_DIRNAME = "evidence"
 FEEDBACK_NAME_RE = re.compile(r"feedback|referee|reviewers?|editors?|editorial|decision", re.I)
 REPLY_NAME_RE = re.compile(r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
@@ -111,16 +118,27 @@ def is_raw_data_rel(rel_path: str) -> bool:
 def evidence_area_of(rel_path: str) -> str:
     """The canonical EVIDENCE area a path belongs to ("" when none).
 
-    `human_review_feedback/` is the real editors'/reviewers' comments (sibling
-    of raw_data/); both areas are inputs, never submission text.
+    `human_review_feedback/` is the real editors'/reviewers' comments and
+    `llm_review_feedback/` the false-positive-filtered LLM review (siblings of
+    raw_data/); every area is an input, never submission text.
     """
     parts = rel_path.replace("\\", "/").split("/")[:-1]
     for part in parts:
         if part in RAW_DATA_DIRNAMES:
             return "raw_data"
-        if part == HUMAN_FEEDBACK_DIR:
-            return HUMAN_FEEDBACK_DIR
+        if part in (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR):
+            return part
     return ""
+
+
+def is_disabled_evidence_rel(rel_path: str) -> bool:
+    """True when a path lives in an inert `<evidence area>.disabled/` tree."""
+    top = str(rel_path or "").replace("\\", "/").lstrip("/").split("/", 1)[0]
+    for area in EVIDENCE_DIRNAMES:
+        if top.startswith(area + ".") \
+                and top[len(area) + 1:].strip().lower() in DISABLED_EVIDENCE_SUFFIXES:
+            return True
+    return False
 
 
 def is_original_submission_rel(rel_path: str) -> bool:
@@ -580,10 +598,15 @@ def main():
 
     files = []
     for root, dirs, names in os.walk(sub):
-        dirs.sort()
+        dirs[:] = sorted(
+            d for d in dirs
+            if not is_disabled_evidence_rel(os.path.relpath(os.path.join(root, d), sub)))
         for n in sorted(names):
             p = os.path.join(root, n)
-            files.append(os.path.relpath(p, sub))
+            rel = os.path.relpath(p, sub)
+            if is_disabled_evidence_rel(rel):
+                continue
+            files.append(rel)
     if not files:
         print("ERROR: SUBMISSION_DIR %s is empty. Stop and ask the user." % sub)
         sys.exit(2)
@@ -609,6 +632,9 @@ def main():
                     entry["role"] = ("previous response to reviewers (evidence context)"
                                      if REPLY_NAME_RE.search(os.path.basename(rel))
                                      else "human review feedback (evidence)")
+            elif area == LLM_FEEDBACK_DIR:
+                entry["role"] = ("LLM review feedback (evidence; false positives "
+                                 "pre-filtered)")
             else:
                 entry["role"] = ("reviewer/editor feedback (raw-data evidence)"
                                  if is_feedback_rel(rel) else "raw data (evidence)")
@@ -627,6 +653,13 @@ def main():
                         "submission text; read as evidence for the concern reconciliation, the "
                         "response letter and the judge's concern-addressing check; never swept, "
                         "counted or edited")
+            elif area == LLM_FEEDBACK_DIR:
+                entry["notes"].append(
+                    "machine-generated review feedback — its false positives were filtered out "
+                    "upstream, so every remaining finding is a real concern with the same standing "
+                    "as a human reviewer's point; external prose, never the authors' submission "
+                    "text; read as evidence for the concern reconciliation, the response letter "
+                    "and the judge's concern-addressing check; never swept, counted or edited")
             elif is_feedback_rel(rel):
                 entry["notes"].append(
                     "editors'/reviewers' feedback — external prose, never the authors' "
@@ -683,12 +716,12 @@ def main():
     with open(os.path.join(work, "inventory.json"), "w", encoding="utf-8") as f:
         json.dump(js, f, indent=2)
 
-    n_ev = sum(1 for e in inventory if e["area"] in ("raw_data", HUMAN_FEEDBACK_DIR))
+    n_ev = sum(1 for e in inventory if e["area"] in EVIDENCE_DIRNAMES)
     print("Inventoried %d files (%d submission, %d evidence-area)."
           % (len(inventory), len(inventory) - n_ev, n_ev))
     print("Converted text corpus in %s" % corpus_dir)
     if n_ev:
-        print("Raw-data evidence text (never swept as submission content) in %s" % evidence_dir)
+        print("Evidence text (never swept as submission content) in %s" % evidence_dir)
     print("Artifacts: inventory.md, inventory.json")
     n_fail = sum(1 for e in inventory if e["status"] in ("failed", "read-only/unreadable"))
     if n_fail:

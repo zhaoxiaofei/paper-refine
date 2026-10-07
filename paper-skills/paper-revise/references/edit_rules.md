@@ -498,13 +498,17 @@ tables > supplementary tables > main text > supplementary text`).
   figures and tables become `manual-required` with the rerun instructions (never
   guess a new value, never regenerate a figure here). Say so in the ledger row
   and in `MANUAL_STEPS.md`.
-* **`raw_data/` is READ-ONLY by contract** (enforced code-side), and so is its
-  sibling `human_review_feedback/`: a finding whose only fix is inside one is
+* **`raw_data/` is READ-ONLY by contract** (enforced code-side), and so are its
+  siblings `human_review_feedback/` and `llm_review_feedback/` (when the corpus
+  carries the latter): a finding whose only fix is inside one is
   `manual-required` with the exact file, row and value the author must decide
   on — never an edit, never a delete, never a "cleanup". They are EVIDENCE, not
   submission content: carried byte-for-byte and never version-token-renamed
   (their file names stay as they are), and the only permitted change anywhere
-  near raw_data is the legacy directory rename the pipeline itself makes.
+  near raw_data is the legacy directory rename the pipeline itself makes. The
+  LLM-review area's findings were already filtered for false positives in a
+  journal mode, so its rows have the same standing as human concerns; closing
+  one as `not-applicable`/`disagree` still needs the recorded rationale.
 * **The editors'/reviewers' feedback inside the evidence areas is never the
   written side.** It is external prose that documents what the review requires
   (in a journal revision mode, it is the concern source the response letter

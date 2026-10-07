@@ -111,18 +111,25 @@ the profiles shipped next to the script → the built-in fallback inside
    pins it. Do not let a new producer-bearing artifact (a new code directory, a
    new data snapshot) enter the corpus without a way to reconcile it.
    The EVIDENCE areas are `raw_data/` (data, figure/table sources, analysis
-   snapshot; legacy `raw_figs/`) and `human_review_feedback/` (the REAL
-   editors'/reviewers' comments, plus any previous response as context). Both
-   are read-only, not submission content: the converter writes their text to
+   snapshot; legacy `raw_figs/`), `human_review_feedback/` (the REAL
+   editors'/reviewers' comments, plus any previous response as context) and —
+   when the operator supplies one — `llm_review_feedback/` (a machine-generated
+   review whose false positives were filtered out upstream, so every remaining
+   finding is a real concern with the same standing as a human point). All are
+   read-only, not submission content: the converter writes their text to
    `WORK/evidence/` (never `WORK/corpus/`), the code-side scans and the skill
    scripts skip them (and a feedback/response document elsewhere in the corpus,
    by name), and no sweep counts or quotes them as the authors' prose. M30
    reads `raw_data/` as the producer side; the journal modes build the concern
-   ledger and the response letter from `human_review_feedback/`; and a JUDGE
-   sees both under the labeled `evidence/` directory in its view (raw_data for
-   correctness, the human feedback for whether the version addresses the
-   raised concerns). `.paper_test/test_raw_data_evidence_area.py` and
-   `.paper_test/test_human_review_feedback_area.py` pin the contract. Never
+   ledger and the response letter from `human_review_feedback/` and (when
+   present) `llm_review_feedback/`, staging the LLM stream under `feedback/llm/`
+   with its origin kept in the ledger; and a JUDGE sees every area under the
+   labeled `evidence/` directory in its view (raw_data for correctness, the
+   feedback areas for whether the version addresses the raised concerns, with
+   the LLM findings judged like human points and never dismissed as model
+   noise). `.paper_test/test_raw_data_evidence_area.py`,
+   `.paper_test/test_human_review_feedback_area.py` and
+   `.paper_test/test_llm_review_feedback_area.py` pin the contract. Never
    extend a scan or a packaging step without routing it through
    `is_evidence_rel` / `is_non_manuscript_rel`.
 9. **A table's or a figure's caption and its place in the manuscript are VENUE FACTS too.**
@@ -287,10 +294,23 @@ default-venue text.
 ## Journal revision modes — do not regress the default
 
 `pipeline_config.json` may carry `revision_mode` (one of `continue`, `init`,
-`transfer`, `resubmit`, `major`, `minor`; default `continue`) and
+`transfer`, `resubmit`, `major`, `minor`, `llm`; default `continue`) and
 `journal_feedback` (the decision-letter files; when unset they are taken from
 `human_review_feedback/` first, then a legacy feedback-named file anywhere in
-the corpus). `continue` is the historical workflow; `none` is its pre-rename
+the corpus). A sibling `llm_review_feedback/` area is read BESIDE them: it is
+staged under `feedback/llm/` and its pre-filtered findings join the concern
+ledger with their origin recorded (the `feedback/concerns` stages consume both
+streams; only the human/decision-letter stream uses the name heuristic).
+Mode `llm` (option 5) is the one exception: it reads ONLY
+`llm_review_feedback/` (no journal letter, no response letter), and it is
+DIRECTORY-DRIVEN -- when no explicit `revision_mode` is recorded and the
+pristine corpus carries a non-empty `llm_review_feedback/`, `journal_mode_of`
+returns `llm` automatically (`setup` records it; run/status print the auto
+detection). An explicit recorded mode always wins, and renaming the area to
+`llm_review_feedback.disabled` (or `.off`) is the inert off-switch: the renamed
+tree is never read as feedback or evidence and never becomes submission
+content (`is_disabled_evidence_rel` keeps it out of scans, views and packages).
+`continue` is the historical workflow; `none` is its pre-rename
 spelling and is still accepted everywhere as an alias (it normalises to
 `continue` and is never returned by `journal_mode_of`). `init` starts a NEW
 submission: the conform stage runs before round 1 (inside the venue's own Word
@@ -419,7 +439,8 @@ touching this area:
   venue's (styles, section names, declarations, reference style). Pinned by
   `.paper_test/test_venue_templates.py`.
 * **The read-only evidence areas are SYMLINKED into sandboxes** (2026-10-01):
-  each stage sandbox's `non_revised/raw_data|raw_figs|human_review_feedback`
+  each stage sandbox's
+  `non_revised/raw_data|raw_figs|human_review_feedback|llm_review_feedback`
   is a RELATIVE symlink to the root's canonical, chmod-protected pristine copy
   (`ensure_pristine_input`), so no sandbox duplicates the evidence. Every walk
   that defines identity/view/input manifests FOLLOWS directory links

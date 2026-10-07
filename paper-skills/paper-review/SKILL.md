@@ -36,7 +36,11 @@ say where they went.
 figure/table sources and the analysis snapshot the author's own scripts
 regenerate, and `human_review_feedback/` (its sibling) with the REAL
 editors'/reviewers' comments from the previous submission — decision letters,
-referee reports — and possibly a previous response-to-reviewers as context.
+referee reports — and possibly a previous response-to-reviewers as context. A
+third optional sibling, `llm_review_feedback/`, carries a machine-generated
+review whose false-positive findings were filtered out upstream, so every
+remaining finding is a real concern with the same standing as a human
+reviewer's point (never dismissed merely because a model wrote it).
 When it carries a child `original_submission/`, that child is the manuscript
 version those reviewers actually saw — still evidence, never the submission:
 use it only to resolve what a raised concern refers to and whether the current
@@ -53,8 +57,8 @@ is skipped by name for the same reason. Reviewer/editor feedback is *external*
 prose — read it as evidence of what the review requires, never attribute its
 sentences to the authors, and never treat it as a written surface to align.
 `raw_data/` stays available for fact-checking and as the producer tier of M30;
-`human_review_feedback/` is what the journal modes' concern reconciliation and
-response letter are built from.
+`human_review_feedback/` and (when present) `llm_review_feedback/` are what the
+journal modes' concern reconciliation and response letter are built from.
 
 ## Mission
 
@@ -78,7 +82,7 @@ A plain "review my manuscript" prompt reliably misses low-salience mechanical is
 5. **One finding per instance.** "Several acronyms are undefined" is not a finding; each undefined acronym is its own finding with its own ID, quote, and location.
 6. **Sweep pattern for every mechanical check:** ENUMERATE (script preferred; scripts live in `WORK/`) → ARTIFACT (`OUT/artifacts/<ID>.md` for the M1/M2/M4–M17 tables; term/value occurrence enumerations are written to `WORK/occurrences_<slug>.md`, which is M8's artifact — pass `--out OUT/artifacts` if you prefer them alongside the others; every instance gets a row, including rows later judged OK; the artifact spans the whole submission corpus, not one file) → AUDIT (each row gets: a finding ID, `OK`, or `unable — <reason>`) → REPORT (findings derived only from artifact rows, never from general impression).
 7. **A sweep with zero findings is INVALID unless its artifact exists and every row is disposed.**
-8. **The evidence areas (`raw_data/`, `human_review_feedback/`) are EVIDENCE, not submission content.** Their text never feeds a written-surface sweep (M1–M29), a word count (M18/M19), a file-hygiene row (M9) or a finding's evidence quote; the same holds for a feedback/response document kept elsewhere in the corpus, by name. M30 alone reads `raw_data/`, as the producer side of a written claim; the human feedback drives the concern reconciliation. Editors'/reviewers' feedback is external prose and is never attributed to the authors.
+8. **The evidence areas (`raw_data/`, `human_review_feedback/`, `llm_review_feedback/`) are EVIDENCE, not submission content.** Their text never feeds a written-surface sweep (M1–M29), a word count (M18/M19), a file-hygiene row (M9) or a finding's evidence quote; the same holds for a feedback/response document kept elsewhere in the corpus, by name. M30 alone reads `raw_data/`, as the producer side of a written claim; the human feedback (and, when supplied, the pre-filtered LLM review) drives the concern reconciliation. Editors'/reviewers'/LLM-review feedback is external prose and is never attributed to the authors.
    The child `human_review_feedback/original_submission/`, when present, is the manuscript version the previous journal's reviewers actually saw — evidence for resolving what a concern refers to and whether the current submission already answers it, never a submission document, a sweep surface, a quotation source or a candidate version.
 
 ## Bundled scripts (use them — they exist so enumeration is deterministic)

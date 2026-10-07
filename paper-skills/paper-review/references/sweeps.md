@@ -29,19 +29,22 @@ says the corpus, it means the SUBMISSION corpus (the converted text under
 figure/table sources of the submission itself). A corpus carries `raw_data/`
 (legacy spelling `raw_figs/`) with data tables, figure sources and the analysis
 snapshot, and `human_review_feedback/` with the REAL editors'/reviewers'
-comments from the previous submission (and any previous response as context).
-Those are the EVIDENCE areas: they are not submitted, no file in them is a
-submission document, and their text is never enumerated, counted, quoted or
-disposed by any written-surface sweep below (M1–M29) — the same holds for a
-feedback/response document kept elsewhere in the corpus, by name. A file in an
-evidence area is never a "main text", "cover letter" or "supplementary"
-document, whatever its name. Reviewer/editor feedback is external prose —
-evidence of what the review requires, never the authors' words and never a
-written surface to align. **M30 is the single exception**: it reads
-`raw_data/`, as the PRODUCER side of a written claim's comparison — and even
-there, a feedback sentence is never the authors' claim, only context. (A JUDGE
-sees both areas, clearly labeled, in its anonymized view; see the judge
-prompt's evidence-area rule.)
+comments from the previous submission (and any previous response as context),
+and — when the operator supplies one — `llm_review_feedback/` with a
+machine-generated review whose false-positive findings were already filtered
+out, so every remaining finding is a real concern with the same standing as a
+human reviewer's point. Those are the EVIDENCE areas: they are not submitted,
+no file in them is a submission document, and their text is never enumerated,
+counted, quoted or disposed by any written-surface sweep below (M1–M29) — the
+same holds for a feedback/response document kept elsewhere in the corpus, by
+name. A file in an evidence area is never a "main text", "cover letter" or
+"supplementary" document, whatever its name. Reviewer/editor/LLM-review
+feedback is external prose — evidence of what the review requires, never the
+authors' words and never a written surface to align. **M30 is the single
+exception**: it reads `raw_data/`, as the PRODUCER side of a written claim's
+comparison — and even there, a feedback sentence is never the authors' claim,
+only context. (A JUDGE sees every area, clearly labeled, in its anonymized
+view; see the judge prompt's evidence-area rule.)
 
 ---
 

@@ -586,7 +586,7 @@ USAGE
         --journal "Frontiers in Immunology" --revision-mode transfer \\
         --journal-feedback-from iScience [--journal-feedback FILE ...]
     python paper_pipeline.py set-revision-mode major --root ./paper_rounds
-        # none | transfer (1) | resubmit (2) | major (3) | minor (4)
+        # none | transfer (1) | resubmit (2) | major (3) | minor (4) | llm (5)
     python paper_pipeline.py run    --root ./paper_rounds --jobs 255
     python paper_pipeline.py run    --root ./paper_rounds --only 1,2      # only rounds 1 and 2
     python paper_pipeline.py run    --root ./paper_rounds --only 2:review,2:merge
@@ -3203,10 +3203,13 @@ VENUE_TRANSFER_RULES = """
     REPLACES the previous venue's. Treat the old class file/styles, old section names, old
     declaration wording, old reference style and old figure/supplementary conventions as
     findings to remove, and verify the new venue's mandatory sections and statements exist.
-    Answer the humans' concerns from `human_review_feedback/` where they still apply; never
-    depend on a response letter. Its child `original_submission/`, when present, is the
-    manuscript version those reviewers actually saw -- evidence for understanding a concern,
-    never the current submission and never a source of text to copy."""
+    Answer the review concerns from `human_review_feedback/` (and from
+    `llm_review_feedback/` when the corpus carries the pre-filtered LLM review) where they still
+    apply; never depend on a response letter. The human area's child `original_submission/`,
+    when present, is the manuscript version those reviewers actually saw -- evidence for
+    understanding a concern, never the current submission and never a source of text to copy.
+    Every remaining LLM-review finding is a real concern (its false positives were filtered out
+    upstream), never noise to dismiss."""
 
 
 def venue_norm_block(venue_id, root=None, transfer: bool = False) -> str:
@@ -3686,6 +3689,15 @@ RAW_DATA_DIRNAMES = (RAW_DATA_DIR, RAW_DATA_DIR_LEGACY)
 # ADDRESSES the human-raised concerns. Both areas together are the corpus's
 # EVIDENCE areas (see is_evidence_rel / the judge-view layout).
 HUMAN_FEEDBACK_DIR = "human_review_feedback"
+# A corpus may ALSO carry a machine-generated review of the previous submission
+# in its own top-level area (a sibling of human_review_feedback/). It follows
+# the SAME evidence contract -- read-only, never submission text, staged into
+# the journal feedback/concerns sessions and shown to judges under evidence/ --
+# with one semantic difference: its false-positive findings were filtered out
+# upstream, so every remaining finding is a real concern the stages must answer
+# (never dismissed merely because a model wrote it, and never silently dropped).
+LLM_FEEDBACK_DIR = "llm_review_feedback"
+REVIEW_FEEDBACK_DIRS = (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR)
 # A corpus may keep the manuscript version the PREVIOUS journal's editors/
 # reviewers actually saw inside the feedback area, under this fixed child name.
 # It is EVIDENCE, not the current submission: it never feeds feedback discovery,
@@ -3693,7 +3705,12 @@ HUMAN_FEEDBACK_DIR = "human_review_feedback"
 # understand what a raised concern refers to and whether the CURRENT base
 # already answers it.
 ORIGINAL_SUBMISSION_DIRNAME = "original_submission"
-EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR,)
+EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + REVIEW_FEEDBACK_DIRS
+# An evidence area the operator renamed to `<area>.disabled` (or `.off`) is
+# INERT: it is not read as evidence or feedback and it is not part of the
+# submission either -- the rename is the documented off-switch, so its files
+# must never leak into the corpus, a judge view or a published package.
+DISABLED_EVIDENCE_SUFFIXES = ("disabled", "off")
 # The stable root the judge view uses to expose the evidence areas (their files
 # stay anonymized inside it; see _view_layout).
 EVIDENCE_VIEW_ROOT = "evidence"
@@ -3784,6 +3801,12 @@ JOURNAL_MODE_TRANSFER = "transfer"
 JOURNAL_MODE_RESUBMIT = "resubmit"
 JOURNAL_MODE_MAJOR = "major"
 JOURNAL_MODE_MINOR = "minor"
+# The LLM-review mode: the round is revised against the false-positive-filtered
+# `llm_review_feedback/` area ONLY (no journal decision letter). It is
+# auto-detected from the directory's presence when the config records no
+# explicit mode, and the directory can be turned off by renaming it to
+# `llm_review_feedback.disabled` (an inert, never-submitted name).
+JOURNAL_MODE_LLM = "llm"
 JOURNAL_MODE_CONTINUE = "continue"
 # The pre-rename spelling of `continue`: kept so existing roots (a config with
 # `"revision_mode": "none"`), scripts and `set-revision-mode none` keep working.
@@ -3796,6 +3819,7 @@ JOURNAL_MODES = {
         "option": 0,
         "label": "the pipeline's own review/revise rounds (no journal feedback)",
         "feedback": False, "response": False, "rewrites": True, "scoped": False,
+        "streams": (),
     },
     JOURNAL_MODE_INIT: {
         # `init` starts a NEW submission: the conform (template-first) stage runs
@@ -3809,30 +3833,42 @@ JOURNAL_MODES = {
                  "convention -- then run the pipeline's own review/revise rounds; no journal "
                  "feedback",
         "feedback": False, "response": False, "rewrites": True, "scoped": False,
+        "streams": (),
     },
     JOURNAL_MODE_TRANSFER: {
         "option": 1,
         "label": "transfer: revise for a NEW journal from another journal's feedback; "
                  "no response to reviewers",
         "feedback": True, "response": False, "rewrites": True, "scoped": False,
+        "streams": ("human", "llm"),
     },
     JOURNAL_MODE_RESUBMIT: {
         "option": 2,
         "label": "resubmit: revise for a new submission to the SAME journal; "
                  "response to reviewers required",
         "feedback": True, "response": True, "rewrites": True, "scoped": False,
+        "streams": ("human", "llm"),
     },
     JOURNAL_MODE_MAJOR: {
         "option": 3,
         "label": "major revision: concern-scoped edits only at the same journal; "
                  "response to reviewers required; no rewrites",
         "feedback": True, "response": True, "rewrites": False, "scoped": True,
+        "streams": ("human", "llm"),
     },
     JOURNAL_MODE_MINOR: {
         "option": 4,
         "label": "minor revision: concern-scoped edits only at the same journal; "
                  "response to reviewers required; no rewrites",
         "feedback": True, "response": True, "rewrites": False, "scoped": True,
+        "streams": ("human", "llm"),
+    },
+    JOURNAL_MODE_LLM: {
+        "option": 5,
+        "label": "llm: revise against the false-positive-filtered LLM review only "
+                 "(llm_review_feedback/); no journal decision letter and no response letter",
+        "feedback": True, "response": False, "rewrites": True, "scoped": False,
+        "streams": ("llm",),
     },
 }
 
@@ -3900,14 +3936,89 @@ def journal_mode_of(ctx=None) -> str:
     Reads `revision_mode` from pipeline_config.json (mirrored into state.json
     as `config`). An unknown value is an error, not a silent 'continue': a typo
     in the mode would otherwise silently run the wrong workflow.
+
+    When NO mode is recorded, a non-empty `llm_review_feedback/` area in the
+    corpus's pristine copy turns the effective mode into `llm` automatically
+    (the operator's directory-driven switch; rename it to
+    `llm_review_feedback.disabled` or record an explicit mode to turn it off).
+    An EXPLICIT recorded mode always wins -- auto-detection never overrides it.
     """
     cfg = (getattr(ctx, "cfg", None) if ctx is not None else None) or {}
-    mode = normalize_revision_mode(cfg.get("revision_mode"))
+    raw = str(cfg.get("revision_mode") or "").strip()
+    if not raw:
+        return auto_revision_mode_for(ctx) or JOURNAL_MODE_CONTINUE
+    mode = normalize_revision_mode(raw)
     if mode not in JOURNAL_MODES:
         die(f"pipeline_config.json records revision_mode {mode!r}, which is not one of "
             f"{', '.join(JOURNAL_MODES)}. Fix it with `set-revision-mode <mode>` or start a "
             f"fresh root.")
     return mode
+
+
+def llm_feedback_present_in(dirp) -> bool:
+    """True when `dirp` carries a NON-EMPTY llm_review_feedback/ area.
+
+    A directory with no file anywhere inside it does not trigger the mode; a
+    renamed (`llm_review_feedback.disabled`) or moved area never does either --
+    only the canonical name counts.
+    """
+    if dirp is None:
+        return False
+    try:
+        area = Path(dirp) / LLM_FEEDBACK_DIR
+        if not area.is_dir():
+            return False
+        return any(p.is_file() and not is_bookkeeping_name(p.name) for p in area.rglob("*"))
+    except OSError:
+        return False
+
+
+def auto_revision_mode_for(ctx=None) -> str:
+    """The directory-driven mode (`llm`) or `""` when auto-detection is off.
+
+    Auto-detection is OFF whenever an explicit revision_mode is recorded (there
+    is no such value in a default root: `setup` writes no key for `continue`),
+    and when the LLM review area is absent, empty or renamed to its inert
+    `.disabled` spelling. The result is cached on the context: the pristine copy
+    cannot change during one invocation.
+    """
+    cfg = (getattr(ctx, "cfg", None) if ctx is not None else None) or {}
+    if str(cfg.get("revision_mode") or "").strip():
+        return ""
+    pristine = getattr(ctx, "pristine", None)
+    if pristine is None:
+        return ""
+    cached = getattr(ctx, "_auto_revision_mode", None)
+    if cached is None:
+        cached = JOURNAL_MODE_LLM if llm_feedback_present_in(pristine) else ""
+        try:
+            setattr(ctx, "_auto_revision_mode", cached)
+        except Exception:                                         # noqa: BLE001
+            pass
+    return cached
+
+
+def revision_mode_origin(ctx=None) -> str:
+    """`explicit` / `auto` / `default` for the effective revision mode."""
+    cfg = (getattr(ctx, "cfg", None) if ctx is not None else None) or {}
+    if str(cfg.get("revision_mode") or "").strip():
+        return "explicit"
+    return "auto" if auto_revision_mode_for(ctx) else "default"
+
+
+def revision_mode_note(ctx=None) -> str:
+    """One line to print when the mode came from the directory, not the config."""
+    if revision_mode_origin(ctx) != "auto":
+        return ""
+    return (f"revision mode auto-detected: {JOURNAL_MODE_LLM} "
+            f"({LLM_FEEDBACK_DIR}/ is present and non-empty; only that area is read). "
+            f"Rename it to {LLM_FEEDBACK_DIR}.disabled, or record an explicit mode "
+            f"(`--revision-mode continue`), to turn the auto-detection off.")
+
+
+def journal_feedback_streams(ctx=None) -> tuple:
+    """Which review-feedback streams the effective mode consumes."""
+    return tuple(JOURNAL_MODES.get(journal_mode_of(ctx), {}).get("streams") or ())
 
 
 def journal_mode_info(ctx=None) -> dict:
@@ -3974,7 +4085,17 @@ def journal_feedback_files(ctx: Ctx) -> list:
          earlier design working when the letter lives in `raw_data/`.
     A file the AUTHORS wrote (`response_to_reviewers.docx`, `cover_letter_to_
     editor.docx`, `point-by-point.md`) is never read as the journal's letter.
+
+    This is the HUMAN/decision-letter stream only. A sibling
+    `llm_review_feedback/` area (false positives pre-filtered) is resolved by
+    `journal_llm_feedback_files` and merged with this one by the feedback/
+    concerns sessions, which keeps each finding's provenance explicit.
     """
+    streams = journal_feedback_streams(ctx)
+    if streams and "human" not in streams:
+        # `llm` mode reads ONLY the LLM review: a human letter in the corpus is
+        # not a concern source here (it stays evidence for the judges).
+        return []
     named = journal_feedback_paths(ctx)
     if named:
         out = []
@@ -3996,11 +4117,18 @@ def journal_feedback_files(ctx: Ctx) -> list:
     for p in sorted(ctx.pristine.rglob("*")):
         if not p.is_file() or is_bookkeeping_name(p.name):
             continue
-        if is_original_submission_rel(p.relative_to(ctx.pristine).as_posix()):
+        rel = p.relative_to(ctx.pristine).as_posix()
+        if is_original_submission_rel(rel):
+            continue
+        if evidence_area_of(rel) == LLM_FEEDBACK_DIR:
+            # The LLM review is its own stream (`journal_llm_feedback_files`),
+            # never swept up by the decision-letter name heuristic: a
+            # "reviewer_report.md" inside llm_review_feedback/ must not be
+            # relabelled as a human letter.
             continue
         if is_journal_feedback_name(p.name) \
                 and not JOURNAL_AUTHORED_REPLY_RE.search(p.name):
-            found.append((p, p.relative_to(ctx.pristine).as_posix()))
+            found.append((p, rel))
     return found
 
 
@@ -4035,25 +4163,54 @@ def human_original_submission_dirs(dirp: Path) -> list:
     return out
 
 
-def human_feedback_files_in(dirp: Path) -> list:
-    """[(path, corpus-relative label)] of every FEEDBACK FILE in `dirp`'s area.
+def review_feedback_files_in(dirp: Path, area_name: str) -> list:
+    """[(path, corpus-relative label)] of every FEEDBACK FILE in one area.
 
-    `original_submission/` is deliberately excluded: it is a manuscript, not a
-    letter or a response. Treating its files as feedback would seed the concern
-    ledger from the manuscript itself.
+    `human_review_feedback/original_submission/` is deliberately excluded: it is
+    a manuscript, not a letter or a response. Treating its files as feedback
+    would seed the concern ledger from the manuscript itself. The LLM area has
+    no such child.
     """
-    area = dirp / HUMAN_FEEDBACK_DIR
+    area = Path(dirp) / area_name
     out = []
     if not area.is_dir():
         return out
     for p in sorted(area.rglob("*")):
         if not p.is_file() or is_bookkeeping_name(p.name):
             continue
-        label = p.relative_to(dirp).as_posix()
-        if is_original_submission_rel(label):
+        label = p.relative_to(Path(dirp)).as_posix()
+        if area_name == HUMAN_FEEDBACK_DIR and is_original_submission_rel(label):
             continue
         out.append((p, label))
     return out
+
+
+def human_feedback_files_in(dirp: Path) -> list:
+    """[(path, label)] of the human editors'/reviewers' feedback files."""
+    return review_feedback_files_in(dirp, HUMAN_FEEDBACK_DIR)
+
+
+def llm_feedback_files_in(dirp: Path) -> list:
+    """[(path, label)] of the (false-positive-filtered) LLM review files."""
+    return review_feedback_files_in(dirp, LLM_FEEDBACK_DIR)
+
+
+def journal_llm_feedback_files(ctx: Ctx) -> list:
+    """[(absolute path, label)] of the LLM review feedback of this root.
+
+    The LLM stream is kept SEPARATE from `journal_feedback_files` (the human
+    decision letter / referee reports): the journal stages consume both, but the
+    provenance, the prompt wording and the ledger's `author` column must never
+    blur them. Unlike the human area there is no name heuristic and no
+    previous-response or `original_submission/` machinery: the area IS the
+    feedback.
+    """
+    streams = journal_feedback_streams(ctx)
+    if streams and "llm" not in streams:
+        return []
+    if not ctx.pristine.is_dir():
+        return []
+    return llm_feedback_files_in(ctx.pristine)
 
 
 def journal_previous_responses(ctx: Ctx) -> list:
@@ -6769,7 +6926,7 @@ def shared_blocks() -> str:
 RAW_DATA_READONLY_RULE = """
 
 === THE EVIDENCE AREAS ARE READ-ONLY AND ARE NEVER SUBMISSION CONTENT ===
-  * The corpus carries its EVIDENCE in two top-level areas, beside the submission documents:
+  * The corpus carries its EVIDENCE in top-level areas, beside the submission documents:
       - `raw_data/` (an older corpus spells it `raw_figs/`; the two spellings mean the SAME
         directory): the data tables, figure/table sources and the analysis snapshot the author's
         own scripts regenerate -- the PRODUCER side of the written claims;
@@ -6781,29 +6938,38 @@ RAW_DATA_READONLY_RULE = """
         journal's editors/reviewers ACTUALLY SAW -- the version their comments were written
         against. It is EVIDENCE (an earlier, reviewer-visible version), never the current
         submission and never a candidate.
-  * Neither area is part of the submission and neither is submitted to the journal. Nothing in
+      - `llm_review_feedback/`: a machine-generated review of the previous submission whose
+        FALSE POSITIVES WERE ALREADY FILTERED OUT upstream, so every remaining item is a real,
+        addressable finding with the same standing as a human reviewer's point. It is EVIDENCE
+        exactly like `human_review_feedback/`: never the authors' prose, never dismissed merely
+        because a model wrote it, and never silently dropped.
+  * No area is part of the submission and none is submitted to the journal. Nothing in
     them is a submission document: a file there is never a main-text, cover-letter, title-page,
     supplementary or figure document, whatever its name suggests, and its text is never the
     authors' prose. Never count it against a word limit, never sweep it for acronyms, citations,
     numbers, terminology or file hygiene, and never quote it as something "the submission says".
-  * Nothing in either area may be edited, regenerated, rewritten, renamed, deleted or added to.
+  * Nothing in any area may be edited, regenerated, rewritten, renamed, deleted or added to.
     A package carries them BYTE-FOR-BYTE, and a document that points into them
     (`\\input{raw_data/...}`, `\\includegraphics{raw_data/...}`) names the file that is there.
   * The ONE permitted change is the raw-data DIRECTORY's own name: if the package (or its base)
     still spells it `raw_figs/`, rename the directory to `raw_data/` and repoint every reference
     to it -- `raw_figs/x` becomes `raw_data/x` -- leaving every file inside untouched, names
     included. Record that one rename in the package's own report.
-  * It is CHECKED, not merely requested: the orchestrator compares both areas against the
+  * It is CHECKED, not merely requested: the orchestrator compares every area against the
     untouched original after every package-producing session and restores the original's copy,
     file by file. A change inside them therefore never reaches the submission -- it only costs
     the work.
-  * Neither area is ever a SCORED difference BY ITSELF: no version is rewarded for changing raw
+  * No area is ever a SCORED difference BY ITSELF: no version is rewarded for changing raw
     data or the feedback files and none is penalized for leaving them exactly as they are. A
     "fixed" data table is not a `resolved` item and a copied feedback file is not an `added` one.
   * HOW THE EVIDENCE MAY BE USED:
       - M30 reads `raw_data/` as the producer side of a written claim's comparison;
       - every stage reads `human_review_feedback/` for what the review requires (the concern
         reconciliation and the response letter are built from it);
+      - every stage reads `llm_review_feedback/` the same way, when the corpus carries it: its
+        remaining findings were already filtered for false positives, so treat each one as a
+        real concern with the same standing (the concern ledger and the response letter answer
+        it too, and its provenance is kept in the ledger's `author`/`source` columns);
       - `human_review_feedback/original_submission/` (when present) may be read ONLY to resolve
         what a raised concern refers to and to decide whether the CURRENT manuscript (`base/`)
         already answers a concern the reviewers raised against the earlier version. Never edit
@@ -6812,14 +6978,15 @@ RAW_DATA_READONLY_RULE = """
         competing version: a concern that no longer exists in `base/` is `already-addressed`
         (quoting the `base/` location that answers it) or `not-applicable` (with the reason) --
         never a `to-fix` row whose only location is `original_submission/`;
-      - a JUDGE sees both areas in its anonymized view under the labeled `evidence/` directory
+      - a JUDGE sees every area in its anonymized view under the labeled `evidence/` directory
         (see the judge prompt): `raw_data/` may be used to check correctness/completeness, and
-        the human feedback may be used to check whether a version ADDRESSES the raised concerns
-        (a concern the target fails to answer while an opponent answers it is a completeness
-        difference; it is a correctness difference when the text claims to answer it and does
-        not). The feedback is IDENTICAL in every view, so it can never by itself say which
-        version is better -- only the manuscript's handling of it can. Never quote a reviewer's
-        words as the authors' text, and never score a version by the reviewers' opinion."""
+        the two feedback areas may be used to check whether a version ADDRESSES the raised
+        concerns (a concern the target fails to answer while an opponent answers it is a
+        completeness difference; it is a correctness difference when the text claims to answer
+        it and does not). The feedback is IDENTICAL in every view, so it can never by itself say
+        which version is better -- only the manuscript's handling of it can. Never quote a
+        reviewer's or the LLM review's words as the authors' text, and never score a version by
+        the reviewers' opinion."""
 
 
 def validation_block(role: str) -> str:
@@ -7593,12 +7760,15 @@ Layout (paths relative to the sandbox root):
                   human_review_feedback/ (the REAL editors'/reviewers' comments, plus any previous
                   response as context; its child original_submission/, when present, is the
                   manuscript version those reviewers ACTUALLY SAW -- evidence for concern
-                  reconciliation only). Neither is part of the submission and no file in either is
-                  a submission document -- never enumerate, sweep, count, quote or report them as
-                  manuscript text (a data table, a figure source, a decision letter or a referee
-                  report is evidence, not the authors' prose), whatever the file names suggest.
-                  Read raw_data/ for facts and as the producer side of an M30 comparison; read the
-                  human feedback for what the review requires. A feedback or response document
+                  reconciliation only), plus llm_review_feedback/ when the corpus carries a
+                  machine-generated review whose false positives were filtered out upstream
+                  (every remaining finding is a real concern with the same standing). None is
+                  part of the submission and no file in any of them is a submission document --
+                  never enumerate, sweep, count, quote or report them as manuscript text (a data
+                  table, a figure source, a decision letter, a referee report or an LLM review is
+                  evidence, not the authors' prose), whatever the file names suggest. Read
+                  raw_data/ for facts and as the producer side of an M30 comparison; read the
+                  feedback areas for what the review requires. A feedback or response document
                   kept elsewhere in the corpus is treated the same way (skipped by name).
   review/       — THE OUTPUT DIRECTORY (the paper-review skill's OUT). Create it if it does not
                   exist. Every artifact you produce goes here: review/findings.json,
@@ -8838,10 +9008,12 @@ original extension kept (that extension is the only naming detail left, because 
 the file). The assignment is randomly permuted per view, so the SAME document has a DIFFERENT name
 in target/ and in every field/ opponent, and nothing in a path reveals how a
 package was produced, how many processing steps it went through, or how heavily it was edited. Consequences to respect:
-  * ONE EXCEPTION, clearly labeled: the two EVIDENCE areas keep a stable directory name --
+  * ONE EXCEPTION, clearly labeled: the EVIDENCE areas keep a stable directory name --
     `evidence/raw_data/…` (the data/figures/tables/analysis the claims were built from) and
     `evidence/human_review_feedback/…` (the REAL editors'/reviewers' comments on the previous
-    submission, plus any previous response-to-reviewers). File names inside them are anonymized
+    submission, plus any previous response-to-reviewers), and, when the corpus carries it,
+    `evidence/llm_review_feedback/…` (a machine-generated review of the previous submission
+    whose false positives were filtered out upstream). File names inside them are anonymized
     like everything else. The labels are identical in every view (the areas are inputs, restored
     byte-for-byte), so they cannot tell you which package is which -- but they tell you what the
     files ARE. See "THE EVIDENCE AREAS" below for how to use them;
@@ -8875,16 +9047,22 @@ THE EVIDENCE AREAS — USE THEM, AND DO NOT MISTAKE THEM FOR THE SUBMISSION:
     text CLAIMS to answer a concern it does not answer. A version may also answer a concern in a
     way the reviewer would reject; judge that on the merits, citing the concern id and the
     manuscript's own handling of it.
+  * `evidence/llm_review_feedback/` (when the corpus carries it) is a machine-generated review of
+    the previous submission whose FALSE POSITIVES WERE ALREADY FILTERED OUT upstream: every
+    remaining item is a real, addressable finding with the same standing as the human concerns.
+    Judge a version's ADDRESSING of it exactly like the human feedback above; never dismiss a
+    finding merely because a model wrote it, and never mistake it for the authors' text.
   * When `evidence/human_review_feedback/` carries an `original_submission/` child, that is the
     manuscript version the reviewers actually saw (their comments were written against it). It
     is EVIDENCE like the letter -- not a candidate and not the submission: never score a version
     by how it differs from that earlier manuscript, never quote it as the authors' current text,
     and use it only to resolve what a raised concern refers to and whether a version answers it.
     It is an input, not a candidate, so it can never by itself distinguish two versions.
-  * NEITHER area is submission text. Never quote a reviewer's sentence as the authors' text,
-    never count a data table or a letter as a manuscript document, and never let your own view of
-    whether the reviewers were right decide a comparison: the feedback is IDENTICAL in every
-    view, so only the manuscripts' handling of it can differ.
+  * NO evidence area is submission text. Never quote a reviewer's (or the LLM review's) sentence
+    as the authors' text, never count a data table, a letter or a machine-generated review as a
+    manuscript document, and never let your own view of whether the reviewers were right decide a
+    comparison: the feedback is IDENTICAL in every view, so only the manuscripts' handling of it
+    can differ.
 
 File METADATA says nothing either, and the orchestrator sanitizes what it can before you see it:
 every file in every view has the SAME modification time and the SAME permission bits (one timestamp
@@ -13381,6 +13559,8 @@ def template_package_files(src: Path) -> list:
     package leaves them out (the same rule the corpus builder and the judges
     apply). Everything else -- figures, tables, data,
     bibliography, the author's own notes -- is copied byte-for-byte.
+    An inert `<evidence area>.disabled/` tree is left out entirely: it is not
+    submission content and not readable evidence.
     """
     out = []
     for p in sorted(Path(src).rglob("*")):
@@ -13388,6 +13568,8 @@ def template_package_files(src: Path) -> list:
             continue
         rel = p.relative_to(src)
         if "work" in rel.parts[:-1] or _is_aux_doc(p.name):
+            continue
+        if is_disabled_evidence_rel(rel.as_posix()):
             continue
         out.append(p)
     return out
@@ -15235,7 +15417,8 @@ def is_raw_data_rel(rel: str) -> bool:
 def evidence_area_of(rel: str) -> str:
     """The EVIDENCE area a corpus-relative path belongs to ("" when none).
 
-    Evidence areas (`raw_data/`, legacy `raw_figs/`, `human_review_feedback/`)
+    Evidence areas (`raw_data/`, legacy `raw_figs/`, `human_review_feedback/`,
+    `llm_review_feedback/`)
     are inputs: never submission documents, never written-surface text. They are
     the ONE exception where the two raw-data spellings still mean one area.
     """
@@ -15243,14 +15426,35 @@ def evidence_area_of(rel: str) -> str:
     return top if top in EVIDENCE_DIRNAMES else ""
 
 
+def is_disabled_evidence_name(name: str) -> bool:
+    """True for `<evidence area>.disabled` / `.off` -- an INERT top-level name."""
+    base = Path(str(name or "")).name
+    for area in EVIDENCE_DIRNAMES:
+        if base.startswith(area + ".") \
+                and base[len(area) + 1:].strip().lower() in DISABLED_EVIDENCE_SUFFIXES:
+            return True
+    return False
+
+
+def is_disabled_evidence_rel(rel: str) -> bool:
+    """True when a corpus-relative path lives in an inert disabled area."""
+    top = str(rel or "").replace("\\", "/").lstrip("/").split("/", 1)[0]
+    return is_disabled_evidence_name(top)
+
+
 def is_evidence_rel(rel: str) -> bool:
     """True when a corpus-relative path lives inside an EVIDENCE area."""
-    return bool(evidence_area_of(rel))
+    return bool(evidence_area_of(rel)) or is_disabled_evidence_rel(rel)
 
 
 def is_human_feedback_rel(rel: str) -> bool:
     """True when a path lives in the human editors'/reviewers' feedback area."""
     return evidence_area_of(rel) == HUMAN_FEEDBACK_DIR
+
+
+def is_llm_feedback_rel(rel: str) -> bool:
+    """True when a path lives in the (pre-filtered) LLM review feedback area."""
+    return evidence_area_of(rel) == LLM_FEEDBACK_DIR
 
 
 def is_non_manuscript_rel(rel: str) -> bool:
@@ -15473,6 +15677,13 @@ def evidence_areas_of(dirp: Path) -> list:
         p = Path(dirp) / name
         if p.is_dir() or p.is_symlink():
             out.append(name)
+    try:
+        for child in sorted(Path(dirp).iterdir()):
+            if is_disabled_evidence_name(child.name) \
+                    and (child.is_dir() or child.is_symlink()):
+                out.append(child.name)
+    except OSError:
+        pass
     return out
 
 
@@ -15480,7 +15691,8 @@ def ensure_pristine_input(ctx: Ctx, dst: Path) -> dict:
     """Materialize a sandbox's pristine input with SYMLINKED evidence areas.
 
     Everything else is copied (the manuscript sources are edited/copied by the
-    stages); the evidence areas (raw_data/, raw_figs/, human_review_feedback/)
+    stages); the evidence areas (raw_data/, raw_figs/, human_review_feedback/,
+    llm_review_feedback/)
     become RELATIVE symlinks to the root's canonical pristine copy -- one
     physical copy per root, no per-sandbox duplication. The canonical areas are
     chmod-protected read-only, so a write through a link fails at the filesystem
@@ -15558,6 +15770,10 @@ def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
     dst.mkdir(parents=True, exist_ok=True)
     for entry in sorted(src.iterdir()):
         if entry.name in exclude_top:
+            continue
+        if is_disabled_evidence_rel(entry.name):
+            # `<evidence area>.disabled/` is inert: never carried into a
+            # version corpus, a sandbox copy or a published package.
             continue
         if skip_aux and _is_aux_doc(entry.name):
             continue
@@ -17278,6 +17494,8 @@ def manifest_for_sources(sources: list) -> dict:
             rel = p.relative_to(src).as_posix()
             if excluded and rel.split("/", 1)[0] in excluded:
                 continue
+            if is_disabled_evidence_rel(rel):
+                continue
             entries.append((prefix + rel, p))
     digs = sha256_files([p for _k, p in entries])
     files = {k: d for (k, _p), d in zip(entries, digs)}
@@ -17576,6 +17794,10 @@ def corpus_dir_view_files(dirp: Path) -> list:
         rel = p.relative_to(dirp).as_posix()
         if rel.split("/", 1)[0] in CORPUS_EXCLUDE_TOP:
             continue
+        if is_disabled_evidence_rel(rel):
+            # An inert `<evidence>.disabled/` area is neither submission content
+            # nor readable evidence: it must never reach a judge view.
+            continue
         out.append((rel, p))
     return out
 
@@ -17658,8 +17880,9 @@ def _view_layout(files: list, r: int, vid: str, view_seed: str) -> tuple:
 
     The EVIDENCE areas are the one exception to the anonymous layout: their
     files keep an anonymized NAME but live under a stable, labeled directory
-    (`evidence/raw_data/…`, `evidence/human_review_feedback/…`) so a judge can
-    tell producer evidence and human feedback from submission documents. The
+    (`evidence/raw_data/…`, `evidence/human_review_feedback/…`,
+    `evidence/llm_review_feedback/…`) so a judge can tell producer evidence and
+    review feedback from submission documents. The
     `human_review_feedback/original_submission/` child keeps its name too (it is
     the reviewer-visible manuscript, an input where present), while every
     other/deeper directory and every file name stays salted per view. The
@@ -18632,9 +18855,9 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
                                                 level=rewrite_level_of(k, m),
                                                 venue=venue_profile_of(ctx),
                                                 journal_block=(journal_rewrite_block(ctx)
-                                                               if journal_mode_of(ctx) in
-                                                               (JOURNAL_MODE_TRANSFER,
-                                                                JOURNAL_MODE_RESUBMIT) else ""),
+                                                               if journal_has_feedback(ctx)
+                                                               and not journal_is_scoped(ctx)
+                                                               else ""),
                                                 venue_norm=venue_norm_for(ctx)))
     rec = ctx.register(rid, "rewrite", r, f"runs/{rid}", upstream_run_id=rid_a1(r),
                        source_id=A1_ID, produces=vid)
@@ -18706,9 +18929,9 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
                                                prior_round=(sb / "prior_round").is_dir(),
                                                prior_failure=note,
                                                journal_block=(journal_review_block(ctx, sb)
-                                                              if journal_mode_of(ctx) in
-                                                              (JOURNAL_MODE_TRANSFER,
-                                                               JOURNAL_MODE_RESUBMIT) else ""),
+                                                              if journal_has_feedback(ctx)
+                                                              and not journal_is_scoped(ctx)
+                                                              else ""),
                                                # A scoped round is ONE review pass by
                                                # definition; the complementary-split
                                                # machinery would contradict its scope.
@@ -19410,7 +19633,8 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
     revise_ids = [rid_for_fresh(r, v) for v in pool if arm_of_vid(v) == "revise"]
     integrate_ids = [rid_for_fresh(r, v) for v in round_integrated_run_ids(ctx, r, m, n)]
     jmode = journal_mode_of(ctx)
-    j_feedback = rid_feedback(r) if jmode in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_RESUBMIT) else None
+    j_feedback = rid_feedback(r) if journal_has_feedback(ctx) and not journal_is_scoped(ctx) \
+        else None
     j_concerns = rid_concerns(r) if journal_is_scoped(ctx) else None
     j_response = rid_response(r) if ctx.run(rid_response(r)) is not None else None
     # review -> AUDIT -> revise: the auditor freezes a COPY of the review and
@@ -21809,14 +22033,14 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
     return {"present": True, "files": len(want), "restored": restored, "dropped": dropped}
 
 
-def human_feedback_entries(dirp: Path) -> dict:
-    """{corpus-relative path: sha256} for `dirp`'s human_review_feedback area.
+def feedback_area_entries(dirp: Path, area_name: str) -> dict:
+    """{corpus-relative path: sha256} for one review-feedback EVIDENCE area.
 
     No version-token normalisation here: the area is an INPUT whose file names
     never carry this package's naming evidence, so its identity is the path.
     """
     out = {}
-    area = dirp / HUMAN_FEEDBACK_DIR
+    area = Path(dirp) / area_name
     if not area.is_dir():
         return out
     try:
@@ -21824,7 +22048,7 @@ def human_feedback_entries(dirp: Path) -> dict:
     except OSError:
         return out
     for p in files:
-        rel = p.relative_to(dirp).as_posix()
+        rel = p.relative_to(Path(dirp)).as_posix()
         try:
             out[rel] = sha256_file(p)
         except OSError:
@@ -21832,21 +22056,38 @@ def human_feedback_entries(dirp: Path) -> dict:
     return out
 
 
-def enforce_readonly_human_feedback(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
-    """Put a package's human_review_feedback/ back to the untouched original.
+def human_feedback_entries(dirp: Path) -> dict:
+    """{corpus-relative path: sha256} for `dirp`'s human_review_feedback area."""
+    return feedback_area_entries(dirp, HUMAN_FEEDBACK_DIR)
+
+
+def llm_feedback_entries(dirp: Path) -> dict:
+    """{corpus-relative path: sha256} for `dirp`'s llm_review_feedback area."""
+    return feedback_area_entries(dirp, LLM_FEEDBACK_DIR)
+
+
+def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
+                                   area_name: str = HUMAN_FEEDBACK_DIR) -> dict:
+    """Put a package's review-feedback area back to the untouched original.
 
     Same contract as raw_data (an INPUT: never edited, renamed, added to or
     dropped), without the legacy-spelling machinery: the directory has one
     spelling. A non-empty directory squatting on a pristine file's path is
-    reported and left alone, exactly like the raw-data layer.
+    reported and left alone, exactly like the raw-data layer. The human and LLM
+    areas share the implementation; only the label and the description of what
+    the area IS differ.
     """
-    src = ctx.pristine / HUMAN_FEEDBACK_DIR
+    human = area_name == HUMAN_FEEDBACK_DIR
+    label = "human" if human else "LLM"
+    what = ("the real editors'/reviewers' comments" if human else
+            "the LLM review findings whose false positives were filtered out")
+    src = ctx.pristine / area_name
     if not src.is_dir():
         return {"present": False, "files": 0, "restored": [], "dropped": []}
-    want = human_feedback_entries(ctx.pristine)
+    want = feedback_area_entries(ctx.pristine, area_name)
     if not want:
         return {"present": False, "files": 0, "restored": [], "dropped": []}
-    area = cand_dir / HUMAN_FEEDBACK_DIR
+    area = cand_dir / area_name
     if area.is_symlink():
         try:
             same = area.resolve() == src.resolve()
@@ -21857,7 +22098,7 @@ def enforce_readonly_human_feedback(ctx: Ctx, cand_dir: Path, warns: list) -> di
                     "linked": True}
         with contextlib.suppress(OSError):
             area.unlink()
-        warns.append(f"READ-ONLY human review feedback: {HUMAN_FEEDBACK_DIR}/ was a symlink to "
+        warns.append(f"READ-ONLY {label} review feedback: {area_name}/ was a symlink to "
                      f"a different target and was replaced with the pristine copy")
     squat = sorted(rel for rel in want if (cand_dir / rel).is_dir())
 
@@ -21883,11 +22124,11 @@ def enforce_readonly_human_feedback(ctx: Ctx, cand_dir: Path, warns: list) -> di
                 with contextlib.suppress(OSError):
                     shutil.copymode(ctx.pristine / rel, dest)
             except OSError as e:
-                warns.append(f"READ-ONLY human review feedback: could not restore "
+                warns.append(f"READ-ONLY {label} review feedback: could not restore "
                              f"{dest.name}: {e}")
                 continue
             restored.append(rel)
-        for rel in sorted(human_feedback_entries(cand_dir)):
+        for rel in sorted(feedback_area_entries(cand_dir, area_name)):
             if rel in want or inside_squat(rel):
                 continue
             try:
@@ -21904,7 +22145,7 @@ def enforce_readonly_human_feedback(ctx: Ctx, cand_dir: Path, warns: list) -> di
     finally:
         restore_modes(mode_plan)
     for s in squat:
-        warns.append(f"READ-ONLY human review feedback: {s} is a directory where the pristine "
+        warns.append(f"READ-ONLY {label} review feedback: {s} is a directory where the pristine "
                      f"original has a file; its content was left alone (the recovery layer "
                      f"refuses to delete real work) and the attempt fails")
     for d in sorted([p for p in area.rglob("*") if p.is_dir()],
@@ -21918,12 +22159,22 @@ def enforce_readonly_human_feedback(ctx: Ctx, cand_dir: Path, warns: list) -> di
         more = (f" (+{len(restored) + len(dropped) - 6} more)"
                 if len(restored) + len(dropped) > 6 else "")
         warns.append(
-            f"READ-ONLY human review feedback: {len(restored) + len(dropped)} file(s) under "
-            f"{HUMAN_FEEDBACK_DIR}/ were put back to the pristine original ({changed}{more}). "
-            f"The area is an INPUT (the real editors'/reviewers' comments): never edit, rename, "
+            f"READ-ONLY {label} review feedback: {len(restored) + len(dropped)} file(s) under "
+            f"{area_name}/ were put back to the pristine original ({changed}{more}). "
+            f"The area is an INPUT ({what}): never edit, rename, "
             f"add or drop anything inside it -- it is copied from the original, so a document "
             f"that points into it must use the name that is there")
     return {"present": True, "files": len(want), "restored": restored, "dropped": dropped}
+
+
+def enforce_readonly_human_feedback(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
+    """Put a package's human_review_feedback/ back to the untouched original."""
+    return enforce_readonly_feedback_area(ctx, cand_dir, warns, HUMAN_FEEDBACK_DIR)
+
+
+def enforce_readonly_llm_feedback(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
+    """Put a package's llm_review_feedback/ back to the untouched original."""
+    return enforce_readonly_feedback_area(ctx, cand_dir, warns, LLM_FEEDBACK_DIR)
 
 
 def verify_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
@@ -21933,9 +22184,11 @@ def verify_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
     no-op."""
     info = canonicalize_raw_data_dir(cand_dir, warns)
     info.update(enforce_readonly_raw_data(ctx, cand_dir, warns))
-    # The human editors'/reviewers' feedback area is an INPUT like raw_data:
-    # same byte-for-byte contract, same restore-from-pristine repair.
+    # The review-feedback areas are INPUTS like raw_data: same byte-for-byte
+    # contract, same restore-from-pristine repair (human editors'/reviewers'
+    # comments and the pre-filtered LLM review).
     info["human_review_feedback"] = enforce_readonly_human_feedback(ctx, cand_dir, warns)
+    info["llm_review_feedback"] = enforce_readonly_llm_feedback(ctx, cand_dir, warns)
     return info
 
 
@@ -21951,7 +22204,8 @@ def raw_data_advisories(ctx: Ctx) -> list:
     """
     want = raw_data_entries(ctx.pristine)
     want_hf = human_feedback_entries(ctx.pristine)
-    if not want and not want_hf:
+    want_llm = llm_feedback_entries(ctx.pristine)
+    if not want and not want_hf and not want_llm:
         return []
     out, seen = [], set()
     areas = [(f"pinned/{pin['id']}", pinned_docs_dir(ctx, pin))
@@ -21981,6 +22235,15 @@ def raw_data_advisories(ctx: Ctx) -> list:
                 out.append(f"{label}/ carries {len(bad_hf)} human-review-feedback file(s) that "
                            f"differ from the pristine original ({', '.join(bad_hf[:3])}"
                            f"{f' +{len(bad_hf) - 3} more' if len(bad_hf) > 3 else ''}); every "
+                           f"stage materializes the original's copy, so this cannot reach a new "
+                           f"package")
+        if want_llm:
+            got_llm = llm_feedback_entries(d)
+            bad_llm = sorted(rel for rel, dig in want_llm.items() if got_llm.get(rel) != dig)
+            if bad_llm:
+                out.append(f"{label}/ carries {len(bad_llm)} LLM-review-feedback file(s) that "
+                           f"differ from the pristine original ({', '.join(bad_llm[:3])}"
+                           f"{f' +{len(bad_llm) - 3} more' if len(bad_llm) > 3 else ''}); every "
                            f"stage materializes the original's copy, so this cannot reach a new "
                            f"package")
     return out
@@ -26200,16 +26463,22 @@ def _write_journal_feedback_inputs(ctx: Ctx, sb: Path) -> list:
 
     The ORIGINAL files are copied byte-for-byte under `feedback/files/` (the
     session may need to quote them exactly) and a text rendering lands under
-    `feedback/text/` (docx/pdf converted when possible). A file that cannot be
-    rendered is recorded in `feedback/unparsed.txt` instead of being dropped
-    silently. The reviewer-visible submission, when the corpus carries one, is
-    staged READ-ONLY and separately under `feedback/original_submission/` (see
-    _stage_original_submission) so it is never seeded as feedback.
+    `feedback/text/` (docx/pdf converted when possible). The pre-filtered LLM
+    review of the corpus's `llm_review_feedback/` area is staged the same way
+    under `feedback/llm/files/` + `feedback/llm/text/`, and every seed candidate
+    carries its `origin` so the ledger can never blur the two voices. A file
+    that cannot be rendered is recorded in `feedback/unparsed.txt` instead of
+    being dropped silently. The reviewer-visible submission, when the corpus
+    carries one, is staged READ-ONLY and separately under
+    `feedback/original_submission/` (see _stage_original_submission) so it is
+    never seeded as feedback.
     """
     files = journal_feedback_files(ctx)
-    if not files:
-        die(f"no human review feedback was found: put the editors'/reviewers' comments in the "
-            f"corpus's {HUMAN_FEEDBACK_DIR}/ area (any file name), or name them with "
+    llm_files = journal_llm_feedback_files(ctx)
+    if not files and not llm_files:
+        die(f"no review feedback was found: put the editors'/reviewers' comments (and/or the "
+            f"false-positive-filtered LLM review) in the corpus's {HUMAN_FEEDBACK_DIR}/ or "
+            f"{LLM_FEEDBACK_DIR}/ area (any file name), or name the letter with "
             f"`setup --journal-feedback FILE` (or `set-revision-mode ... --journal-feedback "
             f"FILE`). The legacy shape also works: a feedback-named file anywhere in the corpus "
             f"(feedback / referee / reviewer / editor / decision in its name), typically under "
@@ -26217,16 +26486,23 @@ def _write_journal_feedback_inputs(ctx: Ctx, sb: Path) -> list:
     previous = journal_previous_responses(ctx)
     (sb / "feedback" / "files").mkdir(parents=True, exist_ok=True)
     (sb / "feedback" / "text").mkdir(parents=True, exist_ok=True)
+    if llm_files:
+        (sb / "feedback" / "llm" / "files").mkdir(parents=True, exist_ok=True)
+        (sb / "feedback" / "llm" / "text").mkdir(parents=True, exist_ok=True)
     if previous:
         (sb / "feedback" / "previous_responses" / "files").mkdir(parents=True, exist_ok=True)
         (sb / "feedback" / "previous_responses" / "text").mkdir(parents=True, exist_ok=True)
-    seed, unparsed, labels = [], [], []
-    for path, label in list(files) + list(previous):
+    seed, unparsed, labels, llm_labels = [], [], [], []
+    streams = ([(path, label, "human", sb / "feedback") for path, label in files]
+               + [(path, label, "llm", sb / "feedback" / "llm") for path, label in llm_files]
+               + [(path, label, "previous", sb / "feedback" / "previous_responses")
+                  for path, label in previous])
+    for path, label, origin, parent in streams:
         safe = label.replace("/", "__")
-        is_previous = (path, label) not in files
-        if not is_previous:
+        if origin == "human":
             labels.append(label)
-        parent = (sb / "feedback" / "previous_responses") if is_previous else (sb / "feedback")
+        elif origin == "llm":
+            llm_labels.append(label)
         dest = parent / "files" / safe
         if dest.exists():
             # A read-only source (a chmod a-w evidence file) was copied with its
@@ -26240,14 +26516,15 @@ def _write_journal_feedback_inputs(ctx: Ctx, sb: Path) -> list:
         text, note = feedback_text_of(path)
         if text.strip():
             (parent / "text" / (safe + ".txt")).write_text(text, encoding="utf-8")
-            if not is_previous:
+            if origin != "previous":
                 for row in seed_concern_candidates(text):
-                    seed.append(dict(row, source=label))
+                    seed.append(dict(row, source=label, origin=origin))
         else:
             unparsed.append(f"{label}: {note or 'no text extracted'}")
     original_submission = _stage_original_submission(ctx, sb)
     write_json_atomic(sb / "feedback" / "CONCERN_SEED.json",
-                      {"files": labels, "candidates": seed, "unparsed": unparsed,
+                      {"files": labels, "llm_files": llm_labels,
+                       "candidates": seed, "unparsed": unparsed,
                        "previous_responses": [label for _p, label in previous],
                        "original_submission": original_submission,
                        "journal_from": str((ctx.cfg or {}).get("journal_feedback_from") or ""),
@@ -26302,6 +26579,7 @@ def materialize_feedback(ctx: Ctx, r: int) -> dict:
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True)}
     rec["feedback_files"] = [label for _p, label in journal_feedback_files(ctx)]
+    rec["llm_feedback_files"] = [label for _p, label in journal_llm_feedback_files(ctx)]
     rec["original_submission"] = (read_json(sb / "feedback" / "CONCERN_SEED.json",
                                             revive=False, lenient=True) or {}).get(
         "original_submission") or {"present": False}
@@ -26328,6 +26606,7 @@ def materialize_concerns(ctx: Ctx, r: int) -> dict:
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True)}
     rec["feedback_files"] = [label for _p, label in journal_feedback_files(ctx)]
+    rec["llm_feedback_files"] = [label for _p, label in journal_llm_feedback_files(ctx)]
     rec["original_submission"] = (read_json(sb / "feedback" / "CONCERN_SEED.json",
                                             revive=False, lenient=True) or {}).get(
         "original_submission") or {"present": False}
@@ -26401,14 +26680,32 @@ def _journal_feedback_labels(ctx: Ctx) -> list:
     return [label for _p, label in journal_feedback_files(ctx)]
 
 
+def journal_feedback_origin(ctx: Ctx) -> str:
+    """The human-readable source of the feedback a round answers."""
+    if journal_mode_of(ctx) == JOURNAL_MODE_LLM:
+        return f"the false-positive-filtered {LLM_FEEDBACK_DIR}/ review"
+    return (str((ctx.cfg or {}).get("journal_feedback_from") or "").strip()
+            or "the source journal")
+
+
+def _journal_llm_feedback_labels(ctx: Ctx) -> list:
+    return [label for _p, label in journal_llm_feedback_files(ctx)]
+
+
 def _journal_seed_text(ctx: Ctx, sb: Path) -> str:
     data = read_json(sb / "feedback" / "CONCERN_SEED.json", revive=False, lenient=True) or {}
     rows = [r for r in (data.get("candidates") or []) if isinstance(r, dict)]
     if not rows:
         return "- (the mechanical split found no candidate headings; read the text yourself)"
-    return "\n".join(f"- [{str(r.get('source') or '')}] "
-                     f"{str(r.get('heading') or '')[:110]}: "
-                     f"{str(r.get('excerpt') or '')[:280]}" for r in rows[:80])
+
+    def _line(r: dict) -> str:
+        tag = (" (LLM review, false positives pre-filtered)"
+               if str(r.get("origin") or "") == "llm" else "")
+        return (f"- [{str(r.get('source') or '')}]{tag} "
+                f"{str(r.get('heading') or '')[:110]}: "
+                f"{str(r.get('excerpt') or '')[:280]}")
+
+    return "\n".join(_line(r) for r in rows[:80])
 
 
 def feedback_prompt(ctx: Ctx, sb: Path, r: int, seed_rows: list) -> str:
@@ -26416,11 +26713,13 @@ def feedback_prompt(ctx: Ctx, sb: Path, r: int, seed_rows: list) -> str:
     mode = journal_mode_of(ctx)
     info = JOURNAL_MODES[mode]
     labels = _journal_feedback_labels(ctx)
-    from_j = str((ctx.cfg or {}).get("journal_feedback_from") or "").strip()
+    llm_labels = _journal_llm_feedback_labels(ctx)
+    from_j = journal_feedback_origin(ctx)
     return f"""JOURNAL FEEDBACK — CONCERN ENUMERATION (one session; you do NOT edit any manuscript)
 
-This run is "{mode}" (option {info['option']}: {info['label']}). The editors'/
-reviewers' feedback of {(from_j or 'the source journal')} has to become a
+This run is "{mode}" (option {info['option']}: {info['label']}). The review
+feedback from {from_j} — the human editors'/reviewers' comments and/or the
+false-positive-filtered LLM review — has to become a
 complete, enumerated concern ledger before anyone touches the manuscript.
 
 WHAT YOU READ (all of it):
@@ -26429,12 +26728,17 @@ WHAT YOU READ (all of it):
     feedback-named file under `raw_data/`):
 {chr(10).join('      - ' + x for x in labels) or '      - (none)'}
   * feedback/text/   — the same files as plain text (use THIS for quoting)
+  * feedback/llm/files/ — the original LLM review file(s), byte-for-byte (from
+    the corpus's `llm_review_feedback/` area; present only when the corpus
+    carries one):
+{chr(10).join('      - ' + x for x in llm_labels) or '      - (none)'}
+  * feedback/llm/text/ — the same LLM files as plain text (use THIS for quoting)
   * feedback/CONCERN_SEED.json — the pipeline's mechanical candidate split; it
     is a seed, not the answer
   * base/            — the manuscript the feedback is about (read-only)
   * feedback/original_submission/ — ONLY when the seed records
     `original_submission.present`: the manuscript version the editors/reviewers
-    of {(from_j or 'the source journal')} actually saw (READ-ONLY evidence)
+    of {from_j} actually saw (READ-ONLY evidence)
 
 If `feedback/CONCERN_SEED.json` lists `previous_responses`, those are the
 authors' OWN earlier response-to-reviewers documents (under
@@ -26454,15 +26758,28 @@ whose target no longer exists in `base/` because it was already changed is
 mark a concern `to-fix` with a location that exists only in
 `feedback/original_submission/`.
 
+ABOUT `feedback/llm/` (when present): this is a machine-generated review whose
+FALSE POSITIVES WERE ALREADY FILTERED OUT upstream. Every remaining item is a
+real concern: enumerate it like a human reviewer's demand, never dismiss it
+because a model wrote it, and never re-litigate it as a false positive. If after
+checking `base/` and the evidence you still believe a row is wrong, it STILL
+gets its own ledger row — disposition `not-applicable` (or action `disagree`)
+with the concrete rationale in `evidence_needed` — never a silent omission. Name
+the LLM the file itself names as the `author` (e.g. "Claude review"); when the
+file names none, use "LLM review (pre-filtered)". A demand the human letter and
+the LLM review both raise is still ONE row whose `source` names both.
+
 SEED (read the real text after it):
 {_journal_seed_text(ctx, sb)}
 
 THE LEDGER IS THE DELIVERABLE (one row per distinct concern):
   * A reviewer paragraph that raises three separate demands is three rows; the
-    same demand repeated by the editor and a reviewer is ONE row whose `source`
-    names both. Never merge two demands, never split one.
+    same demand repeated by the editor, a reviewer or the LLM review is ONE row
+    whose `source` names every place it was raised. Never merge two demands,
+    never split one.
   * `quote` is VERBATIM from the feedback (<=300 chars, whitespace-normalised):
-    it is checked mechanically against feedback/text/, so a paraphrase fails.
+    it is checked mechanically against feedback/text/ and feedback/llm/text/, so
+    a paraphrase fails.
   * `id` is stable and human-usable: `ED-<k>` for editor/decision points,
     `R<n>-<k>` for reviewer n (R1-3 = reviewer 1, third point).
   * `action` says what answering it demands: text | analysis | new-experiment |
@@ -26493,14 +26810,16 @@ def concerns_prompt(ctx: Ctx, sb: Path, r: int, seed_rows: list) -> str:
     mode = journal_mode_of(ctx)
     info = JOURNAL_MODES[mode]
     labels = _journal_feedback_labels(ctx)
-    from_j = str((ctx.cfg or {}).get("journal_feedback_from") or "").strip()
+    llm_labels = _journal_llm_feedback_labels(ctx)
+    from_j = journal_feedback_origin(ctx)
     return f"""JOURNAL FEEDBACK — {mode.upper()} REVISION RECONCILIATION (one session; NO edits)
 
 This run REPLACES the general review of a {mode} revision (option
-{info['option']}: {info['label']}). The journal {(from_j or 'raised the concerns')}
-requires an answer to every point, and the manuscript may change ONLY where a
-concern requires it. Deliver the concern ledger AND the finding list the single
-revision session follows.
+{info['option']}: {info['label']}). The review feedback of
+{from_j} — the human editors'/reviewers' comments
+and/or the false-positive-filtered LLM review — requires an answer to every
+point, and the manuscript may change ONLY where a concern requires it. Deliver
+the concern ledger AND the finding list the single revision session follows.
 
 WHAT YOU READ (all of it):
   * feedback/files/  — the original human feedback file(s), byte-for-byte (from
@@ -26508,11 +26827,16 @@ WHAT YOU READ (all of it):
     feedback-named file under `raw_data/`):
 {chr(10).join('      - ' + x for x in labels) or '      - (none)'}
   * feedback/text/   — the same files as plain text (use THIS for quoting)
+  * feedback/llm/files/ — the original LLM review file(s), byte-for-byte (from
+    the corpus's `llm_review_feedback/` area; present only when the corpus
+    carries one):
+{chr(10).join('      - ' + x for x in llm_labels) or '      - (none)'}
+  * feedback/llm/text/ — the same LLM files as plain text (use THIS for quoting)
   * feedback/CONCERN_SEED.json — the pipeline's mechanical candidate split
   * base/            — the manuscript under revision (read-only)
   * feedback/original_submission/ — ONLY when the seed records
     `original_submission.present`: the manuscript version the editors/reviewers
-    of {(from_j or 'the source journal')} actually saw (READ-ONLY evidence)
+    of {from_j} actually saw (READ-ONLY evidence)
 
 If `feedback/CONCERN_SEED.json` lists `previous_responses`, those are the
 authors' OWN earlier response documents (under `feedback/previous_responses/`):
@@ -26523,6 +26847,14 @@ THAT version while every finding and every `manuscript_location` must name the
 CURRENT `base/`. Use the reviewer-visible copy only to resolve a quote and to
 decide whether `base/` already answers a concern; never edit it, never copy its
 text, and never quote it as the authors' current prose.
+
+When `feedback/llm/` is present, its false positives were ALREADY filtered out
+upstream: every remaining item is a real concern with the same standing as a
+human reviewer's point. Enumerate it, answer it, and never dismiss it as a model
+false positive; a row you still believe is wrong gets `not-applicable` (or
+action `disagree`) with the concrete rationale — never a silent omission. Name
+the LLM the file itself names as `author`, else "LLM review (pre-filtered)"; a
+demand the letter and the LLM review both raise is ONE row naming both sources.
 
 SEED (read the real text after it):
 {_journal_seed_text(ctx, sb)}
@@ -26582,6 +26914,8 @@ WHAT YOU READ:
     exactly once: {', '.join(ids) if ids else '(none)'}
   * feedback/text/ — the reviewers' own wording (quote verbatim; never invent a
     reviewer or a sentence).
+  * feedback/llm/text/ — the LLM review's own wording, when the corpus carries a
+    pre-filtered LLM review (same rule: quote verbatim, never invent a sentence).
   * feedback/ORIGINAL_SUBMISSION.md (and feedback/original_submission/, when it
     is present) — EVIDENCE ONLY: the manuscript version the previous journal's
     editors/reviewers actually saw. It is NOT the current submission (`target/`
@@ -26627,20 +26961,29 @@ round {int(r)}, status "complete") as the very LAST step.
 def journal_review_block(ctx: Ctx, sb: Path) -> str:
     """The block appended to the standard review prompt (modes 1-2)."""
     mode = journal_mode_of(ctx)
+    llm_only = mode == JOURNAL_MODE_LLM
+    heading = ("LLM REVIEW FEEDBACK RECONCILIATION" if llm_only
+               else "JOURNAL FEEDBACK RECONCILIATION")
+    carried = (f"the false-positive-filtered LLM review ({LLM_FEEDBACK_DIR}/; there is no "
+               f"journal decision letter in this mode)"
+               if llm_only else
+               "the review feedback -- the editors'/reviewers' decision letter and, when the "
+               "corpus ships one, the false-positive-filtered LLM review --")
     return f"""
 
-=== JOURNAL FEEDBACK RECONCILIATION (revision mode: {mode}) ===
-The round carries the editors'/reviewers' decision letter in `concerns/`
-(`JF_concerns.json` / `JF_concerns.md`; external prose -- never quote a reviewer
-as if the authors wrote it). Beyond the normal sweep:
+=== {heading} (revision mode: {mode}) ===
+The round carries {carried} in `concerns/`
+(`JF_concerns.json` / `JF_concerns.md`; external prose -- never
+quote a reviewer or the LLM review as if the authors wrote it). Every concern
+has the same standing, whatever its source. Beyond the normal sweep:
   * reconcile EVERY concern id in the ledger and write
     `review/concerns_reconciled.json` with one row per id:
     {{"id": "...", "status": "finding|already-addressed|manual|not-applicable",
       "finding": "<finding id or null>", "location": "<base/ file:where>",
       "rationale": "<one sentence>"}};
   * a concern base/ does not answer is a FINDING with `check: "JF"`,
-    `concern: "<id>"`, id `JF-<n>`, category 0, and the reviewer's verbatim
-    quote as its evidence;
+    `concern: "<id>"`, id `JF-<n>`, category 0, and the source's verbatim quote
+    as its evidence;
   * when `feedback/original_submission/` exists it is the manuscript version the
     editors/reviewers ACTUALLY SAW -- EVIDENCE, not the submission under review.
     Use it only to resolve what a quoted concern refers to and to decide whether
@@ -26666,9 +27009,10 @@ def journal_revise_block(ctx: Ctx) -> str:
         return f"""
 
 === {mode.upper()} REVISION — CONCERN-SCOPED EDITS ONLY ===
-This is a real {mode} revision: the journal raised the concerns now in
+This is a real {mode} revision: the review raised the concerns now in
 `review/findings.json` (every finding has `check: "JF"` and a `concern` id;
-`concerns/JF_concerns.md` carries the reviewers' own words).
+`concerns/JF_concerns.md` carries the sources' own words — human reviewers
+and/or the false-positive-filtered LLM review, with the same standing).
   * Change the manuscript ONLY where a concern requires it. Every edit names the
     JF finding id / concern id that raised it.
   * NO unrelated changes: no restructuring, no style re-wording, no new findings
@@ -26694,10 +27038,12 @@ This is a real {mode} revision: the journal raised the concerns now in
     return f"""
 
 === JOURNAL REVISION MODE: {mode.upper()} (option {info['option']}) ===
-The round is a real revision against the editors'/reviewers' feedback in
-`concerns/` (external prose -- never attribute it to the authors). The review's
-JF findings (`check: "JF"`, with a `concern` id) are mandatory: every one is
-either fixed in the package or recorded as a manual item with the exact steps.
+The round is a real revision against the review feedback in `concerns/` (the
+human editors'/reviewers' points and/or the false-positive-filtered LLM review;
+external prose -- never attribute it to the authors, and give the LLM review's
+findings the same standing). The review's JF findings (`check: "JF"`, with a
+`concern` id) are mandatory: every one is either fixed in the package or
+recorded as a manual item with the exact steps.
 {tail}
 The manuscript must answer every concern; the normal findings still apply.
 When `feedback/original_submission/` exists it is the earlier, reviewer-visible
@@ -26710,15 +27056,26 @@ def journal_rewrite_block(ctx: Ctx) -> str:
     """The block appended to the standard rewrite prompt (modes 1-2)."""
     mode = journal_mode_of(ctx)
     info = JOURNAL_MODES[mode]
+    llm_only = mode == JOURNAL_MODE_LLM
     tail = ("No response letter is written for a transfer; the rewrite IS the answer."
             if not info["response"] else
             "The response letter is generated later from the final package's ledger.")
+    if llm_only:
+        tail = ("No response letter is written in this mode; the rewrite IS the answer to the "
+                "pre-filtered LLM review.")
+    sources = (f"the false-positive-filtered LLM review ({LLM_FEEDBACK_DIR}/)"
+               if llm_only else
+               "the editors'/reviewers' points and, when the corpus ships one, the "
+               "false-positive-filtered LLM review")
+    heading = ("LLM REVIEW MODE" if llm_only else "JOURNAL REVISION MODE")
     return f"""
 
-=== JOURNAL REVISION MODE: {mode.upper()} — the rewrite answers the concerns ===
+=== {heading}: {mode.upper()} — the rewrite answers the concerns ===
 This from-scratch rewrite is for a real submission attempt (mode {mode}, option
-{info['option']}). `concerns/JF_concerns.json|md` carries the editors'/reviewers'
-feedback (external prose; never copy a reviewer's sentence into the manuscript).
+{info['option']}). `concerns/JF_concerns.json|md` carries the review feedback --
+{sources} -- as external prose; never copy a reviewer's or the LLM review's
+sentence into the manuscript. A concern's source never changes its standing:
+every `to-fix`/`manual` row must be answered.
   * The rewritten manuscript must demonstrably answer every concern whose
     `disposition` is `to-fix` or `manual`; list the per-concern handling in
     REWRITE_REPORT.md (concern id -> what the rewrite does, or why it is manual).
@@ -26754,13 +27111,13 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict
                     f"silently answer nothing")
         return data
     texts = []
-    tdir = sb / "feedback" / "text"
-    if tdir.is_dir():
-        for p in sorted(tdir.glob("*.txt")):
-            try:
-                texts.append(_norm_ws(p.read_text(encoding="utf-8", errors="replace")))
-            except OSError:
-                continue
+    for tdir in (sb / "feedback" / "text", sb / "feedback" / "llm" / "text"):
+        if tdir.is_dir():
+            for p in sorted(tdir.glob("*.txt")):
+                try:
+                    texts.append(_norm_ws(p.read_text(encoding="utf-8", errors="replace")))
+                except OSError:
+                    continue
     haystack = " \n ".join(texts)
     seen = set()
     for i, row in enumerate(rows, 1):
@@ -26780,8 +27137,9 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict
             errs.append(f"concern {cid}: quote is missing/too short (a verbatim <=300-char "
                         f"excerpt is required)")
         elif quote not in haystack:
-            errs.append(f"concern {cid}: the quote is not verbatim in any feedback/text/ "
-                        f"rendering (checked whitespace-normalised); a paraphrase fails here")
+            errs.append(f"concern {cid}: the quote is not verbatim in any feedback/text/ or "
+                        f"feedback/llm/text/ rendering (checked whitespace-normalised); a "
+                        f"paraphrase fails here")
         action = str(row.get("action") or "").strip()
         if action not in JOURNAL_CONCERN_ACTIONS:
             errs.append(f"concern {cid}: action {action!r} is not one of "
@@ -26820,9 +27178,12 @@ def postcheck_feedback(ctx: Ctx, rec: dict):
                            "to_fix": data.get("_to_fix", 0),
                            "files": rec.get("feedback_files") or []}
     fdir = sb / "feedback" / "files"
-    if not fdir.is_dir() or not any(fdir.iterdir()):
-        errs.append("feedback/files/ is empty: the original feedback files must be copied in "
-                    "(they are the quote source of record)")
+    ldir = sb / "feedback" / "llm" / "files"
+    have_human = fdir.is_dir() and any(fdir.iterdir())
+    have_llm = ldir.is_dir() and any(ldir.iterdir())
+    if not (have_human or have_llm):
+        errs.append("feedback/files/ and feedback/llm/files/ are both empty: the original "
+                    "feedback files must be copied in (they are the quote source of record)")
     errs.extend(original_submission_staging_problems(ctx, sb))
     _check_pristine_copy(ctx, rec, pristine_dirname(sb), errs)
     errs.extend(input_mismatches(ctx, rec))
@@ -29505,8 +29866,7 @@ def round_run_plan(ctx: Ctx, r: int) -> list:
             f"N={n} (and M={m}). The mode is concern-scoped by definition; run "
             f"`set-revision-mode {jmode}` (it normalises rewrites/revises/integrators/rounds) "
             f"or start a fresh root.")
-    feedback_rid = rid_feedback(r) if jmode in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_RESUBMIT) \
-        else None
+    feedback_rid = rid_feedback(r) if journal_has_feedback(ctx) and not scoped else None
     if feedback_rid:
         entries.append({"id": feedback_rid, "kind": "feedback", "vid": None,
                         "deps": [rid_a1(r)], "stage": "feedback",
@@ -30487,8 +30847,22 @@ def cmd_setup(args) -> None:
     # ---- revision modes (init, options 1-4, continue) -----------------------
     # "continue" (the default) leaves every value below exactly as the operator
     # passed it: the historical workflow is unchanged.
-    raw_revision_mode = str(getattr(args, "revision_mode", None)
-                            or JOURNAL_MODE_CONTINUE).strip().lower()
+    explicit_mode = str(getattr(args, "revision_mode", None) or "").strip()
+    src_path = Path(args.source).resolve() if getattr(args, "source", None) else None
+    auto_llm = bool(src_path and src_path.is_dir() and llm_feedback_present_in(src_path))
+    if not explicit_mode and auto_llm:
+        print(f"[setup] revision mode auto-detected: {JOURNAL_MODE_LLM} (option "
+              f"{JOURNAL_MODES[JOURNAL_MODE_LLM]['option']}) -- --source carries a non-empty "
+              f"{LLM_FEEDBACK_DIR}/ area, and only that area is read. Rename it to "
+              f"{LLM_FEEDBACK_DIR}.disabled (or pass --revision-mode continue) to turn the "
+              f"auto-detection off.")
+        if human_feedback_files_in(src_path):
+            print(f"[setup] WARNING: {HUMAN_FEEDBACK_DIR}/ also carries feedback file(s); mode "
+                  f"{JOURNAL_MODE_LLM} reads ONLY {LLM_FEEDBACK_DIR}/. Pass an explicit journal "
+                  f"mode (transfer/resubmit/major/minor) if the human letter should drive the "
+                  f"revision.")
+    raw_revision_mode = (explicit_mode or (JOURNAL_MODE_LLM if auto_llm else "")
+                         or JOURNAL_MODE_CONTINUE).strip().lower()
     revision_mode = normalize_revision_mode(raw_revision_mode)
     if raw_revision_mode != revision_mode:
         print(f"[setup] note: revision mode {raw_revision_mode!r} is the pre-rename spelling "
@@ -30500,10 +30874,14 @@ def cmd_setup(args) -> None:
             f"Word template first (the conform stage) then run the pipeline's own rounds with "
             f"no journal feedback, 1=transfer (new journal, no response letter), 2=resubmit "
             f"(same journal, letter), 3=major revision (scoped edits, letter), 4=minor "
-            f"revision (scoped edits, letter).")
+            f"revision (scoped edits, letter), 5=llm (the false-positive-filtered "
+            f"{LLM_FEEDBACK_DIR}/ review only; no journal letter, no response letter).")
     journal_feedback = [str(x) for x in (getattr(args, "journal_feedback", None) or [])
                         if str(x).strip()]
     journal_feedback_from = str(getattr(args, "journal_feedback_from", None) or "").strip()
+    if revision_mode == JOURNAL_MODE_LLM and (journal_feedback or journal_feedback_from):
+        print(f"[setup] note: revision mode {JOURNAL_MODE_LLM!r} reads ONLY "
+              f"{LLM_FEEDBACK_DIR}/; --journal-feedback/--journal-feedback-from are ignored")
     if (journal_feedback or journal_feedback_from) \
             and not JOURNAL_MODES[revision_mode]["feedback"]:
         print(f"[setup] note: revision mode {revision_mode!r} reads no journal feedback; "
@@ -30580,19 +30958,38 @@ def cmd_setup(args) -> None:
         # The evidence the whole mode rests on must exist BEFORE a root is
         # created: a journal mode with no feedback file would run the scoped
         # stages against nothing.
-        for item in journal_feedback:
-            q = Path(item)
-            if not q.is_absolute():
-                root_rel = Path(args.root).resolve() / q
-                q = root_rel if root_rel.exists() else (Path.cwd() / q)
-            if not q.is_file():
-                die(f"--journal-feedback {item!r} does not exist (looked for {q}).")
-        if not journal_feedback:
-            hits = [p for p in files if is_journal_feedback_name(p.name)]
+        if revision_mode != JOURNAL_MODE_LLM:
+            for item in journal_feedback:
+                q = Path(item)
+                if not q.is_absolute():
+                    root_rel = Path(args.root).resolve() / q
+                    q = root_rel if root_rel.exists() else (Path.cwd() / q)
+                if not q.is_file():
+                    die(f"--journal-feedback {item!r} does not exist (looked for {q}).")
+        llm_dir = source / LLM_FEEDBACK_DIR
+        llm_hits = [p for p in sorted(llm_dir.rglob("*")) if p.is_file()] \
+            if llm_dir.is_dir() else []
+        if revision_mode == JOURNAL_MODE_LLM:
+            if not llm_hits:
+                die(f"revision mode {JOURNAL_MODE_LLM!r} needs a NON-EMPTY "
+                    f"{LLM_FEEDBACK_DIR}/ area in --source; it is missing or empty. Add the "
+                    f"false-positive-filtered LLM review, or pass an explicit "
+                    f"--revision-mode continue.")
+            print(f"[setup] LLM review feedback:   {len(llm_hits)} file(s) under "
+                  f"{LLM_FEEDBACK_DIR}/ (false positives pre-filtered) drive the concern "
+                  f"ledger; no journal decision letter is read.")
+        elif not journal_feedback:
+            hits = [p for p in files
+                    if is_journal_feedback_name(p.name)
+                    and evidence_area_of(p.relative_to(source).as_posix()) != LLM_FEEDBACK_DIR]
             if hits:
                 print(f"[setup] journal feedback auto-detected in --source: "
                       + ", ".join(sorted(p.name for p in hits)[:4])
                       + (" +%d more" % (len(hits) - 4) if len(hits) > 4 else ""))
+            elif llm_hits:
+                print(f"[setup] journal feedback: no human decision letter was found, but "
+                      f"--source carries {LLM_FEEDBACK_DIR}/ with {len(llm_hits)} file(s), "
+                      f"already filtered for false positives; the journal stages will use it.")
             else:
                 print(f"[setup] WARNING: revision mode {revision_mode!r} needs the editors'/"
                       f"reviewers' feedback, and no feedback-named file was found in --source "
@@ -30809,7 +31206,9 @@ def cmd_setup(args) -> None:
         print(f"[setup] revision mode:          {revision_mode} (option "
               f"{JOURNAL_MODES[revision_mode]['option']}) -- "
               f"{JOURNAL_MODES[revision_mode]['label']}"
-              + (f"; feedback from {journal_feedback_from}" if journal_feedback_from else ""))
+              + (f"; feedback from {journal_feedback_from}" if journal_feedback_from else "")
+              + (f"; feedback source {LLM_FEEDBACK_DIR}/ (pre-filtered)"
+                 if revision_mode == JOURNAL_MODE_LLM else ""))
     _lim = venue_profile.length_limits()
     if _lim["abstract"].get("cap") is None and _lim["main text"].get("cap") is None:
         print(f"[setup] length limits (M19):     none configured by this venue profile -- the "
@@ -32244,6 +32643,9 @@ def cmd_set_revision_mode(args) -> None:
     transfer/resubmit only records the mode: the standard rounds still apply,
     with the journal feedback added as an input. `init` records the mode and
     runs the conform (template-first) stage before round 1 -- no feedback.
+    `llm` records the LLM-review mode; a root that never recorded a mode and
+    whose corpus carries a non-empty `llm_review_feedback/` already reports
+    `llm` here (the directory-driven switch).
     """
     ctx = Ctx(_venue_command_root(args, "set-revision-mode"),
               strict_venue=bool(getattr(args, "strict_venue", False)))
@@ -32260,9 +32662,22 @@ def cmd_set_revision_mode(args) -> None:
               f"rewrites: {'allowed' if info['rewrites'] else 'forbidden'}; "
               f"edits: {'concern-scoped only' if info['scoped'] else 'the full review findings'}")
         if info.get("feedback"):
-            print(f"[set-revision-mode] feedback from: "
-                  f"{(ctx.cfg or {}).get('journal_feedback_from') or '(not set)'}; "
-                  f"named feedback file(s): {', '.join(feedback) if feedback else '(auto-detected)'}")
+            origin = revision_mode_origin(ctx)
+            if origin == "auto":
+                print(f"[set-revision-mode] mode source: auto-detected from "
+                      f"{LLM_FEEDBACK_DIR}/ (rename it to {LLM_FEEDBACK_DIR}.disabled or set a "
+                      f"mode explicitly to override)")
+            if mode == JOURNAL_MODE_LLM:
+                print("[set-revision-mode] feedback source: llm_review_feedback/ only "
+                      "(false positives pre-filtered); no journal decision letter is read")
+            else:
+                print(f"[set-revision-mode] feedback from: "
+                      f"{(ctx.cfg or {}).get('journal_feedback_from') or '(not set)'}; "
+                      f"named feedback file(s): "
+                      f"{', '.join(feedback) if feedback else '(auto-detected)'}")
+            llm_hits = [label for _p, label in journal_llm_feedback_files(ctx)]
+            print(f"[set-revision-mode] LLM review file(s): "
+                  f"{', '.join(llm_hits) if llm_hits else '(none found)'}")
         elif mode != JOURNAL_MODE_CONTINUE:
             print("[set-revision-mode] this mode reads no journal feedback and writes no "
                   "response letter")
@@ -32277,7 +32692,8 @@ def cmd_set_revision_mode(args) -> None:
             f"continue (the historical workflow, the pipeline's own review/revise rounds; the "
             f"pre-rename spelling was 'none') / init (conform into the venue template first, "
             f"then the pipeline's own rounds) / transfer (option 1) / resubmit (option 2) / "
-            f"major (option 3) / minor (option 4)", code=2)
+            f"major (option 3) / minor (option 4) / llm (option 5: the pre-filtered "
+            f"{LLM_FEEDBACK_DIR}/ review only)", code=2)
     begin_run_log("set-revision-mode", ctx.root, sys.argv)
     if ctx.state.get("runs") and not getattr(args, "force", False):
         die(f"this root already has {len(ctx.state['runs'])} run record(s): the revision mode "
@@ -32295,12 +32711,16 @@ def cmd_set_revision_mode(args) -> None:
     if named and not info["feedback"]:
         print(f"[set-revision-mode] note: mode {mode_arg!r} reads no journal feedback; "
               f"--journal-feedback/--journal-feedback-from are ignored")
+    if mode_arg == JOURNAL_MODE_LLM and (named or getattr(args, "journal_feedback_from", None)):
+        print(f"[set-revision-mode] note: mode {JOURNAL_MODE_LLM!r} reads ONLY "
+              f"{LLM_FEEDBACK_DIR}/; --journal-feedback/--journal-feedback-from are ignored")
     with ctx.lock("set-revision-mode"):
         _prev_mode = journal_mode_of(ctx)
         ctx.cfg["revision_mode"] = mode_arg
-        if named and info["feedback"]:
+        if named and info["feedback"] and mode_arg != JOURNAL_MODE_LLM:
             ctx.cfg["journal_feedback"] = named
-        if getattr(args, "journal_feedback_from", None) and info["feedback"]:
+        if getattr(args, "journal_feedback_from", None) and info["feedback"] \
+                and mode_arg != JOURNAL_MODE_LLM:
             ctx.cfg["journal_feedback_from"] = str(args.journal_feedback_from).strip()
         forced = []
         if info["scoped"]:
@@ -32340,10 +32760,16 @@ def cmd_set_revision_mode(args) -> None:
         print(f"[set-revision-mode]   forced by the mode: {f}")
     if info.get("feedback"):
         hits = journal_feedback_files(ctx)
+        llm_hits = journal_llm_feedback_files(ctx)
         print(f"[set-revision-mode] feedback file(s): "
               + (", ".join(label for _p, label in hits) if hits
-                 else "(none found yet -- `run` will refuse until the feedback is in the corpus "
-                      "or named with --journal-feedback)"))
+                 else "(no human letter found)"))
+        print(f"[set-revision-mode] LLM review file(s): "
+              + (", ".join(label for _p, label in llm_hits) if llm_hits else "(none)"))
+        if not hits and not llm_hits:
+            print("[set-revision-mode]   `run` will refuse until the feedback is in the corpus "
+                  "(human_review_feedback/ or llm_review_feedback/) or named with "
+                  "--journal-feedback")
 
 
 def only_is_template_stage_only(spec) -> bool:
@@ -32445,6 +32871,9 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             f"       Restore {ctx.pristine} (e.g. from your own copy of the corpus) or start a "
             f"fresh pipeline root with `setup`.")
     print(f"[run] pristine original: {detail}")
+    _mode_note = revision_mode_note(ctx)
+    if _mode_note:
+        print(f"[run] {_mode_note}")
 
     _only_probe = parse_only_spec(getattr(args, "only", None))
     if only_is_template_stage_only(_only_probe):
@@ -36141,6 +36570,9 @@ def cmd_status(args) -> None:
           f"judges/version={judges_config_note(ctx)} "
           f"integrators/round={integrators_config_note(ctx)}")
     _jmode = journal_mode_of(ctx)
+    _mode_note = revision_mode_note(ctx)
+    if _mode_note:
+        print(f"mode source:   {_mode_note}")
     print(f"ranking:       adaptive severity_tier_category defect prefix LEADS; floor "
           f"{tiebreak_defect_floor_of(ctx)} "
           f"(`set-tiebreak-defect-floor N`; 0 = one cell only, 999999 = every cell)")
@@ -36162,9 +36594,13 @@ def cmd_status(args) -> None:
               f"rewrites: {'allowed' if _jinfo['rewrites'] else 'forbidden'}; "
               f"edits: {'concern-scoped only' if _jinfo['scoped'] else 'full review findings'}")
         if _jinfo.get("feedback"):
-            print(f"               feedback from: "
-                  f"{(ctx.cfg or {}).get('journal_feedback_from') or '(unset)'}; files: "
-                  + (", ".join(_jfb) if _jfb else "(auto-detected in the corpus)"))
+            if _jmode == JOURNAL_MODE_LLM:
+                print(f"               feedback source: {LLM_FEEDBACK_DIR}/ only "
+                      f"(false positives pre-filtered); no journal decision letter")
+            else:
+                print(f"               feedback from: "
+                      f"{(ctx.cfg or {}).get('journal_feedback_from') or '(unset)'}; files: "
+                      + (", ".join(_jfb) if _jfb else "(auto-detected in the corpus)"))
         else:
             print("               no journal feedback is read in this mode")
         _jsub = (ctx.state.get("journal") or {}).get("submission_dir")
@@ -40313,9 +40749,14 @@ def build_parser() -> argparse.ArgumentParser:
                          "major revision at the same journal; response required; "
                          "concern-scoped edits ONLY, no rewrites, no general "
                          "review-audit-revise), minor (option 4: as major, for a minor "
-                         "revision). The feedback file(s) are auto-detected in --source by name "
-                         "(feedback/referee/reviewer/editor/decision), or named with "
-                         "--journal-feedback")
+                         "revision), llm (option 5: revise against the false-positive-"
+                         "filtered llm_review_feedback/ area ONLY; no journal letter, no "
+                         "response letter; when --revision-mode is omitted and --source "
+                         "carries a non-empty llm_review_feedback/, this mode is selected "
+                         "automatically -- rename the area to llm_review_feedback.disabled to "
+                         "turn that off). The human feedback file(s) are auto-detected in "
+                         "--source by name (feedback/referee/reviewer/editor/decision), or "
+                         "named with --journal-feedback")
     ps.add_argument("--journal-feedback", action="append", default=None, metavar="FILE",
                     help="the decision letter / reviewer report file the revision modes read "
                          "(repeatable; a path relative to --root is resolved against it). "
@@ -40746,15 +41187,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     psm = sub.add_parser("set-revision-mode", parents=[common],
                          help="select the revision mode (continue / init / option 1 transfer / "
-                              "2 resubmit / 3 major / 4 minor), or show the current one")
+                              "2 resubmit / 3 major / 4 minor / 5 llm), or show the current one")
     psm.add_argument("mode", nargs="?", default=None, metavar="MODE",
                      help="continue (the pipeline's own review/revise rounds; the legacy "
                           "spelling `none` is still accepted) | init (conform into the venue's own "
                           "Word template before round 1, then the pipeline's own rounds; no "
                           "journal feedback) | transfer (option 1: new journal, no response "
-                          "letter) | resubmit (option 2: same journal, response letter) | "
-                          "major (option 3: scoped major revision + response letter) | "
-                          "minor (option 4: scoped minor revision + response letter). "
+                         "letter) | resubmit (option 2: same journal, response letter) | "
+                         "major (option 3: scoped major revision + response letter) | "
+                         "minor (option 4: scoped minor revision + response letter) | "
+                         "llm (option 5: the false-positive-filtered llm_review_feedback/ "
+                         "area only; no journal letter, no response letter). "
                           "Omit (or pass --show) to print the current mode")
     psm.add_argument("--journal-feedback", action="append", default=None, metavar="FILE",
                      help="the decision letter / reviewer report file (repeatable; relative "

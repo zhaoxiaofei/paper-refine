@@ -131,7 +131,7 @@ def main() -> int:
           and any("dataset_summary" in n for n in evidence_files),
           str(evidence_files))
     check("E1 the converter says so on stdout",
-          "evidence-area" in r.stdout and "Raw-data evidence text" in r.stdout)
+          "evidence-area" in r.stdout and "Evidence text" in r.stdout)
 
     print("== E2: extract_acronyms.py -- no M1/M1b row from evidence prose ==")
     r = subprocess.run([sys.executable, str(SCRIPTS / "extract_acronyms.py"),
@@ -210,10 +210,9 @@ def main() -> int:
           and "human_review_feedback" in shared
           and "never quote it as something \"the submission says\"" in shared)
     check("E5 the review directives name the evidence area",
-          "EVIDENCE areas" in nb.REVIEW_DIRECTIVES
-          and "human_review_feedback/" in nb.REVIEW_DIRECTIVES
-          and "a submission document" in nb.REVIEW_DIRECTIVES
-          and "Neither is part of the submission" in nb.REVIEW_DIRECTIVES)
+          all(s in " ".join(nb.REVIEW_DIRECTIVES.split())
+              for s in ("EVIDENCE areas", "human_review_feedback/", "llm_review_feedback/",
+                        "a submission document", "None is part of the submission")))
 
     print()
     if FAILS:
