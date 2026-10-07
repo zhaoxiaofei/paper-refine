@@ -341,7 +341,8 @@ def is_cover_letter(text: str, name: str = "") -> bool:
 
 RAW_DATA_DIRNAMES = ("raw_data", "raw_figs")
 HUMAN_FEEDBACK_DIR = "human_review_feedback"
-EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR,)
+LLM_FEEDBACK_DIR = "llm_review_feedback"
+EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR)
 EXTERNAL_FEEDBACK_RE = re.compile(
     r"feedback"
     r"|referees?[_ \-]*(?:report|comment)"

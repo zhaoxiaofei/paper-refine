@@ -117,9 +117,10 @@ RETRY POLICY / PANEL INTEGRITY
     signal, failed postcheck) is retried automatically -- TWICE by default, i.e.
     up to three attempts per run, configurable with `run --retries N`. Between
     attempts the orchestrator waits an exponential backoff
-    `--retry-backoff * 2**(failures so far)` seconds (default base 30s -> 30s,
-    60s, 120s, ... capped by `--retry-backoff-max`, default 600s; base 0 retries
-    immediately). The wait applies to the automated waves. In MANUAL mode a
+    `--retry-backoff * 2**(failures so far, counting from 0)` seconds (default
+    base 30s -> 30s, 60s, 120s, ... capped by `--retry-backoff-max`, default
+    600s; base 0 retries immediately -- see `backoff_delay`). The wait applies
+    to the automated waves. In MANUAL mode a
     failed attempt is NEVER rebuilt automatically: the operator owns that
     sandbox, so its work product is preserved and the failure is reported with
     the two supported next steps (`retry --run <ID>` to reset it, or fix the
@@ -12423,10 +12424,32 @@ def zotero_field_continuity_check(base_dir: Path, out_dir: Path, label: str,
         return rep
     if errs is None:
         errs = []
-    base_docs = {_docx_field_key(p.relative_to(base_dir).as_posix()): p
-                 for p in _fmt_corpus_files(base_dir)}
-    out_docs = {_docx_field_key(p.relative_to(out_dir).as_posix()): p
-                for p in _fmt_corpus_files(out_dir)}
+    def doc_map(root: Path) -> tuple:
+        """({pairing key: path}, collisions) for one side of the comparison.
+
+        The version-token-free key pairs `manuscript-4f3a9c1.docx` with
+        `manuscript.docx`, but two DIFFERENT documents can strip to one key
+        (`appendix-a.docx` / `appendix-b.docx`): the dict comprehension kept
+        only the last, so one document was never field-checked at all. The
+        collision is reported instead of being silent.
+        """
+        out, seen = {}, {}
+        for p in _fmt_corpus_files(root):
+            key = _docx_field_key(p.relative_to(root).as_posix())
+            seen.setdefault(key, []).append(p)
+            out[key] = p
+        clashes = {k: v for k, v in seen.items() if len(v) > 1}
+        return out, clashes
+
+    base_docs, base_clash = doc_map(base_dir)
+    out_docs, out_clash = doc_map(out_dir)
+    for side, clashes in (("base", base_clash), ("output", out_clash)):
+        for key, paths in sorted(clashes.items()):
+            warns.append(f"ZOTERO FIELD CONTINUITY: two {side} documents pair to one key "
+                         f"({key!r}): {', '.join(p.name for p in paths)}; only "
+                         f"{max(paths).name} is compared -- "
+                         f"rename them so their names differ by more than a version token")
+            rep["warnings"] += 1
     if not base_docs:
         rep["skipped"] = "the base carries no DOCX"
         return rep
@@ -12838,8 +12861,12 @@ def _docx_hf_signature(path: Path) -> dict:
                   if re.search(r"word/(header|footer)\w*\.xml$", n)}
     except (OSError, zipfile.BadZipFile, KeyError):
         return {}
-    sects = _SECT_RE.findall(doc) if "_SECT_RE" in globals() else \
-        re.findall(r"<w:sectPr(?=[\s>])[^>]*>[\s\S]*?</w:sectPr>", doc)
+    # A self-closing `<w:sectPr .../>` (a legal empty section) must match as the
+    # element it is: the old fallback ran to the NEXT section's closing tag, so
+    # the first section was read as a later one and the page-1 furniture check
+    # compared against the wrong section. `_SECT_RE` was never defined in this
+    # module, so the fallback was the only path.
+    sects = re.findall(r"<w:sectPr(?=[\s/>])[^>]*/>|<w:sectPr(?=[\s>])[\s\S]*?</w:sectPr>", doc)
     roles, seen = [], set()
     for m in re.finditer(r'<w:(header|footer)Reference w:type="(\w+)"',
                          sects[0] if sects else ""):
@@ -30978,6 +31005,14 @@ def cmd_setup(args) -> None:
             # printed, so an operator who passed the defaults learns exactly
             # what the mode changed.
             forced = []
+            # `rounds` first: the per-round lists must be normalised to the
+            # plan's FINAL length, or the config would say `rounds: 1` while
+            # `rewrites`/`revises`/`integrators` still carry the three entries
+            # the default `--rounds 3` expanded to (and `set-revision-mode`
+            # would write the same mode as length-1 lists).
+            if rounds != 1:
+                rounds = 1
+                forced.append("rounds=1 (the concerns are addressed once)")
             if rewrites != [0] * rounds:
                 rewrites = [0] * rounds
                 forced.append("rewrites=0 (a major/minor revision may not rewrite the manuscript)")
@@ -30987,9 +31022,6 @@ def cmd_setup(args) -> None:
             if integrators != [0] * rounds:
                 integrators = [0] * rounds
                 forced.append("integrators=0 (nothing to integrate without rewrite arms)")
-            if rounds != 1:
-                rounds = 1
-                forced.append("rounds=1 (the concerns are addressed once)")
             if getattr(args, "audit", DEFAULT_AUDIT) not in (None, "", "off"):
                 forced.append("audit off (the general review audits do not run in this mode)")
             args.audit = "off"

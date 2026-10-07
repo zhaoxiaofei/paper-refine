@@ -73,7 +73,7 @@ AUX_NAME_RE = re.compile(r"\.(?:tracking|logging)-(?:original|winner[0-9]+|[awi]
 
 # Keep in step with paper_pipeline.EVIDENCE_DIRNAMES: the READ-ONLY input areas
 # whose file names are never this package's naming evidence.
-EVIDENCE_DIRS = {"raw_data", "raw_figs", "human_review_feedback"}
+EVIDENCE_DIRS = {"raw_data", "raw_figs", "human_review_feedback", "llm_review_feedback"}
 
 # "-a" / "_v2" / "_V2" / "-4f3a9c1" at the very end of a stem (the version slot).
 TOKEN_RE = re.compile(r"^(?P<base>.*?)[-_](?P<tok>[0-9a-f]{7}|[A-Za-z]|[vV]\d+)$")

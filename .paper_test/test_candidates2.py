@@ -907,10 +907,17 @@ def test_unreadable_rtf_is_a_failure_not_an_empty_success():
         p.chmod(0o644)
     inv = {e["path"]: e for e in json.loads((work / "inventory.json").read_text())}
     row = inv.get("locked.rtf") or {}
-    check("R13 an unreadable .rtf is 'failed' and not editable",
-          row.get("status") == "failed" and row.get("editable") is False, str(row)[:220])
-    check("R13 the conversion warning counts the unreadable .rtf",
-          "could not be converted" in proc.stdout, proc.stdout[-200:])
+    # uid 0 ignores the file mode (CAP_DAC_OVERRIDE), so a chmod-0 file is still
+    # readable and the premise cannot be created in a root container: assert the
+    # capability instead of reporting a product failure.
+    if os.geteuid() != 0:
+        check("R13 an unreadable .rtf is 'failed' and not editable",
+              row.get("status") == "failed" and row.get("editable") is False, str(row)[:220])
+        check("R13 the conversion warning counts the unreadable .rtf",
+              "could not be converted" in proc.stdout, proc.stdout[-200:])
+    else:
+        print("[skip] R13 the unreadable .rtf checks need a non-root uid "
+              "(chmod 0 does not deny root)")
     # A READABLE but empty document is not a failure: rtf_to_text appends an
     # informational note on success, so only the unreadability marker may
     # demote it to `failed`.

@@ -458,6 +458,31 @@ touching this area:
   falls back to real copies, reported in the materialization record.
   `.paper_test/test_evidence_symlinks.py` pins all of it.
 
+* **Live Zotero fields are a code-enforced preservation contract** (2026-10-07):
+  `paper_docx_format.zotero_field_report` inventories every live field in the
+  parts that can hold one (`word/document.xml`, `word/footnotes.xml`,
+  `word/endnotes.xml`, headers/footers/comments), both as a complex field
+  (`fldChar begin -> instrText -> separate -> result -> end`) and as the
+  single-element `w:fldSimple` form, and names their structural faults (an
+  unclosed begin, a missing OR duplicate `separate`, a stray field char,
+  unparseable citation JSON, a missing/duplicate `citationID`).
+  `zotero_field_continuity_problems` compares a stage's DOCX with its base and
+  fails the attempt when a field disappears into plain text, every live field
+  is removed at once, or a fault is NEW. A bibliography field whose visible
+  reference list shrank, and a baseline whose own fields cannot be
+  inventoried, are REPORTED with a warning instead of being compared
+  empty-to-empty. Documents are paired by
+  version-token-free name, and two names that strip to one key are reported
+  (never silently collapsed). The formatter's LIVE-FIELD FENCE refuses a repair
+  that changes the field signature, and no mechanical text edit (a hygiene
+  repair, the redundant-journal-name drop) may rewrite a field RESULT -- Word
+  and Zotero regenerate it -- so those rows are reported `fix=style-field` and
+  never applied. `setup --zotero off|read|edit|apply`
+  only widens or narrows what an AGENT may edit; it never disables the gate.
+  The single opt-out is the policy key `unlink_zotero_fields` (submission
+  copies). Pinned by `.paper_test/test_zotero_field_continuity.py` and
+  `.paper_test/test_audit_gaps_2026_1007.py`.
+
 ## Known, deliberate limits
 
 * The **skill packages** (`paper-skills/`) are standalone: their own prose still

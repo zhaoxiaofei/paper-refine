@@ -104,11 +104,13 @@ from xml.sax.saxutils import unescape as xml_unescape
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
 # A corpus's read-only EVIDENCE areas (`raw_data/`, legacy spelling `raw_figs/`,
-# and the human editors'/reviewers' feedback): never submission content, never a
+# and the human/LLM editors'-reviewers' feedback -- keep in step with
+# `paper_pipeline.EVIDENCE_DIRNAMES`): never submission content, never a
 # formatting/validation target.
 RAW_DATA_DIRNAMES = ("raw_data", "raw_figs")
 HUMAN_FEEDBACK_DIR = "human_review_feedback"
-EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR,)
+LLM_FEEDBACK_DIR = "llm_review_feedback"
+EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR)
 
 POLICY_DEFAULTS = {
     "journal_italics": "refs-only",     # refs-only | everywhere | off
@@ -177,6 +179,10 @@ TEXT_RE = re.compile(r"<w:t(?:\s[^>]*)?>.*?</w:t>", re.S)
 RUN_RE = re.compile(r"<w:r(?=[\s/>]).*?</w:r>|<w:r(?=[\s/>])[^>]*/>", re.S)
 FIELD_CHAR_RE = re.compile(r"<w:fldChar[^>]*w:fldCharType=\"(\w+)\"[^>]*/?>")
 INSTR_RE = re.compile(r"<w:instrText(?:\s[^>]*)?>.*?</w:instrText>", re.S)
+# Reading a DOCUMENT's sections: a legal self-closing `<w:sectPr .../>` (an
+# empty section) must match as the element it is, never run to the NEXT
+# section's closing tag -- that reported the wrong section's page-1 furniture.
+SECT_READ_RE = re.compile(r"<w:sectPr(?=[\s/>])[^>]*/>|<w:sectPr(?=[\s>])[\s\S]*?</w:sectPr>")
 PROOFERR_RE = re.compile(r"<w:proofErr[^>]*/>")
 # Revision marks beyond the run-level w:ins/w:del pair: Word records tracked
 # table/cell edits and property changes with their own elements, and a final
@@ -316,8 +322,12 @@ def first_section_props(xml: str) -> str | None:
     A manuscript with a separate title-page section carries one `w:sectPr` at
     the end of that section and the body's own at the end of `w:body`; the
     title page's header comes from the FIRST one, never the last.
+
+    A self-closing `<w:sectPr .../>` is a legal empty section and must match as
+    the element it is: the old pattern ran to the NEXT section's closing tag, so
+    page 1 was reported with the following section's furniture.
     """
-    m = re.search(r"<w:sectPr(?=[\s>]).*?</w:sectPr>", xml, re.S)
+    m = SECT_READ_RE.search(xml)
     return m.group(0) if m else None
 
 
@@ -376,6 +386,49 @@ def in_field(ranges: list, pos: int) -> str:
     return ""
 
 
+def in_field_result(ranges: list, start: int, end: int) -> bool:
+    """True when the text span [start, end) lies inside a field RESULT.
+
+    Word (and Zotero's refresh) regenerates a field's result runs from the
+    stored item, so a text edit inside them is lost on refresh while it still
+    changes what the citation/reference currently shows -- the formatter
+    reports such findings as field-protected and never applies them.
+    """
+    return any(start < r_end and r_start < end for r_start, r_end in ranges)
+
+
+def field_result_text_ranges(para: str) -> list:
+    """[(text_start, text_end)] of every complex field's RESULT text in `para`.
+
+    The offsets are in `text_of(para)` coordinates -- the space `hygiene_spans`
+    and the fixer's text edits use. Only the runs AFTER the field's `fldChar
+    separate` and before its `end` are a result; the instruction runs and the
+    field characters themselves are outside.
+    """
+    runs, pos = [], 0
+    for m in TEXT_RE.finditer(para):
+        raw = m.group(0)
+        text = unesc(raw[raw.find(">") + 1:raw.rfind("<")])
+        runs.append((m.start(), m.end(), pos, pos + len(text)))
+        pos += len(text)
+    out, stack = [], []
+    for m in FIELD_CHAR_RE.finditer(para):
+        kind = m.group(1)
+        if kind == "begin":
+            stack.append({"sep": None})
+        elif kind == "separate":
+            if stack and stack[-1]["sep"] is None:
+                stack[-1]["sep"] = m.end()
+        elif kind == "end" and stack:
+            frame = stack.pop()
+            if frame["sep"] is None:
+                continue
+            for xs, xe, ts, te in runs:
+                if xs >= frame["sep"] and xe <= m.start():
+                    out.append((ts, te))
+    return out
+
+
 # ---- live-field inventory and continuity -----------------------------------
 # Word stores a Zotero citation as a complex field: begin -> instrText
 # ("ADDIN ZOTERO_ITEM CSL_CITATION {...}") -> separate -> visible result ->
@@ -387,10 +440,17 @@ def in_field(ranges: list, pos: int) -> str:
 
 ZOTERO_FIELD_ITEM_INSTR = "ADDIN ZOTERO_ITEM"
 ZOTERO_FIELD_BIBL_INSTR = "ADDIN ZOTERO_BIBL"
+# The parts that can carry a live field. Zotero's citations are complex fields
+# in word/document.xml, but a note-style manuscript (and any Word conversion)
+# can hold them in footnotes/endnotes -- and the template pass rewrites those
+# parts too, so the inventory must see them or the gate protects nothing there.
+ZOTERO_FIELD_PARTS = ("word/document.xml", "word/footnotes.xml", "word/endnotes.xml")
+ZOTERO_FIELD_AUX_PARTS_RE = re.compile(r"word/(?:header|footer)\d*\.xml$|word/comments\.xml$")
 ZOTERO_FIELD_TOKEN_RE = re.compile(
     r"<w:fldChar\b[^>]*?w:fldCharType=\"(begin|separate|end)\"[^>]*?/?>"
     r"|<w:instrText\b[^>]*>(.*?)</w:instrText>"
-    r"|<w:t\b[^>]*>(.*?)</w:t>",
+    r"|<w:t\b[^>]*>(.*?)</w:t>"
+    r"|<w:fldSimple\b([^>]*)>(.*?)</w:fldSimple>",
     re.S)
 
 
@@ -407,13 +467,25 @@ def _zotero_field_kind(instr: str) -> str:
 
 def _zotero_citation_id(instr: str) -> tuple:
     """(citationID | None, problem | None) for one ADDIN ZOTERO_ITEM field."""
-    m = re.search(r"CSL_CITATION\s*(\{.*\})\s*$", instr or "", re.S)
+    text = instr or ""
+    m = re.search(r"CSL_CITATION\s*(\{)", text, re.S)
     if not m:
         return None, "the field instruction carries no CSL_CITATION JSON"
     try:
-        data = json.loads(m.group(1))
+        # Decode the FIRST complete JSON value instead of requiring it to run to
+        # the end of the instruction: Word may append a field switch
+        # ("... } \* MERGEFORMAT"), and the anchored pattern then reported a
+        # perfectly good citation as unparseable -- dropping that field from
+        # every base-vs-output comparison.
+        data, end = json.JSONDecoder().raw_decode(text[m.start(1):].strip())
     except (json.JSONDecodeError, ValueError) as e:
         return None, f"the citation JSON does not parse ({e})"
+    tail = text[m.start(1):].strip()[end:].strip()
+    if tail and not tail.startswith("\\"):
+        return None, (f"the field instruction carries text after the citation JSON "
+                      f"({tail[:40]!r})")
+    if not isinstance(data, dict):
+        return None, "the citation JSON is not an object"
     cid = data.get("citationID")
     if not isinstance(cid, str) or not cid.strip():
         return None, "the citation JSON carries no citationID"
@@ -449,7 +521,21 @@ def zotero_field_report(xml: str) -> dict:
 
     for m in ZOTERO_FIELD_TOKEN_RE.finditer(xml):
         raw = m.group(0)
-        if raw.startswith("<w:fldChar"):
+        if raw.startswith("<w:fldSimple"):
+            # The single-element field form: the instruction is the w:instr
+            # ATTRIBUTE and the element's own content is the result. Word can
+            # rewrite a complex field as fldSimple, so it must be inventoried --
+            # a Zotero field invisible here is a field the gate cannot protect.
+            attrs = m.group(4) or ""
+            instr_m = re.search(r'w:instr="([^"]*)"', attrs)
+            # An ATTRIBUTE also escapes the quote characters (`&quot;` around
+            # every JSON key); `unesc` decodes text-node entities only.
+            instr = (unesc(instr_m.group(1)).replace("&quot;", '"').replace("&apos;", "'")
+                     if instr_m else "")
+            fields.append({"begin": m.start(), "end": m.end(), "instr": [instr],
+                           "separate": m.start(),
+                           "result": [text_of(m.group(5) or "")]})
+        elif raw.startswith("<w:fldChar"):
             kind = m.group(1)
             if kind == "begin":
                 stack.append({"begin": m.start(), "end": None, "instr": [],
@@ -458,6 +544,11 @@ def zotero_field_report(xml: str) -> dict:
                 if stack:
                     if stack[-1]["separate"] is None:
                         stack[-1]["separate"] = m.start()
+                    else:
+                        fail("duplicate-separate",
+                             f"a second field separator at byte {m.start()} is inside one "
+                             f"field (the first is at byte {stack[-1]['separate']}); Word "
+                             f"renders the extra separator unpredictably")
                 else:
                     fail("separate-outside-field",
                          f"a field separator at byte {m.start()} is outside any field")
@@ -543,18 +634,56 @@ def zotero_field_signature(report: dict) -> list:
     return sorted(sig)
 
 
+def _merge_zotero_reports(reports: list) -> dict:
+    """One inventory out of several parts' inventories (each is (part, report))."""
+    fields, errors, codes, texts = [], [], Counter(), []
+    counts = Counter()
+    for part, rep in reports:
+        for f in rep.get("fields") or []:
+            merged = dict(f)
+            merged["index"] = len(fields)
+            merged["part"] = part
+            fields.append(merged)
+        errors.extend(f"{part}: {e}" for e in (rep.get("errors") or []))
+        codes.update(rep.get("error_codes") or {})
+        counts.update({k: int(v) for k, v in (rep.get("counts") or {}).items()})
+        if rep.get("text"):
+            texts.append(rep["text"])
+    return {"fields": fields, "errors": errors, "error_codes": dict(codes),
+            "counts": dict(counts), "text": "\n".join(texts)}
+
+
 def zotero_report_for_docx(path) -> dict:
-    """`zotero_field_report` for a .docx path; an unreadable package reports it."""
+    """`zotero_field_report` for a .docx path, over EVERY part that can hold fields.
+
+    Only word/document.xml was read once; a note-style manuscript keeps its
+    citations in word/footnotes.xml (or endnotes.xml, a header/footer or a
+    comment), where they were invisible to the stage gate -- zero fields means
+    "all fields deleted" can never fire either. An unreadable package reports it.
+    """
     try:
         with zipfile.ZipFile(path) as pkg:
-            xml = pkg.read("word/document.xml").decode("utf-8", "replace")
+            names = list(pkg.namelist())
+            if "word/document.xml" not in names:
+                # Every .docx has a main part; reading several parts must not
+                # turn a package WITHOUT it into an empty "no fields" verdict
+                # (that was the `unreadable DOCX package` report before).
+                raise KeyError("word/document.xml")
+            parts = [n for n in names
+                     if n in ZOTERO_FIELD_PARTS or ZOTERO_FIELD_AUX_PARTS_RE.search(n)]
+            xmls = [(n, pkg.read(n).decode("utf-8", "replace")) for n in parts]
     except (OSError, zipfile.BadZipFile, KeyError) as e:
         return {"fields": [], "errors": [f"unreadable DOCX package: {type(e).__name__}: {e}"],
                 "error_codes": {"unreadable-docx": 1},
                 "counts": {"item": 0, "bibliography": 0, "zotero_other": 0, "zotero": 0,
                            "other": 0, "fields": 0, "incomplete": 0},
                 "text": ""}
-    return zotero_field_report(xml)
+    if not xmls:
+        return zotero_field_report("")
+    reports = [(name, zotero_field_report(xml)) for name, xml in xmls]
+    if len(reports) == 1:
+        return reports[0][1]
+    return _merge_zotero_reports(reports)
 
 
 def zotero_field_continuity_problems(base: dict, out: dict) -> dict:
@@ -604,6 +733,15 @@ def zotero_field_continuity_problems(base: dict, out: dict) -> dict:
     if base_fields and not out_fields:
         errors.append(f"ALL {len(base_fields)} Zotero field(s) were deleted (a version may add, "
                       f"edit or delete fields, but never remove every live field at once)")
+    elif not base_fields and (base.get("error_codes") or {}):
+        # The previous version carries Zotero structure that could NOT be
+        # inventoried (a stripped fldChar run leaves its instruction behind): the
+        # comparison below runs against an empty baseline, so "all fields were
+        # deleted" can never fire. Report the degraded baseline instead of
+        # comparing empty-to-empty in silence.
+        warnings.append("the previous version's Zotero structure could not be inventoried "
+                        "(" + ", ".join(sorted(base["error_codes"])) + "), so this comparison "
+                        "has no field baseline; repair the baseline before trusting it")
 
     base_text, out_text = base.get("text") or "", out.get("text") or ""
 
@@ -670,6 +808,16 @@ def zotero_field_continuity_problems(base: dict, out: dict) -> dict:
                           "ADDIN ZOTERO_BIBL field")
         else:
             warnings.append("the bibliography field was deleted together with its reference text")
+    elif base_bib and out_bib:
+        # The bibliography has no citationID, so only its complete disappearance
+        # was probed -- references could vanish from the list with no row at all.
+        # A shrinking result is reported (a growing one is an ordinary revision).
+        base_vis = " ".join((base_bib[0].get("visible_text") or "").split())
+        out_vis = " ".join((out_bib[0].get("visible_text") or "").split())
+        if base_vis and len(out_vis) < len(base_vis):
+            warnings.append(f"the bibliography field's visible reference text shrank "
+                            f"({len(base_vis)} -> {len(out_vis)} characters); confirm the "
+                            f"reference list was edited as intended and not truncated")
     added = [cid for cid in out_items if cid not in base_items]
     return {"errors": errors, "warnings": warnings, "deleted": deleted, "added": added,
             "edited": edited, "plain_text": plain_text,
@@ -741,7 +889,7 @@ def _template_uses_even_odd(template: Path) -> bool:
         return False
     if "evenAndOddHeaders" in settings:
         return True
-    sects = _SECT_RE.findall(doc)
+    sects = SECT_READ_RE.findall(doc)
     return bool(re.search(r'<w:(?:header|footer)Reference w:type="even"',
                           sects[-1] if sects else ""))
 
@@ -771,7 +919,7 @@ def docx_front_matter_report(path: Path, template: Path = None, containers=()) -
     # The section that governs page 1 decides the FIRST-PAGE furniture (see
     # `first_section_props`): reading the last one let a two-section manuscript
     # whose page 1 was not the venue's layout report no gap at all.
-    sects = _SECT_RE.findall(doc)
+    sects = SECT_READ_RE.findall(doc)
     sect = first_section_props(doc) or (sects[-1] if sects else "")
     refs = {}
     for m in re.finditer(r'<w:(header|footer)Reference w:type="(\w+)" r:id="([^"]+)"', sect):
@@ -2839,8 +2987,9 @@ def term_repetition_rows(paras: list, is_ref: list) -> list:
                                      f"({len(words)} words)",
                          "detail": "redundancy in a short passage: name the thing once and "
                                    "refer back to it (pronoun, ellipsis, or the short form); "
-                                   "a proper name three or more times in one paragraph -- a "
-                                   "journal name above all -- reads as padding, and it is a "
+                                   "a proper name three or more times in one paragraph (and "
+                                   "four or more times in the document) -- a journal name "
+                                   "above all -- reads as padding, and it is a "
                                    "writing-quality defect even when no journal rule names it",
                          "protected": False})
     return rows
@@ -4129,8 +4278,14 @@ def hygiene_spans(para: str) -> list:
     return out
 
 
-def hygiene_rows(paras: list, is_ref: list, doc: str) -> list:
-    """One row per text-hygiene instance (references and empty paragraphs skipped)."""
+def hygiene_rows(paras: list, is_ref: list, doc: str, protected=None) -> list:
+    """One row per text-hygiene instance (references and empty paragraphs skipped).
+
+    `protected` is the per-paragraph `field_result_text_ranges` list: a
+    mechanical hygiene edit inside a live field's result is reported as
+    `fix=style-field` (protected) so the fixer, which must never rewrite a
+    field result, is not asked to apply it.
+    """
     rows = []
     for idx, (_, _, para) in enumerate(paras):
         if idx < len(is_ref) and is_ref[idx]:
@@ -4138,11 +4293,15 @@ def hygiene_rows(paras: list, is_ref: list, doc: str) -> list:
         text = text_of(para)
         if not text.strip():
             continue
+        prot = protected[idx] if protected and idx < len(protected) else []
         for sp in hygiene_spans(para):
+            in_result = bool(prot) and in_field_result(prot, sp["start"], sp["end"])
             rows.append({"rule": sp["rule"], "severity": "low", "document": doc,
                          "location": f"p{idx}", "evidence": sp["evidence"],
-                         "detail": sp["detail"], "fix": sp["fix"],
-                         "protected": False, "tier": tier_of(sp["rule"])})
+                         "detail": sp["detail"],
+                         "fix": ("style-field" if (in_result and sp["fix"] == "mechanical")
+                                 else sp["fix"]),
+                         "protected": in_result, "tier": tier_of(sp["rule"])})
     return rows
 
 
@@ -4524,6 +4683,26 @@ def drawing_geometry_rows(part_xml: str, rels: dict, sizes: dict, doc: str,
                 continue
             pw, ph = size
             expected = pw / ph
+            # A CROPPED picture shows only part of the source: `a:srcRect` cuts
+            # a fraction off each side, so the displayed extent must match the
+            # cropped region's ratio. Comparing against the full image flagged a
+            # deliberate crop (FMT-IM1) and the "fix" then distorted it by
+            # rewriting cy. A degenerate crop cannot be verified: skip it, like a
+            # rotated drawing.
+            src_rect = re.search(r"<a:srcRect(?=[\s/>])([^>]*)/?>", block)
+            if src_rect:
+                rect = {k: v for k, v in re.findall(r'([A-Za-z]+)="([^"]*)"',
+                                                    src_rect.group(1))}
+                try:
+                    frac_w = 1 - (float(rect.get("l") or 0)
+                                  + float(rect.get("r") or 0)) / 100000.0
+                    frac_h = 1 - (float(rect.get("t") or 0)
+                                  + float(rect.get("b") or 0)) / 100000.0
+                except ValueError:
+                    continue
+                if frac_w <= 0 or frac_h <= 0:
+                    continue
+                expected = (pw * frac_w) / (ph * frac_h)
             cx = cy = None
             unit = "EMU"
             emit = re.search(r"<wp:extent(?=[\s/>])[^>]*/>", block)
@@ -4780,7 +4959,8 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # (possible lowercase sentence start) and FMT-G3 (missing space after
     # punctuation) are reported for the editing arms.
     is_ref_para = [elem_val(ppr_of(p[2]), "pStyle") == "Bibliography" for p in paras]
-    rows.extend(hygiene_rows(paras, is_ref_para, doc))
+    field_result_text = [field_result_text_ranges(p[2]) for p in paras]
+    rows.extend(hygiene_rows(paras, is_ref_para, doc, protected=field_result_text))
     rows.extend(capitalization_rows(paras, is_ref_para, doc))
     # Fonts, paragraph formatting and heading levels: the copy-editor classes
     # the editing arms align (FMT-T10a..e; report-only, like the text rules).
@@ -4899,7 +5079,11 @@ def analyse_package(path: Path, policy: dict) -> dict:
                               pkg.read("docProps/app.xml").decode("utf-8", "replace"))
                 if m:
                     app_pages = int(m.group(1))
-    except (zipfile.BadZipFile, KeyError, ET.ParseError, UnicodeDecodeError, OSError) as e:
+    except (zipfile.BadZipFile, KeyError, ET.ParseError, UnicodeDecodeError, OSError,
+            RuntimeError, NotImplementedError) as e:
+        # RuntimeError is what `zipfile` raises for an ENCRYPTED entry (and
+        # NotImplementedError for an unsupported compression method): a
+        # password-protected .docx is unreadable like any other, not a crash.
         row = {"rule": "FMT-X1", "severity": "high", "document": path.name, "location": "-",
                "evidence": f"{type(e).__name__}: {e}", "detail": "unreadable DOCX package",
                "fix": "manual", "protected": False}
@@ -5425,18 +5609,27 @@ def fix_document(xml: str, styles: dict, policy: dict,
     edits = []
     for idx, p0, p1, para, text in bodies:
         spans = []
+        # A live field's RESULT text is regenerated by Word, so a text edit
+        # inside it would be lost on refresh: the scanner reports those rows as
+        # field-protected (`fix=style-field`) and the fixer must not apply them
+        # (the unlink policy is the one explicit opt-out).
+        protected = [] if policy["unlink_zotero_fields"] else field_result_text_ranges(para)
         # Text hygiene: a space at a line edge (FMT-P4) and a doubled
         # article/preposition (FMT-G1) are mechanical. Both are recorded
         # below like every other text edit, so the fixer's verification can
         # prove that nothing beyond them moved.
         hygiene = [(sp["start"], sp["end"], sp["repl"])
                    for sp in hygiene_spans(para) if sp["fix"] == "mechanical"]
+        if protected:
+            hygiene = [h for h in hygiene if not in_field_result(protected, h[0], h[1])]
         spans.extend(hygiene)
         if want_cit:
             for m in CIT_YEAR_JOURNAL.finditer(text):
-                spans.append((m.end(2), m.end(3), ""))
+                if not in_field_result(protected, m.end(2), m.end(3)):
+                    spans.append((m.end(2), m.end(3), ""))
             for m in CIT_JOURNAL_YEAR.finditer(text):
-                spans.append((m.end(1), m.end(2), ""))
+                if not in_field_result(protected, m.end(1), m.end(2)):
+                    spans.append((m.end(1), m.end(2), ""))
         if want_spell:
             for minority, majority in spell_target.items():
                 for m in re.finditer(rf"\b{re.escape(minority)}\b", text, re.I):
@@ -5505,17 +5698,25 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
     if "word/document.xml" not in probe_names:
         return {"source": str(src), "output": str(out), "changes": [], "verified": {},
                 "error": "unreadable DOCX package: no word/document.xml", "ok": False}
+    # The same contract covers the READ phase: an encrypted entry (RuntimeError),
+    # an unsupported compression method, a malformed styles.xml (ParseError) or
+    # a non-UTF-8 document.xml must come back as `ok: false`, not a traceback.
     sizes, doc_rels, aux = {}, {}, {}
-    with zipfile.ZipFile(src) as pkg:
-        parts = {i.filename: pkg.read(i.filename) for i in pkg.infolist()}
-        styles = parse_styles(pkg)
-        sizes = media_pixel_sizes(pkg)
-        doc_rels = part_rels(pkg, "word/document.xml")
-        for name in sorted(pkg.namelist()):
-            if re.match(r"word/(?:header|footer)\d*\.xml$", name):
-                aux[name] = (pkg.read(name).decode("utf-8", "replace"),
-                             part_rels(pkg, name))
-    xml_before = parts["word/document.xml"].decode("utf-8")
+    try:
+        with zipfile.ZipFile(src) as pkg:
+            parts = {i.filename: pkg.read(i.filename) for i in pkg.infolist()}
+            styles = parse_styles(pkg)
+            sizes = media_pixel_sizes(pkg)
+            doc_rels = part_rels(pkg, "word/document.xml")
+            for name in sorted(pkg.namelist()):
+                if re.match(r"word/(?:header|footer)\d*\.xml$", name):
+                    aux[name] = (pkg.read(name).decode("utf-8", "replace"),
+                                 part_rels(pkg, name))
+        xml_before = parts["word/document.xml"].decode("utf-8")
+    except (zipfile.BadZipFile, KeyError, ET.ParseError, UnicodeDecodeError, OSError,
+            RuntimeError, NotImplementedError) as e:
+        return {"source": str(src), "output": str(out), "changes": [], "verified": {},
+                "error": f"unreadable DOCX package: {type(e).__name__}: {e}", "ok": False}
     xml_after, changes, meta = fix_document(xml_before, styles, policy,
                                             sizes=sizes, rels=doc_rels)
     try:
@@ -5554,9 +5755,14 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
             parts_new[name] = apply_edits(axml, afixes).encode("utf-8")
             changes.append(f"restored the aspect ratio of {len(afixes)} embedded "
                            f"image extent(s) in {posixpath.basename(name)}")
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-        for name, data in parts_new.items():
-            z.writestr(name, data)
+    try:
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+            for name, data in parts_new.items():
+                z.writestr(name, data)
+    except (OSError, RuntimeError, NotImplementedError) as e:
+        return {"source": str(src), "output": str(out), "changes": [], "verified": {},
+                "error": f"could not write the fixed DOCX: {type(e).__name__}: {e}",
+                "ok": False}
 
     # Text identity is about the DOCUMENT TEXT, not about paragraph count: a
     # fix may delete an empty paragraph or split a run, which changes the
