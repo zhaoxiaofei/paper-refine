@@ -1371,7 +1371,10 @@ KEY_TERMS = ("CNV", "CN ", "copy number", "copy-number", "integer CN", "CNV call
 UNIT_RE = re.compile(
     r"^\s*(?:%|percent|fold|×|x\b|kb|Mb|Gb|bp|nm|µm|um|mm|cm|mL|µL|uL|ng|µg|ug|mg|"
     r"h\b|min\b|s\b|ms\b|°C|K\b|mM|µM|uM|nM|pM|mol|M\b)", re.I)
-NUMBER_RE = re.compile(r"(?<![\w.])(\d[\d,]*(?:\.\d+)?)(?![\w])")
+# The exponent is part of the number: reading `1.2e-4` as the two numbers `1`
+# and `4` put values the author never wrote into the M30 numbers ledger (and
+# left the real p-value out of it).
+NUMBER_RE = re.compile(r"(?<![\w.])(\d[\d,]*(?:\.\d+)?(?:[eE][+-]?\d+)?)(?![\w])")
 
 # --------------------------------------------------------------------------
 # Disposition tiers.
@@ -1697,6 +1700,13 @@ def number_format_rows(paras: list) -> list:
     # with 5+ digits (or a 4+-digit number that already carries a separator)
     # take part in the convention check.
     def _is_quantity(n: str) -> bool:
+        # `1.2e-4` is one value, not a 6-character integer: it has no bearing on
+        # the thousands-separator convention (before the exponent was part of
+        # NUMBER_RE it was read as `1` and `4` and never reached this check).
+        # Only the NEW shape is excluded: a plain decimal (`1,234.5`) stays a
+        # separator case exactly as it was before the exponent was accepted.
+        if not re.fullmatch(r"\d[\d,]*(?:\.\d+)?", n):
+            return False
         digits = n.replace(",", "")
         if len(digits) <= 4:
             return "," in n
@@ -2729,6 +2739,24 @@ def _cohort_reference_re(number: str):
         r"participants?|individuals?|libraries?|replicates?))")
 
 
+def _m30_header_tokens(column) -> set:
+    """The nouns of a table header, split on `_` and camelCase boundaries.
+
+    A shipped analysis table writes its header as `Age_years` / `nSamples`
+    where the prose says "age" / "samples". With the raw underscore compound as
+    ONE token there is no overlap, so `hierarchy_seed_rows` reported "no
+    shipped table column matches this sentence" and the session was told to
+    record `unable — producer not in the corpus` while the producing column sat
+    in the package.
+    """
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", str(column or ""))
+    tokens = set()
+    for token in _M30_TOKEN_RE.findall(spaced.lower()):
+        tokens.add(token)
+        tokens.update(part for part in token.split("_") if len(part) >= 3)
+    return tokens
+
+
 def hierarchy_seed_rows(number_rows: list, tables: list, limit: int = 200) -> list:
     """M30 seed: every un-proved written number paired with candidate producers.
 
@@ -2769,7 +2797,7 @@ def hierarchy_seed_rows(number_rows: list, tables: list, limit: int = 200) -> li
         cohort = bool(_cohort_reference_re(num).search(sentence))
         candidates = []
         for s in stats:
-            head_tokens = set(_M30_TOKEN_RE.findall(str(s.get("column") or "").lower()))
+            head_tokens = _m30_header_tokens(s.get("column"))
             overlap = len(head_tokens & tokens)
             id_col = bool(_M30_ID_HEADER_RE.search(str(s.get("column") or "")))
             if overlap or (cohort and id_col):

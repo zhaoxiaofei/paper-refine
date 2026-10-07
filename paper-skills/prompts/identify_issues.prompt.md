@@ -479,9 +479,10 @@ independently of the main text).
 **Purpose:** every in-text citation vs. the reference list.
 
 **Enumeration:** run `extract_citations.py`. Handles numeric ([1], [1,2],
-[1–3]) and author-year styles, `.bib` files, numbered and unnumbered reference
-lists. Extend it in WORK/ for other styles (e.g. superscript numbers) instead
-of eyeballing.
+[1–3]) and author-year styles, LaTeX `\cite`-family keys against `\bibitem`
+and `.bib` entries (a commented-out or verbatim `\cite` is not a call-out),
+numbered and unnumbered reference lists. Extend it in WORK/ for other styles
+(e.g. superscript numbers) instead of eyeballing.
 
 **Artifact:** `M2_citations.md` — every reference-list entry (one row) and
 every in-text call-out (one row) + auto-derived mismatches.
@@ -517,7 +518,11 @@ score, value, level, age, dose, time, size, …) are recorded as
 `suspect_brackets` and never counted as citations. Unnumbered lists are
 enumerated entry by entry (wrapped continuations are merged), so "listed but
 never cited" is auditable for author-year styles too; the artifact prints the
-reference-list region it read, with the boundary reason.
+reference-list region it read, with the boundary reason. LaTeX call-outs are
+KEYS: `\cite{a,b}` is resolved against the document's own `\bibitem` entries
+and the package's `.bib` entries (a `\nocite{a}` counts as cited but is not an
+in-text call-out), and when the corpus carries `\cite` keys but no key list at
+all the LaTeX checks are reported `unable`, never as an empty "none".
 
 ## M3 — Display-item sweep (script-assisted)
 

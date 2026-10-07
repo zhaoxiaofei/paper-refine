@@ -3,7 +3,8 @@
 
 Enumerates every in-text citation call-out (numeric [1] / [1,2] / [1-3] and
 author-year "(Smith et al., 2019)", "Smith et al. (2019)", "Smith and Jones
-2019") and every reference-list entry, then compares them. One row per
+2019"), every LaTeX `\cite`-family key and every reference-list entry
+(numbered, unnumbered, `\bibitem` and `.bib`), then compares them. One row per
 reference entry AND per call-out occurrence in the artifact:
 
   OUT/artifacts/M2_citations.md / .json
@@ -17,6 +18,15 @@ Each file that carries its own numbered list is its own numbering space:
 orphans, uncited entries, duplicates and order violations are computed per
 document, never merged across documents (a cover letter citing [5] while the
 manuscript starts at [1] is not an ordering defect).
+
+LaTeX sources (`*.tex.txt`/`*.ltx.txt` in the corpus) cite by KEY, so the key
+space of `\cite{a,b}` / `\citep[see][p. 3]{a}` is compared against this
+document's own `\bibitem{a}` entries and the package's `.bib` entries; a
+`\nocite{a}` counts as cited without being an in-text call-out. `%` comments
+and verbatim bodies never contribute a key. When the corpus carries `\cite`
+call-outs but no key list at all, the artifact says the check is UNRESOLVED
+instead of printing an empty "orphans: none" (the reference list is simply not
+in the corpus).
 
 stdlib-only. Usage:
   python extract_citations.py --work ./review/work [--out ./review]
@@ -67,6 +77,51 @@ SUSPECT_PRECEDERS = re.compile(
     r"\s*(?:of|is|was|:|=|are|were)?\s*$", re.I)
 REF_ENTRY_RE = re.compile(r"^\s*\[?(\d{1,3})[\].]\s+(.*)$")
 BIB_ENTRY_RE = re.compile(r"@\w+\s*\{\s*([^,]+),")
+# LaTeX: the call-out is a KEY inside a \cite-family macro (`\cite`, `\citep`,
+# `\citet`, `\citealp`, `\textcite`, `\parencite`, `\autocite`, `\nocite`, ...),
+# the list entry is a `\bibitem[...]{key}`. Without these, a .tex submission
+# reported zero call-outs and a clean "orphans: none" for a document that cites
+# every sentence.
+TEX_CITE_RE = re.compile(
+    r"\\(?P<macro>[A-Za-z]*cite[A-Za-z]*)\*?"
+    r"(?:\s*\[[^\]]*\]){0,3}\s*\{(?P<keys>[^{}]*)\}")
+TEX_BIBITEM_RE = re.compile(r"\\bibitem\s*(?:\[[^\]]*\])?\s*\{(?P<key>[^{}]+)\}")
+TEX_BEGIN_VERBATIM_RE = re.compile(r"\\begin\{(?P<env>verbatim|lstlisting|minted|Verbatim)\}")
+
+
+def latex_source_text(text: str) -> str:
+    """The compilable part of a LaTeX source (line count preserved).
+
+    A `%` comment (any unescaped `%` to the end of the line) and a verbatim
+    body are not manuscript text: a commented-out `\\cite{old}` must not enter
+    the key space and a verbatim sample must not become an orphan call-out.
+    Every line is replaced in place, so the reported line numbers stay the
+    source's own.
+    """
+    kept, in_verbatim = [], None
+    for line in text.split("\n"):
+        if in_verbatim is not None:
+            if ("\\end{%s}" % in_verbatim) in line:
+                in_verbatim = None
+            kept.append("")
+            continue
+        m = TEX_BEGIN_VERBATIM_RE.search(line)
+        if m:
+            in_verbatim = m.group("env")
+            kept.append(line[: m.start()])
+            continue
+        out, i = [], 0
+        while i < len(line):
+            if line[i] == "\\" and i + 1 < len(line):
+                out.append(line[i:i + 2])
+                i += 2
+                continue
+            if line[i] == "%":
+                break
+            out.append(line[i])
+            i += 1
+        kept.append("".join(out))
+    return "\n".join(kept)
 
 REF_HEAD_RE = re.compile(
     r"^\s*(?:#{1,6}\s*)?(?:references?|bibliography|reference\s+list|literature\s+cited)\s*:?\s*$", re.I)
@@ -206,6 +261,8 @@ def main():
     callouts = []       # every in-text citation instance
     ref_entries = []    # every reference-list entry
     bib_entries = []    # .bib entries
+    tex_bibitems = []   # LaTeX \bibitem entries (the document's own list)
+    nocite_keys = defaultdict(list)   # \nocite{a}: cited, but not an in-text call-out
     suspect_brackets = []
     reference_notes = []
 
@@ -220,6 +277,27 @@ def main():
             for m in BIB_ENTRY_RE.finditer(text):
                 bib_entries.append({"file": fname, "key": m.group(1).strip()})
             continue
+        is_latex = fname.endswith((".tex.txt", ".ltx.txt"))
+        if is_latex:
+            for li, pline in enumerate(latex_source_text(text).split("\n"), 1):
+                for m in TEX_CITE_RE.finditer(pline):
+                    keys = [k.strip() for k in m.group("keys").split(",") if k.strip()]
+                    keys = [k for k in keys if k != "*"]   # \nocite{*} = the whole list
+                    if m.group("macro").lower() == "nocite":
+                        nocite_keys[fname].extend(keys)
+                        continue
+                    for key in keys:
+                        # one row per KEY, so "every call-out on one row" holds for
+                        # `\cite{a,b}` too; the numeric/author-year bookkeeping below
+                        # ignores the string `refs` (only ints enter a number space)
+                        callouts.append({"file": fname, "line": li, "raw": m.group(0)[:120],
+                                         "refs": [key], "excerpt": pline.strip()[:120],
+                                         "style": "latex-key", "key": key,
+                                         "macro": m.group("macro")})
+                for m in TEX_BIBITEM_RE.finditer(pline):
+                    tex_bibitems.append({"file": fname, "line": li,
+                                         "key": m.group("key").strip(),
+                                         "text": pline.strip()[:200]})
 
         region = find_reference_region(lines)
         if region is None and classify_context(fname) == "references":
@@ -301,6 +379,28 @@ def main():
             uncited_by_list[f] = uncited
     uncited_entries = sorted({n for nums in uncited_by_list.values() for n in nums})
 
+    # ---- LaTeX key space (a .tex cites by KEY; the list is \bibitem or a .bib)
+    tex_callouts = [c for c in callouts if c.get("style") == "latex-key"]
+    tex_key_space = {b["key"] for b in tex_bibitems} | {b["key"] for b in bib_entries}
+    tex_cited_by_file = defaultdict(list)
+    for c in tex_callouts:
+        tex_cited_by_file[c["file"]].append(c["key"])
+    for f, keys in nocite_keys.items():
+        tex_cited_by_file[f].extend(keys)
+    all_tex_cited = {k for keys in tex_cited_by_file.values() for k in keys}
+    tex_orphans_by_file = {}
+    if tex_key_space:
+        for f, keys in tex_cited_by_file.items():
+            orphans = sorted({k for k in keys if k not in tex_key_space})
+            if orphans:
+                tex_orphans_by_file[f] = orphans
+    tex_orphans = sorted({k for keys in tex_orphans_by_file.values() for k in keys})
+    tex_uncited = sorted({b["key"] for b in tex_bibitems} - all_tex_cited)
+    # \cite keys with no list in the corpus at all: the reference list was not
+    # submitted, so the orphan/uncited checks cannot run. That is `unable`,
+    # never an empty "none".
+    tex_unresolved = bool(tex_callouts) and not tex_key_space
+
     duplicate_entries = {}
     for f, nums in lists_by_file.items():
         dupes = {n: c for n, c in Counter(nums).items() if c > 1}
@@ -346,6 +446,15 @@ def main():
     md += ["", "## Bibliography-file entries (%d)" % len(bib_entries), ""]
     for b in bib_entries:
         md.append("- %s :: %s" % (b["file"], b["key"]))
+    if tex_callouts or tex_bibitems:
+        md += ["", "## LaTeX key space (%d call-out key(s), %d \\bibitem entr(y|ies))" % (
+            len(tex_callouts), len(tex_bibitems)), ""]
+        for c in tex_callouts:
+            md.append("- `\\%s{%s}` at %s:%d" % (c["macro"], c["key"], c["file"], c["line"]))
+        for b in tex_bibitems:
+            md.append("- `\\bibitem{%s}` at %s:%d" % (b["key"], b["file"], b["line"]))
+        for f, keys in sorted(nocite_keys.items()):
+            md.append("- `\\nocite` (cited without a call-out) in %s: %s" % (f, ", ".join(keys)))
     md += ["", "## Auto-derived mismatches (audit each; one finding per instance)", "",
            "Each numbered reference list is its own numbering space — the checks below are per document.",
            "",
@@ -353,6 +462,10 @@ def main():
            "  - per document: %s" % (orphan_callouts_by_file or "none"),
            "- Uncited entries (listed, never cited anywhere): %s" % (uncited_entries or "none"),
            "  - per list: %s" % (uncited_by_list or "none"),
+           "- LaTeX orphan keys (a \\cite key with no \\bibitem/.bib entry): %s" % (
+               tex_orphans or "none"),
+           "  - per document: %s" % (tex_orphans_by_file or "none"),
+           "- LaTeX \\bibitem entries never cited by any \\cite: %s" % (tex_uncited or "none"),
            "- Duplicate entry numbers within one list: %s" % (duplicate_entries or "none"),
            "- Order violations (numeric style, within one document): %d" % len(order_violations),
            "- Max cited number: %d; entries listed: %d (across %d list(s))" % (
@@ -361,23 +474,38 @@ def main():
            "- Bracketed numbers skipped as measurement intervals: %d%s" % (
                len(suspect_brackets),
                "" if not suspect_brackets else " (recorded in the JSON as suspect_brackets, not silently dropped)")]
+    if tex_unresolved:
+        md.append("- LaTeX citations UNRESOLVED (unable — not a clean pass): the corpus carries "
+                  "\\cite call-outs but no \\bibitem/.bib key list, so the LaTeX orphan/uncited "
+                  "checks above did not run; the reference list is not in the corpus")
 
     with open(os.path.join(art_dir, "M2_citations.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(md) + "\n")
     with open(os.path.join(art_dir, "M2_citations.json"), "w", encoding="utf-8") as f:
         json.dump({"ref_entries": ref_entries, "callouts": callouts,
                    "bib_entries": bib_entries,
+                   "tex_callouts": tex_callouts,
+                   "tex_bibitem_entries": tex_bibitems,
+                   "tex_nocite_keys": {f: sorted(set(keys)) for f, keys in nocite_keys.items()},
                    "orphan_callouts": orphan_callouts,
                    "orphan_callouts_by_file": orphan_callouts_by_file,
                    "uncited_entries": uncited_entries,
                    "uncited_entries_by_list": uncited_by_list,
+                   "tex_orphan_keys": tex_orphans,
+                   "tex_orphan_keys_by_file": tex_orphans_by_file,
+                   "tex_uncited_keys": tex_uncited,
+                   "tex_unresolved": tex_unresolved,
                    "duplicate_entries": duplicate_entries,
                    "order_violations": order_violations,
                    "suspect_brackets": suspect_brackets}, f, indent=2)
 
     print("M2 artifact: %d ref entries (%d list(s)), %d call-outs. Orphans: %s | Uncited: %s" % (
         len(ref_entries), len(lists_by_file), len(callouts),
-        orphan_callouts or "none", uncited_entries or "none"))
+        orphan_callouts or "none", uncited_entries or "none")
+        + ("" if not (tex_callouts or tex_bibitems) else
+           " | LaTeX keys: %d call-out(s), orphans: %s, uncited \\bibitem(s): %s%s" % (
+               len(tex_callouts), tex_orphans or "none", tex_uncited or "none",
+               " (UNRESOLVED: no \\bibitem/.bib list in the corpus)" if tex_unresolved else "")))
 
 
 if __name__ == "__main__":

@@ -13816,16 +13816,42 @@ def template_package_md(report: dict) -> str:
     return "\n".join(L) + "\n"
 
 
+def _package_rel_key(path, root) -> str:
+    """A produced/input file's path relative to its package root, version-token free.
+
+    Used to pair a validation failure with the SAME file in the package the
+    stage started from. The version token is PART of a stage's file name
+    (`...-supp-b.tex` -> `...-supp-c.tex`), so it is stripped exactly as
+    `_docx_field_key` strips it for the Zotero field gate (falls back to the
+    basename for a file outside the root).
+    """
+    rel = os.path.relpath(str(path), str(root))
+    if rel.startswith(".."):
+        rel = Path(path).name
+    return _docx_field_key(rel)
+
+
+def _package_rel_path(path, root) -> str:
+    """The file's exact path relative to its package root (basename when outside)."""
+    rel = os.path.relpath(str(path), str(root))
+    return Path(path).name if rel.startswith("..") else rel
+
+
 def _validate_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, input_dir: Path,
                             errs: list, warns: list) -> dict:
     """DOCX-XML/schema + LaTeX-compile validation of a produced package.
 
     A DOCX that does not parse, or a LaTeX document that no longer compiles when
-    the package the stage started from DID compile, is a broken deliverable: it
-    fails the attempt so the retry policy hands the session another go. A compile
-    failure that already exists in the input package is reported, not failed
-    (the pipeline must not punish an agent for the author's broken source). The
-    result is recorded on the run (`rec["validation"]`) and printed.
+    the SAME document in the package the stage started from DID compile, is a
+    broken deliverable: it fails the attempt so the retry policy hands the
+    session another go. A compile failure that already exists in the same file
+    of the input package is reported, not failed (the pipeline must not punish
+    an agent for the author's broken source). The pairing is per file: a
+    sibling that was already broken must not excuse a break this stage
+    introduced in a document that did compile before, while the stage's own
+    version token (`...-supp-b.tex` -> `...-supp-c.tex`) still pairs with the
+    SAME document. The result is recorded on the run (`rec["validation"]`) and
+    printed.
     """
     mod = _format_module()
     res = {"docx_ok": None, "tex_ok": None, "files": 0, "failures": []}
@@ -13844,21 +13870,36 @@ def _validate_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, input_dir: Path,
         res["failures"].append(msg)
         errs.append(msg)
     if tex_fail:
-        base_ok = None
+        base_by_rel, base_by_key = {}, {}
         if input_dir.is_dir():
             brep = mod.validate_paths([input_dir], timeout=VALIDATE_TEX_TIMEOUT)
-            base_ok = not [r for r in brep["results"]
-                           if r["kind"] == "tex" and r["ok"] is False]
-        detail = "; ".join(f"{Path(r['file']).name}: {(r.get('errors') or [r.get('detail') or 'failed'])[0]}"
-                           for r in tex_fail)
-        if base_ok:
+            for r in brep["results"]:
+                if r["kind"] != "tex":
+                    continue
+                base_by_rel[_package_rel_path(r["file"], input_dir)] = r
+                base_by_key.setdefault(_package_rel_key(r["file"], input_dir), []).append(r)
+        introduced, inherited = [], []
+        for r in tex_fail:
+            first = (r.get("errors") or [r.get("detail") or "failed"])[0]
+            # The exact path wins; a version-token rename pairs only when it is
+            # unambiguous (two documents that strip to one key stay unmatched
+            # rather than being paired at random).
+            before = base_by_rel.get(_package_rel_path(r["file"], pkg_dir))
+            if before is None:
+                same_key = base_by_key.get(_package_rel_key(r["file"], pkg_dir)) or []
+                before = same_key[0] if len(same_key) == 1 else None
+            (inherited if before is not None and before.get("ok") is False
+             else introduced).append((r, first))
+        if introduced:
+            detail = "; ".join(f"{Path(r['file']).name}: {first}" for r, first in introduced)
             msg = f"VALIDATION: the LaTeX in this package no longer compiles ({detail})"
             res["failures"].append(msg)
             errs.append(msg)
-        else:
-            warns.append(f"VALIDATION: the LaTeX does not compile ({detail}); the package this "
-                         f"stage started from does not compile either, so this is reported, "
-                         f"not failed")
+        if inherited:
+            detail = "; ".join(f"{Path(r['file']).name}: {first}" for r, first in inherited)
+            warns.append(f"VALIDATION: the LaTeX does not compile ({detail}); the same file did "
+                         f"not compile in the package this stage started from either, so this is "
+                         f"reported, not failed")
     return res
 
 
@@ -18079,6 +18120,64 @@ def _blank_xml_elements(data: bytes, tags, value: bytes = b"") -> bytes:
     return data
 
 
+_RELS_ENTRY_RE = re.compile(rb"<Relationship\b[^>]*/>")
+_CONTENT_TYPE_OVERRIDE_RE = re.compile(rb"<Override\b[^>]*/>")
+
+
+def _rels_part_base_dir(name: str) -> str:
+    """The directory a `.rels` part's relative targets resolve against.
+
+    `_rels/.rels` targets are package-absolute; `word/_rels/document.xml.rels`
+    targets resolve inside `word/` (the part's own `_rels` directory's parent).
+    """
+    head, _sep, _tail = name.rpartition("_rels/")
+    return head
+
+
+def _prune_dropped_part_references(payload: bytes, name: str, dropped: set,
+                                   notes: list) -> bytes:
+    """Drop the relationships and content-type Overrides that name a removed part.
+
+    A sanitizer that deletes a part but leaves the package's pointers at it
+    hands the judge a package Word answers with "unreadable content"/repair: an
+    internal relationship whose Target is not in the archive (and an Override
+    for a part that does not exist) is an OPC integrity violation. The
+    pointer-free `[Content_Types].xml` Default entries stay: a Default for an
+    extension with no part is legal.
+    """
+    low = name.lower()
+    if not dropped:
+        return payload
+    if low == "[content_types].xml":
+        def _override(m):
+            pm = re.search(rb'PartName="([^"]*)"', m.group(0))
+            part = pm.group(1).decode("utf-8", "replace").lstrip("/") if pm else ""
+            if part and part.lower() in dropped:
+                notes.append(f"dropped the [Content_Types].xml Override for {part}")
+                return b""
+            return m.group(0)
+        return _CONTENT_TYPE_OVERRIDE_RE.sub(_override, payload)
+    if not low.endswith(".rels"):
+        return payload
+    base_dir = _rels_part_base_dir(low)
+
+    def _rel(m):
+        el = m.group(0)
+        tm = re.search(rb'TargetMode="([^"]*)"', el)
+        if tm and tm.group(1).lower() == b"external":
+            return el
+        t = re.search(rb'Target="([^"]*)"', el)
+        if not t:
+            return el
+        target = t.group(1).decode("utf-8", "replace")
+        resolved = posixpath.normpath(posixpath.join(base_dir, target)).lstrip("/")
+        if resolved.lower() in dropped:
+            notes.append(f"dropped the {name} relationship to the removed part {resolved}")
+            return b""
+        return el
+    return _RELS_ENTRY_RE.sub(_rel, payload)
+
+
 def _sanitize_ooxml_bytes(data: bytes) -> tuple:
     """(bytes, notes): strip provenance metadata and CANONICALIZE the archive.
 
@@ -18100,7 +18199,10 @@ def _sanitize_ooxml_bytes(data: bytes) -> tuple:
       * document properties -- author/lastModifiedBy/title/subject/description,
         revision number, application/company/manager/template, the Word
         statistics block (stale word/page counts reveal an edit after the last
-        Word save) and the thumbnail part;
+        Word save) and the thumbnail part (together with the package
+        relationship and any content-type Override that named it: a dangling
+        internal relationship is a package Word answers with "unreadable
+        content"/repair);
       * settings.xml edit state -- `w:proofState`, `w:attachedTemplate`,
         `w:docVars` and `w:trackChanges`;
       * `customXml/**` payloads (a generic metadata carrier) are blanked while
@@ -18140,18 +18242,35 @@ def _sanitize_ooxml_bytes(data: bytes) -> tuple:
                      new, flags=re.S)
         new = re.sub(rb"<w:(?:cellIns|cellDel|cellMerge|moveFrom)\b[^>]*/>", b"", new)
         new = re.sub(rb"<w:moveTo\b[^>]*>(.*?)</w:moveTo>", rb"\1", new, flags=re.S)
-        new = re.sub(rb"<w:ins\b[^>]*>(.*?)</w:ins>", rb"\1", new, flags=re.S)
+        # Word nests `w:ins` inside `w:ins` (a later insertion inside an
+        # earlier one). One non-greedy pass pairs the OUTER open tag with the
+        # INNER close tag, so it unwraps the outer mark and leaves the inner
+        # one live -- the view is then not the accepted document the docstring
+        # (and the judge's read) promises. Re-apply until no `w:ins` survives;
+        # each pass removes at least one mark, so this terminates.
+        for _ in range(64):
+            unwrapped = re.sub(rb"<w:ins\b[^>]*>(.*?)</w:ins>", rb"\1", new, flags=re.S)
+            if unwrapped == new:
+                break
+            new = unwrapped
         if new != payload:
             accepted += 1
         return new
 
+    # Parts this sanitizer REMOVES are known before the archive is rewritten, so
+    # every pointer at them can be pruned in the same pass: a `.rels` Target or
+    # a `[Content_Types].xml` Override that names a part no longer present makes
+    # the view a corrupt OPC package (Word: "unreadable content"/repair).
+    dropped = {name.lower() for name, _payload in items
+               if name.lower().startswith("docprops/thumbnail.")}
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
         for name, payload in sorted(items, key=lambda kv: kv[0]):
             low = name.lower()
-            if low.startswith("docprops/thumbnail."):
+            if low in dropped:
                 stripped += 1
                 continue                              # a stale rendered page + Word setting
+            payload = _prune_dropped_part_references(payload, name, dropped, notes)
             if low == "docprops/core.xml":
                 payload = _blank_xml_elements(payload, (b"dc:creator", b"cp:lastModifiedBy"),
                                               b"author")
