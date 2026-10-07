@@ -43,6 +43,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import zipfile
 from pathlib import Path
 
@@ -124,6 +125,8 @@ AUX_SAMPLES = (
     "main.logging-original.tex", "main.logging-a1.tex", "main.logging-w2.tex",
     "refs.tracking-original.bib", "refs.tracking-a3.bib", "refs.tracking-winner12.bib",
     "refs.logging-original.bib", "refs.logging-a3.bib", "refs.logging-winner12.bib",
+    # the compiled PDF of a tracking .tex root is the same family
+    "main.tracking-original.pdf", "main.tracking-a1.pdf", "main.logging-w2.pdf",
 )
 # The superseded generic spellings are ordinary names now (back-compat was
 # dropped on purpose: only the baseline-named pattern is an auxiliary).
@@ -217,7 +220,8 @@ def test_name_family_and_aux_rule():
           nb.tracking_aux_suffix("original", ".docx") == ".tracking-original.docx"
           and nb.tracking_aux_suffix("a1", ".tex") == ".tracking-a1.tex"
           and nb.tracking_aux_suffix("w2", ".bib") == ".tracking-w2.bib"
-          and nb.tracking_aux_suffix("winner3", ".docx") == ".tracking-winner3.docx")
+          and nb.tracking_aux_suffix("winner3", ".docx") == ".tracking-winner3.docx"
+          and nb.tracking_aux_suffix("a1", ".pdf") == ".tracking-a1.pdf")
     check("the fallback differs by exactly the `logging` token",
           nb.tracking_aux_suffix("original", ".docx", True) == ".logging-original.docx"
           and nb.tracking_aux_suffix("a1", ".docx", True) == ".logging-a1.docx"
@@ -226,10 +230,10 @@ def test_name_family_and_aux_rule():
           _raises(nb.tracking_aux_suffix, "previous", ".docx")
           and _raises(nb.tracking_aux_suffix, "a1;rm", ".docx")
           and _raises(nb.tracking_aux_suffix, "a1", ".zip"))
-    check("the whole baseline-named family is registered as an auxiliary",
+    check("the whole baseline-named family (PDFs included) is registered as an auxiliary",
           all(nb._is_aux_doc("doc" + nb.tracking_aux_suffix(tok, ext))
               for tok in ("original", "a1", "w1", "a2", "winner1", "winner12")
-              for ext in (".docx", ".tex", ".bib"))
+              for ext in (".docx", ".tex", ".bib", ".pdf"))
           and all(nb._is_aux_doc("doc" + nb.tracking_aux_suffix(tok, ".docx", True))
                   for tok in ("original", "a1", "winner1")))
     check("the superseded generic spellings are NOT auxiliaries any more",
@@ -624,6 +628,233 @@ def test_tool_none_writes_no_copy():
     check("the entry status says skipped",
           "skipped (tool=none)" in str(mf["versions"][0]["status"]),
           str(mf["versions"][0]["status"]))
+
+
+# =====================================================================
+# E2. The stage-time hook: copies appear with the version, not at round close
+# =====================================================================
+
+def build_bib_root(root: Path) -> "nb.Ctx":
+    """A root whose w1 edits the master, an \\input-ed section and the .bib.
+
+    The master loads both a fragment (`\\input{sections/intro}`) and a
+    bibliography (`\\bibliography{refs}`): exactly the references the tracked
+    copy must re-point at its tracked siblings so the marked-up PDF builds.
+    """
+    src = root / "source"
+    make_docx(src / "manuscript-a.docx", ["Title", "The old abstract.", "Methods."])
+    tex = ("\\documentclass{article}\n\\begin{document}\n"
+           "\\input{sections/intro}\nHello world~\\cite{a}.\n"
+           "\\bibliographystyle{plain}\n\\bibliography{refs}\n\\end{document}\n")
+    write(src / "main.tex", tex)
+    write(src / "sections" / "intro.tex", "Some introduction text.\n")
+    write(src / "refs.bib", BIB)
+    pristine = root / "non_revised"
+    shutil.copytree(src, pristine)
+    ctx = nb.Ctx(root)
+    ctx.cfg = {"rounds": 1, "judges": 1, "rewrites": 1, "revises": 1}
+    ctx.state = {"version": nb.STATE_VERSION, "runs": {}, "rounds": {}, "pinned": [],
+                 "log": [], "config": ctx.cfg}
+    a1 = root / "runs/r1_a1/base"
+    shutil.copytree(pristine, a1)
+    ctx.state["runs"]["r1_a1"] = {"id": "r1_a1", "kind": "a1", "round": 1, "status": "done",
+                                  "sandbox": "runs/r1_a1", "corpus_digest": "d", "attempts": 1}
+    w1 = root / "runs/r1_w1/rewritten"
+    shutil.copytree(pristine, w1)
+    make_docx(w1 / "manuscript-a.docx", ["Title", "The NEW abstract.", "Methods."])
+    write(w1 / "main.tex", tex.replace("Hello world", "Hello brave new world"))
+    write(w1 / "sections" / "intro.tex", "Some CHANGED introduction text.\n")
+    write(w1 / "refs.bib", BIB.replace("One", "Two").replace("2020", "2021"))
+    ctx.state["runs"]["r1_w1"] = {"id": "r1_w1", "kind": "rewrite", "round": 1,
+                                  "status": "done", "sandbox": "runs/r1_w1",
+                                  "corpus_digest": "d", "attempts": 1, "produces": "w1"}
+    return ctx
+
+
+def test_stage_hook_tracks_beside_the_version():
+    """postcheck's hook writes the copies with the version, rewritten + compiled."""
+    print()
+    print("== the stage-time hook: siblings beside the version's documents ==")
+    tmp = scratch("paper_track_stage_")
+    ctx = build_bib_root(tmp)
+    rec = ctx.state["runs"]["r1_w1"]
+    check("the hook reports no warning", nb.track_after_stage(ctx, rec) == "")
+    w1 = ctx.root / "runs/r1_w1/rewritten"
+    check("the .docx copies sit beside the documents",
+          (w1 / "manuscript-a.tracking-original.docx").is_file()
+          and (w1 / "manuscript-a.tracking-a1.docx").is_file(),
+          str(sorted(p.name for p in w1.iterdir())))
+    check("the copies are mirrored under tracking/",
+          (ctx.root / "tracking/r1_w1/original/manuscript-a.tracking-original.docx").is_file()
+          and (ctx.root / "tracking/manifest.json").is_file())
+    if not shutil.which("latexdiff"):
+        skip("the .tex rewiring and the compiled tracking PDFs",
+             "latexdiff is not on PATH on this machine")
+        return
+    master = (w1 / "main.tracking-original.tex").read_text(encoding="utf-8")
+    check("the diffed master loads the TRACKED section copy",
+          "sections/intro.tracking-original" in master, master[:300])
+    check("the diffed master loads the TRACKED bibliography",
+          "refs.tracking-original" in master, master[-300:])
+    check("the BibTeX lowercase aliases were injected",
+          "\\difdelbegin" in master)
+    check("the tracked copy still carries the latexdiff markup",
+          "\\DIFadd" in master and "\\DIFdel" in master)
+    row = next(c for v in (nb.read_json(ctx.root / "tracking/manifest.json") or {}).get("versions")
+               or [] for c in v["comparisons"]
+               if c["ext"] == ".tex" and c["baseline"] == "original"
+               and c["revised_rel"] == "main.tex")
+    check("the manifest records the rewrites",
+          {r["command"] for r in row.get("ref_rewrites") or []} == {"input", "bibliography"},
+          str(row.get("ref_rewrites")))
+    if not shutil.which("latexmk"):
+        skip("the marked-up PDF compile", "latexmk is not on PATH on this machine")
+        return
+    pdf = w1 / "main.tracking-original.pdf"
+    check("the marked-up PDF is BESIDE the tracking .tex",
+          pdf.is_file() and pdf.stat().st_size > 0, str(row.get("pdf_error")))
+    check("the marked-up PDF is mirrored under tracking/",
+          (ctx.root / "tracking/r1_w1/original/main.tracking-original.pdf").is_file()
+          and row.get("pdf_ok") and row.get("pdf"), str(row)[:200])
+    check("a LaTeX fragment is not compiled on its own (its master carries it)",
+          any(c.get("pdf_skipped") for c in (nb.read_json(
+              ctx.root / "tracking/manifest.json") or {})["versions"][0]["comparisons"]
+              if c.get("ext") == ".tex"))
+
+
+def test_round_close_skips_fresh_stage_copies():
+    """The automatic round-close pass must not re-drive the tools for a fresh entry."""
+    print()
+    print("== round close keeps a fresh stage-time entry ==")
+    tmp = scratch("paper_track_skip_")
+    ctx = build_bib_root(tmp)
+    nb.track_after_stage(ctx, ctx.state["runs"]["r1_w1"])
+    saved = nb.latexdiff_one_pair
+    calls = []
+
+    def counting(base, cand, out, **kw):
+        calls.append(str(out))
+        return saved(base, cand, out, **kw)
+
+    nb.latexdiff_one_pair = counting
+    try:
+        mf = nb.run_difference_tracking(ctx, rounds=[1], versions=["w1"], skip_fresh=True)
+    finally:
+        nb.latexdiff_one_pair = saved
+    check("no difference tool runs again for a fresh version", calls == [], str(calls))
+    check("the fresh entry is still in the manifest",
+          any(v["version"] == "w1" for v in mf["versions"]),
+          str([v["version"] for v in mf["versions"]]))
+    # ...but a document that CHANGED after the hook is tracked again.
+    write(ctx.root / "runs/r1_w1/rewritten/main.tex",
+          (ctx.pristine / "main.tex").read_text(encoding="utf-8")
+          .replace("Hello world", "Hello changed again"))
+    calls.clear()
+    nb.latexdiff_one_pair = counting
+    try:
+        nb.run_difference_tracking(ctx, rounds=[1], versions=["w1"], skip_fresh=True)
+    finally:
+        nb.latexdiff_one_pair = saved
+    check("a changed document invalidates the entry (tools run again)", bool(calls), str(calls))
+    # `--no-track` gates the hook itself.
+    tmp2 = scratch("paper_track_off_")
+    ctx2 = build_bib_root(tmp2)
+    ctx2.stage_tracking = False
+    check("the hook is a no-op when the invocation disabled tracking",
+          nb.track_after_stage(ctx2, ctx2.state["runs"]["r1_w1"]) == ""
+          and not (ctx2.root / "tracking").exists())
+
+
+def test_template_stage_tracking_is_sibling_first():
+    """The template-first stage's out/ carries its own tracking copies."""
+    print()
+    print("== the template-first stage tracks its conformed package in place ==")
+    tmp = scratch("paper_track_tpl_")
+    source = tmp / "source"
+    make_docx(source / "manuscript-a.docx", ["Title", "The old abstract.", "Methods."])
+    tex = ("\\documentclass{article}\n\\begin{document}\n"
+           "\\input{part}\n\\input{raw_data/evidence_fragment}\n"
+           "Hello world~\\cite{a}.\n"
+           "\\bibliographystyle{plain}\n\\bibliography{refs}\n\\end{document}\n")
+    write(source / "main.tex", tex)
+    write(source / "part.tex", "A supplementary paragraph.\n")
+    write(source / "raw_data" / "evidence_fragment.tex", "An evidence fragment.\n")
+    write(source / "refs.bib", BIB)
+    root = tmp / "root"
+    shutil.copytree(source, root / "non_revised")
+    ctx = nb.Ctx(root)
+    ctx.cfg = {"rounds": 1, "judges": 1, "rewrites": 1, "revises": 1}
+    ctx.state = {"version": nb.STATE_VERSION, "runs": {}, "rounds": {}, "pinned": [],
+                 "log": [], "config": ctx.cfg}
+    sb = root / "template_rewrite"
+    out = sb / "out"
+    shutil.copytree(ctx.pristine, out)
+    make_docx(out / "manuscript-a.docx", ["Title", "The conformed abstract.", "Methods."])
+    for name in ("main.tex", "part.tex", "refs.bib"):
+        # the staged template-first package is read-only: its tracking copies
+        # inherit that mode and must still be rewritable by the pipeline.
+        (out / name).chmod(0o444)
+    # A pre-existing `template_stage` record (a root from before the hook): the
+    # run path BACKFILLS the copies instead of leaving the stage untracked.
+    ctx.state["template_stage"] = {"ok": True, "dir": "template_rewrite/out",
+                                   "digest": "d", "agent": "manual"}
+    nb._ensure_template_stage_for_run(ctx, types.SimpleNamespace())
+    check("an already-recorded stage is backfilled BESIDE its out/ documents",
+          (out / "manuscript-a.tracking-original.docx").is_file(),
+          str(sorted(p.name for p in out.iterdir())))
+    if shutil.which("latexmk"):
+        pdf = out / "main.tracking-original.pdf"
+        check("an IDENTICAL tracking .tex root is compiled too (the clean PDF)",
+              pdf.is_file() and pdf.stat().st_size > 0
+              and (root / "tracking/r1_a1/original/main.tracking-original.pdf").is_file(),
+              str(sorted(p.name for p in out.iterdir())))
+    else:
+        skip("the identical tracking .tex compile",
+             "latexmk is not on PATH on this machine")
+    master = (out / "main.tracking-original.tex").read_text(encoding="utf-8")
+    check("a READ-ONLY tracking .tex is made writable and rewired to its tracked "
+          "includes/bibliography",
+          "part.tracking-original" in master and "refs.tracking-original" in master
+          and bool((out / "main.tracking-original.tex").stat().st_mode & 0o200),
+          master[-260:])
+    check("the entry is mirrored as round 1's a1",
+          (root / "tracking/r1_a1/original/manuscript-a.tracking-original.docx").is_file())
+    manifest = nb.read_json(root / "tracking/manifest.json") or {}
+    check("the manifest names the template stage",
+          any(str(v.get("version")) == "a1" and v.get("stage") == "template-rewrite"
+              for v in manifest.get("versions") or []))
+    check("a second call is a no-op (the fresh entry is kept)",
+          nb.track_template_stage(ctx, sb).get("skipped") is True)
+    if shutil.which("latexmk"):
+        # Deleting a recorded artifact makes the entry stale: re-tracking must
+        # REPLACE its own read-only copies (regression: PermissionError on the
+        # mirror .tex, which inherited the staged package's 0444 mode).
+        (out / "main.tracking-original.pdf").unlink()
+        res = nb.track_template_stage(ctx, sb)
+        check("a stale entry is re-tracked over its own READ-ONLY copies",
+              not res.get("skipped") and (out / "main.tracking-original.pdf").is_file()
+              and (root / "tracking/r1_a1/original/main.tracking-original.pdf").is_file(),
+              f"skipped={res.get('skipped')}")
+    # materialize_a1 copies out/ (auxiliaries included) into base/: the
+    # round-close a1 pass must keep the same fresh entry, not re-compare.
+    a1 = root / "runs/r1_a1/base"
+    shutil.copytree(out, a1)
+    ctx.state["runs"]["r1_a1"] = {"id": "r1_a1", "kind": "a1", "round": 1, "status": "done",
+                                  "sandbox": "runs/r1_a1", "corpus_digest": "d", "attempts": 1}
+    saved = nb.latexdiff_one_pair
+    calls = []
+
+    def counting(base, cand, out_p, **kw):
+        calls.append(str(out_p))
+        return saved(base, cand, out_p, **kw)
+
+    nb.latexdiff_one_pair = counting
+    try:
+        nb.run_difference_tracking(ctx, rounds=[1], versions=["a1"], skip_fresh=True)
+    finally:
+        nb.latexdiff_one_pair = saved
+    check("round close keeps the template stage's a1 entry (no tool run)",
+          calls == [], str(calls))
 
 
 AGENT_CHOKE_POINTS = ("_execute_attempt_in", "run_defect_audit_agent",

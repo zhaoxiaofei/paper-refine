@@ -4360,6 +4360,7 @@ CAPTION_SUSPECT_RE = re.compile(
 # named for the BASELINE it was compared against (see TRACK_TOKEN_RE):
 #
 #   <name>.tracking-<token>.<ext>    real tracked copy (word/latexdiff)
+#   <name>.tracking-<token>.pdf      compiled marked-up PDF of a latexdiff copy
 #   <name>.logging-<token>.<ext>     the fallback log when the tool failed
 #
 # where <token> is `original` (the pre-conformed submission in non_revised/) or
@@ -4370,6 +4371,11 @@ EDITABLE_DOC_EXTS = (".doc", ".docx", ".tex", ".ltx", ".bib", ".md", ".txt", ".x
                      ".rtf", ".csv")
 # The extensions a difference-tracking copy is built for.
 TRACKING_EXTS = (".docx", ".tex", ".bib")
+# A latexdiff `.tex` copy is COMPILED as well, and the marked-up PDF is part of
+# the same auxiliary family ("<name>.tracking-<token>.pdf"): a reader can open
+# the tracked changes without a LaTeX toolchain, and the file can never leak
+# into a corpus/pin/judge view (see TRACKING_AUX_NAME_RE).
+TRACKING_PDF_EXT = ".pdf"
 # The baseline token of a copy: the pre-conformed original, or the id of the
 # version it was compared against (`a1`, `w2`, `a3`, ... -- the pipeline's own
 # version vocabulary) or a published round winner (`winner1`, `winner2`, ...).
@@ -4384,7 +4390,7 @@ TRACK_TOKEN_RE = re.compile(r"^(?:original|winner[0-9]+|[awi][0-9]+)$", re.IGNOR
 # copies next to a document without changing any version's identity.
 TRACKING_AUX_NAME_RE = re.compile(
     r"\.(?:tracking|logging)-(?:original|winner[0-9]+|[awi][0-9]+)"
-    r"\.(?:docx|tex|bib)$", re.IGNORECASE)
+    r"\.(?:docx|tex|bib|pdf)$", re.IGNORECASE)
 # Trailing version token on a basename stem: the CURRENT content-hash token
 # ("-4f3a9c1"/"_4f3a9c1", 7 lowercase hex characters) or the LEGACY version
 # tokens ("-b", "_v2", "-v10", case-insensitive) that older packages carry.
@@ -6848,8 +6854,9 @@ AUX_FILES_RULE = """PIPELINE AUXILIARY FILES — "<name>.tracking-<token>.<ext>"
   * Every one of those names is an AUXILIARY difference-tracking copy of "<name>.<ext>" written by
     the document-editing tooling or by the orchestrator, not a document of its own. For .docx the
     real copy is Word tracked changes between the document and its baseline; for .tex/.bib it is a
-    latexdiff copy; the matching ".logging-*" file is the documented fallback log used when the
-    real tracked copy could not be produced reliably.
+    latexdiff copy; a latexdiff ".tex" copy's compiled marked-up PDF is the matching
+    "<name>.tracking-<token>.pdf" (the same auxiliary family); the matching ".logging-*" file is
+    the documented fallback log used when the real tracked copy could not be produced reliably.
   * "<token>" NAMES THE BASELINE the copy was compared against, so the file name says what the
     difference is: "original" is the pre-conformed submission, and every other token is the id of
     the version the copy was taken against (the manifest records each row's own meaning). Do not
@@ -14764,13 +14771,14 @@ def tracking_aux_suffix(token: str, ext: str, fallback: bool = False) -> str:
 
     `original` + `.docx` -> ".tracking-original.docx" (or ".logging-original.docx"
     when `fallback`); `a1` + `.tex` -> ".tracking-a1.tex" (or ".logging-a1.tex");
-    `winner2` + `.bib` -> ".tracking-winner2.bib". This is the ONLY place the
-    names are built, so a reader and a writer can never drift apart.
+    `winner2` + `.bib` -> ".tracking-winner2.bib"; a tracking `.tex` root's
+    compiled PDF is `a1` + ".pdf" -> ".tracking-a1.pdf". This is the ONLY place
+    the names are built, so a reader and a writer can never drift apart.
     """
     tok = str(token).strip().lower()
     if not TRACK_TOKEN_RE.match(tok):
         raise ValueError(f"unknown tracking baseline token: {token!r}")
-    if ext not in TRACKING_EXTS:
+    if ext not in TRACKING_EXTS + (TRACKING_PDF_EXT,):
         raise ValueError(f"unknown tracking extension: {ext!r}")
     return f".{'logging' if fallback else 'tracking'}-{tok}{ext}"
 
@@ -27081,6 +27089,18 @@ def postcheck(ctx: Ctx, rec: dict, source: str = "postcheck") -> bool:
     # EVERY attempt is recorded, not only the last one: `postcheck`/`last_error`
     # are overwritten by the next attempt, so without this history a run that
     # failed twice reported one failure (see `attempt_history_lines`).
+    # A version-producing stage is TRACKED the moment it is accepted: the
+    # marked-up copies (`<name>.tracking-<baseline>.<ext>`, or their
+    # `<name>.logging-<baseline>.<ext>` fallback when the tool failed) are
+    # written BESIDE the documents the stage just produced and mirrored under
+    # <root>/tracking/. The pass is code-only and never fatal -- a failure is a
+    # warning on this attempt, never a failed stage (see the DIFFERENCE
+    # TRACKING section).
+    if ok and kind in TRACKING_STAGE_KINDS:
+        note = track_after_stage(ctx, rec)
+        if note:
+            warns = list(warns) + [note]
+            rec["postcheck"]["warnings"] = warns
     if kind != "a1":
         record_attempt(ctx, rec, ok, errs, warns, source=source)
     if ok:
@@ -29678,16 +29698,22 @@ def round_tracking(ctx: Ctx, r: int, enabled: bool,
                    redlines_manifest: dict = None) -> None:
     """Difference-tracking copies + persistent PDFs for one round.
 
-    Both passes are audit aids: they are pure code (no agent session), they
-    never enter a corpus/pin/judge view (see TRACKING_AUX_NAME_RE and the
-    <root>/pdfs/ tree), and a failure here is a WARNING -- never a failed round.
+    The stage-time hooks already wrote each version's copies: this pass FILLS IN
+    what is missing (a version whose hook failed or was skipped, and the
+    round's published winner directory) and leaves a fresh entry alone --
+    `skip_fresh=True` -- instead of driving Word/latexdiff a second time over
+    unchanged content. Both passes are audit aids: they are pure code (no agent
+    session), they never enter a corpus/pin/judge view (see
+    TRACKING_AUX_NAME_RE and the <root>/pdfs/ tree), and a failure here is a
+    WARNING -- never a failed round.
     """
     if not enabled:
         return
     try:
         mf = run_difference_tracking(ctx, rounds=[r], versions=None, tool="auto",
                                      redline_cmd=None, quiet=True,
-                                     redlines_manifest=redlines_manifest)
+                                     redlines_manifest=redlines_manifest,
+                                     skip_fresh=True)
         versions = [v for v in mf["versions"] if int(v.get("round") or 0) == r]
         ok_n = sum(1 for v in versions for c in v["comparisons"]
                    if c.get("ok") and c.get("tool"))
@@ -31420,6 +31446,11 @@ def _ensure_template_stage_for_run(ctx: Ctx, args) -> None:
     """
     if template_stage_record(ctx):
         print("[run] template-first stage: already recorded (state.json)")
+        # BACKFILL: a root whose stage was recorded before the stage-time hook
+        # existed (or one where the process died between recording and tracking)
+        # still gets the copies -- the call is idempotent and keeps a fresh
+        # entry, so it costs one digest pass, never an agent or a comparison.
+        maybe_track_template_stage(ctx, ctx.root / TEMPLATE_REWRITE_DIRNAME)
         return
     if bool(getattr(args, "no_template_stage", False)):
         print("[run] template-first stage: skipped by --no-template-stage")
@@ -31463,6 +31494,7 @@ def _ensure_template_stage_for_run(ctx: Ctx, args) -> None:
               f"{report['coverage']['covered']}/{report['coverage']['checked']} "
               f"({report['coverage']['ratio']:.0%}), round 1 now starts from "
               f"{rec_stage['dir']} (digest {str(rec_stage['digest'])[:12]})")
+        maybe_track_template_stage(ctx, sb)
         return
     sb = _stage_template_rewrite_sandbox(ctx, ctx.pristine, templates, force=True)
     action = ("copy the journal's templates, replace their placeholders with this submission's "
@@ -31493,6 +31525,7 @@ def _ensure_template_stage_for_run(ctx: Ctx, args) -> None:
           f"{report['coverage']['covered']}/{report['coverage']['checked']} "
           f"({report['coverage']['ratio']:.0%}), round 1 now starts from "
           f"{rec_stage['dir']} (digest {str(rec_stage['digest'])[:12]})")
+    maybe_track_template_stage(ctx, sb)
 
 
 def default_template_package_source(ctx: Ctx):
@@ -31546,6 +31579,10 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
             die("the template-first rewrite did not pass its postcheck: "
                 + "; ".join(report["errors"])[:400])
         print("[conform] the package in out/ passed the code-side postcheck")
+        # The stage is finished the moment its postcheck passes: the tracked
+        # copies of the conformed package are written beside out/ now, not at
+        # round close (the run's round-close pass keeps this entry).
+        maybe_track_template_stage(ctx, sb)
         # In transfer/init the conform stage is part of the RUN: a passing check
         # records it so the next `run` starts round 1 from out/ instead of
         # rebuilding (and losing) the session. The standalone `continue`-mode
@@ -31652,6 +31689,7 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
             + "; ".join(report["errors"])[:400])
     print("[conform] the package in out/ passed the code-side postcheck; it is NOT yet "
           "judged: run the review/revise stages (or a full `run`) when you want it in the round.")
+    maybe_track_template_stage(ctx, sb)
 
 def cmd_apply_template(args) -> None:
     """Rebuild a whole submission package inside the venue's Word templates."""
@@ -32151,6 +32189,10 @@ def cmd_run(args) -> None:
 
 
 def _cmd_run_locked(ctx: Ctx, args) -> None:
+    # `--no-track` covers BOTH the per-stage hook (postcheck -> track_after_stage)
+    # and the round-close pass: the choice is recorded on the context BEFORE any
+    # stage starts, so every accepted version is treated the same way.
+    ctx.stage_tracking = not bool(getattr(args, "no_track", False))
     # Input-area names are RESOLVED, never rewritten: a root (and a corpus) set up
     # under the older spellings `non-revised/` / `raw_figs/` keeps them, and both
     # spellings mean the same directory everywhere (manifests_equal normalises, so
@@ -37610,6 +37652,9 @@ def _cmd_redline_locked(ctx: Ctx, args) -> None:
 # "previous" meant:
 #
 #     <name>.tracking-<token>.<ext>    real tracked copy (word/latexdiff)
+#     <name>.tracking-<token>.pdf      the compiled marked-up PDF of a
+#                                      latexdiff .tex copy (rewired to its
+#                                      tracked includes/bibliography first)
 #     <name>.logging-<token>.<ext>     its fallback log when the tool failed
 #     (.ext in .docx / .tex / .bib)
 #
@@ -37626,23 +37671,94 @@ def _cmd_redline_locked(ctx: Ctx, args) -> None:
 #
 # A `.docx` pair goes through redline_one_pair() -- Word's own comparison
 # engine (the `docx-compare` MCP tool) FIRST, then the documented redline chain.
-# A `.tex`/`.bib` pair goes through `latexdiff`. The fallback file is a
-# human-readable before/after log (a marker .docx for a .docx pair) -- never a
-# file that only looks like a real tracked copy.
+# A `.tex`/`.bib` pair goes through `latexdiff`; a latexdiff `.tex` is then
+# REWIRED (its `\input{}`/`\include{}`/`\addbibresource{}`/`\bibliography{}`
+# references point at the tracked copies of those files when this baseline
+# produced them) and compiled into the sibling tracking PDF. EVERY tracking
+# `.tex` compile ROOT gets its PDF -- a byte-identical pair yields the clean
+# PDF of the version (with its tracked includes) -- while a fragment is
+# compiled through its master. The fallback file is a human-readable
+# before/after log (a marker .docx for a .docx pair) -- never a file that only
+# looks like a real tracked copy.
 #
 # The copies are AUXILIARIES (TRACKING_AUX_NAME_RE): they are written BESIDE
-# the candidate documents (except inside a1's hash-verified input `base/`, which
-# is left byte-identical) and mirrored under <root>/tracking/ with a manifest
-# and a README. They never enter a corpus digest, a pin, a judge view, a
-# fingerprint or the revision token. The pass is PURE CODE: it starts no agent
-# session, so it cannot change a champion, a score or a ranking -- both
-# properties are pinned by the `.paper_test/test_difference_tracking_*_*.py` parts.
+# the documents the stage produced -- the template-first stage's `out/`
+# included -- THE MOMENT THAT STAGE IS ACCEPTED (postcheck -> track_after_stage;
+# template stage -> maybe_track_template_stage), and mirrored under
+# <root>/tracking/ with a manifest and a README. The round-close pass keeps a
+# fresh entry, fills in what a stage did not write, and tracks each published
+# winner in place (a1's raw hash-verified `base/` input is never written into).
+# They never enter a corpus digest, a pin, a judge view, a fingerprint or the
+# revision token. The pass is PURE CODE: it starts no agent session, so it
+# cannot change a champion, a score or a ranking -- both properties are pinned
+# by the `.paper_test/test_difference_tracking_*_*.py` parts.
 # =====================================================================
 
 TRACKING_DIRNAME = "tracking"
 TRACKING_MANIFEST = "manifest.json"
+# The run kinds whose accepted output is a submission VERSION: their postcheck
+# writes the difference-tracking copies immediately (see track_after_stage), so
+# the marked-up copy of a version exists as soon as the version does. a1 has no
+# agent stage (it is a byte-identical copy of its source) and the winner
+# directory is published at round close.
+TRACKING_STAGE_KINDS = ("rewrite", "revise", "integrate")
 LATEXDIFF_CMD = "latexdiff"
 LATEXDIFF_TIMEOUT = 600
+
+TRACKING_TOKEN_SCHEME = (
+    "<token> is the baseline a copy was compared against: `original` for the "
+    "pre-conformed submission (non_revised/), or the baseline version's id -- the "
+    "round base `a1`, a rewrite `w<k>`, a revision `a<k>` (an integration's own "
+    "self/ member), or `winner<r>` for the published winner of round r")
+TRACKING_MANIFEST_NOTES = (
+    "A copy named <name>.tracking-<token>.<ext> shows the difference between the "
+    "candidate document and the baseline named by <token>: real Word tracked changes "
+    "for .docx (the docx-compare MCP tool / redline chain), a latexdiff copy for "
+    ".tex/.bib. <name>.logging-<token>.<ext> is the readable before/after log written "
+    "instead when the difference tool failed.",
+    "Every copy here is an AUXILIARY (the compiled tracking PDF included): it is excluded "
+    "from every judged/pinned corpus, fingerprint and revision token, and the pass starts "
+    "no agent session.",
+    "The copies are written BESIDE the version's documents (the template-first "
+    "stage's out/ included) right after that stage is accepted, and mirrored here; "
+    "the round's close only fills in what a stage did not write (and every "
+    "published round<r>_winner/ is tracked in place: against the pre-conformed "
+    "original, and -- for r > 1 -- against the winner of round r-1, "
+    "`tracking-winner<r-1>`).",
+)
+
+
+def tracking_manifest(ctx: Ctx, tool: str, extra_notes=()) -> dict:
+    """The fresh manifest header (the caller fills `versions`)."""
+    return {"generated": utcnow(), "pipeline_root": str(ctx.root), "tool": tool,
+            "token_scheme": TRACKING_TOKEN_SCHEME, "versions": [],
+            "notes": list(TRACKING_MANIFEST_NOTES) + list(extra_notes)}
+
+
+def merge_tracking_entries(ctx: Ctx, entries: list, *, tool: str = "auto",
+                           extra_notes=()) -> dict:
+    """Merge freshly written entries into <root>/tracking/ (manifest + README).
+
+    The manifest ACCUMULATES: the stage-time hooks and the round-close pass each
+    merge their own entries, and an entry for a (round, version) key already on
+    disk is replaced by the fresh one.
+    """
+    out_root = ctx.root / TRACKING_DIRNAME
+    out_root.mkdir(parents=True, exist_ok=True)
+    stored = read_json(out_root / TRACKING_MANIFEST) or {}
+    manifest = tracking_manifest(ctx, tool, extra_notes=extra_notes)
+    prev = {(str(v.get("round")), str(v.get("version"))): v
+            for v in stored.get("versions") or []}
+    order = list(prev)
+    for entry in entries:
+        key = (str(entry.get("round")), str(entry.get("version")))
+        if key not in prev:
+            order.append(key)
+        prev[key] = entry
+    manifest["versions"] = [prev[k] for k in order]
+    write_json_atomic(out_root / TRACKING_MANIFEST, manifest)
+    write_text_atomic(out_root / "README.md", tracking_readme(manifest))
+    return manifest
 
 
 def fresh_package_sources(ctx: Ctx, r: int, vid: str) -> list:
@@ -38003,7 +38119,8 @@ def _close_tracking_entry(entry: dict) -> None:
 
 def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
                             redline_cmd: list = None, quiet: bool = False,
-                            redlines_manifest: dict = None) -> dict:
+                            redlines_manifest: dict = None,
+                            skip_fresh: bool = False) -> dict:
     """Write the per-version difference-tracking copies + manifest.
 
     `versions=None` means every version of each requested round (the pool --
@@ -38011,31 +38128,19 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
     really selected), which is the same set `run_redlines()` resolves. The
     round's PUBLISHED winner is tracked as well: against the pre-conformed
     original and, for r > 1, against the previous round's winner.
+
+    `skip_fresh` keeps a version (or winner) whose copies a stage-time hook
+    already wrote -- see `track_after_stage()` -- instead of driving Word/
+    latexdiff a second time over unchanged content. The round-close pass sets
+    it; the explicit `track` command leaves it off so an operator can always
+    force a refresh.
     """
     rounds = [int(r) for r in (rounds or range(1, ctx.rounds_count() + 1))]
     versions = list(versions) if versions else None
     out_root = ctx.root / TRACKING_DIRNAME
     out_root.mkdir(parents=True, exist_ok=True)
     index = redline_index(redlines_manifest)
-    manifest = {
-        "generated": utcnow(), "pipeline_root": str(ctx.root), "tool": tool,
-        "token_scheme": (
-            "<token> is the baseline a copy was compared against: `original` for the "
-            "pre-conformed submission (non_revised/), or the baseline version's id -- the "
-            "round base `a1`, a rewrite `w<k>`, a revision `a<k>` (an integration's own "
-            "self/ member), or `winner<r>` for the published winner of round r"),
-        "versions": [], "notes": [
-            "A copy named <name>.tracking-<token>.<ext> shows the difference between the "
-            "candidate document and the baseline named by <token>: real Word tracked changes "
-            "for .docx (the docx-compare MCP tool / redline chain), a latexdiff copy for "
-            ".tex/.bib. <name>.logging-<token>.<ext> is the readable before/after log written "
-            "instead when the difference tool failed.",
-            "Every copy here is an AUXILIARY: it is excluded from every judged/pinned corpus, "
-            "fingerprint and revision token, and the pass starts no agent session.",
-            "The round's PUBLISHED winner directory (round<r>_winner/) is tracked in place as "
-            "well: every winner tracks the pre-conformed original, and the winner of round "
-            "r > 1 also tracks the winner of round r-1 (`tracking-winner<r-1>`).",
-        ]}
+    manifest = tracking_manifest(ctx, tool)
     if not index:
         manifest["notes"].append(
             "no fresh redlines manifest was supplied: every .docx pair is compared by this "
@@ -38075,15 +38180,24 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
                 put_version({"round": r, "version": vid, "status": "not materialized",
                              "comparisons": [], "skipped": []})
                 continue
+            baselines = tracking_baselines(ctx, r, vid)
+            stored_entry = prev_versions.get((str(r), str(vid)))
+            if skip_fresh and stored_entry and tracking_entry_is_fresh(
+                    ctx, stored_entry, baselines, srcs):
+                # The stage-time hook already wrote this version's copies and
+                # they still match the documents on disk: keep the entry and
+                # do not drive Word/latexdiff a second time.
+                continue
             entry = {"round": r, "version": vid, "tool": tool,
                      "out_dir": f"{TRACKING_DIRNAME}/r{r}_{vid}/",
                      "previous_baseline": "", "comparisons": [], "skipped": []}
-            for token, base_sources, note in tracking_baselines(ctx, r, vid):
+            for token, base_sources, note in baselines:
                 _track_one_entry(ctx, entry, out_key=f"r{r}_{vid}", r=r, vid=vid,
                                  token=token, base_sources=base_sources,
                                  note=note, srcs=srcs, tool=tool, redline_cmd=redline_cmd,
                                  index=index, in_package=(arm_of_vid(vid) != "base"),
                                  quiet=quiet, memo=memo)
+            compile_tracking_pdfs(ctx, entry, quiet=quiet)
             _close_tracking_entry(entry)
             put_version(entry)
         # The round's published winner: tracked in place (round<r>_winner/) and
@@ -38095,33 +38209,447 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
         wdir = (ctx.root / wname) if wname else None
         if wdir is None or not wdir.is_dir():
             continue
+        winner_srcs = [(wdir, "", ())]
+        champ_vid = str(wrec.get("winner_id") or f"round{r}_winner")
+        winner_baselines = [
+            (TRACK_TOKEN_ORIGINAL, [(ctx.pristine, "", ())],
+             "the pre-conformed original (non_revised/)"),
+            ((f"winner{r - 1}" if r > 1 else ""),
+             ([(winner_dir_of(ctx, r - 1), "", ())] if r > 1 else []),
+             (f"the published winner of round {r - 1} (round{r - 1}_winner/)" if r > 1
+              else ""))]
+        stored_winner = prev_versions.get((str(r), f"round{r}_winner"))
+        if skip_fresh and stored_winner and tracking_entry_is_fresh(
+                ctx, stored_winner, winner_baselines, winner_srcs):
+            continue
         entry = {"round": r, "version": f"round{r}_winner", "winner": True, "tool": tool,
                  "out_dir": f"{TRACKING_DIRNAME}/round{r}_winner/",
                  "previous_baseline": "", "comparisons": [], "skipped": []}
-        winner_srcs = [(wdir, "", ())]
         # The reuse lookup runs against the CHAMPION's version id: the winner
         # directory holds exactly the champion's bytes, so a redline the
         # round-close redlines pass already produced for that version is valid
         # here too (and saves a second Word/COM round trip per pair).
-        champ_vid = str(wrec.get("winner_id") or f"round{r}_winner")
-        for token, base_sources, note in (
-                (TRACK_TOKEN_ORIGINAL, [(ctx.pristine, "", ())],
-                 "the pre-conformed original (non_revised/)"),
-                ((f"winner{r - 1}" if r > 1 else ""),
-                 ([(winner_dir_of(ctx, r - 1), "", ())] if r > 1 else []),
-                 (f"the published winner of round {r - 1} (round{r - 1}_winner/)" if r > 1
-                  else ""))):
+        for token, base_sources, note in winner_baselines:
             _track_one_entry(ctx, entry, out_key=f"round{r}_winner", r=r,
                              vid=champ_vid, token=token,
                              base_sources=base_sources, note=note, srcs=winner_srcs,
                              tool=tool, redline_cmd=redline_cmd, index=index,
                              in_package=True, quiet=quiet, memo=memo)
+        compile_tracking_pdfs(ctx, entry, quiet=quiet)
         _close_tracking_entry(entry)
         put_version(entry)
     flush_versions()
     write_json_atomic(out_root / TRACKING_MANIFEST, manifest)
     write_text_atomic(out_root / "README.md", tracking_readme(manifest))
     return manifest
+
+
+def tracking_entry_counts(entry: dict) -> tuple:
+    """(tracked, fallbacks, skipped, failed) rows of one manifest entry."""
+    rows = [c for c in (entry or {}).get("comparisons") or []]
+    tracked = sum(1 for c in rows if c.get("ok") and c.get("tool"))
+    fallbacks = sum(1 for c in rows if c.get("ok") and not c.get("tool"))
+    skipped = sum(1 for c in rows if c.get("skipped"))
+    failed = sum(1 for c in rows if not c.get("ok") and not c.get("skipped"))
+    return tracked, fallbacks, skipped, failed
+
+
+def tracking_force_writable(path) -> None:
+    """Make an EXISTING auxiliary writable before it is overwritten.
+
+    A tracking copy inherits the mode of the document it was copied from
+    (`shutil.copy2`), and a template-first package is staged read-only -- so a
+    re-run would otherwise fail with PermissionError on its own mirror file.
+    Only our own auxiliary path is ever passed here; a missing file is a no-op.
+    """
+    if not path:
+        return
+    try:
+        p = Path(path)
+        if p.exists():
+            p.chmod(p.stat().st_mode | stat.S_IWUSR)
+    except OSError:
+        pass
+
+
+def tracking_summary_line(entry: dict, where: str = "") -> str:
+    """One console line: what a manifest entry wrote and where."""
+    tracked, fallbacks, skipped, failed = tracking_entry_counts(entry)
+    tools = sorted({str(c.get("tool")) for c in (entry.get("comparisons") or [])
+                    if c.get("ok") and c.get("tool")})
+    line = (f"{tracked} tracked copy(ies)"
+            + (f" with {', '.join(tools)}" if tools else "")
+            + (f", {fallbacks} logging fallback(s)" if fallbacks else "")
+            + (f", {skipped} skipped" if skipped else "")
+            + (f", {failed} FAILED" if failed else ""))
+    return line + (f" -> {where}" if where else "")
+
+
+def tracking_entry_is_fresh(ctx: Ctx, entry: dict, baselines: list, srcs: list) -> bool:
+    """Does a stored manifest entry still describe THIS version's copies?
+
+    Used by `skip_fresh` (the automatic round-close pass and the template-stage
+    re-check) to keep the copies a stage-time hook already wrote instead of
+    driving Word/latexdiff over unchanged content twice. Conservative: a FAILED
+    or skipped row, a missing copy (real or logging fallback, mirrored or
+    in-package), or a pair whose two digests no longer match the documents on
+    disk makes the entry stale, and the version is tracked again.
+    """
+    try:
+        rows = [c for c in (entry or {}).get("comparisons") or []]
+        if not rows or "FAILED" in str(entry.get("status") or ""):
+            return False
+        expected = {}
+        for token, base_sources, _note in baselines:
+            if not token or not any(s.is_dir() for s, _p, _e in base_sources):
+                continue
+            for ext in TRACKABLE_EXTS:
+                pairs, _ub, _uc = match_track_pairs(base_sources, srcs, ext)
+                for pair in pairs:
+                    expected[(token, ext, pair["base_rel"], pair["cand_rel"])] = (
+                        pair["base_digest"], pair["cand_digest"])
+        have = {}
+        for c in rows:
+            if not c.get("ok") or c.get("skipped"):
+                return False
+            fallback = bool(c.get("fallback"))
+            out_rel = c.get("fallback_out") if fallback else c.get("out")
+            if not out_rel or not (ctx.root / str(out_rel)).is_file():
+                return False
+            in_pkg = c.get("in_package")
+            if in_pkg:
+                if fallback:
+                    # The in-package fallback carries the `logging-<token>`
+                    # suffix (the recorded `in_package` path names the real
+                    # copy's name), so it is derived, never assumed.
+                    sib = (ctx.root / str(in_pkg)).parent / (
+                        Path(str(c.get("revised_rel"))).stem
+                        + tracking_aux_suffix(str(c.get("baseline")), str(c.get("ext")),
+                                              fallback=True))
+                else:
+                    sib = ctx.root / str(in_pkg)
+                if not sib.is_file():
+                    return False
+            if c.get("pdf_ok"):
+                # The compiled marked-up PDF is part of the same auxiliary
+                # family: a row whose PDF vanished is refreshed, not reused.
+                for field in ("pdf", "pdf_in_package"):
+                    rel = c.get(field)
+                    if not rel or not (ctx.root / str(rel)).is_file():
+                        return False
+            elif c.get("ext") == ".tex" and c.get("in_package") \
+                    and not c.get("pdf_error") \
+                    and not str(c.get("pdf_skipped") or "").startswith("not a LaTeX root"):
+                # A .tex row with NO recorded PDF outcome -- or one skipped for
+                # a reason the current code no longer uses ("the copy carries no
+                # latexdiff markup") -- predates the tracking-PDF step: refresh
+                # it instead of keeping a PDF-less entry.
+                return False
+            have[(c.get("baseline"), c.get("ext"), c.get("base_rel"),
+                  c.get("revised_rel"))] = (c.get("base_digest"), c.get("cand_digest"))
+        return bool(expected) and have == expected
+    except Exception:                                        # noqa: BLE001
+        # A malformed manifest row is treated as stale: the version is simply
+        # tracked again (and the refreshed entry replaces the odd one).
+        return False
+
+
+def stage_tracking_enabled(ctx: Ctx) -> bool:
+    """Whether this invocation may write difference-tracking copies.
+
+    `run --no-track` records the choice on the context before any stage starts;
+    every other entry point (`conform`, `retry`, `decide`, `track`, direct API
+    calls) defaults to enabled.
+    """
+    return bool(getattr(ctx, "stage_tracking", True))
+
+
+def track_after_stage(ctx: Ctx, rec: dict, *, quiet: bool = False) -> str:
+    """Track ONE just-accepted version; "" on success, else a warning string.
+
+    Called by `postcheck()` the moment a rewrite/revise/integrate attempt
+    passes: the copies go BESIDE the documents the stage wrote (its own
+    `rewritten/`, `revised/` or `integrated/` directory) and are mirrored under
+    <root>/tracking/r<R>_<vid>/. The pass is code-only and can never fail the
+    stage -- a problem is returned as a warning for the attempt record.
+    """
+    if not stage_tracking_enabled(ctx):
+        return ""
+    r = int(rec.get("round") or 0)
+    vid = freshness_vid(rec)
+    if not r or not vid or not is_fresh_vid(vid):
+        return ""
+    try:
+        mf = run_difference_tracking(ctx, rounds=[r], versions=[vid], tool="auto",
+                                     redline_cmd=None, quiet=quiet, skip_fresh=True)
+    except Exception as e:                                   # noqa: BLE001
+        return (f"difference tracking after the stage failed "
+                f"({type(e).__name__}: {e}); the stage itself is unaffected")
+    entry = next((v for v in mf.get("versions") or []
+                  if str(v.get("round")) == str(r) and str(v.get("version")) == str(vid)),
+                 {})
+    if not quiet:
+        print(f"  [track] {rec.get('id')}: "
+              + tracking_summary_line(entry, f"{TRACKING_DIRNAME}/r{r}_{vid}/"))
+    _t, _f, _s, failed = tracking_entry_counts(entry)
+    if failed:
+        return (f"difference tracking wrote {failed} pair(s) with NO copy "
+                f"(see {TRACKING_DIRNAME}/README.md)")
+    return ""
+
+
+def track_template_stage(ctx: Ctx, sb, *, quiet: bool = False) -> dict:
+    """Difference-tracking copies for the template-first stage's package.
+
+    The conformed package `<sb>/out/` is round 1's working original (a1), so it
+    is tracked like any stage version: against the pre-conformed submission
+    (`non_revised/`), with the copies BESIDE the documents in `out/` and
+    mirrored under `<root>/tracking/r1_a1/`. Idempotent: a stored r1_a1 entry
+    whose copies still match the documents is kept, so a re-check never drives
+    Word/latexdiff again.
+    """
+    out = Path(sb) / "out"
+    if not out.is_dir():
+        return {"ok": False, "error": f"{out} is missing"}
+    srcs = [(out, "", CORPUS_EXCLUDE_TOP)]
+    baselines = [(TRACK_TOKEN_ORIGINAL, [(ctx.pristine, "", ())],
+                  "the pre-conformed submission (non_revised/)")]
+    out_root = ctx.root / TRACKING_DIRNAME
+    out_root.mkdir(parents=True, exist_ok=True)
+    stored = read_json(out_root / TRACKING_MANIFEST) or {}
+    prev = {(str(v.get("round")), str(v.get("version"))): v
+            for v in stored.get("versions") or []}
+    key = ("1", A1_ID)
+    if key in prev and tracking_entry_is_fresh(ctx, prev[key], baselines, srcs):
+        return {"ok": True, "entry": prev[key], "skipped": True}
+    entry = {"round": 1, "version": A1_ID, "tool": "auto", "stage": "template-rewrite",
+             "out_dir": f"{TRACKING_DIRNAME}/r1_{A1_ID}/", "previous_baseline": "",
+             "comparisons": [], "skipped": []}
+    memo = {}
+    index = redline_index(None)
+    for token, base_sources, note in baselines:
+        if not any(s.is_dir() for s, _p, _e in base_sources):
+            entry["skipped"].append({"baseline": token, "reason": "no base corpus"})
+            continue
+        _track_one_entry(ctx, entry, out_key=f"r1_{A1_ID}", r=1, vid=A1_ID,
+                         token=token, base_sources=base_sources, note=note,
+                         srcs=srcs, tool="auto", redline_cmd=None, index=index,
+                         in_package=True, quiet=quiet, memo=memo)
+    compile_tracking_pdfs(ctx, entry, quiet=quiet)
+    _close_tracking_entry(entry)
+    manifest = merge_tracking_entries(ctx, [entry], tool="auto")
+    return {"ok": True, "entry": entry, "manifest": manifest, "skipped": False}
+
+
+def maybe_track_template_stage(ctx: Ctx, sb, *, quiet: bool = False) -> str:
+    """Write/refresh the template stage's copies; never fatal (returns a warning)."""
+    if not stage_tracking_enabled(ctx):
+        return ""
+    try:
+        res = track_template_stage(ctx, sb, quiet=quiet)
+    except Exception as e:                                   # noqa: BLE001
+        msg = (f"difference tracking after the template stage failed "
+               f"({type(e).__name__}: {e})")
+        print(f"[track] template-first stage: WARNING: {msg}")
+        return msg + "; the stage itself is unaffected"
+    if not res.get("ok"):
+        msg = str(res.get("error") or "unknown error")
+        print(f"[track] template-first stage: WARNING: {msg}")
+        return f"difference tracking failed: {msg}"
+    if not res.get("skipped") and not quiet:
+        print(f"[track] template-first stage: "
+              + tracking_summary_line(res.get("entry") or {},
+                                      f"{TRACKING_DIRNAME}/r1_{A1_ID}/")
+              + f" (beside {Path(sb) / 'out'}/)")
+    return ""
+
+
+# `\input`/`\include`/`\addbibresource`/`\bibliography` references inside a
+# latexdiff copy: a reference whose target has its OWN tracked copy is pointed at
+# that copy, so the compiled marked-up PDF shows the tracked version of every
+# part (an include's own diff, the tracked bibliography).
+TEX_TRACK_REF_RE = re.compile(
+    r"\\(?P<cmd>input|include|addbibresource|bibliography)\s*"
+    r"(?P<opt>\[[^\]\n]*\])?\s*\{(?P<args>[^{}\n]*)\}")
+
+# A tracked `.bib` inside a `plain`-style BibTeX run is CASE-CHANGED by the
+# style (`change.case$` lowercases the field text, `\DIFdel{...}` ->
+# `\difdel{...}`), and the lowercase control sequences are undefined. The
+# rewired tracking `.tex` therefore carries aliases for them.
+BIB_TRACK_ALIAS_BLOCK = (
+    "% latexdiff aliases (paper_pipeline): BibTeX styles may change.case$ the\n"
+    "% tracked bibliography fields, lowercasing \\DIFdel/\\DIFadd.\n"
+    "\\providecommand{\\difdelbegin}{\\DIFdelbegin}\n"
+    "\\providecommand{\\difdelend}{\\DIFdelend}\n"
+    "\\providecommand{\\difaddbegin}{\\DIFaddbegin}\n"
+    "\\providecommand{\\difaddend}{\\DIFaddend}\n"
+    "\\providecommand{\\difdel}[1]{\\DIFdel{#1}}\n"
+    "\\providecommand{\\difadd}[1]{\\DIFadd{#1}}\n"
+    "\\providecommand{\\difdelbeginFL}{\\DIFdelbeginFL}\n"
+    "\\providecommand{\\difdelendFL}{\\DIFdelendFL}\n"
+    "\\providecommand{\\difaddbeginFL}{\\DIFaddbeginFL}\n"
+    "\\providecommand{\\difaddendFL}{\\DIFaddendFL}\n"
+    "\\providecommand{\\difdelFL}[1]{\\DIFdelFL{#1}}\n"
+    "\\providecommand{\\difaddFL}[1]{\\DIFaddFL{#1}}\n")
+
+
+def _track_tex_ref_target(name: str, cmd: str) -> tuple:
+    """(the rel path whose tracked sibling may exist, its target extension)."""
+    p = Path(str(name).strip())
+    ext = p.suffix.lower()
+    if ext in (".tex", ".bib"):
+        return p.as_posix(), ext
+    target = ".bib" if cmd in ("addbibresource", "bibliography") else ".tex"
+    return p.as_posix() + target, target
+
+
+def rewire_tracking_tex(text: str, tex_path: Path, tracked: dict) -> tuple:
+    """Point a latexdiff copy's file references at the TRACKED siblings.
+
+    `tracked` maps a usable tracked file's ORIGINAL corpus-relative path
+    (`refs.bib`, `sections/intro.tex`) to the path of its tracked copy on disk.
+    A reference with no tracked sibling is left exactly as written -- an
+    unchanged include must keep loading the shared file, and a failed
+    comparison's logging fallback (commented-out diff) must never be loaded.
+    Returns (new text, [{command, from, to}, ...]); the caller writes the text
+    only when the list is non-empty.
+    """
+    rewrites = []
+    bib_rewired = False
+    base = Path(tex_path).parent
+
+    def repl(m):
+        nonlocal bib_rewired
+        cmd = m.group("cmd")
+        names = [n.strip() for n in m.group("args").split(",")]
+        new_names, changed = [], False
+        for name in names:
+            if not name or re.search(r"\.(?:tracking|logging)-", name, re.IGNORECASE):
+                new_names.append(name)
+                continue
+            rel, _ext = _track_tex_ref_target(name, cmd)
+            target = tracked.get(rel) or tracked.get(name)
+            if target is None:
+                new_names.append(name)
+                continue
+            new_name = os.path.relpath(str(target), str(base)).replace(os.sep, "/")
+            if not Path(name).suffix:
+                new_name = str(Path(new_name).with_suffix("")).replace(os.sep, "/")
+            new_names.append(new_name)
+            rewrites.append({"command": cmd, "from": name, "to": new_name})
+            if cmd in ("addbibresource", "bibliography"):
+                bib_rewired = True
+            changed = True
+        if not changed:
+            return m.group(0)
+        return "\\" + cmd + (m.group("opt") or "") + "{" + ", ".join(new_names) + "}"
+
+    out = TEX_TRACK_REF_RE.sub(repl, text)
+    if bib_rewired and "\\difdelbegin" not in out:
+        pos = out.find("\\begin{document}")
+        if pos < 0:
+            out = out + "\n" + BIB_TRACK_ALIAS_BLOCK
+        else:
+            out = out[:pos] + BIB_TRACK_ALIAS_BLOCK + out[pos:]
+    return out, rewrites
+
+
+def compile_tracking_pdfs(ctx: Ctx, entry: dict, *, quiet: bool = False) -> None:
+    """Compile every tracking `.tex` ROOT into `*.tracking-<token>.pdf`.
+
+    The copy is first rewired to the tracked siblings of the files it includes
+    or loads (see rewire_tracking_tex); the build runs in a disposable copy of
+    the package (compile_latex_pdf with keep_aux=True), so no `.aux`/`.log`
+    by-product lands in the package. The PDF is written BESIDE the tracking
+    `.tex`, mirrored under <root>/tracking/, and recorded on the row (`pdf`,
+    `pdf_in_package`, `pdf_ok`, `pdf_error`). A compile failure is a WARNING:
+    the tracked `.tex` stays, and the round is never failed.
+
+    A byte-identical pair (an unmarked `identical-copy` row) is compiled too:
+    the marked-up PDF of a version with no textual change is its clean PDF, and
+    a copy whose INCLUDES changed still shows those tracked includes. Only a
+    LaTeX FRAGMENT is skipped -- it is compiled through its master.
+    """
+    rows = list((entry or {}).get("comparisons") or [])
+    tracked = {}
+    for c in rows:
+        if c.get("ok") and c.get("tool") and not c.get("fallback") and c.get("in_package"):
+            rel = str(c.get("revised_rel") or "")
+            if rel:
+                # Keyed by (baseline token, rel path): the tracked include/
+                # bibliography for a token is only valid for that token's copy.
+                tracked[(str(c.get("baseline") or ""), rel)] = ctx.root / str(c["in_package"])
+    memo = {}
+    for c in rows:
+        if not c.get("ok") or c.get("ext") != ".tex" or not c.get("tool"):
+            continue
+        if c.get("fallback") or not c.get("in_package"):
+            # a1's raw base has no in-package copy to build beside; a logging
+            # fallback is a commented-out diff, not a compilable document.
+            continue
+        src = ctx.root / str(c["in_package"])
+        token = str(c.get("baseline") or "")
+        if not src.is_file():
+            c["pdf_ok"], c["pdf_error"] = False, "the tracking .tex is missing"
+            continue
+        try:
+            text = src.read_text(encoding="utf-8", errors="replace")
+            if not re.search(r"\\documentclass\b", text):
+                # A fragment is compiled through its master; standalone it is
+                # not a document (`!\begin{document}`).
+                c["pdf_skipped"] = "not a LaTeX root (a fragment compiled through its master)"
+                continue
+            token_refs = {rel: path for (tok, rel), path in tracked.items() if tok == token}
+            new_text, rewrites = rewire_tracking_tex(text, src, token_refs)
+            if rewrites:
+                c["ref_rewrites"] = rewrites
+                for target in (src, ctx.root / str(c.get("out") or "")):
+                    if target.is_file():
+                        # The copy may have inherited a read-only mode from a
+                        # read-only staged source (the template-first package):
+                        # our own auxiliary is made writable before the rewrite.
+                        tracking_force_writable(target)
+                        target.write_text(new_text, encoding="utf-8")
+        except OSError as e:                                 # noqa: BLE001
+            c["pdf_ok"], c["pdf_error"] = (
+                False, f"the tracking .tex could not be rewritten: {e}")
+            continue
+        # The package root is the ancestor the row's own rel path descends to
+        # (the file name is the tracked spelling, so the depth is unchanged).
+        pkg = src
+        for _part in Path(str(c.get("revised_rel") or "")).parts:
+            pkg = pkg.parent
+        out_pdf = src.with_suffix(TRACKING_PDF_EXT)
+        digest = sha256_file(src)
+        earlier = memo.get(digest)
+        if earlier is not None:
+            shutil.copy2(earlier, out_pdf)
+            res = {"ok": True, "tool": "copied-from-identical-tracking-tex",
+                   "pages": _pdf_page_count(out_pdf), "error": None}
+        else:
+            try:
+                rel_in_pkg = src.relative_to(pkg).as_posix()
+            except ValueError:                               # pragma: no cover
+                rel_in_pkg = src.name
+            res = compile_latex_pdf(pkg, rel_in_pkg, out_pdf, keep_aux=True,
+                                    link_evidence=True)
+        c["pdf_ok"] = bool(res.get("ok"))
+        c["pdf_error"] = res.get("error")
+        c["pdf_pages"] = int(res.get("pages") or 0)
+        c["pdf_tool"] = res.get("tool")
+        if not c["pdf_ok"]:
+            if not quiet:
+                print(f"  [track] PDF WARNING: {c.get('revised_rel')} vs {token}: "
+                      f"{c.get('pdf_error')}")
+            continue
+        c["pdf_in_package"] = out_pdf.relative_to(ctx.root).as_posix()
+        if c.get("out"):
+            mirror_pdf = (ctx.root / str(c["out"])).with_suffix(TRACKING_PDF_EXT)
+            mirror_pdf.parent.mkdir(parents=True, exist_ok=True)
+            tracking_force_writable(mirror_pdf)
+            shutil.copy2(out_pdf, mirror_pdf)
+            c["pdf"] = mirror_pdf.relative_to(ctx.root).as_posix()
+        memo.setdefault(digest, out_pdf)
 
 
 def track_one_pair(ctx: Ctx, r: int, vid: str, token: str, ext: str, pair: dict,
@@ -38158,10 +38686,18 @@ def track_one_pair(ctx: Ctx, r: int, vid: str, token: str, ext: str, pair: dict,
     # a1 base, whose `base/` is a raw hash-verified input manifest (writing into
     # it would read as a modified input). a1 keeps its copies under <root>/tracking/.
     in_pkg_out = (cand.parent / f"{cand.stem}{suffix}") if in_package else None
+    # Re-tracking an entry must be able to REPLACE its own previous copies, and
+    # those inherited the (possibly read-only) mode of the staged package.
+    for existing in (persist_out, persist_fallback, in_pkg_out):
+        tracking_force_writable(existing)
     rec = {"baseline": token, "ext": ext,
            "base_rel": pair["base_rel"], "revised_rel": pair["cand_rel"],
            "basis": pair["basis"], "out": persist_out.relative_to(ctx.root).as_posix(),
            "in_package": (in_pkg_out.relative_to(ctx.root).as_posix() if in_pkg_out else None),
+           # The two digests the row describes: the freshness gate of the
+           # automatic round-close pass compares them against the documents on
+           # disk, so a copy written for superseded bytes is never reused.
+           "base_digest": pair.get("base_digest"), "cand_digest": pair.get("cand_digest"),
            "fallback": None, "fallback_out": None, "tool": None, "ok": False,
            "attempts": [], "warning": None, "identical": False, "reused_from": None}
     if tool == "none":
@@ -38250,8 +38786,10 @@ def track_one_pair(ctx: Ctx, r: int, vid: str, token: str, ext: str, pair: dict,
         rec["fallback_out"] = persist_fallback.relative_to(ctx.root).as_posix()
         rec["warning"] = f"difference tracking failed ({reason}); the logging fallback was written"
         if in_pkg_out is not None:
+            in_pkg_fb = in_pkg_out.parent / f"{cand.stem}{fb_suffix}"
+            tracking_force_writable(in_pkg_fb)
             try:
-                shutil.copy2(persist_fallback, in_pkg_out.parent / f"{cand.stem}{fb_suffix}")
+                shutil.copy2(persist_fallback, in_pkg_fb)
             except OSError as e:                                # noqa: BLE001
                 rec["warning"] += f"; the in-package fallback failed: {e}"
     else:
@@ -38286,14 +38824,20 @@ def tracking_readme(manifest: dict) -> str:
          "| `<name>.tracking-a<k>.ext` | vs the k-th revised candidate (an integration's own "
          "base) |",
          "| `<name>.tracking-winner<r>.ext` | vs the published winner of round r |",
+         "| `<name>.tracking-<token>.pdf` | the compiled PDF of a tracking `.tex` root "
+         "(marked-up where the copy differs, clean where it is identical) |",
          "| `<name>.logging-<token>.ext` | the fallback log whenever that comparison could not "
          "be produced |", "",
          "`.docx` pairs use Word's own comparison engine through the `docx-compare` MCP tool",
          "(`Word.Application.CompareDocuments`) when it is configured, then the documented",
          "redline chain (python-redlines[docxodus] -> docx-trackdiff -> --redline-cmd -> the",
-         "built-in OOXML writer). `.tex`/`.bib` pairs use `latexdiff`. The copies also sit",
-         "beside the candidate documents inside the run sandbox (a1's hash-verified `base/`",
-         "excepted); this tree is the prune-proof mirror.", "",
+         "built-in OOXML writer). `.tex`/`.bib` pairs use `latexdiff`; every tracking `.tex`",
+         "copy that is a compile root is rewired to the tracked copies of the files it",
+         "includes/loads and compiled into a sibling `.tracking-<token>.pdf` (a fragment is",
+         "skipped; an identical pair yields the clean PDF). The copies sit BESIDE the documents the version was",
+         "written with (the template-first stage's `out/` included; a1's hash-verified `base/`",
+         "excepted), written the moment that stage was accepted; this tree is the prune-proof",
+         "mirror.", "",
          "Every file here is an AUXILIARY: it is excluded from every corpus digest, pin, judge",
          "view, fingerprint and revision token, and this pass starts no agent session -- it can",
          "never change a score, a ranking or a champion.", "",
@@ -38431,13 +38975,22 @@ def latex_root_documents(dirp: Path) -> list:
 
 
 def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
-                      timeout: int = LATEX_COMPILE_TIMEOUT) -> dict:
-    """Compile ONE LaTeX root into `out_pdf`; never raises.
+                      timeout: int = LATEX_COMPILE_TIMEOUT,
+                      keep_aux: bool = False, link_evidence: bool = False) -> dict:
+    r"""Compile ONE LaTeX root into `out_pdf`; never raises.
 
     The build runs inside a DISPOSABLE COPY of the package: `latexmk` writes
     `.aux/.log/.pdf/...` next to its sources, and those by-products must not
     appear inside a version corpus (a `.pdf` is not an auxiliary suffix, so it
-    would change the corpus digest -- an end result).
+    would change the corpus digest -- an end result). `keep_aux` keeps the
+    difference-tracking copies in that copy: a tracking `.tex` that was rewired
+    to `\input` its tracked siblings (see compile_tracking_pdfs) cannot build
+    without them. `link_evidence` SYMLINKS the read-only evidence areas
+    (`raw_data/`, `raw_figs/`, `human_review_feedback/`) into that copy instead
+    of dropping them: a manuscript that `\includepdf{raw_data/...}` or
+    `\input`s a data fragment needs them on disk, and the areas can be huge --
+    the stage sandboxes link them for the same reason. They are read-only
+    inputs, never written through.
     """
     exe = shutil.which("latexmk")
     if not exe:
@@ -38452,7 +39005,22 @@ def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
                         ignore=lambda _d, names: [
                             n for n in names
                             if n == "work" or n.startswith("~$")
-                            or n in EVIDENCE_DIRNAMES or _is_aux_doc(n)])
+                            or n in EVIDENCE_DIRNAMES
+                            or (_is_aux_doc(n) and not keep_aux)])
+        if link_evidence:
+            for name in sorted(EVIDENCE_DIRNAMES):
+                src_dir = pkg / name
+                dst_dir = work / name
+                if not src_dir.exists() or dst_dir.exists():
+                    continue
+                try:
+                    os.symlink(str(src_dir.resolve()), str(dst_dir),
+                               target_is_directory=True)
+                except OSError:
+                    # A platform without symlinks: a real copy is the fallback
+                    # (correct, only slower), never a silently missing file.
+                    shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True,
+                                    symlinks=False)
         argv = [exe, "-pdf", "-interaction=nonstopmode", "-halt-on-error", Path(rel).name]
         proc = subprocess.run(argv, cwd=str((work / rel).parent), capture_output=True,
                               timeout=timeout)
@@ -38510,7 +39078,10 @@ def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
             out_pdf = out_root / Path(rel).with_suffix(".pdf")
             rec = _reuse_pdf_record(previous, label, rel, digest, out_pdf, "latex")
             if rec is None:
-                res = compile_latex_pdf(src, rel, out_pdf)
+                # The evidence areas are read-only INPUTS the manuscript may
+                # legitimately include (`\includepdf{raw_data/...}`): they are
+                # linked into the build workspace, exactly like a stage sandbox.
+                res = compile_latex_pdf(src, rel, out_pdf, link_evidence=True)
                 rec = {"rel": rel, "kind": "latex", "out": out_pdf.relative_to(ctx.root).as_posix(),
                        "sha256": digest, "ok": bool(res.get("ok")), "tool": res.get("tool"),
                        "pages": res.get("pages") or 0, "error": res.get("error")}
@@ -39232,9 +39803,13 @@ USAGE_EXAMPLES = """usage:
           write the per-version DIFFERENCE-TRACKING copies -- beside each
           document and mirrored under <root>/tracking/ -- for .docx (the
           docx-compare MCP tool first, then the redline chain), .tex/.bib
-          (latexdiff), against the pre-conformed original AND the version each
-          arm was derived from, plus every published winner against the original
-          and the previous round's winner. The copy's file name NAMES THE
+          (latexdiff; every tracking .tex that is a compile root is also rewired
+          to its tracked includes/bibliography and compiled into a sibling
+          <name>.tracking-<token>.pdf -- an identical pair yields the clean
+          PDF), against the pre-conformed original AND
+          the version each arm was derived from, plus every published winner
+          against the original and the previous round's winner. The copy's file
+          name NAMES THE
           BASELINE it was compared against: <name>.tracking-<token>.<ext> with
           <token> = original / a1 / w<k> / a<k> / winner<r> (the manifest's
           baseline_note spells out what the token means for that row). A failed
@@ -39244,7 +39819,8 @@ USAGE_EXAMPLES = """usage:
           <root>/pdfs/ (latexmk; the docx-converter chain for DOCX). Both passes
           start NO agent session and cannot change a corpus, a pin or a decision;
           a compile/conversion failure is a WARNING. `--no-pdf` skips the PDF
-          pass, `run --no-track` skips both passes after each round.
+          pass, `run --no-track` skips both passes after each accepted stage and
+          each round.
 
 WORKED EXAMPLE — the default pipeline: THREE rounds, two from-scratch rewrites
 in round 1, integration-and-judge in round 2, and a final
@@ -39739,8 +40315,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="skip the automatic tracked-changes generation after each round "
                          "(the `redline` command still works)")
     run_opts.add_argument("--no-track", action="store_true",
-                    help="skip the automatic difference-tracking copies and the persistent PDF "
-                         "renders after each round (the `track` command still works)")
+                    help="skip the automatic difference-tracking copies (the stage-time hook "
+                         "and the round-close pass) and the persistent PDF renders (the "
+                         "`track` command still works)")
     run_opts.add_argument("--no-wait", action="store_true",
                     help="manual mode: print the prompts for runs whose dependencies are "
                          "satisfied and exit without waiting")

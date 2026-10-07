@@ -776,29 +776,36 @@ block above.
 
 ## Difference tracking, and the persistent PDFs
 
-After every round the pipeline tracks what actually changed -- with **no agent
-session and no LLM call** -- and renders the versions to PDF. Both passes are
-audit aids: a failure is a warning, never a failed round, and every file they
-write is an **auxiliary** that is excluded from every judged/pinned corpus,
-content fingerprint, revision token and judge view (pinned by
-`.paper_test/test_difference_tracking_*_*.py` (parts 1-3 pin the rules and the passes;
-part 4), which runs a stub round with and
-without the passes and asserts the champion, the scores, the pins and every
-recorded corpus digest are identical).
+As soon as a stage is accepted -- and again at each round's close -- the
+pipeline tracks what actually changed, with **no agent session and no LLM
+call**, and renders the versions to PDF. The tracking copies are audit aids: a
+failure is a warning, never a failed stage, and every file the passes write is
+an **auxiliary** that is excluded from every judged/pinned corpus, content
+fingerprint, revision token and judge view. Pinned by
+`.paper_test/test_difference_tracking_*_*.py`: parts 1-3 and 5 pin the naming,
+the passes and the stage-time placement; part 4 runs a stub round with and
+without them and asserts the champion, the scores, the pins and every recorded
+corpus digest are identical.
 
-**Tracked differences.** For each version the pipeline writes, BESIDE the
-documents (and mirrored under `<root>/tracking/r<R>_<version>/`, with
-`manifest.json` + `README.md`):
+**Tracked differences.** The copies are written the moment a stage is accepted
+-- `postcheck()` tracks every rewrite/revise/integrate arm as soon as it passes,
+and the template-first `conform` does the same for `template_rewrite/out/` -- so
+each is BESIDE the documents of the version that was just produced (and mirrored
+under `<root>/tracking/r<R>_<version>/`, with `manifest.json` + `README.md`).
+The round's close keeps every fresh entry (it never re-drives Word/latexdiff
+over unchanged content) and fills in what a stage did not write, plus each
+published winner.
 
 The file name NAMES THE BASELINE the copy was compared against -- no
 "previous", no ambiguity:
 
-| file (`.ext` = `.docx` / `.tex` / `.bib`) | meaning |
+| file (`.ext` = `.docx` / `.tex` / `.bib`; `.pdf` is the compiled marked-up LaTeX copy) | meaning |
 |---|---|
 | `<name>.tracking-original.ext` | vs the pre-conformed original (`non_revised/`, the copy `setup --source` made) |
 | `<name>.tracking-a1.ext` | vs the round base `a1` -- for round r > 1 that is the pinned champion of round r-1 (published as `round<r-1>_winner/`) |
 | `<name>.tracking-w<k>.ext` / `<name>.tracking-a<k>.ext` | vs the k-th rewritten / reviewed-and-revised candidate -- the base an integration run reworked (its own `self/` member) |
 | `<name>.tracking-winner<r>.ext` | vs the published winner of round r (a winner from round 2 on) |
+| `<name>.tracking-<token>.pdf` | the compiled marked-up PDF of a tracking `.tex` root, built from the rewired tracking sources (the clean PDF when the pair is byte-identical) |
 | `<name>.logging-<token>.ext` | the readable before/after log written instead when that comparison FAILED (never a file that only looks like tracked changes) |
 
 `tracking-*` and its `logging-*` fallback differ by exactly one token, and the
@@ -818,6 +825,20 @@ pass REUSES the redline it already produced for the same pair instead of driving
 Word twice (the reuse is gated on the pair's two content digests, so a redline of
 the same file name but of different bytes is never presented as this pair's
 difference).
+
+**The tracking LaTeX copy COMPILES.** Before a tracking `.tex` root is
+compiled, its `\input{}`/`\include{}` and `\addbibresource{}`/`\bibliography{}`
+references are pointed at the tracked copies of those files when the same
+baseline produced them -- an unchanged include keeps loading the shared file,
+and a failed comparison's commented-out `logging-*` fallback is never loaded.
+Lowercase `\difdel`/`\difadd` aliases are injected because `plain`-style BibTeX
+`change.case$` lowercases the tracked bibliography fields. Every root is
+compiled -- a byte-identical pair too, whose tracking PDF is the clean version
+with its tracked includes -- while a fragment is skipped (it compiles through
+its master). The result is written BESIDE the tracking `.tex` as
+`<name>.tracking-<token>.pdf` (and mirrored under `tracking/`), so the changes
+can be read without a LaTeX toolchain. A compile failure is a warning recorded
+on the manifest row (`pdf_error`); the tracked source stays.
 
 The server is the operator's own: register it once and the pipeline probes it
 from `~/.codex/config.toml`, drives it over the same minimal stdio JSON-RPC
@@ -2111,7 +2132,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 96 suites (a few
+any failure. They are independent, so run them in parallel — 97 suites (a few
 minutes at the default parallelism on a 20-core box; tens of minutes
 sequentially):
 

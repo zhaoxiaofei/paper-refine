@@ -14,9 +14,10 @@ from pathlib import Path
 def np_aux(path: Path) -> bool:
     """Mirror the pipeline's auxiliary-name rule for this stub (keep in step with
     paper_pipeline.TRACKING_AUX_NAME_RE): *.tracking-<token>.<ext> and its
-    *.logging-<token>.<ext> fallback, with <token> naming the baseline."""
+    *.logging-<token>.<ext> fallback, with <token> naming the baseline. <ext>
+    covers docx/tex/bib plus the compiled .pdf of a tracking .tex root."""
     return re.search(r"\.(?:tracking|logging)-(?:original|winner[0-9]+|[awi][0-9]+)"
-                     r"\.(?:docx|tex|bib)$", path.name, re.IGNORECASE) is not None
+                     r"\.(?:docx|tex|bib|pdf)$", path.name, re.IGNORECASE) is not None
 
 
 def digest_tree(d: Path) -> str:

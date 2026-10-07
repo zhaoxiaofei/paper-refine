@@ -6706,11 +6706,13 @@ def _is_aux_name(name: str) -> bool:
     a scan of a package reports rows on files the pipeline itself wrote. The
     name is `<anything>.tracking-<token>.<ext>` (or `.logging-<token>.<ext>` for
     the fallback log), where <token> names the baseline: `original`, a version
-    id (`a1`, `w2`, ...) or a published round winner (`winner1`, ...).
+    id (`a1`, `w2`, ...) or a published round winner (`winner1`, ...). The
+    extension set covers the `.docx`/`.tex`/`.bib` copies AND the compiled
+    `.pdf` of a tracking `.tex` compile root.
     """
     low = name.lower()
     return re.search(r"\.(?:tracking|logging)-(?:original|winner[0-9]+|[awi][0-9]+)"
-                     r"\.(?:docx|tex|bib)$", low) is not None
+                     r"\.(?:docx|tex|bib|pdf)$", low) is not None
 
 
 def check_pdf(path: Path, policy: dict) -> dict:

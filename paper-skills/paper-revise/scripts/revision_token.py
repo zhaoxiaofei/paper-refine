@@ -67,8 +67,9 @@ REPORTS = {"changelog.md", "manual_steps.md", "revision_report.md",
 # MUST derive the same token for the same package): a difference-tracking
 # auxiliary is "<name>.tracking-<token>.<ext>" or "<name>.logging-<token>.<ext>",
 # where <token> names the baseline (original / a1 / w2 / a3 / winner1 / ...).
+# `<ext>` is docx/tex/bib, plus the compiled marked-up PDF of a latexdiff copy.
 AUX_NAME_RE = re.compile(r"\.(?:tracking|logging)-(?:original|winner[0-9]+|[awi][0-9]+)"
-                         r"\.(?:docx|tex|bib)$", re.IGNORECASE)
+                         r"\.(?:docx|tex|bib|pdf)$", re.IGNORECASE)
 
 # Keep in step with paper_pipeline.EVIDENCE_DIRNAMES: the READ-ONLY input areas
 # whose file names are never this package's naming evidence.

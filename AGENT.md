@@ -200,26 +200,40 @@ the profiles shipped next to the script → the built-in fallback inside
     `.paper_test/test_venue_template_conformance.py` and
     the `test_docx_format_*_*.py` parts.
 14. **Difference tracking and the PDF renders are AUXILIARY, CODE-ONLY passes.**
-    After each round, `round_tracking()` (never fatal, started by `run` unless
-    `--no-track`) writes `<name>.tracking-<baseline>.<ext>` (or its
-    `<name>.logging-<baseline>.<ext>` fallback log when the tool failed) beside
-    the candidate documents, mirrors it under `<root>/tracking/`, and writes the
-    same copies into every published `round<r>_winner/`. The baseline token
-    NAMES WHAT THE COPY IS COMPARED AGAINST: `original` (the pre-conformed
+    Tracking is written THE MOMENT A STAGE IS ACCEPTED, not at round close:
+    `postcheck()` calls `track_after_stage()` for every `rewrite`/`revise`/
+    `integrate` attempt that passes, and the template-first `conform` calls
+    `maybe_track_template_stage()` when its own postcheck passes. Each writes
+    `<name>.tracking-<baseline>.<ext>` (or the `<name>.logging-<baseline>.<ext>`
+    fallback log when the tool failed) BESIDE the documents the stage produced --
+    `runs/r1_w1/rewritten/`, `runs/r2_a2_revise/revised/`,
+    `template_rewrite/out/` -- mirrors it under `<root>/tracking/`, and writes
+    the same copies into every published `round<r>_winner/` (the round-close
+    `round_tracking()`, started by `run` unless `--no-track`, keeps every fresh
+    entry and fills in what a stage did not write). The baseline token NAMES
+    WHAT THE COPY IS COMPARED AGAINST: `original` (the pre-conformed
     submission), `a1` (the round base), `w<k>`/`a<k>` (the version an
     integration's own `self/` member reworked) or `winner<r>` (a published round
     winner) -- there is no generic "previous" token. `.docx` pairs go through
     the `docx-compare` MCP tool (Word's own `CompareDocuments`) FIRST, then the
-    redline chain; `.tex`/`.bib` pairs go through `latexdiff`. The LaTeX/DOCX
-    PDFs land under `<root>/pdfs/`. Three rules: (a) the names live in ONE place,
-    `TRACKING_AUX_NAME_RE` / `tracking_aux_suffix()` (the scanner and the
-    skill's `revision_token.py` must keep agreeing -- a test pins all three),
-    so no file of the family may ever be treated as submission content; (b) the
-    pass starts NO agent session and must not be able to change a champion, a
-    score, a pin or an input manifest --
-    `.paper_test/test_difference_tracking_4_e2e.py` runs a stub round with and without
-    it and compares the recorded end result;
-    (c) compile/convert failures are WARNINGS (recorded in `<root>/pdfs/` and
+    redline chain; `.tex`/`.bib` pairs go through `latexdiff`, and each latexdiff
+    `.tex` copy that is a LaTeX ROOT -- a byte-identical copy included, which
+    yields the clean PDF -- whose `\input{}`/`\include{}`/`\addbibresource{}`/
+    `\bibliography{}` targets have their own tracked copies is REWIRED to them
+    and compiled into a sibling `<name>.tracking-<baseline>.pdf`
+    (`compile_tracking_pdfs`; the lowercase `\dif*` aliases cover `change.case$`
+    BibTeX styles; a fragment is skipped, it compiles through its master). The
+    version/winner PDFs land under `<root>/pdfs/`. Three rules: (a) the names
+    live in ONE place, `TRACKING_AUX_NAME_RE` / `tracking_aux_suffix()` (the
+    scanner and the skill's `revision_token.py` must keep agreeing -- a test
+    pins all three), so no file of the family (the compiled tracking PDF
+    included) may ever be treated as submission content; (b) the pass starts NO
+    agent session and must not be able to change a champion, a score, a pin or
+    an input manifest -- `.paper_test/test_difference_tracking_4_e2e.py` runs a
+    stub round with and without it and compares the recorded end result, and
+    `.paper_test/test_difference_tracking_5_stage_hooks.py` pins the stage-time
+    placement and the rewired/compiled tracking PDFs; (c) compile/convert
+    failures are WARNINGS (recorded in the manifest / `<root>/pdfs/` and
     printed), never a failed stage.
 
 ## Commands you will use

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.31 — tracking copies arrive with the version, and the tracked LaTeX compiles (2026-10-07)
+
+- **Stage-time placement.** The orchestrator now writes a version's
+  `<name>.tracking-<baseline>.<ext>` copies (and their `<name>.logging-*`
+  fallbacks) BESIDE the documents the moment that stage is accepted --
+  rewrite/revise/integrate in `postcheck()`, the template-first stage in
+  `template_rewrite/out/` -- instead of waiting for the round to close. The
+  round-close pass keeps a fresh entry and only fills in what a stage did not
+  write (plus each published winner).
+- **The compiled PDF is part of the auxiliary family.** Every tracking `.tex`
+  copy that is a LaTeX compile root is rewired to the tracked copies of the
+  files it `\input`/`\include`s and `\addbibresource`/`\bibliography`s, and
+  compiled into the sibling `<name>.tracking-<baseline>.pdf` (lowercase `\dif*`
+  aliases cover `change.case$` BibTeX styles; a fragment compiles through its
+  master). An identical pair is compiled too -- its tracking PDF is the clean
+  version with its tracked includes. `revision_token.py`/`_is_aux_name` treat
+  that `.pdf` exactly like the other auxiliaries, so it can never enter a
+  corpus, a pin, a judge view or the version token.
+
 ## 0.30 — tracking copies are named for their baseline; no back-compat aliases (2026-10-07)
 
 - **The file name now names WHAT the copy was compared against.**
