@@ -29,7 +29,7 @@ suite pins the fix:
     rule E12/rule C, the rewrite/integrate surface it) and the judge states the
     class is scoreable correctness/completeness -- with the frozen coverage map
     unchanged;
-  * `sweeps.md`, `discovery.md` (proposals start at M31) and `edit_rules.md`
+  * `sweeps.md`, `discovery.md` (proposals start at M37) and `edit_rules.md`
     (rule E12) carry the skill-side text, and the standalone prompt appendices
     stay byte-identical to them;
   * a stub review round passes its strict-artifact postcheck with the M30
@@ -207,10 +207,11 @@ def test_evidence_and_seeding():
         ledger = work / "M30_hierarchy_reconciliation.md"
         text = ledger.read_text(encoding="utf-8") if ledger.is_file() else ""
         check(f"{where}: work/M30_hierarchy_reconciliation.md is seeded", ledger.is_file())
-        check(f"{where}: the ledger carries both tables and a disposition column",
+        check(f"{where}: the ledger carries all three tables and a disposition column",
               "## A. written values with candidate producers" in text
               and "## B. code/config literals" in text
-              and text.count("| disposition |") == 2, text[:120])
+              and "## C. written NEGATIVE claims a shipped table contradicts" in text
+              and text.count("| disposition |") == 3, text[:200])
     art = tmp / "run_review" / "review" / "artifacts" / "M30_hierarchy_reconciliation.md"
     check("the review's artifacts/ copy is seeded (the decision table)",
           art.is_file() and "seed check" in art.read_text(encoding="utf-8"))
@@ -264,7 +265,10 @@ def test_review_contract():
           any("M30_hierarchy_reconciliation.md" in e for e in errs), str(errs)[:200])
     for fname in ("M25_artwork_parity.md", "M26_conventions.md", "M27_evidence_coverage.md",
                   "M28_symmetry.md", "M29_caption_schema.md",
-                  "M30_hierarchy_reconciliation.md"):
+                  "M30_hierarchy_reconciliation.md", "M31_artwork_legend.md",
+                  "M32_statistics.md", "M33_availability.md",
+                  "M34_source_data_coverage.md", "M35_disclosures.md",
+                  "M36_zotero_parity.md"):
         (art / fname).write_text("| row | disposition |\n|---|---|\n| x | OK |\n",
                                  encoding="utf-8")
     (sb / "review" / "ARCHITECTURE.md").write_text(
@@ -273,6 +277,8 @@ def test_review_contract():
         "|---|---|---|---|---|---|---|---|---|\n"
         "| ms | all | 1 | x | none | none | writing | Minor | OK |\n", encoding="utf-8")
     fj["coverage"].append({"check": "M30", "disposition": "clean -- basis: M30 artifact"})
+    for cid in ("M31", "M32", "M33", "M34", "M35", "M36"):
+        fj["coverage"].append({"check": cid, "disposition": f"clean -- basis: {cid} artifact"})
     errs2 = []
     nb.check_review_contract(None, sb, fj, errs2, [])
     check("with the row and the artifact the contract passes", errs2 == [], str(errs2)[:200])
@@ -350,11 +356,11 @@ def test_skill_docs():
     check("sweeps.md carries the hierarchy and the seeded tables",
           "github code > data in raw_data/" in sweeps
           and "candidate producer column" in sweeps)
-    check("sweeps.md's finding format and coverage table admit M30",
-          "check: <M1–M30|J1–J5>" in sweeps and "M1–M30 and" in sweeps)
-    check("discovery proposals now start at M31",
-          "Proposals therefore start at M31" in " ".join(discovery.split())
-          and "35 check IDs (M1–M30, J1–J5)" in discovery)
+    check("sweeps.md's finding format and coverage table admit M36",
+          "check: <M1–M36|J1–J5>" in sweeps and "M1–M36 and" in sweeps)
+    check("discovery proposals now start at M37",
+          "Proposals therefore start at M37" in " ".join(discovery.split())
+          and "41 check IDs (M1–M36, J1–J5)" in discovery)
     check("edit_rules.md defines E12 (align the written side, rule C for code, raw_data read-only)",
           "## E12 — Source-hierarchy findings (M30)" in rules
           and "raw_data/` is READ-ONLY by contract" in rules
@@ -365,7 +371,7 @@ def test_skill_docs():
         encoding="utf-8")
     check("the standalone review prompt carries the M30 sweep (appendix sync)",
           "## M30 — Source-hierarchy reconciliation" in ip
-          and "Proposals therefore start at M31" in " ".join(ip.split()))
+          and "Proposals therefore start at M37" in " ".join(ip.split()))
     check("the standalone revise prompt carries rule E12 (appendix sync)",
           "## E12 — Source-hierarchy findings (M30)" in ap)
 

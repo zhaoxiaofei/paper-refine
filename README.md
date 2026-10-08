@@ -2228,7 +2228,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 103 suites (a few
+any failure. They are independent, so run them in parallel — 105 suites (a few
 minutes at the default parallelism on a 20-core box; tens of minutes
 sequentially):
 

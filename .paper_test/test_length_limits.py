@@ -184,10 +184,10 @@ def test_prompts():
     check("LT3 the caption rule now names both narrowed places",
           "check id M19" in on and "cover letter keeps" in on
           and "blanket rule unchanged" in on)
-    check("LT3 discovery proposals start at M31 with the caption rule on",
-          "M31" in on and "number them from M31 upwards" in on and "M30" in on)
-    check("LT3 discovery proposals start at M31 with the caption rule off",
-          "M31" in off and "M18" in off and "M19" in off and "M20" in off)
+    check("LT3 discovery proposals start at M37 with the caption rule on",
+          "M37" in on and "number them from M37 upwards" in on and "M36" in on)
+    check("LT3 discovery proposals start at M37 with the caption rule off",
+          "M37" in off and "M18" in off and "M19" in off and "M20" in off)
 
 
 # =====================================================================
@@ -325,7 +325,10 @@ def test_orchestrator_wiring():
     write(sb / "review" / "artifacts" / "M1_acronyms.md", "| row |\n|---|\n")
     for fname in ("M25_artwork_parity.md", "M26_conventions.md",
                   "M27_evidence_coverage.md", "M28_symmetry.md",
-                  "M29_caption_schema.md", "M30_hierarchy_reconciliation.md"):
+                  "M29_caption_schema.md", "M30_hierarchy_reconciliation.md",
+                  "M31_artwork_legend.md", "M32_statistics.md", "M33_availability.md",
+                  "M34_source_data_coverage.md", "M35_disclosures.md",
+                  "M36_zotero_parity.md"):
         write(sb / "review" / "artifacts" / fname,
               "| row | disposition |\n|---|---|\n| x | OK |\n")
     write(sb / "review" / "ARCHITECTURE.md",
@@ -341,7 +344,7 @@ def test_orchestrator_wiring():
         rows.append({"check": "M18", "disposition": "legend lengths recorded"})
         rows.append({"check": "M20", "disposition": "formatting rows disposed"})
         for cid in ("M21", "M22", "M23", "M24",        # adopted checks (2026-09-22)
-                    "M25", "M26", "M27", "M28", "M29", "M30", "J5"):   # parity + hierarchy
+                    "M25", "M26", "M27", "M28", "M29", "M30", "M31", "M32", "M33", "M34", "M35", "M36", "J5"):   # parity + hierarchy
             rows.append({"check": cid, "disposition": f"clean -- basis: fixture {cid}"})
         if include_m19:
             rows.append({"check": "M19", "disposition": "0 findings"})

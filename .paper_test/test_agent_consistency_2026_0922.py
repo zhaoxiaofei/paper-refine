@@ -226,7 +226,7 @@ def test_check_id_coverage():
     art2.mkdir(parents=True)
     (art2 / "M1_acronyms.md").write_text("| row |\n|---|\n", encoding="utf-8")
     full_ids = ([f"M{i}" for i in range(1, 18)] + ["M18", "M19", "M20"]
-                + ["M21", "M22", "M23", "M24", "M25", "M26", "M27", "M28", "M29", "M30"]
+                + ["M21", "M22", "M23", "M24", "M25", "M26", "M27", "M28", "M29", "M30", "M31", "M32", "M33", "M34", "M35", "M36"]
                 + [f"J{i}" for i in range(1, 6)])
     fj2 = {"submission_dir": "base",
            "coverage": [{"check": c, "disposition": "clean -- basis: x"} for c in full_ids]}
@@ -249,7 +249,10 @@ def test_check_id_coverage():
         if parity_artifacts:
             for fname in ("M25_artwork_parity.md", "M26_conventions.md",
                           "M27_evidence_coverage.md", "M28_symmetry.md",
-                          "M29_caption_schema.md", "M30_hierarchy_reconciliation.md"):
+                          "M29_caption_schema.md", "M30_hierarchy_reconciliation.md",
+                  "M31_artwork_legend.md", "M32_statistics.md", "M33_availability.md",
+                  "M34_source_data_coverage.md", "M35_disclosures.md",
+                  "M36_zotero_parity.md"):
                 (art / fname).write_text("| row | disposition |\n|---|---|\n| x | OK |\n",
                                          encoding="utf-8")
         if arch:
@@ -304,8 +307,8 @@ def test_check_id_coverage():
           ("M21–M24" in acceptance_line
            or all(c in acceptance_line for c in ("M21", "M22", "M23", "M24")))
           and "once proposals are adopted" not in acceptance_line, acceptance_line[:160])
-    check("sweeps.md's FINDING FORMAT admits M21-M30 finding ids",
-          "M1–M30" in format_line and "M1–M29" not in format_line
+    check("sweeps.md's FINDING FORMAT admits M21-M36 finding ids",
+          "M1–M36" in format_line and "M1–M29" not in format_line
           and "M1–M24|J1–J4" not in format_line
           and "M1–M20|J1–J4" not in format_line,
           format_line[:160])
@@ -315,7 +318,7 @@ def test_check_id_coverage():
     # The rewrite-parity checks exist on the review -> audit -> revise path
     # (the classes a from-scratch rewrite fixes as it goes); the judge's frozen
     # coverage map deliberately stays at M1-M24 + J1-J4.
-    for cid in ("M25", "M26", "M27", "M28", "M29", "M30", "J5"):
+    for cid in ("M25", "M26", "M27", "M28", "M29", "M30", "M31", "M32", "M33", "M34", "M35", "M36", "J5"):
         check(f"{cid} is named in the review/audit/revise prompts",
               all(cid in P[s] for s in ("review", "audit", "revise")),
               str([s for s in ("review", "audit", "revise") if cid not in P[s]]))

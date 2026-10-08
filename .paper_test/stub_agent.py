@@ -273,7 +273,8 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
                                          SCOPED_OUT_IDS else f"clean -- basis: stub {c} artifact"),
                          "detail": "stub"}
                         for c in ("M21", "M22", "M23", "M24",
-                                  "M25", "M26", "M27", "M28", "M29", "M30", "J5")])})
+                                  "M25", "M26", "M27", "M28", "M29", "M30",
+                                  "M31", "M32", "M33", "M34", "M35", "M36", "J5")])})
     (out / "findings.md").write_text("# findings (stub)\n\nsummary: stub\n", encoding="utf-8")
     if reconciled:
         write_json(out / "concerns_reconciled.json", {"rows": reconciled})
@@ -286,7 +287,13 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
                        ("M27_evidence_coverage.md", "M27"),
                        ("M28_symmetry.md", "M28"),
                        ("M29_caption_schema.md", "M29"),
-                       ("M30_hierarchy_reconciliation.md", "M30")):
+                       ("M30_hierarchy_reconciliation.md", "M30"),
+                       ("M31_artwork_legend.md", "M31"),
+                       ("M32_statistics.md", "M32"),
+                       ("M33_availability.md", "M33"),
+                       ("M34_source_data_coverage.md", "M34"),
+                       ("M35_disclosures.md", "M35"),
+                       ("M36_zotero_parity.md", "M36")):
         (out / "artifacts" / fname).write_text(
             f"# {cid} (stub)\n\n| row | disposition |\n|---|---|\n"
             f"| stub | OK - stub: nothing found |\n", encoding="utf-8")

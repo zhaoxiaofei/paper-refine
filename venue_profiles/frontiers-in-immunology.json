@@ -26,6 +26,17 @@
     "Key resources",
     "Key resources table"
   ],
+  "leftover_phrases": [
+    "lead contact",
+    "this study did not generate new unique reagents",
+    "requests for resources",
+    "key resources table",
+    "star methods"
+  ],
+  "numbering": "citation",
+  "references": {
+    "flag_preprints": true
+  },
   "length_limits": {
     "source": "https://www.frontiersin.org/journals/immunology/for-authors/article-types, 'Original Research'; https://www.frontiersin.org/guidelines/author-guidelines, 'Abstract' and 'Manuscript length'; both checked 2026-10-01 -- maximum 12,000 words",
     "abstract": {

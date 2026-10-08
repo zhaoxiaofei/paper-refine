@@ -49,7 +49,7 @@ def full_coverage(caption=False):
     rows.append({"check": "M18", "disposition": "0 findings"})
     rows.append({"check": "M20", "disposition": "0 findings -- formatting rows disposed"})
     for cid in ("M21", "M22", "M23", "M24",
-                "M25", "M26", "M27", "M28", "M29", "M30", "J5"):
+                "M25", "M26", "M27", "M28", "M29", "M30", "M31", "M32", "M33", "M34", "M35", "M36", "J5"):
         rows.append({"check": cid, "disposition": f"clean -- basis: fixture {cid}"})
     return rows
 
@@ -85,7 +85,10 @@ def review_sandbox(tmp, submission_dir="./base", coverage=None, artifacts=True,
         (sb / "review/artifacts/M1.md").write_text("|row|\n", encoding="utf-8")
         for fname in ("M25_artwork_parity.md", "M26_conventions.md",
                       "M27_evidence_coverage.md", "M28_symmetry.md",
-                      "M29_caption_schema.md", "M30_hierarchy_reconciliation.md"):
+                      "M29_caption_schema.md", "M30_hierarchy_reconciliation.md",
+                  "M31_artwork_legend.md", "M32_statistics.md", "M33_availability.md",
+                  "M34_source_data_coverage.md", "M35_disclosures.md",
+                  "M36_zotero_parity.md"):
             (sb / "review/artifacts" / fname).write_text(
                 "| row | disposition |\n|---|---|\n| x | OK |\n", encoding="utf-8")
         (sb / "review/ARCHITECTURE.md").write_text(

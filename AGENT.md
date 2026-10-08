@@ -14,7 +14,7 @@ it are local artefacts, not committed).
 | path | what it is |
 |---|---|
 | `paper_pipeline.py` | the orchestrator (single file, stdlib only). CLI: `setup`, `run`, `run-decide`, `decide`, `status`, `trend`, `agents`, `conflicts`, `selfcheck`, `set-venue`, `set-journal`, `set-article-type`, `set-revision-mode`, `set-tiebreak-defect-floor`, `set-dedup-mode`, `add-venue`, `build-venue-templates`, `retry`, `prune`, `redline`, `track`, `conform`. |
-| `paper_docx_format.py` | the optional companion: code-side OOXML style/formatting scan/fix (`scan`/`fix`/`check-pdf`). |
+| `paper_docx_format.py` | the optional companion: code-side OOXML style/formatting scan/fix (`scan`/`fix`/`check-pdf`) and the Zotero live-field parity check (`zotero-check FILE.docx`, FMT-Z1..Z5 / M36). |
 | `paper_redlines_adapter.py` | optional tracked-changes `.docx` bridge. |
 | `docxcompare.sh` + `mcp-docx-compare/` | Word's own comparison engine (`Word.Application.CompareDocuments` through PowerShell COM) -- the FIRST choice whenever two `.docx` files must be tracked (the `docx-compare` MCP tool wraps the script). |
 | `docx2pdf.sh` + `mcp-docx-converter/` | the first-choice DOCX→PDF renderer. |
@@ -243,6 +243,74 @@ the profiles shipped next to the script → the built-in fallback inside
     failures are WARNINGS (recorded in the manifest / `<root>/pdfs/` and
     printed), never a failed stage.
 
+15. **The published package is CHECKED as an artifact, not just as text.**
+    Five classes reached a CERTIFIED package because nothing enumerated them:
+    a section inside the pipeline's own relaxation but above the venue's base
+    number (M19 now reports the BAND, and every mandate says the venue's own
+    number is the one the submission is measured against); reference-entry
+    SHAPE (`FMT-R1`–`FMT-R5`: a malformed journal/volume field, an entry with
+    no venue, an unversioned repository citation, a bioRxiv-style identifier
+    with a foreign DOI prefix, and the profile-gated preprint/trial-abstract
+    row); display-item ORDER (`FMT-O1`, profile-gated by `numbering:
+    "citation"`), glued front matter (`FMT-X2`) and another publisher's
+    leftover boilerplate (`FMT-L1`, from the profile's `leftover_phrases`);
+    availability finality (`FMT-AV1`: "not yet deposited", "available from the
+    lead contact", "on request"; `FMT-AV2`: one repository pinned to two
+    commits); and the shipped PDFs (`FMT-PDF1`–`FMT-PDF3`: an XFA/LiveCycle
+    form shell that renders only Adobe's "Please wait…", an XFA dataset with no
+    filled value, an export with no extractable text). Two more rules live on
+    the PACKAGE level: `PKG-1` reports internal working material in the
+    submission surface (an internal AI-review session URL, the pipeline's own
+    re-authoring ledger or stage report, a stage note) and `is_bookkeeping_name`
+    strips the pipeline's by-product family BY PATTERN, version token included
+    (`REPLACEMENT_LEDGER-c27c42e.md` used to ship because the exact-name test
+    missed it). `publish_final_clean` records `hygiene.internal_artifacts`,
+    `hygiene.pdf_artifacts` and `hygiene.stripped_bookkeeping` in
+    `decision.json`, prints them and writes them into
+    `final_clean_version.readme.md` as AUTHOR ACTIONS — none of them is
+    silently deleted from the author's own file. M30 grew its NON-numeric half
+    (`negative_claim_rows`, seed id `M30-NC`): a written "could not be run /
+    produced no output" claim while a shipped table carries that method's own
+    rows. The review → audit → revise path carries the EVIDENCE-INTEGRITY
+    sweeps **M31–M35** (artwork-versus-legend consistency, a headline
+    statistic against the correction the paper itself states,
+    availability-locator finality, figure-source-data coverage,
+    disclosure/provenance completeness); the judge's frozen map is unchanged,
+    discovery proposals now start at **M37**, and
+    `.paper_test/test_package_integrity_2026_1009.py` pins all of it. Every new
+    profile key (`numbering`, `references`, `leftover_phrases`) follows the
+    "never invent a rule" contract: absent = no rows.
+
+16. **A Word/Zotero refresh must not change the numbering, and the repo PROVES
+    that before a package ships.** The manuscript's citations are live Zotero
+    fields, so their rendered numbers and the bibliography are CACHED results of
+    the last time the citation processor ran. Edit around them (merge two
+    versions, move a paragraph) and the cache goes stale — the numbers in the
+    text and the order of the reference list no longer agree with the document's
+    own citation order — and the first **Zotero → Refresh** in Word renumbers the
+    text, reorders the bibliography and (because the CSL style is stored in TWO
+    places, `word/settings.xml` docVars and the `docProps/custom.xml` property)
+    can re-render every entry in a different style. A certified package can
+    therefore come back with different citation numbers, a different reference
+    order and a different reference format — and individual fields can even be
+    left stale by the refresh, shipping markers that point at the wrong
+    reference. The repo now has **M36** and the code-side `FMT-Z1..Z5` rows
+    (`zotero_citation_state`, `zotero_parity_rows` — offline: every citation
+    field embeds its own `itemData`): `Z1` a marker whose number is not the cited
+    item's rank, `Z2` the entry at a rank describing another work, `Z3` one item
+    with two numbers / a number outside 1..N / an entry never cited, `Z4` a
+    stored marker that disagrees with the visible runs, `Z5` conflicting style
+    stores. `zotero_report_for_docx` carries the rows and
+    `zotero_field_continuity_problems` makes a version that INTRODUCES a
+    high-severity row a hard error while a refresh that clears them is a recorded
+    repair. Every row is `fix=manual`, `protected=true`: the tools NEVER edit a
+    field result. The author's loop is
+    `python3 paper_docx_format.py zotero-check FILE.docx` → refresh in
+    Word/Zotero → re-check → only then flatten (`unlink_zotero_fields`) for the
+    submission copy; **never flatten a document whose markers are stale**, which
+    would freeze the wrong numbering. Pinned by
+    `.paper_test/test_zotero_refresh_parity.py`.
+
 ## Commands you will use
 
 ```bash
@@ -294,7 +362,11 @@ render, from the profile:
 If you add a rule that depends on the venue, add a field to the profile schema
 (documented in `venue_profiles/README.md`), a rendering function here, and a
 case in `test_venue_config.py` that asserts a non-default venue produces no
-default-venue text.
+default-venue text. A field a recorded snapshot predates (`tables`, `figures`,
+`references`, `numbering`, `leftover_phrases`) is inherited from the venue's own
+profile file — and ONLY when the snapshot carries no key for it — by
+`_inherited_display_rules`; a snapshot that carries the key, including an empty
+block, stays authoritative.
 
 ## Journal revision modes — do not regress the default
 

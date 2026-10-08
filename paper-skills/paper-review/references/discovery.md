@@ -26,7 +26,7 @@ over attention.
 ## D0 — Dedup base
 
 From PRIOR build two indexes (`OUT2/known_index.md`):
-- **KNOWN-CLASSES**: the 35 check IDs (M1–M30, J1–J5) with one-line descriptions.
+- **KNOWN-CLASSES**: the 41 check IDs (M1–M36, J1–J5) with one-line descriptions.
 - **KNOWN-INSTANCES**: every prior finding as `id | class | location | evidence quote`.
 
 Anything matching a KNOWN-INSTANCE (same class + same location + same
@@ -131,9 +131,14 @@ Number proposals continuing from the highest existing sweep number. M18
 are reserved and defined in `sweeps.md`; M21–M24 were adopted from earlier
 discovery rounds, M25–M29 are the rewrite-parity checks (artwork/text
 parity, house-style conventions, claim→evidence coverage, sibling-definition
-symmetry, caption-promise parity), and M30 is the source-hierarchy
-reconciliation (a written claim against the code/raw data that produced it).
-Proposals therefore start at M31.
+symmetry, caption-promise parity), M30 is the source-hierarchy
+reconciliation (a written claim against the code/raw data that produced it), and M31–M35
+are the EVIDENCE-INTEGRITY checks (artwork-versus-legend consistency, a headline
+statistic against the correction the paper states, availability-locator finality,
+figure-source-data coverage, disclosure/provenance completeness), and M36 is the
+Zotero live-field refresh parity check (a stale citation marker or bibliography
+order a Word/Zotero refresh would rewrite).
+Proposals therefore start at M37.
 These are PROPOSALS: the user validates them; only validated ones get
 appended to `references/sweeps.md`. This is the feedback loop — no static
 checklist can be complete, but each discovered miss converts into a permanent

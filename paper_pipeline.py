@@ -450,7 +450,7 @@ CODE-SIDE CHECKS (in addition to what the prompts ask the agents to do)
                           template's, and the recorded pass must name each
                           template document and its rendered page count.
     * review contract     submission_dir must resolve to base/, every check id
-                          M1-M17, J1-J5 plus M18-M30 (the always-active length/
+                          M1-M17, J1-J5 plus M18-M35 (the always-active length/
                           caption/formatting checks, the adopted rewrite-parity
                           checks and the source-hierarchy reconciliation) must
                           carry a real coverage disposition,
@@ -991,7 +991,46 @@ from pathlib import Path
 #   * the judge's frozen coverage map is unchanged; the comparison prompt states
 #     explicitly that a claim the package's own code/data refutes is scoreable
 #     correctness/completeness, never cosmetic.
-VERSION = "3.6.0"
+# 3.7.0 -- the PACKAGE-INTEGRITY round: what a certified package still shipped.
+# Five classes of defect survived 3.6.0 because nothing enumerated them. Each
+# becomes either a code-side row (seeded for the session to dispose) or a
+# package gate:
+#   * M19 now reports the BAND between the venue's own number and the
+#     pipeline's relaxation: a 164-word abstract passed a 150-word venue
+#     silently because only the relaxed (165) cap was compared. The band rows
+#     name the margin used and every M19 mandate says the venue's base number is
+#     the one the submission is measured against;
+#   * the reference-entry SHAPE (FMT-R1..R5): a malformed journal/volume field,
+#     an entry with no venue at all, a repository/software citation with no
+#     version or DOI, a bioRxiv-style identifier carrying a foreign DOI prefix,
+#     and (profile-gated by `references.flag_preprints`) a preprint or
+#     trial-in-progress reference;
+#   * display-item ORDER (FMT-O1, profile-gated by `numbering: "citation"`),
+#     front-matter GLUE (FMT-X2: an e-mail or label fused to its neighbour) and
+#     another publisher's LEFTOVER boilerplate (FMT-L1, from the profile's
+#     `leftover_phrases` list);
+#   * AVAILABILITY finality (FMT-AV1: "not yet deposited" / "available from the
+#     lead contact" / "on request") and one-revision pinning (FMT-AV2: the same
+#     repository committed twice across the statements);
+#   * the published PACKAGE: the pipeline's own by-products are stripped by name
+#     with the version token included (`is_bookkeeping_name`), everything that
+#     remains is scanned for internal working material (PKG-1: internal review
+#     session URLs, the re-authoring ledger, stage notes) and every shipped PDF
+#     for a form that renders BLANK (FMT-PDF1..3: an XFA/LiveCycle shell, an
+#     unfilled form dataset, an export with no text). The readme, the decision
+#     report and the decide output list them as author actions.
+#   * M30 grew its NON-NUMERIC half: a written "could not be run / produced no
+#     output" claim while a shipped table carries that method's rows
+#     (`negative_claim_rows`, seed id M30-NC) is now a row.
+#   * the review -> audit -> revise path carries the EVIDENCE-INTEGRITY sweeps
+#     M31-M36 (artwork-versus-legend consistency, a headline statistic against
+#     the correction the paper itself states, availability-locator finality,
+#     figure-source-data coverage, disclosure/provenance completeness, and the
+#     Zotero live-field refresh parity: a stale citation marker or bibliography
+#     order that a Word/Zotero refresh rewrites -- FMT-Z1..Z5 -- with the
+#     `zotero-check` CLI and a version-to-version parity gate), each with its own
+#     coverage row and artifact; the judge's frozen map is unchanged.
+VERSION = "3.7.0"
 STATE_VERSION = 3
 
 # The Zotero tooling policy carried in pipeline_config.json (`setup --zotero`):
@@ -1164,6 +1203,15 @@ _DEFAULT_VENUE_PROFILE = {
     "foreign_container_headings": ["Lead contact", "Resource availability",
                                    "Materials availability", "Method details",
                                    "Key resources", "Key resources table"],
+    # Another publisher's boilerplate the manuscript may still carry after a
+    # transfer (FMT-L1). Nature Biotechnology uses none of it.
+    "leftover_phrases": ["lead contact", "this study did not generate new unique reagents",
+                         "requests for resources"],
+    # Display items are numbered by first citation (FMT-O1).
+    "numbering": "citation",
+    # A preprint is not a published article: report one so the author decides
+    # whether the venue accepts it (FMT-R5).
+    "references": {"flag_preprints": True},
     # The venue's content types. Only `article` carries numbers here (the ones
     # this pipeline has always used, from the venue's content-types table); the
     # other entries exist so a submission can DECLARE its type, and a type with
@@ -1663,6 +1711,29 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
     # this list through `venue_containers()` and its own default is empty.
     foreign = _profile_str_list(out.get("foreign_container_headings"),
                                 "foreign_container_headings", problems) or []
+    # Another publisher's boilerplate phrases (FMT-L1): same contract as the
+    # foreign container headings -- profile DATA, empty by default, never a
+    # phrase list the engine invents.
+    leftover = _profile_str_list(out.get("leftover_phrases"),
+                                 "leftover_phrases", problems) or []
+    # The venue's display-item numbering convention (FMT-O1). "" = the profile
+    # states none, which means the scan reports no ordering row.
+    numbering = str(out.get("numbering") or "").strip().lower()
+    if numbering and numbering not in ("citation", "none"):
+        problems.append(f"numbering must be 'citation' or 'none' (got {numbering!r})")
+        numbering = ""
+    # The reference-entry policy (FMT-R5): only `flag_preprints` today, so a
+    # venue that accepts preprints without comment sets it false/absent.
+    references_in = out.get("references")
+    clean_references = {}
+    if references_in is not None and not isinstance(references_in, dict):
+        problems.append("references must be an object or null")
+    elif isinstance(references_in, dict):
+        flag = references_in.get("flag_preprints")
+        if flag is not None and not isinstance(flag, bool):
+            problems.append("references.flag_preprints must be true, false or null")
+        else:
+            clean_references["flag_preprints"] = bool(flag)
     clean_tables = _clean_display_rules(out.get("tables"), "tables", problems)
     clean_figures = _clean_display_rules(out.get("figures"), "figures", problems)
 
@@ -1697,6 +1768,9 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
         "tables": clean_tables or copy.deepcopy(EMPTY_TABLES),
         "figures": clean_figures or copy.deepcopy(EMPTY_FIGURES),
         "foreign_container_headings": foreign,
+        "leftover_phrases": leftover,
+        "numbering": numbering,
+        "references": clean_references,
         "submission": {
             "pdf_accepted": pdf_accepted,
             "formats": formats,
@@ -3392,6 +3466,18 @@ def _inherited_display_rules(venue_id: str, root, missing: tuple) -> dict:
             inherited["tables"] = copy.deepcopy(fresh.tables)
         if "figures" in missing and fresh.declares_figure_rule:
             inherited["figures"] = copy.deepcopy(fresh.figures)
+        # The reference-entry preference, the numbering convention and the
+        # leftover-phrase list are the same kind of field: they did not exist
+        # when a pre-2026-10-09 snapshot was recorded, and a root that carries
+        # none of them would scan with fewer rules than the postcheck does.
+        # Inherit each one ONLY when the snapshot does not carry its key.
+        if "references" in missing and (fresh.data.get("references") or {}):
+            inherited["references"] = copy.deepcopy(fresh.data["references"])
+        if "numbering" in missing and str(fresh.data.get("numbering") or ""):
+            inherited["numbering"] = str(fresh.data["numbering"])
+        if "leftover_phrases" in missing and (fresh.data.get("leftover_phrases") or ()):
+            inherited["leftover_phrases"] = copy.deepcopy(
+                list(fresh.data["leftover_phrases"]))
     _DISPLAY_RULE_INHERIT_CACHE[key] = inherited
     return inherited
 
@@ -3410,7 +3496,8 @@ def _snapshot_profile(cfg: dict, venue_id: str, root=None):
     snapshot = cfg.get("venue_profile")
     if not isinstance(snapshot, dict):
         return None
-    missing = tuple(k for k in ("tables", "figures") if k not in snapshot)
+    missing = tuple(k for k in ("tables", "figures", "references", "numbering",
+                                "leftover_phrases") if k not in snapshot)
     if missing:
         inherited = _inherited_display_rules(venue_id, root, missing)
         if inherited:
@@ -4509,8 +4596,23 @@ BOOKKEEPING_FILES = ("changelog.md", "manual_steps.md", "revision_report.md",
 CORPORA_STRIP_BOOKKEEPING = BOOKKEEPING_FILES
 
 
+# The pipeline's own by-products can carry a VERSION TOKEN between their name
+# and their extension (`REPLACEMENT_LEDGER-c27c42e.md` is what the published
+# package actually carries after the filename counter runs). The exact-name
+# test above therefore misses them, which is how a stage's internal re-authoring
+# ledger shipped to the journal. The pattern below matches the family with or
+# without a token, so the strip/fingerprint/bookkeeping paths all agree.
+BOOKKEEPING_NAME_RE = re.compile(
+    r"^(?:replacement_ledger|diff_ledger|revision_report|rewrite_report|manual_steps|"
+    r"visual_check|changelog|agent_log|worklog)"
+    r"(?:[-_.][A-Za-z0-9._\-]+)?\.(?:md|txt|json)$", re.I)
+
+
 def is_bookkeeping_name(name: str) -> bool:
-    return name.strip().lower() in BOOKKEEPING_FILES
+    base = str(name or "").strip()
+    if base.lower() in BOOKKEEPING_FILES:
+        return True
+    return bool(BOOKKEEPING_NAME_RE.match(base))
 
 
 # Caption start patterns: "Figure 1 |", "Fig. 2.", "Supplementary Figure 3:", ...
@@ -5686,7 +5788,16 @@ def length_rule_text(profile=None) -> str:
             f"these caps; a\n"
             f"      submission of another content type uses that type's own base numbers and "
             f"margins from\n"
-            f"      the same venue table.")
+            f"      the same venue table.\n"
+            f"      THE MARGIN IS NOT A LICENCE: a section inside the relaxed cap but ABOVE the "
+            f"venue's own\n"
+            f"      base number is REPORTED with the margin it uses, and the review must either "
+            f"trim it to the\n"
+            f"      base number or record, in the M19 artifact, why the margin is being spent "
+            f"(a counting\n"
+            f"      convention, a quoted passage that cannot be cut). A section in that band is "
+            f"never reported\n"
+            f"      clean, because the venue's published number is the base one.")
     cover_clause = _cover_preference_clause(prof)
     cover_total = limits['cover letter'].get('total_max')
     cover_total_clause = (
@@ -5901,10 +6012,10 @@ M18_REVIEW_SWEEP_ON = """3. The PIPELINE-MANDATED caption sweep M18 (see the cap
    references/sweeps.md defines the same sweep). An M18 row is a formatting-tier item and never
    makes a version ineligible: the orchestrator reports caption lengths, it never gates on them.
    M18 is RESERVED by this pipeline for the caption sweep: if your discovery round proposes new
-   sweeps, number them from M31 upwards in review/round2/new_sweeps.md. (The discovery guide says
+   sweeps, number them from M37 upwards in review/round2/new_sweeps.md. (The discovery guide says
    proposals start at M18, and this pipeline always reserves M18 for its caption sweep and M19 for
    its abstract/main-text length sweep, and M20 for the OOXML formatting sweep, so proposals
-   start at M31, after the adopted M21-M30. Say so in new_sweeps.md so the
+   start at M37, after the adopted M21-M36. Say so in new_sweeps.md so the
    operator can renumber when adopting them into the skill.)"""
 M18_REVIEW_SWEEP_REPORT = """3. The PIPELINE-MANDATED legend-length sweep M18 (see the legend rule below; NO cap is
    configured this run): enumerate EVERY figure legend in the corpus into
@@ -5916,8 +6027,8 @@ M18_REVIEW_SWEEP_REPORT = """3. The PIPELINE-MANDATED legend-length sweep M18 (s
    defines the same sweep), and it never makes a version ineligible: with no cap configured the
    word count alone is not a defect, is never scored and is never "fixed" by cutting text.
    M18 is RESERVED by this pipeline for the legend sweep: if your discovery round proposes new
-   sweeps, number them from M31 upwards in review/round2/new_sweeps.md (M18, M19 and M20
-   are reserved, and M21-M30 are adopted), and say so there so the operator can renumber when
+   sweeps, number them from M37 upwards in review/round2/new_sweeps.md (M18, M19 and M20
+   are reserved, and M21-M36 are adopted), and say so there so the operator can renumber when
    adopting them into the skill."""
 M18_REVISE_RULE_ON = """Figure captions: bring EVERY caption over @@CAPTION_LIMIT@@ words back under the limit by
      removing redundancy, repeated statistics and non-meaning-bearing hedging -- never by deleting
@@ -6037,6 +6148,15 @@ def m19_blocks(profile=None) -> dict:
         f" -- and when the persuading part is outside the user's {cover_clause} preference, bring "
         f"it into the range by removing redundancy only (never content); {cover_tail}"
         if cover_clause else "")
+    # The venue's OWN number is the base one; the pipeline's relaxation is a
+    # margin, not a second cap. A section between the two used to be reported
+    # clean everywhere, which is how an abstract of 164 words passed a 150-word
+    # venue: the band clause makes it a row every stage must dispose.
+    band_clause = (
+        "A section inside the relaxed cap but ABOVE the venue's own base number is a REPORTED "
+        "finding too, never a clean row: name the margin it uses (words over the base) and either "
+        "trim it to the base number or state why the margin is being spent."
+        if has_caps else "")
     review = f"""3b. The PIPELINE-MANDATED length sweep M19 (see the length rule in the standing
    exemptions): enumerate the ABSTRACT and the MAIN TEXT of every submission document that carries
    one -- and the PERSUADING PART of the cover letter -- into review/artifacts/M19_length.md, one
@@ -6052,7 +6172,7 @@ def m19_blocks(profile=None) -> dict:
    over-cap section as a CATEGORY-4 (technical formatting) finding. M19 is mandatory (the skill's
    references/sweeps.md defines the same sweep as always-on) and it is NEVER a gate: an over-cap
    section never makes a version ineligible. The cover-letter row adds a MINOR formatting finding
-   {cover_row}"""
+   {cover_row} {band_clause}"""
     if has_caps:
         revise = f"""Abstract/main-text length (check id M19; see the length rule): bring EVERY over-cap abstract
      or main text within the cap ({caps_article}) by removing redundancy,
@@ -6063,20 +6183,21 @@ def m19_blocks(profile=None) -> dict:
      text that is already within the cap. Count with the pipeline's definition (maximal runs of
      NON-SPACE characters; a newline is a space) and record every compression in CHANGELOG.md
      under M19. A section that cannot be brought within the cap without losing content is left as
-     it is and handed to revised/MANUAL_STEPS.md instead of guessing. {revise_cover}{pref_clause}."""
+     it is and handed to revised/MANUAL_STEPS.md instead of guessing. {band_clause}
+     {revise_cover}{pref_clause}."""
         integrate = f"""Abstract/main-text length (check id M19) is a FORMATTING-tier difference class: port a donor's
 version when it is within the cap and the base's is not, or when the donor removed redundancy from
 an over-cap section without losing content. Otherwise compress the base yourself under the length
 rule, and if a section cannot be brought within the cap ({caps_article}) without
 losing content, leave it and record it for manual action. {integrate_cover} Never reach a cap
 by deleting scientific content, and never port a purely shorter version that gives up correctness,
-consistency or preservation to get there."""
+consistency or preservation to get there. {band_clause}"""
         rewrite = f"""Abstract/main-text length (check id M19) is REPORTED here, not fixed: a rewrite must not push
 an abstract or main text over the pipeline's caps ({caps_article}) and must never cut scientific
 content to meet one; {rewrite_cover}.
 If the base is ALREADY over a cap, surface it in rewritten/REWRITE_REPORT.md
 under "PROBLEMS SURFACED" -- the revision and integration stages own the compression, and this
-stage must not change content to achieve it."""
+stage must not change content to achieve it. {band_clause}"""
     else:
         revise = f"""Abstract/main-text length (check id M19; see the length rule): this venue profile sets no
      abstract or main-text cap, so do NOT compress, reword or cut a section for length: count the
@@ -6101,7 +6222,7 @@ SURFACED". Never change content to reach a word count."""
    An over-cap section never makes a version ineligible, and the cover-letter preference is
    user-set: it is at most a +/-1 formatting-tier difference, never a journal requirement. A cover
    letter whose TOTAL content is over its cap is a formatting-tier item too: report it, never gate
-   on it, and never let it outweigh a higher tier."""
+   on it, and never let it outweigh a higher tier. {band_clause}"""
     return {"review": review, "revise": revise, "integrate": integrate, "rewrite": rewrite,
             "judge": judge}
 
@@ -6176,6 +6297,17 @@ M20_REVIEW_SWEEP = f"""3c. The PIPELINE-MANDATED OOXML formatting sweep M20 (alw
    letter to be formatted that way (its source and what it requires). "The run carries the
    letter in the journal's styles" is the PIPELINE talking, not the journal: the postcheck
    fails that closure.
+
+   The ZOTERO LIVE-FIELD rows (FMT-Z1..FMT-Z5, check id M36) are part of this table and are
+   ALWAYS `fix=manual`, `protected=true`: a citation marker whose number is not the cited item's
+   rank, a bibliography entry that describes another work, one item with two numbers, a stored
+   marker that disagrees with the visible text, or two conflicting Zotero style stores in one
+   document. They are never "fixed" by editing a field -- the document must be refreshed in
+   Word/Zotero (or the field repaired there), the code-side check re-run
+   (`python3 paper_docx_format.py zotero-check <file.docx>`), and only then may the fields be
+   flattened for a submission copy. Never flatten a document whose markers are stale: that
+   freezes the wrong numbering, and the next refresh of a copy that still holds live fields
+   would renumber the text and the reference list again.
 
 @@DISPLAY_RULE@@"""
 M20_REVISE_RULE = f"""OOXML formatting uniformity (check id M20; see the formatting sweep): the
@@ -6630,6 +6762,119 @@ def apply_hierarchy_reconcile(text: str, where: str) -> str:
     # token left here would reach the session unresolved.
     return text.replace("@@HIERARCHY_RECONCILE@@",
                         block.replace("@@SOURCE_HIERARCHY@@", SOURCE_HIERARCHY))
+
+
+# ---- M31-M35: THE EVIDENCE-INTEGRITY SWEEPS (review/audit/revise) ----------
+# The five classes a mechanical scan can SEED but only a reader can judge: what
+# a figure actually PRINTS against what its legend says (M31), whether a
+# headline statistic can pass the correction the paper itself states (M32),
+# whether an availability locator is final and pins ONE revision (M33), whether
+# a figure's shipped source data covers exactly what the legend claims (M34),
+# and whether the disclosures/provenance name the real thing -- the model, not
+# the client -- with no internal working material shipped (M35). Each is
+# review-side like M25-M30: the judge's frozen map is unchanged, and the code's
+# own seeds are FMT-AV1/A2 (M33), the M30 source-data comparison (M34) and
+# PKG-1 (M35).
+EVIDENCE_INTEGRITY_REVIEW = """3f. The EVIDENCE-INTEGRITY sweeps M31-M35 (definitions in the skill's
+   references/sweeps.md, sections M31-M35). Each gets its own coverage row and its own
+   artifact under review/artifacts/:
+   * M31 ARTWORK-VERSUS-LEGEND consistency: for every figure compare what the PRINTED
+     artwork says (axis titles, inset labels, column headers, color-bar range, legend keys)
+     with the legend and the manuscript's own name for that quantity. A legend sentence whose
+     only job is to explain a defect the reader sees ("printed as ...", "the legacy column
+     name ...", "which denotes ...", "share the extreme color") is itself the finding: the
+     artwork is corrected, never the legend extended (artifact: M31_artwork_legend.md);
+   * M32 HEADLINE STATISTIC vs the correction the paper states: for every numeric claim on a
+     claim-bearing surface (abstract, cover letter, Results highlights, legends) check the
+     test, the unit of analysis, n, the p-value and the correction the Methods/Statistics
+     section itself states, then check that the corrected level is reachable (a Holm threshold
+     0.05/k; a signed-rank floor of 2^-n). A claim the stated correction cannot support, or an
+     "unadjusted" level reported without its correction status, is a finding (artifact:
+     M32_statistics.md);
+   * M33 AVAILABILITY-LOCATOR FINALITY: every Data/Code/Materials availability statement and
+     resource row must point at a locator that EXISTS now (deposit, DOI, accession, repository
+     + commit) and every statement about one repository must pin ONE revision. The code-side
+     FMT-AV1 (future/conditional locator) and FMT-AV2 (one repository, two commits) rows seed
+     it (artifact: M33_availability.md);
+   * M34 FIGURE SOURCE DATA vs the legend's own claim: for every figure/table compare the
+     shipped source data's distinct dataset/panel/method values and any selection/exclusion
+     rule its metadata records with the counts and the rule the legend and manuscript state.
+     Extra rows (a method the text says was not run, an undocumented second run, a second read
+     length) and missing statements of an exclusion rule are findings; the M30 rows (including
+     the code-side M30-NC "not run" seeds) are the numeric half (artifact:
+     M34_source_data_coverage.md);
+   * M35 DISCLOSURE/PROVENANCE completeness: the generative-AI disclosure names the MODEL with
+     its version (a client/CLI name or a model identifier that does not exist is a finding) and
+     sits where the venue's own guidelines ask for it; every named third-party tool carries its
+     version/commit; and the package ships NO internal working material (the code-side PKG-1
+     rows name internal review-session URLs, the pipeline's own ledgers/reports and stage
+     notes) -- the file is reported for the author to remove, never silently deleted
+     (artifact: M35_disclosures.md);
+   * M36 ZOTERO LIVE-FIELD REFRESH PARITY: the manuscript's citations are live Zotero fields,
+     and their rendered numbers plus the bibliography are CACHED results. Compare the numbering
+     the document shows with the numbering its OWN citation order defines: the code-side FMT-Z1
+     (a marker whose number is not the cited item's rank), FMT-Z2 (the entry at a rank describes
+     another work), FMT-Z3 (one item with two numbers, a number outside 1..N, an entry never
+     cited), FMT-Z4 (stored marker vs visible text) and FMT-Z5 (conflicting Zotero style stores)
+     rows seed it. A Word/Zotero refresh rewrites exactly those caches -- it renumbers the text,
+     reorders the bibliography and re-renders the entries in whichever style the document's
+     preference stores name. The resolution is NEVER to edit a field result here: refresh in
+     Word/Zotero, re-run `python3 paper_docx_format.py zotero-check <file.docx>` until it is
+     clean, and only then flatten the fields (`unlink_zotero_fields`) for the submission copy;
+     flattening a document whose markers are stale freezes the WRONG numbering
+     (artifact: M36_zotero_parity.md).
+   Report each row under its own check id (M31-M36) in the coverage table; a class with no
+   finding is `clean -- basis: <the artifact and what was read>`."""
+
+EVIDENCE_INTEGRITY_AUDIT = """     * M31-M36 evidence integrity: attack a class closed `clean` when the corpus ships what the
+       class needs. An M31 `clean` while the artwork prints a label its legend renames, an M32
+       `clean` while the abstract's p-value cannot pass the correction the Methods state, an M33
+       `clean` while a locator is future/conditional or the same repository carries two commits,
+       an M34 `clean` while a figure's source data carries more datasets/methods than the legend
+       describes, an M35 `clean` while the disclosure names a client instead of a model or the
+       package ships internal working material, or an M36 `clean` while a citation marker's
+       number disagrees with the item's own rank in the Zotero citation order (or the
+       bibliography entry at that rank describes another work) -- each is an `AU-` finding under
+       that check id, with both sides quoted."""
+
+EVIDENCE_INTEGRITY_REVISE = """15. EVIDENCE-INTEGRITY findings (M31-M36) - resolve what is editable and hand the rest to
+    MANUAL_STEPS.md with the exact artifact named:
+    * M31: correct the artwork, or -- when the figure is read-only -- align the editable legend
+      only to what the artwork really shows and put the regeneration step in MANUAL_STEPS.md;
+      never leave a legend sentence whose job is to explain a defect;
+    * M32: move the caveat into the claim (or remove the claim from the abstract) so the level
+      reported is the level the stated correction reaches; never adjust a number;
+    * M33: an availability statement is aligned only by naming where the data/code ARE; a
+      deposit that has not happened is MANUAL_STEPS.md, and two pins become one;
+    * M34: align the editable legend/Methods count or the stated selection rule with the source
+      data; a regenerated figure/table or a stale source-data row is manual-required with the
+      file named;
+    * M35: rewrite a disclosure that names a client/CLI as a model+version disclosure, move it
+      to the venue's required placement, and REMOVE internal working material from the package
+      (report the file in MANUAL_STEPS.md when it carries author content);
+    * M36: NEVER edit a Zotero field result. A stale marker is resolved by the AUTHOR refreshing
+      the fields in Word (Zotero -> Refresh) and re-running the code-side check; record the
+      exact file and the row the refresh must clear in MANUAL_STEPS.md, and state that the fields
+      may be flattened (`unlink_zotero_fields`) ONLY after the check is clean."""
+
+EVIDENCE_INTEGRITY_GENERIC = """EVIDENCE-INTEGRITY (check ids M31-M36, review-side): the classes above are reported,
+   not silently repaired. An availability locator, an artwork label, a source-data selection
+   rule and a disclosure are the AUTHOR's statements: surface them under the class's own id and
+   leave the un-editable side (a read-only figure, a deposit that has not happened, an internal
+   file that must be removed) to MANUAL_STEPS.md with the exact artifact named. M36 is the
+   Zotero live-field refresh parity: a stale citation marker or a bibliography order that
+   disagrees with the document's OWN citation order (FMT-Z1..Z5) is named for the author to
+   refresh in Word/Zotero and re-check with `python3 paper_docx_format.py zotero-check` -- a
+   field RESULT is never edited here, and the fields may be flattened only once the check is
+   clean."""
+
+
+def apply_evidence_integrity(text: str, where: str) -> str:
+    """Substitute the M31-M35 block for the stage that owns it."""
+    block = {"review": EVIDENCE_INTEGRITY_REVIEW,
+             "audit": EVIDENCE_INTEGRITY_AUDIT,
+             "revise": EVIDENCE_INTEGRITY_REVISE}.get(where, EVIDENCE_INTEGRITY_GENERIC)
+    return text.replace("@@EVIDENCE_INTEGRITY@@", block)
 
 
 # ---------------------------------------------------------------------
@@ -7867,6 +8112,8 @@ of its references first (references/sweeps.md, references/discovery.md), then ex
 @@M20_REVIEW_SWEEP@@
 @@REWRITE_PARITY@@
 @@HIERARCHY_RECONCILE@@
+
+@@EVIDENCE_INTEGRITY@@
 @@EVIDENCE_PACK_RULE@@
 4. The discovery round D0-D5 (references/discovery.md), including its proposal of new sweeps for
    issue classes the checklist itself misses, written under review/round2/.
@@ -7906,12 +8153,12 @@ Skill discipline that the orchestrator will check for:
     the short form first and the expansion after it (`MALBAC-sequenced (multiple annealing ...)`)
     has used the token before defining it. When the sentence itself prints the expansion, the
     token IS an abbreviation being defined, so "it is a tool/proper name" is not a disposition.
-  * No silent skips: every check ID M1-M30 and J1-J5 appears in the coverage table with a real
+  * No silent skips: every check ID M1-M36 and J1-J5 appears in the coverage table with a real
      disposition (N findings / clean — basis: <artifact> / unable — <reason>); M19 (the pipeline's
      abstract/main-text length sweep) ALWAYS appears there too, and M18 (the pipeline's caption
      sweep) ALWAYS appears as well: legends are always enumerated, and only its proxy cap is
-     optional. Number your discovery proposals from M31 upwards (M18-M20 are reserved by the
-     pipeline, M21-M30 are adopted).
+     optional. Number your discovery proposals from M37 upwards (M18-M20 are reserved by the
+     pipeline, M21-M36 are adopted).
   * Never invent content, citations, numbers, or accession IDs. Anything unresolvable becomes
     "unresolvable — manual verification required" and is listed in the manual-verification list.
   * Findings are reported, never fixed: identification only.
@@ -8177,6 +8424,8 @@ Explicit requirements that override skill defaults where they conflict:
 
 @@HIERARCHY_RECONCILE@@
 
+@@EVIDENCE_INTEGRITY@@
+
 @@PLACEHOLDER_RULE@@
 
 @@AUX_FILES_RULE@@
@@ -8343,6 +8592,8 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
    Each becomes an `AU-` finding when it is a defect, not a note.
 @@REWRITE_PARITY@@
 @@HIERARCHY_RECONCILE@@
+
+@@EVIDENCE_INTEGRITY@@
 5. WRITE, in `audit/`:
    * `audit.json` — machine-readable, exactly this shape:
        {"round": @@ROUND@@,
@@ -8452,6 +8703,8 @@ invisible to text diff, and a diff-driven port silently drops exactly the change
 to catch. Read the documents, the figure/table assets, the legends, and the code.
 
 @@HIERARCHY_RECONCILE@@
+
+@@EVIDENCE_INTEGRITY@@
 
 Work through the donors ONE AT A TIME with a single ledger across all of them, and classify every
 difference you find into exactly one class:
@@ -8747,6 +9000,8 @@ the original.
      do not invent a resolution -- record the conflict under PROBLEMS SURFACED and leave the base's
      wording (the master prompt's source hierarchy is @@SOURCE_HIERARCHY@@).
 @@HIERARCHY_RECONCILE@@
+
+@@EVIDENCE_INTEGRITY@@
   8. RENAME-SAFE FIGURES/TABLES: never silently renumber or re-letter a figure, table, panel or
      reference; a reorganization must not change what "Figure 3b" or "Supplementary Table 1"
      points at.
@@ -9811,7 +10066,7 @@ reviewed already. Run ONLY these checks, exhaustively, with the same discipline 
     abstract/main-text lengths, OOXML style/formatting uniformity, term families, house style);
   * the prose and architecture passes J3 (Q1-Q12: logic, coherence, wording, register, grammar,
     typography, segmentation -- one-sided small differences included) and J5.
-Do NOT run the content/scientific sweeps and passes (M2, M4, M5, M13-M16, M21-M23, M25, M27-M30,
+Do NOT run the content/scientific sweeps and passes (M2, M4, M5, M13-M16, M21-M23, M25, M27-M36,
 J1, J2, J4) and do NOT run the discovery round D0-D5. Record every one of those ids in the
 coverage table with the disposition "out of scope -- this round's review is the formatting-and-
 writing-only pass" plus one sentence; a row that is silent is still a missing disposition.
@@ -9837,6 +10092,7 @@ the surface, and the revisers may not change a claim here."""
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof)))
     text = apply_rewrite_parity(text, "review")
     text = apply_hierarchy_reconcile(text, "review")
+    text = apply_evidence_integrity(text, "review")
     text = render_venue_tokens(text, prof)
     text = apply_m19(text, prof)
     text = apply_m20(text, prof)
@@ -9885,6 +10141,7 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE))
     text = apply_rewrite_parity(text, "revise")
     text = apply_hierarchy_reconcile(text, "revise")
+    text = apply_evidence_integrity(text, "revise")
     text = text.replace("@@AUDIT_BLOCK@@", audit_block)
     text = render_venue_tokens(text, prof)
     text = apply_m19(text, prof)
@@ -9930,6 +10187,7 @@ def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
             .replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("audit")))
     text = apply_rewrite_parity(text, "audit")
     text = apply_hierarchy_reconcile(text, "audit")
+    text = apply_evidence_integrity(text, "audit")
     text = render_venue_tokens(text, prof)
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule("audit"))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("audit", run_id, r))
@@ -9977,6 +10235,7 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(INTEGRATED_DIR))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("integrate", run_id, r))
     text = apply_hierarchy_reconcile(text, "integrate")
+    text = apply_evidence_integrity(text, "integrate")
     return (text + shared_blocks() + attached_phase1(prof) + "\n" + ATTACHED_PHASE2
             + INTEGRATE_TAIL + venue_norm)
 
@@ -10024,6 +10283,7 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(REWRITTEN_DIR))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("rewrite", run_id, r))
     text = apply_hierarchy_reconcile(text, "rewrite")
+    text = apply_evidence_integrity(text, "rewrite")
     return (text + shared_blocks() + attached_head(prof) + "\n" + attached_phase1(prof) + "\n"
             + ATTACHED_PHASE2 + REWRITE_TAIL + journal_block + venue_norm)
 
@@ -10677,7 +10937,7 @@ def corpus_dir_manifest(dirp: Path, exclude_top=()) -> dict:
     def keep(p: Path) -> bool:
         if not p.is_file() or _is_aux_doc(p.name):
             return False
-        if p.name.strip().lower() in CORPORA_STRIP_BOOKKEEPING:
+        if is_bookkeeping_name(p.name):
             return False
         if exclude_top and p.relative_to(dirp).as_posix().split("/", 1)[0] in exclude_top:
             return False
@@ -11550,10 +11810,13 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
                             for a, b in (caption_spans or []) if a < n and b > 0)
         words = max(0, count_words(" ".join(lines)) - caption_words)
         main_cap = limits["main text"].get("cap")
+        main_base = limits["main text"].get("base")
         return [{"document": doc, "section": "main text", "words": words,
-                 "base": limits["main text"].get("base"),
+                 "base": main_base,
                  "relaxation": limits["main text"].get("relaxation"),
                  "cap": main_cap,
+                 "over_base": main_base is not None and words > main_base,
+                 "base_margin": (words - main_base) if main_base is not None else None,
                  "over_limit": main_cap is not None and words > main_cap,
                  "note": "no Abstract/Introduction heading found: this document carries the "
                          "selected article type's own name, so the whole text is counted "
@@ -11562,10 +11825,13 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
     if abs_start is not None:
         words = count_words(" ".join(lines[abs_start:abs_end]))
         abs_cap = limits["abstract"].get("cap")
+        abs_base = limits["abstract"].get("base")
         rows.append({"document": doc, "section": "abstract", "words": words,
-                     "base": limits["abstract"].get("base"),
+                     "base": abs_base,
                      "relaxation": limits["abstract"].get("relaxation"),
                      "cap": abs_cap,
+                     "over_base": abs_base is not None and words > abs_base,
+                     "base_margin": (words - abs_base) if abs_base is not None else None,
                      "over_limit": abs_cap is not None and words > abs_cap, "note": ""})
     start = abs_end if abs_end is not None else main_start
     # The abstract block ends ON the next heading line ("Introduction" in most
@@ -11597,10 +11863,13 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
     if caption_words:
         notes.append(f"{int(caption_words)} word(s) of figure captions subtracted")
     main_cap = limits["main text"].get("cap")
+    main_base = limits["main text"].get("base")
     rows.append({"document": doc, "section": "main text", "words": words,
-                 "base": limits["main text"].get("base"),
+                 "base": main_base,
                  "relaxation": limits["main text"].get("relaxation"),
                  "cap": main_cap,
+                 "over_base": main_base is not None and words > main_base,
+                 "base_margin": (words - main_base) if main_base is not None else None,
                  "over_limit": main_cap is not None and words > main_cap,
                  "note": "; ".join(notes)})
     return rows
@@ -11766,8 +12035,16 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
             docs.add(doc)
             rows.extend(found)
     over = [r for r in rows if r["over_limit"]]
+    # The BAND: over the venue's own (base) number but inside the pipeline's
+    # relaxation. It is not an over-limit row -- the margin is the pipeline's
+    # deliberate tolerance -- but it is never silent either: a section here is
+    # reported so the session states the margin it is using (see `length_note`
+    # and the M19 mandates). Without this the abstract of a 150-word venue can
+    # sit at 164 words and no row exists anywhere.
+    over_base = [r for r in rows if r.get("over_base") and not r["over_limit"]]
     return {"limits": limits, "source": source, "venue": prof.id,
             "rows": rows, "count": len(rows), "over_limit": over,
+            "over_base": over_base,
             "unparsed": sorted(set(unparsed)), "skipped": sorted(set(skipped)),
             "rendered": sorted(set(rendered)),
             "needs_manual": sorted(set(rendered)) if not rows else [],
@@ -11800,8 +12077,11 @@ def length_note(info) -> str:
                          + ("" if r.get("within_preference") else " OUTSIDE-PREFERENCE"))
         else:
             parts.append(f"{r['section'].replace('main text', 'main-text')} {r['words']} words"
-                         + (" OVER" if r.get("over_limit") else ""))
+                         + (" OVER" if r.get("over_limit")
+                            else (" OVER-VENUE-LIMIT (inside the pipeline's margin)"
+                                  if r.get("over_base") else "")))
     over_n = len([r for r in rows if r.get("over_limit")])
+    band_n = len([r for r in rows if r.get("over_base") and not r.get("over_limit")])
     pref_n = len([r for r in rows if r["section"] == "cover letter"
                   and not r.get("within_preference")])
     abs_cap, main_cap = limits["abstract"].get("cap"), limits["main text"].get("cap")
@@ -11814,6 +12094,14 @@ def length_note(info) -> str:
                      "with the target journal's own guidelines")
     tail = (f"; {over_n} over the cap (advisory only -- never a gate; compress by removing "
             f"redundancy only)" if over_n else "; all within the relaxed caps")
+    if band_n:
+        margins = ", ".join(
+            f"{r['section'].replace('main text', 'main-text')} +{r.get('base_margin')} over the "
+            f"venue's own {r.get('base')}" for r in rows
+            if r.get("over_base") and not r.get("over_limit"))
+        tail += (f"; {band_n} section(s) above the venue's OWN number but inside the pipeline's "
+                 f"relaxation ({margins}) -- report the margin used, then trim or justify "
+                 f"before submission")
     cover_min = limits["cover letter"].get("min")
     cover_max = limits["cover letter"].get("max")
     if pref_n:
@@ -11900,7 +12188,51 @@ def format_policy_of(ctx: Ctx) -> dict:
         policy["empty_paragraph_slots"] = _venue_empty_paragraph_slots(ctx)
     if "cover_letter" not in configured:
         policy["cover_letter"] = _venue_cover_letter_block(ctx)
+    # The venue's own reference-entry preference (`flag_preprints`) and its
+    # display-item numbering convention (`numbering`), plus the leftover-phrase
+    # list another publisher's boilerplate is matched against. All three are
+    # profile data; an operator's `format_policy.<key>` still wins.
+    for key, block in _venue_reference_blocks(ctx).items():
+        if key not in configured:
+            policy[key] = copy.deepcopy(block)
     return policy
+
+
+def _venue_reference_blocks(ctx: Ctx) -> dict:
+    """The reference/numbering/leftover keys the venue profile declares.
+
+    Every key is optional and ABSENT when the profile does not declare it, so a
+    venue that states no numbering convention and lists no leftover phrase gets
+    no `FMT-O1`/`FMT-L1` rows (the "never invent a rule" contract of
+    `venue_profiles/README.md`). The values are copied verbatim from the
+    profile: `references` ({"flag_preprints": bool}), `numbering`
+    ("citation" or ""), `leftover_phrases` (list of strings). Memoized exactly
+    like `_venue_display_blocks`: `format_policy_of` runs on every scan and
+    every stage postcheck, and resolving the venue profile is not free.
+    """
+    cfg = _ctx_cfg(ctx)
+    key = (id(cfg), id(cfg.get("venue_profile")), venue_id_of(ctx),
+           str(cfg.get("article_type") or ""))
+    cached = getattr(ctx, "_venue_reference_blocks", None)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    prof = venue_profile_of(ctx, required=False)
+    data = getattr(prof, "data", {}) or {}
+    out: dict = {}
+    refs = data.get("references")
+    if isinstance(refs, dict):
+        out["references"] = {"flag_preprints": bool(refs.get("flag_preprints"))}
+    numbering = str(data.get("numbering") or "").strip().lower()
+    if numbering:
+        out["numbering"] = numbering
+    phrases = data.get("leftover_phrases")
+    if isinstance(phrases, (list, tuple)):
+        out["leftover_phrases"] = [str(p) for p in phrases if str(p).strip()]
+    try:
+        ctx._venue_reference_blocks = (key, out)
+    except Exception:                                       # noqa: BLE001 -- stub ctx
+        pass
+    return out
 
 
 def _venue_cover_letter_block(ctx: Ctx) -> dict:
@@ -14199,8 +14531,10 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
             docs = corpus_text_documents(sources)
             numbers, terms, outline, ph_rows = [], [], [], []
             claim_rows = []
+            all_texts = []
             for name, rows in docs:
                 paras = [r[0] for r in rows]
+                all_texts.extend(paras)
                 is_ref = [r[1] for r in rows]
                 headings = [r[2] for r in rows]
                 prose = [t for i, t in enumerate(paras) if not is_ref[i]]
@@ -14243,13 +14577,19 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
             tables = data_table_texts(sources)
             seed_rows = mod.hierarchy_seed_rows(numbers, tables)
             code_rows = mod.code_literal_rows(sources, skip_name=is_bookkeeping_name)
+            # M30's NON-numeric half: a written "not run / no output" claim the
+            # shipped tables contradict. Guarded like the rest of the block, so
+            # an older companion module degrades to no rows instead of failing.
+            neg_fn = getattr(mod, "negative_claim_rows", None)
+            neg_rows = neg_fn(all_texts, tables) if neg_fn is not None else []
             evidence["hierarchy"] = {"rows": seed_rows, "count": len(seed_rows),
                                      "tables_read": len(tables)}
             evidence["code_literals"] = {"rows": code_rows, "count": len(code_rows)}
+            evidence["negative_claims"] = {"rows": neg_rows, "count": len(neg_rows)}
         except Exception as e:                                        # noqa: BLE001
             evidence["numbers"] = {"error": f"{type(e).__name__}: {e}"}
             for key in ("terms", "outline", "placeholder_ledger", "claims",
-                        "hierarchy", "code_literals"):
+                        "hierarchy", "code_literals", "negative_claims"):
                 evidence.setdefault(key, {"error": f"{type(e).__name__}: {e}"})
     return evidence
 
@@ -14755,6 +15095,13 @@ def seed_format_policy_file(ctx: Ctx, sb: Path) -> Path:
             # itself must be able to prove a letter was formatted in the
             # manuscript template (FMT-CL1), exactly like the postcheck does.
             "cover_letter": copy.deepcopy(policy.get("cover_letter") or {}),
+            # Reference-entry preference (FMT-R5), display-item numbering
+            # (FMT-O1) and the other publisher's leftover phrases (FMT-L1) are
+            # venue-level DATA as well: without them the session's own scan
+            # reports fewer rows than the postcheck does.
+            "numbering": policy.get("numbering") or "",
+            "references": copy.deepcopy(policy.get("references") or {}),
+            "leftover_phrases": copy.deepcopy(policy.get("leftover_phrases") or []),
             "image_aspect_tolerance": policy.get("image_aspect_tolerance", 0.02)}
     # tmp + rename, NOT write_json_atomic's extra fsync: this file is a pure
     # INPUT every session reads, and the pipeline seeds one per session
@@ -15036,6 +15383,7 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
     # `unable`, never a silent clean.
     hrows = (ev.get("hierarchy") or {}).get("rows") or []
     crows = (ev.get("code_literals") or {}).get("rows") or []
+    nrows = (ev.get("negative_claims") or {}).get("rows") or []
     h_rows = [{"document": r.get("document"), "kind": r.get("kind"),
                "number": r.get("number"), "unit": r.get("unit") or "",
                "sentence": (r.get("sentence") or "")[:110],
@@ -15045,6 +15393,11 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
     c_rows = [{"file": r.get("file"), "line": r.get("line"), "symbol": r.get("symbol"),
                "value": r.get("value"), "context": (r.get("context") or "")[:90]}
               for r in crows]
+    n_rows = [{"written claim": (r.get("claim") or "")[:110],
+               "method token": r.get("token"),
+               "shipped table says": r.get("producer"),
+               "detail": (r.get("detail") or "")[:120]}
+              for r in nrows]
     m30_text = (
         "# M30 — source-hierarchy reconciliation (code-side seed)\n\n"
         "The hierarchy `" + SOURCE_HIERARCHY + "` is the RESOLUTION rule; this table is its "
@@ -15073,6 +15426,15 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
         + _evidence_artifact_table(
             c_rows, ["file", "line", "symbol", "value", "context"],
             "no module-level literal found in the corpus's code/config files")
+        + "\n\n## C. written NEGATIVE claims a shipped table contradicts\n\n"
+        "A sentence that says a method was not run, was not evaluated or produced no output, "
+        "while a shipped table carries that method's own rows with finite values. The hierarchy "
+        "makes the raw-data side authoritative: either the table's stale rows are removed (a "
+        "regenerated figure/table is a manual item) or the written claim is corrected.\n\n"
+        + _evidence_artifact_table(
+            n_rows,
+            ["written claim", "method token", "shipped table says", "detail"],
+            "no written negative claim contradicts a shipped table")
         + "\n")
     _seed_write(work / "M30_hierarchy_reconciliation.md", m30_text)
     if art is not None:
@@ -15505,8 +15867,7 @@ def _corpus_ignore(skip_aux: bool, strip_bookkeeping: bool):
         if skip_aux:
             out += [n for n in names if _is_aux_doc(n)]
         if strip_bookkeeping:
-            out += [n for n in names
-                    if n.strip().lower() in CORPORA_STRIP_BOOKKEEPING]
+            out += [n for n in names if is_bookkeeping_name(n)]
         return out
     return _ignore
 
@@ -15900,7 +16261,7 @@ def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
         if skip_aux and _is_aux_doc(entry.name):
             continue
         if strip_bookkeeping and entry.is_file() \
-                and entry.name.strip().lower() in CORPORA_STRIP_BOOKKEEPING:
+                and is_bookkeeping_name(entry.name):
             continue
         target = dst / entry.name
         if entry.is_dir():
@@ -16750,11 +17111,12 @@ FORMATTING_WRITING_CHECKS = ("M1", "M3", "M6", "M7", "M8", "M9", "M10", "M11", "
 
 REVIEW_SPLIT_SCOPES = {
     "phases": ("A: the MECHANICAL sweeps M1-M17 plus the pipeline-mandated M18/M19/M20 and the "
-               "adopted M21-M30 (rewrite-parity and the source-hierarchy reconciliation included; "
+               "adopted M21-M36 (rewrite-parity, the source-hierarchy reconciliation, the "
+               "evidence-integrity sweeps and the Zotero live-field parity included; "
                "enumerate, artifact, audit)",
                "B: the JUDGMENT passes J1-J5 and the discovery round D0-D5"),
     "aspects": ("A: the CONTENT/scientific checks -- M1-M8, M13-M16 and J1-J3",
-                "B: the PACKAGING/compliance checks -- M9-M12, M17-M20, M21-M30, J4, J5 and the "
+                "B: the PACKAGING/compliance checks -- M9-M12, M17-M20, M21-M36, J4, J5 and the "
                 "discovery round D0-D5"),
 }
 
@@ -17611,7 +17973,7 @@ def manifest_for_sources(sources: list) -> dict:
         for p in _iter_tree_files(src, follow_dir_links=True):
             if not p.is_file() or _is_aux_doc(p.name):
                 continue
-            if p.name.strip().lower() in CORPORA_STRIP_BOOKKEEPING:
+            if is_bookkeeping_name(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
             if excluded and rel.split("/", 1)[0] in excluded:
@@ -17911,7 +18273,7 @@ def corpus_dir_view_files(dirp: Path) -> list:
     for p in entries:
         if _is_view_excluded_file(p.name, siblings.get(p.parent, ())):
             continue
-        if p.name.strip().lower() in CORPORA_STRIP_BOOKKEEPING:
+        if is_bookkeeping_name(p.name):
             continue
         rel = p.relative_to(dirp).as_posix()
         if rel.split("/", 1)[0] in CORPUS_EXCLUDE_TOP:
@@ -21271,7 +21633,7 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
     # 2. every check ID must have a real disposition.
     coverage = fj.get("coverage")
     if not isinstance(coverage, list):
-        errs.append(f"{FINDINGS_REL} has no coverage table; every check ID M1-M17, M18-M30 and "
+        errs.append(f"{FINDINGS_REL} has no coverage table; every check ID M1-M17, M18-M36 and "
                     f"J1-J5 must carry a real disposition (the skill's acceptance gate)")
     else:
         wanted = list(REQUIRED_REVIEW_CHECKS)
@@ -21288,6 +21650,12 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
         # The source-hierarchy reconciliation (sweeps.md M30): the detection side
         # of the hierarchy the prompts already use to RESOLVE a conflict.
         wanted += ["M30"]
+        # The EVIDENCE-INTEGRITY sweeps (sweeps.md M31-M35): artwork-versus-legend
+        # consistency, a headline statistic against the correction the paper
+        # states, availability-locator finality, figure-source-data coverage and
+        # disclosure/provenance completeness, plus M36's Zotero live-field
+    # refresh parity. Review-side like M25-M30.
+        wanted += ["M31", "M32", "M33", "M34", "M35", "M36"]
         in_scope = set(scoped_review_checks(scope))
         out_of_scope = set(wanted) - in_scope if in_scope else set()
         seen_ids, seen_rows, bad = {}, {}, []
@@ -21341,10 +21709,24 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
               # M30 is the DETECTION side of the same hierarchy the prompts use
               # to RESOLVE a conflict; like M25-M29 it is a mechanical sweep on
               # this path (the judgment calls stay in the reviewer's rows).
-              "M30_hierarchy_reconciliation.md": ("M30", "the source-hierarchy reconciliation")}
+              "M30_hierarchy_reconciliation.md": ("M30", "the source-hierarchy reconciliation"),
+              # The EVIDENCE-INTEGRITY sweeps (M31-M35): each enumerates a class
+              # the code can only SEED (what a figure prints, what a correction
+              # supports, whether a locator resolves, what a source file covers,
+              # what a disclosure names), so a zero-finding sweep is valid ONLY
+              # with a disposed artifact.
+              "M31_artwork_legend.md": ("M31", "the evidence-integrity check"),
+              "M32_statistics.md": ("M32", "the evidence-integrity check"),
+              "M33_availability.md": ("M33", "the evidence-integrity check"),
+              "M34_source_data_coverage.md": ("M34", "the evidence-integrity check"),
+              "M35_disclosures.md": ("M35", "the evidence-integrity check"),
+              # M36: the live Zotero field state (stale markers, a reordered
+              # bibliography, conflicting style stores) -- a document a routine
+              # Word/Zotero refresh rewrites.
+              "M36_zotero_parity.md": ("M36", "the Zotero live-field parity check")}
     # A SCOPED round requires only the artifacts of the checks IT runs (the
     # formatting-writing pass keeps M26's house-style table and J5's
-    # architecture table; M25/M27-M30 belong to the content rounds).
+    # architecture table; M25/M27-M36 belong to the content rounds).
     scope_in = set(scoped_review_checks(scope))
     if scope_in:
         parity = {k: v for k, v in parity.items() if v[0] in scope_in}
@@ -24966,7 +25348,7 @@ def audit_artifact_problems(audit, frozen_ids) -> list:
         if not isinstance(cat, int) or not 0 <= cat <= 5:
             problems.append(f"{aid}: category must be an integer 0-5")
         if not str(row.get("check") or "").strip():
-            problems.append(f"{aid}: the check id (M1-M30/J1-J5) is missing")
+            problems.append(f"{aid}: the check id (M1-M36/J1-J5) is missing")
     return problems
 
 
@@ -35890,6 +36272,126 @@ def final_clean_reason(final: dict, rounds_data: list, rounds_total: int, final_
     return ""
 
 
+# ---------------------------------------------------------------------
+# PACKAGE HYGIENE (rule family PKG-*).
+#
+# The published package is what the author hands to the journal, and it carries
+# whatever the champion corpus carries. Two classes shipped in real runs:
+#   * the pipeline's OWN by-products (a re-authoring ledger with the internal
+#     "machine-readable exceptions" block). They are stripped by NAME now
+#     (`is_bookkeeping_name`, version token included) and anything that still
+#     reaches the staging tree is REPORTED here.
+#   * the author's own files carrying INTERNAL review material -- a
+#     `raw_data.README.md` that answers two external AI-review sessions and
+#     quotes their chat URLs. Nothing in a manuscript package should hand a
+#     reviewer an internal critique of that same package.
+# A PDF the package ships is checked with the artifact rules (FMT-PDF1..3): an
+# unfilled Adobe form is a "required document" that renders blank.
+# ---------------------------------------------------------------------
+
+INTERNAL_ARTIFACT_RES = (
+    ("an internal AI-review session URL",
+     re.compile(r"https?://(?:chat\.z\.ai|sorryios\.ai|chatgpt\.com/share|poe\.com|"
+                r"claude\.ai/chat|gemini\.google\.com|chat\.deepseek\.com|"
+                r"aistudio\.google\.com|chatglm\.[a-z]+)[^\s)\]}>\"']*", re.I)),
+    ("the pipeline's re-authoring ledger",
+     re.compile(r"(?i)\bREPLACEMENT\s+LEDGER\b|\bmachine[- ]readable\s+exceptions\b")),
+    # The pipeline's stage artifacts are named with UNDERSCORES (the published
+    # copy may carry a version token): matching the prose spellings ("revision
+    # report") would flag an author's own words, so the identifiers are
+    # required, while "machine-readable exceptions" above already catches the
+    # ledger's own vocabulary in running text.
+    ("the pipeline's own stage report",
+     re.compile(r"(?i)\b(?:REWRITE_REPORT|REWRITE-REPORT|DIFF_LEDGER|DIFF-LEDGER|"
+                r"REVISION_REPORT|REVISION-REPORT|VISUAL_CHECK|VISUAL-CHECK|"
+                r"MANUAL_STEPS|MANUAL-STEPS)\b|\bCHANGELOG\.md\b")),
+    ("an internal working note that names this pipeline's stages",
+     re.compile(r"(?i)\b(?:round\s*\d+\s*winner|a1\s*/\s*base|judge (?:sheet|wave)|"
+                r"stage postcheck)\b")),
+)
+PACKAGE_TEXT_EXTS = (".md", ".markdown", ".txt", ".tex", ".ltx", ".rst", ".json", ".csv",
+                     ".tsv", ".bib", ".html", ".htm", ".xml", ".yml", ".yaml", ".ini",
+                     ".cfg", ".log")
+PACKAGE_TEXT_BYTES_LIMIT = 2_000_000
+
+
+def internal_artifact_rows(root: Path, limit: int = 40) -> list:
+    """PKG-1: shipped files that carry the pipeline's/author's internal material.
+
+    Evidence areas (`raw_data/`, the feedback areas) are the author's own
+    provenance and are never read as prose, so they are skipped -- the rule is
+    about the SUBMISSION surface (and the case that prompted it sat at the
+    corpus top level as `raw_data.README.md`). Rows never delete anything: the
+    author decides whether a file is removed or rewritten.
+    """
+    rows, seen = [], set()
+    root = Path(root)
+    if not root.is_dir():
+        return rows
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(root).as_posix()
+        if is_evidence_rel(rel):
+            continue
+        if p.suffix.lower() not in PACKAGE_TEXT_EXTS:
+            continue
+        try:
+            if p.stat().st_size > PACKAGE_TEXT_BYTES_LIMIT:
+                continue
+            text = p.read_text("utf-8", "replace")
+        except OSError:
+            continue
+        for i, line in enumerate(text.splitlines(), 1):
+            for label, pattern in INTERNAL_ARTIFACT_RES:
+                m = pattern.search(line)
+                if not m:
+                    continue
+                key = (rel, label)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append({
+                    "rule": "PKG-1", "severity": "high", "file": rel, "line": i,
+                    "evidence": f"{line.strip()[:160]!r}: {label}",
+                    "detail": "this file is part of the submission package but carries "
+                              "internal working material (an internal review session, the "
+                              "pipeline's own ledger/report, or a stage note); a reviewer "
+                              "reading it sees how the package was produced instead of the "
+                              "science -- remove the file or strip the internal text",
+                    "fix": "manual"})
+                if len(rows) >= limit:
+                    return rows
+    return rows
+
+
+def package_pdf_rows(root: Path, limit: int = 40) -> list:
+    """FMT-PDF1..3 over every PDF the published package ships."""
+    rows = []
+    root = Path(root)
+    mod = _format_module()
+    if mod is None or not root.is_dir():
+        return rows
+    for p in sorted(root.rglob("*.pdf")):
+        if not p.is_file() or _is_aux_doc(p.name):
+            continue
+        rel = p.relative_to(root).as_posix()
+        if is_evidence_rel(rel):
+            continue
+        try:
+            found = mod.pdf_artifact_rows(p)
+        except Exception as e:                                        # noqa: BLE001
+            found = [{"rule": "FMT-PDF3", "severity": "medium", "document": rel,
+                      "location": "-", "evidence": f"{type(e).__name__}: {e}",
+                      "detail": "the PDF could not be inspected", "fix": "manual",
+                      "protected": False}]
+        for r in found:
+            rows.append(dict(r, document=rel))
+        if len(rows) >= limit:
+            break
+    return rows[:limit]
+
+
 def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = "") -> dict:
     """Publish <root>/final_clean_version/: the champion corpus for a new run.
 
@@ -35971,6 +36473,11 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     # deliverable when the configured venue accepts one (see the venue profile's
     # `submission` block and derived_outputs_rule()).
     hygiene = {"removed": [], "kept_bbl": [], "raw_data_untouched": 0}
+    # The pipeline's own by-products never reach the published package (the copy
+    # strips them by name, version token included): report which ones the
+    # champion carried, so the operator sees the strip instead of guessing.
+    hygiene["stripped_bookkeeping"] = sorted(
+        {q.name for q in src.rglob("*") if q.is_file() and is_bookkeeping_name(q.name)})
     for q in sorted(tmp.rglob("*")):
         if not q.is_file():
             continue
@@ -36007,6 +36514,12 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
                                                    artifacts_dir=ctx.reports_dir,
                                                    template=venue_word_templates(ctx) or None,
                                                    containers=venue_containers(ctx)))
+    # Package hygiene: the by-product names are stripped above; what REMAINS is
+    # scanned for internal material (PKG-1) and every shipped PDF for an
+    # unfilled/blank artifact (FMT-PDF1..3). These are reported, never silently
+    # deleted: the file belongs to the author, but the package must not ship it.
+    hygiene["internal_artifacts"] = internal_artifact_rows(tmp)
+    hygiene["pdf_artifacts"] = package_pdf_rows(tmp)
     manifest = corpus_dir_manifest(tmp)
     final_digest = manifest_digest(manifest)
     if dst.is_dir() and corpus_tree_digest(dst) == final_digest:
@@ -36066,6 +36579,30 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
                  + (f", {fc['renamed']} filename counter(s) incremented"
                     if fc.get("renamed") else "")
                  + f", {fc.get('raw_data_untouched', 0)} raw-data file(s) untouched")
+    hygiene = fc.get("hygiene") or {}
+    stripped = hygiene.get("stripped_bookkeeping") or []
+    if stripped:
+        L.append(f"- the pipeline's own by-product(s) were NOT published (stripped by name): "
+                 + ", ".join(f"`{n}`" for n in stripped[:8])
+                 + (" …" if len(stripped) > 8 else ""))
+    internal = hygiene.get("internal_artifacts") or []
+    if internal:
+        L.append("")
+        L.append(f"**{len(internal)} internal-artifact finding(s) in the published package "
+                 f"(PKG-1) -- the author must remove or rewrite these before submitting:**")
+        for r in internal[:12]:
+            L.append(f"  - `{r.get('file')}` line {r.get('line')}: {r.get('detail')}")
+        if len(internal) > 12:
+            L.append(f"  - … and {len(internal) - 12} more (see reports/decision.json)")
+    pdfs = hygiene.get("pdf_artifacts") or []
+    if pdfs:
+        L.append("")
+        L.append(f"**{len(pdfs)} PDF artifact finding(s) in the published package "
+                 f"(FMT-PDF*) -- a form that renders blank or an unreadable export:**")
+        for r in pdfs[:12]:
+            L.append(f"  - `{r.get('document')}` [{r.get('rule')}]: {r.get('detail')}")
+        if len(pdfs) > 12:
+            L.append(f"  - … and {len(pdfs) - 12} more (see reports/decision.json)")
     L.append("")
     if cert.get("certified"):
         L.append(f"This directory is the certified champion corpus: "
@@ -37789,6 +38326,17 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
               + f"`setup --source {final_clean['path']}`")
     else:
         print(f"[decide] final clean version: NOT (re)built -- {final_clean.get('skipped')}")
+    _hyg = final_clean.get("hygiene") or {}
+    for r in (_hyg.get("internal_artifacts") or [])[:5]:
+        print(f"[decide] PACKAGE HYGIENE (PKG-1, author action required): "
+              f"{r.get('file')} line {r.get('line')} -- {r.get('evidence')}")
+    for r in (_hyg.get("pdf_artifacts") or [])[:5]:
+        print(f"[decide] PDF ARTIFACT ({r.get('rule')}, author action required): "
+              f"{r.get('document')} -- {r.get('detail')}")
+    _stripped = _hyg.get("stripped_bookkeeping") or []
+    if _stripped:
+        print(f"[decide] pipeline by-product(s) stripped from the published package: "
+              + ", ".join(_stripped[:6]) + (" …" if len(_stripped) > 6 else ""))
     print(f"[decide] certification status: {readme_path} "
           f"({certification_label(certification)})")
     if win_token and win_token.get("token"):

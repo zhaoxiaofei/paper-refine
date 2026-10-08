@@ -104,7 +104,7 @@ Truncation silently drops exactly the tail-end mechanical findings, so append ea
 `OUT/findings.md`:
 1. File inventory (from Phase 1).
 2. All sweep artifacts as titled appendix tables (or pointers to `OUT/artifacts/`).
-3. Findings grouped by category 0–5, each entry: ID (`F-001`…), location (document/section/paragraph/line/figure/table; a J5 architecture finding names its paragraph-range scope instead), category, check ID (M1–M30, J1–J5), severity, short verbatim evidence quote (J5: the current → proposed outline), concise explanation, status (`resolvable` / `unresolvable` / `guideline-dependent`).
+3. Findings grouped by category 0–5, each entry: ID (`F-001`…), location (document/section/paragraph/line/figure/table; a J5 architecture finding names its paragraph-range scope instead), category, check ID (M1–M36, J1–J5), severity, short verbatim evidence quote (J5: the current → proposed outline), concise explanation, status (`resolvable` / `unresolvable` / `guideline-dependent`).
 4. Per-document index of finding IDs.
 5. Coverage table: every check ID (M1–M17, J1–J5, M18 (legend counts), M19 (abstract/main-text/cover-letter lengths), M20 (OOXML style/formatting rows from the pipeline's scan), M21–M24 (the earlier adopted sweeps), M25–M29 (the rewrite-parity checks) and M30 (the source-hierarchy reconciliation)) → `N findings` / `clean — basis` / `unable — <reason>`.
 6. Summary note: counts by category/severity; unresolved gaps; missing-citation issues; ambiguous context; unresolvable contradictions; the manual-verification list (incl. Zotero fields); guidelines source/version; items to re-check against the current author guide.
@@ -126,7 +126,7 @@ Truncation silently drops exactly the tail-end mechanical findings, so append ea
 - One sweep at a time; artifact complete before the next begins.
 - Prefer scripts over attention for all enumeration; judgment only classifies rows.
 - Long sessions: maintain `WORK/STATE.md` (current sweep, pending steps, open questions) so the workflow resumes without loss.
-- Grow the skill: after the discovery round, validate the proposals in `OUT/round2/new_sweeps.md` with the user and append them to `references/sweeps.md` as M31, M32… (M18–M20 are reserved by the pipeline and M21–M30 are adopted — see `references/sweeps.md`) — the checklist converges toward exhaustiveness over successive runs instead of pretending to be exhaustive on day one. If the skill directory is read-only (common for an installed skill), do not fight it: keep the accepted text in `OUT/round2/new_sweeps.md` and hand the user the exact block to append.
+- Grow the skill: after the discovery round, validate the proposals in `OUT/round2/new_sweeps.md` with the user and append them to `references/sweeps.md` as M37, M38… (M18–M20 are reserved by the pipeline and M21–M36 are adopted — see `references/sweeps.md`) — the checklist converges toward exhaustiveness over successive runs instead of pretending to be exhaustive on day one. If the skill directory is read-only (common for an installed skill), do not fight it: keep the accepted text in `OUT/round2/new_sweeps.md` and hand the user the exact block to append.
 
 ## Acceptance checks (for the human, after the run)
 
@@ -136,9 +136,9 @@ Truncation silently drops exactly the tail-end mechanical findings, so append ea
 4. `findings.json` exists and every finding has all eight fields.
 
 
-## APPENDIX: Sweeps M1–M30 and judgment passes J1–J5 (references/sweeps.md)
+## APPENDIX: Sweeps M1–M35 and judgment passes J1–J5 (references/sweeps.md)
 
-# Sweeps M1–M30 and Judgment Passes J1–J5 — paper-review
+# Sweeps M1–M36 and Judgment Passes J1–J5 — paper-review
 
 This file is the single source of truth for Phase 2. Follow it exactly.
 Every sweep entry specifies: purpose · scope · enumeration procedure (script
@@ -160,7 +160,7 @@ code or raw data that produced it), and **J5** is the architecture pass that
 reports the rewrite-class issues no instance-level sweep can enumerate
 (organization, paragraph order, transitions, cross-section redundancy). New
 sweeps validated from the discovery round are appended after the adopted block
-as **M31, M32…** in the same format — do not insert into the middle (IDs are
+as **M37, M38…** in the same format — do not insert into the middle (IDs are
 stable).
 
 **Scope of "the corpus" — the EVIDENCE areas are NOT in it.** Wherever this file
@@ -327,7 +327,7 @@ Every finding is ONE instance, formatted:
 
 ```
 F-NNN | location: <doc>/<section>/<paragraph|line|figure|table> | category: <0–5>
-check: <M1–M30|J1–J5> | severity: <Fatal|Critical|Major|Minor> | status: <...>
+check: <M1–M36|J1–J5> | severity: <Fatal|Critical|Major|Minor> | status: <...>
 evidence: "<short verbatim quote of the exact word/number/phrase>"
 problem: <1–2 sentence explanation>
 ```
@@ -1183,7 +1183,7 @@ a different order. A scope whose only "fix" would invent or delete content is
 "Not checked" is not an allowed value. "Unable — <reason>" rows repeat in the
 summary note with their reasons.
 
-The coverage table carries every check ID this skill defines: M1–M30 and
+The coverage table carries every check ID this skill defines: M1–M36 and
 J1–J5 (M18, M19 and M20 are always active). J5's row names
 `review/ARCHITECTURE.md` as its basis.
 
@@ -1548,6 +1548,215 @@ Validation: the class exists because the hierarchy was one-directional — a
 resolution rule with no detection sweep leaves every text-vs-code and
 figure-vs-raw-data conflict to luck.
 
+## M31 — Artwork-versus-legend consistency (a legend that documents a defect)
+
+**Purpose.** A figure whose printed labels, insets or color scale disagree with
+its own legend, or whose legend *explains away* the disagreement instead of the
+artwork being corrected. A legend sentence that says the axis prints a legacy
+column name, that the scale is clamped, or that a label "denotes" something
+else is an admission, not a caption: a reader who looks at the figure alone is
+misled, and the printed quantity the reader sees is not the quantity the paper
+means.
+
+**Enumeration.** For every figure (main and supplementary) compare what the
+IMAGE ITSELF prints — axis titles, inset labels, column headers, color-bar
+range, legend keys, panel letters — with (a) the legend text and (b) the
+manuscript's own name for that quantity. Break a legend into its claims: the
+quantity on each axis, the direction/units, the color scale, each inset's
+content, each column's method name and capitalization. Read the artwork's text
+layer (M25) or the rendered image; do not infer labels from the source code.
+
+**Finding rules.**
+- a printed label that names a different quantity than the legend/manuscript
+  (a legacy or internal column name, a wrong method, a swapped axis) →
+  `correctness`, fix by regenerating/correcting the artwork, never by adding
+  another explanatory clause to the legend;
+- a legend sentence whose only job is to explain a defect the reader sees
+  ("printed as …", "the legacy column name …", "which denotes …", "share the
+  extreme color", "the labels name these two terms") → `correctness` for the
+  figure and a `writing` finding for the sentence, with the same fix route;
+- a clamped color scale narrower than the printed data range → `correctness`
+  (the strongest cells cannot be told from the boundary cells);
+- a label broken across two words in the artwork ("Hetero clitic") → `Major`
+  writing/formatting finding with the intended word quoted;
+- a column order or capitalization that disagrees with the tables that define
+  the methods → `consistency`, named once per column.
+
+## M32 — A headline statistic must pass the correction the paper itself states
+
+**Purpose.** An abstract, cover letter or Results sentence that reports a
+significance level the Methods' own correction cannot support. The Methods may
+legitimately call a family of tests descriptive; the abstract may not convert
+them into a result. A p-value at or below the smallest value the design can
+produce is likewise not evidence of gradation.
+
+**Enumeration.** For every numeric claim on a claim-bearing surface (abstract,
+cover letter, Results highlights, figure legends): the test, the unit of
+analysis, n, the p-value, and — from Methods/Statistics — the correction and
+its family size. Compute the correction threshold (e.g. Holm: 0.05/family
+size) and the test's achievable floor (a one-sided signed-rank with n units
+cannot go below 2^−n). Check that the level in the abstract is the level the
+corrected test reaches, and that the abstract names the correction when it
+reports one (or states explicitly that the tests are descriptive).
+
+**Finding rules.**
+- a significance claim the stated correction cannot reach → `correctness`; the
+  abstraction is resolved by moving the caveat into the claim, or by removing
+  the claim from the abstract;
+- "unadjusted" numbers reported without the correction status the Methods
+  themselves state → `consistency` (same claim, two standards);
+- a p-value equal to the design's floor presented as a graded result →
+  `writing`, with the ceiling named;
+- a ranking the abstract states as a result while the Methods/Results call it
+  qualitative, or while the deposited comparison table orders the callers
+  differently → `correctness`, and the discrepant table is quoted as the other
+  side of the row.
+
+## M33 — Availability locators must be final, and pin ONE revision
+
+**Purpose.** "Not yet deposited", "will be deposited before publication",
+"available from the lead contact in the meantime", "archived on acceptance" and
+"on request" are not availability statements: the reader cannot retrieve
+anything, and a deposit that happens later is a promise, not a locator. Two
+different commits of the same repository across the data- and code-availability
+statements separate the numbers from the code that made them.
+
+**Enumeration.** Every Data/Code/Materials availability statement and every
+software-resource row: the locator (DOI, accession, repository + path), the
+pinned revision (commit, tag, version), and whether the locator resolves NOW.
+The pipeline seeds the mechanical half as `FMT-AV1` (future/conditional
+locator) and `FMT-AV2` (one repository, two commits) rows.
+
+**Finding rules.**
+- a future or conditional locator on any availability surface → `completeness`
+  (author action: deposit and cite, or name where the data already are);
+- the same repository pinned to two revisions across the statements →
+  `correctness` (name the revision the results came from and make every
+  statement agree);
+- an availability claim whose named archive holds none of the figure/table
+  sources the reader needs to reproduce a display item → `completeness`, with
+  the missing artifact named;
+- a tool/version list that omits a tool the Methods name, or a version that
+  contradicts the environment files → `correctness`.
+
+## M34 — Figure source data must cover exactly what the legend claims
+
+**Purpose.** A figure whose shipped source data carries MORE rows/datasets than
+the legend describes (an undocumented re-run, a second read length, a method
+the text says was not evaluated) or FEWER (a selection the legend never
+explains). The reader cannot tell which rows the figure's claim rests on.
+
+**Enumeration.** For every figure/table: the shipped source-data file(s) and
+their metadata; the distinct dataset/panel/method values they contain; the
+counts the legend states; the selection or exclusion rule the metadata itself
+records (a `*_exclusion_rule`, a filter note, a `failed`/`N/A` flag). Compare
+the four.
+
+**Finding rules.**
+- the legend's own count differs from the source data's distinct values →
+  `consistency`, naming both numbers;
+- the source metadata states a selection/exclusion rule the manuscript and
+  legend never state → `completeness` (the rule belongs in the legend or
+  Methods);
+- rows for a method/dataset the manuscript says was not run / not evaluated /
+  not available → `correctness`, and the numeric contradiction is a `M30` row
+  (the code-side `M30-NC` seed names it);
+- duplicate or undocumented dataset variants (a second read length, a re-run)
+  → `consistency` with the rows quoted.
+
+## M35 — Disclosures and provenance name the real thing
+
+**Purpose.** A disclosure that does not let a reader identify what was used:
+a generative-AI statement naming a CLIENT or a chat product instead of the
+MODEL (and its version), a statement placed where the venue does not ask for
+it, a third-party tool with no version/commit, or internal working material
+shipped inside the submission package.
+
+**Enumeration.** (a) The generative-AI/tools disclosure: the model name and
+version, the tool/version actually driven, the vendor, and the venue's required
+placement (usually Methods, with the acknowledgments repeating it if the
+journal asks). (b) Every named third-party tool/version in the Methods and in
+the resource table. (c) The package's file list, for pipeline-generated
+working material (ledgers, stage reports, internal review notes, chat links) —
+the pipeline seeds `PKG-1` rows for it.
+
+**Finding rules.**
+- a disclosure naming a client/CLI/"GPT" without a model+version, or a model
+  identifier that does not exist as written → `completeness` (name the model
+  and version, or name the interface AND the model);
+- the disclosure only in the acknowledgments when the venue's own guidelines
+  ask for Methods (or vice versa) → `consistency` with the guideline quoted;
+- the package ships internal working material → `completeness` for the shipped
+  file, never a silent deletion: the author decides whether to remove the file
+  or strip the text.
+
+## M36 — Zotero live-field refresh parity (a Word/Zotero refresh must not change the numbering)
+
+**Purpose.** The manuscript's citations are LIVE Zotero fields, and a field's
+rendered marker and the bibliography are CACHED results of the last time the
+document's citation processor ran. Edit the manuscript around them (merge two
+versions, move a paragraph, insert a citation by hand) and the cache goes stale:
+the numbers in the text and the order of the reference list no longer agree with
+the document's own citation order. Nothing in the document complains — but the
+first Word/Zotero **Refresh** re-derives the numbering from that order, rewriting
+the markers, reordering the bibliography and (because the style is also stored in
+the file) re-rendering the entries in whichever CSL style the document's
+preference stores name. A certified package can therefore come back from a
+refresh with different citation numbers and a differently formatted reference
+list, and individual fields can even be left behind by the refresh, so the
+document ships with markers that point at the wrong reference.
+
+**Enumeration.** The pipeline's code-side scan emits the machine-checkable half
+(every row is `fix=manual`, `protected=true` — a field result is never edited by
+the tools):
+
+* `FMT-Z1` — a citation marker whose number is not the cited item's rank in the
+  document's own citation order (a STALE marker: the refresh rewrites it, and
+  every later number in the text moves with it);
+* `FMT-Z2` — the bibliography entry at an item's rank does not describe that
+  item (the cached bibliography order disagrees with the citation order);
+* `FMT-Z3` — one cited item renders two different numbers, a number falls
+  outside 1..N, or a listed entry is never cited;
+* `FMT-Z4` — a field's stored marker disagrees with the text a reader sees (a
+  half-updated document);
+* `FMT-Z5` — the document carries conflicting Zotero style stores (the
+  `word/settings.xml` docVars copy and the `docProps/custom.xml` property), so a
+  refresh may re-render every entry in another style.
+
+The check reads only the DOCX: each citation field embeds its own `itemData`
+(title, creators, year), so no Zotero library or network is needed. The CLI
+`python3 paper_docx_format.py zotero-check FILE.docx` runs the same rows on a
+single file and exits non-zero on a high finding — run it after EVERY external
+refresh (in Word: `Zotero` → `Refresh`), and before flattening fields for a
+submission copy.
+
+**Artifact.** `review/artifacts/M36_zotero_parity.md`:
+`field | item key | number shown | rank | entry text | disposition` for the rows
+the scan seeds, plus the rows the session adds (e.g. a field the refresh skipped
+because its item could not be resolved).
+
+**Finding rules.**
+* any `FMT-Z1`/`FMT-Z2`/`FMT-Z4` row → `correctness`: the submitted numbering is
+  not the numbering a reader of the published file will see;
+* a `FMT-Z5` conflict → `consistency`: name both stores and the style the target
+  journal expects;
+* the resolution is ALWAYS: refresh in Word/Zotero (or fix the field), re-run
+  the scan, and only when the rows are gone may the fields be flattened
+  (`unlink_zotero_fields`) for the submission copy. **Never flatten a document
+  whose markers are stale** — that freezes the wrong numbering;
+* a refresh that changes numbers or the reference formatting is not itself a
+  defect; a refresh that leaves a row behind is.
+
+Validation: M36 exists because a certified package's citation numbers — and the
+reference list they point at — can be rewritten by a routine author action
+outside the pipeline, and nothing in the checklist compared the rendered
+numbering with the document's own citation order.
+
+Validation: M31–M35 exist because the mechanical sweeps cannot judge what a
+figure prints, what a correction can support, whether a locator resolves, what
+a source file actually contains, or whether a disclosure names the real model —
+and in each case a real submission shipped the defect.
+
 ## New code-side rule ids the sweeps now emit
 
 | rule | meaning | tier |
@@ -1557,6 +1766,21 @@ figure-vs-raw-data conflict to luck.
 | `FMT-T9g` | a LaTeX value+unit outside siunitx (`\qty{}{}` / `\SI{}{}` / `\num{}`); `\code{}`, verbatim, URLs, citations, math and generated tables are exempt | finding |
 | `FMT-T9i` | mega-paragraph (`>250` words, non-Methods) | finding |
 | `FMT-T9j` | two term families competing for one concept (CN/CNV, simulate/emulate) | finding |
+| `FMT-R1` | reference entry whose journal/volume field is malformed ("Volume 11-2020") | finding |
+| `FMT-R2` | reference entry ending at a bare "(YEAR)." with no venue, locator or publisher | finding |
+| `FMT-R3` | software/repository citation with no version, release or DOI | finding |
+| `FMT-R4` | bioRxiv/medRxiv-style identifier carrying a DOI outside the server's `10.1101/` prefix | finding |
+| `FMT-R5` | reference is a preprint or a trial-in-progress abstract (profile-gated: `references.flag_preprints`) | finding |
+| `FMT-O1` | a numbered display item is first cited out of order (profile-gated: `numbering: "citation"`) | finding |
+| `FMT-X2` | front-matter glue: an e-mail/label fused to the word before or after it, or no space after a label's colon | finding |
+| `FMT-L1` | another publisher's boilerplate phrase the profile lists (`leftover_phrases`) | finding |
+| `FMT-AV1` | availability statement points at a future/conditional locator ("not yet deposited", "available from the lead contact", "on request") | finding |
+| `FMT-AV2` | one repository pinned to two revisions across the availability statements | finding |
+| `FMT-PDF1` | the PDF renders the Adobe "Please wait…" XFA placeholder, not its content | finding |
+| `FMT-PDF2` | an XFA/LiveCycle form with no non-empty data value (an unfilled required form) | finding |
+| `FMT-PDF3` | a PDF with no extractable text at all | finding |
+| `PKG-1` | a shipped package file carries internal working material (an internal review-session URL, the pipeline's ledger/stage report, a stage note) | finding |
+| `M30-NC` | a written "not run / no output" claim a shipped table contradicts (M30's non-numeric half) | finding |
 
 Every seeded row carries its `tier` (`finding` / `advisory`); the disposition
 bar above applies hardest to the `finding` tier.
@@ -1591,7 +1815,7 @@ over attention.
 ## D0 — Dedup base
 
 From PRIOR build two indexes (`OUT2/known_index.md`):
-- **KNOWN-CLASSES**: the 35 check IDs (M1–M30, J1–J5) with one-line descriptions.
+- **KNOWN-CLASSES**: the 41 check IDs (M1–M36, J1–J5) with one-line descriptions.
 - **KNOWN-INSTANCES**: every prior finding as `id | class | location | evidence quote`.
 
 Anything matching a KNOWN-INSTANCE (same class + same location + same
@@ -1696,9 +1920,14 @@ Number proposals continuing from the highest existing sweep number. M18
 are reserved and defined in `sweeps.md`; M21–M24 were adopted from earlier
 discovery rounds, M25–M29 are the rewrite-parity checks (artwork/text
 parity, house-style conventions, claim→evidence coverage, sibling-definition
-symmetry, caption-promise parity), and M30 is the source-hierarchy
-reconciliation (a written claim against the code/raw data that produced it).
-Proposals therefore start at M31.
+symmetry, caption-promise parity), M30 is the source-hierarchy
+reconciliation (a written claim against the code/raw data that produced it), and M31–M35
+are the EVIDENCE-INTEGRITY checks (artwork-versus-legend consistency, a headline
+statistic against the correction the paper states, availability-locator finality,
+figure-source-data coverage, disclosure/provenance completeness), and M36 is the
+Zotero live-field refresh parity check (a stale citation marker or bibliography
+order a Word/Zotero refresh would rewrite).
+Proposals therefore start at M37.
 These are PROPOSALS: the user validates them; only validated ones get
 appended to `references/sweeps.md`. This is the feedback loop — no static
 checklist can be complete, but each discovered miss converts into a permanent

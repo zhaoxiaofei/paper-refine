@@ -323,6 +323,15 @@
     "Key resources",
     "Key resources table"
   ],
+  "leftover_phrases": [
+    "lead contact",
+    "this study did not generate new unique reagents",
+    "requests for resources"
+  ],
+  "numbering": "citation",
+  "references": {
+    "flag_preprints": true
+  },
   "length_limits": {
     "source": "https://www.nature.com/nbt/content (checked 2026-10-01), Article format: abstract <= 150 words, unreferenced; main text <= 3,000 words excluding abstract, Methods, references and figure legends",
     "abstract": {

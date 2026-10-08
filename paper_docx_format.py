@@ -94,7 +94,9 @@ import struct
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import zipfile
+import zlib
 from collections import Counter, defaultdict
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -153,6 +155,17 @@ POLICY_DEFAULTS = {
     # The venue's FIGURE rule (see display_item_rows / FIGURE_CAPTION_RE): {} =
     # this format policy declares no figure rule, so the scan reports none.
     "figures": {},
+    # Display-item NUMBERING ("citation" = first-mention order, the rule both
+    # shipped venues state; "" = the venue states none, so FMT-O1 reports
+    # nothing). The rule is about the venue's own numbering convention, so a
+    # profile that does not declare it gets no rows.
+    "numbering": "",
+    # Another publisher's boilerplate the venue's profile lists as a leftover
+    # (FMT-L1). [] = this profile declares none.
+    "leftover_phrases": [],
+    # Reference-entry policy (rules FMT-R1..R5). FMT-R1..R4 are objective shape
+    # defects and always run; this block adds the venue's own preference.
+    "references": {},                   # {"flag_preprints": true}
 }
 
 JOURNAL_RE = re.compile(
@@ -681,9 +694,25 @@ def zotero_report_for_docx(path) -> dict:
     if not xmls:
         return zotero_field_report("")
     reports = [(name, zotero_field_report(xml)) for name, xml in xmls]
+    # The live-field PARITY rows travel with the inventory (FMT-Z1..Z5): the
+    # stage gate compares them version to version, so a Word/Zotero refresh that
+    # renumbers the text is visible even though every field is still "present".
+    doc_xml = next((xml for name, xml in xmls if name == "word/document.xml"), "")
+    paras = [text_of(p[2]) for p in paragraphs(doc_xml)]
+    try:
+        with zipfile.ZipFile(path) as pkg:
+            style_parts = {n: pkg.read(n).decode("utf-8", "replace")
+                           for n in ("word/settings.xml", "docProps/custom.xml")
+                           if n in pkg.namelist()}
+    except (OSError, zipfile.BadZipFile, KeyError):
+        style_parts = {}
+    parity = zotero_parity_rows(doc_xml, paras, zotero_style_ids(style_parts))
     if len(reports) == 1:
-        return reports[0][1]
-    return _merge_zotero_reports(reports)
+        merged = reports[0][1]
+    else:
+        merged = _merge_zotero_reports(reports)
+    merged["parity_rows"] = parity
+    return merged
 
 
 def zotero_field_continuity_problems(base: dict, out: dict) -> dict:
@@ -744,6 +773,33 @@ def zotero_field_continuity_problems(base: dict, out: dict) -> dict:
                         "has no field baseline; repair the baseline before trusting it")
 
     base_text, out_text = base.get("text") or "", out.get("text") or ""
+    # ---- the live-field PARITY verdict (FMT-Z*) --------------------------------
+    # Every field can be present and structurally sound while its cached
+    # numbering is stale -- that is exactly what a Word/Zotero refresh rewrites.
+    # A version that INTRODUCES a high-severity parity row is an error (the
+    # refresh renumbered the citations inconsistently); one that replaces a
+    # broken state with a consistent one is a recorded repair, never silent.
+    def _high_parity(report: dict) -> int:
+        return sum(1 for r in (report.get("parity_rows") or [])
+                   if r.get("rule") in ("FMT-Z1", "FMT-Z2", "FMT-Z4"))
+
+    base_high, out_high = _high_parity(base), _high_parity(out)
+    if out_high > base_high:
+        sample = "; ".join(r.get("evidence", "")[:70]
+                           for r in (out.get("parity_rows") or [])
+                           if r.get("rule") in ("FMT-Z1", "FMT-Z2", "FMT-Z4"))[:240]
+        errors.append(f"{out_high - base_high} NEW stale-citation fault(s) (FMT-Z1/Z2/Z4): "
+                      f"the previous version had {base_high}, this one has {out_high} -- the "
+                      f"citation numbering no longer agrees with the document's own citation "
+                      f"order ({sample})")
+    elif base_high and not out_high:
+        warnings.append(f"the stale-citation faults of the previous version are GONE "
+                        f"({base_high} -> 0): the field state is now consistent with the "
+                        f"document's citation order")
+    elif out_high:
+        warnings.append(f"{out_high} stale-citation fault(s) (FMT-Z1/Z2/Z4) are carried in "
+                        f"this version: a Word/Zotero refresh will renumber the text and the "
+                        f"bibliography; refresh, re-run the scan, and only then flatten")
 
     def occurrences(hay: str, needle: str) -> int:
         if not needle:
@@ -1436,6 +1492,36 @@ FINDING_TIER_RULES = {
     "FMT-FG1",   # the figure carries no caption / legend next to it
     "FMT-FG2",   # the caption sits on the other side than the venue requires
     "FMT-FG3",   # the figure (or its collected legend) appears before the figures area
+    # Reference-entry shape (FMT-R1..R5): an editor/copyeditor raises a malformed
+    # or unretrievable reference, so the review must dispose every one; a venue
+    # whose profile does not ask for preprint rows simply gets no R5 row.
+    "FMT-R1",    # the journal/volume field is malformed ("Volume 11-2020")
+    "FMT-R2",    # the entry names no venue/locator at all
+    "FMT-R3",    # a repository/software citation with no version or DOI
+    "FMT-R4",    # a bioRxiv-style identifier carrying a foreign DOI prefix
+    "FMT-R5",    # a preprint / trial-in-progress abstract (profile-gated)
+    # Display-item order (FMT-O1): a numbered item is first cited out of order
+    # (profile-gated by `"numbering": "citation"`).
+    "FMT-O1",
+    # Glued front matter (FMT-X2): two words/addresses fused with no separator.
+    "FMT-X2",
+    # Publisher leftovers (FMT-L1): the profile's own list of another
+    # publisher's boilerplate phrases.
+    "FMT-L1",
+    # Availability statements (FMT-AV1/A2): a future/conditional locator, or one
+    # repository pinned to two commits across the statements.
+    "FMT-AV1",
+    "FMT-AV2",
+    # Zotero live-field refresh parity (FMT-Z1..FMT-Z5): a stale citation
+    # marker, a bibliography order that disagrees with the citation order, a
+    # cited item with two numbers, a half-updated field, or two conflicting
+    # style stores in one document. An editor (and the next Word/Zotero refresh)
+    # acts on every one, and only Zotero can re-render them.
+    "FMT-Z1",
+    "FMT-Z2",
+    "FMT-Z3",
+    "FMT-Z4",
+    "FMT-Z5",
 }
 
 
@@ -2730,6 +2816,114 @@ def code_literal_rows(sources: list, limit: int = 200, skip_name=None) -> list:
     return rows
 
 
+# --------------------------------------------------------------------------
+# M30, the NON-NUMERIC half: a written NEGATIVE claim against the shipped
+# tables' own VALUES.
+#
+# M30 enumerated only numbers, so the hierarchy's detection side never saw the
+# other direction: the manuscript says a method "could not be run" (or produced
+# no output / was not evaluated / was excluded) while the figure's own source
+# data ships rows FOR that method with finite values. That is exactly the
+# contradiction the hierarchy exists to resolve (raw data > manuscript prose),
+# and nothing compared the two. The rows below pair such a sentence with the
+# table rows that contradict it. A token that appears in the sentence only as an
+# ordinary word (an author's surname, a place) is filtered by requiring the
+# token to be a VALUE of a tool-like column (header hint) or a repeated
+# categorical value of a small-cardinality column.
+# --------------------------------------------------------------------------
+
+NEGATIVE_CLAIM_RE = re.compile(
+    r"(?i)\b(?:could\s+not\s+be\s+(?:run|executed|evaluated|included|applied)|"
+    r"was\s+not\s+run|were\s+not\s+run|not\s+(?:run|evaluated|included)|"
+    r"did\s+not\s+produce\s+(?:any\s+)?output|produced\s+no\s+output|"
+    r"failed\s+to\s+produce\s+(?:any\s+)?output|"
+    r"could\s+not\s+be\s+assessed|is\s+not\s+evaluated|are\s+not\s+evaluated|"
+    r"was\s+excluded|were\s+excluded)\b")
+TABLE_TOOL_HEADER_RE = re.compile(
+    r"(?i)^\s*(?:tool|method|caller|software|pipeline|package|program|algorithm|"
+    r"model|scorer|name)\s*$")
+TABLE_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.\-]{1,24}$")
+
+
+def table_value_tokens(tables: list, max_tokens: int = 400, min_rows: int = 4) -> dict:
+    """{value token -> "column 'tool' in file X"} for tool-like table columns.
+
+    Two column shapes qualify: a header that names a tool/method/caller field,
+    and any column whose values are short, repeated, and few (a categorical
+    column). Free-text columns never contribute tokens.
+    """
+    tokens = {}
+    for name, text in tables or []:
+        header, body = _simple_table(text)
+        if header is None or len(body) < min_rows:
+            continue
+        width = min(len(header), max(len(r) for r in body))
+        for c in range(width):
+            values = [str(r[c]).strip() for r in body if c < len(r) and str(r[c]).strip()]
+            if not values:
+                continue
+            distinct = set(values)
+            tool_like = bool(TABLE_TOOL_HEADER_RE.match(str(header[c])))
+            categorical = (len(distinct) <= 40 and len(distinct) < len(values)
+                           and all(len(v) <= 24 for v in distinct))
+            if not (tool_like or categorical):
+                continue
+            for v in sorted(distinct):
+                if not TABLE_TOKEN_RE.match(v) or v.lower() in ("true", "false", "nan", "inf"):
+                    continue
+                key = v.lower()
+                entry = (tool_like, f"value {v!r} of column {header[c]!r} in {name}")
+                # A tool-like column wins over a categorical one for the same
+                # token: the row exists to point at the method's own rows.
+                if key not in tokens or (entry[0] and not tokens[key][0]):
+                    tokens[key] = entry
+    out = {}
+    for key in sorted(tokens)[:max_tokens]:
+        out[key] = tokens[key]
+    return out
+
+
+def negative_claim_rows(texts: list, tables: list, limit: int = 40) -> list:
+    """M30 seed: a "not run / no output" claim a shipped table contradicts."""
+    tokens = table_value_tokens(tables)
+    if not tokens:
+        return []
+    rows, seen = [], set()
+    for text in texts or []:
+        s = re.sub(r"\s+", " ", str(text or "")).strip()
+        if not s:
+            continue
+        for m in NEGATIVE_CLAIM_RE.finditer(s):
+            sentence = s[max(0, m.start() - 200):m.end() + 200]
+            lowered = sentence.lower()
+            hits = []
+            for token, (tool_like, where) in tokens.items():
+                if not re.search(r"(?<![A-Za-z0-9])" + re.escape(token)
+                                 + r"(?![A-Za-z0-9])", lowered):
+                    continue
+                hits.append((0 if tool_like else 1, token, where))
+            # One sentence usually names ONE method and several of the table's
+            # other categorical values (the cohort, the cell line). Report the
+            # tool-like tokens first and cap the sentence's rows, so the seed
+            # names the contradiction instead of the whole column.
+            for _rank, token, where in sorted(hits)[:2]:
+                key = (token, where, sentence[:80])
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append({
+                    "rule": "M30-NC", "severity": "medium",
+                    "claim": sentence[:220], "token": token, "producer": where,
+                    "detail": (f"the text says {token!r} was not run / produced no output while "
+                               f"a shipped table carries it ({where}); the hierarchy makes the "
+                               f"raw-data side authoritative -- either the table's rows are "
+                               f"stale and must be removed, or the written claim is wrong"),
+                })
+                if len(rows) >= limit:
+                    return rows
+    return rows
+
+
 def _cohort_reference_re(number: str):
     """The sentence shape that makes a written number a cohort SIZE."""
     num = re.escape(str(number))
@@ -3275,6 +3469,14 @@ def _fix_kind(rule: str, policy: dict) -> str:
     if rule in ("FMT-T6d", "FMT-T6e"):
         return "style-field"
     if rule in ("FMT-S2", "FMT-S4"):
+        return "manual"
+    if rule in ("FMT-R5", "FMT-AV1", "FMT-AV2") or rule.startswith("FMT-Z"):
+        # A preprint/trial-only reference, a future/conditional locator and two
+        # pinned revisions of one repository all need an AUTHOR decision (deposit
+        # the data, pin one commit, replace the citation): the code reports them
+        # and never edits around them. The Zotero field-state rows are the same:
+        # only Word/Zotero can re-render a citation field, and a field RESULT is
+        # never edited by this tool.
         return "manual"
     return "editorial"
 
@@ -4774,6 +4976,689 @@ def drawing_geometry_rows(part_xml: str, rels: dict, sizes: dict, doc: str,
     return rows, fixes
 
 
+# --------------------------------------------------------------------------
+# REFERENCE-ENTRY SHAPE (rules FMT-R1..FMT-R5).
+#
+# M10 enumerates every reference entry's SHAPE only as prose for the agent
+# ("does the entry name a venue, a year, a locator?"). A malformed entry then
+# ships because nothing mechanical ever read it: a journal field written
+# "Front. Genet. Volume 11-2020", a citation that stops at "(2013)." with no
+# venue at all, a software tool cited as a bare GitHub URL with no version, a
+# bioRxiv identifier carrying a DOI from another registration agency, and a
+# reference that is a preprint or a trial-in-progress abstract rather than a
+# published article. The five rows below enumerate exactly those shapes so the
+# review must dispose them (the preprint/trial row is profile-gated: a venue
+# that allows preprints gets no row).
+#
+# They read TEXT, never a field result: an entry inside a live Zotero field is
+# reported `fix=style-field` like every other reference-level row, because Word
+# and Zotero regenerate the visible list.
+# --------------------------------------------------------------------------
+
+# "Front. Genet. Volume 11-2020", "Volume 11-2020", "Vol. 11-2020": a volume
+# field glued to a year instead of "11, 565825 (2020)".
+REF_VOLUME_MALFORMED_RE = re.compile(
+    r"\bvol(?:ume)?\.?\s*\d+\s*[-\u2013\u2014]\s*(?:19|20)\d{2}\b", re.I)
+# A DOI anywhere in the entry (the identifier, not the resolver URL only).
+REF_DOI_RE = re.compile(r"\b10\.\d{4,9}/[^\s,;)\]]+")
+# The evidence a reference entry names SOME venue: a journal-like token, a
+# book/publisher, a preprint server, or any locator. Deliberately generous --
+# the row exists to catch an entry with NO venue at all, so a false "has a
+# venue" is a missed row, never a wrong one.
+REF_VENUE_HINT_RE = re.compile(
+    r"(?i)(?:"
+    r"doi:|10\.\d{4,9}/|https?://|www\.|"
+    r"\barXiv\b|\bbioRxiv\b|\bmedRxiv\b|\bPreprint\b|\bZenodo\b|\bFigshare\b|\bDryad\b|"
+    r"\b(?:journal|proceedings|press|publishing|springer|elsevier|wiley|plos|elife|"
+    r"frontiers|academic|university press|cold spring harbor|oxford)\b|"
+    r"\b(?:nature|science|cell|lancet|blood|bioinformatics|nucleic|genome|giga|gigascience|"
+    r"brief|immunol|methods|medicine|oncol|cancer|bioinform|genet|biol|biochem|biophys|"
+    r"commun|adv|rep|rev|lett|bull|proc|ann|arch|am|eur|int|mol|syst|clin|hum|"
+    r"sci|jco|n\s*engl)\b\s*[.,:]?|"
+    # a volume, page shape: "10, giab008", "16, 8777", "12, e431"
+    r"\b\d+\s*,\s*(?:e?\d+|[a-z]{2,}\d+)\b"
+    r")")
+REF_BARE_YEAR_END_RE = re.compile(r"\(\s*(?:19|20)\d{2}\s*\)\.?\s*$")
+REF_REPO_HOST_RE = re.compile(
+    r"\b(?:github\.com|gitlab\.com|bitbucket\.org|sourceforge\.net|codeberg\.org)\b", re.I)
+REF_VERSION_HINT_RE = re.compile(
+    r"(?i)(?:\bv?\d+\.\d+(?:\.\d+)?\b|\bcommit\b|\bversion\b|\brelease\b|"
+    r"\bdoi\b|\bzenodo\b|\bfigshare\b|\baccess(?:ed)?\b)")
+# A bioRxiv/medRxiv-style identifier: the server's YYYY.MM.DD.NNNNNN code (with
+# or without the server's name) must carry the server's own DOI prefix.
+REF_SERVER_CODE_RE = re.compile(r"\b(?:19|20)\d{2}\.\d{2}\.\d{2}\.\d{5,}\b")
+REF_PREPRINT_RE = re.compile(r"(?i)\b(?:bioRxiv|medRxiv|arXiv|Preprint)\b")
+REF_TRIAL_ABSTRACT_RE = re.compile(r"\bTPS\d{3,}\b")
+BIORXIV_DOI_PREFIX = "10.1101"
+
+
+def reference_entry_rows(paras: list, is_ref: list, policy: dict = None,
+                         limit: int = 80) -> list:
+    """FMT-R1..R5: malformed / unsupported reference-entry shapes.
+
+    `paras` are paragraph texts, `is_ref` the parallel "this is a reference
+    entry" flags. Rows are ordered by paragraph and capped; each carries the
+    entry's first ~120 characters as evidence so the reviewer can find it.
+    """
+    rows = []
+    policy = policy or {}
+    ref_policy = policy.get("references") or {}
+    flag_preprints = bool(ref_policy.get("flag_preprints"))
+
+    def entry_ref(idx: int) -> str:
+        return f"reference entry at paragraph {idx}"
+
+    for idx, (text, is_reference) in enumerate(zip(paras or [], is_ref or [])):
+        if not is_reference:
+            continue
+        entry = re.sub(r"\s+", " ", str(text or "")).strip()
+        if len(entry.split()) < 4:
+            continue
+        head = entry[:120]
+        if REF_VOLUME_MALFORMED_RE.search(entry):
+            rows.append({"rule": "FMT-R1", "severity": "medium",
+                         "location": entry_ref(idx), "evidence": head,
+                         "detail": "the journal/volume field is malformed (a volume glued to a "
+                                   "year, e.g. 'Volume 11-2020'); a reference needs the venue's "
+                                   "own volume/page form (e.g. '11, 565825 (2020)')",
+                         "protected": False})
+        has_venue = bool(REF_VENUE_HINT_RE.search(entry))
+        if not has_venue and REF_BARE_YEAR_END_RE.search(entry):
+            rows.append({"rule": "FMT-R2", "severity": "medium",
+                         "location": entry_ref(idx), "evidence": head,
+                         "detail": "the entry ends at a bare '(YEAR).' and names no venue, "
+                                   "locator or publisher; an entry a reader cannot retrieve is "
+                                   "not a citation",
+                         "protected": False})
+        repo_only = (REF_REPO_HOST_RE.search(entry)
+                     and not REF_DOI_RE.search(entry)
+                     and not REF_PREPRINT_RE.search(entry))
+        if repo_only and not REF_VERSION_HINT_RE.search(entry):
+            rows.append({"rule": "FMT-R3", "severity": "low",
+                         "location": entry_ref(idx), "evidence": head,
+                         "detail": "a software/repository citation with no version, release or "
+                                   "DOI; cite the used version (a release tag, a commit, or the "
+                                   "archived DOI) so the reader can retrieve the same code",
+                         "protected": False})
+        if REF_SERVER_CODE_RE.search(entry):
+            prefix_match = REF_DOI_RE.search(entry)
+            doi = prefix_match.group(0) if prefix_match else ""
+            if not doi.startswith(BIORXIV_DOI_PREFIX + "/"):
+                rows.append({"rule": "FMT-R4", "severity": "medium",
+                             "location": entry_ref(idx), "evidence": head,
+                             "detail": "the entry carries a bioRxiv/medRxiv-style identifier "
+                                       f"({(REF_SERVER_CODE_RE.search(entry).group(0))}) but its "
+                                       f"DOI {'is ' + doi if doi else 'is missing'} instead of "
+                                       f"the server's own {BIORXIV_DOI_PREFIX}/ prefix",
+                             "protected": False})
+        if flag_preprints and (REF_PREPRINT_RE.search(entry)
+                               or REF_TRIAL_ABSTRACT_RE.search(entry)):
+            kind = ("a trial-in-progress abstract" if REF_TRIAL_ABSTRACT_RE.search(entry)
+                    else "a preprint")
+            rows.append({"rule": "FMT-R5", "severity": "low",
+                         "location": entry_ref(idx), "evidence": head,
+                         "detail": f"the entry is {kind}, not a published article, and this "
+                                   "venue's profile asks for a row on every one: confirm the "
+                                   "venue accepts it, or cite the published version",
+                         "protected": False})
+        if len(rows) >= limit:
+            break
+    return rows[:limit]
+
+
+# --------------------------------------------------------------------------
+# DISPLAY-ITEM ORDER (rule FMT-O1).
+#
+# A venue that numbers display items by first appearance (both shipped profiles
+# do) rejects a manuscript whose tables and figures are cited out of order: a
+# reader meets Table 4 before Table 1, and the numbering the submission system
+# builds disagrees with the file. Nothing in the checklist compared the order
+# of the first call-outs with the numbers themselves; M3 only asks whether a
+# call-out exists. This is a text rule (the numbers are read from the prose, not
+# from the caption blocks), profile-gated by `"numbering": "citation"`.
+# --------------------------------------------------------------------------
+
+NUMBERING_MENTION_RES = {
+    "figure": re.compile(
+        r"(?i)\b(?:figure|fig\.?|figs\.?)\s*(S?\d+[A-Za-z]?|[IVXLC]+)\b"),
+    "table": re.compile(
+        r"(?i)\btables?\s*(S?\d+[A-Za-z]?|[IVXLC]+)\b"),
+}
+SUPPLEMENTARY_ITEM_RE = re.compile(r"^S\d+", re.I)
+ROMAN_NUMERAL_RE = re.compile(r"^[IVXLC]+$")
+
+
+def _roman_value(token: str):
+    vals = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100}
+    total, prev = 0, 0
+    for ch in reversed(token.upper()):
+        if ch not in vals:
+            return None
+        v = vals[ch]
+        total = total - v if v < prev else total + v
+        prev = max(prev, v)
+    return total or None
+
+
+def _display_item_key(kind: str, token: str):
+    """(family, number) for a display-item mention; None when unparsable."""
+    supp = bool(SUPPLEMENTARY_ITEM_RE.match(token))
+    digits = re.match(r"^S?(\d+)", token, re.I)
+    if digits:
+        return (kind, "supp" if supp else "main", int(digits.group(1)), token.upper())
+    if ROMAN_NUMERAL_RE.match(token):
+        return (kind, "supp" if supp else "main", _roman_value(token), token.upper())
+    return None
+
+
+def display_order_rows(paras: list, is_ref: list = None, is_caption: list = None,
+                       is_heading: list = None, order_policy: bool = False) -> list:
+    """FMT-O1: a numbered display item is first mentioned out of numeric order.
+
+    Only the FIRST call-out of every item counts (a later repeat is free), the
+    reference list and the caption/legend blocks are skipped (a caption is not a
+    call-out), and the main and supplementary families are compared separately:
+    a supplementary figure may legitimately follow a main figure of any number.
+    """
+    if not order_policy:
+        return []
+    is_ref = list(is_ref or [False] * len(paras))
+    first = {}
+    for idx, text in enumerate(paras or []):
+        if idx < len(is_ref) and is_ref[idx]:
+            continue
+        if is_caption and idx < len(is_caption) and is_caption[idx]:
+            continue
+        if is_heading and idx < len(is_heading) and is_heading[idx]:
+            continue
+        for kind, pattern in NUMBERING_MENTION_RES.items():
+            for m in pattern.finditer(str(text or "")):
+                key = _display_item_key(kind, m.group(1))
+                if key and key[2] is not None and key not in first:
+                    first[key] = idx
+    rows = []
+    for (kind, family) in sorted({(k[0], k[1]) for k in first}):
+        seq = sorted(((idx, key) for key, idx in first.items()
+                      if key[0] == kind and key[1] == family))
+        seen_after = []
+        for idx, key in seq:
+            for prev_idx, prev_key in seen_after:
+                if key[2] < prev_key[2]:
+                    rows.append({
+                        "rule": "FMT-O1", "severity": "medium", "location": f"p{idx}",
+                        "evidence": f"{key[3]} first cited at p{idx} after {prev_key[3]} "
+                                    f"(p{prev_idx})",
+                        "detail": (f"the {kind} numbering does not follow the order of first "
+                                   f"citation: {prev_key[3]} is cited before {key[3]}"),
+                        "protected": False})
+                    break
+            seen_after.append((idx, key))
+    return rows
+
+
+# --------------------------------------------------------------------------
+# CORRESPONDENCE / GLUED-FURNITURE (rule FMT-X2).
+#
+# A front-matter edit that deletes a separator leaves two words fused with no
+# space -- "* Correspondence:Zhen Xie, lead contactzhenxie@tsinghua.edu.cn" is
+# what the reader and the submission system see. The address itself is a valid
+# e-mail, so the bibliography/identifier checks pass it; the defect is the
+# MISSING SPACE around it, which no rule looked for.
+# --------------------------------------------------------------------------
+
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+EMAIL_GLUE_BEFORE_RE = re.compile(r"[A-Za-z0-9]{2,}$")
+FURNITURE_LABEL_RE = re.compile(
+    r"(?i)\b(?:correspondence|corresponding author|e-?mail|contact|author list|"
+    r"affiliations?|orcid|keywords?)\s*:")
+
+
+def correspondence_glue_rows(paras: list, is_ref: list = None, limit: int = 12) -> list:
+    """FMT-X2: a fused word/address or a label with no space after its colon."""
+    rows = []
+    is_ref = list(is_ref or [False] * len(paras))
+    for idx, text in enumerate(paras or []):
+        if idx < len(is_ref) and is_ref[idx]:
+            continue
+        s = str(text or "")
+        evidence = None
+        for m in EMAIL_RE.finditer(s):
+            before = s[:m.start()]
+            if EMAIL_GLUE_BEFORE_RE.search(before):
+                evidence = (f"{s[max(0, m.start() - 24):m.end() + 12]!r}: the address is glued "
+                            f"to the word before it")
+                break
+            after = s[m.end():m.end() + 1]
+            if after and after.isalpha():
+                evidence = (f"{s[max(0, m.start() - 12):m.end() + 16]!r}: the address is glued "
+                            f"to the text after it")
+                break
+        if evidence is None:
+            for m in FURNITURE_LABEL_RE.finditer(s):
+                rest = s[m.end():m.end() + 1]
+                if rest and not rest.isspace() and evidence is None:
+                    # An URL scheme right after a colon is not glue.
+                    if s[m.end():m.end() + 2].startswith("//"):
+                        continue
+                    evidence = (f"{s[max(0, m.start() - 6):m.end() + 24]!r}: no space after the "
+                                f"label's colon")
+                    break
+        if evidence:
+            rows.append({"rule": "FMT-X2", "severity": "medium", "location": f"p{idx}",
+                         "evidence": evidence,
+                         "detail": "two words/addresses are fused with no separator; a "
+                                   "front-matter edit removed a space (or a word)",
+                         "protected": False})
+            if len(rows) >= limit:
+                break
+    return rows
+
+
+# --------------------------------------------------------------------------
+# PUBLISHER LEFTOVERS (rule FMT-L1).
+#
+# A manuscript transferred from another publisher's template keeps that
+# publisher's boilerplate: "lead contact", "this study did not generate new
+# unique reagents", "requests for resources". Which phrases are leftovers is a
+# VENUE fact (the profile declares them in `leftover_phrases`; a profile that
+# declares none gets no row), and the row is a finding the review must dispose
+# -- an editor reading a Frontiers submission that says "lead contact" sees a
+# manuscript prepared for another journal.
+# --------------------------------------------------------------------------
+
+
+def leftover_phrase_rows(paras: list, phrases, is_ref: list = None,
+                         limit: int = 40) -> list:
+    """FMT-L1: a phrase the venue's profile lists as another publisher's."""
+    wanted = [str(p).strip() for p in (phrases or []) if str(p).strip()]
+    if not wanted:
+        return []
+    rows = []
+    is_ref = list(is_ref or [False] * len(paras))
+    for idx, text in enumerate(paras or []):
+        if idx < len(is_ref) and is_ref[idx]:
+            continue
+        s = str(text or "")
+        for phrase in wanted:
+            m = re.search(r"(?i)(?<![A-Za-z0-9])" + re.escape(phrase)
+                          + r"(?![A-Za-z0-9])", s)
+            if not m:
+                continue
+            rows.append({"rule": "FMT-L1", "severity": "low", "location": f"p{idx}",
+                         "evidence": (f"{s[max(0, m.start() - 30):m.end() + 30]!r}: "
+                                      f"{phrase!r}"),
+                         "detail": f"{phrase!r} is another publisher's boilerplate, not this "
+                                   f"venue's; remove it or replace it with the venue's own "
+                                   f"statement",
+                         "protected": False})
+            break
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+# --------------------------------------------------------------------------
+# AVAILABILITY STATEMENTS (rules FMT-AV1/A2).
+#
+# The availability contract already checks that a locator EXISTS and that a
+# DOI/accession resolves. Two shapes slip through: a locator that is FUTURE or
+# CONDITIONAL ("not yet deposited", "will be deposited before publication",
+# "available from the lead contact in the meantime", "on request"), and the
+# same repository pinned to TWO commits across the data- and code-availability
+# statements -- which silently separates the numbers from the code that made
+# them. Both are mechanical text shapes, so both become rows.
+# --------------------------------------------------------------------------
+
+AVAIL_UNRESOLVED_RES = (
+    ("not yet deposited", re.compile(r"(?i)\bnot\s+yet\s+deposited\b")),
+    ("to be deposited", re.compile(r"(?i)\b(?:to|will)\s+be\s+deposited\b")),
+    ("deposited ... before publication",
+     re.compile(r"(?i)\bdeposit(?:ed|ing)?\b[^.]{0,80}\bbefore\s+publication\b")),
+    ("available from the lead contact",
+     re.compile(r"(?i)\bavailable\s+from\s+the\s+(?:lead\s+)?contact\b")),
+    ("available on request",
+     re.compile(r"(?i)\bavailable\s+(?:up)?on\s+(?:reasonable\s+)?request\b")),
+    ("available from the authors",
+     re.compile(r"(?i)\bavailable\s+from\s+the\s+authors\b")),
+    ("in the meantime", re.compile(r"(?i)\bin\s+the\s+meantime\b")),
+    ("archived on acceptance",
+     re.compile(r"(?i)\barchived\b[^.]{0,60}\b(?:on|upon|after)\s+acceptance\b")),
+)
+REPO_PIN_RE = re.compile(
+    r"https?://(?:www\.)?(github\.com|gitlab\.com|bitbucket\.org|codeberg\.org)/"
+    r"([A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(?:/tree/([0-9a-fA-F]{7,40}))?", re.I)
+
+
+def availability_rows(paras: list, is_ref: list = None, limit: int = 20) -> list:
+    """FMT-AV1 (future/conditional locator) and FMT-AV2 (two pinned commits)."""
+    rows = []
+    is_ref = list(is_ref or [False] * len(paras))
+    pins = {}
+    for idx, text in enumerate(paras or []):
+        if idx < len(is_ref) and is_ref[idx]:
+            continue
+        s = str(text or "")
+        for label, pattern in AVAIL_UNRESOLVED_RES:
+            m = pattern.search(s)
+            if not m:
+                continue
+            rows.append({"rule": "FMT-AV1", "severity": "medium", "location": f"p{idx}",
+                         "evidence": (f"{s[max(0, m.start() - 30):m.end() + 40]!r}: {label}"),
+                         "detail": "the availability statement points at a future or "
+                                   "conditional locator; a submission must name where the data "
+                                   "and code ARE, not where they will be",
+                         "protected": False})
+            break
+        for m in REPO_PIN_RE.finditer(s):
+            repo = f"{m.group(1).lower()}/{m.group(2)}"
+            commit = m.group(3)
+            if commit:
+                pins.setdefault(repo, []).append((idx, commit[:12]))
+    for repo, found in sorted(pins.items()):
+        commits = {c for _i, c in found}
+        if len(commits) > 1:
+            where = ", ".join(f"{c} (p{i})" for i, c in found[:4])
+            rows.append({"rule": "FMT-AV2", "severity": "medium",
+                         "location": f"{repo}", "evidence": where,
+                         "detail": "the same repository is pinned to more than one commit "
+                                   "across the availability statements; the pinned code and the "
+                                   "pinned results must be the same revision",
+                         "protected": False})
+    return rows[:limit]
+
+
+# --------------------------------------------------------------------------
+# ZOTERO LIVE-FIELD REFRESH PARITY (rules FMT-Z1..FMT-Z5).
+#
+# The pipeline byte-preserves live Zotero fields (it never refreshes them), so
+# whatever NUMBERING the upstream document carried travels into the certified
+# package. A Word/Zotero "Refresh" then re-derives the numbering from the
+# document's own citation order: every marker whose cached number disagrees with
+# that order is rewritten, the bibliography is regenerated, and the reference
+# FORMATTING follows whichever CSL style the document's preference store names.
+# That is how a certified package whose markers were stale came back with
+# different numbers, a reordered bibliography and a different reference style.
+#
+# Everything below is checkable in the DOCX ALONE -- each citation field embeds
+# its own `citationItems[].itemData`, and the bibliography entries are ordinary
+# paragraphs -- so the check needs no Zotero library and no network:
+#   FMT-Z1  a citation marker whose number is not the item's own rank in the
+#           document's citation order (a STALE marker; the refresh will change
+#           it, and every later reference number in the text shifts);
+#   FMT-Z2  the bibliography entry at an item's rank does not describe that item
+#           (the cached bibliography order disagrees with the citation order);
+#   FMT-Z3  one item renders two different numbers, or a cited number is outside
+#           1..N (the citation set is not a bijection onto the entry list);
+#   FMT-Z4  a field's stored `formattedCitation` disagrees with its VISIBLE text
+#           (a half-updated document: Word shows a different number than the one
+#           the next refresh will write);
+#   FMT-Z5  the document carries CONFLICTING Zotero style identifiers (the
+#           docVars copy in `word/settings.xml` vs the `docProps/custom.xml`
+#           property), so a refresh may re-render every entry in another CSL
+#           style than the one the package was built with.
+# --------------------------------------------------------------------------
+
+ZOTERO_STYLE_REF_RE = re.compile(r"https?://www\.zotero\.org/styles/([A-Za-z0-9._\-]+)")
+ZOTERO_DOCVAR_RE = re.compile(r'w:name="(ZOTERO_PREF\d*)"[^>]*w:val="([^"]*)"')
+
+
+def zotero_style_ids(parts: dict) -> dict:
+    """{part name -> style id} for every Zotero preference store in a package.
+
+    `parts` is {part name: xml text}. Zotero records the document's CSL style in
+    `word/settings.xml` (`w:docVars`) and, in newer versions, again in
+    `docProps/custom.xml`; the two can disagree after a version upgrade or a
+    partial re-save, and the next refresh then renders in the OTHER style.
+    """
+    found = {}
+    for name, xml in (parts or {}).items():
+        if not isinstance(xml, str):
+            continue
+        m = ZOTERO_STYLE_REF_RE.search(xml)
+        if m:
+            found[name] = m.group(1)
+    return found
+
+
+def _zotero_marker_text(marker: str) -> str:
+    """A citation field's `formattedCitation` LaTeX-ish marker as visible text.
+
+    Zotero stores the marker with its own escapes (`\\super 3,39\\nosupersub{}`,
+    `19\\uc0\\u8211{}23`). Normalizing it is what lets the stored instruction be
+    compared with the runs a reader sees.
+    """
+    s = str(marker or "")
+    s = re.sub(r"\\nosupersub\{\}", "", s)
+    s = re.sub(r"\\super\s*", "", s)
+    s = re.sub(r"\\uc0", "", s)
+    # Zotero writes its unicode escapes as DECIMAL codepoints (`\u8211{}` is the
+    # en dash U+2013), like RTF/Word field syntax -- not hexadecimal.
+    s = re.sub(r"\\u(\d{1,5})\{\}", lambda m: chr(int(m.group(1))), s)
+    s = re.sub(r"\{\}", "", s)
+    s = re.sub(r"\\(?:emph|textit|textbf|textsuperscript)\{([^{}]*)\}", r"\1", s)
+    return re.sub(r"\s+", "", s)
+
+
+def _marker_numbers(marker: str, text: str = None) -> list:
+    """The numbers a numeric citation marker names, en-dash ranges expanded."""
+    raw = text if text is not None else _zotero_marker_text(marker)
+    out = []
+    for chunk in re.split(r"[;]", str(raw or "")):
+        for part in chunk.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            m = re.fullmatch(r"(\d+)\s*[\u2013\u2014-]\s*(\d+)", part)
+            if m:
+                a, b = int(m.group(1)), int(m.group(2))
+                if a <= b and b - a <= 80:
+                    out.extend(range(a, b + 1))
+                continue
+            m = re.fullmatch(r"\d+", part)
+            if m:
+                out.append(int(part))
+    return out
+
+
+ZOTERO_TOKEN_STOPWORDS = {"the", "and", "for", "with", "from", "into", "using", "their",
+                          "this", "that", "single", "cell", "cells", "human", "data"}
+
+
+def _entry_describes_item(entry: str, item: dict) -> bool:
+    """Does a bibliography ENTRY text describe the citation's embedded itemData?
+
+    A first-author family name or a distinctive title token is enough: the row
+    exists to catch an entry that is a different WORK (the mis-numbered
+    bibliography), never to grade the reference formatting.
+    """
+    if not entry or not isinstance(item, dict):
+        return True                      # nothing to judge: never a false row
+    hay = re.sub(r"[^a-z0-9 ]+", " ", unicodedata.normalize(
+        "NFKD", str(entry)).lower())
+    creators = item.get("author") or item.get("editor") or []
+    if isinstance(creators, list) and creators:
+        first = creators[0] if isinstance(creators[0], dict) else {}
+        family = str(first.get("family") or first.get("literal") or "").strip()
+        if family:
+            token = re.sub(r"[^a-z0-9 ]+", " ", family.lower()).split()
+            if token and token[0] in hay:
+                return True
+    title = str(item.get("title") or "")
+    tokens = [t for t in re.sub(r"[^a-z0-9 ]+", " ", title.lower()).split()
+              if len(t) > 4 and t not in ZOTERO_TOKEN_STOPWORDS]
+    if tokens and any(t in hay for t in tokens[:8]):
+        return True
+    return False
+
+
+def zotero_citation_state(xml: str, para_texts: list = None,
+                          style_ids: dict = None) -> dict:
+    """The live-field citation state of one document.xml (see the FMT-Z rules)."""
+    report = zotero_field_report(xml)
+    fields = []
+    for f in report["fields"]:
+        if f["kind"] != "item":
+            continue
+        js = None
+        try:
+            m = re.search(r"\{.*\}", f["instr"], re.S)
+            js = json.loads(m.group(0)) if m else None
+        except (ValueError, TypeError):
+            js = None
+        props = (js or {}).get("properties") or {}
+        marker = props.get("formattedCitation") or props.get("formatted citation") or ""
+        items, data = [], []
+        for ci in (js or {}).get("citationItems") or []:
+            if not isinstance(ci, dict):
+                continue
+            uri = (ci.get("uris") or [ci.get("uri") or ""])[0]
+            items.append(str(uri or ci.get("id") or ""))
+            data.append(ci.get("itemData") or {})
+        fields.append({"citationID": f.get("citationID"), "marker": marker,
+                       "visible": f.get("visible_text") or "",
+                       "shown": _zotero_marker_text(marker),
+                       "numbers": _marker_numbers(marker),
+                       "items": items, "itemData": data, "begin": f.get("begin")})
+    order = {}
+    for f in fields:
+        for key in f["items"]:
+            order.setdefault(key, len(order) + 1)
+    entries = {}
+    for text in para_texts or []:
+        m = re.match(r"^\s*(\d+)\s*[\.\)]\s*(.+)$", str(text or ""))
+        if m:
+            entries.setdefault(int(m.group(1)), m.group(2).strip())
+    numeric = bool(fields) and sum(1 for f in fields if f["numbers"]) >= max(1, 0.6 * len(fields))
+    return {"fields": fields, "order": order, "entries": entries, "numeric": numeric,
+            "distinct_items": len(order),
+            "style_ids": dict(style_ids or {}), "report": report}
+
+
+def zotero_parity_rows(xml: str, para_texts: list = None, style_ids: dict = None,
+                       limit: int = 60) -> list:
+    """FMT-Z1..Z5: the live-field state a Word/Zotero refresh would rewrite."""
+    state = zotero_citation_state(xml, para_texts, style_ids)
+    if not state["fields"]:
+        return []
+    rows = []
+    order, entries = state["order"], state["entries"]
+    numeric = state["numeric"]
+    # FMT-Z1 -- a stale marker (the item's number is not its rank).
+    stale_items = set()
+    if numeric:
+        for f in state["fields"]:
+            pairs = list(zip(f["items"], f["numbers"]))
+            if len(pairs) != len(f["items"]) or len(f["numbers"]) != len(f["items"]):
+                continue                 # a marker whose shape cannot be paired: FMT-Z3 covers it
+            bad = [(k, order.get(k), n) for k, n in pairs if order.get(k) != n]
+            if not bad:
+                continue
+            stale_items.update(k for k, _r, _n in bad)
+            shown = ", ".join(f"item ...{str(k).split('/')[-1]} shows {n} (its rank is {r})"
+                              for k, r, n in bad[:3])
+            rows.append({"rule": "FMT-Z1", "severity": "high",
+                         "location": f"field {f['citationID']}", "evidence": shown,
+                         "detail": "the citation's cached NUMBER disagrees with the item's own "
+                                   "position in this document's citation order: the field is "
+                                   "STALE. A Word/Zotero refresh rewrites it (and reorders the "
+                                   "bibliography), so the submitted numbers are not the ones a "
+                                   "reader of the published version will see",
+                         "protected": True})
+            if len(rows) >= limit:
+                return rows
+    # FMT-Z2 -- the entry at the item's rank describes another work.
+    if entries and numeric:
+        for f in state["fields"]:
+            for key, data in zip(f["items"], f["itemData"]):
+                rank = order.get(key)
+                entry = entries.get(rank)
+                if not entry or _entry_describes_item(entry, data):
+                    continue
+                rows.append({"rule": "FMT-Z2", "severity": "high",
+                             "location": f"reference {rank}",
+                             "evidence": f"cited item title {str(data.get('title'))[:70]!r} vs "
+                                         f"entry {rank}: {entry[:70]!r}",
+                             "detail": "the bibliography entry at this cited item's number "
+                                       "describes a different work: the cached bibliography order "
+                                       "disagrees with the citation order, so every reader "
+                                       "lookup lands on the wrong reference",
+                             "protected": True})
+                if len(rows) >= limit:
+                    return rows
+    # FMT-Z3 -- one item showing two numbers, or a number outside 1..N.
+    seen = {}
+    for f in state["fields"]:
+        if len(f["numbers"]) != len(f["items"]):
+            continue
+        for key, n in zip(f["items"], f["numbers"]):
+            seen.setdefault(key, {}).setdefault(n, f["citationID"])
+    for key, numbers in sorted(seen.items()):
+        # A stale marker is already a FMT-Z1 row; this rule adds the *pairing*
+        # fault only where the ranks agreed but the numbers still differ (a
+        # subtler half-updated document), so the two do not double-report.
+        if len(numbers) > 1 and key not in stale_items:
+            rows.append({"rule": "FMT-Z3", "severity": "medium",
+                         "location": f"item ...{str(key).split('/')[-1]}",
+                         "evidence": "numbers " + ", ".join(
+                             f"{n} (field {c})" for n, c in sorted(numbers.items())[:4]),
+                         "detail": "the same cited item renders two different numbers in one "
+                                   "document: at least one field was not updated with the rest",
+                         "protected": True})
+    if numeric and state["distinct_items"]:
+        over = sorted({n for f in state["fields"] for n in f["numbers"]
+                       if n > state["distinct_items"]})
+        uncited = sorted(set(entries) - {n for f in state["fields"] for n in f["numbers"]}) \
+            if entries else []
+        if over:
+            rows.append({"rule": "FMT-Z3", "severity": "medium", "location": "numbering",
+                         "evidence": f"cited number(s) {over[:6]} exceed the "
+                                     f"{state['distinct_items']} distinct cited item(s)",
+                         "detail": "a citation number points outside the bibliography the "
+                                   "document's own citations define",
+                         "protected": True})
+        if uncited:
+            rows.append({"rule": "FMT-Z3", "severity": "low", "location": "bibliography",
+                         "evidence": f"entry number(s) {uncited[:6]} are never cited",
+                         "detail": "the cached bibliography lists an entry no citation marker "
+                                   "uses: the bibliography is stale (a refresh drops it, which "
+                                   "renumbers everything after it)",
+                         "protected": True})
+    # FMT-Z4 -- the stored marker and the visible runs disagree.
+    for f in state["fields"]:
+        if not f["shown"]:
+            continue
+        # Judge only a marker this normalization FULLY understands: after the
+        # handled commands are removed, any LaTeX left over (a locale note, a
+        # custom style) could look like a disagreement, so it is not judged.
+        residue = re.sub(
+            r"\\super\s*|\\nosupersub\{\}|\\uc0|\\u\d{1,5}\{\}|"
+            r"\\(?:emph|textit|textbf|textsuperscript)\{[^{}]*\}", "", str(f["marker"]))
+        if "\\" in residue:
+            continue
+        visible = re.sub(r"\s+", "", str(f.get("visible") or ""))
+        if visible and visible != f["shown"]:
+            rows.append({"rule": "FMT-Z4", "severity": "high",
+                         "location": f"field {f['citationID']}",
+                         "evidence": f"stored {f['shown']!r} vs visible {visible!r}",
+                         "detail": "the field's stored marker and the text a reader sees "
+                                   "disagree: the document was saved half-updated, and the next "
+                                   "refresh will change the visible number",
+                         "protected": True})
+    # FMT-Z5 -- conflicting Zotero style stores.
+    styles = state.get("style_ids") or {}
+    distinct = sorted(set(styles.values()))
+    if len(distinct) > 1:
+        where = "; ".join(f"{part} -> {sid}" for part, sid in sorted(styles.items()))
+        rows.append({"rule": "FMT-Z5", "severity": "medium", "location": "document preferences",
+                     "evidence": where,
+                     "detail": "the document carries more than one Zotero citation-style "
+                               "identifier; a refresh re-renders every entry in whichever store "
+                               "it honours, so the bibliography FORMAT can change (and no "
+                               "longer match the target journal's style) without any warning",
+                     "protected": True})
+    return rows[:limit]
+
+
 def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
                      sizes: dict = None, rels: dict = None) -> dict:
     rows = []
@@ -5044,6 +5929,67 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     para_is_ref = [elem_val(ppr_of(p[2]), "pStyle") == "Bibliography" for p in paras]
     para_is_head = [bool((elem_val(ppr_of(p[2]), "pStyle") or "").startswith("Heading"))
                     for p in paras]
+    # A caption/legend paragraph is not a display-item CALL-OUT: the ordering
+    # rule below (FMT-O1) reads the prose, so the caption blocks are excluded the
+    # same way the length scan excludes them from the main text.
+    para_is_caption = [bool(TABLE_CAPTION_RE.match(t) or FIGURE_CAPTION_RE.match(t)
+                            or TABLE_CAPTION_BARE_RE.match(t)
+                            or FIGURE_CAPTION_BARE_RE.match(t))
+                       for t in para_texts]
+    # Reference-entry shape (FMT-R1..R5), glued front matter (FMT-X2),
+    # publisher leftovers (FMT-L1) and the availability statements (FMT-AV1/A2)
+    # are RETRIEVABILITY/HYGIENE classes: they hold wherever the text appears
+    # (a supplementary file carries its own reference list and availability
+    # note, a cover letter can carry another publisher's boilerplate), so they
+    # run on every document the package scan opens.
+    for r in reference_entry_rows(para_texts, para_is_ref, policy):
+        rows.append({"rule": r["rule"], "severity": r["severity"], "document": doc,
+                     "location": r["location"], "evidence": r["evidence"],
+                     "detail": r["detail"], "fix": _fix_kind(r["rule"], policy),
+                     "protected": bool(r.get("protected")),
+                     "tier": tier_of(r["rule"])})
+    for r in correspondence_glue_rows(para_texts, para_is_ref):
+        rows.append({"rule": r["rule"], "severity": r["severity"], "document": doc,
+                     "location": r["location"], "evidence": r["evidence"],
+                     "detail": r["detail"], "fix": _fix_kind(r["rule"], policy),
+                     "protected": False, "tier": tier_of(r["rule"])})
+    for r in leftover_phrase_rows(para_texts, policy.get("leftover_phrases"),
+                                  para_is_ref):
+        rows.append({"rule": r["rule"], "severity": r["severity"], "document": doc,
+                     "location": r["location"], "evidence": r["evidence"],
+                     "detail": r["detail"], "fix": _fix_kind(r["rule"], policy),
+                     "protected": False, "tier": tier_of(r["rule"])})
+    for r in availability_rows(para_texts, para_is_ref):
+        rows.append({"rule": r["rule"], "severity": r["severity"], "document": doc,
+                     "location": r["location"], "evidence": r["evidence"],
+                     "detail": r["detail"], "fix": _fix_kind(r["rule"], policy),
+                     "protected": False, "tier": tier_of(r["rule"])})
+    # The live Zotero field state (FMT-Z1..Z4): a document whose citation
+    # markers/bibliography disagree with its own citation order is rewritten by
+    # the next Word/Zotero refresh, so it must never be treated as clean. Every
+    # row is a field-held fact, hence `protected` (the fixer never edits a
+    # field result) and `fix=manual` (only Zotero can re-render it). FMT-Z5
+    # (the conflicting style stores) is added by `analyse_package`, which has
+    # the other package parts.
+    for r in zotero_parity_rows(xml, para_texts):
+        if r["rule"] == "FMT-Z5":
+            continue
+        rows.append({"rule": r["rule"], "severity": r["severity"], "document": doc,
+                     "location": r["location"], "evidence": r["evidence"],
+                     "detail": r["detail"], "fix": "manual",
+                     "protected": True, "tier": tier_of(r["rule"])})
+    # Display-item ORDER (FMT-O1) is a MANUSCRIPT-BODY convention: a
+    # supplementary file references the main figures and arranges its own
+    # (the first call-out test would compare mentions of another document's
+    # items), and a cover letter has no numbered display items of its own.
+    if display_rules_apply(doc):
+        for r in display_order_rows(para_texts, para_is_ref, para_is_caption,
+                                    para_is_head,
+                                    order_policy=str(policy.get("numbering") or "") == "citation"):
+            rows.append({"rule": r["rule"], "severity": r["severity"], "document": doc,
+                         "location": r["location"], "evidence": r["evidence"],
+                         "detail": r["detail"], "fix": _fix_kind(r["rule"], policy),
+                         "protected": False, "tier": tier_of(r["rule"])})
     for r in text_style_rows(para_texts, para_is_ref, para_is_head):
         fix = _fix_kind(r["rule"], policy)
         if r.get("protected") and fix == "mechanical":
@@ -5118,6 +6064,35 @@ def analyse_package(path: Path, policy: dict) -> dict:
         return {"file": str(path), "rows": [row], "by_rule": {"FMT-X1": 1},
                 "high": 1, "medium": 0, "low": 0, "documents": {}}
     res = analyse_document(xml, styles, policy, path.name, sizes=sizes, rels=doc_rels)
+    # FMT-Z5: the document's Zotero citation STYLE is recorded in more than one
+    # place (`word/settings.xml` docVars and, in newer versions, the
+    # `docProps/custom.xml` property). They can disagree after an upgrade or a
+    # partial re-save, and the next refresh then re-renders every bibliography
+    # entry in the other CSL style -- a whole-package formatting change with no
+    # other warning. Only this package-level pass can see both stores.
+    try:
+        with zipfile.ZipFile(path) as pkg:
+            zotero_parts = {}
+            for cand in ("word/settings.xml", "docProps/custom.xml"):
+                if cand in pkg.namelist():
+                    zotero_parts[cand] = pkg.read(cand).decode("utf-8", "replace")
+            for cand in pkg.namelist():
+                if re.match(r"customXml/item\d*\.xml$", cand):
+                    zotero_parts[cand] = pkg.read(cand).decode("utf-8", "replace")
+            styles_found = zotero_style_ids(zotero_parts)
+            if len(set(styles_found.values())) > 1:
+                res["rows"].append({
+                    "rule": "FMT-Z5", "severity": "medium", "document": path.name,
+                    "location": "document preferences",
+                    "evidence": "; ".join(f"{p} -> {s}" for p, s in sorted(styles_found.items())),
+                    "detail": "the document carries more than one Zotero citation-style "
+                              "identifier; a Word/Zotero refresh re-renders every "
+                              "bibliography entry in whichever store it honours, so the "
+                              "reference FORMAT can change (and no longer match the target "
+                              "journal's style) without any other warning",
+                    "fix": "manual", "protected": True, "tier": tier_of("FMT-Z5")})
+    except (zipfile.BadZipFile, KeyError, OSError):
+        pass
     for name, rels in aux_parts:
         aux_rows, _aux_fixes = drawing_geometry_rows(
             aux_xml.get(name, ""), rels, sizes, path.name, policy,
@@ -7310,6 +8285,170 @@ def _is_aux_name(name: str) -> bool:
                      r"\.(?:docx|tex|bib|pdf)$", low) is not None
 
 
+# --------------------------------------------------------------------------
+# PDF ARTIFACT SANITY (rules FMT-PDF1..FMT-PDF3).
+#
+# A submission package ships PDFs that must OPEN and SHOW their content outside
+# the author's own machine. Two shapes pass every existing check because they
+# are valid PDFs with a valid page:
+#   * an Adobe LiveCycle/XFA FORM: the page is a JavaScript shell, so a reader
+#     that is not Adobe Acrobat (a journal's converter, a browser view, the
+#     submission system's text extractor) renders "Please wait..." and nothing
+#     else. A "reporting summary filled.pdf" can therefore be COMPLETELY blank
+#     while being 1.6 MB of XFA template.
+#   * a PDF whose XFA dataset exists but carries no value: the form was never
+#     filled in (or the fill was never saved into the dataset).
+# Both are reported as high findings (the pipeline must not certify a package
+# whose required form is blank), and the check degrades to the raw byte scan
+# when `pdfinfo` is unavailable.
+# --------------------------------------------------------------------------
+
+PDF_PLACEHOLDER_RE = re.compile(
+    r"(?is)if this message is not eventually replaced by the proper contents")
+PDF_PLACEHOLDER_BYTES_RE = re.compile(
+    rb"(?is)if this message is not eventually replaced by the proper contents")
+PDF_PLACEHOLDER_STRONG_RE = re.compile(r"(?is)please wait\.{0,3}")
+PDF_VERSION_EXTS = (".pdf",)
+
+
+def _pdfinfo_form(path: Path) -> str:
+    """The `Form:` line pdfinfo prints ("" when pdfinfo is absent/unreadable).
+
+    `pdfinfo` prints "Form: none" for an ordinary PDF, so only a value naming a
+    form TECHNOLOGY (XFA/LiveCycle/Acrobat form) counts; "none" is no form.
+    """
+    exe = shutil.which("pdfinfo")
+    if not exe:
+        return ""
+    try:
+        proc = subprocess.run([exe, str(path)], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    for line in (proc.stdout or "").splitlines():
+        if line.lower().startswith("form:"):
+            value = line.split(":", 1)[1].strip()
+            return "" if value.lower() in ("", "none") else value
+    return ""
+
+
+def _xfa_dataset_report(path: Path):
+    """(is_xfa, non_empty_values, is_livecycle_shell) for a PDF's XFA dataset.
+
+    `is_livecycle_shell` is True when the PDF's own rendered text is the Adobe
+    placeholder, i.e. the document is a FORM DEFINITION, not a document.
+    """
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return (False, 0, False)
+    form_line = _pdfinfo_form(Path(path))
+    # The byte test requires the AcroForm/XFA object structure, not the bare
+    # string: a normal compiled PDF can contain "/XFA" inside its own text.
+    is_xfa = ("xfa" in form_line.lower()
+              or (b"AcroForm" in data and re.search(rb"/XFA[\s/\[]", data) is not None))
+    is_shell = bool(PDF_PLACEHOLDER_RE.search(data.decode("latin-1", "replace")))
+    non_empty = 0
+    for m in re.finditer(rb"stream\r?\n", data):
+        start = m.end()
+        end = data.find(b"endstream", start)
+        if end < 0:
+            continue
+        raw = data[start:end]
+        try:
+            dec = zlib.decompress(raw)
+        except zlib.error:
+            continue
+        if not is_shell and PDF_PLACEHOLDER_BYTES_RE.search(dec):
+            # The placeholder lives in a COMPRESSED stream: the shell is real
+            # even when pdftotext cannot render the page (a viewer that cannot
+            # run the form shows exactly the same message).
+            is_shell = True
+        if is_xfa and b"xfa:datasets" in dec:
+            text = dec.decode("utf-8", "replace")
+            for em in re.finditer(r"<([A-Za-z_][\w.\-]*)>([^<>]{1,400})</\1>", text):
+                if em.group(2).strip():
+                    non_empty += 1
+    return (is_xfa, non_empty, is_shell)
+
+
+def _pdf_carries_an_image(path: Path) -> bool:
+    """True when the PDF embeds an image (a text-less figure/scan is EXPECTED).
+
+    `FMT-PDF3` exists for an export that lost its content, not for a figure
+    saved as a PDF: the common case of a raster figure (or a scanned page) has
+    no extractable text and is perfectly valid, so the check must not report it.
+    Reads the object structure first, then looks for a JPEG/PNG stream when the
+    object dictionary is compressed.
+    """
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return False
+    if re.search(rb"/Subtype\s*/Image", data):
+        return True
+    for m in re.finditer(rb"stream\r?\n", data):
+        start = m.end()
+        end = data.find(b"endstream", start)
+        if end < 0:
+            continue
+        raw = data[start:end]
+        if raw[:3] == b"\xff\xd8\xff" or raw[:8] == b"\x89PNG\r\n\x1a\n":
+            return True
+        try:
+            dec = zlib.decompress(raw)
+        except zlib.error:
+            continue
+        if dec[:3] == b"\xff\xd8\xff" or dec[:8] == b"\x89PNG\r\n\x1a\n":
+            return True
+    return False
+
+
+def pdf_artifact_rows(path: Path, text: str = None, pages=None) -> list:
+    """FMT-PDF1..3 for one PDF (empty list = nothing proven wrong)."""
+    rows = []
+    name = Path(path).name
+    if text is None:
+        exe = shutil.which("pdftotext")
+        if exe:
+            proc = subprocess.run([exe, "-layout", str(path), "-"],
+                                  capture_output=True, text=True)
+            text = proc.stdout or ""
+        else:
+            text = ""
+    body = (text or "").strip()
+    is_xfa, non_empty, is_shell = _xfa_dataset_report(Path(path))
+    placeholder = (bool(PDF_PLACEHOLDER_RE.search(body))
+                   or (bool(PDF_PLACEHOLDER_STRONG_RE.search(body)) and len(body) < 1500)
+                   or is_shell)
+    if placeholder:
+        evidence = (f"rendered text is the Adobe placeholder ({len(body)} chars)"
+                    if body else "the PDF's own streams carry the Adobe placeholder text")
+        rows.append({"rule": "FMT-PDF1", "severity": "high", "document": name,
+                     "location": "-",
+                     "evidence": evidence,
+                     "detail": "this PDF is a form SHELL: readers other than Adobe "
+                               "Acrobat render only 'Please wait...', so any content it is "
+                               "supposed to carry is invisible to the editor, the reviewer "
+                               "and the submission system; flatten it before shipping",
+                     "fix": "manual", "protected": False})
+    if is_xfa and non_empty == 0:
+        rows.append({"rule": "FMT-PDF2", "severity": "high", "document": name,
+                     "location": "-",
+                     "evidence": "XFA/LiveCycle form with no non-empty data value",
+                     "detail": "the form ships UNFILLED (every field is empty or default); "
+                               "fill it in the Adobe reader (or replace it with a flattened "
+                               "PDF) before submitting",
+                     "fix": "manual", "protected": False})
+    elif not body and (pages or 0) >= 1 and not _pdf_carries_an_image(Path(path)):
+        rows.append({"rule": "FMT-PDF3", "severity": "medium", "document": name,
+                     "location": "-",
+                     "evidence": f"{pages} page(s), no extractable text",
+                     "detail": "the PDF carries no extractable text and no embedded image: "
+                               "an empty export rather than a rendered document",
+                     "fix": "manual", "protected": False})
+    return rows
+
+
 def check_pdf(path: Path, policy: dict) -> dict:
     if not shutil.which("pdftotext"):
         return {"file": str(path), "pages": 0, "blank_pages": [], "ok": None,
@@ -7340,6 +8479,9 @@ def check_pdf(path: Path, policy: dict) -> dict:
              "detail": "blank page in the rendered document (header/footer only)",
              "fix": "mechanical", "protected": False}
             for i in blank if len(blank) > policy["blank_page_tolerance"]]
+    # The artifact checks (FMT-PDF1..3) run on the SAME extraction: a form shell
+    # has one non-blank page and would otherwise pass as clean.
+    rows.extend(pdf_artifact_rows(path, text=txt, pages=res["pages"]))
     return {"file": str(path), "pages": res["pages"], "blank_pages": blank,
             "furniture": res["furniture"][:5], "rows": rows,
             "ok": not rows}
@@ -7401,6 +8543,50 @@ def cmd_check_pdf(args) -> int:
     if args.json:
         Path(args.json).write_text(json.dumps(res, indent=2, ensure_ascii=False), encoding="utf-8")
     return 0 if res["ok"] is not False else 1
+
+
+def cmd_zotero_check(args) -> int:
+    """`zotero-check`: what a Word/Zotero refresh would rewrite in this DOCX.
+
+    Read-only and library-free: the citation fields embed their own itemData and
+    the bibliography entries are ordinary paragraphs, so the check runs on any
+    machine. Exit 1 when a high-severity row exists (FMT-Z1/Z2/Z4), i.e. the
+    document's numbering is not the numbering a refresh produces.
+    """
+    path = Path(args.file)
+    try:
+        with zipfile.ZipFile(path) as pkg:
+            xml = pkg.read("word/document.xml").decode("utf-8", "replace")
+            style_parts = {n: pkg.read(n).decode("utf-8", "replace")
+                           for n in ("word/settings.xml", "docProps/custom.xml")
+                           if n in pkg.namelist()}
+    except (OSError, zipfile.BadZipFile, KeyError) as e:
+        print(f"[FAIL] {path}: unreadable DOCX ({type(e).__name__}: {e})")
+        return 1
+    paras = [text_of(p[2]) for p in paragraphs(xml)]
+    styles = zotero_style_ids(style_parts)
+    rows = zotero_parity_rows(xml, paras, styles)
+    state = zotero_citation_state(xml, paras, styles)
+    counts = Counter(r["rule"] for r in rows)
+    print(f"{path}")
+    print(f"  live field(s): {state['report']['counts'].get('item', 0)} citation, "
+          f"{state['report']['counts'].get('bibliography', 0)} bibliography; "
+          f"{state['distinct_items']} distinct cited item(s); "
+          f"style store(s): {styles or 'none'}")
+    if not rows:
+        print("  CLEAN -- the markers, the bibliography order and the style store(s) agree; "
+              "a Word/Zotero refresh reproduces this numbering")
+    for r in rows:
+        print(f"  [{r['rule']}] {r['severity']}: {r['evidence']}")
+        print(f"      {r['detail']}")
+    print(f"  {len(rows)} row(s): "
+          + (", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "none"))
+    if args.json:
+        Path(args.json).write_text(json.dumps({"file": str(path), "rows": rows,
+                                               "style_ids": styles,
+                                               "counts": dict(counts)},
+                                              indent=2, ensure_ascii=False), encoding="utf-8")
+    return 1 if any(r["severity"] == "high" for r in rows) else 0
 
 
 def cmd_validate(args) -> int:
@@ -7465,6 +8651,11 @@ def main(argv=None) -> int:
     p.add_argument("--policy")
     p.add_argument("--json")
     p.set_defaults(func=cmd_check_pdf)
+    z = sub.add_parser("zotero-check", help="what a Word/Zotero refresh would rewrite "
+                                            "(stale markers, bibliography order, style stores)")
+    z.add_argument("file")
+    z.add_argument("--json")
+    z.set_defaults(func=cmd_zotero_check)
     v = sub.add_parser("validate", help="validate DOCX XML/schema and compile .tex files")
     v.add_argument("paths", nargs="+")
     v.add_argument("--json")
