@@ -7683,6 +7683,32 @@ CODE_DIR = "code"
 FINDINGS_REL = "review/findings.json"
 FINDINGS_MD_REL = "review/findings.md"
 ARTIFACTS_REL = "review/artifacts"
+# --- the discovery round's own contract (D0-D5) --------------------------
+# The discovery round is the pipeline's open-ended hunt for issue CLASSES the
+# frozen checklist does not own; its findings (X-*) feed the revisers and its
+# proposals (M37+...) feed the next checklist run. Until this contract existed
+# only the PRESENCE of one of the three legacy files was noticed (and only as a
+# warning), so a three-line "# none" was indistinguishable from a thorough
+# round -- the 2026-10-09 external audits' single most-reported gap. The checks
+# verify STRUCTURE (the enumerations and per-row dispositions the round's own
+# guide, `references/discovery.md`, requires), never that its judgement is
+# correct; they run under the same `--strict-artifacts` policy as the review's
+# own decision tables (fail by default, warn under `--non-strict-artifacts`)
+# and are never repairable bookkeeping -- the phase either ran or it did not.
+DISCOVERY_ROUND_FILES = ("known_index.md", "gap_table.md", "probes.md",
+                         "probe_results.md", "findings_extra.json", "findings_extra.md",
+                         "new_sweeps.md", "round2_summary.md")
+DISCOVERY_MIN_GAP_ROWS = 25          # D1's floor ("target >= 25 rows total")
+DISCOVERY_PROPOSAL_MIN = 37          # M18-M20 reserved by the pipeline, M21-M36 adopted
+DISCOVERY_PROBE_ID_RE = re.compile(r"\bP2-\d{2,}\b")
+DISCOVERY_X_ID_RE = re.compile(r"^X-\d+$")
+DISCOVERY_SEVERITIES = ("fatal", "critical", "major", "minor")
+# D5's zero-proposal escape: the file must SAY there were no proposals (and
+# why), never just be a placeholder -- the honest-limits rule of the round.
+DISCOVERY_NO_PROPOSAL_RE = re.compile(
+    r"\b(?:no|none|nothing)\b[^.\n]{0,60}?\b(?:new\s+)?(?:sweep|proposal)s?\b"
+    r"|\bnothing\s+to\s+propose\b", re.I)
+_DISCOVERY_STATUS_TOKENS = ("pending", "executed", "unable", "no anomalies", "no anomaly")
 DISCOVERY_RELS = ("review/round2/findings_extra.json", "review/round2/findings_extra.md",
                   "review/round2/new_sweeps.md")
 DIFF_LEDGER_REL = "revised/DIFF_LEDGER.md"
@@ -8115,8 +8141,20 @@ of its references first (references/sweeps.md, references/discovery.md), then ex
 
 @@EVIDENCE_INTEGRITY@@
 @@EVIDENCE_PACK_RULE@@
-4. The discovery round D0-D5 (references/discovery.md), including its proposal of new sweeps for
-   issue classes the checklist itself misses, written under review/round2/.
+4. The discovery round D0-D5 (references/discovery.md): the checklist-gap table, the probes and
+   their EXECUTED dispositions, the X-* findings and the proposed new sweeps, all written under
+   review/round2/. The orchestrator verifies this phase's deliverables as a contract:
+   D0 known_index.md names the frozen class range; D1 gap_table.md carries >=25 class rows, each
+   marked COVERED (by which check) or UNCOVERED, with at least one UNCOVERED row; D2 probes.md
+   turns EVERY uncovered row into a probe (P2-...) or records it as an analysis limitation, and
+   every probe row carries its status; D3 probe_results.md executes every probe with a
+   disposition -- a clean probe says "no anomalies -- checked: <locations>", an `unable` probe
+   says why; D4 findings_extra.{md,json} carries the standard finding shape (id X-NNN, location,
+   category 0-5, check = the gap-row class label, severity, evidence quote, explanation) and no
+   row that merely re-reports a frozen F-* finding; D5 new_sweeps.md carries sweeps.md-shaped
+   proposals (Purpose, Enumeration, Artifact, Finding rules) numbered from M37, or states
+   explicitly that there were no proposals and why; round2_summary.md reports the counts and the
+   round's honest limits. A placeholder "# none" round fails the postcheck.
 5. The skill's verification pass and acceptance checks before finalizing.
 
 @@PRIOR_ROUND@@
@@ -8590,6 +8628,18 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
    in the abstract or a legend whose `source` cell is empty in work/NUMBERS_LEDGER.md while the
    shipped data files prove it; a term family competing for one concept (work/M24_concepts.md).
    Each becomes an `AU-` finding when it is a defect, not a note.
+3g. ATTACK THE DISCOVERY ROUND'S PROBE DISPOSITIONS. When the frozen review carries
+   review/round2/probe_results.md, every probe row is a disposition the reviewer wrote and
+   nothing has audited: a probe closed `no anomalies -- checked: <locations>` with no locations,
+   with the same blanket sentence as many other rows, or one whose checked locations cannot
+   answer its own question is a boilerplate closure of the same kind task 2 attacks. For every
+   probe row, re-locate its evidence and judge whether the disposition is about THAT probe's own
+   bar, then record one row in `audit/PROBE_AUDIT.md` (probe id | reviewer's disposition | your
+   verdict | evidence): `stands` (rule-specific and supported by the named locations), `promoted
+   to AU-xxx` (a real anomalous value/label the closure hid -- add the `AU-` finding with the
+   full finding shape), or `needs-evidence` (the closure does not show its checked locations or
+   evidence -- say exactly what is missing). The orchestrator requires one row per probe id and
+   refuses a promotion whose `AU-xxx` id audit.json's `adds` does not define.
 @@REWRITE_PARITY@@
 @@HIERARCHY_RECONCILE@@
 
@@ -8609,6 +8659,9 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
      your verdict | your finding id).
    * `audit/DISPOSITION_AUDIT.md` — one row per finding-tier scan row you examined, with your
      verdict (`stands` / `promoted to AU-xxx` / `needs-evidence`).
+   * `audit/PROBE_AUDIT.md` — when the frozen review carries review/round2/probe_results.md,
+     one row per probe (probe id | reviewer's disposition | your verdict
+     `stands`/`promoted to AU-xxx`/`needs-evidence` | evidence).
 5. State in `audit.json` → `notes` how many finding-tier rows you examined and how many you
    promoted. A run that examined none must say so explicitly (that is a legitimate, auditable
    outcome when the reviewer's reasons are specific).
@@ -21597,6 +21650,540 @@ def cover_letter_row_survival_problems(ctx: Ctx, sb: Path) -> list:
             f"M20 finding, or OK with the journal's own quoted override)"]
 
 
+# =====================================================================
+# THE DISCOVERY ROUND'S CONTRACT (D0-D5)
+#
+# `references/discovery.md` defines the round; until now nothing verified it.
+# These helpers turn its deliverables into an auditable contract: the
+# enumerations exist, every row carries a disposition, the X-* findings have
+# the standard finding shape, proposals are sweeps.md-shaped and numbered from
+# M37, and the previous round's proposals are re-probed instead of vanishing.
+# They verify STRUCTURE only -- the truth of a disposition stays the auditor's
+# and the revisers' job.
+# =====================================================================
+
+def _discovery_nonempty(p: Path) -> bool:
+    """True when `p` is a regular file with at least one byte."""
+    try:
+        return p.is_file() and p.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _discovery_rows(path: Path) -> list:
+    """Every data row of every markdown table block of one discovery artifact."""
+    return [r for block in parse_markdown_blocks(path) for r in block["rows"]]
+
+
+def _row_text(row) -> str:
+    """One table row's cells flattened for keyword reads (whitespace-normalized)."""
+    return " ".join(" ".join(str(v or "").split()) for v in row.values())
+
+
+def _discovery_status_cells(row) -> list:
+    """(token, rest) for every cell that STARTS with a probe status token.
+
+    D2/D3's probe rows carry a status cell (`pending` / `executed` /
+    `unable -- reason`), and D3's clean closure starts `no anomalies -- checked:
+    <locations>`. Reading the CELL START keeps prose that merely mentions
+    "pending" from being read as the row's own status.
+    """
+    out = []
+    for v in row.values():
+        cell = " ".join(str(v or "").split())
+        low = cell.lower()
+        for token in _DISCOVERY_STATUS_TOKENS:
+            if low.startswith(token):
+                out.append((token, cell[len(token):].strip(" :;,-—–")))
+                break
+    return out
+
+
+def discovery_gap_summary(sb: Path) -> dict:
+    """{rows, covered, uncovered, unmarked} of review/round2/gap_table.md."""
+    covered = uncovered = unmarked = 0
+    rows = _discovery_rows(sb / "review" / "round2" / "gap_table.md")
+    for r in rows:
+        low = _row_text(r).lower()
+        if re.search(r"\buncovered\b|\bnot\s+covered\b", low):
+            uncovered += 1
+        elif re.search(r"\bcovered\b", low):
+            covered += 1
+        else:
+            unmarked += 1
+    return {"rows": len(rows), "covered": covered, "uncovered": uncovered,
+            "unmarked": unmarked}
+
+
+def discovery_probe_ids(sb: Path) -> list:
+    """The P2-* probe ids declared in review/round2/probes.md, in file order."""
+    ids = []
+    for r in _discovery_rows(sb / "review" / "round2" / "probes.md"):
+        m = DISCOVERY_PROBE_ID_RE.search(_row_text(r))
+        if m and m.group(0) not in ids:
+            ids.append(m.group(0))
+    return ids
+
+
+def discovery_probe_result_ids(sb: Path) -> list:
+    """The P2-* probe ids recorded in review/round2/probe_results.md."""
+    ids = []
+    for r in _discovery_rows(sb / "review" / "round2" / "probe_results.md"):
+        m = DISCOVERY_PROBE_ID_RE.search(_row_text(r))
+        if m and m.group(0) not in ids:
+            ids.append(m.group(0))
+    return ids
+
+
+def prior_proposal_ids(sb: Path) -> list:
+    """Sweep ids proposed by the PREVIOUS round (prior_round/new_sweeps.md)."""
+    try:
+        text = (sb / "prior_round" / "new_sweeps.md").read_text(encoding="utf-8",
+                                                                errors="replace")
+    except OSError:
+        return []
+    out = []
+    for m in re.finditer(r"(?m)^#{2,3}\s*(M\d+)\b", text):
+        if m.group(1) not in out:
+            out.append(m.group(1))
+    return out
+
+
+def discovery_contract_problems(sb: Path) -> tuple:
+    """(errors, warnings) for one review sandbox's D0-D5 deliverables.
+
+    Structural, never judgemental: every enumeration the round's own guide
+    requires exists, every enumerated row carries a disposition, the X-*
+    findings have the standard finding shape, proposals are sweeps.md-shaped
+    and numbered from M37, and the previous round's proposals are re-probed
+    (the convergence loop D5 promises, made code-enforced). Callers apply the
+    `--strict-artifacts` policy -- see `check_discovery_contract`.
+    """
+    r2 = sb / "review" / "round2"
+    errors, warns = [], []
+    missing = [name for name in DISCOVERY_ROUND_FILES if not _discovery_nonempty(r2 / name)]
+    if missing:
+        errors.append(
+            "review/round2/ is missing the discovery round's deliverable(s) "
+            f"{', '.join(missing)}: the D0-D5 phase must leave all of "
+            f"{', '.join(DISCOVERY_ROUND_FILES)} (references/discovery.md). A phase whose "
+            "artifacts are absent cannot be told apart from one that never ran -- the review's "
+            "own sweeps are held to the same bar (a zero-finding sweep is invalid unless its "
+            "artifact exists and every row is disposed)")
+    # D0 -- the dedup base names the frozen class range.
+    ki = r2 / "known_index.md"
+    if _discovery_nonempty(ki):
+        try:
+            text = ki.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        # Both spellings of the range ends count: the frozen ids are unpadded
+        # (M1/J5) but a session may write the padded forms (M01/J05) the census
+        # docs also use; a hard failure over id spelling would be an id trap,
+        # not a quality signal.
+        def _class_id_mentioned(tok: str) -> bool:
+            return re.search(rf"(?<![A-Za-z0-9]){re.escape(tok[0])}0*{int(tok[1:])}"
+                             rf"(?![A-Za-z0-9])", text) is not None
+
+        if not (_class_id_mentioned("M1") and _class_id_mentioned("J5")):
+            errors.append(
+                "review/round2/known_index.md never names both ends of the frozen class range "
+                "(M1 and J5 must appear as whole tokens): D0's KNOWN-CLASSES index is what keeps "
+                "the round from re-reporting an already-owned class, and an index built without "
+                "it cannot exclude anything")
+    # D1 -- the gap table: >= 25 class rows, each COVERED/UNCOVERED, at least
+    # one uncovered (the two-sided-defect seed alone is a standing gap).
+    gap = discovery_gap_summary(sb)
+    if _discovery_nonempty(r2 / "gap_table.md"):
+        if gap["rows"] < DISCOVERY_MIN_GAP_ROWS:
+            errors.append(
+                f"review/round2/gap_table.md carries {gap['rows']} row(s); D1's gap table must "
+                f"enumerate at least {DISCOVERY_MIN_GAP_ROWS} issue-class rows "
+                f"(references/discovery.md: seed the table, then ask 'what else?' twice more)")
+        if gap["unmarked"]:
+            errors.append(
+                f"review/round2/gap_table.md leaves {gap['unmarked']} of its {gap['rows']} "
+                f"row(s) without a COVERED/UNCOVERED marking: every class row must state "
+                f"whether a frozen check owns it (and which)")
+        if gap["rows"] and not gap["uncovered"] and not gap["unmarked"]:
+            errors.append(
+                "review/round2/gap_table.md marks every row COVERED: a discovery round that "
+                "found no uncovered class has not run D1 -- the two-sided-defect seed alone (a "
+                "known class whose definition reads only ONE direction) is a gap row until both "
+                "directions have been reported, and so are the D3 anomaly hunts")
+    # D2 -- probes: every UNCOVERED row becomes a probe (or a recorded
+    # analysis limitation); probe rows carry a status cell and a reason.
+    probe_rows = _discovery_rows(r2 / "probes.md")
+    probe_ids, probeless, bad_probe_rows = [], 0, []
+    limitations = 0
+    for r in probe_rows:
+        text = _row_text(r)
+        m = DISCOVERY_PROBE_ID_RE.search(text)
+        if not m:
+            if re.search(r"\blimitation\b", text, re.I):
+                limitations += 1
+            elif text.strip():
+                probeless += 1
+            continue
+        pid = m.group(0)
+        if pid not in probe_ids:
+            probe_ids.append(pid)
+        statuses = _discovery_status_cells(r)
+        if not statuses:
+            bad_probe_rows.append(f"{pid} has no status cell (state pending/executed/unable)")
+        for token, rest in statuses:
+            if token == "unable" and len(re.findall(r"[0-9a-z]+", rest)) < 2:
+                bad_probe_rows.append(f"{pid} is `unable` with no reason")
+    if _discovery_nonempty(r2 / "probes.md") and gap["uncovered"]:
+        have = len(probe_ids) + limitations
+        if have < gap["uncovered"]:
+            errors.append(
+                f"review/round2/probes.md declares {have} probe/limitation row(s) for "
+                f"{gap['uncovered']} UNCOVERED gap row(s): D2 converts EVERY uncovered row "
+                f"into a concrete probe (P2-...); a row that cannot be probed is recorded as an "
+                f"analysis limitation, never silently dropped")
+    if bad_probe_rows:
+        errors.append(
+            "review/round2/probes.md has probe row(s) without a usable disposition "
+            f"({'; '.join(bad_probe_rows[:4])}): every probe row states its status, and `unable` "
+            f"states why execution was impossible")
+    if probeless:
+        warns.append(
+            f"review/round2/probes.md carries {probeless} non-empty row(s) with neither a P2-* "
+            f"probe id nor an analysis-limitation note -- check they are not dropped root rows")
+    # D3 -- results: one executed disposition per probe; a clean probe names the
+    # locations it checked; `unable` states its reason.
+    result_problems, unable_short, no_checked = [], [], []
+    result_ids = []
+    for r in _discovery_rows(r2 / "probe_results.md"):
+        text = _row_text(r)
+        m = DISCOVERY_PROBE_ID_RE.search(text)
+        if not m:
+            continue
+        pid = m.group(0)
+        if pid in result_ids:
+            continue
+        result_ids.append(pid)
+        low = text.lower()
+        statuses = _discovery_status_cells(r)
+        tokens = [t for t, _ in statuses]
+        if "pending" in tokens:
+            result_problems.append(f"{pid} is still `pending` (`executed`/`unable` required)")
+        for token, rest in statuses:
+            if token == "unable" and len(re.findall(r"[0-9a-z]+", rest)) < 2:
+                unable_short.append(pid)
+        if "unable" not in tokens and "unable" in low:
+            if len(re.findall(r"[0-9a-z]+", low.split("unable", 1)[1])) < 2:
+                unable_short.append(pid)
+        if re.search(r"\bno anomalies?\b", low):
+            tail = re.split(r"\bchecked\b", low, maxsplit=1)
+            if len(tail) < 2 or len(re.findall(r"[0-9a-z]", tail[1])) < 3:
+                no_checked.append(pid)
+        if len(re.findall(r"[A-Za-z0-9]+", text)) < 6:
+            result_problems.append(f"{pid} records no usable disposition")
+    if _discovery_nonempty(r2 / "probe_results.md"):
+        missing_res = [p for p in probe_ids if p not in result_ids]
+        if missing_res:
+            errors.append(
+                f"review/round2/probe_results.md records no result for probe(s) "
+                f"{', '.join(missing_res[:6])}" + (" ..." if len(missing_res) > 6 else "")
+                + ": D3 executes EVERY probe and records one disposition per row (a clean probe "
+                  "records 'no anomalies -- checked: <locations>')")
+        extra = [p for p in result_ids if p not in probe_ids]
+        if extra:
+            warns.append(
+                f"review/round2/probe_results.md reports probe id(s) {', '.join(extra[:6])} "
+                f"that probes.md never declares -- declare them there or drop the rows")
+        if result_problems:
+            errors.append("review/round2/probe_results.md: " + "; ".join(result_problems[:4]))
+        if unable_short:
+            errors.append(
+                f"review/round2/probe_results.md closes {len(unable_short)} probe(s) `unable` "
+                f"with no reason ({', '.join(unable_short[:4])}): an unable probe states WHY it "
+                f"could not be executed")
+        if no_checked:
+            errors.append(
+                f"review/round2/probe_results.md closes {len(no_checked)} probe(s) 'no "
+                f"anomalies' without naming the checked locations "
+                f"({', '.join(no_checked[:4])}): D3's clean closure is "
+                f"'no anomalies -- checked: <locations>'")
+    # D4 -- the X-* findings carry the standard finding shape.
+    if _discovery_nonempty(r2 / "findings_extra.json"):
+        xj = read_json(r2 / "findings_extra.json", revive=False, lenient=True)
+        if not isinstance(xj, dict) or not isinstance(xj.get("findings"), list):
+            errors.append(
+                "review/round2/findings_extra.json does not carry a 'findings' list (the D4 "
+                "deliverable: {'findings': [...], 'coverage': [...]})")
+        else:
+            bad, seen = [], set()
+            for f in xj["findings"]:
+                if not isinstance(f, dict):
+                    bad.append("a non-object row")
+                    continue
+                fid = str(f.get("id") or "").strip()
+                if not DISCOVERY_X_ID_RE.match(fid):
+                    bad.append(f"{fid or '(no id)'}: the id must be X-001...")
+                    continue
+                if fid in seen:
+                    bad.append(f"{fid}: duplicate id")
+                seen.add(fid)
+                for key in ("location", "check", "evidence", "explanation"):
+                    if not str(f.get(key) or "").strip():
+                        bad.append(f"{fid}: no {key}")
+                if str(f.get("severity") or "").strip().lower() not in DISCOVERY_SEVERITIES:
+                    bad.append(f"{fid}: severity {f.get('severity')!r} is not one of "
+                               f"Fatal/Critical/Major/Minor")
+                try:
+                    ok_cat = 0 <= int(f.get("category")) <= 5
+                except (TypeError, ValueError):
+                    ok_cat = False
+                if not ok_cat:
+                    bad.append(f"{fid}: category {f.get('category')!r} is not an integer 0-5")
+            if bad:
+                errors.append(
+                    "review/round2/findings_extra.json carries malformed X-finding(s): "
+                    + "; ".join(bad[:6]) + (" ..." if len(bad) > 6 else "")
+                    + " (an X-* finding has the standard finding shape: id X-NNN, location, "
+                      "category 0-5, check = the gap-row class label, severity, evidence quote, "
+                      "explanation)")
+    # D5 -- proposals are sweeps.md-shaped, numbered from M37, or the file
+    # states explicitly that there were none (and why).
+    if _discovery_nonempty(r2 / "new_sweeps.md"):
+        try:
+            text = (r2 / "new_sweeps.md").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        matches = list(re.finditer(r"(?m)^#{2,3}\s*(M\d+)\b[^\n]*$", text))
+        if matches:
+            bad, seen = [], set()
+            for i, m in enumerate(matches):
+                sid = m.group(1)
+                end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+                block = text[m.start():end]
+                if int(sid[1:]) < DISCOVERY_PROPOSAL_MIN:
+                    bad.append(f"{sid} is below the numbering floor M{DISCOVERY_PROPOSAL_MIN} "
+                               f"(M18-M20 are reserved and M21-M36 already adopted)")
+                if sid in seen:
+                    bad.append(f"{sid} is proposed twice")
+                seen.add(sid)
+                low = block.lower()
+                for field in ("purpose", "enumeration", "artifact", "finding rule"):
+                    if field not in low:
+                        bad.append(f"{sid}: no `{field}` field")
+            if bad:
+                errors.append(
+                    "review/round2/new_sweeps.md does not carry sweeps.md-shaped proposal(s): "
+                    + "; ".join(bad[:6])
+                    + " (each proposal is `## M<NN> -- <name>` with Purpose, Enumeration, "
+                      "Artifact and Finding rules, numbered from M37)")
+        elif not DISCOVERY_NO_PROPOSAL_RE.search(text):
+            errors.append(
+                "review/round2/new_sweeps.md carries no `## M<NN>` proposal and does not state "
+                "that there were no new sweeps to propose: D5's zero-proposal outcome must be "
+                "explicit (and say why), never a placeholder like '# none'")
+    # D6 -- the summary reports the round's counts and its honest limits.
+    if _discovery_nonempty(r2 / "round2_summary.md"):
+        try:
+            text = (r2 / "round2_summary.md").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        low = text.lower()
+        missing_bits = [w for w in ("gap", "probe") if w not in low]
+        if missing_bits:
+            errors.append(
+                f"review/round2/round2_summary.md does not state its {'/'.join(missing_bits)} "
+                f"count(s): the summary reports gap rows (covered/uncovered), probes "
+                f"(executed/clean/findings/unable), X-findings, proposed sweeps and the round's "
+                f"honest limits")
+        elif not re.search(r"could not|cannot|limit", low):
+            warns.append(
+                "review/round2/round2_summary.md carries no honest-limits statement ('what "
+                "this round could NOT check'); the round's guide requires one")
+    # Continuity -- a class the previous round proposed is re-probed (or
+    # explicitly dispositioned) now; D5's convergence loop must not depend on an
+    # operator re-reading per-run files.
+    gone = []
+    prior_ids = prior_proposal_ids(sb)
+    if prior_ids:
+        parts = []
+        for rel in (FINDINGS_REL, FINDINGS_MD_REL):
+            p = sb / rel
+            try:
+                if p.is_file():
+                    parts.append(p.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                pass
+        try:
+            for p in sorted(r2.iterdir()):
+                if p.is_file():
+                    parts.append(p.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            pass
+        blob = "\n".join(parts)
+        gone = [pid for pid in prior_ids if not _finding_id_mentioned(pid, blob)]
+        if gone:
+            errors.append(
+                f"the previous round's discovery round proposed sweep(s) {', '.join(gone)} "
+                f"that this round re-checks NOWHERE: every prior proposal must be re-probed "
+                f"against the current corpus and recorded -- run it as a probe in "
+                f"review/round2/probes.md / probe_results.md, or disposition it as "
+                f"'prior proposal <id>: no instances in base/' in review/round2/new_sweeps.md "
+                f"or round2_summary.md. A proposed class must not vanish between rounds; the "
+                f"proposal's purpose is to converge into a mechanical check")
+    return errors, warns
+
+
+def check_discovery_contract(ctx: Ctx, sb: Path, errs: list, warns: list) -> list:
+    """Apply `discovery_contract_problems` under the review's artifact policy.
+
+    Under the default `--strict-artifacts on` the problems FAIL the attempt
+    (like the review's own decision tables); under `--non-strict-artifacts`
+    they are recorded as warnings, and `decide --residual-gate` still refuses
+    to certify a run whose record carries them. Returns the ERROR list for the
+    run record (the advisory problems are recorded as warnings only).
+    """
+    derrs, dwarns = discovery_contract_problems(sb)
+    promotes = strict_dispositions(ctx)
+    for p in derrs:
+        (errs if promotes else warns).append(f"discovery round: {p}")
+    for p in dwarns:
+        warns.append(f"discovery round: {p}")
+    return derrs
+
+
+def review_owes_discovery(ctx, rec: dict) -> bool:
+    """Does THIS review session have to leave the D0-D5 deliverables?
+
+    A "formatting-writing" round never runs the discovery phase (its prompt
+    says so). Under a phases/aspects split only session B carries it; session
+    A's postcheck must not demand the other half's deliverable.
+    """
+    try:
+        scope = round_review_scope(ctx, int(rec.get("round") or 1))
+    except Exception:                                             # noqa: BLE001
+        scope = "full"
+    if scope != "full":
+        return False
+    if review_split_of(ctx) != "off":
+        try:
+            return str(rec.get("id") or "") == rid_review_b(int(rec.get("round") or 1))
+        except Exception:                                         # noqa: BLE001
+            return False
+    return True
+
+
+def cross_namespace_duplicate_notes(sb: Path, fj) -> list:
+    """X-* findings that look like re-reports of the frozen F-* list (D0's rule).
+
+    D0 forbids re-reporting a prior finding ("same class + same location + same
+    substance"), but nothing audited the rule mechanically. This reuses the
+    census's own key (a `line N` both sides parse, excerpts at least
+    DEDUP_MIN_WORDS long, token-set Jaccard at the census threshold) and
+    reports the pair so the session and the archived record can see it; it
+    never drops anything (same location with a different substance is legal).
+    """
+    extra = read_json(sb / REVIEW_DIR / "round2" / "findings_extra.json",
+                      revive=False, lenient=True)
+    if not isinstance(extra, dict):
+        return []
+    xrows = [f for f in (extra.get("findings") or [])
+             if isinstance(f, dict) and f.get("id")]
+    frows = [f for f in ((fj or {}).get("findings") or [])
+             if isinstance(f, dict) and f.get("id")]
+    notes = []
+    for x in xrows:
+        x_loc = dedup_location_of(f"{x.get('location')} {x.get('evidence')}")
+        for f in frows:
+            f_loc = dedup_location_of(f"{f.get('location')} {f.get('evidence')}")
+            if not dedup_rows_match("X", x_loc, "X", f_loc):
+                continue
+            notes.append(
+                f"{x.get('id')} looks like a duplicate of the frozen {f.get('id')} (same line "
+                f"{x_loc[0]}; excerpt similarity above the census threshold): D0 says the same "
+                f"class+location+substance is NOT reportable -- drop the X row, or keep it only "
+                f"if its substance really differs and say so in its explanation ('related to "
+                f"{f.get('id')}')")
+            break
+    return notes
+
+
+def parse_sweep_proposals(text: str) -> tuple:
+    """(proposals, problems) for one new_sweeps.md document.
+
+    A proposal is a `## M<NN> -- <name>` block carrying the four sweeps.md
+    fields (Purpose / Enumeration / Artifact / Finding rules); `proposals` are
+    `(id, name, block)` in file order, `problems` name every disqualifying
+    defect (numbering below the floor, a missing field, a duplicate id). Pure,
+    so the review contract and the `adopt-sweep` command share one reader.
+    """
+    proposals, problems = [], []
+    matches = list(re.finditer(r"(?m)^#{2,3}\s*(M\d+)\s*[—–-]\s*(.+?)\s*$", text))
+    if not matches:
+        return [], []
+    for i, m in enumerate(matches):
+        sid, name = m.group(1), m.group(2).strip()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        block = text[m.start():end].rstrip() + "\n"
+        if int(sid[1:]) < DISCOVERY_PROPOSAL_MIN:
+            problems.append(f"{sid}: below the numbering floor M{DISCOVERY_PROPOSAL_MIN} "
+                            f"(M18-M20 are reserved and M21-M36 already adopted)")
+        low = block.lower()
+        for field in ("purpose", "enumeration", "artifact", "finding rule"):
+            if field not in low:
+                problems.append(f"{sid}: no `{field}` field")
+        proposals.append((sid, name, block))
+    ids = [p[0] for p in proposals]
+    dups = sorted({i for i in ids if ids.count(i) > 1})
+    if dups:
+        problems.append(f"duplicate proposal id(s): {', '.join(dups)}")
+    return proposals, problems
+
+
+def adopt_sweep_problems(proposals: list, sweeps_text: str) -> list:
+    """Why these proposals cannot be appended to the target sweeps.md ([] = ok)."""
+    problems = []
+    existing = []
+    for m in re.finditer(r"(?m)^#{2,3}\s*(M\d+)\b", sweeps_text):
+        n = int(m.group(1)[1:])
+        if n not in existing:
+            existing.append(n)
+    top = max(existing) if existing else 0
+    for sid, _name, _block in proposals:
+        n = int(sid[1:])
+        if n in existing:
+            problems.append(f"{sid} already exists in the target sweeps.md")
+        elif n <= top:
+            problems.append(
+                f"{sid} does not continue the target's numbering (its highest sweep is M{top}): "
+                f"proposals are appended continuing from the highest existing sweep number, so "
+                f"reuse would collide with an adopted definition")
+    return problems
+
+
+def resync_sweeps_appendix(sweeps_path: Path, sweeps_text: str) -> str:
+    """Keep the standalone review prompt's sweeps appendix byte-equal to sweeps.md.
+
+    `validate_skill.py`'s D10 check requires the two to match, so an adoption
+    that skipped this would leave the repo failing its own consistency harness.
+    Returns a note for the operator.
+    """
+    prompt = sweeps_path.parent.parent.parent / "prompts" / "identify_issues.prompt.md"
+    if not prompt.is_file():
+        return f"(no {prompt.name} beside the skills; its appendix was not re-synced)"
+    try:
+        lines = prompt.read_text(encoding="utf-8").splitlines()
+    except OSError as e:                                          # noqa: BLE001
+        return f"(the prompt {prompt} could not be read: {e}; not re-synced)"
+    start = next((i for i, ln in enumerate(lines) if ln.startswith("## APPENDIX: Sweeps")), None)
+    stop = next((i for i, ln in enumerate(lines) if ln.startswith("## APPENDIX: Discovery")), None)
+    if start is None or stop is None or stop <= start:
+        return f"(could not locate the sweeps appendix in {prompt}; not re-synced)"
+    new_lines = (lines[:start + 1] + [""] + sweeps_text.strip().splitlines() + [""]
+                 + lines[stop:])
+    write_text_atomic(prompt, "\n".join(new_lines) + "\n")
+    return f"re-synced the sweeps appendix in {prompt}"
+
+
 def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                           scope: str = "full") -> None:
     """Verify the review deliverables the prompt promises the orchestrator checks.
@@ -21839,6 +22426,12 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                 "explanation says \"carried over from <prior-id>\") or recorded as "
                 "\"prior <prior-id>: not reproducible in base/\" in the summary note of "
                 "findings.md -- a defect must not vanish because a later pass missed it.")
+    # 5b. the discovery round's X-* findings must not re-report the frozen list.
+    #     D0 states the dedup rule; the mechanical trail below (same location,
+    #     comparable quote, census Jaccard) makes a violation visible instead of
+    #     relying on the session's own diligence.
+    for note in cross_namespace_duplicate_notes(sb, fj):
+        warns.append(note)
     # 6. the M1b long-form table must be audited, not skipped. The inventory
     #    alone reads healthy for exactly this defect (an acronym defined at
     #    first use while the long form carries the prose), so residue rows may
@@ -22113,6 +22706,15 @@ PRIOR_ROUND_RULE = """PRIOR-ROUND FINDINGS (read-only; round @@ROUND@@ reviews t
     Do not re-file a prior finding that no longer holds, and do not drop one that does.
   * The orchestrator refuses the review if any prior finding id appears in NEITHER
     findings.json nor findings.md, so complete this reconciliation first.
+  * The previous round's DISCOVERY PROPOSALS (prior_round/new_sweeps.md, when present) are the
+    convergence loop: every `## M<NN>` proposal in it is a class the last round could not yet
+    check mechanically, so RE-PROBE each one against the current base/ corpus too. Record every
+    proposal id where the orchestrator can see it -- run it as a probe row in
+    review/round2/probes.md / review/round2/probe_results.md, or write
+    "prior proposal <id>: no instances in base/" into review/round2/new_sweeps.md or
+    review/round2/round2_summary.md. The orchestrator refuses the review if a prior proposal id
+    appears NOWHERE in the round-2 artifacts (nor in findings.json/findings.md), because a
+    discovered class that vanishes between rounds never becomes a mechanical check.
   * Carrying findings forward does NOT replace the sweeps: run the complete M1-M17 + J1-J5 set
     plus the pipeline-mandated M18-M24 checks, the rewrite-parity M25-M29 checks and the
     source-hierarchy reconciliation M30 (the
@@ -25389,6 +25991,80 @@ def _frozen_review_findings(sb: Path) -> list:
     return out
 
 
+def _probe_audit_verdict(row) -> str:
+    """The verdict token of one PROBE_AUDIT row ("" when none is stated)."""
+    for v in row.values():
+        cell = " ".join(str(v or "").split())
+        low = cell.lower()
+        if low.startswith(("stands", "promoted", "needs-evidence", "needs evidence")):
+            return cell
+    return ""
+
+
+def probe_audit_problems(sb: Path) -> list:
+    """Errors for the auditor's attack on the discovery round's probe rows.
+
+    The auditor exists to attack the reviewer's boilerplate closures, but the
+    discovery round's probe dispositions were outside its surface: a probe
+    closed "no anomalies -- checked: <locations>" with nothing checked, or one
+    blanket sentence shared by 25 rows, was never audited. When the frozen
+    review carries probe rows the auditor disposes them one row each in
+    `audit/PROBE_AUDIT.md` (`stands` / `promoted to AU-xxx` / `needs-evidence`),
+    and a promotion must name a real `AU-*` finding.
+    """
+    ids = discovery_probe_result_ids(sb)
+    if not ids:
+        return []
+    head = ", ".join(ids[:5]) + (" ..." if len(ids) > 5 else "")
+    path = sb / "audit" / "PROBE_AUDIT.md"
+    if not _discovery_nonempty(path):
+        return [f"review/round2/probe_results.md carries {len(ids)} probe disposition(s) "
+                f"({head}) but audit/PROBE_AUDIT.md is missing or empty: the auditor must "
+                f"attack the discovery round's probe closures one row each (verdict `stands` / "
+                f"`promoted to AU-xxx` / `needs-evidence`), exactly like the reviewer's "
+                f"finding-tier rows -- a blanket 'no anomalies' is the same boilerplate this "
+                f"stage exists to promote"]
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    errors = []
+    seen, verdictless = set(), []
+    for r in _discovery_rows(path):
+        m = DISCOVERY_PROBE_ID_RE.search(_row_text(r))
+        if not m:
+            continue
+        pid = m.group(0)
+        seen.add(pid)
+        if not _probe_audit_verdict(r):
+            verdictless.append(pid)
+    missing = [p for p in ids if p not in seen]
+    if missing:
+        errors.append(
+            f"audit/PROBE_AUDIT.md does not dispose probe(s) "
+            f"{', '.join(missing[:6])}" + (" ..." if len(missing) > 6 else "")
+            + ": one row per probe result, with the verdict `stands` / `promoted to AU-xxx` / "
+              "`needs-evidence`")
+    if verdictless:
+        errors.append(
+            f"audit/PROBE_AUDIT.md row(s) {', '.join(verdictless[:6])} carry no verdict: state "
+            f"`stands` (the reviewer's disposition is rule-specific and stands), `promoted to "
+            f"AU-xxx`, or `needs-evidence` (say what evidence the closure lacks)")
+    aj = read_json(sb / "audit" / "audit.json", revive=False, lenient=True)
+    adds = {}
+    if isinstance(aj, dict):
+        adds = {str(f.get("id") or "").strip() for f in (aj.get("adds") or [])
+                if isinstance(f, dict) and str(f.get("id") or "").strip()}
+    promoted = {a.upper() for a in re.findall(r"\bpromoted\s+to\s+(AU-[A-Za-z0-9-]+)", text, re.I)}
+    unknown = sorted(a for a in promoted if a not in adds)
+    if unknown:
+        errors.append(
+            f"audit/PROBE_AUDIT.md promotes probe row(s) to {', '.join(unknown)} but audit.json's "
+            f"`adds` list defines no such finding: a promoted row must name the AU-* finding it "
+            f"became, so the revisers resolve it")
+    return errors
+
+
 def postcheck_audit(ctx: Ctx, rec: dict):
     """The auditor's deliverable: a complete, evidenced disposition of the review."""
     sb = ctx.sandbox_of(rec)
@@ -25433,6 +26109,9 @@ def postcheck_audit(ctx: Ctx, rec: dict):
     if not (sb / "audit" / "AUDIT.md").is_file():
         warns.append("audit/AUDIT.md (the human-readable disposition record) was not found; a "
                      "dropped finding must stay re-checkable by a human")
+    # The discovery round's probe rows are dispositions too: the auditor attacks
+    # each of them (or says why it could not), one row per probe.
+    errs.extend(probe_audit_problems(sb))
     errs.extend(input_mismatches(ctx, rec))
     return (not errs), errs, warns, None
 
@@ -25471,7 +26150,16 @@ def postcheck_review(ctx: Ctx, rec: dict):
         check_visual_artifact(sb / VISUAL_ARTIFACT_REVIEW,
                               f"the visual-inspection record {VISUAL_ARTIFACT_REVIEW}",
                               errs, warns, sandbox=sb, render_roots=[sb / REVIEW_DIR])
-    if not any((sb / rel).exists() for rel in DISCOVERY_RELS):
+    # THE DISCOVERY ROUND'S CONTRACT (D0-D5): the phase's deliverables are
+    # quality-checked, not just existence-checked (see
+    # `discovery_contract_problems`). The problems follow the review's
+    # `--strict-artifacts` policy -- fail by default, warn under
+    # `--non-strict-artifacts` -- and the list is recorded for
+    # `decide --residual-gate`. A "formatting-writing" round never runs the
+    # phase, and under a phases/aspects split only session B carries it.
+    if review_owes_discovery(ctx, rec):
+        rec["discovery_contract"] = check_discovery_contract(ctx, sb, errs, warns)
+    elif not any((sb / rel).exists() for rel in DISCOVERY_RELS):
         warns.append("no discovery-round artifact under review/round2/ -- the D0-D5 phase cannot "
                      "be verified")
     _check_pristine_copy(ctx, rec, pristine_dirname(ctx.sandbox_of(rec)), errs)
@@ -28362,7 +29050,8 @@ STAGE_DELIVERABLES = {
                "expected": (FINDINGS_MD_REL, "review/round2/findings_extra.json",
                             VISUAL_ARTIFACT_REVIEW)},
     "audit": {"required": ("audit/audit.json",),
-              "expected": ("audit/AUDIT.md", "audit/DISPOSITION_AUDIT.md")},
+              "expected": ("audit/AUDIT.md", "audit/DISPOSITION_AUDIT.md",
+                           "audit/PROBE_AUDIT.md")},
     "rewrite": {"required": (REWRITE_REPORT_REL,),
                 "expected": (f"{REWRITTEN_DIR}/VISUAL_CHECK.md",
                              f"{REWRITTEN_DIR}/MANUAL_STEPS.md")},
@@ -28517,6 +29206,20 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
             # corpus pointer, the coverage table and the M1b long-form gate), so
             # the session gets the whole contract, not a summary of it.
             check_review_contract(None, sb, fj, errs, warns)   # selfcheck: no ctx/round scope
+        # The discovery round's D0-D5 contract, unless THIS session's own prompt
+        # says the phase is not its job (the formatting-writing scope, or the
+        # mechanical half of a split review).
+        try:
+            _prompt = (sb / PROMPT_FILE).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            _prompt = ""
+        _no_discovery = ("FORMATTING AND WRITING ONLY" in _prompt
+                         or ("SPLIT REVIEW" in _prompt
+                             and "YOUR SCOPE (B)" not in _prompt))
+        if not _no_discovery:
+            _derrs, _dwarns = discovery_contract_problems(sb)
+            errs.extend(f"discovery round: {d}" for d in _derrs)
+            warns.extend(f"discovery round: {d}" for d in _dwarns)
         report = artifact_quality_report(sb / REVIEW_DIR)
         for rel, problems in sorted(report.items()):
             for p in problems:
@@ -28540,6 +29243,7 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
                  if str(f.get("id") or "").strip()]))
         if not (sb / "audit" / "AUDIT.md").is_file():
             warns.append("audit/AUDIT.md (the human-readable disposition record) is missing")
+        errs.extend(probe_audit_problems(sb))
     elif kind in ("rewrite", "revise", "integrate"):
         pkg = output_dir_of(rec)
         d = sb / pkg
@@ -33274,6 +33978,82 @@ def cmd_set_dedup_mode(args) -> None:
     print(f"[set-dedup-mode] mode: {mode_arg} ({detail})")
 
 
+def _adopt_sweep_source(arg: str) -> Path:
+    """The new_sweeps.md a `--proposals` argument names (a file or a sandbox)."""
+    p = Path(str(arg)).expanduser()
+    if p.is_dir():
+        for rel in ("review/round2/new_sweeps.md", "new_sweeps.md"):
+            if (p / rel).is_file():
+                return p / rel
+        die(f"{p} carries no review/round2/new_sweeps.md (nor a bare new_sweeps.md): pass the "
+            f"proposal file or a review sandbox root", code=2)
+    return p
+
+
+def cmd_adopt_sweep(args) -> None:
+    """`adopt-sweep`: validate a discovery proposal file; with --yes, append it.
+
+    D5's proposals used to die in review/round2/new_sweeps.md ("the orchestrator
+    ARCHIVES that file for you but does not apply the proposals itself"), so in
+    an unattended chain of runs a discovered class could be re-discovered
+    forever. This command is the adoption step: it parses the proposal blocks,
+    refuses anything that is not sweeps.md-shaped or does not continue the
+    numbering, checks the target for collisions, and (with --yes) appends the
+    validated blocks to the skill's `references/sweeps.md` while re-syncing the
+    standalone review prompt's appendix to it (validate_skill.py's D10).
+    """
+    src = _adopt_sweep_source(getattr(args, "proposals", ""))
+    if not src.is_file():
+        die(f"--proposals {src} is not a file", code=2)
+    sweeps = (Path(str(args.sweeps)).expanduser() if getattr(args, "sweeps", None) else
+              Path(__file__).resolve().parent / "paper-skills" / "paper-review"
+              / "references" / "sweeps.md")
+    if not sweeps.is_file():
+        die(f"the target sweeps.md {sweeps} does not exist (pass --sweeps PATH)", code=2)
+    try:
+        text = src.read_text(encoding="utf-8", errors="replace")
+        cur = sweeps.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:                                          # noqa: BLE001
+        die(f"could not read {src} / {sweeps}: {e}", code=2)
+    proposals, problems = parse_sweep_proposals(text)
+    if not proposals:
+        if DISCOVERY_NO_PROPOSAL_RE.search(text):
+            print(f"[adopt-sweep] {src}: no new-sweep proposals (the file says so); nothing "
+                  f"to adopt")
+            return
+        print(f"[adopt-sweep] {src} carries no `## M<NN> -- <name>` proposal block")
+        raise SystemExit(1)
+    problems += adopt_sweep_problems(proposals, cur)
+    print(f"[adopt-sweep] {src}: {len(proposals)} proposal(s) -> {sweeps}")
+    for sid, name, _block in proposals:
+        print(f"  - {sid}: {name}")
+    if problems:
+        print(f"[adopt-sweep] REFUSED: {len(problems)} problem(s):")
+        for p in problems:
+            print(f"  - {p}")
+        raise SystemExit(1)
+    if not getattr(args, "yes", False):
+        print("[adopt-sweep] dry run: nothing was written. Re-run with --yes to append the "
+              "proposal(s) to sweeps.md and re-sync the standalone prompt's appendix.")
+        return
+
+    def _adopted(block: str) -> str:
+        lines = block.rstrip("\n").split("\n")
+        lines[0] = re.sub(r"\s*[\(\[]proposed[\)\]]\s*$", "", lines[0]).rstrip()
+        return "\n".join(lines)
+
+    new_text = (cur.rstrip("\n") + "\n\n"
+                + "\n\n".join(_adopted(b) for _sid, _name, b in proposals) + "\n")
+    write_text_atomic(sweeps, new_text)
+    note = resync_sweeps_appendix(sweeps, new_text)
+    print(f"[adopt-sweep] appended {len(proposals)} proposal(s) to {sweeps}")
+    print(f"[adopt-sweep] {note}")
+    print("[adopt-sweep] follow-ups: the review now runs the new sweep id(s), so their coverage "
+          "rows, artifacts and finding rules must be implemented in the review skill + prompts "
+          "(and a regression test added) before the next round; `selfcheck`/`validate_skill.py` "
+          "will report any inconsistency.")
+
+
 def cmd_set_revision_mode(args) -> None:
     """Set (or show) the journal revision mode of an existing root.
 
@@ -36694,6 +37474,8 @@ def collect_residuals(ctx: Ctx) -> dict:
         if kind == "review":
             for rel, probs in sorted((rec.get("artifact_quality") or {}).items()):
                 add(f"{rid}: decision artifact {rel}: {str(probs[0])[:140]}", gate=True)
+            for prob in (rec.get("discovery_contract") or []):
+                add(f"{rid}: discovery round: {str(prob)[:160]}", gate=True)
     return {"items": items, "gating": gating, "advisory": advisory,
             "count": len(items), "gating_count": len(gating), "advisory_count": len(advisory)}
 
@@ -41925,6 +42707,20 @@ def build_parser() -> argparse.ArgumentParser:
     psc.add_argument("--round", type=int, default=0,
                      help="the round the marker must name (0 = do not check the round)")
     psc.set_defaults(func=cmd_selfcheck)
+
+    psw2 = sub.add_parser("adopt-sweep",
+                          help="validate a review/round2/new_sweeps.md proposal file and, with "
+                               "--yes, append its proposals to the skill's references/sweeps.md "
+                               "(re-syncing the standalone prompt's appendix)")
+    psw2.add_argument("--proposals", required=True, metavar="PATH",
+                      help="the proposal file, or a review sandbox carrying "
+                           "review/round2/new_sweeps.md")
+    psw2.add_argument("--sweeps", default=None, metavar="PATH",
+                      help="target sweeps.md (default: paper-skills/paper-review/references/"
+                           "sweeps.md beside this script)")
+    psw2.add_argument("--yes", action="store_true",
+                      help="append the validated proposal(s); without it this is a dry run")
+    psw2.set_defaults(func=cmd_adopt_sweep, root=None)
 
     pag = sub.add_parser("agents", parents=[common],
                          help="list the agent session names each round will run (a dry plan)")

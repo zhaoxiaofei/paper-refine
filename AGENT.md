@@ -13,7 +13,7 @@ it are local artefacts, not committed).
 
 | path | what it is |
 |---|---|
-| `paper_pipeline.py` | the orchestrator (single file, stdlib only). CLI: `setup`, `run`, `run-decide`, `decide`, `status`, `trend`, `agents`, `conflicts`, `selfcheck`, `set-venue`, `set-journal`, `set-article-type`, `set-revision-mode`, `set-tiebreak-defect-floor`, `set-dedup-mode`, `add-venue`, `build-venue-templates`, `retry`, `prune`, `redline`, `track`, `conform`. |
+| `paper_pipeline.py` | the orchestrator (single file, stdlib only). CLI: `setup`, `run`, `run-decide`, `decide`, `status`, `trend`, `agents`, `conflicts`, `selfcheck`, `adopt-sweep`, `set-venue`, `set-journal`, `set-article-type`, `set-revision-mode`, `set-tiebreak-defect-floor`, `set-dedup-mode`, `add-venue`, `build-venue-templates`, `retry`, `prune`, `redline`, `track`, `conform`. |
 | `paper_docx_format.py` | the optional companion: code-side OOXML style/formatting scan/fix (`scan`/`fix`/`check-pdf`) and the Zotero live-field parity check (`zotero-check FILE.docx`, FMT-Z1..Z5 / M36). |
 | `paper_redlines_adapter.py` | optional tracked-changes `.docx` bridge. |
 | `docxcompare.sh` + `mcp-docx-compare/` | Word's own comparison engine (`Word.Application.CompareDocuments` through PowerShell COM) -- the FIRST choice whenever two `.docx` files must be tracked (the `docx-compare` MCP tool wraps the script). |
@@ -310,6 +310,29 @@ the profiles shipped next to the script → the built-in fallback inside
     submission copy; **never flatten a document whose markers are stale**, which
     would freeze the wrong numbering. Pinned by
     `.paper_test/test_zotero_refresh_parity.py`.
+
+17. **The discovery round (D0–D5) is CHECKED, and its proposals CONVERGE.**
+    Phase 3 of the review is the open-ended hunt for classes the frozen
+    checklist does not own; a three-line `new_sweeps.md` (or no `review/round2/`
+    at all) used to pass. `paper_pipeline.discovery_contract_problems` reads the
+    whole deliverable set and, under the review's `--strict-artifacts` policy,
+    fails a review whose discovery round is not real work: `known_index.md`
+    names the class range, `gap_table.md` carries ≥25 rows each marked
+    COVERED/UNCOVERED with at least one UNCOVERED, `probes.md` covers every
+    uncovered row (probe or recorded limitation) with a status, `probe_results.md`
+    disposes every probe (`no anomalies — checked: <locations>` / `unable —
+    reason`), `findings_extra.json` carries the standard X-* finding shape,
+    `new_sweeps.md` carries sweeps.md-shaped proposals from M37 (or an explicit
+    no-proposal statement) and `round2_summary.md` the counts + honest limits.
+    Continuity is code-enforced: every proposal id in `prior_round/new_sweeps.md`
+    must be re-probed or dispositioned in the current round's round-2 artifacts.
+    The auditor attacks the probe dispositions (`audit/PROBE_AUDIT.md`), F/X
+    duplicates get a mechanical audit trail, and `adopt-sweep` validates a
+    proposal file and (with `--yes`) appends it to `references/sweeps.md` while
+    re-syncing the standalone prompt's appendix. Pinned by
+    `.paper_test/test_round2_sweep_2026_1009.py`. Do not weaken any of these
+    gates to make a session pass: the whole point is that an unfilled phase is
+    indistinguishable from a skipped one.
 
 ## Commands you will use
 

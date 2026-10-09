@@ -80,6 +80,35 @@ def review_sandbox(tmp, submission_dir="./base", coverage=None, artifacts=True,
          "artifacts": {}, "coverage": full_coverage() if coverage is None else coverage}),
         encoding="utf-8")
     (sb / "review/findings.md").write_text("# stub\n", encoding="utf-8")
+    # The discovery round's D0-D5 deliverables (the review postcheck verifies
+    # them as a contract; see test_round2_sweep_2026_1009.py).
+    r2 = sb / "review/round2"
+    r2.mkdir(parents=True, exist_ok=True)
+    (r2 / "known_index.md").write_text(
+        "# D0 (fixture)\n\nM1 .. M36, J1 .. J5 (KNOWN-CLASSES); no KNOWN-INSTANCES\n",
+        encoding="utf-8")
+    (r2 / "gap_table.md").write_text(
+        "# D1 (fixture)\n\n| # | gap row | coverage |\n|---|---|---|\n"
+        + "\n".join(f"| {i} | fixture class {i} | "
+                    + ("COVERED (M1)" if i <= 23 else "UNCOVERED") + " |"
+                    for i in range(1, 26))
+        + "\n", encoding="utf-8")
+    (r2 / "probes.md").write_text(
+        "# D2 (fixture)\n\n| probe id | gap row | status |\n|---|---|---|\n"
+        "| P2-001 | 24 | executed |\n| P2-002 | 25 | executed |\n", encoding="utf-8")
+    (r2 / "probe_results.md").write_text(
+        "# D3 (fixture)\n\n| probe id | disposition |\n|---|---|\n"
+        "| P2-001 | executed - no anomalies - checked: base/ (fixture) |\n"
+        "| P2-002 | executed - no anomalies - checked: base/ (fixture) |\n", encoding="utf-8")
+    (r2 / "findings_extra.json").write_text(
+        json.dumps({"findings": [], "coverage": []}), encoding="utf-8")
+    (r2 / "findings_extra.md").write_text("# D4 (fixture)\n", encoding="utf-8")
+    (r2 / "new_sweeps.md").write_text(
+        "# D5 (fixture)\n\nNo new sweep proposals in this fixture.\n", encoding="utf-8")
+    (r2 / "round2_summary.md").write_text(
+        "# Round-2 summary (fixture)\n\nGap rows: 25 (23 covered, 2 uncovered). Probes: 2 "
+        "executed (clean). X-findings: none. Proposed sweeps: none.\n"
+        "Honest limits: fixture only.\n", encoding="utf-8")
     if artifacts:
         (sb / "review/artifacts").mkdir(parents=True, exist_ok=True)
         (sb / "review/artifacts/M1.md").write_text("|row|\n", encoding="utf-8")

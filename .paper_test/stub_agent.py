@@ -312,9 +312,44 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
         "# visual inspection (stub)\n\nstub: pages NOT visually verified (no renderer used); "
         "the rendering step is handed to the author\n",
         encoding="utf-8")
-    write_json(out / "round2" / "findings_extra.json", {"findings": [], "coverage": []})
-    (out / "round2" / "findings_extra.md").write_text("# extra (stub)\n", encoding="utf-8")
-    (out / "round2" / "new_sweeps.md").write_text("# none\n", encoding="utf-8")
+    # The discovery round D0-D5: the stub mirrors a *thorough* round, because
+    # the pipeline now verifies the phase's deliverables as a contract (>=25
+    # gap rows each COVERED/UNCOVERED, a probe or recorded limitation per
+    # uncovered row, one executed disposition per probe, sweeps.md-shaped
+    # proposals from M37 or an explicit no-proposal statement, and a summary
+    # with the counts and honest limits).
+    r2 = out / "round2"
+    (r2 / "known_index.md").write_text(
+        "# D0 - dedup base (stub)\n\n## KNOWN-CLASSES\n\n"
+        + " ".join(f"M{i}" for i in range(1, 37)) + " J1 J2 J3 J4 J5\n\n"
+        "## KNOWN-INSTANCES\n\n(none: this stub round carries no prior findings)\n",
+        encoding="utf-8")
+    (r2 / "gap_table.md").write_text(
+        "# D1 - gap table (stub)\n\n| # | issue class | coverage |\n|---|---|---|\n"
+        + "\n".join(f"| {i} | stub class question {i} | "
+                    + ("COVERED (M1)" if i <= 23 else "UNCOVERED") + " |"
+                    for i in range(1, 26))
+        + "\n", encoding="utf-8")
+    (r2 / "probes.md").write_text(
+        "# D2 - probes (stub)\n\n| probe id | gap row | question | evidence | status |\n"
+        "|---|---|---|---|---|\n"
+        "| P2-001 | 24 | stub probe one | base/ | executed |\n"
+        "| P2-002 | 25 | stub probe two | base/ | executed |\n", encoding="utf-8")
+    (r2 / "probe_results.md").write_text(
+        "# D3 - probe results (stub)\n\n| probe id | disposition |\n|---|---|\n"
+        "| P2-001 | executed - no anomalies - checked: base/ (stub) |\n"
+        "| P2-002 | executed - no anomalies - checked: base/ (stub) |\n", encoding="utf-8")
+    write_json(r2 / "findings_extra.json", {"findings": [], "coverage": []})
+    (r2 / "findings_extra.md").write_text("# D4 - extra findings (stub)\n", encoding="utf-8")
+    (r2 / "new_sweeps.md").write_text(
+        "# D5 - new-sweep proposals (stub)\n\nNo new sweep proposals this round: the stub "
+        "corpus is one synthetic file, so no class recurred that a probe caught by accident.\n",
+        encoding="utf-8")
+    (r2 / "round2_summary.md").write_text(
+        "# Round-2 summary (stub)\n\nGap rows: 25 (23 covered, 2 uncovered). Probes: 2 executed "
+        "(2 clean, 0 findings, 0 unable). X-findings: none. Proposed sweeps: none. "
+        "Manual verification: none.\n\nHonest limits: this round could not exercise a real "
+        "corpus (stub).\n", encoding="utf-8")
     fill_seeded_tables(out / "artifacts")
     write_json(sb / "_pipeline_done.json", {
         "stage": "review", "run_id": name, "round": round_no, "status": "complete",
@@ -483,6 +518,21 @@ def do_audit(sb: Path, name: str, round_no: int) -> int:
     (out / "DISPOSITION_AUDIT.md").write_text(
         "| rule | row | reviewer's reason | verdict | finding |\n|---|---|---|---|---|\n",
         encoding="utf-8")
+    # The discovery round's probe rows are attacked like the reviewer's other
+    # dispositions: one row per probe, verdict `stands` in the stub.
+    probe_ids = []
+    pres = rev / "round2" / "probe_results.md"
+    if pres.is_file():
+        for line in pres.read_text(encoding="utf-8").splitlines():
+            m = re.search(r"\bP2-\d{2,}\b", line)
+            if m and m.group(0) not in probe_ids:
+                probe_ids.append(m.group(0))
+    if probe_ids:
+        (out / "PROBE_AUDIT.md").write_text(
+            "| probe id | reviewer's disposition | verdict | evidence |\n|---|---|---|---|\n"
+            + "".join(f"| {pid} | stub capture | stands | stub: re-checked base/ |\n"
+                      for pid in probe_ids),
+            encoding="utf-8")
     write_json(sb / "_pipeline_done.json",
                {"stage": "audit", "run_id": name, "round": round_no, "status": "complete",
                 "error": None,

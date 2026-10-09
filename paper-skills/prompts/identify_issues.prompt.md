@@ -1810,7 +1810,8 @@ If PRIOR is missing, STOP and tell the user to run the standard review first.
 never invent; unresolvable → `unresolvable — manual verification required`;
 unverifiable guideline rule → `guideline-dependent`; no silent skips — every
 enumerated item gets a disposition; one finding per instance; prefer scripts
-over attention.
+over attention. The orchestrator verifies the phase's deliverables as a
+contract — see "The orchestrator's contract" at the end of this file.
 
 ## D0 — Dedup base
 
@@ -1939,3 +1940,46 @@ runs instead of pretending completeness on day one.
 Counts: gap rows (covered/uncovered), probes (executed/clean/findings/unable),
 X-findings by category/severity, proposed sweeps. Manual-verification list.
 Statement of what this round could NOT check (honest limits).
+
+## The orchestrator's contract (what is verified)
+
+The pipeline reads the D0–D5 deliverables and REFUSES the review (under the
+default `--strict-artifacts on`; a warning under `--non-strict-artifacts`, and
+a gating residual for `decide --residual-gate`) when any of the following is
+missing or unfulfilled. Everything below is structural — the truth of a
+disposition stays the auditor's and the revisers' job:
+
+- `OUT2/known_index.md` — non-empty, and names both ends of the frozen class
+  range (M1 and J5) as whole tokens: the dedup base must include the classes it
+  excludes.
+- `OUT2/gap_table.md` — at least 25 class rows, EACH marked COVERED (by which
+  check) or UNCOVERED, and at least one UNCOVERED row: the two-sided-defect
+  seed alone is a standing gap until both directions have been reported, and so
+  are the D3 anomaly hunts.
+- `OUT2/probes.md` — one probe (`P2-…`) or a recorded analysis limitation for
+  EVERY uncovered gap row; every probe row carries its status (`pending` /
+  `executed` / `unable` — reason).
+- `OUT2/probe_results.md` — one disposition for every declared probe: no
+  `pending` rows; a clean probe reads `no anomalies — checked: <locations>`
+  (the locations are required); an `unable` probe states why it could not be
+  executed.
+- `OUT2/findings_extra.json` — the standard finding shape for every `X-*` row
+  (unique id, location, category 0–5, check = the gap-row class label,
+  severity, evidence quote, explanation). D0's dedup rule is also checked
+  mechanically: an X row whose line and excerpt match a frozen `F-*` row is
+  reported as a likely duplicate (same class+location+substance is not
+  reportable).
+- `OUT2/new_sweeps.md` — sweeps.md-shaped proposals (`## M<NN> — <name>` with
+  Purpose, Enumeration, Artifact and Finding rules) numbered from M37, with no
+  duplicate ids; or an explicit statement that there were no proposals (and
+  why) — a bare `# none` is refused. The operator adopts validated proposals
+  with `paper_pipeline.py adopt-sweep --proposals review/round2/new_sweeps.md`
+  (`--yes` writes them into `references/sweeps.md`).
+- `OUT2/round2_summary.md` — the round's counts (gap rows, probes, X-findings,
+  proposed sweeps) and its honest-limits statement.
+
+Continuity is enforced too: every sweep id the PREVIOUS round proposed
+(`prior_round/new_sweeps.md`) must be re-probed or explicitly dispositioned
+("prior proposal M37: no instances in base/") in this round's round-2
+artifacts — a proposed class must not vanish between rounds; that is how it
+converges into a mechanical check.

@@ -745,6 +745,48 @@ review → audit → revise path (`sweeps.md` §M30):
   refutes is scoreable `correctness`/`completeness`, never cosmetic — while the
   frozen coverage map stays M1–M24 + J1–J4, exactly as M25–M29 did.
 
+## The discovery round (D0–D5) is verified as a contract
+
+Phase 3 of `$paper-review` is the open-ended hunt for issue CLASSES the frozen
+checklist does not own (`paper-skills/paper-review/references/discovery.md`).
+Its deliverables used to be existence-checked at best — a session could leave a
+three-line `new_sweeps.md` (or no `review/round2/` at all, which was a warning)
+and the review still passed. The pipeline now reads the whole D0–D5 deliverable
+set and, under the review's `--strict-artifacts` policy (fail by default, warn
+under `--non-strict-artifacts`, and recorded for `decide --residual-gate`),
+REFUSES a review whose discovery round is not real work:
+
+* `known_index.md` names the frozen class range (M1 … J5);
+* `gap_table.md` carries ≥25 class rows, each marked COVERED (by which check)
+  or UNCOVERED, with at least one UNCOVERED row (the two-sided-defect seed
+  alone is a standing gap until both directions have been reported);
+* `probes.md` converts every UNCOVERED row into a `P2-…` probe or records it as
+  an analysis limitation, and every probe row states its status;
+* `probe_results.md` executes every probe — a clean probe reads
+  `no anomalies — checked: <locations>`, an `unable` probe says why;
+* `findings_extra.json` carries the standard finding shape for every `X-*` row,
+  and a cross-namespace check reports an X row whose line + excerpt match a
+  frozen `F-*` row (D0's "same class+location+substance is not reportable");
+* `new_sweeps.md` carries sweeps.md-shaped proposals (Purpose, Enumeration,
+  Artifact, Finding rules) numbered from M37, or an explicit statement that
+  there were no proposals and why — a bare `# none` is refused;
+* `round2_summary.md` reports the counts and the round's honest limits.
+
+Continuity is enforced: every sweep id the PREVIOUS round proposed
+(`prior_round/new_sweeps.md`) must be re-probed or explicitly dispositioned
+("prior proposal M37: no instances in base/") in the current round's round-2
+artifacts, so a discovered class cannot vanish between rounds.
+
+Adoption is a command, not a manual paste: `paper_pipeline.py adopt-sweep
+--proposals review/round2/new_sweeps.md` validates the proposal blocks, refuses
+non-continuing numbering or collisions with `references/sweeps.md`, appends
+them with `--yes` and re-syncs the standalone review prompt's appendix
+(`validate_skill.py`'s D10 sync check). And the auditor now attacks the
+discovery round's probe dispositions like the reviewer's other decision rows:
+when the frozen review carries probe rows, `audit/PROBE_AUDIT.md` must dispose
+each probe (`stands` / `promoted to AU-xxx` / `needs-evidence`), and a
+promotion must name a real `AU-*` finding.
+
 ## Arm levels, the difference ledger, and the language pass (W-11/W-12)
 
 * **Rewrite arms carry a level.** With `--rewrites 2` the round stages one

@@ -420,6 +420,31 @@ def build_review_sandbox(tmp: Path, short_rows: bool, marker_in_review: bool) ->
     write(art / "OUTLINE.md", "# OUTLINE\n\n" + outline_rows(2 if short_rows else 0,
                                                             0 if short_rows else 2))
     write(art / "VIS_visual.md", "# visual\n\npages reviewed: none\n")
+    # The discovery round's D0-D5 deliverables: the pre-flight verifies them as
+    # a contract too (see test_round2_sweep_2026_1009.py).
+    write(sb / "review" / "round2" / "known_index.md",
+          "# D0 (fixture)\n\nKNOWN-CLASSES: M1 ... M36, J1 ... J5\n")
+    write(sb / "review" / "round2" / "gap_table.md",
+          "# D1 (fixture)\n\n| # | gap row | coverage |\n|---|---|---|\n"
+          + "\n".join(f"| {i} | fixture class {i} | "
+                      + ("COVERED (M1)" if i <= 23 else "UNCOVERED") + " |"
+                      for i in range(1, 26)) + "\n")
+    write(sb / "review" / "round2" / "probes.md",
+          "# D2 (fixture)\n\n| probe id | gap row | status |\n|---|---|---|\n"
+          "| P2-001 | 24 | executed |\n| P2-002 | 25 | executed |\n")
+    write(sb / "review" / "round2" / "probe_results.md",
+          "# D3 (fixture)\n\n| probe id | disposition |\n|---|---|\n"
+          "| P2-001 | executed - no anomalies - checked: base/ (fixture) |\n"
+          "| P2-002 | executed - no anomalies - checked: base/ (fixture) |\n")
+    write(sb / "review" / "round2" / "findings_extra.json",
+          {"findings": [], "coverage": []})
+    write(sb / "review" / "round2" / "findings_extra.md", "# D4 (fixture)\n")
+    write(sb / "review" / "round2" / "new_sweeps.md",
+          "# D5 (fixture)\n\nNo new sweep proposals in this fixture.\n")
+    write(sb / "review" / "round2" / "round2_summary.md",
+          "# Round-2 summary (fixture)\n\nGap rows: 25 (23 covered, 2 uncovered). Probes: 2 "
+          "executed (clean). X-findings: none. Proposed sweeps: none.\n"
+          "Honest limits: fixture only.\n")
     marker = {"stage": "review", "run_id": "r1_review", "round": 1, "status": "complete"}
     write((sb / "review" / nb.MARKER_FILE) if marker_in_review else (sb / nb.MARKER_FILE), marker)
     return sb
