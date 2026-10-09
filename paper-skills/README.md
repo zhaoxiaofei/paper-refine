@@ -107,8 +107,8 @@ Outputs land in `./review/`:
 
 ### Step 2 — (optional) Validate the growth-loop proposals
 
-`review/round2/new_sweeps.md` proposes new sweeps (M20+; M18 and M19 are
-reserved by the pipeline) based on what
+`review/round2/new_sweeps.md` proposes new sweeps (M37+; M18–M20 are
+reserved and M21–M36 already adopted) based on what
 the discovery round caught that the checklist missed. Review them, then
 append the ones you accept to `references/sweeps.md` of the installed
 `paper-review` copy. If that directory is read-only (typical for an installed
@@ -277,8 +277,9 @@ paper-skills/
   word counts (the venue profile requires them to respect the article type's
   limit but publishes no number); an optional `--caption-limit` proxy cap only
   changes whether an over-count legend is reported as an over-cap item.
-- New sweeps you validate from `round2/new_sweeps.md` append as M20+ at the
-  end of `references/sweeps.md` of the loaded copy (M18 and M19 are reserved);
+- New sweeps you validate from `round2/new_sweeps.md` append as M37+ at the
+  end of `references/sweeps.md` of the loaded copy (M18–M20 are reserved and
+  M21–M36 already adopted);
   IDs are stable, never renumbered.
 - **File naming**: `paper-revise` gives each revision package ONE version token:
   the 7-character content-hash printed by `paper-revise/scripts/revision_token.py`

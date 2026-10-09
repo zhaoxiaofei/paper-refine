@@ -4313,7 +4313,24 @@ def prescribed_empty_indices(paras: list, policy: dict) -> set:
     return out
 
 
-def stray_empty_paragraph_groups(paras: list, policy: dict) -> tuple:
+def _table_paragraph_indices(xml: str, paras: list) -> set:
+    """Indices of the paragraphs that live inside a `<w:tbl>` (a table cell's own).
+
+    A `w:tc` must hold at least one block-level element: splicing out a cell's
+    only (empty) paragraph leaves `<w:tc></w:tc>`, which Word reports as a
+    corrupt file, and the fixer's well-formedness/text-identity verification
+    cannot see it. Table paragraphs are therefore never stray.
+    """
+    if not xml:
+        return set()
+    spans = [(m.start(), m.end()) for m in re.finditer(r"<w:tbl\b[\s\S]*?</w:tbl>", xml)]
+    if not spans:
+        return set()
+    return {i for i, (p0, _p1, _frag) in enumerate(paras)
+            if any(a <= p0 < b for a, b in spans)}
+
+
+def stray_empty_paragraph_groups(paras: list, policy: dict, xml: str = None) -> tuple:
     """([(indices_to_delete, kind)], prescribed_indices).
 
     Two classes are stray: a blank line ATTACHED to a heading (immediately
@@ -4323,10 +4340,16 @@ def stray_empty_paragraph_groups(paras: list, policy: dict) -> tuple:
     `max_empty_paragraph_run` (only the non-prescribed excess is deleted; a
     template-prescribed spacer counts as one of the allowed blanks). `kind` is
     "heading" or "run".
+
+    `xml` is the document the paragraphs were read from; when it is given,
+    paragraphs inside a table cell are never in a delete group (see
+    `_table_paragraph_indices`).
     """
     prescribed = prescribed_empty_indices(paras, policy)
     texts = [text_of(p[2]).strip() for p in paras]
-    is_empty = [not texts[i] and not has_drawing(paras[i][2])
+    in_table = _table_paragraph_indices(xml, paras)
+    is_empty = [not texts[i] and i not in in_table
+                and not has_drawing(paras[i][2])
                 and not has_field(paras[i][2])                # a field run is content
                 and not PAGEBREAK_RE.search(paras[i][2])       # FMT-S1 owns breaks
                 for i in range(len(paras))]
@@ -4362,9 +4385,9 @@ def stray_empty_paragraph_groups(paras: list, policy: dict) -> tuple:
     return groups, prescribed
 
 
-def stray_empty_paragraph_rows(paras: list, policy: dict, doc: str) -> list:
+def stray_empty_paragraph_rows(paras: list, policy: dict, doc: str, xml: str = None) -> list:
     """FMT-S8 (blank attached to a heading) / FMT-S6 (run beyond the cap)."""
-    groups, _prescribed = stray_empty_paragraph_groups(paras, policy)
+    groups, _prescribed = stray_empty_paragraph_groups(paras, policy, xml)
     rows = []
     for drop, kind in groups:
         lo, hi = drop[0], drop[-1]
@@ -5326,7 +5349,7 @@ AVAIL_UNRESOLVED_RES = (
 )
 REPO_PIN_RE = re.compile(
     r"https?://(?:www\.)?(github\.com|gitlab\.com|bitbucket\.org|codeberg\.org)/"
-    r"([A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(?:/tree/([0-9a-fA-F]{7,40}))?", re.I)
+    r"([A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(?:/(?:tree|commit)/([0-9a-fA-F]{7,40}))?", re.I)
 
 
 def availability_rows(paras: list, is_ref: list = None, limit: int = 20) -> list:
@@ -5399,7 +5422,6 @@ def availability_rows(paras: list, is_ref: list = None, limit: int = 20) -> list
 # --------------------------------------------------------------------------
 
 ZOTERO_STYLE_REF_RE = re.compile(r"https?://www\.zotero\.org/styles/([A-Za-z0-9._\-]+)")
-ZOTERO_DOCVAR_RE = re.compile(r'w:name="(ZOTERO_PREF\d*)"[^>]*w:val="([^"]*)"')
 
 
 def zotero_style_ids(parts: dict) -> dict:
@@ -5463,6 +5485,37 @@ def _marker_numbers(marker: str, text: str = None) -> list:
 ZOTERO_TOKEN_STOPWORDS = {"the", "and", "for", "with", "from", "into", "using", "their",
                           "this", "that", "single", "cell", "cells", "human", "data"}
 
+# The bibliography container headings. Entries are numbered paragraphs, but so
+# are numbered section headings ("1. Introduction") and numbered body lists, and
+# `setdefault` let the FIRST "N. text" paragraph of the whole document own the
+# entry at rank N -- a healthy manuscript then reported FMT-Z2/FMT-Z3 rows
+# ("entry 1: 'Introduction' does not describe the cited item").
+BIBLIO_HEADING_RE = re.compile(
+    r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:references|bibliography|literature\s+cited|"
+    r"works\s+cited|references\s+cited|bibliography\s+and\s+notes)\s*:?\s*$", re.I)
+
+
+def _bibliography_entry_start(para_texts: list) -> int:
+    """Index of the first paragraph after the LAST usable bibliography heading.
+
+    The entries are scanned from there; a document with no container heading
+    keeps the historical whole-document scan (a heading-less numbered
+    bibliography still needs the check), so this can only REMOVE the numbered
+    heading/body-list false positives.
+
+    "Usable" = at least one numbered entry follows it, which skips the Zotero
+    bibliography FIELD's own result paragraph (its placeholder text is literally
+    "bibliography" and it can sit after the entries).
+    """
+    start = 0
+    texts = list(para_texts or [])
+    for i, text in enumerate(texts):
+        if not BIBLIO_HEADING_RE.match(str(text or "")):
+            continue
+        if any(re.match(r"^\s*\d+\s*[\.\)]\s*\S", str(t or "")) for t in texts[i + 1:]):
+            start = i + 1
+    return start
+
 
 def _entry_describes_item(entry: str, item: dict) -> bool:
     """Does a bibliography ENTRY text describe the citation's embedded itemData?
@@ -5501,8 +5554,15 @@ def zotero_citation_state(xml: str, para_texts: list = None,
             continue
         js = None
         try:
-            m = re.search(r"\{.*\}", f["instr"], re.S)
-            js = json.loads(m.group(0)) if m else None
+            # Decode the FIRST complete JSON value, not the brace-to-brace span:
+            # Word may append a field switch ("... } \* MERGEFORMAT") or the
+            # instruction may carry braces of its own, and the greedy pattern
+            # then raised, silently dropping the field from every Z-rule. The
+            # field inventory's own reader (`_zotero_citation_id`) already
+            # decodes it this way.
+            m = re.search(r"CSL_CITATION\s*(\{)", f["instr"], re.S)
+            if m:
+                js, _end = json.JSONDecoder().raw_decode(f["instr"][m.start(1):].strip())
         except (ValueError, TypeError):
             js = None
         props = (js or {}).get("properties") or {}
@@ -5524,7 +5584,7 @@ def zotero_citation_state(xml: str, para_texts: list = None,
         for key in f["items"]:
             order.setdefault(key, len(order) + 1)
     entries = {}
-    for text in para_texts or []:
+    for text in (para_texts or [])[_bibliography_entry_start(para_texts):]:
         m = re.match(r"^\s*(\d+)\s*[\.\)]\s*(.+)$", str(text or ""))
         if m:
             entries.setdefault(int(m.group(1)), m.group(2).strip())
@@ -5685,7 +5745,11 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # ---- structural -----------------------------------------------------------
     for idx, (p0, p1, para) in enumerate(paras):
         text = text_of(para)
-        empty = not text.strip() and not has_drawing(para)
+        # A field run is CONTENT, never an empty paragraph: the fixer refuses to
+        # touch one (moving its page break would unbalance the field), so a row
+        # the scan still filed `mechanical` could never be repaired and made the
+        # whole fix verify as failed. The two sides read the same definition.
+        empty = not text.strip() and not has_drawing(para) and not has_field(para)
         if PAGEBREAK_RE.search(para) and empty:
             row("FMT-S1", "high", f"p{idx}", "empty paragraph holding a page break",
                 "break-only paragraphs render as a blank page (or a stray empty line); delete it "
@@ -5707,7 +5771,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # Stray empty paragraphs: template-prescribed blanks (the front-matter spacer
     # above the title, a slot the journal's own template carries) are exempt; a
     # blank attached to a heading is FMT-S8, a run beyond the cap is FMT-S6.
-    rows.extend(stray_empty_paragraph_rows(paras, policy, doc))
+    rows.extend(stray_empty_paragraph_rows(paras, policy, doc, xml))
 
     # ---- legends --------------------------------------------------------------
     legend_idx = [i for i, (_, _, p) in enumerate(paras) if LEGEND_RE.match(text_of(p))]
@@ -5830,7 +5894,10 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
             t = ("link" if in_link else "plain",
                  elem_val(rpr, "rStyle") or "-",
                  elem_val(rpr, "color") or "-",
-                 elem_val(rpr, "u") or "-",
+                 # `w:u w:val="none"` is an EXPLICIT "not underlined": it renders
+                 # exactly like no `w:u` at all, so counting it as underlined made
+                 # a document that mixes both spellings report mixed treatments.
+                 "u" if is_on(rpr, "u") else "-",
                  "i" if is_on(rpr, "i") else "-")
             for m in URL_RE.finditer(rtext):
                 treatments[m.group(0)].add(t)
@@ -6181,6 +6248,16 @@ def apply_edits(xml: str, edits: list) -> str:
     return xml
 
 
+# CT_PPrBase's children that PRECEDE `w:spacing`, in schema order: a child spliced
+# into a `w:pPr` must land after every one of them or the emitter produces a
+# schema-invalid property bag that only a real OOXML validator notices.
+PPR_SPACING_AFTER = ("pStyle", "keepNext", "keepLines", "pageBreakBefore", "framePr",
+                     "widowControl", "numPr", "suppressLineNumbers", "pBdr", "shd", "tabs",
+                     "suppressAutoHyphens", "kinsoku", "wordWrap", "overflowPunct",
+                     "topLinePunct", "autoSpaceDE", "autoSpaceDN", "bidi", "adjustRightInd",
+                     "snapToGrid")
+
+
 def insert_into_ppr(para: str, element: str, after=("pStyle", "keepNext", "keepLines")) -> str:
     ppr = ppr_of(para)
     if ppr is None:
@@ -6235,7 +6312,7 @@ def _unlink_fields(xml: str) -> tuple:
 
 def fix_document(xml: str, styles: dict, policy: dict,
                  sizes: dict = None, rels: dict = None) -> tuple:
-    """(new_xml, changes) — byte-level edits; rules run in dependency order."""
+    """(new_xml, changes, meta) — byte-level edits; rules run in dependency order."""
     changes = []
 
     # 1. unlink fields first, so run-level fixes stick ---------------------------
@@ -6273,7 +6350,7 @@ def fix_document(xml: str, styles: dict, policy: dict,
     # paragraph texts), and the prescribed blanks -- the front-matter spacer
     # above the title, the template's own placeholder slots -- are never in the
     # group.
-    groups, _prescribed = stray_empty_paragraph_groups(paragraphs(xml), policy)
+    groups, _prescribed = stray_empty_paragraph_groups(paragraphs(xml), policy, xml)
     drop = sorted({i for indices, _kind in groups for i in indices})
     if drop:
         plist = paragraphs(xml)
@@ -6302,7 +6379,12 @@ def fix_document(xml: str, styles: dict, policy: dict,
                 edits.append((at, at + len(old), want_sp))
                 n += 1
         else:
-            edits.append((p0, p1, insert_into_ppr(para, want_sp)))
+            # `w:spacing` is late in CT_PPrBase's child sequence: anchoring it
+            # after pStyle/keepNext/keepLines alone put it BEFORE an existing
+            # numPr/pBdr/shd/tabs, which the schema orders ahead of it (the
+            # well-formedness fence cannot see the difference, and the optional
+            # `docx validate` may not be installed).
+            edits.append((p0, p1, insert_into_ppr(para, want_sp, after=PPR_SPACING_AFTER)))
             n += 1
     if edits:
         xml = apply_edits(xml, edits)
@@ -6341,16 +6423,28 @@ def fix_document(xml: str, styles: dict, policy: dict,
 
     # 5. title-page header ------------------------------------------------------
     if policy["title_page_header"] == "suppress":
-        sects = list(re.finditer(r"<w:sectPr(?=[\s>]).*?</w:sectPr>", xml, re.S))
-        if sects and re.search(r"<w:headerReference", sects[0].group(0)) \
-                and "<w:titlePg" not in sects[0].group(0):
-            s = sects[0]
-            at = s.start() + s.group(0).find("</w:sectPr>")
-            for tag in ("docGrid", "printerSettings"):
-                t = s.group(0).find(f"<w:{tag}")
-                if t != -1:
-                    at = min(at, s.start() + t)
-            xml = apply_edits(xml, [(at, at, "<w:titlePg/>")])
+        # SECT_READ_RE is the reader that also matches a legal self-closing
+        # `<w:sectPr .../>`; the old non-greedy pattern ran past it to the NEXT
+        # section's closing tag, so a self-closing first section never got its
+        # w:titlePg added.
+        s = next(SECT_READ_RE.finditer(xml), None)
+        if s is not None and "<w:headerReference" in s.group(0) \
+                and "<w:titlePg" not in s.group(0):
+            body = s.group(0)
+            if body.rstrip().endswith("/>"):
+                # A legal self-closing (empty) section has no closing tag to
+                # insert before: expand it, or the splice lands OUTSIDE the
+                # element and the scanner keeps reporting FMT-S3 while the fixer
+                # believes it repaired it.
+                head = body.rstrip()[:-2].rstrip() + ">"
+                xml = apply_edits(xml, [(s.start(), s.end(), head + "<w:titlePg/></w:sectPr>")])
+            else:
+                at = s.start() + body.find("</w:sectPr>")
+                for tag in ("docGrid", "printerSettings"):
+                    t = body.find(f"<w:{tag}")
+                    if t != -1:
+                        at = min(at, s.start() + t)
+                xml = apply_edits(xml, [(at, at, "<w:titlePg/>")])
             changes.append("added w:titlePg: the running head no longer prints on page 1")
 
     # 6. unintended italics (title block, italic 'et al.' outside fields) -------
@@ -6955,21 +7049,6 @@ def _set_para_style(para: str, style: str) -> str:
         return para.replace(block, new, 1)
     om = re.match(r"<w:p(?=[\s>])[^>]*>", para)
     return para[:om.end()] + f'<w:pPr><w:pStyle w:val="{style}"/></w:pPr>' + para[om.end():]
-
-
-def _set_para_text(para: str, text: str) -> str:
-    """Replace the visible text, keeping the FIRST run's properties."""
-    spans = list(re.finditer(r"<w:t(?:\s[^>]*)?>(.*?)</w:t>", para, re.S))
-    if not spans:
-        return para
-    out, pos = [], 0
-    for i, m in enumerate(spans):
-        out.append(para[pos:m.start()])
-        inner = (text if i == 0 else "").replace("&", "&amp;").replace("<", "&lt;")
-        out.append(f"<w:t>{inner}</w:t>")
-        pos = m.end()
-    out.append(para[pos:])
-    return "".join(out)
 
 
 def _style_index(styles_xml: str) -> tuple:
@@ -8477,7 +8556,10 @@ def check_pdf(path: Path, policy: dict) -> dict:
     rows = [{"rule": "FMT-S2", "severity": "high", "document": path.name,
              "location": f"page {i}", "evidence": "page carries no body text",
              "detail": "blank page in the rendered document (header/footer only)",
-             "fix": "mechanical", "protected": False}
+             # a PDF page is re-rendered, never patched in place: `_fix_kind`
+             # classes FMT-S2 as manual, and a "mechanical" label here promised
+             # a repair no tool can perform on the artifact
+             "fix": "manual", "protected": False}
             for i in blank if len(blank) > policy["blank_page_tolerance"]]
     # The artifact checks (FMT-PDF1..3) run on the SAME extraction: a form shell
     # has one non-blank page and would otherwise pass as clean.
@@ -8525,10 +8607,16 @@ def cmd_fix(args) -> int:
                                        encoding="utf-8")
         return 1
     v = rep["verified"]
-    print(f"fixed {src.name} -> {out.name}: {len(rep['changes'])} change(s); "
+    # `ok: false` is a FAILURE (exit 1): the summary line must not read as a
+    # success the exit code contradicts.
+    head = "fixed" if rep["ok"] else "fix FAILED for"
+    print(f"{head} {src.name} -> {out.name}: {len(rep['changes'])} change(s); "
           f"mechanical findings {v['mechanical_findings_before']} -> {v['mechanical_findings_after']}; "
           f"text identical={v['text_identical']}; parts intact={v['parts_intact']}; "
           f"schema={v['schema_detail']}")
+    if not rep["ok"]:
+        print(f"  the repaired file was NOT accepted: "
+              f"{rep.get('error') or 'a verification check failed -- see the JSON report'}")
     for c in rep["changes"]:
         print(f"  - {c}")
     if args.json:
@@ -8556,21 +8644,40 @@ def cmd_zotero_check(args) -> int:
     path = Path(args.file)
     try:
         with zipfile.ZipFile(path) as pkg:
-            xml = pkg.read("word/document.xml").decode("utf-8", "replace")
+            names = list(pkg.namelist())
+            if "word/document.xml" not in names:
+                raise KeyError("word/document.xml")
+            # EVERY part that can hold fields, not just the main one: a
+            # note-style manuscript keeps its citations in word/footnotes.xml
+            # (or endnotes/header/footer/comments), and reading only
+            # document.xml printed CLEAN, exit 0 for a document whose
+            # footnotes a Word/Zotero refresh would rewrite.
+            part_names = [n for n in names
+                          if n in ZOTERO_FIELD_PARTS or ZOTERO_FIELD_AUX_PARTS_RE.search(n)]
+            parts = [(n, pkg.read(n).decode("utf-8", "replace")) for n in part_names]
             style_parts = {n: pkg.read(n).decode("utf-8", "replace")
                            for n in ("word/settings.xml", "docProps/custom.xml")
-                           if n in pkg.namelist()}
+                           if n in names}
     except (OSError, zipfile.BadZipFile, KeyError) as e:
         print(f"[FAIL] {path}: unreadable DOCX ({type(e).__name__}: {e})")
         return 1
+    xml = next(x for n, x in parts if n == "word/document.xml")
     paras = [text_of(p[2]) for p in paragraphs(xml)]
     styles = zotero_style_ids(style_parts)
     rows = zotero_parity_rows(xml, paras, styles)
+    for name, part_xml in parts:
+        if name == "word/document.xml":
+            continue
+        extra = zotero_parity_rows(part_xml,
+                                   [text_of(p[2]) for p in paragraphs(part_xml)], styles)
+        rows += [dict(r, location=f"{name}: {r['location']}") for r in extra]
     state = zotero_citation_state(xml, paras, styles)
+    report = zotero_report_for_docx(path)
+    counts_report = report.get("counts") or state["report"]["counts"]
     counts = Counter(r["rule"] for r in rows)
     print(f"{path}")
-    print(f"  live field(s): {state['report']['counts'].get('item', 0)} citation, "
-          f"{state['report']['counts'].get('bibliography', 0)} bibliography; "
+    print(f"  live field(s): {counts_report.get('item', 0)} citation, "
+          f"{counts_report.get('bibliography', 0)} bibliography; "
           f"{state['distinct_items']} distinct cited item(s); "
           f"style store(s): {styles or 'none'}")
     if not rows:

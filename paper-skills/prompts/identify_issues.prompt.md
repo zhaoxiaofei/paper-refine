@@ -1976,7 +1976,8 @@ disposition stays the auditor's and the revisers' job:
   with `paper_pipeline.py adopt-sweep --proposals review/round2/new_sweeps.md`
   (`--yes` writes them into `references/sweeps.md`).
 - `OUT2/round2_summary.md` — the round's counts (gap rows, probes, X-findings,
-  proposed sweeps) and its honest-limits statement.
+  proposed sweeps); a missing honest-limits statement is reported as a WARNING
+  (the round's counts are the hard failure, and the auditor reads the limits).
 
 Continuity is enforced too: every sweep id the PREVIOUS round proposed
 (`prior_round/new_sweeps.md`) must be re-probed or explicitly dispositioned

@@ -6764,7 +6764,7 @@ def apply_hierarchy_reconcile(text: str, where: str) -> str:
                         block.replace("@@SOURCE_HIERARCHY@@", SOURCE_HIERARCHY))
 
 
-# ---- M31-M35: THE EVIDENCE-INTEGRITY SWEEPS (review/audit/revise) ----------
+# ---- M31-M36: THE EVIDENCE-INTEGRITY SWEEPS (review/audit/revise) ----------
 # The five classes a mechanical scan can SEED but only a reader can judge: what
 # a figure actually PRINTS against what its legend says (M31), whether a
 # headline statistic can pass the correction the paper itself states (M32),
@@ -6775,8 +6775,8 @@ def apply_hierarchy_reconcile(text: str, where: str) -> str:
 # review-side like M25-M30: the judge's frozen map is unchanged, and the code's
 # own seeds are FMT-AV1/A2 (M33), the M30 source-data comparison (M34) and
 # PKG-1 (M35).
-EVIDENCE_INTEGRITY_REVIEW = """3f. The EVIDENCE-INTEGRITY sweeps M31-M35 (definitions in the skill's
-   references/sweeps.md, sections M31-M35). Each gets its own coverage row and its own
+EVIDENCE_INTEGRITY_REVIEW = """3f. The EVIDENCE-INTEGRITY sweeps M31-M36 (definitions in the skill's
+   references/sweeps.md, sections M31-M36). Each gets its own coverage row and its own
    artifact under review/artifacts/:
    * M31 ARTWORK-VERSUS-LEGEND consistency: for every figure compare what the PRINTED
      artwork says (axis titles, inset labels, column headers, color-bar range, legend keys)
@@ -6870,7 +6870,7 @@ EVIDENCE_INTEGRITY_GENERIC = """EVIDENCE-INTEGRITY (check ids M31-M36, review-si
 
 
 def apply_evidence_integrity(text: str, where: str) -> str:
-    """Substitute the M31-M35 block for the stage that owns it."""
+    """Substitute the M31-M36 block for the stage that owns it."""
     block = {"review": EVIDENCE_INTEGRITY_REVIEW,
              "audit": EVIDENCE_INTEGRITY_AUDIT,
              "revise": EVIDENCE_INTEGRITY_REVISE}.get(where, EVIDENCE_INTEGRITY_GENERIC)
@@ -7709,6 +7709,13 @@ DISCOVERY_NO_PROPOSAL_RE = re.compile(
     r"\b(?:no|none|nothing)\b[^.\n]{0,60}?\b(?:new\s+)?(?:sweep|proposal)s?\b"
     r"|\bnothing\s+to\s+propose\b", re.I)
 _DISCOVERY_STATUS_TOKENS = ("pending", "executed", "unable", "no anomalies", "no anomaly")
+# D1's UNCOVERED spellings: the plain word, "not covered" and the hyphenated
+# "not-covered"/"not-yet-covered", plus the partial/no-check phrasings that all
+# mean "no frozen check owns this row" -- only the covered branch of the gap
+# classifier may read a row as COVERED.
+_DISCOVERY_UNCOVERED_RE = re.compile(
+    r"\bun[\s-]?covered\b|\bnot[\s-]+(?:yet[\s-]+)?covered\b|\bpartially[\s-]+covered\b"
+    r"|\bcovered\s+by\s+nothing\b|\bno\s+check\b", re.I)
 DISCOVERY_RELS = ("review/round2/findings_extra.json", "review/round2/findings_extra.md",
                   "review/round2/new_sweeps.md")
 DIFF_LEDGER_REL = "revised/DIFF_LEDGER.md"
@@ -21705,7 +21712,13 @@ def discovery_gap_summary(sb: Path) -> dict:
     rows = _discovery_rows(sb / "review" / "round2" / "gap_table.md")
     for r in rows:
         low = _row_text(r).lower()
-        if re.search(r"\buncovered\b|\bnot\s+covered\b", low):
+        # The UNCOVERED spellings D1's own prose uses: "UNCOVERED", "not covered",
+        # the hyphenated "not-covered"/"not-yet-covered", "partially covered",
+        # "covered by nothing" and "no check". Reading the hyphenated forms as
+        # COVERED made a table whose every UNCOVERED row is spelled that way fail
+        # with the wrong message ("marks every row COVERED ... has not run D1")
+        # and, worse, never required a probe for those rows.
+        if _DISCOVERY_UNCOVERED_RE.search(low):
             uncovered += 1
         elif re.search(r"\bcovered\b", low):
             covered += 1
@@ -21747,6 +21760,28 @@ def prior_proposal_ids(sb: Path) -> list:
         if m.group(1) not in out:
             out.append(m.group(1))
     return out
+
+
+def prior_proposal_dispositioned(pid: str, probe_blob: str, note_blob: str) -> bool:
+    """Is a prior proposal id re-probed or explicitly dispositioned THIS round?
+
+    A bare mention anywhere in the round-2 artifacts used to satisfy the
+    convergence gate -- "No new sweep proposals: numbering starts at M37" in
+    the summary passed it without any re-probe, which voids the loop D5
+    promises. The two routes the prompt names are what count now: the id
+    appears in a probe/result row (the re-probe route), or it appears in a note
+    that says the word `prior` beside it (the
+    "prior proposal <id>: no instances in base/" disposition).
+    """
+    if not re.search(r"(?<![A-Za-z0-9])" + re.escape(pid) + r"(?![A-Za-z0-9])", probe_blob):
+        for m in re.finditer(r"(?<![A-Za-z0-9])" + re.escape(pid) + r"(?![A-Za-z0-9])",
+                             note_blob):
+            window = note_blob[max(0, m.start() - 90):m.end() + 90].lower()
+            if re.search(r"\bprior\b", window):
+                break
+        else:
+            return False
+    return True
 
 
 def discovery_contract_problems(sb: Path) -> tuple:
@@ -21854,7 +21889,7 @@ def discovery_contract_problems(sb: Path) -> tuple:
     # D3 -- results: one executed disposition per probe; a clean probe names the
     # locations it checked; `unable` states its reason.
     result_problems, unable_short, no_checked = [], [], []
-    result_ids = []
+    result_ids, dup_result_ids = [], []
     for r in _discovery_rows(r2 / "probe_results.md"):
         text = _row_text(r)
         m = DISCOVERY_PROBE_ID_RE.search(text)
@@ -21862,8 +21897,13 @@ def discovery_contract_problems(sb: Path) -> tuple:
             continue
         pid = m.group(0)
         if pid in result_ids:
-            continue
-        result_ids.append(pid)
+            # EVERY row of a declared probe is judged: a stale `pending` row after
+            # a good row used to be dropped silently, so the probe that never ran
+            # (or was never retracted) could hide behind file order.
+            if pid not in dup_result_ids:
+                dup_result_ids.append(pid)
+        else:
+            result_ids.append(pid)
         low = text.lower()
         statuses = _discovery_status_cells(r)
         tokens = [t for t, _ in statuses]
@@ -21894,18 +21934,25 @@ def discovery_contract_problems(sb: Path) -> tuple:
             warns.append(
                 f"review/round2/probe_results.md reports probe id(s) {', '.join(extra[:6])} "
                 f"that probes.md never declares -- declare them there or drop the rows")
+        if dup_result_ids:
+            warns.append(
+                f"review/round2/probe_results.md records probe id(s) "
+                f"{', '.join(dup_result_ids[:6])} more than once: every row is judged, so "
+                f"retract the superseded disposition instead of leaving both in place")
         if result_problems:
-            errors.append("review/round2/probe_results.md: " + "; ".join(result_problems[:4]))
+            errors.append("review/round2/probe_results.md: "
+                          + "; ".join(sorted(set(result_problems))[:4]))
         if unable_short:
             errors.append(
-                f"review/round2/probe_results.md closes {len(unable_short)} probe(s) `unable` "
-                f"with no reason ({', '.join(unable_short[:4])}): an unable probe states WHY it "
+                f"review/round2/probe_results.md closes {len(set(unable_short))} probe(s) "
+                f"`unable` with no reason ({', '.join(sorted(set(unable_short))[:4])}): an "
+                f"unable probe states WHY it "
                 f"could not be executed")
         if no_checked:
             errors.append(
-                f"review/round2/probe_results.md closes {len(no_checked)} probe(s) 'no "
+                f"review/round2/probe_results.md closes {len(set(no_checked))} probe(s) 'no "
                 f"anomalies' without naming the checked locations "
-                f"({', '.join(no_checked[:4])}): D3's clean closure is "
+                f"({', '.join(sorted(set(no_checked))[:4])}): D3's clean closure is "
                 f"'no anomalies -- checked: <locations>'")
     # D4 -- the X-* findings carry the standard finding shape.
     if _discovery_nonempty(r2 / "findings_extra.json"):
@@ -21953,35 +22000,31 @@ def discovery_contract_problems(sb: Path) -> tuple:
             text = (r2 / "new_sweeps.md").read_text(encoding="utf-8", errors="replace")
         except OSError:
             text = ""
-        matches = list(re.finditer(r"(?m)^#{2,3}\s*(M\d+)\b[^\n]*$", text))
-        if matches:
-            bad, seen = [], set()
-            for i, m in enumerate(matches):
-                sid = m.group(1)
-                end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-                block = text[m.start():end]
-                if int(sid[1:]) < DISCOVERY_PROPOSAL_MIN:
-                    bad.append(f"{sid} is below the numbering floor M{DISCOVERY_PROPOSAL_MIN} "
-                               f"(M18-M20 are reserved and M21-M36 already adopted)")
-                if sid in seen:
-                    bad.append(f"{sid} is proposed twice")
-                seen.add(sid)
-                low = block.lower()
-                for field in ("purpose", "enumeration", "artifact", "finding rule"):
-                    if field not in low:
-                        bad.append(f"{sid}: no `{field}` field")
-            if bad:
+        # `parse_sweep_proposals` is the ONE reader the `adopt-sweep` command uses
+        # too: a contract that accepted a heading the adopter cannot parse (a
+        # `## M37 Foo` block without the `-- <name>` separator) passed the review
+        # and then died at adoption time with "carries no proposal block".
+        proposals, problems = parse_sweep_proposals(text)
+        if proposals or problems:
+            if problems:
                 errors.append(
                     "review/round2/new_sweeps.md does not carry sweeps.md-shaped proposal(s): "
-                    + "; ".join(bad[:6])
+                    + "; ".join(problems[:6])
                     + " (each proposal is `## M<NN> -- <name>` with Purpose, Enumeration, "
                       "Artifact and Finding rules, numbered from M37)")
+        elif re.search(r"(?m)^#{2,3}\s*(M\d+)\b", text):
+            errors.append(
+                "review/round2/new_sweeps.md carries a `## M<NN>` heading that is not a "
+                "sweeps.md-shaped proposal block: a proposal is `## M<NN> -- <name>` with "
+                "Purpose, Enumeration, Artifact and Finding rules, numbered from M37, and the "
+                "`adopt-sweep` command reads the same shape")
         elif not DISCOVERY_NO_PROPOSAL_RE.search(text):
             errors.append(
                 "review/round2/new_sweeps.md carries no `## M<NN>` proposal and does not state "
                 "that there were no new sweeps to propose: D5's zero-proposal outcome must be "
                 "explicit (and say why), never a placeholder like '# none'")
-    # D6 -- the summary reports the round's counts and its honest limits.
+    # The round's summary (the D5 output section of references/discovery.md) reports its
+    # counts and its honest limits.
     if _discovery_nonempty(r2 / "round2_summary.md"):
         try:
             text = (r2 / "round2_summary.md").read_text(encoding="utf-8", errors="replace")
@@ -22005,31 +22048,32 @@ def discovery_contract_problems(sb: Path) -> tuple:
     gone = []
     prior_ids = prior_proposal_ids(sb)
     if prior_ids:
-        parts = []
-        for rel in (FINDINGS_REL, FINDINGS_MD_REL):
-            p = sb / rel
-            try:
-                if p.is_file():
-                    parts.append(p.read_text(encoding="utf-8", errors="replace"))
-            except OSError:
-                pass
-        try:
-            for p in sorted(r2.iterdir()):
-                if p.is_file():
-                    parts.append(p.read_text(encoding="utf-8", errors="replace"))
-        except OSError:
-            pass
-        blob = "\n".join(parts)
-        gone = [pid for pid in prior_ids if not _finding_id_mentioned(pid, blob)]
+        def _blob(rels) -> str:
+            out = []
+            for rel in rels:
+                p = sb / rel
+                try:
+                    if p.is_file():
+                        out.append(p.read_text(encoding="utf-8", errors="replace"))
+                except OSError:
+                    pass
+            return "\n".join(out)
+
+        probe_blob = _blob(("review/round2/probes.md", "review/round2/probe_results.md"))
+        note_blob = _blob((FINDINGS_REL, FINDINGS_MD_REL, "review/round2/new_sweeps.md",
+                           "review/round2/round2_summary.md"))
+        gone = [pid for pid in prior_ids
+                if not prior_proposal_dispositioned(pid, probe_blob, note_blob)]
         if gone:
             errors.append(
                 f"the previous round's discovery round proposed sweep(s) {', '.join(gone)} "
-                f"that this round re-checks NOWHERE: every prior proposal must be re-probed "
-                f"against the current corpus and recorded -- run it as a probe in "
-                f"review/round2/probes.md / probe_results.md, or disposition it as "
-                f"'prior proposal <id>: no instances in base/' in review/round2/new_sweeps.md "
-                f"or round2_summary.md. A proposed class must not vanish between rounds; the "
-                f"proposal's purpose is to converge into a mechanical check")
+                f"that this round re-checks NOWHERE (a passing mention does not count): every "
+                f"prior proposal must be re-probed against the current corpus and recorded -- "
+                f"run it as a probe row in review/round2/probes.md / probe_results.md, or "
+                f"disposition it as 'prior proposal <id>: no instances in base/' in "
+                f"review/round2/new_sweeps.md or round2_summary.md. A proposed class must not "
+                f"vanish between rounds; the proposal's purpose is to converge into a "
+                f"mechanical check")
     return errors, warns
 
 
@@ -22081,6 +22125,14 @@ def cross_namespace_duplicate_notes(sb: Path, fj) -> list:
     DEDUP_MIN_WORDS long, token-set Jaccard at the census threshold) and
     reports the pair so the session and the archived record can see it; it
     never drops anything (same location with a different substance is legal).
+
+    The CLASS is part of the key: the note's own text invokes "the same
+    class+location+substance is NOT reportable", and passing a literal "X" for
+    both sides made the comparison vacuous -- a discovery finding that merely
+    shared a line with an unrelated frozen row was told to be dropped. When
+    neither side parses a `line N`, the two findings' own `location` cells are
+    the fallback key (the finding format does not mandate a line number, so the
+    census key alone left the audit inert).
     """
     extra = read_json(sb / REVIEW_DIR / "round2" / "findings_extra.json",
                       revive=False, lenient=True)
@@ -22092,17 +22144,29 @@ def cross_namespace_duplicate_notes(sb: Path, fj) -> list:
              if isinstance(f, dict) and f.get("id")]
     notes = []
     for x in xrows:
+        x_cls = dedup_class_id(x.get("check"))
+        if not x_cls:
+            continue                     # no class -> no dedup key (the census rule)
         x_loc = dedup_location_of(f"{x.get('location')} {x.get('evidence')}")
         for f in frows:
+            f_cls = dedup_class_id(f.get("check"))
+            if not f_cls or f_cls != x_cls:
+                continue
             f_loc = dedup_location_of(f"{f.get('location')} {f.get('evidence')}")
-            if not dedup_rows_match("X", x_loc, "X", f_loc):
+            if not (dedup_rows_match(x_cls, x_loc, f_cls, f_loc)
+                    or (dedup_same_place(x.get("location"), f.get("location"))
+                        and dedup_excerpts_match(x_loc, f_loc))):
                 continue
             notes.append(
-                f"{x.get('id')} looks like a duplicate of the frozen {f.get('id')} (same line "
-                f"{x_loc[0]}; excerpt similarity above the census threshold): D0 says the same "
-                f"class+location+substance is NOT reportable -- drop the X row, or keep it only "
-                f"if its substance really differs and say so in its explanation ('related to "
-                f"{f.get('id')}')")
+                f"{x.get('id')} looks like a duplicate of the frozen {f.get('id')} (same class "
+                f"{x_cls}, "
+                + (f"same line {x_loc[0]}"
+                   if x_loc[0] is not None else
+                   f"same location {str(x.get('location') or '').strip()!r}")
+                + "; excerpt similarity above the census threshold): D0 says the same "
+                  "class+location+substance is NOT reportable -- drop the X row, or keep it "
+                  f"only if its substance really differs and say so in its explanation "
+                  f"('related to {f.get('id')}')")
             break
     return notes
 
@@ -22185,13 +22249,17 @@ def resync_sweeps_appendix(sweeps_path: Path, sweeps_text: str) -> str:
 
 
 def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
-                          scope: str = "full") -> None:
+                          scope: str = "full", split: str = None) -> None:
     """Verify the review deliverables the prompt promises the orchestrator checks.
 
     `scope` is the round's review scope: a "formatting-writing" round still has
     to CARRY every check id in its coverage table, but the out-of-scope ids may
     be disposed as "out of scope -- ..." (that is the scope contract), while the
     in-scope surface checks keep the full bar.
+
+    `split` overrides the split mode normally read from `ctx` (the sandbox
+    selfcheck has no plan to read it from, so it passes the mode its own prompt
+    states -- the two must agree on which half owes which artifacts).
     """
     if not isinstance(fj, dict):
         return
@@ -22321,19 +22389,21 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
     # (M25-M29 artifacts), session B owns the J5 architecture pass and the
     # discovery round. Each session's postcheck must not demand the other's
     # artifacts -- the merge unions the coverage tables and artifacts.
-    split = "off"
-    if ctx is not None:
+    split_mode = "off"
+    if split is not None:
+        split_mode = split if split in REVIEW_SPLIT_MODES else "off"
+    elif ctx is not None:
         try:
-            split = review_split_of(ctx)
+            split_mode = review_split_of(ctx)
         except Exception:                                        # noqa: BLE001
-            split = "off"
-    part_b = bool(split != "off" and str(sb.name).endswith("_review_b"))
+            split_mode = "off"
+    part_b = bool(split_mode != "off" and str(sb.name).endswith("_review_b"))
     # phases: A = mechanical (M25-M29 artifacts), B = J1-J5 + discovery (J5
     # architecture table). aspects: A = content, B = packaging + M21-M30 + J5.
-    want_parity_artifacts = (split == "off"
-                             or (split == "phases" and not part_b)
-                             or (split == "aspects" and part_b))
-    want_architecture = (split == "off" or part_b)
+    want_parity_artifacts = (split_mode == "off"
+                             or (split_mode == "phases" and not part_b)
+                             or (split_mode == "aspects" and part_b))
+    want_architecture = (split_mode == "off" or part_b)
     if want_parity_artifacts and art_dir.is_dir():
         for fname, (cid, kind_phrase) in parity.items():
             p = art_dir / fname
@@ -22638,12 +22708,31 @@ def archive_review_outputs(ctx: Ctx, r: int) -> Path:
     The next round's reviewer gets them as its carry-over reference, and the
     operator keeps the frozen finding list even after the sandbox is pruned.
     Best-effort: an archive failure must never fail the round.
+
+    Under a `--review-split` round the MERGED finding list and the whole
+    discovery round live in part B (`merge_review_parts` writes them there), so
+    B is the archive source when it exists: reading only part A dropped every
+    `X-*` finding and every `M37+` proposal from the next round's
+    `prior_round/`, which made the convergence gate vacuous.
     """
     dst = ctx.reports_dir / f"round{int(r)}_review"
     rec = ctx.run(rid_review(r))
     if rec is None:
         return dst
     sb = ctx.sandbox_of(rec)
+    b_sb = None
+    try:
+        if review_split_of(ctx) != "off":
+            rec_b = ctx.run(rid_review_b(r))
+            b_sb = ctx.sandbox_of(rec_b) if rec_b is not None else None
+    except Exception:                                            # noqa: BLE001
+        b_sb = None
+
+    def _src(rel: str) -> Path:
+        if b_sb is not None and (b_sb / rel).is_file():
+            return b_sb / rel
+        return sb / rel
+
     mapping = ((FINDINGS_REL, "findings.json"),
                (FINDINGS_MD_REL, "findings.md"),
                ("review/round2/findings_extra.json", "findings_extra.json"),
@@ -22651,7 +22740,7 @@ def archive_review_outputs(ctx: Ctx, r: int) -> Path:
                ("review/round2/new_sweeps.md", "new_sweeps.md"),
                ("review/round2/round2_summary.md", "round2_summary.md"))
     for rel, name in mapping:
-        p = sb / rel
+        p = _src(rel)
         if not p.is_file():
             continue
         try:
@@ -24012,7 +24101,10 @@ def _names_check_or_finding(cell: str) -> bool:
     # Case-insensitive on purpose: the callers compare LOWERCASED dispositions
     # (the boilerplate counter normalizes them), and `fmt-t9c` names the rule
     # just as well as `FMT-T9c`.
-    return bool(re.search(r"(FMT-[A-Z0-9]+|M\d{1,2}\b|J[1-4]\b|F-\d+|X-\d+|AU-\d+|R-\d+)",
+    # J5 is part of the frozen set (and of the review's coverage contract): the
+    # J[1-4] range made a repeated architecture verdict that cites only J5 read
+    # as unreferenced boilerplate.
+    return bool(re.search(r"(FMT-[A-Z0-9]+|M\d{1,2}\b|J[1-5]\b|F-\d+|X-\d+|AU-\d+|R-\d+)",
                           str(cell or ""), re.I))
 
 
@@ -26423,8 +26515,18 @@ def merge_review_parts(ctx: Ctx, rec_b: dict) -> dict:
                         revive=False, lenient=True) or {}
         extra += [f for f in (doc.get("findings") or []) if isinstance(f, dict)]
     if extra:
+        # Keep each side's D4 coverage list: rewriting the file with an EMPTY
+        # coverage dropped part B's own D4 record from the merged artifact the
+        # reviser and the archived ledger read.
+        coverage = []
+        for sb in (a_sb, b_sb):
+            doc = read_json(sb / REVIEW_DIR / "round2" / "findings_extra.json",
+                            revive=False, lenient=True) or {}
+            for row in (doc.get("coverage") or []):
+                if row not in coverage:
+                    coverage.append(row)
         write_json_atomic(b_sb / REVIEW_DIR / "round2" / "findings_extra.json",
-                          {"findings": extra, "coverage": []})
+                          {"findings": extra, "coverage": coverage})
     return merged["split_review"]
 
 
@@ -26815,6 +26917,28 @@ def dedup_rows_match(class_a, loc_a, class_b, loc_b, threshold: float = None) ->
     line_b, words_b = loc_b
     if line_a is None or line_b is None or line_a != line_b:
         return False
+    if len(words_a) < DEDUP_MIN_WORDS or len(words_b) < DEDUP_MIN_WORDS:
+        return False
+    thr = DEDUP_FUZZY_THRESHOLD if threshold is None else float(threshold)
+    return dedup_fuzzy_similarity(words_a, words_b) >= thr
+
+
+def dedup_same_place(loc_a, loc_b) -> bool:
+    """True when two findings name the SAME location cell (lowercased, squeezed).
+
+    The census key needs a literal `line N` on both sides; the finding format
+    spells a location as a document/section/paragraph reference ("Results,
+    paragraph 2") just as often. This is the fallback that keeps a same-place
+    comparison possible without loosening `dedup_rows_match` itself.
+    """
+    a = " ".join(str(loc_a or "").lower().split())
+    return bool(a) and a == " ".join(str(loc_b or "").lower().split())
+
+
+def dedup_excerpts_match(loc_a: tuple, loc_b: tuple, threshold: float = None) -> bool:
+    """Both excerpts carry DEDUP_MIN_WORDS and overlap at the census threshold."""
+    _line_a, words_a = loc_a
+    _line_b, words_b = loc_b
     if len(words_a) < DEDUP_MIN_WORDS or len(words_b) < DEDUP_MIN_WORDS:
         return False
     thr = DEDUP_FUZZY_THRESHOLD if threshold is None else float(threshold)
@@ -27248,8 +27372,9 @@ def judge_basis_problems(comp: dict, where: str, strict: bool) -> tuple:
 
       * `basis` names the tier that DECIDES the comparison -- the first tier, in
         the fixed priority order, whose net is not zero (`correctness` /
-        `consistency` / `preservation` / `completeness` / `formatting` /
-        `writing`; for a net-zero comparison with rows, the highest-priority
+        `preservation` / `completeness` / `consistency` / `writing` /
+        `formatting`, the `BASIS_TIERS` order; for a net-zero comparison with rows,
+        the highest-priority
         tier in which the two versions differ; `none` for a clean 0);
       * `resolved` and `introduced` list the concrete items behind a score
         (tier, severity, <=25-word evidence); an empty ledger means "no content
@@ -29202,17 +29327,34 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
         elif not isinstance(fj.get("findings"), list):
             errs.append(f"{FINDINGS_REL} has no 'findings' list")
         else:
+            # Read THIS session's prompt FIRST: it states the round's review scope,
+            # and the pre-flight must preview the verdict the postcheck (which
+            # derives the scope from the plan) will reach. With the default
+            # `scope="full"` a formatting-writing session's selfcheck demanded the
+            # content rounds' parity artifacts its prompt scopes out -- the
+            # pre-flight disagreeing with the verdict it previews.
+            try:
+                _prompt = (sb / PROMPT_FILE).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                _prompt = ""
+            _scope = ("formatting-writing"
+                      if "FORMATTING AND WRITING ONLY" in _prompt else "full")
+            # A SPLIT round's two halves owe different artifacts. The postcheck
+            # reads the plan; the selfcheck usually runs in its own process with no
+            # ctx, so it reads the split mode its own prompt states and the half its
+            # own sandbox name states (`r<r>_review_b`), and the two verdicts agree.
+            _split = "off"
+            if "SPLIT REVIEW" in _prompt:
+                _split = ("aspects"
+                          if ("PACKAGING/compliance" in _prompt
+                              or "CONTENT/scientific" in _prompt) else "phases")
             # `check_review_contract` needs no pipeline state (it verifies the
             # corpus pointer, the coverage table and the M1b long-form gate), so
             # the session gets the whole contract, not a summary of it.
-            check_review_contract(None, sb, fj, errs, warns)   # selfcheck: no ctx/round scope
+            check_review_contract(None, sb, fj, errs, warns, scope=_scope, split=_split)
         # The discovery round's D0-D5 contract, unless THIS session's own prompt
         # says the phase is not its job (the formatting-writing scope, or the
         # mechanical half of a split review).
-        try:
-            _prompt = (sb / PROMPT_FILE).read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            _prompt = ""
         _no_discovery = ("FORMATTING AND WRITING ONLY" in _prompt
                          or ("SPLIT REVIEW" in _prompt
                              and "YOUR SCOPE (B)" not in _prompt))
