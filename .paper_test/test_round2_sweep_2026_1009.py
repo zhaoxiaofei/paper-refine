@@ -385,7 +385,7 @@ def test_cross_namespace_duplicates():
     sb = _round2(tmpdir("xd") / "sb")
     quote = "line 42 of the manuscript: the treated group showed a higher median value"
     (sb / "review/round2/findings_extra.json").write_text(json.dumps({"findings": [
-        {"id": "X-001", "location": "base/m.md", "category": 0, "check": "one-sided class",
+        {"id": "X-001", "location": "base/m.md", "category": 0, "check": "M30",
          "severity": "Major", "evidence": quote, "explanation": "x"}]}), encoding="utf-8")
     fj = {"findings": [{"id": "F-012", "location": "base/m.md", "category": 0, "check": "M30",
                         "severity": "Major", "evidence": quote, "explanation": "y"}]}
@@ -397,6 +397,24 @@ def test_cross_namespace_duplicates():
     check("XD2 a same-line different-substance row is not reported",
           nb.cross_namespace_duplicate_notes(sb, fj2) == [],
           str(nb.cross_namespace_duplicate_notes(sb, fj2))[:240])
+    # A different CLASS at the same place is a different defect: D0's key is
+    # "same class + same location + same substance", and the audit compared a
+    # literal "X" against a literal "X" -- so it told the session to drop a
+    # legitimate X row that merely shared a line with an unrelated F row.
+    fj3 = {"findings": [dict(fj["findings"][0], check="M1")]}
+    check("XD3 a different class at the same place is not reported",
+          nb.cross_namespace_duplicate_notes(sb, fj3) == [],
+          str(nb.cross_namespace_duplicate_notes(sb, fj3))[:240])
+    # The finding format spells a location as a section/paragraph reference just
+    # as often as a `line N`; without the location-cell fallback the census key
+    # alone left the audit inert for those rows.
+    plain = dict(fj["findings"][0], location="Results, paragraph 2",
+                 evidence="the treated group showed a higher median value")
+    (sb / "review/round2/findings_extra.json").write_text(json.dumps({"findings": [
+        dict(plain, id="X-001", explanation="x")]}), encoding="utf-8")
+    notes = nb.cross_namespace_duplicate_notes(sb, {"findings": [dict(plain, id="F-012")]})
+    check("XD4 a same-location/same-substance pair without a line number is reported",
+          len(notes) == 1 and "X-001" in notes[0], str(notes)[:240])
 
 
 # =====================================================================

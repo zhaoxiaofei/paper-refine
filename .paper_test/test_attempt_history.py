@@ -346,6 +346,20 @@ nb.CURRENT_RUN_LOG = None
 check("H4 a log inside the root is recorded as a root-relative path",
       saved["run_logs"][-1] == f"reports/{inner.name}",
       f"{saved['run_logs'][-1]!r} vs {f'reports/{inner.name}'!r}")
+# print_raw (`--json`) must reach the tee exactly ONCE. main() stamps FIRST and
+# installs the tee inside the stamper, so `sys.stdout` is the TimestampedStream
+# and `print_raw`'s underlying stream IS the RunLogStream -- the raw write already
+# lands in the file. Mirroring into the stamper's delegated `_fh` as well wrote
+# every `--json` line to the log twice.
+_stdout, _stderr = sys.stdout, sys.stderr
+json_log = nb.start_run_log("run", root_h, ["paper_pipeline.py", "run", "--json"])
+nb.install_timestamped_streams()
+nb.install_run_log(json_log)
+nb.print_raw('{"probe": "print_raw"}')
+sys.stdout.flush()
+sys.stdout, sys.stderr = _stdout, _stderr
+n_json = json_log.read_text(encoding="utf-8").count('{"probe": "print_raw"}')
+check("H5 a --json line reaches the invocation log exactly once", n_json == 1, f"n={n_json}")
 
 print()
 print("== I. the retry prompt is told EVERY failure of the previous attempt ==")

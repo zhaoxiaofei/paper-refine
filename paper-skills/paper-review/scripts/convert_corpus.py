@@ -331,7 +331,10 @@ def _xlsx_row_cells(row_xml, shared):
         if col:
             cells[col] = value
         else:
-            cells[len(cells) + 1] = value
+            # The fallback column is the one AFTER the highest keyed so far, not
+            # `len(cells)+1`: a row whose first labeled cell is B1 made the next
+            # unlabeled cell overwrite column 2 instead of taking column 3.
+            cells[max(cells, default=0) + 1] = value
     return cells
 
 
@@ -366,13 +369,20 @@ def xlsx_to_text(path: str) -> tuple:
                     if not cells:
                         continue
                     rn = re.search(r'r="(\d+)"', rm.group(1))
-                    row_idx = int(rn.group(1)) if rn else len(rows) + 1
+                    # A row the producer wrote WITHOUT `r=` follows the highest
+                    # row number seen so far. `len(rows)+1` collided with an
+                    # explicit number (a sheet that starts at r="2", or a
+                    # fallback index equal to a later row's), and `sorted` then
+                    # compared the two cell dicts -> TypeError -> the blanket
+                    # handler dropped the WHOLE workbook as "xlsx-unreadable".
+                    row_idx = int(rn.group(1)) if rn else (max(r[0] for r in rows) + 1
+                                                           if rows else 1)
                     rows.append((row_idx, cells))
                     max_col = max(max_col, max(cells))
                 # pad every row to the widest column so a sparse row (data only in
                 # column C, or a merged/omitted cell) cannot silently shift values
                 # into the wrong column when the table is summed downstream (M15)
-                for _row_idx, cells in sorted(rows):
+                for _row_idx, cells in sorted(rows, key=lambda r: r[0]):
                     lines.append(" | ".join(cells.get(c, "") for c in range(1, max_col + 1)))
             if not resolved:
                 notes.append("xlsx: no worksheet parts found")
@@ -453,7 +463,14 @@ def rtf_to_text(path: str) -> tuple:
                 # fall through to the generic control-word path below and be
                 # consumed whole -- matching `u` and advancing one character
                 # leaked the tail ("ul" -> "l") into the corpus text.
-                m = re.match(r"u(-?\d+)\D?", raw[i:])
+                # The delimiter after `\uNNNN` is a SPACE (or nothing); it is
+                # never the next escape's backslash -- `\D?` ate it, so
+                # `\u9731\u9733` leaked as "☃u9733" and a following control word
+                # (`\u9786\par`) collapsed to the literal "par" while the escape
+                # that should have produced the character vanished. Dropping the
+                # backslash from the delimiter class also lets the surrogate-pair
+                # path see its second half.
+                m = re.match(r"u(-?\d+)(?:[^\s\\\d]| )?", raw[i:])
                 code = int(m.group(1))
                 if code < 0:
                     code += 65536

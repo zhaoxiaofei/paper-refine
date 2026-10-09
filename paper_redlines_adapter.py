@@ -67,6 +67,22 @@ def write_out(out_path, data):
         fail("cannot write output %s: %s" % (out_path, exc), 6)
 
 
+def drop_partial(out_path, probe):
+    """Clear OUT after a probe that failed, before the next one is tried.
+
+    `clear_out` runs once before the probes, but a backend can write PART of
+    OUT and then raise: the bytes stayed in place, so the next probe that
+    returned without writing looked successful through `wrote()` and its name
+    was printed for a corrupt file it never produced (exit 0). Clearing on
+    every failure path keeps the invariant `clear_out` documents -- a
+    non-empty OUT was written by the probe that just ran.
+    """
+    if not os.path.lexists(out_path):
+        return                       # the probe wrote nothing: nothing to drop
+    clear_out(out_path)
+    print("redlines: dropped the partial output left by %s" % probe, file=sys.stderr)
+
+
 def try_engine_api(mod, base, revised, out):
     """Write OUT with the published package's engine API; True when it did.
 
@@ -193,6 +209,7 @@ def main(argv):
                 fn(out)
             except Exception as exc:                           # noqa: BLE001
                 print("redlines.%s.%s failed: %s" % (cls_name, meth, exc), file=sys.stderr)
+                drop_partial(out, "redlines.%s.%s" % (cls_name, meth))
                 continue
             if wrote(out):
                 print("python-redlines:%s.%s" % (cls_name, meth))
@@ -208,6 +225,7 @@ def main(argv):
             try:
                 res = fn(*args)
             except Exception:                                  # noqa: BLE001
+                drop_partial(out, "redlines.%s" % fn_name)
                 continue
             if isinstance(res, (bytes, bytearray)):
                 write_out(out, res)
@@ -224,6 +242,7 @@ def main(argv):
             pass
         except Exception as exc:                               # noqa: BLE001
             print("redlines.main failed: %s" % exc, file=sys.stderr)
+            drop_partial(out, "redlines.main")
         if wrote(out):
             print("python-redlines:main")
             return 0

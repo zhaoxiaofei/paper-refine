@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""extract_citations.py — M2 citation ↔ reference-list sweep.
+r"""extract_citations.py — M2 citation ↔ reference-list sweep.
 
 Enumerates every in-text citation call-out (numeric [1] / [1,2] / [1-3] and
 author-year "(Smith et al., 2019)", "Smith et al. (2019)", "Smith and Jones

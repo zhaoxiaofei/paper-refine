@@ -63,8 +63,15 @@ MAIN_END = re.compile(
     r"supplementary (?:information|methods|figures|tables|notes))"
     r"\s*(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)
 KEYWORDS = re.compile(r"^\s*(?:key\s?words?)\s*[:.\u2014\u2013-]", re.I)
+# A caption line starts with the label, the number AND its separator ("Figure 2
+# | ...", "Fig. 1: ...", "Figure 3. ..."). Without the separator guard a BODY
+# sentence that merely opens with a figure reference ("Figure 2A shows that p53
+# levels rose ...") was subtracted as a legend, systematically undercounting the
+# main text toward a false "ok" -- `extract_numbers.FIG_CAPTION_RE` enforces the
+# same separator for exactly this reason.
+CAPTION_SEP = r"[.:|–—,](?:\s*\S|\s*$)"
 CAPTION = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?"
-                     r"(?:figure|fig\.?)\s*S?\d+", re.I)
+                     r"(?:figure|fig\.?)\s*S?\d+\s*" + CAPTION_SEP, re.I)
 COVER_SALUTATION = re.compile(r"^\s*(?:dear\b|to the (?:editor|editors)\b)", re.I)
 COVER_CLOSING = re.compile(
     r"^\s*(?:sincerely|yours (?:sincerely|faithfully|truly)|best regards|kind regards|regards|"
@@ -363,6 +370,13 @@ def is_evidence_path(path: str) -> bool:
     """
     parts = str(path).replace("\\", "/").split("/")
     if any(part in EVIDENCE_DIRNAMES for part in parts[:-1]):
+        return True
+    # The converter FLATTENS an evidence file's directory into its name
+    # ("raw_data/table1.txt" -> "raw_data__table1.txt"); the two sibling
+    # extractors (extract_citations.py, extract_acronyms.py) already gate on
+    # that spelling, and without it raw-data text was counted against the
+    # submission's abstract/main-text limits.
+    if any(parts[-1].startswith(d + "__") for d in EVIDENCE_DIRNAMES):
         return True
     return bool(EXTERNAL_FEEDBACK_RE.search(parts[-1])
                 or AUTHORED_REPLY_RE.search(parts[-1]))
