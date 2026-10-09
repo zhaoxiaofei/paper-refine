@@ -1,6 +1,6 @@
 # Discovery Round D0–D5 — paper-review (Phase 3)
 
-Purpose: the standard review runs fixed sweeps M1–M30 and judgment passes
+Purpose: the standard review runs fixed sweeps M1–M36 and judgment passes
 J1–J5. Those are finite lists — the checklist itself can be incomplete. This
 round hunts for issue CLASSES the checklist does not cover.
 

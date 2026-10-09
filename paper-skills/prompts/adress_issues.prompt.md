@@ -52,7 +52,7 @@ The review's **rewrite-parity findings (M25–M29)**, **source-hierarchy finding
 - **E — Apply edits** one at a time in plan order, under rules E1–E12 in `references/edit_rules.md` (precision, Zotero fields, missing items, plagiarism/AI content, difference-tracking auxiliary `.tracking-<baseline>.<ext>` / `.logging-<baseline>.<ext>`, scientific-judgement guard, **E11** — rewrite-parity findings: align the editable surface for M25–M29, scoped restructuring for J5 with one `WORK/RESTRUCTURE_<id>.md` per finding — and **E12** — source-hierarchy findings: align the WRITTEN side with the authoritative producer, rule C for a code fix, `raw_data/` read-only).
 - **P — Propagation (A6).** Priority when a mismatched number/label/term/claim is corrected: supplementary tables > supplementary figures/notes > main figures & legends > Methods > main text > abstract > cover letter. For EVERY correction: script-extract all occurrences of the old AND new values across the whole revised corpus; update every occurrence; verify each row. Cross-check A6 against the A2 baseline — a baseline occurrence missing from A6 is a missed propagation; fix it.
 - **C — Code revisions** (only if analysis code is in scope). Scientific integrity rule: never change analysis code merely to make outputs match manuscript numbers — details in `references/edit_rules.md`.
-- **V — Validate.** V1 round-trip integrity (artifact `WORK/roundtrip_check.md`) · V2 locality via diff log (A7: hunks inside a J5 scope are mapped through the finding id + `WORK/RESTRUCTURE_<id>.md`; every other hunk must map to a finding id) · V3 full mechanical rescan of the revised corpus (A8: the M1–M30 sweeps from paper-review — including the M26 convention re-run and the J5 scope check — PLUS any sweep definitions in `./review/round2/new_sweeps.md`) · V4 checksum re-verification (artifact `WORK/checksums_after.txt`) · V5 final outputs.
+- **V — Validate.** V1 round-trip integrity (artifact `WORK/roundtrip_check.md`) · V2 locality via diff log (A7: hunks inside a J5 scope are mapped through the finding id + `WORK/RESTRUCTURE_<id>.md`; every other hunk must map to a finding id) · V3 full mechanical rescan of the revised corpus (A8: the M1–M36 sweeps from paper-review — including the M26 convention re-run and the J5 scope check — PLUS any sweep definitions in `./review/round2/new_sweeps.md`) · V4 checksum re-verification (artifact `WORK/checksums_after.txt`) · V5 final outputs.
 
 Artifacts A1–A9 column specifications and status vocabularies: `references/ledger.md`.
 
@@ -164,7 +164,7 @@ changed".
 
 **Improvement rows (`I-xxx`).** An edit that repairs a defect the frozen review
 did NOT name is legal when it is recorded, not hidden: give it an `I-xxx` id, the
-check id it belongs to (M1–M30 / J1–J5), the tier
+check id it belongs to (M1–M36 / J1–J5), the tier
 (`correctness|preservation|completeness|consistency|writing|formatting`), a
 severity (`minor|major|critical|fatal`, a distance from correct that applies to
 every tier -- see the review skill's sweeps.md), one line of evidence with a location, and the

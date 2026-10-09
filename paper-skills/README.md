@@ -225,7 +225,7 @@ with and without the skills, graded by scripted assertions:
 paper-skills/
 ├── paper-review/
 │   ├── SKILL.md                     # phases, hard rules, output spec
-│   ├── references/sweeps.md         # M1–M30 + J1–J5 (source of truth)
+│   ├── references/sweeps.md         # M1–M36 + J1–J5 (source of truth)
 │   ├── references/discovery.md      # D0–D5 discovery round
 │   └── scripts/                     # convert_corpus, extract_{acronyms,
 │                                    #   citations,numbers,occurrences},

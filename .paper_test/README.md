@@ -56,6 +56,7 @@ ls .paper_test/test_*.py | sed 's|.*/||' \
 | `test_fixes.py` | Asserts the fixed behaviour of every finding in `paper_round_pipeline_issue_findings.md` (wrong-corpus, missing-artifact, prompt-sync, ranking). |
 | `test_candidates.py` | Round-1 candidate repros: prune-then-run, setup script copy, restarting a setup that died part-way (the `_setup_in_progress` marker, while a complete root stays protected), `mc:Ignorable` declarations, stale redline output, manual-step counting. |
 | `test_candidates2.py` | Round-2 candidate repros (the audit archives): skill-script regressions R1-R11, the unreadable-.rtf failure and the journal-stage contract checks R13, judge/agent-command handling, xlsx/corpus fixes. |
+| `test_round2_sweep_2026_1009.py` | The 2026-10-09 round-2-sweep candidates (the four model audits of the discovery round): the prior-round reconciliation gate reads BOTH frozen-finding namespaces (`prior_round/findings.json` `F-*` and `prior_round/findings_extra.json` `X-*`, so a discovery finding cannot vanish between rounds), and the live skill/prompt documents state the sweep set the code enforces (M1–M36 + J1–J5, no stale "M1–M30"/"M1–M35" range). |
 | `test_document_recovery.py` | The document-recovery layer: a dropped base file is restored with a warning instead of failing the round, plus the per-invocation retry budget and judge-label normalization. |
 | `test_llm_stochastic_failures.py` | The stochastic-LLM contract: fenced/prose/BOM JSON, wrong-typed or half-written markers and ledgers, documents replaced by symlinks or directories, unreadable files/directories, judge sheets with null entries or fractional scores. Asserts every case either repairs with a warning or fails the attempt cleanly -- never a crash, never a silent accept. |
 | `test_change_requests_*.py` | The pool/integration change requests: every round stages `M` REWRITTEN candidates first and `N` reviewed-and-then-revised candidates from ONE shared review pass, then reworks EVERY pool member once with the WHOLE pool as donors (`i1 = a1 <- (w1..wM, a2..)`, ... -- no pairwise arms); `--rewrites` / `--revises` accept an integer or a per-round list (short lists repeat their last element); the optional `docx` CLI (including `docx diff`) is probed and documented in every prompt; the defaults are `--rounds 3` / `--jobs 255` / `--rewrites 2,0,0` / `--revises 1,1,1`. Ends with two real stub-agent rounds (default plan and a custom plan). Split into 5 parts: `_1_plan` (plan/ids), `_2_integration` (integration arms), `_3_cli` (cli surface), `_4_e2e_default`, `_5_e2e_custom` (`<base>_lib.py` holds the shared helpers). |
@@ -137,6 +138,7 @@ python3 .paper_test/test_design_audit_2026_0919.py
 python3 .paper_test/test_fixes.py
 python3 .paper_test/test_candidates.py
 python3 .paper_test/test_candidates2.py
+python3 .paper_test/test_round2_sweep_2026_1009.py
 python3 .paper_test/test_document_recovery.py
 python3 .paper_test/test_llm_stochastic_failures.py
 python3 .paper_test/test_change_requests_1_plan.py          # parts 2-5 are siblings

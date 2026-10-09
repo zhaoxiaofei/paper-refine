@@ -21806,29 +21806,39 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                         f"`scope`; the revision stage's E11 restructuring licence is bounded by "
                         f"that scope, so it must be recorded (document/section/paragraph-range)")
     # 5. every prior-round finding must be reconciled (carried forward or recorded as gone).
-    prior = sb / "prior_round" / "findings.json"
-    if prior.is_file():
+    #    BOTH frozen-finding namespaces: the list the revisers and the auditor must
+    #    dispose is the union of prior_round/findings.json (F-*) and
+    #    prior_round/findings_extra.json (X-*, the discovery round's findings), and
+    #    both files are copied into the sandbox. Reading only findings.json let an
+    #    X-finding vanish between rounds without failing anything -- the exact
+    #    silent-loss the F-* half of this gate exists to prevent.
+    prior_ids = []
+    for prior_rel in ("prior_round/findings.json", "prior_round/findings_extra.json"):
+        prior = sb / prior_rel
+        if not prior.is_file():
+            continue
         pj = read_json(prior, revive=False, lenient=True)   # agent-written
-        prior_ids = [str(f.get("id") or "") for f in ((pj or {}).get("findings") or [])
-                     if isinstance(f, dict) and f.get("id")]
-        if prior_ids:
-            blob = json.dumps(fj)
-            md = sb / FINDINGS_MD_REL
-            if md.is_file():
-                try:
-                    blob += "\n" + md.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    pass
-            missing = sorted({pid for pid in prior_ids if not _finding_id_mentioned(pid, blob)})
-            if missing:
-                errs.append(
-                    f"{len(missing)} finding(s) from the previous round's review are "
-                    f"reconciled NOWHERE in findings.json/findings.md: {missing[:10]}"
-                    + ("..." if len(missing) > 10 else "")
-                    + ". Each prior finding must either be carried forward (a new finding whose "
-                    "explanation says \"carried over from <prior-id>\") or recorded as "
-                    "\"prior <prior-id>: not reproducible in base/\" in the summary note of "
-                    "findings.md -- a defect must not vanish because a later pass missed it.")
+        prior_ids += [str(f.get("id") or "") for f in ((pj or {}).get("findings") or [])
+                      if isinstance(f, dict) and f.get("id")]
+    if prior_ids:
+        blob = json.dumps(fj)
+        md = sb / FINDINGS_MD_REL
+        if md.is_file():
+            try:
+                blob += "\n" + md.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+        missing = sorted({pid for pid in prior_ids if not _finding_id_mentioned(pid, blob)})
+        if missing:
+            errs.append(
+                f"{len(missing)} finding(s) from the previous round's review "
+                f"(findings.json + findings_extra.json) are "
+                f"reconciled NOWHERE in findings.json/findings.md: {missing[:10]}"
+                + ("..." if len(missing) > 10 else "")
+                + ". Each prior finding must either be carried forward (a new finding whose "
+                "explanation says \"carried over from <prior-id>\") or recorded as "
+                "\"prior <prior-id>: not reproducible in base/\" in the summary note of "
+                "findings.md -- a defect must not vanish because a later pass missed it.")
     # 6. the M1b long-form table must be audited, not skipped. The inventory
     #    alone reads healthy for exactly this defect (an acronym defined at
     #    first use while the long form carries the prose), so residue rows may
@@ -22092,8 +22102,9 @@ PRIOR_ROUND_RULE = """PRIOR-ROUND FINDINGS (read-only; round @@ROUND@@ reviews t
     READ-ONLY and hash-verified: never modify it.
   * WHY: a single review pass has been measured to miss defects that another pass of the SAME
     corpus finds, so a prior finding must never vanish silently. BEFORE running your sweeps,
-    re-check EVERY finding in prior_round/findings.json against the current base/ corpus and give
-    each one exactly one of two dispositions, recorded where the orchestrator can see it:
+    re-check EVERY finding in prior_round/findings.json AND every discovery finding in
+    prior_round/findings_extra.json against the current base/ corpus and give each one exactly one
+    of two dispositions, recorded where the orchestrator can see it:
       - STILL PRESENT -> include it in YOUR findings with a NEW id, and put the exact marker
         "carried over from <prior-id>" in the explanation field (for example
         "carried over from F-012");

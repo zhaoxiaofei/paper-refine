@@ -81,7 +81,7 @@ changed".
 
 **Improvement rows (`I-xxx`).** An edit that repairs a defect the frozen review
 did NOT name is legal when it is recorded, not hidden: give it an `I-xxx` id, the
-check id it belongs to (M1–M30 / J1–J5), the tier
+check id it belongs to (M1–M36 / J1–J5), the tier
 (`correctness|preservation|completeness|consistency|writing|formatting`), a
 severity (`minor|major|critical|fatal`, a distance from correct that applies to
 every tier -- see the review skill's sweeps.md), one line of evidence with a location, and the
