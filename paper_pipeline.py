@@ -2827,7 +2827,11 @@ def _docx_exemplar_text(path: Path):
     try:
         with zipfile.ZipFile(path) as pkg:
             xml = pkg.read("word/document.xml").decode("utf-8", "replace")
-    except (OSError, zipfile.BadZipFile, KeyError):
+    # RuntimeError is what `zipfile` raises for an ENCRYPTED entry and
+    # NotImplementedError for an unsupported compression method: neither is an
+    # OSError/BadZipFile/KeyError, so a reader that answers "unreadable" must
+    # name them (see `paper_docx_format.analyse_package`).
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return None
     sections, lines = [], []
     for _s, _e, frag in mod.paragraphs(xml):
@@ -4385,9 +4389,14 @@ def seed_concern_candidates(text: str) -> list:
     """
     lines = [ln.rstrip() for ln in (text or "").splitlines()]
     starts = []
+    # The word alternatives keep their trailing `\b` (so "editorial" does not
+    # start a block); the marker alternatives must NOT carry it: `\b` can never
+    # match after "." / ")" / "-" when a space follows, so "1. Comment" and
+    # "- Item" never split (only the unusual "1.Comment" did), and the
+    # docstring's "numbered-point markers" were dead.
     head_re = re.compile(
-        r"^\s*(?:reviewer|referee|editor|comments?|major|minor|point|query|"
-        r"\d+\s*[.)]|[-*•])\b", re.I)
+        r"^\s*(?:(?:reviewer|referee|editor|comments?|major|minor|point|query)\b|"
+        r"\d+\s*[.)]|[-*•]\s+)", re.I)
     for i, ln in enumerate(lines):
         if head_re.match(ln):
             starts.append(i)
@@ -11453,7 +11462,10 @@ def count_manual_steps(path: Path):
     not counted, and nested bullets are counted individually.
     """
     try:
-        text = path.read_text(encoding="utf-8")
+        # errors="replace", like every sibling reader: a non-UTF-8 byte raises
+        # UnicodeDecodeError (a ValueError, NOT an OSError) and crashed a count
+        # that exists to REPORT how much work is handed to the author.
+        text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
     lines = text.splitlines()
@@ -11513,7 +11525,8 @@ def _docx_paragraphs(path: Path):
         with zipfile.ZipFile(path) as z:
             data = z.read("word/document.xml")
         root = ET.fromstring(data)
-    except (OSError, KeyError, zipfile.BadZipFile, ET.ParseError):
+    except (OSError, KeyError, zipfile.BadZipFile, ET.ParseError, RuntimeError,
+            NotImplementedError):
         return None
     return ["".join(t.text or "" for t in p.iter(ns + "t")) for p in root.iter(ns + "p")]
 
@@ -13450,7 +13463,7 @@ def _docx_paragraph_texts(path: Path) -> list:
     try:
         with zipfile.ZipFile(path) as z:
             xml = z.read("word/document.xml").decode("utf-8", "replace")
-    except (OSError, zipfile.BadZipFile, KeyError):
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return []
     out = []
     for _p0, _p1, frag in mod.paragraphs(xml):
@@ -13476,7 +13489,7 @@ def _docx_hf_signature(path: Path) -> dict:
             doc = z.read("word/document.xml").decode("utf-8", "replace")
             hf = {n: z.read(n).decode("utf-8", "replace") for n in names
                   if re.search(r"word/(header|footer)\w*\.xml$", n)}
-    except (OSError, zipfile.BadZipFile, KeyError):
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return {}
     # A self-closing `<w:sectPr .../>` (a legal empty section) must match as the
     # element it is: the old fallback ran to the NEXT section's closing tag, so
@@ -13520,7 +13533,7 @@ def _style_usage(docx: Path) -> set:
     try:
         with zipfile.ZipFile(docx) as z:
             xml = z.read("word/document.xml").decode("utf-8", "replace")
-    except (OSError, zipfile.BadZipFile, KeyError):
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return set()
     return {sid for sid in re.findall(r'<w:pStyle w:val="([^"]+)"', xml) if sid}
 
@@ -13546,7 +13559,7 @@ def _defined_styles(docx: Path) -> set:
     try:
         with zipfile.ZipFile(docx) as z:
             styles = z.read("word/styles.xml").decode("utf-8", "replace")
-    except (OSError, zipfile.BadZipFile, KeyError):
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return set()
     return set(re.findall(r'w:styleId="([^"]+)"', styles))
 
@@ -13591,7 +13604,7 @@ def _out_part_hashes(docx: Path) -> set:
             for name in z.namelist():
                 if name.endswith((".xml", ".rels", ".jpeg", ".jpg", ".png", ".emf", ".wmf")):
                     hashes.add(hashlib.sha256(z.read(name)).hexdigest())
-    except (OSError, zipfile.BadZipFile, KeyError):
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return set()
     return hashes
 
@@ -13630,7 +13643,7 @@ def _superscripts_by_paragraph(path: Path) -> dict:
     try:
         with zipfile.ZipFile(path) as z:
             xml = z.read("word/document.xml").decode("utf-8", "replace")
-    except (OSError, zipfile.BadZipFile, KeyError):
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return out
     for _p0, _p1, frag in mod.paragraphs(xml):
         text = re.sub(r"\s+", " ", mod.text_of(frag)).strip().lower()
@@ -14063,7 +14076,7 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
             with zipfile.ZipFile(doc) as z:
                 have = set(re.findall(r'w:styleId="([^"]+)"',
                                       z.read("word/styles.xml").decode("utf-8", "replace")))
-        except (OSError, zipfile.BadZipFile, KeyError):
+        except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
             style_gap.append({"file": doc.name, "error": "no readable word/styles.xml"})
             continue
         tpl_for_doc = template_for_package_file(doc, templates or {}, manuscript_names)
@@ -14076,7 +14089,7 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
             with zipfile.ZipFile(tpl_for_doc) as z:
                 want = set(re.findall(r'w:styleId="([^"]+)"',
                                       z.read("word/styles.xml").decode("utf-8", "replace")))
-        except (OSError, zipfile.BadZipFile, KeyError):
+        except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
             continue
         gone = sorted(want - have)
         if gone:
@@ -14912,7 +14925,8 @@ def corpus_text_documents(sources: list) -> list:
                     # must not throw a UnicodeDecodeError straight past the
                     # unreadable-package guard and abort the whole scan.
                     xml = z.read("word/document.xml").decode("utf-8", "replace")
-            except (zipfile.BadZipFile, KeyError, OSError):
+            except (zipfile.BadZipFile, KeyError, OSError, RuntimeError,
+                    NotImplementedError):
                 continue
             rows = []
             for _p0, _p1, para in mod.paragraphs(xml):
@@ -18893,7 +18907,8 @@ def _sanitize_ooxml_bytes(data: bytes) -> tuple:
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zin:
             items = [(i.filename, zin.read(i.filename)) for i in zin.infolist()]
-    except (zipfile.BadZipFile, OSError, KeyError) as e:          # noqa: BLE001
+    except (zipfile.BadZipFile, OSError, KeyError, RuntimeError,
+            NotImplementedError) as e:                            # noqa: BLE001
         return data, [f"not a readable OOXML zip ({e}); metadata left as is"]
     stripped = 0
     accepted = 0
@@ -21263,7 +21278,7 @@ def discovery_ledger_reconciliation_problems(ledger: Path, ids) -> list:
     if not missing:
         return []
     return [f"{INTEGRATION_LEDGER_REL} never names {len(missing)} discovery finding id(s) "
-            f"({', '.join(missing[:6])}" + (" ..." if len(missing) > 6 else ")")
+            f"({', '.join(missing[:6])}" + (" ...)" if len(missing) > 6 else ")")
             + ": the round's frozen X-* list (frozen_discovery/findings_extra.json) must be "
               "reconciled row by row -- ported, kept-base, or one explicit no-donor-fix row per "
               "id -- so a revision cannot be lost between the revise arm and the integrated "
@@ -21575,6 +21590,40 @@ VISUAL_MAX_RENDER_ATTEMPTS = 2
 VISUAL_TEMPLATE_RENDER_TIMEOUT = 300
 
 
+def _toml_array_at(text: str, start: int):
+    """The balanced `[...]` starting at `start`, or None (quoted brackets kept).
+
+    `\\[[^\\]]*\\]` stopped at the FIRST `]`, so ONE argument containing a
+    bracket truncated the array, `json.loads` failed and every argument was
+    silently dropped -- the server then launched with no args at all, a wrong
+    configuration that looked like a successful launch.
+    """
+    i = start
+    while i < len(text) and text[i] in " \t":
+        i += 1
+    if i >= len(text) or text[i] != "[":
+        return None
+    j, depth, quote = i, 0, None
+    while j < len(text):
+        ch = text[j]
+        if quote:
+            if quote == '"' and ch == "\\":
+                j += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return text[i:j + 1]
+        j += 1
+    return None
+
+
 def mcp_server_spec(name: str) -> dict:
     """{command, args} for one configured MCP server, {} when unreadable.
 
@@ -21599,10 +21648,14 @@ def mcp_server_spec(name: str) -> dict:
     if not cm:
         return {}
     args = []
-    am = re.search(r"^\s*args\s*=\s*(\[[^\]]*\])", body, re.MULTILINE)
+    am = re.search(r"^\s*args\s*=\s*", body, re.MULTILINE)
     if am:
+        raw = _toml_array_at(body, am.end())
+    else:
+        raw = None
+    if raw is not None:
         try:
-            args = [str(a) for a in json.loads(am.group(1))]
+            args = [str(a) for a in json.loads(raw)]
         except ValueError:
             args = []
     return {"command": os.path.expanduser(cm.group(1)), "args": args}
@@ -23406,7 +23459,8 @@ def _structured_problem_for(rel: str, p: Path):
                 ET.fromstring(z.read("word/document.xml"))
         else:
             ET.fromstring(text)
-    except (ValueError, ET.ParseError, zipfile.BadZipFile, KeyError) as e:
+    except (ValueError, ET.ParseError, zipfile.BadZipFile, KeyError, RuntimeError,
+            NotImplementedError) as e:
         kind = p.suffix.lstrip(".").upper()
         return f"{rel} is malformed {kind} ({str(e)[:160]})"
     return None
@@ -25917,7 +25971,11 @@ def prepare_resume_session(ctx: Ctx, rec: dict, argv: list, key: str, reason: st
     rec["resume_attempts"] = dict(rec.get("resume_attempts") or {}, **{key: used + 1})
     rec["last_resume"] = {"session": key, "attempt": used + 1, "reason": reason,
                           "started": utcnow(), "prompt": RESUME_PROMPT_FILE,
-                          "argv": [*argv[:3], "..."][:3]}
+                          # The marker belongs to the TRUNCATED case only: the
+                          # old `[*argv[:3], "..."][:3]` dropped it exactly when
+                          # the command was longer than three words (so the
+                          # record looked complete) and added it to short ones.
+                          "argv": ([*argv[:3], "..."] if len(argv) > 3 else list(argv))}
     return {"rid": rec["id"], "session": key, "reason": reason, "argv": list(argv),
             "problems": problems, "prompt": RESUME_PROMPT_FILE}
 
@@ -26493,7 +26551,13 @@ def audit_artifact_problems(audit, frozen_ids) -> list:
         adds = []
     seen_add = set()
     for i, row in enumerate(adds):
-        aid = str((row or {}).get("id") or "").strip() if isinstance(row, dict) else ""
+        if not isinstance(row, dict):
+            # The `dispositions` loop above already reports a non-object row
+            # instead of dereferencing it; this loop read `row.get(...)`
+            # unconditionally and crashed cmd_selfcheck with an AttributeError.
+            problems.append(f"adds[{i}] is not an object")
+            continue
+        aid = str(row.get("id") or "").strip()
         if not AUDIT_ID_RE.match(aid):
             problems.append(f"adds[{i}] id {aid!r} is not AU-<n>")
             aid = aid or f"adds[{i}]"
@@ -28076,6 +28140,12 @@ def validate_judge_sheet(sj: dict, rec: dict):
 
 
 JUDGE_DISCOVERY_DIR = "judge_review/discovery"
+# The spellings that DISPOSE a judge discovery row: the judge block's own
+# `clean -- checked: ...` and the review skill's `no anomalies -- checked: ...`
+# (the block tells the judge to read that skill, and the module's own
+# `_DISCOVERY_STATUS_TOKENS` already accepts both for the review's probes).
+JUDGE_DISPOSITION_RE = re.compile(
+    r"\b(?:clean|finding|unable|limitation|no anomal(?:y|ies))\b", re.I)
 
 
 def judge_discovery_problems(sb: Path, rec: dict) -> tuple:
@@ -28130,10 +28200,20 @@ def judge_discovery_problems(sb: Path, rec: dict) -> tuple:
         ids_in_file = []
         for r in rows:
             text = _row_text(r)
-            if not re.search(r"\b(clean|finding|unable|limitation)\b", text, re.I):
+            if not JUDGE_DISPOSITION_RE.search(text):
                 out_w.append(f"{JUDGE_DISCOVERY_DIR}/{side}.md has a row with no disposition "
                              f"cell (`clean -- checked: <locations>` or a finding row): "
                              f"{text[:90]!r}")
+            elif (re.search(r"(?i)\b(?:clean|no anomal(?:y|ies))\b", text)
+                  and not re.search(r"(?i)\bchecked\b", text)):
+                # The block's clean closure is `clean -- checked: <locations>`,
+                # and the review's own D3 check fails a probe closed "no
+                # anomalies" with nothing named: a bare `clean` states no
+                # coverage at all. Reported as a warning (structural softness
+                # is a warning here; only a missing/empty file fails).
+                out_w.append(f"{JUDGE_DISCOVERY_DIR}/{side}.md closes a row `clean` without "
+                             f"naming the checked locations (the closure is `clean -- checked: "
+                             f"<locations>`): {text[:90]!r}")
             for fid in re.findall(r"(?<![A-Za-z0-9])X-\d+(?![A-Za-z0-9])", text):
                 if fid in ids_in_file:
                     out_w.append(f"{JUDGE_DISCOVERY_DIR}/{side}.md lists finding id {fid} more "
@@ -40095,7 +40175,8 @@ def docx_is_readable(path: Path) -> tuple:
             xml = z.read("word/document.xml")
         ET.fromstring(xml)
         return True, "readable OOXML (word/document.xml parses)"
-    except (OSError, KeyError, zipfile.BadZipFile, ET.ParseError) as e:
+    except (OSError, KeyError, zipfile.BadZipFile, ET.ParseError, RuntimeError,
+            NotImplementedError) as e:
         return False, f"{type(e).__name__}: {str(e)[:160]}"
 
 

@@ -75,7 +75,11 @@ CAPTION = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?"
 COVER_SALUTATION = re.compile(r"^\s*(?:dear\b|to the (?:editor|editors)\b)", re.I)
 COVER_CLOSING = re.compile(
     r"^\s*(?:sincerely|yours (?:sincerely|faithfully|truly)|best regards|kind regards|regards|"
-    r"with (?:best|kind) regards|thank you)\b", re.I)
+    r"with (?:best|kind) regards)\b|"
+    # A bare courtesy line closes the letter; "Thank you for considering our
+    # manuscript ..." is a body OPENER, and treating it as the closing set the
+    # persuading count to 0 and reported a false OUTSIDE-PREFERENCE row.
+    r"^\s*thank you(?:\s+(?:very much|again))?[.,!]?\s*$", re.I)
 COVER_DISCLOSURE = re.compile(
     r"^\s*(?:manuscript title|title|authors?|author list|affiliations?|corresponding author|"
     r"running title|related manuscripts?|prior discussions?|suggested reviewers?|"

@@ -45,9 +45,18 @@ for f in "$ORIG" "$REVISED"; do
     esac
 done
 
-# Resolve symlinks so Word sees the real files.
-ORIG_REAL="$(realpath -- "$ORIG")"
-REVISED_REAL="$(realpath -- "$REVISED")"
+# Resolve symlinks so Word sees the real files. Checked like docx2pdf.sh does:
+# an unconditional `realpath` under `set -e` died with an opaque
+# "command not found" (exit 127) on a host without coreutils, before the
+# `command -v realpath` guard further down could produce its own message.
+if ! ORIG_REAL="$(realpath -- "$ORIG" 2>/dev/null)"; then
+    echo "Error: cannot resolve the path: $ORIG" >&2
+    exit 1
+fi
+if ! REVISED_REAL="$(realpath -- "$REVISED" 2>/dev/null)"; then
+    echo "Error: cannot resolve the path: $REVISED" >&2
+    exit 1
+fi
 
 # Derive a default output name from the resolved original path.
 if [[ -z "$OUTPUT" ]]; then

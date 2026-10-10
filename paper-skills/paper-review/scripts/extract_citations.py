@@ -263,6 +263,7 @@ def main():
     bib_entries = []    # .bib entries
     tex_bibitems = []   # LaTeX \bibitem entries (the document's own list)
     nocite_keys = defaultdict(list)   # \nocite{a}: cited, but not an in-text call-out
+    nocite_all_files = set()          # \nocite{*}: the WHOLE list is cited
     suspect_brackets = []
     reference_notes = []
 
@@ -282,6 +283,13 @@ def main():
             for li, pline in enumerate(latex_source_text(text).split("\n"), 1):
                 for m in TEX_CITE_RE.finditer(pline):
                     keys = [k.strip() for k in m.group("keys").split(",") if k.strip()]
+                    if m.group("macro").lower() == "nocite" and "*" in keys:
+                        # `\nocite{*}` has no key to record: every entry of the
+                        # document's list is cited, which the key space below
+                        # turns into "cited" for this file (before this, the
+                        # star was dropped and EVERY \bibitem was reported as
+                        # listed-but-never-cited).
+                        nocite_all_files.add(fname)
                     keys = [k for k in keys if k != "*"]   # \nocite{*} = the whole list
                     if m.group("macro").lower() == "nocite":
                         nocite_keys[fname].extend(keys)
@@ -387,6 +395,9 @@ def main():
         tex_cited_by_file[c["file"]].append(c["key"])
     for f, keys in nocite_keys.items():
         tex_cited_by_file[f].extend(keys)
+    for f in sorted(nocite_all_files):
+        tex_cited_by_file[f].extend(b["key"] for b in tex_bibitems if b["file"] == f)
+        tex_cited_by_file[f].extend(b["key"] for b in bib_entries if b["file"] == f)
     all_tex_cited = {k for keys in tex_cited_by_file.values() for k in keys}
     tex_orphans_by_file = {}
     if tex_key_space:

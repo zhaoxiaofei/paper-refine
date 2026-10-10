@@ -43,5 +43,9 @@ export function allowedRoots(value) {
 export function containsPath(target, roots) {
   if (!roots || !roots.length) return true;
   const abs = realOrResolved(target);
-  return roots.some((r) => abs === r || abs.startsWith(r + path.sep));
+  // A root that already ENDS with the separator is the filesystem root: adding
+  // another one turned "/" into "//", which no absolute path starts with, so
+  // the "allow everything" spelling DOCX_MCP_ALLOWED_ROOTS=/ refused every file.
+  return roots.some((r) => abs === r
+    || abs.startsWith(r.endsWith(path.sep) ? r : r + path.sep));
 }

@@ -50,7 +50,11 @@ def is_non_manuscript(name: str) -> bool:
 
 
 LABEL_PATTERNS = [
-    ("p-value", re.compile(r"\b[pP]\s*[=<>≤≥]\s*(\d+\.?\d*(?:[eE][+-]?\d+)?)")),
+    # The leading-dot form is a p-value too (`p = .05`, the APA spelling with no
+    # leading zero): requiring a digit before the point dropped every one of
+    # them from the M4 inventory, so an abstract/results conflict on such a
+    # p-value was never compared.
+    ("p-value", re.compile(r"\b[pP]\s*[=<>≤≥]\s*((?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)")),
     ("n", re.compile(r"\b[nN]\s*=\s*(\d+)\b")),
     ("AUC", re.compile(r"\bAU(?:C|ROC)\s*(?:was|is|of|=|:|approximately)?\s*(0?\.\d+|\d\.\d+)\b", re.I)),
     ("percentage", re.compile(r"\b(\d{1,3}(?:\.\d+)?)\s*%")),

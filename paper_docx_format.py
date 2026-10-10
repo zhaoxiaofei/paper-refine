@@ -707,7 +707,11 @@ def zotero_report_for_docx(path) -> dict:
             parts = [n for n in names
                      if n in ZOTERO_FIELD_PARTS or ZOTERO_FIELD_AUX_PARTS_RE.search(n)]
             xmls = [(n, pkg.read(n).decode("utf-8", "replace")) for n in parts]
-    except (OSError, zipfile.BadZipFile, KeyError) as e:
+    # RuntimeError is what `zipfile` raises for an ENCRYPTED entry and
+    # NotImplementedError for an unsupported compression method (see
+    # `analyse_package`): a password-protected .docx is unreadable like any
+    # other, never a crash out of a reader that returns a fallback verdict.
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError) as e:
         return {"fields": [], "errors": [f"unreadable DOCX package: {type(e).__name__}: {e}"],
                 "error_codes": {"unreadable-docx": 1},
                 "counts": {"item": 0, "bibliography": 0, "zotero_other": 0, "zotero": 0,
@@ -724,7 +728,7 @@ def zotero_report_for_docx(path) -> dict:
             style_parts = {n: pkg.read(n).decode("utf-8", "replace")
                            for n in ("word/settings.xml", "docProps/custom.xml")
                            if n in pkg.namelist()}
-    except (OSError, zipfile.BadZipFile, KeyError):
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         style_parts = {}
     parity = zotero_parity_rows_for_parts(xmls, zotero_style_ids(style_parts))
     if len(reports) == 1:
@@ -947,7 +951,7 @@ def docx_style_ids(path: Path) -> list:
     try:
         with zipfile.ZipFile(path) as pkg:
             xml = pkg.read("word/styles.xml").decode("utf-8", "replace")
-    except (OSError, zipfile.BadZipFile, KeyError):
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return []
     return sorted(set(re.findall(r'w:styleId="([^"]+)"', xml)))
 
@@ -965,7 +969,7 @@ def _template_uses_even_odd(template: Path) -> bool:
                         if "word/settings.xml" in names else "")
             doc = tpkg.read("word/document.xml").decode("utf-8", "replace") \
                 if "word/document.xml" in names else ""
-    except (OSError, zipfile.BadZipFile, KeyError):
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return False
     if "evenAndOddHeaders" in settings:
         return True
@@ -992,7 +996,7 @@ def docx_front_matter_report(path: Path, template: Path = None, containers=()) -
                         if "word/settings.xml" in names else "")
             hf_parts = {n: pkg.read(n) for n in names
                         if n.startswith(("word/header", "word/footer")) and n.endswith(".xml")}
-    except (OSError, zipfile.BadZipFile, KeyError):
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return {}
     rel_map = {m.group(1): (m.group(2).lower(), m.group(3))
                for m in _RELS_RE.finditer(rels)}
@@ -1084,7 +1088,7 @@ def docx_front_matter_report(path: Path, template: Path = None, containers=()) -
         with zipfile.ZipFile(template) as tpkg:
             tpl_doc = tpkg.read("word/document.xml").decode("utf-8", "replace")
         layout = _template_front_layout(tpl_doc)
-    except (OSError, zipfile.BadZipFile, KeyError):
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         layout = {}
     if layout:
         if corr:
@@ -2863,6 +2867,13 @@ NEGATIVE_CLAIM_RE = re.compile(
     r"failed\s+to\s+produce\s+(?:any\s+)?output|"
     r"could\s+not\s+be\s+assessed|is\s+not\s+evaluated|are\s+not\s+evaluated|"
     r"was\s+excluded|were\s+excluded)\b")
+# The "excluded / not included" branches routinely talk about SAMPLES, not
+# about a method ("Samples from the pilot cohort were excluded before the SCYN
+# caller was applied"); the subject rule below keeps a categorical value of an
+# unrelated column (the cohort's own label) from producing a row that claims
+# the text says that value "was not run".
+NEGATIVE_SUBJECT_METHOD_ONLY_RE = re.compile(
+    r"(?i)\b(?:(?:was|were)\s+excluded|not\s+included|could\s+not\s+be\s+included)\b")
 TABLE_TOOL_HEADER_RE = re.compile(
     r"(?i)^\s*(?:tool|method|caller|software|pipeline|package|program|algorithm|"
     r"model|scorer|name)\s*$")
@@ -2920,10 +2931,22 @@ def negative_claim_rows(texts: list, tables: list, limit: int = 40) -> list:
         for m in NEGATIVE_CLAIM_RE.finditer(s):
             sentence = s[max(0, m.start() - 200):m.end() + 200]
             lowered = sentence.lower()
+            # The claim's SUBJECT, inferred from word order: only a token that
+            # PRECEDES the negative phrase can be what the sentence says was
+            # "not run" ("SCYN could not be run"). A token that merely follows
+            # it ("... were excluded before the SCYN caller was applied") is
+            # not the subject, and pairing it reported the opposite of the text.
+            claim_at = m.start() - max(0, m.start() - 200)
+            method_only = NEGATIVE_SUBJECT_METHOD_ONLY_RE.search(m.group(0)) is not None
             hits = []
             for token, (tool_like, where) in tokens.items():
-                if not re.search(r"(?<![A-Za-z0-9])" + re.escape(token)
-                                 + r"(?![A-Za-z0-9])", lowered):
+                tm = re.search(r"(?<![A-Za-z0-9])" + re.escape(token)
+                               + r"(?![A-Za-z0-9])", lowered)
+                if tm is None or tm.start() >= claim_at:
+                    continue
+                if method_only and not tool_like:
+                    # "excluded"/"not included" is a claim about the samples
+                    # unless it names a tool/method column's own value.
                     continue
                 hits.append((0 if tool_like else 1, token, where))
             # One sentence usually names ONE method and several of the table's
@@ -4215,7 +4238,7 @@ def cover_letter_stamp_rows(path: Path, policy: dict) -> list:
                         continue
                     if hashlib.sha256(pkg.read(name)).hexdigest() in want_parts:
                         carried.append(posixpath.basename(name))
-    except (OSError, zipfile.BadZipFile, KeyError):
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return []
     hits = sorted(used_styles & want_styles)
     if not hits and not carried:
@@ -4282,7 +4305,7 @@ def empty_paragraph_slots_from_template(template) -> list:
         try:
             with zipfile.ZipFile(template) as pkg:
                 xml = pkg.read("word/document.xml").decode("utf-8", "replace")
-        except (OSError, zipfile.BadZipFile, KeyError):
+        except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
             return []
     else:
         xml = str(template)
@@ -4347,7 +4370,21 @@ def _table_paragraph_indices(xml: str, paras: list) -> set:
     """
     if not xml:
         return set()
-    spans = [(m.start(), m.end()) for m in re.finditer(r"<w:tbl\b[\s\S]*?</w:tbl>", xml)]
+    # Balance the `<w:tbl>`/`</w:tbl>` pairs: the lazy regex stopped at the
+    # FIRST `</w:tbl>`, so with a NESTED table (a table inside a cell) every
+    # paragraph of the outer table after the inner one lost the protection --
+    # including a following cell's ONLY paragraph, which the fixer could then
+    # splice out, leaving `<w:tc></w:tc>` (a file Word reports as corrupt).
+    spans, depth, start = [], 0, 0
+    for m in re.finditer(r"<w:tbl(?=[\s>])|</w:tbl>", xml):
+        if m.group(0) == "</w:tbl>":
+            depth = max(0, depth - 1)
+            if depth == 0:
+                spans.append((start, m.end()))
+        else:
+            if depth == 0:
+                start = m.start()
+            depth += 1
     if not spans:
         return set()
     return {i for i, (p0, _p1, _frag) in enumerate(paras)
@@ -5071,10 +5108,12 @@ REF_REPO_HOST_RE = re.compile(
 REF_VERSION_HINT_RE = re.compile(
     r"(?i)(?:\bv?\d+\.\d+(?:\.\d+)?\b|\bcommit\b|\bversion\b|\brelease\b|"
     r"\bdoi\b|\bzenodo\b|\bfigshare\b|\baccess(?:ed)?\b|"
-    # a repository URL pinned by path IS a version pin: /tree/<sha>, /commit/<sha>
-    # (the old hint read only the words around it and called a commit-pinned
-    # software citation "no version").
-    r"/(?:tree|commit)/[0-9a-fA-F]{7,40}\b)")
+    # a repository URL pinned by path IS a version pin: /tree/<sha>,
+    # /commit/<sha>, /blob/<sha> -- the same three spellings REPO_PIN_RE
+    # (FMT-AV2) counts as a pin (the old hint read only the words around it and
+    # called a commit-pinned software citation "no version"; the missing /blob
+    # spelling made FMT-R3 disagree with FMT-AV2 on the same URL).
+    r"/(?:tree|commit|blob)/[0-9a-fA-F]{7,40}\b)")
 # A bioRxiv/medRxiv-style identifier: the server's YYYY.MM.DD.NNNNNN code (with
 # or without the server's name) must carry the server's own DOI prefix.
 REF_SERVER_CODE_RE = re.compile(r"\b(?:19|20)\d{2}\.\d{2}\.\d{2}\.\d{5,}\b")
@@ -5132,9 +5171,12 @@ def reference_entry_rows(paras: list, is_ref: list, policy: dict = None,
                                    "archived DOI) so the reader can retrieve the same code",
                          "protected": False})
         if REF_SERVER_CODE_RE.search(entry):
-            prefix_match = REF_DOI_RE.search(entry)
-            doi = prefix_match.group(0) if prefix_match else ""
-            if not doi.startswith(BIORXIV_DOI_PREFIX + "/"):
+            # EVERY DOI of the entry decides: an entry that names a published
+            # DOI first and the server's own 10.1101/ DOI after it was flagged
+            # although the preprint identifier carries the right prefix.
+            dois = REF_DOI_RE.findall(entry)
+            doi = dois[0] if dois else ""
+            if not any(d.startswith(BIORXIV_DOI_PREFIX + "/") for d in dois):
                 rows.append({"rule": "FMT-R4", "severity": "medium",
                              "location": entry_ref(idx), "evidence": head,
                              "detail": "the entry carries a bioRxiv/medRxiv-style identifier "
@@ -5176,7 +5218,20 @@ _DISPLAY_ITEM_TOKEN = r"(?:S?\d+[A-Za-z]?|[IVXLC]+)"
 # "figure 100", nor "Figure 2 and X-ray ..." of "figure 10" -- while the
 # confirmed case ("Figures 3 and 4", "Fig. 2 and 3", "Figures 3-5") is
 # unchanged. Roman-numeral call-outs stay supported as the FIRST token.
-_DISPLAY_LIST_TOKEN = r"S?\d+[A-Za-z]?"
+#
+# Bounded to three digits and closed with a `(?!\d)` guard: a continuation
+# token is an item NUMBER, never a year or another long number that merely
+# starts with digits. "Figure 1, 2020 update" dated a phantom figure 2020 and
+# the next real "Figure 2" was reported as first cited after it.
+_DISPLAY_LIST_TOKEN = r"S?\d{1,3}[A-Za-z]?(?!\d)"
+# The separators that name a RANGE rather than a list: "Figures 3-5",
+# "Figs. 2–4", "Figures 3 to 5". A range call-out mentions every item inside
+# it, so all of them are first cited at that paragraph; reading only the
+# endpoints made a later "Figure 4" look like a first mention out of order.
+_DISPLAY_RANGE_JOIN_RE = re.compile(r"(?:[-\u2013]|\b(?:to|through)\b)", re.I)
+# A gap wider than this is not a display-item range (more likely two numbers
+# that happen to sit around a dash); the fill is skipped.
+_DISPLAY_RANGE_MAX = 100
 # "figure 3" / "figures 3 and 4" / "fig. 3" / "figs. 3" / "fig 3" -- the
 # plural `figures` is the most common call-out form of all, and a call-out
 # names EVERY item of its conjunction; matching only the first number
@@ -5223,6 +5278,22 @@ def _display_item_key(kind: str, token: str):
     return None
 
 
+def _display_phrase_tokens(phrase: str) -> list:
+    """[(token, is_range_continuation)] for one matched call-out phrase.
+
+    The gap text BEFORE a token decides whether it continues a range ("3-5",
+    "3 to 5") or a plain list ("3 and 4", "3, 4"): only the range joins every
+    item between the two numbers into the call-out.
+    """
+    out, prev_end = [], None
+    for m in DISPLAY_ITEM_TOKEN_RE.finditer(phrase):
+        gap = phrase[prev_end:m.start()] if prev_end is not None else ""
+        out.append((m.group(0), bool(prev_end is not None
+                                     and _DISPLAY_RANGE_JOIN_RE.search(gap))))
+        prev_end = m.end()
+    return out
+
+
 def display_order_rows(paras: list, is_ref: list = None, is_caption: list = None,
                        is_heading: list = None, order_policy: bool = False) -> list:
     """FMT-O1: a numbered display item is first mentioned out of numeric order.
@@ -5245,9 +5316,21 @@ def display_order_rows(paras: list, is_ref: list = None, is_caption: list = None
             continue
         for kind, pattern in NUMBERING_MENTION_RES.items():
             for m in pattern.finditer(str(text or "")):
-                for token in DISPLAY_ITEM_TOKEN_RE.findall(m.group(0)):
+                filled, prev = [], None
+                for token, is_range in _display_phrase_tokens(m.group(0)):
                     key = _display_item_key(kind, token)
-                    if key and key[2] is not None and key not in first:
+                    if key is None or key[2] is None:
+                        prev = None
+                        continue
+                    if (is_range and prev is not None and prev[0] == key[0]
+                            and prev[1] == key[1]
+                            and 0 < key[2] - prev[2] <= _DISPLAY_RANGE_MAX):
+                        filled.extend((key[0], key[1], n, str(n))
+                                      for n in range(prev[2] + 1, key[2]))
+                    filled.append(key)
+                    prev = key
+                for key in filled:
+                    if key not in first:
                         first[key] = idx
     rows = []
     for (kind, family) in sorted({(k[0], k[1]) for k in first}):
@@ -5393,7 +5476,14 @@ AVAIL_UNRESOLVED_RES = (
      re.compile(r"(?i)\bavailable\s+(?:up)?on\s+(?:reasonable\s+)?request\b")),
     ("available from the authors",
      re.compile(r"(?i)\bavailable\s+from\s+the\s+authors\b")),
-    ("in the meantime", re.compile(r"(?i)\bin\s+the\s+meantime\b")),
+    # "in the meantime" alone is ordinary English ("the discussion continues in
+    # the meantime"): like every sibling pattern here, the conditional locator
+    # needs the availability context in the same sentence.
+    ("in the meantime",
+     re.compile(r"(?i)\b(?:availab\w*|deposit\w*|request|share\w*|archiv\w*|obtain\w*)"
+                r"\b[^.]{0,80}\bin\s+the\s+meantime\b|"
+                r"\bin\s+the\s+meantime\b[^.]{0,80}\b"
+                r"(?:availab\w*|deposit\w*|request|share\w*|archiv\w*|obtain\w*)\b")),
     ("archived on acceptance",
      re.compile(r"(?i)\barchived\b[^.]{0,60}\b(?:on|upon|after)\s+acceptance\b")),
     # The locator is CONDITIONAL even when the sentence does not glue
@@ -7279,9 +7369,9 @@ def validate_docx_parts(path: Path) -> dict:
                     ET.fromstring(z.read(name))
                 except ET.ParseError as e:
                     errs.append(f"{name}: malformed XML ({e})")
-                except OSError as e:                              # noqa: PERF203
+                except (OSError, RuntimeError, NotImplementedError) as e:  # noqa: PERF203
                     errs.append(f"{name}: unreadable ({e})")
-    except (zipfile.BadZipFile, OSError) as e:
+    except (zipfile.BadZipFile, OSError, RuntimeError, NotImplementedError) as e:
         errs.append(f"not a readable .docx zip ({type(e).__name__}: {e})")
     schema_ok, schema_detail = validate_package(path)
     if schema_ok is False:
@@ -7465,7 +7555,7 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
                  if "word/_rels/document.xml.rels" in tnames else "")
         tset = (tpkg.read("word/settings.xml").decode("utf-8", "replace")
                 if "word/settings.xml" in tnames else "")
-    except (KeyError, OSError):
+    except (KeyError, OSError, RuntimeError, NotImplementedError):
         return {}
     rel_map = {m.group(1): (m.group(2).lower(), m.group(3))
                for m in _RELS_RE.finditer(trels)}
@@ -7664,7 +7754,7 @@ def template_style_roles(template: Path) -> dict:
         with zipfile.ZipFile(template) as tpkg:
             styles = tpkg.read("word/styles.xml").decode("utf-8", "replace")
             doc = tpkg.read("word/document.xml").decode("utf-8", "replace")
-    except (OSError, zipfile.BadZipFile, KeyError):
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return {}
     roles = {"headings": {}}
     try:
@@ -8157,7 +8247,11 @@ def _apply_front_refs(doc_xml: str, front: dict) -> tuple:
         m = sects[idx]
         body = re.sub(r"<w:(?:header|footer)Reference[^>]*/>", "", m.group(0))
         body = re.sub(r"<w:titlePg[^>]*/>", "", body)
-        om = re.match(r"<w:sectPr(?=[\s>])[^>]*>", body)
+        # The OPENING tag only: `[^>]*` greedily consumed the `/` of a legal
+        # `<w:sectPr att="x"/>`, so the references were inserted AFTER the
+        # self-closing element -- as siblings of `w:sectPr`, which is
+        # schema-invalid OOXML -- instead of inside it.
+        om = re.match(r"<w:sectPr(?=[\s>])(?:[^>/]|/(?!>))*>", body)
         if om:
             body = body[:om.end()] + (refs_all if idx == 0 else refs_body) + body[om.end():]
         else:
@@ -8509,7 +8603,7 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
             with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
                 for name, data in parts.items():
                     z.writestr(name, data)
-    except (OSError, zipfile.BadZipFile, KeyError) as e:
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError) as e:
         return {"file": str(src), "ok": False, "error": f"{type(e).__name__}: {e}"}
 
     def _text(p: Path) -> str:
@@ -8525,7 +8619,8 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
                 check_parts.append("word/numbering.xml")
             for name in check_parts:
                 ET.fromstring(z.read(name))
-    except (OSError, zipfile.BadZipFile, ET.ParseError, KeyError) as e:
+    except (OSError, zipfile.BadZipFile, ET.ParseError, KeyError, RuntimeError,
+            NotImplementedError) as e:
         return {"file": str(src), "ok": False, "error": f"verification failed: {e}"}
     changes = [f"copied {len(copied)} template part(s)",
                f"remapped {remapped} style reference(s)"]
@@ -9042,7 +9137,7 @@ def cmd_zotero_check(args) -> int:
             style_names += [n for n in names if re.match(r"customXml/item\d*\.xml$", n)]
             style_parts = {n: pkg.read(n).decode("utf-8", "replace")
                            for n in style_names}
-    except (OSError, zipfile.BadZipFile, KeyError) as e:
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError) as e:
         print(f"[FAIL] {path}: unreadable DOCX ({type(e).__name__}: {e})")
         return 1
     xml = next(x for n, x in parts if n == "word/document.xml")

@@ -72,6 +72,12 @@ try {
   check('a PATH-delimiter separated list keeps every root', () => {
     assert.equal(allowedRoots([root, outside].join(path.delimiter)).length, 2);
   });
+  check('a "/" root allows any absolute path (the allow-everything spelling)', () => {
+    const roots = allowedRoots(path.sep);
+    assert.deepEqual(roots, [path.sep]);
+    assert.equal(containsPath('/etc/passwd', roots), true);
+    assert.equal(containsPath(work, roots), true);
+  });
 } finally {
   rmSync(work, { recursive: true, force: true });
 }
