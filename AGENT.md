@@ -334,6 +334,45 @@ the profiles shipped next to the script → the built-in fallback inside
     gates to make a session pass: the whole point is that an unfilled phase is
     indistinguishable from a skipped one.
 
+18. **The discovery round's `X-*` findings reach the stages that need them
+    WITHOUT breaking judge blinding: the integrator gets the frozen list, the
+    judges re-derive their own.** The review's phase-3 discovery round is the
+    only source of defect classes the frozen checklist does not own, and its
+    `X-*` findings are what the revision arms resolve. Two consumers were
+    missing, and they need DIFFERENT treatment:
+
+    * the INTEGRATOR is not a blind stage: `round_discovery_seed()` resolves the
+      round's list (the review sandbox, part B under a split review, or the
+      archived `reports/round<r>_review/` copy) and `seed_discovery_findings()`
+      copies `review/round2/findings_extra.{json,md}` VERBATIM into
+      `frozen_discovery/` there (read-only, in `inputs_manifest`, byte-verified
+      by `input_mismatches`). `integrated/DIFF_LEDGER.md` must reconcile every X
+      id (ported / kept-base / an explicit no-donor-fix row), which
+      `postcheck_integrate` verifies by id, or a donor's X fix can be dropped as
+      an "unnamable" difference and the round's revision work vanishes. The
+      AUDITOR's `drop` takes an X id out of force (`discovery_dropped_ids()`).
+    * the JUDGE is COMPLETELY blind to the sources of a package -- no other
+      session's findings, no round, no producing agent -- so it is **never
+      seeded** with the list. Judge contract v5 instead requires the judge to
+      RE-DERIVE the class itself: `judge_discovery_problems()` enforces one
+      disposed file per side (`judge_review/discovery/target.md` +
+      `<label>.md` for every opponent; missing or empty = failed run,
+      structural softness = warning), produced by the bounded pass in
+      `judge_discovery_block()` with the SAME candidates and depth for every
+      side. An X-class difference the pass proves is filed as a normal
+      `resolved`/`introduced` row in an EXISTING tier (the shared class rule's
+      category mapping: categories 0-5 already cover
+      correctness/preservation/completeness/consistency/writing/formatting;
+      never invent a new class, because the census, the ranking and the score
+      model all read the same six). An X id a judge cites is its OWN finding id
+      -- descriptive, never a frozen check id -- and the `checks` coverage map
+      stays M1-M24 + J1-J4.
+
+    The judge prompt must stay free of provenance vocabulary (see
+    `test_agent_consistency_2026_0922.py`) and must not hand over any discovery
+    list; the pass is worded in content terms only. Pinned by
+    `.paper_test/test_discovery_parity_2026_1010.py`.
+
 ## Commands you will use
 
 ```bash

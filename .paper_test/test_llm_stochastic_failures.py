@@ -396,6 +396,14 @@ def main() -> int:
         # The field contains Word documents, so the visual record is part of the
         # judge contract too (this suite is about sheet recovery, not that gate).
         (art / "VIS_visual.md").write_text("Renderer: none; pages not visually verified.\n")
+        # Contract v5: the judge's OWN discovery pass (one disposed file per side).
+        dsc = sb / "judge_review" / "discovery"
+        dsc.mkdir(parents=True)
+        header = "| class | probe | checked | disposition |\n|---|---|---|---|\n"
+        for side in ("target", "v1"):
+            rows = "\n".join(f"| class {i} | probe the class | {side}/ | "
+                             f"clean - checked: {side}/ |" for i in range(5))
+            (dsc / f"{side}.md").write_text(header + rows + "\n", encoding="utf-8")
         (sb / "scores.json").write_text(json.dumps(
             {"run_id": rid, "target_id": "tABCDEF12", "round": 1, "judge_index": 1,
              "comparisons": [{"opponent_label": "v1", "score": 1, "reason": "better"}]}))

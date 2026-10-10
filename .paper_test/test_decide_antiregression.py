@@ -124,6 +124,13 @@ def judge_main() -> int:
     (jr / "inventory.md").write_text("# inventory (antiregression stub judge)\n",
                                      encoding="utf-8")
     (jr / "artifacts" / "M1_acronyms.md").write_text("| row |\n|---|\n", encoding="utf-8")
+    # Contract v5: the judge's OWN discovery pass, one disposed file per side.
+    header = "| class | probe | checked | disposition |\n|---|---|---|---|\n"
+    (jr / "discovery").mkdir(exist_ok=True)
+    for side in ["target", *labels]:
+        rows = "\n".join(f"| class {i} | probe the class | {side}/ | "
+                         f"clean - checked: {side}/ |" for i in range(5))
+        (jr / "discovery" / f"{side}.md").write_text(header + rows + "\n", encoding="utf-8")
     (sb / "_pipeline_done.json").write_text(json.dumps(
         {"stage": "judge", "run_id": name, "status": "complete", "error": None}),
         encoding="utf-8")

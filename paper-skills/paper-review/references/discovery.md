@@ -195,3 +195,19 @@ Continuity is enforced too: every sweep id the PREVIOUS round proposed
 ("prior proposal M37: no instances in base/") in this round's round-2
 artifacts — a proposed class must not vanish between rounds; that is how it
 converges into a mechanical check.
+
+Downstream parity is enforced in two different directions:
+
+- the integration stage is NOT blind, so the same frozen `X-*` list (verbatim
+  `findings_extra.{json,md}`) is handed to it; its own ledger must reconcile
+  every X id (ported / kept-base / an explicit no-donor-fix row), and a
+  disposition the auditor DROPPED is not in force and is never scored;
+- the judge panel is COMPLETELY blind to the sources of a package (no other
+  session's findings, no round, no producing agent), so it is NEVER handed this
+  list: each judge re-derives its own bounded discovery pass over every side
+  (the target and every opponent, the same candidates and depth) and scores any
+  X-class difference as a normal row in the tier the shared defect-class rule
+  gives the finding's own category.
+
+Without this parity a class discovered here and resolved by a revision would be
+lost in the merge or invisible to the panel that ranks the revision.

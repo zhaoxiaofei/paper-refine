@@ -333,6 +333,9 @@ def test_stub_round_sessions():
     # orchestrator scan, no digest, no review artifacts, no evidence pack. The
     # format policy carries the venue profile's TABLE rule, which a judge needs
     # to derive its own M20 rows with the public scanner; it names no version.
+    # (The judge's own discovery pass is written by the AGENT under
+    # judge_review/discovery/ -- never seeded -- see
+    # test_discovery_parity_2026_1010.py.)
     leaked = []
     for p in first.rglob("*"):
         if not p.is_file():

@@ -5391,7 +5391,18 @@ SCORE_MAX = 4
 # lower-priority gain can never offset a higher-priority loss. (v3 summed the
 # tiers additively with differentiated caps and made formatting/writing
 # MINOR-only; both are superseded.)
-JUDGE_CONTRACT_VERSION = 4
+# v5 (2026-10-10): the judge runs its OWN DISCOVERY PASS. A judge is completely
+# blind to provenance and is handed NO discovery list, so the defect classes the
+# frozen checklist does not own are RE-DERIVED by the judge: one bounded pass
+# over every side (target + every opponent, same candidates and depth), recorded
+# as one disposed file per side under `judge_review/discovery/` and scored as
+# normal ledger rows (the finding's own category decides the tier) wherever the
+# sides differ. A pass that never ran is indistinguishable from one that found
+# nothing, so a missing or empty pass FAILS the run -- otherwise the panel could
+# silently ignore that class of findings again, and a version that resolved one
+# would not be ranked ahead of the version that still carried it. (v4 and
+# earlier: no discovery pass.)
+JUDGE_CONTRACT_VERSION = 5
 # The scoring classes, in priority order (2026-10-01 calibration):
 #   correctness  -- the truth of what is asserted (wrong claim, strength mismatch)
 #   preservation -- content lost or invented between the two versions
@@ -7302,6 +7313,118 @@ RAW_DATA_READONLY_RULE = """
         the reviewers' opinion."""
 
 
+def _discovery_ids_line(ids) -> str:
+    return ", ".join(str(i) for i in (ids or ())) or "(none)"
+
+
+def _discovery_dropped_note(dropped) -> str:
+    """The auditor-drops paragraph of the INTEGRATE block ("" when there are none)."""
+    if not dropped:
+        return ""
+    rows = "; ".join(f"{i} -- {why or 'no reason recorded'}" for i, why in dropped)
+    return (f"\n  * {len(dropped)} of these id(s) were DROPPED when the list was disposed (a "
+            f"dropped finding is not in force; no version was asked to fix it): {rows}. Do not "
+            f"port or reconcile anything FOR a dropped id -- record it as "
+            f"`dropped -- not in force` if the ledger needs a row for it.")
+
+
+def judge_discovery_block() -> str:
+    """The judge's OWN discovery pass (see `JUDGE_DIRECTIVES`).
+
+    The judge never receives another session's findings (complete blinding):
+    instead it RE-DERIVES a bounded discovery pass of its own over every side --
+    the target and every opponent, with the same candidates and depth -- records
+    one disposed file per side under `judge_review/discovery/`, and files any
+    class difference as a normal scored row. The wording names no provenance:
+    the pass is about the CONTENT in front of the judge.
+    """
+    return """
+=== YOUR OWN DISCOVERY PASS (`X-*`) — EVERY SIDE, THE SAME DEPTH ===
+
+The fixed sweeps are finite; no checklist can be complete. Before you compare, run your OWN
+bounded discovery pass (the spirit of $paper-review's phase-3 discovery pass; read the skill's
+references/discovery.md for its discipline -- the bounded procedure below is what this sandbox
+executes) over EVERY package you can see -- `target/` AND every `field/<label>/` -- with the SAME
+candidates and depth for each side. You are the only source of these findings: no discovery list is
+handed to you, and nothing about where a package came from is available or needed.
+
+For EACH side, identically:
+  * ENUMERATE class candidates: start from the seed list below, then add at least two of your own
+    ("what else?" twice). A candidate is a question about a CLASS of defect, never an instance.
+  * PROBE each candidate against that side's corpus, naming the files/regions you checked (use a
+    script where one helps).
+  * DISPOSE every candidate: `clean -- checked: <locations>`, or a finding row carrying a
+    location, a category (0-5), a severity, a verbatim evidence quote and a one-line explanation.
+    A candidate you cannot probe is recorded as a limitation, never silently dropped.
+  * WRITE one file per side: `judge_review/discovery/target.md` for the target and
+    `judge_review/discovery/<label>.md` for each opponent label. One table per file, one row per
+    candidate, finding ids `X-001`, `X-002`, ... unique within the file.
+
+Seed candidates (extend them):
+  * a reporting number, label or unit the package's own shipped data or code does not support;
+  * a convention (spelling, hyphenation, term family, numbering style) applied in one place and
+    not another and owned by no frozen check;
+  * an expected-but-absent value or label the package's own logic requires (a test, an n, an
+    error-bar definition, a scale);
+  * a present-but-unexpected token: leftover meta-commentary, a duplicated value that disagrees,
+    a placeholder where content belongs;
+  * boundary defects: the first and last sentence of every section and legend, and every heading;
+  * sibling asymmetry: items of one family (panels, labels, sections) defined unevenly;
+  * a claim/pointer pair where one side is missing or overrun (availability, sources, disclosures).
+
+HOW THE PASS ENTERS YOUR SHEET: compare the sides' discovery files. A class ONE side carries and
+the other does not -- or two sides carrying it at DIFFERENT rungs -- is a normal scored item in the
+tier the shared defect-class rule gives the finding's category (classify by the concrete defect
+when the category splits), cited by its id in the row's `check` cell:
+  * the target no longer carries it while the opponent does  -> `resolved`;
+  * the target carries it while the opponent does not        -> `introduced`;
+  * both carry it at DIFFERENT rungs                         -> two rows, each at its own rung
+    (a distance, not a swap);
+  * both carry it at the same rung, or neither does          -> no row for it.
+The `checks` coverage map stays the frozen M/J ids: your discovery findings are YOUR OWN
+instrument, recorded in the files above and in the ledger rows -- never a frozen check id. Do NOT
+propose new sweeps (there is no adoption path from this sandbox)."""
+
+
+def discovery_parity_integrate_block(ids, dropped=()) -> str:
+    """The integrator's discovery-parity block (port the X fixes; reconcile the list)."""
+    ids = [str(i) for i in (ids or ())]
+    if not ids:
+        return """
+=== THE ROUND'S DISCOVERY FINDINGS (`X-*`) ===
+
+The round's review carries no frozen discovery findings (no phase-3 discovery round ran, or it
+found none), so there is no extra list to reconcile here: the ledger's `finding effect` cells name
+only the findings your donors and self/ actually cite. This is still not a review stage -- do not
+author a discovery hunt and do not propose new sweeps."""
+    return f"""
+=== THE ROUND'S DISCOVERY FINDINGS (`X-*`) — FROZEN, INTEGRATE THE FIXES ===
+
+The round's review ran the $paper-review skill's discovery round (D0-D5) against this round's BASE
+corpus and its findings are the X-* list in `frozen_discovery/findings_extra.json` (readable copy:
+`frozen_discovery/findings_extra.md`): READ-ONLY, the SAME list the round's revision arms
+resolved. This is the ONE piece of the frozen review this sandbox consumes -- there is still no
+`review/` directory, no F-* finding list and no A1 ledger here.
+
+Why it matters: the revise arm(s) in your pool acted on this list, so a donor may carry a safe,
+evidenced fix for an X defect that self/ (or another donor) still carries. Without the list those
+edits look like unnamed/cosmetic differences and would be dropped under (e) -- silently losing the
+round's revision work in the integrated package. Treat an X fix exactly like any other finding
+fix:
+  * self/ still carries the defect and a donor resolves it -> PORT the donor's fix (class (a)),
+    and record the id in the ledger row's `finding effect` cell (`preserves X-001`).
+  * self/ and a donor fix it differently -> decide by the source hierarchy (class (b)), and
+    record the rejected alternative.
+  * self/ already resolves it -> KEEP AS-IS (class (c)); never port an older wording back.
+  * Never port an edit that makes an X finding WORSE or re-introduces the defect. If a donor's
+    "fix" contradicts the hierarchy or the rest of the package, keep the safe reading and say so.
+  * `integrated/DIFF_LEDGER.md` must reconcile EVERY X id listed below ({_discovery_ids_line(ids)})
+    -- a ported row, a kept-base row, or one explicit "no donor carries a fix" row per remaining
+    id -- so a resolution cannot be lost between the revise arm and the integrated package. The V3
+    rescan re-locates the list in `integrated/` and records each id's state.
+  * Do NOT author a discovery hunt of your own and do NOT propose new sweeps.{_discovery_dropped_note(dropped)}"""
+
+
 def validation_block(role: str) -> str:
     """VALIDATION_RULE with the ONE role-specific substitution.
 
@@ -7731,6 +7854,22 @@ _DISCOVERY_UNCOVERED_RE = re.compile(
     r"|\bcovered\s+by\s+nothing\b|\bno\s+check\b", re.I)
 DISCOVERY_RELS = ("review/round2/findings_extra.json", "review/round2/findings_extra.md",
                   "review/round2/new_sweeps.md")
+# --- the discovery list as the INTEGRATION stage receives it ----------------
+# The discovery round's X-* findings are the round's only record of defect
+# classes the frozen checklist does not own. The revisers merge them into their
+# ledger, but the integration stage used to be told nothing about them: an X fix
+# could be dropped by an integrator as an "unnamable" difference, so the round's
+# revision work could vanish from the integrated package. The integrator is NOT
+# a blind stage, so it gets a SEED: the round's own frozen list is copied
+# byte-for-byte (review/round2/findings_extra.{json,md}, the same list the
+# revise sessions merged) into a read-only `frozen_discovery/` directory, and
+# every id must be reconciled in its ledger. The JUDGE is deliberately NOT
+# seeded -- a judge must be completely blind to where a package came from, so it
+# RE-DERIVES its own discovery findings instead (see `judge_discovery_block`).
+# The auditor's drops are honoured: an X id the round's auditor dropped is not a
+# defect any version was asked to fix, so the integrator must not score it.
+DISCOVERY_SEED_DIR = "frozen_discovery"
+DISCOVERY_SEED_FILES = ("findings_extra.json", "findings_extra.md")
 DIFF_LEDGER_REL = "revised/DIFF_LEDGER.md"
 REWRITE_REPORT_REL = "rewritten/REWRITE_REPORT.md"
 # The integration stage's ledger lives in its own output package.
@@ -8174,7 +8313,13 @@ of its references first (references/sweeps.md, references/discovery.md), then ex
    row that merely re-reports a frozen F-* finding; D5 new_sweeps.md carries sweeps.md-shaped
    proposals (Purpose, Enumeration, Artifact, Finding rules) numbered from M37, or states
    explicitly that there were no proposals and why; round2_summary.md reports the counts and the
-   round's honest limits. A placeholder "# none" round fails the postcheck.
+   round's honest limits. A placeholder "# none" round fails the postcheck. The SAME frozen list
+   (verbatim) is handed to the stages that need it: the auditor disposes every X id and the
+   integration stage must reconcile each one in its ledger (ported / kept-base / no-donor-fix), so
+   whatever the revisers resolve from this list is also integrated. The judge panel is COMPLETELY
+   blind to provenance and is never handed your list: it re-derives its own discovery findings
+   over every side, so keep every id stable and every evidence quote exactly locatable in case a
+   judge's own pass re-finds the same defect.
 5. The skill's verification pass and acceptance checks before finalizing.
 
 @@PRIOR_ROUND@@
@@ -8374,7 +8519,10 @@ the artifacts landing in ./revised. Read the skill's SKILL.md and its references
       structured data -- a row's id field, a mapping key, or an id list -- because the orchestrator
       reads the ids from that file and re-runs this stage when an id is missing. Any container name
       is accepted (the skill's coverage table, `findings`, `ledger`, `rows`, ...); an id that only
-      appears inside a prose sentence is NOT accepted as naming it.
+      appears inside a prose sentence is NOT accepted as naming it. An X-* discovery finding is
+      treated exactly like an F-* one -- same ledger row, same evidence bar -- and the V3 rescan
+      re-locates its quoted defect in revised/: a resolution whose evidence is still present after
+      your edits is not resolved, and every X id is reported the same way the F-* list is.
   R1  re-verify every finding against the sources; record a verdict with a location-checked
       rationale (empty rationale = invalid). False positives are discarded only with a concrete
       recorded rationale; ambiguous wording becomes "clarification"; unverifiable becomes
@@ -8614,7 +8762,12 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
                     strongest evidence you can produce — never "I disagree".
    SILENCE IS NOT ALLOWED: every frozen id appears exactly once in audit.json, as confirm or drop.
    A finding you cannot decide from the corpus is `confirm` with a note (the reviser sees it) —
-   dropping on "cannot tell" is forbidden.
+   dropping on "cannot tell" is forbidden. This applies to the X-* discovery ids exactly like the
+   F-* ids, and your verdict is the round's consensus for the stages downstream that consume the
+   list: a DROPPED X id is not in force for the integration stage either (it must not score a
+   dropped id), so a drop here is what keeps a non-defect from being "fixed" and re-scored as if it
+   were one. The judge panel is blind and re-derives its own discovery findings -- it never reads
+   your dispositions, and nothing about this stage reaches it.
 2. ATTACK THE DISPOSITIONS. The seeded tables (work/ and review/artifacts/) contain rows the
    reviewer closed as `OK — <reason>`. For every row whose rule is FINDING-TIER (the tier column of
    work/FORMAT_SCAN.json, and the rule list in your evidence pack), ask: is the reason about THIS
@@ -8763,6 +8916,10 @@ Layout (paths relative to the sandbox root):
                   reference: nothing in integrated/ may be worse than this.
   integrated/   — YOU create this; YOUR INTEGRATED PACKAGE goes here.
   code/         — revised analysis code + rerun instructions, if the imported fixes require them.
+  frozen_discovery/ — when this round ran a discovery round, the round's FROZEN X-* finding list
+                  (findings_extra.json + findings_extra.md), READ-ONLY and byte-verified: the
+                  one review artifact this sandbox consumes -- see THE ROUND'S DISCOVERY FINDINGS
+                  below. Absent when the round carries no discovery findings.
 
 Each of self/ and others/<id>/ is a COMPLETE document corpus at its top level (plus code/ where the
 package had revised analysis code) -- none of them contains a nested revised/ directory. Your
@@ -8866,12 +9023,16 @@ integrated/CHANGELOG.md, because downstream judges and the human gate receive on
 
 === WHAT DOES NOT APPLY IN THIS SANDBOX (explicit carve-outs — read before the excerpts) ===
 
-  * There is NO review/ directory here, and NO review/findings.json or
-    review/round2/findings_extra.json. The $paper-revise steps that consume them are NEUTRALISED for
-    this run: do NOT build an A1 ledger keyed to finding IDs, do NOT look for those files, and do
-    NOT stop to ask the user for a review (the skill's "findings files missing -> STOP and ask the
-    user" rule does not apply here). integrated/DIFF_LEDGER.md, described above, IS this run's
-    ledger.
+  * There is NO review/ directory here, and NO review/findings.json. The $paper-revise steps that
+    consume the F-* list are NEUTRALISED for this run: do NOT build an A1 ledger keyed to finding
+    IDs, do NOT look for those files, and do NOT stop to ask the user for a review (the skill's
+    "findings files missing -> STOP and ask the user" rule does not apply here).
+    integrated/DIFF_LEDGER.md, described above, IS this run's ledger.
+    THE ONE EXCEPTION: when this round ran a discovery round, its frozen X-* findings ARE handed
+    to you, read-only, under `frozen_discovery/` -- see THE ROUND'S DISCOVERY FINDINGS below. That
+    list is what the round's revision arms resolved, so it is the round's shared defect landscape
+    for exactly the classes no frozen sweep owns, and it must be reconciled (ported / kept-base /
+    no-donor-fix) in the ledger like every other finding.
   * Do NOT run a pre-port review phase. The only review-shaped step here is the POST-port V3 rescan
     in section 2 below; the master Phase-1 excerpt's "run the complete review workflow including the
     discovery round D0-D5 and then present the findings list" is NEUTRALISED for this sandbox.
@@ -8882,6 +9043,8 @@ integrated/CHANGELOG.md, because downstream judges and the human gate receive on
     REVISION_REPORT.md, revision_report.json, DIFF_LEDGER.md -- are NOT submission content. Never
     sweep, quote, score or "fix" their text as if it were manuscript text; they are regenerated per
     run and the judges are told to ignore them.
+
+@@DISCOVERY_PARITY@@
 
 === RE-VALIDATE AFTER PORTING (mandatory) ===
 
@@ -8901,7 +9064,9 @@ integrated/CHANGELOG.md, because downstream judges and the human gate receive on
      NOTE: this sandbox intentionally has no review/ directory, so the revision skill's V3 pointer to
      "./review/round2/new_sweeps.md" is vacuous here. Rescan with the standard frozen set
      (M1-M17 + J1-J4)@@M18_INTEGRATE_CLAUSE@@; if some other sweep file is genuinely absent, record
-     that instead of inventing results.
+     that instead of inventing results. When `frozen_discovery/` is present, the rescan ALSO
+     re-locates every X-* finding in integrated/ and records, per id, whether the defect is
+     present, resolved or not applicable -- the reconciliation your ledger must carry.
   3. Confirm explicitly that nothing in integrated/ is worse than non_revised/ (no deleted claims,
      softened limitations, or broken cross-references), and that EVERY donor directory was opened
      and read (list them in the ledger).
@@ -9366,12 +9531,15 @@ absolute ratings re-compress into noise and the comparison this design exists to
    and a deterministic check reported from one side only has not been run.
 
    @@EVIDENCE_PACK_RULE@@
-   Do NOT run the discovery phase D0-D5 and do NOT propose new sweeps: every version in the field
-   must receive identical minimum scrutiny. Follow the skill's core discipline
+   No discovery list is handed to you: run your OWN bounded discovery pass over target/ AND every
+   field/<label>/ with the same depth (see YOUR OWN DISCOVERY PASS below) -- it is the only
+   instrument for the defect classes the frozen checklist does not own, and it must add identical
+   minimum scrutiny to every side. Do NOT propose new sweeps. Follow the skill's core discipline
    (ENUMERATE -> ARTIFACT -> AUDIT for every mechanical check, one finding per instance, no silent
    skips, never invent content/citations/numbers/accession IDs). Your sweep artifacts go under
    judge_review/ -- the target's own package may contain its own reports; those claims are NOT
    authoritative, your independent examination is.
+@@JUDGE_DISCOVERY@@
 2. Read EVERY opponent in field/ IN FULL, then compare the target to each opponent ONE AT A TIME and
    give exactly one integer score per opponent.
 3. Write scores.json (schema below), verify it parses as JSON, and then write the completion marker.
@@ -9702,13 +9870,20 @@ item has a valid tier, a severity and non-empty evidence of <=25 words; every re
 specific to THAT comparison, and written in the TARGET's frame (say what the TARGET does better or
 worse -- never only what the opponent does, which is unreadable in the sheet and in
 reports/raw_scores.csv); notes <= 80 words.
-CONTRACT v4 -- two additions, both ENFORCED:
+CONTRACT v5 -- three additions, all ENFORCED:
   * `checks` on every comparison: one disposition for EVERY frozen check id (M1-M17, M18, M19, M20,
-    M21, M22, M23, M24, J1-J4). Each value starts with `clean` (examined, nothing found -- add the
-    one-line basis),
+    M21, M22, M23, M24, J1-J4). Each value starts with
+    `clean` (examined, nothing found -- add the one-line basis),
     `findings` (examined; the items are in `resolved`/`introduced`) or `unable` (examined, could
     not be judged -- say why). A comparison with a missing check id fails its run: a judge that
     never examined an opponent must say so rather than let code infer it.
+  * YOUR OWN DISCOVERY PASS is part of the contract: one disposed file per side under
+    `judge_review/discovery/` (target.md + one per opponent label), produced by the bounded
+    procedure in the task above with the same candidates and depth for every side. A missing or
+    empty pass fails its run; an X-* difference the pass proves is filed as a normal
+    `resolved`/`introduced` row under the tier the shared defect-class rule gives the finding's
+    own category, with the finding's id in the row's `check` cell -- so the classes no fixed
+    sweep owns are re-derived and scored in the same six-class vocabulary as everything else.
   * the integer is DERIVED from the rows, LEXICOGRAPHICALLY: the six tiers are compared in their
     priority order and the FIRST tier whose net is not zero decides the comparison (rows weigh
     minor 1 / major 2 / critical 3 / fatal 4; resolved add, introduced subtract; the deciding
@@ -10271,7 +10446,8 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
                      self_id: str, other_ids: list,
                      caption_limit: int = DEFAULT_CAPTION_LIMIT,
                      zotero: str = DEFAULT_ZOTERO_MODE,
-                     prior_failure: str = "", venue=None, venue_norm: str = "") -> str:
+                     prior_failure: str = "", venue=None, venue_norm: str = "",
+                     discovery_ids: list = None, discovery_dropped: list = None) -> str:
     """Integration prompt: self/ reworked with ALL the other pool members.
 
     One run per pool member (there are no pairwise arms): the base stays the
@@ -10297,6 +10473,8 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
                      zotero_cli_block("edit", zotero, ZOTERO_LEDGER_INTEGRATED))
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof))
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE))
+    text = text.replace("@@DISCOVERY_PARITY@@",
+                        discovery_parity_integrate_block(discovery_ids, discovery_dropped))
     text = render_venue_tokens(text, prof)
     text = apply_m19(text, prof)
     text = apply_m20(text, prof)
@@ -10391,6 +10569,7 @@ def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index
             .replace("@@DOCX_CLI_RULE@@", docx_cli_block())
             .replace("@@ZOTERO_CLI_RULE@@", zotero_cli_block("judge", zotero))
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof)))
+    text = text.replace("@@JUDGE_DISCOVERY@@", judge_discovery_block())
     if field_first:
         # C26: a designed counterbalance, not a provenance signal. Half of the
         # panel reads every opponent BEFORE sweeping the target, so a first-read
@@ -15658,11 +15837,13 @@ def evidence_pack_block(where: str) -> str:
                  "`review/artifacts/M30_hierarchy_reconciliation.md`")
     elif where == "judge":
         # BLINDING: a judge is handed NOTHING but the blinded packages. It must
-        # derive every measurement itself; the orchestrator verifies the judge's
-        # rows afterwards and never seeds them.
+        # derive every measurement itself (and its own discovery findings -- see
+        # the discovery pass); the orchestrator verifies the judge's rows
+        # afterwards and never seeds them.
         return """BLINDING RULE (read first) -- you are handed the blinded packages and NOTHING else: no
-   findings or reviews from other sessions, no change ledger, no orchestrator measurements, no
-   digests or version tokens, no pre-computed check rows, and no history of any package. (ONE
+   findings or reviews from other sessions, no discovery list, no change ledger,
+   no orchestrator measurements, no digests or version tokens, no pre-computed check rows, and
+   no history of any package. (ONE
    venue-level exception: when the venue ships an official template, `visual_template/` holds
    that template's own render -- identical for every session and every package, derived from
    nothing in the field, so it names no provenance; see the visual-inspection rule.) Your
@@ -19822,6 +20003,11 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
     stage_venue_template(ctx, sb)
     seed_template_visuals(ctx, sb)
     seed_evidence_pack(ctx, sb, sb / "self", "stage")
+    # The round's frozen discovery list (X-*, see DISCOVERY_SEED_DIR): the ONE
+    # review artifact this stage consumes. The revision arms resolved it, so a
+    # donor may carry its fix; the ledger must reconcile every id (ported /
+    # kept-base / no-donor-fix) or the round's revision work can be lost here.
+    disc = seed_discovery_findings(ctx, r, sb)
     note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / "PROMPT.md"
     if not prompt.is_file():
@@ -19831,13 +20017,17 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
                                                   zotero=zotero_mode_of(ctx),
                                                   prior_failure=note,
                                                   venue=venue_profile_of(ctx),
-                                                  venue_norm=venue_norm_for(ctx)))
+                                                  venue_norm=venue_norm_for(ctx),
+                                                  discovery_ids=disc["ids"],
+                                                  discovery_dropped=disc["dropped"]))
     rec = ctx.register(rid, "integrate", r, f"runs/{rid}", self_id=self_id,
                        other_ids=other_ids, pool_ids=pool, produces=vid,
-                       field_ids=other_ids)
+                       field_ids=other_ids, discovery_ids=list(disc["ids"]))
     rec["inputs_manifest"] = {"self": hash_manifest(sb / "self"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True),
                               "others": hash_manifest(sb / "others")}
+    if disc["dir"] is not None:
+        rec["inputs_manifest"][DISCOVERY_SEED_DIR] = hash_manifest(sb / DISCOVERY_SEED_DIR)
     return rec
 
 
@@ -19971,6 +20161,15 @@ def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
             # M20 table rows with the public scanner: `scan <dir> --policy
             # format_policy.json`.
             seed_format_policy_file(ctx, sb)
+            # NO discovery list is seeded into a judge sandbox: the judge must
+            # be COMPLETELY blind to where any package came from (no other
+            # session's findings, no round, no producing agent), so the
+            # discovery classes are RE-DERIVED by the judge itself -- one
+            # bounded pass per side, identical for the target and every
+            # opponent (see `judge_discovery_block` and `judge_discovery_-
+            # problems`). The integration stage still receives the review's
+            # frozen list, because it is not a blind stage (see
+            # DISCOVERY_SEED_DIR).
             prompt = sb / "PROMPT.md"
             if not prompt.is_file():
                 _copy_session_tools(sb, stamp=view_stamp)
@@ -20891,6 +21090,184 @@ def round_consumed_findings(ctx: Ctx, r) -> list:
     if not (sb / FINDINGS_REL).is_file():
         return []
     return findings_from_sandbox(sb, audit_record_of(ctx, r))
+
+
+# ---------------------------------------------------------------------
+# The discovery round's X-* list, seeded into the INTEGRATION stage (the one
+# stage that needs the round's own list and is not blind). The judges never
+# receive it: they re-derive their own pass (`judge_discovery_block`).
+# See DISCOVERY_SEED_DIR above and AGENT.md.
+# ---------------------------------------------------------------------
+
+def discovery_findings_of(dirp: Path) -> list:
+    """The X-* finding rows of a `review/round2/`-shaped directory or its seed copy."""
+    data = read_json(dirp / "findings_extra.json", revive=False, lenient=True)
+    rows = data.get("findings") if isinstance(data, dict) else None
+    out, seen = [], set()
+    for f in rows or ():
+        if not isinstance(f, dict):
+            continue
+        fid = str(f.get("id") or "").strip()
+        if fid and DISCOVERY_X_ID_RE.match(fid) and fid not in seen:
+            seen.add(fid)
+            out.append(f)
+    return out
+
+
+def discovery_dropped_ids(audit, ids) -> list:
+    """[(id, one-line reason)] for the discovery ids the round's auditor DROPPED.
+
+    The auditor's `drop` is the disposal the revisers honoured, so a dropped X
+    finding is NOT in force: the integration stage must not port or reconcile
+    anything for it (the prompt tells it to record `dropped -- not in force`
+    when the ledger needs a row).
+    """
+    if not isinstance(audit, dict):
+        return []
+    reasons = {}
+    for row in (audit.get("dispositions") or []):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("verdict") or "").strip().lower() != "drop":
+            continue
+        fid = str(row.get("id") or "").strip()
+        if fid:
+            reasons[fid] = " ".join(str(row.get("reason") or "").split())[:200]
+    return [(str(i), reasons[str(i)]) for i in ids if str(i) in reasons]
+
+
+def round_discovery_dir(ctx: Ctx, r: int):
+    """The `review/round2/` directory that owns round r's discovery list.
+
+    Prefers the review session the discovery round actually lives in -- part B
+    under a split review (the merge copies the discovery there), the single
+    review run otherwise -- and falls back to the archived copy under
+    `reports/round<r>_review/`, so a decided or pruned root still seeds the same
+    list. None when the round carries no discovery deliverables (a
+    formatting-writing scope round, a concern-scoped journal round, or a
+    first-generation root).
+    """
+    try:
+        r = int(r)
+    except (TypeError, ValueError):
+        return None
+    cands = []
+    try:
+        split = review_split_of(ctx) != "off"
+    except Exception:                                             # noqa: BLE001
+        split = False
+    first, second = ((rid_review_b(r), rid_review(r)) if split
+                     else (rid_review(r), rid_review_b(r)))
+    for rid_ in (first, second):
+        rec = ctx.run(rid_)
+        # Only a FINISHED review owns a discovery round: a pending/failed
+        # sandbox can hold a partial round2/ from an interrupted attempt, and
+        # seeding half a list would be worse than seeding none.
+        if rec is not None and str(rec.get("status") or "") == "done":
+            cands.append(ctx.sandbox_of(rec) / REVIEW_DIR / "round2")
+    cands.append(ctx.reports_dir / f"round{r}_review")
+    for c in cands:
+        if (c / "findings_extra.json").is_file():
+            return c
+    return None
+
+
+def round_discovery_seed(ctx: Ctx, r: int) -> dict:
+    """Round r's discovery list as the INTEGRATION stage receives it.
+
+    {"source", "findings", "ids", "dropped"}: `source` is the review directory
+    the list came from (None when the round has none), `findings` the X-* rows in
+    file order, `ids` their ids, `dropped` the [(id, reason)] rows the round's
+    auditor dropped (never scored; see `discovery_dropped_ids`).
+    """
+    src = round_discovery_dir(ctx, r)
+    findings = discovery_findings_of(src) if src is not None else []
+    ids = [str(f.get("id") or "").strip() for f in findings]
+    return {"source": src, "findings": findings, "ids": ids,
+            "dropped": discovery_dropped_ids(audit_record_of(ctx, r), ids)}
+
+
+def _copy_bytes_if_different(src: Path, dst: Path) -> bool:
+    """Copy one small input file byte-for-byte when it differs (idempotent)."""
+    try:
+        data = src.read_bytes()
+    except OSError:
+        return False
+    if dst.is_file():
+        try:
+            if dst.read_bytes() == data:
+                return False
+        except OSError:
+            pass
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    def do(p: Path) -> None:
+        with open(p, "wb") as f:
+            f.write(data)
+
+    # A UNIQUE temporary sibling + os.replace, exactly like every other writer
+    # here: a fixed ".tmp" could be renamed into place half-written by a second
+    # materializer running at the same time.
+    _atomic_write_bytes(tmp_path_for(dst), dst, do)
+    return True
+
+
+def seed_discovery_findings(ctx: Ctx, r: int, sb: Path) -> dict:
+    """Materialize round r's frozen discovery list under `sb/frozen_discovery/`.
+
+    The list is copied VERBATIM from the review's own `round2/` deliverables
+    (`findings_extra.json` + `findings_extra.md`; see DISCOVERY_SEED_DIR), so the
+    integration stage reads exactly the list the revision arms merged. A round
+    whose discovery round found NO X finding seeds nothing either: an empty list
+    carries no id to reconcile, and the sandbox surface stays as small as it can
+    be (any stale seed is removed). Returns `round_discovery_seed()` plus the
+    seed directory in `dir`.
+    """
+    seed = round_discovery_seed(ctx, r)
+    dst = sb / DISCOVERY_SEED_DIR
+    if seed["source"] is None or not seed["ids"]:
+        if dst.exists():
+            rmtree_force(dst, ignore_errors=True)
+        seed["dir"] = None
+        return seed
+    for name in DISCOVERY_SEED_FILES:
+        src = seed["source"] / name
+        if src.is_file():
+            _copy_bytes_if_different(src, dst / name)
+    seed["dir"] = dst if dst.is_dir() else None
+    return seed
+
+
+def discovery_ledger_missing(ledger_text: str, ids) -> list:
+    """The discovery ids an integration ledger never names (whole-token match)."""
+    return [str(i) for i in (ids or ()) if not _finding_id_mentioned(str(i), ledger_text or "")]
+
+
+def discovery_ledger_reconciliation_problems(ledger: Path, ids) -> list:
+    """Errors for an integration DIFF_LEDGER.md that does not reconcile every X id.
+
+    Contract: the round's frozen discovery list is reconciled BY ID in the
+    integration ledger (ported / kept-base / no-donor-fix), so a resolution one
+    of the revise arms made cannot be silently lost in the integrated package.
+    """
+    ids = [str(i) for i in (ids or ()) if str(i).strip()]
+    if not ids:
+        return []
+    text = ""
+    try:
+        if ledger.is_file():
+            text = ledger.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    missing = discovery_ledger_missing(text, ids)
+    if not missing:
+        return []
+    return [f"{INTEGRATION_LEDGER_REL} never names {len(missing)} discovery finding id(s) "
+            f"({', '.join(missing[:6])}" + (" ..." if len(missing) > 6 else ")")
+            + ": the round's frozen X-* list (frozen_discovery/findings_extra.json) must be "
+              "reconciled row by row -- ported, kept-base, or one explicit no-donor-fix row per "
+              "id -- so a revision cannot be lost between the revise arm and the integrated "
+              "package"]
 
 
 def critical_findings_input(ctx: Ctx, rec: dict):
@@ -24624,6 +25001,7 @@ REPAIR_PROFILES = {
         "errors": (REPAIR_MARKER_PATTERNS + REPAIR_STRUCTURED_PATTERNS
                    + (REPAIR_VISUAL_PATTERN,) + REPAIR_LANGUAGE_PATTERNS
                    + (r"^integrated/DIFF_LEDGER\.md is missing: ",
+                      r"^integrated/DIFF_LEDGER\.md never names \d+ discovery finding id\(s\) ",
                       r"^integrate: \d+ ledger row\(s\) carry no `artifact` ")),
         "scope": "the bookkeeping files inside integrated/ (DIFF_LEDGER.md, "
                  "revision_report.json, REVISION_REPORT.md, CHANGELOG.md, MANUAL_STEPS.md, "
@@ -26660,6 +27038,13 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
                          f"donor of the pool must appear in the ledger (a donor with nothing to "
                          f"port gets an explicit no-difference row) so the whole pool is provably "
                          f"accounted for")
+    # Contract: the round's frozen discovery list is reconciled BY ID in the
+    # ledger -- a resolution the revise arm made must not vanish in the merge.
+    # Hard under the default strict policy (the ledger is machine-parsable
+    # bookkeeping and the rows are mechanical), a warning otherwise.
+    if rec.get("discovery_ids"):
+        msgs = discovery_ledger_reconciliation_problems(ledger, rec.get("discovery_ids"))
+        (errs if strict_dispositions(ctx) else warns).extend(msgs)
     summ = rec.get("summary") or {}
     for key in ("critical_remaining", "writing_remaining", "manual_items"):
         if not is_int(summ.get(key)):
@@ -27399,6 +27784,11 @@ def judge_coverage_problems(comp: dict, where: str, strict: bool) -> tuple:
     every frozen check id. This is the code-side answer to "the judge sweeps
     only its target": a sheet that never looked at an opponent has to say so, and
     a missing id is a failed run, not a style slip.
+
+    The judge's own discovery findings (contract v5) are NOT check ids: they
+    live in `judge_review/discovery/` (one disposed file per side) and in the
+    ledger rows that cite them, never in this map (see
+    `judge_discovery_problems`).
     """
     out_e, out_w = [], []
     emit = out_e.append if strict else out_w.append
@@ -27444,7 +27834,7 @@ def judge_coverage_problems(comp: dict, where: str, strict: bool) -> tuple:
 
 
 def judge_basis_problems(comp: dict, where: str, strict: bool) -> tuple:
-    """(errors, warnings) for one comparison's graded basis (judge contract v4).
+    """(errors, warnings) for one comparison's graded basis (judge contract v5).
 
     The integer score is a claim about a defect class, and the ledger is what
     makes the claim checkable. The orchestrator enforces the judge prompt's own
@@ -27521,7 +27911,7 @@ def judge_basis_problems(comp: dict, where: str, strict: bool) -> tuple:
                      f"formatting-tier MINOR row -- length may enter a comparison by at most +-1 "
                      f"and is never a scoring tier of its own; got tier {norm[0]!r}, severity "
                      f"{norm[1]!r}")
-            if cid and cid not in JUDGE_COVERAGE_CHECKS:
+            if cid and cid not in JUDGE_COVERAGE_CHECKS and not DISCOVERY_X_ID_RE.match(cid):
                 # A ledger row's `check` cell is DESCRIPTIVE: nothing is looked up
                 # by it (the arithmetic reads tier/severity/evidence only), and
                 # the row has to be re-checkable, not perfectly labelled. So an id
@@ -27530,12 +27920,14 @@ def judge_basis_problems(comp: dict, where: str, strict: bool) -> tuple:
                 # contract is the coverage map above ("one disposition per frozen
                 # check id"), where a missing id still fails the run, and the
                 # FMT-*/Q1-Q12 spellings the prompt itself uses are normalized
-                # before this point.
+                # before this point. An X-* id needs no lookup: it is the judge's
+                # OWN discovery id (contract v5), defined by the file it cites in
+                # `judge_review/discovery/`, and the row counts like any other.
                 out_w.append(f"{prefix}{where}.{side}[{k}].check {cid!r} is not a frozen check id; "
                              f"the row still counts for the arithmetic and the id is kept as "
                              f"written -- cite M1-M24/J1-J4 (the writing rubric's Q1-Q12 items "
                              f"belong to {WRITING_RUBRIC_CHECK}, and an FMT-* sweep rule belongs "
-                             f"to M20)")
+                             f"to M20), or an X-* id from `judge_review/discovery/`")
             items.append((side, norm[0], norm[1], norm[2], cid,
                           bool(cid == "J4" and norm[2].strip().lower().startswith("possible ai"))))
     if bad:
@@ -27683,6 +28075,94 @@ def validate_judge_sheet(sj: dict, rec: dict):
     return errs, warns
 
 
+JUDGE_DISCOVERY_DIR = "judge_review/discovery"
+
+
+def judge_discovery_problems(sb: Path, rec: dict) -> tuple:
+    """(errors, warnings) for the judge's OWN discovery pass (judge contract v5).
+
+    The judge is COMPLETELY blind to provenance and is handed NO discovery
+    list, so the classes the frozen checklist does not own are re-derived by
+    the judge itself: one bounded pass over every side -- `target.md` plus one
+    `<label>.md` per opponent label under `judge_review/discovery/` -- with the
+    same candidates and depth for each side, and every candidate disposed
+    (`clean -- checked: <locations>`, or a finding row with a location, a
+    category, a severity and a verbatim evidence quote). Those files are the
+    only instrument for those classes; a pass that never ran is
+    indistinguishable from one that found nothing, so a missing or empty file
+    FAILS the run (structural softness is reported as a warning instead).
+    """
+    labels = [str(l) for l in (rec.get("label_map") or {})]
+    sides = ["target"] + labels
+    dd = sb / JUDGE_DISCOVERY_DIR
+    out_e, out_w = [], []
+    missing = [s for s in sides if not (dd / f"{s}.md").is_file()]
+    if len(missing) == len(sides):
+        out_e.append(
+            f"{JUDGE_DISCOVERY_DIR}/ is missing: contract v{JUDGE_CONTRACT_VERSION} requires "
+            f"the judge's OWN discovery pass over every side (one disposed file per side: "
+            f"target.md plus one <label>.md per opponent label). No discovery list is handed to "
+            f"a judge, so this pass is the only instrument for the classes the frozen sweeps do "
+            f"not own, and an unrun pass is indistinguishable from one that found nothing")
+        return out_e, out_w
+    if missing:
+        out_e.append(
+            f"{JUDGE_DISCOVERY_DIR}/ has no file for {len(missing)} side(s): "
+            f"{', '.join(missing[:6])}" + (" ..." if len(missing) > 6 else "")
+            + " -- the SAME candidates and depth are required for the target AND every "
+              "opponent, so a side without a file was not passed with equal scrutiny")
+    defined = set()
+    for side in sides:
+        p = dd / f"{side}.md"
+        if not p.is_file():
+            continue
+        rows = _discovery_rows(p)
+        if not rows:
+            out_e.append(
+                f"{JUDGE_DISCOVERY_DIR}/{side}.md carries no table rows: the pass enumerates the "
+                f"shared seed candidates (plus at least two of the judge's own) and disposes "
+                f"every one (`clean -- checked: <locations>` or a finding row)")
+            continue
+        if len(rows) < 5:
+            out_w.append(
+                f"{JUDGE_DISCOVERY_DIR}/{side}.md carries {len(rows)} row(s): the pass's seed "
+                f"list alone is larger than that -- a handful of rows looks like a placeholder")
+        ids_in_file = []
+        for r in rows:
+            text = _row_text(r)
+            if not re.search(r"\b(clean|finding|unable|limitation)\b", text, re.I):
+                out_w.append(f"{JUDGE_DISCOVERY_DIR}/{side}.md has a row with no disposition "
+                             f"cell (`clean -- checked: <locations>` or a finding row): "
+                             f"{text[:90]!r}")
+            for fid in re.findall(r"(?<![A-Za-z0-9])X-\d+(?![A-Za-z0-9])", text):
+                if fid in ids_in_file:
+                    out_w.append(f"{JUDGE_DISCOVERY_DIR}/{side}.md lists finding id {fid} more "
+                                 f"than once (one row per candidate, ids unique within the file)")
+                ids_in_file.append(fid)
+                defined.add(fid)
+    # Every X-* id a ledger row cites must be a finding the pass recorded.
+    cited = set()
+    sj = scores_json_of(sb, str(rec.get("kind") or "judge"))
+    if isinstance(sj, dict):
+        for comp in (sj.get("comparisons") or []):
+            if not isinstance(comp, dict):
+                continue
+            for side in ("resolved", "introduced"):
+                for item in (comp.get(side) or []):
+                    if not isinstance(item, dict):
+                        continue
+                    cid = _frozen_check_id(item.get("check"))
+                    if DISCOVERY_X_ID_RE.match(cid):
+                        cited.add(cid)
+    unknown = sorted(cited - defined)
+    if unknown:
+        out_w.append(
+            f"{len(unknown)} ledger row(s) cite an X-* id the discovery files never define "
+            f"({', '.join(unknown[:6])}): every X row must name a finding the pass recorded -- "
+            f"the file gives the evidence the row cites")
+    return out_e, out_w
+
+
 def postcheck_judge(ctx: Ctx, rec: dict):
     sb = ctx.sandbox_of(rec)
     errs, warns = [], []
@@ -27763,6 +28243,11 @@ def postcheck_judge(ctx: Ctx, rec: dict):
     elif not any(p.is_file() for p in jr.rglob("*")):
         errs.append("judge_review/ exists but is empty: at least the corpus inventory and the "
                     "sweep artifacts are required there")
+    # Contract v5: the judge's OWN discovery pass (no list is handed to a judge,
+    # so the classes no frozen check owns are re-derived by every side).
+    derrs, dwarns = judge_discovery_problems(sb, rec)
+    errs.extend(derrs)
+    warns.extend(dwarns)
     if word_docs_present([sb / "target", sb / "field", sb / "original"]):
         check_visual_artifact(jr / "artifacts" / "VIS_visual.md",
                               f"the visual-inspection record {VISUAL_ARTIFACT_JUDGE}",
@@ -29497,6 +29982,14 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
                 warns.append(f"{INTEGRATION_LEDGER_REL} could not be parsed as a table (the "
                              f"per-difference artifacts, the size classes and the finding-effect "
                              f"column cannot be checked)")
+            # Contract: the round's frozen discovery list is reconciled by id --
+            # a resolution cannot be lost between the revise arm and the
+            # integrated package.
+            seed_ids = ([str(f.get("id")) for f in
+                         discovery_findings_of(sb / DISCOVERY_SEED_DIR)]
+                        if (sb / DISCOVERY_SEED_DIR).is_dir() else [])
+            errs.extend(discovery_ledger_reconciliation_problems(
+                sb / INTEGRATION_LEDGER_REL, seed_ids))
         if kind == "rewrite":
             level = _prompt_rewrite_level(sb)
             if level and (sb / REWRITE_REPORT_REL).is_file():
@@ -29559,6 +30052,12 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
             verrs, vwarns = validate_judge_sheet(sj, jrec)
             errs.extend(verrs)
             warns.extend(vwarns)
+            # Contract v5: the judge's OWN discovery pass (one disposed file per
+            # side), reproduced from THIS sandbox so the session's pre-flight
+            # reports exactly what the postcheck would reject.
+            derrs, dwarns = judge_discovery_problems(sb, jrec)
+            errs.extend(derrs)
+            warns.extend(dwarns)
         if word_docs_present([sb / "target", sb / "field", sb / "original"]):
             check_visual_artifact(jr / "artifacts" / "VIS_visual.md",
                                   f"the visual-inspection record {VISUAL_ARTIFACT_JUDGE}",

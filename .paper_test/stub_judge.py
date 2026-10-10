@@ -67,6 +67,25 @@ def stub_checks(score: int) -> dict:
     return out
 
 
+def write_judge_discovery(sb: Path, labels) -> None:
+    """The judge's OWN discovery pass (contract v5): one disposed file per side."""
+    dd = sb / "judge_review" / "discovery"
+    dd.mkdir(parents=True, exist_ok=True)
+    classes = [
+        ("value consistency", "compare every reported value with the shipped data"),
+        ("convention drift", "check spelling/hyphenation/term families across documents"),
+        ("expected-but-absent", "check tests, n, error-bar definitions and scales"),
+        ("leftover tokens", "check for meta-commentary and disagreeing duplicates"),
+        ("sibling symmetry", "compare panels, labels and sections of one family"),
+    ]
+    header = ("| class | probe | checked | disposition |\n|---|---|---|---|\n")
+    for side in ["target", *labels]:
+        rows = "\n".join(f"| {c} | {p} | {side}/ (stub) | "
+                         f"clean - checked: {side}/ (stub) |" for c, p in classes)
+        (dd / f"{side}.md").write_text(
+            f"# discovery pass (stub) - {side}\n\n{header}{rows}\n", encoding="utf-8")
+
+
 def main() -> int:
     sb = Path.cwd()
     prompt = (sb / "PROMPT.md").read_text(encoding="utf-8")
@@ -92,6 +111,7 @@ def main() -> int:
         "notes": "deterministic stub judge"}), encoding="utf-8")
     jr = sb / "judge_review"
     (jr / "artifacts").mkdir(parents=True, exist_ok=True)
+    write_judge_discovery(sb, labels)
     (jr / "inventory.md").write_text("# inventory (stub judge)\n", encoding="utf-8")
     (jr / "artifacts" / "M1_acronyms.md").write_text("| row |\n|---|\n", encoding="utf-8")
     (jr / "artifacts" / "VIS_visual.md").write_text(

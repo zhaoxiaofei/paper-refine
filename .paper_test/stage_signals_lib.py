@@ -65,6 +65,16 @@ def write(p: Path, data):
     p.write_text(data if isinstance(data, str) else json.dumps(data), encoding="utf-8")
 
 
+def write_judge_discovery(sb: Path, labels=()) -> None:
+    """The judge's OWN discovery pass (contract v5): a disposed file per side."""
+    header = "| class | probe | checked | disposition |\n|---|---|---|---|\n"
+    for side in ["target", *labels]:
+        rows = "\n".join(
+            f"| class {i} | probe the class | {side}/ | clean - checked: {side}/ |"
+            for i in range(5))
+        write(sb / "judge_review" / "discovery" / f"{side}.md", header + rows + "\n")
+
+
 def scratch(prefix: str) -> Path:
     tmp = Path(tempfile.mkdtemp(prefix=prefix))
     TMPDIRS.append(tmp)
@@ -499,12 +509,14 @@ def test_selfcheck():
         write(jsb / "scores.json", {"run_id": "judge_tok9_j1", "target_id": "tok9",
                                     "comparisons": [{"opponent_label": "v1", "score": 0}]})
         write(jsb / "judge_review" / "inventory.md", "# inventory\n")
+        write_judge_discovery(jsb)
         write(jsb / nb.MARKER_FILE, {"stage": "judge", "run_id": "judge_tok9_j1",
                                      "status": "complete"})
         ok_j, errs_j, _w = nb.sandbox_selfcheck(jsb, "judge", "judge_tok9_j1", 0)
         check("a judge sandbox is judged as a JUDGE (no package-directory complaint)",
               ok_j and not errs_j, str(errs_j)[:200])
-        (jsb / "judge_review" / "inventory.md").unlink()
+        shutil.rmtree(jsb / "judge_review")
+        (jsb / "judge_review").mkdir()
         check("an empty judge_review/ is reported",
               any("judge_review/" in e for e in nb.sandbox_selfcheck(jsb, "judge",
                                                                      "judge_tok9_j1", 0)[1]))
@@ -699,6 +711,7 @@ def test_selfcheck_covers_the_other_stages():
     (jsb / "field" / "v1").mkdir(parents=True)
     (jsb / "field" / "v2").mkdir(parents=True)
     write(jsb / "judge_review" / "inventory.md", "# inventory\n")
+    write_judge_discovery(jsb, ["v1", "v2"])
     write(jsb / "scores.json",
           {"run_id": "judge_tok9_j1", "target_id": "tok9", "judge_index": 1,
            "comparisons": [{"opponent_label": "v1", "score": 2, "basis": "correctness",
@@ -870,6 +883,7 @@ def test_judge_selfcheck_catches_a_bad_sheet():
         jsb = tmp / f"judge_tok9_j1_{len(list(tmp.iterdir()))}"
         (jsb / "field" / "v1").mkdir(parents=True)
         write(jsb / "judge_review" / "inventory.md", "# inventory\n")
+        write_judge_discovery(jsb, ["v1"])
         write(jsb / "scores.json", sheet)
         write(jsb / nb.MARKER_FILE, {"stage": "judge", "run_id": sheet["run_id"],
                                      "status": "complete"})

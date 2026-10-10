@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""The 2026-09-21 redesign, extended 2026-09-30: judge contract v4 (four severity rungs in
-every tier, lexicographic tier order), writing class, incumbent-margin ranking.
+"""The 2026-09-21 redesign, extended 2026-09-30 and 2026-10-10: judge contract v5 (four severity
+rungs in every tier, lexicographic tier order, discovery X-* coverage), writing class,
+incumbent-margin ranking.
 
 Run:  python3 .paper_test/test_redesign_v3.py
 `PAPER_WS` retargets the suite at a baseline copy (red before the redesign).
@@ -50,8 +51,8 @@ def comp(score, resolved=(), introduced=(), checks=True, basis="consistency"):
 
 
 def test_contract_v4():
-    print("== judge contract v4: four rungs in EVERY tier, lexicographic tier order, coverage ==")
-    check("the contract version is 4", np.JUDGE_CONTRACT_VERSION == 4,
+    print("== judge contract: four rungs in EVERY tier, lexicographic tier order, coverage ==")
+    check("the contract version is 5", np.JUDGE_CONTRACT_VERSION == 5,
           str(np.JUDGE_CONTRACT_VERSION))
     check("`writing` is a scored class", "writing" in np.BASIS_TIERS, str(np.BASIS_TIERS))
     # 2026-09-30: EVERY tier is on the same four-rung scale (a distance from correct). The v3
@@ -277,6 +278,13 @@ def zero_judge_main() -> int:
     (jr / "artifacts").mkdir(parents=True, exist_ok=True)
     (jr / "inventory.md").write_text("# inventory (zero judge)\n", encoding="utf-8")
     (jr / "artifacts" / "M1_acronyms.md").write_text("| row |\n|---|\n", encoding="utf-8")
+    # Contract v5: the judge's OWN discovery pass, one disposed file per side.
+    header = "| class | probe | checked | disposition |\n|---|---|---|---|\n"
+    for side in ["target", *labels]:
+        rows = "\n".join(f"| class {i} | probe the class | {side}/ | "
+                         f"clean - checked: {side}/ |" for i in range(5))
+        (jr / "discovery").mkdir(exist_ok=True)
+        (jr / "discovery" / f"{side}.md").write_text(header + rows + "\n", encoding="utf-8")
     (sb / "_pipeline_done.json").write_text(json.dumps(
         {"stage": "judge", "run_id": sb.name, "status": "complete", "error": None}),
         encoding="utf-8")

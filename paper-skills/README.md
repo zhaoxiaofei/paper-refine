@@ -1,6 +1,6 @@
 # paper-review + paper-revise — Codex Skills for Manuscript Submissions (any venue or journal)
 
-**Package version:** 0.34 (M31–M36 package-integrity sweeps, the FMT-R/O/X/L/AV/Z/PDF rule families, PKG-1, and the discovery-round D0–D5 contract; see CHANGELOG.md) — distributed as the directory
+**Package version:** 0.35 (discovery parity: the integrator reconciles the frozen X-* list, and judge contract v5 makes every judge re-derive its own discovery findings — never handed a list; see CHANGELOG.md) — distributed as the directory
 `paper-skills-v03`. The version lives here, not in the skill frontmatter. If more
 than one copy of this package is installed, check this line and retire the
 older copies (`paper-skills-v01/`, `paper-skills-v02/`): Codex registers skills by

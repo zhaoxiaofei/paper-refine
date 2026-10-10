@@ -690,9 +690,13 @@ The review/audit/revise path now carries them explicitly:
   declared scope under a content freeze, a numbering check and one
   `work/RESTRUCTURE_<id>.md` artifact per finding;
 * the judge panel's frozen coverage map (M1–M24 + J1–J4) is deliberately
-  unchanged: identical minimum scrutiny across versions is what keeps it
-  calibrated, and the comparison already scores these differences in the
-  consistency/completeness/correctness tiers.
+  unchanged for the CHECKLIST classes: identical minimum scrutiny across
+  versions is what keeps it calibrated, and the comparison already scores those
+  differences in the consistency/completeness/correctness tiers. The classes
+  the checklist does not own are NOT added to the coverage map either: the
+  judge re-derives them in its own bounded discovery pass (contract v5) and
+  files any difference as a normal ledger row, so an X-class fix is scored
+  without handing the judge another session's findings.
 
 ## M30: the source hierarchy is a detection rule too
 
@@ -786,6 +790,32 @@ discovery round's probe dispositions like the reviewer's other decision rows:
 when the frozen review carries probe rows, `audit/PROBE_AUDIT.md` must dispose
 each probe (`stands` / `promoted to AU-xxx` / `needs-evidence`), and a
 promotion must name a real `AU-*` finding.
+
+**The discovery class reaches its two missing consumers — the integrator by
+list, the judges by their own pass.** The X-* findings were once visible only to
+the revision arms: an integrator could drop a donor's X fix as an "unnamable"
+difference, and the judges never considered the class at all -- so a revised
+package was not ranked ahead of the version it had improved on. The two stages
+need different treatment:
+
+* the INTEGRATOR is not blind: the frozen
+  `review/round2/findings_extra.{json,md}` is copied VERBATIM into a read-only
+  `frozen_discovery/` directory in its sandbox (recorded in the run's input
+  manifest, byte-verified like every other input), with the auditor's `drop`
+  dispositions honored (a dropped X id is not in force and is never scored).
+  `integrated/DIFF_LEDGER.md` must reconcile every X id (ported / kept-base / an
+  explicit no-donor-fix row) -- a revision cannot be lost in the merge.
+* the JUDGES are COMPLETELY blind to where a package came from (no other
+  session's findings, no round, no producing agent), so they are never handed
+  the list. Judge contract v5 requires each judge to RE-DERIVE the class itself:
+  a bounded discovery pass over EVERY side (target and every opponent, same
+  candidates and depth), recorded as one disposed file per side under
+  `judge_review/discovery/` (a missing or empty pass fails the run), and any
+  X-class difference is filed as a normal `resolved`/`introduced` row in the tier
+  the shared defect-class rule gives the finding's own category (an EXISTING
+  tier: correctness / preservation / completeness / consistency / writing /
+  formatting -- no new class is invented, so the issue census and the ranking
+  read it like every other defect).
 
 ## Arm levels, the difference ledger, and the language pass (W-11/W-12)
 
@@ -1692,18 +1722,21 @@ them.
 
 **The judge gets none of it — blinding is absolute.** A judge sandbox contains
 only the blinded views (`target/`, `field/<label>/`, `original/`) and the prompt;
-no review findings, no change ledger, no orchestrator scan, no digest or
-revision token, no pre-computed M18/M19/M20 rows. Even a scan computed from the
-judge's *own* target would be a pre-digested view (and a digest it could
-correlate), so the judge prompt instead carries a BLINDING RULE: derive every
-measurement yourself from the packages in front of you with the same public
-tool (`python paper_docx_format.py scan target/`) and record the rows in
-`judge_review/artifacts/`. Consistency is then checked from the orchestrator's
-side: after a judge run, `postcheck_judge` re-scans that blinded target itself,
-records it in `reports/judge_evidence_<run>.json` and the run record, and warns
-(never fails) when the judge produced no corresponding artifact table. The
-panel's numbers stay auditable without the judge ever being handed an answer
-key.
+no review findings, no discovery list, no change ledger, no orchestrator scan,
+no digest or revision token, no pre-computed M18/M19/M20 rows. Even a scan
+computed from the judge's *own* target would be a pre-digested view (and a digest
+it could correlate), so the judge prompt instead carries a BLINDING RULE: derive
+every measurement yourself from the packages in front of you with the same
+public tool (`python paper_docx_format.py scan target/`) and record the rows in
+`judge_review/artifacts/`. The classes the fixed sweeps do not own are NOT handed
+over either: the judge runs its own bounded discovery pass over every side
+(contract v5, `judge_review/discovery/`), so the panel neither learns which
+package is which nor ignores that class of findings. Consistency is then checked
+from the orchestrator's side: after a judge run, `postcheck_judge` re-scans that
+blinded target itself, records it in `reports/judge_evidence_<run>.json` and the
+run record, warns (never fails) when the judge produced no corresponding
+artifact table, and requires the discovery pass to exist for every side. The
+panel's numbers stay auditable without the judge ever being handed an answer key.
 
 What a judge can see is submission content only, and every other channel is
 closed by construction:
@@ -1822,7 +1855,9 @@ made mechanical where it can be:
   `manual-required`, not compressed.
 
 **The judge's integer is derived from its own ledger, and the TIER ORDER is the
-derivation** (judge contract v4, 2026-09-30). Every class carries the same four
+derivation** (judge contract v4, 2026-09-30; v5, 2026-10-10, adds the judge's OWN
+bounded discovery pass and the scoring of its `X-*` differences, under the same
+six tiers). Every class carries the same four
 severity rungs — Fatal 4 / Critical 3 / Major 2 / Minor 1, a distance from
 correct — and the six tiers are compared **lexicographically** in the fixed
 priority order `correctness > preservation > completeness > consistency >
@@ -1857,7 +1892,7 @@ The artifact *process* is shared as well; the differences are deliberate:
 |---|---|---|
 | `inventory.md` + `artifacts/M<id>_*.md` (ENUMERATE → ARTIFACT → AUDIT) + the M18/M19/M20 tables | review, judge | the judge runs the same frozen sweep set as the review; it must derive its own rows from the blinded packages |
 | `work/CODE_SCANS.json` + `EVIDENCE_PACK.md` (the orchestrator's own M18/M19/M20/placeholder counts and corpus identity, from one set of functions) | review, rewrite, revise, integrate | one measurement of one corpus, so no session re-estimates a number; the scans use the same file-set rules as the pin and the judge view (`work/` scratch, auxiliaries, bookkeeping and derived outputs never counted) |
-| nothing seeded at all; `postcheck_judge` re-scans the blinded target outside the sandbox | judge | a pre-computed row would be an answer key |
+| nothing seeded at all; `postcheck_judge` re-scans the blinded target outside the sandbox, and the judge's OWN discovery pass is written by the agent under `judge_review/discovery/` (one disposed file per side) | judge | a pre-computed row would be an answer key, and another session's findings (or the round's discovery list) would identify how a package was produced; the discovery classes are re-derived by the judge itself, with identical candidates and depth for every side |
 | `CHANGELOG.md` + `MANUAL_STEPS.md` inside the package | rewrite, revise, integrate | the package's own record of what changed and what the author must still do |
 | `REVISION_REPORT.md` + `revision_report.json` (one row per frozen finding id) | revise, integrate | only these sessions are given findings to resolve |
 | `scores.json` (signed comparison items with class + severity) | judge | only the panel scores |
@@ -2315,7 +2350,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 109 suites (a few
+any failure. They are independent, so run them in parallel — 110 suites (a few
 minutes at the default parallelism on a 20-core box; tens of minutes
 sequentially):
 

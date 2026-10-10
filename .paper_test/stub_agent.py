@@ -4,11 +4,76 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+
+def stub_discovery_x_findings() -> list:
+    """One well-shaped X-* finding when PAPER_STUB_DISCOVERY_X is set.
+
+    The default stub round writes an EMPTY discovery list (most suites do not
+    exercise the discovery parity); the parity e2e sets the variable so the
+    whole chain -- audit disposition, revision ledger, integration ledger
+    reconciliation -- runs against a real X id (the judge's OWN discovery pass
+    is independent of this list).
+    """
+    if not os.environ.get("PAPER_STUB_DISCOVERY_X"):
+        return []
+    return [{"id": "X-001", "location": "base/manuscript-o.md:2", "category": 2,
+             "check": "convention applied unevenly", "severity": "Minor",
+             "evidence": "stub: one convention, applied in one place and not another",
+             "explanation": "stub discovery finding for the parity contract",
+             "status": "resolvable"}]
+
+
+def frozen_finding_rows(review: Path) -> list:
+    """Every finding row a compliant session must consume: F-* AND X-*.
+
+    The revision and audit stages read `review/findings.json` PLUS the
+    discovery round's `review/round2/findings_extra.json` (paper-revise merges
+    both namespaces). A stub that reads only findings.json silently drops the
+    X-* list -- exactly the inconsistency the pipeline's contracts check for.
+    """
+    rows, seen = [], set()
+    for rel in ("findings.json", "round2/findings_extra.json"):
+        p = review / rel
+        if not p.is_file():
+            continue
+        try:
+            doc = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        found = doc.get("findings") if isinstance(doc, dict) else doc
+        for row in (found or ()):
+            if not isinstance(row, dict):
+                continue
+            fid = row.get("id")
+            if fid and fid not in seen:
+                seen.add(fid)
+                rows.append(row)
+    return rows
+
+
+def discovery_ids(sb: Path) -> list:
+    """The X-* ids of the round's frozen discovery seed (`frozen_discovery/`)."""
+    p = sb / "frozen_discovery" / "findings_extra.json"
+    if not p.is_file():
+        return []
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    found = doc.get("findings") if isinstance(doc, dict) else []
+    out = []
+    for row in (found or ()):
+        fid = str((row or {}).get("id") or "").strip() if isinstance(row, dict) else ""
+        if re.match(r"^X-\d+$", fid) and fid not in out:
+            out.append(fid)
+    return out
 
 
 def np_aux(path: Path) -> bool:
@@ -339,15 +404,20 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
         "# D3 - probe results (stub)\n\n| probe id | disposition |\n|---|---|\n"
         "| P2-001 | executed - no anomalies - checked: base/ (stub) |\n"
         "| P2-002 | executed - no anomalies - checked: base/ (stub) |\n", encoding="utf-8")
-    write_json(r2 / "findings_extra.json", {"findings": [], "coverage": []})
-    (r2 / "findings_extra.md").write_text("# D4 - extra findings (stub)\n", encoding="utf-8")
+    xfindings = stub_discovery_x_findings()
+    write_json(r2 / "findings_extra.json", {"findings": xfindings, "coverage": []})
+    (r2 / "findings_extra.md").write_text(
+        "# D4 - extra findings (stub)\n"
+        + "".join(f"\n- {f['id']}: {f['explanation']}\n" for f in xfindings),
+        encoding="utf-8")
     (r2 / "new_sweeps.md").write_text(
         "# D5 - new-sweep proposals (stub)\n\nNo new sweep proposals this round: the stub "
         "corpus is one synthetic file, so no class recurred that a probe caught by accident.\n",
         encoding="utf-8")
     (r2 / "round2_summary.md").write_text(
         "# Round-2 summary (stub)\n\nGap rows: 25 (23 covered, 2 uncovered). Probes: 2 executed "
-        "(2 clean, 0 findings, 0 unable). X-findings: none. Proposed sweeps: none. "
+        f"(2 clean, 0 findings, 0 unable). X-findings: {len(xfindings)}"
+        + (f" ({xfindings[0]['id']})" if xfindings else " (none)") + ". Proposed sweeps: none. "
         "Manual verification: none.\n\nHonest limits: this round could not exercise a real "
         "corpus (stub).\n", encoding="utf-8")
     fill_seeded_tables(out / "artifacts")
@@ -491,14 +561,7 @@ def do_audit(sb: Path, name: str, round_no: int) -> int:
     `test_residual_audit_2026_0921.py`, not by the stub round.
     """
     rev = sb / "review"
-    frozen = []
-    fj = rev / "findings.json"
-    if fj.is_file():
-        try:
-            frozen = ((json.loads(fj.read_text(encoding="utf-8")) or {})
-                      .get("findings") or [])
-        except (OSError, ValueError):
-            frozen = []
+    frozen = frozen_finding_rows(rev)
     out = sb / "audit"
     out.mkdir(parents=True, exist_ok=True)
     disps = [{"id": str(f.get("id")), "verdict": "confirm",
@@ -553,10 +616,11 @@ def do_revision(sb: Path, name: str, round_no: int, stage: str) -> int:
     (out / "CHANGELOG.md").write_text("# changelog (stub)\n", encoding="utf-8")
     (out / "REVISION_REPORT.md").write_text("# report (stub)\n", encoding="utf-8")
     language_pass_artifact(out, "revised documents")
-    # The ledger contract: one row per finding id from the frozen review (the
-    # revise stage consumes review/findings.json; the cross stage works from the
-    # self/ package, which carries the same ledger back in). A run that lists no
-    # row at all cannot prove "no finding was silently dropped" and is retried.
+    # The ledger contract: one row per finding id from the frozen review -- the
+    # revise stage consumes review/findings.json AND review/round2/
+    # findings_extra.json (the discovery round's X-* ids); the cross stage works
+    # from the self/ package, which carries the same ledger back in. A run that
+    # lists no row at all cannot prove "no finding was silently dropped".
     changed = [p.relative_to(out).as_posix() for p in sorted(out.rglob("*"))
                if p.is_file() and not np_aux(p)
                and p.name.lower() not in ("changelog.md", "manual_steps.md",
@@ -564,7 +628,8 @@ def do_revision(sb: Path, name: str, round_no: int, stage: str) -> int:
                                           "visual_check.md")
                and "work" not in p.relative_to(out).parts[:-1]]
     rows = []
-    for rel in ("review/findings.json", "revised/revision_report.json"):
+    for rel in ("review/findings.json", "review/round2/findings_extra.json",
+                "revised/revision_report.json"):
         p = sb / rel
         if not p.is_file():
             continue
@@ -705,6 +770,14 @@ def do_integration(sb: Path, name: str, round_no: int) -> int:
         rows.append(f"| D-{i:03d} | {d} | (e) | {size} | stub: donor wording | "
                     f"stub: self wording | keep-self | stub: no ported difference | "
                     f"none | {art} | none |")
+    # Contract v5: the round's frozen discovery list is reconciled BY ID (the
+    # revise arm resolved it; the integrated package must not lose a fix). One
+    # row per X id, with its `finding effect`.
+    for cid in discovery_ids(sb):
+        rows.append(f"| {cid} | (discovery) | frozen_discovery/findings_extra.json | small | "
+                    f"— | — | keep-self | stub: discovery reconciliation (no donor carries a "
+                    f"differing fix) | none | integrated/work/diffs/D-000.md | "
+                    f"preserves {cid} |")
     (out / "DIFF_LEDGER.md").write_text(
         "# diff ledger (stub integration)\n\n"
         "| id | donor | location | size | donor says | self says | verdict | why | "
@@ -754,11 +827,36 @@ JUDGE_CHECK_IDS = ([f"M{i}" for i in range(1, 18)]
 
 
 def stub_checks(score: int) -> dict:
-    """Contract v3 per-opponent coverage map (every frozen check id disposed)."""
+    """Per-opponent coverage map (every frozen check id disposed)."""
     out = {c: "clean -- stub: deterministic digest comparison" for c in JUDGE_CHECK_IDS}
     if score:
         out["M1"] = "findings -- stub: digest ordering (see resolved/introduced)"
     return out
+
+
+def write_judge_discovery(sb: Path, labels) -> None:
+    """The judge's OWN discovery pass (contract v5): one disposed file per side.
+
+    The stub disposes the shared seed candidates `clean` for the target and
+    every opponent label, so the sandbox mirrors a session that ran the pass
+    with equal scrutiny on every side (the determinism of the stub leaves no
+    discovery finding to score).
+    """
+    dd = sb / "judge_review" / "discovery"
+    dd.mkdir(parents=True, exist_ok=True)
+    classes = [
+        ("value consistency", "compare every reported value with the shipped data"),
+        ("convention drift", "check spelling/hyphenation/term families across documents"),
+        ("expected-but-absent", "check tests, n, error-bar definitions and scales"),
+        ("leftover tokens", "check for meta-commentary and disagreeing duplicates"),
+        ("sibling symmetry", "compare panels, labels and sections of one family"),
+    ]
+    header = ("| class | probe | checked | disposition |\n|---|---|---|---|\n")
+    for side in ["target", *labels]:
+        rows = "\n".join(f"| {c} | {p} | {side}/ (stub) | "
+                         f"clean - checked: {side}/ (stub) |" for c, p in classes)
+        (dd / f"{side}.md").write_text(
+            f"# discovery pass (stub) - {side}\n\n{header}{rows}\n", encoding="utf-8")
 
 
 def do_judge(sb: Path, name: str, round_no: int, prompt: str) -> int:
@@ -781,6 +879,7 @@ def do_judge(sb: Path, name: str, round_no: int, prompt: str) -> int:
                                     "notes": "stub"})
     jr = sb / "judge_review"
     (jr / "artifacts").mkdir(parents=True, exist_ok=True)
+    write_judge_discovery(sb, labels)
     (jr / "inventory.md").write_text("# inventory (stub)\n", encoding="utf-8")
     (jr / "artifacts" / "M1_acronyms.md").write_text("| row |\n|---|\n", encoding="utf-8")
     (jr / "artifacts" / "VIS_visual.md").write_text(

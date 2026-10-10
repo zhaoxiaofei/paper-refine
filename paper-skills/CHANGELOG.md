@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.35 — discovery parity: the integrator gets the list, judges re-derive their own (2026-10-10)
+
+- **The integration stage reconciles the discovery list.** The frozen `X-*`
+  findings (`OUT2/findings_extra.{json,md}`) are copied verbatim into
+  `frozen_discovery/` in the integration sandbox (the integration stage is not
+  blind), with the auditor's `drop` dispositions honored (a dropped id is not in
+  force and is never scored). `integrated/DIFF_LEDGER.md` must name every X id
+  (ported / kept-base / an explicit no-donor-fix row), so a revision cannot be
+  lost between the revise arm and the integrated package; the V3 rescan
+  re-locates the list.
+- **Judge contract v5: the judge runs its OWN discovery pass.** A judge is
+  COMPLETELY blind to the sources of a package (no other session's findings, no
+  round, no producing agent) and is NEVER handed the discovery list. Each judge
+  instead re-derives one bounded pass over every side — the target and every
+  opponent, the same candidates and depth — recorded as one disposed file per
+  side under `judge_review/discovery/` (a missing or empty pass fails the run),
+  and files any X-class difference as a normal `resolved`/`introduced` row in
+  the tier the shared defect-class rule gives the finding's own category.
+
 ## 0.34 — package integrity, Zotero refresh parity, and the discovery-round contract (2026-10-09)
 
 - **M31–M36 in the review contract.** The EVIDENCE-INTEGRITY sweeps M31–M35
