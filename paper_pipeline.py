@@ -4587,9 +4587,9 @@ CAPTION_UNPARSED_EXTS = (".doc", ".pdf", ".ppt", ".pptx")
 # submission directory. They are pipeline bookkeeping, not submission content:
 # they are excluded from the caption scan and from the document-set comparison so
 # that a changelog quoting a caption, or a report that is regenerated under a
-# different name, is never judged as manuscript text. They stay inside the
-# corpus DIGEST (hash/pin/next-round base) so that the pin and the judge's
-# target remain byte-identical.
+# different name, is never judged as manuscript text. They are excluded from the
+# corpus DIGEST (hash/pin/next-round base) -- and from the materialized pin and
+# judge target -- by this same name rule, so the two sides remain byte-identical.
 BOOKKEEPING_FILES = ("changelog.md", "manual_steps.md", "revision_report.md",
                      "revision_report.json", "diff_ledger.md", "rewrite_report.md",
                      "visual_check.md",
@@ -18513,7 +18513,12 @@ def effective_content_fingerprint(ctx: Ctx, r: int, vid: str) -> str:
 
 
 def recorded_version_digest(ctx: Ctx, r: int, vid: str):
-    """The digest recorded when the version's run/pin completed (no I/O)."""
+    """The digest recorded when the version's run/pin completed.
+
+    `original` is the one exception: `working_original_digest` resolves it under
+    the corpus rule (live when the working original is on disk, recorded
+    otherwise). Every other version answers from its run or pin record.
+    """
     if vid == ORIGINAL_ID:
         return working_original_digest(ctx)
     if is_fresh_vid(vid):
@@ -19662,10 +19667,15 @@ def materialize_a1(ctx: Ctx, r: int) -> dict:
         src_id, src_dir = pin["id"], pinned_docs_dir(ctx, pin)
     want = (working_original_digest(ctx) if src_id == ORIGINAL_ID
             else (find_pin(ctx, src_id) or {}).get("digest"))
-    if base.exists() and want and corpus_tree_digest(base) != want:
+    if (base.exists() and want
+            and manifest_digest(manifest_for_sources([(base, "", ())])) != want):
         # An earlier round was re-run and its champion changed: a stale base copy
         # must never silently become this round's base (the digest would say one
-        # thing and the documents another).
+        # thing and the documents another). The comparison uses the SAME corpus
+        # rule as `want` and as the re-computation below -- comparing the
+        # whole-tree digest here rebuilt an intact base on EVERY invocation as
+        # soon as the package carried a bookkeeping-named file (the ledger or
+        # CHANGELOG the corpus rule strips).
         rmtree_force(base)
     if not base.exists():
         copy_into(src_dir, base)
@@ -24383,7 +24393,11 @@ def _caption_and_document_checks(ctx: Ctx, rec: dict, vid: str, base_sources: li
 def postcheck_a1(ctx: Ctx, rec: dict):
     errs, warns = [], []
     src_id = rec.get("source_id")
-    want = (ctx.state.get("original_digest") if src_id == ORIGINAL_ID
+    # The SAME resolver materialize_a1 used: the whole-tree state read here
+    # compared the corpus digest of base/ against a legacy recording rule (and
+    # ignored the template stage's own working original), i.e. the same mixing
+    # this file's other A1 checks no longer do.
+    want = (working_original_digest(ctx) if src_id == ORIGINAL_ID
             else (find_pin(ctx, src_id) or {}).get("digest"))
     got = recompute_corpus_digest(ctx, rec["round"], A1_ID)
     # The DIGEST is still recorded below; only its verification is skipped
@@ -33288,9 +33302,17 @@ def cmd_setup(args) -> None:
             containers=venue_containers(ctx))
         for w in setup_warns:
             print(f"[setup] {w}")
+    # The original's VERSION digest uses the same corpus rule as every other
+    # version digest (`manifest_for_sources`: the tracking auxiliaries and the
+    # bookkeeping-named files are not corpus content). Recording the whole-tree
+    # digest here instead made materialize_a1 die with "A1_1 base/ does not match
+    # its source" for any package carrying a stage by-product -- a published
+    # `REPLACEMENT_LEDGER-<token>.md` in a continue root's source, a CHANGELOG.md.
+    # `source_manifest` above stays the byte-level guard of the pristine copy.
     ctx.state = {"version": STATE_VERSION, "runs": {}, "rounds": {}, "pinned": [], "log": [],
                  "source_manifest": hash_manifest(ctx.pristine),
-                 "original_digest": corpus_tree_digest(ctx.pristine),
+                 "original_digest":
+                     manifest_digest(manifest_for_sources([(ctx.pristine, "", ())])),
                  "original_content_fingerprint":
                      corpus_content_set_fingerprint([(ctx.pristine, "", ())]),
                  "original_format_fix": format_fix_report,
@@ -34165,8 +34187,34 @@ def working_original_dir(ctx: Ctx) -> Path:
 
 
 def working_original_digest(ctx: Ctx):
+    """The working original's VERSION DIGEST, under the corpus rule.
+
+    Every version digest -- and the digest `materialize_a1` re-computes for the
+    round-1 base -- is defined by `manifest_for_sources`, which strips the
+    tracking auxiliaries and the bookkeeping-named files (`REPLACEMENT_LEDGER-
+    <token>.md`, `CHANGELOG.md`, ...). Roots set up before the rules were unified
+    recorded the WHOLE-TREE digest there instead, so a continue root whose source
+    carried a stage's published ledger disagreed with its own byte-identical base
+    copy and died with "A1_1 base/ does not match its source 'orig'".
+
+    A recorded value that equals the tree digest of the working original (and not
+    its corpus digest) is exactly that legacy recording, and resolves to the
+    corpus digest here. Any OTHER disagreement returns the recorded value, so a
+    working original whose documents really changed is still caught by the A1
+    comparison. A missing/pruned working original falls back to the record.
+    """
     st = template_stage_record(ctx)
-    return st.get("digest") or (ctx.state or {}).get("original_digest")
+    recorded = st.get("digest") or (ctx.state or {}).get("original_digest")
+    src = working_original_dir(ctx)
+    if not recorded or not src.is_dir():
+        return recorded
+    man = manifest_for_sources([(src, "", ())])
+    if not man.get("count"):
+        return recorded
+    corpus = manifest_digest(man)
+    if corpus != recorded and corpus_tree_digest(src) == recorded:
+        return corpus
+    return recorded
 
 
 def working_original_fingerprint(ctx: Ctx):

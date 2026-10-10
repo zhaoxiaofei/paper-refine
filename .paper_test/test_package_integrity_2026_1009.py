@@ -33,6 +33,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import zipfile
@@ -331,6 +332,108 @@ def test_package_hygiene():
 
 
 # ---------------------------------------------------------------------------
+# 6b. the round-1 base of a package that carries the pipeline's own by-product
+# ---------------------------------------------------------------------------
+def test_a1_base_with_bookkeeping_byproduct():
+    """`setup` on a source carrying a stage by-product must still materialize
+    round 1 (regression, 2026-10-11).
+
+    The published package of a previous round carries `REPLACEMENT_LEDGER-
+    c27c42e.md` -- the name the pipeline's own filename counter produces -- and a
+    continue root copies it into `non_revised/`. The original's version digest
+    and the A1 base digest must BOTH use the corpus rule (`manifest_for_sources`,
+    which strips it); when `setup` recorded the whole-tree digest instead, the
+    byte-identical base copy died with "A1_1 base/ does not match its source".
+    """
+    tmp = scratch("pi_a1_digest_")
+    src = tmp / "src"
+    src.mkdir()
+    (src / "manuscript.md").write_text(
+        "Abstract\n\n" + _words(100) + "\n\nIntroduction\n\n" + _words(200)
+        + "\n\nFigure 1 | A caption here.\n\nMethods\n\nx\n", encoding="utf-8")
+    (src / "REPLACEMENT_LEDGER-c27c42e.md").write_text(
+        "# re-authoring ledger\n", encoding="utf-8")
+    root = tmp / "root"
+    proc = subprocess.run([sys.executable, str(WS / "paper_pipeline.py"),
+                           "setup", "--source", str(src), "--root", str(root)],
+                          capture_output=True, text=True, timeout=600)
+    check("setup accepts a source carrying the pipeline's published ledger",
+          proc.returncode == 0, (proc.stdout + proc.stderr)[-200:])
+    if proc.returncode != 0:
+        return
+    pristine = root / "non_revised"
+    corpus_digest = pp.manifest_digest(pp.manifest_for_sources([(pristine, "", ())]))
+    tree_digest = pp.corpus_tree_digest(pristine)
+    state = json.loads((root / "state.json").read_text(encoding="utf-8"))
+    check("setup records the original digest under the corpus rule (ledger stripped)",
+          state.get("original_digest") == corpus_digest != tree_digest,
+          f"{str(state.get('original_digest'))[:12]} vs tree {tree_digest[:12]}")
+    ctx = pp.Ctx(root)
+    ctx.load()
+    err, rec = "", None
+    try:
+        rec = pp.materialize_a1(ctx, 1)
+    except Exception as e:                                          # noqa: BLE001
+        err = f"{type(e).__name__}: {e}"
+    check("round 1 materializes for the ledger-carrying package",
+          rec is not None and rec.get("status") == "done", err[:200])
+    if rec is None:
+        return
+    base = root / "runs" / "r1_a1" / "base"
+    check("the base keeps the ledger and hashes under the corpus rule",
+          (base / "REPLACEMENT_LEDGER-c27c42e.md").is_file()
+          and pp.manifest_digest(pp.manifest_for_sources([(base, "", ())])) == corpus_digest
+          and rec.get("corpus_digest") == corpus_digest,
+          str(rec.get("corpus_digest"))[:12])
+    ok, errs, _warns, _ = pp.postcheck_a1(ctx, rec)
+    check("the a1 postcheck verifies the copy (no false 'not byte-identical')",
+          ok and not errs, str(errs)[:200])
+
+
+def test_a1_base_with_legacy_original_digest():
+    """A root recorded before the rules were unified (the whole-tree digest even
+    though the package carries a bookkeeping-named file) still materializes:
+    the working original resolves under the corpus rule."""
+    tmp = scratch("pi_a1_legacy_")
+    root = tmp / "root"
+    pristine = root / "non_revised"
+    pristine.mkdir(parents=True)
+    (pristine / "mainText.md").write_text("# Title\n\nSome text.\n", encoding="utf-8")
+    (pristine / "REPLACEMENT_LEDGER-c27c42e.md").write_text(
+        "# re-authoring ledger\n", encoding="utf-8")
+    tree_digest = pp.corpus_tree_digest(pristine)
+    corpus_digest = pp.manifest_digest(pp.manifest_for_sources([(pristine, "", ())]))
+    check("the fixture separates the two digest rules", tree_digest != corpus_digest)
+    ctx = pp.Ctx(root)
+    ctx.cfg = {"venue": "nature-biotechnology", "rounds": 1}
+    ctx.state = {"version": pp.STATE_VERSION, "runs": {}, "rounds": {}, "pinned": [], "log": [],
+                 "source_manifest": pp.hash_manifest(pristine),
+                 "original_digest": tree_digest,      # the pre-fix recording rule
+                 "original_content_fingerprint":
+                     pp.corpus_content_set_fingerprint([(pristine, "", ())]),
+                 "config": ctx.cfg}
+    check("the working original resolves to the corpus rule, not the legacy recording",
+          pp.working_original_digest(ctx) == corpus_digest,
+          str(pp.working_original_digest(ctx))[:12])
+    err, rec = "", None
+    try:
+        rec = pp.materialize_a1(ctx, 1)
+    except Exception as e:                                          # noqa: BLE001
+        err = f"{type(e).__name__}: {e}"
+    check("a legacy root materializes round 1 instead of dying on the mixed rule",
+          rec is not None and rec.get("status") == "done", err[:200])
+    if rec is None:
+        return
+    base = ctx.runs_dir / "r1_a1" / "base"
+    before = os.stat(base)
+    pp.materialize_a1(ctx, 1)
+    after = os.stat(base)
+    check("an intact base is not rebuilt on every materialization",
+          (before.st_ino, before.st_mtime_ns) == (after.st_ino, after.st_mtime_ns),
+          f"inode {before.st_ino} -> {after.st_ino}")
+
+
+# ---------------------------------------------------------------------------
 # 7. M30's non-numeric half: a "not run" claim a shipped table contradicts
 # ---------------------------------------------------------------------------
 def test_negative_claims():
@@ -391,6 +494,8 @@ def main() -> int:
                 ("availability", test_availability),
                 ("pdf", test_pdf),
                 ("package_hygiene", test_package_hygiene),
+                ("a1_base_bookkeeping", test_a1_base_with_bookkeeping_byproduct),
+                ("a1_base_legacy_digest", test_a1_base_with_legacy_original_digest),
                 ("negative_claims", test_negative_claims),
                 ("wiring", test_wiring)]
     try:
