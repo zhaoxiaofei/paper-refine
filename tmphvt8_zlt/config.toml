@@ -1,0 +1,3 @@
+[mcp_servers.docx]
+command = "node"
+args = ["--filter", "a]b", "server.js"]
