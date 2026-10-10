@@ -71,6 +71,7 @@ documentation.
 | `id` | slug | the id `set-venue` resolves. Letters, digits, `.`, `_`, `+`, `-`. |
 | `label` | string | human name used in the prompt prose (`"Nature Biotechnology"`). Default: the id. |
 | `short` | string | short form used in phrases like "not an NBT rule". Default: the label. |
+| `sources` | object of URL/string | the profile's own provenance map (which guideline page each number came from). Carried through the loader unchanged so a stage that reads the profile through `VenueProfile.data` can name its source, as the skill instructs. Not validated: it is documentation. |
 | `description` | string | what the profile is for; shown by `set-venue --list`. |
 | `default_article_type` | slug | the type selected when the root records none. Default: the first entry. |
 | `article_types` | list | the venue's content types (see below). A profile written in the older single-type shape (`article_type` + top-level `length_limits`/`captions`, no table) is read as a one-entry table and keeps its old behaviour. |

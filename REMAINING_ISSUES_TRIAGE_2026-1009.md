@@ -12,7 +12,7 @@ audit directories:
    human**.
 
 Both audited directories are READ-ONLY and were not modified. Every check below was run against
-them read-only; the repo-side changes are in the working tree only (no commit).
+them read-only; the repo-side changes are committed (`0bfedcc`, merged as `cab4cc3`).
 
 Source audits ingested (read-only): `audit_data/2026-1009-0128-cnb-23to24-1008-0413-6f541c1-remaining-issues`
 (`glm52-agent.txt`, `glm53-agent.txt`, `glm53flash-agent.txt`, `grok-build.txt`, `grok-expert.txt`) and
@@ -169,7 +169,7 @@ artifacts so a review cannot silently skip them.
 
 ---
 
-## 4. What was changed in the repo (working tree; no commit)
+## 4. What was changed in the repo (committed: `0bfedcc`, merged as `cab4cc3`)
 
 `paper_pipeline.py` (VERSION → `3.7.0`):
 

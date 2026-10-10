@@ -697,8 +697,6 @@ def zotero_report_for_docx(path) -> dict:
     # The live-field PARITY rows travel with the inventory (FMT-Z1..Z5): the
     # stage gate compares them version to version, so a Word/Zotero refresh that
     # renumbers the text is visible even though every field is still "present".
-    doc_xml = next((xml for name, xml in xmls if name == "word/document.xml"), "")
-    paras = [text_of(p[2]) for p in paragraphs(doc_xml)]
     try:
         with zipfile.ZipFile(path) as pkg:
             style_parts = {n: pkg.read(n).decode("utf-8", "replace")
@@ -706,7 +704,7 @@ def zotero_report_for_docx(path) -> dict:
                            if n in pkg.namelist()}
     except (OSError, zipfile.BadZipFile, KeyError):
         style_parts = {}
-    parity = zotero_parity_rows(doc_xml, paras, zotero_style_ids(style_parts))
+    parity = zotero_parity_rows_for_parts(xmls, zotero_style_ids(style_parts))
     if len(reports) == 1:
         merged = reports[0][1]
     else:
@@ -779,19 +777,23 @@ def zotero_field_continuity_problems(base: dict, out: dict) -> dict:
     # A version that INTRODUCES a high-severity parity row is an error (the
     # refresh renumbered the citations inconsistently); one that replaces a
     # broken state with a consistent one is a recorded repair, never silent.
-    def _high_parity(report: dict) -> int:
-        return sum(1 for r in (report.get("parity_rows") or [])
-                   if r.get("rule") in ("FMT-Z1", "FMT-Z2", "FMT-Z4"))
+    # Compare the faults, not just their count (the structural comparison above
+    # does the same): a version that repairs one stale field while breaking
+    # another keeps the count identical and used to pass as "carried".
+    def _high_parity_sigs(report: dict) -> Counter:
+        return Counter(f"{r.get('rule')}|{r.get('location')}"
+                       for r in (report.get("parity_rows") or [])
+                       if r.get("rule") in ("FMT-Z1", "FMT-Z2", "FMT-Z4"))
 
-    base_high, out_high = _high_parity(base), _high_parity(out)
-    if out_high > base_high:
-        sample = "; ".join(r.get("evidence", "")[:70]
-                           for r in (out.get("parity_rows") or [])
-                           if r.get("rule") in ("FMT-Z1", "FMT-Z2", "FMT-Z4"))[:240]
-        errors.append(f"{out_high - base_high} NEW stale-citation fault(s) (FMT-Z1/Z2/Z4): "
-                      f"the previous version had {base_high}, this one has {out_high} -- the "
-                      f"citation numbering no longer agrees with the document's own citation "
-                      f"order ({sample})")
+    base_sigs, out_sigs = _high_parity_sigs(base), _high_parity_sigs(out)
+    base_high, out_high = sum(base_sigs.values()), sum(out_sigs.values())
+    new_sigs = out_sigs - base_sigs
+    if new_sigs:
+        sample = "; ".join(sig for sig, _n in sorted(new_sigs.items())[:3])[:240]
+        errors.append(f"{sum(new_sigs.values())} NEW stale-citation fault(s) (FMT-Z1/Z2/Z4) "
+                      f"that the previous version did not carry (it had {base_high}, this one "
+                      f"has {out_high}) -- the citation numbering no longer agrees with the "
+                      f"document's own citation order ({sample})")
     elif base_high and not out_high:
         warnings.append(f"the stale-citation faults of the previous version are GONE "
                         f"({base_high} -> 0): the field state is now consistent with the "
@@ -5046,7 +5048,11 @@ REF_REPO_HOST_RE = re.compile(
     r"\b(?:github\.com|gitlab\.com|bitbucket\.org|sourceforge\.net|codeberg\.org)\b", re.I)
 REF_VERSION_HINT_RE = re.compile(
     r"(?i)(?:\bv?\d+\.\d+(?:\.\d+)?\b|\bcommit\b|\bversion\b|\brelease\b|"
-    r"\bdoi\b|\bzenodo\b|\bfigshare\b|\baccess(?:ed)?\b)")
+    r"\bdoi\b|\bzenodo\b|\bfigshare\b|\baccess(?:ed)?\b|"
+    # a repository URL pinned by path IS a version pin: /tree/<sha>, /commit/<sha>
+    # (the old hint read only the words around it and called a commit-pinned
+    # software citation "no version").
+    r"/(?:tree|commit)/[0-9a-fA-F]{7,40}\b)")
 # A bioRxiv/medRxiv-style identifier: the server's YYYY.MM.DD.NNNNNN code (with
 # or without the server's name) must carry the server's own DOI prefix.
 REF_SERVER_CODE_RE = re.compile(r"\b(?:19|20)\d{2}\.\d{2}\.\d{2}\.\d{5,}\b")
@@ -5142,8 +5148,13 @@ def reference_entry_rows(paras: list, is_ref: list, policy: dict = None,
 # --------------------------------------------------------------------------
 
 NUMBERING_MENTION_RES = {
+    # "figure 3" / "figures 3 and 4" / "fig. 3" / "figs. 3" / "fig 3" -- the
+    # plural `figures` is the most common call-out form of all and the old
+    # alternation (`figure|fig\.?|figs\.?`) could not match it: "figure 3" was
+    # seen, "Figures 3 and 4" was not, so the rule both missed out-of-order
+    # call-outs and mis-dated an item's first mention.
     "figure": re.compile(
-        r"(?i)\b(?:figure|fig\.?|figs\.?)\s*(S?\d+[A-Za-z]?|[IVXLC]+)\b"),
+        r"(?i)\b(?:figures?|figs?\.?)\s*(S?\d+[A-Za-z]?|[IVXLC]+)\b"),
     "table": re.compile(
         r"(?i)\btables?\s*(S?\d+[A-Za-z]?|[IVXLC]+)\b"),
 }
@@ -5346,6 +5357,16 @@ AVAIL_UNRESOLVED_RES = (
     ("in the meantime", re.compile(r"(?i)\bin\s+the\s+meantime\b")),
     ("archived on acceptance",
      re.compile(r"(?i)\barchived\b[^.]{0,60}\b(?:on|upon|after)\s+acceptance\b")),
+    # The locator is CONDITIONAL even when the sentence does not glue
+    # "available" to "on request": the common phrasings put the depositor
+    # between them ("available from the corresponding author on reasonable
+    # request", "shared upon request").
+    ("available ... on request",
+     re.compile(r"(?i)\bavailab\w*[^.]{0,60}\b(?:up)?on\s+(?:reasonable\s+)?request\b")),
+    ("available ... upon publication",
+     re.compile(r"(?i)\bavailab\w*[^.]{0,40}\b(?:up)?on\s+publication\b")),
+    ("shared ... on request",
+     re.compile(r"(?i)\bshar(?:ed|ing)\b[^.]{0,60}\b(?:up)?on\s+(?:reasonable\s+)?request\b")),
 )
 REPO_PIN_RE = re.compile(
     r"https?://(?:www\.)?(github\.com|gitlab\.com|bitbucket\.org|codeberg\.org)/"
@@ -5377,9 +5398,21 @@ def availability_rows(paras: list, is_ref: list = None, limit: int = 20) -> list
             commit = m.group(3)
             if commit:
                 pins.setdefault(repo, []).append((idx, commit[:12]))
+
+    def _same_pin(a: str, b: str) -> bool:
+        """One commit id is a prefix of the other (7-char vs full SHA)."""
+        n = min(len(a), len(b))
+        return n >= 7 and a[:n].lower() == b[:n].lower()
+
     for repo, found in sorted(pins.items()):
-        commits = {c for _i, c in found}
-        if len(commits) > 1:
+        # Compare commits by PREFIX: the same revision cited once as a short
+        # SHA and once in full (or at two truncation lengths) is ONE pin, not
+        # two conflicting ones.
+        distinct = []
+        for _i, c in found:
+            if not any(_same_pin(c, d) for d in distinct):
+                distinct.append(c)
+        if len(distinct) > 1:
             where = ", ".join(f"{c} (p{i})" for i, c in found[:4])
             rows.append({"rule": "FMT-AV2", "severity": "medium",
                          "location": f"{repo}", "evidence": where,
@@ -5479,6 +5512,15 @@ def _marker_numbers(marker: str, text: str = None) -> list:
             m = re.fullmatch(r"\d+", part)
             if m:
                 out.append(int(part))
+                continue
+            # A citing field may carry PREFIX text inside its own marker
+            # ("(hg19)37" -- the residue the 2026-10-09 Zotero forensics
+            # measured on the shipped CNB file). The citation number is the
+            # trailing cluster after the parenthesized prefix; refusing the
+            # whole marker made the field invisible to every numbering rule.
+            m = re.fullmatch(r"\([^()]*\)\s*(\d+(?:\s*[,;\u2013\u2014-]\s*\d+)*)", part)
+            if m:
+                out.extend(_marker_numbers(None, m.group(1)))
     return out
 
 
@@ -5594,12 +5636,34 @@ def zotero_citation_state(xml: str, para_texts: list = None,
             "style_ids": dict(style_ids or {}), "report": report}
 
 
+def _cluster_numbers_are_the_ranks(f: dict, order: dict) -> bool:
+    """True when a field's rendered numbers ARE exactly its items' ranks.
+
+    Zotero renders a numeric cluster in NUMBER order while `citationItems` keep
+    insertion order, so a correctly rendered field ([a(rank 4), b(rank 3)]
+    shown "3,4") is not stale in any reader-visible sense: the numbers are the
+    right numbers, only the display order differs. Pairing positionally
+    reports two false stale rows on it, and the FMT-Z3 pairing rule then reads
+    one item rendering two numbers; both rules skip such a cluster.
+    """
+    if len(f.get("numbers") or []) != len(f.get("items") or []):
+        return False
+    ranks = [order.get(k) for k in f["items"]]
+    return None not in ranks and sorted(f["numbers"]) == sorted(ranks)
+
+
 def zotero_parity_rows(xml: str, para_texts: list = None, style_ids: dict = None,
-                       limit: int = 60) -> list:
+                       limit: int = 60, order: dict = None) -> list:
     """FMT-Z1..Z5: the live-field state a Word/Zotero refresh would rewrite."""
     state = zotero_citation_state(xml, para_texts, style_ids)
     if not state["fields"]:
         return []
+    if order is not None:
+        # A caller that reads several parts of one package (document.xml plus
+        # footnotes/endnotes/headers) supplies the package-wide citation order,
+        # so every part is judged against the SAME ranks.
+        state["order"] = dict(order)
+        state["distinct_items"] = len(state["order"])
     rows = []
     order, entries = state["order"], state["entries"]
     numeric = state["numeric"]
@@ -5607,6 +5671,8 @@ def zotero_parity_rows(xml: str, para_texts: list = None, style_ids: dict = None
     stale_items = set()
     if numeric:
         for f in state["fields"]:
+            if _cluster_numbers_are_the_ranks(f, order):
+                continue             # consistent cluster: only the display order differs
             pairs = list(zip(f["items"], f["numbers"]))
             if len(pairs) != len(f["items"]) or len(f["numbers"]) != len(f["items"]):
                 continue                 # a marker whose shape cannot be paired: FMT-Z3 covers it
@@ -5648,10 +5714,28 @@ def zotero_parity_rows(xml: str, para_texts: list = None, style_ids: dict = None
     # FMT-Z3 -- one item showing two numbers, or a number outside 1..N.
     seen = {}
     for f in state["fields"]:
-        if len(f["numbers"]) != len(f["items"]):
+        if len(f["numbers"]) != len(f["items"]) or _cluster_numbers_are_the_ranks(f, order):
             continue
         for key, n in zip(f["items"], f["numbers"]):
             seen.setdefault(key, {}).setdefault(n, f["citationID"])
+    # An un-pairable marker is NOT invisible: a numeric field that renders a
+    # different COUNT of numbers than it cites items (a half-updated cluster,
+    # one number left for two items, a dropped number) is judged by neither
+    # FMT-Z1 (needs a pair per item) nor the rule above (needs equal counts).
+    if numeric:
+        for f in state["fields"]:
+            if f["numbers"] and len(f["numbers"]) != len(f["items"]):
+                rows.append({"rule": "FMT-Z3", "severity": "medium",
+                             "location": f"field {f['citationID']}",
+                             "evidence": f"{len(f['numbers'])} rendered number(s) ("
+                                         + ", ".join(str(n) for n in f["numbers"][:6])
+                                         + f") for {len(f['items'])} cited item(s)",
+                             "detail": "the marker cannot be paired with the field's own "
+                                       "citation items (a half-updated cluster, a dropped "
+                                       "number, or a marker the normalizer cannot read): the "
+                                       "visible number(s) cannot be trusted, and a Word/Zotero "
+                                       "refresh rewrites the field",
+                             "protected": True})
     for key, numbers in sorted(seen.items()):
         # A stale marker is already a FMT-Z1 row; this rule adds the *pairing*
         # fault only where the ranks agreed but the numbers still differ (a
@@ -5716,6 +5800,39 @@ def zotero_parity_rows(xml: str, para_texts: list = None, style_ids: dict = None
                                "it honours, so the bibliography FORMAT can change (and no "
                                "longer match the target journal's style) without any warning",
                      "protected": True})
+    return rows[:limit]
+
+
+def zotero_parity_rows_for_parts(parts: list, style_ids: dict = None,
+                                 limit: int = 60) -> list:
+    """FMT-Z1..Z5 over EVERY field-carrying part of one package.
+
+    `parts` is [(part name, that part's XML)]. The parts are judged against ONE
+    package-wide citation order -- document.xml first, then footnotes/endnotes/
+    headers/comments in name order -- because a per-part order makes footnote
+    ranks local to the footnotes and produces false stale rows; a version whose
+    footnote citations are stale must not look clean to the stage gate while
+    `zotero-check` reports them.
+    """
+    main = [(n, x) for n, x in parts if n == "word/document.xml"]
+    rest = sorted(((n, x) for n, x in parts if n != "word/document.xml"), key=lambda t: t[0])
+    # The order map must be built in the same document-first order the parts are
+    # judged in: taking it from the caller's list made the main part's ranks
+    # depend on zip member order (a package listing footnotes.xml first would
+    # shift every in-text citation and report false stale rows).
+    order = {}
+    for _name, xml in main + rest:
+        for key in zotero_citation_state(xml)["order"]:
+            order.setdefault(key, len(order) + 1)
+    rows = []
+    for name, xml in main + rest:
+        paras = [text_of(p[2]) for p in paragraphs(xml)]
+        part_rows = zotero_parity_rows(xml, paras, style_ids, limit=limit, order=order)
+        if name != "word/document.xml":
+            part_rows = [dict(r, location=f"{name}: {r['location']}") for r in part_rows]
+        rows.extend(part_rows)
+        if len(rows) >= limit:
+            break
     return rows[:limit]
 
 
@@ -6836,7 +6953,25 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
                             == zotero_field_signature(fields_after))
     if policy.get("unlink_zotero_fields"):
         # Explicit submission-copy policy: the fields are MEANT to become plain
-        # text, so the continuity gate stands down for this one caller.
+        # text, so the continuity gate stands down for this one caller. It does
+        # NOT stand down for a STALE document: the documented workflow is
+        # "refresh, re-run zotero-check, and only then flatten", and flattening
+        # a stale document freezes the wrong numbers in the submission copy (no
+        # later refresh can repair a field that is no longer a field).
+        field_parts = [(name, parts[name].decode("utf-8", "replace"))
+                       for name in sorted(parts)
+                       if name in ZOTERO_FIELD_PARTS
+                       or ZOTERO_FIELD_AUX_PARTS_RE.search(name)]
+        stale = [r for r in zotero_parity_rows_for_parts(field_parts)
+                 if r.get("rule") in ("FMT-Z1", "FMT-Z2", "FMT-Z4")]
+        if stale:
+            return {"source": str(src), "output": str(out), "changes": [], "verified": {},
+                    "error": (f"refusing to flatten a stale document: "
+                              f"{len(stale)} stale-citation fault(s) (FMT-Z1/Z2/Z4) must be "
+                              f"repaired in Word/Zotero and `zotero-check` re-run before "
+                              f"`unlink_zotero_fields` unlinks the fields -- flattening now "
+                              f"freezes the wrong numbering in the submission copy"),
+                    "ok": False}
         field_errors = []
     else:
         field_errors = list(field_problems["errors"])
@@ -8633,13 +8768,53 @@ def cmd_check_pdf(args) -> int:
     return 0 if res["ok"] is not False else 1
 
 
+# Field-integrity faults that are Zotero's own shapes ("bad-citation-json", a
+# Zotero field without its separate, a duplicate citationID, a stray Zotero
+# instruction). `unclosed-field`/`duplicate-separate` can belong to ANY Word
+# field, so they count only when their message names a Zotero field kind.
+ZOTERO_FAULT_CODES = ("bad-citation-json", "no-separate", "duplicate-citation-id",
+                      "zotero-instr-outside-field")
+ZOTERO_FAULT_KIND_WORDS = ("the item field", "the bibliography field",
+                           "the zotero-other field")
+
+
+def zotero_structural_faults(report: dict) -> list:
+    """The Zotero field-integrity errors of one `zotero_report_for_docx` report.
+
+    A citation field whose instruction does not parse (or which has no
+    separate, a duplicate citationID, an unclosed field) drops out of every
+    FMT-Z rule, so the parity rows alone read "CLEAN" on a corrupt document.
+    These are the faults `zotero-check` must report and fail on before an author
+    flattens the fields.
+
+    A multi-part inventory prefixes each message with its part
+    ("word/footnotes.xml: [bad-citation-json] ..."), so the code is read after
+    an optional part name: a document that carries footnotes.xml (every
+    Word-produced file does) is otherwise declared clean again.
+    """
+    out = []
+    for msg in report.get("errors") or []:
+        m = re.match(r"(?:\S+:\s+)?\[([a-z\-]+)\]", str(msg))
+        code = m.group(1) if m else ""
+        if code in ZOTERO_FAULT_CODES:
+            out.append(str(msg))
+        elif code in ("unclosed-field", "duplicate-separate") and \
+                any(word in str(msg) for word in ZOTERO_FAULT_KIND_WORDS):
+            out.append(str(msg))
+    return out
+
+
 def cmd_zotero_check(args) -> int:
     """`zotero-check`: what a Word/Zotero refresh would rewrite in this DOCX.
 
     Read-only and library-free: the citation fields embed their own itemData and
     the bibliography entries are ordinary paragraphs, so the check runs on any
-    machine. Exit 1 when a high-severity row exists (FMT-Z1/Z2/Z4), i.e. the
-    document's numbering is not the numbering a refresh produces.
+    machine. Exit 1 when a high-severity row exists (FMT-Z1/Z2/Z4) -- i.e. the
+    document's numbering is not the numbering a refresh produces -- or when a
+    Zotero field itself is structurally broken (unparseable citation JSON, no
+    separate, duplicate citationID, an unclosed field): such a field is absent
+    from every numbering rule, so "no rows" would otherwise print CLEAN on a
+    document whose citation cache cannot be trusted.
     """
     path = Path(args.file)
     try:
@@ -8664,15 +8839,10 @@ def cmd_zotero_check(args) -> int:
     xml = next(x for n, x in parts if n == "word/document.xml")
     paras = [text_of(p[2]) for p in paragraphs(xml)]
     styles = zotero_style_ids(style_parts)
-    rows = zotero_parity_rows(xml, paras, styles)
-    for name, part_xml in parts:
-        if name == "word/document.xml":
-            continue
-        extra = zotero_parity_rows(part_xml,
-                                   [text_of(p[2]) for p in paragraphs(part_xml)], styles)
-        rows += [dict(r, location=f"{name}: {r['location']}") for r in extra]
+    rows = zotero_parity_rows_for_parts(parts, styles)
     state = zotero_citation_state(xml, paras, styles)
     report = zotero_report_for_docx(path)
+    faults = zotero_structural_faults(report)
     counts_report = report.get("counts") or state["report"]["counts"]
     counts = Counter(r["rule"] for r in rows)
     print(f"{path}")
@@ -8680,20 +8850,27 @@ def cmd_zotero_check(args) -> int:
           f"{counts_report.get('bibliography', 0)} bibliography; "
           f"{state['distinct_items']} distinct cited item(s); "
           f"style store(s): {styles or 'none'}")
-    if not rows:
+    if not rows and not faults:
         print("  CLEAN -- the markers, the bibliography order and the style store(s) agree; "
               "a Word/Zotero refresh reproduces this numbering")
+    for fault in faults:
+        print(f"  [field-integrity] {fault}")
     for r in rows:
         print(f"  [{r['rule']}] {r['severity']}: {r['evidence']}")
         print(f"      {r['detail']}")
+    if faults:
+        print(f"  {len(faults)} field-integrity fault(s): a field this broken is not "
+              f"inventoried by the numbering rules; repair it in Word/Zotero and re-run "
+              f"this check before flattening the fields")
     print(f"  {len(rows)} row(s): "
           + (", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "none"))
     if args.json:
         Path(args.json).write_text(json.dumps({"file": str(path), "rows": rows,
                                                "style_ids": styles,
-                                               "counts": dict(counts)},
+                                               "counts": dict(counts),
+                                               "field_integrity_faults": faults},
                                               indent=2, ensure_ascii=False), encoding="utf-8")
-    return 1 if any(r["severity"] == "high" for r in rows) else 0
+    return 1 if faults or any(r["severity"] == "high" for r in rows) else 0
 
 
 def cmd_validate(args) -> int:

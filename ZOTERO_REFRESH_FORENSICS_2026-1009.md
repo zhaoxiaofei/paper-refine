@@ -76,7 +76,7 @@ different things.
 * The reference checks that existed (M10, the identifier lookups) read the bibliography TEXT; they
   cannot tell that entry 27 is the wrong work for the sentence that cites 27.
 
-## 5. What the repo now does (implemented, no commit yet)
+## 5. What the repo now does (committed in `0bfedcc`, merged as `cab4cc3`)
 
 **`paper_docx_format.py` — FMT-Z1..Z5, offline, no library needed** (`zotero_citation_state`,
 `zotero_parity_rows`), because every citation field embeds its own `itemData`:

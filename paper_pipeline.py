@@ -1749,10 +1749,18 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
         "guidelines_source": str(prompt.get("guidelines_source")
                                  or f"the current {label} author guidelines").strip(),
     }
+    # The profile's own provenance: SKILL.md points the sessions at it ("the
+    # profile's own `sources` field names where its numbers come from"), and
+    # the rebuilt return value used to drop the key, so a stage reading the
+    # profile through VenueProfile.data could not name the guideline it used.
+    raw_sources = out.get("sources")
+    clean_sources = ({str(k): str(v) for k, v in raw_sources.items()}
+                     if isinstance(raw_sources, dict) else {})
     return {
         "id": venue_id,
         "label": label,
         "short": short,
+        "sources": clean_sources,
         "description": str(out.get("description") or "").strip(),
         "article_type": default_entry["label"],
         "article_type_id": default_type_id,
@@ -12846,6 +12854,21 @@ def zotero_field_continuity_check(base_dir: Path, out_dir: Path, label: str,
         rep["skipped"] = "the base carries no DOCX"
         return rep
     pairs = [(base_docs[k], out_docs[k]) for k in sorted(set(base_docs) & set(out_docs))]
+    # A pairing-key collision (`appendix-a.docx` / `appendix-b.docx`) leaves one
+    # of the documents out of the comparison entirely (the key maps to a single
+    # path). Pair every colliding document whose counterpart carries the same
+    # name, so a field deleted or garbled in the shadowed file is still caught;
+    # the collision warning above still names the group.
+    paired = {(b.resolve(), o.resolve()) for b, o in pairs}
+    for key in sorted(set(base_clash) & set(out_clash)):
+        for base in sorted(base_clash[key]):
+            cand = [o for o in out_clash[key]
+                    if o.name.lower() == base.name.lower()
+                    and not any(p[0] == base.resolve() for p in paired)
+                    and not any(p[1] == o.resolve() for p in paired)]
+            if len(cand) == 1:
+                pairs.append((base, cand[0]))
+                paired.add((base.resolve(), cand[0].resolve()))
     rest_base = [base_docs[k] for k in sorted(base_docs) if k not in out_docs]
     rest_out = [out_docs[k] for k in sorted(out_docs) if k not in base_docs]
     # A stage may rename a document (a template stage hands back the template's
@@ -14858,19 +14881,32 @@ LOOKUP_BUDGET_SHARES = {"identifier": 4, "placeholder": 2, "gene": 10}
 
 
 def _select_lookup_targets(targets: list, budget: int) -> list:
-    """Trim the lookup list to `budget`, with an allocation per source class."""
+    """Trim the lookup list to `budget`, with an allocation per source class.
+
+    Every class first takes up to its reserved share; the remaining budget is
+    then filled with the REMAINDER of those same lists (reserved classes first,
+    then any other source), so the cap is actually spent. Popping each class's
+    list before slicing it silently discarded that remainder: a corpus of 30
+    identifiers checked 4 of a 24-lookup budget and left everything else
+    unexamined.
+    """
     if len(targets) <= budget:
         return list(targets)
     by_source = {}
     for t in targets:
         by_source.setdefault(str(t.get("source") or ""), []).append(t)
     picked, used = [], 0
+    taken = {}
     for source, share in LOOKUP_BUDGET_SHARES.items():
-        for t in by_source.pop(source, [])[:share]:
+        take = (by_source.get(source) or [])[:share]
+        taken[source] = len(take)
+        for t in take:
             picked.append(t)
             used += 1
-    for source in sorted(by_source):
-        for t in by_source[source]:
+    rest = list(LOOKUP_BUDGET_SHARES)
+    rest += [s for s in sorted(by_source) if s not in LOOKUP_BUDGET_SHARES]
+    for source in rest:
+        for t in (by_source.get(source) or [])[taken.get(source, 0):]:
             if used >= budget:
                 break
             picked.append(t)
@@ -30084,6 +30120,8 @@ def census_prefix_total(agg: dict, sel: dict, vid: str):
     cumulative statistic over the SAME prefix the ranked rows use, so the run
     table's `defects@K` column compares like with like. None when the member has
     no census row at all (the cell then stays '-', never a fabricated 0).
+    None the same way when the decision carries no ranking prefix to accumulate
+    over -- an absent `cells_used` cannot be read as "zero defects".
     """
     census = (agg or {}).get("issue_census") or {}
     if str(vid) not in census:
@@ -30092,7 +30130,7 @@ def census_prefix_total(agg: dict, sel: dict, vid: str):
     row = cumulative.get(str(vid)) or []
     cells = int(((sel or {}).get("tiebreak") or {}).get("cells_used") or 0)
     if not cells or not row:
-        return 0
+        return None
     return int(row[min(cells, len(row)) - 1])
 
 

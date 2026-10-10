@@ -166,6 +166,7 @@ python3 .paper_test/test_length_limits.py
 python3 .paper_test/test_hash_cache.py
 python3 .paper_test/test_revision_token.py
 python3 .paper_test/test_final_clean_version.py
+python3 .paper_test/test_debug_2026_1010.py
 ```
 
 ## Pointing a suite at a baseline copy
