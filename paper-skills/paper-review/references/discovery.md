@@ -118,10 +118,10 @@ enumeration procedure · artifact columns · finding rules) so the next review
 run catches it mechanically:
 
 ```
-## M31 — <name> (proposed)
+## M<N> — <name> (proposed)          # N = the next free id (proposals start at M37)
 **Purpose:** ...
 **Enumeration:** <script or manual procedure — must be enumerable>
-**Artifact:** M31_<slug>.md: <columns>
+**Artifact:** M<N>_<slug>.md: <columns>
 **Finding rules:** one per instance, listed
 ```
 

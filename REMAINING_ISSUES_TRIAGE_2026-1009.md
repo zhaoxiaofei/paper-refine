@@ -1,7 +1,7 @@
 # Remaining-issue triage — 2026-10-09 — two audited final packages
 
-Repo: `/home/zhaoxiaofei/paper-refine` @ `6f541c1` (+ the working-tree revision described
-below; nothing committed yet). This report answers the three questions asked about the two
+Repo: `/home/zhaoxiaofei/paper-refine` @ `6f541c1` (+ the repository-side fixes described
+below, committed as `0bfedcc` and merged as `cab4cc3`). This report answers the three questions asked about the two
 audit directories:
 
 1. **Is each potential issue real**, checked against the result directories themselves
@@ -299,7 +299,7 @@ proposals now start at **M37**.
   after the change exposed the expected contract-fixture updates (the review contract now
   requires the M31–M35 coverage rows and their artifacts, and the discovery-proposal numbering
   moved to M36); all of them are included above.
-* Working tree only — **nothing was committed**, and nothing under
+* The repository-side fixes are committed (`0bfedcc`, merged as `cab4cc3`), and nothing under
   `~/paper-refine/audit_data/`, `/home/cnb-manuscript-postgrad-data/` or
   `/home/neohetero-manuscript-postgrad-data/` was written to (the new scans open those trees
   read-only).

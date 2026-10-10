@@ -1,6 +1,6 @@
 # paper-review + paper-revise — Codex Skills for Manuscript Submissions (any venue or journal)
 
-**Package version:** 0.33 (`llm_review_feedback/` joins `human_review_feedback/` as pre-filtered evidence with the same concern standing; see CHANGELOG.md) — distributed as the directory
+**Package version:** 0.34 (M31–M36 package-integrity sweeps, the FMT-R/O/X/L/AV/Z/PDF rule families, PKG-1, and the discovery-round D0–D5 contract; see CHANGELOG.md) — distributed as the directory
 `paper-skills-v03`. The version lives here, not in the skill frontmatter. If more
 than one copy of this package is installed, check this line and retire the
 older copies (`paper-skills-v01/`, `paper-skills-v02/`): Codex registers skills by
@@ -178,7 +178,7 @@ claim-vs-code/raw-data conflict is a row a session disposes instead of a
 coincidence. A
 discovery round (D0–D5) then hunts issue
 classes outside the checklist, and its validated proposals grow the
-checklist (M31+) for future runs.
+checklist (M37+; M21–M36 are already adopted) for future runs.
 
 The revision skill mirrors the discipline: an A1 ledger where every finding
 ID must get exactly one row and a status (no silent skips), an edit plan

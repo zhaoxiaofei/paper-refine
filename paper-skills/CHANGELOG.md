@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.34 — package integrity, Zotero refresh parity, and the discovery-round contract (2026-10-09)
+
+- **M31–M36 in the review contract.** The EVIDENCE-INTEGRITY sweeps M31–M35
+  (artwork-versus-legend consistency, a headline statistic against the correction
+  the paper states, availability-locator finality, figure-source-data coverage,
+  disclosure/provenance completeness) and M36 (the Zotero live-field refresh
+  parity check) are required coverage rows with their own artifacts, defined in
+  `paper-review/references/sweeps.md` and enforced by the pipeline's review
+  contract.
+- **New rule families.** `FMT-R1`–`R5` (reference-entry shape), `FMT-O1`
+  (display-item first-mention order; profile-gated by `numbering: "citation"`),
+  `FMT-X2` (front-matter glue), `FMT-L1` (profile-declared leftover phrases),
+  `FMT-AV1`/`AV2` (availability finality and one-revision pinning), `FMT-Z1`–`Z5`
+  (Zotero live-field parity: stale markers, bibliography order, half-updated
+  clusters, stored-vs-visible disagreement, conflicting style stores), `PKG-1`
+  (internal working material in the submission surface) and `FMT-PDF1`–`PDF3`
+  (XFA shell / unfilled form / empty export). `M30-NC` adds the source-hierarchy
+  rule's non-numeric half (a written "could not be run" claim against the
+  shipped table that carries the method's own rows).
+- **The discovery round is a contract (D0–D5).** The round's artifacts are
+  verified (gap rows with an executed probe or a recorded limitation,
+  well-shaped `X-*` findings, sweeps.md-shaped proposals from M37 — M18–M36 are
+  already adopted — or an explicit no-proposal statement), the previous round's
+  proposals must be re-probed or dispositioned, and `adopt-sweep` validates a
+  proposal before appending it to `references/sweeps.md`.
+- **Prompt re-syncs (D10).** `prompts/identify_issues.prompt.md` and
+  `prompts/adress_issues.prompt.md` carry the M31–M36 and discovery-round
+  changes and stay byte-identical to their sources.
+
 ## 0.33 — `llm_review_feedback/`: a pre-filtered LLM review is evidence too (2026-10-07)
 
 - **New evidence area.** A setup `--source` directory may carry an optional

@@ -162,7 +162,7 @@ the base's from this round's review) or to the arm's own marker. A `-` now means
 | `--retry-backoff S` / `--retry-backoff-max S` (`run`) | exponential retry wait: base S doubling per failed attempt (default 30s), capped per wait (default 600s); 0 retries immediately |
 | `--no-wait` (`run`, manual mode) | print every currently-runnable prompt at once instead of waiting for each dependency |
 | `--require-clean-captions` (`decide`) | print the suggested-length caption report; kept for CLI compatibility — caption length is advisory, so it never exits non-zero (use exit 4/5 for real problems) |
-| `--skip-hash` (every command except `selfcheck`) | skip the integrity VERIFICATION passes for this invocation (digests are still recorded; every report says they were skipped) |
+| `--skip-hash` (every command except `selfcheck` and `adopt-sweep`) | skip the integrity VERIFICATION passes for this invocation (digests are still recorded; every report says they were skipped) |
 
 ## Requirements
 
@@ -1471,6 +1471,8 @@ Stand-alone use (never edits in place unless you pass `--out` yourself):
 python paper_docx_format.py scan  <dir> --pdf <rendered.pdf> --json out.json
 python paper_docx_format.py fix   file.docx --out file.fixed.docx
 python paper_docx_format.py check-pdf rendered.pdf
+python paper_docx_format.py zotero-check file.docx   # live Zotero fields: refresh parity
+python paper_docx_format.py validate <package dir>   # DOCX XML + standalone .tex
 ```
 
 Findings inside Zotero fields (the bibliography, citation fields) are reported
@@ -1624,6 +1626,46 @@ reported, never punished. A failed attempt goes through the normal retry policy
 copied next to `PROMPT.md` in every session sandbox (including the judge's, whose
 prompt names the same command); it carries no per-run data, and the judge's copy
 is stamped with the view timestamp.
+
+### Zotero live-field parity (`zotero-check`, FMT-Z1–Z5) and package integrity (M31–M36, PKG-1, FMT-PDF1–3)
+
+A manuscript's citations are live Zotero fields: the numbers in the text and the
+order of the bibliography are CACHED results of the last citation-processor run,
+so edits around them can leave a package whose numbering the first
+**Zotero → Refresh** in Word would rewrite. The workflow is **refresh in Word →
+re-check → flatten**:
+
+```bash
+python paper_docx_format.py zotero-check submission.docx
+```
+
+Read-only and library-free (the fields embed their own `itemData`), it
+inventories every field-carrying part (`word/document.xml`, footnotes/endnotes,
+headers/footers, comments), judges them against ONE document-first package-wide
+citation order, and reports `FMT-Z1` (a cached marker whose number is not the
+item's rank — a stale field), `FMT-Z2` (the bibliography entry at an item's
+number describing another work), `FMT-Z3` (one item showing two numbers, a
+half-updated cluster, an out-of-range number, an uncited entry), `FMT-Z4` (the
+stored marker and the visible runs disagreeing) and `FMT-Z5` (more than one
+Zotero style store). Exit 1 on a high-severity row or on a structurally broken
+field (unparseable citation JSON, no `separate`, duplicate `citationID`, an
+unclosed field), so "no rows" never prints CLEAN for a field the numbering rules
+cannot read. The stage gate compares the parity rows and the fault signature
+version to version, and `fix --unlink-zotero-fields` (the explicit flattening
+policy) refuses to unlink a STALE document — flattening now would freeze the
+wrong numbers in the submission copy.
+
+The same round (2026-10-09) added the evidence-integrity sweeps **M31–M36**
+(M31 artwork-versus-legend consistency, M32 a headline statistic against the
+correction the paper states, M33 availability-locator finality, M34
+figure-source-data coverage, M35 disclosure/provenance completeness, M36 the
+Zotero refresh parity above), the always-on reference-shape rules `FMT-R1`–`R5`,
+availability rules `FMT-AV1`/`AV2`, display-item first-mention order `FMT-O1`,
+the package-hygiene rule `PKG-1` (internal working material — review-session
+URLs, the pipeline's own ledgers — must not ship) and `FMT-PDF1`–`PDF3` (an XFA
+form shell, an unfilled form, an empty export). `publish_final_clean` reports
+PKG-1/internal-URL hits and the PDF-artifact rows in the publish step; they are
+findings for the author, never silent edits.
 
 ## The code-side evidence pack (identical numbers in every session)
 
@@ -2258,6 +2300,9 @@ its four integration runs never started.
 | `paper_pipeline.py` | the orchestrator (setup / run / run-decide / decide / retry / status / selfcheck / prune / redline / track) |
 | `paper_docx_format.py` | OOXML style/formatting scanner, fixer and blank-page checker |
 | `paper_redlines_adapter.py` | tracked-changes bridge (`python-redlines[docxodus]`) |
+| `AGENT.md` | the agent-facing contract (rules the sessions and reviewers are held to) |
+| `REMAINING_ISSUES_TRIAGE_2026-1009.md` | the 2026-10-09 human triage of the two audited final packages |
+| `ZOTERO_REFRESH_FORENSICS_2026-1009.md` | the 2026-10-09 Zotero live-field forensics that M36/FMT-Z grew from |
 | `docx2pdf.sh` | Word→PDF conversion via PowerShell (WSL/Git Bash) |
 | `docxcompare.sh` | Word→redline comparison via PowerShell (WSL/Git Bash) |
 | `mcp-docx-converter/` | the `docx-converter` MCP tool used as the first-choice renderer |
@@ -2270,7 +2315,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 108 suites (a few
+any failure. They are independent, so run them in parallel — 109 suites (a few
 minutes at the default parallelism on a 20-core box; tens of minutes
 sequentially):
 
@@ -2350,7 +2395,8 @@ compatibility for a root with no `venue`/`article_type` key.
 ## Notes
 
 * `--root` and `--source` must not be nested; `setup` refuses a non-empty root.
-* `--skip-hash` (accepted by every command) skips the integrity VERIFICATION
+* `--skip-hash` (accepted by every command except `selfcheck` and
+  `adopt-sweep`) skips the integrity VERIFICATION
   passes for that ONE invocation — the pristine copy, the pinned champions, the
   published winners, every completed run's frozen inputs, the judge-view digests
   and the a1 base digest. Digests are still RECORDED (state.json, the pins, the

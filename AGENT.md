@@ -416,7 +416,7 @@ spelling and is still accepted everywhere as an alias (it normalises to
 submission: the conform stage runs before round 1 (inside the venue's own Word
 template when one ships, else to the journal's own author guidelines and then
 academic convention) and reads no feedback. The modes are documented in README
-→ "Revision modes: continue, init, and the journal modes" and pinned by
+→ "Revision modes: `continue`, `init`, the journal modes (options 1–4), and `llm` (5)" and pinned by
 the `test_journal_revision_modes_*_*.py` parts + the init section of
 `.paper_test/test_venue_template_conformance.py`. Two rules matter when
 touching this area:

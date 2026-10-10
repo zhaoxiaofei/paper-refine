@@ -410,22 +410,15 @@ def in_field_result(ranges: list, start: int, end: int) -> bool:
     return any(start < r_end and r_start < end for r_start, r_end in ranges)
 
 
-def field_result_text_ranges(para: str) -> list:
-    """[(text_start, text_end)] of every complex field's RESULT text in `para`.
+def _field_result_spans(xml: str) -> list:
+    """[(result_start, result_end)] XML offsets of every complex field's RESULT.
 
-    The offsets are in `text_of(para)` coordinates -- the space `hygiene_spans`
-    and the fixer's text edits use. Only the runs AFTER the field's `fldChar
-    separate` and before its `end` are a result; the instruction runs and the
-    field characters themselves are outside.
+    The stack walks begin/separate/end across the WHOLE xml, so a field whose
+    result spans paragraphs (a Zotero bibliography field: begin+separate in the
+    first entry paragraph, a lone end at the last) still yields one span.
     """
-    runs, pos = [], 0
-    for m in TEXT_RE.finditer(para):
-        raw = m.group(0)
-        text = unesc(raw[raw.find(">") + 1:raw.rfind("<")])
-        runs.append((m.start(), m.end(), pos, pos + len(text)))
-        pos += len(text)
     out, stack = [], []
-    for m in FIELD_CHAR_RE.finditer(para):
+    for m in FIELD_CHAR_RE.finditer(xml):
         kind = m.group(1)
         if kind == "begin":
             stack.append({"sep": None})
@@ -434,11 +427,40 @@ def field_result_text_ranges(para: str) -> list:
                 stack[-1]["sep"] = m.end()
         elif kind == "end" and stack:
             frame = stack.pop()
-            if frame["sep"] is None:
-                continue
-            for xs, xe, ts, te in runs:
-                if xs >= frame["sep"] and xe <= m.start():
-                    out.append((ts, te))
+            if frame["sep"] is not None:
+                out.append((frame["sep"], m.start()))
+    return out
+
+
+def field_result_text_ranges(para: str, doc_spans=None, para_start: int = 0) -> list:
+    """[(text_start, text_end)] of every complex field's RESULT text in `para`.
+
+    The offsets are in `text_of(para)` coordinates -- the space `hygiene_spans`
+    and the fixer's text edits use. Only the runs AFTER the field's `fldChar
+    separate` and before its `end` are a result; the instruction runs and the
+    field characters themselves are outside. `doc_spans` is the document-wide
+    `_field_result_spans(xml)` list for the xml `para` was sliced from and
+    `para_start` that slice's offset: a field that STARTS in an earlier
+    paragraph (the Zotero bibliography) protects its result paragraphs too,
+    which the paragraph-scoped stack could not see.
+    """
+    runs, pos = [], 0
+    for m in TEXT_RE.finditer(para):
+        raw = m.group(0)
+        text = unesc(raw[raw.find(">") + 1:raw.rfind("<")])
+        runs.append((m.start(), m.end(), pos, pos + len(text)))
+        pos += len(text)
+    if doc_spans is None:
+        spans = _field_result_spans(para)
+    else:
+        end = para_start + len(para)
+        spans = [(max(s, para_start) - para_start, min(e, end) - para_start)
+                 for s, e in doc_spans if s < end and para_start < e]
+    out = []
+    for s, e in spans:
+        for xs, xe, ts, te in runs:
+            if xs >= s and xe <= e:
+                out.append((ts, te))
     return out
 
 
@@ -5147,17 +5169,33 @@ def reference_entry_rows(paras: list, is_ref: list, policy: dict = None,
 # from the caption blocks), profile-gated by `"numbering": "citation"`.
 # --------------------------------------------------------------------------
 
+_DISPLAY_ITEM_TOKEN = r"(?:S?\d+[A-Za-z]?|[IVXLC]+)"
+# The tokens a CONJUNCTION/range list may continue with: the digit form only.
+# A trailing English word that happens to be roman-numeral letters must not
+# date a phantom item -- "Figure 1 and C. elegans ..." is not a call-out of
+# "figure 100", nor "Figure 2 and X-ray ..." of "figure 10" -- while the
+# confirmed case ("Figures 3 and 4", "Fig. 2 and 3", "Figures 3-5") is
+# unchanged. Roman-numeral call-outs stay supported as the FIRST token.
+_DISPLAY_LIST_TOKEN = r"S?\d+[A-Za-z]?"
+# "figure 3" / "figures 3 and 4" / "fig. 3" / "figs. 3" / "fig 3" -- the
+# plural `figures` is the most common call-out form of all, and a call-out
+# names EVERY item of its conjunction; matching only the first number
+# ("Figures 3 and 4" -> "Figures 3") mis-dated 4's first mention and could
+# report it as first cited later than a smaller number.
 NUMBERING_MENTION_RES = {
-    # "figure 3" / "figures 3 and 4" / "fig. 3" / "figs. 3" / "fig 3" -- the
-    # plural `figures` is the most common call-out form of all and the old
-    # alternation (`figure|fig\.?|figs\.?`) could not match it: "figure 3" was
-    # seen, "Figures 3 and 4" was not, so the rule both missed out-of-order
-    # call-outs and mis-dated an item's first mention.
     "figure": re.compile(
-        r"(?i)\b(?:figures?|figs?\.?)\s*(S?\d+[A-Za-z]?|[IVXLC]+)\b"),
+        r"(?i)\b(?:figures?|figs?\.?)\s*" + _DISPLAY_ITEM_TOKEN
+        + r"(?:\s*(?:,\s*(?:and|&)?\s*|\s+(?:and|&|to|through)\s+|[-\u2013]\s*)"
+          + _DISPLAY_LIST_TOKEN + r")*"),
     "table": re.compile(
-        r"(?i)\btables?\s*(S?\d+[A-Za-z]?|[IVXLC]+)\b"),
+        r"(?i)\btables?\s*" + _DISPLAY_ITEM_TOKEN
+        + r"(?:\s*(?:,\s*(?:and|&)?\s*|\s+(?:and|&|to|through)\s+|[-\u2013]\s*)"
+          + _DISPLAY_LIST_TOKEN + r")*"),
 }
+# Every item token of one matched call-out phrase (the leading keyword has no
+# digit and no roman letter that follows a non-word character, so the
+# lookbehind keeps word interiors out).
+DISPLAY_ITEM_TOKEN_RE = re.compile(r"(?i)(?<![A-Za-z0-9])" + _DISPLAY_ITEM_TOKEN)
 SUPPLEMENTARY_ITEM_RE = re.compile(r"^S\d+", re.I)
 ROMAN_NUMERAL_RE = re.compile(r"^[IVXLC]+$")
 
@@ -5207,9 +5245,10 @@ def display_order_rows(paras: list, is_ref: list = None, is_caption: list = None
             continue
         for kind, pattern in NUMBERING_MENTION_RES.items():
             for m in pattern.finditer(str(text or "")):
-                key = _display_item_key(kind, m.group(1))
-                if key and key[2] is not None and key not in first:
-                    first[key] = idx
+                for token in DISPLAY_ITEM_TOKEN_RE.findall(m.group(0)):
+                    key = _display_item_key(kind, token)
+                    if key and key[2] is not None and key not in first:
+                        first[key] = idx
     rows = []
     for (kind, family) in sorted({(k[0], k[1]) for k in first}):
         seq = sorted(((idx, key) for key, idx in first.items()
@@ -5370,7 +5409,12 @@ AVAIL_UNRESOLVED_RES = (
 )
 REPO_PIN_RE = re.compile(
     r"https?://(?:www\.)?(github\.com|gitlab\.com|bitbucket\.org|codeberg\.org)/"
-    r"([A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(?:/(?:tree|commit)/([0-9a-fA-F]{7,40}))?", re.I)
+    r"([A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)"
+    # A commit PIN, in every host's own spelling: GitHub's
+    # /tree|commit|blob/<sha> and GitLab's /-/tree|commit|blob/<sha>. Only this
+    # family is a pin; release TAGS are deliberately not -- citing two releases
+    # of one tool is a legitimate comparison, not an inconsistent statement.
+    r"(?:/-)?/(?:tree|commit|blob)/([0-9a-fA-F]{7,40})", re.I)
 
 
 def availability_rows(paras: list, is_ref: list = None, limit: int = 20) -> list:
@@ -5506,12 +5550,19 @@ def _marker_numbers(marker: str, text: str = None) -> list:
             m = re.fullmatch(r"(\d+)\s*[\u2013\u2014-]\s*(\d+)", part)
             if m:
                 a, b = int(m.group(1)), int(m.group(2))
-                if a <= b and b - a <= 80:
+                # A YEAR range ("2019-2020") is not a reference range.
+                if a <= b and b - a <= 80 and not (1000 <= a and b <= 2999):
                     out.extend(range(a, b + 1))
                 continue
             m = re.fullmatch(r"\d+", part)
             if m:
-                out.append(int(part))
+                # A bare publication year is not a reference number: an
+                # author-year marker like "Smith et al., 2019" (or a
+                # suppress-author "2019") used to cross the numeric threshold
+                # and report "item shows 2019 (its rank is 2)" for a healthy
+                # manuscript. No real bibliography ranks an item 2019.
+                if not _is_pub_year(int(part)):
+                    out.append(int(part))
                 continue
             # A citing field may carry PREFIX text inside its own marker
             # ("(hg19)37" -- the residue the 2026-10-09 Zotero forensics
@@ -5521,7 +5572,43 @@ def _marker_numbers(marker: str, text: str = None) -> list:
             m = re.fullmatch(r"\([^()]*\)\s*(\d+(?:\s*[,;\u2013\u2014-]\s*\d+)*)", part)
             if m:
                 out.extend(_marker_numbers(None, m.group(1)))
+                continue
+            # "2 p. 5" -- the number comes FIRST and a page locator follows; the
+            # reference is the leading number (the old parse dropped the whole
+            # part, so a 3-number cluster read as 2 and fired a false FMT-Z3).
+            m = re.match(r"(\d+)(?!\d)", part)
+            if m:
+                if not _is_pub_year(int(m.group(1))):
+                    out.append(int(m.group(1)))
+                continue
+            # "see 39" -- a CSL prefix word in front of the number. A locator
+            # word ("p. 5", "fig. 3") names a place, not a reference, and the
+            # prefix of a year ("Smith 2019") is not a number either. The
+            # separator is optional because the marker the rules read has
+            # already been whitespace-stripped by `_zotero_marker_text`
+            # ("see 39" -> "see39").
+            m = re.fullmatch(r"([A-Za-z][A-Za-z.\s]*?)\s*(\d{1,4})", part)
+            if m:
+                words = m.group(1).strip().split()
+                if words and words[-1].rstrip(".").lower() not in MARKER_LOCATOR_WORDS:
+                    n = int(m.group(2))
+                    if not _is_pub_year(n):
+                        out.append(n)
+                continue
     return out
+
+
+def _is_pub_year(n: int) -> bool:
+    """A bare 4-digit number in the plausible publication-year window."""
+    return 1000 <= n <= 2999
+
+
+# Words that can precede a NUMBER without naming a reference ("p. 5",
+# "fig. 3"): their trailing integer is a location, not a citation number.
+MARKER_LOCATOR_WORDS = frozenset(
+    "p pp page pages vol volume no n number ch chap chapter sec section fig "
+    "figure figs eq equation ref reference col para app appendix suppl table "
+    "note line".split())
 
 
 ZOTERO_TOKEN_STOPWORDS = {"the", "and", "for", "with", "from", "into", "using", "their",
@@ -5653,9 +5740,13 @@ def _cluster_numbers_are_the_ranks(f: dict, order: dict) -> bool:
 
 
 def zotero_parity_rows(xml: str, para_texts: list = None, style_ids: dict = None,
-                       limit: int = 60, order: dict = None) -> list:
+                       limit: int = 60, order: dict = None, numeric: bool = None,
+                       state: dict = None) -> list:
     """FMT-Z1..Z5: the live-field state a Word/Zotero refresh would rewrite."""
-    state = zotero_citation_state(xml, para_texts, style_ids)
+    # `state` lets a multi-part caller reuse the inventory it already built
+    # (one full parse per part instead of two); it must have been built from
+    # the SAME xml/para_texts/style_ids.
+    state = state if state is not None else zotero_citation_state(xml, para_texts, style_ids)
     if not state["fields"]:
         return []
     if order is not None:
@@ -5664,6 +5755,12 @@ def zotero_parity_rows(xml: str, para_texts: list = None, style_ids: dict = None
         # so every part is judged against the SAME ranks.
         state["order"] = dict(order)
         state["distinct_items"] = len(state["order"])
+    if numeric is not None:
+        # ... and the same is true of the "is this a numeric-style document"
+        # gate: a footnotes part that mixes one numeric marker with an
+        # author-year one falls under the 60% line on its own, and the STALE
+        # numeric marker beside it stayed invisible to every FMT-Z rule.
+        state["numeric"] = bool(numeric)
     rows = []
     order, entries = state["order"], state["entries"]
     numeric = state["numeric"]
@@ -5803,6 +5900,23 @@ def zotero_parity_rows(xml: str, para_texts: list = None, style_ids: dict = None
     return rows[:limit]
 
 
+def zotero_package_order(parts: list) -> dict:
+    """The document-first package-wide citation order over one package's parts.
+
+    `parts` is [(part name, that part's XML)]. document.xml first, then the
+    rest in name order: taking the order from the caller's list made the main
+    part's ranks depend on zip member order (a package listing footnotes.xml
+    first would shift every in-text citation and report false stale rows).
+    """
+    main = [(n, x) for n, x in parts if n == "word/document.xml"]
+    rest = sorted(((n, x) for n, x in parts if n != "word/document.xml"), key=lambda t: t[0])
+    order = {}
+    for _name, xml in main + rest:
+        for key in zotero_citation_state(xml)["order"]:
+            order.setdefault(key, len(order) + 1)
+    return order
+
+
 def zotero_parity_rows_for_parts(parts: list, style_ids: dict = None,
                                  limit: int = 60) -> list:
     """FMT-Z1..Z5 over EVERY field-carrying part of one package.
@@ -5816,18 +5930,27 @@ def zotero_parity_rows_for_parts(parts: list, style_ids: dict = None,
     """
     main = [(n, x) for n, x in parts if n == "word/document.xml"]
     rest = sorted(((n, x) for n, x in parts if n != "word/document.xml"), key=lambda t: t[0])
-    # The order map must be built in the same document-first order the parts are
-    # judged in: taking it from the caller's list made the main part's ranks
-    # depend on zip member order (a package listing footnotes.xml first would
-    # shift every in-text citation and report false stale rows).
+    # One document-first pass builds BOTH the package-wide order and each
+    # part's inventory; `zotero_parity_rows` then reuses the inventory instead
+    # of re-parsing the same multi-megabyte XML (it used to parse every part
+    # twice per call, which dominated `zotero-check` and the stage gate).
     order = {}
+    states = []
     for _name, xml in main + rest:
-        for key in zotero_citation_state(xml)["order"]:
-            order.setdefault(key, len(order) + 1)
-    rows = []
-    for name, xml in main + rest:
         paras = [text_of(p[2]) for p in paragraphs(xml)]
-        part_rows = zotero_parity_rows(xml, paras, style_ids, limit=limit, order=order)
+        st = zotero_citation_state(xml, paras, style_ids)
+        states.append((_name, xml, st))
+        for key in st["order"]:
+            order.setdefault(key, len(order) + 1)
+    # The numeric gate is PACKAGE-wide, like the order: any part whose markers
+    # meet the 60% numeric rule makes the document numeric-style, so a stale
+    # numeric marker in a mixed footnotes part is judged by the same ranks as
+    # the main text instead of dropping out of every FMT-Z rule.
+    numeric = any(st["numeric"] for _n, _x, st in states)
+    rows = []
+    for name, xml, st in states:
+        part_rows = zotero_parity_rows(xml, limit=limit, order=order,
+                                       numeric=numeric, state=st)
         if name != "word/document.xml":
             part_rows = [dict(r, location=f"{name}: {r['location']}") for r in part_rows]
         rows.extend(part_rows)
@@ -6056,7 +6179,9 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # (possible lowercase sentence start) and FMT-G3 (missing space after
     # punctuation) are reported for the editing arms.
     is_ref_para = [elem_val(ppr_of(p[2]), "pStyle") == "Bibliography" for p in paras]
-    field_result_text = [field_result_text_ranges(p[2]) for p in paras]
+    doc_field_results = _field_result_spans(xml)
+    field_result_text = [field_result_text_ranges(p[2], doc_field_results, p[0])
+                         for p in paras]
     rows.extend(hygiene_rows(paras, is_ref_para, doc, protected=field_result_text))
     rows.extend(capitalization_rows(paras, is_ref_para, doc))
     # Fonts, paragraph formatting and heading levels: the copy-editor classes
@@ -6111,6 +6236,21 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # rules can also run over the LaTeX/markdown sources (paper_pipeline scans those).
     para_texts = [text_of(p[2]) for p in paras]
     para_is_ref = [elem_val(ppr_of(p[2]), "pStyle") == "Bibliography" for p in paras]
+    # The reference-SHAPE rules must survive a venue template that remaps style
+    # ids by NAME (apply_word_template rewrites them): a package restyled that
+    # way carries its reference list under another style id and every FMT-R
+    # rule switched off silently. When no paragraph uses the literal id but the
+    # document HAS an explicit bibliography heading, fall back to the numbered
+    # entries under it (the same structural primitive FMT-Z2 uses).
+    para_is_ref_rows = para_is_ref
+    if not any(para_is_ref):
+        bib_start = _bibliography_entry_start(para_texts)
+        if bib_start > 0:
+            para_is_ref_rows = [bool(para_is_ref[i])
+                                or (i >= bib_start
+                                    and bool(re.match(r"^\s*\d+\s*[\.\)]\s*\S",
+                                                      str(para_texts[i] or ""))))
+                                for i in range(len(para_is_ref))]
     para_is_head = [bool((elem_val(ppr_of(p[2]), "pStyle") or "").startswith("Heading"))
                     for p in paras]
     # A caption/legend paragraph is not a display-item CALL-OUT: the ordering
@@ -6126,7 +6266,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # (a supplementary file carries its own reference list and availability
     # note, a cover letter can carry another publisher's boilerplate), so they
     # run on every document the package scan opens.
-    for r in reference_entry_rows(para_texts, para_is_ref, policy):
+    for r in reference_entry_rows(para_texts, para_is_ref_rows, policy):
         rows.append({"rule": r["rule"], "severity": r["severity"], "document": doc,
                      "location": r["location"], "evidence": r["evidence"],
                      "detail": r["detail"], "fix": _fix_kind(r["rule"], policy),
@@ -6290,7 +6430,8 @@ def analyse_package(path: Path, policy: dict) -> dict:
         pdf = path.with_suffix(".pdf")
         if pdf.is_file() and shutil.which("pdftotext"):
             txt = subprocess.run(["pdftotext", "-layout", str(pdf), "-"],
-                                 capture_output=True, text=True).stdout
+                                 capture_output=True, text=True, encoding="utf-8",
+                                 errors="replace", timeout=60).stdout
             pages, src = blank_pages_in_text(txt)["pages"], "the rendered PDF beside it"
         elif app_pages is not None:
             pages, src = app_pages, "the cached docProps/app.xml value -- render to confirm"
@@ -6309,6 +6450,17 @@ def analyse_package(path: Path, policy: dict) -> dict:
             "documents": {path.name: res}}
 
 
+def docx_files_under(dirp: Path) -> list:
+    """Every .docx under a directory, EITHER extension case.
+
+    `rglob("*.docx")` is case-SENSITIVE on Linux, so a Word-authored
+    `REPORT.DOCX` was invisible to the scan and validate paths (the corpus
+    itself copies any file, so the document was in the package but never
+    checked). The set dedupes on case-insensitive filesystems.
+    """
+    return sorted(set(dirp.rglob("*.docx")) | set(dirp.rglob("*.DOCX")))
+
+
 def scan_paths(paths: list, policy: dict) -> dict:
     """Scan the corpus documents under `paths`.
 
@@ -6323,7 +6475,7 @@ def scan_paths(paths: list, policy: dict) -> dict:
     for p in paths:
         if not p.exists():
             continue
-        files = sorted(p.rglob("*.docx")) if p.is_dir() else [p]
+        files = docx_files_under(p) if p.is_dir() else [p]
         for f in files:
             if f.name.startswith("~$") or _is_aux_name(f.name):
                 continue
@@ -6807,6 +6959,7 @@ def fix_document(xml: str, styles: dict, policy: dict,
     want_hy = policy["term_hyphenation"] == "dominant"
     # This block ALWAYS runs: text hygiene is mechanical and unconditional, and
     # the three consistency rules below are policy-gated (`keep` pre-judge).
+    doc_field_results = _field_result_spans(xml)
     bodies = []
     for idx, (p0, p1, para) in enumerate(paragraphs(xml)):
         if elem_val(ppr_of(para), "pStyle") == "Bibliography":
@@ -6827,7 +6980,8 @@ def fix_document(xml: str, styles: dict, policy: dict,
         # inside it would be lost on refresh: the scanner reports those rows as
         # field-protected (`fix=style-field`) and the fixer must not apply them
         # (the unlink policy is the one explicit opt-out).
-        protected = [] if policy["unlink_zotero_fields"] else field_result_text_ranges(para)
+        protected = ([] if policy["unlink_zotero_fields"]
+                     else field_result_text_ranges(para, doc_field_results, p0))
         # Text hygiene: a space at a line edge (FMT-P4) and a doubled
         # article/preposition (FMT-G1) are mechanical. Both are recorded
         # below like every other text edit, so the fixer's verification can
@@ -7241,7 +7395,11 @@ def _adopt_page_geometry(doc_xml: str, template_doc_xml: str) -> tuple:
     report, which read the same last section, showed no gap.
     """
     t_sects = list(_SECT_RE.finditer(template_doc_xml or ""))
-    m_sects = list(_SECT_RE.finditer(doc_xml))
+    # The MANUSCRIPT side reads the same way `first_section_props` reads it: a
+    # legal self-closing `<w:sectPr .../>` is an empty section and must not be
+    # skipped, or page 1 silently keeps the author's geometry while the report
+    # (which reads the first section correctly) shows the template's.
+    m_sects = list(SECT_READ_RE.finditer(doc_xml))
     if not t_sects or not m_sects:
         return doc_xml, False
     # CT_SectPr's child order; a replacement must keep the sequence valid even
@@ -7258,6 +7416,10 @@ def _adopt_page_geometry(doc_xml: str, template_doc_xml: str) -> tuple:
         return doc_xml, False
 
     def adopt(body: str) -> str:
+        if body.rstrip().endswith("/>"):
+            # Expand the empty section first: the geometry children belong
+            # INSIDE it, and a splice before the tag's `/>` would orphan them.
+            body = body[:body.rfind("/>")].rstrip() + ">" + "</w:sectPr>"
         for tag in ("pgSz", "pgMar", "cols", "docGrid"):
             el = elem(body, tag)
             new_el = geo.get(tag)
@@ -7729,6 +7891,8 @@ def _bold_label_runs(para_xml: str) -> str:
     at the colon so only the label is bold -- the concatenated w:t text stays
     byte-identical.
     """
+    RPR_RE = re.compile(r"<w:rPr(?=[\s/>])(?:[^>]*/>|[^>]*>[\s\S]*?</w:rPr>)")
+
     m = _CORRESP_RE.match(text_of(para_xml).strip())
     if not m:
         return para_xml
@@ -7745,16 +7909,28 @@ def _bold_label_runs(para_xml: str) -> str:
         take = min(left, len(text))
         head, tail = text[:take], text[take:]
         left -= take
-        rpr = re.search(r"<w:rPr>[\s\S]*?</w:rPr>", run)
+        rpr = RPR_RE.search(run)
         props = rpr.group(0) if rpr else ""
-        bold = props if ("<w:b/>" in props or re.search(r'<w:b w:val="(?:1|true|on)"', props)) \
-            else (props.replace("<w:rPr>", "<w:rPr><w:b/>", 1) if props
-                  else "<w:rPr><w:b/></w:rPr>")
+        if "<w:b/>" in props or re.search(r'<w:b w:val="(?:1|true|on)"', props):
+            bold = props
+        elif not props:
+            bold = "<w:rPr><w:b/></w:rPr>"
+        elif props.endswith("/>"):
+            bold = props[:-2].rstrip() + "><w:b/></w:rPr>"
+        else:
+            # Merge the bold INTO the existing property bag. Word writes the
+            # routine w:rsidRPr attribute on run properties, and CT_R allows
+            # exactly ONE w:rPr child, so the old insert-a-second-<w:rPr>
+            # splice produced a schema-invalid run (Word: "unreadable
+            # content") for any rsid-carrying run.
+            open_tag = re.match(r"<w:rPr(?=[\s/>])[^>]*>", props).group(0)
+            bold = props.replace(open_tag, open_tag + "<w:b/>", 1)
 
         def with_text(txt: str, want: str) -> str:
             frag = run[:tm.start(2)] + xml_escape(txt) + run[tm.end(2):]
-            if re.search(r"<w:rPr>[\s\S]*?</w:rPr>", frag):
-                return re.sub(r"<w:rPr>[\s\S]*?</w:rPr>", want, frag, count=1)
+            fm = RPR_RE.search(frag)
+            if fm:
+                return frag[:fm.start()] + want + frag[fm.end():]
             om = re.match(r"<w:r\b[^>]*>", frag)
             return frag[:om.end()] + want + frag[om.end():]
 
@@ -7958,7 +8134,10 @@ def _apply_front_refs(doc_xml: str, front: dict) -> tuple:
     the title page's logo header. Writing only the LAST section (the old
     behaviour) left page 1 in the author's own furniture.
     """
-    sects = list(_SECT_RE.finditer(doc_xml))
+    # A self-closing `<w:sectPr .../>` IS the page-1 section (see
+    # `first_section_props`): skipping it put the venue's logo/title-page
+    # furniture on the BODY section while page 1 kept the author's own.
+    sects = list(SECT_READ_RE.finditer(doc_xml))
     if not sects:
         return doc_xml, False
     refs_all, refs_body = "", ""
@@ -7979,7 +8158,13 @@ def _apply_front_refs(doc_xml: str, front: dict) -> tuple:
         body = re.sub(r"<w:(?:header|footer)Reference[^>]*/>", "", m.group(0))
         body = re.sub(r"<w:titlePg[^>]*/>", "", body)
         om = re.match(r"<w:sectPr(?=[\s>])[^>]*>", body)
-        body = body[:om.end()] + (refs_all if idx == 0 else refs_body) + body[om.end():]
+        if om:
+            body = body[:om.end()] + (refs_all if idx == 0 else refs_body) + body[om.end():]
+        else:
+            # A self-closing empty section: expand it so the references land
+            # INSIDE the element instead of after its `/>`.
+            body = (body[:body.rfind("/>")].rstrip() + ">"
+                    + (refs_all if idx == 0 else refs_body) + "</w:sectPr>")
         if idx == 0 and "<w:titlePg" not in body:
             body = (body.replace("<w:docGrid", "<w:titlePg/><w:docGrid", 1)
                     if "<w:docGrid" in body else
@@ -8455,7 +8640,7 @@ def validate_paths(paths: list, json_out: Path = None, timeout: int = 300) -> di
     for p in paths:
         p = Path(p)
         if p.is_dir():
-            files += [q for q in sorted(p.rglob("*.docx"))
+            files += [q for q in docx_files_under(p)
                       if not q.name.startswith("~$") and not _is_aux_name(q.name)
                       and not any(part in EVIDENCE_DIRNAMES for part in q.parts[:-1])]
             files += [q for q in sorted(p.rglob("*.tex")) + sorted(p.rglob("*.ltx"))
@@ -8521,15 +8706,22 @@ PDF_PLACEHOLDER_RE = re.compile(
     r"(?is)if this message is not eventually replaced by the proper contents")
 PDF_PLACEHOLDER_BYTES_RE = re.compile(
     rb"(?is)if this message is not eventually replaced by the proper contents")
-PDF_PLACEHOLDER_STRONG_RE = re.compile(r"(?is)please wait\.{0,3}")
+# The XFA shell renders "Please wait..." (the ellipsis is part of the
+# placeholder). Without it the pattern matched the ordinary English phrase in
+# any sentence -- "Please wait for the reviewer assignment..." -- and a healthy
+# one-page letter was reported FMT-PDF1 at high severity.
+PDF_PLACEHOLDER_STRONG_RE = re.compile(r"(?is)please\s+wait\s*(?:\.{2,3}|\u2026)")
 PDF_VERSION_EXTS = (".pdf",)
 
 
 def _pdfinfo_form(path: Path) -> str:
-    """The `Form:` line pdfinfo prints ("" when pdfinfo is absent/unreadable).
+    """The raw `Form:` value pdfinfo prints ("" when pdfinfo is absent/unreadable).
 
-    `pdfinfo` prints "Form: none" for an ordinary PDF, so only a value naming a
-    form TECHNOLOGY (XFA/LiveCycle/Acrobat form) counts; "none" is no form.
+    `pdfinfo` prints "Form: none" for an ordinary PDF and the form TECHNOLOGY
+    (XFA/LiveCycle/AcroForm) for a form, and the two must stay distinguishable:
+    a caller that asks "is this (or may it be) a form?" tests for the empty
+    string (pdfinfo could not tell) and for "none" (pdfinfo proved there is no
+    form) separately, exactly as `pdf_artifact_rows` does.
     """
     exe = shutil.which("pdfinfo")
     if not exe:
@@ -8541,7 +8733,7 @@ def _pdfinfo_form(path: Path) -> str:
     for line in (proc.stdout or "").splitlines():
         if line.lower().startswith("form:"):
             value = line.split(":", 1)[1].strip()
-            return "" if value.lower() in ("", "none") else value
+            return value
     return ""
 
 
@@ -8625,15 +8817,21 @@ def pdf_artifact_rows(path: Path, text: str = None, pages=None) -> list:
         exe = shutil.which("pdftotext")
         if exe:
             proc = subprocess.run([exe, "-layout", str(path), "-"],
-                                  capture_output=True, text=True)
+                                  capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace", timeout=60)
             text = proc.stdout or ""
         else:
             text = ""
     body = (text or "").strip()
     is_xfa, non_empty, is_shell = _xfa_dataset_report(Path(path))
-    placeholder = (bool(PDF_PLACEHOLDER_RE.search(body))
-                   or (bool(PDF_PLACEHOLDER_STRONG_RE.search(body)) and len(body) < 1500)
-                   or is_shell)
+    strong = bool(PDF_PLACEHOLDER_STRONG_RE.search(body)) and len(body) < 1500
+    if strong and not is_shell:
+        # The bare "Please wait..." fallback must not flag ordinary prose. It
+        # fires only for a document that is (or may be) a form: pdfinfo reported
+        # one, or pdfinfo is unavailable to disprove it.
+        form_line = _pdfinfo_form(Path(path))
+        strong = form_line == "" or "none" not in form_line.lower()
+    placeholder = bool(PDF_PLACEHOLDER_RE.search(body)) or strong or is_shell
     if placeholder:
         evidence = (f"rendered text is the Adobe placeholder ({len(body)} chars)"
                     if body else "the PDF's own streams carry the Adobe placeholder text")
@@ -8671,7 +8869,8 @@ def check_pdf(path: Path, policy: dict) -> dict:
                           "detail": "cannot check pages for blankness", "fix": "manual",
                           "protected": False}]}
     proc = subprocess.run(["pdftotext", "-layout", str(path), "-"],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=60)
     if proc.returncode != 0:
         # An unreadable/missing PDF yields empty text, which parses as 0 pages
         # and 0 blank pages: reporting that as clean is a false pass on the one
@@ -8794,7 +8993,11 @@ def zotero_structural_faults(report: dict) -> list:
     """
     out = []
     for msg in report.get("errors") or []:
-        m = re.match(r"(?:\S+:\s+)?\[([a-z\-]+)\]", str(msg))
+        # The part-name prefix can contain a space ("word/my notes.xml: ..."),
+        # which `\S+:` could never span: the fault code read as "" and the row
+        # was dropped, so `zotero-check` printed CLEAN (exit 0) on a broken
+        # field -- the exact regression the multi-part prefix parse closed.
+        m = re.match(r"(?:\S[^\n]*?: )?\[([a-z][a-z\-]*)\]", str(msg))
         code = m.group(1) if m else ""
         if code in ZOTERO_FAULT_CODES:
             out.append(str(msg))
@@ -8830,9 +9033,15 @@ def cmd_zotero_check(args) -> int:
             part_names = [n for n in names
                           if n in ZOTERO_FIELD_PARTS or ZOTERO_FIELD_AUX_PARTS_RE.search(n)]
             parts = [(n, pkg.read(n).decode("utf-8", "replace")) for n in part_names]
+            # EVERY store the package-level scan reads, customXml payloads
+            # included: the CLI printed "style store(s): ..." and CLEAN while a
+            # third store in customXml/item<N>.xml was visible only to the
+            # stage gate's scan.
+            style_names = [n for n in ("word/settings.xml", "docProps/custom.xml")
+                           if n in names]
+            style_names += [n for n in names if re.match(r"customXml/item\d*\.xml$", n)]
             style_parts = {n: pkg.read(n).decode("utf-8", "replace")
-                           for n in ("word/settings.xml", "docProps/custom.xml")
-                           if n in names}
+                           for n in style_names}
     except (OSError, zipfile.BadZipFile, KeyError) as e:
         print(f"[FAIL] {path}: unreadable DOCX ({type(e).__name__}: {e})")
         return 1
@@ -8841,6 +9050,10 @@ def cmd_zotero_check(args) -> int:
     styles = zotero_style_ids(style_parts)
     rows = zotero_parity_rows_for_parts(parts, styles)
     state = zotero_citation_state(xml, paras, styles)
+    # ... over EVERY field-carrying part: the count beside the citation count
+    # (itself package-wide) read only document.xml, so a note-style manuscript
+    # printed "N citation(s); 0 distinct cited item(s)".
+    distinct_items = len(zotero_package_order(parts))
     report = zotero_report_for_docx(path)
     faults = zotero_structural_faults(report)
     counts_report = report.get("counts") or state["report"]["counts"]
@@ -8848,7 +9061,7 @@ def cmd_zotero_check(args) -> int:
     print(f"{path}")
     print(f"  live field(s): {counts_report.get('item', 0)} citation, "
           f"{counts_report.get('bibliography', 0)} bibliography; "
-          f"{state['distinct_items']} distinct cited item(s); "
+          f"{distinct_items} distinct cited item(s); "
           f"style store(s): {styles or 'none'}")
     if not rows and not faults:
         print("  CLEAN -- the markers, the bibliography order and the style store(s) agree; "
@@ -8888,7 +9101,7 @@ def cmd_validate(args) -> int:
 
 
 def cmd_lookup(args) -> int:
-    """`lookup --kind KIND --query Q`: resolve a searchable placeholder.
+    """`lookup [--kind KIND] Q`: resolve a searchable placeholder.
 
     Verdicts: found / absent (a verified negative) / error (never fatal).  The
     positional form `lookup "<title>"` still means a preprint search.
@@ -8952,7 +9165,7 @@ def main(argv=None) -> int:
                     help="another query (repeatable; batch a whole placeholder list)")
     lk.add_argument("--kind", default="preprint",
                     choices=["preprint", "paper", "title", "doi", "accession", "repository",
-                             "repo", "commit", "archive", "deposit", "orcid"])
+                             "repo", "commit", "archive", "deposit", "orcid", "gene"])
     lk.add_argument("--json")
     lk.add_argument("--timeout", type=int, default=30)
     lk.set_defaults(func=cmd_lookup)

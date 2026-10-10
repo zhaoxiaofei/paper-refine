@@ -450,7 +450,7 @@ CODE-SIDE CHECKS (in addition to what the prompts ask the agents to do)
                           template's, and the recorded pass must name each
                           template document and its rendered page count.
     * review contract     submission_dir must resolve to base/, every check id
-                          M1-M17, J1-J5 plus M18-M35 (the always-active length/
+                          M1-M17, J1-J5 plus M18-M36 (the always-active length/
                           caption/formatting checks, the adopted rewrite-parity
                           checks and the source-hierarchy reconciliation) must
                           carry a real coverage disposition,
@@ -1736,6 +1736,12 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
             clean_references["flag_preprints"] = bool(flag)
     clean_tables = _clean_display_rules(out.get("tables"), "tables", problems)
     clean_figures = _clean_display_rules(out.get("figures"), "figures", problems)
+    # The profile's own provenance map (C15 preserves it): a non-object value
+    # is a malformed field like any other and must be reported, not dropped.
+    raw_sources = out.get("sources")
+    if raw_sources is not None and not isinstance(raw_sources, dict):
+        problems.append("'sources' must be an object of name -> URL/string (the profile's "
+                        "provenance map); got " + type(raw_sources).__name__)
 
     if problems:
         raise VenueProfileError(f"{origin}: " + "; ".join(problems))
@@ -1753,7 +1759,6 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
     # profile's own `sources` field names where its numbers come from"), and
     # the rebuilt return value used to drop the key, so a stage reading the
     # profile through VenueProfile.data could not name the guideline it used.
-    raw_sources = out.get("sources")
     clean_sources = ({str(k): str(v) for k, v in raw_sources.items()}
                      if isinstance(raw_sources, dict) else {})
     return {
@@ -10561,8 +10566,13 @@ class RunLogStream:
         return getattr(self._stream, name)
 
 
+# Commands that drive or mutate a root keep their console in
+# reports/<cmd>-<stamp>.log (see begin_run_log). `conform --agent`, `add-venue`
+# and `track` run FULL agent sessions / Word compare work like `redline` does,
+# so their retry, backoff and advisory lines must land in the root too instead
+# of only in a disposable sandbox log.
 LOGGING_COMMANDS = ("setup", "run", "run-decide", "decide", "retry", "prune", "redline",
-                    "conflicts")
+                    "conflicts", "conform", "add-venue", "track")
 # The path of the invocation's run log (set by `main`, recorded by
 # `save_state`): a root accumulates the console of its invocations, so the
 # retry/backoff lines and the judge advisories of an old run are still readable.
@@ -12434,6 +12444,13 @@ def pre_judge_format_policy(ctx: Ctx) -> dict:
     return policy
 
 
+def _docx_files_under(dirp: Path) -> list:
+    """Every .docx/.DOCX under a directory (see paper_docx_format.docx_files_under):
+    `rglob("*.docx")` is case-sensitive on Linux, so an uppercase extension was
+    invisible to every corpus formatting scan."""
+    return sorted(set(dirp.rglob("*.docx")) | set(dirp.rglob("*.DOCX")))
+
+
 def scan_format_in_sources(sources: list, policy=None) -> dict:
     """Style/formatting findings over [(dir, prefix, excluded_top)] sources.
 
@@ -12458,14 +12475,21 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
     resolved = dict(getattr(mod, "POLICY_DEFAULTS", {}) or {})
     resolved.update(policy or {})
     policy = resolved
+    # The same "a later source overrides the earlier one" filter the caption and
+    # length scanners apply: without it a path provided by two sources (a
+    # candidate's own revised/code/ over code/) was reported from BOTH copies --
+    # one of them a file the corpus builder never ships.
+    overrides = corpus_source_overrides(sources)
     docs, rows = [], []
-    for src, prefix, excluded in sources:
+    for i, (src, prefix, excluded) in enumerate(sources):
         if not src.is_dir():
             continue
-        for p in sorted(src.rglob("*.docx")):
+        for p in _docx_files_under(src):
             if not p.is_file() or p.name.startswith("~$") or _is_aux_doc(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
+            if (prefix + rel) in overrides[i]:
+                continue                      # a later source provides this path
             if excluded and rel.split("/", 1)[0] in excluded:
                 continue
             if is_non_manuscript_rel(rel):
@@ -12512,7 +12536,6 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                              "evidence": r["evidence"], "detail": r["detail"],
                              "fix": "editorial", "protected": False,
                              "tier": r.get("tier") or mod.tier_of(r["rule"])})
-    overrides = corpus_source_overrides(sources)
     by_rule = {}
     for r in rows:
         by_rule[r["rule"]] = by_rule.get(r["rule"], 0) + 1
@@ -12541,7 +12564,7 @@ def format_note(info) -> str:
 def _fmt_corpus_files(dirp: Path) -> list:
     """Corpus .docx files under `dirp` (the same filter the corpus builder uses)."""
     out = []
-    for p in sorted(dirp.rglob("*.docx")):
+    for p in _docx_files_under(dirp):
         if not p.is_file() or p.name.startswith("~$") or _is_aux_doc(p.name):
             continue
         rel = p.relative_to(dirp).as_posix()
@@ -13661,7 +13684,7 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
         multiset -- failed a compliant session.
         """
         out = []
-        for p in root.rglob("*.docx"):
+        for p in _docx_files_under(root):
             if not p.is_file() or _is_aux_doc(p.name) or p.name.startswith("~$"):
                 continue
             rel = p.relative_to(root)
@@ -14690,7 +14713,7 @@ def corpus_text_documents(sources: list) -> list:
     for src, prefix, excluded in sources:
         if not src.is_dir() or mod is None:
             continue
-        for p in sorted(src.rglob("*.docx")):
+        for p in _docx_files_under(src):
             if not p.is_file() or p.name.startswith("~$") or _is_aux_doc(p.name) \
                     or is_bookkeeping_name(p.name):
                 continue
@@ -16476,6 +16499,9 @@ def die(msg: str, code: int = 1):
     sys.exit(code)
 
 
+ONLY_ROUND_RANGE_CAP = 64
+
+
 def parse_only_rounds(text: str, item: str, flag: str = "--only") -> set:
     """Parse the round side of an `--only` item: "2", "1-3" or "1,2,4" -> set.
 
@@ -16494,6 +16520,14 @@ def parse_only_rounds(text: str, item: str, flag: str = "--only") -> set:
                 die(f"{flag}: round ordinals are 1-based, got {item!r}")
             if hi < lo:
                 die(f"{flag}: empty round range {chunk!r} in {item!r}")
+            # Refuse an implausible span HERE: `1-999999999` used to expand
+            # into a billion-element set -- the process died (MemoryError, no
+            # message) long before `validate` could range-check it against the
+            # configured round count.
+            if hi - lo + 1 > ONLY_ROUND_RANGE_CAP:
+                die(f"{flag}: round range {chunk!r} in {item!r} names "
+                    f"{hi - lo + 1} rounds; the pipeline's round count is a handful "
+                    f"(rounds are 1-based)")
             rounds.update(range(lo, hi + 1))
             continue
         if not chunk.isdigit():
@@ -17809,7 +17843,12 @@ class Ctx:
         return acquired
 
     def rounds_count(self) -> int:
-        return int(self.cfg.get("rounds", DEFAULTS["rounds"]) or 0)
+        # The SAME clamp `config_rounds` applies, and for the same reason: a
+        # hand-edited `"rounds": 0` made this accessor return 0 (every other
+        # caller clamps, but `pinned_integrity`'s range(1, 1), the r0_a2
+        # final-version id and prune's keep_from do not), silently disabling
+        # winner verification instead of failing.
+        return config_rounds(self)
 
     def judges_count(self, r: int = None) -> int:
         """Judge sessions per version.
@@ -21315,7 +21354,11 @@ def docx_compare_mcp_spec() -> dict:
     cmd = str(spec.get("command") or "")
     if not cmd:
         return {}
-    present = Path(cmd).exists() if cmd.startswith(("/", "~")) else bool(shutil.which(cmd))
+    # `~` IS expanded here, like the sibling probe in `mcp_server_configured`:
+    # a home-relative command used to read as "not installed" and silently
+    # vanish from the redline chain.
+    present = (Path(os.path.expanduser(cmd)).exists() if cmd.startswith(("/", "~"))
+               else bool(shutil.which(cmd)))
     return spec if present else {}
 
 
@@ -21357,7 +21400,8 @@ def visual_renderer_choices() -> list:
     if mcp_server_configured(DOCX_MCP_SERVER):
         spec = mcp_server_spec(DOCX_MCP_SERVER)
         cmd = str(spec.get("command") or "")
-        present = Path(cmd).exists() if cmd.startswith(("/", "~")) else bool(shutil.which(cmd))
+        present = (Path(os.path.expanduser(cmd)).exists() if cmd.startswith(("/", "~"))
+                   else bool(shutil.which(cmd)))
         if cmd and present:
             out.append((f"mcp:{DOCX_MCP_SERVER}", spec))
     here = Path(__file__).resolve().parent
@@ -30889,10 +30933,17 @@ def _terminate_agent_tree(proc: subprocess.Popen) -> None:
     `start_new_session=True`, so SIGTERM (then SIGKILL) to its process group
     reaches every descendant that did not deliberately leave the group.
     """
-    try:
-        pgid = os.getpgid(proc.pid)
-    except OSError:
-        pgid = None
+    # os.getpgid/os.killpg are POSIX-only: on native Windows the attribute is
+    # MISSING (AttributeError, not OSError), so a timed-out agent raised out of
+    # the timeout handler and its tree kept running. The group kill happens only
+    # where both calls exist; elsewhere proc.terminate()/proc.kill() is the
+    # portable fallback.
+    pgid = None
+    if hasattr(os, "getpgid") and hasattr(os, "killpg"):
+        try:
+            pgid = os.getpgid(proc.pid)
+        except OSError:
+            pgid = None
     try:
         if pgid:
             os.killpg(pgid, signal.SIGTERM)
@@ -36063,7 +36114,14 @@ def detect_round_judge_conflicts(opinions: list) -> list:
                 raw = (o.get("checks") or {}).get(cid)
                 if raw is None:
                     continue
-                disp[str(o.get("judge_run"))] = str(raw).strip().split()[0].lower()
+                # An agent-authored cell can be empty/whitespace ("" is a legal
+                # JSON value in scores.json): splitting it would raise
+                # IndexError and the callers' generic handler then skips the
+                # WHOLE round's conflicts audit. Degrade per-check, not
+                # per-round: the empty disposition simply disagrees with
+                # nothing.
+                words = str(raw).strip().split()
+                disp[str(o.get("judge_run"))] = (words[0] if words else "").lower()
             vals = set(disp.values())
             if "clean" in vals and (vals & {"findings", "unable"}):
                 conflicting.append((cid, vals))
@@ -37350,7 +37408,20 @@ def package_pdf_rows(root: Path, limit: int = 40) -> list:
         if is_evidence_rel(rel):
             continue
         try:
-            found = mod.pdf_artifact_rows(p)
+            # FMT-PDF3 (an empty export: no extractable text, no embedded
+            # image) requires the page count, and this was the one caller that
+            # never supplied one -- so the publish scan could not report the
+            # blank export its own docstring promises to catch. pdftotext ends
+            # every rendered page with a form feed.
+            text = pages = None
+            if shutil.which("pdftotext"):
+                proc = subprocess.run(["pdftotext", "-layout", str(p), "-"],
+                                      capture_output=True, text=True, encoding="utf-8",
+                                      errors="replace", timeout=60)
+                if proc.returncode == 0:
+                    text = proc.stdout or ""
+                    pages = text.count("\f")
+            found = mod.pdf_artifact_rows(p, text=text, pages=pages)
         except Exception as e:                                        # noqa: BLE001
             found = [{"rule": "FMT-PDF3", "severity": "medium", "document": rel,
                       "location": "-", "evidence": f"{type(e).__name__}: {e}",
@@ -39493,7 +39564,7 @@ def _argv_from_template(template: list, base: Path, revised: Path, out: Path) ->
 def _run_redline_cmd(argv: list, out: Path, timeout: int = 900) -> dict:
     try:
         proc = subprocess.run([str(a) for a in argv], capture_output=True, text=True,
-                              timeout=timeout)
+                              encoding="utf-8", errors="replace", timeout=timeout)
         rc, err, so = proc.returncode, (proc.stderr or "").strip(), (proc.stdout or "").strip()
     except FileNotFoundError as e:                              # noqa: BLE001
         rc, err, so = None, f"not found: {e}", ""
@@ -42751,10 +42822,10 @@ def build_parser() -> argparse.ArgumentParser:
                          f"{DEFAULTS['retry_backoff_max']})")
     run_opts.add_argument("--agent", choices=["codex", "claude", "manual"], default=DEFAULTS["agent"])
     run_opts.add_argument("--no-template-stage", action="store_true",
-                          help="transfer mode only: do NOT author the package inside the "
-                               "journal's Word templates before the round (the default is to "
-                               "run that stage first, since it defines the submission the "
-                               "round starts from)")
+                          help="do NOT author the package inside the journal's Word templates "
+                               "before the round (the default is to run that stage first in "
+                               "the `init` AND `transfer` journal modes, since it defines the "
+                               "submission the round starts from)")
     run_opts.add_argument("--agent-cmd", default=None,
                     help="JSON argv list overriding the agent command")
     run_opts.add_argument("--judge-agent", choices=["codex", "claude", "manual"], default=None,
