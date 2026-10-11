@@ -11,6 +11,9 @@ debug_runs/
 # The README quickstart's own run root (`./paper_rounds`) is output, not source.
 paper_rounds/
 
+# ignore temporary directories and files
+tmp/
+
 # Windows/WSL "downloaded from the internet" marker files (`name:Zone.Identifier`)
 *:Zone.Identifier
 
