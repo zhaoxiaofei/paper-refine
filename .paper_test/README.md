@@ -18,8 +18,8 @@ The suites are independent (each builds its own root under `tempfile.mkdtemp`,
 and the fixed `/tmp` paths are per-suite), so run them in parallel:
 
 ```bash
-python3 .paper_test/run_all.py             # GNU parallel, 20 jobs by default
-                                           # (capped by the CPU count and the suite count)
+python3 .paper_test/run_all.py             # GNU parallel, 24 jobs by default
+                                           # (capped only by the suite count)
 python3 .paper_test/run_all.py -j 4        # cap the parallelism
 python3 .paper_test/run_all.py -j 1        # exactly the old sequential loop
 python3 .paper_test/run_all.py --only test_pipeline test_docx_format_1_scan_fix

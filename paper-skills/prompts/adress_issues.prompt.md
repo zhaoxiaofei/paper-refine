@@ -294,6 +294,16 @@ read or parse (foreign namespace, missing `itemData`, unreadable XML) stays
 untouched and goes to MANUAL_STEPS.md; never trigger Zotero Refresh yourself —
 the author refreshes in Word.
 
+**The pipeline's formatter performs the deterministic refresh OFFLINE
+(2026-10-11).** Every package-producing stage's postcheck runs `fix_package`,
+which refreshes stale markers from the document's own citation order, rebuilds a
+library-order bibliography and reconciles the style stores (`zotero-refresh`
+does the same stand-alone). A session therefore never needs to file a stale
+marker as a hand-off: file `manual-required` for a citation/problem ONLY when
+that offline refresh refuses it (a marker shape it cannot rebuild, a
+bibliography entry it cannot match to any item's embedded `itemData`) — those
+refusals are listed in the formatter's report under `zotero_refresh.skip`.
+
 **Snapshot first, prove the edit.** Keep an untouched copy of every `.docx`
 whose live fields you edit. After saving, validate the edited copy against that
 snapshot with the bundled read-only validator

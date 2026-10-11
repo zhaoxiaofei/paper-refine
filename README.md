@@ -1492,6 +1492,8 @@ formatting used to be invisible to every stage. The pipeline now handles it:
 Policy overrides (`setup --format-policy policy.json`): `journal_italics`,
 `quote_style`, `caption_line`, `caption_space`, `title_page_header`,
 `url_style`, `max_em_dashes_per_1000`, `unlink_zotero_fields`,
+`refresh_zotero_fields`, `repair_reference_entries`,
+`unlink_zotero_fields_at_publish`,
 `align_heading_sizes`, `blank_page_tolerance`, `max_empty_paragraph_run`,
 `empty_paragraph_slots`, `image_aspect_tolerance`.
 
@@ -1657,7 +1659,7 @@ copied next to `PROMPT.md` in every session sandbox (including the judge's, whos
 prompt names the same command); it carries no per-run data, and the judge's copy
 is stamped with the view timestamp.
 
-### Zotero live-field parity (`zotero-check`, FMT-Z1–Z5) and package integrity (M31–M36, PKG-1, FMT-PDF1–3)
+### Zotero live-field parity + automatic repair (`zotero-check` / `zotero-refresh`) and package integrity (M31–M36, PKG-1, FMT-PDF1–4)
 
 A manuscript's citations are live Zotero fields: the numbers in the text and the
 order of the bibliography are CACHED results of the last citation-processor run,
@@ -1684,6 +1686,43 @@ cannot read. The stage gate compares the parity rows and the fault signature
 version to version, and `fix --unlink-zotero-fields` (the explicit flattening
 policy) refuses to unlink a STALE document — flattening now would freeze the
 wrong numbers in the submission copy.
+
+**The pipeline REPAIRS the stale state itself (2026-10-11).** `fix_package`
+(every package-producing stage, plus publication) runs an offline refresh before
+the mechanical fixes: `zotero_refresh_document` re-derives every marker from the
+document's own citation order, rewrites the cached `formattedCitation` and the
+visible result runs, rebuilds a bibliography whose order/numbers disagree
+(matching every entry to its item's embedded `itemData`; all-or-nothing), and
+reconciles the style stores to ONE CSL style. The same pass repairs the
+reference-entry shapes `FMT-R1`/`R2`/`R3` from the values the package's own
+`.bib` proves (a fused volume, a missing arXiv locator, a missing software
+year). Nothing is written unless every field resolves and the result passes the
+same FMT-Z checks that reported the defect; anything else stays a manual item.
+Stand-alone:
+
+```bash
+python paper_docx_format.py zotero-refresh file.docx [--out file.fixed.docx]
+python paper_docx_format.py xfa-export form.pdf   # readable rendering of a filled XFA form
+```
+
+**Unlinking is NEVER a default: the pipeline does not unlink the Zotero fields
+unless it is explicitly asked to** — the author normally unlinks them manually
+when preparing the final submission file. When unlinking *is* requested, it
+always runs in this order (refresh → verify → unlink), so it can only freeze
+the CORRECT numbering. The explicit triggers are the CLI options
+`zotero-refresh FILE.docx --unlink`, `fix FILE.docx --out OUT
+--unlink-zotero-fields`, and — for the published copy — `decide
+--unlink-zotero-fields` (or `format_policy.unlink_zotero_fields_at_publish:
+true`); the published copy is otherwise left with refreshed, live fields, and
+the readme says so. When a requested flatten is refused (the refresh could not
+make the document clean) `readiness` records `FMT-Z7` ("live fields remain in
+the published copy") instead of freezing unverified numbers. A filled XFA form still needs the Adobe export when the venue
+requires the journal's own form: the scanner reports `FMT-PDF4`
+(filled-but-not-flattened, never the false `FMT-PDF2` "unfilled" this pipeline
+itself used to emit), `xfa-export` writes a readable rendering of every answer,
+and `decide` records a `readiness` verdict (`submission_ready` plus the package
+findings); `decide --require-ready` turns those findings into blockers instead
+of certifying a package that cannot be uploaded.
 
 The same round (2026-10-09) added the evidence-integrity sweeps **M31–M36**
 (M31 artwork-versus-legend consistency, M32 a headline statistic against the
@@ -2350,13 +2389,12 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 111 suites (a few
-minutes at the default parallelism on a 20-core box; tens of minutes
-sequentially):
+any failure. They are independent, so run them in parallel — 112 suites (a few
+minutes at the default 24 parallel sessions; tens of minutes sequentially):
 
 ```bash
-python3 .paper_test/run_all.py          # GNU parallel (20 jobs by default, capped by the
-                                      # CPU count and the suite count); falls back to a
+python3 .paper_test/run_all.py          # GNU parallel (24 jobs by default, capped only by
+                                      # the suite count); falls back to a
                                       # thread pool when `parallel` is missing
 python3 .paper_test/run_all.py -j 4     # cap the parallelism on a smaller box
 python3 .paper_test/run_all.py -j 1     # the old sequential loop, for a bisect
@@ -2425,7 +2463,7 @@ compatibility for a root with no `venue`/`article_type` key.
 | 2 | nothing to decide yet, or a usage error |
 | 3 | a round is incomplete (progress saved; resume with `run`) |
 | 4 | a valid stopping point that is not a certified answer: `decide --require-complete` on a provisional decision, or `redline` with failed renders (when a tool was used) |
-| 5 | `decide` found integrity or (with `--format-gate`) high-severity formatting problems |
+| 5 | `decide` found integrity problems, (with `--format-gate`) high-severity formatting problems, or (with `--require-ready`) package-level readiness findings |
 
 ## Notes
 

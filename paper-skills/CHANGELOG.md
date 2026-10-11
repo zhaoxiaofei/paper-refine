@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.36 — the offline Zotero refresh: the formatter repairs the fields (2026-10-11)
+
+- **`zotero-refresh` and the automatic refresh in `fix_package`.** A new
+  deterministic repair (`zotero_refresh_document`, `refresh_zotero_parts`,
+  `refresh_zotero_package` in `paper_docx_format.py`, CLI `zotero-refresh`)
+  re-derives every citation number from the document's own citation order,
+  rewrites the field's cached `formattedCitation`/`plainCitation` and the visible
+  result runs, rebuilds a bibliography whose order or numbers disagree (every
+  entry matched to its item's embedded `itemData`; a full bijection or nothing)
+  and reconciles the conflicting CSL style stores. The refresh is
+  all-or-nothing and verifies itself with the same FMT-Z checks that reported
+  the defect; a refusal writes nothing and records the reason. `fix_package`
+  runs it (policy `refresh_zotero_fields`, default ON) at every
+  package-producing stage and at publication, BEFORE `unlink_zotero_fields` —
+  a flattened submission copy now carries the correct numbering.
+- **Reference-entry repairs from the package's own bibliography.** The
+  FMT-R1/R2/R3 shapes (a volume fused to a year, a bare-year entry with no
+  venue, a software citation with no year) are repaired from the facts a
+  sibling `.bib` proves (`repair_reference_entries`, `load_bib_facts`), with the
+  same rules re-run as the verification; no record, no repair.
+- **The XFA reader counts answers across dataset packets.** A filled LiveCycle
+  form (stale empty packet + current filled packet, whitespace-serialized tags)
+  is no longer reported as UNFILLED: `FMT-PDF2` fires only when every packet is
+  empty, a filled-but-shell form gets the new `FMT-PDF4` (flatten it), and
+  `xfa-export` renders the answers readably.
+- **Submission readiness is a recorded verdict.** `decide` records a
+  `readiness` block (`submission_ready` + the package findings), the status
+  readme prints "Submission readiness: NOT READY" beside CERTIFIED, and
+  `decide --require-ready` turns those findings into blockers. XFA answer
+  renderings are written to `reports/xfa_exports/`.
+- **Unlinking is NEVER a default — it is an explicit CLI opt-in.** The pipeline
+  refreshes the fields everywhere, but it does not unlink them (the author
+  normally unlinks manually when preparing the final submission file). The
+  explicit triggers are `zotero-refresh FILE.docx --unlink`,
+  `fix FILE.docx --out OUT --unlink-zotero-fields`, and — for the published
+  copy — `decide --unlink-zotero-fields` (or
+  `format_policy.unlink_zotero_fields_at_publish: true`). When requested, the
+  order is refresh → verify → unlink, so only the verified numbering is
+  frozen; a refusal leaves the fields live and becomes readiness finding
+  `FMT-Z7` ("live fields remain in the published copy") — never a silent
+  freeze. The readme states which of the three outcomes happened.
+- **Skill/prompt sync.** `paper-revise/SKILL.md`, `references/edit_rules.md`
+  (rule E2) and the standalone `adress_issues.prompt.md` now say the refresh is
+  automatic, so a stale citation is a hand-off only when the offline refresh
+  refuses it.
+
 ## 0.35 — discovery parity: the integrator gets the list, judges re-derive their own (2026-10-10)
 
 - **The integration stage reconciles the discovery list.** The frozen `X-*`

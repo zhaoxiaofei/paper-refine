@@ -13,6 +13,9 @@ spacing. This tool makes those defects checkable and fixes the mechanical ones.
     python3 paper_docx_format.py scan  PACKAGE_DIR [--pdf FILE.pdf] [--json OUT.json]
     python3 paper_docx_format.py fix   FILE.docx --out FILE.fixed.docx [--json OUT.json]
     python3 paper_docx_format.py check-pdf FILE.pdf
+    python3 paper_docx_format.py zotero-check   FILE.docx      # what a refresh would rewrite
+    python3 paper_docx_format.py zotero-refresh FILE.docx      # repair it offline (in place)
+    python3 paper_docx_format.py xfa-export     FORM.pdf       # readable rendering of the answers
     # policy overrides:  --policy policy.json  (see POLICY_DEFAULTS)
 
 Design rules, each one the result of an observed failure:
@@ -85,8 +88,10 @@ text quoted that REQUIRES the formatting.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
+import os
 import posixpath
 import re
 import shutil
@@ -148,6 +153,17 @@ POLICY_DEFAULTS = {
     "image_aspect_tolerance": 0.02,
     "strip_proofing_markers": True,
     "unlink_zotero_fields": False,
+    # The local Zotero refresh (see `refresh_zotero_parts`): re-derive the
+    # numbering from the document's own citation order, rebuild the
+    # bibliography order, and reconcile the style stores -- automatically, at
+    # every stage postcheck and at publication. `off` leaves the fields exactly
+    # as authored and only reports them. `zotero_style` pins the CSL style the
+    # stores are reconciled TO ("" = keep the newer store's style).
+    "refresh_zotero_fields": True,
+    # The reference-entry repairs (FMT-R1/R2/R3) a sibling .bib proves; `off`
+    # reports the shapes and never touches the bibliography text.
+    "repair_reference_entries": True,
+    "zotero_style": "",
     "blank_page_tolerance": 0,
     # The venue's TABLE rule (see DISPLAY_PLACEMENTS / display_item_rows):
     # {} = this format policy declares no table rule, so the scan reports none.
@@ -167,6 +183,19 @@ POLICY_DEFAULTS = {
     # defects and always run; this block adds the venue's own preference.
     "references": {},                   # {"flag_preprints": true}
 }
+
+
+def _policy_flag(policy: dict, key: str, default: bool = True) -> bool:
+    """A policy key as a boolean ("off"/"false"/"no"/"0" disable)."""
+    if key not in (policy or {}):
+        return default
+    value = policy.get(key)
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() not in ("off", "false", "no", "0")
+
 
 JOURNAL_RE = re.compile(
     r"\b(?:Nature(?:\s+(?:Biotechnology|Methods|Genetics|Communications|Medicine))?|"
@@ -5803,12 +5832,15 @@ def zotero_citation_state(xml: str, para_texts: list = None,
         for key in f["items"]:
             order.setdefault(key, len(order) + 1)
     entries = {}
+    entry_order = []
     for text in (para_texts or [])[_bibliography_entry_start(para_texts):]:
         m = re.match(r"^\s*(\d+)\s*[\.\)]\s*(.+)$", str(text or ""))
         if m:
             entries.setdefault(int(m.group(1)), m.group(2).strip())
+            entry_order.append(int(m.group(1)))
     numeric = bool(fields) and sum(1 for f in fields if f["numbers"]) >= max(1, 0.6 * len(fields))
     return {"fields": fields, "order": order, "entries": entries, "numeric": numeric,
+            "entry_order": entry_order,
             "distinct_items": len(order),
             "style_ids": dict(style_ids or {}), "report": report}
 
@@ -5898,6 +5930,20 @@ def zotero_parity_rows(xml: str, para_texts: list = None, style_ids: dict = None
                              "protected": True})
                 if len(rows) >= limit:
                     return rows
+        # ... and the entries must APPEAR in rank order: a list whose numbers
+        # run 2,1 (or whose paragraphs are otherwise out of order) is a stale
+        # bibliography a Word/Zotero refresh re-sorts, even though every
+        # numbered entry happens to describe the right work.
+        seq = [n for n in (state.get("entry_order") or []) if n in entries]
+        expected = sorted(entries)
+        if seq and sorted(seq) == expected and seq != expected:
+            rows.append({"rule": "FMT-Z2", "severity": "medium", "location": "bibliography",
+                         "evidence": f"entries appear in the order {seq[:10]}",
+                         "detail": "the bibliography's paragraphs are not in citation-rank "
+                                   "order: a Word/Zotero refresh re-sorts the list (the "
+                                   "numbered entries may still describe the right works, so "
+                                   "nothing else notices)",
+                         "protected": True})
     # FMT-Z3 -- one item showing two numbers, or a number outside 1..N.
     seen = {}
     for f in state["fields"]:
@@ -6047,6 +6093,951 @@ def zotero_parity_rows_for_parts(parts: list, style_ids: dict = None,
         if len(rows) >= limit:
             break
     return rows[:limit]
+
+
+# --------------------------------------------------------------------------
+# THE LOCAL REFRESH — a deterministic Zotero "Refresh" (2026-10-11)
+#
+# `zotero-check` (FMT-Z1..Z5) proves that a live-field document is stale, and
+# the old contract stopped there: the numbers were repaired only by a human
+# running Zotero → Refresh in Word. This section closes the loop offline.
+# Every citation item's number is re-derived from the document's own citation
+# order, the markers and their cached JSON are rewritten to it, and the
+# bibliography is rebuilt in the same order — the same repair the plugin
+# performs, restricted to the part a machine can verify.
+#
+# Contract (each clause is a refusal, not a warning):
+#   * only a NUMERIC citation style is refreshed; a marker shape this module
+#     cannot rebuild byte-for-byte is left for the author;
+#   * every cited item must resolve to a rank, and every marker must be
+#     rebuildable, or NOTHING is written;
+#   * the bibliography is rebuilt only when it is needed AND every entry can
+#     be matched to its item with confidence, or NOTHING is written;
+#   * the result must pass the FMT-Z checks that reported the staleness; if it
+#     does not, the ORIGINAL xml is returned with the reason recorded.
+# --------------------------------------------------------------------------
+
+ZOTERO_MARKER_CLUSTER_RE = re.compile(r"\d+(?:\s*[,;\u2013\u2014-]\s*\d+)*")
+ZOTERO_MARKER_COMMAND_RE = re.compile(
+    r"\\super\b|\\nosupersub\{\}|\\nosupersub\b|\\uc0|\\u\d{1,5}\{\}")
+
+
+def _zotero_marker_cluster(marker: str):
+    """(start, end, cluster) of a formattedCitation's numeric cluster, or None.
+
+    Only a marker that is NOTHING but Zotero's own commands around one numeric
+    cluster is refreshable: a marker carrying prose, a locator or a command
+    this normalizer does not know stays with the author, exactly as it does in
+    the FMT-Z rules.
+
+    The cluster's INTERIOR may itself carry Zotero escapes: an en dash inside
+    "20\u201324,29,44" is serialized `\\uc0\\u8211{}24,29,44`, so the cluster is
+    taken from the first to the last digit and the interior is accepted once
+    the known commands are removed and only digits/separators remain.
+    """
+    s = str(marker or "")
+    digits = [i for i, ch in enumerate(s) if ch.isdigit()]
+    if not digits:
+        return None
+    start, stop = digits[0], digits[-1] + 1
+    interior = s[start:stop]
+    if not re.fullmatch(r"[\d\s,;.\u2013\u2014-]*",
+                        ZOTERO_MARKER_COMMAND_RE.sub("", interior)):
+        return None
+    residue = ZOTERO_MARKER_COMMAND_RE.sub("", s[:start] + s[stop:])
+    if residue.strip():
+        return None
+    return start, stop, interior
+
+
+def _zotero_cluster_for_ranks(ranks, original_cluster: str) -> str:
+    """(raw, visible) clusters Zotero prints for `ranks`.
+
+    A contiguous run of >2 ranks that the ORIGINAL cluster printed as a range
+    stays a range (the same dash serialization); everything else is a comma
+    list, which is what the numeric styles use for two items and for gaps.
+    `raw` keeps Zotero's escape (`\\uc0\\u8211{}`) when the original used it;
+    `visible` is what the result runs carry.
+    """
+    ranks = sorted({int(r) for r in ranks})
+    if not ranks:
+        return "", ""
+    if "\\uc0\\u8211{}" in original_cluster or "\\u8211{}" in original_cluster:
+        dash_raw, dash_vis = "\\uc0\\u8211{}", "\u2013"
+    elif "\u2013" in original_cluster:
+        dash_raw = dash_vis = "\u2013"
+    elif "\u2014" in original_cluster:
+        dash_raw = dash_vis = "\u2014"
+    elif "-" in original_cluster:
+        dash_raw = dash_vis = "-"
+    else:
+        dash_raw, dash_vis = "\\uc0\\u8211{}", "\u2013"
+    raw_parts, vis_parts = [], []
+    i = 0
+    while i < len(ranks):
+        j = i
+        while j + 1 < len(ranks) and ranks[j + 1] == ranks[j] + 1:
+            j += 1
+        if j - i >= 2:                       # >= 3 contiguous: a range
+            raw_parts.append(f"{ranks[i]}{dash_raw}{ranks[j]}")
+            vis_parts.append(f"{ranks[i]}{dash_vis}{ranks[j]}")
+        else:
+            for k in range(i, j + 1):
+                raw_parts.append(str(ranks[k]))
+                vis_parts.append(str(ranks[k]))
+        i = j + 1
+    return ",".join(raw_parts), ",".join(vis_parts)
+
+
+def _zotero_json_span(text: str):
+    """(start, end, parsed) of the first CSL_CITATION JSON value in `text`."""
+    m = re.search(r"CSL_CITATION\s*\{", text or "")
+    if not m:
+        return None
+    start = m.end() - 1
+    try:
+        js, n = json.JSONDecoder().raw_decode(text[start:].strip())
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
+    lead = len(text[start:]) - len(text[start:].lstrip())
+    start += lead
+    return start, start + n, js
+
+
+def _zotero_run_span(xml: str, start: int, end: int, kind: str):
+    """Span of the run holding the `kind` fldChar inside [start, end).
+
+    `zotero_field_report` records the fldChar ELEMENT's offsets, which sit
+    inside a run (the closing `</w:r>` follows them); the search window is
+    widened by a few hundred bytes so a run that only *contains* the element
+    can still match, and the element's own position decides which field it
+    belongs to.
+    """
+    end = end if end is not None else len(xml)
+    w0, w1 = max(0, start - 4000), min(len(xml), end + 4000)
+    for m in RUN_RE.finditer(xml, w0, w1):
+        fc = FIELD_CHAR_RE.search(m.group(0))
+        if not fc or fc.group(1) != kind:
+            continue
+        at = m.start() + fc.start()
+        if start <= at <= end:
+            return m.start(), m.end()
+    return None
+
+
+def _zotero_result_region(xml: str, frame: dict):
+    """(runs, template_run) of one field's RESULT runs, or None when unsafe.
+
+    The result region is everything between the run that carries the field's
+    `separate` fldChar and the run that carries its `end`. A refresh replaces
+    the region's text runs with one rebuilt run, so every run in it must be a
+    simple text run: a drawing, a `w:tab` or a nested field makes the region
+    unsafe and the field is left untouched.
+    """
+    sep = _zotero_run_span(xml, frame["begin"], frame["end"], "separate")
+    end = _zotero_run_span(xml, frame["begin"], frame["end"], "end")
+    if not sep or not end or sep[1] > end[0]:
+        return None
+    s, e = sep[1], end[0]
+    region_runs = list(RUN_RE.finditer(xml, s, e))
+    # Only whitespace may live outside the runs.
+    residue = RUN_RE.sub("", xml[s:e])
+    if residue.strip():
+        return None
+    template = None
+    for m in region_runs:
+        run = m.group(0)
+        if FIELD_CHAR_RE.search(run) or INSTR_RE.search(run) or DRAWING_RE.search(run) \
+                or "<w:tab" in run or "<w:br" in run:
+            return None
+        # EXACTLY one `w:t`: the rebuilt result run is cloned from the first
+        # run and its text replaced, so a run carrying a second `w:t` would
+        # keep that element's stale text beside the new number.
+        if len(re.findall(r"<w:t(?:\s[^>]*)?>.*?</w:t>", run, re.S)) != 1:
+            return None
+        if template is None:
+            template = run
+    if template is None:
+        return None
+    return (s, e, [(m.start(), m.end(), m.group(0)) for m in region_runs], template)
+
+
+def _zotero_result_run(template_run: str, text: str) -> str:
+    """A run cloned from the field's own result run, carrying `text`."""
+    return re.sub(r"<w:t(?:\s[^>]*)?>.*?</w:t>",
+                  '<w:t xml:space="preserve">' + esc(text) + "</w:t>",
+                  template_run, count=1, flags=re.S)
+
+
+def _zotero_entry_span_of_run(content: str):
+    """(start, end, number) of an entry's leading 'N.' text run, or None."""
+    m = re.match(r"^\s*(<w:r(?: [^>]*)?>.*?</w:r>)", content, flags=re.S)
+    if not m:
+        return None
+    run = m.group(1)
+    t = text_of(run)
+    nm = re.fullmatch(r"\s*(\d+)\s*[\.\)]?\s*", t)
+    if not nm:
+        return None
+    return m.start(1), m.end(1), int(nm.group(1))
+
+
+def _zotero_entry_match_score(entry_text: str, item: dict) -> int:
+    """Confidence that a bibliography ENTRY text describes one itemData."""
+    hay = re.sub(r"[^a-z0-9 ]+", " ", unicodedata.normalize(
+        "NFKD", str(entry_text or "")).lower())
+    score = 0
+    creators = item.get("author") or item.get("editor") or []
+    if isinstance(creators, list) and creators and isinstance(creators[0], dict):
+        family = str(creators[0].get("family") or creators[0].get("literal") or "").strip()
+        token = re.sub(r"[^a-z0-9 ]+", " ", family.lower()).split()
+        if token and token[0] in hay:
+            score += 3
+            if token[0] in hay[:80]:
+                score += 1
+    issued = item.get("issued") or {}
+    try:
+        year = str(issued.get("date-parts", [[None]])[0][0])
+    except (KeyError, IndexError, TypeError):
+        year = ""
+    if year and year != "None" and f"({year})" in re.sub(r"\s+", " ", entry_text):
+        score += 1
+    title = str(item.get("title") or "")
+    for t in re.sub(r"[^a-z0-9 ]+", " ", title.lower()).split():
+        if len(t) > 4 and t not in ZOTERO_TOKEN_STOPWORDS and t in hay:
+            score += 1
+            if score >= 8:
+                break
+    return score
+
+
+def zotero_bibliography_state(xml: str, frame: dict):
+    """The bibliography field's paragraphs, its entry texts and the rebuild parts.
+
+    Returns {"skip": reason|None, "heads": [...], "contents": [...],
+    "numbers": [...], "spine": xml, "tail": xml, "start": i, "end": i,
+    "end_in_last_entry": bool, "entries": [(number, text), ...]} or a skip
+    reason when the field is not a simple numbered list the rebuild can own.
+    `spine` is everything from the field's first paragraph through the run
+    that carries `separate`; `tail` is everything after the last ENTRY
+    paragraph (or, when the closing fldChar lives in that paragraph, from the
+    run that carries `end`). Zotero writes the closing fldChar alone in a
+    trailing no-text paragraph, so the tail is regularly a whole paragraph.
+    """
+    if frame.get("end") is None:
+        return {"skip": "the bibliography field has no closing fldChar"}
+    p_start = p_last = None
+    for p0, p1, _para in paragraphs(xml):
+        if p_start is None and p0 <= frame["begin"] < p1:
+            p_start = (p0, p1)
+        if p0 <= frame["end"] <= p1:
+            p_last = (p0, p1)
+    if p_start is None or p_last is None:
+        return {"skip": "the bibliography field's paragraphs were not found"}
+    sep = _zotero_run_span(xml, frame["begin"], frame["end"], "separate")
+    end = _zotero_run_span(xml, frame["begin"], frame["end"], "end")
+    if not sep or not end:
+        return {"skip": "the bibliography field has no separate/end pair"}
+    p0_start, _p1_start = p_start
+    _p0_last, p1_last = p_last
+    spine = xml[p0_start:sep[1]]
+    heads, contents, numbers, entries, spans = [], [], [], [], []
+    gap_after_entry = False
+    for k, (p0, p1, para) in enumerate(paragraphs(xml)):
+        if p0 < p0_start or p1 > p1_last:
+            continue
+        open_m = re.match(r"<w:p(?: [^>]*)?>", para)
+        if not open_m:
+            return {"skip": "a bibliography paragraph has no opening tag"}
+        head_end = open_m.end()
+        ppr = ppr_of(para)
+        if ppr:
+            ppr_at = para.find(ppr)
+            if ppr_at < 0:
+                return {"skip": "a bibliography paragraph's pPr was not found"}
+            head_end = ppr_at + len(ppr)
+        # The CONTENT runs: everything after the paragraph's properties (or
+        # after the `separate` run for the first paragraph), up to the closing
+        # tag -- or up to the `end` run when the field closes inside this very
+        # paragraph.
+        content_start = (sep[1] - p0) if p0 == p0_start else head_end
+        end_here = end[0] >= p0 and end[1] <= p1
+        if end_here:
+            content = para[content_start:end[0] - p0]
+        else:
+            close_at = para.rfind("</w:p>")
+            content = para[content_start:close_at if close_at >= 0 else len(para)]
+        span = _zotero_entry_span_of_run(content)
+        if span is None:
+            # Allowed only AFTER the entries (a trailing paragraph with no text,
+            # e.g. the one that carries the closing fldChar alone): it is kept
+            # verbatim in `tail`. A text-less paragraph BETWEEN two entries
+            # would have no place in a rank-ordered rebuild -- refusing beats
+            # silently dropping a paragraph the author put there.
+            if entries and not text_of(content).strip():
+                gap_after_entry = True
+                continue
+            return {"skip": (f"bibliography paragraph {k} does not start with a numbered "
+                             f"entry: {text_of(content)[:60]!r}")}
+        if gap_after_entry:
+            return {"skip": ("a text-less paragraph sits between bibliography entries; "
+                             "the rebuild cannot place it")}
+        numbers.append(span[2])
+        entries.append((span[2], re.sub(r"\s+", " ", text_of(content)).strip()))
+        heads.append(para[:head_end])
+        contents.append(content)
+        spans.append((p0, p1, end_here))
+    if not contents:
+        return {"skip": "the bibliography field carries no entries"}
+    last_p1 = spans[-1][1]
+    end_in_last_entry = spans[-1][2]
+    tail = xml[end[0]:last_p1] if end_in_last_entry else xml[last_p1:p1_last]
+    return {"skip": None, "heads": heads, "contents": contents,
+            "numbers": numbers, "entries": entries, "spine": spine, "tail": tail,
+            "start": p0_start, "end": p1_last, "sep_end": sep[1], "end_start": end[0],
+            "end_in_last_entry": end_in_last_entry, "para_count": len(contents)}
+
+
+def _zotero_bibliography_plan(xml: str, frame: dict, items_by_rank: dict):
+    """Decide whether the bibliography needs a rebuild, and build it.
+
+    `items_by_rank` maps rank -> itemData for every cited item. Returns
+    {"needed": bool, "xml": rebuilt_region|None, "skip": reason|None,
+    "entries": n, "reordered": bool, "renumbered": n}.
+    """
+    st = zotero_bibliography_state(xml, frame)
+    if st.get("skip"):
+        return {"needed": True, "xml": None, "skip": st["skip"]}
+    ranks = sorted(items_by_rank)
+    mismatched = [n for n in st["numbers"] if n not in items_by_rank]
+    for n, text in st["entries"]:
+        item = items_by_rank.get(n)
+        if item is not None and not _entry_describes_item(text, item):
+            mismatched.append(n)
+    needed = bool(mismatched) or st["numbers"] != ranks
+    if not needed:
+        return {"needed": False, "xml": None, "skip": None, "entries": len(st["numbers"]),
+                "reordered": False, "renumbered": 0}
+    # ---- match every entry to one item; a full bijection or nothing ---------
+    candidates = []
+    for idx, (_n, text) in enumerate(st["entries"]):
+        for rank, item in items_by_rank.items():
+            score = _zotero_entry_match_score(text, item)
+            if score:
+                candidates.append((score, idx, rank))
+    candidates.sort(key=lambda t: (-t[0], t[1], t[2]))
+    taken_entry, taken_rank, assignment = set(), set(), {}
+    for score, idx, rank in candidates:
+        if score < 4:
+            break
+        if idx in taken_entry or rank in taken_rank:
+            continue
+        assignment[idx] = rank
+        taken_entry.add(idx)
+        taken_rank.add(rank)
+    if len(assignment) != len(st["entries"]) or taken_rank != set(ranks):
+        return {"needed": True, "xml": None,
+                "skip": (f"only {len(assignment)} of {len(st['entries'])} bibliography "
+                         f"entries could be matched to a cited item")}
+    # ---- rebuild: target paragraph k carries the entry whose item rank is k --
+    contents_by_rank = {}
+    for idx, rank in assignment.items():
+        span = _zotero_entry_span_of_run(st["contents"][idx])
+        if span is None:
+            return {"needed": True, "xml": None, "skip": "a bibliography entry lost its number"}
+        run = st["contents"][idx][span[0]:span[1]]
+        new_run = re.sub(r"(<w:t(?:\s[^>]*)?>)(\d+)([\.\)]?)(\s*)(</w:t>)",
+                         lambda m: m.group(1) + str(rank) + m.group(3) + m.group(4)
+                         + m.group(5), run, count=1)
+        contents_by_rank[rank] = (st["contents"][idx][:span[0]] + new_run
+                                  + st["contents"][idx][span[1]:])
+    reordered = any(rank != idx + 1 for idx, rank in assignment.items())
+    pieces = []
+    for k, rank in enumerate(ranks):
+        head = st["spine"] if k == 0 else st["heads"][k]
+        close = "" if (k == len(ranks) - 1 and st["end_in_last_entry"]) else "</w:p>"
+        pieces.append(head + contents_by_rank[rank] + close)
+    pieces.append(st["tail"])
+    rebuilt = "".join(pieces)
+    return {"needed": True, "xml": rebuilt, "skip": None, "entries": len(ranks),
+            "reordered": reordered,
+            "renumbered": sum(1 for idx, rank in assignment.items()
+                              if st["numbers"][idx] != rank)}
+
+
+def zotero_refresh_document(xml: str, para_texts: list = None,
+                            style_ids: dict = None, limit: int = 1000) -> dict:
+    """Apply the local refresh to one document.xml. See the section contract.
+
+    Returns {"xml": <original or repaired>, "changed": bool, "fields_fixed":
+    int, "entries": int, "reordered": bool, "changes": [str], "skip": reason}.
+    """
+    out = {"xml": xml, "changed": False, "fields_fixed": 0, "entries": 0,
+           "reordered": False, "renumbered": 0, "changes": [], "skip": None}
+    report = zotero_field_report(xml)
+    state = zotero_citation_state(xml, para_texts, style_ids)
+    item_frames = [f for f in report["fields"] if f["kind"] == "item"]
+    if not item_frames:
+        out["skip"] = "no live citation fields"
+        return out
+    if any(not f.get("complete") or not f.get("has_separate") for f in item_frames):
+        out["skip"] = "a citation field is structurally incomplete"
+        return out
+    if not state["numeric"]:
+        out["skip"] = ("the document's markers are not a numeric citation style; a refresh "
+                       "of an author-year style is not reproduced offline")
+        return out
+    order = state["order"]
+    items_by_rank = {}
+    edits = []
+    fields_fixed = 0
+    for frame in item_frames:
+        instr_m = INSTR_RE.search(xml, frame["begin"], frame["end"] or len(xml))
+        if not instr_m:
+            out["skip"] = "a citation field carries no instruction"
+            return out
+        inner = re.sub(r"^<w:instrText[^>]*>|</w:instrText>$", "",
+                       instr_m.group(0), flags=re.S)
+        instr_text = unesc(inner)
+        js_span = _zotero_json_span(instr_text)
+        if js_span is None:
+            out["skip"] = "a citation field's JSON does not parse"
+            return out
+        js_start, js_end, js = js_span
+        props = js.get("properties") or {}
+        marker = props.get("formattedCitation") or ""
+        cluster = _zotero_marker_cluster(marker)
+        if cluster is None:
+            out["skip"] = f"field {frame.get('citationID')!r} carries a marker shape the " \
+                          f"refresh cannot rebuild"
+            return out
+        keys, ranks = [], []
+        for ci in js.get("citationItems") or []:
+            if not isinstance(ci, dict):
+                out["skip"] = "a citation item is malformed"
+                return out
+            uri = (ci.get("uris") or [ci.get("uri") or ""])[0]
+            key = str(uri or ci.get("id") or "")
+            keys.append(key)
+            ranks.append(order.get(key))
+            data = ci.get("itemData") or {}
+            if key and isinstance(data, dict) and data:
+                items_by_rank.setdefault(order.get(key), data)
+        if not keys or any(r is None for r in ranks):
+            out["skip"] = f"field {frame.get('citationID')!r} cites an item with no rank"
+            return out
+        region = _zotero_result_region(xml, frame)
+        if region is None:
+            out["skip"] = f"field {frame.get('citationID')!r} has no simple result runs"
+            return out
+        current = _marker_numbers(marker)
+        if len(current) != len(ranks):
+            out["skip"] = (f"field {frame.get('citationID')!r} renders a different count of "
+                           f"numbers ({len(current)}) than it cites items ({len(ranks)}); the "
+                           f"cluster cannot be rebuilt safely")
+            return out
+        if sorted(current) == sorted(ranks):
+            continue                      # consistent: nothing to rewrite
+        new_cluster_raw, new_cluster = _zotero_cluster_for_ranks(ranks, cluster[2])
+        new_marker = marker[:cluster[0]] + new_cluster_raw + marker[cluster[1]:]
+        new_js = json.loads(json.dumps(js))
+        new_js.setdefault("properties", {})
+        new_js["properties"]["formattedCitation"] = new_marker
+        new_js["properties"]["plainCitation"] = new_cluster
+        new_json = json.dumps(new_js, ensure_ascii=False, separators=(",", ":"))
+        new_instr = instr_text[:js_start] + new_json + instr_text[js_end:]
+        open_tag = instr_m.group(0)[:instr_m.group(0).find(">") + 1]
+        edits.append((instr_m.start(), instr_m.end(), open_tag + esc(new_instr)
+                      + "</w:instrText>"))
+        r_s, r_e, _runs, template = region
+        edits.append((r_s, r_e, _zotero_result_run(template, new_cluster)))
+        fields_fixed += 1
+        if fields_fixed >= limit:
+            out["skip"] = "too many stale fields for one refresh pass"
+            return out
+    # The marker edits are applied even when there are none: a document whose
+    # markers already match can still carry a bibliography whose ORDER disagrees
+    # (every entry describes the right work, but the paragraphs run 2,1), and
+    # that is exactly what a Word/Zotero refresh re-sorts -- so the bibliography
+    # phase below must not be skipped just because nothing was renumbered.
+    refreshed = apply_edits(xml, edits) if edits else xml
+    # ---- the bibliography ------------------------------------------------
+    # Fresh offsets: the marker edits above changed the byte positions of
+    # everything after them, so the bibliography frame must be re-read from the
+    # REFRESHED text (the original frame's offsets would fall inside another
+    # field's region and the separate/end probe would fail).
+    bib_frames = [f for f in zotero_field_report(refreshed)["fields"]
+                  if f["kind"] == "bibliography"]
+    bib_info = {"needed": False, "entries": 0, "reordered": False, "renumbered": 0}
+    bib_rebuilt = False
+    if len(bib_frames) > 1:
+        out["skip"] = "more than one bibliography field in one document"
+        return out
+    if bib_frames:
+        st = zotero_bibliography_state(refreshed, bib_frames[0])
+        if st.get("skip") == "the bibliography field carries no entries":
+            # The numbered list lives OUTSIDE the field (a plain list, or a
+            # Word variant that keeps only a placeholder inside it). The field
+            # cannot rebuild it; the marker refresh may still proceed when the
+            # list is already consistent with the new ranks -- otherwise a
+            # half-refresh would point the markers at the wrong entries.
+            probe = zotero_parity_rows(refreshed, [text_of(p[2]) for p in paragraphs(refreshed)],
+                                       style_ids)
+            bad = [r for r in probe
+                   if r["rule"] == "FMT-Z2"
+                   or (r["rule"] == "FMT-Z3" and "never cited" in r["evidence"])]
+            if bad:
+                out["skip"] = ("the bibliography list is outside its field and does not match "
+                               "the citation order: " + str(bad[0]["evidence"])[:120])
+                return out
+        else:
+            plan = _zotero_bibliography_plan(refreshed, bib_frames[0], items_by_rank)
+            if plan.get("skip"):
+                out["skip"] = f"bibliography rebuild refused: {plan['skip']}"
+                return out
+            if plan["needed"]:
+                bib_info = plan
+                if plan.get("xml") is None:
+                    out["skip"] = "bibliography rebuild refused"
+                    return out
+                st2 = zotero_bibliography_state(refreshed, bib_frames[0])
+                if st2 is None or st2.get("skip"):
+                    out["skip"] = "bibliography rebuild refused (paragraph spans changed)"
+                    return out
+                refreshed = (refreshed[:st2["start"]] + plan["xml"]
+                             + refreshed[st2["end"]:])
+                bib_rebuilt = True
+    if not edits and not bib_rebuilt:
+        out["skip"] = ("every marker already matches the document's citation order and the "
+                       "bibliography already runs in rank order; only the style store can "
+                       "still differ")
+        return out
+    # ---- verify -----------------------------------------------------------
+    try:
+        import xml.etree.ElementTree as _ET
+        _ET.fromstring(refreshed)
+    except _ET.ParseError as e:                                        # noqa: F821
+        out["skip"] = f"the refreshed XML does not parse ({e})"
+        return out
+    new_paras = [text_of(p[2]) for p in paragraphs(refreshed)]
+    rows_before = zotero_parity_rows(xml, para_texts, style_ids)
+    rows_after = zotero_parity_rows(refreshed, new_paras, style_ids)
+    high_before = sum(1 for r in rows_before if r["rule"] in ("FMT-Z1", "FMT-Z2", "FMT-Z4"))
+    high_after = sum(1 for r in rows_after if r["rule"] in ("FMT-Z1", "FMT-Z2", "FMT-Z4"))
+    if high_after > high_before or (high_after and not high_before):
+        out["skip"] = (f"the refreshed document still carries {high_after} high-severity "
+                       f"parity row(s); nothing was written")
+        return out
+    new_state = zotero_citation_state(refreshed, new_paras, style_ids)
+    old_keys = [(f["citationID"], tuple(f["items"])) for f in state["fields"]]
+    new_keys = [(f["citationID"], tuple(f["items"])) for f in new_state["fields"]]
+    if old_keys != new_keys:
+        out["skip"] = "the refresh would change which items the fields cite; nothing was written"
+        return out
+    changes = []
+    if fields_fixed:
+        changes.append(f"Zotero refresh (offline): renumbered {fields_fixed} stale citation "
+                       f"marker(s) to the document's own citation order")
+    if bib_rebuilt:
+        changes.append(f"rebuilt the bibliography in citation order "
+                       f"({bib_info.get('entries', 0)} entries, "
+                       f"{bib_info.get('renumbered', 0)} renumbered"
+                       + (", reordered" if bib_info.get("reordered") else "") + ")")
+    out.update({"xml": refreshed, "changed": True, "fields_fixed": fields_fixed,
+                "entries": bib_info.get("entries", 0),
+                "reordered": bool(bib_info.get("reordered")),
+                "renumbered": bib_info.get("renumbered", 0),
+                "changes": changes, "skip": None,
+                "rows_before": [r["rule"] for r in rows_before],
+                "rows_after": [r["rule"] for r in rows_after]})
+    return out
+
+
+def zotero_style_reconcile(parts: dict, preferred: str = "") -> dict:
+    """Make every Zotero style store name ONE style (FMT-Z5's repair).
+
+    The style URL is the only byte touched. The preferred style is the
+    caller's (the venue's own CSL style when the profile names one); otherwise
+    the store `docProps/custom.xml` names is kept, because that is the store
+    the current Zotero Word plugin writes and the one the rendered entries in
+    this document lineage were produced with.
+    """
+    ids = zotero_style_ids(parts)
+    distinct = sorted(set(ids.values()))
+    out = {"changed": False, "from": dict(ids), "to": {}, "changes": []}
+    if len(distinct) <= 1:
+        return out
+    target = preferred if preferred in distinct else ""
+    if not target:
+        target = ids.get("docProps/custom.xml") or distinct[-1]
+    new_parts = dict(parts)
+    for name, sid in sorted(ids.items()):
+        if sid == target:
+            continue
+        raw = new_parts.get(name)
+        text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw or "")
+        # Zotero 6 writes an `http://` store and the XML text may carry
+        # `&quot;` right after the id, so the whole URL is replaced by pattern
+        # (a literal `https://` replace missed the legacy store entirely).
+        new_text = re.sub(r"https?://www\.zotero\.org/styles/" + re.escape(sid) + r"\b",
+                          f"https://www.zotero.org/styles/{target}", text)
+        if new_text != text:
+            new_parts[name] = new_text.encode("utf-8") if isinstance(raw, bytes) else new_text
+            out["to"][name] = target
+    if out["to"]:
+        out["changed"] = True
+        out["parts"] = new_parts
+        out["changes"].append(
+            "Zotero style stores reconciled to "
+            f"{target!r} (" + "; ".join(f"{n}: {ids[n]} -> {target}"
+                                        for n in sorted(out["to"])) + ")")
+    return out
+
+
+def refresh_zotero_parts(parts: dict, policy: dict = None) -> dict:
+    """The local refresh + style reconcile over one package's parts (in memory).
+
+    `parts` is {zip name: bytes}. Returns {"parts": updated|None, "changed":
+    bool, "changes": [str], "skip": reason|None, "zotero": report|None}. The
+    caller decides whether to swap the parts in; nothing is written here.
+    """
+    policy = policy or {}
+    rep = {"parts": None, "changed": False, "changes": [], "skip": None, "zotero": None}
+    if "word/document.xml" not in parts:
+        rep["skip"] = "no word/document.xml"
+        return rep
+    style_names = [n for n in ("word/settings.xml", "docProps/custom.xml") if n in parts]
+    style_names += [n for n in parts if re.match(r"customXml/item\d*\.xml$", n)]
+    style_parts = {n: parts[n].decode("utf-8", "replace") for n in style_names}
+    other_field_parts = [n for n in parts
+                         if n in ("word/footnotes.xml", "word/endnotes.xml")
+                         and b"ADDIN ZOTERO_ITEM" in parts[n]]
+    style_info = zotero_style_reconcile(style_parts,
+                                        str(policy.get("zotero_style") or ""))
+    new_parts = dict(parts)
+    if style_info.get("changed"):
+        # Only the stores whose style id changed are re-encoded; every other
+        # part keeps its original bytes.
+        for n in sorted(style_info.get("to") or {}):
+            text = style_info["parts"][n]
+            new_parts[n] = text.encode("utf-8") if isinstance(text, str) else text
+            style_parts[n] = text.decode("utf-8", "replace") if isinstance(text, bytes) else text
+        rep["changes"].extend(style_info["changes"])
+    xml = new_parts["word/document.xml"].decode("utf-8", "replace")
+    if other_field_parts:
+        rep["skip"] = ("citation fields live outside word/document.xml "
+                       f"({', '.join(other_field_parts)}); the offline refresh is limited to "
+                       f"the main part -- no numbering was written")
+    else:
+        zot = zotero_refresh_document(xml, [text_of(p[2]) for p in paragraphs(xml)],
+                                      style_ids=zotero_style_ids(style_parts))
+        rep["zotero"] = {k: v for k, v in zot.items() if k != "xml"}
+        if zot.get("changed"):
+            new_parts["word/document.xml"] = zot["xml"].encode("utf-8")
+            rep["changes"].extend(zot["changes"])
+        elif zot.get("skip"):
+            rep["skip"] = zot["skip"]
+    rep["changed"] = bool(rep["changes"])
+    if rep["changed"]:
+        rep["parts"] = new_parts
+    return rep
+
+
+def refresh_zotero_package(src, out=None, policy: dict = None) -> dict:
+    """Apply the local refresh + style reconcile to one DOCX (zip-level).
+
+    All other parts are copied byte-identically; `out` defaults to an in-place
+    replace. Returns a report with `changed`, `changes`, `skip`, the field
+    counts before/after and the parity rows before/after.
+    """
+    src = Path(src)
+    rep = {"source": str(src), "output": str(out or src), "ok": True, "changed": False,
+           "changes": [], "skip": None, "zotero": None}
+    try:
+        with zipfile.ZipFile(src) as pkg:
+            names = [n for n in pkg.namelist() if not n.endswith("/")]
+            if "word/document.xml" not in names:
+                return dict(rep, ok=False, skip="no word/document.xml")
+            parts = {n: pkg.read(n) for n in names}
+    except (OSError, zipfile.BadZipFile) as e:
+        return dict(rep, ok=False, skip=f"unreadable DOCX ({type(e).__name__}: {e})")
+    inner = refresh_zotero_parts(parts, policy)
+    rep["changes"] = list(inner.get("changes") or [])
+    rep["skip"] = inner.get("skip")
+    rep["zotero"] = inner.get("zotero")
+    if not inner.get("changed"):
+        return rep
+    rep["changed"] = True
+    parts = inner["parts"]
+    dst = Path(out) if out is not None else src
+    tmp = dst.with_name(f".{dst.name}.zotrefresh{os.getpid()}.tmp")
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+            for n in names:
+                z.writestr(n, parts[n])
+        os.replace(tmp, dst)
+    except OSError as e:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        return dict(rep, ok=False, skip=f"could not write the refreshed DOCX ({e})")
+    rep["output"] = str(dst)
+    return rep
+
+
+# --------------------------------------------------------------------------
+# REFERENCE-ENTRY REPAIRS (the FMT-R1/R2/R3 classes, auto-repaired)
+#
+# A malformed entry inside a live Zotero bibliography field cannot be fixed by
+# the numbering refresh: its TEXT is wrong ("Front. Genet. Volume 11-2020"),
+# not its number. The facts needed to repair it are usually already in the
+# submission: a sibling .bib the paper's own supplementary ships. When a
+# record there carries what a flagged entry is missing (a fused volume, a
+# locator for a bare year, a year for a software URL), the repair is applied
+# to the entry's own runs and re-checked against the same rules. Nothing is
+# invented: no record, no repair.
+# --------------------------------------------------------------------------
+
+BIB_ENTRY_START_RE = re.compile(r"@(\w+)\s*\{\s*([^,\s]+)\s*,", re.S)
+
+
+def load_bib_facts(paths) -> list:
+    """Parse .bib files into fact records for entry repair (stdlib only)."""
+    records = []
+    for p in paths or []:
+        try:
+            text = Path(p).read_text("utf-8", "replace")
+        except OSError:
+            continue
+        pos = 0
+        while True:
+            m = BIB_ENTRY_START_RE.search(text, pos)
+            if not m:
+                break
+            # Body = up to the matching closing brace of this entry.
+            i = m.end()
+            depth = 1
+            while i < len(text) and depth:
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                i += 1
+            body = text[m.end():i - 1]
+            pos = i
+            fields = {}
+            for fm in re.finditer(r"(\w+)\s*=\s*(\{(?:[^{}]|\{[^{}]*\})*\}|\"[^\"]*\"|[^,\n]+)",
+                                  body):
+                name = fm.group(1).lower()
+                value = fm.group(2).strip()
+                if value.startswith("{") and value.endswith("}"):
+                    value = value[1:-1]
+                elif value.startswith('"') and value.endswith('"'):
+                    value = value[1:-1]
+                fields[name] = re.sub(r"\s+", " ", value).strip()
+            author = fields.get("author") or ""
+            first_family = ""
+            if author:
+                first = author.split(" and ")[0]
+                first_family = (first.split(",")[0] if "," in first
+                                else first.split()[-1]).strip()
+            year = ""
+            date = fields.get("date") or fields.get("year") or ""
+            ym = re.search(r"(?:19|20)\d{2}", date)
+            if ym:
+                year = ym.group(0)
+            records.append({
+                "key": m.group(2), "type": m.group(1).lower(),
+                "title": fields.get("title", ""), "first_family": first_family,
+                "year": year, "journal": fields.get("journaltitle")
+                or fields.get("journal") or fields.get("shortjournal", ""),
+                "volume": fields.get("volume", ""), "pages": fields.get("pages", ""),
+                "doi": (fields.get("doi", "") or "").strip(),
+                "eprint": fields.get("eprint", ""),
+                "eprinttype": fields.get("eprinttype", ""),
+                "url": fields.get("url", ""),
+                "file": str(p)})
+    return records
+
+
+def _bib_record_for_entry(entry_text: str, records: list):
+    """The record a reference entry is about (DOI first, then name+title)."""
+    text = re.sub(r"\s+", " ", entry_text or "")
+    dois = {d.lower().rstrip(".,;)") for d in REF_DOI_RE.findall(text)}
+    if dois:
+        for r in records:
+            if r.get("doi") and r["doi"].lower().rstrip(".,;)") in dois:
+                return r
+    low = text.lower()
+    best, best_score = None, 0
+    for r in records:
+        score = 0
+        fam = (r.get("first_family") or "").lower()
+        if fam and fam in low:
+            score += 3
+        if r.get("year") and f"({r['year']})" in text:
+            score += 1
+        title = str(r.get("title") or "")
+        for t in re.sub(r"[^a-z0-9 ]+", " ", title.lower()).split():
+            if len(t) > 4 and t not in ZOTERO_TOKEN_STOPWORDS and t in low:
+                score += 1
+        if score > best_score:
+            best, best_score = r, score
+    return best if best_score >= 4 else None
+
+
+def _iter_wt_elements(para: str):
+    for m in re.finditer(r"<w:t(?:\s[^>]*)?>.*?</w:t>", para, re.S):
+        inner = m.group(0)
+        text = unesc(inner[inner.find(">") + 1:inner.rfind("<")])
+        yield m.start(), m.end(), text
+
+
+def _set_wt_text(para: str, start: int, end: int, text: str) -> str:
+    """The replacement for one w:t element's [start, end) span.
+
+    The opening tag is kept verbatim (attributes such as `xml:space` survive);
+    only the element's content changes.
+    """
+    inner_open = para.find(">", start) + 1
+    return para[start:inner_open] + esc(text) + "</w:t>"
+
+
+def _replace_text_in_para(para: str, old: str, new: str):
+    """Replace one substring of the paragraph's visible text.
+
+    A match inside ONE `w:t` element keeps that element's run untouched. A match
+    spanning several elements is allowed ONLY when every touched run is plain
+    (carries no `w:rPr`): the replacement then lands in the first element and
+    the others are emptied, so no run property is silently dropped. Anything
+    else is refused (`None`) -- the caller records the skip.
+    """
+    spans = list(_iter_wt_elements(para))
+    joined, offsets = "", []
+    for s, e, t in spans:
+        offsets.append((len(joined), s, e, t))
+        joined += t
+    at = joined.find(old)
+    if at < 0:
+        return None
+    touched = []
+    for pos, s, e, t in offsets:
+        if pos + len(t) <= at:
+            continue
+        if pos >= at + len(old):
+            break
+        touched.append((pos, s, e, t))
+    if not touched:
+        return None
+    first, last = touched[0], touched[-1]
+    head = first[3][:at - first[0]]
+    tail_off = at + len(old) - last[0]
+    if tail_off < 0 or tail_off > len(last[3]):
+        return None
+    tail = last[3][tail_off:]
+    if len(touched) > 1:
+        for _pos, s, e, _t in touched:
+            if "<w:rPr" in para[s:e]:
+                return None
+    edits = []
+    for k, (_pos, s, e, t) in enumerate(touched):
+        text = (head + new + tail) if k == 0 else ""
+        edits.append((s, e, _set_wt_text(para, s, e, text)))
+    return apply_edits(para, edits)
+
+
+def repair_reference_entries(xml: str, records: list) -> dict:
+    """Apply the FMT-R1/R2/R3 repairs a sibling bibliography proves.
+
+    Returns {"xml", "changed", "repairs": [{entry, rule, before, after}],
+    "skipped": [reason]}. `records` comes from `load_bib_facts`.
+    """
+    out = {"xml": xml, "changed": False, "repairs": [], "skipped": []}
+    if not records:
+        out["skipped"].append("no bibliography file supplied any facts")
+        return out
+    paras = paragraphs(xml)
+    texts = [text_of(p[2]) for p in paras]
+    first = _bibliography_entry_start(texts)
+    edits, repairs = [], []
+    for idx in range(first, len(paras)):
+        p0, p1, para = paras[idx]
+        entry = re.sub(r"\s+", " ", texts[idx]).strip()
+        m = re.match(r"^\s*(\d+)\s*[\.\)]\s*(.+)$", entry)
+        if not m or len(entry.split()) < 4:
+            continue
+        rec = _bib_record_for_entry(entry, records)
+        if rec is None:
+            continue
+        cands = []
+        # P1 -- a volume fused to a year ("Volume 11-2020"): use the volume and
+        # article/page number the bibliography records.
+        vm = REF_VOLUME_MALFORMED_RE.search(entry)
+        page = (rec.get("pages") or "").strip()
+        if vm and rec.get("volume") and page:
+            old = vm.group(0)
+            tail = entry[vm.end():]
+            if tail.startswith(", "):
+                old = old + ", "
+                new = f"{rec['volume']}, {page} "
+            else:
+                new = f"{rec['volume']}, {page}"
+            cands.append(("FMT-R1", old, new))
+        # P2 -- an entry that ends at a bare "(YEAR)" with no venue at all: the
+        # bibliography's own locator makes it retrievable.
+        if not REF_VENUE_HINT_RE.search(entry) and REF_BARE_YEAR_END_RE.search(entry):
+            year = rec.get("year") or ""
+            locator = ""
+            if rec.get("eprint") and (rec.get("eprinttype") or "").lower().endswith("arxiv"):
+                locator = f"Preprint at https://arxiv.org/abs/{rec['eprint']}"
+            elif rec.get("eprint") and "arxiv" in (rec.get("url") or "").lower():
+                locator = f"Preprint at https://arxiv.org/abs/{rec['eprint']}"
+            elif rec.get("doi"):
+                locator = f"Preprint at https://doi.org/{rec['doi']}"
+            if locator and year:
+                ym = re.search(r"\(\s*" + re.escape(year) + r"\s*\)", entry)
+                if ym:
+                    cands.append(("FMT-R2", ym.group(0),
+                                  f"{locator} ({year})"))
+        # P3 -- a repository/software citation with no year: the bibliography
+        # dates it.
+        if (REF_REPO_HOST_RE.search(entry) and not REF_DOI_RE.search(entry)
+                and not REF_PREPRINT_RE.search(entry)
+                and not REF_VERSION_HINT_RE.search(entry)
+                and rec.get("year") and not re.search(r"(?:19|20)\d{2}", entry)):
+            um = re.search(r"(?P<lead>\.\s+)(?P<url>https?://\S+)", entry)
+            if um:
+                cands.append(("FMT-R3", um.group(0),
+                              f" ({rec['year']}). " + um.group("url")))
+        for rule, old, new in cands:
+            new_para = _replace_text_in_para(para, old, new)
+            if new_para is None:
+                out["skipped"].append(
+                    f"{rule}: the text to replace in entry {m.group(1)} spans runs")
+                continue
+            edits.append((p0, p1, new_para))
+            repairs.append({"entry": m.group(1), "rule": rule,
+                            "before": old[:80], "after": new[:80]})
+            para = new_para
+    if not edits:
+        return out
+    new_xml = apply_edits(xml, edits)
+    # Verify with the same rule set: no repair may leave its own rule firing.
+    new_texts = [text_of(p[2]) for p in paragraphs(new_xml)]
+    # The entry flag must accept the number fused to the text ("15.Dong"):
+    # Word renders the separator as a TAB, which `text_of` drops, and a
+    # whitespace-requiring pattern then read every entry as "not a reference"
+    # and the verification counted zero rows on both sides.
+    is_ref = lambda t: bool(re.match(r"^\s*\d+\s*[\.\)]\s*\S", t))  # noqa: E731
+    before_rows = reference_entry_rows(texts, [is_ref(t) for t in texts])
+    after_rows = reference_entry_rows(new_texts, [is_ref(t) for t in new_texts])
+    rules = {r["rule"] for r in repairs}
+    before_n = sum(1 for r in before_rows if r["rule"] in rules)
+    after_n = sum(1 for r in after_rows if r["rule"] in rules)
+    if after_n >= before_n:
+        out["skipped"].append("the repair did not clear its own rule; nothing was written")
+        return out
+    out.update({"xml": new_xml, "changed": True, "repairs": repairs})
+    return out
 
 
 def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
@@ -7175,8 +8166,40 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
             RuntimeError, NotImplementedError) as e:
         return {"source": str(src), "output": str(out), "changes": [], "verified": {},
                 "error": f"unreadable DOCX package: {type(e).__name__}: {e}", "ok": False}
+
+    # 0. THE LOCAL ZOTERO REFRESH (and the style-store reconcile), so every
+    # later rule -- and the delivered file -- sees the numbering a Word/Zotero
+    # refresh would produce. A refusal (an unresolvable field, a bibliography
+    # the rebuild cannot own) leaves the document untouched and is reported:
+    # the flatten guard below then still refuses to freeze a stale numbering.
+    zotero_refresh = {"changed": False, "skip": "disabled by policy"}
+    if _policy_flag(policy, "refresh_zotero_fields", True):
+        _zr = refresh_zotero_parts(parts, policy)
+        zotero_refresh = {k: v for k, v in _zr.items() if k != "parts"}
+        if _zr.get("changed"):
+            parts = _zr["parts"]
+            xml_before = parts["word/document.xml"].decode("utf-8")
+    # 0b. REFERENCE-ENTRY REPAIRS: the facts a sibling .bib supplies repair the
+    # FMT-R1/R2/R3 shapes in the bibliography text; the Zotero library itself is
+    # not written (a later refresh would restore the library's own values, and
+    # the rules would report that again -- never a silent drift).
+    reference_repair = {"changed": False, "repairs": [], "skipped": []}
+    if _policy_flag(policy, "repair_reference_entries", True):
+        bibs = sorted(p for p in Path(src).parent.glob("*.bib") if p.is_file())
+        if bibs:
+            _rr = repair_reference_entries(xml_before, load_bib_facts(bibs))
+            reference_repair = {k: v for k, v in _rr.items() if k != "xml"}
+            if _rr.get("changed"):
+                xml_before = _rr["xml"]
     xml_after, changes, meta = fix_document(xml_before, styles, policy,
                                             sizes=sizes, rels=doc_rels)
+    if zotero_refresh.get("changed"):
+        changes = list(zotero_refresh.get("changes") or []) + list(changes)
+    if reference_repair.get("changed"):
+        changes = [f"reference-entry repair: {len(reference_repair['repairs'])} entr(y/ies) "
+                   f"repaired from the package's own bibliography ("
+                   + ", ".join(sorted({r['rule'] for r in reference_repair['repairs']})) + ")"
+                   ] + list(changes)
     try:
         ET.fromstring(xml_after)
         xml_wellformed, xml_detail = True, ""
@@ -7304,7 +8327,8 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
               and xml_wellformed
               and schema[0] is not False
               and not field_errors)
-    return {"source": str(src), "output": str(out), "changes": changes, "verified": verified, "ok": ok}
+    return {"source": str(src), "output": str(out), "changes": changes, "verified": verified,
+            "zotero_refresh": zotero_refresh, "reference_repair": reference_repair, "ok": ok}
 
 
 def validate_package(path: Path):
@@ -8832,44 +9856,115 @@ def _pdfinfo_form(path: Path) -> str:
     return ""
 
 
+def _xfa_dataset_packets(data: bytes) -> list:
+    """Every decompressed `xfa:datasets` packet in a PDF, as (offset, text).
+
+    A LiveCycle form saved more than once carries SEVERAL dataset packets: the
+    original template's empty one and the current filled one (an incremental
+    update appends the newer). The scan returns all of them, and the caller
+    treats the form as filled when ANY packet carries an answer -- the older
+    "the first packet decides" reading is how a genuinely filled Reporting
+    Summary was reported as UNFILLED by both the round-1 review and the
+    publish-time scanner.
+    """
+    packets = []
+    for m in re.finditer(rb"stream\r?\n", data):
+        start = m.end()
+        end = data.find(b"endstream", start)
+        if end < 0:
+            continue
+        try:
+            dec = zlib.decompress(data[start:end])
+        except zlib.error:
+            continue
+        if b"xfa:datasets" in dec:
+            packets.append((start, dec.decode("utf-8", "replace")))
+    return packets
+
+
+# XFA answers serialize with whitespace before the closing bracket
+# (`<author\n>Xuegong Zhang</author\n>`), which is why the old
+# `<tag>value</tag>` pattern counted ZERO answers on a filled form.
+XFA_LEAF_RE = re.compile(r"<([A-Za-z_][\w.\-]*)\s*>\s*([^<>]{1,400}?)\s*</\1\s*>")
+
+
 def _xfa_dataset_report(path: Path):
     """(is_xfa, non_empty_values, is_livecycle_shell) for a PDF's XFA dataset.
 
     `is_livecycle_shell` is True when the PDF's own rendered text is the Adobe
     placeholder, i.e. the document is a FORM DEFINITION, not a document.
+    `non_empty_values` counts the answer leaves of EVERY dataset packet; an
+    XFA form with no dataset packet at all returns -1 (unverifiable), which
+    never produces the "unfilled" finding.
     """
     try:
         data = Path(path).read_bytes()
     except OSError:
-        return (False, 0, False)
+        return (False, -1, False)
     form_line = _pdfinfo_form(Path(path))
     # The byte test requires the AcroForm/XFA object structure, not the bare
     # string: a normal compiled PDF can contain "/XFA" inside its own text.
     is_xfa = ("xfa" in form_line.lower()
               or (b"AcroForm" in data and re.search(rb"/XFA[\s/\[]", data) is not None))
     is_shell = bool(PDF_PLACEHOLDER_RE.search(data.decode("latin-1", "replace")))
-    non_empty = 0
-    for m in re.finditer(rb"stream\r?\n", data):
-        start = m.end()
-        end = data.find(b"endstream", start)
-        if end < 0:
-            continue
-        raw = data[start:end]
-        try:
-            dec = zlib.decompress(raw)
-        except zlib.error:
-            continue
-        if not is_shell and PDF_PLACEHOLDER_BYTES_RE.search(dec):
-            # The placeholder lives in a COMPRESSED stream: the shell is real
-            # even when pdftotext cannot render the page (a viewer that cannot
-            # run the form shows exactly the same message).
-            is_shell = True
-        if is_xfa and b"xfa:datasets" in dec:
-            text = dec.decode("utf-8", "replace")
-            for em in re.finditer(r"<([A-Za-z_][\w.\-]*)>([^<>]{1,400})</\1>", text):
-                if em.group(2).strip():
-                    non_empty += 1
+    packets = _xfa_dataset_packets(data) if is_xfa else []
+    non_empty = -1 if is_xfa and not packets else 0
+    for _off, text in packets:
+        for em in XFA_LEAF_RE.finditer(text):
+            if em.group(2).strip():
+                non_empty += 1
+    if not is_shell:
+        for m in re.finditer(rb"stream\r?\n", data):
+            start = m.end()
+            end = data.find(b"endstream", start)
+            if end < 0:
+                continue
+            try:
+                dec = zlib.decompress(data[start:end])
+            except zlib.error:
+                continue
+            if PDF_PLACEHOLDER_BYTES_RE.search(dec):
+                # The placeholder lives in a COMPRESSED stream: the shell is
+                # real even when pdftotext cannot render the page.
+                is_shell = True
+                break
     return (is_xfa, non_empty, is_shell)
+
+
+def xfa_dataset_answers(path: Path, limit: int = 400) -> list:
+    """[(field name, answer)] of the richest XFA dataset packet (or [])."""
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return []
+    best = []
+    for _off, text in _xfa_dataset_packets(data):
+        answers = [(em.group(1), em.group(2).strip())
+                   for em in XFA_LEAF_RE.finditer(text) if em.group(2).strip()]
+        if len(answers) > len(best):
+            best = answers
+    return best[:limit]
+
+
+def xfa_export_text(path: Path) -> str:
+    """A readable rendering of a filled XFA form (the answer to the shell).
+
+    This is what the pipeline can produce offline: the editor/reviewer can
+    read every answer even when their viewer shows the Adobe placeholder. It is
+    NOT a layout reproduction of the journal's form (that needs Acrobat), so the
+    pipeline ships it beside the original and says so.
+    """
+    answers = xfa_dataset_answers(path)
+    if not answers:
+        return ""
+    lines = [f"Readable export of the XFA form data in {Path(path).name}",
+             "Generated by paper_docx_format.py xfa-export (the PDF's own text layer "
+             "shows the Adobe placeholder outside Acrobat).", ""]
+    for name, value in answers:
+        lines.append(f"[{name}]")
+        lines.append(value)
+        lines.append("")
+    return "\n".join(lines)
 
 
 def _pdf_carries_an_image(path: Path) -> bool:
@@ -8905,7 +10000,7 @@ def _pdf_carries_an_image(path: Path) -> bool:
 
 
 def pdf_artifact_rows(path: Path, text: str = None, pages=None) -> list:
-    """FMT-PDF1..3 for one PDF (empty list = nothing proven wrong)."""
+    """FMT-PDF1..4 for one PDF (empty list = nothing proven wrong)."""
     rows = []
     name = Path(path).name
     if text is None:
@@ -8941,10 +10036,26 @@ def pdf_artifact_rows(path: Path, text: str = None, pages=None) -> list:
     if is_xfa and non_empty == 0:
         rows.append({"rule": "FMT-PDF2", "severity": "high", "document": name,
                      "location": "-",
-                     "evidence": "XFA/LiveCycle form with no non-empty data value",
+                     "evidence": "XFA/LiveCycle form whose dataset packet(s) carry no "
+                                 "non-empty answer",
                      "detail": "the form ships UNFILLED (every field is empty or default); "
                                "fill it in the Adobe reader (or replace it with a flattened "
                                "PDF) before submitting",
+                     "fix": "manual", "protected": False})
+    elif is_xfa and non_empty > 0 and placeholder:
+        # The form IS filled; the defect is only the delivery format. Reported
+        # separately so the instruction is "flatten" (an export step), never
+        # "fill" (which would overwrite real answers). `xfa-export` writes the
+        # readable rendering this row's detail points at.
+        rows.append({"rule": "FMT-PDF4", "severity": "high", "document": name,
+                     "location": "-",
+                     "evidence": f"XFA/LiveCycle form with {non_empty} non-empty answer(s) "
+                                 f"but the placeholder is what a non-Acrobat reader shows",
+                     "detail": "the mandatory form is FILLED but delivered as a shell: the "
+                               "answers live only in the XFA data layer. Open it in Adobe "
+                               "Acrobat Reader and export a flattened, text-readable PDF (the "
+                               "pipeline's `xfa-export` writes a readable rendering of every "
+                               "answer beside the package for reference)",
                      "fix": "manual", "protected": False})
     elif not body and (pages or 0) >= 1 and not _pdf_carries_an_image(Path(path)):
         rows.append({"rule": "FMT-PDF3", "severity": "medium", "document": name,
@@ -9024,6 +10135,13 @@ def cmd_scan(args) -> int:
 
 def cmd_fix(args) -> int:
     policy = load_policy(args.policy)
+    if getattr(args, "unlink_zotero_fields", False):
+        # The explicit submission-copy opt-in (README's `--unlink-zotero-fields`):
+        # the refresh runs first, then the fields are flattened to their correct
+        # visible text. Refused (exit 1) when the refresh cannot make the
+        # numbering clean -- flattening stale numbering freezes the wrong numbers.
+        policy = dict(policy)
+        policy["unlink_zotero_fields"] = True
     src, out = Path(args.file), Path(args.out)
     if src.resolve() == out.resolve():
         log("error: --out must differ from the input")
@@ -9181,6 +10299,76 @@ def cmd_zotero_check(args) -> int:
     return 1 if faults or any(r["severity"] == "high" for r in rows) else 0
 
 
+def cmd_zotero_refresh(args) -> int:
+    """`zotero-refresh`: repair the stale numbering/bibliography offline.
+
+    The repair runs only when every field resolves and the result passes the
+    same FMT-Z checks `zotero-check` runs; otherwise nothing is written and the
+    reason is printed (exit 1). `--out` writes a copy; without it the file is
+    replaced in place (the pipeline's own callers do the same on a temp copy).
+    """
+    policy = load_policy(args.policy)
+    if getattr(args, "unlink", False):
+        # refresh → verify → unlink, as ONE fixer chain: the flatten is refused
+        # whenever the refresh could not make the numbering clean.
+        src = Path(args.file)
+        dst = Path(args.out) if args.out else src
+        tmp = dst.with_name(f".{dst.name}.zotunlink{os.getpid()}.tmp")
+        upolicy = dict(policy)
+        upolicy["unlink_zotero_fields"] = True
+        rep = fix_package(src, tmp, upolicy)
+        if not rep.get("ok"):
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            print(f"  no change: {rep.get('error') or 'the fixer refused the chain'}")
+            if args.json:
+                Path(args.json).write_text(json.dumps(rep, indent=2, ensure_ascii=False),
+                                           encoding="utf-8")
+            return 1
+        try:
+            os.replace(tmp, dst)
+        except OSError as e:                                            # noqa: BLE001
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            print(f"  could not write {dst}: {e}")
+            return 1
+        v = rep.get("verified") or {}
+        print(f"  unlinked: Zotero fields {v.get('zotero_fields_before', {}).get('zotero', '?')}"
+              f" -> {v.get('zotero_fields_after', {}).get('zotero', '?')}"
+              f" in {dst}")
+        for line in rep.get("changes") or []:
+            print(f"  [refresh] {line}")
+        if args.json:
+            Path(args.json).write_text(json.dumps(rep, indent=2, ensure_ascii=False),
+                                       encoding="utf-8")
+        return 0
+    res = refresh_zotero_package(Path(args.file), args.out, policy)
+    for line in res.get("changes") or []:
+        print(f"  [refresh] {line}")
+    zot = res.get("zotero") or {}
+    if zot.get("fields_fixed"):
+        print(f"  renumbered {zot['fields_fixed']} stale marker(s); "
+              f"parity rows: {zot.get('rows_before')} -> {zot.get('rows_after')}")
+    if not res.get("changed"):
+        print(f"  no change: {res.get('skip') or 'nothing to repair'}")
+    if args.json:
+        Path(args.json).write_text(json.dumps(res, indent=2, ensure_ascii=False),
+                                   encoding="utf-8")
+    return 0 if res.get("ok") and res.get("changed") else (1 if not res.get("ok") else 0)
+
+
+def cmd_xfa_export(args) -> int:
+    """`xfa-export`: readable rendering of a filled XFA form PDF."""
+    text = xfa_export_text(Path(args.file))
+    if not text:
+        print(f"{args.file}: no XFA dataset answers found (nothing to export)")
+        return 1
+    out = Path(args.out) if args.out else Path(args.file).with_suffix(".xfa-answers.txt")
+    out.write_text(text, encoding="utf-8")
+    print(f"{args.file}: answers rendered to {out}")
+    return 0
+
+
 def cmd_validate(args) -> int:
     report = validate_paths([Path(p) for p in args.paths], Path(args.json) if args.json else None,
                             timeout=args.timeout)
@@ -9236,6 +10424,10 @@ def main(argv=None) -> int:
     f.add_argument("file")
     f.add_argument("--out", required=True)
     f.add_argument("--policy")
+    f.add_argument("--unlink-zotero-fields", action="store_true",
+                   help="also flatten the (refreshed) Zotero citations/bibliography to plain "
+                        "text: the submission-copy policy. Refused when the offline refresh "
+                        "cannot make the numbering clean first.")
     f.add_argument("--json")
     f.set_defaults(func=cmd_fix)
     p = sub.add_parser("check-pdf", help="blank-page check of a rendered PDF")
@@ -9248,6 +10440,22 @@ def main(argv=None) -> int:
     z.add_argument("file")
     z.add_argument("--json")
     z.set_defaults(func=cmd_zotero_check)
+    zr = sub.add_parser("zotero-refresh", help="repair stale Zotero numbering and the "
+                                               "bibliography order offline (no Word/Zotero)")
+    zr.add_argument("file")
+    zr.add_argument("--out", help="output path (default: replace the file in place)")
+    zr.add_argument("--policy")
+    zr.add_argument("--unlink", action="store_true",
+                    help="after the refresh, flatten the citation fields to plain text (the "
+                         "submission copy; runs the full fixer chain so the ordering "
+                         "refresh→verify→unlink is enforced)")
+    zr.add_argument("--json")
+    zr.set_defaults(func=cmd_zotero_refresh)
+    xe = sub.add_parser("xfa-export", help="render a filled XFA form PDF's answers as "
+                                           "readable text (the shell workaround)")
+    xe.add_argument("file")
+    xe.add_argument("--out")
+    xe.set_defaults(func=cmd_xfa_export)
     v = sub.add_parser("validate", help="validate DOCX XML/schema and compile .tex files")
     v.add_argument("paths", nargs="+")
     v.add_argument("--json")

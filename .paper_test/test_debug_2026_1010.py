@@ -360,16 +360,18 @@ def test_census_prefix_total_no_fabricated_zero():
 
 
 # =====================================================================
-# C10 -- flattening must refuse a stale document
+# C10 -- flattening refreshes first, and still refuses what it cannot repair
 # =====================================================================
 def test_flatten_refuses_stale_document():
-    print("\n== C10 unlink_zotero_fields refuses a stale document ==")
+    print("\n== C10 unlink_zotero_fields: refresh -> verify -> unlink (refuse when stuck) ==")
     tmp = scratch("dbg_flatten_")
     items = [("AAAA", "Alpha work", "Alvarez"), ("BBBB", "Beta work", "Bianchi")]
     body = ('<w:document xmlns:w="%s"><w:body>' % NS
             + _cite_field("citeA", r"\super 1\nosupersub{}", [items[0]], "1")
             + _cite_field("citeB", r"\super 39\nosupersub{}", [items[1]], "39")
-            + '<w:p><w:t>References</w:t></w:p>'
+            # The text must sit in a run: a bare `<w:p><w:t>` is schema-invalid
+            # and `fix_package`'s `docx validate` step then fails the whole fix.
+            + '<w:p><w:r><w:t>References</w:t></w:r></w:p>'
             + _bibliography_para(1, "Alvarez, A. Alpha work. Journal (2011).")
             + _bibliography_para(2, "Bianchi, B. Beta work. Journal (2012).")
             + '</w:body></w:document>')
@@ -378,10 +380,34 @@ def test_flatten_refuses_stale_document():
     policy["unlink_zotero_fields"] = True
     out = tmp / "flattened.docx"
     rep = fmt.fix_package(stale, out, policy)
-    check("the formatter refuses to unlink the fields of a stale document",
-          rep.get("ok") is False and "stale" in str(rep.get("error")),
+    # 2026-10-11: the formatter now runs the offline refresh BEFORE the
+    # flatten, so the stale marker is repaired and the frozen text carries the
+    # CORRECT number; the guard below moved to the documents the refresh
+    # cannot repair (a refused marker/bibliography, or refresh_zotero_fields
+    # off) -- those are still refused, never frozen with stale numbering.
+    check("a stale document is refreshed before the flatten (the numbering is repaired)",
+          rep.get("ok") is True and (rep.get("zotero_refresh") or {}).get("changed"),
           str(rep)[:240])
-    check("no flattened copy is produced", not out.exists())
+    check("the flattened copy is produced", out.exists())
+    report = fmt.zotero_report_for_docx(out)
+    check("the flattened copy carries no live fields",
+          report["counts"].get("zotero", 0) == 0, str(report["counts"]))
+    texts = [fmt.text_of(p[2]) for p in fmt.paragraphs(
+        zipfile.ZipFile(out).read("word/document.xml").decode("utf-8"))]
+    check("the flattened text carries the refreshed number (39 -> 2)",
+          texts[0].strip() == "1" and texts[1].strip() == "2", repr(texts[:2]))
+
+    tmp2 = scratch("dbg_flatten_refuse_")
+    stale2 = _docx(tmp2, "stale.docx", body)
+    policy2 = dict(fmt.POLICY_DEFAULTS)
+    policy2["unlink_zotero_fields"] = True
+    policy2["refresh_zotero_fields"] = False     # the fields stay exactly as authored
+    out2 = tmp2 / "flattened.docx"
+    rep2 = fmt.fix_package(stale2, out2, policy2)
+    check("a stale document the refresh cannot repair is STILL refused",
+          rep2.get("ok") is False and "stale" in str(rep2.get("error")),
+          str(rep2)[:240])
+    check("no flattened copy is produced for the refused document", not out2.exists())
     clean_body = ('<w:document xmlns:w="%s"><w:body>' % NS
                   + _cite_field("citeA", r"\super 1\nosupersub{}", [items[0]], "1")
                   + _cite_field("citeB", r"\super 2\nosupersub{}", [items[1]], "2")

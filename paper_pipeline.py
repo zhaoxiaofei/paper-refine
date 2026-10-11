@@ -4480,6 +4480,13 @@ DOCX_FORMAT_MODULE = "paper_docx_format.py"
 # scan stays advisory.
 FORMAT_FIX_MODES = ("auto", "off")
 DEFAULT_FORMAT_FIX = "auto"
+# The published copy keeps its LIVE Zotero fields by default. The pipeline
+# refreshes them (repairs the numbering) but does NOT unlink them: unlinking is
+# the author's own step when the final submission file is prepared (the field
+# state stays editable in Zotero). Operators who want the pipeline to flatten
+# `final_clean_version/` set
+# `format_policy.unlink_zotero_fields_at_publish: true`.
+DEFAULT_PUBLISH_FLATTEN_ZOTERO = False
 # `run --only`: run a subset of the round's stages. `merge` is an alias for the
 # integration stage (the pipeline's "merge from the other versions" step), and
 # `a`/`w`/`i` are the short spellings used in the round plan.
@@ -12466,6 +12473,36 @@ def format_policy_of(ctx: Ctx) -> dict:
         if key not in configured:
             policy[key] = copy.deepcopy(block)
     return policy
+
+
+def publication_format_policy(ctx: Ctx, policy: dict, cli_flatten: bool = False) -> tuple:
+    """(policy for the PUBLISHED copy, flatten_requested).
+
+    By default the published copy keeps LIVE Zotero fields: the formatter
+    refreshes them (repairs the numbering) at publish time, but unlinking them
+    is the AUTHOR's own step when the final submission file is prepared — the
+    run's corpora stay editable in Zotero, and the readme says the copy was
+    left live.
+
+    Unlinking is an EXPLICIT opt-in, never a default: pass `cli_flatten` (the
+    `decide --unlink-zotero-fields` option) or set
+    `format_policy.unlink_zotero_fields_at_publish: true`. The published copy
+    is then flattened (citations become plain text with the refreshed numbers,
+    so no journal conversion can renumber them). A flatten is refused whenever
+    the refresh could not make the document clean; the refused case is recorded
+    as readiness finding `FMT-Z7` rather than freezing unverified numbering.
+    """
+    cfg = (ctx.cfg or {}).get("format_policy") or {}
+    if cli_flatten:
+        flatten = True
+    elif "unlink_zotero_fields_at_publish" in cfg:
+        flatten = bool(cfg.get("unlink_zotero_fields_at_publish"))
+    else:
+        flatten = DEFAULT_PUBLISH_FLATTEN_ZOTERO
+    out = dict(policy)
+    if flatten:
+        out["unlink_zotero_fields"] = True
+    return out, flatten
 
 
 def _venue_reference_blocks(ctx: Ctx) -> dict:
@@ -38061,7 +38098,8 @@ def package_pdf_rows(root: Path, limit: int = 40) -> list:
     return rows[:limit]
 
 
-def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = "") -> dict:
+def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = "",
+                        flatten_zotero: bool = False) -> dict:
     """Publish <root>/final_clean_version/: the champion corpus for a new run.
 
     The copy starts byte-identical to the pinned champion's corpus (that
@@ -38176,19 +38214,77 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     # Normalize the PUBLISHED copy and record it; the pin digest above was
     # verified before these repairs, and the `format_fix` block below states
     # exactly what changed.
+    # The published copy is refreshed like every other corpus, but its Zotero
+    # fields are NOT unlinked by default: unlinking is the author's own step
+    # when the final submission file is prepared. `decide
+    # --unlink-zotero-fields` (or the `unlink_zotero_fields_at_publish` policy
+    # key) opts in and flattens the (already refreshed) fields so no
+    # journal-side conversion can renumber them; the working corpora (pinned/,
+    # the round winners) always keep their live fields. The pin digest above
+    # was verified before these repairs.
+    pub_policy, flatten_zotero = publication_format_policy(
+        ctx, format_policy_of(ctx), cli_flatten=bool(flatten_zotero))
+    # Field counts BEFORE the published copy is refreshed/flattened, so the
+    # readme can say what actually happened instead of guessing.
+    _fmt_z = _format_module()
+    zot_before = {}
+    if _fmt_z is not None and hasattr(_fmt_z, "zotero_report_for_docx"):
+        for q in sorted(tmp.rglob("*.docx")):
+            try:
+                _zrep = _fmt_z.zotero_report_for_docx(q)
+            except Exception:                                      # noqa: BLE001
+                continue
+            zot_before[q.name] = int((_zrep.get("counts") or {}).get("zotero", 0))
     format_fix = ({"skipped": "format_fix=off"}
                   if str((ctx.cfg or {}).get("format_fix") or DEFAULT_FORMAT_FIX) == "off"
-                  else normalize_formatting_in_dir(tmp, format_policy_of(ctx),
+                  else normalize_formatting_in_dir(tmp, pub_policy,
                                                    FINAL_CLEAN_DIRNAME, warns=None,
                                                    artifacts_dir=ctx.reports_dir,
                                                    template=venue_word_templates(ctx) or None,
                                                    containers=venue_containers(ctx)))
+    hygiene["zotero_unlinked"] = {"requested": bool(flatten_zotero),
+                                  "documents": [], "fields_before": zot_before}
+    hygiene["zotero_live_fields"] = []
+    if _fmt_z is not None and hasattr(_fmt_z, "zotero_report_for_docx"):
+        for q in sorted(tmp.rglob("*.docx")):
+            try:
+                _zrep = _fmt_z.zotero_report_for_docx(q)
+            except Exception:                                      # noqa: BLE001
+                continue
+            _n = (_zrep.get("counts") or {}).get("zotero", 0)
+            if _n:
+                hygiene["zotero_live_fields"].append({"file": q.name, "fields": int(_n)})
+            elif zot_before.get(q.name):
+                hygiene["zotero_unlinked"]["documents"].append(q.name)
     # Package hygiene: the by-product names are stripped above; what REMAINS is
     # scanned for internal material (PKG-1) and every shipped PDF for an
     # unfilled/blank artifact (FMT-PDF1..3). These are reported, never silently
     # deleted: the file belongs to the author, but the package must not ship it.
     hygiene["internal_artifacts"] = internal_artifact_rows(tmp)
     hygiene["pdf_artifacts"] = package_pdf_rows(tmp)
+    # A filled XFA form cannot be FLATTENED offline (that needs Acrobat), but
+    # its answers can be rendered readably -- so the decision readme points at
+    # a text rendering of every answer instead of leaving the reviewer with the
+    # Adobe placeholder. Written to the reports directory, never into the
+    # package (the package stays byte-clean manuscript content).
+    hygiene["xfa_exports"] = []
+    _fmt_mod = _format_module()
+    if _fmt_mod is not None and hasattr(_fmt_mod, "xfa_export_text"):
+        xfa_dir = Path(ctx.reports_dir) / "xfa_exports"
+        for r in hygiene["pdf_artifacts"]:
+            if r.get("rule") not in ("FMT-PDF1", "FMT-PDF2", "FMT-PDF4"):
+                continue
+            src_pdf = tmp / str(r.get("document") or "")
+            if not src_pdf.is_file():
+                continue
+            text = _fmt_mod.xfa_export_text(src_pdf)
+            if not text:
+                continue
+            xfa_dir.mkdir(parents=True, exist_ok=True)
+            dest = xfa_dir / (src_pdf.name + ".answers.txt")
+            write_text_atomic(dest, text)
+            hygiene["xfa_exports"].append({"document": r.get("document"),
+                                           "export": str(dest)})
     manifest = corpus_dir_manifest(tmp)
     final_digest = manifest_digest(manifest)
     if dst.is_dir() and corpus_tree_digest(dst) == final_digest:
@@ -38272,6 +38368,49 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
             L.append(f"  - `{r.get('document')}` [{r.get('rule')}]: {r.get('detail')}")
         if len(pdfs) > 12:
             L.append(f"  - … and {len(pdfs) - 12} more (see reports/decision.json)")
+    xfa_exports = hygiene.get("xfa_exports") or []
+    if xfa_exports:
+        L.append("")
+        L.append("Readable rendering(s) of the form answers (generated by the pipeline, so the "
+                 "answers can be reviewed even where the PDF shell shows the Adobe placeholder):")
+        for r in xfa_exports[:8]:
+            L.append(f"  - `{r.get('document')}` -> `{r.get('export')}`")
+    zu = hygiene.get("zotero_unlinked") or {}
+    live_fields = hygiene.get("zotero_live_fields") or []
+    unlinked = zu.get("documents") or []
+    fields_before = sum((zu.get("fields_before") or {}).values()) if isinstance(
+        zu.get("fields_before"), dict) else 0
+    if zu.get("requested") and not live_fields and unlinked:
+        L.append("")
+        L.append(f"Citation fields: refreshed and UNLINKED in the published copy "
+                 f"({len(unlinked)} document(s), {fields_before} field(s) flattened to plain "
+                 f"citation text carrying the verified numbering) — no Word/Zotero conversion "
+                 f"can renumber it. The pinned copies in this run keep the live fields.")
+    elif zu.get("requested") and live_fields:
+        L.append("")
+        L.append(f"**Citation fields: flattening was requested but {len(live_fields)} document(s) "
+                 f"still carry live fields** (the offline refresh refused them; see "
+                 f"`readiness.findings` and the formatter's `zotero_refresh.skip`): "
+                 + ", ".join(f"`{r.get('file')}` ({r.get('fields')})" for r in live_fields[:6]))
+    elif zu and zu.get("requested") is False and fields_before and live_fields:
+        L.append("")
+        L.append(f"Citation fields: refreshed and left LIVE in the published copy "
+                 f"({fields_before} field(s)) — unlinking is the author's own step for the final "
+                 f"submission file; run `decide --unlink-zotero-fields` (or set "
+                 f"`format_policy.unlink_zotero_fields_at_publish: true`) to have the pipeline "
+                 f"flatten the published copy.")
+    package_findings = cert.get("package_findings") or []
+    if cert.get("certified") and package_findings:
+        L.append("")
+        L.append(f"**Submission readiness: NOT READY -- {len(package_findings)} package-level "
+                 f"finding(s) above must be resolved (or explicitly waived) before this package "
+                 f"is uploaded.** The pipeline fixed everything it can fix offline (Zotero "
+                 f"numbering/bibliography, reference-entry facts, formatting); the remaining "
+                 f"items are listed here and in `reports/decision.json` "
+                 f"(`readiness.findings`). `decide --require-ready` turns them into blockers.")
+    elif cert.get("submission_ready") is False and not package_findings:
+        L.append("")
+        L.append("**Submission readiness: see `reports/decision.json` `readiness` block.**")
     L.append("")
     if cert.get("certified"):
         L.append(f"This directory is the certified champion corpus: "
@@ -38294,6 +38433,53 @@ def write_final_clean_readme(ctx: Ctx, certification: dict, final: dict,
     p = ctx.root / FINAL_CLEAN_README_NAME
     write_text_atomic(p, final_clean_readme_text(ctx, certification, final, final_clean))
     return p
+
+
+def package_readiness(final_clean: dict) -> dict:
+    """The published package's own findings, as a readiness verdict.
+
+    Certification answers "did the pipeline's process hold?"; readiness
+    answers "can THIS package be uploaded?". The two are different: a champion
+    can be certified while the published copy still carries a form shell, an
+    unfilled/boilerplate required document or internal working material. The
+    findings are always recorded; `decide --require-ready` additionally turns
+    them into blockers (exit 5), and the status readme always prints the
+    verdict so "CERTIFIED" can never be read as "submission-ready" alone.
+    """
+    hyg = (final_clean or {}).get("hygiene") or {}
+    findings = []
+    for r in hyg.get("internal_artifacts") or []:
+        findings.append({"rule": r.get("rule") or "PKG-1",
+                         "document": r.get("file"), "detail": r.get("detail")})
+    for r in hyg.get("pdf_artifacts") or []:
+        findings.append({"rule": r.get("rule"), "document": r.get("document"),
+                         "detail": r.get("detail")})
+    xfa = []
+    for r in hyg.get("xfa_exports") or []:
+        xfa.append({"document": r.get("document"), "export": r.get("export")})
+    zu = hyg.get("zotero_unlinked") or {}
+    if zu.get("requested"):
+        for r in hyg.get("zotero_live_fields") or []:
+            findings.append({
+                "rule": "FMT-Z7", "document": r.get("file"),
+                "detail": (f"{r.get('fields')} live Zotero citation field(s) remain in the "
+                           f"published copy although flattening was requested: the offline "
+                           f"refresh/flatten pass did not remove them (a refused refresh — the "
+                           f"formatter's zotero_refresh.skip names the reason — or "
+                           f"format_fix=off), so they were left live rather than frozen with "
+                           f"unverified numbering; refresh it in Word/Zotero and re-run, or "
+                           f"flatten it manually and re-verify")})
+    return {"submission_ready": not findings, "findings": findings, "xfa_exports": xfa}
+
+
+def readiness_gate_problems(readiness: dict, require_ready: bool) -> list:
+    """The `--require-ready` gate: package findings as decision blockers."""
+    if not require_ready or (readiness or {}).get("submission_ready"):
+        return []
+    findings = (readiness or {}).get("findings") or []
+    return [f"{len(findings)} package-level finding(s) in the published package "
+            f"(--require-ready): "
+            + "; ".join(f"{f.get('rule')} on {f.get('document')}" for f in findings[:4])]
 
 
 def collect_residuals(ctx: Ctx) -> dict:
@@ -39780,11 +39966,19 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     # blocks, exactly as it blocks `certification` below.
     _clean_reason = final_clean_reason(final, rounds_data, R, final_regression, chain_ok,
                                        provisional, panel_gaps, gate_problems)
-    final_clean = publish_final_clean(ctx, final, not _clean_reason, _clean_reason)
+    final_clean = publish_final_clean(ctx, final, not _clean_reason, _clean_reason,
+                                      flatten_zotero=bool(getattr(
+                                          args, "unlink_zotero_fields", False)))
     # `action` (created/unchanged) describes THIS invocation, not the decision:
     # keeping it out of decision.json/report keeps two consecutive `decide` runs
     # byte-identical (apart from their generation timestamp).
     final_clean_json = {k: v for k, v in final_clean.items() if k != "action"}
+    # SUBMISSION READINESS (separate from process certification): the published
+    # package's own findings -- a form shell, internal working material -- are
+    # recorded on every decision; `--require-ready` turns them into blockers.
+    readiness = package_readiness(final_clean)
+    gate_problems.extend(readiness_gate_problems(readiness,
+                                                 bool(getattr(args, "require_ready", False))))
     integrity = {"pristine_ok": pok, "pristine_detail": pdetail, "pinned_errors": perrs,
                  "evidence_not_verifiable": list(evid_missing),
                  "hash_checks": "skipped" if hash_checks_skipped() else "verified",
@@ -39807,6 +40001,8 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     certification["hash_checks"] = "skipped" if hash_checks_skipped() else "verified"
     if hash_checks_skipped():
         certification["notes"] = list(certification.get("notes") or []) + [hash_skip_note()]
+    certification["submission_ready"] = readiness["submission_ready"]
+    certification["package_findings"] = readiness["findings"]
     cert_blockers = certification["blockers"]
     cert_notes = certification["notes"]
     # The status document is a SIBLING of the directory and is written on every
@@ -39832,6 +40028,7 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         # know where a gate put its rows.
         "residual_gate": bool(getattr(args, "residual_gate", DEFAULT_RESIDUAL_GATE)),
         "residuals": residuals,
+        "readiness": readiness,
         "score_model": score_model_doc(ctx),
         "rounds": [{"round": rd["round"],
                     "field": rd["agg"]["field"],
@@ -43400,6 +43597,23 @@ def build_parser() -> argparse.ArgumentParser:
                                   "problems (exit 5). Unsourced numbers stay advisory")
     decide_opts.add_argument("--non-residual-gate", dest="residual_gate", action="store_false",
                              help="record the residual items instead of failing the decision")
+    decide_opts.add_argument("--require-ready", action="store_true",
+                             help="turn the published package's own findings into blockers: a "
+                                  "form that renders as the Adobe shell, an unfilled required "
+                                  "document, or internal working material shipped in the package "
+                                  "makes the decision NOT CERTIFIED (exit 5) instead of merely "
+                                  "recorded. The readiness verdict and the findings are always "
+                                  "written to decision.json and the status readme; this flag only "
+                                  "turns them into a gate.")
+    decide_opts.add_argument("--unlink-zotero-fields", action="store_true",
+                             help="flatten the published copy's (already refreshed) Zotero "
+                                  "citation fields to plain text, so a journal-side conversion "
+                                  "cannot renumber them. OFF BY DEFAULT and never implied: the "
+                                  "pipeline does not unlink fields unless this flag (or "
+                                  "format_policy.unlink_zotero_fields_at_publish) asks for it, "
+                                  "because the author normally unlinks manually when preparing "
+                                  "the final submission file. Affects final_clean_version/ only; "
+                                  "the pinned corpora keep their live fields.")
     # Shared by run / run-decide / decide: the optional LLM cross-judge conflict
     # audit (the deterministic pass and the manual TODO files always run).  The
     # LLM pass itself is OFF by default -- the LLM defect audit covers the same

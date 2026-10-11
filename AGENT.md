@@ -311,6 +311,35 @@ the profiles shipped next to the script → the built-in fallback inside
     would freeze the wrong numbering. Pinned by
     `.paper_test/test_zotero_refresh_parity.py`.
 
+    **The offline refresh closes that loop by itself (2026-10-11).**
+    `zotero_refresh_document`/`refresh_zotero_parts` re-derive every marker from
+    the document's own citation order, rewrite the field's cached JSON and its
+    visible result runs, rebuild a bibliography whose order or numbers disagree
+    (every entry matched to its item's embedded `itemData`; a full bijection or
+    nothing) and reconcile the two style stores to one CSL style — and
+    `fix_package` runs it automatically at every package-producing stage and at
+    publication, before `unlink_zotero_fields` (so a flattened submission copy
+    carries the CORRECT numbering). **Unlinking is NEVER a default**: the
+    pipeline does not unlink the fields unless asked, because the author
+    normally unlinks them manually for the final submission file. When asked
+    (CLI `zotero-refresh FILE.docx --unlink`, `fix ... --unlink-zotero-fields`,
+    or — for the published copy — `decide --unlink-zotero-fields` /
+    `format_policy.unlink_zotero_fields_at_publish: true`), the order is
+    refresh → verify → unlink; the published copy is otherwise left with
+    refreshed live fields and the readme says so. A refused flatten leaves the
+    fields live and is recorded as readiness finding `FMT-Z7`, never as a
+    silent freeze. It also repairs
+    the reference-entry shapes
+    `FMT-R1`/`R2`/`R3` from the facts a sibling `.bib` proves. The refresh is
+    all-or-nothing and self-verified: an unresolvable item, an unrebuildable
+    marker or a result that still fails its own FMT-Z checks writes NOTHING.
+    Stand-alone: `python3 paper_docx_format.py zotero-refresh FILE.docx`. XFA
+    forms: `FMT-PDF4` says filled-but-not-flattened (never the old false
+    `FMT-PDF2`), `xfa-export` renders the answers readably, and `decide`
+    records `readiness` (`submission_ready`) with `--require-ready` turning the
+    package findings into blockers. Pinned by
+    `.paper_test/test_zotero_auto_refresh_2026_1011.py`.
+
 17. **The discovery round (D0–D5) is CHECKED, and its proposals CONVERGE.**
     Phase 3 of the review is the open-ended hunt for classes the frozen
     checklist does not own; a three-line `new_sweeps.md` (or no `review/round2/`
@@ -404,7 +433,7 @@ python paper_pipeline.py setup --source ./non_revised --root ./paper_rounds \
 
 # validation (see README.md -> Tests for the full list)
 python3 -m py_compile paper_pipeline.py paper_docx_format.py
-python3 .paper_test/run_all.py                 # every suite, offline (20 jobs by default)
+python3 .paper_test/run_all.py                 # every suite, offline (24 jobs by default)
 sh .paper_test/run_one.sh test_venue_config.py
 ```
 

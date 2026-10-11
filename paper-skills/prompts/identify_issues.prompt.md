@@ -1740,7 +1740,12 @@ because its item could not be resolved).
   not the numbering a reader of the published file will see;
 * a `FMT-Z5` conflict → `consistency`: name both stores and the style the target
   journal expects;
-* the resolution is ALWAYS: refresh in Word/Zotero (or fix the field), re-run
+* the resolution is ALWAYS: run the pipeline's offline refresh
+  (`paper_docx_format.py zotero-refresh FILE.docx`, which every
+  package-producing stage's formatter runs automatically and which repairs the
+  markers, the bibliography order and the style stores), or refresh in
+  Word/Zotero for a field the offline refresh REFUSES (its report's
+  `zotero_refresh.skip` names the reason); re-run
   the scan, and only when the rows are gone may the fields be flattened
   (`unlink_zotero_fields`) for the submission copy. **Never flatten a document
   whose markers are stale** — that freezes the wrong numbering;
