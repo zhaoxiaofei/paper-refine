@@ -33,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
@@ -114,7 +115,38 @@ def run_round(tmp: Path, *, rewrites: str, revises: str, jobs: int, sleeps: dict
 
 
 def overlap(a: dict, b: dict) -> bool:
-    return (a["start"] < b["end"]) and (b["start"] < a["end"])
+    return bool(a) and bool(b) and (a["start"] < b["end"]) and (b["start"] < a["end"])
+
+
+def submitted_spans(root: Path, ids) -> dict:
+    """{id: {"start", "end"}} from the pipeline's OWN submission stamps.
+
+    `last_attempt_started` is written by the parent process immediately before
+    `subprocess.Popen`, so it dates when the SCHEDULER submitted the session --
+    the stub log's own `start` additionally carries the child's boot time, which
+    grows by seconds (26 s measured) when `run_all.py -j 24` hammers a 20-core
+    box. The parallelism assertions below accept either signal, so a loaded box
+    cannot turn a launched-together wave into "not parallel"; a real barrier
+    still fails BOTH (the submission of the second session then happens after
+    the first one FINISHED). Missing or unparsable stamps are simply absent.
+    """
+    try:
+        state = json.loads((Path(root) / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for sid in ids:
+        rec = (state.get("runs") or {}).get(sid) or {}
+        first = rec.get("last_attempt_started") or rec.get("started")
+        last = rec.get("finished")
+        if not first or not last:
+            continue
+        try:
+            out[sid] = {"start": datetime.fromisoformat(str(first)).timestamp(),
+                        "end": datetime.fromisoformat(str(last)).timestamp()}
+        except ValueError:
+            continue
+    return out
 
 
 def max_concurrency(spans: dict) -> int:
@@ -161,8 +193,15 @@ def test_dag_scheduling():
           and sum(1 for n in names if ("_judge_" in n or n.startswith("judge_"))) == 16,
           str(names[:6]) + f" ... {len(names)} total")
     w1, w2, rev = spans["r1_w1"], spans["r1_w2"], spans["r1_review"]
-    check("the two rewrites run in parallel with each other", overlap(w1, w2),
-          f"w1 {w1['start']:.2f}-{w1['end']:.2f} w2 {w2['start']:.2f}-{w2['end']:.2f}")
+    # Either signal counts: the stub's own span, or the scheduler's submission
+    # stamps (which do not include the child's boot latency).
+    submitted = submitted_spans(root, set(spans))
+    check("the two rewrites run in parallel with each other",
+          overlap(w1, w2) or overlap(submitted.get("r1_w1", {}), submitted.get("r1_w2", {})),
+          f"w1 {w1['start']:.2f}-{w1['end']:.2f} w2 {w2['start']:.2f}-{w2['end']:.2f}"
+          f" submitted {submitted.get('r1_w1', {}).get('start')}-"
+          f"{submitted.get('r1_w1', {}).get('end')} / "
+          f"{submitted.get('r1_w2', {}).get('start')}-{submitted.get('r1_w2', {}).get('end')}")
     # The INVARIANT is structural (the deps below); the wall-clock comparisons
     # stay one-sided and generous so a loaded box cannot turn a scheduling bug
     # into a false alarm -- a barrier would put the review AFTER the last
@@ -202,9 +241,11 @@ def test_dag_scheduling():
           f"pool end {pool_end:.2f}, earliest integration "
           f"{min(s['start'] for s in integrations.values()):.2f}")
     check("the integrations run in parallel with each other",
-          max_concurrency(integrations) >= 2,
+          max_concurrency(integrations) >= 2
+          or max_concurrency({k: v for k, v in submitted.items() if k in integrations}) >= 2,
           f"max concurrency {max_concurrency(integrations)} over "
-          f"{len(integrations)} integration(s)")
+          f"{len(integrations)} integration(s); submitted "
+          f"{max_concurrency({k: v for k, v in submitted.items() if k in integrations})}")
     judge_map = {n: s for n, s in spans.items() if ("_judge_" in n or n.startswith("judge_"))}
     judge_spans = list(judge_map.values())
     integ_end = max(s["end"] for s in integrations.values())
@@ -213,8 +254,10 @@ def test_dag_scheduling():
           f"integrations end {integ_end:.2f}, first judge "
           f"{min(s['start'] for s in judge_spans):.2f}")
     check("judge sessions run in parallel with each other",
-          max_concurrency(judge_map) >= 2,
-          f"max concurrency {max_concurrency(judge_map)} over {len(judge_map)} judge(s)")
+          max_concurrency(judge_map) >= 2
+          or max_concurrency({k: v for k, v in submitted.items() if k in judge_map}) >= 2,
+          f"max concurrency {max_concurrency(judge_map)} over {len(judge_map)} judge(s); "
+          f"submitted {max_concurrency({k: v for k, v in submitted.items() if k in judge_map})}")
     # The structural invariant behind every timing check above: the dependency
     # graph has NO stage barrier -- review and revise depend on the base/review
     # only, and integrations wait for the whole pool.

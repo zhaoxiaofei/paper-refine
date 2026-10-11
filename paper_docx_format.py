@@ -5499,6 +5499,24 @@ AVAIL_UNRESOLVED_RES = (
     ("to be deposited", re.compile(r"(?i)\b(?:to|will)\s+be\s+deposited\b")),
     ("deposited ... before publication",
      re.compile(r"(?i)\bdeposit(?:ed|ing)?\b[^.]{0,80}\bbefore\s+publication\b")),
+    # A future promise whose verb is a DISSEMINATION sibling of "deposit": the
+    # shipped NeoHeteroclitic package said the Figure-4 matrices "will be added
+    # to that repository before publication" -- the same deferred locator as
+    # "will be deposited ... before publication" above, and exactly the class
+    # this rule exists for, but no pattern named that verb family, so the row
+    # was never filed for it (the CNB sibling statement, "not yet deposited",
+    # WAS filed). The deferral marker in the SAME sentence as the future form
+    # is required, which keeps ordinary future prose out; either order counts
+    # ("Before publication, the matrices will be added ...").
+    ("promised ... before publication",
+     re.compile(r"(?i)(?:\b(?:will|shall|to)\s+be\s+"
+                r"(?:added|uploaded|released|shared|posted|archived|deposited|"
+                r"made\s+available|available)\b[^.]{0,80}\b"
+                r"(?:before|prior\s+to|(?:up)?on|after)\s+(?:publication|acceptance)\b"
+                r"|\b(?:before|prior\s+to|(?:up)?on|after)\s+(?:publication|acceptance)\b"
+                r"[^.]{0,80}\b(?:will|shall|to)\s+be\s+"
+                r"(?:added|uploaded|released|shared|posted|archived|deposited|"
+                r"made\s+available|available)\b)")),
     ("available from the lead contact",
      re.compile(r"(?i)\bavailable\s+from\s+the\s+(?:lead\s+)?contact\b")),
     ("available on request",
@@ -9080,22 +9098,68 @@ def _insert_ppr_extra(ppr_xml: str, extra: str) -> str:
     """Add template pPr children (spacing/ind/jc/rPr) in schema-safe positions."""
     if not extra:
         return ppr_xml
-    rm = re.search(r"<w:rPr(?=[\s>])", ppr_xml)
+    # `w:pPrChange` (a recorded formatting change) is the LAST child of a pPr
+    # and carries a nested `w:pPr` of its own: the `<w:rPr>` inside it is
+    # revision RECORD, not this paragraph's property bag, so every edit below
+    # stays in the part before it -- and a target with no direct rPr lands its
+    # children there too, never after the change (CT_PPr's child order forbids
+    # that).
+    ci = ppr_xml.find("<w:pPrChange")
+    head, change = (ppr_xml[:ci], ppr_xml[ci:]) if ci >= 0 else (ppr_xml, "")
+    open_tag = re.match(r"<w:pPr(?=[\s/>])[^>]*>", head)
+    if open_tag and open_tag.group(0).endswith("/>"):
+        # `<w:pPr/>`: an empty property bag with no closing tag. Open it so the
+        # template's children have a home; the old fallback appended a SECOND
+        # pPr to the paragraph (CT_P allows one). The test is on the pPr's OWN
+        # open tag -- a head that merely ENDS with a self-closing child
+        # (`<w:pPr><w:jc w:val="center"/>`) is not an empty bag.
+        return (open_tag.group(0)[:-2].rstrip() + ">" + extra + "</w:pPr>" + change)
+    if re.search(r"<w:rPr(?=[\s>])", extra):
+        # CT_PPr carries at most ONE w:rPr child, and it must sit after every
+        # other pPr child except sectPr/pPrChange. The template's own rPr
+        # REPLACES the paragraph's direct one -- the same way `_apply_ppr_extra`
+        # drops the direct spacing/ind/jc before inserting -- so the existing
+        # rPr is removed first. Splicing the template's rPr BESIDE the existing
+        # one emitted two rPr children, schema-invalid OOXML that Word reports
+        # as unreadable content (the shipped NeoHeteroclitic main text carries
+        # exactly that on its affiliation and correspondence lines, and its
+        # `docx validate` fails on it).
+        head = re.sub(r"<w:rPr(?=[\s/>])[^>]*/>|<w:rPr(?=[\s>])[^>]*>[\s\S]*?</w:rPr>",
+                      "", head, count=1)
+    rm = re.search(r"<w:rPr(?=[\s>])", head)
     if rm:
-        return ppr_xml[:rm.start()] + extra + ppr_xml[rm.start():]
-    return ppr_xml.replace("</w:pPr>", extra + "</w:pPr>", 1)
+        head = head[:rm.start()] + extra + head[rm.start():]
+    elif change:
+        head = head + extra
+    else:
+        head = head.replace("</w:pPr>", extra + "</w:pPr>", 1)
+    return head + change
 
 
 def _apply_ppr_extra(frag: str, extra: str) -> str:
     """Give a paragraph the TEMPLATE's own pPr children (its direct spacing)."""
     if not extra:
         return frag
-    m = re.search(r"<w:pPr(?=[\s>])[^>]*>[\s\S]*?</w:pPr>", frag)
-    if m:
-        block = re.sub(r"<w:(?:spacing|ind|jc)(?=[\s/>])[^>]*/>", "", m.group(0))
-        return frag.replace(m.group(0), _insert_ppr_extra(block, extra), 1)
     om = re.match(r"<w:p\b[^>]*>", frag)
-    return frag[:om.end()] + f"<w:pPr>{extra}</w:pPr>" + frag[om.end():]
+    if not om:
+        return frag
+    # The paragraph's OWN pPr: a balanced span, so a nested `w:pPrChange`
+    # (which carries a `</w:pPr>` of its own) is not mistaken for its end --
+    # the lazy regex that stopped at the first `</w:pPr>` truncated the block
+    # inside the recorded change and spliced the template's children into the
+    # revision record.
+    pm = re.compile(r"<w:pPr(?=[\s/>])").search(frag, om.end())
+    if not pm:
+        return frag[:om.end()] + f"<w:pPr>{extra}</w:pPr>" + frag[om.end():]
+    s, e = element_span(frag, pm.start(), "pPr")
+    block = frag[s:e]
+    # The direct spacing/ind/jc the template replaces: confined to the part
+    # BEFORE a recorded `w:pPrChange`, whose nested pPr is revision record
+    # (stripping inside it edited the author's tracked formatting history).
+    ci = block.find("<w:pPrChange")
+    head, change = (block[:ci], block[ci:]) if ci >= 0 else (block, "")
+    head = re.sub(r"<w:(?:spacing|ind|jc)(?=[\s/>])[^>]*/>", "", head)
+    return frag[:s] + _insert_ppr_extra(head + change, extra) + frag[e:]
 
 
 def _front_matter_styles(doc_xml: str, roles: dict, tpl_doc: str = "") -> tuple:
