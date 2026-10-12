@@ -63,6 +63,18 @@ REPORTS = {"changelog.md", "manual_steps.md", "revision_report.md",
            # paper_pipeline.BOOKKEEPING_FILES -- the two implementations must
            # compute the same token for the same package).
            "_pipeline_done.json", "scores.json"}
+# Keep in step with paper_pipeline.BOOKKEEPING_NAME_RE: bookkeeping carries a
+# TOKEN between its name and its extension after the naming pass
+# (`worklog_2026-10-11.md`, `diff_ledger_v2.md`, `revision_report_draft.json`),
+# and the exact-name set above misses every one of those. The pipeline's twin
+# (`revision_token_for_dir`, via `is_bookkeeping_name`) excludes the family, so
+# hashing a suffixed variant here made the two implementations derive DIFFERENT
+# tokens for the same package -- while both files' comments insist they MUST
+# agree.
+BOOKKEEPING_NAME_RE = re.compile(
+    r"^(?:replacement_ledger|diff_ledger|revision_report|rewrite_report|manual_steps|"
+    r"visual_check|changelog|agent_log|worklog)"
+    r"(?:[-_.][A-Za-z0-9._\-]+)?\.(?:md|txt|json)$", re.IGNORECASE)
 # Keep in step with paper_pipeline.TRACKING_AUX_NAME_RE (the two implementations
 # MUST derive the same token for the same package): a difference-tracking
 # auxiliary is "<name>.tracking-<token>.<ext>" or "<name>.logging-<token>.<ext>",
@@ -85,7 +97,7 @@ def is_payload(p: Path, root: Path) -> bool:
     if rel.parts and rel.parts[0] == "work":
         return False
     name = p.name.lower().strip()
-    if name in REPORTS or AUX_NAME_RE.search(name):
+    if name in REPORTS or BOOKKEEPING_NAME_RE.match(name) or AUX_NAME_RE.search(name):
         return False
     return True
 

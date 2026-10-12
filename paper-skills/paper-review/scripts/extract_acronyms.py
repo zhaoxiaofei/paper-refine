@@ -171,6 +171,11 @@ FILE_RE = re.compile(
 
 REF_HEADING_RE = re.compile(
     r"^\s*(?:#{1,6}\s*)?(?:references?|bibliography|reference\s+list|literature\s+cited)\s*:?\s*$", re.I)
+# The reference-role file names: "ref", "refs", "references", "ref-list" --
+# the SAME word-boundary rule convert_corpus.py's role guesser uses.
+# Deliberately not a bare "ref" PREFIX: "refined_draft.txt" is not a
+# bibliography, and treating it as one dropped its prose from the M1 inventory.
+REF_ROLE_RE = re.compile(r"\brefs?\b|\breferences?\b")
 STOP_SECTION_RE = re.compile(
     r"^\s*(?:#{1,6}\s+)?(?:figure\s+legends?|figures?|table\s+legends?|tables?|"
     r"supplementary(?:\s+\w+)?|extended\s+data(?:\s+\w+)?|methods?|materials\s+and\s+methods|"
@@ -294,7 +299,7 @@ def classify_context(fname):
     # fed the M1 inventory and the M1b long-form table with prose that is not
     # the authors' own. The reference-list exclusion in the spec applies to
     # these files exactly like it applies to a "References" section.
-    if re.search(r"(^|[^a-z])ref", f) or "bibliograph" in f or re.search(r"\.bib(\.|$)", raw):
+    if REF_ROLE_RE.search(f) or "bibliograph" in f or re.search(r"\.bib(\.|$)", raw):
         return "references"
     if "abstract" in f: return "abstract"
     if "supp" in f or "extended_data" in f or "appendix" in f: return "supplementary"
@@ -755,7 +760,14 @@ def audit_long_forms(acro, swept):
                     if occ["context"] == ctx and occ["file"] == fname_ctx:
                         n_short += 1
             if n_short:
-                out["short_after"][ctx] = n_short
+                # ACCUMULATE: the dict is keyed by context only while this loop
+                # runs per FILE, so two files that both use the short form in the
+                # same context kept only the last file's count (abstract.md with
+                # the short form x3 plus intro.md with x1 reported 1). The M1
+                # field rule reads short_after to separate an orphan definition
+                # from one still in use, and every sibling field (rows, quotes)
+                # aggregates across files.
+                out["short_after"][ctx] = out["short_after"].get(ctx, 0) + n_short
         if out["rows"] or out["first"]:
             result[tok] = out
     return result

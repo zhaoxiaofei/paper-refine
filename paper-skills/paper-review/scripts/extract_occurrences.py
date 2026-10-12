@@ -117,7 +117,18 @@ def variant_pattern(term, mode):
     # The class is `*` (not `+`) so the hyphenless spelling the old code
     # accepted for hyphenated terms ("scRNA-seq" ~ "scRNAseq") keeps matching.
     parts = [re.escape(p) for p in re.split(r"[\s\-]+", term.strip()) if p]
-    pat = r"(?i)\b" + r"[\s\-]*".join(parts) + r"(?:es|s)?\b"
+    if not parts:
+        raise ValueError(f"empty term {term!r}: a term to enumerate must carry at least "
+                         f"one character")
+    # `(?<!\\w)`/`(?!\\w)` rather than `\\b`: a trailing `\\b` cannot match after
+    # a term whose last character is not a word character, so `--term "CD4+"` and
+    # `--term "C++"` matched NOTHING while the artifact still asserted "0
+    # occurrences" -- and a P1 propagation pass read that as "fully propagated".
+    # The lookarounds keep the ordinary word-edge semantics (scRNA-seq still
+    # matches) and tolerate a non-word edge on either side. An empty term used to
+    # compile to `(?i)(?<!\\w)(?:es|s)?(?!\\w)`, which MATCHED empty strings in
+    # every word (6 matches inside a three-word sentence).
+    pat = r"(?i)(?<!\w)" + r"[\s\-]*".join(parts) + r"(?:es|s)?(?!\w)"
     return re.compile(pat)
 
 
@@ -176,7 +187,11 @@ def main():
 
     all_results = []
     for mode, target in targets:
-        pat = variant_pattern(target, mode)
+        try:
+            pat = variant_pattern(target, mode)
+        except ValueError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(2)
         results = []
         if os.path.isdir(corpus):
             for fname in sorted(os.listdir(corpus)):

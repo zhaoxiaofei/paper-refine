@@ -3402,6 +3402,22 @@ def rewrite_text_spans(para: str, edits: list) -> tuple:
     edits = sorted((s, e, r) for s, e, r in edits if 0 <= s <= e <= len(text) and (e > s or r))
     if not edits:
         return para, []
+    # The reconstruction below walks the text as a NON-OVERLAPPING sequence
+    # (`pos = e`), so an edit nested inside another one -- an FMT-P3 doubled
+    # space inside the journal segment an FMT-T8a drop removes -- was spliced at
+    # stale offsets: the returned `applied` ledger claimed it ran while the
+    # emitted text matched neither edit, and fix_document's own text-identity
+    # verification then refused the whole fix run with a generic mismatch.
+    # Keep the first edit of each overlapping group (the sort is by start then
+    # end, so the EARLIER-starting edit wins, and of two edits sharing a start
+    # the narrower one is kept) and drop what it subsumes, so `applied`
+    # describes exactly what the returned paragraph holds.
+    deduped = []
+    for s, e, r in edits:
+        if deduped and s < deduped[-1][1]:
+            continue
+        deduped.append((s, e, r))
+    edits = deduped
     applied = [(s, e, text[s:e], r) for s, e, r in edits]
     keep, pos = [], 0
     for s, e, _r in edits:
@@ -4397,13 +4413,26 @@ def _table_paragraph_indices(xml: str, paras: list) -> set:
     corrupt file, and the fixer's well-formedness/text-identity verification
     cannot see it. Table paragraphs are therefore never stray.
     """
-    if not xml:
+    spans = _table_spans(xml)
+    if not spans:
         return set()
-    # Balance the `<w:tbl>`/`</w:tbl>` pairs: the lazy regex stopped at the
-    # FIRST `</w:tbl>`, so with a NESTED table (a table inside a cell) every
-    # paragraph of the outer table after the inner one lost the protection --
-    # including a following cell's ONLY paragraph, which the fixer could then
-    # splice out, leaving `<w:tc></w:tc>` (a file Word reports as corrupt).
+    return {i for i, (p0, _p1, _frag) in enumerate(paras)
+            if any(a <= p0 < b for a, b in spans)}
+
+
+def _table_spans(xml: str) -> list:
+    """(start, end) spans of the document's `<w:tbl>` blocks, NESTING-aware.
+
+    Balance the `<w:tbl>`/`</w:tbl>` pairs: a lazy `<w:tbl>.*?</w:tbl>` regex
+    stops at the FIRST `</w:tbl>`, so with a NESTED table (a table inside a cell)
+    everything of the outer table after the inner one escapes the span -- the
+    paragraphs of a following cell lose their table-cell protection (the fixer
+    could then splice out a cell's ONLY paragraph, leaving `<w:tc></w:tc>`, a
+    file Word reports as corrupt) and the heading detector read those cell
+    paragraphs as body text. Both call sites use this one definition.
+    """
+    if not xml:
+        return []
     spans, depth, start = [], 0, 0
     for m in re.finditer(r"<w:tbl(?=[\s>])|</w:tbl>", xml):
         if m.group(0) == "</w:tbl>":
@@ -4414,10 +4443,7 @@ def _table_paragraph_indices(xml: str, paras: list) -> set:
             if depth == 0:
                 start = m.start()
             depth += 1
-    if not spans:
-        return set()
-    return {i for i, (p0, _p1, _frag) in enumerate(paras)
-            if any(a <= p0 < b for a, b in spans)}
+    return spans
 
 
 def stray_empty_paragraph_groups(paras: list, policy: dict, xml: str = None) -> tuple:
@@ -5282,6 +5308,23 @@ NUMBERING_MENTION_RES = {
 DISPLAY_ITEM_TOKEN_RE = re.compile(r"(?i)(?<![A-Za-z0-9])" + _DISPLAY_ITEM_TOKEN)
 SUPPLEMENTARY_ITEM_RE = re.compile(r"^S\d+", re.I)
 ROMAN_NUMERAL_RE = re.compile(r"^[IVXLC]+$")
+# The phrase a call-out may carry IN FRONT of the keyword: "Supplementary
+# Figure 2" and "Extended Data Figure 3" are their own families, not main
+# figures (the main/supplementary split the row logic promises above). Reading
+# only the keyword+token shape recorded both as MAIN figures, so a later
+# "Figure 1" produced a false FMT-O1.
+DISPLAY_SUPP_PREFIX_RE = re.compile(r"(?i)(?:supplementary|supplemental|suppl\.?)\s*$")
+DISPLAY_EDATA_PREFIX_RE = re.compile(r"(?i)extended\s+data\s*$")
+
+
+def _display_family_prefix(before: str):
+    """The family a call-out phrase's PREFIX names, or "" for the token's own."""
+    zone = (before or "")[-24:]
+    if DISPLAY_EDATA_PREFIX_RE.search(zone):
+        return "edata"
+    if DISPLAY_SUPP_PREFIX_RE.search(zone):
+        return "supp"
+    return ""
 
 
 def _roman_value(token: str):
@@ -5345,12 +5388,15 @@ def display_order_rows(paras: list, is_ref: list = None, is_caption: list = None
             continue
         for kind, pattern in NUMBERING_MENTION_RES.items():
             for m in pattern.finditer(str(text or "")):
+                prefix_family = _display_family_prefix(str(text or "")[:m.start()])
                 filled, prev = [], None
                 for token, is_range in _display_phrase_tokens(m.group(0)):
                     key = _display_item_key(kind, token)
                     if key is None or key[2] is None:
                         prev = None
                         continue
+                    if prefix_family and key[1] == "main":
+                        key = (key[0], prefix_family, key[2], key[3])
                     if (is_range and prev is not None and prev[0] == key[0]
                             and prev[1] == key[1]
                             and 0 < key[2] - prev[2] <= _DISPLAY_RANGE_MAX):
@@ -5675,6 +5721,26 @@ def _zotero_marker_text(marker: str) -> str:
     return re.sub(r"\s+", "", s)
 
 
+_MARKER_RANGE_MAX = 80
+
+
+def _marker_range_numbers(a: int, b: int) -> list:
+    """The numbers one ``a-b`` citation range names.
+
+    An expandable range expands. A range the parser will not expand -- longer
+    than `_MARKER_RANGE_MAX`, or written backwards -- keeps its two ENDPOINTS:
+    dropping it made the field look like it cites NOTHING, so every later check
+    skipped it (FMT-Z1/Z3 read no numbers, and the offline refresh's count guard
+    refused the document on a number list of length 0). A year range
+    ("2019-2020") is not a citation range at all and still yields nothing.
+    """
+    if 1000 <= a and b <= 2999:
+        return []
+    if 0 < b - a <= _MARKER_RANGE_MAX:
+        return list(range(a, b + 1))
+    return [a, b]
+
+
 def _marker_numbers(marker: str, text: str = None) -> list:
     """The numbers a numeric citation marker names, en-dash ranges expanded."""
     raw = text if text is not None else _zotero_marker_text(marker)
@@ -5686,10 +5752,19 @@ def _marker_numbers(marker: str, text: str = None) -> list:
                 continue
             m = re.fullmatch(r"(\d+)\s*[\u2013\u2014-]\s*(\d+)", part)
             if m:
-                a, b = int(m.group(1)), int(m.group(2))
-                # A YEAR range ("2019-2020") is not a reference range.
-                if a <= b and b - a <= 80 and not (1000 <= a and b <= 2999):
-                    out.extend(range(a, b + 1))
+                out.extend(_marker_range_numbers(int(m.group(1)), int(m.group(2))))
+                continue
+            # "12-14p.5" -- `_zotero_marker_text` deletes every space, so the
+            # page locator of a range written "12-14 p. 5" arrives GLUED to the
+            # range. The old parse fell through to the leading-number branch,
+            # read the cluster as the single number 12 and dropped 13 and 14,
+            # while the same cluster written "12-14, p. 5" expanded. A locator
+            # names a place, not a reference: expand the range, ignore the
+            # locator.
+            m = re.fullmatch(r"(\d+)\s*[\u2013\u2014-]\s*(\d+)([A-Za-z][A-Za-z.\s]*?)"
+                             r"(\d{1,4})", part)
+            if m and m.group(3).strip().rstrip(".").lower() in MARKER_LOCATOR_WORDS:
+                out.extend(_marker_range_numbers(int(m.group(1)), int(m.group(2))))
                 continue
             m = re.fullmatch(r"\d+", part)
             if m:
@@ -5783,6 +5858,22 @@ def _bibliography_entry_start(para_texts: list) -> int:
     return start
 
 
+def _zotero_word_in(hay: str, token: str) -> bool:
+    """True when `token` appears in `hay` as a WORD, not as a substring.
+
+    `hay` is the normalised entry text (lowercase, alphanumerics and single
+    spaces), so the boundary is the string's own alphanumeric run. A plain
+    `token in hay` made the parity check blind: the family "He" matched "The
+    method ...", "Li" matched "Applied ..." and the title token "model" matched
+    "Remodeling ...", so FMT-Z2 could not see an entry that describes a
+    DIFFERENT work -- the check that catches a stale numbered bibliography.
+    """
+    if not token:
+        return False
+    return re.search(r"(?<![a-z0-9])" + re.escape(str(token)) + r"(?![a-z0-9])",
+                     hay or "") is not None
+
+
 def _entry_describes_item(entry: str, item: dict) -> bool:
     """Does a bibliography ENTRY text describe the citation's embedded itemData?
 
@@ -5800,12 +5891,12 @@ def _entry_describes_item(entry: str, item: dict) -> bool:
         family = str(first.get("family") or first.get("literal") or "").strip()
         if family:
             token = re.sub(r"[^a-z0-9 ]+", " ", family.lower()).split()
-            if token and token[0] in hay:
+            if token and _zotero_word_in(hay, token[0]):
                 return True
     title = str(item.get("title") or "")
     tokens = [t for t in re.sub(r"[^a-z0-9 ]+", " ", title.lower()).split()
               if len(t) > 4 and t not in ZOTERO_TOKEN_STOPWORDS]
-    if tokens and any(t in hay for t in tokens[:8]):
+    if tokens and any(_zotero_word_in(hay, t) for t in tokens[:8]):
         return True
     return False
 
@@ -6309,20 +6400,25 @@ def _zotero_entry_match_score(entry_text: str, item: dict) -> int:
     if isinstance(creators, list) and creators and isinstance(creators[0], dict):
         family = str(creators[0].get("family") or creators[0].get("literal") or "").strip()
         token = re.sub(r"[^a-z0-9 ]+", " ", family.lower()).split()
-        if token and token[0] in hay:
+        if token and _zotero_word_in(hay, token[0]):
             score += 3
-            if token[0] in hay[:80]:
+            if _zotero_word_in(hay[:80], token[0]):
                 score += 1
     issued = item.get("issued") or {}
     try:
         year = str(issued.get("date-parts", [[None]])[0][0])
-    except (KeyError, IndexError, TypeError):
+    except (KeyError, IndexError, TypeError, AttributeError):
+        # A hand- or agent-edited citation JSON can carry "issued": "2020" (a
+        # string) or a list: `issued.get` then raises AttributeError, which
+        # escaped through _zotero_bibliography_plan into the fixer. The module
+        # already treats malformed itemData as in-scope (the isinstance guard
+        # around the creators above), so this is the same guard, completed.
         year = ""
     if year and year != "None" and f"({year})" in re.sub(r"\s+", " ", entry_text):
         score += 1
     title = str(item.get("title") or "")
     for t in re.sub(r"[^a-z0-9 ]+", " ", title.lower()).split():
-        if len(t) > 4 and t not in ZOTERO_TOKEN_STOPWORDS and t in hay:
+        if len(t) > 4 and t not in ZOTERO_TOKEN_STOPWORDS and _zotero_word_in(hay, t):
             score += 1
             if score >= 8:
                 break
@@ -6976,7 +7072,15 @@ def repair_reference_entries(xml: str, records: list) -> dict:
     paras = paragraphs(xml)
     texts = [text_of(p[2]) for p in paras]
     first = _bibliography_entry_start(texts)
-    edits, repairs = [], []
+    # Keyed by the paragraph's ORIGINAL span: `apply_edits` splices every edit at
+    # its own offsets, so two edits for one paragraph spliced the second
+    # replacement on shifted coordinates and ate the bytes that followed the
+    # paragraph (`</w:p>` became `:p>`), and fix_package's well-formedness check
+    # then aborted the ENTIRE fix run with a misleading "repaired file was not
+    # accepted". An entry that trips two rules at once is realistic: FMT-R1 (a
+    # fused volume-year) plus FMT-R2 (a bare year with no venue). The loop chains
+    # `para`, so the last write for a span IS the paragraph both repairs produced.
+    edits, repairs = {}, []
     for idx in range(first, len(paras)):
         p0, p1, para = paras[idx]
         entry = re.sub(r"\s+", " ", texts[idx]).strip()
@@ -7032,13 +7136,13 @@ def repair_reference_entries(xml: str, records: list) -> dict:
                 out["skipped"].append(
                     f"{rule}: the text to replace in entry {m.group(1)} spans runs")
                 continue
-            edits.append((p0, p1, new_para))
+            edits[p0, p1] = new_para
             repairs.append({"entry": m.group(1), "rule": rule,
                             "before": old[:80], "after": new[:80]})
             para = new_para
     if not edits:
         return out
-    new_xml = apply_edits(xml, edits)
+    new_xml = apply_edits(xml, [(s, e, v) for (s, e), v in edits.items()])
     # Verify with the same rule set: no repair may leave its own rule firing.
     new_texts = [text_of(p[2]) for p in paragraphs(new_xml)]
     # The entry flag must accept the number fused to the text ("15.Dong"):
@@ -7528,11 +7632,19 @@ def analyse_package(path: Path, policy: dict) -> dict:
         pages, src = None, ""
         pdf = path.with_suffix(".pdf")
         if pdf.is_file() and shutil.which("pdftotext"):
-            txt = subprocess.run(["pdftotext", "-layout", str(pdf), "-"],
-                                 capture_output=True, text=True, encoding="utf-8",
-                                 errors="replace", timeout=60).stdout
-            pages, src = blank_pages_in_text(txt)["pages"], "the rendered PDF beside it"
-        elif app_pages is not None:
+            try:
+                txt = subprocess.run(["pdftotext", "-layout", str(pdf), "-"],
+                                     capture_output=True, text=True, encoding="utf-8",
+                                     errors="replace", timeout=60).stdout
+                pages, src = (blank_pages_in_text(txt)["pages"],
+                              "the rendered PDF beside it")
+            except (OSError, subprocess.SubprocessError) as e:
+                # A wedged or erroring pdftotext must degrade to the cached value,
+                # never abort the whole corpus scan (the sibling helpers catch
+                # exactly this tuple). `pages` stays None so the fallback runs.
+                print(f"warning: pdftotext failed on {pdf.name} ({type(e).__name__}); "
+                      f"using the cached page count", file=sys.stderr)
+        if pages is None and app_pages is not None:
             pages, src = app_pages, "the cached docProps/app.xml value -- render to confirm"
         if pages and pages > 2:
             res["rows"].append(cover_letter_page_row(path, pages, src))
@@ -8887,7 +8999,11 @@ def heading_like_paragraphs(doc_xml: str, containers=()) -> list:
     if body is None:
         return []
     paras = list(paragraphs(doc_xml))
-    tables = [(m.start(), m.end()) for m in re.finditer(r"<w:tbl\b[\s\S]*?</w:tbl>", doc_xml)]
+    # `_table_spans` balances nested tables; the lazy regex this used to run
+    # stopped at the inner `</w:tbl>`, so a paragraph of the OUTER table after a
+    # nested one was read as body text and `_retag_headings` could stamp a
+    # Heading style onto a short bold line inside a table cell.
+    tables = _table_spans(doc_xml)
     entries = [i for i, p in enumerate(paras) if text_of(p[2]).strip()]
     skip = set(entries[:1])                       # the article title
     for i in entries[1:4]:                        # the author line
@@ -9035,7 +9151,15 @@ def _bold_label_runs(para_xml: str) -> str:
         tm = re.search(r"(<w:t[^>]*>)([\s\S]*?)(</w:t>)", run)
         if not tm:
             continue
-        text = xml_unescape(tm.group(2))
+        # `unesc`, not `xml.sax.saxutils.unescape`: the sax decoder only knows
+        # `&amp;`/`&lt;`/`&gt;`, so a run carrying a numeric reference
+        # (`&#8211;`, Word's own serialization for a dash) was under-decoded and
+        # then re-escaped by with_text into `&amp;#8211;` -- visible junk in the
+        # correspondence line. The text-identity check could not see it either
+        # (both sides decode back to the same character through unesc), and the
+        # bold/roman split point drifted because `left` counts decoded
+        # characters while the under-decoded text is longer.
+        text = unesc(tm.group(2))
         if not text.strip():
             continue
         take = min(left, len(text))
@@ -9082,7 +9206,7 @@ def _label_is_bold(para_xml: str) -> bool:
         return False
     left = len(m.group(0))
     for run in re.findall(r"<w:r\b[\s\S]*?</w:r>", para_xml):
-        text = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", run))
+        text = "".join(unesc(t) for t in re.findall(r"<w:t[^>]*>([^<]*)</w:t>", run))
         if not text.strip():
             continue
         take = min(left, len(text))
@@ -10070,10 +10194,20 @@ def pdf_artifact_rows(path: Path, text: str = None, pages=None) -> list:
     if text is None:
         exe = shutil.which("pdftotext")
         if exe:
-            proc = subprocess.run([exe, "-layout", str(path), "-"],
-                                  capture_output=True, text=True, encoding="utf-8",
-                                  errors="replace", timeout=60)
-            text = proc.stdout or ""
+            try:
+                proc = subprocess.run([exe, "-layout", str(path), "-"],
+                                      capture_output=True, text=True, encoding="utf-8",
+                                      errors="replace", timeout=60)
+                text = proc.stdout or ""
+            except (OSError, subprocess.SubprocessError) as e:
+                # The module's contract is to REPORT a row, never to raise out of
+                # a scan; a stalled/failing pdftotext degrades exactly like the
+                # "pdftotext not available" branch below (the sibling helpers
+                # catch this same tuple).
+                print(f"warning: pdftotext failed on {Path(path).name} "
+                      f"({type(e).__name__}); the PDF's text layer was not read",
+                      file=sys.stderr)
+                text = ""
         else:
             text = ""
     body = (text or "").strip()
@@ -10138,9 +10272,22 @@ def check_pdf(path: Path, policy: dict) -> dict:
                           "location": "-", "evidence": "pdftotext not available",
                           "detail": "cannot check pages for blankness", "fix": "manual",
                           "protected": False}]}
-    proc = subprocess.run(["pdftotext", "-layout", str(path), "-"],
-                          capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", timeout=60)
+    try:
+        proc = subprocess.run(["pdftotext", "-layout", str(path), "-"],
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        # A timeout/wedged child re-raised subprocess.TimeoutExpired straight out
+        # of the scan (60 s in, on exactly the large or pathological PDF this
+        # check exists for). Report it like any other unreadable input instead.
+        return {"file": str(path), "pages": 0, "blank_pages": [], "ok": False,
+                "rows": [{"rule": "FMT-S2", "severity": "high", "document": path.name,
+                          "location": "-",
+                          "evidence": f"pdftotext failed: {type(e).__name__}"
+                                      + (f": {e}" if str(e) else ""),
+                          "detail": "the PDF could not be read (pdftotext did not finish); "
+                                    "no blank-page verdict is possible",
+                          "fix": "manual", "protected": False}]}
     if proc.returncode != 0:
         # An unreadable/missing PDF yields empty text, which parses as 0 pages
         # and 0 blank pages: reporting that as clean is a false pass on the one
@@ -10368,8 +10515,10 @@ def cmd_zotero_refresh(args) -> int:
 
     The repair runs only when every field resolves and the result passes the
     same FMT-Z checks `zotero-check` runs; otherwise nothing is written and the
-    reason is printed (exit 1). `--out` writes a copy; without it the file is
-    replaced in place (the pipeline's own callers do the same on a temp copy).
+    reason is printed (exit 1). The one nothing-to-do case -- "no live citation
+    fields", a document that carries no field to refresh -- exits 0. `--out`
+    writes a copy; without it the file is replaced in place (the pipeline's own
+    callers do the same on a temp copy).
     """
     policy = load_policy(args.policy)
     if getattr(args, "unlink", False):
@@ -10418,7 +10567,17 @@ def cmd_zotero_refresh(args) -> int:
     if args.json:
         Path(args.json).write_text(json.dumps(res, indent=2, ensure_ascii=False),
                                    encoding="utf-8")
-    return 0 if res.get("ok") and res.get("changed") else (1 if not res.get("ok") else 0)
+    # The docstring's contract: the repair runs only when every field resolves and
+    # the result passes the FMT-Z checks; otherwise the reason is printed and the
+    # exit status is 1. `ok=True, changed=False` with a recorded skip reason IS
+    # that refusal (an unresolvable field, a non-numeric style, a rebuild it
+    # declined), and returning 0 here let a caller gating on the exit status read
+    # a refused/stale refresh as success. "no live citation fields" is the one
+    # nothing-to-do case -- no field exists to refresh -- and stays 0.
+    refused = bool(res.get("skip")) and str(res.get("skip")) != "no live citation fields"
+    if not res.get("ok") or refused:
+        return 1
+    return 0
 
 
 def cmd_xfa_export(args) -> int:

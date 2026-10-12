@@ -265,7 +265,17 @@ def collect_candidates(docs, min_len=5, min_count=1):
                     continue
                 low = tok.lower()
                 key = _candidate_key(low)
-                if key == low or len(key) < min_len:
+                # The CANONICAL surface belongs to its own family: the decision
+                # below needs "two or more distinct surface forms", and the
+                # surface that IS the licensed key is one of the two
+                # (analysed/analyzed, colour/color). Skipping it left the layer
+                # dead for exactly the canonical-versus-variant mixes it exists
+                # to catch -- a corpus of `analysed` x2 + `analyzed` x2 produced
+                # ZERO candidates. The `len(key) < min_len` floor is what keeps
+                # the unanchored -our substitution from manufacturing families
+                # out of short function words (four -> for has a 3-character
+                # key and stays out).
+                if len(key) < min_len:
                     continue
                 by_key[key][low] += 1
                 if len(where[(key, low)]) < 3:

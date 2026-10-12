@@ -10967,10 +10967,14 @@ CURRENT_RUN_LOG = None
 def start_run_log(cmd: str, root, argv=None) -> Path:
     """Open `reports/<cmd>-<stamp>.log` and mirror stdout/stderr into it.
 
-    Returns the path (None-ish empty Path on failure). Called by `main()` for the
-    commands that drive or mutate a root: `status`/`--help` stay quiet. The file
-    is also recorded on the root as `run_logs` so a later inspection can find the
-    console of any invocation, and `setup` writes into the root it is creating.
+    Returns the path, or None when the log could not be opened. `Path("")` is
+    Path(".") and TRUTHY, so the old empty-Path sentinel defeated every caller's
+    `if path` guard: a failed open printed "run log: .", set CURRENT_RUN_LOG to
+    '.', and appended '.' to the root's `run_logs` history. Called by `main()`
+    for the commands that drive or mutate a root: `status`/`--help` stay quiet.
+    The file is also recorded on the root as `run_logs` so a later inspection can
+    find the console of any invocation, and `setup` writes into the root it is
+    creating.
     """
     try:
         reports = Path(root) / "reports"
@@ -10996,7 +11000,7 @@ def start_run_log(cmd: str, root, argv=None) -> Path:
             f.write(header)
         return path
     except OSError:
-        return Path()
+        return None
 
 
 def install_run_log(path: Path) -> None:
@@ -11028,7 +11032,7 @@ def begin_run_log(cmd: str, root, argv=None) -> Path:
     """Start the invocation's run log, mirror the console into it, say where it is."""
     global CURRENT_RUN_LOG
     path = start_run_log(cmd, root, argv or sys.argv)
-    if path and str(path):
+    if path is not None:
         CURRENT_RUN_LOG = path
         install_run_log(path)
         print(f"[{cmd}] run log: {path}")
@@ -11694,7 +11698,15 @@ def count_manual_steps(path: Path):
 # ---------------------------------------------------------------------
 
 def _strip_latex(text: str) -> str:
-    text = re.sub(r"\\(?:cite[a-zA-Z]*|ref|label|url|href)\s*\{[^{}]*\}", " ", text)
+    # Keep in step with paper-skills/paper-review/scripts/count_words.py: the
+    # same two gaps made the two word counters disagree with each other AND
+    # overcount prose. Optional arguments first (`\cite[p.5]{x}` left `[p.5]` and
+    # `x` behind as prose); then inline/single-line display math (`$p<0.05$`,
+    # `\(x\)`, `\[x\]`), which is not prose either.
+    text = re.sub(r"\\(?:cite[a-zA-Z]*|ref|label|url|href)\s*"
+                  r"(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text)
+    text = re.sub(r"\$\$[\s\S]*?\$\$|\$[^$]*\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)", " ",
+                  text)
     text = re.sub(r"\\[a-zA-Z@]+\*?", " ", text)
     return re.sub(r"\s+", " ", text.replace("{", " ").replace("}", " ")).strip()
 
@@ -12081,6 +12093,17 @@ TEX_SCAFFOLD_RE = re.compile(
     r"includegraphics|includesvg|input|include|vspace|hspace|setlength|geometry|"
     r"graphicspath|hypersetup|newcommand|renewcommand)\*?(?:\[[^\]]*\])?"
     r"(?:\{[^{}]*\})*")
+# A LaTeX comment: an UNESCAPED ``%`` and everything after it on the line.
+# The escape count is what matters: ``\%`` is a literal percent sign (prose),
+# while ``\\%`` is a line break followed by a comment. The old ``(?<!\\)%``
+# looked at ONE preceding backslash, so every ``\\%`` kept its comment text and
+# the length/style scans counted it as the authors' prose.
+TEX_COMMENT_RE = re.compile(r"(?<!\\)((?:\\\\)*)%.*$", re.M)
+
+
+def strip_tex_comment(text: str) -> str:
+    """`text` without its LaTeX comments (the escape pair kept in place)."""
+    return TEX_COMMENT_RE.sub(r"\1", text or "")
 
 
 def _tex_brace_delta(text: str) -> int:
@@ -12096,6 +12119,19 @@ def _tex_brace_delta(text: str) -> int:
         elif ch == "}":
             delta -= 1
     return delta
+
+
+# Display-math environments: the twin of count_words.TEX_MATH_ENV. Their
+# `\begin`/`\end` tokens were stripped but the BODY was counted as the authors'
+# prose, drifting a .tex count upward against the venue cap.
+TEX_MATH_ENV_RE = re.compile(
+    r"\\begin\{(equation\*?|align\*?|alignat\*?|eqnarray\*?|gather\*?|multline\*?|"
+    r"displaymath|math|split|flalign\*?)\}[\s\S]*?\\end\{\1\}", re.M)
+
+
+def blank_math_environments(text: str) -> str:
+    """`text` without the bodies of display-math environments (newlines kept)."""
+    return TEX_MATH_ENV_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text or "")
 
 
 def _tex_split_group(text: str):
@@ -12138,7 +12174,8 @@ def text_source_paragraphs(path: Path) -> list:
     except OSError:
         return []
     if path.suffix.lower() in (".tex", ".ltx"):
-        raw = re.sub(r"(?m)(?<!\\)%.*$", "", raw)
+        raw = strip_tex_comment(raw)
+        raw = blank_math_environments(raw)
         raw = TEX_ENV_TOKEN_RE.sub("\n\n", raw)
         raw = re.sub(r"\\(?:section|subsection|subsubsection|paragraph|chapter)\*?"
                      r"\s*\{[^{}]*\}", "\n\n", raw)
@@ -12164,26 +12201,36 @@ def _tex_length_scan(text: str):
         (a one-line abstract used to be replaced by the bare heading and lost).
     """
     out, captions, abstract_end = [], [], None
-    raw_lines = (text or "").splitlines()
+    raw_lines = blank_math_environments(text or "").splitlines()
     i, n = 0, len(raw_lines)
     while i < n:
         raw = raw_lines[i]
         i += 1
-        line = re.sub(r"(?<!\\)%.*$", "", raw).strip()
-        if re.match(r"\\begin\{abstract\}", line):
-            rest = re.sub(r"^\\begin\{abstract\}", "", line)
-            rest = re.sub(r"\\end\{abstract\}.*$", "", rest).strip()
-            out.append("Abstract")
-            if rest:
-                out.append(_tex_line_text(rest))
-            if "\\end{abstract}" in line:
+        line = strip_tex_comment(raw).strip()
+        begins = re.match(r"\\begin\{abstract\}", line)
+        ends = re.search(r"\\end\{abstract\}", line)
+        if begins or ends:
+            # Both environment tokens may sit ANYWHERE on the line: a one-line
+            # abstract is `\begin{abstract} ... \end{abstract}`, and the usual
+            # ending is `Last sentence.\end{abstract}`. The old start-anchored
+            # tests honoured only a token at position 0, so on the usual ending
+            # `abstract_end` stayed unset, the NEXT paragraph was counted as
+            # abstract text and the main-text count lost it.
+            if begins:
+                out.append("Abstract")
+            head_from = begins.end() if begins else 0
+            if ends is None:
+                rest = _tex_line_text(line[head_from:])
+                if rest:
+                    out.append(rest)
+            else:
+                head = _tex_line_text(line[head_from:ends.start()])
+                if head:
+                    out.append(head)
                 abstract_end = len(out)
-            continue
-        if re.match(r"\\end\{abstract\}", line):
-            abstract_end = len(out)
-            rest = re.sub(r"^\\end\{abstract\}", "", line).strip()
-            if rest:
-                out.append(_tex_line_text(rest))
+                after = _tex_line_text(line[ends.end():])
+                if after:
+                    out.append(after)
             continue
         m = re.match(r"\\(?:sub)*section\*?(?:\[[^\]]*\])?\{([^{}]*)\}", line)
         if m:
@@ -12200,7 +12247,7 @@ def _tex_length_scan(text: str):
             group = line[cap.end():]
             depth = 1 + _tex_brace_delta(group)
             while depth > 0 and i < n:
-                nxt = re.sub(r"(?<!\\)%.*$", "", raw_lines[i]).strip()
+                nxt = strip_tex_comment(raw_lines[i]).strip()
                 i += 1
                 group = f"{group}\n{nxt}"
                 depth += _tex_brace_delta(nxt)
@@ -12932,6 +12979,8 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
             if not p.is_file() or _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
+            if (prefix + rel) in overrides[i]:
+                continue                      # a later source provides this path
             if excluded and rel.split("/", 1)[0] in excluded:
                 continue
             if is_non_manuscript_rel(rel):
@@ -13383,11 +13432,22 @@ def apply_template_prompt(ctx: Ctx, sb: Path, src: Path, templates: dict) -> str
     """
     if not templates:
         return apply_guideline_conform_prompt(ctx, src)
-    main = Path(templates.get("main") or "")
     # `Path("")` is Path(".") and truthy: an absent role must stay None so the
-    # "ships no ... template" wording is what the prompt carries.
+    # "ships no ... template" wording is what the prompt carries. `main` used to
+    # take the `Path(templates.get("main") or "")` shortcut while supp/cover were
+    # fixed, so an official pack whose only Word file is a cover/supplementary
+    # template rendered a REQUEST to fill an empty file name in the main-text
+    # slot, while the checker side (`template_for_package_file`) read main as
+    # absent -- the session was told to satisfy a requirement nothing could meet.
+    main = Path(templates["main"]) if templates.get("main") else None
     supp = Path(templates["supplementary"]) if templates.get("supplementary") else None
     cover = Path(templates["cover"]) if templates.get("cover") else None
+    main_read = (f"venue_template/word/{main.name}  -- the journal's MAIN-TEXT template "
+                 f"(fill it)" if main else
+                 "(the venue ships no MAIN-TEXT template: the manuscript keeps its own file "
+                 "from source/, edited in place and formatted per the venue's guidelines)")
+    main_src = ("venue_template/word/" + main.name) if main else \
+        "the source document itself (no main-text template ships)"
     docs = sorted(p.name for p in Path(src).glob("*.docx")) or ["(no .docx in source/)"]
     prof = venue_profile_of(ctx, required=False)
     label = (prof.label if prof is not None else venue_id_of(ctx))
@@ -13422,7 +13482,7 @@ cover-letter rule below (a cover-letter template, or the guideline/convention
 chain when this venue ships none).
 
 READ (read-only, hash-verified):
-  * venue_template/word/{main.name}  -- the journal's MAIN-TEXT template (fill it)
+  * {main_read}
   * {supp_line}
 {cover_line.rstrip()}
   * source/ -- the package whose content you carry over:
@@ -13462,7 +13522,7 @@ WRITE (only inside out/):
        - never invent a style, font, size, colour, indentation or bullet, and
          never re-tag a paragraph with a style the template does not use for that
          kind of content.
-       - the main text     <- venue_template/word/{main.name}
+       - the main text     <- {main_src}
        - the supplementary <- {supp_src}
        - a cover letter    <- {cover_src}
          (a letter, never a manuscript: when this venue ships no cover-letter
@@ -15040,9 +15100,14 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
         evidence["placeholders"] = {"error": f"{type(e).__name__}: {e}"}
     try:
         man = manifest_for_sources(sources)
-        evidence["corpus_identity"] = {"digest": manifest_digest(man),
-                                       "files": sorted(man["files"]),
-                                       "revision_token": revision_token_for_dir(corpus_dir)}
+        evidence["corpus_identity"] = {
+            "digest": manifest_digest(man),
+            "files": sorted(man["files"]),
+            # The TOKEN string, not the whole report dict: the one consumer
+            # (the EVIDENCE_PACK writer) interpolates this field, and the
+            # prompts tell sessions to quote a 7-hex token -- a Python dict repr
+            # was noise exactly where a token was promised.
+            "revision_token": (revision_token_for_dir(corpus_dir) or {}).get("token")}
     except Exception as e:                                            # noqa: BLE001
         evidence["corpus_identity"] = {"error": f"{type(e).__name__}: {e}"}
     # ---- artifact engines (numbers M4, terms M8, outline, placeholders) -------
@@ -15129,7 +15194,14 @@ def corpus_text_documents(sources: list) -> list:
     """
     mod = _format_module()
     out = []
-    for src, prefix, excluded in sources:
+    # The same later-source-override filter `corpus_manifest` applies by
+    # construction (its {path: digest} map) and the DOCX branch of
+    # scan_format_in_sources applies explicitly: without it a path provided by
+    # two sources was read TWICE -- every paragraph of the collided document
+    # fed the placeholder / number-provenance / prose scans under one name, from
+    # stale bytes the corpus builder never ships.
+    overrides = corpus_source_overrides(sources)
+    for i, (src, prefix, excluded) in enumerate(sources):
         if not src.is_dir() or mod is None:
             continue
         for p in _docx_files_under(src):
@@ -15137,6 +15209,8 @@ def corpus_text_documents(sources: list) -> list:
                     or is_bookkeeping_name(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
+            if (prefix + rel) in overrides[i]:
+                continue                      # a later source provides this path
             if excluded and rel.split("/", 1)[0] in excluded:
                 continue
             if is_non_manuscript_rel(rel):
@@ -15165,6 +15239,8 @@ def corpus_text_documents(sources: list) -> list:
                          for q in src.rglob(suf)]):
             if not p.is_file() or _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
                 continue
+            if (prefix + p.relative_to(src).as_posix()) in overrides[i]:
+                continue                      # a later source provides this path
             rel = p.relative_to(src).as_posix()
             if excluded and rel.split("/", 1)[0] in excluded:
                 continue
@@ -15244,7 +15320,12 @@ def data_table_texts(sources: list, limit: int = 40) -> list:
     the *prose* proves nothing about where it came from.
     """
     out = []
-    for src, prefix, excluded in sources or []:
+    # Later sources override earlier ones for the same relative path (the rule
+    # corpus_manifest enforces by construction): without the filter a collided
+    # document's values were read twice, and a stale copy's numbers could be the
+    # ones a reconciliation "proves".
+    overrides = corpus_source_overrides(sources or [])
+    for i, (src, prefix, excluded) in enumerate(sources or []):
         if not src.is_dir():
             continue
         for p in sorted(src.rglob("*")):
@@ -15256,6 +15337,8 @@ def data_table_texts(sources: list, limit: int = 40) -> list:
             except OSError:
                 continue
             rel = p.relative_to(src).as_posix()
+            if (prefix + rel) in overrides[i]:
+                continue                      # a later source provides this path
             if excluded and rel.split("/", 1)[0] in excluded:
                 continue
             if "work" in rel.split("/")[:-1]:
@@ -17815,6 +17898,13 @@ def upstream_deps(rec: dict) -> list:
     if kind == "rewrite":
         return [rid_a1(r)]
     if kind == "review":
+        return [rid_a1(r)]
+    if kind == "probe":
+        # The probe review is materialized from the round base, like every other
+        # base-consuming kind. Without this branch `upstream_deps` returned []
+        # for a probe, `unmet_deps` was empty, and a `retry`/`--only` on a probe
+        # whose base was still pending bypassed the DepsNotMet defer path and
+        # died inside materialize_probe's RuntimeError instead.
         return [rid_a1(r)]
     if kind == "audit":
         return [rec.get("upstream_run_id") or rid_review(r)]
@@ -22083,7 +22173,17 @@ def round_consumed_findings(ctx: Ctx, r) -> list:
         r = int(r)
     except (TypeError, ValueError):
         return []
-    rev = ctx.run(rid_review(r))
+    # Under `--review-split` the round has ONE frozen list: the merged A+B file,
+    # and `merge_review_parts` writes it into session B's `review/` (the directory
+    # the revise sessions copy). Reading session A unconditionally therefore
+    # handed every consumer a PARTIAL list: the rewrite/integration arms'
+    # self-reported remaining counts were cross-checked against A alone, and the
+    # decision report's remaining-work figure undercounted by every finding only
+    # session B filed. Session A stays the source only when no split is
+    # configured (or B never produced a list).
+    rev = ctx.run(rid_review_b(r) if review_split_of(ctx) != "off" else rid_review(r))
+    if (rev is None or rev.get("status") != "done") and review_split_of(ctx) != "off":
+        rev = ctx.run(rid_review(r))
     if not rev or rev.get("status") != "done":
         return []
     sb = ctx.sandbox_of(rev)
@@ -23806,7 +23906,13 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
     """
     if not isinstance(fj, dict):
         return
-    seen_ids = {}
+    # The M1b gate near the end of this function reads `seen_rows`, and it runs
+    # whenever the M1 artifact carries a long-form row -- whether or not the
+    # coverage table exists. The three dicts were initialised inside the
+    # coverage branch, so a findings.json that parses and holds a findings list
+    # but no coverage table crashed the contract check with NameError instead
+    # of reporting the missing table.
+    seen_ids, seen_rows, bad = {}, {}, []
     # 1. the review must be about base/, not about non_revised/ or anything else.
     raw = fj.get("submission_dir")
     if isinstance(raw, str) and raw.strip():
@@ -23856,7 +23962,6 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
         wanted += ["M31", "M32", "M33", "M34", "M35", "M36"]
         in_scope = set(scoped_review_checks(scope))
         out_of_scope = set(wanted) - in_scope if in_scope else set()
-        seen_ids, seen_rows, bad = {}, {}, []
         for row in coverage:
             if not isinstance(row, dict):
                 continue
@@ -31043,6 +31148,14 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
             errs.append(problem)
     # 4. the stage-specific contracts, each through the postcheck's own helper
     if kind == "review":
+        # The session prompt is read TWICE in this block: by the review-contract
+        # branch for its scope, and by the discovery-contract check at the end,
+        # which runs whether or not findings.json parsed. Initialise it here --
+        # the branch that reads the file sits inside an `else`, so a missing or
+        # broken findings.json (exactly the pre-flight state this selfcheck
+        # exists to diagnose) raised NameError instead of reporting the missing
+        # deliverable.
+        _prompt = ""
         fj = read_json(sb / FINDINGS_REL, revive=False, lenient=True)
         if not isinstance(fj, dict):
             errs.append(f"{FINDINGS_REL} is missing or does not parse as a JSON object "
@@ -34257,6 +34370,12 @@ def cmd_setup(args) -> None:
               "pristine 'non_revised' corpus. Continuing anyway.")
     root = Path(args.root).resolve()
     marker = root / SETUP_MARKER
+    if root.exists() and not root.is_dir():
+        # `--root typo.txt` exists and is a FILE: `any(root.iterdir())` raised
+        # NotADirectoryError mid-setup instead of the clean refusal every other
+        # unusable root gets.
+        die(f"--root exists and is a FILE, not a directory: {root} "
+            f"(choose a fresh --root or delete it)")
     if root.exists() and any(root.iterdir()):
         # A root this pipeline created and never finished (the marker is written
         # before the first copy and removed only once state.json exists) is
@@ -41085,21 +41204,29 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     # A final champion the panel judged WORSE than the pristine original is not
     # a package to hand to the next run; ANY round's recomputation mismatch
     # blocks, exactly as it blocks `certification` below.
-    _clean_reason = final_clean_reason(final, rounds_data, R, final_regression, chain_ok,
-                                       provisional, panel_gaps, gate_problems)
-    final_clean = publish_final_clean(ctx, final, not _clean_reason, _clean_reason,
+    # SUBMISSION READINESS (separate from process certification): the published
+    # package's own findings -- a form shell, internal working material -- are
+    # recorded on every decision; `--require-ready` turns them into blockers.
+    # The copy is ALWAYS built (certified or not), so these findings are known
+    # BEFORE the verdict is stamped: the readiness blockers join `gate_problems`
+    # first, and `final_clean_version.certified` is derived from the completed
+    # reason afterwards. Stamping it first wrote `final_clean_version.certified:
+    # true` beside `certification.certified: false` -- exactly the split
+    # `final_clean_reason` exists to prevent.
+    final_clean = publish_final_clean(ctx, final, True, "",
                                       flatten_zotero=bool(getattr(
                                           args, "unlink_zotero_fields", False)))
+    readiness = package_readiness(final_clean)
+    gate_problems.extend(readiness_gate_problems(readiness,
+                                                 bool(getattr(args, "require_ready", False))))
+    _clean_reason = final_clean_reason(final, rounds_data, R, final_regression, chain_ok,
+                                       provisional, panel_gaps, gate_problems)
+    final_clean["certified"] = not _clean_reason
+    final_clean["certification_note"] = _clean_reason or None
     # `action` (created/unchanged) describes THIS invocation, not the decision:
     # keeping it out of decision.json/report keeps two consecutive `decide` runs
     # byte-identical (apart from their generation timestamp).
     final_clean_json = {k: v for k, v in final_clean.items() if k != "action"}
-    # SUBMISSION READINESS (separate from process certification): the published
-    # package's own findings -- a form shell, internal working material -- are
-    # recorded on every decision; `--require-ready` turns them into blockers.
-    readiness = package_readiness(final_clean)
-    gate_problems.extend(readiness_gate_problems(readiness,
-                                                 bool(getattr(args, "require_ready", False))))
     integrity = {"pristine_ok": pok, "pristine_detail": pdetail, "pinned_errors": perrs,
                  "evidence_not_verifiable": list(evid_missing),
                  "hash_checks": "skipped" if hash_checks_skipped() else "verified",
@@ -42279,6 +42406,25 @@ def tracking_baselines(ctx: Ctx, r: int, vid: str) -> list:
     return out
 
 
+def winner_tracking_baselines(ctx: Ctx, r: int) -> list:
+    """[(token, sources, note)] for the round's published winner, original first.
+
+    Round 1 has no previous winner to track, so its list holds the original
+    ONLY. The empty-baseline tuple (`""`, no sources, no note) used to be passed
+    to `_track_one_entry` anyway, which appended a phantom
+    `{"baseline": "", "reason": "no base corpus"}` skip row to every round-1
+    winner manifest -- while the freshness reader (`tracking_entry_is_fresh`)
+    skips empty tokens, so writer and reader disagreed and every round-1 entry
+    carried one bogus skip.
+    """
+    out = [(TRACK_TOKEN_ORIGINAL, [(ctx.pristine, "", ())],
+            "the pre-conformed original (non_revised/)")]
+    if r > 1:
+        out.append((f"winner{r - 1}", [(winner_dir_of(ctx, r - 1), "", ())],
+                    f"the published winner of round {r - 1} (round{r - 1}_winner/)"))
+    return out
+
+
 def latexdiff_one_pair(base: Path, cand: Path, out: Path,
                        timeout: int = LATEXDIFF_TIMEOUT) -> dict:
     """Write a `latexdiff` copy of one `.tex`/`.bib` pair; never raises."""
@@ -42678,13 +42824,7 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
             continue
         winner_srcs = [(wdir, "", ())]
         champ_vid = str(wrec.get("winner_id") or f"round{r}_winner")
-        winner_baselines = [
-            (TRACK_TOKEN_ORIGINAL, [(ctx.pristine, "", ())],
-             "the pre-conformed original (non_revised/)"),
-            ((f"winner{r - 1}" if r > 1 else ""),
-             ([(winner_dir_of(ctx, r - 1), "", ())] if r > 1 else []),
-             (f"the published winner of round {r - 1} (round{r - 1}_winner/)" if r > 1
-              else ""))]
+        winner_baselines = winner_tracking_baselines(ctx, r)
         stored_winner = prev_versions.get((str(r), f"round{r}_winner"))
         if skip_fresh and stored_winner and tracking_entry_is_fresh(
                 ctx, stored_winner, winner_baselines, winner_srcs):

@@ -573,7 +573,15 @@ def convert_one(path: str, rel: str) -> dict:
             "converted-empty" if any("unreadable" not in n for n in notes) else "failed")
     elif ext == ".docx":
         text, notes = docx_to_text(path)
-        status = "converted" if text else ("converted-empty" if not notes else "failed")
+        # Same predicate as the .rtf/.xlsx branches: `docx_to_text` appends an
+        # INFORMATIONAL note on success (the metadata/PII line fires whenever
+        # docProps/core.xml exists -- i.e. every real Word file -- plus
+        # header/footer and tracked-change notes), so "empty text and any note at
+        # all" classified an image-only or empty-shell .docx as FAILED, counted
+        # it in the could-not-convert warning and wrote no corpus file at all.
+        status = "converted" if text else ("converted-empty"
+                                           if any("unreadable" not in n for n in notes)
+                                           else "failed")
     elif ext == ".xlsx":
         text, notes = xlsx_to_text(path)
         status = "converted" if text else ("converted-empty"

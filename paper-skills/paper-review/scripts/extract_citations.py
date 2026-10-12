@@ -43,6 +43,11 @@ _NON_MANUSCRIPT_RE = re.compile(
     r"feedback|referee|reviewers?|editors?|editorial|decision[_ \-]*(?:letter|notice|email)"
     r"|response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
 _REPLY_RE = re.compile(r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
+# The reference-role file names: "ref", "refs", "references", "ref-list",
+# "cnb-26-4-refs" -- the SAME word-boundary rule convert_corpus.py's role
+# guesser uses. Deliberately not a bare "ref" PREFIX: `refined_draft.txt` and
+# `refresh_log.txt` are not bibliographies.
+REF_ROLE_RE = re.compile(r"\brefs?\b|\breferences?\b")
 
 
 def is_non_manuscript(name: str) -> bool:
@@ -53,10 +58,15 @@ def is_non_manuscript(name: str) -> bool:
     base = parts[-1]
     if any(base.startswith(d + "__") for d in EVIDENCE_DIRNAMES):
         return True
+    if "cover" in base.lower():
+        # A cover letter IS a submission document -- and this test must come
+        # FIRST: with the reply test above it, `cover_letter_response.docx.txt`
+        # was dropped as non-manuscript even though the cover-letter rule (and
+        # the M19 length sweep) treats a letter as the authors' own submission
+        # text.
+        return False
     if _REPLY_RE.search(base):
         return True
-    if "cover" in base.lower():
-        return False            # a cover letter IS a submission document
     return bool(_NON_MANUSCRIPT_RE.search(base))
 
 
@@ -75,7 +85,12 @@ SUSPECT_PRECEDERS = re.compile(
     r"size|length|width|volume|mass|weight|height|area|depth|distance|speed|"
     r"unit|replicate|ratio|fold|bound|limit|baseline|score)s?"
     r"\s*(?:of|is|was|:|=|are|were)?\s*$", re.I)
-REF_ENTRY_RE = re.compile(r"^\s*\[?(\d{1,3})[\].]\s+(.*)$")
+# The closing parenthesis is a numbering style several journals use, and the
+# call-out pattern two pages below already accepts it (NUM_ENTRY_RE's
+# `[\].)]`). Without it a `1) Smith J. Nature 2019.` list parsed to ZERO
+# entries, so the orphan/uncited/duplicate checks silently fell back to the
+# cross-file union and the M2 inventory was wrong for that style.
+REF_ENTRY_RE = re.compile(r"^\s*\[?(\d{1,3})[\].)]\s+(.*)$")
 BIB_ENTRY_RE = re.compile(r"@\w+\s*\{\s*([^,]+),")
 # LaTeX: the call-out is a KEY inside a \cite-family macro (`\cite`, `\citep`,
 # `\citet`, `\citealp`, `\textcite`, `\parencite`, `\autocite`, `\nocite`, ...),
@@ -166,7 +181,13 @@ def classify_context(fname):
     f = re.sub(r"\.[a-z0-9]{1,5}$", "", f)
     if "cover" in f: return "cover letter"
     if "title" in f: return "title page"
-    if re.search(r"(^|[^a-z])ref", f) or "bibliograph" in f or re.search(r"\.bib(\.|$)", raw):
+    # "ref"/"refs"/"references"/"ref-list" name a bibliography; a word that
+    # merely STARTS with those letters does not. `(^|[^a-z])ref` matched
+    # "refined_draft.txt" and "refresh_log.txt", and a "references"-role file
+    # with no heading is consumed as the reference region below -- so such a
+    # file's in-text call-outs were never counted and its prose was read as
+    # entries.
+    if REF_ROLE_RE.search(f) or "bibliograph" in f or re.search(r"\.bib(\.|$)", raw):
         return "references"
     if "abstract" in f: return "abstract"
     if "supp" in f or "extended_data" in f or "appendix" in f: return "supplementary"
@@ -216,6 +237,27 @@ def find_reference_region(lines):
     return start, end, note
 
 
+# Calendar month names are never author surnames. The TWO-AUTHOR branch needs no
+# parentheses, so ordinary date prose ("between January and February 2019") was
+# read as an author-year call-out and every cover letter / Methods section fed
+# the M2 inventory phantom rows that a human then audits by hand. Only a pair
+# where BOTH tokens are months is rejected: "May and Smith 2019" is a citation.
+MONTH_NAMES = frozenset((
+    "january february march april may june july august september october november december "
+    "jan feb mar apr jun jul aug sep sept oct nov dec").split())
+
+
+def is_date_prose(m) -> bool:
+    """True when an author-year match is a calendar-date phrase, not a call-out."""
+    if m.group("a1") or m.group("a3"):
+        # The "X et al., YYYY" and "(X, YYYY)" branches carry their own anchors; a
+        # month CAN be a surname there ("(May, 2019)").
+        return False
+    names = [m.group("a2"), m.group("a2b")]
+    return bool(names[0] and names[1]
+                and names[0].lower() in MONTH_NAMES and names[1].lower() in MONTH_NAMES)
+
+
 def ay_callout(m):
     """Normalise an author-year match into (raw, author string, year)."""
     if m.group("y1"):
@@ -235,7 +277,15 @@ def parse_nums(inner):
             if 0 < b - a <= 200:
                 nums.extend(range(a, b + 1))
             else:
-                nums.append(part)
+                # A range the parser will not expand -- longer than this review's
+                # cap, or written backwards -- still NAMES its two endpoints.
+                # Storing the raw string meant every later check (which keeps
+                # only ints) treated the call-out as citing nothing: no orphan,
+                # no order violation, and every entry of a `[1-250]` review
+                # looked "listed but never cited". The OOXML twin
+                # (`paper_docx_format._marker_range_numbers`) keeps the endpoints
+                # for exactly this reason.
+                nums.extend(sorted({a, b}))
         elif part:
             try:
                 nums.append(int(part))
@@ -341,15 +391,38 @@ def main():
             prev_line = raw
             for m in NUM_CIT_RE.finditer(raw):
                 before = raw[:m.start()].rstrip()
-                if SUSPECT_PRECEDERS.search(before):
+                suspect = bool(SUSPECT_PRECEDERS.search(before))
+                inner = m.group(1)
+                # An interval SHAPE after a measurement word ("in the interval
+                # [2, 5]", "CI [1.2-3.4]") is a measurement interval, not a
+                # call-out: counting it fabricated order violations and orphan
+                # numbers (C10/C24 in the skill harness pin exactly that).
+                interval_shape = bool(re.search(r"[,;]", inner)
+                                      or re.search(r"\d\s*[\u2013\u2014-]\s*\d", inner))
+                if suspect and interval_shape:
                     suspect_brackets.append({"file": fname, "line": li, "raw": m.group(0),
                                              "excerpt": raw.strip()[:120],
                                              "why": "bracketed range after a measurement word"})
                     continue
+                if suspect:
+                    # A SINGLE bracketed number after one of the generic
+                    # measurement words (level, value, age, time, size...) is a
+                    # real call-out candidate: dropping it removed the reference
+                    # from the cited set entirely, so the sweep could assert
+                    # "reference 12 is listed but never cited" -- a false finding.
+                    # It IS counted, and still recorded here (and flagged
+                    # `suspect` in the call-out) for the human to check.
+                    suspect_brackets.append({"file": fname, "line": li, "raw": m.group(0),
+                                             "excerpt": raw.strip()[:120],
+                                             "why": "single bracketed number after a "
+                                                    "measurement word (counted; verify)"})
                 callouts.append({"file": fname, "line": li, "raw": m.group(0),
-                                 "refs": parse_nums(m.group(1)),
-                                 "excerpt": raw.strip()[:120], "style": "numeric"})
+                                 "refs": parse_nums(inner),
+                                 "excerpt": raw.strip()[:120], "style": "numeric",
+                                 "suspect": suspect})
             for m in AY_CIT_RE.finditer(raw):
+                if is_date_prose(m):
+                    continue
                 raw_cit, author, year = ay_callout(m)
                 callouts.append({"file": fname, "line": li, "raw": raw_cit,
                                  "refs": ["%s %s" % (author, year)],
@@ -482,9 +555,11 @@ def main():
            "- Max cited number: %d; entries listed: %d (across %d list(s))" % (
                max_cited, len(ref_entries), len(lists_by_file)),
            "- Author-year call-outs cannot be matched to a list mechanically — audit by hand.",
-           "- Bracketed numbers skipped as measurement intervals: %d%s" % (
+           "- Bracketed numbers FLAGGED as possible measurement intervals: %d "
+           "(kept in the cited set so a reference is never falsely reported as never "
+           "cited)%s" % (
                len(suspect_brackets),
-               "" if not suspect_brackets else " (recorded in the JSON as suspect_brackets, not silently dropped)")]
+               "" if not suspect_brackets else " (recorded in the JSON as suspect_brackets)")]
     if tex_unresolved:
         md.append("- LaTeX citations UNRESOLVED (unable — not a clean pass): the corpus carries "
                   "\\cite call-outs but no \\bibitem/.bib key list, so the LaTeX orphan/uncited "

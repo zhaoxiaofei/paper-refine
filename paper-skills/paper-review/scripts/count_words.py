@@ -99,6 +99,17 @@ TEX_SCAFFOLD = re.compile(
     r"includegraphics|includesvg|input|include|vspace|hspace|setlength|geometry|"
     r"graphicspath|hypersetup|newcommand|renewcommand)\*?(?:\[[^\]]*\])?"
     r"(?:\{[^{}]*\})*")
+# A LaTeX comment: an UNESCAPED ``%`` and everything after it on the line. The
+# escape count is what matters: ``\%`` is a literal percent sign (prose), while
+# ``\\%`` is a line break followed by a comment. The old ``(?<!\\)%`` looked at
+# ONE preceding backslash, so every ``\\%`` kept its comment and the comment's
+# words were counted as the authors'.
+TEX_COMMENT = re.compile(r"(?<!\\)((?:\\\\)*)%.*$", re.M)
+
+
+def strip_tex_comment(text: str) -> str:
+    """`text` without its LaTeX comments (the escape pair kept in place)."""
+    return TEX_COMMENT.sub(r"\1", text or "")
 
 ABSTRACT_RELAXATION = 1.10
 MAIN_TEXT_RELAXATION = 1.25
@@ -123,10 +134,38 @@ def lenient_cap(base: int, factor: float) -> int:
 
 
 def _strip_latex(text: str) -> str:
-    """Prose of a LaTeX line: commands removed, braces treated as spaces."""
-    text = re.sub(r"\\(?:cite[a-zA-Z]*|ref|label|url|href)\s*\{[^{}]*\}", " ", text)
+    """Prose of a LaTeX line: commands removed, math blanked, braces as spaces."""
+    # The OPTIONAL arguments come first: the brace-only pattern left `[p.5]` and
+    # `x` behind as prose for `\cite[p.5]{x}` (and for the `\citep[see][p.5]{x}`
+    # form), so M19 counted phantom words on exactly the manuscripts whose
+    # counting must be trusted.
+    text = re.sub(r"\\(?:cite[a-zA-Z]*|ref|label|url|href)\s*"
+                  r"(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text)
+    # Inline and single-line display math (`$p<0.05$`, `\(x\)`, `\[x\]`) is not
+    # prose; only the command names used to be stripped, so the body's tokens
+    # were counted.
+    text = re.sub(r"\$\$[\s\S]*?\$\$|\$[^$]*\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)", " ",
+                  text)
     text = re.sub(r"\\[a-zA-Z@]+\*?", " ", text)
     return re.sub(r"\s+", " ", text.replace("{", " ").replace("}", " ")).strip()
+
+
+# Display-math environments whose BODY is not prose. Their `\begin`/`\end`
+# tokens were already stripped, so the equation's own tokens were counted as the
+# authors' words -- an upward drift on an equation-heavy .tex, the dangerous
+# direction against a venue cap.
+TEX_MATH_ENV = re.compile(
+    r"\\begin\{(equation\*?|align\*?|alignat\*?|eqnarray\*?|gather\*?|multline\*?|"
+    r"displaymath|math|split|flalign\*?)\}[\s\S]*?\\end\{\1\}", re.M)
+
+
+def blank_math_environments(text: str) -> str:
+    """`text` without the bodies of display-math environments.
+
+    Each blanked body keeps its own newlines, so the surrounding paragraph
+    structure (and therefore the abstract/main-text line accounting) survives.
+    """
+    return TEX_MATH_ENV.sub(lambda m: "\n" * m.group(0).count("\n"), text or "")
 
 
 def _brace_delta(text: str) -> int:
@@ -182,26 +221,35 @@ def tex_lines(text: str):
     words), which the main-text count subtracts.
     """
     lines, captions, abstract_end = [], [], None
-    raw_lines = (text or "").splitlines()
+    raw_lines = blank_math_environments(text or "").splitlines()
     i, n = 0, len(raw_lines)
     while i < n:
         raw = raw_lines[i]
         i += 1
-        line = re.sub(r"(?<!\\)%.*$", "", raw).strip()
-        if re.match(r"\\begin\{abstract\}", line):
-            rest = re.sub(r"^\\begin\{abstract\}", "", line)
-            rest = re.sub(r"\\end\{abstract\}.*$", "", rest).strip()
-            lines.append("Abstract")
-            if rest:
-                lines.append(_line_text(rest))
-            if "\\end{abstract}" in line:
+        line = strip_tex_comment(raw).strip()
+        begins = re.match(r"\\begin\{abstract\}", line)
+        ends = re.search(r"\\end\{abstract\}", line)
+        if begins or ends:
+            # Both tokens may sit ANYWHERE on the line (`\begin{abstract} ...
+            # \end{abstract}`, or the usual `Last sentence.\end{abstract}`):
+            # the old start-anchored tests left `abstract_end` unset on the
+            # usual ending, so the next paragraph was counted as abstract text
+            # and the main-text count lost it.
+            if begins:
+                lines.append("Abstract")
+            head_from = begins.end() if begins else 0
+            if ends is None:
+                rest = _line_text(line[head_from:])
+                if rest:
+                    lines.append(rest)
+            else:
+                head = _line_text(line[head_from:ends.start()])
+                if head:
+                    lines.append(head)
                 abstract_end = len(lines)
-            continue
-        if re.match(r"\\end\{abstract\}", line):
-            abstract_end = len(lines)
-            rest = re.sub(r"^\\end\{abstract\}", "", line).strip()
-            if rest:
-                lines.append(_line_text(rest))
+                after = _line_text(line[ends.end():])
+                if after:
+                    lines.append(after)
             continue
         m = TEX_SECTION.match(line)
         if m:
@@ -215,7 +263,7 @@ def tex_lines(text: str):
             group = line[cap.end():]
             depth = 1 + _brace_delta(group)
             while depth > 0 and i < n:
-                nxt = re.sub(r"(?<!\\)%.*$", "", raw_lines[i]).strip()
+                nxt = strip_tex_comment(raw_lines[i]).strip()
                 i += 1
                 group = f"{group}\n{nxt}"
                 depth += _brace_delta(nxt)
@@ -594,6 +642,17 @@ def main(argv=None) -> int:
                 row["total_max"] = cover_total_max
                 row["over_limit"] = bool(cover_total_max and words > cover_total_max)
             keep.append(row)
+        if not keep and args.section in ("abstract", "main-text"):
+            # The principle the cover-letter branch above already honours: an
+            # empty rows list is indistinguishable from a crashed or ignored run.
+            # A document with no abstract / no main-text shape answered with
+            # NOTHING (stdout and JSON both silent, exit 0), which an M19 sweep
+            # reads as "not checked" -- a missing data point, not a clean one.
+            whole = count_words(text)
+            keep.append({"file": str(p), "section": f"no {args.section} section detected",
+                         "words": whole, "cap": None, "over_limit": False,
+                         "note": f"no {args.section} shape was detected in this document; the "
+                                 f"whole file was counted instead ({whole} words)"})
         out.extend(keep)
     if args.json:
         print(json.dumps({"caps": caps, "rows": out}, indent=2))
