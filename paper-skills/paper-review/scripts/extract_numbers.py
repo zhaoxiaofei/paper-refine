@@ -66,6 +66,11 @@ LABEL_PATTERNS = [
 ]
 ACCESSION_RE = re.compile(r"\b(GSE\d+|PRJNA\d+|SR[APRX]\d+|E-MTAB-\d+|zenodo\.\d+)\b", re.I)
 VERSION_RE = re.compile(r"\b(?:v(?:er(?:sion)?)?\.?\s?)(\d+(?:\.\d+)+)\b", re.I)
+# The reference-role file names: "ref", "refs", "references", "ref-list" --
+# the SAME word-boundary rule convert_corpus.py's role guesser uses.
+# Deliberately not a bare "ref" PREFIX: "refined_draft.txt" is not a
+# bibliography (it was classified as one and its numbers were skipped).
+REF_ROLE_RE = re.compile(r"\brefs?\b|\breferences?\b")
 
 REF_HEAD_RE = re.compile(
     r"^\s*(?:#{1,6}\s*)?(?:references?|bibliography|reference\s+list|literature\s+cited)\s*:?\s*$", re.I)
@@ -173,7 +178,11 @@ def classify_context(fname):
     # "suppAll-d.bib" matched the "supp" heuristic below and was swept as
     # supplementary text, so cited papers' percentages and p-values entered the
     # M4 inventory as if they were the authors' own numbers.
-    if re.search(r"(^|[^a-z])ref", f) or "bibliograph" in f or re.search(r"\.bib(\.|$)", raw):
+    # "ref"/"refs"/"references"/"ref-list" name a bibliography; a word that
+    # merely STARTS with those letters does not: `(^|[^a-z])ref` classified
+    # "refined_draft.txt" and "refresh_log.txt" as references, and their numbers
+    # were swept as cited works' numbers instead of the authors' own.
+    if REF_ROLE_RE.search(f) or "bibliograph" in f or re.search(r"\.bib(\.|$)", raw):
         return "references"
     if "abstract" in f: return "abstract"
     if "supp" in f or "extended_data" in f or "appendix" in f: return "supplementary"

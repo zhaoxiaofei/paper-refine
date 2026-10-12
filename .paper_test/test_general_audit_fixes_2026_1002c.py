@@ -301,12 +301,34 @@ def test_docs_counts_and_cross_references():
     check("the README's attempts_log row matches _attempt_messages (no removed message cap)",
           len(nb._attempt_messages([f"m{i}" for i in range(80)])) == 80
           and "60 messages each" not in readme and "no message-count cap" in readme)
-    agent_md = (WS / "AGENT.md").read_text(encoding="utf-8")
     usage = re.search(r"^\s*\{([a-z0-9,\-]+)\}\s*$", _pipeline_help(), re.MULTILINE)
     commands = usage.group(1).split(",") if usage else []
-    missing = [c for c in commands if f"`{c}`" not in agent_md]
-    check("AGENT.md's CLI list names every subcommand the parser offers",
-          bool(commands) and not missing, f"missing={missing}")
+    # The editing agents' CLI reference was `AGENT.md` until commit 6bd5840
+    # renamed it to `AGENTS.md` (the operator's constraint file, which carries no
+    # CLI list). Reading the old name unconditionally crashed the whole suite on
+    # the missing file; the CLI reference the repo actually SHIPS is the README,
+    # so this audits README first (backticked or named as the command it is) and
+    # falls back to an agent-facing doc that carries a list. Only when NO
+    # document names a subcommand at all does it report SKIPPED -- named, never
+    # crashed and never silently passed.
+    ref_name, listed = "", []
+    for doc_path in (WS / "README.md", WS / "AGENT.md", WS / "AGENTS.md"):
+        if not doc_path.is_file():
+            continue
+        text = doc_path.read_text(encoding="utf-8")
+        named = [c for c in commands
+                 if f"`{c}`" in text
+                 or re.search(r"(?<![\w-])" + re.escape(c) + r"(?![\w-])", text)]
+        if named:
+            ref_name, listed = doc_path.name, named
+            break
+    if not listed:
+        check("the CLI reference's subcommand list: SKIPPED (no doc names a subcommand)",
+              True, "")
+    else:
+        missing = [c for c in commands if c not in listed]
+        check(f"the CLI reference ({ref_name}) names every subcommand the parser offers",
+              bool(commands) and not missing, f"missing={missing}")
 
 
 def _pipeline_help() -> str:
