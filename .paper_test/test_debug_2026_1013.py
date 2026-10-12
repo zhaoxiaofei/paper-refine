@@ -57,10 +57,30 @@ Every check below was a real, reproduced failure before this round's patches:
     `extract_acronyms`
     overwrote `short_after[ctx]` per file instead of accumulating.
 
+The `D9` checks are the DOUBLE-CHECK follow-ups: defects the second read of this
+round's own patches found, each reproduced on the committed bytes first --
+
+  * `_marker_range_numbers` returned BOTH endpoints of an EQUAL-ended range
+    (`12-12` -> `[12, 12]`), so the refresh's count guard and FMT-Z3 read a
+    one-item field as a two-number cluster (a false half-updated row);
+  * the `zotero-refresh` exit-status rule read the CLEAN document's
+    "every marker already matches ..." skip as a refusal and exited 1;
+  * the template prompt, one line below the fixed MAIN-TEXT read line, still
+    named "the main template" as the supplementary's write target in a pack
+    that ships no main-text template;
+  * `setup --root <a FILE>/sub` (the FILE check's own defect class, one path
+    component deeper) died in a NotADirectoryError traceback.
+
+The same block closes the double-check's one remaining static claim: `D9 a split
+round consumed list is the MERGED A+B one` EXECUTES the C03 contract (it passes
+on the fixed tree and was reverse-checked -- reverting the C03 branch to the old
+`ctx.run(rid_review(r))` read makes it fail).
+
 `PAPER_WS` retargets the suite at another copy of the tree.
 """
 from __future__ import annotations
 
+import html
 import importlib.util
 import json
 import os
@@ -69,6 +89,7 @@ import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
 
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
@@ -378,6 +399,186 @@ def test_cli_contracts():
 # D8 -- the paper-skills script defects
 # =====================================================================
 
+_CLEAN_STYLE = "http://www.zotero.org/styles/nature-biotechnology"
+_CLEAN_ITEMS = {
+    "K1": {"title": "Alpha diversity in single cells", "family": "Alvarez", "year": 2020},
+    "K2": {"title": "Beta catenin signalling atlas", "family": "Bianchi", "year": 2021},
+}
+
+
+def _cite_field_para(cid: str, marker: str, keys: list, visible: str) -> str:
+    """One live Zotero citation field, its `itemData` embedded (library-free)."""
+    payload = {
+        "citationID": cid,
+        "properties": {"formattedCitation": marker, "plainCitation": visible, "noteIndex": 0},
+        "citationItems": [
+            {"id": k + "/1",
+             "uris": [f"http://zotero.org/users/local/AAA/items/{k}"],
+             "itemData": {"type": "article-journal", "title": _CLEAN_ITEMS[k]["title"],
+                          "author": [{"family": _CLEAN_ITEMS[k]["family"], "given": "A"}],
+                          "issued": {"date-parts": [[_CLEAN_ITEMS[k]["year"]]]}}}
+            for k in keys],
+        "schema": "https://github.com/citation-style-language/schema/raw/master/"
+                  "csl-citation.json",
+    }
+    instr = html.escape("ADDIN ZOTERO_ITEM CSL_CITATION "
+                        + json.dumps(payload, ensure_ascii=False), quote=False)
+    return ('<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+            f'<w:r><w:instrText xml:space="preserve">{instr}</w:instrText></w:r>'
+            '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+            f'<w:r><w:t>{visible}</w:t></w:r>'
+            '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>')
+
+
+def _bib_entry_para(number: int, text: str, opener: str = "") -> str:
+    return ('<w:p><w:pPr><w:pStyle w:val="Bibliography"/></w:pPr>' + opener
+            + f'<w:r><w:t>{number}.</w:t></w:r>'
+            + f'<w:r><w:tab/><w:t xml:space="preserve">{text}</w:t></w:r></w:p>')
+
+
+def _clean_zotero_docx(path: Path) -> Path:
+    """A DOCX the offline refresh finds ALREADY clean (cached markers = ranks).
+
+    Two citation fields (K1 rank 1, K2 rank 2) whose cached markers and visible
+    runs already show those ranks, a bibliography field whose entries run in
+    rank order, and ONE Zotero style store: `zotero_refresh_document` takes its
+    `not edits and not bib_rebuilt` branch, the nothing-to-do skip.
+    """
+    bib_open = ('<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+                '<w:r><w:instrText xml:space="preserve">ADDIN ZOTERO_BIBL '
+                '{"uncited":[],"omitted":[],"custom":[]} CSL_BIBLIOGRAPHY</w:instrText></w:r>'
+                '<w:r><w:fldChar w:fldCharType="separate"/></w:r>')
+    body = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">',
+            '<w:body>',
+            '<w:p><w:r><w:t>Main text.</w:t></w:r></w:p>',
+            _cite_field_para("citeA", r"\super 1\nosupersub{}", ["K1"], "1"),
+            _cite_field_para("citeB", r"\super 2\nosupersub{}", ["K2"], "2"),
+            '<w:p><w:r><w:t>References</w:t></w:r></w:p>',
+            _bib_entry_para(1, "Alvarez, A. et al. Alpha diversity in single cells. "
+                               "Journal 1, 1-9 (2020).", opener=bib_open),
+            _bib_entry_para(2, "Bianchi, B. et al. Beta catenin signalling atlas. "
+                               "Journal 2, 1-9 (2021)."),
+            '<w:p><w:pPr><w:pStyle w:val="Bibliography"/></w:pPr>'
+            '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>',
+            "</w:body></w:document>"]
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("[Content_Types].xml",
+                   '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/'
+                   'package/2006/content-types"/>')
+        z.writestr("word/document.xml", "\n".join(body))
+        z.writestr("word/settings.xml",
+                   '<?xml version="1.0"?><w:settings xmlns:w="http://schemas.'
+                   'openxmlformats.org/wordprocessingml/2006/main"><w:docVars><w:docVar '
+                   'w:name="ZOTERO_PREF_1" w:val="&lt;data&gt;&lt;style id=&quot;'
+                   f'{_CLEAN_STYLE}&quot;/&gt;&lt;/data&gt;"/></w:docVars></w:settings>')
+    return path
+
+
+def _refresh_args(path):
+    """The `zotero-refresh` CLI namespace for one file."""
+    args = type("A", (), {})()
+    args.file, args.out, args.policy, args.json, args.unlink = str(path), None, None, None, False
+    return args
+
+
+def test_double_check_followups():
+    print()
+    print("== D9 follow-ups found while double-checking this round's own fixes ==")
+    equal_marker = r"\super 12-12\nosupersub{}"
+    check("D9 an equal-ended citation range names ONE number (no duplicate endpoint)",
+          fmt._marker_range_numbers(12, 12) == [12]
+          and fmt._marker_numbers(equal_marker) == [12]
+          and ec.parse_nums("12-12") == [12],
+          f"{fmt._marker_numbers(equal_marker)} / {ec.parse_nums('12-12')}")
+    check("D9 the endpoint rules this round pinned are unchanged",
+          fmt._marker_range_numbers(1, 250) == [1, 250]
+          and fmt._marker_range_numbers(8, 3) == [8, 3]     # written order (1012::D4)
+          and fmt._marker_range_numbers(2019, 2020) == []
+          and fmt._marker_range_numbers(3, 5) == [3, 4, 5]
+          and sorted(fmt._marker_range_numbers(8, 3)) == sorted(ec.parse_nums("8-3")),
+          str([fmt._marker_range_numbers(a, b)
+               for a, b in ((1, 250), (8, 3), (2019, 2020), (3, 5))]))
+
+    tmp = scratch("dbg1013_cleanx_")
+    clean = _clean_zotero_docx(tmp / "clean.docx")
+    res = fmt.refresh_zotero_package(clean)
+    check("D9 a document the refresh finds CLEAN reports nothing_to_do, not a refusal",
+          res.get("ok") and not res.get("changed") and res.get("nothing_to_do") is True
+          and "already matches" in str(res.get("skip")),
+          json.dumps({k: v for k, v in res.items() if k != "zotero"})[:220])
+    check("D9 a clean document's `zotero-refresh` exits 0 (a no-repair is a success)",
+          fmt.cmd_zotero_refresh(_refresh_args(clean)) == 0)
+    broken = tmp / "broken.docx"
+    broken.write_bytes(b"not a zip")
+    check("D9 a REFUSED refresh still exits 1 (the C18 rule keeps its meaning)",
+          fmt.cmd_zotero_refresh(_refresh_args(broken)) == 1)
+
+    root = scratch("dbg1013_prompt2_")
+    src = root / "source"
+    src.mkdir()
+    (src / "manuscript.docx").write_bytes(b"PK\x03\x04stub")
+    ctx = nb.Ctx(root)
+    cover_only = nb.apply_template_prompt(ctx, root / "sb", src,
+                                          {"cover": Path("/venue/word/cover.docx")})
+    supp_lines = [l.strip() for l in cover_only.splitlines() if "the supplementary <-" in l]
+    check("D9 a pack with no main-text template names no main template anywhere",
+          "the main template (no separate one ships)" not in cover_only
+          and supp_lines == ["- the supplementary <- the source document itself "
+                             "(no supplementary or main-text template ships)"],
+          str(supp_lines))
+    main_only = nb.apply_template_prompt(ctx, root / "sb2", src,
+                                         {"main": Path("/venue/word/main.docx")})
+    check("D9 a main-only pack still builds the supplementary from the main template",
+          [l.strip() for l in main_only.splitlines() if "the supplementary <-" in l]
+          == ["- the supplementary <- the main template (no separate supplementary "
+              "template ships)"],
+          str([l.strip() for l in main_only.splitlines() if "the supplementary <-" in l]))
+
+    parent = scratch("dbg1013_rootp_") / "afile.txt"
+    parent.write_text("not a directory\n", encoding="utf-8")
+    proc = subprocess.run([sys.executable, str(WS / "paper_pipeline.py"), "setup",
+                           "--source", str(src), "--root", str(parent / "sub")],
+                          capture_output=True, text=True, timeout=300)
+    out = proc.stdout + proc.stderr
+    check("D9 a --root under a FILE parent dies cleanly (no NotADirectoryError traceback)",
+          proc.returncode != 0 and "Traceback" not in out
+          and "ERROR: cannot create the root directory" in out,
+          out.strip().splitlines()[-1][:170] if out.strip() else "")
+
+    # 5. C03: the round verified this statically (five sibling call sites), so
+    #    the contract is EXECUTED here instead. Under `--review-split`
+    #    `merge_review_parts` writes the ONE frozen list (A's rows + B's) into
+    #    session B's `review/`, so an arm with no `review/` copy of its own must
+    #    be cross-checked against THAT list, not against A's partial one. These
+    #    two checks pass on the fixed tree BY CONSTRUCTION and are the reason
+    #    the fix cannot silently regress: reverting the C03 read to
+    #    `ctx.run(rid_review(r))` was verified to make the first one fail.
+    sroot = scratch("dbg1013_split_")
+    sctx = nb.Ctx(sroot)
+    sctx.cfg = {"review_split": "phases"}
+    for rid, ids in (("r1_review", ["F-A1"]), ("r1_review_b", ["F-A1", "B-F-A2"])):
+        sb = sroot / "runs" / rid / "review"
+        sb.mkdir(parents=True)
+        (sb / "findings.json").write_text(json.dumps(
+            {"submission_dir": "base",
+             "findings": [{"id": i, "check": "M1", "location": "p1", "evidence": "e"}
+                          for i in ids]}), encoding="utf-8")
+        sctx.state["runs"][rid] = {"id": rid, "kind": "review", "round": 1,
+                                   "status": "done", "sandbox": f"runs/{rid}"}
+    merged = [str(f.get("id")) for f in nb.round_consumed_findings(sctx, 1)]
+    check("D9 a split round consumed list is the MERGED A+B one (never A alone)",
+          merged == ["F-A1", "B-F-A2"], str(merged))
+    sctx.cfg = {"review_split": "off"}
+    single = [str(f.get("id")) for f in nb.round_consumed_findings(sctx, 1)]
+    check("D9 with no split the round's frozen list still reads session A",
+          single == ["F-A1"], str(single))
+
+
+# =====================================================================
+# D8 -- the paper-skills script defects
+# =====================================================================
+
 def test_skill_scripts():
     print()
     print("== D8 skill-script scanners and counters ==")
@@ -535,6 +736,7 @@ def main() -> int:
     test_pdftotext_timeout()
     test_docx_engine_fixes()
     test_cli_contracts()
+    test_double_check_followups()
     test_skill_scripts()
     cleanup()
     print()

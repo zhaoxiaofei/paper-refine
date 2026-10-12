@@ -13456,7 +13456,14 @@ def apply_template_prompt(ctx: Ctx, sb: Path, src: Path, templates: dict) -> str
     guide_line = (f"    The venue profile records: {guide_clause}\n") if guide_clause else ""
     supp_line = ("venue_template/word/" + supp.name) if supp else \
         "(the venue ships no separate supplementary template)"
-    supp_src = supp_line if supp else "the main template (no separate one ships)"
+    # The supplementary's WRITE target mirrors `template_for_package_file`'s own
+    # chain (the supplementary template, else the main template, else nothing):
+    # naming "the main template" in a pack that ships NO main template was the
+    # same dangling reference the MAIN-TEXT line above stopped rendering -- the
+    # session was pointed at a file the pack does not carry.
+    supp_src = (("venue_template/word/" + supp.name) if supp else
+                ("the main template (no separate supplementary template ships)" if main else
+                 "the source document itself (no supplementary or main-text template ships)"))
     cover_line = (("  * venue_template/word/" + cover.name
                    + "  -- the journal's COVER-LETTER template (fill it)\n") if cover else
                   "  * NO cover-letter template ships with this venue: author the cover letter\n"
@@ -34390,8 +34397,16 @@ def cmd_setup(args) -> None:
             die(f"--root exists and is not empty: {root} (choose a fresh --root or delete it)")
     if is_within(root, source) or is_within(source, root):
         die("--root and --source must not be nested inside each other")
-    root.mkdir(parents=True, exist_ok=True)
-    marker.write_text(f"setup started {utcnow()}\n", encoding="utf-8")
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        marker.write_text(f"setup started {utcnow()}\n", encoding="utf-8")
+    except OSError as e:
+        # The same unusable-root class the FILE check above refuses: a --root
+        # whose PARENT is a file (`--root typo.txt/new`) reached mkdir and died
+        # in a NotADirectoryError traceback instead of the clean refusal every
+        # other bad root gets (and the marker write can fail on a read-only
+        # mount). Nothing has been created at this point.
+        die(f"cannot create the root directory {root}: {type(e).__name__}: {e}")
     ctx = Ctx(root)
     ctx.runs_dir.mkdir(parents=True, exist_ok=True)
     ctx.reports_dir.mkdir(parents=True, exist_ok=True)

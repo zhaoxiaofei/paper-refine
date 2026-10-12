@@ -5733,12 +5733,21 @@ def _marker_range_numbers(a: int, b: int) -> list:
     skipped it (FMT-Z1/Z3 read no numbers, and the offline refresh's count guard
     refused the document on a number list of length 0). A year range
     ("2019-2020") is not a citation range at all and still yields nothing.
+
+    The two endpoints keep the WRITTEN order (the round's pin:
+    `5-3` -> `[5, 3]`) but are never repeated: an EQUAL-ended range ("12-12",
+    which the pre-round code expanded to `[12]`) would otherwise return the same
+    number TWICE, and the refresh's count guard (`len(current) != len(ranks)`)
+    and FMT-Z3's pairing would then read a one-item field as a two-number
+    cluster -- a false "half-updated cluster" row on a document Zotero rendered
+    correctly. The skill twin (`extract_citations.parse_nums`) keeps the same
+    endpoint SET, so a one-number cluster reads the same on both sides.
     """
     if 1000 <= a and b <= 2999:
         return []
     if 0 < b - a <= _MARKER_RANGE_MAX:
         return list(range(a, b + 1))
-    return [a, b]
+    return list(dict.fromkeys((a, b)))
 
 
 def _marker_numbers(marker: str, text: str = None) -> list:
@@ -6584,7 +6593,9 @@ def zotero_refresh_document(xml: str, para_texts: list = None,
     """Apply the local refresh to one document.xml. See the section contract.
 
     Returns {"xml": <original or repaired>, "changed": bool, "fields_fixed":
-    int, "entries": int, "reordered": bool, "changes": [str], "skip": reason}.
+    int, "entries": int, "reordered": bool, "changes": [str], "skip": reason,
+    "nothing_to_do": bool}. `skip` with `nothing_to_do` is the clean no-op (the
+    document already is what a refresh would write), not a refusal.
     """
     out = {"xml": xml, "changed": False, "fields_fixed": 0, "entries": 0,
            "reordered": False, "renumbered": 0, "changes": [], "skip": None}
@@ -6725,6 +6736,12 @@ def zotero_refresh_document(xml: str, para_texts: list = None,
         out["skip"] = ("every marker already matches the document's citation order and the "
                        "bibliography already runs in rank order; only the style store can "
                        "still differ")
+        # Nothing to repair is a SUCCESS, not a refusal. `cmd_zotero_refresh`
+        # distinguishes the two by this flag: a document a Word/Zotero refresh
+        # would leave alone must not exit 1, or every stage's session reads a
+        # healthy file as "the offline refresh refused it" and files a hand-off
+        # for numbering that is already correct.
+        out["nothing_to_do"] = True
         return out
     # ---- verify -----------------------------------------------------------
     try:
@@ -6812,11 +6829,15 @@ def refresh_zotero_parts(parts: dict, policy: dict = None) -> dict:
     """The local refresh + style reconcile over one package's parts (in memory).
 
     `parts` is {zip name: bytes}. Returns {"parts": updated|None, "changed":
-    bool, "changes": [str], "skip": reason|None, "zotero": report|None}. The
-    caller decides whether to swap the parts in; nothing is written here.
+    bool, "changes": [str], "skip": reason|None, "zotero": report|None,
+    "nothing_to_do": bool}. `skip` with `nothing_to_do` is the clean no-op (the
+    document's numbering and bibliography already are what the refresh would
+    write); any other `skip` is a refusal. The caller decides whether to swap
+    the parts in; nothing is written here.
     """
     policy = policy or {}
-    rep = {"parts": None, "changed": False, "changes": [], "skip": None, "zotero": None}
+    rep = {"parts": None, "changed": False, "changes": [], "skip": None, "zotero": None,
+           "nothing_to_do": False}
     if "word/document.xml" not in parts:
         rep["skip"] = "no word/document.xml"
         return rep
@@ -6851,6 +6872,7 @@ def refresh_zotero_parts(parts: dict, policy: dict = None) -> dict:
             rep["changes"].extend(zot["changes"])
         elif zot.get("skip"):
             rep["skip"] = zot["skip"]
+            rep["nothing_to_do"] = bool(zot.get("nothing_to_do"))
     rep["changed"] = bool(rep["changes"])
     if rep["changed"]:
         rep["parts"] = new_parts
@@ -6861,12 +6883,13 @@ def refresh_zotero_package(src, out=None, policy: dict = None) -> dict:
     """Apply the local refresh + style reconcile to one DOCX (zip-level).
 
     All other parts are copied byte-identically; `out` defaults to an in-place
-    replace. Returns a report with `changed`, `changes`, `skip`, the field
-    counts before/after and the parity rows before/after.
+    replace. Returns a report with `changed`, `changes`, `skip`,
+    `nothing_to_do` (a skip that is NOT a refusal: the document was already
+    clean), the field counts before/after and the parity rows before/after.
     """
     src = Path(src)
     rep = {"source": str(src), "output": str(out or src), "ok": True, "changed": False,
-           "changes": [], "skip": None, "zotero": None}
+           "changes": [], "skip": None, "zotero": None, "nothing_to_do": False}
     try:
         with zipfile.ZipFile(src) as pkg:
             names = [n for n in pkg.namelist() if not n.endswith("/")]
@@ -6878,6 +6901,7 @@ def refresh_zotero_package(src, out=None, policy: dict = None) -> dict:
     inner = refresh_zotero_parts(parts, policy)
     rep["changes"] = list(inner.get("changes") or [])
     rep["skip"] = inner.get("skip")
+    rep["nothing_to_do"] = bool(inner.get("nothing_to_do"))
     rep["zotero"] = inner.get("zotero")
     if not inner.get("changed"):
         return rep
@@ -10515,10 +10539,12 @@ def cmd_zotero_refresh(args) -> int:
 
     The repair runs only when every field resolves and the result passes the
     same FMT-Z checks `zotero-check` runs; otherwise nothing is written and the
-    reason is printed (exit 1). The one nothing-to-do case -- "no live citation
-    fields", a document that carries no field to refresh -- exits 0. `--out`
-    writes a copy; without it the file is replaced in place (the pipeline's own
-    callers do the same on a temp copy).
+    reason is printed (exit 1). The NOTHING-TO-DO cases exit 0: "no live citation
+    fields" (a document that carries no field to refresh) and the CLEAN document
+    whose markers/bibliography already are what a refresh would write (the
+    report carries `nothing_to_do: true`). `--out` writes a copy; without it the
+    file is replaced in place (the pipeline's own callers do the same on a temp
+    copy).
     """
     policy = load_policy(args.policy)
     if getattr(args, "unlink", False):
@@ -10572,9 +10598,13 @@ def cmd_zotero_refresh(args) -> int:
     # exit status is 1. `ok=True, changed=False` with a recorded skip reason IS
     # that refusal (an unresolvable field, a non-numeric style, a rebuild it
     # declined), and returning 0 here let a caller gating on the exit status read
-    # a refused/stale refresh as success. "no live citation fields" is the one
-    # nothing-to-do case -- no field exists to refresh -- and stays 0.
-    refused = bool(res.get("skip")) and str(res.get("skip")) != "no live citation fields"
+    # a refused/stale refresh as success. The NOTHING-TO-DO skips stay 0: "no
+    # live citation fields" (no field exists to refresh) and a document the
+    # refresh found ALREADY clean (`nothing_to_do`) -- a document that needs no
+    # repair is a success, not a refusal, and a session that read the exit
+    # status as "refused" would file a hand-off for correct numbering.
+    refused = (bool(res.get("skip")) and not res.get("nothing_to_do")
+               and str(res.get("skip")) != "no live citation fields")
     if not res.get("ok") or refused:
         return 1
     return 0
