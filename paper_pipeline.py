@@ -1030,7 +1030,37 @@ from pathlib import Path
 #     order that a Word/Zotero refresh rewrites -- FMT-Z1..Z5 -- with the
 #     `zotero-check` CLI and a version-to-version parity gate), each with its own
 #     coverage row and artifact; the judge's frozen map is unchanged.
-VERSION = "3.7.0"
+# 3.8.0 -- THE PROBE REVIEW (`setup --probe-review`, default on; `--no-probe-review`
+#   or `set-probe-review off` is the off switch). One extra INDEPENDENT session
+#   per full-scope round, launched IN PARALLEL with the checklist review and
+#   given NOTHING but the corpus (the submission documents AND the evidence
+#   areas, raw_data/ and code/ included) -- no review, no finding list, no
+#   sweeps. It is GENERIC by design: any defect class may be filed, in the
+#   standard six-category/four-rung vocabulary, and wherever a defect can be
+#   shown by a computation it declares a small re-runnable verifier:
+#     * the orchestrator RE-RUNS every declared verifier at postcheck time and
+#       compares its last stdout line with the finding's `computed` value -- a
+#       computation that does not reproduce FAILS the attempt (a computation
+#       the probe cannot reproduce is a correctness blocker, not a finding);
+#       findings without a verifier are evidence rows like any other finding;
+#     * its findings become X-9xx rows of the same standing as the discovery
+#       round's X-* findings: merged into every downstream copy of
+#       `review/round2/findings_extra.json` (the source review sandbox is never
+#       mutated), so the reviser must resolve them, the auditor may only drop
+#       them with evidence, and the integration ledger must reconcile them
+#       (`frozen_discovery/` carries the merged list, probe findings included);
+#       the ARCHIVED discovery list is merged too, so a pruned root re-seeds the
+#       same ids and the next round's prior_round/ reconciliation covers every
+#       probe finding;
+#     * the JUDGE panel stays completely blind and is NEVER handed the list: it
+#       re-derives its own generic discovery pass, and an X-class difference it
+#       proves is filed as a normal resolved/introduced row.
+#   The stage exists because one review pass is a sample of the defect space:
+#   a superlative claim whose sign the paper's own table contradicted, a stale
+#   sidecar string and degenerate intervals in a shipped source table all
+#   survived every layer in real runs -- and the discovery round's own probes
+#   had read the very table and reported "no anomalies".
+VERSION = "3.8.0"
 STATE_VERSION = 3
 
 # The Zotero tooling policy carried in pipeline_config.json (`setup --zotero`):
@@ -4490,9 +4520,10 @@ DEFAULT_PUBLISH_FLATTEN_ZOTERO = False
 # `run --only`: run a subset of the round's stages. `merge` is an alias for the
 # integration stage (the pipeline's "merge from the other versions" step), and
 # `a`/`w`/`i` are the short spellings used in the round plan.
-ONLY_STAGES = ("rewrite", "review", "audit", "revise", "integrate", "judge",
+ONLY_STAGES = ("rewrite", "review", "probe", "audit", "revise", "integrate", "judge",
                "feedback", "concerns", "response", "conform")
 ONLY_ALIASES = {"w": "rewrite", "rewrites": "rewrite", "r": "review", "reviews": "review",
+                "pr": "probe", "prob": "probe", "probes": "probe", "probe-review": "probe",
                 "aud": "audit", "audits": "audit", "auditor": "audit", "verify": "audit",
                 "a": "revise", "a2": "revise", "revises": "revise", "revision": "revise",
                 "i": "integrate", "integrations": "integrate", "integration": "integrate",
@@ -10456,6 +10487,165 @@ def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule("audit"))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("audit", run_id, r))
     return text + shared_blocks() + AUDIT_TAIL + venue_norm
+
+
+PROBE_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
+
+You are PROBE run @@RUN_ID@@ — round @@ROUND@@ — an INDEPENDENT DISCOVERY session inside an
+orchestrated manuscript-revision pipeline. Your sandbox is:
+  @@SANDBOX@@
+@@PRIOR_FAILURE@@
+Write ONLY inside this sandbox and never touch sibling sandboxes or parent directories. Keep your
+working directory at the sandbox root. Nothing else is required: what follows is the whole task.
+
+WHAT THIS STAGE IS — AND IS NOT. You are neither the checklist reviewer nor the reviser:
+  * you do NOT run the checklist's sweeps and you never propose new sweeps;
+  * you do NOT edit the manuscript or any other file; identification only;
+  * you are NOT given any finding list, review or sweep artifact. The round's checklist review
+    may exist, may be running in another sandbox, or may not exist at all — either way you must
+    not read it (it is not in your sandbox). Your value is a SECOND, UNANCHORED read of the same
+    corpus, in a context that has not already disposed hundreds of rows.
+You are GENERIC on purpose: ANY defect class may be reported — content, numbers, consistency,
+completeness, writing, packaging, figures, references, provenance, internal working material —
+with the discipline every session uses: enumerate, dispose, ONE FINDING PER INSTANCE, never
+invent, and record what you could not check as a limitation instead of a silent skip. Wherever a
+defect can be SHOWN BY A COMPUTATION, you attach a small re-runnable script to the finding; the
+orchestrator re-runs it (see "WHAT FAILS THE RUN").
+
+Layout (paths relative to the sandbox root):
+  base/                  — the round's corpus: the submission documents (main text, cover letter,
+                           supplementary, front matter) AND the evidence areas the corpus carries
+                           — `raw_data/` (data tables, figure/table sources, analysis snapshot)
+                           and `code/` when present. READ-ONLY (hash-verified after your run).
+  non_revised/           — the pristine original. READ-ONLY. Do not review or touch it.
+  probe_review/          — YOUR OUTPUT DIRECTORY. All deliverables go here.
+  probe_review/CLAIM_SURFACES.md — seeded CANDIDATE list (claim-bearing sentences the
+                           orchestrator's paragraph model found). A starting point, NOT the scope.
+  probe_review/PRODUCERS.md — seeded CANDIDATE list (the corpus's data tables with their columns
+                           and row counts, and its code files). A starting point, NOT the scope.
+
+=== THE METHOD: LOOK EVERYWHERE, DISPOSE EVERYTHING, VERIFY WHAT CAN BE VERIFIED ===
+
+1. SURVEY the corpus YOURSELF — every submission document (every section, every figure legend,
+   every front-matter block), the evidence areas (`raw_data/`, `code/`), the relations BETWEEN
+   them (numbers, names, dates, versions, pointers, cross-references), and the packaging itself.
+   Candidate classes to run (extend them; ask "what else?" twice):
+     * a claim, number, label or unit the corpus's OWN data or code does not support — check the
+       producer's own VALUES (direction, sign, rank, count, presence), not just that a table
+       exists;
+     * a convention (spelling, hyphenation, term family, numbering) applied in one place and not
+       another, owned by no fixed check;
+     * an expected-but-absent item the corpus's own logic requires (a test, an n, an error-bar
+       definition, a promised pointer, a missing deliverable);
+     * a present-but-unexpected token: stale text, internal working material, a placeholder
+       where content belongs, a duplicated value that disagrees;
+     * boundary defects: the first and last sentence of every section and legend, every heading;
+     * sibling asymmetry: items of one family (panels, labels, sections, siblings) defined
+       unevenly;
+     * a claim/pointer pair where one side is missing or overrun (availability, sources,
+       disclosures, cross-references);
+     * a shipped source artifact that cannot be used as shipped (degenerate values, rows from a
+       run the text says did not happen, a stale sidecar, a file that contradicts its own note);
+     * anything else you can show.
+   For every AREA you examine, `coverage.md` states how many candidates you considered and how
+   many findings came out of it. A candidate that turns out clean is a one-line disposition, not
+   a finding.
+
+2. VERIFY BY COMPUTATION wherever you can: write a small script under `probe_review/scripts/`
+   that reads the corpus's own files and prints its result as the LAST non-empty stdout line — a
+   number, a ratio, a rank list, a count, a short canonical string. Attach it to the finding:
+
+       "verifier": {"script": "probe_review/scripts/xxx.py",
+                    "computed": "<EXACTLY the last non-empty stdout line the script prints>",
+                    "shows":  "<what the computation demonstrates about the defect>"}
+
+   The script must read ONLY files inside this sandbox (relative paths from the sandbox root),
+   be deterministic and offline (no network, no randomness, no clock dependence), and be
+   re-runnable exactly as `python3 probe_review/scripts/<name>.py` from the sandbox root.
+   PREFER FEWER, REAL COMPUTATIONS OVER MANY SHAKY ONES: a verifier that does not reproduce
+   fails the whole attempt (see below). Omit the verifier when no computation can show the
+   defect — the evidence quote and location then carry the finding, and that is fully
+   acceptable. Never write a script that merely re-prints the claim or hard-codes the answer.
+
+3. FILE THE FINDINGS in `probe_review/findings_probe.json` (plus a readable
+   `probe_review/findings_probe.md`), one finding per instance, in the pipeline's standard shape:
+
+   {"id": "X-901...", "location": "<document/section, figure/legend, or file:line>",
+    "category": <0-5>, "check": "<short class label, e.g. 'stale sidecar'>",
+    "severity": "Fatal" | "Critical" | "Major" | "Minor",
+    "evidence": "<verbatim quote, or a file:line reference>",
+    "explanation": "<what is wrong and the one-line fix route; `raw_data/` is read-only>",
+    "status": "resolvable" | "unresolvable",
+    "verifier": { ... }}                            // OPTIONAL, as above
+
+   THE ID BLOCK IS RESERVED: use X-901, X-902, ... (X-9xx only). X-001... belongs to another
+   session's discovery round; a finding outside X-9xx is rejected by the orchestrator. The
+   top level also carries `"checked": [{"area": "...", "examined": N, "findings": N}, ...]`
+   — one entry per area you examined. An EMPTY findings list is legal exactly when `checked`
+   documents what was examined; a missing findings file or a missing/empty `coverage.md` is
+   not.
+
+4. WRITE `probe_review/coverage.md`: the `checked` areas with their candidate/finding counts,
+   what you could NOT check and why, and the exact commands you re-ran to satisfy yourself.
+   This round's honest limits are part of the deliverable.
+
+=== WHAT FAILS THE RUN ===
+  * a declared verifier whose re-run does not reproduce `computed` (a mismatch, a missing
+    script, a non-zero exit, an empty output, a timeout) — a computation the probe cannot
+    reproduce is a correctness blocker, not a finding;
+  * a finding outside the X-9xx block, or missing location / evidence / explanation / category /
+    severity;
+  * a missing findings file, or a missing/empty `coverage.md`;
+  * reading or writing outside this sandbox.
+
+=== DELIVERABLES (all under probe_review/) ===
+  * `findings_probe.json` + `findings_probe.md` — the findings (an empty list is legal, with
+    the `checked` inventory)
+  * `coverage.md`                                — the areas examined, counts and honest limits
+  * `scripts/*.py`                               — every declared verifier, re-runnable
+The finding vocabulary below is the one every session uses — classify each finding with it.
+
+@@DEFECT_CLASS_RULE@@
+@@STANDING_EXEMPTIONS@@
+@@SELFCHECK@@
+"""
+
+
+PROBE_TAIL = """
+
+=== END-OF-PROMPT REMINDER ===
+
+You are the PROBE, not the reviewer and not the reviser: survey the corpus, dispose every
+candidate, file every defect you find as an X-9xx finding (with a re-runnable verifier wherever
+a computation can show it), account for every area you examined in coverage.md, and change
+nothing. Finish by running the pre-flight check, then write `_pipeline_done.json` (stage="probe")
+IN THE SANDBOX ROOT — next to PROMPT.md, NOT inside `probe_review/` — carrying
+{"stage": "probe", "run_id": "...", "round": N, "status": "complete", "findings": N,
+ "verified": N, "areas": N}.
+"""
+
+
+def probe_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
+                 venue=None) -> str:
+    """The PROBE REVIEW prompt: a generic, cold-context independent discovery pass.
+
+    Self-contained by design: the session is handed no checklist, no finding
+    list and no review artifact, so the prompt states the method, the finding
+    schema, the reserved id block and the verifier/re-runnability contract in
+    full. The class is deliberately NOT restricted: any defensible defect may
+    be filed, and the verifier is a tool for the rows a computation can show.
+    """
+    prof = _as_profile(venue)
+    text = (PROBE_DIRECTIVES
+            .replace("@@RUN_ID@@", run_id)
+            .replace("@@SANDBOX@@", str(sandbox.resolve()))
+            .replace("@@ROUND@@", str(int(r)))
+            .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE)
+            .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule(prof))
+            .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
+            .replace("@@SELFCHECK@@", selfcheck_block("probe", run_id, r)))
+    text = text.replace("@@MARKER_ROOT@@", marker_root_rule(PROBE_DIR))
+    return text + shared_blocks() + PROBE_TAIL
 
 
 def integrate_prompt(sandbox: Path, run_id: str, r: int,
@@ -16830,6 +17020,12 @@ class OnlySpec:
         # a Ctx) and then folded into judge_selectors.
         self.judge_run_ids = []
         self.raw = ""            # the item text as typed, for the run log
+        # `run --only review` also drives the round's PROBE session (see
+        # entry_selected: the probe is part of the review STEP, and the auditor
+        # and revisers consume its findings). `retry --runs` clears this: a
+        # retry resets exactly the runs the operator named, so redoing the
+        # review never silently re-pays for the probe.
+        self.probe_with_review = True
 
     def validate(self, rounds_count: int, flag: str = "--only") -> "OnlySpec":
         """Reject round ordinals the pipeline does not have."""
@@ -16938,7 +17134,7 @@ class OnlySpec:
         # Exact stage names win over the single-letter prefixes below: "audit"
         # must not be read as "a" (revise), and the journal chain's stages are
         # their own classes.
-        if vid in ("audit", "feedback", "concerns", "response"):
+        if vid in ("probe", "audit", "feedback", "concerns", "response"):
             return vid
         if vid == "conform":
             return "conform"
@@ -16977,6 +17173,14 @@ class OnlySpec:
         if self.all_stages:
             return True
         stage = plan_stage_of(entry)
+        if stage == "probe" and self.probe_with_review and "review" in self.classes_for(r):
+            # The PROBE is part of the review STEP: selecting the review stage
+            # (`--only review`, `2:review`) runs the probe beside it, because the
+            # auditor and the revisers consume its findings -- without this, the
+            # documented `--only review` -> `--only audit` sequence would block
+            # on the probe dependency. A session-level token (`r1_review`) stays
+            # exact: run `--only r1_probe` / a plain `run` to complete the step.
+            return True
         tokens = self.session_tokens_for(r)
         if tokens:
             if session_id_of_entry(entry) in tokens:
@@ -17049,7 +17253,7 @@ class OnlySpec:
                     or self.sessions or self.judge_selectors or self.judge_run_ids)
 
 
-def parse_only_spec(raw, flag: str = "--only") -> OnlySpec:
+def parse_only_spec(raw, flag: str = "--only", probe_with_review: bool = True) -> OnlySpec:
     """Parse `run --only` into an OnlySpec (None/empty/`all` = everything).
 
     Round ordinals and stage names combine as described on OnlySpec. Accepted
@@ -17071,6 +17275,7 @@ def parse_only_spec(raw, flag: str = "--only") -> OnlySpec:
         parts = re.split(r"[,\s]+", text)
     spec = OnlySpec()
     spec.raw = text
+    spec.probe_with_review = bool(probe_with_review)
     for part in parts:
         token = part.strip().lower()
         if not token:
@@ -17092,7 +17297,7 @@ def parse_only_spec(raw, flag: str = "--only") -> OnlySpec:
         # `r1_w2` / `r1_a2` / `r1_i1` / `r1_review` / `r1_review_b` / `r1_audit`:
         # ONE session of one round. A `_j<k>` tail makes it a judge session
         # (`r1_w2_j1`), the same selection as `r1_judge_w2_j1`.
-        sel = re.fullmatch(r"r(\d+)\s*[_:/.-]\s*(w\d+|a\d+|i\d+|review|reviewer|audit|"
+        sel = re.fullmatch(r"r(\d+)\s*[_:/.-]\s*(w\d+|a\d+|i\d+|review|reviewer|probe|audit|"
                            r"feedback|concerns|response|"
                            r"rewriter\d+|reviser\d+|integrator\d+)"
                            r"((?:[_:/.-](?:b|j\d+))?)", token)
@@ -17283,8 +17488,8 @@ def _add_session_id(spec: "OnlySpec", r, session_id: str, part: str,
     if sid == "a1":
         die(f"{flag}: {part!r} names a1, the round base COPY -- it has no agent session "
             f"(use `reviser1` for the first reviser, which edits a1 into a2)")
-    if not re.fullmatch(r"(?:w\d+|a\d+|i\d+|review|review_b|audit|feedback|concerns|response)",
-                        sid):
+    if not re.fullmatch(r"(?:w\d+|a\d+|i\d+|review|review_b|probe|audit|feedback|concerns|"
+                        r"response)", sid):
         die(f"{flag}: {part!r} is not a session this pipeline knows (use a stage name, or a "
             f"session such as `rewriter1`, `reviser1`, `integrator1`, `review`, `audit`, `w2`, "
             f"`w2_j1`, `r1_w2`, `r1_judge_w2_j1`)")
@@ -17352,7 +17557,7 @@ def _session_token(raw: str, part: str, flag: str = "--only") -> str:
     m = re.fullmatch(r"(reviewer|review)(_?b)?", tok)
     if m:
         return "review_b" if m.group(2) else "review"
-    if re.fullmatch(r"(?:a1|w\d+|a\d+|i\d+|orig|audit|feedback|concerns|response)", tok):
+    if re.fullmatch(r"(?:a1|w\d+|a\d+|i\d+|orig|probe|audit|feedback|concerns|response)", tok):
         if tok == "a1":
             die(f"{flag}: {part!r} names a1, the round base COPY -- it has no agent session "
                 f"(use `reviser1` for the first reviser, which edits a1 into a2)")
@@ -17460,6 +17665,23 @@ def rid_audit(r: int) -> str:
     return f"r{r}_audit"
 
 
+def rid_probe(r: int) -> str:
+    """The round's PROBE REVIEW run (an INDEPENDENT discovery session).
+
+    One extra session per round, launched IN PARALLEL with the review and
+    feeding the same frozen finding list (its findings carry the reserved
+    `X-9xx` ids). It is GENERIC: it never runs the checklist and is not
+    restricted to any defect class -- it hunts whatever it can find in the
+    corpus with a cold context, and wherever a defect can be shown by a
+    computation it writes a small re-runnable script and declares the value it
+    prints. The orchestrator re-runs every declared verifier at postcheck time:
+    a computation that does not reproduce is a correctness blocker (the attempt
+    fails); findings without a verifier are evidence rows like any other
+    finding.
+    """
+    return f"r{r}_probe"
+
+
 REVIEW_SPLIT_MODES = ("off", "phases", "aspects")
 # The review's per-round SCOPE. "full" runs the whole frozen sweep set; the
 # "formatting-writing" scope is the final polish pass: only the surface checks
@@ -17487,6 +17709,62 @@ def review_split_of(ctx: Ctx) -> str:
     """The configured review split ('off' | 'phases' | 'aspects')."""
     raw = str((getattr(ctx, "cfg", None) or {}).get("review_split") or "off").strip().lower()
     return raw if raw in REVIEW_SPLIT_MODES else "off"
+
+
+# --- the PROBE REVIEW stage (`setup --probe-review`, default on) -------------
+# A second, INDEPENDENT discovery channel -- generic by design. It is a
+# cold-context session that is given the corpus (the submission documents AND
+# the evidence areas, `raw_data/` and `code/` included) and NOTHING else: never
+# the review, never a finding list, never a sweep artifact. It exists because
+# one review pass is a sample of the defect space: a whole class of defects has
+# survived every layer in real runs (a comparative claim the paper's own table
+# contradicted in sign; a stale sidecar string; degenerate intervals shipped in
+# a source table), and the discovery round's own probes had read the very table
+# and reported "no anomalies". Its value is a second, unanchored read -- plus
+# the pipeline's one hard lever: wherever a defect can be SHOWN BY A
+# COMPUTATION, the finding declares a small re-runnable script and the value it
+# prints, and the orchestrator re-runs it. A computation that does not
+# reproduce is a hard failure; the findings (any class, category 0-5,
+# Fatal..Minor) become `X-9xx` rows of the same standing as the discovery
+# round's `X-*` findings: the reviser must resolve them, the auditor may only
+# drop them with evidence, the integrator must reconcile them, and the JUDGE
+# panel stays blind to the list (it re-derives its own generic pass).
+#
+# The mode is recorded at setup (`probe_review`: "on"/"off"). A root that
+# carries no such key -- everything created before this feature -- plans no
+# probe run; `set-probe-review on` opts it in. `--only` can, of course, select
+# or skip the session for one invocation, but the recorded policy is the off
+# switch.
+PROBE_REVIEW_MODES = ("on", "off")
+PROBE_REVIEW_DEFAULT = "on"
+PROBE_DIR = "probe_review"
+PROBE_FINDINGS_REL = f"{PROBE_DIR}/findings_probe.json"
+PROBE_FINDINGS_MD_REL = f"{PROBE_DIR}/findings_probe.md"
+PROBE_COVERAGE_REL = f"{PROBE_DIR}/coverage.md"
+PROBE_REPRO_REL = f"{PROBE_DIR}/REPRODUCTION.md"
+PROBE_SURFACES_REL = f"{PROBE_DIR}/CLAIM_SURFACES.md"
+PROBE_PRODUCERS_REL = f"{PROBE_DIR}/PRODUCERS.md"
+PROBE_SCRIPT_PREFIX = f"{PROBE_DIR}/scripts/"
+# The reserved finding-id block: probe findings are X-9xx, so a collision with the
+# discovery round's own sequential X-0xx ids is impossible by construction (and
+# the merge still remaps defensively if a session ignores the block).
+PROBE_ID_RE = re.compile(r"^X-9\d{2}$")
+PROBE_FINDING_ID_BASE = 900
+# Every DECLARED verifier is re-run at postcheck time. The timeout is per
+# script; the scripts are the session's own, offline and deterministic by
+# contract.
+PROBE_REPRO_TIMEOUT = 120
+
+
+def probe_review_of(ctx) -> str:
+    """Is the round's probe-review stage part of the plan?
+
+    The recorded policy wins; a root without the key (created before the
+    feature) plans no probe session. An unknown value falls back to "off"
+    rather than to the more expensive mode.
+    """
+    raw = str((getattr(ctx, "cfg", None) or {}).get("probe_review") or "").strip().lower()
+    return raw if raw in PROBE_REVIEW_MODES else "off"
 
 
 def rid_revise(r: int, vid: str) -> str:
@@ -19907,6 +20185,10 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
     ensure_copy(ctx.sandbox_of(a1) / "base", sb / "base")
     ensure_pristine_input(ctx, sb / PRISTINE_DIR)
     ensure_copy(ctx.sandbox_of(rev_rec) / REVIEW_DIR, sb / REVIEW_DIR)
+    # The PROBE session is an independent producer of X-9xx rows: merge them
+    # into THIS sandbox's frozen review copy (never into the source review), so
+    # the auditor disposes them beside every other frozen id.
+    probe_merge = merge_probe_into_review_copy(ctx, r, sb)
     if journal_has_feedback(ctx):
         # The auditor disposes JF findings against the real letter, and a
         # concern the reviewers raised against the earlier version can only be
@@ -19931,10 +20213,587 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
                                               venue_norm=venue_norm_for(ctx)))
     rec = ctx.register(rid, "audit", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=a1.get("source_id"))
+    rec["probe_merge"] = probe_merge
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True),
                               "review": hash_manifest(sb / REVIEW_DIR)}
     return rec
+
+
+# =====================================================================
+# THE PROBE REVIEW (see `rid_probe` / `PROBE_REVIEW_MODES`)
+#
+#   probe_review/          — the ONLY output directory (see PROBE_DIR)
+#     CLAIM_SURFACES.md    — seeded: claim-bearing sentences (a CANDIDATE list)
+#     PRODUCERS.md         — seeded: the corpus's own table/code inventory
+#     findings_probe.json/md — the findings (any class; X-9xx ids) + `checked`
+#     coverage.md          — the areas examined, counts and honest limits
+#     scripts/*.py         — every declared verifier, re-runnable
+#     REPRODUCTION.md      — code-written by the postcheck (NOT the session)
+#
+# The orchestrator RE-RUNS every DECLARED verifier at postcheck time and
+# compares the last stdout line with its `computed` value: equal -> the
+# computation is trustworthy; different -> the attempt FAILS (a computation the
+# probe cannot reproduce is a correctness blocker, not a finding). The findings
+# (X-9xx) ride in the round's discovery list
+# (`review/round2/findings_extra.json` in every downstream copy), so the
+# reviser must resolve them, the auditor may only drop them with evidence, and
+# the integrator must reconcile them.
+# =====================================================================
+
+# The probe is GENERIC on purpose: any defect class may be reported, in the
+# same six-category / four-rung vocabulary every session uses. A computation (a
+# script whose last stdout line is compared by the orchestrator) is a TOOL for
+# the rows that can be verified that way, not a restriction on what the session
+# may look at or report: a stale sidecar string, a missing deliverable, an
+# inconsistent number, an unreadable figure or a broken pointer is just as
+# reportable as a claim its own producer contradicts.
+
+
+def seeded_probe_paths(sb: Path) -> set:
+    """Every file the probe materializer writes before the agent starts.
+
+    `leftovers_present` treats them as INPUTS: a freshly materialized probe
+    sandbox must not read as "already worked in".
+    """
+    return {sb / PROBE_SURFACES_REL, sb / PROBE_PRODUCERS_REL}
+
+
+def probe_table_inventory(corpus: Path, limit: int = 400) -> list:
+    """Rows for `PROBE_PRODUCERS.md`: the corpus's own data tables + code files.
+
+    Deterministic and cheap: tabular files get their header columns and data-row
+    count, everything else is listed by path. This is the producer CANDIDATE
+    list the prompt requires the session to go beyond, never the enumeration.
+    """
+    rows = []
+    for area in RAW_DATA_DIRNAMES:
+        root = corpus / area
+        if not root.is_dir():
+            continue
+        for p in sorted(root.rglob("*")):
+            if len(rows) >= limit or not p.is_file():
+                continue
+            suffix = p.suffix.lower()
+            if suffix not in (".tsv", ".csv", ".json", ".md", ".txt"):
+                continue
+            rel = p.relative_to(corpus).as_posix()
+            columns, count = "(non-tabular)", ""
+            if suffix in (".tsv", ".csv"):
+                try:
+                    with open(p, "r", encoding="utf-8", errors="replace", newline="") as f:
+                        header = f.readline().rstrip("\n")
+                        count = sum(1 for _ in f)
+                    cells = header.split("\t" if suffix == ".tsv" else ",")
+                    columns = " | ".join(str(c).strip()[:40] for c in cells[:14]) or "(empty)"
+                except OSError:
+                    columns = "(unreadable)"
+            rows.append({"file": rel, "data rows": count, "columns (first 14)": columns})
+    code = corpus / CODE_DIR
+    if code.is_dir():
+        for p in sorted(code.rglob("*")):
+            if len(rows) >= limit or not p.is_file():
+                continue
+            if p.suffix.lower() in (".py", ".r", ".sh", ".ipynb", ".json", ".yaml", ".yml",
+                                    ".toml", ".cfg", ".ini"):
+                rows.append({"file": p.relative_to(corpus).as_posix(), "data rows": "",
+                             "columns (first 14)": "(producer code/config)"})
+    return rows
+
+
+def seed_probe_surfaces(ctx: Ctx, sb: Path, r: int) -> dict:
+    """Write the probe sandbox's two candidate inventories (inputs, not answers).
+
+    CLAIM_SURFACES.md is the same paragraph model the review's claim-strength
+    ledger uses, so the probe cannot silently miss a claim surface the pipeline
+    knows exists; PRODUCERS.md is the data/code inventory. Both are marked as
+    CANDIDATE lists: the prompt requires the session to read the surfaces and
+    the producers itself and to account for every surface in coverage.md.
+    """
+    corpus = sb / "base"
+    try:
+        ev = code_side_evidence(ctx, corpus, f"{rid_probe(r)}:probe")
+    except Exception as e:                                        # noqa: BLE001
+        ev = {"error": f"{type(e).__name__}: {e}"}
+    claim_rows = []
+    for c in ((ev.get("claims") or {}).get("rows") or []):
+        markers = c.get("markers")
+        claim_rows.append({
+            "document": c.get("document"), "paragraph": c.get("paragraph"),
+            "kind": c.get("kind"), "direction": c.get("direction"),
+            "marker(s)": ", ".join(markers) if isinstance(markers, (list, tuple))
+            else str(markers or ""),
+            "sentence": (c.get("sentence") or "")[:160]})
+    write_text_atomic(sb / PROBE_SURFACES_REL, (
+        "# CLAIM SURFACES — seeded CANDIDATE list (the enumeration is YOURS)\n\n"
+        "Every claim-bearing sentence the orchestrator's paragraph model found (the same model the "
+        "review's J3 claim-strength ledger uses). `direction` = the polarity the model saw: `over` "
+        "= a maximal claim, `under` = a hedge. This list is NOT the enumeration: read the surfaces "
+        "themselves — the abstract, every figure legend, the cover letter, the Results and "
+        "statistics paragraphs — and account for each surface in `coverage.md`.\n\n"
+        + _evidence_artifact_table(
+            claim_rows, ["document", "paragraph", "kind", "direction", "marker(s)", "sentence"],
+            "no claim-bearing sentence was found by the code-side model")
+        + "\n"))
+    write_text_atomic(sb / PROBE_PRODUCERS_REL, (
+        "# PRODUCERS — seeded CANDIDATE list (data tables and code in the corpus)\n\n"
+        "The corpus's own `" + "/`, `".join(RAW_DATA_DIRNAMES) + "/` files and its `code/` "
+        "directory. Tabular files show their header columns and data-row count so a claim can be "
+        "paired with the column that must support it. This list is NOT the enumeration: read the "
+        "files you need, and use a producer the corpus carries even when it is not listed here.\n\n"
+        + _evidence_artifact_table(
+            probe_table_inventory(corpus),
+            ["file", "data rows", "columns (first 14)"],
+            "no producer file (data table or code) was found in the corpus")
+        + "\n"))
+    return {"claims": len(claim_rows)}
+
+
+def materialize_probe(ctx: Ctx, r: int) -> dict:
+    """The PROBE REVIEW sandbox (see `rid_probe`): a cold-context discovery pass.
+
+    Materialized from the round base ONLY. Deliberately absent: `review/`,
+    `prior_round/`, any finding list, any sweep artifact. The session's value
+    is that it re-derives its own read of the corpus -- and its own
+    computations -- in a context that has not just disposed the checklist's
+    rows. The seeds are CANDIDATE lists, not a scope: any defect class may be
+    reported.
+    """
+    rid = rid_probe(r)
+    a1 = ctx.run(rid_a1(r))
+    if a1 is None:
+        raise RuntimeError(f"cannot materialize {rid}: {rid_a1(r)} does not exist")
+    sb = ctx.runs_dir / rid
+    sb.mkdir(parents=True, exist_ok=True)
+    ensure_copy(ctx.sandbox_of(a1) / "base", sb / "base")
+    ensure_pristine_input(ctx, sb / PRISTINE_DIR)
+    (sb / PROBE_DIR).mkdir(exist_ok=True)
+    seed_probe_surfaces(ctx, sb, r)
+    note = prior_failure_block(ctx.run(rid) or {}) if ctx.run(rid) else PRIOR_FAILURE_NONE
+    prompt = sb / PROMPT_FILE
+    if not prompt.is_file():
+        write_text_atomic(prompt, probe_prompt(sb, rid, r, prior_failure=note,
+                                               venue=venue_profile_of(ctx)))
+    rec = ctx.register(rid, "probe", r, f"runs/{rid}",
+                       upstream_run_id=rid_a1(r), source_id=a1.get("source_id"))
+    rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
+                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR,
+                                                          follow_dir_links=True)}
+    return rec
+
+
+def _probe_value_equal(declared, produced) -> bool:
+    """Is the declared `computed` value equal to what the script re-printed?
+
+    Whitespace-insensitive; two numbers compare NUMERICALLY (0.912 == 0.9120,
+    3.1e-2 == 0.031); any other value compares as a canonical string. "Close"
+    is not enough: the row's claim is that the script prints THIS value.
+    """
+    a = " ".join(str(declared or "").split())
+    b = " ".join(str(produced or "").split())
+    if a == b:
+        return True
+    if not a or not b:
+        return False
+    try:
+        return math.isclose(float(a), float(b), rel_tol=1e-6, abs_tol=1e-12)
+    except (TypeError, ValueError):
+        return False
+
+
+def _probe_contract_problems(sb: Path) -> tuple:
+    """(errors, warnings, findings) for `probe_review/findings_probe.json`.
+
+    Sandbox-local and pure, exactly like the review's contract helpers, so the
+    session's pre-flight (`sandbox_selfcheck`) applies the detectors the
+    postcheck will apply -- never a different verdict.
+
+    The probe is GENERIC: a finding may be any defect class anywhere in the
+    corpus (documents, raw_data/, code/, figures, references), in the same
+    six-category / four-rung vocabulary every session uses, and a finding MAY
+    carry a `verifier` -- a re-runnable script plus the exact value it prints --
+    when the defect can be shown by computation. What is checked here:
+
+      * `checked`: every AREA the probe examined, with its candidate and finding
+        counts, so a zero-finding outcome is an examined corpus and not an
+        unrun pass;
+      * every finding's standard shape, unique id in the reserved X-9xx block;
+      * every declared verifier: a relative script under `probe_review/scripts/`
+        that exists, plus the non-empty `computed` value it must print (the
+        orchestrator re-runs it -- see `probe_reproduction`).
+    """
+    errs, warns = [], []
+    p = sb / PROBE_FINDINGS_REL
+    if not p.is_file():
+        return ([f"{PROBE_FINDINGS_REL} is missing: the probe's findings (an EMPTY list is "
+                 f"legal) and its `checked` inventory are the deliverable, and that artifact is "
+                 f"what distinguishes an examined corpus from an unrun pass"], [], [])
+    doc = read_json(p, revive=False, lenient=True)               # agent-written
+    if not isinstance(doc, dict):
+        return ([f"{PROBE_FINDINGS_REL} does not parse as a JSON object"], [], [])
+    checked = doc.get("checked")
+    if not isinstance(checked, list) or not checked:
+        errs.append(f"{PROBE_FINDINGS_REL} carries no 'checked' list: every area the probe "
+                    f"examined (documents and sections, raw_data/, code/, figures, references, "
+                    f"cross-document consistency, ...) is listed with the number of candidates "
+                    f"examined and the findings filed, so a zero-finding outcome is an examined "
+                    f"corpus and not an unrun pass")
+        checked = []
+    for c in checked:
+        if not isinstance(c, dict) or not str(c.get("area") or "").strip():
+            errs.append(f"{PROBE_FINDINGS_REL}: a `checked` row has no 'area' name")
+            continue
+        area = str(c["area"]).strip()
+        for key in ("examined", "findings"):
+            try:
+                value = int(c.get(key))
+            except (TypeError, ValueError):
+                value = -1
+            if value < 0:
+                errs.append(f"{PROBE_FINDINGS_REL}: checked area {area!r} carries no usable "
+                            f"{key!r} count")
+    raw = doc.get("findings")
+    if not isinstance(raw, list):
+        errs.append(f"{PROBE_FINDINGS_REL} carries no 'findings' list (an empty list is legal "
+                    f"when `checked` documents the examination)")
+        raw = []
+    findings, seen = [], set()
+    for i, f in enumerate(raw):
+        if not isinstance(f, dict):
+            errs.append(f"{PROBE_FINDINGS_REL}: finding {i} is not an object")
+            continue
+        fid = str(f.get("id") or "").strip()
+        if not PROBE_ID_RE.match(fid):
+            errs.append(f"{PROBE_FINDINGS_REL}: id {fid or '(none)'!r} is outside the reserved "
+                        f"probe block X-901...X-999")
+            continue
+        if fid in seen:
+            errs.append(f"{PROBE_FINDINGS_REL}: duplicate id {fid}")
+        seen.add(fid)
+        for key in ("location", "evidence", "explanation"):
+            if not str(f.get(key) or "").strip():
+                errs.append(f"{PROBE_FINDINGS_REL} {fid}: no {key}")
+        if str(f.get("severity") or "").strip().lower() not in DISCOVERY_SEVERITIES:
+            errs.append(f"{PROBE_FINDINGS_REL} {fid}: severity {f.get('severity')!r} is not one "
+                        f"of {'/'.join(s.capitalize() for s in DISCOVERY_SEVERITIES)}")
+        try:
+            ok_cat = 0 <= int(f.get("category")) <= 5
+        except (TypeError, ValueError):
+            ok_cat = False
+        if not ok_cat:
+            errs.append(f"{PROBE_FINDINGS_REL} {fid}: category {f.get('category')!r} is not an "
+                        f"integer 0-5")
+        verifier = f.get("verifier")
+        if verifier is not None:
+            if not isinstance(verifier, dict):
+                errs.append(f"{PROBE_FINDINGS_REL} {fid}: `verifier` is not an object "
+                            f"({{script, computed, shows}}) -- omit it when no computation can "
+                            f"show the defect")
+            else:
+                script = str(verifier.get("script") or "").strip()
+                if not script:
+                    errs.append(f"{PROBE_FINDINGS_REL} {fid}: the verifier carries no `script`")
+                else:
+                    sp = Path(script)
+                    if sp.is_absolute() or ".." in sp.parts \
+                            or not script.startswith(PROBE_SCRIPT_PREFIX):
+                        errs.append(f"{PROBE_FINDINGS_REL} {fid}: verifier script {script!r} "
+                                    f"must be a relative path under {PROBE_SCRIPT_PREFIX}")
+                    elif not (sb / sp).is_file():
+                        errs.append(f"{PROBE_FINDINGS_REL} {fid}: verifier script {script!r} "
+                                    f"does not exist")
+                if not str(verifier.get("computed") or "").strip():
+                    errs.append(f"{PROBE_FINDINGS_REL} {fid}: the verifier carries no `computed` "
+                                f"value (EXACTLY the last non-empty stdout line the script "
+                                f"prints)")
+        findings.append(f)
+    return errs, warns, findings
+
+
+def probe_reproduction(sb: Path, findings: list) -> dict:
+    """Re-run every DECLARED verifier and record what it printed.
+
+    A finding's `verifier` is {script, computed, shows}: the script's last
+    non-empty stdout line must equal `computed`. The orchestrator runs it itself
+    (offline, bounded, cwd = the sandbox root); a mismatch, a missing script, a
+    non-zero exit, an empty output or a timeout is an error the caller turns into
+    a failed attempt -- a computation the probe cannot reproduce is a
+    correctness blocker, not a finding. Findings WITHOUT a verifier are
+    evidence/quotation rows: they are not re-run (their evidence is the quoted
+    text or file:line reference), and they carry status `no-verifier` in the
+    record.
+    """
+    results = []
+    for f in findings or ():
+        fid = str(f.get("id") or "")
+        verifier = f.get("verifier")
+        if not isinstance(verifier, dict):
+            results.append({"row": fid, "script": "", "declared": "", "produced": "",
+                            "status": "no-verifier", "detail": ""})
+            continue
+        script = str(verifier.get("script") or "").strip()
+        entry = {"row": fid, "script": script,
+                 "declared": " ".join(str(verifier.get("computed") or "").split()),
+                 "produced": "", "status": "", "detail": ""}
+        target = sb / script if script else None
+        if target is None or not target.is_file() or not is_within(target, sb / PROBE_DIR):
+            entry.update(status="missing")
+            results.append(entry)
+            continue
+        try:
+            with tempfile.TemporaryFile("w+b") as out:
+                proc = subprocess.run(
+                    [sys.executable, str(target)], cwd=str(sb), stdin=subprocess.DEVNULL,
+                    stdout=out, stderr=subprocess.DEVNULL, timeout=PROBE_REPRO_TIMEOUT)
+                out.seek(0, os.SEEK_END)
+                size = out.tell()
+                out.seek(max(0, size - 8192))
+                tail = out.read().decode("utf-8", "replace")
+            lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
+            produced = lines[-1] if lines else ""
+            entry["produced"] = " ".join(produced.split())[:200]
+            if proc.returncode != 0:
+                entry.update(status="failed", detail=f"exit {proc.returncode}")
+            elif not produced:
+                entry.update(status="empty")
+            elif _probe_value_equal(entry["declared"], produced):
+                entry.update(status="reproduced")
+            else:
+                entry.update(status="mismatch")
+        except subprocess.TimeoutExpired:
+            entry.update(status="timeout", detail=f"over {PROBE_REPRO_TIMEOUT}s")
+        except OSError as e:                                     # noqa: BLE001
+            entry.update(status="failed", detail=f"{type(e).__name__}: {e}"[:120])
+        results.append(entry)
+    verified = [r for r in results if r["status"] != "no-verifier"]
+    mismatches = [r["row"] for r in verified if r["status"] == "mismatch"]
+    broken = [r["row"] for r in verified
+              if r["status"] in ("missing", "timeout", "failed", "empty")]
+    return {"rows": len(results), "verified": len(verified),
+            "reproduced": sum(1 for r in verified if r["status"] == "reproduced"),
+            "mismatches": mismatches, "broken": broken, "results": results}
+
+
+def _write_probe_reproduction(sb: Path, repro: dict) -> None:
+    """The code-written reproduction record (`probe_review/REPRODUCTION.md`)."""
+    lines = ["# PROBE REPRODUCTION — the orchestrator re-ran every declared verifier", "",
+             "| finding | script | declared | re-run printed | status |",
+             "|---|---|---|---|---|"]
+    for r in repro.get("results") or ():
+        lines.append("| {row} | `{script}` | {declared} | {produced} | {status}{detail} |".format(
+            row=r.get("row"), script=r.get("script"), declared=r.get("declared") or "(none)",
+            produced=r.get("produced") or "(none)", status=r.get("status"),
+            detail=(f" ({r['detail']})" if r.get("detail") else "")))
+    lines += ["", f"{repro.get('reproduced', 0)} of {repro.get('verified', 0)} declared "
+                  f"verifier(s) reproduced exactly; {len(repro.get('mismatches') or [])} "
+                  f"mismatch(es), {len(repro.get('broken') or [])} broken script(s). A mismatch "
+                  "or a broken script fails the attempt: a computation the probe cannot "
+                  "reproduce is a correctness blocker, not a finding.", ""]
+    write_text_atomic(sb / PROBE_REPRO_REL, "\n".join(lines))
+
+
+def postcheck_probe(ctx: Ctx, rec: dict):
+    """The probe session's contract: the checked inventory, the findings, and
+    every DECLARED verifier RE-RUN.
+
+    Structural plus computational. The findings are generic (any category, any
+    severity, any location in the corpus); the `checked` inventory is what makes
+    a zero-finding outcome distinguishable from an unrun pass; and for every
+    finding that carries a verifier, the orchestrator re-runs the script and
+    compares its last stdout line with the declared `computed` value. A mismatch
+    is a hard error (the attempt fails and is retried), never a warning --
+    a computation the probe cannot reproduce is a correctness blocker.
+    """
+    sb = ctx.sandbox_of(rec)
+    errs, warns = [], []
+    marker = marker_json(sb, rec["kind"])
+    _marker_checks(rec, marker, "probe", errs, warns, sb=sb)
+    errs.extend(structured_output_problems(ctx, rec))
+    warns.extend(inherited_structured_output_notes(ctx, rec))
+    perrs, pwarns, findings = _probe_contract_problems(sb)
+    errs.extend(perrs)
+    warns.extend(pwarns)
+    coverage = sb / PROBE_COVERAGE_REL
+    if not coverage.is_file():
+        errs.append(f"{PROBE_COVERAGE_REL} is missing: the areas examined, the counts and the "
+                    f"round's honest limits are part of the deliverable")
+    else:
+        try:
+            if not coverage.read_text(encoding="utf-8", errors="replace").strip():
+                errs.append(f"{PROBE_COVERAGE_REL} is EMPTY: account for the areas examined, the "
+                            f"findings they produced and what could not be checked")
+        except OSError as e:                                     # noqa: BLE001
+            errs.append(f"{PROBE_COVERAGE_REL} could not be read ({e})")
+    repro = probe_reproduction(sb, findings)
+    if findings:
+        _write_probe_reproduction(sb, repro)
+    findings_ids = sorted(str(f.get("id") or "").strip() for f in findings)
+    repro["findings"] = findings_ids
+    rec["probe_review"] = repro
+    for r in repro["results"]:
+        if r["status"] == "mismatch":
+            errs.append(f"{PROBE_FINDINGS_REL} {r['row']}: the re-run of `{r['script']}` printed "
+                        f"{r['produced']!r} where the finding declares {r['declared']!r} -- the "
+                        f"declared computation does not reproduce (a correctness blocker: fix "
+                        f"the script or the declared value)")
+        elif r["status"] in ("missing", "timeout", "failed", "empty"):
+            errs.append(f"{PROBE_FINDINGS_REL} {r['row']}: the verifier `{r['script']}` "
+                        f"{'is missing' if r['status'] == 'missing' else r['status']}"
+                        + (f" ({r['detail']})" if r["detail"] else "")
+                        + " -- a declared verifier must be a re-runnable script that prints its "
+                          "`computed` value as the last stdout line (omit the verifier when no "
+                          "computation can show the defect)")
+    _check_pristine_copy(ctx, rec, pristine_dirname(ctx.sandbox_of(rec)), errs)
+    errs.extend(input_mismatches(ctx, rec))
+    return (not errs), errs, warns, None
+
+
+def probe_findings_rows(ctx: Ctx, r: int) -> list:
+    """The probe session's X-9xx findings ([] when the round ran no probe).
+
+    A FINISHED probe run wins, even when its list is empty -- falling back to
+    the archive could resurrect a superseded list. A root whose probe sandbox is
+    gone (pruned, or a decision re-derived later) reads the archived copy under
+    `reports/round<r>_review/`, so the frozen list stays reproducible.
+    """
+    try:
+        r = int(r)
+    except (TypeError, ValueError):
+        return []
+    rec = ctx.run(rid_probe(r))
+    if rec is not None and str(rec.get("status") or "") == "done":
+        doc = read_json(ctx.sandbox_of(rec) / PROBE_FINDINGS_REL,
+                        revive=False, lenient=True)
+        found = doc.get("findings") if isinstance(doc, dict) else []
+        return [f for f in (found or ()) if isinstance(f, dict)
+                and str(f.get("id") or "").strip()]
+    # The ARCHIVED round keeps the probe findings MERGED into its
+    # findings_extra.json (see archive_review_outputs): they are already part of
+    # the archived discovery list, so re-adding them here would double-seed the
+    # same defects under remapped ids.
+    archived = read_json(ctx.reports_dir / f"round{r}_review" / "findings_extra.json",
+                         revive=False, lenient=True)
+    if isinstance(archived, dict) and isinstance(archived.get("probe_merge"), dict):
+        return []
+    doc = read_json(ctx.reports_dir / f"round{r}_review" / "findings_probe.json",
+                    revive=False, lenient=True)
+    found = doc.get("findings") if isinstance(doc, dict) else []
+    return [f for f in (found or ()) if isinstance(f, dict)
+            and str(f.get("id") or "").strip()]
+
+
+def probe_review_upstream_doc(ctx: Ctx, r: int) -> dict:
+    """The UNMERGED review `round2/findings_extra.json` doc ({} when none).
+
+    Resolved like every other downstream consumer: session B under a split
+    review, the single review run otherwise, then the archived copy -- so a
+    pruned root still yields the base the merge is computed from.
+    """
+    rid = rid_review_b(r) if review_split_of(ctx) != "off" else rid_review(r)
+    rec = ctx.run(rid)
+    if rec is not None and str(rec.get("status") or "") == "done":
+        doc = read_json(ctx.sandbox_of(rec) / REVIEW_DIR / "round2" / "findings_extra.json",
+                        revive=False, lenient=True)
+        if isinstance(doc, dict):
+            return doc
+    doc = read_json(ctx.reports_dir / f"round{int(r)}_review" / "findings_extra.json",
+                    revive=False, lenient=True)
+    return doc if isinstance(doc, dict) else {}
+
+
+def probe_findings_for_merge(existing_ids, rows) -> tuple:
+    """(findings with collision-free ids, remap) against the ids already in a list.
+
+    Deterministic, in row order: a probe row whose id is already used (or that
+    is outside the reserved X-9xx block) moves to the first free X-9xx slot.
+    Every consumer that applies this rule to the same inputs (the merged review
+    copies, the integration seed) reaches the same ids.
+    """
+    used = {str(i) for i in (existing_ids or ()) if str(i).strip()}
+    out, remap = [], {}
+    for row in rows or ():
+        row = dict(row)
+        fid = str(row.get("id") or "").strip()
+        new = fid
+        if not DISCOVERY_X_ID_RE.match(new) or new in used:
+            k = PROBE_FINDING_ID_BASE + 1
+            while f"X-{k:03d}" in used:
+                k += 1
+            new = f"X-{k:03d}"
+            remap[fid] = new
+        used.add(new)
+        row["id"] = new
+        out.append(row)
+    return out, remap
+
+
+def probe_merged_review_doc(ctx: Ctx, r: int, base_doc) -> tuple:
+    """(merged doc or None, rows added, remap) for one review-copy merge.
+
+    The ONE place that computes what `merge_probe_into_review_copy` writes, so
+    the materializer and the input-freshness check (`_review_copy_mismatch`)
+    cannot disagree about the expected content. `None` means the probe carried
+    no findings and the copy is the upstream bytes, unchanged.
+    """
+    rows = probe_findings_rows(ctx, r)
+    if not rows:
+        return None, [], {}
+    doc = base_doc if isinstance(base_doc, dict) else {}
+    block = doc.get("probe_merge")
+    if isinstance(block, dict) and str(block.get("source") or "") == rid_probe(r):
+        # The base is ALREADY the merged doc (only reachable through the archive
+        # fallback of probe_review_upstream_doc): merging again would duplicate
+        # every row under remapped ids.
+        return doc, [], block.get("id_remap") or {}
+    existing = [f for f in (doc.get("findings") or []) if isinstance(f, dict)]
+    merged_rows, remap = probe_findings_for_merge([f.get("id") for f in existing], rows)
+    merged = dict(doc)
+    merged["findings"] = existing + merged_rows
+    merged["probe_merge"] = {"source": rid_probe(r), "rows": len(merged_rows),
+                             "id_remap": remap}
+    return merged, merged_rows, remap
+
+
+def merge_probe_into_review_copy(ctx: Ctx, r: int, sb: Path) -> dict:
+    """Merge the probe session's X-9xx findings into THIS sandbox's review copy.
+
+    The probe findings have the same standing as the discovery round's X-* rows,
+    so they travel in the ONE file every downstream contract reads
+    (`review/round2/findings_extra.json`). The SOURCE review sandbox is never
+    mutated -- it is frozen and byte-verified -- and every consumer (auditor,
+    each reviser) gets the same merged copy. Colliding ids are remapped
+    deterministically (see `probe_findings_for_merge`) and the merge block records
+    the remap.
+    """
+    rows = probe_findings_rows(ctx, r)
+    if not rows:
+        return {"rows": 0, "remap": {}}
+    target = sb / REVIEW_DIR / "round2" / "findings_extra.json"
+    # Compute the expected merge from the UNMERGED upstream review (never from
+    # the copy, which may already carry a merge block): writing the expected doc
+    # is idempotent, replaces a stale merge after a probe retry, and cannot
+    # duplicate rows under remapped ids.
+    merged, merged_rows, remap = probe_merged_review_doc(
+        ctx, r, probe_review_upstream_doc(ctx, r))
+    if merged is None:
+        return {"rows": 0, "remap": {}}
+    current = read_json(target, revive=False, lenient=True)
+    if isinstance(current, dict) and current == merged:
+        return {"rows": len(merged_rows), "remap": remap, "skipped": True}
+    target.parent.mkdir(parents=True, exist_ok=True)
+    write_json_atomic(target, merged)
+    lines = ["# Probe findings (X-9xx) — merged into this sandbox's frozen review", "",
+             "| id | location | severity | category | explanation |", "|---|---|---|---|---|"]
+    for f in merged_rows:
+        lines.append("| {i} | {loc} | {sev} | {cat} | {expl} |".format(
+            i=f.get("id"), loc=str(f.get("location") or "").replace("|", "/"),
+            sev=f.get("severity"), cat=f.get("category"),
+            expl=str(f.get("explanation") or "").replace("|", "/")[:160]))
+    if remap:
+        lines += ["", "id remap (collision with an existing finding): "
+                      + ", ".join(f"{k} -> {v}" for k, v in sorted(remap.items())), ""]
+    write_text_atomic(sb / PROBE_FINDINGS_MD_REL, "\n".join(lines) + "\n")
+    return {"rows": len(merged_rows), "remap": remap}
 
 
 def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
@@ -19978,6 +20837,11 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     # The frozen review/ is the authoritative finding list: a partial copy must
     # never be trusted (the revision ledger keys on every finding id).
     ensure_copy(src_sb / REVIEW_DIR, sb / REVIEW_DIR)
+    # The PROBE session's X-9xx findings are part of the frozen list this
+    # reviser must resolve: merge them into THIS sandbox's review copy (the
+    # source review sandbox is never touched; every consumer gets the same
+    # merged list -- see merge_probe_into_review_copy).
+    probe_merge = merge_probe_into_review_copy(ctx, r, sb)
     if journal_has_feedback(ctx):
         if (src_sb / "concerns").is_dir():
             ensure_copy(src_sb / "concerns", sb / "concerns")
@@ -20012,6 +20876,7 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
                                                venue_norm=venue_norm_for(ctx)))
     rec = ctx.register(rid, "revise", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=A1_ID, produces=vid)
+    rec["probe_merge"] = probe_merge
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True),
                               "review": hash_manifest(sb / REVIEW_DIR)}
@@ -20341,6 +21206,7 @@ REBUILD_HANDLERS = {
     "a1": lambda ctx, rec: materialize_a1(ctx, int(rec["round"])),
     "rewrite": lambda ctx, rec: materialize_rewrite(ctx, int(rec["round"]), _vid_index(rec)),
     "review": _rebuild_review,
+    "probe": lambda ctx, rec: materialize_probe(ctx, int(rec["round"])),
     "audit": lambda ctx, rec: materialize_audit(ctx, int(rec["round"])),
     "revise": lambda ctx, rec: materialize_revise(ctx, int(rec["round"]), _rec_vid(rec)),
     "integrate": lambda ctx, rec: materialize_integrate(ctx, int(rec["round"]), _vid_index(rec)),
@@ -20444,6 +21310,42 @@ PRIOR_ROUND_FILES = ("findings.json", "findings.md", "findings_extra.json",
                      "findings_extra.md", "new_sweeps.md", "round2_summary.md")
 
 
+def _review_copy_mismatch(ctx: Ctx, r: int, sb: Path, upstream_dir: Path):
+    """None when the sandbox's frozen review copy is what this round must hold.
+
+    The audit and revision sandboxes receive the review WITH the probe findings
+    merged into `round2/findings_extra.json` (`merge_probe_into_review_copy`),
+    so comparing the whole area against the raw upstream review marked every
+    such sandbox stale as soon as the probe filed anything -- each new
+    invocation reset the audit and blocked the revisers. Compare the area
+    file-by-file and allow EXACTLY that one file to differ, provided it equals
+    the merge this build computes from the CURRENT probe run: a probe retry that
+    changes the list still drifts (and resets the downstream sandboxes, which is
+    the point), and a probe run that is not done means the copy is out of date.
+    """
+    prec = ctx.run(rid_probe(r))
+    if prec is not None and str(prec.get("status") or "") != "done":
+        return (f"the probe run {rid_probe(r)} is not done: the findings this round's auditor "
+                f"and revisers consume will change")
+    cur = hash_manifest(sb / REVIEW_DIR).get("files") or {}
+    want = hash_manifest(upstream_dir).get("files") or {}
+    rel = "round2/findings_extra.json"
+    differing = sorted({k for k in set(cur) | set(want) if cur.get(k) != want.get(k)})
+    if not differing:
+        # Byte-identical to the upstream review: nothing to explain.
+        return None
+    others = [k for k in differing if k != rel]
+    if others:
+        return (f"{REVIEW_DIR}/ no longer matches its current upstream source "
+                f"({', '.join(others[:3])})")
+    expected, _rows, _remap = probe_merged_review_doc(ctx, r, probe_review_upstream_doc(ctx, r))
+    actual = read_json(sb / REVIEW_DIR / rel, revive=False, lenient=True)
+    if expected is None or actual != expected:
+        return (f"{REVIEW_DIR}/{rel} no longer matches the frozen list this round's auditor "
+                f"and revisers must consume (the probe findings changed)")
+    return None
+
+
 def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
     """Input-area drift for ONE run, measured against its CURRENT upstream."""
     kind, r = rec["kind"], int(rec["round"])
@@ -20494,9 +21396,23 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
         rev_rec = ctx.run(rev_rid)
         if rev_rec is None or rev_rec.get("status") != "done":
             probs.append("upstream review/concerns run is not done")
-        else:
+        elif journal_is_scoped(ctx):
             probs.append(mismatch("review",
                                   hash_manifest(ctx.sandbox_of(rev_rec) / REVIEW_DIR)))
+        else:
+            # The general review path merges the probe findings into this copy
+            # (see _review_copy_mismatch): compare against the merge, not the raw
+            # upstream bytes.
+            probs.append(_review_copy_mismatch(ctx, r, sb,
+                                               ctx.sandbox_of(rev_rec) / REVIEW_DIR))
+    elif kind == "probe":
+        # The probe reads the round base and the pristine original, like every
+        # other round-family session; its own provenance record is written by
+        # the postcheck, so only the INPUT areas are drift-checked here.
+        if a1 is not None and a1.get("status") == "done":
+            probs.append(mismatch("base", hash_manifest(ctx.sandbox_of(a1) / "base")))
+        if src_ok:
+            probs.append(mismatch(pristine_dirname(sb), ctx.source_manifest))
     elif kind in ("feedback", "concerns"):
         if a1 is not None and a1.get("status") == "done":
             probs.append(mismatch("base", hash_manifest(ctx.sandbox_of(a1) / "base")))
@@ -20528,7 +21444,8 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
         if rv is None or rv.get("status") != "done":
             probs.append("upstream review run is not done")
         else:
-            probs.append(mismatch(REVIEW_DIR, hash_manifest(ctx.sandbox_of(rv) / REVIEW_DIR)))
+            probs.append(_review_copy_mismatch(ctx, r, sb,
+                                               ctx.sandbox_of(rv) / REVIEW_DIR))
     elif kind == "integrate":
         self_id = rec.get("self_id")
         others = list(rec.get("other_ids") or [])
@@ -20600,8 +21517,9 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
     # reach the audit sandbox too (it is not an arm of the pool, so nothing else
     # in this function would ever look at it).
     audit_ids = [rid_audit(r)] if ctx.run(rid_audit(r)) is not None else []
-    order = ((rewrite_ids + ([rid_review(r)] if n else []) + audit_ids + revise_ids
-              + integrate_ids)
+    probe_ids = [rid_probe(r)] if ctx.run(rid_probe(r)) is not None else []
+    order = ((rewrite_ids + ([rid_review(r)] if n else []) + probe_ids + audit_ids
+              + revise_ids + integrate_ids)
              + ([j_feedback] if j_feedback else []) + ([j_concerns] if j_concerns else [])
              + ([j_response] if j_response else []))
     if n and review_split_of(ctx) != "off":
@@ -20609,8 +21527,8 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
         # assignment REPLACED the whole list, so a `--review-split` run in a
         # journal mode never revalidated a stale feedback/concerns/response
         # sandbox: the drift survived and the response letter stayed "done".
-        order = (rewrite_ids + [rid_review(r), rid_review_b(r)] + audit_ids + revise_ids
-                 + integrate_ids
+        order = (rewrite_ids + [rid_review(r), rid_review_b(r)] + probe_ids + audit_ids
+                 + revise_ids + integrate_ids
                  + ([j_feedback] if j_feedback else [])
                  + ([j_concerns] if j_concerns else [])
                  + ([j_response] if j_response else []))
@@ -20618,8 +21536,12 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
     # Any arm's content change invalidates every judge session of the round (the
     # panel scores the whole field), and every pool member feeds every
     # integration run that takes it as a donor.
-    dependents = {rid_a1(r): rewrite_ids + ([rid_review(r)] if n else []),
+    dependents = {rid_a1(r): rewrite_ids + ([rid_review(r)] if n else []) + probe_ids,
                   rid_review(r): list(audit_ids) + list(revise_ids)}
+    for _pid in probe_ids:
+        # The auditor and every reviser consume the merged review copy, so a
+        # reset probe must reach them (their frozen list is derived from it).
+        dependents[_pid] = list(audit_ids) + list(revise_ids)
     for _aid in audit_ids:
         # The revisers' sandboxes carry the auditor's `audit/` copy.
         dependents[_aid] = list(revise_ids)
@@ -20731,6 +21653,7 @@ SIGNAL_ALT_DIRS = {
     "audit": ("audit",),
     "judge": ("judge_review",),
     "review": (REVIEW_DIR,),
+    "probe": (PROBE_DIR,),
     "rewrite": (REWRITTEN_DIR,),
     "revise": (REVISED_DIR,),
     "integrate": (INTEGRATED_DIR,),
@@ -20883,6 +21806,11 @@ def likely_complete_artifacts(ctx: Ctx, rec: dict) -> bool:
         # instead of re-verified.
         aj = read_json(sb / "audit" / "audit.json", revive=False, lenient=True)
         return isinstance(aj, dict)
+    if rec["kind"] == "probe":
+        # The probe session's product is the machine-readable findings/verifier
+        # file; REPRODUCTION.md is written by the postcheck, so it is not a
+        # completion signal of its own.
+        return (sb / PROBE_FINDINGS_REL).is_file()
     return False
 
 
@@ -20958,6 +21886,16 @@ def leftovers_present(ctx: Ctx, rec: dict) -> bool:
         if not d.is_dir():
             return False
         seeded = seeded_evidence_paths(sb)
+        return any(p.is_file() and p not in seeded for p in d.rglob("*"))
+    if rec["kind"] == "probe":
+        # The probe session's output directory is created (with the seeded claim
+        # surface/producer lists) by the materializer; anything else under it is
+        # the agent's own work, and the repro record the postcheck writes cannot
+        # exist yet for a pending run.
+        d = sb / PROBE_DIR
+        if not d.is_dir():
+            return False
+        seeded = seeded_probe_paths(sb)
         return any(p.is_file() and p not in seeded for p in d.rglob("*"))
     # rewrite / revise / integrate: the output package and code/ are the agent's.
     for rel in (output_dir_of(rec), CODE_DIR):
@@ -21151,7 +22089,16 @@ def round_consumed_findings(ctx: Ctx, r) -> list:
     sb = ctx.sandbox_of(rev)
     if not (sb / FINDINGS_REL).is_file():
         return []
-    return findings_from_sandbox(sb, audit_record_of(ctx, r))
+    findings = findings_from_sandbox(sb, audit_record_of(ctx, r))
+    # The PROBE is the round's second producer in the same frozen list: arms
+    # whose sandbox carries no review/ copy (rewrite, integration) must count
+    # its findings here too, or their self-reported critical/writing counts are
+    # cross-checked against an incomplete list.
+    probe_rows, _remap = probe_findings_for_merge(
+        [f.get("id") for f in findings], probe_findings_rows(ctx, r))
+    have = {str(f.get("id")) for f in findings}
+    findings += [f for f in probe_rows if str(f.get("id")) not in have]
+    return findings
 
 
 # ---------------------------------------------------------------------
@@ -21245,7 +22192,15 @@ def round_discovery_seed(ctx: Ctx, r: int) -> dict:
     src = round_discovery_dir(ctx, r)
     findings = discovery_findings_of(src) if src is not None else []
     ids = [str(f.get("id") or "").strip() for f in findings]
+    # The PROBE session is a second producer in the same namespace: its X-9xx
+    # rows ride in the frozen list the integration ledger must reconcile, and
+    # the same collision rule the merged review copies used is applied here, so
+    # every consumer names the same ids.
+    probe_findings, remap = probe_findings_for_merge(ids, probe_findings_rows(ctx, r))
+    findings = findings + probe_findings
+    ids = ids + [str(f.get("id") or "").strip() for f in probe_findings]
     return {"source": src, "findings": findings, "ids": ids,
+            "probe_findings": len(probe_findings), "probe_remap": remap,
             "dropped": discovery_dropped_ids(audit_record_of(ctx, r), ids)}
 
 
@@ -21287,10 +22242,41 @@ def seed_discovery_findings(ctx: Ctx, r: int, sb: Path) -> dict:
     """
     seed = round_discovery_seed(ctx, r)
     dst = sb / DISCOVERY_SEED_DIR
-    if seed["source"] is None or not seed["ids"]:
+    if not seed["ids"]:
         if dst.exists():
             rmtree_force(dst, ignore_errors=True)
         seed["dir"] = None
+        return seed
+    if seed.get("probe_findings"):
+        # The probe findings have no file of their own in the review copy: write
+        # the MERGED list (the review's rows plus the probe's X-9xx rows) as the
+        # frozen seed, so the integration ledger reconciles the same ids the
+        # merged review copies carried.
+        base = (read_json(seed["source"] / "findings_extra.json",
+                          revive=False, lenient=True)
+                if seed["source"] is not None else {})
+        base = base if isinstance(base, dict) else {}
+        write_json_atomic(dst / "findings_extra.json",
+                          {"findings": seed["findings"],
+                           "coverage": base.get("coverage") or [],
+                           "probe_merge": {"rows": seed["probe_findings"],
+                                           "id_remap": seed.get("probe_remap") or {}}})
+        md = ""
+        src_md = (seed["source"] / "findings_extra.md") if seed["source"] is not None else None
+        if src_md is not None and src_md.is_file():
+            try:
+                md = src_md.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                md = ""
+        probe_part = seed["findings"][-int(seed["probe_findings"]):]
+        probe_md = "\n".join(
+            f"- {f.get('id')}: {f.get('location')} -- {f.get('explanation')}"
+            for f in probe_part)
+        md = ((md + "\n\n" if md else "")
+              + "## Probe findings (X-9xx, recomputed by the orchestrator)\n\n"
+              + (probe_md or "(none)") + "\n")
+        write_text_atomic(dst / "findings_extra.md", md)
+        seed["dir"] = dst if dst.is_dir() else None
         return seed
     for name in DISCOVERY_SEED_FILES:
         src = seed["source"] / name
@@ -23302,9 +24288,39 @@ def archive_review_outputs(ctx: Ctx, r: int) -> Path:
             continue
         try:
             dst.mkdir(parents=True, exist_ok=True)
+            if name == "findings_extra.json":
+                # Archive the MERGED list (the review's X-* rows plus the probe
+                # session's X-9xx rows), exactly as every downstream copy holds
+                # it. The next round's prior_round/ copy and its reconciliation
+                # gate then cover probe findings with no extra machinery -- a
+                # defect the probe found cannot vanish between rounds.
+                base = read_json(p, revive=False, lenient=True)
+                merged, _rows, _remap = probe_merged_review_doc(
+                    ctx, r, base if isinstance(base, dict) else {})
+                if merged is not None:
+                    write_json_atomic(dst / name, merged)
+                    continue
             shutil.copy2(p, dst / name)
         except OSError:
             continue
+    # The PROBE session's deliverables are archived beside the review's, so a
+    # pruned root can still re-seed the same frozen list (`findings_probe.json`)
+    # and the operator keeps the reproduction record with the round's review.
+    probe_rec = ctx.run(rid_probe(r))
+    if probe_rec is not None and str(probe_rec.get("status") or "") == "done":
+        psb = ctx.sandbox_of(probe_rec)
+        for rel, name in ((PROBE_FINDINGS_REL, "findings_probe.json"),
+                          (PROBE_FINDINGS_MD_REL, "findings_probe.md"),
+                          (PROBE_COVERAGE_REL, "probe_coverage.md"),
+                          (PROBE_REPRO_REL, "probe_reproduction.md")):
+            p = psb / rel
+            if not p.is_file():
+                continue
+            try:
+                dst.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(p, dst / name)
+            except OSError:
+                continue
     # The CSV export of the same findings rides beside the archive (one row per
     # finding, with the review's own evidence/explanation as the verbal
     # description), so an operator gets the round's defect list without parsing
@@ -23343,7 +24359,9 @@ PRIOR_ROUND_RULE = """PRIOR-ROUND FINDINGS (read-only; round @@ROUND@@ reviews t
     corpus finds, so a prior finding must never vanish silently. BEFORE running your sweeps,
     re-check EVERY finding in prior_round/findings.json AND every discovery finding in
     prior_round/findings_extra.json against the current base/ corpus and give each one exactly one
-    of two dispositions, recorded where the orchestrator can see it:
+    of two dispositions, recorded where the orchestrator can see it
+    (that file carries every X-* row, INCLUDING the X-9xx rows an independent probe session
+    filed when that round ran one):
       - STILL PRESENT -> include it in YOUR findings with a NEW id, and put the exact marker
         "carried over from <prior-id>" in the explanation field (for example
         "carried over from F-012");
@@ -23378,6 +24396,11 @@ PRIOR_ROUND_RULE = """PRIOR-ROUND FINDINGS (read-only; round @@ROUND@@ reviews t
 STRUCTURED_OUTPUT_JSON = {
     "review": ("_pipeline_done.json", "review/findings.json",
                "review/round2/findings_extra.json"),
+    # The probe review's finding list (with its `checked` inventory and any
+    # verifier declarations): a truncated one must fail the attempt like every
+    # other stage's structured output (the postcheck cannot re-run verifiers
+    # from a broken file).
+    "probe": ("_pipeline_done.json", PROBE_FINDINGS_REL),
     # The audit's sheet is validated in full by `audit_artifact_problems`, but the
     # PARSE gate belongs here too: a truncated audit.json must be caught by the
     # same structured-output scan as every other stage's (and by manual mode's
@@ -23396,6 +24419,7 @@ STRUCTURED_OUTPUT_JSON = {
 }
 STRUCTURED_OUTPUT_ROOTS = {
     "review": ("review",),
+    "probe": (PROBE_DIR,),
     "rewrite": ("rewritten", "code"),
     "revise": ("revised", "code"),
     "integrate": ("integrated", "code"),
@@ -28400,6 +29424,7 @@ POSTCHECK_HANDLERS = {
     "a1": postcheck_a1,
     "rewrite": postcheck_rewrite,
     "review": postcheck_review,
+    "probe": postcheck_probe,
     "audit": postcheck_audit,
     "revise": postcheck_revise,
     "integrate": postcheck_integrate,
@@ -29857,7 +30882,7 @@ def postcheck(ctx: Ctx, rec: dict, source: str = "postcheck") -> bool:
 # postcheck calls, so the two can never disagree.
 # =====================================================================
 
-SELFCHECK_STAGES = ("rewrite", "review", "audit", "revise", "integrate", "judge")
+SELFCHECK_STAGES = ("rewrite", "review", "probe", "audit", "revise", "integrate", "judge")
 
 # --- the stage's own bookkeeping deliverables --------------------------------
 # `required` FAILS an attempt when it is missing (the postcheck errors on it);
@@ -29870,6 +30895,8 @@ STAGE_DELIVERABLES = {
     "review": {"required": (FINDINGS_REL,),
                "expected": (FINDINGS_MD_REL, "review/round2/findings_extra.json",
                             VISUAL_ARTIFACT_REVIEW)},
+    "probe": {"required": (PROBE_FINDINGS_REL, PROBE_COVERAGE_REL),
+              "expected": (PROBE_FINDINGS_MD_REL,)},
     "audit": {"required": ("audit/audit.json",),
               "expected": ("audit/AUDIT.md", "audit/DISPOSITION_AUDIT.md",
                            "audit/PROBE_AUDIT.md")},
@@ -30069,6 +31096,28 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
             check_visual_artifact(sb / VISUAL_ARTIFACT_REVIEW,
                                   f"the visual-inspection record {VISUAL_ARTIFACT_REVIEW}",
                                   errs, warns, sandbox=sb, render_roots=[sb / REVIEW_DIR])
+    elif kind == "probe":
+        # The probe session's own detectors, verbatim: the checked inventory and
+        # the finding shapes AND the reproduction pass, so a computation that
+        # does not reproduce is caught while the session is still live.
+        perrs, pwarns, findings = _probe_contract_problems(sb)
+        errs.extend(perrs)
+        warns.extend(pwarns)
+        if not (sb / PROBE_COVERAGE_REL).is_file():
+            errs.append(f"{PROBE_COVERAGE_REL} is missing: the areas examined, the counts and "
+                        f"the round's honest limits are part of the deliverable")
+        if findings:
+            repro = probe_reproduction(sb, findings)
+            for r in repro["results"]:
+                if r["status"] == "mismatch":
+                    errs.append(f"{PROBE_FINDINGS_REL} {r['row']}: the re-run of `{r['script']}` "
+                                f"printed {r['produced']!r} where the finding declares "
+                                f"{r['declared']!r} -- the declared computation does not "
+                                f"reproduce")
+                elif r["status"] in ("missing", "timeout", "failed", "empty"):
+                    errs.append(f"{PROBE_FINDINGS_REL} {r['row']}: the verifier `{r['script']}` "
+                                f"{'is missing' if r['status'] == 'missing' else r['status']}"
+                                + (f" ({r['detail']})" if r["detail"] else ""))
     elif kind == "audit":
         aj = sb / "audit" / "audit.json"
         if not aj.is_file():
@@ -32060,6 +33109,19 @@ def round_run_plan(ctx: Ctx, r: int) -> list:
                             "deps": [rid_a1(r), rid_review(r)], "stage": "review",
                             "materialize": (lambda c: materialize_review(c, r, "b"))})
             review_deps.append(rid_review_b(r))
+        if probe_review_of(ctx) == "on" and round_review_scope(ctx, r) == "full":
+            # The PROBE REVIEW: an independent, cold-context DISCOVERY session
+            # that runs IN PARALLEL with the checklist review (same base, no
+            # dependency on it). It hunts any defect class and, where a
+            # computation can show one, declares a re-runnable verifier the
+            # orchestrator re-runs. Its findings feed the frozen list (X-9xx),
+            # so the auditor and the revisers wait for it exactly like the
+            # review. Skipped in a "formatting-writing" polish round: that round
+            # may not touch content, and the probe is a content-level pass.
+            entries.append({"id": rid_probe(r), "kind": "probe", "vid": None,
+                            "deps": [rid_a1(r)], "stage": "probe review",
+                            "materialize": (lambda c: materialize_probe(c, r))})
+            review_deps.append(rid_probe(r))
         if audit_enabled(ctx) and not scoped:
             # review -> AUDIT -> revise. The auditor disposes the frozen review
             # before any reviser sees it, so a boilerplate closure or a
@@ -33303,6 +34365,12 @@ def cmd_setup(args) -> None:
                "stop_after_no_progress": int(getattr(args, "stop_after_no_progress", 0) or 0),
                "review_split": str(getattr(args, "review_split", "off") or "off"),
                "audit": str(getattr(args, "audit", DEFAULT_AUDIT) or DEFAULT_AUDIT),
+               # The PROBE REVIEW's recorded policy: "on" (default) plans one
+               # extra independent session per full-scope round; "off" is the
+               # documented off switch (`set-probe-review` flips it on an
+               # existing root). A root with no key plans no probe run.
+               "probe_review": str(getattr(args, "probe_review", PROBE_REVIEW_DEFAULT)
+                                   or PROBE_REVIEW_DEFAULT),
                "placeholder_lookup": str(getattr(args, "placeholder_lookup",
                                                  DEFAULT_PLACEHOLDER_LOOKUP)
                                          or DEFAULT_PLACEHOLDER_LOOKUP),
@@ -34830,6 +35898,48 @@ def cmd_set_tiebreak_defect_floor(args) -> None:
     print(f"[set-tiebreak-defect-floor] floor: {floor} (the severity_tier_category walk stops "
           f"when the cleanest ranked version reaches {floor} defect(s), or when every cell is "
           f"used)")
+
+
+def cmd_set_probe_review(args) -> None:
+    """Set (or show) the PROBE REVIEW policy of an existing root.
+
+    "on" plans one extra independent session per full-scope round (see
+    `--probe-review`); "off" is the off switch. The change takes effect for
+    rounds whose review has not been materialized yet -- a round already in
+    flight keeps the plan it started with, and a finished probe run keeps its
+    record. Like every plan-shaping policy, it refuses to change a root that
+    already has run records unless `--force` is given.
+    """
+    ctx = Ctx(_venue_command_root(args, "set-probe-review"),
+              strict_venue=bool(getattr(args, "strict_venue", False)))
+    ctx.load()
+    mode_arg = str(getattr(args, "mode", None) or "").strip().lower()
+    show = bool(getattr(args, "show", False)) or not mode_arg
+    if show:
+        print(f"[set-probe-review] probe review: {probe_review_of(ctx)} "
+              f"(a root without the key plans none; `on` adds one independent discovery session "
+              f"beside each full-scope round's review, with every declared verifier re-run by "
+              f"the orchestrator)")
+        return
+    if mode_arg not in PROBE_REVIEW_MODES:
+        die(f"set-probe-review needs one of {', '.join(PROBE_REVIEW_MODES)} (got {mode_arg!r})",
+            code=2)
+    begin_run_log("set-probe-review", ctx.root, sys.argv)
+    if ctx.state.get("runs") and not getattr(args, "force", False):
+        die(f"this root already has {len(ctx.state['runs'])} run record(s): the probe policy "
+            f"changes a future round's plan.\n"
+            f"       Re-run `set-probe-review {mode_arg} --force` if the change is intended "
+            f"(rounds whose review has not been materialized yet will use it).")
+    with ctx.lock("set-probe-review"):
+        ctx.cfg["probe_review"] = mode_arg
+        ctx.state["config"] = ctx.cfg
+        write_json_atomic(ctx.cfg_path, ctx.cfg)
+        ctx.log("set-probe-review", detail=mode_arg)
+        ctx.save_state()
+    detail = ("one cold-context independent discovery session per full-scope round, findings "
+              "X-9xx, every declared verifier re-run at postcheck time" if mode_arg == "on"
+              else "no probe session is planned")
+    print(f"[set-probe-review] probe review: {mode_arg} ({detail})")
 
 
 def cmd_set_dedup_mode(args) -> None:
@@ -38540,6 +39650,17 @@ def collect_residuals(ctx: Ctx) -> dict:
                 add(f"{rid}: decision artifact {rel}: {str(probs[0])[:140]}", gate=True)
             for prob in (rec.get("discovery_contract") or []):
                 add(f"{rid}: discovery round: {str(prob)[:160]}", gate=True)
+        if kind == "probe":
+            pr = rec.get("probe_review") or {}
+            if pr.get("mismatches"):
+                add(f"{rid}: {len(pr['mismatches'])} probe verifier(s) whose re-run did not "
+                    f"reproduce the declared value "
+                    f"({', '.join(str(x) for x in pr['mismatches'][:4])}): a computation the "
+                    f"probe cannot reproduce is a correctness blocker", gate=True)
+            if pr.get("findings"):
+                add(f"{rid}: {len(pr['findings'])} independent probe finding(s) "
+                    f"({', '.join(str(x) for x in pr['findings'][:6])}) -- filed as X-9xx rows "
+                    f"for the round's revision arms", gate=False)
     return {"items": items, "gating": gating, "advisory": advisory,
             "count": len(items), "gating_count": len(gating), "advisory_count": len(advisory)}
 
@@ -42712,7 +43833,8 @@ def _cmd_prune_locked(ctx: Ctx, args) -> None:
 # `run`'s staging loop -- so resetting a downstream BEFORE the upstream it
 # consumes would rebuild it from input that is about to be replaced.
 RETRY_KIND_RANK = {"a1": 0, "feedback": 1, "concerns": 1, "rewrite": 2, "review": 2,
-                   "audit": 3, "revise": 4, "response": 5, "integrate": 6, "judge": 7}
+                   "probe": 3, "audit": 4, "revise": 5, "response": 6, "integrate": 7,
+                   "judge": 8}
 
 
 def _judge_selection_for_retry(ctx: Ctx, r: int, spec: str):
@@ -42840,7 +43962,7 @@ def _cmd_retry_locked(ctx: Ctx, args) -> None:
         # stages, ROUND:STAGE, single sessions, judge selectors and judge run
         # ids), so the operator can reset exactly the part of the pipeline an
         # equivalent `run --only` invocation would have driven.
-        only = parse_only_spec(args.runs, flag="--runs")
+        only = parse_only_spec(args.runs, flag="--runs", probe_with_review=False)
         if only is None or not only:
             die("--runs: the selection names nothing; pass rounds, stages or sessions "
                 "(e.g. `--runs 1:review,1:feedback`; the grammar is the one documented for "
@@ -43533,6 +44655,26 @@ def build_parser() -> argparse.ArgumentParser:
                          "the revisers wait for it")
     ps.add_argument("--no-audit", dest="audit", action="store_const", const="off",
                     help="turn the auditor off (same as --audit off)")
+    ps.add_argument("--probe-review", choices=list(PROBE_REVIEW_MODES),
+                    default=PROBE_REVIEW_DEFAULT,
+                    help="run an INDEPENDENT PROBE session in parallel with every full-scope "
+                         "round's review: a cold-context INDEPENDENT discovery pass that is "
+                         "given ONLY the corpus (the submission documents and the evidence "
+                         "areas, raw_data/ and code/ included) -- never a finding list. It is "
+                         "GENERIC on purpose: any defect class may be filed, in the standard "
+                         "categories and severities, and wherever a defect can be shown by a "
+                         "computation the finding declares a small re-runnable script and the "
+                         "value it prints. The orchestrator re-runs every declared verifier and "
+                         "FAILS the attempt when the computation does not reproduce. Its "
+                         "findings are X-9xx rows of the same standing as the discovery round's "
+                         "X-* findings (the reviser must resolve them, the auditor may only drop "
+                         "them with evidence, the integrator must reconcile them). ON by default "
+                         "(`--no-probe-review` turns it off; `set-probe-review off` does the "
+                         "same on an existing root); it adds `r<r>_probe` beside `r<r>_review`, "
+                         "and the audit/revision sessions wait for it. Skipped in a "
+                         "formatting-writing polish round")
+    ps.add_argument("--no-probe-review", dest="probe_review", action="store_const",
+                    const="off", help="turn the probe review off (same as --probe-review off)")
     ps.add_argument("--placeholder-lookup", choices=list(PLACEHOLDER_LOOKUP_MODES),
                     default=DEFAULT_PLACEHOLDER_LOOKUP,
                     help="online (default) = the orchestrator resolves searchable hand-off "
@@ -43950,6 +45092,20 @@ def build_parser() -> argparse.ArgumentParser:
     pdm.add_argument("--force", action="store_true",
                      help="change the mode although this root already has run records")
     pdm.set_defaults(func=cmd_set_dedup_mode)
+
+    ppr = sub.add_parser("set-probe-review", parents=[common],
+                         help="set (or show) the PROBE REVIEW policy: on (one independent, "
+                              "cold-context discovery session beside each full-scope round's "
+                              "review; every declared verifier is re-run by the orchestrator) "
+                              "or off (the documented off switch)")
+    ppr.add_argument("mode", nargs="?", default=None, choices=list(PROBE_REVIEW_MODES),
+                     metavar="MODE",
+                     help="on or off. Omit, or pass --show, to print the current policy")
+    ppr.add_argument("--show", action="store_true",
+                     help="print the root's current probe-review policy and exit")
+    ppr.add_argument("--force", action="store_true",
+                     help="change the policy although this root already has run records")
+    ppr.set_defaults(func=cmd_set_probe_review)
 
     pav = sub.add_parser("add-venue", parents=[common],
                          help="create/update ONE venue profile (JSON + venue_profiles/README.md) "

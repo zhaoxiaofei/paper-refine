@@ -615,7 +615,9 @@ schedule: `2 3` = two rounds following the schedule's rounds 2 and 3, `3`/`-1`
 `--no-conflict-agent` select the two optional LLM audits (the defect audit is
 on by default with an agent backend; the conflict LLM pass is off by default).
 Setup-time policy flags:
-`--audit {off,on}` (the auditor stage), `--placeholder-lookup {off,online}`
+`--audit {off,on}` (the auditor stage), `--probe-review {on,off}`
+(the independent discovery session; ON by default, `--no-probe-review` turns it off,
+`set-probe-review off` flips an existing root), `--placeholder-lookup {off,online}`
 (resolve searchable hand-off markers before the sessions run),
 `--strict-artifacts [on|fix|off]` (what a boilerplate or unfilled decision table
 does to an attempt: `on` fails it, `fix` first spends one scoped repair session
@@ -654,6 +656,55 @@ pipeline's single largest source of shipped leftovers, and one extra session per
 than a second round. `setup --audit off` (or `--no-audit`) restores the two-step review → revise
 plan and keeps an existing root's recorded policy; it costs one session per round, not per
 candidate.
+
+## The probe review (`setup --probe-review on`): a second, independent discovery pass
+
+Every checklist pass is finite, and one review pass is a sample of the defect space. A real run
+showed what slips through: the abstract, Results, Discussion, Fig. 2 legend and cover letter said
+the tool "gives the best overall balance" and that both haplotype references agree on the leading
+callers, while the paper's own Table S2 rank-biserial signs and donor-level medians in `raw_data/`
+did not support it — and the reviewer's own discovery probes had read that very table and reported
+"no anomalies".
+
+The **probe review** is one extra independent session per full-scope round (`r<r>_probe`, planned
+in parallel with `r<r>_review`; the auditor and the revision arms WAIT for it). It is deliberately
+cold-context and GENERIC — any defect class may be reported. It belongs to the review STEP: the
+auditor and the revisers consume its findings, so `run --only review` (or `2:review`) drives the
+probe with the review, while `retry --runs 1:review` stays exact (a retry resets only the runs the
+operator names):
+
+* it is given the corpus and NOTHING else — no `review/`, no finding list, no sweeps; its sandbox
+  carries only `base/`, `non_revised/` and two seeded CANDIDATE inventories
+  (`probe_review/CLAIM_SURFACES.md`, `probe_review/PRODUCERS.md`), which it is told are starting
+  points, not a scope;
+* it surveys the submission documents, the evidence areas (`raw_data/`, `code/`), the relations
+  between them and the packaging itself (the checklist's discovery discipline: expected-but-absent,
+  present-but-unexpected, boundary, sibling asymmetry, claim/pointer mismatch, stale or unusable
+  shipped sources, …) and disposes every candidate into a finding or a recorded clean row;
+* wherever a defect can be SHOWN BY A COMPUTATION, the finding declares a small script under
+  `probe_review/scripts/` and the exact value it prints
+  (`"verifier": {script, computed, shows}`); findings without a computation are evidence rows like
+  any other finding;
+* **the orchestrator re-runs every declared verifier at postcheck time** and compares the last
+  stdout line with the declared `computed` value (`probe_review/REPRODUCTION.md`). A mismatch (or
+  a missing script / non-zero exit / empty output / timeout) FAILS the attempt — a computation the
+  probe cannot reproduce is a correctness blocker, not a finding;
+* every finding is an **`X-9xx` row** (the reserved probe block) of the same standing as the
+  discovery round's `X-*` findings: it is merged into the frozen
+  `review/round2/findings_extra.json` of the auditor and every reviser (the source review sandbox
+  is never mutated), into the integration seed `frozen_discovery/`, and into
+  `reports/round<r>_review/` (so a pruned root re-seeds the same ids). Colliding ids are remapped
+  deterministically and the remap is recorded;
+* its report carries a `checked` inventory (every area examined, with candidate/finding counts)
+  and `probe_review/coverage.md`, so a zero-finding pass is an examined corpus and not an unrun
+  one.
+
+`--probe-review {on,off}` (default `on`; `--no-probe-review` or `set-probe-review off` on an
+existing root) is the off switch; a root created before the feature carries no key and plans no
+probe session until `set-probe-review on`. The JUDGE panel stays completely blind and is never
+handed the list — it re-derives its own generic discovery pass and scores side differences as
+normal `resolved`/`introduced` rows. A `formatting-writing` polish round plans no probe (it is a
+content-level pass).
 
 ## The rewrite-parity checks (M25–M29 + J5): making review do the rewrite's job
 
@@ -1033,6 +1084,7 @@ boxes.
 | `a1` | `r<r>_a1` | the round's base: round 1 is the pristine copy, later rounds the previous champion (no agent) |
 | `rewrite` | `r<r>_w1…wM` | full alternative versions with a **declared level**: odd arms are `structural` (organization-level, reported in `## ORGANIZATION MAP`), even arms are `sentence` (same organization, prose-level). With M≥2 the round therefore carries BOTH kinds of difference for the integration stage to weigh |
 | `review` | `r<r>_review` | ONE frozen identification pass (`$paper-review`) that feeds every revise session |
+| `probe` | `r<r>_probe` | **on by default** (`setup --probe-review off` / `--no-probe-review` / `set-probe-review off` disables): an INDEPENDENT, cold-context discovery session launched IN PARALLEL with the review and given the corpus only (no review, no finding list). It is GENERIC — any defect class may be filed — and wherever a defect can be shown by a computation the finding declares a re-runnable verifier; the orchestrator re-runs every declared verifier (a non-reproducing computation FAILS the attempt) and the findings ride in the frozen discovery list as `X-9xx` rows (reviser resolves, auditor disposes, integrator reconciles) |
 | `audit` | `r<r>_audit` | **on by default** (`setup --audit off` / `--no-audit` disables): an INDEPENDENT AUDITOR between the reviewer and the revisers — it disposes every frozen finding (confirm, or drop WITH evidence), promotes the reviewer's boilerplate `OK` closures of finding-tier rows into real `AU-*` findings, and hands the AUDITED list to the revision arms |
 | `revise` | `r<r>_a2…a{1+N}` | reviewed-and-revised versions that consume the frozen review (or the audited list, when the auditor ran) |
 | `integrate` | `r<r>_i1…iK` | "merge from the other versions": every pool member SELECTED by the round's `--integrators` mask reworked with the WHOLE pool as donors (the default mask 0xFFFFFFFF selects all K = 1+M+N members) |
@@ -2389,7 +2441,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 113 suites (a few
+any failure. They are independent, so run them in parallel — 114 suites (a few
 minutes at the default 24 parallel sessions; tens of minutes sequentially):
 
 ```bash

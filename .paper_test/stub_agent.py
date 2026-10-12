@@ -551,6 +551,61 @@ def do_response(sb: Path, name: str, round_no: int) -> int:
     return 0
 
 
+def do_probe(sb: Path, name: str, round_no: int) -> int:
+    """The PROBE REVIEW stub: a compliant, generic probe deliverable set.
+
+    Reads the format the pipeline's `postcheck_probe` enforces: a `checked`
+    inventory and a findings list (possibly empty). With
+    `PAPER_STUB_PROBE_FINDING` set, one finding X-901 is filed with a real
+    verifier -- the stub writes the script and then RUNS it, so the
+    orchestrator's own re-run reproduces the declared value -- which exercises
+    the merge/disposition/reconciliation chain end to end.
+    """
+    out = sb / "probe_review"
+    (out / "scripts").mkdir(parents=True, exist_ok=True)
+    doc_count = sum(1 for p in (sb / "base").rglob("*") if p.is_file())
+    script = out / "scripts" / "pr001.py"
+    script.write_text(
+        "from pathlib import Path\n"
+        "files = [p for p in Path('base').rglob('*') if p.is_file()]\n"
+        "print(len(files))\n",
+        encoding="utf-8")
+    proc = subprocess.run([sys.executable, str(script)], cwd=str(sb),
+                          capture_output=True, text=True, check=False)
+    computed = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
+    assert computed == str(doc_count), (computed, doc_count)
+    checked = [{"area": "corpus inventory", "examined": doc_count, "findings": 0},
+               {"area": "submission documents", "examined": doc_count, "findings": 0}]
+    findings = []
+    if os.environ.get("PAPER_STUB_PROBE_FINDING"):
+        checked.append({"area": "stub producer", "examined": 1, "findings": 1})
+        findings.append({
+            "id": "X-901", "location": "base/manuscript (stub)", "category": 1,
+            "check": "stub class", "severity": "Major",
+            "evidence": "stub: the corpus inventory contradicts the stub claim",
+            "explanation": "stub probe finding for the merge/disposition chain",
+            "status": "resolvable",
+            "verifier": {"script": "probe_review/scripts/pr001.py",
+                         "computed": computed,
+                         "shows": "the corpus inventory the stub claim was checked against"}})
+    write_json(out / "findings_probe.json", {"checked": checked, "findings": findings})
+    (out / "findings_probe.md").write_text(
+        ("| id | severity | explanation |\n|---|---|---|\n"
+         + "\n".join(f"| {f['id']} | {f['severity']} | {f['explanation']} |"
+                     for f in findings) + "\n") if findings else "(no findings)\n",
+        encoding="utf-8")
+    (out / "coverage.md").write_text(
+        "# Probe coverage (stub)\n\n"
+        + "\n".join(f"- {c['area']}: {c['examined']} examined, {c['findings']} finding(s)"
+                    for c in checked)
+        + "\n- limitations: the stub checks only the corpus inventory\n", encoding="utf-8")
+    write_json(sb / "_pipeline_done.json",
+               {"stage": "probe", "run_id": name, "round": round_no, "status": "complete",
+                "findings": len(findings), "verified": len(findings),
+                "areas": len(checked)})
+    return 0
+
+
 def do_audit(sb: Path, name: str, round_no: int) -> int:
     """Deterministic auditor: confirm every frozen finding, add nothing.
 
@@ -904,6 +959,8 @@ def main() -> int:
         return do_response(sb, name, round_no)
     if name.endswith("_review"):
         return do_review(sb, name, round_no)
+    if name.endswith("_probe"):
+        return do_probe(sb, name, round_no)
     if name.endswith("_audit"):
         return do_audit(sb, name, round_no)
     if re.search(r"_w\d+$", name):
