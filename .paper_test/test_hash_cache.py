@@ -269,7 +269,7 @@ def test_decide_end_to_end():
     norm = lambda t: re.sub(r"Generated: [^\n]+", "Generated: X", t)
     check("HC6 DECISION_REPORT.md is identical (minus the generation time)",
           norm(r1) == norm(r2))
-    clean = root / "final_clean_version"
+    clean = root / f"final_clean_version_{root.name}"
     files = sorted(p.name for p in clean.rglob("*") if p.is_file()) if clean.is_dir() else []
     check("HC6 decide publishes <root>/final_clean_version",
           clean.is_dir() and "manuscript-b.md" in files, str(files))
@@ -317,7 +317,7 @@ def test_run_decide():
     check("HC7 the decision report was written",
           (root / "reports" / "DECISION_REPORT.md").is_file())
     check("HC7 final_clean_version was published",
-          (root / "final_clean_version" / "manuscript-b.md").is_file())
+          (root / f"final_clean_version_{root.name}" / "manuscript-b.md").is_file())
     check("HC7 the clean version is announced as a ready --source",
           "setup --source" in out and "final_clean_version" in out)
     check("HC7 run-decide honours decide's flags",

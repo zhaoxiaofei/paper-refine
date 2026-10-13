@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""`decide` publishes <root>/final_clean_version/ with the generation counter +1.
+"""`decide` publishes <root>/final_clean_version_<root name>/ (plus a sibling
+zip) with the generation counter +1.
 
 Run:  python3 .paper_test/test_final_clean_version.py
 
@@ -22,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
@@ -88,7 +90,7 @@ def main() -> int:
                 "--retries", "0"])
     out = proc.stdout + proc.stderr
     check("FCV run-decide succeeds", proc.returncode == 0, out[-300:])
-    final = root / "final_clean_version"
+    final = root / f"final_clean_version_{root.name}"
     names = sorted(p.name for p in final.rglob("*") if p.is_file()) if final.is_dir() else []
     check("FCV final_clean_version exists and carries files", bool(names), str(names))
     check("FCV every cnb-11-* generation counter became cnb-12-*",
@@ -122,13 +124,35 @@ def main() -> int:
           and "Certification: CERTIFIED" in fcv_text
           and "setup --source" in fcv_text,
           fcv_text[:200])
+    # the same tree is also zipped beside the directory, which is KEPT in place
+    zpath = root / f"final_clean_version_{root.name}.zip"
+    znames, zdoc = [], b""
+    if zpath.is_file():
+        with zipfile.ZipFile(zpath) as zf:
+            znames = sorted(zf.namelist())
+            zdoc = zf.read(f"final_clean_version_{root.name}/cnb-12-2-mainText-b.md") \
+                if f"final_clean_version_{root.name}/cnb-12-2-mainText-b.md" in znames else b""
+    check("FCV the package is compressed into a sibling zip (directory KEPT)",
+          zpath.is_file() and final.is_dir()
+          and znames and all(n.startswith(f"final_clean_version_{root.name}/")
+                             for n in znames)
+          and any(n.endswith("cnb-12-2-mainText-b.md") for n in znames)
+          and zdoc == (final / "cnb-12-2-mainText-b.md").read_bytes(),
+          str(znames))
+    check("FCV decision.json and the readme record the zip",
+          (info.get("zip") or {}).get("path") == str(zpath)
+          and (info.get("zip") or {}).get("files") == len(names)
+          and str(zpath) in fcv_text, json.dumps(info.get("zip"))[:200])
     # idempotence: a second decide leaves the tree byte-identical (no churn)
     before = sorted(nb.sha256_file(p) for p in final.rglob("*") if p.is_file())
+    zip_before = nb.sha256_file(zpath)
     proc = run(["decide", "--root", str(root)])
     after = sorted(nb.sha256_file(p) for p in final.rglob("*") if p.is_file())
     check("FCV a second decide leaves final_clean_version unchanged",
           before == after and "unchanged" in (proc.stdout + proc.stderr), out[-120:])
-    superseded = list((root / "_superseded").glob("final_clean_version.*")) \
+    check("FCV the repeat decide leaves the zip byte-identical (no churn)",
+          nb.sha256_file(zpath) == zip_before and zpath.is_file())
+    superseded = list((root / "_superseded").glob(f"final_clean_version_{root.name}.*")) \
         if (root / "_superseded").is_dir() else []
     check("FCV no superseded copy was archived on the repeat run", not superseded,
           str(superseded))

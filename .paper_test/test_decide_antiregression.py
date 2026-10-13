@@ -191,10 +191,11 @@ def test_decide_refuses_to_certify_a_regression():
           and any("WORSE than the pristine original" in str(b) for b in cert["blockers"]),
           json.dumps(cert)[:300])
     readme = root / "final_clean_version.readme.md"
+    fc_dir = root / f"final_clean_version_{root.name}"
     check("an uncertified decision STILL builds final_clean_version/ (always generated)",
           (cert.get("clean_version") or {}).get("published") is True
-          and (root / "final_clean_version").is_dir(),
-          f"clean={cert.get('clean_version')} dir={(root / 'final_clean_version').exists()}")
+          and fc_dir.is_dir(),
+          f"clean={cert.get('clean_version')} dir={fc_dir.exists()}")
     check("the sibling readme carries the NOT-CERTIFIED status and the blocker",
           readme.is_file() and "NOT CERTIFIED" in readme.read_text(encoding="utf-8")
           and "WORSE than the pristine original" in readme.read_text(encoding="utf-8"),

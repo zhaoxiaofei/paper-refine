@@ -101,7 +101,7 @@ write_decision(root_a, None, [
 
 
 # B CONSUMED A's output (the moving reference), and predates the census.
-write_decision(root_b, root_a / "final_clean_version", [
+write_decision(root_b, root_a / f"final_clean_version_{root_a.name}", [
     round_rec(2, "i3", 2.0, 1.0, 36, 2.0, 1.0),
     round_rec(3, "a2", 2.0, 1.1, 36, 2.0, 0.5)],
     {"champion": "a2", "format": {"rows": [{"rule": "FMT-T1"}, {"rule": "FMT-T2"}],

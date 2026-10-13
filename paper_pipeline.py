@@ -4487,18 +4487,28 @@ SETUP_MARKER = "_setup_in_progress"
 # pin, into its own directory directly under --root: <root>/round<R>_winner/.
 WINNER_DIR_FMT = "round{r}_winner"
 # `decide` also publishes the final champion as a clean, self-contained corpus
-# that can seed a NEW pipeline run: <root>/final_clean_version/. It is the
-# winner corpus byte-for-byte (no process scratch, no auxiliaries, no
-# self-written reports), so `setup --source <root>/final_clean_version` starts
-# from exactly the content the judges scored. It is generated on EVERY decide,
-# certified or not; the verdict and the package's provenance live in the
-# SIBLING <root>/final_clean_version.readme.md. Nothing is written INSIDE it:
-# an added README/manifest would become manuscript content for the next round.
+# that can seed a NEW pipeline run, named after the root directory that hosts
+# it: <root>/final_clean_version_<root directory name>/. It is the winner
+# corpus byte-for-byte (no process scratch, no auxiliaries, no self-written
+# reports), so `setup --source <root>/final_clean_version_<root directory
+# name>` starts from exactly the content the judges scored. It is generated on
+# EVERY decide, certified or not; the verdict and the package's provenance live
+# in the SIBLING <root>/final_clean_version.readme.md. Nothing is written
+# INSIDE it: an added README/manifest would become manuscript content for the
+# next round. The same tree is also compressed into the SIBLING
+# <root>/final_clean_version_<root directory name>.zip; the directory is KEPT.
 FINAL_CLEAN_DIRNAME = "final_clean_version"
 # The SIBLING status file: the directory itself stays a byte-clean manuscript
 # corpus (anything inside it would become manuscript content in the next run),
 # so the certification verdict and the package's provenance live beside it.
 FINAL_CLEAN_README_NAME = FINAL_CLEAN_DIRNAME + ".readme.md"
+
+
+def final_clean_dirname(root: Path) -> str:
+    """The published package's directory name: `final_clean_version_<root name>`."""
+    return f"{FINAL_CLEAN_DIRNAME}_{Path(root).resolve().name}"
+
+
 # Companion module for the code-side OOXML style/formatting scan (see
 # scan_format_in_sources). `setup` copies it next to the pipeline script so the
 # root stays self-contained; when it is absent the scan reports "unavailable"
@@ -35611,10 +35621,11 @@ def _ensure_template_stage_for_run(ctx: Ctx, args) -> None:
 def default_template_package_source(ctx: Ctx):
     """The package `conform` rebuilds when no --source is given.
 
-    The published final package when the root has one (`final_clean_version/`),
-    else the most recent complete round's `round<r>_winner/`, else None.
+    The published final package when the root has one
+    (`final_clean_version_<root dir name>/`), else the most recent complete
+    round's `round<r>_winner/`, else None.
     """
-    fin = ctx.root / "final_clean_version"
+    fin = ctx.root / final_clean_dirname(ctx.root)
     if fin.is_dir() and any(fin.iterdir()):
         return fin
     rounds = sorted((int(k) for k in (ctx.state.get("rounds") or {})
@@ -39342,9 +39353,41 @@ def package_pdf_rows(root: Path, limit: int = 40) -> list:
     return rows[:limit]
 
 
+def write_final_clean_zip(dirp: Path, zip_path: Path) -> dict:
+    """Compress the published package into `zip_path`, KEEPING `dirp` in place.
+
+    The archive holds the directory itself (`<dir name>/...`), so unzipping it
+    beside the directory restores exactly the published tree. The bytes are
+    deterministic (sorted entries, fixed entry timestamps), so a repeat `decide`
+    over an unchanged package keeps the existing archive instead of rewriting it
+    (no churn). The directory is never removed or modified by this function.
+    """
+    ztmp = zip_path.with_name(zip_path.name + ".tmp")
+    n_files = 0
+    with zipfile.ZipFile(ztmp, "w", zipfile.ZIP_DEFLATED) as zf:
+        for q in sorted(dirp.rglob("*")):
+            rel = f"{dirp.name}/{q.relative_to(dirp).as_posix()}"
+            info = zipfile.ZipInfo(rel + "/" if q.is_dir() else rel,
+                                   date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = (0o755 if q.is_dir() else 0o644) << 16
+            if q.is_dir():
+                zf.writestr(info, b"")
+                continue
+            n_files += 1
+            with open(q, "rb") as fsrc, zf.open(info, "w") as fdst:
+                shutil.copyfileobj(fsrc, fdst, 1 << 20)
+    if zip_path.is_file() and sha256_file(zip_path) == sha256_file(ztmp):
+        ztmp.unlink()
+    else:
+        os.replace(ztmp, zip_path)
+    return {"path": str(zip_path), "files": n_files, "bytes": zip_path.stat().st_size}
+
+
 def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = "",
                         flatten_zotero: bool = False) -> dict:
-    """Publish <root>/final_clean_version/: the champion corpus for a new run.
+    """Publish <root>/final_clean_version_<root dir name>/: the champion corpus
+    for a new run.
 
     The copy starts byte-identical to the pinned champion's corpus (that
     identity is verified BEFORE the counter increment below). The winner
@@ -39359,8 +39402,8 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
 
     The generation counter in the filenames is then INCREMENTED by one
     (`int(filename.split("-")[1])`, guarded for a missing/non-numeric field) and
-    the references inside text files are repointed to the new names, so
-    `final_clean_version/` is the NEXT round's source under the user's naming
+    the references inside text files are repointed to the new names, so the
+    published copy is the NEXT round's source under the user's naming
     convention (cnb-11-* -> cnb-12-*, ...).
 
     The copy is ALWAYS attempted (2026-10-01): an uncertified champion's corpus
@@ -39370,12 +39413,18 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     next run's manuscript. `certified`/`reason` are carried into the returned
     record for that readme (they no longer gate the copy).
 
+    The same tree is also compressed into the SIBLING
+    `<root>/final_clean_version_<root dir name>.zip` (see write_final_clean_zip)
+    for handing the package over; the directory itself is KEPT in place and is
+    still the next run's `--source`.
+
     Returns {"path", "digest", "pin_digest", "files", "renamed", "action",
-    "certified", "certification_note"} or {"skipped": <reason>, ...} when the
-    corpus itself cannot be built (no winner/pin on disk, empty corpus, a digest
-    mismatch, a name collision). The write is idempotent: an existing copy that
-    already hashes to the expected (incremented) tree is left untouched; a
-    superseded copy is archived under _superseded/, never deleted.
+    "certified", "certification_note", "zip"} or {"skipped": <reason>, ...}
+    when the corpus itself cannot be built (no winner/pin on disk, empty
+    corpus, a digest mismatch, a name collision). The write is idempotent: an
+    existing copy that already hashes to the expected (incremented) tree is
+    left untouched; a superseded copy is archived under _superseded/, never
+    deleted.
     """
     pin = final.get("pin") or {}
     src = None
@@ -39389,8 +39438,10 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     _meta = {"certified": bool(certified), "certification_note": reason or None}
     if src is None:
         return dict(_meta, skipped="neither the published winner nor the pin is present on disk")
-    dst = ctx.root / FINAL_CLEAN_DIRNAME
-    tmp = ctx.root / (FINAL_CLEAN_DIRNAME + ".tmp")
+    fc_name = final_clean_dirname(ctx.root)
+    dst = ctx.root / fc_name
+    tmp = ctx.root / (fc_name + ".tmp")
+    zip_path = ctx.root / (fc_name + ".zip")
     if tmp.exists():
         rmtree_force(tmp)
     copy_into(src, tmp, exclude_top=CORPUS_EXCLUDE_TOP, skip_aux=True, strip_bookkeeping=True)
@@ -39482,7 +39533,7 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     format_fix = ({"skipped": "format_fix=off"}
                   if str((ctx.cfg or {}).get("format_fix") or DEFAULT_FORMAT_FIX) == "off"
                   else normalize_formatting_in_dir(tmp, pub_policy,
-                                                   FINAL_CLEAN_DIRNAME, warns=None,
+                                                   fc_name, warns=None,
                                                    artifacts_dir=ctx.reports_dir,
                                                    template=venue_word_templates(ctx) or None,
                                                    containers=venue_containers(ctx)))
@@ -39537,10 +39588,11 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
                     files=manifest["count"], renamed=counter["renamed"],
                     raw_data_untouched=counter.get("raw_data_untouched", 0),
                     modes_cleared=len(chmod_plan),
-                    format_fix=format_fix, hygiene=hygiene, action="unchanged")
+                    format_fix=format_fix, hygiene=hygiene,
+                    zip=write_final_clean_zip(dst, zip_path), action="unchanged")
     if dst.exists():
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        aside = unique_path(superseded_dir_of(ctx) / f"{FINAL_CLEAN_DIRNAME}.{stamp}")
+        aside = unique_path(superseded_dir_of(ctx) / f"{fc_name}.{stamp}")
         aside.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(dst), str(aside))
     os.replace(tmp, dst)
@@ -39548,7 +39600,8 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
                 files=manifest["count"], renamed=counter["renamed"],
                 raw_data_untouched=counter.get("raw_data_untouched", 0),
                 modes_cleared=len(chmod_plan),
-                format_fix=format_fix, hygiene=hygiene, action="created")
+                format_fix=format_fix, hygiene=hygiene,
+                zip=write_final_clean_zip(dst, zip_path), action="created")
 
 
 def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
@@ -39588,6 +39641,11 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
                  + (f", {fc['renamed']} filename counter(s) incremented"
                     if fc.get("renamed") else "")
                  + f", {fc.get('raw_data_untouched', 0)} raw-data file(s) untouched")
+        _zip = fc.get("zip") or {}
+        if _zip.get("path"):
+            L.append(f"- the same package is compressed at `{_zip['path']}` "
+                     f"({_zip.get('files', '?')} file(s), {_zip.get('bytes', '?')} bytes); "
+                     f"the directory is kept in place.")
     hygiene = fc.get("hygiene") or {}
     stripped = hygiene.get("stripped_bookkeeping") or []
     if stripped:
@@ -39658,7 +39716,8 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
     L.append("")
     if cert.get("certified"):
         L.append(f"This directory is the certified champion corpus: "
-                 f"`setup --source {ctx.root / FINAL_CLEAN_DIRNAME}` starts the next run from it.")
+                 f"`setup --source {ctx.root / final_clean_dirname(ctx.root)}` starts the next "
+                 f"run from it.")
     else:
         L.append("> **Do not treat this directory as a certified answer.** It is the champion "
                  "corpus this decision produced; the blockers above say why the decision was "
@@ -39884,7 +39943,12 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
                  f"It is the champion corpus with no scratch, no auxiliaries and no self-written "
                  f"reports, so it can seed the next pipeline run directly. Its certification "
                  f"status and provenance are in the SIBLING `{FINAL_CLEAN_README_NAME}` "
-                 f"(the directory itself stays byte-clean manuscript content):")
+                 f"(the directory itself stays byte-clean manuscript content).")
+        _zip = final_clean.get("zip") or {}
+        if _zip.get("path"):
+            L.append(f"It is also compressed, the directory KEPT, as `{_zip['path']}` "
+                     f"({_zip.get('files', '?')} file(s), {_zip.get('bytes', '?')} bytes) "
+                     f"for handing the package over.")
         if final_clean.get("renamed"):
             L.append("")
             L.append(f"Its filenames carry the generation counter INCREMENTED by one "
@@ -41457,6 +41521,11 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
               + f"`setup --source {final_clean['path']}`")
     else:
         print(f"[decide] final clean version: NOT (re)built -- {final_clean.get('skipped')}")
+    _zip = final_clean.get("zip") or {}
+    if _zip.get("path"):
+        print(f"[decide] final clean zip: {_zip['path']} "
+              f"({_zip.get('files', '?')} file(s), {_zip.get('bytes', '?')} bytes); "
+              f"the directory is kept")
     _hyg = final_clean.get("hygiene") or {}
     for r in (_hyg.get("internal_artifacts") or [])[:5]:
         print(f"[decide] PACKAGE HYGIENE (PKG-1, author action required): "

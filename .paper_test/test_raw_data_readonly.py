@@ -258,12 +258,12 @@ def test_round_and_publish(root: Path, src: Path):
                   f"unchanged", same_tree(area, src / "raw_data"))
     check("RO3 the stage sandboxes really carry raw-data copies", seen > 0, str(seen))
     dec = cli("decide", "--root", root)
+    clean = root / f"final_clean_version_{root.name}"
     check("RO3 decide publishes final_clean_version", dec.returncode == 0
-          and (root / "final_clean_version").is_dir(), (dec.stdout + dec.stderr)[-400:])
+          and clean.is_dir(), (dec.stdout + dec.stderr)[-400:])
     check("RO3 no PermissionError and no leftover temp tree",
           "PermissionError" not in (dec.stdout + dec.stderr)
-          and not (root / "final_clean_version.tmp").exists())
-    clean = root / "final_clean_version"
+          and not (root / f"final_clean_version_{root.name}.tmp").exists())
     if not (clean / "raw_data").is_dir():
         check("RO3 the published package carries raw_data/", False, str(sorted(clean.iterdir())))
         return
