@@ -27,12 +27,14 @@ carries its evidence areas as relative symlinks to the root's canonical copy,
 so the payload -- and therefore the token -- must be identical whether an
 evidence area is a real directory or a link.
 
-File NAMES do not enter the hash, and existing version tokens inside file
-contents are normalized to "<VERSION>" before hashing. That makes the token
+File NAMES do not enter the hash, and a version marker inside file contents is
+REMOVED (with its separator) before hashing. That makes the token
 STABLE: it does not change when you apply it (rename "...-a.docx" to
 "...-<token>.docx", "..._v2.tex" to "..._<token>.tex", and repoint the
-references) -- so it is a package ID derived from the revision content, not a
-hash of its own naming pass.
+references) IN BOTH APPLY PATHS -- the replaced token AND the token-less append
+(rename "refs.bib" to "refs-<token>.bib" and repoint "\bibliography{refs}") --
+so it is a package ID derived from the revision content, not a hash of its own
+naming pass.
 
 Applying the token (the naming rule of paper-revise, step R2): for every editable
 manuscript document replace a trailing version token ("-a", "_v2", an existing
@@ -156,24 +158,29 @@ def is_evidence_rel(rel: str) -> bool:
 
 
 def content_token_free(data: bytes, tokens) -> bytes:
-    """Bytes with version-token REFERENCES normalized (so the hash is stable).
+    """Bytes with version-token REFERENCES removed (so the hash is stable).
 
     Only reference-like occurrences are touched -- never a bare "-x" in prose:
       1. any token (or 7-hex token) immediately followed by a file extension;
       2. any token inside a LaTeX reference command's argument.
+
+    Removing the marker (with its separator) is what makes the hash stable
+    under the token-less APPEND path too: "refs.bib" and "refs-<T>.bib" both
+    normalize to "refs.bib", where the old "<VERSION>" substitution left the
+    un-tokened and the tokened spelling with DIFFERENT bytes.
     """
     alts = [re.escape(t.encode()) for t in sorted(set(tokens), key=len, reverse=True) if t]
     alts.append(rb"[0-9a-f]{7}")
     tok = rb"(?:" + b"|".join(alts) + rb")"
     data = re.sub(rb"([-_])" + tok + rb"(?=\.[A-Za-z][A-Za-z0-9]{0,9}\b)",
-                  rb"\1<VERSION>", data)
+                  rb"", data)
     cmd = re.compile(
         rb"(\\(?:input|include|subfile|bibliography|bibliographystyle|addbibresource|"
         rb"includegraphics|lstinputlisting|inputminted|externaldocument|subimport|import)\b"
         rb"[^{}]*?\{)([^{}]*)(\})")
 
     def _arg(m):
-        inner = re.sub(rb"([-_])" + tok + rb"(?![0-9A-Za-z_])", rb"\1<VERSION>", m.group(2))
+        inner = re.sub(rb"([-_])" + tok + rb"(?![0-9A-Za-z_])", rb"", m.group(2))
         return m.group(1) + inner + m.group(3)
 
     return cmd.sub(_arg, data)

@@ -153,7 +153,7 @@ def build_source(root: Path) -> Path:
     return src
 
 
-def build_root(root: Path, source: Path, *, rounds: int = 2) -> "np.Ctx":
+def build_root(root: Path, source: Path, *, rounds: int = 2) -> "nb.Ctx":
     """A synthetic root whose round-1/round-2 version sandboxes exist on disk.
 
     a1 (r1) = the original; w1 = an edited copy; i1 = w1's package integrated

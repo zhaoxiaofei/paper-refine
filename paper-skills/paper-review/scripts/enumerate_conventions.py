@@ -160,6 +160,12 @@ _NON_MANUSCRIPT_RE = re.compile(
     r"feedback|referee|reviewers?|editors?|editorial|decision[_ \-]*(?:letter|notice|email)"
     r"|response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
 _REPLY_RE = re.compile(r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
+# The WORD "cover" (and the camelCase "coverLetter"), not the substring: a bare
+# `"cover" in name` also named `discovery.md`, `coverage_table.txt` and
+# `recovered_samples.md` a cover letter (forcing them into the submission runs)
+# and masked a reply file whose name merely contains the substring.
+_COVER_WORD_RE = re.compile(
+    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))(?:[Cc]over|COVER)(?![a-z])")
 
 
 def _non_manuscript(name: str) -> bool:
@@ -170,7 +176,7 @@ def _non_manuscript(name: str) -> bool:
     base = parts[-1]
     if any(base.startswith(d + "__") for d in EVIDENCE_DIRNAMES):
         return True
-    if "cover" in base.lower():
+    if _COVER_WORD_RE.search(base):
         return False            # a cover letter IS a submission document
     if _REPLY_RE.search(base):
         return True

@@ -43,6 +43,12 @@ _NON_MANUSCRIPT_RE = re.compile(
     r"feedback|referee|reviewers?|editors?|editorial|decision[_ \-]*(?:letter|notice|email)"
     r"|response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
 _REPLY_RE = re.compile(r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
+# The WORD "cover" (and the camelCase "coverLetter"), not the substring: a bare
+# `"cover" in name` also named `discovery.md`, `coverage_table.txt` and
+# `recovered_samples.md` a cover letter (forcing them into the submission runs)
+# and masked a reply file whose name merely contains the substring.
+_COVER_WORD_RE = re.compile(
+    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))(?:[Cc]over|COVER)(?![a-z])")
 # The reference-role file names: "ref", "refs", "references", "ref-list",
 # "cnb-26-4-refs" -- the SAME word-boundary rule convert_corpus.py's role
 # guesser uses. Deliberately not a bare "ref" PREFIX: `refined_draft.txt` and
@@ -58,7 +64,7 @@ def is_non_manuscript(name: str) -> bool:
     base = parts[-1]
     if any(base.startswith(d + "__") for d in EVIDENCE_DIRNAMES):
         return True
-    if "cover" in base.lower():
+    if _COVER_WORD_RE.search(base):
         # A cover letter IS a submission document -- and this test must come
         # FIRST: with the reply test above it, `cover_letter_response.docx.txt`
         # was dropped as non-manuscript even though the cover-letter rule (and
@@ -274,7 +280,12 @@ def parse_nums(inner):
         rm = re.match(r"(\d+)\s*[–-]\s*(\d+)$", part)
         if rm:
             a, b = int(rm.group(1)), int(rm.group(2))
-            if 0 < b - a <= 200:
+            # The cap is the OOXML twin's own constant
+            # (paper_docx_format._MARKER_RANGE_MAX) and the two must agree: this
+            # file expanded a range of 81-200 into all 120 numbers while the
+            # twin kept the two endpoints, so the same cluster read differently
+            # on the two sides.
+            if 0 < b - a <= 80:
                 nums.extend(range(a, b + 1))
             else:
                 # A range the parser will not expand -- longer than this review's

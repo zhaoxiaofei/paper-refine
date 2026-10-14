@@ -379,7 +379,13 @@ def sections(text: str, abstract_end=None, caption_lines=None) -> list:
     words = max(0, count_words(" ".join(body)) - captions)
     notes = []
     if abs_start is None:
-        notes.append("no Abstract heading; counted from the start of the document")
+        # The count does not always start at line 0: with a main-text heading
+        # and no Abstract, `start` is the line AFTER that heading, and the note
+        # the M19 artifact carries must say so (it fed the audit trail a span
+        # that began earlier than the counted one).
+        notes.append("no Abstract heading; counted from the start of the document"
+                     if not start else
+                     "no Abstract heading; counted from after the main-text heading")
     if not end_found:
         notes.append("no Methods/References heading; counted to the end")
     if captions:
@@ -390,7 +396,7 @@ def sections(text: str, abstract_end=None, caption_lines=None) -> list:
 
 def is_cover_letter(text: str, name: str = "") -> bool:
     """A cover letter, by filename or opening salutation."""
-    if "cover" in (name or "").lower():
+    if _COVER_WORD_RE.search(name or ""):
         return True
     for line in (text or "").splitlines()[:12]:
         if COVER_SALUTATION.match(line.strip()):
@@ -411,6 +417,14 @@ EXTERNAL_FEEDBACK_RE = re.compile(
     re.I)
 AUTHORED_REPLY_RE = re.compile(
     r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
+# The WORD "cover" (and the camelCase "coverLetter"/"plainLetter"), not the
+# substring: a bare `"cover" in name` also named `discovery.md`,
+# `coverage_table.txt` and `recovered_samples.md` the cover letter (forcing them
+# into the submission runs) and masked a reply file whose name merely contains the
+# substring. A word starts at the start, after a non-letter, or at a lower->UPPER
+# camelCase boundary; it ends at a non-lowercase character.
+_COVER_WORD_RE = re.compile(
+    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))(?:[Cc]over|COVER)(?![a-z])")
 
 
 def is_evidence_path(path: str) -> bool:
@@ -434,7 +448,7 @@ def is_evidence_path(path: str) -> bool:
     # exactly as in extract_citations.py: with the reply/feedback test below it,
     # `cover_letter_response.md` was dropped as reviewers' feedback and the
     # letter never reached the M19 length sweep.
-    if "cover" in parts[-1].lower():
+    if _COVER_WORD_RE.search(parts[-1]):
         return False
     return bool(EXTERNAL_FEEDBACK_RE.search(parts[-1])
                 or AUTHORED_REPLY_RE.search(parts[-1]))
@@ -497,6 +511,18 @@ def main(argv=None) -> int:
         types = (profile or {}).get("article_types") or []
         type_id = str(args.article_type or (profile or {}).get("default_article_type")
                       or "").strip().lower()
+        if types and not type_id:
+            # Mirror the pipeline's own rule (normalize_venue_profile):
+            # `default_article_type or clean_types[0]["id"]` -- with no
+            # --article-type and no default, the FIRST type is the default. The
+            # loop below matched every candidate on `not type_id` and broke on
+            # none, so the LAST type won silently: an arbitrary type's caps were
+            # applied to the submission (110/1875 where the profile meant
+            # 150/3000) with no hint in the output.
+            first = next((c for c in types
+                          if isinstance(c, dict) and str(c.get("id") or "").strip()), None)
+            if first is not None:
+                type_id = str(first["id"]).strip().lower()
         entry = None
         if types:
             for candidate in types:

@@ -38,7 +38,10 @@ Conversion details that matter downstream:
     string indexes would poison M15's column sums) and sheet names are mapped
     through workbook relationships, not by sorted file name.
   * .rtf — converted with a small stdlib stripper (formatting is not
-    preserved); flagged read-only because editing RTF as plain text corrupts it.
+    preserved). The conversion is flagged EDITABLE (the C19 contract: .tsv,
+    .rtf and .ltx are converted and marked editable), so an edit to an .rtf
+    document must be applied to the .rtf itself through an RTF-aware tool --
+    paste the stripped text back over the file and the markup is destroyed.
 
 Why this exists: sweeps must run over a uniform plain-text corpus so that every
 enumeration is deterministic and reproducible. Conversion failures are RECORDED,
@@ -67,7 +70,6 @@ BINARY_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".gif", ".svg", ".eps",
                ".gz", ".tar", ".xlsx.lock", ".py", ".r", ".ipynb", ".xls", ".pptx", ".docx~"}
 
 ROLE_PATTERNS = [
-    ("cover letter", re.compile(r"cover|letter_to_editor|tocover", re.I)),
     ("title page", re.compile(r"title|titlepage|first_page", re.I)),
     ("abstract", re.compile(r"abstract", re.I)),
     ("main text", re.compile(r"manuscript|main|article|paper|(?:^|[_\-. ])ms(?:[_\-. ]|$)", re.I)),
@@ -80,6 +82,16 @@ ROLE_PATTERNS = [
     ("code", re.compile(r"\.py$|\.r$|\.ipynb$|code|script|(?:^|[_\-. ])src(?:[_\-. ]|$)", re.I)),
     ("data", re.compile(r"\.csv$|\.tsv$|data", re.I)),
 ]
+
+# The cover-letter ROLE, tested against the name's OWN case (guess_role tests
+# the other patterns on the lowercased name, where "plainLetter" and
+# "newsletter" are indistinguishable): a word starts at the start, after a
+# non-letter, or at a lower->UPPER camelCase boundary, so `cover_letter`,
+# `coverLetter` and `plainLetter` are the letter while `discovery`, `coverage`
+# and `newsletter` are not.
+COVER_LETTER_ROLE_RE = re.compile(
+    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))(?:[Cc]over|COVER)(?![a-z])"
+    r"|(?i:letter_to_editor|tocover)")
 
 RAW_DATA_DIRNAMES = ("raw_data", "raw_figs")
 HUMAN_FEEDBACK_DIR = "human_review_feedback"
@@ -98,7 +110,10 @@ REPLY_NAME_RE = re.compile(r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?
 
 
 def guess_role(rel_path: str) -> str:
-    base = os.path.basename(rel_path).lower()
+    raw = os.path.basename(rel_path)
+    if COVER_LETTER_ROLE_RE.search(raw):
+        return "cover letter"
+    base = raw.lower()
     for role, pat in ROLE_PATTERNS:
         if pat.search(base):
             return role

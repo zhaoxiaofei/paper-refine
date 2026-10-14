@@ -207,6 +207,17 @@ def main(argv):
                 continue
             try:
                 fn(out)
+            except SystemExit as exc:
+                # SystemExit is a BaseException, so the `except Exception` below
+                # never saw it: a backend CLASS whose output method truncated OUT
+                # and then exited 1 left the partial file in place -- the exact
+                # failure the `main` probe at the bottom of this module drops. A
+                # clean exit (0/None) is left to the `wrote` check below.
+                if exc.code not in (0, None):
+                    print("redlines.%s.%s exited %s" % (cls_name, meth, exc.code),
+                          file=sys.stderr)
+                    drop_partial(out, "redlines.%s.%s" % (cls_name, meth))
+                    continue
             except Exception as exc:                           # noqa: BLE001
                 print("redlines.%s.%s failed: %s" % (cls_name, meth, exc), file=sys.stderr)
                 drop_partial(out, "redlines.%s.%s" % (cls_name, meth))
@@ -224,6 +235,13 @@ def main(argv):
         for args in ((base, revised, out), (base, revised)):
             try:
                 res = fn(*args)
+            except SystemExit as exc:
+                # Same asymmetry as the class-method probe above: a module-level
+                # helper that exits non-zero has FAILED, whatever it wrote.
+                if exc.code not in (0, None):
+                    print("redlines.%s exited %s" % (fn_name, exc.code), file=sys.stderr)
+                    drop_partial(out, "redlines.%s" % fn_name)
+                    continue
             except Exception:                                  # noqa: BLE001
                 drop_partial(out, "redlines.%s" % fn_name)
                 continue

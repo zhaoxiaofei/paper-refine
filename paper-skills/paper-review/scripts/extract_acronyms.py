@@ -80,6 +80,12 @@ EXTERNAL_FEEDBACK_RE = re.compile(
     re.I)
 AUTHORED_REPLY_RE = re.compile(
     r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
+# The WORD "cover" (and the camelCase "coverLetter"), not the substring: a bare
+# `"cover" in name` also named `discovery.md`, `coverage_table.txt` and
+# `recovered_samples.md` a cover letter (forcing them into the submission runs)
+# and masked a reply file whose name merely contains the substring.
+_COVER_WORD_RE = re.compile(
+    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))(?:[Cc]over|COVER)(?![a-z])")
 
 
 def is_evidence_name(fname: str) -> bool:
@@ -99,7 +105,7 @@ def is_evidence_name(fname: str) -> bool:
     # exactly as in extract_citations.py: with the reply/feedback test below it,
     # `cover_letter_response.md` was dropped as reviewers' feedback and the
     # letter's own text never reached M1/M1b.
-    if "cover" in base.lower():
+    if _COVER_WORD_RE.search(base):
         return False
     # A previous response-to-reviewers (the authors' own document) is not
     # manuscript prose either: it never produces an M1/M1b row.

@@ -2083,6 +2083,21 @@ def available_venue_profiles(root=None) -> dict:
                                              "error": str(e), "origin": origin,
                                              "path": str(path)})
                 continue
+            if profile.id in found and found[profile.id].get("path") != str(path):
+                # Two files claiming one id: the later one is loadable by
+                # nothing (load_venue_profile resolves by id) and used to be
+                # invisible in `set-venue --list` -- the command whose job is to
+                # show why an id is missing. It is listed under its own stem
+                # with the reason; the winner keeps the id (root files win over
+                # shipped ones, and the first of two same-directory files wins
+                # deterministically by filename order).
+                found.setdefault(path.stem, {
+                    "id": path.stem, "label": path.stem,
+                    "error": (f"{path}: the profile id {profile.id!r} is already provided by "
+                              f"{found[profile.id].get('path') or 'another file'}; rename one id "
+                              f"or remove the duplicate"),
+                    "origin": origin, "path": str(path)})
+                continue
             found.setdefault(profile.id, {"id": profile.id, "label": profile.label,
                                           "description": profile.description,
                                           "origin": origin, "path": str(path),
@@ -3035,6 +3050,12 @@ def _skeleton_titles(norm: dict, official: dict = None) -> list:
         return " ".join(w[:-1] if len(w) > 3 and w.endswith("s") else w for w in words)
 
     merged = [s["title"] for s in off]
+    # The insert position must be found in the list that GROWS, never in `off`:
+    # once one advisory section was inserted, index `i` of `off` no longer names
+    # the same slot of `merged`, so a later advisory section landed BEFORE its
+    # predecessor (Ethics 0.5, Data availability 0.6 -> the 0.6 section came
+    # first). `merged_pos` carries each merged slot's mean_position in parallel.
+    merged_pos = [float(o.get("mean_position", 99)) for o in off]
     seen = {key(t) for t in merged}
     word_sets = [set(key(t).split()) for t in merged]
     for a in adv:
@@ -3047,11 +3068,12 @@ def _skeleton_titles(norm: dict, official: dict = None) -> list:
             # fuller heading already present.
             continue
         idx = len(merged)
-        for i, o in enumerate(off):
-            if float(a.get("mean_position", 99)) <= float(o.get("mean_position", 99)):
+        for i, pos in enumerate(merged_pos):
+            if float(a.get("mean_position", 99)) <= pos:
                 idx = i
                 break
         merged.insert(idx, title)
+        merged_pos.insert(idx, float(a.get("mean_position", 99)))
         seen.add(k)
         word_sets.append(set(k.split()))
     return merged
@@ -4060,7 +4082,16 @@ def is_journal_feedback_name(name) -> bool:
 # document, not the journal's feedback: the auto-detection must never read one
 # as the letter (the cover letter is the common trap -- "editor" is in its name).
 JOURNAL_AUTHORED_REPLY_RE = re.compile(
-    r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point|cover", re.I)
+    r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point"
+    r"|(?-i:(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))(?:[Cc]over|COVER)(?![a-z]))", re.I)
+# The WORD "cover" (or the camelCase "coverLetter"/"plainLetter"), never the
+# substring: a bare `cover` also matched `discovery.md`, `coverage_table.txt`
+# and `recovered_notes.tex`, which then read as the letter (or hid a reply whose
+# name merely contains the substring). A word starts at the string's start,
+# after a non-letter, or at a lower->UPPER camelCase boundary, and ends at a
+# non-lowercase character.
+_COVER_WORD_RE = re.compile(
+    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))(?:[Cc]over|COVER)(?![a-z])")
 # The reply-only spelling for the written-surface scans: a cover letter IS a
 # submission document (M19 counts it as one), a response-to-reviewers is not
 # manuscript prose.
@@ -11669,7 +11700,8 @@ def _json_from_text(text: str, lenient: bool):
             return None
     decoder = json.JSONDecoder()
     stripped = text.strip()
-    best, best_score = None, None
+    total = len(stripped)
+    found = []                       # (start, end, value)
     for i, ch in enumerate(text):
         if ch not in "{[":
             continue
@@ -11677,22 +11709,44 @@ def _json_from_text(text: str, lenient: bool):
             obj, end = decoder.raw_decode(text, i)
         except ValueError:
             continue
+        found.append((i, end, obj))
+    if not found:
+        return None
+
+    def outside_prose(i: int, end: int) -> int:
+        """Text outside [i, end) that is not another candidate's own JSON.
+
+        Counting an earlier candidate as prose is what let a trailing in-prose
+        EXAMPLE outscore the payload that preceded it.
+        """
+        other = 0
+        for s, e, _o in found:
+            if (s, e) == (i, end):
+                continue
+            other += max(0, min(e, i) - s) + max(0, e - max(s, end))
+        return max(0, total - (end - i) - other)
+
+    # The document is the candidate that SPANS the text -- the LARGEST parsed
+    # value, not merely the first `{` ("The schema is {"example": true}. And the
+    # data is: {…}" returned the in-prose EXAMPLE) and not merely the last one
+    # (a file ending in an example -- "… Note the schema example is {"example":
+    # true}" -- returned the example). A value whose surrounding prose dwarfs it
+    # is a fragment: "A"*1000 + '{...}' + "B"*1000 names an example, not a
+    # document, and is still refused. A value that runs to the end of the text
+    # is the document whatever precedes it (a fenced or introduced file); the
+    # prose counted here is the text outside this value that is not another
+    # candidate's own JSON, so a document carrying a nested object or a second
+    # value is not penalized for either.
+    best, best_len = None, -1
+    for i, end, obj in found:
+        json_len = end - i
         tail = text[end:].strip()
-        if not tail or set(tail) <= set("`~"):
-            return obj
-        # Count only the prose AROUND the document; `stripped` includes the JSON
-        # itself, so comparing against it would reject a short document wrapped
-        # in a sentence ("Here it is: {…} Done.").
-        prose = len(text[:i].strip()) + len(tail)
-        if prose >= len(stripped) - (end - i):
+        fenced = not tail or set(tail) <= set("`~")
+        prose = outside_prose(i, end)
+        if not fenced and prose > 2 * json_len:
             continue
-        # MOSTLY-JSON text with short prose margins -- and when several
-        # start tokens qualify, the document is the one that SPANS the text,
-        # not simply the first `{` in it: "The schema is {"example": true}. And
-        # the data is: {…}" returned the in-prose EXAMPLE object.
-        score = (end - i) - prose
-        if best_score is None or score > best_score:
-            best, best_score = obj, score
+        if json_len > best_len:
+            best, best_len = obj, json_len
     return best
 
 
@@ -16792,7 +16846,10 @@ def is_non_manuscript_rel(rel: str) -> bool:
         return True
     # A COVER LETTER is a submission document (M19 counts it as one) even when
     # its name says "to_editor"; only its "cover" spelling protects it here.
-    if re.search(r"cover", base, re.I):
+    # The word is matched as a WORD (see _COVER_WORD_RE): a bare `cover`
+    # substring also matched `discovery.md`, `coverage_table.txt` and
+    # `recovered_notes.tex`, forcing those back into the manuscript scans.
+    if _COVER_WORD_RE.search(base):
         return False
     return is_journal_feedback_name(base)
 
@@ -18993,12 +19050,15 @@ def corpus_content_fingerprint(ctx: Ctx, r: int, vid: str) -> str:
 # first 7 hex characters of SHA-256 over the sorted content digests of the
 # payload files, with the payload defined exactly like a version corpus (no
 # work/ scratch, no difference-tracking auxiliaries -- see TRACKING_AUX_NAME_RE
-# -- and no self-written reports) and with NAMES ignored. Existing version tokens inside
-# file CONTENTS (a repointed LaTeX \addbibresource{refs-4f3a9c1.bib}, say) are
-# normalized to "<VERSION>" before hashing, so applying the token does not
-# change it -- the same algorithm is shipped to the agents as
-# paper-revise/scripts/revision_token.py, and the test suite asserts the two
-# implementations agree.
+# -- and no self-written reports) and with NAMES ignored. A version marker
+# inside file CONTENTS (a repointed LaTeX \bibliography{refs-4f3a9c1.bib} or
+# \addbibresource{refs-4f3a9c1.bib}, say) is REMOVED before hashing, so
+# applying the token does not change it -- in BOTH apply paths: the replaced
+# trailing token ("ms-a.tex" -> "ms-<T>.tex") and the token-less APPEND
+# ("refs.bib" -> "refs-<T>.bib"), whose old "<VERSION>" substitution left
+# "refs" and "refs-<T>" with DIFFERENT normalized bytes. The same algorithm is
+# shipped to the agents as paper-revise/scripts/revision_token.py, and the test
+# suite asserts the two implementations agree.
 # ---------------------------------------------------------------------
 DOCHASH_HEX7_RE = re.compile(r"^[0-9a-f]{7}$")
 
@@ -19020,26 +19080,29 @@ def _payload_files_of_dir(dirp: Path) -> list:
 
 
 def _normalize_version_refs(data: bytes, tokens) -> bytes:
-    """Version-token REFERENCES in file bytes, normalized to "<VERSION>".
+    """Version-token REFERENCES in file bytes, with the marker REMOVED.
 
     Only reference-like occurrences are touched -- never a bare "-x" in prose:
       1. any token (or 7-hex token) immediately followed by a file extension;
       2. any token inside a LaTeX reference command's argument.
-    That keeps the hash stable when the token is applied (the old and the new
-    form normalize identically) without over-matching words like "panel-a".
+    Removing the marker (with its separator) keeps the hash stable when the
+    token is applied: "fig1.png" and "fig1-4f3a9c1.png" both normalize to
+    "fig1.png", and "refs.bib" and "refs-4f3a9c1.bib" alike -- the sibling
+    `<VERSION>` substitution could not make the token-less append path stable.
+    A prose "-a" ("panel-a") is still untouched.
     """
     alts = [re.escape(str(t).encode()) for t in sorted(set(tokens), key=len, reverse=True) if t]
     alts.append(rb"[0-9a-f]{7}")
     tok = rb"(?:" + b"|".join(alts) + rb")"
     data = re.sub(rb"([-_])" + tok + rb"(?=\.[A-Za-z][A-Za-z0-9]{0,9}\b)",
-                  rb"\1<VERSION>", data)
+                  rb"", data)
     cmd = re.compile(
         rb"(\\(?:input|include|subfile|bibliography|bibliographystyle|addbibresource|"
         rb"includegraphics|lstinputlisting|inputminted|externaldocument|subimport|import)\b"
         rb"[^{}]*?\{)([^{}]*)(\})")
 
     def _arg(m):
-        inner = re.sub(rb"([-_])" + tok + rb"(?![0-9A-Za-z_])", rb"\1<VERSION>", m.group(2))
+        inner = re.sub(rb"([-_])" + tok + rb"(?![0-9A-Za-z_])", rb"", m.group(2))
         return m.group(1) + inner + m.group(3)
 
     return cmd.sub(_arg, data)
@@ -20207,7 +20270,14 @@ def attempt_history_lines(ctx: Ctx, indent: str = "  ", limit: int = 40) -> list
                 out.append(f"{indent}    kept: {kept} (archive pruned; the attempt's record "
                            f"stays in state.json)")
             elif h.get("artifacts_lost"):
-                log = (h.get("agent_log") or [None])[0]
+                # `agent_log` has been stored as a STRING since the record was
+                # introduced (`entry["agent_log"] = str(log.relative_to(...))`);
+                # `[0]` on it printed the first CHARACTER ("| transcript: r").
+                # The sibling branch below already normalizes the older list
+                # shape, so this one does the same.
+                log = h.get("agent_log")
+                if isinstance(log, list):        # older records stored a list
+                    log = log[0] if log else None
                 out.append(f"{indent}    artifacts: NOT preserved (the attempt's sandbox was "
                            f"rebuilt before the pipeline archived attempts)"
                            + (f" | transcript: {log}" if log else ""))
@@ -22958,6 +23028,15 @@ def _toml_array_at(text: str, start: int):
                 quote = None
         elif ch in "\"'":
             quote = ch
+        elif ch == "#":
+            # A TOML comment inside the array may carry a bracket; it is not
+            # part of the array (and `args = ["a", # note with ]\n "b"]` must
+            # not stop at that bracket).
+            nl = text.find("\n", j)
+            if nl < 0:
+                return None
+            j = nl
+            continue
         elif ch == "[":
             depth += 1
         elif ch == "]":
@@ -22968,6 +23047,53 @@ def _toml_array_at(text: str, start: int):
     return None
 
 
+def _toml_string_at(text: str, i: int):
+    """(value, index after) for the TOML string literal at `text[i]`, else None.
+
+    A basic (`"…"`) string decodes TOML's own escapes (`\\"`, `\\\\`, `\\t`,
+    `\\uXXXX`); a literal (`'…'`) string does not. An unterminated multi-line
+    (triple-quoted) string, an unknown escape or an unterminated literal returns
+    None: the caller reports the entry as UNREADABLE instead of launching a
+    server with a wrong argv or a Windows path that still carries its double
+    backslashes.
+    """
+    if i >= len(text) or text[i] not in "\"'":
+        return None
+    q = text[i]
+    if text.startswith(q * 3, i):
+        return None
+    out, j, n = [], i + 1, len(text)
+    while j < n:
+        c = text[j]
+        if c == q:
+            return "".join(out), j + 1
+        if c == "\\" and q == '"':
+            if j + 1 >= n:
+                return None
+            e = text[j + 1]
+            simple = {"b": "\b", "t": "\t", "n": "\n", "f": "\f", "r": "\r",
+                      '"': '"', "\\": "\\"}
+            if e in simple:
+                out.append(simple[e])
+                j += 2
+                continue
+            if e in "uU":
+                width = 4 if e == "u" else 8
+                hexs = text[j + 2:j + 2 + width]
+                if len(hexs) < width or not re.fullmatch(r"[0-9A-Fa-f]+", hexs):
+                    return None
+                try:
+                    out.append(chr(int(hexs, 16)))
+                except (ValueError, OverflowError):
+                    return None
+                j += 2 + width
+                continue
+            return None                       # unknown escape: refuse, never guess
+        out.append(c)
+        j += 1
+    return None                                # unterminated
+
+
 def _toml_array_values(raw: str):
     """The string values of a TOML array (`raw`), or None when unreadable.
 
@@ -22976,41 +23102,36 @@ def _toml_array_values(raw: str):
     (`args = ["node", "server.js",]`) -- both legal TOML, both a `ValueError`
     for `json.loads`. The fallback scans the bracketed body quote-aware and
     accepts only quoted elements, so a genuinely malformed array still reports
-    as unreadable instead of silently dropping every argument.
+    as unreadable instead of silently dropping every argument. The fallback also
+    decodes TOML's string escapes and ignores `#` comments, so a legal entry
+    like `args = ["say \\"hi\\"",]` or one carrying a comment is read correctly
+    instead of coming back with the backslashes still in it (the server would
+    then be launched with a wrong argv).
     """
     try:
         return [str(a) for a in json.loads(raw)]
     except ValueError:
         pass
+    except TypeError:
+        return None
     body = (raw or "").strip()
     if len(body) < 2 or body[0] != "[" or body[-1] != "]":
         return None
-    items, buf, quote = [], "", None
-    for ch in body[1:-1]:
-        if quote:
-            buf += ch
-            if ch == quote:
-                quote = None
+    inner, out, i, n = body[1:-1], [], 0, len(body) - 2
+    while i < n:
+        ch = inner[i]
+        if ch in " \t\r\n,":
+            i += 1
             continue
-        if ch in "\"'":
-            quote = ch
-            buf += ch
-        elif ch == ",":
-            items.append(buf)
-            buf = ""
-        else:
-            buf += ch
-    items.append(buf)
-    if quote:
-        return None
-    out = []
-    for item in items:
-        item = item.strip()
-        if not item:
-            continue                      # TOML allows the trailing comma
-        if len(item) < 2 or item[0] != item[-1] or item[0] not in "\"'":
+        if ch == "#":
+            nl = inner.find("\n", i)
+            i = n if nl < 0 else nl + 1
+            continue
+        got = _toml_string_at(inner, i)
+        if got is None:
             return None
-        out.append(item[1:-1])
+        value, i = got
+        out.append(value)
     return out
 
 
@@ -23026,17 +23147,27 @@ def mcp_server_spec(name: str) -> dict:
     except OSError:
         return {}
     quoted = re.escape(name)
+    # A legal trailing comment (`[mcp_servers.x] # note`) does not unconfigure
+    # the server: with `\]\s*$` the header never matched, so a configured server
+    # probed as absent.
     header = re.compile(r"^\s*\[\s*mcp_servers\s*\.\s*(?:\"" + quoted + r"\"|'"
-                        + quoted + r"'|" + quoted + r")\s*\]\s*$", re.MULTILINE)
+                        + quoted + r"'|" + quoted + r")\s*\]\s*(?:#.*)?$", re.MULTILINE)
     m = header.search(text)
     if not m:
         return {}
     rest = text[m.end():]
     nxt = re.search(r"^\s*\[", rest, re.MULTILINE)
     body = rest[:nxt.start()] if nxt else rest
-    cm = re.search(r"""^\s*command\s*=\s*["']([^"']+)["']""", body, re.MULTILINE)
+    cm = re.search(r"^[ \t]*command[ \t]*=[ \t]*", body, re.MULTILINE)
     if not cm:
         return {}
+    got = _toml_string_at(body, cm.end())
+    if got is None or not got[0].strip():
+        return {}
+    # The TOML basic string decodes its escapes: `command = "C:\\Program
+    # Files\\node.exe"` names `C:\Program Files\node.exe`, and the raw
+    # `C:\\Program Files\\node.exe` never started on Windows.
+    command = os.path.expanduser(got[0])
     args = []
     am = re.search(r"^\s*args\s*=\s*", body, re.MULTILINE)
     if am:
@@ -23055,7 +23186,7 @@ def mcp_server_spec(name: str) -> dict:
             # report the entry instead of using it half-read.
             return {}
         args = values
-    return {"command": os.path.expanduser(cm.group(1)), "args": args}
+    return {"command": command, "args": args}
 
 
 def mcp_stdio_tool_call(spec: dict, tool: str, arguments: dict,
@@ -30784,6 +30915,13 @@ def journal_review_coverage_problems(ctx: Ctx, rec: dict, sb: Path, fj: dict) ->
         return errs
     got_rows = [x for x in (data.get("rows") or []) if isinstance(x, dict)]
     got = [str(x.get("id") or "") for x in got_rows]
+    # "one row per concern id" is this function's own contract: two rows for the
+    # same id (the classic contradictory pair) were invisible to the set
+    # arithmetic below, which saw the id as present exactly once.
+    dups = sorted({cid for cid in got if cid and got.count(cid) > 1})
+    if dups:
+        errs.append(f"the reconciliation names {len(dups)} concern(s) MORE THAN ONCE: "
+                    f"{', '.join(dups[:6])} -- one row per concern id")
     missing = sorted(want - set(got))
     extra = sorted(set(got) - want)
     if missing:
@@ -34189,8 +34327,23 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
         # next `run` died in pinned_integrity ("... is missing"), bricking the
         # root with no way back except restoring state.json.
         win_dst = winner_dir_of(ctx, r)
-        win_dst.mkdir(parents=True, exist_ok=True)
-        build_corpus_dir(ctx, r, a2, win_dst)
+        # Atomic, like publish_winner(): a crash between `mkdir` and the copy
+        # used to leave a PARTIALLY updated `round<r>_winner/` that the next run
+        # copied the new corpus ON TOP OF (build_corpus_dir copies into the
+        # directory, it does not clear it), and the digest then described -- and
+        # publication carried -- a mixture of two revisions. The tmp build makes
+        # the swap all-or-nothing; a displaced copy is archived, never deleted.
+        win_tmp = ctx.root / (win_dst.name + ".tmp")
+        if win_tmp.exists():
+            rmtree_force(win_tmp)
+        win_tmp.mkdir(parents=True, exist_ok=True)
+        build_corpus_dir(ctx, r, a2, win_tmp)
+        if win_dst.exists():
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            aside = unique_path(superseded_dir_of(ctx) / f"{win_dst.name}.{stamp}")
+            aside.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(win_dst), str(aside))
+        os.replace(win_tmp, win_dst)
         rrec["winner_dir"] = win_dst.name
         rrec["winner_digest"] = corpus_tree_digest(win_dst)
         rrec["journal_mode"] = journal_mode_of(ctx)
@@ -39709,6 +39862,24 @@ PACKAGE_TEXT_BYTES_LIMIT = 2_000_000
 # never a failure: the pointer lives in the author's prose.
 
 
+def _pkg2_url_query_value(line: str, start: int) -> bool:
+    """Is `line[start:]` the value of a URL query/fragment key (not a pointer)?
+
+    `Query: https://example.com/get?file=README.md` names the URL's query
+    value, not the author's file; `Build with SRC=code/analysis.py` is a
+    pointer the reader cannot resolve. Both are preceded by `=`, so the
+    character alone cannot decide -- the token carrying the `=` does (a URL
+    token carries `://` or `?` before it).
+    """
+    i = start - 1
+    if i < 0 or line[i] != "=":
+        return False
+    while i > 0 and not line[i - 1].isspace():
+        i -= 1
+    token = line[i:start]
+    return "://" in token or "?" in token
+
+
 def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
     """PKG-2: shipped text files that refer into a non-submitted area.
 
@@ -39728,8 +39899,17 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
     patterns = []
     if names:
         patterns.append(re.compile(
-            r"(?<![\w./\\=&?#-])(?:" + "|".join(re.escape(n) for n in names)
-            + r")/[\w.\-/]*[\w]", re.I))
+            # `=` is allowed (a URL-query value is filtered by
+            # `_pkg2_url_query_value`, so `SRC=code/analysis.py` IS reported);
+            # `+` and a backslash separator are ordinary filename characters in
+            # a path (`code/foo+bar.py`, `raw_data\tables.tsv`), and without them
+            # the row named a path that does not exist ("code/foo"). ONE space is
+            # allowed inside the name, and only when a dot-carrying filename
+            # follows it ("raw_data/my table.tsv"): the row must name the
+            # reference the author wrote, and a bare word after the space
+            # ("raw_data/ and methods.md") still stops at the space.
+            r"(?<![\w./\\&?#-])(?:" + "|".join(re.escape(n) for n in names)
+            + r")[/\\][\w.\-+\\/]*[\w](?:\s+[\w\-+]+(?:\.[\w\-+]+)+)?", re.I))
     # A README name, bare or under a relative directory (`docs/README.md`): the
     # boundary guard keeps a URL tail (`https://host/repo/README.md`) out of the
     # report, and a path into another area (`raw_data/README.md`) is already
@@ -39743,21 +39923,34 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
     # normal way these names appear in running text, but not a longer filename
     # (`README.md.bak`); `=&?#` keeps a URL's query/fragment value out.
     patterns.append(re.compile(
-        r"(?<![\w./\\=&?#-])(?:[\w.\-+()]+/)*README[\w.\-+()]*\.(?:md|txt)"
+        r"(?<![\w./\\&?#-])(?:[\w.\-+()]+/)*README[\w.\-+()]*\.(?:md|txt)"
         r"(?![\w\-/]|\.\w)", re.I))
     for p in sorted(root.rglob("*")):
-        if not p.is_file() or p.suffix.lower() not in PACKAGE_TEXT_EXTS:
+        if not p.is_file():
+            continue
+        ext = p.suffix.lower()
+        if ext == ".docx":
+            # The manuscript the journal actually reads is a .docx: a dangling
+            # reference inside it is the defect this scan exists for, and the
+            # text-file scan never opened it (a `See raw_data/tables.tsv` in
+            # word/document.xml produced no row at all).
+            lines = _docx_paragraphs(p)
+            if lines is None:
+                continue
+        elif ext in PACKAGE_TEXT_EXTS:
+            try:
+                if p.stat().st_size > PACKAGE_TEXT_BYTES_LIMIT:
+                    continue
+                text = p.read_text("utf-8", "replace")
+            except OSError:
+                continue
+            lines = text.splitlines()
+        else:
             continue
         rel = p.relative_to(root).as_posix()
         if is_evidence_rel(rel) or _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
             continue
-        try:
-            if p.stat().st_size > PACKAGE_TEXT_BYTES_LIMIT:
-                continue
-            text = p.read_text("utf-8", "replace")
-        except OSError:
-            continue
-        for i, line in enumerate(text.splitlines(), 1):
+        for i, line in enumerate(lines, 1):
             # EVERY reference on the line, not the first pattern's first hit:
             # the area pattern runs first, so `See README.md and also
             # raw_data/tables.tsv.` used to report only the area path, and a
@@ -39771,13 +39964,19 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
             found.sort(key=lambda mm: (mm.start(), -(mm.end() - mm.start())))
             kept = []
             for mm in found:
+                if _pkg2_url_query_value(line, mm.start()):
+                    continue
                 if any(k.start() <= mm.start() and mm.end() <= k.end() for k in kept):
                     continue
                 kept.append(mm)
             for m in kept:
                 ref = m.group(0)
-                head = ref.split("/", 1)[0].lower()
-                if head == CODE_DIR and is_non_submitted_readme_name(ref.rsplit("/", 1)[-1]):
+                # BOTH separators: the area pattern accepts a backslash
+                # (`raw_data\tables.tsv`), and splitting on "/" alone read the
+                # whole reference as the "head", so the row's advice named the
+                # README rule for a raw_data pointer.
+                head = re.split(r"[/\\]", ref, 1)[0].lower()
+                if head == CODE_DIR and is_non_submitted_readme_name(re.split(r"[/\\]", ref)[-1]):
                     # `set-submit-code on` does not resurrect a README, so the
                     # code switch is the wrong advice in BOTH states.
                     hint = (" (the author's README*.md/README*.txt files are never submitted)")
@@ -43591,7 +43790,14 @@ def write_docx_logging_fallback(base: Path, cand: Path, out: Path, baseline: str
         if body is None:
             raise RuntimeError("the revised document carries no w:body")
         base_texts = [_para_text(p) for p in _docx_root(base)[1].iter(_w("p"))]
-        cand_paras = list(body.findall(_w("p")))
+        # DEEP on both sides: `.iter` descends into table cells, so a table
+        # paragraph on the base side is compared against the SAME paragraph on
+        # the candidate side. `body.findall` (top level only) made every table
+        # paragraph look deleted, printing phantom `[BEFORE: …]` markers for
+        # text the revision never touched (and dropping the candidate's own
+        # table paragraphs), while the sibling `_before_after_lines` compares
+        # `.iter` against `.iter`.
+        cand_paras = list(body.iter(_w("p")))
         new_body = ET.Element(_w("body"))
         new_body.append(copy.deepcopy(_note_para(note)))
         sm = difflib.SequenceMatcher(None, base_texts,

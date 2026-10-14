@@ -4719,8 +4719,19 @@ def cover_letter_page_row(path: Path, pages, source: str) -> dict:
 
 # A letter by name: "cover letter", "coverLetter", "letter to the editor", ...
 # A response/rebuttal/decision document also carries "letter" and is NOT a
-# cover letter.
-COVER_LETTER_NAME_RE = re.compile(r"cover|letter", re.I)
+# cover letter. The words are matched as WORDS: a bare `cover|letter` substring
+# also named `discovery.docx`, `coverage_stats.docx` and `newsletter.docx` the
+# cover letter, so FMT-CL1 checked the wrong file (and the file the sweeps were
+# counting as submission prose is a discovery note, not the letter). A word
+# starts at the string's start, after a non-letter, or at a lower->UPPER
+# camelCase boundary ("plainLetter"), and it ends at a non-lowercase character
+# (so "coverage"/"newsletter"/"discovered" do not match, while "coverLetter"
+# and "plainLetter" do); the plural is allowed for `letter` so
+# "cover_letters.docx" still names the letter.
+_WORD_EDGE = r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))"
+COVER_LETTER_NAME_RE = re.compile(
+    _WORD_EDGE + r"(?:[Cc]over|COVER)(?![a-z])"
+    r"|" + _WORD_EDGE + r"(?:[Ll]etter|LETTER)s?(?![a-z])")
 NON_COVER_LETTER_NAME_RE = re.compile(
     r"response|repl(?:y|ies)|rebuttal|point[\s_-]?by[\s_-]?point|"
     r"decision[\s_-]?(?:letter|notice)|referee|reviewer", re.I)
@@ -6285,7 +6296,8 @@ def _marker_range_numbers(a: int, b: int) -> list:
     and FMT-Z3's pairing would then read a one-item field as a two-number
     cluster -- a false "half-updated cluster" row on a document Zotero rendered
     correctly. The skill twin (`extract_citations.parse_nums`) keeps the same
-    endpoint SET, so a one-number cluster reads the same on both sides.
+    endpoint SET and the same CAP (80), so a one-number cluster and an 81-200
+    range read the same on both sides.
     """
     if 1000 <= a and b <= 2999:
         return []
@@ -6904,6 +6916,13 @@ def _zotero_result_region(xml: str, frame: dict):
     region_runs = list(RUN_RE.finditer(xml, s, e))
     # Only whitespace may live outside the runs.
     residue = RUN_RE.sub("", xml[s:e])
+    # ... and a PROOFING MARKER: Word inserts `w:proofErr` inside field results
+    # constantly, and the module strips them under `strip_proofing_markers`
+    # anyway. Refusing the whole field for one left every such field unrefreshed
+    # ("has no simple result runs") in a real Word-saved document, while the
+    # region is rebuilt as ONE run here, so a marker inside it is dropped either
+    # way.
+    residue = PROOFERR_RE.sub("", residue)
     if residue.strip():
         return None
     template = None
@@ -7490,6 +7509,58 @@ def refresh_zotero_package(src, out=None, policy: dict = None) -> dict:
 BIB_ENTRY_START_RE = re.compile(r"@(\w+)\s*\{\s*([^,\s]+)\s*,", re.S)
 
 
+def _strip_bib_comments(text: str) -> str:
+    """`text` with BibTeX `%` comments removed, quote-, brace- and escape-aware.
+
+    A `%` starts a comment only where BibTeX allows one: outside a value. That
+    means outside a quoted string AND outside a brace GROUP -- a `%` inside
+    `title = "Growth was 100%"` or inside `title = {A 50% effect}` is data (a
+    brace value runs from depth 2 down), while a `%` at the entry-body level
+    (depth 1) or between entries (depth 0) comments out the rest of the line. An
+    escaped `\\%` is a literal percent, not a comment start. Newlines survive so
+    line structure -- and the field regexes that read it -- stay intact. Without
+    this, ANY `%` on an entry's `@` line dropped the whole entry, and a `%`
+    comment carrying a brace (`% TODO: check the } case`) closed the entry
+    early: the live `pages`/`year` fields after it were lost, and a commented
+    `% pages = {111}` OVERWROTE the live `pages = {7}` because the comment's
+    text was scanned as fields. Treating a `%` inside a brace value as a
+    comment, in turn, destroyed the field it sits in (`title = {A 50% effect}`
+    came back as `A 50 pages = {7}, year = {2020}`).
+    """
+    out = []
+    i, n = 0, len(text)
+    quote = False
+    depth = 0
+    while i < n:
+        ch = text[i]
+        if ch == "\\" and i + 1 < n:
+            out.append(ch)
+            out.append(text[i + 1])
+            i += 2
+            continue
+        if ch == '"' and depth <= 1:
+            # A quote delimits a value only at the entry level; inside a brace
+            # value it is ordinary text, exactly as the entry scanner reads it.
+            quote = not quote
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "%" and not quote and depth <= 1:
+            j = text.find("\n", i)
+            if j < 0:
+                break
+            i = j                     # the newline itself is kept
+            continue
+        if not quote:
+            if ch == "{":
+                depth += 1
+            elif ch == "}" and depth:
+                depth -= 1
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def load_bib_facts(paths) -> list:
     """Parse .bib files into fact records for entry repair (stdlib only)."""
     records = []
@@ -7498,6 +7569,7 @@ def load_bib_facts(paths) -> list:
             text = Path(p).read_text("utf-8", "replace")
         except OSError:
             continue
+        text = _strip_bib_comments(text)
         pos = 0
         while True:
             m = BIB_ENTRY_START_RE.search(text, pos)
@@ -7506,20 +7578,29 @@ def load_bib_facts(paths) -> list:
             # Body = up to the matching closing brace of this entry.
             i = m.end()
             depth = 1
+            quote = False
             while i < len(text) and depth:
-                if text[i] == "{":
+                ch = text[i]
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == '"' and depth == 1:
+                    # A brace inside a quoted value ("A title with a } brace")
+                    # is text, not the entry's closing brace. The quote is a
+                    # DELIMITER only at the entry level, though: inside a brace
+                    # value BibTeX treats it as an ordinary character, so
+                    # `title = {A 5" incision}` -- an ODD number of quotes -- must
+                    # not unbalance the walk and swallow the following entries.
+                    quote = not quote
+                elif not quote and ch == "{":
                     depth += 1
-                elif text[i] == "}":
+                elif not quote and ch == "}":
                     depth -= 1
                 i += 1
             body = text[m.end():i - 1]
             pos = i
             # A commented-out entry ("% @article{...}") is not a fact the
-            # bibliography states: parsing it made the repairs write a volume,
-            # page or year out of a paragraph the author had switched off.
-            line_start = text.rfind("\n", 0, m.start()) + 1
-            if "%" in text[line_start:m.start()]:
-                continue
+            # bibliography states; its comment text is already gone above.
             fields = {}
             for fm in re.finditer(r"(\w+)\s*=\s*(\{(?:[^{}]|\{[^{}]*\})*\}|\"[^\"]*\"|[^,\n]+)",
                                   body):
@@ -7600,8 +7681,16 @@ def _set_wt_text(para: str, start: int, end: int, text: str) -> str:
     """
     inner_open = para.find(">", start) + 1
     open_tag = para[start:inner_open]
-    if text != text.strip() and "xml:space" not in open_tag:
-        open_tag = open_tag[:open_tag.rfind(">")] + ' xml:space="preserve">'
+    if text != text.strip():
+        if "xml:space" not in open_tag:
+            open_tag = open_tag[:open_tag.rfind(">")] + ' xml:space="preserve">'
+        elif not re.search(r"""xml:space\s*=\s*(?:"preserve"|'preserve')""", open_tag):
+            # An existing `xml:space="default"` explicitly tells the reader to
+            # trim the boundary whitespace this replacement writes (the exact
+            # bug the attribute exists to prevent), and the `"xml:space" not in
+            # open_tag` test above waved it through because the NAME was there.
+            open_tag = re.sub(r"""xml:space\s*=\s*(?:"[^"]*"|'[^']*')""",
+                              'xml:space="preserve"', open_tag, count=1)
     return open_tag + esc(text) + "</w:t>"
 
 
@@ -7696,11 +7785,21 @@ def repair_reference_entries(xml: str, records: list) -> dict:
             old = vm.group(0)
             tail = entry[vm.end():]
             rest = tail[2:] if tail.startswith(", ") else None
-            # A tail that already OPENS with a locator ("Volume 11-2020, 565825
-            # (2020)") carries the article number the bibliography records:
-            # writing it again printed it twice ("11, 565825 565825 (2020)").
-            # Only a tail with no locator of its own gains one.
-            has_locator = (rest if rest is not None else tail).lstrip()[:1].isalnum()
+            # A tail that already carries a locator ("Volume 11-2020, 565825
+            # (2020)", "Volume 11-2020: 565825 (2020)", "Volume 11-2020
+            # (565825)") must not gain the article number again -- writing it
+            # twice printed it twice ("11, 565825 565825 (2020)"). A locator is
+            # a token that CARRIES A NUMBER: the old first-character-is-
+            # alphanumeric test also read prose as a locator, so
+            # "Volume 11-2020, online (2020)." had its volume deleted and no
+            # article number inserted at all. The brackets/colon form
+            # ("(565825)", ": 565825") is a locator too, so leading punctuation
+            # is skipped first; a bare year is not a locator.
+            head_text = (rest if rest is not None else tail).lstrip(" \t:;,.-")
+            lead = head_text.split(None, 1)[0] if head_text else ""
+            core = lead.strip("()[]{}.,;:'\"")
+            has_locator = bool(re.search(r"\d", core)) \
+                and not re.fullmatch(r"(?:19|20)\d{2}", core)
             if rest is not None:
                 old = old + ", "
                 new = (f"{rec['volume']}, " if has_locator
@@ -10885,7 +10984,13 @@ def _xfa_dataset_report(path: Path):
 
 
 def xfa_dataset_answers(path: Path, limit: int = 400) -> list:
-    """[(field name, answer)] of the richest XFA dataset packet (or [])."""
+    """[(field name, answer)] of the richest XFA dataset packet (or []).
+
+    `limit` bounds a caller's listing; `None` returns every answer. The
+    readable export passes None: it promises "every answer", while the FMT gate
+    counts every non-empty leaf (`_xfa_dataset_report`), so a form with more
+    than `limit` answers was reported as N filled and exported as N-1.
+    """
     try:
         data = Path(path).read_bytes()
     except OSError:
@@ -10896,7 +11001,7 @@ def xfa_dataset_answers(path: Path, limit: int = 400) -> list:
                    for em in XFA_LEAF_RE.finditer(text) if em.group(2).strip()]
         if len(answers) > len(best):
             best = answers
-    return best[:limit]
+    return best if limit is None else best[:limit]
 
 
 def xfa_export_text(path: Path) -> str:
@@ -10907,7 +11012,7 @@ def xfa_export_text(path: Path) -> str:
     NOT a layout reproduction of the journal's form (that needs Acrobat), so the
     pipeline ships it beside the original and says so.
     """
-    answers = xfa_dataset_answers(path)
+    answers = xfa_dataset_answers(path, limit=None)
     if not answers:
         return ""
     lines = [f"Readable export of the XFA form data in {Path(path).name}",
