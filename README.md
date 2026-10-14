@@ -1024,6 +1024,32 @@ Word twice (the reuse is gated on the pair's two content digests, so a redline o
 the same file name but of different bytes is never presented as this pair's
 difference).
 
+**The redline is weighed, not trusted** (`redline_fidelity`). Every successful
+backend's output is measured -- the words its `w:ins`/`w:del` markup marks,
+against the least a faithful redline needs for that pair (paragraph-aligned,
+word-level). A backend that marks an order of magnitude more than the pair
+really changes is the signature of the 2026-10-14 CNB tracking copy: a Word
+paragraph carries `w:lastRenderedPageBreak` inside its one text run, and
+`docx-trackdiff` cannot diff such a run piecewise, so it deleted and re-inserted
+the WHOLE paragraph for a ten-word edit (624 marked words for 84 words of real
+change). Under `--tool auto` an over-marking backend is passed over for the next
+one and the least-marked result is kept (an explicit `--tool`/`--redline-cmd`
+choice is honoured with the caveat recorded). `manifest.json` carries the
+numbers per attempt (`fidelity`), the readme lists the over-marked files under
+Caveats, and the second backend no longer needs the adapter file: `redlines`
+runs the engine in process (and `setup` copies `paper_redlines_adapter.py` into
+the root for the CLI route).
+
+**The built-in OOXML writer is lossless for inline content.** It walks the diff
+op by op and rewrites only the changed text (everything else keeps its rPr), so
+a soft line break (SHIFT+ENTER), a tab or a Zotero field char keeps its place --
+accepting every change reproduces the revised paragraph, rejecting every change
+reproduces the base paragraph, and the 2026-10-14 NeoHetero correspondence block
+keeps both of its soft breaks (the previous writer rebuilt a changed paragraph
+from plain text and dropped them). A paragraph the walk cannot split piecewise
+falls back to whole-paragraph markup that carries the revised paragraph's own
+XML, so nothing inside it is lost either.
+
 **The tracking LaTeX copy COMPILES.** Before a tracking `.tex` root is
 compiled, its `\input{}`/`\include{}` and `\addbibresource{}`/`\bibliography{}`
 references are pointed at the tracked copies of those files when the same
@@ -1051,7 +1077,18 @@ codex mcp add docx-compare -- node /path/to/repo/mcp-docx-compare/index.js
 Both shipped MCP servers (`mcp-docx-compare/`, `mcp-docx-converter/`) need that
 `npm ci` step before they can start: `node_modules/` is never vendored, so a
 fresh clone that skips it fails with `Cannot find module
-'@modelcontextprotocol/server'`.
+'@modelcontextprotocol/server'`. Each server also drives a companion shell
+script -- `docxcompare.sh` (`../`, `./`, then PATH) for the compare server,
+`docx2pdf.sh` for the converter -- so a copy deployed without that script
+answers `initialize()` and then fails EVERY tool call with
+`spawn docxcompare.sh ENOENT` (`install_skill.sh` installs the dependency and
+the companion with each copy). The pipeline's probe reads both:
+`mcp_server_unusable_reason(name)` is what the redlines manifest and the
+renderer list report, so a configured-but-dead server is named with the fix
+(`... its Node dependencies are not installed: run npm install in <dir>`;
+`... the docxcompare.sh script its tool drives is missing: ...`), and the MCP
+client's handshake now carries the server's own stderr tail instead of the bare
+`did not answer initialize()` the 2026-10-14 run recorded.
 
 ```bash
 python paper_pipeline.py track --root ./paper_rounds            # re-run tracking + PDFs
@@ -1590,6 +1627,29 @@ Policy overrides (`setup --format-policy policy.json`): `journal_italics`,
 `align_heading_sizes`, `blank_page_tolerance`, `max_empty_paragraph_run`,
 `empty_paragraph_slots`, `image_aspect_tolerance`.
 
+**Captions are ONE paragraph, with one spacing and one style.** The scan and the
+fixer read the same CAPTION BLOCK definition (a label — `Fig. 2 |`,
+`Figure S1.`, `Supplementary Fig. 4:`, `Table 3 …` — plus the paragraphs that
+continue it, inside the venue's own figures/tables area):
+
+* `FMT-T2a`/`FMT-T2b` check every paragraph of the block, not only the label:
+  a continuation left without direct spacing inherits the document default and
+  renders one caption at two line spacings — exactly the 2026-10-14 CNB Fig. 3
+  defect (its first paragraph single-spaced, its second at 1.5). The fixer
+  unifies the spacing across the block.
+* `FMT-T2c` reports a caption split across several paragraphs and the fixer
+  MERGES them into the label paragraph: every run travels verbatim (rPr kept,
+  moved runs pinned roman/italic/size only where the label's style would
+  otherwise change them), separator spaces are the only bytes added, and the
+  fixer's verifier is told the joins (`verified.caption_joins`) so text identity
+  is still proven. A block carrying a drawing, a text box, a tracked change or a
+  section break is left alone and the row stays `fix=editorial` for the revision
+  arms.
+* `FMT-T2d` aligns a caption that carries a paragraph style its sibling captions
+  in the same area do not (the 2026-10-14 supplementary file's first legend wore
+  the front-matter *Author List* style) — the minority follows the majority, and
+  a tie reports nothing.
+
 Stand-alone use (never edits in place unless you pass `--out` yourself):
 
 ```bash
@@ -1695,7 +1755,7 @@ every other package part is byte-identical, runs `docx validate` when available,
 and the rendered page pass (`check-pdf`, the agents' `VIS_visual` record) covers
 what OOXML inspection cannot see.
 
-### Text-level consistency and layout budgets across the whole package (rules FMT-T8a–T8h and FMT-T9c/T9f/T9g/T9i/T9j)
+### Text-level consistency and layout budgets across the whole package (rules FMT-T8a–T8h and FMT-T9c/T9f/T9g/T9i/T9j/T9k/T10f)
 
 Some consistency problems are not OOXML at all — they are in the text — and they
 now run over every `.docx` AND every `.tex/.ltx/.md/.txt` source, so a problem is
@@ -1706,8 +1766,10 @@ found in the cover letter, the main text and the supplementary alike:
 | `FMT-T9c` | long sentence or long list-paragraph, **section-tiered**: 40 words in a cover letter/abstract/legend, 46 in the body, 61 in Methods; `>=3` enumerated items inside a `>200`-word paragraph | finding (finding-tier); the reviewer must dispose it against that bar |
 | `FMT-T9f` | a term the manuscript glosses in place ("X (Y, which …)": `average spot length (sequencing read length, …)`) | finding: use the standard term, or keep the gloss as a recorded decision |
 | `FMT-T9g` | a LaTeX value+unit outside siunitx (`\qty{}{}` / `\SI{}{}`, `\num{}` for bare numbers; both spellings accepted) | finding; `\code{}`, verbatim, URLs, `\cite`, cross-references, inline math and generated tables are exempt |
-| `FMT-T9i` | a mega-paragraph (`>250` words, non-Methods) | finding: split it at the natural boundary |
+| `FMT-T9i` | a mega-paragraph (`>250` words, in the body narrative) | finding: split it at the natural boundary. Methods enumerations and LEGENDS are exempt — a legend is one paragraph by the caption rule (`FMT-T2c`), and its length is the venue's own word-budget question (M18) |
 | `FMT-T9j` | two term families competing for one concept (CN/CNV/CNA, simulate/emulate) | finding: fix one term per concept in `GLOSSARY.md` |
+| `FMT-T9k` | a narrative paragraph built from ONE sentence (the paragraph-level "lone division"; 5–45 words, body/abstract) | finding: merge the sentence into the paragraph it belongs to, or give the claim its support — a paragraph carries a claim plus its support. Captions/legends, end-matter sections (funding, ethics, availability, acronym lists), statement shapes, keywords and table cells are exempt by construction |
+| `FMT-T10f` | a heading whose section holds exactly ONE subsection (the same "lone division" one level up) | finding: promote the lone subsection into its parent, or add the sibling the section is missing |
 | `FMT-T8a` | a document mixes citation formats (`(Author et al., 2015, Nature Methods)` vs `(Author et al., Nature Methods, 2015)` vs `(Author et al., 2015)`) | report; with `citation_journal_names="drop"` (default) the redundant journal segment is deleted, leaving one author-year format. Reported only when an odd form cannot be matched safely |
 | `FMT-T8b` | nested parentheses (`(… (BAF))`) | finding-tier — moving the inner item out is a wording decision the revision stage makes; mathematical calls like `T(·,·)` are excluded |
 | `FMT-T8c` | a distinctive term repeated in one short passage (`Nature Biotechnology` four times in one cover letter) | finding-tier redundancy: a proper name ≥3× in one paragraph *and* ≥4× in the document, or a long content word ≥5× in one paragraph, must be varied or dropped — a writing-quality defect does not need a journal rule to exist. Deliberately narrow: proper names (2–3 capitalized words, no document-structure word) and single long content words |
@@ -2482,7 +2544,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 118 suites (a few
+any failure. They are independent, so run them in parallel — 120 suites (a few
 minutes at the default 24 parallel sessions; tens of minutes sequentially):
 
 ```bash

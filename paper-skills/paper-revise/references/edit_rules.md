@@ -343,13 +343,23 @@ in the package you produced:
 * after EACH step, re-run the code-side scan of the package
   (`python paper_docx_format.py scan <package dir>`): a step that introduces a
   finding-tier row (a long sentence at the section's bar, a new mega-paragraph, a
-  nested parenthesis, a value+unit outside siunitx) is fixed before the next step
+  new one-sentence paragraph FMT-T9k, a nested parenthesis, a value+unit outside
+  siunitx, a caption split into paragraphs FMT-T2c) is fixed before the next step
   runs. Each step must leave the package no worse than it found it.
 
 The steps, in order: L1 premise/factual errors · L2 formal-logic slips ·
 L3 logic jumps · L4 coherence · L5 unexplained prerequisites · L6 redundancy ·
 L7 non-academic wording · L8 non-written register · L9 stiff/translated phrasing ·
 L10 grammar · L11 typos/punctuation. Iterate at most twice, then stop and report.
+
+PARAGRAPH AND SECTION SHAPE — the same rule at two levels of the outline: a container that
+  divides at all divides into more than one part. A narrative paragraph carries a claim plus its
+  support, so a paragraph built from ONE sentence reads as an accident (FMT-T9k, finding-tier):
+  merge the sentence into the paragraph it belongs to, or give the claim its support. A section
+  that divides at all holds two or more subsections, so a section holding exactly ONE subsection
+  is FMT-T10f: promote the lone subsection into its parent, or add the sibling the section is
+  missing. End-matter statements, acronym lists, captions and table cells are exempt by
+  construction.
 
 ## E9b — The whitespace/grammar/typography sweep (every package-producing stage)
 

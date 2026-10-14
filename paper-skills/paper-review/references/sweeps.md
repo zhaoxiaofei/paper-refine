@@ -798,8 +798,10 @@ stays as it is.
 
 **Purpose:** the corpus converters read text only, so a candidate can pass every
 other sweep while shipping a blank page, a running head on the title page,
-mixed hyperlink/plain URL and email treatments, per-figure legend spacing,
-heading style drift or an italic correspondence block. M20 makes the OOXML
+mixed hyperlink/plain URL and email treatments, per-figure legend spacing, a
+caption split across several paragraphs (`FMT-T2c`; a caption is ONE paragraph)
+or carrying a paragraph style its sibling captions in the same area do not
+(`FMT-T2d`), heading style drift or an italic correspondence block. M20 makes the OOXML
 formatting visible, enumerable and repairable. The orchestrator enumerates it
 (the code-side scan of the reviewed corpus) and normalizes the mechanical
 classes before a candidate is fingerprinted, pinned or judged.

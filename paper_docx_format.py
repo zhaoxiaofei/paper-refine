@@ -60,6 +60,25 @@ caption / caption on the wrong side / item before its area -- with
 (a key-resources table inside the methods, a graphical abstract). A policy that
 declares no rule for a kind reports nothing for it.
 
+A display item's caption is ONE paragraph with ONE spacing and ONE style, and
+the scan and the fixer read the same CAPTION BLOCK definition (a figure/table
+label -- `Fig. 2 |`, `Figure S1.`, `Table 3 ...` -- plus the paragraphs that
+continue it, inside the venue's own figures/tables area): `FMT-T2a`/`FMT-T2b`
+check every paragraph of the block (a continuation left without direct spacing
+renders one caption at two line spacings), `FMT-T2c` reports a caption split
+across paragraphs and the fixer MERGES it into the label paragraph (runs
+verbatim, the verifier told the join via `verified.caption_joins`; a block
+carrying a drawing, a text box, a tracked change or a section break is left for
+the revision arms), and `FMT-T2d` aligns a caption carrying a paragraph style
+its sibling captions in the same area do not.
+
+The text-level rules include the "lone division" pair: a narrative paragraph
+built from ONE sentence is `FMT-T9k` and a section holding exactly ONE
+subsection is `FMT-T10f` -- the same shape rule at two levels of the outline
+(a container that divides at all divides into more than one part), both
+finding-tier, with end-matter statements, acronym lists, captions and table
+cells exempt by construction.
+
 The same policy carries the VENUE TEMPLATE's own blank-line slots
 (`policy["empty_paragraph_slots"]`, derived from the journal's official Word
 template by the pipeline): an empty paragraph whose (own, previous, next) style
@@ -235,7 +254,16 @@ OTHER_REVISION_MARK_RE = re.compile(
     r"numberingChange)(?=[\s/>])")
 DRAWING_RE = re.compile(r"<w:(?:drawing|pict|object|txbxContent)(?=[\s/>])")
 PAGEBREAK_RE = re.compile(r"<w:br[^>]*w:type=\"page\"[^>]*/?>")
-LEGEND_RE = re.compile(r"^\s*(?:Fig(?:ure)?\.?)\s*\d+\s*[|:.\u2014\u2013-]")
+# A figure legend LABEL. The vocabulary matches the display rules' own caption
+# labels (see DISPLAY_CAPTION_* below): the plain "Fig. 2 |"/"Figure 1." form
+# plus the numbered supplementary forms the venues collect in a legends area --
+# "Figure S1.", "Supplementary Fig. 4:", "Extended Data Figure 3 |". The old
+# `\d+`-only pattern never saw "Figure S1.", so a supplementary legend kept the
+# body style's spacing while its siblings were normalized (the 2026-10-14
+# packages) and stayed invisible to the section/word model as well.
+LEGEND_RE = re.compile(
+    r"^\s*(?:supplementary\s+|supp\.?\s+|extended\s+data\s+)?fig(?:ure)?s?\.?\s*"
+    r"(?:S?\d+[A-Za-z]?|[IVXLC]+)\s*[|:.\u2014\u2013-]", re.I)
 STRAIGHT_RE = re.compile(r"[\"']")
 CURLY_RE = re.compile("[\u2018\u2019\u201c\u201d]")
 EM, EN = "\u2014", "\u2013"
@@ -941,13 +969,15 @@ def zotero_field_continuity_problems(base: dict, out: dict) -> dict:
 
 
 def parse_styles(pkg: zipfile.ZipFile) -> dict:
-    """styleId -> {sz, basedOn, type, spacing, i, iCs}.
+    """styleId -> {sz, basedOn, type, spacing, i, iCs, b}.
 
     `i`/`iCs` are the OOXML tri-state toggles of the style's own rPr (True =
     italic, False = explicitly roman, None = inherited). They are what makes an
     italic that lives in a CHARACTER STYLE (`w:rStyle w:val="Emphasis"`) or in a
     paragraph style visible: a run can be italic without carrying `<w:i/>`
-    itself, and only checking the run's direct rPr misses it.
+    itself, and only checking the run's direct rPr misses it. `b` is the same
+    tri-state for bold, which the caption-block merge needs to keep a moved
+    continuation run from inheriting a bold caption label's weight.
     """
     out = {}
     if "word/styles.xml" not in pkg.namelist():
@@ -956,7 +986,8 @@ def parse_styles(pkg: zipfile.ZipFile) -> dict:
     defaults = root.find(f"{W}docDefaults/{W}rPrDefault/{W}rPr")
     if defaults is not None:
         out["@docDefaults"] = {"i": _tri_state(defaults.find(W + "i")),
-                               "iCs": _tri_state(defaults.find(W + "iCs"))}
+                               "iCs": _tri_state(defaults.find(W + "iCs")),
+                               "b": _tri_state(defaults.find(W + "b"))}
     for st in root.iter(W + "style"):
         sid = st.get(W + "styleId") or ""
         rpr, ppr = st.find(W + "rPr"), st.find(W + "pPr")
@@ -966,6 +997,7 @@ def parse_styles(pkg: zipfile.ZipFile) -> dict:
                    if rpr is not None and rpr.find(W + "sz") is not None else None),
             "i": _tri_state(rpr.find(W + "i")) if rpr is not None else None,
             "iCs": _tri_state(rpr.find(W + "iCs")) if rpr is not None else None,
+            "b": (_tri_state(rpr.find(W + "b")) if rpr is not None else None),
             "basedOn": base.get(W + "val") if base is not None else None,
             "type": st.get(W + "type") or "",
             "spacing": (ppr.find(W + "spacing") if ppr is not None else None),
@@ -1526,6 +1558,8 @@ FINDING_TIER_RULES = {
     "FMT-T9g",   # LaTeX quantity outside \SI/\num
     "FMT-T9i",   # paragraph structure (mega-paragraph)
     "FMT-T9j",   # two term families competing for one concept (CN vs CNV)
+    "FMT-T9k",   # a narrative paragraph built from ONE sentence
+    "FMT-T10f",  # a heading whose section holds exactly ONE subsection
     "FMT-T8f",   # indentation convention broken between sibling paragraphs/captions
     "FMT-T8g",   # the front page is split by a rendered page break (keywords on page 2)
     "FMT-T8h",   # the cover letter exceeds its two-page budget
@@ -1599,6 +1633,37 @@ def tier_of(rule: str) -> str:
 LONG_SENTENCE_BARS = {"front": 40, "abstract": 40, "legend": 40, "body": 46,
                       "methods": 61, "heading": 10 ** 6, "refs": 10 ** 6}
 STRICT_KINDS = ("front", "abstract", "legend")
+
+# One-sentence-paragraph exclusions (FMT-T9k). A paragraph in one of these
+# SECTIONS is a statement list by convention (an acronym list, a funding or
+# ethics statement, an availability note), never a narrative paragraph; and a
+# paragraph of one of these SHAPES is a statement wherever it sits.
+SINGLE_SENTENCE_SKIP_SECTION_RE = re.compile(
+    r"^(?:acknowledg|funding|author contributions?|contributions?|competing interests?|"
+    r"conflict of interest|ethics|data availability|code availability|"
+    r"materials? availability|resource availability|supplementary|abbreviations?|"
+    r"references|graphical abstract|highlights?|lead contact)\b", re.I)
+SINGLE_SENTENCE_SKIP_TEXT_RE = re.compile(
+    r"^(?:the authors? declares?|the author declares|this (?:work|study|project) "
+    r"(?:was|is|did|has)|we (?:thank|are grateful)|"
+    r"(?-i:[A-Z][A-Z0-9\-\u2010-\u2015]{1,7}),\s|"
+    r"keywords?\s*:|key words\s*:|https?://|doi:|orcid)", re.I)
+
+
+def _table_row_like(text: str) -> bool:
+    """A table row in a TEXT source -- never a paragraph for FMT-T9k.
+
+    The DOCX path excludes table cells by their container; a `.md`/`.tex`/`.txt`
+    source has no containers, so the row shapes are the test: a markdown pipe
+    row, a LaTeX `cell & cell \\\\` row, or a converted row whose cells became
+    tab-separated lines.
+    """
+    t = (text or "").strip()
+    if t.startswith("|") and t.endswith("|") and t.count("|") >= 3:
+        return True
+    if t.count("&") >= 2 and ("\\\\" in t or t.endswith("\\")):
+        return True
+    return t.count("\t") >= 2
 
 ABSTRACT_HEAD_RE = re.compile(r"^\s*(?:abstract|summary)\s*:?\s*$", re.I)
 KEYWORDS_HEAD_RE = re.compile(r"^\s*(?:key\s?words?|keywords)\b", re.I)
@@ -1968,16 +2033,42 @@ def key_term_rows(paras: list, terms=None) -> list:
     return rows
 
 
-def long_text_rows(paras: list, is_ref: list = None, kinds: list = None) -> list:
-    """FMT-T9c (long sentence), FMT-T9c/T9i (list paragraph / mega paragraph).
+def long_text_rows(paras: list, is_ref: list = None, kinds: list = None,
+                   headings: list = None, in_container: list = None,
+                   in_area: list = None) -> list:
+    """FMT-T9c (long sentence), FMT-T9c/T9i (list paragraph / mega paragraph)
+    and FMT-T9k (a narrative paragraph built from ONE sentence).
 
     The sentence bar is section-aware (LONG_SENTENCE_BARS): 40 words in an
     abstract, a cover letter or a legend; 46 in the body; 61 in Methods.  Every
     row carries its `tier`, and the strict sections are finding-tier, so the
     review can no longer close them with "no journal rule".
+
+    The mega-paragraph rule (FMT-T9i) skips legends: a legend is ONE paragraph
+    by the caption rule (FMT-T2c), and its length is the venue's M18 word-budget
+    question -- "split it at the natural boundary" is the wrong advice there.
+
+    `headings`/`in_container`/`in_area` (optional) let the one-sentence rule
+    read the paragraph's section (end-matter sections are statement lists, not
+    narrative) and skip table-cell paragraphs and a display area's own notes.
     """
     rows, is_ref = [], list(is_ref or [False] * len(paras))
     kinds = list(kinds) if kinds else section_kinds(paras)
+    heads = list(headings) if headings else None
+    container = list(in_container) if in_container else None
+    area = list(in_area) if in_area else None
+    # The nearest preceding heading's text, for the end-matter exclusions of
+    # the one-sentence rule (an acronym list or a funding statement is not a
+    # narrative paragraph, whatever the paragraph looks like in isolation).
+    section_of = [""] * len(paras)
+    if heads:
+        current = ""
+        for i in range(len(paras)):
+            if i < len(heads):
+                flag = heads[i][1] if isinstance(heads[i], tuple) else heads[i]
+                if flag:
+                    current = str(paras[i] or "").strip()
+            section_of[i] = current
     for i, text in enumerate(paras):
         if i < len(is_ref) and is_ref[i]:
             continue
@@ -2008,12 +2099,47 @@ def long_text_rows(paras: list, is_ref: list = None, kinds: list = None) -> list
                                    "paragraph at a natural boundary; keep the treatment of "
                                    "the items identical",
                          "protected": False})
-        elif words > 250 and kind != "methods":
+        elif words > 250 and kind not in ("methods", "legend"):
+            # A legend is ONE paragraph by the caption rule (FMT-T2c): telling a
+            # caption to "split at the natural boundary" contradicts it, and a
+            # long legend's length is the venue's M18/word-budget question, not
+            # a paragraph-shape defect.
             rows.append({"rule": "FMT-T9i", "severity": "low", "tier": "finding",
                          "evidence": f"paragraph {i} is {words} words long ({kind})",
                          "detail": "a paragraph this long carries several messages: split it "
                                    "at the natural boundary so each paragraph makes one point",
                          "protected": False})
+        # FMT-T9k -- the paragraph-level "lone division": a narrative paragraph
+        # built from ONE sentence. A paragraph carries a claim plus its support;
+        # a short single sentence standing alone reads as an accident (the
+        # 2026-10-14 winners shipped seven of them in the Results/Discussion
+        # narrative, and the rewrite that produced them could always have merged
+        # the sentence into the paragraph it belongs to or given it its support).
+        # Skipped where a one-line paragraph is the convention: captions and
+        # legends, end-matter sections (funding/ethics/availability/acronym
+        # lists), statement shapes, keywords, table cells, and anything shorter
+        # than five words.
+        if kind in ("body", "abstract") and 5 <= words <= 45:
+            stripped = (text or "").strip()
+            sentences = [s for s in re.split(r"(?<=[.!?])\s+", stripped) if s.strip()]
+            if (len(sentences) == 1
+                    and re.search(r"[.!?][\"\u2019\u201d)\]]?$", stripped)
+                    and not (container and i < len(container) and container[i])
+                    and not (area and i < len(area) and area[i])
+                    and not SINGLE_SENTENCE_SKIP_TEXT_RE.match(stripped)
+                    and not SINGLE_SENTENCE_SKIP_SECTION_RE.match(section_of[i])
+                    and not _table_row_like(stripped)
+                    and not caption_label_kind(stripped)
+                    and not LEGEND_RE.match(stripped)):
+                rows.append({
+                    "rule": "FMT-T9k", "severity": "low", "tier": "finding",
+                    "evidence": (f"paragraph {i} is ONE {words}-word sentence "
+                                 f"({kind}): {stripped[:80]!r}"),
+                    "detail": ("a paragraph carries a claim plus its support: merge this "
+                               "sentence into the paragraph it belongs to, or give it the "
+                               "support the claim needs -- a one-sentence paragraph reads "
+                               "as a formatting accident"),
+                    "protected": False})
     return rows
 
 
@@ -3330,7 +3456,8 @@ def variant_rows(paras: list, is_ref: list) -> list:
     return rows
 
 
-def text_style_rows(paras: list, is_ref: list = None, headings: list = None) -> list:
+def text_style_rows(paras: list, is_ref: list = None, headings: list = None,
+                    in_container: list = None, in_area: list = None) -> list:
     """All FMT-T8/T9 rows for a document's paragraphs.
 
     Every row carries `tier` (see FINDING_TIER_RULES): finding-tier rows must be
@@ -3345,7 +3472,9 @@ def text_style_rows(paras: list, is_ref: list = None, headings: list = None) -> 
     rows += nested_parentheses_rows(paras)
     rows += term_repetition_rows(paras, is_ref)
     rows += variant_rows(paras, is_ref)
-    rows += long_text_rows(paras, is_ref, section_kinds(paras, headings))
+    rows += long_text_rows(paras, is_ref, section_kinds(paras, headings),
+                           headings=headings, in_container=in_container,
+                           in_area=in_area)
     rows += self_gloss_rows(paras, is_ref)
     rows += confusable_pair_rows(prose)
     rows += concept_family_rows(paras, is_ref)
@@ -3530,7 +3659,7 @@ def style_survey(xml: str, styles: dict) -> dict:
 
 
 def _fix_kind(rule: str, policy: dict) -> str:
-    if rule in ("FMT-S1", "FMT-T2a", "FMT-T2b", "FMT-T3a"):
+    if rule in ("FMT-S1", "FMT-T2a", "FMT-T2b", "FMT-T2c", "FMT-T2d", "FMT-T3a"):
         return "mechanical"
     if rule in ("FMT-S6", "FMT-S8",          # stray empty paragraphs (template-aware)
                 "FMT-P4",                    # a space at a visual line edge
@@ -3577,6 +3706,7 @@ def _fix_kind(rule: str, policy: dict) -> str:
 
 
 MECHANICAL_RULES = {"FMT-S1", "FMT-S3", "FMT-S5", "FMT-T1", "FMT-T2a", "FMT-T2b",
+                    "FMT-T2c", "FMT-T2d",
                     "FMT-T3a", "FMT-T3b", "FMT-T6a", "FMT-T6b", "FMT-T6c", "FMT-T6f",
                     "FMT-T6g", "FMT-T7a", "FMT-T7b", "FMT-T8a", "FMT-T8d", "FMT-T8e",
                     "FMT-S6", "FMT-S8", "FMT-P4", "FMT-G1", "FMT-IM1"}
@@ -3642,10 +3772,16 @@ PAGE_BREAK_RE = re.compile(r"<w:lastRenderedPageBreak(?=[\s/>])[^>]*/>")
 # review must dispose them and a package-producing stage must fix them.
 DISPLAY_PLACEMENTS = ("end", "inline", "any")
 DISPLAY_CAPTION_SIDES = ("before", "after", "any")
-TABLES_HEADING_RE = re.compile(r"^\s*(?:list\s+of\s+)?tables?\s*:?\s*$", re.I)
+# The area headings carry the supplementary prefix too: a supplementary-material
+# file collects "Supplementary Figures" / "Supplementary Tables" exactly as the
+# main manuscript collects "Figures" / "Tables", and the caption-block rule
+# below must find that area in either document.
+_AREA_PREFIX = r"(?:(?:supplementary|supp\.?|extended\s+data)\s+)?"
+TABLES_HEADING_RE = re.compile(
+    r"^\s*" + _AREA_PREFIX + r"(?:list\s+of\s+)?tables?\s*:?\s*$", re.I)
 FIGURES_HEADING_RE = re.compile(
-    r"^\s*(?:list\s+of\s+figures?|figures?|figure\s+titles?\s+and\s+legends?|"
-    r"figure\s+legends?|captions?)\s*:?\s*$", re.I)
+    r"^\s*" + _AREA_PREFIX + r"(?:list\s+of\s+figures?|figures?|figure\s+titles?\s+and"
+    r"\s+legends?|figure\s+legends?|captions?)\s*:?\s*$", re.I)
 # "Table 3. Title", "Table 3 | Title", "Table 3: Title", "Table S3 -- Title",
 # "TABLE 4 - Title" are captions; "Table 3 shows ..." is prose, not a caption
 # (the separator right after the number is what tells them apart). The figure
@@ -3687,6 +3823,387 @@ DISPLAY_KINDS = {
                "rules": DISPLAY_FIGURE_RULES, "heading_re": FIGURES_HEADING_RE,
                "caption_re": FIGURE_CAPTION_RE, "caption_bare_re": FIGURE_CAPTION_BARE_RE},
 }
+
+
+# ---- caption/legend BLOCKS (rules FMT-T2a..FMT-T2d) -------------------------
+# A display item's caption is ONE paragraph -- the venues that collect legends
+# state it ("Please use only a single paragraph for the caption") and the
+# collected-legends layout reads that way -- and every paragraph of a caption
+# block carries the caption's own line spacing. Both the scan and the fixer read
+# the same definition:
+#
+#   * a LABEL opens a block: a paragraph whose text starts with a figure or
+#     table caption label ("Fig. 2 | ...", "Figure S1. ...", "Table 3 ...");
+#   * a CONTINUATION is the paragraph right after the label (or after another
+#     continuation): non-empty text, no embedded drawing, not a heading, not
+#     another label, not a reference entry, no section break, not inside a
+#     table/text box;
+#   * an empty paragraph, a heading, another label, an image or a table closes
+#     the block.
+#
+# The BLOCK rules (a multi-paragraph caption -> merge it; a caption carrying a
+# foreign paragraph style -> align it with its sibling captions; a continuation
+# inheriting the body's line spacing -> give it the caption's) run where the
+# venue's own display AREA holds the captions -- the "Figure legends"/"Figures"
+# and "Tables" areas the collected-legend layouts declare. Outside such an area
+# the paragraph after a label may be ordinary body prose, so no block is formed
+# there and the label alone is normalized.
+
+def container_spans(xml: str) -> list:
+    """(start, end) of every table / text-box container in `xml`.
+
+    A paragraph inside a table cell (or a text box) is part of that container,
+    never a continuation of a caption above it -- the flattened paragraph list
+    holds one entry per cell paragraph, and merging those into the caption
+    would move a table's content into prose.
+    """
+    spans, stack = [], []
+    tokens = re.compile(r"<w:(tbl|txbxContent)(?=[\s>])|</w:(tbl|txbxContent)>")
+    for m in tokens.finditer(xml):
+        if m.group(1):
+            stack.append(m.start())
+        elif stack:
+            spans.append((stack.pop(), m.end()))
+    for start in stack:                       # hand-edited XML: close at EOF
+        spans.append((start, len(xml)))
+    return spans
+
+
+def caption_label_kind(text: str) -> str:
+    """`"figure"`, `"table"` or `""` -- the display kind a caption label opens."""
+    t = text or ""
+    if FIGURE_CAPTION_RE.match(t):
+        return "figure"
+    if TABLE_CAPTION_RE.match(t):
+        return "table"
+    return ""
+
+
+def display_area_kinds(paras: list) -> list:
+    """The display area each paragraph sits in: "figure" / "table" / "".
+
+    A figures/tables heading (the venue's collected legends/tables area) opens
+    the area; the next heading of any kind closes it.
+    """
+    out, area = [], ""
+    for _, _, para in paras:
+        text = text_of(para).strip()
+        style = _para_style(para)
+        heading = bool(style and style.startswith("Heading"))
+        if heading:
+            if FIGURES_HEADING_RE.match(text):
+                area = "figure"
+            elif TABLES_HEADING_RE.match(text):
+                area = "table"
+            else:
+                area = ""
+        out.append(area)
+    return out
+
+
+def _caption_continuation(para: str) -> bool:
+    """True when `para` continues the caption block opened above it."""
+    if not text_of(para).strip():
+        return False
+    if has_drawing(para):
+        return False
+    if "<w:sectPr" in para:
+        return False
+    style = _para_style(para)
+    if style.startswith("Heading") or style == "Bibliography":
+        return False
+    if caption_label_kind(text_of(para)):
+        return False
+    return True
+
+
+def caption_block_ranges(paras: list, areas: list = None, containers=(),
+                         xml: str = None) -> list:
+    """[{"kind", "label", "continuations", "in_area"}] for every caption block.
+
+    `areas` is `display_area_kinds(paras)` when the caller has it; `containers`
+    is `container_spans(xml)` so a table cell's paragraph is never read as a
+    caption continuation. `xml` (when given) also marks whether the block is
+    MERGEABLE -- its bytes are exactly the block's own paragraphs and nothing
+    Word owns sits in them; the scan reports a block the fixer must refuse as an
+    editorial row instead of a mechanical one.
+    """
+    areas = list(areas) if areas is not None else [""] * len(paras)
+    containers = list(containers or ())
+
+    def inside_container(i: int) -> bool:
+        p0 = paras[i][0]
+        return any(a <= p0 < b for a, b in containers)
+
+    blocks, i = [], 0
+    while i < len(paras):
+        kind = caption_label_kind(text_of(paras[i][2]))
+        if not kind:
+            i += 1
+            continue
+        conts, j = [], i + 1
+        while (j < len(paras) and not inside_container(j)
+               and _caption_continuation(paras[j][2])):
+            conts.append(j)
+            j += 1
+        parts = [paras[k] for k in [i] + conts]
+        mergeable = bool(conts) and caption_block_mergeable(parts)
+        if mergeable and xml is not None:
+            # Only whitespace may sit between the block's paragraphs: anything
+            # else (a bookmark, a proof marker) would be dropped by the splice.
+            mergeable = all(not xml[parts[k][1]:parts[k + 1][0]].strip()
+                            for k in range(len(parts) - 1))
+        blocks.append({"kind": kind, "label": i, "continuations": conts,
+                       "in_area": bool(areas[i] == kind) if i < len(areas) else False,
+                       "mergeable": mergeable})
+        i = j
+    return blocks
+
+
+# ---- caption-block repairs (the FMT-T2c merge, the FMT-T2d alignment) -------
+# A caption is merged into ONE paragraph by moving the continuation paragraphs'
+# run content into the label paragraph and deleting the continuation
+# paragraphs. The merge never rewrites text: every run travels verbatim, and
+# the only byte added is the single separator space between the label's text
+# and the continuation's. The verifier is told about the joins
+# (`meta["text_baseline"]`), because the flattened document text then holds one
+# paragraph where the input held two.
+#
+# What the merge refuses (the block is left as it is, and the scan row stays a
+# report for the revision arms):
+#   * an embedded drawing/object, a text box, a note/comment reference, content
+#     control or a tracked change inside the block -- moving those across a
+#     paragraph boundary can unbalance what Word owns;
+#   * a section break inside the block;
+#   * a paragraph whose bytes are not exactly the block's own paragraphs (a
+#     bookmark or proof-error element BETWEEN them would be dropped by the
+#     splice).
+# A Zotero citation field is NOT a refusal: its runs travel verbatim and in
+# order, so the field stays balanced, and the LIVE-FIELD FENCE (the field
+# signature compare in `fix_package`) rejects the file if it does not.
+CAPTION_MERGE_REFUSE_RE = re.compile(
+    r"<w:(?:drawing|pict|object|txbxContent|footnoteReference|"
+    r"endnoteReference|commentReference|sdt|ins|del|moveFrom|moveTo|cellIns|cellDel)"
+    r"(?=[\s/>])")
+JOIN_SEP = " "
+# CT_RPr child order (ECMA-376 17.3.2): the merge's own overrides are spliced
+# in schema order, exactly as `insert_into_ppr` does for pPr children.
+RPR_CHILD_ORDER = (
+    "rStyle", "rFonts", "b", "bCs", "i", "iCs", "caps", "smallCaps", "strike",
+    "dstrike", "outline", "shadow", "emboss", "imprint", "noProof", "snapToGrid",
+    "vanish", "webHidden", "color", "spacing", "w", "kern", "position", "sz",
+    "szCs", "highlight", "u", "effect", "bdr", "shd", "fitText", "vertAlign",
+    "rtl", "cs", "em", "lang", "eastAsianLayout", "specVanish", "oMath")
+
+
+def _join_texts(left: str, right: str) -> str:
+    """The caption's text after `right` joins it: one space between the parts."""
+    if not left or not right:
+        return left + right
+    if left[-1].isspace() or right[0].isspace():
+        return left + right
+    return left + JOIN_SEP + right
+
+
+def _flatten_with_joins(texts: list, joins: list) -> str:
+    """The verifier's flattened document text, with the caption joins applied."""
+    drop, joined = set(), {}
+    for j in joins:
+        joined[j["label"]] = j["continuations"]
+        drop.update(j["continuations"])
+    out = []
+    for i, t in enumerate(texts):
+        if i in drop:
+            continue
+        if i in joined:
+            text = t
+            for c in joined[i]:
+                text = _join_texts(text, texts[c])
+            out.append(text)
+        else:
+            out.append(t)
+    return "\n".join(t for t in out if t.strip())
+
+
+def _style_flag(styles: dict, sid: str | None, key: str):
+    """A tri-state style property (bold/italic) down the `basedOn` chain."""
+    seen = set()
+    while sid and sid in (styles or {}) and sid not in seen:
+        seen.add(sid)
+        if styles[sid].get(key) is not None:
+            return styles[sid][key]
+        sid = styles[sid].get("basedOn")
+    return None
+
+
+def _effective_run_flag(styles: dict, para_style: str, run: str, key: str):
+    """The run's effective bold/italic: its own direct rPr, else the style."""
+    node = {"b": "b", "i": "i"}[key]
+    rpr = rpr_of(run)
+    direct = _tri_state(_find_elem(rpr, node))
+    if direct is not None:
+        return direct
+    return _style_flag(styles, para_style, key)
+
+
+def _find_elem(frag: str | None, tag: str):
+    """The `<w:tag>` ELEMENT of `frag` (ElementTree view), or None."""
+    if not frag:
+        return None
+    try:
+        return ET.fromstring(f'<r xmlns:w="{W[1:-1]}">{frag}</r>').find(W + tag)
+    except ET.ParseError:
+        return None
+
+
+def _rpr_splice(rpr: str, element: str, tag: str) -> str:
+    """Insert `element` (one `<w:tag .../>`) into `rpr` in schema order.
+
+    The scan runs over the rPr's INNER children only: the wrapper itself is not
+    a child of the sequence, and treating it as one put the new element after
+    `</w:rPr>` -- schema-invalid XML `docx validate` rejected.
+    """
+    want = RPR_CHILD_ORDER.index(tag) if tag in RPR_CHILD_ORDER else len(RPR_CHILD_ORDER)
+    stripped = rpr.rstrip()
+    if stripped.endswith("/>"):
+        return f"<w:rPr>{element}</w:rPr>"
+    head_end = rpr.find(">") + 1
+    head, inner = rpr[:head_end], rpr[head_end:]
+    close = inner.rfind("</w:rPr>")
+    body, tail = (inner[:close], inner[close:]) if close >= 0 else (inner, "")
+    # place it after the LAST child that must precede it
+    last_before = 0
+    for m in re.finditer(r"<w:([A-Za-z]+)(?=[\s/>])", body):
+        child = m.group(1)
+        idx = RPR_CHILD_ORDER.index(child) if child in RPR_CHILD_ORDER else want
+        if idx <= want:
+            end = element_span(body, m.start(), child)[1]
+            last_before = max(last_before, end)
+    return head + body[:last_before] + element + body[last_before:] + tail
+
+
+def _run_with_override(run: str, element: str, tag: str) -> str:
+    """`run` with `element` spliced into its rPr (created when absent)."""
+    rpr = rpr_of(run)
+    if rpr is None:
+        head_end = run.find(">") + 1
+        return run[:head_end] + f"<w:rPr>{element}</w:rPr>" + run[head_end:]
+    return run.replace(rpr, _rpr_splice(rpr, element, tag), 1)
+
+
+def _caption_continuation_runs(inner: str, styles: dict, src_style: str,
+                               dst_style: str) -> str:
+    """`inner` (a continuation's run content) with the label style's own
+    bold/italic/size pinned OFF the moved runs where the two styles disagree.
+
+    The label paragraph keeps its pPr, so a caption label styled with a bold
+    Caption style would otherwise turn its whole legend bold when the
+    continuation is merged into it. A run that already carries its own direct
+    property keeps it; only the inherited difference is pinned.
+    """
+    props = []
+    for key in ("b", "i"):
+        src, dst = _style_flag(styles, src_style, key), _style_flag(styles, dst_style, key)
+        if src != dst:
+            props.append(key)
+    src_sz, dst_sz = style_sz(styles, src_style), style_sz(styles, dst_style)
+    if src_sz and dst_sz and src_sz != dst_sz:
+        props.append("sz")
+    if not props:
+        return inner
+    out, pos = [], 0
+    for r0, r1, run in runs(inner):
+        out.append(inner[pos:r0])
+        new_run = run
+        for key in props:
+            rpr = rpr_of(new_run)
+            if elem(rpr, key) is not None:
+                continue
+            if key in ("b", "i"):
+                src = _effective_run_flag(styles, src_style, new_run, key)
+                dst = _effective_run_flag(styles, dst_style, new_run, key)
+                if src == dst:
+                    continue
+                value = "0" if not (src or False) else "1"
+                latin = f'<w:{key} w:val="{value}"/>'
+                complex_script = f'<w:{key}Cs w:val="{value}"/>'
+            else:
+                latin = f'<w:sz w:val="{src_sz}"/>'
+                complex_script = f'<w:szCs w:val="{src_sz}"/>'
+            new_run = _run_with_override(new_run, latin, key)
+            new_run = _run_with_override(
+                new_run, complex_script, "szCs" if key == "sz" else key + "Cs")
+        out.append(new_run)
+        pos = r1
+    out.append(inner[pos:])
+    return "".join(out)
+
+
+def merged_caption_paragraph(parts: list, styles: dict) -> str | None:
+    """The single paragraph a caption block collapses to, or None to refuse.
+
+    `parts` is [(start, end, xml)] -- the label paragraph first, then its
+    continuation paragraphs, all byte-adjacent in the body. Every run travels
+    verbatim; the only bytes added are the separator space(s) and the
+    schema-ordered rPr overrides that keep a moved run's own bold/italic/size
+    (`_caption_continuation_runs`). Callers must verify the splice's byte range
+    covers exactly these paragraphs and nothing between them.
+    """
+    if not caption_block_mergeable(parts):
+        return None
+
+    label = parts[0][2]
+    split_label = _caption_para_split(label)
+    if split_label is None:
+        return None
+    head, ppr, content = split_label
+    out = head + ppr + content
+    text = text_of(label)
+    for _, _, cont in parts[1:]:
+        split_cont = _caption_para_split(cont)
+        if split_cont is None:
+            return None
+        _, _, ccontent = split_cont
+        ctext = text_of(cont)
+        if ctext and text and not text[-1:].isspace() and not ctext[:1].isspace():
+            out += '<w:r><w:t xml:space="preserve"> </w:t></w:r>'
+        out += _caption_continuation_runs(ccontent, styles,
+                                          _para_style(cont), _para_style(label))
+        text = _join_texts(text, ctext)
+    return out + "</w:p>"
+
+
+def _caption_para_split(para: str):
+    """(head, pPr, content) of one paragraph, or None when the shape is unusual."""
+    head_end = para.find(">") + 1
+    if head_end <= 0:
+        return None
+    head, inner = para[:head_end], para[head_end:]
+    ppr = ppr_of(para) or ""
+    if ppr and not inner.startswith(ppr):
+        return None
+    content = inner[len(ppr):]
+    if not content.endswith("</w:p>"):
+        return None
+    return head, ppr, content[:-len("</w:p>")]
+
+
+def caption_block_mergeable(parts: list) -> bool:
+    """Whether `parts` (label + continuations) can be merged without loss.
+
+    The scan and the fixer read this one predicate: a block it refuses is not a
+    mechanical row (`fix=editorial`, for the revision arms), so a caption
+    carrying a Zotero field or an image never makes the fixer's own
+    "mechanical findings cleared" verification fail.
+    """
+    if not parts or not text_of(parts[0][2]).strip():
+        return False
+    for _, _, para in parts:
+        if CAPTION_MERGE_REFUSE_RE.search(para) or "<w:sectPr" in para:
+            return False
+        if _caption_para_split(para) is None:
+            return False
+    return True
 
 
 def display_rules_apply(doc_name: str) -> bool:
@@ -4842,6 +5359,30 @@ def style_convention_rows(paras: list, styles: dict, doc: str) -> list:
                                     "missing level or restore the intermediate heading"),
                          "fix": "editorial", "protected": False, "tier": tier_of("FMT-T10e")})
         prev = level
+    # (f) a heading whose section holds exactly ONE child heading: FMT-T9k's
+    # "lone division" one level up. A section that divides at all divides into
+    # more than one part -- the lone subsection is either the parent's own
+    # content (promote it) or the section is missing the sibling it needs.
+    heads = _headings_in(paras)
+    for k, (idx, level) in enumerate(heads):
+        kids = []
+        for idx2, level2 in heads[k + 1:]:
+            if level2 <= level:
+                break
+            if level2 == level + 1:
+                kids.append(idx2)
+        if len(kids) != 1:
+            continue
+        parent = text_of(paras[idx][2]).strip()
+        child = text_of(paras[kids[0]][2]).strip()
+        rows.append({"rule": "FMT-T10f", "severity": "low", "document": doc,
+                     "location": f"p{idx}",
+                     "evidence": (f"the section {parent[:60]!r} (H{level}) holds exactly "
+                                  f"ONE subsection {child[:60]!r} (H{level + 1})"),
+                     "detail": ("a section that divides at all divides into more than one "
+                                "part: promote the lone subsection into its parent, or add "
+                                "the sibling the section is missing"),
+                     "fix": "editorial", "protected": False, "tier": tier_of("FMT-T10f")})
     return rows
 
 
@@ -7231,11 +7772,14 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     paras = paragraphs(xml)
     franges = field_ranges(xml)
 
-    def row(rule, severity, location, evidence, detail, protected=False):
+    def row(rule, severity, location, evidence, detail, protected=False, fix=None):
         # A finding inside a Zotero field is reported, never silently edited --
         # the fix kind has to say so, or the fixer's "all mechanical findings
         # resolved" verification would fail on a row it is not allowed to touch.
-        fix = _fix_kind(rule, policy)
+        # `fix` overrides the rule's default: a caption block the merge must
+        # refuse (a field or an image inside it) is an editorial row even though
+        # the rule is mechanical for the blocks the fixer can merge.
+        fix = fix or _fix_kind(rule, policy)
         if protected and fix == "mechanical":
             fix = "style-field"
         rows.append({"rule": rule, "severity": severity, "document": doc, "location": location,
@@ -7279,20 +7823,88 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # blank attached to a heading is FMT-S8, a run beyond the cap is FMT-S6.
     rows.extend(stray_empty_paragraph_rows(paras, policy, doc, xml))
 
-    # ---- legends --------------------------------------------------------------
-    legend_idx = [i for i, (_, _, p) in enumerate(paras) if LEGEND_RE.match(text_of(p))]
-    for i in legend_idx:
+    # ---- legends / captions ---------------------------------------------------
+    # The unit is the caption BLOCK: a label ("Fig. 2 | ...", "Figure S1. ...",
+    # "Table 3 ...") plus the paragraphs that continue it. A caption is ONE
+    # paragraph (FMT-T2c) and every paragraph of one caption carries the
+    # caption's spacing (FMT-T2a/T2b): a continuation left without direct
+    # spacing inherits the document default and renders 1.5-spaced beside a
+    # single-spaced caption -- the 2026-10-14 packages' Fig. 3 defect. Blocks
+    # are read inside the venue's own display areas (see
+    # `caption_block_ranges`); a figure label outside one still gets its own
+    # spacing rows, exactly as before.
+    areas = display_area_kinds(paras)
+    blocks = caption_block_ranges(paras, areas, container_spans(xml), xml=xml)
+    legend_rows = []
+    for b in blocks:
+        members = [b["label"]] + (b["continuations"] if b["in_area"] else [])
+        for m in members:
+            legend_rows.append((m, b))
+    in_blocks = {m for m, _ in legend_rows}
+    for i, (_, _, p) in enumerate(paras):
+        if LEGEND_RE.match(text_of(p)) and i not in in_blocks:
+            legend_rows.append((i, None))
+    legend_idx = sorted({m for m, _ in legend_rows})
+    for i, b in sorted(legend_rows):
         para = paras[i][2]
+        if b is not None and i != b["label"]:
+            what = (f"continuation paragraph of the {b['kind']} caption "
+                    f"{text_of(paras[b['label']][2]).strip()[:40]!r} (p{b['label']})")
+        elif b is not None:
+            what = f"{b['kind']} caption {text_of(para).strip()[:40]!r}"
+        else:
+            what = f"legend {text_of(para).strip()[:40]!r}"
         sp = elem(ppr_of(para), "spacing")
         line, before, after = attr(sp, "line"), attr(sp, "before"), attr(sp, "after")
         if line != str(policy["caption_line"]):
             row("FMT-T2a", "medium", f"p{i}",
-                f"legend line spacing {line or 'inherit'} != {policy['caption_line']} (single)",
-                "figure legends must be single-spaced")
+                f"{what} line spacing {line or 'inherit'} != {policy['caption_line']} "
+                f"(single)",
+                "a caption is single-spaced: a continuation left at the body's own "
+                "spacing renders one caption at two line spacings")
         if before != str(policy["caption_space"]) or after != str(policy["caption_space"]):
             row("FMT-T2b", "low", f"p{i}",
-                f"legend spacing before={before} after={after} != {policy['caption_space']}",
-                "legend paragraph spacing differs between figures")
+                f"{what} spacing before={before} after={after} != "
+                f"{policy['caption_space']}",
+                "legend paragraph spacing differs between captions")
+    for b in blocks:
+        if not (b["in_area"] and b["continuations"]):
+            continue
+        conts = ", ".join(f"p{c}" for c in b["continuations"][:4])
+        if len(b["continuations"]) > 4:
+            conts += f", +{len(b['continuations']) - 4} more"
+        row("FMT-T2c", "medium", f"p{b['label']}",
+            f"the {b['kind']} caption {text_of(paras[b['label']][2]).strip()[:50]!r} "
+            f"continues in {len(b['continuations'])} more paragraph(s) ({conts})",
+            "a caption is one paragraph: merge the continuation paragraph(s) into the "
+            "caption so the legend renders (and is read) as one block",
+            fix=None if b.get("mergeable") else "editorial")
+    # One caption family, one paragraph style: a caption that carries a
+    # different style from the majority of its siblings in the same area (a
+    # front-matter 'Author List' style on the first supplementary legend, say)
+    # renders differently from every other caption. A tie reports nothing --
+    # there is no majority to follow.
+    for area_kind in ("figure", "table"):
+        members = [b["label"] for b in blocks if b["in_area"] and b["kind"] == area_kind]
+        if len(members) < 2:
+            continue
+        seen = Counter(_para_style(paras[i][2]) for i in members)
+        if len(seen) < 2:
+            continue
+        majority, count = seen.most_common(1)[0]
+        if count * 2 <= len(members):
+            continue
+        for i in members:
+            style = _para_style(paras[i][2])
+            if style == majority:
+                continue
+            row("FMT-T2d", "low", f"p{i}",
+                f"the {area_kind} caption {text_of(paras[i][2]).strip()[:50]!r} carries "
+                f"paragraph style {style or '(body)'!r} while {count} of "
+                f"{len(members)} captions in this area use "
+                f"{majority or '(body)'!r}",
+                "one caption family, one paragraph style: align the minority with its "
+                "siblings")
 
     # ---- italics / journal emphasis -------------------------------------------
     # What is italic is decided by the FULL style precedence (direct rPr >
@@ -7526,6 +8138,13 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
                             or TABLE_CAPTION_BARE_RE.match(t)
                             or FIGURE_CAPTION_BARE_RE.match(t))
                        for t in para_texts]
+    # Table-cell and text-box paragraphs are not narrative paragraphs: the
+    # one-sentence rule (FMT-T9k) reads prose, and a cell holding a description
+    # is a table's cell however many words it carries.
+    _containers = container_spans(xml)
+    para_in_container = [any(a <= paras[i][0] < b for a, b in _containers)
+                         for i in range(len(paras))]
+    para_in_area = [bool(x) for x in display_area_kinds(paras)]
     # Reference-entry shape (FMT-R1..R5), glued front matter (FMT-X2),
     # publisher leftovers (FMT-L1) and the availability statements (FMT-AV1/A2)
     # are RETRIEVABILITY/HYGIENE classes: they hold wherever the text appears
@@ -7580,7 +8199,9 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
                          "location": r["location"], "evidence": r["evidence"],
                          "detail": r["detail"], "fix": _fix_kind(r["rule"], policy),
                          "protected": False, "tier": tier_of(r["rule"])})
-    for r in text_style_rows(para_texts, para_is_ref, para_is_head):
+    for r in text_style_rows(para_texts, para_is_ref, para_is_head,
+                             in_container=para_in_container,
+                             in_area=para_in_area):
         fix = _fix_kind(r["rule"], policy)
         if r.get("protected") and fix == "mechanical":
             fix = "style-field"
@@ -7903,14 +8524,84 @@ def fix_document(xml: str, styles: dict, policy: dict,
                        f"next to a heading or beyond the max_empty_paragraph_run cap "
                        f"(template-prescribed blanks kept)")
 
-    # 3. legend spacing ----------------------------------------------------------
+    # 3. caption/legend blocks ---------------------------------------------------
+    # One caption, one paragraph, one spacing, one style (see
+    # `caption_block_ranges`): the merge (FMT-T2c) first, so the spacing below
+    # runs on the paragraphs the file will actually ship.
+    # 3a. the caption's own paragraph style (FMT-T2d) ---------------------------
+    plist = paragraphs(xml)
+    areas = display_area_kinds(plist)
+    blocks = caption_block_ranges(plist, areas, container_spans(xml), xml=xml)
+    edits, n = [], 0
+    for area_kind in ("figure", "table"):
+        members = [x["label"] for x in blocks
+                   if x["in_area"] and x["kind"] == area_kind]
+        if len(members) < 2:
+            continue
+        seen = Counter(_para_style(plist[i][2]) for i in members)
+        majority, count = seen.most_common(1)[0]
+        if len(seen) < 2 or count * 2 <= len(members):
+            continue
+        for i in members:
+            para = plist[i][2]
+            if _para_style(para) == majority:
+                continue
+            pstyle = elem(ppr_of(para), "pStyle")
+            if pstyle is None:
+                continue
+            at = plist[i][0] + para.find(pstyle)
+            replacement = f'<w:pStyle w:val="{majority}"/>' if majority else ""
+            edits.append((at, at + len(pstyle), replacement))
+            n += 1
+    if edits:
+        xml = apply_edits(xml, edits)
+        changes.append(f"aligned {n} caption paragraph(s) with the paragraph style "
+                       f"their sibling captions in the same area use")
+
+    # 3b. merge multi-paragraph captions (FMT-T2c) ------------------------------
+    plist = paragraphs(xml)
+    areas = display_area_kinds(plist)
+    blocks = caption_block_ranges(plist, areas, container_spans(xml), xml=xml)
+    edits, joins, refused = [], [], 0
+    for b in blocks:
+        if not (b["in_area"] and b["continuations"]):
+            continue
+        parts = [plist[i] for i in [b["label"]] + b["continuations"]]
+        merged = merged_caption_paragraph(parts, styles)
+        if merged is None or not b.get("mergeable"):
+            refused += 1
+            continue
+        edits.append((parts[0][0], parts[-1][1], merged))
+        joins.append({"label": b["label"], "continuations": b["continuations"],
+                      "caption": text_of(parts[0][2]).strip()[:60]})
+    joined_baseline = None
+    if edits:
+        # The verifier compares the flattened document text; the merge turns two
+        # paragraphs into one, so it gets the joined baseline of THIS list.
+        joined_baseline = _flatten_with_joins([text_of(p[2]) for p in plist], joins)
+        xml = apply_edits(xml, edits)
+        changes.append(f"merged {len(edits)} multi-paragraph caption(s) into one "
+                       f"paragraph" + (f" ({refused} left for the revision arms: a "
+                                       f"field/image inside)" if refused else ""))
+
+    # 3c. the caption's line spacing (FMT-T2a/T2b) ------------------------------
     want_sp = (f'<w:spacing w:before="{policy["caption_space"]}" '
                f'w:after="{policy["caption_space"]}" w:line="{policy["caption_line"]}" '
                f'w:lineRule="auto"/>')
+    plist = paragraphs(xml)
+    areas = display_area_kinds(plist)
+    blocks = caption_block_ranges(plist, areas, container_spans(xml), xml=xml)
+    targets = set()
+    for b in blocks:
+        targets.add(b["label"])
+        if b["in_area"]:
+            targets.update(b["continuations"])
+    for i, (_, _, para) in enumerate(plist):
+        if LEGEND_RE.match(text_of(para)):
+            targets.add(i)
     edits, n = [], 0
-    for idx, (p0, p1, para) in enumerate(paragraphs(xml)):
-        if not LEGEND_RE.match(text_of(para)):
-            continue
+    for i in sorted(targets):
+        p0, p1, para = plist[i]
         ppr = ppr_of(para)
         if ppr and elem(ppr, "spacing"):
             old = elem(ppr, "spacing")
@@ -7931,7 +8622,7 @@ def fix_document(xml: str, styles: dict, policy: dict,
             n += 1
     if edits:
         xml = apply_edits(xml, edits)
-        changes.append(f"unified figure-legend spacing on {n} legend(s) "
+        changes.append(f"unified figure-legend spacing on {n} caption paragraph(s) "
                        f"(line={policy['caption_line']}, before/after={policy['caption_space']})")
 
     # 4. heading keepNext (+ optional size alignment) ---------------------------
@@ -8324,7 +9015,8 @@ def fix_document(xml: str, styles: dict, policy: dict,
             changes.append(f"restored the aspect ratio of {len(geo_fixes)} embedded "
                            f"image extent(s) from the image's own pixels")
 
-    return xml, changes, {"text_edits": text_edits, "text_stage_xml": text_stage_xml}
+    return xml, changes, {"text_edits": text_edits, "text_stage_xml": text_stage_xml,
+                          "caption_joins": joins, "text_baseline": joined_baseline}
 
 
 def fix_package(src: Path, out: Path, policy: dict) -> dict:
@@ -8458,9 +9150,13 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
 
     # Text identity is about the DOCUMENT TEXT, not about paragraph count: a
     # fix may delete an empty paragraph or split a run, which changes the
-    # newline count but not a single character of text.
+    # newline count but not a single character of text. A caption the fixer
+    # MERGED is the one structural change that joins two paragraph texts into
+    # one; `fix_document` records the joined baseline, and the comparison uses
+    # it so the merge is verified against the same text it started from.
     text_before = "\n".join(t for t in (text_of(p[2]) for p in paragraphs(xml_before)) if t.strip())
     text_after = "\n".join(t for t in (text_of(p[2]) for p in paragraphs(xml_after)) if t.strip())
+    text_baseline = meta.get("text_baseline") or text_before
     quote_free = lambda s: re.sub(r"[\"'\u2018\u2019\u201c\u201d]", "", s)
     # The recorded text edits (citation journals, spelling, hyphenation) are the
     # only allowed text differences; rebuild the expected text by applying them to
@@ -8494,11 +9190,12 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
     verified = {
         "zip_readable": True,
         "parts_intact": same_parts,
-        "text_identical": text_before == text_after,
-        "text_diff_only_quotes": quote_free(text_before) == quote_free(text_after),
-        "text_stage_diff_only_quotes": quote_free(text_before) == quote_free(text_stage),
+        "text_identical": text_baseline == text_after,
+        "text_diff_only_quotes": quote_free(text_baseline) == quote_free(text_after),
+        "text_stage_diff_only_quotes": quote_free(text_baseline) == quote_free(text_stage),
         "text_diff_only_recorded_edits": text_after == text_expected,
         "text_edits": len(meta.get("text_edits") or []),
+        "caption_joins": len(meta.get("caption_joins") or []),
         "mechanical_findings_before": len([r for r in before_rows if r["fix"] == "mechanical"]),
         "mechanical_findings_after": len([r for r in after_rows if r["fix"] == "mechanical"]),
         "remaining_mechanical_rules": remaining,

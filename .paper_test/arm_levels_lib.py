@@ -183,6 +183,23 @@ def test_scan_regression_compare():
                                                 "fixture")
     check("an unchanged package has no regression", not errs2 and not warns2,
           f"{errs2} {warns2}")
+    # A family the ORCHESTRATOR'S OWN format fixer gained while merging split
+    # captions (the merge changes how the caption text is read) is attributed to
+    # the normalizer: reported as a warning, not as the stage's regression.
+    (after / "m.md").write_text(
+        "A short clean sentence. Another one. " + ("word " * 60).strip() + ".\n",
+        encoding="utf-8")
+    errs3, warns3 = nb.scan_regression_problems(
+        ctx, [(before, "", ())], [(after, "", ())], "fixture",
+        fixer_reclassified={"FMT-T9c"})
+    check("a fixer-reclassified family is a WARNING that names the normalizer",
+          not errs3 and any("format normalization" in w and "FORMAT_FIX" in w for w in warns3),
+          f"{errs3} {warns3}")
+    check("_scan_rule_delta lists only the rules the fixer itself gained",
+          nb._scan_rule_delta({"scan_before": {"rows": [{"rule": "FMT-T9c"}]},
+                               "scan_after": {"rows": [{"rule": "FMT-T9c"},
+                                                       {"rule": "FMT-T8c"},
+                                                       {"rule": "FMT-T8c"}]}}) == ["FMT-T8c"])
 
 
 # ---------------------------------------------------------------------------

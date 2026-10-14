@@ -805,7 +805,7 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 import zipfile
-from collections import Counter
+from collections import Counter, deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timezone
 from pathlib import Path
@@ -6374,7 +6374,9 @@ M20_REVIEW_SWEEP = f"""3c. The PIPELINE-MANDATED OOXML formatting sweep M20 (alw
    and add any formatting defect the scan cannot see (font/size/justification/spacing/legend
    placement/table formatting, caption placement, heading numbering) as new rows. Classes the
    scan covers: break-only paragraphs and blank pages, header-on-title-page, tracked changes and
-   proofing markers, figure-legend spacing, heading keepNext/style drift, unintended italics
+   proofing markers, figure-legend spacing INCLUDING a caption split across several paragraphs
+   (FMT-T2c: a caption is one paragraph) and a caption carrying a paragraph style its sibling
+   captions in the same area do not (FMT-T2d), heading keepNext/style drift, unintended italics
    (Zotero bibliography/citation fields are field-protected: report them as style-level items,
    fixable through the CSL style or by unlinking the fields in the submission copy), missing or
    inconsistent journal italics, mixed hyperlink/plain URL and email treatments, mixed
@@ -9489,6 +9491,14 @@ LANGUAGE_PASS_RULE = """LANGUAGE PASS — a bounded, iterative pass over every e
        CONVENTIONS (character spacing, blank lines, line or paragraph breaks) are NOT this pass's
        business: the format scan and the orchestrator's normalizer own them, so never rewrite text
        for them here
+  PARAGRAPH AND SECTION SHAPE — the same rule at two levels of the outline: a container that
+  divides at all divides into more than one part. A narrative paragraph carries a claim plus its
+  support, so a paragraph built from ONE sentence reads as an accident (FMT-T9k, finding-tier):
+  merge the sentence into the paragraph it belongs to, or give the claim its support. A section
+  that divides at all holds two or more subsections, so a section holding exactly ONE subsection
+  is FMT-T10f: promote the lone subsection into its parent, or add the sibling the section is
+  missing. End-matter statements, acronym lists, captions and table cells are exempt by
+  construction.
   ONE worse word is one row: each step fixes every instance it finds, not only a recurring one, and
   a difference is a change only when one side is WORSE on the step's own criterion -- two equally
   acceptable readings are not an improvement.
@@ -9497,9 +9507,9 @@ LANGUAGE_PASS_RULE = """LANGUAGE PASS — a bounded, iterative pass over every e
   step, and the orchestrator records which steps are missing; an empty file is not a pass.
   AFTER EACH STEP, re-run the code-side scan of the package you are editing
   (`python paper_docx_format.py scan <package dir>`): a step that introduces a finding-tier row (a
-  long sentence, a new mega-paragraph, a nested parenthesis, a value+unit outside siunitx) is
-  fixed before the next step runs, because each step must leave the package no worse than it
-  found it.
+  long sentence, a new mega-paragraph, a new one-sentence paragraph FMT-T9k, a nested parenthesis,
+  a value+unit outside siunitx, a caption split into paragraphs FMT-T2c) is fixed
+  before the next step runs, because each step must leave the package no worse than it found it.
   Guards, all mandatory: never change a number, citation, accession, gene/tool name or a
   scientific claim's meaning; never invent content; keep every LaTeX macro, brace and
   environment intact (validate afterwards); a sentence you cannot improve without changing
@@ -10065,32 +10075,84 @@ def codex_config_path() -> Path:
     return base / "config.toml"
 
 
-def mcp_server_configured(name: str) -> bool:
-    """Is the Codex MCP server `name` configured AND startable on this machine?
+def _node_server_missing_deps(script: Path) -> bool:
+    """A Node server script whose declared dependencies are not installed.
 
-    The MCP tools are used by the AGENT sessions the pipeline launches, which
-    inherit the operator's Codex configuration; the orchestrator itself also
-    drives this one server (see `mcp_stdio_tool_call`) so the template renders IT
-    seeds use the same first-choice converter. What the probe answers is
-    therefore "can the agents we are about to start actually call this server?",
-    by checking the config written by `codex mcp add`
-    (`[mcp_servers.<name>]`) and verifying that the files the entry names still
-    exist (a deleted script used to look configured). A missing/unreadable
-    config yields False, and the prompts then tell the agents to use the next
-    converter in the list.
+    The two MCP servers this repo ships are `node <dir>/index.js`: their
+    `package.json` declares `@modelcontextprotocol/*`, and Node resolves
+    `node_modules` from the script's directory UPWARD. A copy without it (the
+    2026-10-14 state of every copy on this machine) exits with
+    `ERR_MODULE_NOT_FOUND` before it reads stdin, so the JSON-RPC handshake
+    sees EOF -- which is exactly the opaque "did not answer initialize()" the
+    tracking manifest recorded. Detecting it here turns that into an
+    actionable reason ("run `npm install` in <dir>").
+    """
+    pkg = script.parent / "package.json"
+    if not pkg.is_file():
+        return False
+    try:
+        data = json.loads(pkg.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return False
+    if not (isinstance(data, dict) and (data.get("dependencies") or {})):
+        return False
+    node, seen = script.parent, 0
+    while seen < 16:
+        if (node / "node_modules").is_dir():
+            return False
+        if node.parent == node:
+            break
+        node, seen = node.parent, seen + 1
+    return True
+
+
+# The companion shell script each SHIPPED MCP server drives. Both node servers
+# resolve it inside their own tool call (`../<script>`, `./<script>`, then
+# PATH): a copy deployed without it answers initialize() happily and then fails
+# EVERY tool call with `spawn <script> ENOENT` -- the 2026-10-15 state of the
+# configured docx-compare copy (`install_skill.sh` copies the mcp-* directories
+# but not the scripts they drive). The probe reports the gap up front.
+MCP_SERVER_COMPANIONS = {
+    DOCX_COMPARE_MCP_SERVER: ("docxcompare.sh", "DOCXCOMPARE_SH"),
+    DOCX_MCP_SERVER: ("docx2pdf.sh", "DOCX2PDF_SH"),
+}
+
+
+def _mcp_companion_missing(script: Path, companion: str, env_var: str = "") -> bool:
+    """True when `companion` is neither beside `script`/its parent nor on PATH.
+
+    An explicit override env var (`DOCXCOMPARE_SH`/`DOCX2PDF_SH`, which both
+    servers honour first) pointing at an executable file counts as present.
+    """
+    override = os.environ.get(env_var) if env_var else ""
+    if override and Path(override).is_file() and os.access(override, os.X_OK):
+        return False
+    for cand in (script.parent / companion, script.parent.parent / companion):
+        if cand.is_file() and os.access(str(cand), os.X_OK):
+            return False
+    return shutil.which(companion) is None
+
+
+def mcp_server_unusable_reason(name: str) -> str:
+    """Why the configured server `name` cannot start ('' when it looks usable).
+
+    The boolean probe below is this function == "": the pipeline's prompts and
+    the redline chain ask `mcp_server_configured`, while the manifests and the
+    redline readme print this REASON, so an operator sees the actionable cause
+    instead of a silent skip.
     """
     cfg = codex_config_path()
     try:
         text = cfg.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return False
+        return f"{name!r} is not configured in {cfg}"
     quoted = re.escape(name)
     header = re.compile(
         r"^\s*\[\s*mcp_servers\s*\.\s*(?:\"" + quoted + r"\"|'" + quoted + r"'|" + quoted +
         r")\s*\]\s*$", re.MULTILINE)
     m = header.search(text)
     if not m:
-        return False
+        return f"{name!r} is not configured in {cfg}"
     rest = text[m.end():]
     nxt = re.search(r"^\s*\[", rest, re.MULTILINE)
     body = rest[:nxt.start()] if nxt else rest
@@ -10101,18 +10163,53 @@ def mcp_server_configured(name: str) -> bool:
         exe = os.path.expanduser(cm.group(1).split()[0]) if cm.group(1).strip() else ""
         if exe.startswith(("/", "~")):
             if not Path(exe).exists():
-                return False
+                return f"the command it names is not installed: {exe}"
         elif exe and not shutil.which(exe):
-            return False
+            return f"the command it names is not on PATH: {exe}"
     candidates = [c for c in re.findall(r"[\"']([^\"']+)[\"']", body)
                   if c.startswith(("/", "~"))]
     if not candidates:
-        return False
+        return f"{name!r} names no absolute path for its server script"
     for cand in candidates:
         path = Path(os.path.expanduser(cand))
         if path.suffix.lower() in (".js", ".mjs", ".cjs", ".py", ".sh") and not path.exists():
-            return False              # the server script itself is gone
-    return any(Path(os.path.expanduser(c)).exists() for c in candidates)
+            return f"the server script it names is gone: {path}"
+    for cand in candidates:
+        path = Path(os.path.expanduser(cand))
+        if path.suffix.lower() in (".js", ".mjs", ".cjs") and path.is_file() \
+                and _node_server_missing_deps(path):
+            return (f"its Node dependencies are not installed: run `npm install` in "
+                    f"{path.parent}")
+    companion_pair = MCP_SERVER_COMPANIONS.get(name)
+    if companion_pair:
+        companion, env_var = companion_pair
+        server_scripts = [Path(os.path.expanduser(c)) for c in candidates
+                          if Path(os.path.expanduser(c)).suffix.lower()
+                          in (".js", ".mjs", ".cjs") and Path(os.path.expanduser(c)).is_file()]
+        if server_scripts and _mcp_companion_missing(server_scripts[0], companion, env_var):
+            return (f"the {companion} script its tool drives is missing: put it next to "
+                    f"{server_scripts[0].name} (or in its parent directory) or on PATH")
+    if not any(Path(os.path.expanduser(c)).exists() for c in candidates):
+        return f"none of the paths it names exists: {', '.join(candidates[:3])}"
+    return ""
+
+
+def mcp_server_configured(name: str) -> bool:
+    """Is the Codex MCP server `name` configured AND startable on this machine?
+
+    The MCP tools are used by the AGENT sessions the pipeline launches, which
+    inherit the operator's Codex configuration; the orchestrator itself also
+    drives this one server (see `mcp_stdio_tool_call`) so the template renders IT
+    seeds use the same first-choice converter. What the probe answers is
+    therefore "can the agents we are about to start actually call this server?",
+    by checking the config written by `codex mcp add`
+    (`[mcp_servers.<name>]`) and verifying that the files the entry names still
+    exist (a deleted script used to look configured) AND that a Node server's
+    declared dependencies are installed (`mcp_server_unusable_reason`, which
+    carries the actionable text). A missing/unreadable config yields False, and
+    the prompts then tell the agents to use the next converter in the list.
+    """
+    return mcp_server_unusable_reason(name) == ""
 
 
 # ---------------------------------------------------------------------
@@ -14885,6 +14982,24 @@ def _validate_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, input_dir: Path,
     return res
 
 
+def _scan_rule_delta(summary: dict) -> list:
+    """Finding-tier rules the format fixer's OWN scans gained (before -> after).
+
+    The caption merge (FMT-T2c) changes the text model: a continuation
+    paragraph becomes part of its legend, so rules that read the model (the
+    legend sentence bar, term repetition) can gain rows without the AGENT
+    having changed a character of text. The stage regression check reads this
+    attribution together with the fixer's own change list (see
+    `scan_regression_problems(..., fixer_reclassified=...)`).
+    """
+    def _counts(info) -> Counter:
+        return Counter(str(r.get("rule") or "")
+                       for r in ((info or {}).get("rows") or []))
+    before = _counts((summary or {}).get("scan_before"))
+    after = _counts((summary or {}).get("scan_after"))
+    return sorted(rule for rule, n in after.items() if rule and n > before.get(rule, 0))
+
+
 def _format_fix_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, warns: list,
                              errs: list = None) -> dict:
     """Normalize one stage package BEFORE it is fingerprinted, pinned or judged.
@@ -14930,6 +15045,10 @@ def _format_fix_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, warns: list,
             pkg_dir, pre_judge_format_policy(ctx), rec["id"], warns=warns,
             artifacts_dir=ctx.sandbox_of(rec), template=venue_word_templates(ctx) or None,
             containers=venue_containers(ctx))
+        # Finding-tier rules the fixer's OWN before/after scans gained in this
+        # package (see `_scan_rule_delta`): the caption merge changes the text
+        # model, so the stage regression check reads them with that attribution.
+        rec["format_fix_rules_introduced"] = _scan_rule_delta(rec["format_fix"])
     except Exception as e:                                            # noqa: BLE001
         rec["format_fix"] = {"label": rec["id"], "error": f"{type(e).__name__}: {e}"}
         warns.append(f"FORMAT-FIX: the code-side formatting normalization could not run "
@@ -22955,11 +23074,12 @@ def mcp_stdio_tool_call(spec: dict, tool: str, arguments: dict,
         return {"ok": False, "error": "the MCP server entry names no command"}
     try:
         proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, text=True, bufsize=1,
+                                stderr=subprocess.PIPE, text=True, bufsize=1,
                                 encoding="utf-8", errors="replace")
     except OSError as e:
         return {"ok": False, "error": f"the MCP server would not start: {e}"}
     lines = queue.Queue()
+    err_tail = deque(maxlen=6)
 
     def pump(stream) -> None:
         try:
@@ -22968,7 +23088,35 @@ def mcp_stdio_tool_call(spec: dict, tool: str, arguments: dict,
         finally:
             lines.put(None)
 
+    def pump_err(stream) -> None:
+        try:
+            for line in stream:
+                err_tail.append(line)
+        except (OSError, ValueError):
+            pass
+
     threading.Thread(target=pump, args=(proc.stdout,), daemon=True).start()
+    threading.Thread(target=pump_err, args=(proc.stderr,), daemon=True).start()
+
+    def failure(prefix: str) -> dict:
+        """`prefix` plus what the SERVER itself said, when saying nothing.
+
+        The handshake used to discard the server's stderr, so a server that
+        died on startup (a missing npm dependency -- the 2026-10-14 state of
+        the docx-compare/docx-converter copies) surfaced as the bare "did not
+        answer initialize()". One bounded wait drains the pipe, and the tail
+        travels into the manifest, so the operator sees the real error.
+        """
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=2)
+        time.sleep(0.05)
+        text = "".join(err_tail).strip().replace("\n", " | ")
+        bits = [prefix]
+        if proc.returncode is not None:
+            bits.append(f"the server exited with code {proc.returncode}")
+        if text:
+            bits.append(f"stderr: {text[-300:]}")
+        return {"ok": False, "error": "; ".join(bits)}
 
     def send(obj: dict) -> None:
         proc.stdin.write(json.dumps(obj) + "\n")
@@ -23001,7 +23149,7 @@ def mcp_stdio_tool_call(spec: dict, tool: str, arguments: dict,
                          "clientInfo": {"name": "paper_pipeline", "version": VERSION}}})
         init = wait_for(1, time.monotonic() + min(float(timeout), 60.0))
         if init is None:
-            return {"ok": False, "error": "the MCP server did not answer initialize()"}
+            return failure("the MCP server did not answer initialize()")
         if init.get("error"):
             return {"ok": False, "error": f"initialize() failed: {init['error']}"}
         send({"jsonrpc": "2.0", "method": "notifications/initialized"})
@@ -23009,8 +23157,7 @@ def mcp_stdio_tool_call(spec: dict, tool: str, arguments: dict,
               "params": {"name": tool, "arguments": arguments}})
         rep = wait_for(2, time.monotonic() + float(timeout))
         if rep is None:
-            return {"ok": False,
-                    "error": f"the MCP tool {tool} did not answer within {int(timeout)}s"}
+            return failure(f"the MCP tool {tool} did not answer within {int(timeout)}s")
         if rep.get("error"):
             return {"ok": False, "error": f"the MCP tool {tool} failed: {rep['error']}"}
         return {"ok": True, "result": rep.get("result") or {}}
@@ -27646,7 +27793,7 @@ def check_language_pass(ctx: Ctx, rec: dict, pkg: Path, label: str,
 
 
 def scan_regression_problems(ctx: Ctx, before_sources: list, after_sources: list,
-                             label: str) -> tuple:
+                             label: str, fixer_reclassified=None) -> tuple:
     """(errors, warnings): did the OUTPUT introduce a new finding-tier family?
 
     Every package-producing stage is compared with the package it started from,
@@ -27657,6 +27804,13 @@ def scan_regression_problems(ctx: Ctx, before_sources: list, after_sources: list
     family that was already present is reported as a warning, because a stage
     legitimately trades rows inside a family (splitting one sentence can create
     a shorter one elsewhere).
+
+    `fixer_reclassified` names the rules the orchestrator's OWN format fixer
+    gained rows for in the delivered package while merging split captions (see
+    `_scan_rule_delta` + `add_stage_quality_checks`): a family that appeared
+    because the caption text is now READ as a legend is a pipeline-side
+    text-model artifact, reported as a warning -- the review still disposes the
+    rows -- instead of failing a stage that changed no text.
 
     This is ALSO where the venue's own TABLE rule is enforced (rules FMT-TB1
     ..FMT-TB3): a rule the venue profile declares is not a regression question
@@ -27685,6 +27839,7 @@ def scan_regression_problems(ctx: Ctx, before_sources: list, after_sources: list
 
     before, after = counts(before_info), counts(after_info)
     errs, warns = [], []
+    fixer_reclassified = set(fixer_reclassified or ())
     for rule in sorted(set(before) | set(after)):
         if rule in DISPLAY_RULE_IDS:
             # The venue's table/figure rule is enforced by `display_rule_errors`
@@ -27694,6 +27849,14 @@ def scan_regression_problems(ctx: Ctx, before_sources: list, after_sources: list
         if after[rule] <= before[rule]:
             continue
         if before[rule] == 0:
+            if rule in fixer_reclassified:
+                warns.append(
+                    f"{label}: the new {rule} row(s) ({after[rule]}) come from the "
+                    f"orchestrator's own format normalization (it merged split captions, "
+                    f"which changes how the caption's text is read), not from this stage's "
+                    f"edit -- recorded in the run's FORMAT_FIX artifact; the review disposes "
+                    f"the row(s)")
+                continue
             errs.append(
                 f"{label}: the delivered package introduces a NEW finding-tier defect family "
                 f"{rule} ({after[rule]} row(s); the package it started from had none) -- fix it "
@@ -27808,7 +27971,17 @@ def add_stage_quality_checks(ctx: Ctx, rec: dict, before_sources: list, after_so
                              pkg: Path, label: str, errs: list, warns: list) -> None:
     """The language pass + the "no NEW finding-tier family" comparison."""
     check_language_pass(ctx, rec, pkg, label, errs, warns)
-    rerrs, rwarns = scan_regression_problems(ctx, before_sources, after_sources, label)
+    # A caption the format fixer MERGED changes how the caption's text is read
+    # (a continuation paragraph becomes part of its legend), so a rule the fixer
+    # itself gained rows for is attributed to the normalizer, not to this
+    # stage's edit -- reported as a warning that names the FORMAT_FIX artifact.
+    merged_captions = any(
+        "multi-paragraph caption" in str(change)
+        for doc in ((rec.get("format_fix") or {}).get("documents") or [])
+        for change in (doc.get("changes") or []))
+    reclassified = set(rec.get("format_fix_rules_introduced") or ()) if merged_captions else set()
+    rerrs, rwarns = scan_regression_problems(ctx, before_sources, after_sources, label,
+                                             fixer_reclassified=reclassified)
     errs.extend(rerrs)
     warns.extend(rwarns)
 AUDIT_VERDICTS = ("confirm", "drop")
@@ -34661,6 +34834,14 @@ def cmd_setup(args) -> None:
     _fmt_mod = script.with_name(DOCX_FORMAT_MODULE)
     if _fmt_mod.is_file():
         shutil.copy(_fmt_mod, root / DOCX_FORMAT_MODULE)
+    # The redline adapter travels with the root too: the tracking stage's
+    # python-redlines backend resolves it NEXT TO THE RUNNING SCRIPT, and a root
+    # without it silently skipped that engine (the weaker fallbacks then
+    # over-marked a small edit as whole-paragraph rewrites -- exactly what
+    # `redline_fidelity` now flags).
+    _adapter = script.with_name(REDLINE_ADAPTER_NAME)
+    if _adapter.is_file():
+        shutil.copy(_adapter, root / REDLINE_ADAPTER_NAME)
     # The venue profiles travel with the root too: the root stays
     # self-contained, `set-venue --profile` has a directory to install into,
     # and a root-local edit overrides the shipped copy. The config's snapshot is
@@ -41970,6 +42151,12 @@ def cmd_run_decide(args) -> None:
 
 REDLINE_DIRNAME = "redlines"
 REDLINE_AUTHOR = "paper_pipeline"
+# The python-redlines adapter ships in the repo root next to the orchestrator;
+# `setup` copies it into the root with `paper_docx_format.py` so the tracking
+# stage's second backend is available where the run actually executes. A root
+# without it used to skip `python-redlines[docxodus]` silently and fall through
+# to the weaker engines (see `redline_fidelity`).
+REDLINE_ADAPTER_NAME = "paper_redlines_adapter.py"
 REDLINE_TOOLS = ("auto", "docx-compare", "redlines", "docx-trackdiff", "builtin", "none")
 # The backend NAME every manifest/README row uses for the Word-native compare.
 REDLINE_COMPARE_BACKEND = "docx-compare (Word CompareDocuments via MCP)"
@@ -42058,8 +42245,60 @@ def match_docx_pairs(base_sources: list, cand_sources: list) -> tuple:
 
 
 def redline_adapter_path() -> Path:
-    """The python-redlines adapter shipped next to this script."""
-    return Path(__file__).resolve().with_name("paper_redlines_adapter.py")
+    """The python-redlines adapter shipped next to this script.
+
+    `setup` copies it into the root with the other modules (see
+    `REDLINE_ADAPTER_NAME`); a root created before that copy existed resolves a
+    path that is not there, which is why the backend now also runs the
+    engine IN PROCESS (`_redlines_inproc`) before giving up.
+    """
+    return Path(__file__).resolve().with_name(REDLINE_ADAPTER_NAME)
+
+
+def _redlines_inproc(base: Path, revised: Path, out: Path) -> dict:
+    """Run `python-redlines` in THIS process (no adapter file needed).
+
+    The docxodus engine extracts a binary lazily; a read-only user cache (a
+    sandboxed home) makes the first call fail, so the engine is retried against
+    a writable temp cache -- the same two-step the adapter performs, minus the
+    file-path dependency that silently skipped this backend on every root.
+    """
+    try:
+        import python_redlines as mod                             # noqa: PLC0415
+    except ImportError as e:
+        return {"backend": "python-redlines[docxodus]", "ok": False, "rc": None,
+                "detail": f"python-redlines is not importable: {e}"}
+    attempts = []
+    for eng_name in ("DocxodusEngine", "XmlPowerToolsEngine"):
+        cls = getattr(mod, eng_name, None)
+        if cls is None:
+            continue
+        tmp_cache = None
+        for use_tmp in (False, True):
+            if use_tmp and tmp_cache is None:
+                tmp_cache = tempfile.mkdtemp(prefix="paper-redlines-")
+            try:
+                data, _stdout, _stderr = (cls(tmp_cache) if use_tmp else cls()).run_redline(
+                    REDLINE_AUTHOR, str(base), str(revised))
+            except Exception as e:                                # noqa: BLE001
+                attempts.append(f"{eng_name}: {type(e).__name__}: {e}")
+                continue
+            if data:
+                try:
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    out.write_bytes(data)
+                except OSError as e:
+                    attempts.append(f"{eng_name}: cannot write {out}: {e}")
+                    continue
+                if tmp_cache:
+                    shutil.rmtree(tmp_cache, ignore_errors=True)
+                return {"backend": "python-redlines[docxodus]", "cmd": ["in-process", eng_name],
+                        "rc": 0, "ok": True,
+                        "detail": f"python-redlines:{eng_name}.run_redline (in process)"}
+        if tmp_cache:
+            shutil.rmtree(tmp_cache, ignore_errors=True)
+    return {"backend": "python-redlines[docxodus]", "ok": False, "rc": None,
+            "detail": "; ".join(attempts)[:300] or "no supported engine class"}
 
 
 def _argv_from_template(template: list, base: Path, revised: Path, out: Path) -> list:
@@ -42114,8 +42353,11 @@ def docx_is_readable(path: Path) -> tuple:
         return False, f"{type(e).__name__}: {str(e)[:160]}"
 
 
+WORDML_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
 def _w(tag: str) -> str:
-    return f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}{tag}"
+    return f"{{{WORDML_NS}}}{tag}"
 
 
 MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
@@ -42164,15 +42406,6 @@ def _para_text(p) -> str:
     return "".join(t.text or "" for t in p.iter(_w("t")))
 
 
-def _new_run(text: str, del_text: bool = False):
-    r = ET.Element(_w("r"))
-    t = ET.SubElement(r, _w("delText") if del_text else _w("t"))
-    if text[:1].isspace() or text[-1:].isspace():
-        t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-    t.text = text
-    return r
-
-
 def _track_change(tag: str, counter: list, ts: str):
     el = ET.Element(_w(tag))
     counter[0] += 1
@@ -42199,39 +42432,247 @@ def _wrap_para(p, tag: str, del_text: bool, counter: list, ts: str):
     return new_p
 
 
+def _para_atoms(p) -> list:
+    """[{kind, text, element, rpr, split}] of one paragraph, in document order.
+
+    kind "text": `text` is the run's text, `element` its source element (a run
+    or an opaque container such as a hyperlink), `rpr` its own rPr XML, `split`
+    True when the writer may cut the text at a character boundary. kind "mark":
+    `text` is the XML of an inline element with no text of its own (a SOFT LINE
+    BREAK, a tab, a field char, a drawing). "".join(text) is the paragraph text.
+    """
+    atoms = []
+    for ch in list(p):
+        if ch.tag == _w("pPr"):
+            continue
+        if ch.tag == _w("r"):
+            rpr_xml = None
+            simple = all(g.tag in (_w("rPr"), _w("t"), _w("br"), _w("cr"), _w("tab"),
+                                   _w("lastRenderedPageBreak"), _w("noBreakHyphen"),
+                                   _w("softHyphen")) for g in ch)
+            if not simple:
+                # A run carrying something the writer must not split
+                # (fldChar/instrText/drawing): keep the WHOLE run.
+                atoms.append({"kind": "mark", "text": ET.tostring(ch).decode(),
+                              "element": None, "rpr": None, "split": True})
+                continue
+            for g in list(ch):
+                if g.tag == _w("rPr"):
+                    rpr_xml = ET.tostring(g).decode()
+                elif g.tag == _w("t"):
+                    atoms.append({"kind": "text", "text": g.text or "", "element": ch,
+                                  "rpr": rpr_xml, "split": True})
+                else:
+                    mark = ("<w:r>" + (rpr_xml or "") + ET.tostring(g).decode() + "</w:r>")
+                    atoms.append({"kind": "mark", "text": mark, "element": None,
+                                  "rpr": None, "split": True})
+        else:
+            text = "".join(t.text or "" for t in ch.iter(_w("t")))
+            if text:
+                atoms.append({"kind": "text", "text": text, "element": ch,
+                              "rpr": None, "split": False})
+            else:
+                atoms.append({"kind": "mark", "text": ET.tostring(ch).decode(),
+                              "element": None, "rpr": None, "split": True})
+    return atoms
+
+
+def _atoms_digest(atoms: list):
+    """(text, spans, marks) of an atom list; spans are [start, end, atom]."""
+    text, spans, marks, pos = [], [], [], 0
+    for atom in atoms:
+        if atom["kind"] == "text":
+            spans.append([pos, pos + len(atom["text"]), atom])
+            text.append(atom["text"])
+            pos += len(atom["text"])
+        else:
+            marks.append([pos, atom])
+    return "".join(text), spans, marks
+
+
+class _ReplaceFallback(Exception):
+    """The paragraph cannot be rewritten piecewise: use whole-paragraph markup."""
+
+
+def _emit_text(out: list, text: str, spans: list, marks: list, start: int, end: int,
+               mode: str, counter: list, ts: str) -> None:
+    """Append `text[start:end]` to `out`, as tracked changes of `mode`.
+
+    Text pieces are cut at the stream's own run boundaries, and the marks (soft
+    line breaks, tabs, field chars) are interleaved at their OWN offsets: a
+    SHIFT+ENTER break must stay between the same two words in the redline as in
+    the paragraph it came from. A mark inside a deleted piece is a deleted
+    break (`<w:delText>` conversion included); a container the stream may not
+    split (`atom["split"]` False) only travels whole, else the paragraph falls
+    back to whole-paragraph markup.
+    """
+    if end <= start:
+        return
+
+    def text_pieces(s: int, e: int) -> list:
+        pieces, pos = [], s
+        while pos < e:
+            span = next((sp for sp in spans if sp[0] <= pos < sp[1]), None)
+            if span is None:
+                raise _ReplaceFallback()
+            atom = span[2]
+            stop = min(e, span[1])
+            whole = (pos == span[0] and stop == span[1])
+            if not atom["split"] and not whole:
+                raise _ReplaceFallback()
+            if whole and not atom["split"] and atom["element"] is not None:
+                pieces.append(("element", atom["element"]))
+            else:
+                run = ET.Element(_w("r"))
+                if atom["rpr"]:
+                    run.append(ET.fromstring(atom["rpr"]))
+                t = ET.SubElement(run, _w("delText") if mode == "del" else _w("t"))
+                piece_text = text[pos:stop]
+                if piece_text[:1].isspace() or piece_text[-1:].isspace():
+                    t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+                t.text = piece_text
+                pieces.append(("run", run))
+            pos = stop
+        return pieces
+
+    def mark_elements(atom) -> list:
+        try:
+            parsed = ET.fromstring(f'<w:wrap xmlns:w="{WORDML_NS}">'
+                                   f'{atom["text"]}</w:wrap>')
+        except ET.ParseError:
+            return []
+        children = [copy.deepcopy(c) for c in list(parsed)]
+        if mode == "del":
+            for child in children:
+                for t in child.iter(_w("t")):
+                    t.tag = _w("delText")
+        return children
+
+    events = []                                    # ("text", pieces) | ("mark", atom)
+    pos = start
+    for at, atom in sorted([(a, m) for a, m in marks if start <= a < end],
+                           key=lambda pair: pair[0]):
+        if at > pos:
+            events.append(("text", text_pieces(pos, at)))
+            pos = at
+        events.append(("mark", atom))
+    if pos < end:
+        events.append(("text", text_pieces(pos, end)))
+
+    if mode == "eq":
+        for kind, payload in events:
+            if kind == "mark":
+                out.extend(mark_elements(payload))
+                continue
+            for piece_kind, value in payload:
+                out.append(copy.deepcopy(value) if piece_kind == "element" else value)
+        return
+    wrapper = _track_change("del" if mode == "del" else "ins", counter, ts)
+    for kind, payload in events:
+        if kind == "mark":
+            for element in mark_elements(payload):
+                wrapper.append(element)
+            continue
+        for piece_kind, value in payload:
+            if piece_kind != "element":
+                wrapper.append(value)
+                continue
+            element = copy.deepcopy(value)
+            if mode == "del":
+                for t in element.iter(_w("t")):
+                    t.tag = _w("delText")
+            wrapper.append(element)
+    out.append(wrapper)
+
+
 def _replace_para(bp, rp, counter: list, ts: str):
-    """Word-level tracked changes inside one changed paragraph."""
+    """Word-level tracked changes inside one changed paragraph.
+
+    The diff is walked OP BY OP (equal / insert / delete / replace), so the
+    tracked-changes document keeps both contracts Word readers rely on:
+    ACCEPTING every change reproduces the revised paragraph, and REJECTING every
+    change reproduces the base paragraph. Every run's own rPr rides with its
+    text, and the non-text inline elements (a SOFT LINE BREAK from SHIFT+ENTER,
+    a tab, a Zotero field char) keep their places in both streams -- the old
+    writer rebuilt the paragraph from plain text and silently dropped them (the
+    2026-10-14 NeoHetero redline's correspondence block lost both of its soft
+    line breaks and read as one line).
+
+    A paragraph the walk cannot split piecewise (an opaque hyperlink/field
+    container whose text takes part in a change, an unwalkable structure) falls
+    back to WHOLE-PARAGRAPH markup: the base paragraph deleted and the revised
+    paragraph inserted with its own XML, so nothing inside it is lost either.
+    """
+    try:
+        base_text, base_spans, base_marks = _atoms_digest(_para_atoms(bp))
+        rev_text, rev_spans, rev_marks = _atoms_digest(_para_atoms(rp))
+    except (ET.ParseError, RecursionError):
+        return _whole_paragraph_change(bp, rp, counter, ts)
+    if base_text != _para_text(bp) or rev_text != _para_text(rp):
+        return _whole_paragraph_change(bp, rp, counter, ts)
+
+    base_words = re.findall(r"\S+\s*", base_text)
+    rev_words = re.findall(r"\S+\s*", rev_text)
+    base_off, rev_off = [0], [0]
+    for w in base_words:
+        base_off.append(base_off[-1] + len(w))
+    for w in rev_words:
+        rev_off.append(rev_off[-1] + len(w))
+
+    out = []
+    try:
+        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+                None, base_words, rev_words, autojunk=False).get_opcodes():
+            if tag == "equal":
+                _emit_text(out, rev_text, rev_spans, rev_marks,
+                           rev_off[j1], rev_off[j2], "eq", counter, ts)
+            elif tag == "insert":
+                _emit_text(out, rev_text, rev_spans, rev_marks,
+                           rev_off[j1], rev_off[j2], "ins", counter, ts)
+            elif tag == "delete":
+                _emit_text(out, base_text, base_spans, base_marks,
+                           base_off[i1], base_off[i2], "del", counter, ts)
+            else:
+                _emit_text(out, base_text, base_spans, base_marks,
+                           base_off[i1], base_off[i2], "del", counter, ts)
+                _emit_text(out, rev_text, rev_spans, rev_marks,
+                           rev_off[j1], rev_off[j2], "ins", counter, ts)
+    except (_ReplaceFallback, ET.ParseError, RecursionError):
+        return _whole_paragraph_change(bp, rp, counter, ts)
+
     new_p = ET.Element(_w("p"))
-    pr = bp.find(_w("pPr"))
+    pr = rp.find(_w("pPr")) if rp.find(_w("pPr")) is not None else bp.find(_w("pPr"))
     if pr is not None:
         new_p.append(copy.deepcopy(pr))
-    base_words = re.findall(r"\S+\s*", _para_text(bp))
-    rev_words = re.findall(r"\S+\s*", _para_text(rp))
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
-            None, base_words, rev_words, autojunk=False).get_opcodes():
-        if tag == "equal":
-            for word in base_words[i1:i2]:
-                new_p.append(_new_run(word))
-        elif tag == "delete":
-            tc = _track_change("del", counter, ts)
-            for word in base_words[i1:i2]:
-                tc.append(_new_run(word, del_text=True))
-            new_p.append(tc)
-        elif tag == "insert":
-            tc = _track_change("ins", counter, ts)
-            for word in rev_words[j1:j2]:
-                tc.append(_new_run(word))
-            new_p.append(tc)
-        else:
-            tc = _track_change("del", counter, ts)
-            for word in base_words[i1:i2]:
-                tc.append(_new_run(word, del_text=True))
-            new_p.append(tc)
-            tc = _track_change("ins", counter, ts)
-            for word in rev_words[j1:j2]:
-                tc.append(_new_run(word))
-            new_p.append(tc)
+    for element in out:
+        new_p.append(element)
     return new_p
+
+
+def _whole_paragraph_change(bp, rp, counter: list, ts: str):
+    """The fallback: the base paragraph deleted, the revised one inserted AS IS.
+
+    Nothing inside the revised paragraph is rebuilt from text, so every soft
+    line break, tab, field and drawing survives; the markup is paragraph-level
+    (and the attempt log records that), never lossy.
+    """
+    wrapper = ET.Element(_w("p"))
+    pr = rp.find(_w("pPr")) if rp.find(_w("pPr")) is not None else bp.find(_w("pPr"))
+    if pr is not None:
+        wrapper.append(copy.deepcopy(pr))
+    del_el = _track_change("del", counter, ts)
+    for child in list(bp):
+        if child is not bp.find(_w("pPr")):
+            del_el.append(copy.deepcopy(child))
+    for t in del_el.iter(_w("t")):
+        t.tag = _w("delText")
+    ins_el = _track_change("ins", counter, ts)
+    for child in list(rp):
+        if child is not rp.find(_w("pPr")):
+            ins_el.append(copy.deepcopy(child))
+    wrapper.append(del_el)
+    wrapper.append(ins_el)
+    return wrapper
 
 
 def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path) -> dict:
@@ -42341,6 +42782,85 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
     return info
 
 
+def redline_markup_weight(docx: Path) -> dict:
+    """Words the tracked-changes document marks: {"ins": n, "del": n}."""
+    ins = dele = 0
+    try:
+        _, base_root = _docx_root(docx)
+    except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError):
+        return {"ins": 0, "del": 0}
+    for el in base_root.iter(_w("ins")):
+        ins += len(" ".join(t.text or "" for t in el.iter(_w("t"))).split())
+    for el in base_root.iter(_w("del")):
+        dele += len(" ".join(t.text or "" for t in el.iter(_w("delText"))).split())
+    return {"ins": ins, "del": dele}
+
+
+def redline_minimal_weight(base: Path, revised: Path) -> dict:
+    """The least markup a FAITHFUL redline needs for this pair.
+
+    Paragraph-aligned, then word-level inside the paired paragraphs (the
+    built-in writer's own alignment). A redline may legitimately exceed it (a
+    moved paragraph is delete+insert to every engine that does not track
+    moves), so the check this feeds only fires on the order-of-magnitude
+    over-marking a whole-paragraph fallback produces -- the 2026-10-14 CNB
+    main-text redline marked 624 words for 84 words of real change.
+    """
+    words = lambda s: len(re.findall(r"\S+\s*", s or ""))          # noqa: E731
+    try:
+        _, base_root = _docx_root(base)
+        _, rev_root = _docx_root(revised)
+        base_body, rev_body = base_root.find(_w("body")), rev_root.find(_w("body"))
+        base_texts = [_para_text(p) for p in base_body.findall(_w("p"))]
+        rev_texts = [_para_text(p) for p in rev_body.findall(_w("p"))]
+    except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError, AttributeError):
+        return {"ins": 0, "del": 0}
+    ins = dele = 0
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+            None, base_texts, rev_texts, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        if tag == "insert":
+            ins += sum(words(t) for t in rev_texts[j1:j2])
+            continue
+        if tag == "delete":
+            dele += sum(words(t) for t in base_texts[i1:i2])
+            continue
+        common = min(i2 - i1, j2 - j1)
+        for k in range(common):
+            a = re.findall(r"\S+\s*", base_texts[i1 + k])
+            b = re.findall(r"\S+\s*", rev_texts[j1 + k])
+            for op, a1, a2, b1, b2 in difflib.SequenceMatcher(
+                    None, a, b, autojunk=False).get_opcodes():
+                if op in ("insert", "replace"):
+                    ins += b2 - b1
+                if op in ("delete", "replace"):
+                    dele += a2 - a1
+        ins += sum(words(t) for t in rev_texts[j1 + common:j2])
+        dele += sum(words(t) for t in base_texts[i1 + common:i2])
+    return {"ins": ins, "del": dele}
+
+
+def redline_fidelity(base: Path, revised: Path, out: Path) -> dict:
+    """How faithful `out` is, as far as a code-side check can tell.
+
+    `over_marked` is the red-flag the 2026-10-14 run needed: a backend that
+    rewrites whole paragraphs when it cannot diff their runs (docx-trackdiff's
+    granular fallback) marks an order of magnitude more words than the pair
+    really changes, which a reader takes for "a huge edit". The tracking stage
+    records these numbers per attempt and prefers the least-marked backend.
+    """
+    marked = redline_markup_weight(out)
+    minimal = redline_minimal_weight(base, revised)
+    marked_w = marked["ins"] + marked["del"]
+    minimal_w = minimal["ins"] + minimal["del"]
+    over = bool(minimal_w) and marked_w > max(3 * minimal_w, minimal_w + 200)
+    return {"marked_words": marked_w, "minimal_words": minimal_w,
+            "marked_ins": marked["ins"], "marked_del": marked["del"],
+            "minimal_ins": minimal["ins"], "minimal_del": minimal["del"],
+            "over_marked": over}
+
+
 def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
                      out: Path) -> dict:
     """Create one tracked-changes docx; returns the attempt log (never raises)."""
@@ -42379,6 +42899,8 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
                     "detail": f"cannot clear a stale output file: {e}"}
 
     attempts = []
+    winner = None
+    best = None                     # (marked words, temp copy, attempt record)
     for backend in order:
         stale = drop_stale_out(backend)
         if stale:
@@ -42392,13 +42914,19 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
             if not compare_spec:
                 # Not an attempt: the machine has no usable compare server, so
                 # the chain moves on. Recorded, so the manifest says why the
-                # first-choice engine was not the one that produced the file.
+                # first-choice engine was not the one that produced the file --
+                # WITH the probe's own reason (a missing command, a deleted
+                # script, an uninstalled Node dependency), which is what tells
+                # the operator what to fix.
+                reason = mcp_server_unusable_reason(DOCX_COMPARE_MCP_SERVER)
                 attempts.append({
                     "backend": REDLINE_COMPARE_BACKEND,
                     "cmd": ["mcp", DOCX_COMPARE_MCP_SERVER, DOCX_COMPARE_MCP_TOOL],
                     "rc": None, "ok": False, "skipped": True,
                     "detail": f"the {DOCX_COMPARE_MCP_SERVER!r} MCP server is not configured/"
-                              f"startable on this machine; the next redline backend was used"})
+                              f"startable on this machine"
+                              + (f" ({reason})" if reason else "")
+                              + "; the next redline backend was used"})
                 continue
             res = mcp_compare_docx(compare_spec, base, revised, out)
             ooxml_ok, ooxml_detail = (docx_is_readable(out) if res.get("ok")
@@ -42412,15 +42940,32 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
                 "ok": bool(res.get("ok") and ooxml_ok), "detail": detail,
                 "validated_ooxml": bool(ooxml_ok)})
         elif backend == "redlines":
-            adapter = redline_adapter_path()
-            if not adapter.is_file():
-                attempts.append({"backend": "python-redlines[docxodus]", "ok": False, "rc": None,
-                                 "detail": f"adapter missing: {adapter}"})
-            else:
-                res = _run_redline_cmd([sys.executable, str(adapter), str(base), str(revised),
-                                        str(out)], out)
-                res["backend"] = "python-redlines[docxodus]"
+            stale = drop_stale_out(backend)
+            if stale:
+                attempts.append(stale)
+                continue
+            res = _redlines_inproc(base, revised, out)
+            ooxml_ok, ooxml_detail = (docx_is_readable(out) if res.get("ok")
+                                      else (False, "no output file"))
+            res["validated_ooxml"] = bool(ooxml_ok)
+            if res.get("ok") and not ooxml_ok:
+                res["ok"] = False
+                res["detail"] = f"the engine wrote an unreadable package: {ooxml_detail}"
                 attempts.append(res)
+                continue
+            attempts.append(res)
+            if not res.get("ok"):
+                # The engine was not importable (or failed): fall back to the
+                # adapter CLI, which probes further interface shapes.
+                adapter = redline_adapter_path()
+                if not adapter.is_file():
+                    attempts.append({"backend": "python-redlines[docxodus]", "ok": False,
+                                     "rc": None, "detail": f"adapter missing: {adapter}"})
+                else:
+                    res2 = _run_redline_cmd([sys.executable, str(adapter), str(base),
+                                             str(revised), str(out)], out)
+                    res2["backend"] = "python-redlines[docxodus]"
+                    attempts.append(res2)
         elif backend == "docx-trackdiff":
             for argv in (["docx-trackdiff", str(base), str(revised), str(out)],
                          ["docx-trackdiff", "--base", str(base), "--revised", str(revised),
@@ -42448,9 +42993,55 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
             except Exception as e:                              # noqa: BLE001
                 attempts.append({"backend": "builtin-ooxml", "cmd": ["builtin"], "rc": None,
                                  "ok": False, "detail": str(e)[:300]})
-        if attempts and attempts[-1].get("ok"):
+        last = attempts[-1] if attempts else None
+        if not (last and last.get("ok")):
+            continue
+        # A backend that produced a readable redline is not yet a usable one:
+        # Word's own compare can mark a moved paragraph delete+insert, but a
+        # backend that cannot diff a paragraph's runs rewrites the WHOLE
+        # paragraph for a small edit. Measure the markup against the least a
+        # faithful redline needs and prefer the quietest engine: a backend that
+        # over-marks hands the pair to the next one, and the best (least marked)
+        # result is kept when every backend over-marks.
+        fidelity = redline_fidelity(base, revised, out)
+        last["fidelity"] = fidelity
+        if fidelity["over_marked"]:
+            last["warning"] = (f"over-marked redline: {fidelity['marked_words']} marked word(s) "
+                               f"for {fidelity['minimal_words']} word(s) of real change (the "
+                               f"backend rewrites whole paragraphs when a run is not plain "
+                               f"text)")
+        # An operator's EXPLICIT choice of backend (`--redline-tool`, or a
+        # `--redline-cmd` they wired) is honoured: the numbers are recorded and
+        # the caveat is reported, but the chain does not shop for a quieter
+        # engine. Under `auto`, the quietest engine wins.
+        if not fidelity["over_marked"] or tool != "auto":
+            winner = last
             break
-    winner = next((a for a in attempts if a.get("ok")), None)
+        fd, saved_name = tempfile.mkstemp(prefix="paper-redline-", suffix=".docx")
+        os.close(fd)
+        saved = Path(saved_name)
+        shutil.copyfile(out, saved)
+        if best is None or fidelity["marked_words"] < best[0]:
+            if best is not None:
+                with contextlib.suppress(OSError):
+                    best[1].unlink()
+            best = (fidelity["marked_words"], saved, last)
+        else:
+            with contextlib.suppress(OSError):
+                saved.unlink()
+    if winner is None and best is not None:
+        # No backend stayed inside the fidelity bar: keep the least-marked one
+        # (the last backend's output is already at OUT; restore when needed).
+        with contextlib.suppress(OSError):
+            shutil.copyfile(best[1], out)
+        winner = best[2]
+        winner["fidelity_selected"] = True
+        winner["detail"] = (f"{winner.get('detail') or ''} -- kept as the least-marked of "
+                            f"{len(attempts)} over-marking attempt(s) ({best[0]} word(s))"
+                            ).strip()
+    if best is not None:
+        with contextlib.suppress(OSError):
+            best[1].unlink()
     if not winner and order:
         # The manifest will say FAILED: do not leave a file at OUT for a later
         # reader to mistake for this pair's redline.
@@ -42477,10 +43068,19 @@ def redline_readme(manifest: dict) -> str:
          "3. `docx-trackdiff` (CLI, two argument forms, then `python -m docx_trackdiff`)",
          "4. `--redline-cmd '<json argv with {base} {revised} {out}>'` when you supply one",
          "5. the built-in OOXML word/paragraph-level tracked-changes writer (stdlib only; "
-         "unchanged paragraphs are copied verbatim, a changed paragraph is rebuilt from plain "
-         "text).", "",
+         "unchanged paragraphs are copied verbatim, a changed paragraph carries word-level "
+         "w:ins/w:del IN PLACE of its runs -- soft line breaks, tabs and field chars keep their "
+         "positions, accepting every change reproduces the revised paragraph and rejecting "
+         "every change reproduces the base paragraph).", "",
          "Each row names the backend that actually produced the file; `manifest.json` keeps every "
          "attempt (command, exit code, stderr tail).", "",
+         "FIDELITY: every successful attempt is weighed -- the words its w:ins/w:del markup "
+         "marks against the least a faithful redline needs for that pair. A backend that marks "
+         "an order of magnitude more (it rewrites whole paragraphs when a run is not plain "
+         "text, e.g. a Word paragraph carrying `w:lastRenderedPageBreak`) is passed over for "
+         "the next one, and the least-marked result is kept when every backend over-marks; "
+         "`fidelity` in `manifest.json` carries the numbers, and `over_marked` names the "
+         "caveat here.", "",
          "| round | version | source | pair | basis | tool | result |",
          "|---|---|---|---|---|---|---|"]
     for v in manifest["versions"]:
@@ -45470,7 +46070,10 @@ def build_parser() -> argparse.ArgumentParser:
     prl.add_argument("--tool", choices=list(REDLINE_TOOLS), default="auto",
                      help="auto (default): the docx-compare MCP tool (Word's own compare engine) "
                           "first, then python-redlines[docxodus], docx-trackdiff and the built-in "
-                          "OOXML diff; or force one backend; `none` writes only the "
+                          "OOXML diff -- under auto a backend whose markup overstates the change "
+                          "(see redline_fidelity) is passed over for the next, and the "
+                          "least-marked result is kept; or force one backend (its result is kept "
+                          "and the fidelity caveat reported); `none` writes only the "
                           "manifest/report")
     prl.add_argument("--redline-cmd", default=None,
                      help="JSON argv list for any other tool, with {base} {revised} {out} "

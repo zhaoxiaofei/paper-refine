@@ -162,13 +162,14 @@ def doc_xml(filler: int = 0) -> str:
 </w:body></w:document>"""
 
 
-def make_package(path: Path, document_xml: str | None = None) -> Path:
+def make_package(path: Path, document_xml: str | None = None,
+                 styles: str | None = None) -> Path:
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("[Content_Types].xml", CONTENT_TYPES)
         z.writestr("_rels/.rels", RELS)
         z.writestr("word/_rels/document.xml.rels", DOC_RELS)
         z.writestr("word/document.xml", document_xml or doc_xml())
-        z.writestr("word/styles.xml", STYLES)
+        z.writestr("word/styles.xml", styles or STYLES)
         z.writestr("word/header1.xml", HEADER)
         z.writestr("docProps/core.xml", CORE)
         z.writestr("docProps/app.xml", APP)
@@ -1596,6 +1597,236 @@ def part_scan_and_fix():
     test_template_list_numbering()
     test_fix_extended(docx)
     test_quote_normalisation_spans_runs()
+
+
+# ---- caption/legend BLOCKS (FMT-T2a..FMT-T2d) -------------------------------
+# The 2026-10-14 packages shipped captions Word had hand-split: the CNB main
+# text's Fig. 2 legend ran three paragraphs and its Fig. 3 legend's second
+# paragraph inherited the document default (1.5) beside a single-spaced first
+# paragraph, and the NeoHetero supplementary file's first legend carried the
+# Author List style its siblings do not. The fixtures below carry the same
+# classes; the fixer must merge a caption into one paragraph (keeping every run,
+# the moved runs' own bold, and the Live-field fence), align the odd caption's
+# style with its siblings, unify the line spacing across a caption whose merge
+# it must refuse, and NEVER swallow a table's cell paragraphs into its caption.
+
+CAPTION_STYLES = STYLES.replace("</w:styles>", """  <w:style w:type="paragraph" w:styleId="Caption"><w:name w:val="caption"/>
+    <w:basedOn w:val="Normal"/><w:rPr><w:b/><w:bCs/></w:rPr></w:style>
+  <w:style w:type="paragraph" w:styleId="AuthorList"><w:name w:val="Author List"/>
+    <w:basedOn w:val="Normal"/><w:rPr><w:b/></w:rPr></w:style>
+</w:styles>""")
+
+
+def doc_xml_caption_blocks() -> str:
+    """One of every caption-block defect (see the section comment)."""
+    P_ = P[1:-1]
+    return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="{P_}" xmlns:r="{R[1:-1]}" xmlns:mc="{MC[1:-1]}" xmlns:w14="{W14[1:-1]}" mc:Ignorable="w14">
+<w:body>
+  <w:p><w:r><w:t>CopyNumBench: a benchmark</w:t></w:r></w:p>
+  <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Figure legends</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Fig. 1 | A single-paragraph legend.</w:t></w:r></w:p>
+  <w:p><w:pPr><w:pStyle w:val="AuthorList"/></w:pPr><w:r><w:t>Figure S1. The legend that took the author-line style.</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Figure S2. A supplementary legend beside it.</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Fig. 2 | A legend whose text continues into</w:t></w:r></w:p>
+  <w:p><w:pPr><w:ind w:firstLine="480"/></w:pPr><w:r><w:t>a second paragraph that renders at the document line spacing.</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Fig. 3 | A legend that cites its source</w:t></w:r></w:p>
+  <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> ADDIN ZOTERO_ITEM CSL_CITATION {{"citationID":"cite1"}} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>[1]</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t xml:space="preserve"> and keeps a second paragraph.</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Fig. 4 | A legend whose continuation carries a revision</w:t></w:r></w:p>
+  <w:p><w:ins w:id="7" w:author="A" w:date="2026-10-14T00:00:00Z"><w:r><w:t>a tracked-change continuation.</w:t></w:r></w:ins></w:p>
+  <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Tables</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Table S1. A table caption that must not swallow the table.</w:t></w:r></w:p>
+  <w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/></w:tblGrid>
+    <w:tr><w:tc><w:tcPr/><w:p><w:r><w:t>RESOURCE</w:t></w:r></w:p></w:tc>
+    <w:tc><w:tcPr/><w:p><w:r><w:t>IDENTIFIER</w:t></w:r></w:p></w:tc></w:tr>
+  </w:tbl>
+  <w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+</w:body></w:document>"""
+
+
+def doc_xml_caption_bold() -> str:
+    """A legends area whose caption labels carry the bold Caption style."""
+    P_ = P[1:-1]
+    return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="{P_}" xmlns:r="{R[1:-1]}" xmlns:mc="{MC[1:-1]}" xmlns:w14="{W14[1:-1]}" mc:Ignorable="w14">
+<w:body>
+  <w:p><w:r><w:t>A Frontiers-style manuscript.</w:t></w:r></w:p>
+  <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Figures</w:t></w:r></w:p>
+  <w:p><w:pPr><w:pStyle w:val="Caption"/></w:pPr><w:r><w:t>Figure 1. A bold caption title</w:t></w:r></w:p>
+  <w:p><w:r><w:t>The legend body must not inherit the label's bold weight.</w:t></w:r></w:p>
+  <w:p><w:pPr><w:pStyle w:val="Caption"/></w:pPr><w:r><w:t>Figure 2. Another caption</w:t></w:r></w:p>
+  <w:p><w:r><w:t>A sibling legend body.</w:t></w:r></w:p>
+  <w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+</w:body></w:document>"""
+
+
+def _paragraphs_of(path: Path) -> list:
+    with zipfile.ZipFile(path) as z:
+        return fmt.paragraphs(z.read("word/document.xml").decode("utf-8"))
+
+
+def _para_texts(path: Path) -> list:
+    return [fmt.text_of(p[2]) for p in _paragraphs_of(path)]
+
+
+def test_caption_blocks():
+    print()
+    print("== caption/legend blocks (FMT-T2a..FMT-T2d) ==")
+    tmp = scratch("paper_fmt_captions_")
+    policy = fmt.load_policy(None)
+    bad = make_package(tmp / "mainText.docx", doc_xml_caption_blocks(), CAPTION_STYLES)
+    rows = fmt.scan_paths([bad], policy)["rows"]
+    by_rule = {}
+    for r in rows:
+        by_rule.setdefault(r["rule"], []).append(r)
+    check("the continuation of a split caption is reported (FMT-T2a)",
+          any(r["rule"] == "FMT-T2a"
+              and "continuation paragraph of the figure caption" in r["evidence"]
+              for r in rows), str(by_rule.get("FMT-T2a"))[:200])
+    t2c = by_rule.get("FMT-T2c", [])
+    check("a multi-paragraph caption is FMT-T2c (mergeable -> mechanical)",
+          len([r for r in t2c if r["fix"] == "mechanical"]) == 2
+          and all(r["tier"] == "advisory" for r in t2c), str(t2c)[:240])
+    check("a caption whose continuation carries a revision is editorial, not mechanical",
+          len([r for r in t2c if r["fix"] == "editorial"]) == 1, str(t2c)[:240])
+    t2d = by_rule.get("FMT-T2d", [])
+    check("a caption carrying a foreign style is FMT-T2d",
+          len(t2d) == 1 and "Figure S1" in t2d[0]["evidence"]
+          and "AuthorList" in t2d[0]["evidence"], str(t2d)[:240])
+    check("the table's cell paragraphs are not read as its caption's continuation",
+          not any("Table S1" in (r["evidence"] + r["detail"]) for r in t2c), str(t2c)[:240])
+    check("the S-numbered legends get the spacing rows too",
+          any(r["rule"] == "FMT-T2a" and "Figure S1" in r["evidence"] for r in rows),
+          str(by_rule.get("FMT-T2a"))[:240])
+
+    fixed = tmp / "fixed.docx"
+    rep = fmt.fix_package(bad, fixed, policy)
+    v = rep.get("verified") or {}
+    check("the caption fixer verifies (text identical, parts intact, schema ok)",
+          bool(rep.get("ok")), f"ok={rep.get('ok')} v={str(v)[:200]} err={rep.get('error')}")
+    check("the verifier is told the paragraph joins", v.get("caption_joins") == 2,
+          str(v.get("caption_joins")))
+    texts = _para_texts(fixed)
+    joined = "Fig. 2 | A legend whose text continues into a second paragraph that " \
+             "renders at the document line spacing."
+    check("the split caption is ONE paragraph and its text is the joined text",
+          joined in texts, str([t for t in texts if t.startswith("Fig. 2")]))
+    cite = [t for t in texts if t.startswith("Fig. 3")]
+    check("a caption carrying a Zotero field still merges, the field kept live",
+          len(cite) == 1 and "[1]" in cite[0] and "keeps a second paragraph" in cite[0],
+          str(cite)[:200])
+    check("the refused caption (a tracked change) is left as two paragraphs",
+          any(t.startswith("Fig. 4") for t in texts)
+          and "a tracked-change continuation." in texts, str(texts)[:200])
+    paras = _paragraphs_of(fixed)
+    idx = next(i for i, t in enumerate(texts) if t.startswith("Fig. 2"))
+    ppr = fmt.ppr_of(paras[idx][2])
+    sp = fmt.elem(ppr, "spacing")
+    check("the merged caption keeps the label's own spacing",
+          fmt.attr(sp, "line") == "240" and fmt.attr(sp, "before") == "200"
+          and fmt.attr(sp, "after") == "200", str(sp))
+    check("the merged caption drops the continuation's first-line indent",
+          fmt.elem(ppr, "ind") is None, str(fmt.elem(ppr, "ind")))
+    s1 = next(i for i, t in enumerate(texts) if t.startswith("Figure S1"))
+    check("the odd caption's style is aligned with its siblings",
+          fmt._para_style(paras[s1][2]) == "", fmt._para_style(paras[s1][2]))
+    table_para = next(i for i, t in enumerate(texts) if t.startswith("Table S1"))
+    check("the table caption stays one paragraph and the table's cells stay in place",
+          fmt.attr(fmt.elem(fmt.ppr_of(paras[table_para][2]), "spacing"), "line") == "240"
+          and texts[table_para + 1:table_para + 3] == ["RESOURCE", "IDENTIFIER"],
+          str(texts[table_para:table_para + 3]))
+    out_rows = fmt.scan_paths([fixed], policy)["rows"]
+    check("the re-scan has no mechanical caption row left",
+          not [r for r in out_rows if r["rule"] in ("FMT-T2a", "FMT-T2b", "FMT-T2c",
+                                                    "FMT-T2d")
+               and r["fix"] == "mechanical"],
+          str([r for r in out_rows if r["rule"].startswith("FMT-T2")])[:300])
+    check("the refused caption's row survives as editorial (the arms must merge it)",
+          any(r["rule"] == "FMT-T2c" and r["fix"] == "editorial" for r in out_rows),
+          str([r for r in out_rows if r["rule"] == "FMT-T2c"])[:200])
+
+
+def test_caption_bold_merge():
+    print()
+    print("== a bold Caption label keeps its legend body unbold when merged ==")
+    tmp = scratch("paper_fmt_caption_bold_")
+    policy = fmt.load_policy(None)
+    bad = make_package(tmp / "mainText.docx", doc_xml_caption_bold(), CAPTION_STYLES)
+    fixed = tmp / "fixed.docx"
+    rep = fmt.fix_package(bad, fixed, policy)
+    check("the merge verifies", bool(rep.get("ok")), str(rep.get("verified"))[:200])
+    paras = _paragraphs_of(fixed)
+    texts = [fmt.text_of(p[2]) for p in paras]
+    idx = next(i for i, t in enumerate(texts) if t.startswith("Figure 1."))
+    xml = paras[idx][2]
+    check("the moved body run is pinned roman (b=0) after the merge",
+          '<w:b w:val="0"/>' in xml and '<w:bCs w:val="0"/>' in xml, xml[:400])
+    check("the bold label run itself is untouched",
+          xml.count('<w:b w:val="0"/>') == 1, xml[:400])
+    check("both legends are one paragraph each now",
+          len([t for t in texts if t.startswith("Figure ")]) == 2
+          and not any(t.startswith("The legend body") or t.startswith("A sibling")
+                      for t in texts), str(texts)[:200])
+
+
+# ---- lone divisions (FMT-T9k / FMT-T10f) ------------------------------------
+# The same shape rule at two levels of the manuscript's hierarchy: a container
+# that divides at all must divide into more than one part. A narrative
+# paragraph built from ONE sentence (the 2026-10-14 winners shipped seven) and a
+# section holding exactly ONE subsection are the paragraph- and section-level
+# cases of it. The end-matter sections (statements, acronym lists) and table
+# cells are the conventions the rule must NOT report.
+
+def doc_xml_lone_division() -> str:
+    P_ = P[1:-1]
+    return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="{P_}" xmlns:r="{R[1:-1]}" xmlns:mc="{MC[1:-1]}" xmlns:w14="{W14[1:-1]}" mc:Ignorable="w14">
+<w:body>
+  <w:p><w:r><w:t>CopyNumBench: a benchmark</w:t></w:r></w:p>
+  <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Results</w:t></w:r></w:p>
+  <w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>Ploidy estimation</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Ginkgo placed most cells within the window, ahead of every other caller tested here.</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Ginkgo placed most cells within the window. The advantage is measurable in ploidy itself.</w:t></w:r></w:p>
+  <w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>Secondary analysis</w:t></w:r></w:p>
+  <w:p><w:r><w:t>The secondary analysis adds a second sentence. It also adds a third one to stay prose.</w:t></w:r></w:p>
+  <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Discussion</w:t></w:r></w:p>
+  <w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>Limitations</w:t></w:r></w:p>
+  <w:p><w:r><w:t>The comparisons rest on nine donors. Small differences may not reach significance.</w:t></w:r></w:p>
+  <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Funding</w:t></w:r></w:p>
+  <w:p><w:r><w:t>This work was supported by grant 2024-0001 from the Example Foundation.</w:t></w:r></w:p>
+  <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Tables</w:t></w:r></w:p>
+  <w:p><w:r><w:t>Table 1. A caption that is one sentence long.</w:t></w:r></w:p>
+  <w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>
+    <w:tr><w:tc><w:tcPr/><w:p><w:r><w:t>Percentile rank of the predicted IC50 of the pair.</w:t></w:r></w:p></w:tc></w:tr>
+  </w:tbl>
+  <w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+</w:body></w:document>"""
+
+
+def test_lone_division_rules():
+    print()
+    print("== lone divisions: one-sentence paragraphs (FMT-T9k), lone subsections (FMT-T10f) ==")
+    tmp = scratch("paper_fmt_lone_")
+    bad = make_package(tmp / "mainText.docx", doc_xml_lone_division())
+    rows = fmt.scan_paths([bad], fmt.load_policy(None))["rows"]
+    t9k = [r for r in rows if r["rule"] == "FMT-T9k"]
+    check("a one-sentence narrative paragraph is FMT-T9k (finding-tier)",
+          len(t9k) == 1 and t9k[0]["tier"] == "finding"
+          and "Ginkgo placed most cells" in t9k[0]["evidence"], str(t9k)[:240])
+    check("a two-sentence paragraph is not",
+          not any("advantage is measurable" in r["evidence"] for r in t9k), str(t9k)[:200])
+    check("an end-matter statement section is exempt",
+          not any("grant 2024-0001" in r["evidence"] for r in t9k), str(t9k)[:200])
+    check("a table cell is exempt",
+          not any("Percentile rank" in r["evidence"] for r in t9k), str(t9k)[:200])
+    check("a caption is exempt (the caption rules own it)",
+          not any("Table 1" in r["evidence"] for r in t9k), str(t9k)[:200])
+    t10f = [r for r in rows if r["rule"] == "FMT-T10f"]
+    check("a section holding exactly one subsection is FMT-T10f",
+          len(t10f) == 1 and "Limitations" in t10f[0]["evidence"]
+          and t10f[0]["tier"] == "finding", str(t10f)[:300])
+    check("a section with two subsections is not reported",
+          not any("Results" in r["evidence"] for r in t10f), str(t10f)[:200])
 
 def run_parts(funcs, banner: str) -> int:
     """Run this part's sections in THIS process (the suite is split so GNU
