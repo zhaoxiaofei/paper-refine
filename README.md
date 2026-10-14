@@ -235,13 +235,19 @@ cited instead). `setup --submit-code on` (or `set-submit-code on` on an
 existing root) submits the area instead: the copy then carries `code/` and the
 letter may cite it like any other package file. The policy only decides what
 the next assembly of `journal_submission/` carries — it never touches a pin, a
-score or a champion. The same rule covers every submitted file, not just the
+score or a champion. The author's own documentation is never submitted either:
+**every file whose name matches `README*.md` or `README*.txt`, at any depth, is
+dropped from the submission copy** (it stays in the corpus, the pin and the
+published winner — it is treated like `code/` for submission purposes, with no
+opt-in switch), `journal_submission.json` records `readme_files_excluded`, and a
+to-be-submitted document may not refer to one. The same rule covers every
+submitted file, not just the
 letter: the assembly scans the copy it just built and **reports** (never
 rewrites, never fails) each text file that still points into an area the
 submission does not carry — `PKG-2` rows in
 `journal_submission.json.non_submitted_references`, printed as author actions,
-including a `raw_data/` or feedback path, which are read-only inputs that never
-ship at all.
+including a `raw_data/` or feedback path (read-only inputs that never ship at
+all) and a `README.md`-style reference.
 
 Every evidence area is hash-pinned, and any stage write into it is restored and
 reported.
@@ -1272,10 +1278,12 @@ How each mode runs:
 * **The four journal modes** finish by assembling `<root>/journal_submission/`: the final
   package minus `raw_data/` and — unless `--submit-code on` /
   `set-submit-code on` asks for it — the analysis-code area (`code/`), minus
-  the pipeline's bookkeeping and revision auxiliaries (plus the response letter
-  when the mode requires one), with
+  every `README*.md`/`README*.txt` file (the author's own documentation, never
+  submitted), minus the pipeline's bookkeeping and revision auxiliaries (plus
+  the response letter when the mode requires one), with
   `<root>/journal_submission.json` recording the mode and the manifest
-  (`raw_data_included: false`, and `code_included` the policy's real value).
+  (`raw_data_included: false`, `code_included` the policy's real value, and
+  `readme_files_excluded` the files that were dropped).
   When a
   mode requires a letter and none exists, the package is NOT assembled. When
   the round produced tracked changes (`redlines/<version>/from-original/`), the

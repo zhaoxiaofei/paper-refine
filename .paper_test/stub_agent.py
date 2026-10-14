@@ -517,6 +517,8 @@ def do_response(sb: Path, name: str, round_no: int) -> int:
     # it; see postcheck_response's code/ rejection).
     non_submission_dirs = ("raw_data", "raw_figs", "human_review_feedback",
                            "llm_review_feedback", "code")
+    # ... and the author's own README files are never submitted either.
+    readme_name_re = re.compile(r"^readme.*\.(?:md|txt)$", re.I)
     non_manuscript_re = re.compile(
         r"feedback|referee|reviewers?|editors?|editorial|decision"
         r"|response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
@@ -528,6 +530,8 @@ def do_response(sb: Path, name: str, round_no: int) -> int:
         if "work" in rel.parts[:-1]:
             return False
         if any(part in non_submission_dirs for part in rel.parts[:-1]):
+            return False
+        if readme_name_re.match(p.name):
             return False
         return not non_manuscript_re.search(p.name)
 

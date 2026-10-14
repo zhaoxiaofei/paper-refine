@@ -16576,6 +16576,21 @@ def is_code_rel(rel: str) -> bool:
     return top == CODE_DIR
 
 
+# The author's own documentation is never submitted either: any FILE whose name
+# matches the glob `README*.md` / `README*.txt` (at any depth) is treated like
+# `code/` for submission purposes. It stays in the corpus (and therefore in a
+# pin and a published winner), but the journal submission copy drops it, no
+# to-be-submitted document may refer into it, and `journal_submission.json`
+# records every file that was dropped. The match is case-insensitive: a
+# `readme.md` must not ship by accident.
+README_NAME_RE = re.compile(r"^readme.*\.(?:md|txt)$", re.IGNORECASE)
+
+
+def is_non_submitted_readme_name(name: str) -> bool:
+    """True for a `README*.md` / `README*.txt` file name (never submitted)."""
+    return bool(README_NAME_RE.match(str(name or "").strip()))
+
+
 def evidence_area_of(rel: str) -> str:
     """The EVIDENCE area a corpus-relative path belongs to ("" when none).
 
@@ -30190,15 +30205,18 @@ def response_prompt(ctx: Ctx, sb: Path, r: int, target_label: str,
     # The analysis code is not part of the submission by default: the letter is
     # a to-be-submitted file, so it must not refer into `code/`. With
     # `submit_code: on` the area ships and a citation is legitimate.
-    code_rule = (f"  * `{CODE_DIR}/` ships with this submission (`submit_code: on`): a "
-                 f"`{CODE_DIR}/` path is citeable exactly like any other package file;\n"
-                 if submit_code_of(ctx) else
-                 f"  * `{CODE_DIR}/` is NOT part of the submission (the analysis code is not "
-                 f"submitted in this root): never cite a `{CODE_DIR}/` path in "
-                 f"`changes`/`new_data` -- the letter is a to-be-submitted file and must not "
-                 f"refer into the code directory. Describe a code change in the response "
-                 f"sentence instead, and cite the submission document (Methods/text/legend) "
-                 f"that carries it;\n")
+    code_rule = ((f"  * `{CODE_DIR}/` ships with this submission (`submit_code: on`): a "
+                  f"`{CODE_DIR}/` path is citeable exactly like any other package file;\n"
+                  if submit_code_of(ctx) else
+                  f"  * `{CODE_DIR}/` is NOT part of the submission (the analysis code is not "
+                  f"submitted in this root): never cite a `{CODE_DIR}/` path in "
+                  f"`changes`/`new_data` -- the letter is a to-be-submitted file and must not "
+                  f"refer into the code directory. Describe a code change in the response "
+                  f"sentence instead, and cite the submission document (Methods/text/legend) "
+                  f"that carries it;\n")
+                 + f"  * `README*.md` / `README*.txt` files are NEVER submitted (the author's "
+                   f"own documentation, dropped from the package like `{CODE_DIR}/`): never "
+                   f"cite one in `changes`/`new_data`;\n")
     return f"""RESPONSE TO REVIEWERS (the point-by-point letter; you do NOT edit the manuscript)
 
 Revision mode: {mode} (option {info['option']}: {info['label']}).
@@ -30689,6 +30707,11 @@ def postcheck_response(ctx: Ctx, rec: dict):
                   or "work" in Path(f).parts[:-1]):
                 errs.append(f"response row {cid!r}: change file {f!r} is not a submission "
                             f"document (bookkeeping/auxiliary/evidence files never ship)")
+            elif is_non_submitted_readme_name(Path(f).name):
+                errs.append(f"response row {cid!r}: change file {f!r} is a README*.md/"
+                            f"README*.txt file, which is never submitted (the author's own "
+                            f"documentation): cite a submission document, or describe the change "
+                            f"in the response text instead")
             elif not (target / f).exists():
                 errs.append(f"response row {cid!r}: change file {f!r} does not exist in the "
                             f"package -- the letter must not cite a file the revision does not "
@@ -30703,6 +30726,11 @@ def postcheck_response(ctx: Ctx, rec: dict):
                     or "work" in Path(f).parts[:-1]:
                 errs.append(f"response row {cid!r}: new-data file {f!r} is not a submission "
                             f"document (bookkeeping/evidence files never ship)")
+            elif is_non_submitted_readme_name(Path(f).name):
+                errs.append(f"response row {cid!r}: new-data file {f!r} is a README*.md/"
+                            f"README*.txt file, which is never submitted (the author's own "
+                            f"documentation): cite a submission document, or describe the change "
+                            f"in the response text instead")
             elif not (target / f).exists():
                 errs.append(f"response row {cid!r}: new-data file {f!r} does not exist in the "
                             f"package")
@@ -30854,8 +30882,10 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
     auxiliaries) and includes the response-to-reviewers letter when the mode
     requires one. The analysis-code area `code/` is stripped with it -- it is
     revision content, but not part of the submission -- unless the recorded
-    `submit_code` policy is `on` (see `submit_code_of`). The manifest records
-    exactly what shipped, including which of the two went out.
+    `submit_code` policy is `on` (see `submit_code_of`), and the author's own
+    `README*.md` / `README*.txt` files are stripped unconditionally (they are
+    the author's documentation, never manuscript content). The manifest records
+    exactly what shipped, including what was dropped and why.
     """
     mode = journal_mode_of(ctx)
     dst = ctx.root / JOURNAL_SUBMISSION_DIR
@@ -30896,6 +30926,16 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
                     out_dir.mkdir(exist_ok=True)
                     shutil.copy2(p, out_dir / p.name)
                     marked.append(f"tracked_changes/{p.name}")
+    # The author's README files are never submitted (any depth), treated like
+    # `code/` for submission purposes -- including a marked-up copy of one, so
+    # this runs AFTER the tracked-change copies are placed. They stay in the
+    # corpus/pin/winner; only this copy drops them, and the manifest names
+    # every one.
+    readme_dropped = []
+    for q in sorted(dst.rglob("*")):
+        if q.is_file() and is_non_submitted_readme_name(q.name):
+            readme_dropped.append(q.relative_to(dst).as_posix())
+            q.unlink()
     left = sorted(p.name for name in non_submitted if (dst / name).exists())
     if left:
         die(f"the submission package still carries a NON-SUBMITTED area ({', '.join(left)}); "
@@ -30918,9 +30958,15 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
                        "marked_changes": marked,
                        "raw_data_included": False,
                        "code_included": bool(include_code),
+                       "readme_files_excluded": readme_dropped,
                        "non_submitted_references": dangling,
                        "manifest": manifest,
                        "created": utcnow()})
+    if readme_dropped:
+        print(f"[journal] {len(readme_dropped)} README*.md/README*.txt file(s) are NOT submitted "
+              f"(the author's own documentation, treated like {CODE_DIR}/): "
+              + ", ".join(f"`{r}`" for r in readme_dropped[:6])
+              + (" …" if len(readme_dropped) > 6 else ""))
     if dangling:
         print(f"[journal] {len(dangling)} reference(s) in the to-be-submitted files point into "
               f"an area this submission does NOT carry (PKG-2) -- the journal cannot resolve "
@@ -34741,7 +34787,7 @@ def cmd_setup(args) -> None:
               f"(nothing to integrate without rewrite arms)")
         print(f"[setup] pipeline:               concerns -> revision -> "
               f"{'response -> ' if revision_mode in (JOURNAL_MODE_MAJOR, JOURNAL_MODE_MINOR) else ''}"
-              f"{JOURNAL_SUBMISSION_DIR}/ (raw_data/ never submitted; "
+              f"{JOURNAL_SUBMISSION_DIR}/ (raw_data/ and README*.md/.txt never submitted; "
               f"{'code/ submitted' if str(getattr(args, 'submit_code', DEFAULT_SUBMIT_CODE)) == 'on' else 'code/ never submitted'})")
         _jm_skip = True
     else:
@@ -39409,15 +39455,27 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
     `areas` names the areas THIS package does not carry (the caller derives it
     from what the assembly stripped), so the same scan reports a `code/`
     reference only while the code is not submitted -- with `submit_code: on` a
-    `code/` path resolves and is no finding at all.
+    `code/` path resolves and is no finding at all. The author's `README*.md` /
+    `README*.txt` FILES are never carried by a submission, so a bare
+    `README*.md` / `.txt` token -- or one under a relative directory
+    (`docs/README.md`) -- in a shipped document is a row unconditionally; a URL
+    that merely ends in a README name is not.
     """
     rows, names = [], [str(a) for a in (areas or ())]
     root = Path(root)
-    if not names or not root.is_dir():
+    if not root.is_dir():
         return rows
-    pattern = re.compile(
-        r"(?<![\w./\\-])(?:" + "|".join(re.escape(n) for n in names)
-        + r")/[\w.\-/]*[\w]", re.I)
+    patterns = []
+    if names:
+        patterns.append(re.compile(
+            r"(?<![\w./\\-])(?:" + "|".join(re.escape(n) for n in names)
+            + r")/[\w.\-/]*[\w]", re.I))
+    # A README name, bare or under a relative directory (`docs/README.md`): the
+    # boundary guard keeps a URL tail (`https://host/repo/README.md`) out of the
+    # report, and a path into another area (`raw_data/README.md`) is already
+    # matched by that area's pattern above.
+    patterns.append(re.compile(
+        r"(?<![\w./\\-])(?:[\w.\-]+/)*README[\w.\-]*\.(?:md|txt)(?![\w.\-/])", re.I))
     for p in sorted(root.rglob("*")):
         if not p.is_file() or p.suffix.lower() not in PACKAGE_TEXT_EXTS:
             continue
@@ -39431,13 +39489,17 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
         except OSError:
             continue
         for i, line in enumerate(text.splitlines(), 1):
-            m = pattern.search(line)
+            m = next((mm for mm in (pat.search(line) for pat in patterns) if mm), None)
             if not m:
                 continue
             ref = m.group(0)
-            hint = (f" (the analysis code ships only when `set-submit-code on` asks for it)"
-                    if ref.split("/", 1)[0].lower() == CODE_DIR else
-                    " (that area is a read-only input: it never ships)")
+            head = ref.split("/", 1)[0].lower()
+            if head == CODE_DIR:
+                hint = " (the analysis code ships only when `set-submit-code on` asks for it)"
+            elif head in {str(n).lower() for n in names}:
+                hint = " (that area is a read-only input: it never ships)"
+            else:
+                hint = " (the author's README*.md/README*.txt files are never submitted)"
             rows.append({
                 "rule": "PKG-2", "file": rel, "line": i, "reference": ref,
                 "detail": (f"this file is part of the submission but refers into {ref!r}, "
@@ -40759,7 +40821,7 @@ def cmd_status(args) -> None:
         _jsub = (ctx.state.get("journal") or {}).get("submission_dir")
         if _jsub:
             print(f"               submission package: {_jsub}"
-                  f" (raw_data/ excluded"
+                  f" (raw_data/ excluded, README*.md/.txt excluded"
                   + ("" if submit_code_of(ctx) else ", code/ excluded")
                   + f"; response "
                   f"{'included' if (ctx.state.get('journal') or {}).get('response') else 'not written'})")

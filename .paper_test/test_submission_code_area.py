@@ -15,7 +15,11 @@ area. The rules follow, and this suite pins them:
     and the same citation passes;
   * a shipped file that still refers into a stripped area is REPORTED (PKG-2,
     `journal_submission.json.non_submitted_references`), never rewritten and
-    never a failure -- and the report disappears once the area ships.
+    never a failure -- and the report disappears once the area ships;
+  * the author's own `README*.md` / `README*.txt` files are never submitted
+    either (treated like `code/` for submission purposes): the copy drops them
+    at any depth, the manifest names them, a shipped reference to one is a
+    PKG-2 row, and a letter may not cite one.
 
 Run:  python3 .paper_test/test_submission_code_area.py
 """
@@ -232,9 +236,77 @@ def test_dangling_reference_report():
               str(sub_manifest.get("non_submitted_references"))[:300])
 
 
+def test_readme_files_are_never_submitted():
+    print()
+    print("== SC5: README*.md / README*.txt files are never submitted ==")
+    lib.check("SC5 the README glob matches those names (case-insensitively)",
+              nb.is_non_submitted_readme_name("README.md")
+              and nb.is_non_submitted_readme_name("README-notes.txt")
+              and nb.is_non_submitted_readme_name("readme.md")
+              and nb.is_non_submitted_readme_name("README-dev.md")
+              and not nb.is_non_submitted_readme_name("README.docx")
+              and not nb.is_non_submitted_readme_name("myREADME.md")
+              and not nb.is_non_submitted_readme_name("README"))
+    tmp = lib.scratch("paper_code_readme_")
+    root = lib.setup_and_run(
+        tmp, "major", with_code=True,
+        extra_source_files={
+            "README.md": "# author working notes\nrun code/analysis.py\n",
+            "docs/README-dev.txt": "developer notes\n",
+            "notes.md": "Methods\nSee README.md for how the pipeline ran.\n"
+                        "Mirror: https://github.com/team/repo/README.md\n"})
+    files = lib.submission_files(root)
+    lib.check("SC5 the submission drops every README*.md/.txt file (any depth)",
+              not any(nb.is_non_submitted_readme_name(Path(f).name) for f in files), str(files))
+    lib.check("SC5 the other documents still ship",
+              "manuscript.txt" in files and "notes.md" in files, str(files))
+    sub_manifest = json.loads((root / "journal_submission.json").read_text(encoding="utf-8"))
+    lib.check("SC5 the manifest names the dropped README files",
+              sub_manifest.get("readme_files_excluded") == ["README.md", "docs/README-dev.txt"],
+              str(sub_manifest.get("readme_files_excluded")))
+    refs = sub_manifest.get("non_submitted_references") or []
+    lib.check("SC5 a shipped README reference is reported (PKG-2, bare or nested)",
+              any(r.get("file") == "notes.md" and r.get("reference") == "README.md"
+                  and "never submitted" in r.get("detail", "") for r in refs)
+              and not any(str(r.get("reference") or "").startswith("https")
+                          for r in refs), str(refs)[:400])
+    lib.check("SC5 the dropped README files really are gone from the copy",
+              not (root / "journal_submission" / "README.md").exists()
+              and not (root / "journal_submission" / "docs" / "README-dev.txt").exists())
+    # A README is not citable by the letter either (the same rule as code/).
+    ctx = nb.Ctx(root)
+    ctx.load()
+    rec = ctx.run("r1_response")
+    map_path = ctx.sandbox_of(rec) / nb.JOURNAL_RESPONSE_MAP_REL
+    prompt = nb.response_prompt(ctx, ctx.sandbox_of(rec), 1, "the final package",
+                                {"concerns": []})
+    lib.check("SC5 the letter prompt states the README rule",
+              "`README*.md` / `README*.txt` files are NEVER submitted" in prompt)
+    data = json.loads(map_path.read_text(encoding="utf-8"))
+    data["rows"][0]["changes"] = [{"file": "docs/README-dev.txt", "location": "stub",
+                                   "before": "a", "after": "b"}]
+    nb.write_json_atomic(map_path, data)
+    ok, errs, _w, _x = nb.postcheck_response(ctx, rec)
+    lib.check("SC5 a letter citing a README file fails the postcheck",
+              not ok and any("README*.md" in e for e in errs), str(errs)[:300])
+    # ... and the exclusion is unconditional: submitting the code does not
+    # resurrect the README files.
+    ctx.cfg["submit_code"] = "on"
+    nb.write_json_atomic(ctx.cfg_path, ctx.cfg)
+    ctx.load()
+    target, label = nb.journal_final_target(ctx)
+    nb.publish_journal_submission(ctx, target, label,
+                                  response_dir=ctx.sandbox_of(ctx.run("r1_response")))
+    files = lib.submission_files(root)
+    lib.check("SC5 `submit_code: on` still does not ship a README",
+              "code/analysis.py" in files
+              and not any(nb.is_non_submitted_readme_name(Path(f).name) for f in files),
+              str(files))
+
+
 if __name__ == "__main__":
     sys.exit(lib.run_parts(
         [test_code_rel_helper, test_submission_excludes_code,
          test_response_letter_never_cites_code, test_submit_code_switch,
-         test_dangling_reference_report],
+         test_dangling_reference_report, test_readme_files_are_never_submitted],
         "SUBMISSION CODE-AREA CHECKS PASSED"))
