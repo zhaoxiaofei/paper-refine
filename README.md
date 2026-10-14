@@ -153,6 +153,7 @@ the base's from this round's review) or to the arm's own marker. A `-` now means
 | `build-venue-templates --venue ID` | re-derive that pack from the exemplars (`<venue-id>.manuscripts/`) without an agent |
 | `set-revision-mode continue\|init\|transfer\|resubmit\|major\|minor` | switch the revision mode (`none` still accepted as the pre-rename spelling of `continue`) |
 | `set-tiebreak-defect-floor N` / `set-dedup-mode off\|location` | calibration of the selection key |
+| `set-submit-code off\|on` | whether `code/` is part of the submission (`off`, the default: revision content the stages revise and the judges evaluate, but stripped from `journal_submission/` like `raw_data/`, and not citeable by the response letter; `on`: the submission carries it and the letter may cite it) |
 | `retry --run ID` / `retry --runs SELECTION` / `prune --keep-latest N` | reset one session, or the same subset `run --only` would drive / reclaim disk from old sandboxes |
 | `redline --root ROOT` / `track --root ROOT` | (re)write the tracked-changes `.docx` tree / the difference-tracking copies (`*.tracking-*`) plus the persistent PDF renders |
 | `--zotero off\|read\|edit\|apply` (`setup`; default `edit`) | the Zotero policy every stage prompt repeats: `off` = no Zotero tooling, `read` = resolve citations read-only, `edit` = the revised copy may add/edit/delete citation fields (the library stays read-only), `apply` = as `edit` plus the one allowed library write. Whichever mode is set, the code-side field-continuity gate fails a stage that drops, unlinks or malforms a live field |
@@ -220,6 +221,27 @@ manuscript files:
   authors still believe is wrong is closed `not-applicable`/`disagree` with a
   recorded rationale — never silently dropped. It is read-only evidence, never
   submission text.
+
+The analysis-code area **`code/`** is not submitted by default either, and is
+handled the same way on the submission surface: it is revision content — a
+stage may revise it, the judges evaluate it and M30 reads it as a producer, so
+a corpus, a pin and a published winner carry it — but the journal submission
+copy **strips it exactly like `raw_data/`**, `journal_submission.json` records
+the actual `code_included`, and a to-be-submitted document may not refer into
+it: a response-to-reviewers letter whose `changes`/`new_data` cites a `code/`
+path fails its postcheck (`code/` is not a submission document — the fix is
+described in the response text, and the submission document that carries it is
+cited instead). `setup --submit-code on` (or `set-submit-code on` on an
+existing root) submits the area instead: the copy then carries `code/` and the
+letter may cite it like any other package file. The policy only decides what
+the next assembly of `journal_submission/` carries — it never touches a pin, a
+score or a champion. The same rule covers every submitted file, not just the
+letter: the assembly scans the copy it just built and **reports** (never
+rewrites, never fails) each text file that still points into an area the
+submission does not carry — `PKG-2` rows in
+`journal_submission.json.non_submitted_references`, printed as author actions,
+including a `raw_data/` or feedback path, which are read-only inputs that never
+ship at all.
 
 Every evidence area is hash-pinned, and any stage write into it is restored and
 reported.
@@ -574,7 +596,8 @@ with a note, when it does not).
 `--strict-venue` (accepted by every subcommand that works on a root: `setup`,
 `run`, `run-decide`, `decide`, `status`, `agents`, `set-venue`, `set-journal`,
 `set-article-type`, `set-dedup-mode`, `set-revision-mode`,
-`set-tiebreak-defect-floor`, `add-venue`, `build-venue-templates`, `conform`,
+`set-tiebreak-defect-floor`, `set-submit-code`, `add-venue`,
+`build-venue-templates`, `conform`,
 `conflicts`, `retry`, `prune`, `redline`, `track`, `trend`) makes a missing
 journal, a journal/venue mismatch, a config/snapshot disagreement and an
 unresolvable article type fatal instead of advisory.
@@ -617,7 +640,12 @@ on by default with an agent backend; the conflict LLM pass is off by default).
 Setup-time policy flags:
 `--audit {off,on}` (the auditor stage), `--probe-review {on,off}`
 (the independent discovery session; ON by default, `--no-probe-review` turns it off,
-`set-probe-review off` flips an existing root), `--placeholder-lookup {off,online}`
+`set-probe-review off` flips an existing root), `--submit-code {off,on}`
+(whether the analysis-code area `code/` is part of the submission; OFF by
+default -- the area is revision content the stages revise and the judges
+evaluate, but the journal submission strips it like `raw_data/` and the
+response letter may not cite it; `set-submit-code on` flips an existing root),
+`--placeholder-lookup {off,online}`
 (resolve searchable hand-off markers before the sessions run),
 `--strict-artifacts [on|fix|off]` (what a boilerplate or unfilled decision table
 does to an attempt: `on` fails it, `fix` first spends one scoped repair session
@@ -1242,9 +1270,13 @@ How each mode runs:
   exist in the final package, `planned` rows forbidden from claiming results,
   and a new-experiment concern required to cite its new data.
 * **The four journal modes** finish by assembling `<root>/journal_submission/`: the final
-  package minus `raw_data/`, minus the pipeline's bookkeeping and revision
-  auxiliaries (plus the response letter when the mode requires one), with
-  `<root>/journal_submission.json` recording the mode and the manifest. When a
+  package minus `raw_data/` and — unless `--submit-code on` /
+  `set-submit-code on` asks for it — the analysis-code area (`code/`), minus
+  the pipeline's bookkeeping and revision auxiliaries (plus the response letter
+  when the mode requires one), with
+  `<root>/journal_submission.json` recording the mode and the manifest
+  (`raw_data_included: false`, and `code_included` the policy's real value).
+  When a
   mode requires a letter and none exists, the package is NOT assembled. When
   the round produced tracked changes (`redlines/<version>/from-original/`), the
   marked-up copies ship in `journal_submission/tracked_changes/` BESIDE the
@@ -2441,7 +2473,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 116 suites (a few
+any failure. They are independent, so run them in parallel — 117 suites (a few
 minutes at the default 24 parallel sessions; tens of minutes sequentially):
 
 ```bash

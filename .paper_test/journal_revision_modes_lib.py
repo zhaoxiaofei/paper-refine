@@ -64,10 +64,16 @@ def run_cli(*argv, timeout=600):
                           capture_output=True, text=True, timeout=timeout)
 
 
-def build_source(root: Path) -> Path:
+def build_source(root: Path, with_code: bool = False) -> Path:
     src = root / "src"
     (src / "raw_data").mkdir(parents=True)
     (src / "human_review_feedback").mkdir(parents=True)
+    if with_code:
+        # The analysis-code area: revision content like the documents, but not
+        # part of the submission unless the root ships it (see
+        # publish_journal_submission / `set-submit-code`).
+        (src / "code").mkdir(parents=True)
+        (src / "code" / "analysis.py").write_text("print('analysis')\n", encoding="utf-8")
     (src / "manuscript.txt").write_text(
         "Abstract\nWe used scRNA-seq to profile the cells.\n\n"
         "Introduction\nscRNA-seq was performed once and the claims follow.\n", encoding="utf-8")
@@ -91,8 +97,13 @@ def build_source(root: Path) -> Path:
 
 
 def setup_and_run(tmp: Path, mode: str, *, rewrites: int = 0, judges: int = 1,
-                  target: str = "iScience", source_journal: str = "iScience") -> Path:
-    src = build_source(tmp)
+                  target: str = "iScience", source_journal: str = "iScience",
+                  with_code: bool = False, extra_source_files: dict = None) -> Path:
+    src = build_source(tmp, with_code=with_code)
+    for rel, text in (extra_source_files or {}).items():
+        p = src / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
     root = tmp / "root"
     r = run_cli("setup", "--source", str(src), "--root", str(root),
                 "--rounds", "1", "--rewrites", str(rewrites), "--revises", "1",

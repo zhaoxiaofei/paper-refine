@@ -4073,6 +4073,16 @@ JOURNAL_RESPONSE_MD_REL = "response/RESPONSE_TO_REVIEWERS.md"
 JOURNAL_RESPONSE_MAP_REL = "response/response_map.json"
 JOURNAL_SUBMISSION_DIR = "journal_submission"
 
+# The analysis-code area (`code/`) is revision CONTENT, like the documents: a
+# stage may revise it (rule C), the judges evaluate it, and a corpus, a pin and
+# a winner carry it. It is NOT part of the SUBMISSION by default -- the
+# submission copy strips it exactly like the evidence areas, and no
+# to-be-submitted file may refer into it. `setup --submit-code on` (or
+# `set-submit-code on` on an existing root) submits it instead: the copy then
+# carries `code/`, and a response letter may cite a code file like any other.
+SUBMIT_CODE_MODES = ("on", "off")
+DEFAULT_SUBMIT_CODE = "off"
+
 
 def normalize_revision_mode(value=None) -> str:
     """The canonical revision-mode name for a configured/passed value.
@@ -4188,6 +4198,22 @@ def journal_is_scoped(ctx=None) -> bool:
 def journal_needs_response(ctx=None) -> bool:
     """True when a response-to-reviewers document is a required deliverable."""
     return bool(journal_mode_info(ctx).get("response"))
+
+
+def submit_code_of(ctx=None) -> bool:
+    """Whether the analysis-code area is part of the submission.
+
+    `submit_code` is recorded at setup (`on`/`off`) and flipped on an existing
+    root with `set-submit-code`. A root without the key -- every root created
+    before this policy existed -- behaves as `off`: `code/` is revision content
+    whose files a stage may revise and the judges evaluate, but the submission
+    copy strips it, and a to-be-submitted file may not refer into it.
+    """
+    raw = ((getattr(ctx, "cfg", None) if ctx is not None else None) or {}).get("submit_code")
+    if isinstance(raw, bool):
+        # A hand-edited config that carries the JSON boolean, not the string.
+        return raw
+    return str(raw or "").strip().lower() in ("on", "true", "yes", "1")
 
 
 def journal_has_feedback(ctx=None) -> bool:
@@ -16536,6 +16562,18 @@ def is_raw_data_rel(rel: str) -> bool:
     """True when a corpus-relative path lives inside raw_data/ (or raw_figs/)."""
     top = str(rel or "").replace("\\", "/").lstrip("/").split("/", 1)[0]
     return top in RAW_DATA_DIRNAMES
+
+
+def is_code_rel(rel: str) -> bool:
+    """True when a corpus-relative path lives inside the analysis-code area.
+
+    `code/` is the revision's own code deliverable (a stage may revise it), but
+    it is NEVER a submitted file: the journal submission copy strips it exactly
+    like the raw-data evidence area, and no to-be-submitted document (the
+    response letter in particular) may cite a path inside it.
+    """
+    top = str(rel or "").replace("\\", "/").lstrip("/").split("/", 1)[0]
+    return top == CODE_DIR
 
 
 def evidence_area_of(rel: str) -> str:
@@ -30149,6 +30187,18 @@ def response_prompt(ctx: Ctx, sb: Path, r: int, target_label: str,
     to_j = str((ctx.cfg or {}).get("journal") or "").strip()
     ids = [str(c.get("id") or "") for c in (concern_ledger.get("concerns") or [])
            if isinstance(c, dict)]
+    # The analysis code is not part of the submission by default: the letter is
+    # a to-be-submitted file, so it must not refer into `code/`. With
+    # `submit_code: on` the area ships and a citation is legitimate.
+    code_rule = (f"  * `{CODE_DIR}/` ships with this submission (`submit_code: on`): a "
+                 f"`{CODE_DIR}/` path is citeable exactly like any other package file;\n"
+                 if submit_code_of(ctx) else
+                 f"  * `{CODE_DIR}/` is NOT part of the submission (the analysis code is not "
+                 f"submitted in this root): never cite a `{CODE_DIR}/` path in "
+                 f"`changes`/`new_data` -- the letter is a to-be-submitted file and must not "
+                 f"refer into the code directory. Describe a code change in the response "
+                 f"sentence instead, and cite the submission document (Methods/text/legend) "
+                 f"that carries it;\n")
     return f"""RESPONSE TO REVIEWERS (the point-by-point letter; you do NOT edit the manuscript)
 
 Revision mode: {mode} (option {info['option']}: {info['label']}).
@@ -30193,7 +30243,7 @@ WRITE:
 ABSOLUTE RULES:
   * every changes[].file and new_data[] path must EXIST in target/ (checked
     mechanically): never cite a figure, table or file that is not in the package;
-  * status "addressed"/"partially-addressed" needs at least one change or one
+{code_rule}  * status "addressed"/"partially-addressed" needs at least one change or one
     new data file; status "already-addressed" is only for a concern the ledger
     already marks `already-addressed` (name the location in `response`, cite no
     change); status "planned" claims nothing done yet;
@@ -30629,6 +30679,11 @@ def postcheck_response(ctx: Ctx, rec: dict):
             f = str(c.get("file") or "").strip()
             if not f:
                 errs.append(f"response row {cid!r}: a change entry names no file")
+            elif not submit_code_of(ctx) and is_code_rel(f):
+                errs.append(f"response row {cid!r}: change file {f!r} points into {CODE_DIR}/, "
+                            f"which is never submitted (the analysis code is not part of the "
+                            f"submission): cite a submission document, or describe the code "
+                            f"change in the response text instead")
             elif (is_evidence_rel(f) or _is_aux_doc(Path(f).name)
                   or is_bookkeeping_name(Path(f).name)
                   or "work" in Path(f).parts[:-1]):
@@ -30639,7 +30694,12 @@ def postcheck_response(ctx: Ctx, rec: dict):
                             f"package -- the letter must not cite a file the revision does not "
                             f"carry")
         for f in new_data:
-            if is_evidence_rel(f) or is_bookkeeping_name(Path(f).name) \
+            if not submit_code_of(ctx) and is_code_rel(f):
+                errs.append(f"response row {cid!r}: new-data file {f!r} points into {CODE_DIR}/, "
+                            f"which is never submitted (the analysis code is not part of the "
+                            f"submission): cite a submission document, or describe the code "
+                            f"change in the response text instead")
+            elif is_evidence_rel(f) or is_bookkeeping_name(Path(f).name) \
                     or "work" in Path(f).parts[:-1]:
                 errs.append(f"response row {cid!r}: new-data file {f!r} is not a submission "
                             f"document (bookkeeping/evidence files never ship)")
@@ -30787,12 +30847,15 @@ def journal_final_version_id(ctx: Ctx) -> str:
 
 def publish_journal_submission(ctx: Ctx, target: Path, label: str,
                                response_dir: Path = None) -> Path:
-    """Assemble the JOURNAL SUBMISSION: the package minus the evidence area.
+    """Assemble the JOURNAL SUBMISSION: the package minus the non-submitted areas.
 
-    `raw_data/` is an INPUT (evidence), never a submitted document, so the
-    submission copy strips it (and the pipeline's own bookkeeping and
-    revision auxiliaries) and includes the response-to-reviewers letter when
-    the mode requires one. The manifest records exactly what shipped.
+    `raw_data/` (an INPUT: evidence) is never a submitted document, so the
+    submission copy strips it (and the pipeline's own bookkeeping and revision
+    auxiliaries) and includes the response-to-reviewers letter when the mode
+    requires one. The analysis-code area `code/` is stripped with it -- it is
+    revision content, but not part of the submission -- unless the recorded
+    `submit_code` policy is `on` (see `submit_code_of`). The manifest records
+    exactly what shipped, including which of the two went out.
     """
     mode = journal_mode_of(ctx)
     dst = ctx.root / JOURNAL_SUBMISSION_DIR
@@ -30800,7 +30863,9 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
         rmtree_force(dst)
     dst.mkdir(parents=True, exist_ok=True)
     copy_into(target, dst, exclude_top=("work",), skip_aux=True, strip_bookkeeping=True)
-    for name in EVIDENCE_DIRNAMES:
+    include_code = submit_code_of(ctx)
+    non_submitted = tuple(EVIDENCE_DIRNAMES) + (() if include_code else (CODE_DIR,))
+    for name in non_submitted:
         if (dst / name).exists():
             rmtree_force(dst / name)
     response_files = []
@@ -30831,10 +30896,16 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
                     out_dir.mkdir(exist_ok=True)
                     shutil.copy2(p, out_dir / p.name)
                     marked.append(f"tracked_changes/{p.name}")
-    left = sorted(p.name for name in EVIDENCE_DIRNAMES if (dst / name).exists())
+    left = sorted(p.name for name in non_submitted if (dst / name).exists())
     if left:
-        die(f"the submission package still carries the evidence area ({', '.join(left)}); this "
-            f"is a pipeline bug -- report it before submitting anything.")
+        die(f"the submission package still carries a NON-SUBMITTED area ({', '.join(left)}); "
+            f"this is a pipeline bug -- report it before submitting anything.")
+    # PKG-2: nothing that ships may point at what does not ship (AGENTS.md). The
+    # areas THIS package lacks are exactly the ones a shipped file must not
+    # refer into; reported as an author action, never rewritten or failed.
+    missing_areas = [name for name in EVIDENCE_DIRNAMES + (CODE_DIR,)
+                     if not (dst / name).exists()]
+    dangling = non_submitted_reference_rows(dst, missing_areas)
     manifest = hash_manifest(dst)
     write_json_atomic(ctx.root / "journal_submission.json",
                       {"mode": mode,
@@ -30846,8 +30917,19 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
                        "response_files": response_files,
                        "marked_changes": marked,
                        "raw_data_included": False,
+                       "code_included": bool(include_code),
+                       "non_submitted_references": dangling,
                        "manifest": manifest,
                        "created": utcnow()})
+    if dangling:
+        print(f"[journal] {len(dangling)} reference(s) in the to-be-submitted files point into "
+              f"an area this submission does NOT carry (PKG-2) -- the journal cannot resolve "
+              f"them; the author must point at shipped content (or submit the area, when it is "
+              f"one that can ship -- see `set-submit-code`):")
+        for r in dangling[:6]:
+            print(f"  - {r['file']} line {r['line']}: `{r['reference']}`")
+        if len(dangling) > 6:
+            print(f"  - … and {len(dangling) - 6} more (see journal_submission.json)")
     return dst
 
 
@@ -30886,6 +30968,7 @@ def drive_journal_finalize(ctx: Ctx, *, cmd, timeout: int, jobs: int, retries: i
     ctx.save_state()
     print(f"[run] journal submission assembled: {dst} "
           f"({len((hash_manifest(dst) or {}).get('files') or {})} file(s); raw_data/ excluded"
+          + ("" if submit_code_of(ctx) else "; code/ excluded")
           + (f"; response letter included ({', '.join(sorted(p.name for p in dst.iterdir() if p.name.startswith('RESPONSE') or p.name == 'response_map.json'))})" if response_dir else "; no response letter (transfer mode)")
           + ")")
     return True, False
@@ -34515,6 +34598,10 @@ def cmd_setup(args) -> None:
                # existing root). A root with no key plans no probe run.
                "probe_review": str(getattr(args, "probe_review", PROBE_REVIEW_DEFAULT)
                                    or PROBE_REVIEW_DEFAULT),
+               # Whether `code/` is part of the submission (default: off -- the
+               # area is revision content, never submitted unless asked for).
+               "submit_code": str(getattr(args, "submit_code", DEFAULT_SUBMIT_CODE)
+                                  or DEFAULT_SUBMIT_CODE),
                "placeholder_lookup": str(getattr(args, "placeholder_lookup",
                                                  DEFAULT_PLACEHOLDER_LOOKUP)
                                          or DEFAULT_PLACEHOLDER_LOOKUP),
@@ -34654,7 +34741,8 @@ def cmd_setup(args) -> None:
               f"(nothing to integrate without rewrite arms)")
         print(f"[setup] pipeline:               concerns -> revision -> "
               f"{'response -> ' if revision_mode in (JOURNAL_MODE_MAJOR, JOURNAL_MODE_MINOR) else ''}"
-              f"{JOURNAL_SUBMISSION_DIR}/ (raw_data/ never submitted)")
+              f"{JOURNAL_SUBMISSION_DIR}/ (raw_data/ never submitted; "
+              f"{'code/ submitted' if str(getattr(args, 'submit_code', DEFAULT_SUBMIT_CODE)) == 'on' else 'code/ never submitted'})")
         _jm_skip = True
     else:
         _jm_skip = False
@@ -36085,6 +36173,48 @@ def cmd_set_probe_review(args) -> None:
               "X-9xx, every declared verifier re-run at postcheck time" if mode_arg == "on"
               else "no probe session is planned")
     print(f"[set-probe-review] probe review: {mode_arg} ({detail})")
+
+
+def cmd_set_submit_code(args) -> None:
+    """Set (or show) whether the analysis-code area is part of the submission.
+
+    "off" (the default, and the behaviour of every root created before this
+    policy existed) strips `code/` from `journal_submission/` exactly like the
+    evidence areas and rejects a response letter that cites a `code/` path;
+    "on" submits the area instead (the copy carries `code/`, and citing it is
+    legal). The area stays revision CONTENT either way -- a stage may revise it
+    and the judges evaluate it -- and flipping the policy can never change a
+    pin, a score or a champion: it only decides what the NEXT assembly of
+    `journal_submission/` carries (a plain `run` re-assembles it once the
+    revision is complete).
+    """
+    ctx = Ctx(_venue_command_root(args, "set-submit-code"),
+              strict_venue=bool(getattr(args, "strict_venue", False)))
+    ctx.load()
+    mode_arg = str(getattr(args, "mode", None) or "").strip().lower()
+    show = bool(getattr(args, "show", False)) or not mode_arg
+    if show:
+        print(f"[set-submit-code] code/ in the submission: "
+              f"{'on' if submit_code_of(ctx) else 'off'} "
+              f"(off strips the analysis-code area from journal_submission/ and refuses a "
+              f"response letter that cites it; on ships it)")
+        return
+    if mode_arg not in SUBMIT_CODE_MODES:
+        die(f"set-submit-code needs one of {', '.join(SUBMIT_CODE_MODES)} (got {mode_arg!r})",
+            code=2)
+    begin_run_log("set-submit-code", ctx.root, sys.argv)
+    with ctx.lock("set-submit-code"):
+        ctx.cfg["submit_code"] = mode_arg
+        ctx.state["config"] = ctx.cfg
+        write_json_atomic(ctx.cfg_path, ctx.cfg)
+        ctx.log("set-submit-code", detail=mode_arg)
+        ctx.save_state()
+    detail = ("`code/` ships in the submission package and a response letter may cite it"
+              if mode_arg == "on" else
+              "`code/` is stripped from the submission package and a response letter may not "
+              "cite it")
+    print(f"[set-submit-code] code/ in the submission: {mode_arg} ({detail}; the next plain "
+          f"`run` re-assembles journal_submission/ once the revision is complete)")
 
 
 def cmd_set_dedup_mode(args) -> None:
@@ -39263,6 +39393,63 @@ PACKAGE_TEXT_EXTS = (".md", ".markdown", ".txt", ".tex", ".ltx", ".rst", ".json"
 PACKAGE_TEXT_BYTES_LIMIT = 2_000_000
 
 
+# PKG-2: a to-be-submitted file that points into an area the submission does not
+# carry (the analysis code, the raw data, the review feedback) leaves its reader
+# -- the journal, a reviewer, a rebuild -- a reference it can never resolve. The
+# pattern matches a path whose FIRST segment is one of those area names and that
+# is not the tail of a longer path or URL (`https://host/tree/main/code/a.py` is
+# not the author's own `code/`, so the "nothing word-like or `/` before it" guard
+# keeps URLs and longer paths out). The row is a REPORT, never a rewrite and
+# never a failure: the pointer lives in the author's prose.
+
+
+def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
+    """PKG-2: shipped text files that refer into a non-submitted area.
+
+    `areas` names the areas THIS package does not carry (the caller derives it
+    from what the assembly stripped), so the same scan reports a `code/`
+    reference only while the code is not submitted -- with `submit_code: on` a
+    `code/` path resolves and is no finding at all.
+    """
+    rows, names = [], [str(a) for a in (areas or ())]
+    root = Path(root)
+    if not names or not root.is_dir():
+        return rows
+    pattern = re.compile(
+        r"(?<![\w./\\-])(?:" + "|".join(re.escape(n) for n in names)
+        + r")/[\w.\-/]*[\w]", re.I)
+    for p in sorted(root.rglob("*")):
+        if not p.is_file() or p.suffix.lower() not in PACKAGE_TEXT_EXTS:
+            continue
+        rel = p.relative_to(root).as_posix()
+        if is_evidence_rel(rel) or _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
+            continue
+        try:
+            if p.stat().st_size > PACKAGE_TEXT_BYTES_LIMIT:
+                continue
+            text = p.read_text("utf-8", "replace")
+        except OSError:
+            continue
+        for i, line in enumerate(text.splitlines(), 1):
+            m = pattern.search(line)
+            if not m:
+                continue
+            ref = m.group(0)
+            hint = (f" (the analysis code ships only when `set-submit-code on` asks for it)"
+                    if ref.split("/", 1)[0].lower() == CODE_DIR else
+                    " (that area is a read-only input: it never ships)")
+            rows.append({
+                "rule": "PKG-2", "file": rel, "line": i, "reference": ref,
+                "detail": (f"this file is part of the submission but refers into {ref!r}, "
+                           f"which the submission does not carry: the journal cannot resolve "
+                           f"the reference. Point at shipped content, or replace the pointer "
+                           f"with a locator that ships{hint}"),
+                "fix": "manual"})
+            if len(rows) >= limit:
+                return rows
+    return rows
+
+
 def internal_artifact_rows(root: Path, limit: int = 40) -> list:
     """PKG-1: shipped files that carry the pipeline's/author's internal material.
 
@@ -40572,7 +40759,9 @@ def cmd_status(args) -> None:
         _jsub = (ctx.state.get("journal") or {}).get("submission_dir")
         if _jsub:
             print(f"               submission package: {_jsub}"
-                  f" (raw_data/ excluded; response "
+                  f" (raw_data/ excluded"
+                  + ("" if submit_code_of(ctx) else ", code/ excluded")
+                  + f"; response "
                   f"{'included' if (ctx.state.get('journal') or {}).get('response') else 'not written'})")
     # Filesystem-level numbers only: walking an 11 GB sandbox tree here would make
     # `status` take minutes. Exact per-sandbox sizes are what `prune` reports.
@@ -44792,6 +44981,15 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--journal-feedback-from", default=None, metavar="JOURNAL",
                     help="the journal the feedback came from (free text, e.g. \"iScience\"); "
                          "the response letter names it. The TARGET journal is still --journal")
+    ps.add_argument("--submit-code", choices=list(SUBMIT_CODE_MODES),
+                    default=DEFAULT_SUBMIT_CODE,
+                    help="whether the analysis-code area (`code/`) is part of the SUBMISSION "
+                         "(default: off). The area is revision content either way -- a stage may "
+                         "revise it and the judges evaluate it -- but with `off` the journal "
+                         "submission copy strips `code/` exactly like `raw_data/` and a "
+                         "to-be-submitted file (the response letter in particular) may not refer "
+                         "into it; with `on` the copy carries `code/` and the letter may cite it "
+                         "(`set-submit-code on` flips an existing root)")
     ps.add_argument("--revises", default=None,
                     help=f"the number N of REVIEWED-AND-THEN-REVISED candidates per round: an "
                          f"integer or a comma-separated list, with the same rules as --rewrites "
@@ -45287,6 +45485,20 @@ def build_parser() -> argparse.ArgumentParser:
     psm.add_argument("--force", action="store_true",
                      help="change the mode although this root already has run records")
     psm.set_defaults(func=cmd_set_revision_mode)
+
+    psc = sub.add_parser("set-submit-code", parents=[common],
+                         help="set (or show) whether the analysis-code area (`code/`) is part "
+                              "of the SUBMISSION: off (default -- revision content the stages "
+                              "revise and the judges evaluate, but stripped from "
+                              "journal_submission/ like raw_data/, and not citeable by the "
+                              "response letter) or on (the submission copy carries it and a "
+                              "letter may cite it)")
+    psc.add_argument("mode", nargs="?", default=None, choices=list(SUBMIT_CODE_MODES),
+                     metavar="MODE",
+                     help="on or off. Omit, or pass --show, to print the current policy")
+    psc.add_argument("--show", action="store_true",
+                     help="print whether `code/` is part of the submission and exit")
+    psc.set_defaults(func=cmd_set_submit_code)
 
     ptf = sub.add_parser("set-tiebreak-defect-floor", parents=[common],
                          help="set (or show) the adaptive defect-prefix walk's floor (the prefix "

@@ -512,7 +512,11 @@ def do_response(sb: Path, name: str, round_no: int) -> int:
     target = sb / "target"
     skip_names = {"changelog.md", "manual_steps.md", "revision_report.md", "revision_report.json",
                   "diff_ledger.md", "visual_check.md"}
-    evidence_dirs = ("raw_data", "raw_figs", "human_review_feedback", "llm_review_feedback")
+    # The areas a letter must not cite while they are not submitted: the
+    # evidence areas (never) and the analysis-code area (unless the root ships
+    # it; see postcheck_response's code/ rejection).
+    non_submission_dirs = ("raw_data", "raw_figs", "human_review_feedback",
+                           "llm_review_feedback", "code")
     non_manuscript_re = re.compile(
         r"feedback|referee|reviewers?|editors?|editorial|decision"
         r"|response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
@@ -523,7 +527,7 @@ def do_response(sb: Path, name: str, round_no: int) -> int:
             return False
         if "work" in rel.parts[:-1]:
             return False
-        if any(part in evidence_dirs for part in rel.parts[:-1]):
+        if any(part in non_submission_dirs for part in rel.parts[:-1]):
             return False
         return not non_manuscript_re.search(p.name)
 
