@@ -1626,7 +1626,11 @@ statements separate the numbers from the code that made them.
 software-resource row: the locator (DOI, accession, repository + path), the
 pinned revision (commit, tag, version), and whether the locator resolves NOW.
 The pipeline seeds the mechanical half as `FMT-AV1` (future/conditional
-locator) and `FMT-AV2` (one repository, two commits) rows.
+locator) and `FMT-AV2` (one repository, two commits) rows, plus the `PKG-2`
+rows for a to-be-submitted DOCUMENT that refers at what the submission does not
+carry — an area-prefixed path (`code/…`, `raw_data/…`) or a plain file name the
+package holds only outside the submission (a script under `code/`, the
+`raw_data/` archive, a `README*.md` file).
 
 **Finding rules.**
 - a future or conditional locator on any availability surface → `completeness`
@@ -1638,7 +1642,14 @@ locator) and `FMT-AV2` (one repository, two commits) rows.
   sources the reader needs to reproduce a display item → `completeness`, with
   the missing artifact named;
 - a tool/version list that omits a tool the Methods name, or a version that
-  contradicts the environment files → `correctness`.
+  contradicts the environment files → `correctness`;
+- a to-be-submitted document naming a file the submission does not carry (the
+  `PKG-2` rows) → `completeness`, with the sentence quoted: the reader cannot
+  resolve it. The fix is a REWRITE that names where the material really is or
+  carries the fact itself — never editing, deleting or extending the excluded
+  area, and never a locator the submission cannot honor. When the sentence is
+  still there at publication the orchestrator REMOVES it, so the fact it
+  carried is lost: report it now.
 
 ## M34 — Figure source data must cover exactly what the legend claims
 
@@ -1786,11 +1797,11 @@ and in each case a real submission shipped the defect.
 | `FMT-PDF2` | an XFA/LiveCycle form with no non-empty data value (an unfilled required form) | finding |
 | `FMT-PDF3` | a PDF with no extractable text at all | finding |
 | `PKG-1` | a shipped package file carries internal working material (an internal review-session URL, the pipeline's ledger/stage report, a stage note) | finding |
+| `PKG-2` | a to-be-submitted file refers at what the submission does not carry (a `code/…` or `raw_data/…` path, a file name the package holds only outside the submission, a `README*.md`) | finding |
 | `M30-NC` | a written "not run / no output" claim a shipped table contradicts (M30's non-numeric half) | finding |
 
 Every seeded row carries its `tier` (`finding` / `advisory`); the disposition
 bar above applies hardest to the `finding` tier.
-
 ## APPENDIX: Discovery round D0–D5 (references/discovery.md)
 
 # Discovery Round D0–D5 — paper-review (Phase 3)

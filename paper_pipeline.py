@@ -4249,6 +4249,21 @@ def submit_code_of(ctx=None) -> bool:
     return str(raw or "").strip().lower() in ("on", "true", "yes", "1")
 
 
+def submission_not_carried_areas(ctx) -> list:
+    """The area names a submission built from this root does NOT carry (PKG-2).
+
+    ONE definition of "what a submission leaves out", shared by the journal
+    assembly (which derives it from the copy it just stripped), the published
+    package's own scan and the code-side evidence pack, so the three can never
+    disagree about whether a `code/` pointer dangles: the evidence areas never
+    ship, and the analysis code ships only under `submit_code: on`.
+    """
+    areas = [str(n) for n in EVIDENCE_DIRNAMES]
+    if not submit_code_of(ctx):
+        areas.append(CODE_DIR)
+    return areas
+
+
 def journal_has_feedback(ctx=None) -> bool:
     """True when the mode consumes an editors'/reviewers' decision letter.
 
@@ -4734,7 +4749,15 @@ CORPORA_STRIP_BOOKKEEPING = BOOKKEEPING_FILES
 BOOKKEEPING_NAME_RE = re.compile(
     r"^(?:replacement_ledger|diff_ledger|revision_report|rewrite_report|manual_steps|"
     r"visual_check|changelog|agent_log|worklog)"
-    r"(?:[-_.][A-Za-z0-9._\-]+)?\.(?:md|txt|json)$", re.I)
+    r"(?:[-_.][A-Za-z0-9._\-]+)?\.(?:md|txt|json)$"
+    # The pipeline's own MEASUREMENT artifacts (written next to a run, never
+    # into a delivered package): a scan/repair report, the code-side evidence
+    # pack, the PKG-2 record. They are skipped by every corpus walk AND by the
+    # PKG-2 scan itself -- an evidence JSON that names the areas ("raw_data/",
+    # "code/") is not a submitted document, and reporting it as a dangling
+    # reference would drown the real rows (2026-10-15).
+    r"|^(?:code_scans|format_scan|format_fix|pkg2)(?:[-_.][A-Za-z0-9._\-]+)?"
+    r"\.(?:md|txt|json)$", re.I)
 
 
 def is_bookkeeping_name(name: str) -> bool:
@@ -6937,7 +6960,13 @@ EVIDENCE_INTEGRITY_REVIEW = """3f. The EVIDENCE-INTEGRITY sweeps M31-M36 (defini
      resource row must point at a locator that EXISTS now (deposit, DOI, accession, repository
      + commit) and every statement about one repository must pin ONE revision. The code-side
      FMT-AV1 (future/conditional locator) and FMT-AV2 (one repository, two commits) rows seed
-     it (artifact: M33_availability.md);
+     it (artifact: M33_availability.md), and its other half is the code-side PKG-2 rows (the
+     "Submission-surface references" table in `review/work/EVIDENCE_PACK.md`): a to-be-submitted
+     DOCUMENT that names a file the submission does not carry -- a script under `code/`, the
+     `raw_data/` archive, one of the author's README files -- promises the reader something
+     nobody can deliver. Such a sentence is REWRITTEN (name where the material really is, or
+     carry the fact itself); the orchestrator REMOVES the sentence mechanically at publication
+     when the pointer is still there, and the science it carried is then lost;
    * M34 FIGURE SOURCE DATA vs the legend's own claim: for every figure/table compare the
      shipped source data's distinct dataset/panel/method values and any selection/exclusion
      rule its metadata records with the counts and the rule the legend and manuscript state.
@@ -6987,7 +7016,12 @@ EVIDENCE_INTEGRITY_REVISE = """15. EVIDENCE-INTEGRITY findings (M31-M36) - resol
     * M32: move the caveat into the claim (or remove the claim from the abstract) so the level
       reported is the level the stated correction reaches; never adjust a number;
     * M33: an availability statement is aligned only by naming where the data/code ARE; a
-      deposit that has not happened is MANUAL_STEPS.md, and two pins become one;
+      deposit that has not happened is MANUAL_STEPS.md, and two pins become one. A sentence of
+      a to-be-submitted document that points at what the submission does not carry (the
+      code-side PKG-2 seed in `work/EVIDENCE_PACK.md`) is REWRITTEN so it names shipped content
+      or carries the fact itself -- never left as a promise, and never "fixed" by deleting the
+      fact with the pointer (the orchestrator removes the whole sentence if the pointer is
+      still there when the package is published);
     * M34: align the editable legend/Methods count or the stated selection rule with the source
       data; a regenerated figure/table or a stale source-data row is manual-required with the
       file named;
@@ -7008,7 +7042,15 @@ EVIDENCE_INTEGRITY_GENERIC = """EVIDENCE-INTEGRITY (check ids M31-M36, review-si
    disagrees with the document's OWN citation order (FMT-Z1..Z5) is named for the author to
    refresh in Word/Zotero and re-check with `python3 paper_docx_format.py zotero-check` -- a
    field RESULT is never edited here, and the fields may be flattened only once the check is
-   clean."""
+   clean.
+
+   PKG-2 is the SUBMISSION-SURFACE half of M33: a delivered document may only point at content
+   the submission itself carries. A sentence naming a file the submission leaves out (a script
+   under `code/`, the `raw_data/` archive, one of the author's README files) is REWRITTEN so it
+   names shipped content or carries the fact itself; the orchestrator's own PKG-2 rows (the
+   "Submission-surface references" table in `work/EVIDENCE_PACK.md`) list them, and the
+   orchestrator REMOVES the sentence mechanically when the pointer is still there at
+   publication -- whatever fact the pointer carried is then gone."""
 
 
 def apply_evidence_integrity(text: str, where: str) -> str:
@@ -15070,6 +15112,11 @@ def _format_fix_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, warns: list,
     stage hands on must carry every live field of the base version, may edit
     or delete individual fields with their citation text, and may never drop
     them all or leave one malformed.
+
+    The PKG-2 removal (a to-be-submitted document may not point at what the
+    submission does not carry) runs the same way, for the same reason: it is a
+    submission-surface fact, not a style preference, so `--format-fix off` does
+    not switch it off.
     """
     sb = ctx.sandbox_of(rec)
     inp = sb / ("self" if rec.get("kind") == "integrate" else "base")
@@ -15086,6 +15133,23 @@ def _format_fix_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, warns: list,
                          f"package (see zotero_fields in the run record)")
         return rep
 
+    # PKG-2 repair FIRST (and whatever the format-fix policy says): a
+    # to-be-submitted document may not point at what the submission does not
+    # carry, and the pointer is REMOVED here (the sentence that carries it)
+    # rather than shipped dangling. Running before the format normalization
+    # means that pass sees the final text (and cleans up an emptied paragraph).
+    # The session was told the rule by the code-side pack; this is the
+    # mechanical guarantee.
+    if pkg_dir.is_dir():
+        try:
+            rec["reference_strip"] = strip_dangling_references_in_dir(
+                pkg_dir, submission_not_carried_areas(ctx), rec["id"], warns=warns,
+                artifacts_dir=ctx.sandbox_of(rec),
+                artifact_name=f"PKG2_{rec['id']}.json")
+        except Exception as e:                                        # noqa: BLE001
+            rec["reference_strip"] = {"label": rec["id"], "error": f"{type(e).__name__}: {e}"}
+            warns.append(f"PKG-2: the dangling-reference removal could not run "
+                         f"({type(e).__name__}: {e}); the package is reported, not repaired")
     if str((ctx.cfg or {}).get("format_fix") or DEFAULT_FORMAT_FIX) == "off":
         rec["format_fix"] = {"label": rec["id"], "skipped": "format_fix=off"}
         _field_gate()
@@ -15336,6 +15400,20 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
         evidence["placeholders"] = scan_placeholders_in_sources(sources)
     except Exception as e:                                            # noqa: BLE001
         evidence["placeholders"] = {"error": f"{type(e).__name__}: {e}"}
+    # PKG-2 (AGENTS.md): a to-be-submitted document may not point at what the
+    # submission does not carry. The mechanical half runs in every
+    # package-producing stage's postcheck (the sentence is REMOVED there); this
+    # seed puts the rows in front of the review/audit/revise sessions FIRST, so
+    # the sentence is rewritten in prose instead of lost, and so a document the
+    # mechanical edit cannot touch (a structural file, a pointer inside a live
+    # citation field) is still fixed by someone.
+    try:
+        areas = submission_not_carried_areas(ctx)
+        evidence["submission_references"] = {
+            "not_carried": list(areas),
+            "rows": non_submitted_reference_rows(corpus_dir, areas)}
+    except Exception as e:                                            # noqa: BLE001
+        evidence["submission_references"] = {"error": f"{type(e).__name__}: {e}"}
     try:
         man = manifest_for_sources(sources)
         evidence["corpus_identity"] = {
@@ -15520,6 +15598,8 @@ def evidence_pack_summary(ev: dict) -> str:
               f"({fmt.get('high', 0)} high); placeholders {ph.get('count', '?')}"
             + f"; J3 claim-strength rows "
               f"{(ev.get('claims') or {}).get('count', '?')}"
+            + f"; PKG-2 dangling references "
+              f"{len((ev.get('submission_references') or {}).get('rows') or [])}"
             + f"; M30 hierarchy rows "
               f"{(ev.get('hierarchy') or {}).get('count', '?')}"
               f" (+{(ev.get('code_literals') or {}).get('count', '?')} literal(s))"
@@ -16315,7 +16395,27 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
                                        "no code-side formatting finding")
             + "\n")
     plc = ev.get("placeholders") or {}
-    lines += ["## Hand-off placeholders", "",
+    sref = ev.get("submission_references") or {}
+    sref_rows = sref.get("rows") or []
+    lines += ["## Submission-surface references (PKG-2)", "",
+              "A to-be-submitted document may only point at content the submission itself "
+              "carries. Every row below names a file of THIS package that refers at what the "
+              "submission does not carry ("
+              + (", ".join(f"`{a}/`" for a in (sref.get("not_carried") or [])) or "no area")
+              + ", plus the author's `README*.md`/`README*.txt` files). REWRITE the sentence so "
+              "it points at shipped content or carries the fact itself -- the pipeline removes "
+              "the sentence mechanically if it is still there when the package is published, "
+              "and a removed sentence loses the science it carried.", ""]
+    if sref_rows:
+        lines += [f"| file | line | reference | resolves to |", "|---|---|---|---|"]
+        for r in sref_rows[:40]:
+            lines.append(f"| {r.get('file')} | {r.get('line')} | `{r.get('reference')}` | "
+                         + (", ".join(f"`{x}`" for x in (r.get("resolves_to") or [])) or "—")
+                         + " |")
+    else:
+        lines.append("(no dangling reference in a to-be-submitted file)")
+    lines += ["",
+              "## Hand-off placeholders", "",
               f"- count: {plc.get('count', '?')}",
               f"- files: {', '.join(plc.get('files') or []) or '(none)'}", "",
               "## Corpus identity", "",
@@ -16784,6 +16884,19 @@ README_NAME_RE = re.compile(r"^readme.*\.(?:md|txt)$", re.IGNORECASE)
 def is_non_submitted_readme_name(name: str) -> bool:
     """True for a `README*.md` / `README*.txt` file name (never submitted)."""
     return bool(README_NAME_RE.match(str(name or "").strip()))
+
+
+# A Word OWNER (lock) file: `<~$><document name>` beside the document Word has
+# open. It is never manuscript content: it holds the opening user's name, it is
+# not a document (converting it fails "not a zip file"), and it matches no
+# submission name pattern. The pipeline's version corpora and published copies
+# therefore never carry one -- exactly like a difference-tracking auxiliary --
+# and the recovery layer never restores one a stage dropped. Readers that list
+# the corpus (the review's file inventory, the M9/M6 sweeps) already skip it by
+# this same prefix; this predicate is the ONE place the rule is spelled.
+def is_word_owner_name(name: str) -> bool:
+    """True for a Word owner/lock file name (`~$document.docx`)."""
+    return str(name or "").strip().startswith("~$")
 
 
 def evidence_area_of(rel: str) -> str:
@@ -19695,6 +19808,23 @@ def _sanitize_ooxml_bytes(data: bytes) -> tuple:
                 payload = payload.replace(PLACEHOLDER_TOKEN.encode(), b"[TO BE COMPLETED")
             elif low.endswith((".xml", ".rels")):
                 payload = _accept_changes(payload)
+                if low.endswith(".rels"):
+                    # A relationship TARGET that names an absolute local path
+                    # (the venue's Word template attaches
+                    # `file:///C:\Users\<someone>\...\*.dotx`, and a package may
+                    # link a local file in any other way): the blind view must
+                    # not carry a machine/user name, and no judge can open the
+                    # path anyway. The relationship itself stays -- an element
+                    # may reference it, and a dropped relationship is a
+                    # dangling `r:id` -- so only the target is neutralized, and
+                    # only inside a `.rels` part (a document's own text may
+                    # legitimately quote such an attribute).
+                    new = re.sub(
+                        rb'(Target=")(?:file:|[A-Za-z]:[\\/]|\\\\[^"/]*[\\/])[^"]*"',
+                        rb'\1about:blank"', payload)
+                    if new != payload:
+                        stripped += 1
+                    payload = new
             info = zipfile.ZipInfo(name, date_time=VIEW_FIXED_ZIP_TIME)
             info.compress_type = zipfile.ZIP_DEFLATED
             info.create_system = 0
@@ -25144,7 +25274,7 @@ def _candidate_corpus_files(sb: Path, out_dir: str = REVISED_DIR) -> list:
         if not d.is_dir():
             continue
         for p in _iter_tree_files(d, follow_dir_links=True):
-            if not p.is_file() or _is_aux_doc(p.name):
+            if not p.is_file() or _is_aux_doc(p.name) or is_word_owner_name(p.name):
                 continue
             rel = p.relative_to(d).as_posix()
             if is_package and rel.split("/", 1)[0] in CORPUS_EXCLUDE_TOP:
@@ -25667,6 +25797,9 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
       * derived build outputs (.aux/.log/.synctex.gz/... -- the prompts
         prescribe leaving them out of revised/);
       * the difference-tracking auxiliaries (see TRACKING_AUX_NAME_RE);
+      * a Word OWNER (lock) file (`~$<name>`): it is not a document, and a
+        candidate that drops it loses no content -- restoring one only puts a
+        162-byte Word by-product back into the corpus (2026-10-15);
       * the pipeline's own bookkeeping files (the agent regenerates them);
       * revised/work/ scratch.
     Skip-conditions, so recovery never duplicates content:
@@ -25710,7 +25843,7 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
             continue
         for q in sorted(bsrc.rglob("*")):
             if not q.is_file() or _is_aux_doc(q.name) or _is_derived_name(q.name) \
-                    or is_bookkeeping_name(q.name):
+                    or is_bookkeeping_name(q.name) or is_word_owner_name(q.name):
                 continue
             brel = q.relative_to(bsrc).as_posix()
             if (bexcluded and brel.split("/", 1)[0] in bexcluded) \
@@ -25764,7 +25897,7 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
         if not src_dir.is_dir():
             continue
         for p in sorted(src_dir.rglob("*")):
-            if not p.is_file() or _is_aux_doc(p.name):
+            if not p.is_file() or _is_aux_doc(p.name) or is_word_owner_name(p.name):
                 continue
             rel_in = p.relative_to(src_dir).as_posix()
             if excluded and rel_in.split("/", 1)[0] in excluded:
@@ -28580,8 +28713,19 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     if journal_is_scoped(ctx):
         # A major/minor revision may change the manuscript ONLY where a reviewer
         # concern requires it: every changed file must be named in the revision
-        # ledger, and no file may be added or removed.
-        errs.extend(scoped_scope_problems(ctx, sb, rev))
+        # ledger, and no file may be added or removed. The orchestrator's own
+        # PKG-2 removal (a dangling reference edited out before this check) is
+        # exempt and reported: the session neither made that edit nor could name
+        # it.
+        _pipe_files = [f.get("file") for f in
+                       ((rec.get("reference_strip") or {}).get("files") or [])
+                       if f.get("removed")]
+        if _pipe_files:
+            warns.append("the orchestrator removed a dangling reference (PKG-2) from "
+                         + ", ".join(f"`{f}`" for f in _pipe_files[:4])
+                         + " -- a submission-surface repair, not a concern-driven edit; the "
+                           "removed sentences are in the run record (reference_strip)")
+        errs.extend(scoped_scope_problems(ctx, sb, rev, pipeline_changed=_pipe_files))
     return (not errs), errs, warns, None
 
 
@@ -31170,15 +31314,22 @@ def _scope_tree_files(root: Path) -> dict:
     return out
 
 
-def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path) -> list:
+def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=()) -> list:
     """The major/minor scope guard: only concern-driven edits are allowed.
 
     File-level and mechanical: an added or deleted file is an error; a modified
     file must be named in the package's revision ledger (which `postcheck_revise`
     requires to name every frozen finding id). The prompt asks for hunk-level
     discipline; this is the enforceable floor.
+
+    `pipeline_changed` names the files the ORCHESTRATOR's own repairs touched
+    before this check ran (the PKG-2 removal of a dangling reference, which is a
+    submission-surface rule and not a concern-driven edit): those are exempt --
+    the session never made them and cannot name them in its ledger -- and the
+    exemption is reported by the caller.
     """
     errs = []
+    pipeline_changed = {str(p) for p in (pipeline_changed or ())}
     base = sb / "base"
     if not base.is_dir() or not rev.is_dir():
         return errs
@@ -31200,6 +31351,8 @@ def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path) -> list:
                     f"document; restore it")
     for key in sorted(k for k in set(want) & set(got) if want[k][1] != got[k][1]):
         rel = got[key][0]
+        if rel in pipeline_changed:
+            continue
         if rel not in ledger_text and Path(rel).name not in ledger_text:
             errs.append(f"scoped revision changed {rel!r} but the ledger names neither the file "
                         f"nor its basename: every edit must trace to a reviewer concern")
@@ -31318,8 +31471,17 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
     # corpus/pin/winner; only this copy drops them, and the manifest names
     # every one.
     readme_dropped = []
+    # A Word owner (lock) file is not a document and never part of a submission
+    # (no submission pattern names one); the delivered folder carries only real
+    # files, and the manifest names what was dropped.
+    word_owner_dropped = []
     for q in sorted(dst.rglob("*")):
-        if q.is_file() and is_non_submitted_readme_name(q.name):
+        if not q.is_file():
+            continue
+        if is_word_owner_name(q.name):
+            word_owner_dropped.append(q.relative_to(dst).as_posix())
+            q.unlink()
+        elif is_non_submitted_readme_name(q.name):
             readme_dropped.append(q.relative_to(dst).as_posix())
             q.unlink()
     # `name`, not `p.name`: `p` is the tracked-changes copy loop's variable
@@ -31332,10 +31494,21 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
             f"this is a pipeline bug -- report it before submitting anything.")
     # PKG-2: nothing that ships may point at what does not ship (AGENTS.md). The
     # areas THIS package lacks are exactly the ones a shipped file must not
-    # refer into; reported as an author action, never rewritten or failed.
+    # refer into. The pointers are REMOVED from the shipped documents (the
+    # sentence that carries one), and whatever the mechanical layer may not
+    # touch -- a structural file, a sentence carrying a live citation field --
+    # is reported as an author action; the assembly never fails on it.
     missing_areas = [name for name in EVIDENCE_DIRNAMES + (CODE_DIR,)
                      if not (dst / name).exists()]
-    dangling = non_submitted_reference_rows(dst, missing_areas)
+    try:
+        reference_strip = strip_dangling_references_in_dir(
+            dst, missing_areas, "journal submission", warns=None,
+            artifacts_dir=ctx.reports_dir,
+            artifact_name="PKG2_journal_submission.json")
+        dangling = reference_strip.get("remaining") or []
+    except Exception as e:                                            # noqa: BLE001
+        reference_strip = {"error": f"{type(e).__name__}: {e}"}
+        dangling = non_submitted_reference_rows(dst, missing_areas)
     manifest = hash_manifest(dst)
     write_json_atomic(ctx.root / "journal_submission.json",
                       {"mode": mode,
@@ -31349,6 +31522,14 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
                        "raw_data_included": False,
                        "code_included": bool(include_code),
                        "readme_files_excluded": readme_dropped,
+                       "word_owner_files_excluded": word_owner_dropped,
+                       "removed_dangling_references": [
+                           {"file": f["file"], "sentences": f["removed"]}
+                           for f in (reference_strip.get("files") or []) if f.get("removed")],
+                       "removed_local_path_links": [
+                           {"file": f["file"], "links": f["removed_links"]}
+                           for f in (reference_strip.get("files") or [])
+                           if f.get("removed_links")],
                        "non_submitted_references": dangling,
                        "manifest": manifest,
                        "created": utcnow()})
@@ -31357,15 +31538,39 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
               f"(the author's own documentation, treated like {CODE_DIR}/): "
               + ", ".join(f"`{r}`" for r in readme_dropped[:6])
               + (" …" if len(readme_dropped) > 6 else ""))
+    if word_owner_dropped:
+        print(f"[journal] {len(word_owner_dropped)} Word owner (lock) file(s) are NOT "
+              f"submitted (a Word by-product, not a document): "
+              + ", ".join(f"`{r}`" for r in word_owner_dropped[:6])
+              + (" …" if len(word_owner_dropped) > 6 else ""))
     if dangling:
         print(f"[journal] {len(dangling)} reference(s) in the to-be-submitted files point into "
-              f"an area this submission does NOT carry (PKG-2) -- the journal cannot resolve "
-              f"them; the author must point at shipped content (or submit the area, when it is "
-              f"one that can ship -- see `set-submit-code`):")
+              f"an area this submission does NOT carry and could NOT be removed mechanically "
+              f"(PKG-2) -- the journal cannot resolve them; the author must point at shipped "
+              f"content (or submit the area, when it is one that can ship -- see "
+              f"`set-submit-code`):")
         for r in dangling[:6]:
             print(f"  - {r['file']} line {r['line']}: `{r['reference']}`")
         if len(dangling) > 6:
             print(f"  - … and {len(dangling) - 6} more (see journal_submission.json)")
+    _removed_refs = reference_strip.get("removed") or 0
+    if _removed_refs:
+        print(f"[journal] {_removed_refs} dangling reference(s) were REMOVED from the "
+              f"to-be-submitted document(s) (a to-be-submitted file may not point at what the "
+              f"submission does not carry); the removed sentences are recorded verbatim in "
+              f"journal_submission.json:")
+        for f in (reference_strip.get("files") or [])[:6]:
+            if f.get("removed"):
+                print(f"  - {f['file']}: {len(f['removed'])} sentence(s), e.g. "
+                      f"`{str(f['removed'][0])[:120]}`")
+    _removed_links = reference_strip.get("removed_links") or 0
+    if _removed_links:
+        print(f"[journal] {_removed_links} local-path link(s) (an attached Word template "
+              f"pointing at somebody's own machine) were REMOVED from the submitted part(s); "
+              f"the removed links are recorded in journal_submission.json:")
+        for f in (reference_strip.get("files") or [])[:6]:
+            for s in (f.get("removed_links") or [])[:2]:
+                print(f"  - {f['file']}: {str(s)[:140]}")
     return dst
 
 
@@ -39852,14 +40057,152 @@ PACKAGE_TEXT_EXTS = (".md", ".markdown", ".txt", ".tex", ".ltx", ".rst", ".json"
 PACKAGE_TEXT_BYTES_LIMIT = 2_000_000
 
 
-# PKG-2: a to-be-submitted file that points into an area the submission does not
-# carry (the analysis code, the raw data, the review feedback) leaves its reader
-# -- the journal, a reviewer, a rebuild -- a reference it can never resolve. The
-# pattern matches a path whose FIRST segment is one of those area names and that
-# is not the tail of a longer path or URL (`https://host/tree/main/code/a.py` is
-# not the author's own `code/`, so the "nothing word-like or `/` before it" guard
-# keeps URLs and longer paths out). The row is a REPORT, never a rewrite and
-# never a failure: the pointer lives in the author's prose.
+# PKG-2: a to-be-submitted file that points at what the submission does not carry
+# (the analysis code, the raw data, the review feedback, the author's README
+# files) leaves its reader -- the journal, a reviewer, a rebuild -- a reference
+# it can never resolve. Two reference SHAPES are reported, because authors write
+# both (the second one was the 2026-10-15 gap: a supplementary legend that names
+# a script and an archive the submission never carries, with no `code/` path to
+# match):
+#   * an AREA-PREFIXED path, whose FIRST segment is one of those area names and
+#     that is not the tail of a longer path or URL (`https://host/tree/main/code/a.py`
+#     is not the author's own `code/`, so the "nothing word-like or `/` before
+#     it" guard keeps URLs and longer paths out);
+#   * a plain FILE NAME the package carries ONLY inside such an area (or as one
+#     of its never-shipped by-products): the name resolves against the package
+#     itself, so it is a row exactly when the shipped reader cannot open it.
+# A name the package does not carry at all (an external repository's file, a
+# producer only the journal has) is NOT this scan's business: only a pointer at
+# something the package itself holds outside the submission is.
+# The row is a REPORT, never a rewrite and never a failure: the pointer lives in
+# the author's prose.
+
+
+# The extensions a written reference carries. A fixed list, never "any dotted
+# token": prose abbreviations ("et al."), figure call-outs ("Fig. 2"), model
+# names ("DeepSeek-V4.1-Flash") and DOIs must not read as filenames.
+PKG2_NAME_EXTS = (
+    "py", "pyi", "ipynb", "r", "rmd", "sh", "bash", "c", "cc", "cpp", "h", "hpp",
+    "java", "js", "mjs", "ts", "pl", "jl", "m", "sql",
+    "zip", "tar", "tgz", "gz", "bz2", "xz", "7z",
+    "csv", "tsv", "txt", "dat", "parquet", "feather",
+    "xlsx", "xls", "ods", "json", "jsonl", "ndjson", "yaml", "yml", "toml",
+    "ini", "cfg", "conf", "env", "xml", "html", "htm", "css",
+    "md", "markdown", "rst", "tex", "ltx", "bib", "bbl", "docx", "doc",
+    "pdf", "png", "jpg", "jpeg", "tif", "tiff", "eps", "svg",
+    "h5", "hdf5", "npz", "npy", "pkl", "pth", "joblib", "rds",
+    "fa", "fasta", "fq", "fastq", "fq.gz", "bam", "vcf", "bed", "gff", "gtf",
+    "out", "log", "lst",
+)
+
+
+def _pkg2_name_pattern():
+    """The written-filename token a shipped document may refer by name.
+
+    Parentheses are NOT part of the name class: Word prose writes "(hpep-v07.zip)"
+    and an example path's own parentheses must not travel into the reference the
+    row names. The lookbehind keeps a URL tail or a longer path out (`/code/a.py`
+    is the area pattern's job), the lookahead keeps a longer NAME out
+    (`README.md.bak`, `data.csv.gz`), and a one-letter time of day (`9 a.m.`) is
+    never a filename.
+    """
+    ext = "|".join(re.escape(e) for e in sorted(set(PKG2_NAME_EXTS), key=len, reverse=True))
+    return re.compile(r"(?<![\w./\\+\-])(?![aApP]\.m(?![A-Za-z])|e\.g|i\.e)"
+                      r"(?:[\w.\-+]+[/\\])*[\w\-+]+\.(?:"
+                      + ext + r")(?!\w|\.\w)", re.I)
+
+
+PKG2_NAME_RE = _pkg2_name_pattern()
+
+
+# A sentence that LOCATES its material elsewhere -- a public repository, a
+# deposit, a DOI link, an archive -- resolves for the reader even when this very
+# package carries a same-named file outside the submission (a `code/` copy of a
+# script the manuscript says is "in the hpep subdirectory of that repository").
+# The 2026-10-15 discovery round: without this guard the bare-name rule could
+# delete a Methods sentence whose pointer really does resolve.
+PKG2_EXTERNAL_LOCATOR_RE = re.compile(
+    r"(?i)https?://|www\.|\b(?:github|gitlab|bitbucket|sourceforge|zenodo|figshare|dryad|"
+    r"osf\.io|protocols\.io|doi\.org|repositor(?:y|ies)|repo\b|deposit(?:ed|ory)?|"
+    r"archived at|available (?:at|from|on)|publicly available|openly available)\b")
+
+
+def _pkg2_external_locator(text: str, start: int, end: int) -> bool:
+    """True when the reference's own SENTENCE points the reader at a locator.
+
+    Sentence-scoped (not line/paragraph-scoped) on purpose: a paragraph may cite
+    a work whose embedded `itemData` carries a DOI URL, and that must not excuse
+    a pointer in a different sentence.
+    """
+    mod = _format_module()
+    if mod is not None and hasattr(mod, "sentence_spans"):
+        try:
+            for a, b in mod.sentence_spans(text):
+                if a <= start and end <= b:
+                    return bool(PKG2_EXTERNAL_LOCATOR_RE.search(text[a:b]))
+        except Exception:                                             # noqa: BLE001
+            pass
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    return bool(PKG2_EXTERNAL_LOCATOR_RE.search(
+        text[line_start:line_end if line_end >= 0 else len(text)]))
+
+
+def _pkg2_name_index(root: Path, area_set: set) -> tuple:
+    """Which written file names THIS package ships, and which it does not.
+
+    Four lookup structures over one walk (following directory links, like every
+    corpus identity walk):
+      * `shipped_paths` / `shipped_names` -- the files a submission carries;
+      * `absent_paths` / `absent_names` -- the files the package holds but a
+        submission does not: everything inside a non-carried area plus the
+        never-shipped by-products (a Word owner file, a difference-tracking
+        auxiliary, the pipeline's own bookkeeping).
+    A name is reported only when it resolves to the second group: a shipped name
+    resolves for the reader, and a name the package does not carry at all is not
+    a pointer at this package's own material.
+    """
+    shipped_paths, shipped_names = set(), set()
+    absent_paths, absent_names = {}, {}
+    for p in _iter_tree_files(root, follow_dir_links=True):
+        try:
+            rel = p.relative_to(root).as_posix()
+        except ValueError:                                             # pragma: no cover
+            continue
+        top = rel.split("/", 1)[0].lower()
+        absent = (top in area_set or is_word_owner_name(p.name)
+                  or _is_aux_doc(p.name) or is_bookkeeping_name(p.name))
+        if absent:
+            absent_names.setdefault(p.name.lower(), []).append(rel)
+            absent_paths.setdefault(rel.lower(), rel)
+        else:
+            shipped_paths.add(rel.lower())
+            shipped_names.add(p.name.lower())
+    return shipped_paths, shipped_names, absent_paths, absent_names
+
+
+def _pkg2_name_resolution(ref: str, index: tuple):
+    """(reason, where) for a written file name: "shipped", "absent" or "unknown".
+
+    `ref` is the token as the author wrote it (`jf_supplement_analysis.py`, or a
+    relative path). "absent" carries the package-relative path(s) where the file
+    actually lives -- the row names them, so the author sees which area the
+    reader would have to reach into.
+    """
+    shipped_paths, shipped_names, absent_paths, absent_names = index
+    key = str(ref or "").strip().replace("\\", "/")
+    while key.startswith("./"):
+        key = key[2:]
+    low = key.lower()
+    base = low.rsplit("/", 1)[-1]
+    if low in shipped_paths or base in shipped_names:
+        return "shipped", []
+    if low in absent_paths:
+        return "absent", [absent_paths[low]]
+    hits = absent_names.get(base) or []
+    if hits:
+        return "absent", sorted(hits)
+    return "unknown", []
 
 
 def _pkg2_url_query_value(line: str, start: int) -> bool:
@@ -39881,7 +40224,7 @@ def _pkg2_url_query_value(line: str, start: int) -> bool:
 
 
 def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
-    """PKG-2: shipped text files that refer into a non-submitted area.
+    """PKG-2: shipped text files that refer at what the submission does not carry.
 
     `areas` names the areas THIS package does not carry (the caller derives it
     from what the assembly stripped), so the same scan reports a `code/`
@@ -39891,11 +40234,147 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
     `README*.md` / `.txt` token -- or one under a relative directory
     (`docs/README.md`) -- in a shipped document is a row unconditionally; a URL
     that merely ends in a README name is not.
+
+    A reference is reported in either of two SHAPES (see the block above this
+    function): an area-prefixed path, and a plain file NAME the package carries
+    only outside the submission. The name shape is what a supplementary legend
+    writes -- "produced by `jf_supplement_analysis.py`, which is distributed with
+    the source code ... `hpep-v07.zip`" names two files the submission never
+    carries, and no path prefix for a pattern to match.
+
+    Files INSIDE a non-carried area are never scanned as submission documents:
+    `code/README_RERUN.md` cites `raw_data/hpep-v07.zip` and `code/out/...` as a
+    matter of course -- it is the area's own documentation, not a shipped file
+    with a dangling pointer.
     """
     rows, names = [], [str(a) for a in (areas or ())]
     root = Path(root)
     if not root.is_dir():
         return rows
+    area_set = {n.lower() for n in names}
+    patterns = _pkg2_area_patterns(names)
+    index = _pkg2_name_index(root, area_set)
+
+    def row(rel: str, line_no: int, ref: str, hint: str, resolves=()) -> dict:
+        out = {
+            "rule": "PKG-2", "file": rel, "line": line_no, "reference": ref,
+            "detail": (f"this file is part of the submission but refers at {ref!r}, "
+                       f"which the submission does not carry: the journal cannot "
+                       f"resolve the reference. Point at shipped content, or replace "
+                       f"the pointer with a locator that ships{hint}"),
+            "fix": "manual"}
+        if resolves:
+            out["resolves_to"] = list(resolves)[:3]
+        return out
+
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(root).as_posix()
+        if rel.split("/", 1)[0].lower() in area_set:
+            # A file inside a non-carried area is part of that area, never a
+            # submission document: its own internal pointers are not findings.
+            continue
+        if is_evidence_rel(rel) or is_word_owner_name(p.name) or _is_aux_doc(p.name) \
+                or is_bookkeeping_name(p.name) or is_non_submitted_readme_name(p.name):
+            # A README*.md/.txt file is the author's own documentation and never
+            # a submitted file: what it points at is the author's business.
+            continue
+        ext = p.suffix.lower()
+        if ext == ".docx":
+            # The manuscript the journal actually reads is a .docx: a dangling
+            # reference inside it is the defect this scan exists for, and the
+            # text-file scan never opened it (a `See raw_data/tables.tsv` in
+            # word/document.xml produced no row at all).
+            #
+            # Its PARTS carry links too: the venue's Word template attaches
+            # `file:///C:\Users\<someone>\...\template.dotx`, which a restyled
+            # package inherits -- a pointer at a document no reader can open,
+            # naming the machine it was authored on (2026-10-15 discovery round).
+            _mod = _format_module()
+            if _mod is not None and hasattr(_mod, "local_path_link_rows"):
+                try:
+                    _links = _mod.local_path_link_rows(p)
+                except Exception:                                     # noqa: BLE001
+                    _links = []
+                for _part, _rid, _rtype, _target in _links:
+                    rows.append({
+                        "rule": "PKG-2", "file": rel, "line": 1, "reference": _target,
+                        "part": _part,
+                        "detail": (f"the package part {_part} links to the local path "
+                                   f"{_target!r}: a reader (the journal, a reviewer, a "
+                                   f"rebuild) cannot open it, and it names the machine that "
+                                   f"authored it. The orchestrator removes an "
+                                   f"attached-template link; any other local-path link is "
+                                   f"the author's to repoint"),
+                        "fix": "manual"})
+                    if len(rows) >= limit:
+                        return rows
+            lines = _docx_paragraphs(p)
+            if lines is None:
+                continue
+        elif ext in PACKAGE_TEXT_EXTS:
+            try:
+                if p.stat().st_size > PACKAGE_TEXT_BYTES_LIMIT:
+                    continue
+                text = p.read_text("utf-8", "replace")
+            except OSError:
+                continue
+            lines = text.splitlines()
+        else:
+            continue
+        for i, line in enumerate(lines, 1):
+            # EVERY reference on the line, not the first pattern's first hit:
+            # the area pattern runs first, so `See README.md and also
+            # raw_data/tables.tsv.` used to report only the area path, and a
+            # second reference (the same class the scan exists for) was lost.
+            found = [mm for pat in patterns for mm in pat.finditer(line)]
+            # The area pattern's span covers a README under it
+            # (`code/README.md`): that is ONE reference, named by the longer
+            # match, not a second finding.
+            found.sort(key=lambda mm: (mm.start(), -(mm.end() - mm.start())))
+            kept = []
+            for mm in found:
+                if _pkg2_url_query_value(line, mm.start()):
+                    continue
+                if any(k.start() <= mm.start() and mm.end() <= k.end() for k in kept):
+                    continue
+                kept.append(mm)
+            for m in kept:
+                ref = m.group(0)
+                # BOTH separators: the area pattern accepts a backslash
+                # (`raw_data\tables.tsv`), and splitting on "/" alone read the
+                # whole reference as the "head", so the row's advice named the
+                # README rule for a raw_data pointer.
+                rows.append(row(rel, i, ref, _pkg2_hint(ref, area_set)))
+                if len(rows) >= limit:
+                    return rows
+            # The NAME shape: a written filename that resolves, inside this very
+            # package, only to material the submission does not carry. A name
+            # already covered by an area/README match (any overlap) is that one
+            # reference, not a second finding.
+            for m in PKG2_NAME_RE.finditer(line):
+                if any(k.start() < m.end() and m.start() < k.end() for k in kept):
+                    continue
+                if _pkg2_url_query_value(line, m.start()):
+                    continue
+                reason, where = _pkg2_name_resolution(m.group(0), index)
+                if reason != "absent":
+                    continue
+                if _pkg2_external_locator(line, m.start(), m.end()):
+                    # The sentence sends the reader to a repository/DOI/archive:
+                    # the pointer resolves there, so this is not a finding (the
+                    # package merely happens to carry a same-named copy).
+                    continue
+                rows.append(row(rel, i, m.group(0),
+                                _pkg2_hint(where[0], area_set), resolves=where))
+                if len(rows) >= limit:
+                    return rows
+    return rows
+
+
+def _pkg2_area_patterns(names: list) -> list:
+    """The area-path and README-name patterns for one set of not-carried areas."""
     patterns = []
     if names:
         patterns.append(re.compile(
@@ -39925,77 +40404,378 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
     patterns.append(re.compile(
         r"(?<![\w./\\&?#-])(?:[\w.\-+()]+/)*README[\w.\-+()]*\.(?:md|txt)"
         r"(?![\w\-/]|\.\w)", re.I))
-    for p in sorted(root.rglob("*")):
+    if names:
+        # The AREA ITSELF, written with no file behind the separator: a bare
+        # `code/` (nothing after the slash) and the prose spelling "the code
+        # directory" / "the raw_data folder". The 2026-10-15 report was exactly
+        # this -- "the supplementary material refers to the `code` directory" --
+        # a pointer with no filename for the other patterns to match.
+        joined = "|".join(re.escape(n) for n in names)
+        patterns.append(re.compile(
+            r"(?<![\w./\\&?#-])(?:" + joined
+            + r")[/\\](?![^\s.,;:)\]}\u201d\u2019\"'])", re.I))
+        patterns.append(re.compile(
+            r"(?<![\w./\\&?#-])(?:" + joined + r")[/\\]?\s+(?:director(?:y|ies)|"
+            r"folder|dir)\b", re.I))
+    return patterns
+
+
+def _pkg2_hint(ref: str, area_set: set) -> str:
+    """The one-fact reason a reference cannot be resolved, for the row's advice.
+
+    `ref` is what the author wrote (`code/out/x.csv`) or where the package
+    actually carries a bare name (`code/jf_supplement_analysis.py`), so one
+    function covers both shapes -- and the prose spelling of an area itself
+    ("code directory", "raw_data/"), where the area word is the first token.
+    """
+    parts = re.split(r"[/\\\s]", str(ref))
+    head = (parts[0] or "").lower()
+    base = parts[-1]
+    if is_non_submitted_readme_name(base):
+        # `set-submit-code on` does not resurrect a README, so the code switch is
+        # the wrong advice in BOTH states.
+        return (" (the author's README*.md/README*.txt files are never submitted)")
+    if head == CODE_DIR:
+        return " (the analysis code ships only when `set-submit-code on` asks for it)"
+    if head in area_set:
+        return " (that area is a read-only input: it never ships)"
+    if is_bookkeeping_name(base) or _is_aux_doc(base) or is_word_owner_name(base):
+        return (" (it is one of the pipeline's own by-product files, which never ship)")
+    return " (the author's README*.md/README*.txt files are never submitted)"
+
+
+# --- PKG-2 repair: REMOVE the dangling reference ------------------------------
+#
+# Reporting a pointer the reader can never resolve is not enough: the submission
+# must not CARRY one (AGENTS.md: "nothing that ships points at what does not
+# ship", and the 2026-10-15 operator decision -- remove the pointer instead of
+# shipping it dangling). The repair is mechanical, coarse and verifiable:
+#   * only to-be-submitted DOCUMENTS are edited (never an evidence area, never
+#     `code/`, never a by-product a submission never carries);
+#   * the unit is the SENTENCE that carries the pointer, never a splice inside
+#     it (a removed half-sentence reads as damage);
+#   * structural files (`.csv`, `.json`, `.bib`, ...) are NOT edited -- deleting
+#     a row/key can break the file -- and stay reported for the author;
+#   * every removal is recorded VERBATIM and the result is re-scanned: a file
+#     that does not come back clean is reported, never quietly left different.
+PKG2_EDITABLE_TEXT_EXTS = (".md", ".markdown", ".txt", ".rst", ".tex", ".ltx")
+# The response-to-reviewers letter is the AUTHORS' statement, and its own
+# postcheck already FAILS an attempt that cites a non-submitted file (the letter
+# prompt forbids it outright). Deleting a sentence from a signed point-by-point
+# letter at assembly time could break the concern-by-concern mapping, so the
+# letter is REPORTED (it stays in the `remaining` re-scan) and never edited here.
+PKG2_NEVER_EDITED_NAMES = frozenset({
+    Path(JOURNAL_RESPONSE_MD_REL).name, Path(JOURNAL_RESPONSE_MAP_REL).name,
+})
+
+
+def pkg2_reference_spans(text: str, patterns: list, index: tuple) -> list:
+    """[(start, end)] of the PKG-2 references inside ONE text (paragraph or file).
+
+    The detector's rules, expressed over a string instead of over a walk: the
+    area/README patterns plus the name shape resolved against the package's own
+    file names. The repair uses it to widen a reference to its sentence.
+    """
+    spans = []
+    for pat in patterns:
+        for m in pat.finditer(text):
+            if _pkg2_url_query_value(text, m.start()):
+                continue
+            spans.append((m.start(), m.end()))
+    for m in PKG2_NAME_RE.finditer(text):
+        if any(a < m.end() and m.start() < b for a, b in spans):
+            continue
+        if _pkg2_url_query_value(text, m.start()):
+            continue
+        if _pkg2_name_resolution(m.group(0), index)[0] == "absent":
+            if not _pkg2_external_locator(text, m.start(), m.end()):
+                spans.append((m.start(), m.end()))
+    return sorted(set(spans))
+
+
+def _pkg2_build_index(dirp: Path, areas) -> tuple:
+    names = [str(a) for a in (areas or ())]
+    return (_pkg2_area_patterns(names),
+            _pkg2_name_index(dirp, {n.lower() for n in names}))
+
+
+# A line that is a HEADING, not part of the sentence under it. Text documents
+# (`.md`, `.txt`, `.tex`, `.rst`) put these on their own line, and the sentence
+# splitter cannot see the boundary: without this, removing the sentence that
+# carries `We ran code/analysis.py ...` also deleted the `Methods` heading line
+# above it.
+PKG2_HEADING_LINE_RE = re.compile(
+    r"^\s*(?:#{1,6}\s+\S"                       # Markdown heading
+    r"|\*\*[^*]+\*\*\s*$"                        # a bold-only heading line
+    r"|\\[a-zA-Z]+\*?(?:\[[^\]]*\])?\s*(?:\{[^}]*\})?\s*$"   # \section{Methods}
+    r"|[A-Z][A-Za-z0-9 ,/&()\-]{0,38}$"          # Methods / Data availability
+    r"|[A-Z0-9][A-Z0-9 ,/&()\-]{0,38}$)")        # DATA AVAILABILITY
+
+
+def is_heading_line(line: str) -> bool:
+    """True for a short heading-like line (<= 3 words, no sentence punctuation)."""
+    s = str(line or "").strip()
+    if not s or len(s.split()) > 3 or s[-1] in ".!?:;,":
+        return False
+    return bool(PKG2_HEADING_LINE_RE.match(s))
+
+
+def is_structural_reference_line(before: str) -> bool:
+    """True when a reference is a document INCLUDE, not prose.
+
+    `\\includegraphics{raw_data/Fig1.png}`, `\\input{code/x.tex}`,
+    `![f](code/out/figS3.png)`, `[x](raw_data/t.csv)` and a Markdown reference
+    definition (`[x]: code/y.py`) name a file the document *uses*: deleting the
+    sentence that carries one would delete the include and change what the
+    document renders. Those references are REPORTED (the re-scan lists them as
+    remaining) and left for the author, who can repoint, ship or drop the
+    include deliberately -- a prose pointer, by contrast, is removed.
+    """
+    before = str(before or "")
+    if re.search(r"\\[a-zA-Z@]+\*?(?:\[[^\]]*\])*\{[^{}]*$", before):
+        return True                      # LaTeX command argument
+    if re.search(r"\]\(\s*[^)]*$", before):
+        return True                      # Markdown link/image target
+    if re.match(r"^\s*\[[^\]]*\]:\s*\S*$", before):
+        return True                      # Markdown reference definition
+    return False
+
+
+def _drop_reference_sentences_text(text: str, spans: list) -> tuple:
+    """(new_text, removed, structural): the prose SENTENCES of a text document.
+
+    `drop_sentences` with one text-document rule: a heading line the reference
+    does not touch is never swallowed (a heading is not part of the sentence
+    under it), so `Methods\\nWe ran code/analysis.py ...` loses only its second
+    line. A reference that is a document INCLUDE rather than prose
+    (`\\includegraphics{...}`, a Markdown link target) is left alone entirely:
+    it comes back in `structural` so the caller reports it
+    (`is_structural_reference_line`). Everything else is the shared sentence
+    machinery.
+    """
+    mod = _format_module()
+    text = text or ""
+    prose, structural = [], []
+    for s, e in sorted(tuple(x) for x in (spans or ())):
+        line_start = text.rfind("\n", 0, s) + 1
+        (structural if is_structural_reference_line(text[line_start:s])
+         else prose).append((s, e))
+    windows = []
+    for a, b in (mod.sentence_windows(text, prose, eat_whitespace=False)
+                 if mod is not None else ()):
+        # The window may OPEN on a heading line or on a LaTeX command line the
+        # reference does not sit on (`\includegraphics{...}\nWe ran code/a.py`):
+        # neither is part of the sentence under them.
+        while True:
+            line_end = text.find("\n", a)
+            if line_end < 0 or line_end >= b:
+                break
+            if any(a <= s and s < line_end for s, _e in prose):
+                break
+            if not (is_heading_line(text[a:line_end])
+                    or text[a:line_end].lstrip().startswith("\\")):
+                break
+            a = line_end + 1
+        # ... and it may CLOSE on one: `We ran code/a.py\n\includegraphics{...}`
+        # has no sentence break between them, and deleting the include would
+        # change what the document renders.
+        while b > a:
+            line_start = text.rfind("\n", 0, b) + 1
+            if line_start <= a:
+                break
+            line = text[line_start:b]
+            if any(line_start <= s < b for s, _e in prose):
+                break
+            if not (line.lstrip().startswith("\\")
+                    or any(line_start <= s < b for s, _e in structural)):
+                break
+            b = line_start - 1 if text[line_start - 1:line_start] == "\n" else line_start
+        # A mid-line removal must not leave the space that used to separate the
+        # sentence from its neighbour ("... the benchmark. The command is in
+        # code/x.py." -> "... the benchmark." and not "... the benchmark. ").
+        while a > 0 and text[a - 1] in " \t":
+            a -= 1
+        if b > a:
+            windows.append((a, b))
+    if not windows:
+        return text, [], [text[s:e] for s, e in structural]
+    out, removed, pos = [], [], 0
+    for a, b in windows:
+        out.append(text[pos:a])
+        removed.append(text[a:b].strip())
+        pos = b
+    out.append(text[pos:])
+    return "".join(out), removed, [text[s:e] for s, e in structural]
+
+
+def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
+                                     warns: list = None,
+                                     artifacts_dir: Path = None,
+                                     artifact_name: str = None) -> dict:
+    """Remove every dangling reference the PKG-2 scan finds in `dirp`'s documents.
+
+    Returns {"label", "areas", "files": [{"file", "removed": [sentence, ...],
+    "skipped": [reason, ...]}], "removed": n, "skipped": n, "remaining": [row, ...],
+    "ok": bool}. `remaining` is the re-scan of the repaired tree: a non-empty list
+    means something the mechanical layer may not touch is still dangling (a
+    structural file, a sentence carrying a live citation field), and the caller
+    reports it as an author action.
+
+    The orchestrator's own artifact (`artifacts_dir`) receives the FULL record --
+    the removed sentences verbatim -- because a top-level JSON inside the package
+    would become submission content. Nothing is deleted from an evidence area,
+    from `code/` or from a file a submission never carries.
+    """
+    dirp = Path(dirp)
+    report = {"label": label, "areas": [str(a) for a in (areas or ())],
+              "files": [], "removed": 0, "removed_links": 0, "skipped": 0,
+              "remaining": [], "ok": True}
+    if not dirp.is_dir():
+        report["skipped_note"] = f"{dirp} is not a directory"
+        return report
+    patterns, index = _pkg2_build_index(dirp, areas)
+    mod = _format_module()
+    area_set = {str(a).lower() for a in (areas or ())}
+    for p in sorted(dirp.rglob("*")):
         if not p.is_file():
             continue
-        ext = p.suffix.lower()
-        if ext == ".docx":
-            # The manuscript the journal actually reads is a .docx: a dangling
-            # reference inside it is the defect this scan exists for, and the
-            # text-file scan never opened it (a `See raw_data/tables.tsv` in
-            # word/document.xml produced no row at all).
-            lines = _docx_paragraphs(p)
-            if lines is None:
-                continue
-        elif ext in PACKAGE_TEXT_EXTS:
+        rel = p.relative_to(dirp).as_posix()
+        if rel.split("/", 1)[0].lower() in area_set or is_evidence_rel(rel):
+            continue
+        if is_word_owner_name(p.name) or _is_aux_doc(p.name) or is_bookkeeping_name(p.name) \
+                or is_non_submitted_readme_name(p.name):
+            # The author's own README*.md/.txt files are never submitted: editing
+            # one would rewrite the author's documentation to satisfy a submission
+            # rule that does not apply to it.
+            continue
+        if p.name in PKG2_NEVER_EDITED_NAMES:
+            # Reported (the re-scan lists it), never edited -- see the constant.
             try:
-                if p.stat().st_size > PACKAGE_TEXT_BYTES_LIMIT:
-                    continue
-                text = p.read_text("utf-8", "replace")
+                if pkg2_reference_spans(p.read_text("utf-8", "replace"), patterns, index):
+                    entry = {"file": rel, "removed": [],
+                             "skipped": ["the response-to-reviewers letter is the authors' "
+                                         "statement: reported, never edited"]}
+                    report["files"].append(entry)
+                    report["skipped"] += 1
             except OSError:
-                continue
-            lines = text.splitlines()
-        else:
+                pass
             continue
-        rel = p.relative_to(root).as_posix()
-        if is_evidence_rel(rel) or _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
-            continue
-        for i, line in enumerate(lines, 1):
-            # EVERY reference on the line, not the first pattern's first hit:
-            # the area pattern runs first, so `See README.md and also
-            # raw_data/tables.tsv.` used to report only the area path, and a
-            # second reference (the same class the scan exists for) was lost.
-            found = [mm for pat in patterns for mm in pat.finditer(line)]
-            if not found:
-                continue
-            # The area pattern's span covers a README under it
-            # (`code/README.md`): that is ONE reference, named by the longer
-            # match, not a second finding.
-            found.sort(key=lambda mm: (mm.start(), -(mm.end() - mm.start())))
-            kept = []
-            for mm in found:
-                if _pkg2_url_query_value(line, mm.start()):
-                    continue
-                if any(k.start() <= mm.start() and mm.end() <= k.end() for k in kept):
-                    continue
-                kept.append(mm)
-            for m in kept:
-                ref = m.group(0)
-                # BOTH separators: the area pattern accepts a backslash
-                # (`raw_data\tables.tsv`), and splitting on "/" alone read the
-                # whole reference as the "head", so the row's advice named the
-                # README rule for a raw_data pointer.
-                head = re.split(r"[/\\]", ref, 1)[0].lower()
-                if head == CODE_DIR and is_non_submitted_readme_name(re.split(r"[/\\]", ref)[-1]):
-                    # `set-submit-code on` does not resurrect a README, so the
-                    # code switch is the wrong advice in BOTH states.
-                    hint = (" (the author's README*.md/README*.txt files are never submitted)")
-                elif head == CODE_DIR:
-                    hint = " (the analysis code ships only when `set-submit-code on` asks for it)"
-                elif head in {str(n).lower() for n in names}:
-                    hint = " (that area is a read-only input: it never ships)"
+        ext = p.suffix.lower()
+        entry = {"file": rel, "removed": [], "skipped": []}
+        try:
+            if ext == ".docx":
+                if mod is None or not hasattr(mod, "strip_reference_sentences"):
+                    entry["skipped"].append("the OOXML engine is unavailable")
                 else:
-                    hint = (" (the author's README*.md/README*.txt files are never submitted)")
-                rows.append({
-                    "rule": "PKG-2", "file": rel, "line": i, "reference": ref,
-                    "detail": (f"this file is part of the submission but refers into {ref!r}, "
-                               f"which the submission does not carry: the journal cannot "
-                               f"resolve the reference. Point at shipped content, or replace "
-                               f"the pointer with a locator that ships{hint}"),
-                    "fix": "manual"})
-                if len(rows) >= limit:
-                    return rows
-    return rows
+                    tmp_out = p.with_name(p.name + ".pkg2.tmp")
+                    try:
+                        # 1. A local-path link the package carries (the venue
+                        #    template's attachedTemplate): removed together with
+                        #    its own relationship.
+                        if hasattr(mod, "strip_local_path_links"):
+                            link_res = mod.strip_local_path_links(p, tmp_out)
+                            if link_res.get("ok") and link_res.get("removed"):
+                                os.replace(tmp_out, p)
+                                entry.setdefault("removed_links", []).extend(
+                                    f"{r.get('part')}: {r.get('target')}"
+                                    for r in link_res["removed"])
+                            else:
+                                if link_res.get("error"):
+                                    entry["skipped"].append(f"docx link: {link_res['error']}")
+                        # 2. The sentence that carries a text pointer.
+                        res = mod.strip_reference_sentences(
+                            p, tmp_out, lambda t: pkg2_reference_spans(t, patterns, index))
+                        if res.get("ok") and res.get("removed"):
+                            os.replace(tmp_out, p)
+                            entry["removed"] = [r.get("sentence") for r in res["removed"]]
+                        else:
+                            if res.get("error"):
+                                entry["skipped"].append(f"docx: {res['error']}")
+                            entry["skipped"].extend(res.get("skipped") or [])
+                    finally:
+                        # A half-written `.pkg2.tmp` must never stay inside the
+                        # package (it would become corpus content).
+                        if tmp_out.exists():
+                            tmp_out.unlink()
+            elif ext in PKG2_EDITABLE_TEXT_EXTS:
+                text = None
+                try:
+                    if p.stat().st_size > PACKAGE_TEXT_BYTES_LIMIT:
+                        entry["skipped"].append("the file is too large to repair")
+                    else:
+                        text = p.read_text("utf-8")
+                except (OSError, UnicodeDecodeError) as e:
+                    entry["skipped"].append(f"{type(e).__name__}: {e}")
+                if text is not None and mod is not None and hasattr(mod, "sentence_windows"):
+                    spans = pkg2_reference_spans(text, patterns, index)
+                    if spans:
+                        new_text, removed, structural = _drop_reference_sentences_text(
+                            text, spans)
+                        if removed:
+                            after_spans = pkg2_reference_spans(new_text, patterns, index)
+                            if len(after_spans) < len(
+                                    pkg2_reference_spans(text, patterns, index)):
+                                write_text_atomic(p, new_text)
+                                entry["removed"] = removed
+                            else:
+                                entry["skipped"].append(
+                                    "the edit would not reduce the reference count; left to "
+                                    "the author")
+                        for ref in structural:
+                            entry["skipped"].append(
+                                f"{ref!r} is a document INCLUDE (a command argument or a "
+                                f"link target), not prose: the author repoints it at shipped "
+                                f"content or drops the include deliberately")
+            elif ext in PACKAGE_TEXT_EXTS:
+                try:
+                    text = p.read_text("utf-8", "replace")
+                except OSError:
+                    text = ""
+                if pkg2_reference_spans(text, patterns, index):
+                    entry["skipped"].append(
+                        "a structural file (deleting a row/key would break it); the author "
+                        "repairs it")
+            else:
+                continue
+        except Exception as e:                                        # noqa: BLE001
+            entry["skipped"].append(f"{type(e).__name__}: {e}")
+        if entry["removed"] or entry["skipped"] or entry.get("removed_links"):
+            report["files"].append(entry)
+        report["removed"] += len(entry["removed"])
+        report["removed_links"] += len(entry.get("removed_links") or [])
+        report["skipped"] += len(entry["skipped"])
+    report["remaining"] = non_submitted_reference_rows(dirp, report["areas"])
+    report["ok"] = not report["remaining"]
+    if warns is not None:
+        if report["removed"]:
+            warns.append(
+                f"PKG-2: {report['removed']} dangling reference(s) were REMOVED from "
+                f"{label}'s to-be-submitted document(s) (a to-be-submitted file may not "
+                f"point at what the submission does not carry): "
+                + "; ".join(f"`{f['file']}`: {len(f['removed'])} sentence(s)"
+                            for f in report["files"] if f["removed"]))
+        if report["removed_links"]:
+            warns.append(
+                f"PKG-2: {report['removed_links']} local-path link(s) (an attached Word "
+                f"template pointing at somebody's own machine) were REMOVED from "
+                f"{label}'s package part(s): "
+                + "; ".join(f"`{f['file']}`: {len(f['removed_links'])} link(s)"
+                            for f in report["files"] if f.get("removed_links")))
+        if report["remaining"]:
+            warns.append(
+                f"PKG-2: {len(report['remaining'])} dangling reference(s) could NOT be "
+                f"removed mechanically (a structural file or a sentence carrying a live "
+                f"citation field): the author must repair them -- "
+                + "; ".join(f"{r['file']} line {r['line']}: {r['reference']}"
+                            for r in report["remaining"][:4]))
+    if artifacts_dir is not None and (report["removed"] or report["removed_links"]
+                                      or report["remaining"]):
+        name = artifact_name or f"PKG2_{label}.json"
+        try:
+            write_json_atomic(Path(artifacts_dir) / name, report)
+        except OSError:
+            pass
+    return report
 
 
 def internal_artifact_rows(root: Path, limit: int = 40) -> list:
@@ -40210,6 +40990,14 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     # deliverable when the configured venue accepts one (see the venue profile's
     # `submission` block and derived_outputs_rule()).
     hygiene = {"removed": [], "kept_bbl": [], "raw_data_untouched": 0}
+    # A Word OWNER (lock) file is not a document: it holds the name of whoever
+    # had the file open, it matches no submission name pattern, and it is the
+    # one artifact a reviewer could not even convert ("not a zip file"). It is
+    # dropped from the delivered copy -- like a build by-product -- and named in
+    # the readme, so the author knows their Word session left it behind. Only
+    # the DELIVERED copy is touched: the pin, the winner and the round base keep
+    # the bytes they were hashed with (the pin digest above was verified first).
+    hygiene["removed_word_owner_files"] = []
     # The pipeline's own by-products never reach the published package (the copy
     # strips them by name, version token included): report which ones the
     # champion carried, so the operator sees the strip instead of guessing.
@@ -40227,7 +41015,10 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
             hygiene["raw_data_untouched"] += 1
             continue
         low = q.name.lower()
-        if low.endswith((".blg", ".bcf", ".run.xml", ".synctex.gz", ".aux", ".log", ".out",
+        if is_word_owner_name(q.name):
+            hygiene["removed_word_owner_files"].append(rel)
+            q.unlink()
+        elif low.endswith((".blg", ".bcf", ".run.xml", ".synctex.gz", ".aux", ".log", ".out",
                          ".fls", ".fdb_latexmk", ".toc", ".lof", ".lot", ".nav", ".snm",
                          ".vrb", ".idx", ".ilg", ".ind")):
             hygiene["removed"].append(rel)
@@ -40254,6 +41045,17 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     # was verified before these repairs.
     pub_policy, flatten_zotero = publication_format_policy(
         ctx, format_policy_of(ctx), cli_flatten=bool(flatten_zotero))
+    # PKG-2 repair (before the published copy is formatted): the pointers a
+    # to-be-submitted document may not carry are REMOVED, and the removal is
+    # recorded verbatim below. A package produced before the stage-side repair
+    # existed reaches publication with them; this is the publish-time guarantee.
+    try:
+        hygiene["removed_dangling_references"] = strip_dangling_references_in_dir(
+            tmp, submission_not_carried_areas(ctx), final_clean_dirname(ctx.root),
+            warns=None, artifacts_dir=ctx.reports_dir,
+            artifact_name=f"PKG2_{final_clean_dirname(ctx.root)}.json")
+    except Exception as e:                                            # noqa: BLE001
+        hygiene["removed_dangling_references"] = {"error": f"{type(e).__name__}: {e}"}
     # Field counts BEFORE the published copy is refreshed/flattened, so the
     # readme can say what actually happened instead of guessing.
     _fmt_z = _format_module()
@@ -40292,6 +41094,17 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     # deleted: the file belongs to the author, but the package must not ship it.
     hygiene["internal_artifacts"] = internal_artifact_rows(tmp)
     hygiene["pdf_artifacts"] = package_pdf_rows(tmp)
+    # PKG-2 (AGENTS.md: nothing that ships points at what does not ship). The
+    # journal submission's own assembly scans the copy it just stripped; THIS
+    # path published every other deliverable, and it never ran the scan at all
+    # -- a supplementary legend that names the analysis script and the raw-data
+    # archive reached the certified package with no row anywhere (2026-10-15).
+    # The not-carried areas are the standing ones (see
+    # `submission_not_carried_areas`), because this copy is the corpus the
+    # author submits FROM: it still carries `code/` and the evidence, and the
+    # submission does not.
+    hygiene["non_submitted_references"] = non_submitted_reference_rows(
+        tmp, submission_not_carried_areas(ctx))
     # A filled XFA form cannot be FLATTENED offline (that needs Acrobat), but
     # its answers can be rendered readably -- so the decision readme points at
     # a text rendering of every answer instead of leaving the reviewer with the
@@ -40387,6 +41200,12 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
         L.append(f"- the pipeline's own by-product(s) were NOT published (stripped by name): "
                  + ", ".join(f"`{n}`" for n in stripped[:8])
                  + (" …" if len(stripped) > 8 else ""))
+    word_owner = hygiene.get("removed_word_owner_files") or []
+    if word_owner:
+        L.append(f"- {len(word_owner)} Word owner (lock) file(s) were NOT published (a Word "
+                 f"by-product -- it holds the opening user's name and is not a document): "
+                 + ", ".join(f"`{n}`" for n in word_owner[:8])
+                 + (" …" if len(word_owner) > 8 else ""))
     internal = hygiene.get("internal_artifacts") or []
     if internal:
         L.append("")
@@ -40396,6 +41215,38 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
             L.append(f"  - `{r.get('file')}` line {r.get('line')}: {r.get('detail')}")
         if len(internal) > 12:
             L.append(f"  - … and {len(internal) - 12} more (see reports/decision.json)")
+    ref_strip = hygiene.get("removed_dangling_references") or {}
+    if ref_strip.get("removed"):
+        L.append("")
+        L.append(f"Dangling references: {ref_strip['removed']} sentence(s) that pointed at "
+                 f"content this submission does not carry (the analysis code, the raw data, "
+                 f"the review feedback, a README) were REMOVED from the to-be-submitted "
+                 f"document(s) -- a submitted file may not refer to what it does not ship. "
+                 f"A champion that came from a revision stage was already repaired before it "
+                 f"was pinned; a champion that IS the base/original reached this copy with the "
+                 f"pointer still in it (the pin keeps the bytes that were scored). The removed "
+                 f"sentences are recorded verbatim in "
+                 f"`reports/decision.json` (`final_clean.hygiene.removed_dangling_references`) "
+                 f"and in `reports/{'PKG2_' + final_clean_dirname(ctx.root) + '.json'}`:")
+        for f in (ref_strip.get("files") or [])[:12]:
+            for s in (f.get("removed") or [])[:4]:
+                L.append(f"  - `{f.get('file')}`: {str(s)[:200]}")
+    if ref_strip.get("removed_links"):
+        L.append("")
+        L.append(f"Local-path links: {ref_strip['removed_links']} attached-template link(s) "
+                 f"pointing at a path on somebody's own machine (the venue's Word template "
+                 f"carries one into every restyled package) were REMOVED from the package "
+                 f"part(s) that named them:")
+        for f in (ref_strip.get("files") or [])[:12]:
+            for s in (f.get("removed_links") or [])[:4]:
+                L.append(f"  - `{f.get('file')}`: {str(s)[:200]}")
+    if ref_strip.get("remaining"):
+        L.append("")
+        L.append(f"**{len(ref_strip['remaining'])} dangling reference(s) could NOT be removed "
+                 f"mechanically (PKG-2) -- a structural file or a sentence carrying a live "
+                 f"citation field; the author must repair them:**")
+        for r in ref_strip["remaining"][:12]:
+            L.append(f"  - `{r.get('file')}` line {r.get('line')}: `{r.get('reference')}`")
     pdfs = hygiene.get("pdf_artifacts") or []
     if pdfs:
         L.append("")
@@ -40489,6 +41340,17 @@ def package_readiness(final_clean: dict) -> dict:
     for r in hyg.get("internal_artifacts") or []:
         findings.append({"rule": r.get("rule") or "PKG-1",
                          "document": r.get("file"), "detail": r.get("detail")})
+    # PKG-2 leftovers: the pointers the mechanical removal may not touch (a
+    # structural file, a sentence carrying a live citation field). The ones it
+    # DID remove are recorded in the readme/decision as resolved work, not as
+    # findings -- chasing an already-removed pointer would be a false positive.
+    for r in ((hyg.get("removed_dangling_references") or {}).get("remaining") or []):
+        detail = str(r.get("detail") or "")
+        if not detail.startswith("line "):
+            detail = f"line {r.get('line')}: {r.get('reference')} -- {detail}"
+        findings.append({
+            "rule": r.get("rule") or "PKG-2", "document": r.get("file"),
+            "detail": detail})
     for r in hyg.get("pdf_artifacts") or []:
         findings.append({"rule": r.get("rule"), "document": r.get("document"),
                          "detail": r.get("detail")})
@@ -42274,6 +43136,24 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     if _stripped:
         print(f"[decide] pipeline by-product(s) stripped from the published package: "
               + ", ".join(_stripped[:6]) + (" …" if len(_stripped) > 6 else ""))
+    _wo = _hyg.get("removed_word_owner_files") or []
+    if _wo:
+        print(f"[decide] Word owner (lock) file(s) not published (a Word by-product, not a "
+              f"document): " + ", ".join(_wo[:6]) + (" …" if len(_wo) > 6 else ""))
+    _ref = _hyg.get("removed_dangling_references") or {}
+    if _ref.get("removed"):
+        print(f"[decide] PKG-2: {_ref['removed']} sentence(s) referring to content this "
+              f"submission does not carry were REMOVED from the to-be-submitted "
+              f"document(s); the removed text is in "
+              f"`final_clean_version.readme.md` and decision.json")
+    if _ref.get("removed_links"):
+        print(f"[decide] PKG-2: {_ref['removed_links']} attached-template link(s) pointing at "
+              f"a path on somebody's own machine were REMOVED from the published package "
+              f"(the venue's Word template carries one into every restyled package)")
+    for r in (_ref.get("remaining") or [])[:5]:
+        print(f"[decide] PKG-2 (author action required): {r.get('file')} line "
+              f"{r.get('line')} -- `{r.get('reference')}` could not be removed "
+              f"mechanically: {str(r.get('detail'))[:160]}")
     print(f"[decide] certification status: {readme_path} "
           f"({certification_label(certification)})")
     if win_token and win_token.get("token"):

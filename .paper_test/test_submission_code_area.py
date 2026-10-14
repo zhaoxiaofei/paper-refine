@@ -174,7 +174,7 @@ def test_submit_code_switch():
 
 def test_dangling_reference_report():
     print()
-    print("== SC4: a shipped file referring into a stripped area is reported (PKG-2) ==")
+    print("== SC4: a pointer at a stripped area is REMOVED from the shipped file (PKG-2) ==")
     # The scan is a pure function of a tree: a plain path is a row, a URL tail
     # (a longer path that merely ends in code/) is not.
     tmp = lib.scratch("paper_code_refs_")
@@ -201,23 +201,39 @@ def test_dangling_reference_report():
     lib.check("SC4 the scan reports nothing when the package carries every area",
               nb.non_submitted_reference_rows(pkg, ()) == [])
     # End to end: a document of the corpus that cites code/ reaches the
-    # submission and is recorded as an author action.
+    # submission with the SENTENCE that carried the pointer removed, and the
+    # removal is recorded verbatim (never silent).
     root = lib.setup_and_run(
         tmp / "e2e", "major", with_code=True,
-        extra_source_files={"notes.md": "Methods\nWe ran code/analysis.py for Figure 1.\n",
+        extra_source_files={"notes.md": "Methods\nWe ran code/analysis.py for Figure 1.\n"
+                                        "The benchmark is described in the main text.\n",
                             "data_note.md": "The data live in raw_data/tables.tsv.\n"})
     sub_manifest = json.loads((root / "journal_submission.json").read_text(encoding="utf-8"))
     refs = sub_manifest.get("non_submitted_references") or []
-    lib.check("SC4 the submission manifest records the dangling reference",
-              any(r.get("file") == "notes.md" and r.get("reference") == "code/analysis.py"
-                  for r in refs), str(refs)[:300])
-    lib.check("SC4 the input area's reference is reported too, with the right reason",
-              any(r.get("file") == "data_note.md" and r.get("reference") == "raw_data/tables.tsv"
-                  and "never ships" in r.get("detail", "") for r in refs), str(refs)[:400])
-    lib.check("SC4 the pointer is reported, never repaired or failed",
-              (root / "journal_submission" / "notes.md").is_file()
-              and "code/analysis.py" in (root / "journal_submission" / "notes.md")
-              .read_text(encoding="utf-8"))
+    # The removal runs in the stage postcheck (before the package is pinned) and
+    # in the submission assembly: both record it, so the journal manifest is
+    # read together with the run record.
+    state = json.loads((root / "state.json").read_text(encoding="utf-8"))
+    strips = [r.get("reference_strip") or {} for r in (state.get("runs") or {}).values()]
+    removed = [x for s in strips for x in (s.get("files") or [])]
+    removed += sub_manifest.get("removed_dangling_references") or []
+    lib.check("SC4 the REMOVED pointer is recorded verbatim in the run record",
+              any(r.get("file") == "notes.md"
+                  and any("code/analysis.py" in s for s in (r.get("removed")
+                                                            or r.get("sentences") or []))
+                  for r in removed), str(removed)[:400])
+    lib.check("SC4 the read-only input's pointer is removed too",
+              any(r.get("file") == "data_note.md"
+                  and any("raw_data/tables.tsv" in s for s in (r.get("removed")
+                                                               or r.get("sentences") or []))
+                  for r in removed), str(removed)[:400])
+    shipped = (root / "journal_submission" / "notes.md").read_text(encoding="utf-8")
+    lib.check("SC4 the shipped document no longer carries the pointer",
+              "code/analysis.py" not in shipped, shipped[:200])
+    lib.check("SC4 the removal keeps the sentences around it",
+              "Methods" in shipped and "described in the main text" in shipped, shipped[:200])
+    lib.check("SC4 nothing dangling is left in the submission",
+              refs == [], str(refs)[:300])
     # Once the area ships, the code reference resolves (the raw_data/ one, in a
     # read-only input, still does not).
     ctx = nb.Ctx(root)
@@ -265,11 +281,21 @@ def test_readme_files_are_never_submitted():
               sub_manifest.get("readme_files_excluded") == ["README.md", "docs/README-dev.txt"],
               str(sub_manifest.get("readme_files_excluded")))
     refs = sub_manifest.get("non_submitted_references") or []
-    lib.check("SC5 a shipped README reference is reported (PKG-2, bare or nested)",
-              any(r.get("file") == "notes.md" and r.get("reference") == "README.md"
-                  and "never submitted" in r.get("detail", "") for r in refs)
+    shipped_notes = (root / "journal_submission" / "notes.md").read_text(encoding="utf-8")
+    state = json.loads((root / "state.json").read_text(encoding="utf-8"))
+    removed = [x for r in (state.get("runs") or {}).values()
+               for x in ((r.get("reference_strip") or {}).get("files") or [])]
+    removed += sub_manifest.get("removed_dangling_references") or []
+    lib.check("SC5 a shipped README reference is REMOVED (PKG-2, bare)",
+              any(r.get("file") == "notes.md"
+                  and any("README.md" in s for s in (r.get("removed")
+                                                     or r.get("sentences") or []))
+                  for r in removed)
+              and "See README.md" not in shipped_notes, str(removed)[:400])
+    lib.check("SC5 a URL that merely ends in a README name survives, and is no row",
+              "https://github.com/team/repo/README.md" in shipped_notes
               and not any(str(r.get("reference") or "").startswith("https")
-                          for r in refs), str(refs)[:400])
+                          for r in refs), f"{shipped_notes[:200]!r} {str(refs)[:200]}")
     lib.check("SC5 the dropped README files really are gone from the copy",
               not (root / "journal_submission" / "README.md").exists()
               and not (root / "journal_submission" / "docs" / "README-dev.txt").exists())

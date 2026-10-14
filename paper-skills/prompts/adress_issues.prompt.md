@@ -770,3 +770,31 @@ cannot be sourced. A number in the abstract, a legend or the cover letter may
 not stay unsourced — it is proved, cited, a declared parameter, or removed as
 decoration (never silently, and never by changing a scientific claim). Removing
 a number is a `preservation`-tier change: record it in CHANGELOG.md.
+
+## E13 — A to-be-submitted document may not point at what the submission does not carry
+
+The submission ships a FIXED set of files (the documents, the figures and whatever the operator
+explicitly submits); everything else in the corpus — the analysis code under `CODE/`, the
+`raw_data/` evidence (and the feedback areas), and every `README*.md` / `README*.txt` file — is
+left out, so a pointer at one of them is a reference no reader, editor or reviewer can resolve.
+The orchestrator seeds the rows (`work/EVIDENCE_PACK.md`, "Submission-surface references",
+PKG-2: an area-prefixed path AND a plain file name the package carries only outside the
+submission) and REMOVES the sentence mechanically if it is still there when the package is
+published — so a pointer left in place costs whatever the sentence said. REWRITE it instead:
+
+* name where the material really is — a shipped supplementary file, a public repository with a
+  pinned commit, a statement the Data availability block already carries — or carry the fact
+  itself (`Figure S3 was computed from the per-candidate tables of the benchmark, which ship as
+  Supplementary Data S1`);
+* never invent a locator, never deposit anything, and never cite a file the submission does not
+  carry "because the reviewers have the package";
+* it is NEVER a reason to edit, delete or extend the excluded area (`raw_data/`, the feedback
+  areas and the author's README files are read-only evidence; `CODE/` is revised only under rule
+  C and only when the operator submits it) — the MANUSCRIPT is the side that changes;
+* a pointer inside a live Zotero field, or inside a structural file (`.csv`, `.json`, `.bib`),
+  is not removed mechanically: record it in `MANUAL_STEPS.md` with the sentence quoted, or, when
+  the file is prose and your own edit can carry it, rewrite it in the revision.
+
+Removing the pointing sentence is a `preservation`-tier change when it carries a scientific
+fact: prefer the rewrite, and record what left the text in CHANGELOG.md when deletion is the
+only honest option.

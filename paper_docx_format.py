@@ -3603,6 +3603,438 @@ def delete_text_spans(para: str, spans: list) -> tuple:
     return new_para, [a[2] for a in applied]
 
 
+# --- removal of the SENTENCE a caller's finder names -------------------------
+#
+# The pipeline's PKG-2 cleanup uses these: a to-be-submitted document may not
+# point at what the submission does not carry (AGENTS.md, "nothing that ships
+# points at what does not ship"), and a pointer no shipped locator can replace
+# is REMOVED here instead of shipping dangling. The removal is deliberately
+# coarse -- the whole sentence that carries the pointer, never a splice inside
+# it -- and it is verified (well-formed XML, the same text minus exactly the
+# removed sentences, every live citation field carried over unchanged).
+
+# Tokens whose trailing period does NOT end a sentence: abbreviations and
+# initials ("e.g.", "et al.", "J. Smith", "Fig. 2"). Over-merging only widens a
+# window a caller is about to DELETE, so the set stays small and explicit.
+SENTENCE_ABBREV_TAIL_RE = re.compile(
+    r"(?i)(?:\b(?:e\.g|i\.e|c\.f|cf|vs|al|approx|ca|dr|prof|st|no|vol|pp|p|fig|figs|"
+    r"eq|eqs|ref|refs|sec|tab|suppl|supp|ext|data)\.|(?:\b[A-Za-z]\.|\b[A-Z]\.){1,3})$")
+# A sentence that resumes with one of these after a terminator+space did not end
+# there ("... (Figure 2). ..." vs "... the value).").
+SENTENCE_CONTINUATION_CHARS = ")]}\u201d\u2019'\""
+
+
+def sentence_spans(text: str) -> list:
+    """(start, end) of every SENTENCE in `text` (boundary-aligned spans).
+
+    The splitter is the repo's own (`(?<=[.!?])\\s+`, see the outline scaffold)
+    with the two continuations that would otherwise cut a sentence in half: a
+    piece that starts with a lowercase letter or a closing bracket/quote
+    continues the previous sentence, and so does a piece whose previous token is
+    an abbreviation or initials. A caller that only MEASURES is insensitive to a
+    wrong merge; a caller that DELETES a window is not, so the merge set is
+    deliberately small and documented.
+    """
+    text = text or ""
+    spans, start = [], 0
+    for m in re.finditer(r"(?<=[.!?])\s+", text):
+        nxt = text[m.end():m.end() + 1]
+        if nxt and (nxt.islower() or nxt in SENTENCE_CONTINUATION_CHARS):
+            continue
+        if SENTENCE_ABBREV_TAIL_RE.search(text[start:m.start()].strip()):
+            continue
+        spans.append((start, m.start()))
+        start = m.end()
+    if text[start:].strip():
+        spans.append((start, len(text)))
+    return spans
+
+
+def sentence_windows(text: str, spans: list, eat_whitespace: bool = True) -> list:
+    """(start, end) of the smallest sentence window(s) covering `spans`.
+
+    A window is expanded over the whitespace the deletion leaves behind: the
+    trailing run when the sentence has a successor, the leading run when it is
+    the last one (a removal that left a leading/trailing space would become a
+    new FMT-P4 "space at a visual line edge" row). `eat_whitespace=False` stops
+    the expansion at the first newline and then trims only spaces/tabs: a
+    line-oriented document (`.md`, `.txt`, `.tex`) keeps its line structure, so
+    deleting a sentence never JOINS the lines around it.
+    """
+    text = text or ""
+    bounds = sentence_spans(text)
+    out = []
+    for s, e in sorted(tuple(x) for x in (spans or ())):
+        for a, b in bounds:
+            if a <= s and e <= b:
+                out.append((a, b))
+                break
+    merged = []
+    for a, b in sorted(out):
+        if merged and a <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    fixed = []
+    for a, b in merged:
+        while b < len(text) and (text[b].isspace() if eat_whitespace else text[b] in " \t"):
+            b += 1
+        if eat_whitespace and b >= len(text):
+            while a > 0 and text[a - 1].isspace():
+                a -= 1
+        fixed.append((a, b))
+    return fixed
+
+
+def _wt_fragments(frag: str) -> list:
+    """[(xml_start, xml_end, unescaped_text)] for every `<w:t>` in a paragraph.
+
+    The same enumeration `rewrite_text_spans` works on (`_text_fragments`), kept
+    local so the caller's text offsets and the XML offsets a field lookup needs
+    can never drift apart.
+    """
+    return [(m.start(), m.end(), unesc(m.group(1)))
+            for m in re.finditer(r"<w:t(?:\s[^>]*)?>(.*?)</w:t>", frag, re.S)]
+
+
+def _xml_span_for_text_range(frag: str, a: int, b: int):
+    """The XML range of a paragraph whose TEXT range [a, b) lives, or None."""
+    lo = hi = None
+    pos = 0
+    for s, e, t in _wt_fragments(frag):
+        if pos + len(t) > a and lo is None:
+            lo = s
+        if pos < b:
+            hi = e
+        pos += len(t)
+    if lo is None or hi is None:
+        return None
+    return (lo, hi) if lo <= hi else None
+
+
+def strip_reference_sentences(src: Path, out: Path, finder) -> dict:
+    """Remove every SENTENCE of `src` that `finder` names as a dangling pointer.
+
+    `finder(text) -> [(start, end), ...]` names the reference spans inside one
+    paragraph's own text (the pipeline passes its PKG-2 matcher). Every span is
+    widened to the sentence that carries it and that sentence is deleted from
+    the document text; nothing else in the package is touched.
+
+    A sentence that carries a live citation FIELD is NOT removed: dropping a
+    field would renumber the bibliography and break the base-to-candidate
+    field-continuity gate, so the pointer stays and the caller reports it (the
+    author or the next revision session fixes that one in prose). The same
+    refusal covers a text range the OOXML cannot address as plain text.
+
+    Returns {"source", "output", "ok", "removed": [{"paragraph", "sentence",
+    "references"}], "skipped": [reason], "verified": {...}, "error"} -- the
+    removed sentences VERBATIM, so a caller can print exactly what left the
+    document. `ok` is False and `src` is carried over unchanged when the result
+    would not verify.
+    """
+    out = Path(out)
+    res = {"source": str(src), "output": str(out), "ok": False, "removed": [],
+           "skipped": [], "verified": {}}
+    try:
+        if Path(src).resolve() == out.resolve():
+            res["error"] = ("the output path is the source document: the caller must hand in "
+                            "a DIFFERENT path (the zip rewrite would truncate the source)")
+            return res
+    except OSError:                                                    # pragma: no cover
+        pass
+    try:
+        with zipfile.ZipFile(src) as pkg:
+            parts = {i.filename: pkg.read(i.filename) for i in pkg.infolist()}
+    except (zipfile.BadZipFile, OSError, KeyError, RuntimeError, NotImplementedError) as e:
+        res["error"] = f"unreadable DOCX package: {type(e).__name__}: {e}"
+        return res
+    if "word/document.xml" not in parts:
+        res["error"] = "unreadable DOCX package: no word/document.xml"
+        return res
+    xml = parts["word/document.xml"].decode("utf-8")
+    paras = paragraphs(xml)
+    edits, removed = [], []
+    for index, (p0, p1, frag) in enumerate(paras):
+        text = "".join(t for _s, _e, t in _wt_fragments(frag))
+        spans = [tuple(s) for s in (finder(text) or ())]
+        if not spans:
+            continue
+        windows = sentence_windows(text, spans)
+        if not windows:
+            res["skipped"].append(
+                f"paragraph {index}: the reference could not be widened to a sentence")
+            continue
+        fields_before = zotero_field_report(frag)
+        keep = []
+        for a, b in windows:
+            span = _xml_span_for_text_range(frag, a, b)
+            hit_field = False
+            if span is not None:
+                lo, hi = span
+                for m in re.finditer(r"<w:fldChar\b[^>]*/>|<w:instrText\b[^>]*>.*?</w:instrText>"
+                                     r"|<w:fldSimple\b[^>]*>.*?</w:fldSimple>", frag, re.S):
+                    if m.start() < hi and lo < m.end():
+                        hit_field = True
+                        break
+            if hit_field:
+                res["skipped"].append(
+                    f"paragraph {index}: the sentence carrying a dangling reference also "
+                    f"carries a live citation field ({text[a:b].strip()[:80]!r}); dropping it "
+                    f"would renumber the bibliography -- fix it in prose")
+                continue
+            keep.append((a, b))
+        if not keep:
+            continue
+        new_frag, applied = rewrite_text_spans(frag, [(a, b, "") for a, b in keep])
+        if not applied:
+            res["skipped"].append(
+                f"paragraph {index}: the text edit could not be applied (a match crossing "
+                f"formatted runs)")
+            continue
+        if parts_has_field(frag) and zotero_field_report(new_frag) != fields_before:
+            res["skipped"].append(
+                f"paragraph {index}: the removal would change the paragraph's citation fields")
+            continue
+        expected, pos = [], 0
+        for a, b in keep:
+            expected.append(text[pos:a])
+            pos = b
+        expected.append(text[pos:])
+        expected_text = "".join(expected)
+        got_text = "".join(t for _s, _e, t in _wt_fragments(new_frag))
+        if got_text != expected_text or text_of(new_frag) != expected_text:
+            res["skipped"].append(
+                f"paragraph {index}: the edit did not reproduce the text it was supposed to "
+                f"(refused rather than shipped)")
+            continue
+        edits.append((p0, p1, new_frag))
+        for (a, b) in keep:
+            removed.append({
+                "paragraph": index, "sentence": text[a:b].strip(),
+                "references": [text[s:e] for s, e in spans if a <= s and e <= b],
+                "expected_text": expected_text})
+    if not edits:
+        res["verified"] = {"removed": 0, "xml": True, "fields": True, "text": True}
+        res["ok"] = True
+        return res
+    new_xml = apply_edits(xml, edits)
+    try:
+        ET.fromstring(new_xml)
+    except ET.ParseError as e:
+        res["error"] = f"the removal produced malformed XML: {e}"
+        return res
+    if zotero_field_signature(zotero_field_report(xml)) \
+            != zotero_field_signature(zotero_field_report(new_xml)):
+        res["error"] = ("the removal would change which live citation fields the document "
+                        "carries")
+        return res
+    # Text identity over the WHOLE document: every paragraph that was not edited
+    # carries the same text as before, and every edited one carries exactly the
+    # text the removal computed (a structural splice would show up here).
+    want_by_para = {int(r["paragraph"]): r["expected_text"] for r in removed}
+    paras_before = paragraphs(xml)
+    paras_after = paragraphs(new_xml)
+    if len(paras_before) != len(paras_after):
+        res["error"] = "the removal changed the paragraph count"
+        return res
+    for i, ((_s0, _e0, frag0), (_s1, _e1, frag1)) in enumerate(zip(paras_before, paras_after)):
+        if text_of(frag1) != want_by_para.get(i, text_of(frag0)):
+            res["error"] = (f"the removal changed paragraph {i} beyond the sentences it "
+                            f"removed")
+            return res
+    parts_new = dict(parts)
+    parts_new["word/document.xml"] = new_xml.encode("utf-8")
+    try:
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+            for name, data in parts_new.items():
+                z.writestr(name, data)
+    except (OSError, RuntimeError, NotImplementedError) as e:
+        res["error"] = f"could not write the repaired DOCX: {type(e).__name__}: {e}"
+        return res
+    res["removed"] = removed
+    res["verified"] = {"removed": len(removed), "xml": True, "fields": True, "text": True}
+    res["ok"] = True
+    return res
+
+
+def parts_has_field(frag: str) -> bool:
+    """True when a paragraph fragment carries any complex/simple field."""
+    return bool(re.search(r"<w:fldChar\b|<w:instrText\b|<w:fldSimple\b", frag or ""))
+
+
+# A relationship TARGET that names a path on somebody's own machine: a `file:`
+# URI (`file:///C:\Users\hannah.eccles\...\frontiers_template.dotx`, what the
+# venue's Word template carries into every restyled package), a Windows drive or
+# UNC path. It is not content -- the reader cannot open it, and it leaks a
+# machine/user name -- while an internal part (`/word/styles.xml`), a
+# `http(s)`/`mailto` link or a relative target is not one of these.
+LOCAL_PATH_TARGET_RE = re.compile(r"^(?:file:|[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/]|[\\/]{2,}\?)")
+ATTACHED_TEMPLATE_REL = ("http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+                         "attachedTemplate")
+_REL_ENTRY_RE = re.compile(r"<Relationship\b[^>]*/>")
+
+
+def local_path_link_rows(path: Path) -> list:
+    """[(part, relationship_id, relationship_type, target)] of local-path links.
+
+    Every `.rels` part of the package is inspected: a relationship whose Target
+    is an absolute local path (`file:` URI, a drive letter, a UNC share) is a
+    pointer no reader can resolve -- and, for the attached-template link the
+    venue's own template carries, a path that names a third party's machine.
+    """
+    rows = []
+    try:
+        with zipfile.ZipFile(path) as pkg:
+            for name in sorted(pkg.namelist()):
+                if not name.endswith(".rels"):
+                    continue
+                try:
+                    text = pkg.read(name).decode("utf-8", "replace")
+                except (KeyError, RuntimeError, NotImplementedError):
+                    continue
+                for m in _REL_ENTRY_RE.finditer(text):
+                    entry = m.group(0)
+                    target = (attr_of(entry, "Target") or "")
+                    if not LOCAL_PATH_TARGET_RE.match(target.strip()):
+                        continue
+                    rows.append((name, attr_of(entry, "Id") or "",
+                                 attr_of(entry, "Type") or "", target.strip()))
+    except (zipfile.BadZipFile, OSError, KeyError, RuntimeError, NotImplementedError):
+        return []
+    return rows
+
+
+def strip_local_path_links(src: Path, out: Path) -> dict:
+    """Remove the package's attached-template link when it names a local path.
+
+    The venue's Word templates carry `w:attachedTemplate` -> `file:///C:\\Users\\
+    <someone>\\...\\template.dotx`; a restyled package inherits it, so the
+    submitted file points at a document no reader can open and leaks the machine
+    it was authored on. The element and ITS OWN relationship are dropped (the
+    element is what references the relationship, so both go together and no
+    dangling `r:id` is left); every other part is carried over verbatim, and the
+    result must re-open, parse and keep its text.
+
+    Any OTHER local-path relationship is left alone (a live field or hyperlink
+    referencing it would break) and is reported by `local_path_link_rows`.
+    Returns {"source", "output", "ok", "removed": [{"part", "target"}],
+    "skipped": [...], "verified": {...}, "error"}.
+    """
+    out = Path(out)
+    res = {"source": str(src), "output": str(out), "ok": False, "removed": [],
+           "skipped": [], "verified": {}}
+    try:
+        if Path(src).resolve() == out.resolve():
+            res["error"] = ("the output path is the source document: the caller must hand in "
+                            "a DIFFERENT path (the zip rewrite would truncate the source)")
+            return res
+        with zipfile.ZipFile(src) as pkg:
+            parts = {i.filename: pkg.read(i.filename) for i in pkg.infolist()}
+    except (zipfile.BadZipFile, OSError, KeyError, RuntimeError, NotImplementedError) as e:
+        res["error"] = f"unreadable DOCX package: {type(e).__name__}: {e}"
+        return res
+    settings = "word/_rels/settings.xml.rels"
+    if settings not in parts:
+        res["skipped"].append("no word/_rels/settings.xml.rels part")
+        res["ok"] = True
+        res["verified"] = {"removed": 0, "parts": len(parts)}
+        return res
+    rels = parts[settings].decode("utf-8", "replace")
+    kill = []
+    for m in _REL_ENTRY_RE.finditer(rels):
+        entry = m.group(0)
+        target = (attr_of(entry, "Target") or "").strip()
+        if (attr_of(entry, "Type") or "").strip() != ATTACHED_TEMPLATE_REL:
+            continue
+        if not LOCAL_PATH_TARGET_RE.match(target):
+            continue
+        kill.append((m.start(), m.end(), target, attr_of(entry, "Id") or ""))
+    if not kill:
+        res["skipped"].append("no attached-template link to a local path")
+        res["ok"] = True
+        res["verified"] = {"removed": 0, "parts": len(parts)}
+        return res
+    # Rebuild by splicing from the end so earlier offsets stay valid.
+    new_rels = rels
+    for a, b, _t, _rid in sorted(kill, key=lambda k: -k[0]):
+        new_rels = new_rels[:a] + new_rels[b:]
+    doc = "word/settings.xml"
+    removed = []
+    parts_new = dict(parts)
+    parts_new[settings] = new_rels.encode("utf-8")
+    ids = {rid for _a, _b, _t, rid in kill if rid}
+    if doc in parts and ids:
+        settings_xml = parts[doc].decode("utf-8", "replace")
+        new_settings = settings_xml
+        for rid in ids:
+            # Both element spellings (Word writes the empty element; be safe
+            # about the paired form) and both with and without the `r:id`.
+            rid_pat = re.escape(rid)
+            new_settings = re.sub(
+                r"<w:attachedTemplate\b[^>]*r:id=\"" + rid_pat + r"\"[^>]*/>"
+                r"|<w:attachedTemplate\b[^>]*r:id=\"" + rid_pat
+                + r"\"[^>]*>.*?</w:attachedTemplate>"
+                r"|<w:attachedTemplate\b[^>]*/>", "", new_settings)
+        # NO dangling reference may survive: the relationship is gone, so every
+        # element that referenced it must be gone too (a live `r:id` naming a
+        # dropped relationship is what makes Word offer "unreadable content").
+        for rid in ids:
+            if re.search(r'r:id="' + re.escape(rid) + r'"', new_settings):
+                res["error"] = (f"the attached-template element referencing {rid!r} could "
+                                f"not be removed, so the relationship was left in place")
+                return res
+        if new_settings == settings_xml:
+            # The relationship was not (or no longer) referenced by an element:
+            # the drop is still safe, but say so instead of pretending.
+            res["skipped"].append("the attached-template element was not present in "
+                                  "word/settings.xml (the relationship alone was dropped)")
+        parts_new[doc] = new_settings.encode("utf-8")
+    try:
+        ET.fromstring(parts_new[settings].decode("utf-8"))
+        if doc in parts:
+            ET.fromstring(parts_new[doc].decode("utf-8"))
+    except ET.ParseError as e:
+        res["error"] = f"the removal produced malformed XML: {e}"
+        return res
+    for _a, _b, target, rid in kill:
+        removed.append({"part": settings, "target": target, "id": rid})
+    try:
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+            for name, data in parts_new.items():
+                z.writestr(name, data)
+    except (OSError, RuntimeError, NotImplementedError) as e:
+        res["error"] = f"could not write the repaired DOCX: {type(e).__name__}: {e}"
+        return res
+    # Verification: the copy re-opens, and every part OTHER than the two edited
+    # ones is byte-identical to the source.
+    try:
+        with zipfile.ZipFile(out) as chk:
+            names = set(chk.namelist())
+            same = all(chk.read(n) == parts[n] for n in names - {settings, doc})
+    except (zipfile.BadZipFile, OSError, KeyError) as e:
+        res["error"] = f"the repaired DOCX could not be re-read: {type(e).__name__}: {e}"
+        return res
+    if names != set(parts) or not same:
+        res["error"] = "the repair changed more than the attached-template link"
+        return res
+    res["removed"] = removed
+    res["verified"] = {"removed": len(removed), "parts": len(parts), "others_identical": True}
+    res["ok"] = True
+    return res
+
+
+def attr_of(element: str, name: str):
+    """The value of one XML attribute in an element fragment (None when absent).
+
+    `attr()` is the `w:`-prefixed accessor; a `.rels` entry's attributes
+    (`Target`, `Type`, `Id`) carry no prefix, so this is the plain-name variant.
+    """
+    m = re.search(r"\b" + re.escape(name) + r"""\s*=\s*("([^"]*)"|'([^']*)')""", element or "")
+    if not m:
+        return None
+    return m.group(2) if m.group(2) is not None else m.group(3)
+
+
 def style_survey(xml: str, styles: dict) -> dict:
     """Per-document font / paragraph-style inventory (the STYLE artifact).
 

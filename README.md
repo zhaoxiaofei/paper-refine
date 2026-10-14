@@ -243,12 +243,35 @@ published winner — it is treated like `code/` for submission purposes, with no
 opt-in switch), `journal_submission.json` records `readme_files_excluded`, and a
 to-be-submitted document may not refer to one. The same rule covers every
 submitted file, not just the
-letter: the assembly scans the copy it just built and **reports** (never
-rewrites, never fails) each text file that still points into an area the
-submission does not carry — `PKG-2` rows in
-`journal_submission.json.non_submitted_references`, printed as author actions,
-including a `raw_data/` or feedback path (read-only inputs that never ship at
-all) and a `README.md`-style reference.
+letter: **a to-be-submitted file may point only at what the submission itself
+carries**, and a pointer to anything else is a `PKG-2` defect that the pipeline
+**removes** rather than ships. Both reference shapes are found — an
+area-prefixed path (`code/…`, `raw_data/…`) and a bare file NAME the package
+holds only outside the submission (a script under `code/`, the `raw_data/`
+archive, a `README*.md`), resolved against the package's own file list — and the
+unit of removal is the SENTENCE that carries the pointer, never a splice inside
+one (a heading line is never swallowed with it, and a sentence carrying a live
+citation field, or a structural file such as `.csv`/`.json`, is left alone and
+reported for the author). The removal runs in every package-producing stage's
+postcheck (so the version that is judged and pinned is already clean) and again
+on the published package and the journal submission (so a champion that IS the
+base/original — it never passed a stage — is repaired too); the pin and the
+winner keep the bytes they were hashed with. Every removed sentence is recorded
+VERBATIM in the run record (`runs/<id>/PKG2_<id>.json`), in
+`journal_submission.json` (`removed_dangling_references`), in
+`reports/decision.json` and in `final_clean_version.readme.md`, and whatever the
+mechanical layer may not touch stays a `PKG-2` row under
+`non_submitted_references` — printed as an author action, never a silent
+deletion and never a failure.
+
+The same scan reads a document's PARTS, not only its text: a `.rels`
+relationship whose target is an absolute local path (`file:///C:\Users\<someone>
+\…\template.dotx`, which the venue's own Word template attaches to every package
+restyled with it) is a pointer nobody can open and names the machine it was
+authored on. The attached-template link is **removed** together with its own
+relationship (every other part stays byte-identical), the other kinds are
+reported, and the judge's blind view neutralizes such targets in place so the
+panel never reads a machine path.
 
 Every evidence area is hash-pinned, and any stage write into it is restored and
 reported.
@@ -1899,8 +1922,8 @@ cannot disagree about a number:
 
 | artifact | what it holds |
 |---|---|
-| `CODE_SCANS.json` | M18 legend counts, M19 abstract/main-text lengths, M20 OOXML formatting rows, the hand-off placeholder count and the corpus identity (digest, file list, revision token) |
-| `EVIDENCE_PACK.md` | the same, human-readable, with the re-scan command |
+| `CODE_SCANS.json` | M18 legend counts, M19 abstract/main-text lengths, M20 OOXML formatting rows, the hand-off placeholder count, the PKG-2 submission-surface rows (a to-be-submitted document that names a file the submission does not carry) and the corpus identity (digest, file list, revision token) |
+| `EVIDENCE_PACK.md` | the same, human-readable, with the re-scan command and the "Submission-surface references (PKG-2)" table |
 | `M18_caption_words.md`, `M19_length.md`, `M20_formatting.md` | seeded tables (one row per code-side finding, empty disposition column) for the review and the judge |
 | `CLAIM_STRENGTH.md` | J3's claim-strength ledger, BOTH directions: one row per claim-bearing paragraph per direction (`under` = a hedge the evidence may not require; `over` = a maximal claim the evidence may not support), each with a disposition column. Seeded under `review/artifacts/` for the review and under `work/` for the package-producing and audit sessions |
 | `M30_hierarchy_reconciliation.md` | M30's source-hierarchy seed: table A pairs every written number the shipped data tables do NOT prove with its candidate producer column and the check the code can make (a cohort-size sentence against the table's own row count; a value against the column's min/max/mean/sum); table B lists the code/config literals (`N_SAMPLES = 15`). Seeded under `review/artifacts/` for the review and under `work/` for the other layouts; a disposed decision table |
@@ -2544,7 +2567,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 121 suites (a few
+any failure. They are independent, so run them in parallel — 122 suites (a few
 minutes at the default 24 parallel sessions; tens of minutes sequentially):
 
 ```bash
