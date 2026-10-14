@@ -307,9 +307,11 @@ RULES CARRIED INTO EVERY PROMPT (AND WHERE THEY COME FROM)
       <root>/round<R>_winner/ (documents at the top level) in addition to its
       content-addressed pin, and both copies are digest-verified against each
       other on every `run`/`decide`. `decide` additionally publishes the FINAL
-      champion as <root>/final_clean_version/: the same corpus byte-for-byte
+      champion as <root>/final_clean_version_<root name>/ (zipped beside it):
+      the same corpus byte-for-byte
       without process scratch, auxiliaries or self-written reports, ready to
-      seed a new pipeline run (`setup --source <root>/final_clean_version`).
+      seed a new pipeline run (`setup --source
+      <root>/final_clean_version_<root name>`).
       It is written on EVERY decide, certified or not, and is idempotent; the
       certification verdict (and why a package is not signed) is stated in the
       sibling <root>/final_clean_version.readme.md.
@@ -595,7 +597,7 @@ USAGE
     python paper_pipeline.py status --root ./paper_rounds
     python paper_pipeline.py redline --root ./paper_rounds [--round R] [--tool auto]
     python paper_pipeline.py track   --root ./paper_rounds [--round R] [--no-pdf]
-    python paper_pipeline.py decide --root ./paper_rounds   # also writes final_clean_version/
+    python paper_pipeline.py decide --root ./paper_rounds   # also writes final_clean_version_<root name>/
     python paper_pipeline.py retry  --root ./paper_rounds --run r2_review
     python paper_pipeline.py retry  --root ./paper_rounds --runs 1:judge,2:feedback,2:review
     python paper_pipeline.py prune  --root ./paper_rounds --keep-latest 1 [--yes]
@@ -738,7 +740,7 @@ DIRECTORY LAYOUT CREATED UNDER --root
     pinned/<r>_<champion_id>/       documents/, meta.json
     round<R>_winner/                the round's winner, documents at top level
                                     (digest-verified copy of the pin)
-    final_clean_version/            `decide`'s clean copy of the final champion:
+    final_clean_version_<root name>/  `decide`'s clean copy of the final champion:
                                     submission documents + code/, no scratch,
                                     auxiliaries or self-written reports -- a
                                     `setup --source` for the next run (always
@@ -11570,6 +11572,7 @@ def _json_from_text(text: str, lenient: bool):
             return None
     decoder = json.JSONDecoder()
     stripped = text.strip()
+    best, best_score = None, None
     for i, ch in enumerate(text):
         if ch not in "{[":
             continue
@@ -11583,9 +11586,17 @@ def _json_from_text(text: str, lenient: bool):
         # Count only the prose AROUND the document; `stripped` includes the JSON
         # itself, so comparing against it would reject a short document wrapped
         # in a sentence ("Here it is: {…} Done.").
-        if len(text[:i].strip()) + len(tail) < len(stripped) - (end - i):
-            return obj              # mostly-JSON text with short prose margins
-    return None
+        prose = len(text[:i].strip()) + len(tail)
+        if prose >= len(stripped) - (end - i):
+            continue
+        # MOSTLY-JSON text with short prose margins -- and when several
+        # start tokens qualify, the document is the one that SPANS the text,
+        # not simply the first `{` in it: "The schema is {"example": true}. And
+        # the data is: {…}" returned the in-prose EXAMPLE object.
+        score = (end - i) - prose
+        if best_score is None or score > best_score:
+            best, best_score = obj, score
+    return best
 
 
 def read_json(path: Path, revive: bool = True, lenient: bool = False):
@@ -13114,6 +13125,17 @@ def fix_docx_in_place(path: Path, policy: dict, template: Path = None,
             tmp.unlink()
         return {"file": path.name, "changes": rep.get("changes") or [], "applied": False,
                 "error": "self-verification failed (the original file was kept)",
+                "verified": rep.get("verified")}
+    if rep.get("error") and not rep.get("ok"):
+        # `fix_package` reports an unreadable package as `ok: false` with NO
+        # changes; without this branch the walk below fell through to
+        # `base = path` and returned `note: already clean`, dropping the error
+        # -- a corrupt/encrypted/non-DOCX manuscript passed the formatting pass
+        # as CLEAN.
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        return {"file": path.name, "changes": [], "applied": False,
+                "error": str(rep.get("error")),
                 "verified": rep.get("verified")}
     base = tmp if rep.get("changes") else path
     changes = list(rep.get("changes") or [])
@@ -22827,6 +22849,52 @@ def _toml_array_at(text: str, start: int):
     return None
 
 
+def _toml_array_values(raw: str):
+    """The string values of a TOML array (`raw`), or None when unreadable.
+
+    `json.loads` is the fast path, but the operator's own `config.toml` may use
+    TOML's literal strings (`args = ['node', 'server.js']`) or a trailing comma
+    (`args = ["node", "server.js",]`) -- both legal TOML, both a `ValueError`
+    for `json.loads`. The fallback scans the bracketed body quote-aware and
+    accepts only quoted elements, so a genuinely malformed array still reports
+    as unreadable instead of silently dropping every argument.
+    """
+    try:
+        return [str(a) for a in json.loads(raw)]
+    except ValueError:
+        pass
+    body = (raw or "").strip()
+    if len(body) < 2 or body[0] != "[" or body[-1] != "]":
+        return None
+    items, buf, quote = [], "", None
+    for ch in body[1:-1]:
+        if quote:
+            buf += ch
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "\"'":
+            quote = ch
+            buf += ch
+        elif ch == ",":
+            items.append(buf)
+            buf = ""
+        else:
+            buf += ch
+    items.append(buf)
+    if quote:
+        return None
+    out = []
+    for item in items:
+        item = item.strip()
+        if not item:
+            continue                      # TOML allows the trailing comma
+        if len(item) < 2 or item[0] != item[-1] or item[0] not in "\"'":
+            return None
+        out.append(item[1:-1])
+    return out
+
+
 def mcp_server_spec(name: str) -> dict:
     """{command, args} for one configured MCP server, {} when unreadable.
 
@@ -22857,10 +22925,17 @@ def mcp_server_spec(name: str) -> dict:
     else:
         raw = None
     if raw is not None:
-        try:
-            args = [str(a) for a in json.loads(raw)]
-        except ValueError:
-            args = []
+        values = _toml_array_values(raw)
+        if values is None:
+            # A malformed entry is UNREADABLE, never "configured with no
+            # arguments": `json.loads` alone rejects TOML's own literal strings
+            # (`args = ['a']`) and TOML's trailing comma (`["a", "b",]`), and
+            # the old `except ValueError: args = []` then launched the server
+            # with no argv at all -- the silent wrong configuration
+            # `_toml_array_at` exists to prevent. Returning {} makes the caller
+            # report the entry instead of using it half-read.
+            return {}
+        args = values
     return {"command": os.path.expanduser(cm.group(1)), "args": args}
 
 
@@ -30936,7 +31011,11 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
         if q.is_file() and is_non_submitted_readme_name(q.name):
             readme_dropped.append(q.relative_to(dst).as_posix())
             q.unlink()
-    left = sorted(p.name for name in non_submitted if (dst / name).exists())
+    # `name`, not `p.name`: `p` is the tracked-changes copy loop's variable
+    # above, so the old generator raised UnboundLocalError whenever the guard
+    # fired without any redline to copy (and otherwise named the last redline
+    # file instead of the leaked area).
+    left = sorted(name for name in non_submitted if (dst / name).exists())
     if left:
         die(f"the submission package still carries a NON-SUBMITTED area ({', '.join(left)}); "
             f"this is a pipeline bug -- report it before submitting anything.")
@@ -35941,8 +36020,8 @@ def cmd_apply_template(args) -> None:
         if staged.is_dir() and any(staged.iterdir()):
             src = staged
     if src is None:
-        die("no package to rebuild: the root has no final_clean_version/ and no completed "
-            "round's round<r>_winner/ -- name one with --source <dir>")
+        die("no package to rebuild: the root has no final_clean_version_<root name>/ and no "
+            "completed round's round<r>_winner/ -- name one with --source <dir>")
     prof = venue_profile_of(ctx, required=False)
     journal = journal_of(ctx) or (prof.default_journal if prof is not None else "")
     print(f"[conform] venue: {venue_id_of(ctx)}"
@@ -39468,14 +39547,23 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
     patterns = []
     if names:
         patterns.append(re.compile(
-            r"(?<![\w./\\-])(?:" + "|".join(re.escape(n) for n in names)
+            r"(?<![\w./\\=&?#-])(?:" + "|".join(re.escape(n) for n in names)
             + r")/[\w.\-/]*[\w]", re.I))
     # A README name, bare or under a relative directory (`docs/README.md`): the
     # boundary guard keeps a URL tail (`https://host/repo/README.md`) out of the
     # report, and a path into another area (`raw_data/README.md`) is already
     # matched by that area's pattern above.
+    #
+    # The name class is the stripper's own (`is_non_submitted_readme_name`
+    # removes every `readme*.(md|txt)` basename): a name it drops must still be
+    # REPORTED, so `README+.md` / `README(notes).md` count, while a SPACE stays
+    # out -- allowing whitespace here would bridge unrelated prose ("README and
+    # methods.md"). The trailing guard admits a sentence-final period, the
+    # normal way these names appear in running text, but not a longer filename
+    # (`README.md.bak`); `=&?#` keeps a URL's query/fragment value out.
     patterns.append(re.compile(
-        r"(?<![\w./\\-])(?:[\w.\-]+/)*README[\w.\-]*\.(?:md|txt)(?![\w.\-/])", re.I))
+        r"(?<![\w./\\=&?#-])(?:[\w.\-+()]+/)*README[\w.\-+()]*\.(?:md|txt)"
+        r"(?![\w\-/]|\.\w)", re.I))
     for p in sorted(root.rglob("*")):
         if not p.is_file() or p.suffix.lower() not in PACKAGE_TEXT_EXTS:
             continue
@@ -39489,26 +39577,44 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
         except OSError:
             continue
         for i, line in enumerate(text.splitlines(), 1):
-            m = next((mm for mm in (pat.search(line) for pat in patterns) if mm), None)
-            if not m:
+            # EVERY reference on the line, not the first pattern's first hit:
+            # the area pattern runs first, so `See README.md and also
+            # raw_data/tables.tsv.` used to report only the area path, and a
+            # second reference (the same class the scan exists for) was lost.
+            found = [mm for pat in patterns for mm in pat.finditer(line)]
+            if not found:
                 continue
-            ref = m.group(0)
-            head = ref.split("/", 1)[0].lower()
-            if head == CODE_DIR:
-                hint = " (the analysis code ships only when `set-submit-code on` asks for it)"
-            elif head in {str(n).lower() for n in names}:
-                hint = " (that area is a read-only input: it never ships)"
-            else:
-                hint = " (the author's README*.md/README*.txt files are never submitted)"
-            rows.append({
-                "rule": "PKG-2", "file": rel, "line": i, "reference": ref,
-                "detail": (f"this file is part of the submission but refers into {ref!r}, "
-                           f"which the submission does not carry: the journal cannot resolve "
-                           f"the reference. Point at shipped content, or replace the pointer "
-                           f"with a locator that ships{hint}"),
-                "fix": "manual"})
-            if len(rows) >= limit:
-                return rows
+            # The area pattern's span covers a README under it
+            # (`code/README.md`): that is ONE reference, named by the longer
+            # match, not a second finding.
+            found.sort(key=lambda mm: (mm.start(), -(mm.end() - mm.start())))
+            kept = []
+            for mm in found:
+                if any(k.start() <= mm.start() and mm.end() <= k.end() for k in kept):
+                    continue
+                kept.append(mm)
+            for m in kept:
+                ref = m.group(0)
+                head = ref.split("/", 1)[0].lower()
+                if head == CODE_DIR and is_non_submitted_readme_name(ref.rsplit("/", 1)[-1]):
+                    # `set-submit-code on` does not resurrect a README, so the
+                    # code switch is the wrong advice in BOTH states.
+                    hint = (" (the author's README*.md/README*.txt files are never submitted)")
+                elif head == CODE_DIR:
+                    hint = " (the analysis code ships only when `set-submit-code on` asks for it)"
+                elif head in {str(n).lower() for n in names}:
+                    hint = " (that area is a read-only input: it never ships)"
+                else:
+                    hint = (" (the author's README*.md/README*.txt files are never submitted)")
+                rows.append({
+                    "rule": "PKG-2", "file": rel, "line": i, "reference": ref,
+                    "detail": (f"this file is part of the submission but refers into {ref!r}, "
+                               f"which the submission does not carry: the journal cannot "
+                               f"resolve the reference. Point at shipped content, or replace "
+                               f"the pointer with a locator that ships{hint}"),
+                    "fix": "manual"})
+                if len(rows) >= limit:
+                    return rows
     return rows
 
 
@@ -44643,10 +44749,10 @@ USAGE_EXAMPLES = """usage:
   run-decide --root <dir> [same options as `run`] [same options as `decide`]
           run the pending rounds and then decide, in series: the `run` phase
           holds the root lock and finishes first, then `decide` recomputes the
-          decision and publishes <root>/final_clean_version/ -- the champion
-          corpus byte-for-byte (no scratch, no auxiliaries, no self-written
-          reports), ready to seed the NEXT pipeline run with
-          `paper_pipeline.py setup --source <root>/final_clean_version`.
+          decision and publishes <root>/final_clean_version_<root name>/ -- the
+          champion corpus byte-for-byte (no scratch, no auxiliaries, no
+          self-written reports), ready to seed the NEXT pipeline run with
+          `paper_pipeline.py setup --source <root>/final_clean_version_<root name>`.
   status  --root <dir> [--skip-hash]
           integrity, per-round progress and the per-run table.
           It also prints the venue, the journal and the resolved length limits.
@@ -44703,13 +44809,13 @@ USAGE_EXAMPLES = """usage:
           [--require-clean-captions] [--skip-hash]
           recompute every completed round in code, verify the pinned chain,
           write reports/DECISION_REPORT.md + decision.json + raw_scores.csv,
-          and publish <root>/final_clean_version/ (the champion corpus without
-          process scratch, auxiliaries or self-written reports) so a new
-          pipeline can be seeded directly from it. The clean copy is ALWAYS
-          written (2026-10-01), certified or not; the verdict and its blockers
-          travel in the sibling final_clean_version.readme.md, so an uncertified
-          copy is never silent. Only a corpus that cannot be built at all is
-          skipped, with the reason.
+          and publish <root>/final_clean_version_<root name>/ (the champion
+          corpus without process scratch, auxiliaries or self-written reports)
+          so a new pipeline can be seeded directly from it. The clean copy is
+          ALWAYS written (2026-10-01), certified or not; the verdict and its
+          blockers travel in the sibling final_clean_version.readme.md, so an
+          uncertified copy is never silent. Only a corpus that cannot be built
+          at all is skipped, with the reason.
           The round-R champion is the final answer; each round's winner is also
           published at <root>/round<R>_winner/, and --package-winner copies the
           final one to <root>/final/ (refused when the pin/winner chain, the
@@ -45238,8 +45344,9 @@ def build_parser() -> argparse.ArgumentParser:
                                   "pipeline does not unlink fields unless this flag (or "
                                   "format_policy.unlink_zotero_fields_at_publish) asks for it, "
                                   "because the author normally unlinks manually when preparing "
-                                  "the final submission file. Affects final_clean_version/ only; "
-                                  "the pinned corpora keep their live fields.")
+                                  "the final submission file. Affects "
+                                  "final_clean_version_<root name>/ only; the pinned corpora "
+                                  "keep their live fields.")
     # Shared by run / run-decide / decide: the optional LLM cross-judge conflict
     # audit (the deterministic pass and the manual TODO files always run).  The
     # LLM pass itself is OFF by default -- the LLM defect audit covers the same
@@ -45480,7 +45587,7 @@ def build_parser() -> argparse.ArgumentParser:
     pd = sub.add_parser("decide",
                         parents=[common, decide_opts, conflict_opts, defect_audit_opts],
                         help="recompute rounds, verify pins, write the decision report and "
-                             "publish <root>/final_clean_version/")
+                             "publish <root>/final_clean_version_<root name>/")
     pd.set_defaults(func=cmd_decide)
 
     psv = sub.add_parser("set-venue", parents=[common],
@@ -45699,7 +45806,8 @@ def build_parser() -> argparse.ArgumentParser:
                               "every template style, header, footer and bullet); without "
                               "--agent the same job is done by the code-side pass")
     pat.add_argument("--source", default=None, metavar="DIR",
-                     help="the package to rebuild (default: <root>/final_clean_version/, else "
+                     help="the package to rebuild (default: "
+                          "<root>/final_clean_version_<root name>/, else "
                           "the last complete round's round<r>_winner/)")
     pat.add_argument("--dest", default=None, metavar="DIR",
                      help=f"destination package directory (default: "

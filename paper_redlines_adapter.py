@@ -238,8 +238,17 @@ def main(argv):
     if callable(entry):
         try:
             entry(["redlines", base, revised, out])   # argv[0] for argparse-shaped mains
-        except SystemExit:
-            pass
+        except SystemExit as exc:
+            # A backend that exits NON-ZERO is a failed probe, whatever it left
+            # behind: `wrote()` only asks whether a non-empty OUT exists, so a
+            # shim that truncated OUT and then exited 1 was reported as a
+            # success ("python-redlines:main", exit 0) for a corrupt file. The
+            # exception paths above and below already drop the partial output;
+            # this one did not even look at the code.
+            code = exc.code
+            if code not in (0, None):
+                print("redlines.main exited %s" % (code,), file=sys.stderr)
+                drop_partial(out, "redlines.main")
         except Exception as exc:                               # noqa: BLE001
             print("redlines.main failed: %s" % exc, file=sys.stderr)
             drop_partial(out, "redlines.main")

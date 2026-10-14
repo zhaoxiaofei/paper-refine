@@ -254,9 +254,12 @@ def unesc(text: str) -> str:
 
     `xml.sax.saxutils.unescape` only knows `&amp;`/`&lt;`/`&gt;`, but Word also
     writes `&#8212;`-style references for dashes and smart quotes; leaving those
-    literal made the punctuation rules blind to them.
+    literal made the punctuation rules blind to them. The XML predefined
+    entities `&quot;`/`&apos;` are decoded for the same reason: `esc()` escapes
+    the resulting `&`, so a paragraph carrying `&quot;` used to be re-written as
+    `&amp;quot;` and Word printed the reference itself.
     """
-    text = xml_unescape(text or "")
+    text = xml_unescape(text or "", {"&quot;": '"', "&apos;": "'"})
 
     def charref(m, base):
         """The decoded character, or the literal reference when it is not valid.
@@ -6844,8 +6847,16 @@ def refresh_zotero_parts(parts: dict, policy: dict = None) -> dict:
     style_names = [n for n in ("word/settings.xml", "docProps/custom.xml") if n in parts]
     style_names += [n for n in parts if re.match(r"customXml/item\d*\.xml$", n)]
     style_parts = {n: parts[n].decode("utf-8", "replace") for n in style_names}
+    # The parts the FIELD READER (`ZOTERO_FIELD_PARTS` +
+    # `ZOTERO_FIELD_AUX_PARTS_RE`, i.e. the set `zotero-check` scans) treats as
+    # citation surfaces must all be REFUSED here, not just footnotes/endnotes: a
+    # stale live field in a header, footer or comment was neither refreshed nor
+    # named, so the refresh reported success and `zotero-check` then failed on
+    # the same package.
     other_field_parts = [n for n in parts
-                         if n in ("word/footnotes.xml", "word/endnotes.xml")
+                         if (n in ZOTERO_FIELD_PARTS
+                             or ZOTERO_FIELD_AUX_PARTS_RE.search(n))
+                         and n != "word/document.xml"
                          and b"ADDIN ZOTERO_ITEM" in parts[n]]
     style_info = zotero_style_reconcile(style_parts,
                                         str(policy.get("zotero_style") or ""))
@@ -6962,6 +6973,12 @@ def load_bib_facts(paths) -> list:
                 i += 1
             body = text[m.end():i - 1]
             pos = i
+            # A commented-out entry ("% @article{...}") is not a fact the
+            # bibliography states: parsing it made the repairs write a volume,
+            # page or year out of a paragraph the author had switched off.
+            line_start = text.rfind("\n", 0, m.start()) + 1
+            if "%" in text[line_start:m.start()]:
+                continue
             fields = {}
             for fm in re.finditer(r"(\w+)\s*=\s*(\{(?:[^{}]|\{[^{}]*\})*\}|\"[^\"]*\"|[^,\n]+)",
                                   body):
@@ -7034,10 +7051,17 @@ def _set_wt_text(para: str, start: int, end: int, text: str) -> str:
     """The replacement for one w:t element's [start, end) span.
 
     The opening tag is kept verbatim (attributes such as `xml:space` survive);
-    only the element's content changes.
+    only the element's content changes. A replacement that BEGINS or ENDS with
+    whitespace at the element's boundary needs `xml:space="preserve"`: without
+    it Word ignores that whitespace on load, so a "verified" repair delivered a
+    text the pipeline had not written. `rewrite_text_spans` -- the sibling
+    emitter -- has always added the attribute for exactly this case.
     """
     inner_open = para.find(">", start) + 1
-    return para[start:inner_open] + esc(text) + "</w:t>"
+    open_tag = para[start:inner_open]
+    if text != text.strip() and "xml:space" not in open_tag:
+        open_tag = open_tag[:open_tag.rfind(">")] + ' xml:space="preserve">'
+    return open_tag + esc(text) + "</w:t>"
 
 
 def _replace_text_in_para(para: str, old: str, new: str):
@@ -7073,8 +7097,16 @@ def _replace_text_in_para(para: str, old: str, new: str):
         return None
     tail = last[3][tail_off:]
     if len(touched) > 1:
+        # The run that OWNS the w:t is the enclosing `<w:r>`: `w:rPr` lives
+        # there, never inside the `w:t` span, so the old `<w:rPr" in
+        # para[s:e]` test could not fire -- a multi-run match happily dropped
+        # the italic/bold a half-replaced entry carried.
         for _pos, s, e, _t in touched:
-            if "<w:rPr" in para[s:e]:
+            run_start = max(para.rfind("<w:r>", 0, s), para.rfind("<w:r ", 0, s))
+            run_end = para.find("</w:r>", e)
+            if run_start < 0 or run_end < 0:
+                continue                  # not a well-formed run: leave it alone
+            if "<w:rPr" in para[run_start:run_end]:
                 return None
     edits = []
     for k, (_pos, s, e, t) in enumerate(touched):
@@ -7122,11 +7154,18 @@ def repair_reference_entries(xml: str, records: list) -> dict:
         if vm and rec.get("volume") and page:
             old = vm.group(0)
             tail = entry[vm.end():]
-            if tail.startswith(", "):
+            rest = tail[2:] if tail.startswith(", ") else None
+            # A tail that already OPENS with a locator ("Volume 11-2020, 565825
+            # (2020)") carries the article number the bibliography records:
+            # writing it again printed it twice ("11, 565825 565825 (2020)").
+            # Only a tail with no locator of its own gains one.
+            has_locator = (rest if rest is not None else tail).lstrip()[:1].isalnum()
+            if rest is not None:
                 old = old + ", "
-                new = f"{rec['volume']}, {page} "
+                new = (f"{rec['volume']}, " if has_locator
+                       else f"{rec['volume']}, {page} ")
             else:
-                new = f"{rec['volume']}, {page}"
+                new = f"{rec['volume']}" if has_locator else f"{rec['volume']}, {page}"
             cands.append(("FMT-R1", old, new))
         # P2 -- an entry that ends at a bare "(YEAR)" with no venue at all: the
         # bibliography's own locator makes it retrievable.
@@ -10097,7 +10136,12 @@ def _xfa_dataset_packets(data: bytes) -> list:
 # XFA answers serialize with whitespace before the closing bracket
 # (`<author\n>Xuegong Zhang</author\n>`), which is why the old
 # `<tag>value</tag>` pattern counted ZERO answers on a filled form.
-XFA_LEAF_RE = re.compile(r"<([A-Za-z_][\w.\-]*)\s*>\s*([^<>]{1,400}?)\s*</\1\s*>")
+# The value class is deliberately unbounded: `[^<>]` cannot cross a tag
+# boundary, so the match is confined to one text node and there is nothing to
+# backtrack over. The old `{1,400}` cap made a LONGER answer invisible -- a
+# filled form whose answer ran past 400 characters counted as UNFILLED
+# (FMT-PDF2) and `xfa_export_text` (which promises "every answer") dropped it.
+XFA_LEAF_RE = re.compile(r"<([A-Za-z_][\w.\-]*)\s*>\s*([^<>]*?)\s*</\1\s*>")
 
 
 def _xfa_dataset_report(path: Path):
@@ -10348,8 +10392,25 @@ def check_pdf(path: Path, policy: dict) -> dict:
 # CLI
 # --------------------------------------------------------------------------
 
+def _missing_paths(paths) -> list:
+    """The paths the CALLER named that do not exist.
+
+    `scan_paths`/`validate_paths` skip an absent path silently, which is right
+    inside a directory walk but wrong for a path the operator typed: a typo
+    printed "OOXML formatting: clean" / "validation: 0 file(s), 0 failure(s)"
+    with exit 0, i.e. a check that read nothing reported a clean result
+    (AGENTS.md: a skipped integrity check is reported as skipped).
+    """
+    return [str(p) for p in paths if not Path(p).exists()]
+
+
 def cmd_scan(args) -> int:
     policy = load_policy(args.policy)
+    missing = _missing_paths(args.paths)
+    if missing:
+        for m in missing:
+            log(f"error: no such file or directory: {m}")
+        return 2
     info = scan_paths([Path(p) for p in args.paths], policy)
     if args.pdf:
         pdf = check_pdf(Path(args.pdf), policy)
@@ -10399,6 +10460,15 @@ def cmd_fix(args) -> int:
     if not rep["ok"]:
         print(f"  the repaired file was NOT accepted: "
               f"{rep.get('error') or 'a verification check failed -- see the JSON report'}")
+        # The rejected artifact must not sit at the requested --out path where a
+        # caller (a script that ignores the exit code, a later run) reads it as a
+        # good file: the fixer already wrote it there, so it is removed again.
+        # The JSON report keeps the verification detail.
+        try:
+            out.unlink()
+            print(f"  removed the rejected output {out.name}")
+        except OSError as e:
+            log(f"warning: could not remove the rejected output {out}: {e}")
     for c in rep["changes"]:
         print(f"  - {c}")
     if args.json:
@@ -10623,6 +10693,11 @@ def cmd_xfa_export(args) -> int:
 
 
 def cmd_validate(args) -> int:
+    missing = _missing_paths(args.paths)
+    if missing:
+        for m in missing:
+            log(f"error: no such file or directory: {m}")
+        return 2
     report = validate_paths([Path(p) for p in args.paths], Path(args.json) if args.json else None,
                             timeout=args.timeout)
     for r in report["results"]:

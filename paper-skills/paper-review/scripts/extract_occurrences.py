@@ -49,10 +49,10 @@ def is_non_manuscript(name: str) -> bool:
     base = parts[-1]
     if any(base.startswith(d + "__") for d in EVIDENCE_DIRNAMES):
         return True
-    if _REPLY_RE.search(base):
-        return True
     if "cover" in base.lower():
         return False            # a cover letter IS a submission document
+    if _REPLY_RE.search(base):
+        return True
     return bool(_NON_MANUSCRIPT_RE.search(base))
 
 
@@ -105,10 +105,12 @@ def variant_pattern(term, mode):
                 pats.append(re.escape(mant + mul + "\u2212" + str(abs(int(exp)))) + close)
         except ValueError:
             pass
-        # A trailing comma is only a separator when no digit follows: without
-        # the ",digit" guard the value 5 also matched inside "5,000".
+        # A trailing comma or period is only a separator when no digit follows:
+        # without the ",digit" guard the value 5 also matched inside "5,000",
+        # and without the ".digit" one the value 12 matched inside the DIFFERENT
+        # value "12.5" (the leading guard only covers "X.y" -> y).
         return re.compile(r"(?<![\w.])(" + "|".join(sorted(set(pats), key=len, reverse=True))
-                          + r")(?![\w]|,\d)")
+                          + r")(?![\w]|,\d|\.\d)")
     # term mode: allow hyphen/space interchange, case-insensitive, optional 's'.
     # EVERY inter-word separator in the given term becomes the same class, so a
     # term written with a space also matches its hyphenated spelling and a

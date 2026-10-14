@@ -11,8 +11,11 @@ debug_runs/
 # The README quickstart's own run root (`./paper_rounds`) is output, not source.
 paper_rounds/
 
-# ignore temporary directories and files
-tmp/
+# ignore temporary directories and files. `tmp/` alone missed the shape the
+# debug rounds actually create: `tempfile.mkdtemp(prefix="tmp")` in the
+# repository root emits `tmp<8 random characters>/` (no slash), so three of
+# them were swept into the tree by a `git add`. The glob covers both.
+tmp*/
 
 # Windows/WSL "downloaded from the internet" marker files (`name:Zone.Identifier`)
 *:Zone.Identifier

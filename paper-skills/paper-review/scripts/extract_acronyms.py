@@ -95,6 +95,12 @@ def is_evidence_name(fname: str) -> bool:
     base = parts[-1]
     if any(base.startswith(d + "__") for d in EVIDENCE_DIRNAMES):
         return True
+    # A cover letter IS a submission document -- and this test must come FIRST,
+    # exactly as in extract_citations.py: with the reply/feedback test below it,
+    # `cover_letter_response.md` was dropped as reviewers' feedback and the
+    # letter's own text never reached M1/M1b.
+    if "cover" in base.lower():
+        return False
     # A previous response-to-reviewers (the authors' own document) is not
     # manuscript prose either: it never produces an M1/M1b row.
     return bool(EXTERNAL_FEEDBACK_RE.search(base) or AUTHORED_REPLY_RE.search(base))

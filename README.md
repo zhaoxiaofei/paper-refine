@@ -24,7 +24,7 @@ and a clean, ready-to-use package.
 * **You get** `reports/DECISION_REPORT.md` (the ranked decision, the issue
   census, every reported-only signal) and `decision.json` (the same, machine
   readable, with an explicit certification verdict), each round's winner, and
-  `final_clean_version/` with its sibling `final_clean_version.readme.md` (the
+  `final_clean_version_<root name>/` with its sibling `final_clean_version.readme.md` (the
   status document) — always generated, so the champion corpus can seed the next
   run's `--source`.
 * **Default plan** — three rounds, two judges per version, two round-1 rewrites
@@ -82,7 +82,8 @@ python paper_pipeline.py run-decide --root ./paper_rounds
 #   ./paper_rounds/reports/DECISION_REPORT.md
 #   ./paper_rounds/reports/decision.json
 #   ./paper_rounds/round<r>_winner/          the champion of each round
-#   ./paper_rounds/final_clean_version/      the champion, renamed for the next run
+#   ./paper_rounds/final_clean_version_paper_rounds/   the champion, renamed for the next run
+#   ./paper_rounds/final_clean_version_paper_rounds.zip  the same package, zipped beside it
 #   ./paper_rounds/final_clean_version.readme.md   its certification status
 ```
 
@@ -104,7 +105,7 @@ Everything lives under the root you passed to `setup`:
 | `reports/round<r>_judge_conflicts.md` (+ `.json`) | the round's cross-judge conflicts (opposite scores, a claim one judge files as `resolved` and another as `introduced`, different numbers for the same fact, clean-vs-findings check dispositions), each a REQUIRED MANUAL CHECK; the cumulative `reports/JUDGE_CONFLICTS_TODO.md` collects every round's open items |
 | `reports/round<r>_review_findings.csv` | the round's review findings (id, check, category, severity, location, evidence, explanation), one row each |
 | `round<r>_winner/` | the champion of each round (content-addressed: identical content is never re-run) |
-| `final_clean_version/` | the champion corpus, renamed for the next run's `--source`; ALWAYS built, certified or not |
+| `final_clean_version_<root name>/` | the champion corpus, renamed for the next run's `--source`; ALWAYS built, certified or not |
 | `final_clean_version.readme.md` | the package's status document (sibling of the directory): certification verdict, blockers/notes, champion + digests, and the reuse hint |
 | `redlines/` | the pipeline's tracked-changes `.docx` per candidate and source pair (`from-base/`, `from-original/`, `from-setup-source/`) |
 | `tracking/` | one difference-tracking copy per baseline (`*.tracking-original.*`, `*.tracking-a1.*`, `*.tracking-w<k>.*`, `*.tracking-winner<r>.*`, or the matching `*.logging-*` fallback when a tool failed), mirrored from the version packages and published winners |
@@ -135,7 +136,7 @@ the base's from this round's review) or to the arm's own marker. A `-` now means
 * `provisional: true` — only some rounds are complete; the champion is the last
   completed round's. `decide --require-complete` makes that an exit 4;
 * a `blockers` entry — the champion is **NOT certified**; `decide` exits 5.
-  `final_clean_version/` is still generated (with the champion corpus), and its
+  `final_clean_version_<root name>/` is still generated (with the champion corpus), and its
   sibling `final_clean_version.readme.md` says so in plain words — never treat
   that package as a signed answer, and check the readme before reusing it.
 
@@ -145,7 +146,7 @@ the base's from this round's review) or to the arm's own marker. A `-` now means
 | --- | --- |
 | `setup --source DIR --root ROOT` | copy the pristine corpus read-only, record its hashes, write `pipeline_config.json` + `state.json` |
 | `run --root ROOT` / `run-decide` | run every stage (staged in dependency order) / run and then decide |
-| `decide --root ROOT` | re-derive every round, verify the pin chain, write the report + `decision.json`, build `final_clean_version/` + its status readme |
+| `decide --root ROOT` | re-derive every round, verify the pin chain, write the report + `decision.json`, build `final_clean_version_<root name>/` + its status readme |
 | `status --root ROOT` | the root's config, integrity, ranking floor and dedup mode |
 | `trend --roots A B C` | cross-run chain: per-round medians, margins, censuses and certification |
 | `set-venue` / `set-journal` / `set-article-type` | change the rule set / target journal / content type |
@@ -374,11 +375,11 @@ source package is never modified:
 
 ```bash
 python paper_pipeline.py conform --root ./paper_rounds                 # -> <root>/template_package/
-python paper_pipeline.py conform --root ./paper_rounds --source ./paper_rounds/final_clean_version --dest ./submission_word
+python paper_pipeline.py conform --root ./paper_rounds --source ./paper_rounds/final_clean_version_paper_rounds --dest ./submission_word
 python paper_pipeline.py conform --root ./paper_rounds --source ./paper_rounds/runs/r1_w1/rewritten --force
 ```
 
-With no `--source` it rebuilds `<root>/final_clean_version/`, else the last complete round's
+With no `--source` it rebuilds `<root>/final_clean_version_<root name>/`, else the last complete round's
 `round<r>_winner/`.
 
 **`conform --agent` — the LLM fills the journal's own templates.** With `--agent`
@@ -967,7 +968,7 @@ an offline environment where the pipeline's own identifier lookups all come
 back `skipped`: the package must still not ship the marker, so the alternative
 is to have the stage write the verified fact (or the verified negative with its
 search date) into the document. A gated residual blocks certification; the
-champion corpus is still built into `final_clean_version/`, and
+champion corpus is still built into `final_clean_version_<root name>/`, and
 `final_clean_version.readme.md` records the refusal — see the `certification`
 block above.
 
@@ -1576,7 +1577,7 @@ formatting used to be invisible to every stage. The pipeline now handles it:
   review contract requires an `M20` coverage row, like M18/M19.
 * `decide` re-scans the winner, reports it in `decision.json` /
   `DECISION_REPORT.md`, and `publish_final_clean` normalizes + verifies the
-  published `final_clean_version/` copy.
+  published `final_clean_version_<root name>/` copy.
 * `decide --format-gate` promotes HIGH-severity findings (break-only
   paragraph/blank page, tracked changes, unreadable package) to decision
   problems (exit 5). The scan stays advisory without the flag.
@@ -2481,7 +2482,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 117 suites (a few
+any failure. They are independent, so run them in parallel — 118 suites (a few
 minutes at the default 24 parallel sessions; tens of minutes sequentially):
 
 ```bash
@@ -2581,7 +2582,7 @@ compatibility for a root with no `venue`/`article_type` key.
 * That read-only contract is taken literally: `raw_data/`,
   `human_review_feedback/` and `llm_review_feedback/` (and everything inside them) may be
   `chmod -R a-w`, so the pipeline never needs write permission there — `setup`,
-  publication of `final_clean_version/`, pruning, retries and the
+  publication of `final_clean_version_<root name>/`, pruning, retries and the
   restore-from-pristine step all work on a read-only tree, and the modes the
   author set are preserved in every copy. The restore step is the only thing
   that writes there, and it puts the modes back exactly as it found them; the

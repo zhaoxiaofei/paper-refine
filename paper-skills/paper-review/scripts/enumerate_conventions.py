@@ -170,10 +170,10 @@ def _non_manuscript(name: str) -> bool:
     base = parts[-1]
     if any(base.startswith(d + "__") for d in EVIDENCE_DIRNAMES):
         return True
-    if _REPLY_RE.search(base):
-        return True
     if "cover" in base.lower():
         return False            # a cover letter IS a submission document
+    if _REPLY_RE.search(base):
+        return True
     return bool(_NON_MANUSCRIPT_RE.search(base))
 
 

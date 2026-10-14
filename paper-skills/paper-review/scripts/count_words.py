@@ -430,6 +430,12 @@ def is_evidence_path(path: str) -> bool:
     # submission's abstract/main-text limits.
     if any(parts[-1].startswith(d + "__") for d in EVIDENCE_DIRNAMES):
         return True
+    # A cover letter IS a submission document -- and this test must come FIRST,
+    # exactly as in extract_citations.py: with the reply/feedback test below it,
+    # `cover_letter_response.md` was dropped as reviewers' feedback and the
+    # letter never reached the M19 length sweep.
+    if "cover" in parts[-1].lower():
+        return False
     return bool(EXTERNAL_FEEDBACK_RE.search(parts[-1])
                 or AUTHORED_REPLY_RE.search(parts[-1]))
 
