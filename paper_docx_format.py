@@ -5541,11 +5541,56 @@ def hygiene_spans(para: str) -> list:
     possible lowercase sentence start) and FMT-G3 (a missing space after
     punctuation) are reported for the editing arms, because mathematics,
     notation and subscripts legitimately carry those shapes.
+
+    FMT-X2's two GLUE shapes are mechanical here as well (2026-10-15): a
+    front-matter label fused to its value (`Correspondence:Zhen Xie`) and an
+    e-mail address fused to the name before it are each ONE missing space, and
+    the repair is verifiable as an insertion (the fixer's recorded edit keeps the
+    text identical otherwise). The ambiguous shapes stay with the editing arms:
+    when the address's local part is neither a prefix nor a suffix of the word it
+    touches, the correct split needs a reader's judgement, so no span is emitted
+    and the FMT-X2 row stands.
     """
     out = []
     text = text_of(para)
     if not text.strip():
         return out
+    # ---- front-matter glue (FMT-X2) ------------------------------------------
+    for m in FURNITURE_LABEL_RE.finditer(text):
+        if m.end() >= len(text) or text[m.end()].isspace():
+            continue
+        if text[m.end():m.end() + 2] == "//":       # a URL scheme, not glue
+            continue
+        out.append({"rule": "FMT-X2", "fix": "mechanical", "start": m.end(), "end": m.end(),
+                    "repl": " ",
+                    "evidence": f"{text[max(0, m.start() - 8):m.end() + 18]!r}: no space after "
+                                f"the label's colon",
+                    "detail": "insert the missing space between the front-matter label and its "
+                              "value"})
+    for m in EMAIL_RE.finditer(text):
+        word_m = EMAIL_GLUE_BEFORE_RE.search(text[:m.start()])
+        local = m.group(0).split("@", 1)[0]
+        cut = None
+        if word_m:
+            word = word_m.group(0)
+            if local and len(word) > len(local) and word.lower().endswith(local.lower()):
+                cut = m.start() - len(local)
+            elif local and len(word) > len(local) and word.lower().startswith(local.lower()):
+                cut = m.start() + len(local)
+        if cut is None:
+            # The match ITSELF carries the glue (`Xiezhenxie@host`). Splitting it
+            # needs to know where the author's name ends and the address begins,
+            # and a guess here REWRITES a correct address into a wrong one (the
+            # first cut of this repair turned a healthy
+            # `zhenxie@tsinghua.edu.cn` into `zhen xie@tsinghua.edu.cn`). No span
+            # is emitted: the FMT-X2 row stands, the review/revise arms fix it in
+            # prose, and the published copy keeps the glue REPORTED (advisory)
+            # rather than silently re-spaced.
+            continue
+        out.append({"rule": "FMT-X2", "fix": "mechanical", "start": cut, "end": cut, "repl": " ",
+                    "evidence": f"{text[max(0, m.start() - 24):m.end() + 12]!r}: the address is "
+                                f"glued to the word before it",
+                    "detail": "insert the missing space between the name and the e-mail address"})
     for s, e in visual_text_lines(para):
         seg = text[s:e]
         if not seg:
@@ -5627,6 +5672,15 @@ def hygiene_rows(paras: list, is_ref: list, doc: str, protected=None) -> list:
             continue
         prot = protected[idx] if protected and idx < len(protected) else []
         for sp in hygiene_spans(para):
+            if sp["rule"] == "FMT-X2":
+                # The front-matter GLUE spans are APPLIED by the fixer but never
+                # reported from here: the authoritative row for that class is
+                # `correspondence_glue_rows`, which reports `fix=editorial` (the
+                # shapes the mechanical repair cannot split stay for the editing
+                # arms). Reporting them as mechanical rows made the fixer's own
+                # verification fail on a document it had just repaired -- the
+                # residue is the unsplittable name/address glue by design.
+                continue
             in_result = bool(prot) and in_field_result(prot, sp["start"], sp["end"])
             rows.append({"rule": sp["rule"], "severity": "low", "document": doc,
                          "location": f"p{idx}", "evidence": sp["evidence"],
@@ -11347,15 +11401,20 @@ def _xfa_dataset_packets(data: bytes) -> list:
     publish-time scanner.
     """
     packets = []
-    for m in re.finditer(rb"stream\r?\n", data):
+    for m in re.finditer(rb"(?<!end)stream\r?\n", data):
         start = m.end()
         end = data.find(b"endstream", start)
         if end < 0:
             continue
+        raw = data[start:end]
         try:
-            dec = zlib.decompress(data[start:end])
+            dec = zlib.decompress(raw)
         except zlib.error:
-            continue
+            # An UNCOMPRESSED stream is legal (`/Length` with no `/Filter`) and
+            # the XFA packet set may be written that way by a non-Adobe tool:
+            # skipping it made `all_datasets` read 0 on a form that carries two
+            # packet sets (the 2026-10-15 hand-off test).
+            dec = raw
         if b"xfa:datasets" in dec:
             packets.append((start, dec.decode("utf-8", "replace")))
     return packets
@@ -11398,7 +11457,7 @@ def _xfa_dataset_report(path: Path):
             if em.group(2).strip():
                 non_empty += 1
     if not is_shell:
-        for m in re.finditer(rb"stream\r?\n", data):
+        for m in re.finditer(rb"(?<!end)stream\r?\n", data):
             start = m.end()
             end = data.find(b"endstream", start)
             if end < 0:
@@ -11415,6 +11474,186 @@ def _xfa_dataset_report(path: Path):
     return (is_xfa, non_empty, is_shell)
 
 
+def _pdf_object_bodies(data: bytes) -> dict:
+    """{object number: raw body} for a PDF, object streams expanded.
+
+    The one thing `_xfa_dataset_packets` cannot see: WHICH packet the form
+    actually reads. The AcroForm's `/XFA` array names it by object number, and on
+    a form saved more than once those numbers live inside an object stream
+    (`/ObjStm`) -- so the array has to be read from the DECOMPRESSED objects, not
+    from the raw bytes. Text-level reading served the earlier rounds; it is what
+    made a form's live dataset unidentifiable (2026-10-15).
+    """
+    objs: dict = {}
+    # NOT line-anchored: a PDF may use `\r` line endings, and `(?m)^` then
+    # matches almost nothing (two top-level objects out of 54 in this file's
+    # case), so the object carrying the live /XFA array was never read. A wrong
+    # hit inside a stream is harmless as long as it is not the LAST definition
+    # of the number we resolve -- the dictionary guard below drops those.
+    for m in re.finditer(rb"(\d+)\s+0\s+obj", data):
+        num = int(m.group(1))
+        start = m.end()
+        end = data.find(b"endobj", start)
+        body = data[start:end if end >= 0 else len(data)]
+        stripped = body.lstrip(b"\r\n \t")
+        if not stripped.startswith(b"<<") and b"stream" not in body[:200]:
+            continue
+        if stripped.startswith(b"<<") and b"stream" not in body:
+            close = stripped.find(b">>")
+            if close < 0:
+                continue
+        objs[num] = body
+    for num in list(objs):
+        body = objs[num]
+        if b"/ObjStm" not in body[:400]:
+            continue
+        sm = re.search(rb"(?<!end)stream\r?\n", body)
+        if not sm:
+            continue
+        raw = body[sm.end():]
+        stop = raw.find(b"endstream")
+        if stop >= 0:
+            raw = raw[:stop]
+        try:
+            dec = zlib.decompress(raw)
+        except zlib.error:
+            continue
+        fm = re.search(rb"/First (\d+)", body)
+        nm = re.search(rb"/N (\d+)", body)
+        if not (fm and nm):
+            continue
+        first, count = int(fm.group(1)), int(nm.group(1))
+        hdr = dec[:first].split()
+        for i in range(count):
+            try:
+                onum, off = int(hdr[2 * i]), int(hdr[2 * i + 1])
+            except (IndexError, ValueError):
+                break
+            nxt = int(hdr[2 * i + 3]) if 2 * i + 3 < len(hdr) else len(dec) - first
+            # LAST definition wins: an incremental update appends the newer
+            # objects, and a PDF reader resolves an object number to its LATEST
+            # definition. `setdefault` kept the first, i.e. the stale XFA packet
+            # array -- which is how this helper first read a filled form's live
+            # dataset as the empty duplicate (2026-10-15).
+            objs[onum] = dec[first + off:first + nxt]
+    return objs
+
+
+def _obj_stream_text(body: bytes):
+    """The decompressed (or plain) stream of one object body, or None."""
+    sm = re.search(rb"(?<!end)stream\r?\n", body)
+    if not sm:
+        return None
+    raw = body[sm.end():]
+    stop = raw.find(b"endstream")
+    if stop >= 0:
+        raw = raw[:stop]
+    try:
+        return zlib.decompress(raw)
+    except zlib.error:
+        return raw
+
+
+def xfa_live_packets(path: Path) -> dict:
+    """Which XFA packets the AcroForm READS, and what each one carries.
+
+    Returns {"resolved", "packets": {name: (object number, non-empty leaves,
+    text)}, "live_datasets": [names], "all_datasets": <count of dataset packets
+    in the file>}. `resolved` is False when the /XFA array cannot be read (an
+    older reader's guess is then the best available), and the 2026-10-15
+    Audit's question -- "is the empty copy the one the form uses, or a stale
+    duplicate?" -- is answered by the /XFA array itself, never by packet order.
+    """
+    out = {"resolved": False, "packets": {}, "live_datasets": [], "all_datasets": 0}
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return out
+    objs = _pdf_object_bodies(data)
+    out["all_datasets"] = len(_xfa_dataset_packets(data))
+    acro = [(num, body) for num, body in objs.items() if re.search(rb"/XFA[\s/\[]", body)]
+    if not acro:
+        return out
+    # An incremental update appends: the object with the HIGHEST number is the
+    # live AcroForm (a later save never lowers an object number).
+    num, body = max(acro, key=lambda kv: kv[0])
+    m = re.search(rb"/XFA\s*\[(.*?)\]", body, re.S)
+    if m:
+        for name, onum in re.findall(rb"\(([^)]*)\)\s*(\d+)\s+0\s+R", m.group(1)):
+            pname = name.decode("latin-1")
+            onum = int(onum)
+            pbody = objs.get(onum)
+            text = _obj_stream_text(pbody) if pbody is not None else None
+            if text is None:
+                continue
+            if b"xfa:datasets" in text or b"<xfa:data" in text:
+                answers = [(em.group(1), em.group(2).strip())
+                           for em in XFA_LEAF_RE.finditer(text.decode("utf-8", "replace"))
+                           if em.group(2).strip()]
+                out["packets"][pname] = (onum, len(answers), text)
+            else:
+                out["packets"][pname] = (onum, 0, text)
+        out["resolved"] = bool(out["packets"])
+    else:
+        # A single-stream /XFA: the whole XDP is in one object; its datasets
+        # packet is the part this report needs.
+        sm = re.search(rb"/XFA\s+(\d+)\s+0\s+R", body)
+        if sm:
+            text = _obj_stream_text(objs.get(int(sm.group(1)), b""))
+            if text and b"xfa:data" in text:
+                answers = [(em.group(1), em.group(2).strip())
+                           for em in XFA_LEAF_RE.finditer(text.decode("utf-8", "replace"))
+                           if em.group(2).strip()]
+                out["packets"]["<single-stream>"] = (int(sm.group(1)), len(answers), text)
+                out["resolved"] = True
+    out["live_datasets"] = [k for k, v in out["packets"].items()
+                            if v[2] and (b"xfa:datasets" in v[2] or b"<xfa:data" in v[2])]
+    return out
+
+
+def _xfa_packet_summary(path: Path) -> dict:
+    """The LIVE dataset's answer count, plus any STALE duplicate packet set.
+
+    A form saved twice carries the original (often empty) packet set AND the
+    saved one, and the two disagree -- the 2026-10-15 operator's audit of the
+    CopyNumBench Reporting Summary reported "the XFA dataset the file actually
+    uses is empty" about a form whose live dataset carries 48 answers (the
+    empty one is the STALE copy, object 76, while the live /XFA array names
+    object 275). Both readings are reachable: a strict reader resolves the
+    latest object (the answers show), some XFA processors and text tools take the
+    first packet (the form reads BLANK). That is a deliverable defect either way,
+    so the count of each side is reported and the caller words its row from
+    them.
+    """
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return {}
+    is_xfa, _all_answers, is_shell = _xfa_dataset_report(Path(path))
+    live = xfa_live_packets(Path(path))
+    out = {"is_xfa": is_xfa, "is_shell": is_shell, "resolved": bool(live.get("resolved")),
+           "live_answers": 0, "live_objects": [], "stale_answers": 0, "stale_objects": [],
+           "packets": live.get("all_datasets") or 0}
+    live_nums = set()
+    for name, (onum, count, text) in (live.get("packets") or {}).items():
+        if not text or not (b"xfa:datasets" in text or b"<xfa:data" in text):
+            continue
+        live_nums.add(onum)
+        out["live_objects"].append(onum)
+        out["live_answers"] = max(out["live_answers"], int(count))
+    live_texts = {v[2].decode("utf-8", "replace")
+                  for v in (live.get("packets") or {}).values() if v[2]}
+    for _off, text in _xfa_dataset_packets(data):
+        if not out["resolved"] or text in live_texts:
+            continue
+        # A dataset packet the /XFA array does not name: a stale copy from an
+        # earlier save. Its own answer count is what a reader taking "the first
+        # packet" would see.
+        answers = sum(1 for em in XFA_LEAF_RE.finditer(text) if em.group(2).strip())
+        out["stale_answers"] = max(out["stale_answers"], answers)
+    return out
+
+
 def xfa_dataset_answers(path: Path, limit: int = 400) -> list:
     """[(field name, answer)] of the richest XFA dataset packet (or []).
 
@@ -11422,11 +11661,27 @@ def xfa_dataset_answers(path: Path, limit: int = 400) -> list:
     readable export passes None: it promises "every answer", while the FMT gate
     counts every non-empty leaf (`_xfa_dataset_report`), so a form with more
     than `limit` answers was reported as N filled and exported as N-1.
+
+    The LIVE packet wins when the AcroForm's own `/XFA` array can be read: the
+    export must show the answers the form actually carries, and reading a stale
+    duplicate instead is how "the form is filled" and "the form is blank" were
+    both argued about the same file in 2026-10-15.
     """
     try:
         data = Path(path).read_bytes()
     except OSError:
         return []
+    live = xfa_live_packets(Path(path))
+    if live.get("resolved"):
+        for name in live.get("live_datasets") or []:
+            text = live["packets"].get(name, (None, 0, None))[2]
+            if not text:
+                continue
+            answers = [(em.group(1), em.group(2).strip())
+                       for em in XFA_LEAF_RE.finditer(text.decode("utf-8", "replace"))
+                       if em.group(2).strip()]
+            if answers:
+                return answers if limit is None else answers[:limit]
     best = []
     for _off, text in _xfa_dataset_packets(data):
         answers = [(em.group(1), em.group(2).strip())
@@ -11472,7 +11727,7 @@ def _pdf_carries_an_image(path: Path) -> bool:
         return False
     if re.search(rb"/Subtype\s*/Image", data):
         return True
-    for m in re.finditer(rb"stream\r?\n", data):
+    for m in re.finditer(rb"(?<!end)stream\r?\n", data):
         start = m.end()
         end = data.find(b"endstream", start)
         if end < 0:
@@ -11490,7 +11745,7 @@ def _pdf_carries_an_image(path: Path) -> bool:
 
 
 def pdf_artifact_rows(path: Path, text: str = None, pages=None) -> list:
-    """FMT-PDF1..4 for one PDF (empty list = nothing proven wrong)."""
+    """FMT-PDF1..6 for one PDF (empty list = nothing proven wrong)."""
     rows = []
     name = Path(path).name
     if text is None:
@@ -11514,6 +11769,12 @@ def pdf_artifact_rows(path: Path, text: str = None, pages=None) -> list:
             text = ""
     body = (text or "").strip()
     is_xfa, non_empty, is_shell = _xfa_dataset_report(Path(path))
+    pack = _xfa_packet_summary(Path(path)) if is_xfa else {}
+    if pack.get("resolved"):
+        # With the live packet known, the FILLED/UNFILLED question is decided by
+        # the packet the AcroForm actually reads (`live_answers`), not by "some
+        # packet somewhere has text".
+        non_empty = int(pack.get("live_answers") or 0)
     strong = bool(PDF_PLACEHOLDER_STRONG_RE.search(body)) and len(body) < 1500
     if strong and not is_shell:
         # The bare "Please wait..." fallback must not flag ordinary prose. It
@@ -11534,14 +11795,30 @@ def pdf_artifact_rows(path: Path, text: str = None, pages=None) -> list:
                                "and the submission system; flatten it before shipping",
                      "fix": "manual", "protected": False})
     if is_xfa and non_empty == 0:
-        rows.append({"rule": "FMT-PDF2", "severity": "high", "document": name,
-                     "location": "-",
-                     "evidence": "XFA/LiveCycle form whose dataset packet(s) carry no "
-                                 "non-empty answer",
-                     "detail": "the form ships UNFILLED (every field is empty or default); "
-                               "fill it in the Adobe reader (or replace it with a flattened "
-                               "PDF) before submitting",
-                     "fix": "manual", "protected": False})
+        if pack.get("resolved") and int(pack.get("stale_answers") or 0) > 0:
+            # The answers EXIST, but only in a packet set the /XFA array does not
+            # name: no reader reaches them, and the form reads blank.
+            rows.append({"rule": "FMT-PDF5", "severity": "high", "document": name,
+                         "location": "-",
+                         "evidence": f"the /XFA array names a dataset with 0 answers while the "
+                                     f"file carries a SECOND (unreferenced) packet set with "
+                                     f"{pack['stale_answers']} non-empty value(s)",
+                         "detail": "the mandatory form's OWN data layer is EMPTY: the answers "
+                                   "live in an unreferenced copy of the packet set that no "
+                                   "reader, conversion or submission system resolves. Open the "
+                                   "file in Adobe Acrobat, re-enter/confirm the answers and "
+                                   "export a flattened PDF (the pipeline's `xfa-export` renders "
+                                   "the unreferenced copy so nothing is lost in the meantime)",
+                         "fix": "manual", "protected": False})
+        else:
+            rows.append({"rule": "FMT-PDF2", "severity": "high", "document": name,
+                         "location": "-",
+                         "evidence": "XFA/LiveCycle form whose dataset packet(s) carry no "
+                                     "non-empty answer",
+                         "detail": "the form ships UNFILLED (every field is empty or default); "
+                                   "fill it in the Adobe reader (or replace it with a flattened "
+                                   "PDF) before submitting",
+                         "fix": "manual", "protected": False})
     elif is_xfa and non_empty > 0 and placeholder:
         # The form IS filled; the defect is only the delivery format. Reported
         # separately so the instruction is "flatten" (an export step), never
@@ -11557,6 +11834,28 @@ def pdf_artifact_rows(path: Path, text: str = None, pages=None) -> list:
                                "pipeline's `xfa-export` writes a readable rendering of every "
                                "answer beside the package for reference)",
                      "fix": "manual", "protected": False})
+        if pack.get("resolved") and int(pack.get("packets") or 0) > 1:
+            # The file carries TWO packet sets. The live one is read here; a
+            # strict XFA processor that takes the first shows the other, and the
+            # 2026-10-15 audit of this very file read it as BLANK for that reason.
+            rows.append({"rule": "FMT-PDF6", "severity": "medium", "document": name,
+                         "location": "-",
+                         "evidence": f"{pack['packets']} XFA packet set(s) in one file: the "
+                                     f"/XFA array names the filled one "
+                                     f"({pack.get('live_answers')} answer(s), object(s) "
+                                     f"{pack.get('live_objects')}), and a stale copy with "
+                                     f"{pack.get('stale_answers')} non-empty value(s) is still "
+                                     f"in the file",
+                         "detail": "this form was saved twice, so it carries an older and a "
+                                   "newer packet set. A reader that resolves PDF objects "
+                                   "strictly shows the answers; one that takes the first packet "
+                                   "shows an empty form (that is how the same file reads as "
+                                   "'blank' to a text tool or a strict XFA processor, including "
+                                   "some editorial systems and the operator's own audit). "
+                                   "Open it in Adobe Acrobat and use 'Save As' to write a "
+                                   "single-set file, or export a flattened PDF "
+                                   "(`xfa-export` renders the live answers for reference)",
+                         "fix": "manual", "protected": False})
     elif not body and (pages or 0) >= 1 and not _pdf_carries_an_image(Path(path)):
         rows.append({"rule": "FMT-PDF3", "severity": "medium", "document": name,
                      "location": "-",

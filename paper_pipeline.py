@@ -2672,7 +2672,8 @@ def scan_template_conformance(sources: list, requirements: dict,
         if not src.is_dir():
             continue
         for p in sorted(src.rglob("*")):
-            if not p.is_file() or _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
+            if not p.is_file() or is_non_document_name(p.name) \
+                    or is_bookkeeping_name(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
             if excluded and rel.split("/", 1)[0] in excluded:
@@ -6949,6 +6950,9 @@ EVIDENCE_INTEGRITY_REVIEW = """3f. The EVIDENCE-INTEGRITY sweeps M31-M36 (defini
      only job is to explain a defect the reader sees ("printed as ...", "the legacy column
      name ...", "which denotes ...", "share the extreme color") is itself the finding: the
      artwork is corrected, never the legend extended (artifact: M31_artwork_legend.md);
+     the code-side PKG-4 rows in `review/work/EVIDENCE_PACK.md` ("Display items the submission
+     does not carry") are this class's packaging half: a document that CITES and legends a
+     figure the package carries no file for -- ship the figure, embed it, or drop the citation;
    * M32 HEADLINE STATISTIC vs the correction the paper states: for every numeric claim on a
      claim-bearing surface (abstract, cover letter, Results highlights, legends) check the
      test, the unit of analysis, n, the p-value and the correction the Methods/Statistics
@@ -6967,6 +6971,9 @@ EVIDENCE_INTEGRITY_REVIEW = """3f. The EVIDENCE-INTEGRITY sweeps M31-M36 (defini
      nobody can deliver. Such a sentence is REWRITTEN (name where the material really is, or
      carry the fact itself); the orchestrator REMOVES the sentence mechanically at publication
      when the pointer is still there, and the science it carried is then lost;
+     a `PKG-3` row is the same table's other shape -- a file name the package carries NOWHERE --
+     which the mechanical layer never removes: rewrite the sentence to ship the file, to name a
+     locator the submission carries, or to drop the pointer;
    * M34 FIGURE SOURCE DATA vs the legend's own claim: for every figure/table compare the
      shipped source data's distinct dataset/panel/method values and any selection/exclusion
      rule its metadata records with the counts and the rule the legend and manuscript state.
@@ -11279,6 +11286,124 @@ def pipeline_identity_note(ctx: Ctx) -> str:
             f"created with).")
 
 
+def frozen_snapshot_root(path=None) -> dict:
+    """The pipeline ROOT that holds the running script as its frozen copy ({} = none).
+
+    `setup` freezes the running script into the new root on purpose ("THIS copy
+    is frozen into the root and is what every later `run` executes"), so running
+    a ROOT's own copy is the documented way to drive that root. It is NOT a way
+    to create a NEW root: the 2026-10-15 neohet-12to13 run was set up that way
+    -- `python3 <neohet-10to11>.../paper_pipeline.py setup --root <neohet-12to13>`
+    -- so the new root froze a two-day-old snapshot (commit e15c869) and EVERY
+    later command in it ran that code: the PKG-2 dangling-reference scan, the
+    README rule and the M31-M36 evidence-integrity sweeps committed between then
+    and the run's start were all silently absent, and the operator's audit found
+    the same defects in the "new" package that the fixes had already closed.
+
+    Detection is structural -- the running file sits directly inside a directory
+    that holds a pipeline registry (`state.json`/`pipeline_config.json`) -- so it
+    needs no marker in the file itself and cannot be fooled by a rename. The
+    returned record names that root, when its snapshot was last written, the
+    ORIGIN pipeline the snapshot was frozen from (its own `state.json` records
+    it) and the sha256 of both, so the caller can say exactly which code would
+    run and which tree the operator meant to use.
+    """
+    try:
+        here = Path(path).resolve() if path else Path(__file__).resolve()
+    except (NameError, OSError):                                      # pragma: no cover
+        return {}
+    holder = here.parent
+    if not ((holder / "state.json").is_file() or (holder / "pipeline_config.json").is_file()):
+        return {}
+    try:
+        rec = read_json(holder / "state.json") or {}
+    except Exception:                                                 # noqa: BLE001
+        rec = {}
+    origin = rec.get("pipeline") or {}
+    frozen_at = ""
+    try:
+        frozen_at = datetime.fromtimestamp(here.stat().st_mtime, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+    except OSError:                                                   # pragma: no cover
+        pass
+    origin_path = str(origin.get("path") or "")
+    origin_digest = ""
+    if origin_path and Path(origin_path).is_file():
+        try:
+            origin_digest = sha256_file(Path(origin_path))
+        except OSError:                                               # pragma: no cover
+            origin_digest = ""
+    try:
+        own_digest = sha256_file(here)
+    except OSError:                                                   # pragma: no cover
+        own_digest = ""
+    return {"root": str(holder), "script": str(here), "frozen_at": frozen_at,
+            "origin_path": origin_path, "origin_digest": origin_digest,
+            "origin_version": origin.get("version"),
+            "digest": own_digest,
+            "origin_differs": bool(origin_digest and own_digest
+                                   and origin_digest != own_digest)}
+
+
+def root_pipeline_staleness(ctx: Ctx) -> dict:
+    """How this ROOT's frozen pipeline relates to the ORIGIN tree it was frozen from.
+
+    `setup` records the script it ran (`state.json` -> `pipeline: {path, sha256,
+    version}`), and a root keeps that frozen copy on purpose: every later `run`
+    executes the snapshotted code, which is what makes a verdict reproducible.
+    The price is that fixes committed to the origin tree afterwards are NOT in
+    the run -- and nothing said so. The 2026-10-15 neohet-12to13 root is the
+    case: it was set up from an old root's copy, so all later commands ran
+    commit e15c869's code and re-found defects the origin tree had already
+    closed. This reports that state (used by `status`); it never changes a run.
+    """
+    recorded = (ctx.state or {}).get("pipeline") or {}
+    origin_path = str(recorded.get("path") or "")
+    frozen = ctx.root / "paper_pipeline.py"
+    out = {"frozen": str(frozen) if frozen.is_file() else None,
+           "frozen_at": None, "origin": origin_path or None,
+           "recorded_sha256": str(recorded.get("sha256") or "") or None,
+           "origin_sha256": None, "origin_differs": False, "snapshot_of_root": None}
+    if frozen.is_file():
+        try:
+            out["frozen_at"] = datetime.fromtimestamp(
+                frozen.stat().st_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except OSError:                                               # pragma: no cover
+            pass
+        holder = frozen_snapshot_root(frozen)
+        out["snapshot_of_root"] = holder.get("root") if holder else None
+    if origin_path and Path(origin_path).is_file():
+        try:
+            out["origin_sha256"] = sha256_file(Path(origin_path))
+        except OSError:                                               # pragma: no cover
+            pass
+    out["origin_differs"] = bool(out["origin_sha256"] and out["recorded_sha256"]
+                                 and out["origin_sha256"] != out["recorded_sha256"])
+    return out
+
+
+def pipeline_snapshot_note(ctx: Ctx) -> str:
+    """One paragraph for `status`: which code this root actually runs."""
+    st = root_pipeline_staleness(ctx)
+    if not st.get("frozen"):
+        return ""
+    if not st.get("origin"):
+        return (f"[pipeline] this root runs the pipeline frozen into it "
+                f"({st.get('frozen_at') or 'date unknown'}); the recorded origin is unknown")
+    if not st.get("origin_differs"):
+        return (f"[pipeline] this root runs the pipeline snapshot frozen into it "
+                f"({st.get('frozen_at') or 'date unknown'}), and the ORIGIN tree "
+                f"{st['origin']} is unchanged since")
+    return (f"[pipeline] NOTE: this root runs the snapshot frozen into it "
+            f"({st.get('frozen_at') or 'date unknown'}, sha256 "
+            f"{str(st.get('recorded_sha256'))[:16]}...), while the ORIGIN tree "
+            f"{st['origin']} has changed since (sha256 "
+            f"{str(st.get('origin_sha256'))[:16]}...). Keeping the snapshot is what makes this "
+            f"root's verdicts reproducible, but fixes committed to the origin tree after it are "
+            f"NOT in this run: create a NEW root with the origin tree's `paper_pipeline.py` "
+            f"(same --source) when you want them.")
+
+
 def nat_key(s: str):
     return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", str(s))]
 
@@ -12129,8 +12254,11 @@ def scan_captions_in_sources(sources: list, limit=None) -> dict:
         for p in sorted(src.rglob("*")):
             if not p.is_file():
                 continue
-            if _is_aux_doc(p.name):
-                # tracked-changes auxiliaries duplicate their parent's captions
+            if is_non_document_name(p.name):
+                # tracked-changes auxiliaries duplicate their parent's captions,
+                # and a Word owner / OS stub is not a document at all (without
+                # this the caption scan reported "1 file(s) not parseable" for a
+                # 162-byte `~$…docx` and a legend count for a `:Zone.Identifier`).
                 continue
             rel = p.relative_to(src).as_posix()
             if excluded and rel.split("/", 1)[0] in excluded:
@@ -13191,7 +13319,7 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
         if not src.is_dir():
             continue
         for p in _docx_files_under(src):
-            if not p.is_file() or p.name.startswith("~$") or _is_aux_doc(p.name):
+            if not p.is_file() or is_non_document_name(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
             if (prefix + rel) in overrides[i]:
@@ -15414,6 +15542,25 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
             "rows": non_submitted_reference_rows(corpus_dir, areas)}
     except Exception as e:                                            # noqa: BLE001
         evidence["submission_references"] = {"error": f"{type(e).__name__}: {e}"}
+    # The two families that only the PUBLISHED package used to see, seeded here
+    # so a review/audit/revise session can ADDRESS them in prose (the mechanical
+    # layer reports them; only the editing arms can ship a figure, embed it, or
+    # re-point a citation):
+    #   * PKG-4 -- a display item the documents cite (and legend) while the
+    #     package carries no figure file for it (the operator's "Figure S3 is
+    #     cited and has a legend, but it is not in the submission");
+    #   * FMT-TP1 -- the title page does not print the content type this run is
+    #     configured for (a GAP the venue profile states no rule for, so it is
+    #     counted and named, never turned into a requirement).
+    try:
+        evidence["display_items"] = {
+            "rows": package_display_item_rows(corpus_dir, submission_not_carried_areas(ctx))}
+    except Exception as e:                                            # noqa: BLE001
+        evidence["display_items"] = {"error": f"{type(e).__name__}: {e}"}
+    try:
+        evidence["front_matter_gaps"] = {"rows": front_matter_gap_rows(ctx, corpus_dir)}
+    except Exception as e:                                            # noqa: BLE001
+        evidence["front_matter_gaps"] = {"error": f"{type(e).__name__}: {e}"}
     try:
         man = manifest_for_sources(sources)
         evidence["corpus_identity"] = {
@@ -15600,6 +15747,11 @@ def evidence_pack_summary(ev: dict) -> str:
               f"{(ev.get('claims') or {}).get('count', '?')}"
             + f"; PKG-2 dangling references "
               f"{len((ev.get('submission_references') or {}).get('rows') or [])}"
+            + f"; PKG-4 missing display items "
+              f"{len((ev.get('display_items') or {}).get('rows') or [])}"
+            + (f"; FMT-TP1 title-page gap(s) "
+               f"{len((ev.get('front_matter_gaps') or {}).get('rows') or [])}"
+               if (ev.get("front_matter_gaps") or {}).get("rows") else "")
             + f"; M30 hierarchy rows "
               f"{(ev.get('hierarchy') or {}).get('count', '?')}"
               f" (+{(ev.get('code_literals') or {}).get('count', '?')} literal(s))"
@@ -16405,15 +16557,51 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
               + ", plus the author's `README*.md`/`README*.txt` files). REWRITE the sentence so "
               "it points at shipped content or carries the fact itself -- the pipeline removes "
               "the sentence mechanically if it is still there when the package is published, "
-              "and a removed sentence loses the science it carried.", ""]
+              "and a removed sentence loses the science it carried. A row whose rule is `PKG-3` "
+              "is the other shape: the document names a file this package carries NOWHERE (not "
+              "in the submission, not in `code/`, not in `raw_data/`), so no reader can resolve "
+              "it and the mechanical layer will NOT touch it -- the sentence must be rewritten "
+              "to ship the file, name a locator the submission carries, or drop the pointer.",
+              ""]
     if sref_rows:
-        lines += [f"| file | line | reference | resolves to |", "|---|---|---|---|"]
+        lines += [f"| file | line | rule | reference | resolves to |", "|---|---|---|---|---|"]
         for r in sref_rows[:40]:
-            lines.append(f"| {r.get('file')} | {r.get('line')} | `{r.get('reference')}` | "
+            lines.append(f"| {r.get('file')} | {r.get('line')} | {r.get('rule') or 'PKG-2'} | "
+                         f"`{r.get('reference')}` | "
                          + (", ".join(f"`{x}`" for x in (r.get("resolves_to") or [])) or "—")
                          + " |")
     else:
         lines.append("(no dangling reference in a to-be-submitted file)")
+    dis = ev.get("display_items") or {}
+    dis_rows = dis.get("rows") or []
+    if dis_rows or dis.get("error"):
+        lines += ["",
+                  "## Display items the submission does not carry (PKG-4)", "",
+                  "A document that CITES (and usually legends) a figure the package carries no "
+                  "file for leaves the reader nothing to look at. Ship the figure, embed it in "
+                  "the document that legends it, or drop the citation -- say which in the "
+                  "package, and say where the figure now lives.", ""]
+        if dis_rows:
+            lines += ["| file | line | item | the package holds it only as |",
+                      "|---|---|---|---|"]
+            for r in dis_rows[:20]:
+                lines.append(f"| {r.get('file')} | {r.get('line')} | `{r.get('reference')}` | "
+                             + (", ".join(f"`{x}`" for x in (r.get("resolves_to") or [])) or "—")
+                             + " |")
+        else:
+            lines.append(f"(the check could not run: {dis.get('error')})")
+    gap = ev.get("front_matter_gaps") or {}
+    gap_rows = gap.get("rows") or []
+    if gap_rows:
+        lines += ["",
+                  "## Title-page gaps (FMT-TP1)", "",
+                  "The venue profile records this run's content type; it states NO rule that the "
+                  "type is printed on the title page. These rows COUNT AND NAME the gap (a rule "
+                  "this rule set does not state is never invented): if the target journal's own "
+                  "guidelines ask for the type on the title page, print it; otherwise record the "
+                  "confirmation.", ""]
+        for r in gap_rows[:8]:
+            lines.append(f"- `{r.get('file')}`: {r.get('detail')}")
     lines += ["",
               "## Hand-off placeholders", "",
               f"- count: {plc.get('count', '?')}",
@@ -16567,7 +16755,7 @@ def scan_placeholders_in_sources(sources: list) -> dict:
         if not src.is_dir():
             continue
         for p in sorted(src.rglob("*")):
-            if not p.is_file() or _is_aux_doc(p.name):
+            if not p.is_file() or is_non_document_name(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
             if excluded and rel.split("/", 1)[0] in excluded:
@@ -16897,6 +17085,35 @@ def is_non_submitted_readme_name(name: str) -> bool:
 def is_word_owner_name(name: str) -> bool:
     """True for a Word owner/lock file name (`~$document.docx`)."""
     return str(name or "").strip().startswith("~$")
+
+
+# PLATFORM JUNK (2026-10-15): a file the OPERATING SYSTEM wrote beside a real
+# one. WSL/Windows "Mark of the Web" leaves an alternate-data-stream stub when a
+# file is copied out of a download (`figures/figS3.png:Zone.Identifier`, 25
+# bytes of `[ZoneTransfer] ZoneId=3`) and the two desktops leave an index file
+# (`.DS_Store`, `Thumbs.db`, `desktop.ini`). None of them is manuscript content:
+# they are not documents, they carry no text, and the 2026-10-15 neohet package
+# shipped one inside `figures/` -- a name that looks like a figure the
+# submission does not contain. Reported and stripped at publication; never
+# counted as a document by any scan.
+PLATFORM_JUNK_SUFFIXES = (":zone.identifier", ":zone.identifier:$data")
+PLATFORM_JUNK_NAMES = frozenset({".ds_store", "thumbs.db", "ehthumbs.db", "desktop.ini"})
+
+
+def is_platform_junk_name(name: str) -> bool:
+    """True for an OS by-product that is never part of a submission."""
+    low = str(name or "").strip().lower()
+    if not low:
+        return False
+    base = low.replace("\\", "/").rsplit("/", 1)[-1]
+    if base.strip() in PLATFORM_JUNK_NAMES:
+        return True
+    return any(sfx in low for sfx in PLATFORM_JUNK_SUFFIXES)
+
+
+def is_non_document_name(name: str) -> bool:
+    """A name that is never manuscript content: auxiliary, lock or OS junk."""
+    return bool(_is_aux_doc(name) or is_word_owner_name(name) or is_platform_junk_name(name))
 
 
 def evidence_area_of(rel: str) -> str:
@@ -31531,6 +31748,9 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
                            for f in (reference_strip.get("files") or [])
                            if f.get("removed_links")],
                        "non_submitted_references": dangling,
+                       # PKG-3: names the submission carries NOWHERE. Reported,
+                       # never removed (`dangling` above is the removal set).
+                       "unresolvable_references": list(reference_strip.get("advisory") or []),
                        "manifest": manifest,
                        "created": utcnow()})
     if readme_dropped:
@@ -31571,6 +31791,13 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
         for f in (reference_strip.get("files") or [])[:6]:
             for s in (f.get("removed_links") or [])[:2]:
                 print(f"  - {f['file']}: {str(s)[:140]}")
+    _advisory = reference_strip.get("advisory") or []
+    if _advisory:
+        print(f"[journal] {len(_advisory)} reference(s) name a file the package carries NOWHERE "
+              f"(PKG-3) -- reported for the author, never removed (recorded in "
+              f"journal_submission.json -> unresolvable_references):")
+        for r in _advisory[:4]:
+            print(f"  - {r.get('file')} line {r.get('line')}: `{r.get('reference')}`")
     return dst
 
 
@@ -35146,6 +35373,40 @@ def cmd_setup(args) -> None:
             die(f"--root exists and is not empty: {root} (choose a fresh --root or delete it)")
     if is_within(root, source) or is_within(source, root):
         die("--root and --source must not be nested inside each other")
+    # A new root must not freeze an OLD ROOT's pipeline snapshot by accident
+    # (2026-10-15) -- checked BEFORE anything is created, so a refused setup
+    # leaves the filesystem exactly as it found it. This is structural, not a
+    # file marker: the script that is running lives directly inside another
+    # pipeline root, so what would be frozen into the new root is THAT root's
+    # copy, not the tree the operator maintains. The operator's own report
+    # reached us through exactly this path, and the new root then ran two-day-old
+    # code for every later command (see `frozen_snapshot_root`). Re-running the
+    # same command from the origin tree is the fix; `--pipeline-snapshot-ok`
+    # records the deliberate exception.
+    _ident = pipeline_identity()
+    _snap = frozen_snapshot_root(_ident.get("path"))
+    if _snap and not bool(getattr(args, "pipeline_snapshot_ok", False)):
+        _origin = _snap.get("origin_path") or ""
+        _hint = (f"run THAT file instead:\n    python3 {_origin} setup ..."
+                 if _origin and Path(_origin).is_file() else
+                 "run the `paper_pipeline.py` of the tree you actually maintain")
+        die("this command would freeze another root's PIPELINE SNAPSHOT into the new root:\n"
+            f"    running now : {_snap['script']}\n"
+            f"    snapshot of : {_snap['root']} (frozen {_snap.get('frozen_at') or 'date unknown'}"
+            + (f", frozen from {_origin}" if _origin else "") + ")\n"
+            f"    origin code : " + (f"differs ({str(_snap.get('origin_digest'))[:16]}... vs "
+                                    f"{str(_snap.get('digest'))[:16]}...)"
+                                    if _snap.get("origin_differs") else
+                                    "matches the snapshot (or cannot be read)")
+            + f"\nEvery later `run` in the new root executes the frozen copy, so fixes committed "
+              f"since the snapshot would never run (the 2026-10-15 neohet-12to13 root was set up "
+              f"this way and silently re-found defects the origin tree had already closed). "
+              f"{_hint}\nPass --pipeline-snapshot-ok only when freezing this exact snapshot is "
+              f"what you intend.", code=2)
+    _pipeline_state = dict(_ident)
+    if _snap and _snap.get("origin_path"):
+        _pipeline_state.update(snapshot_of=_snap.get("root"),
+                               snapshot_origin=_snap.get("origin_path"))
     try:
         root.mkdir(parents=True, exist_ok=True)
         marker.write_text(f"setup started {utcnow()}\n", encoding="utf-8")
@@ -35162,8 +35423,16 @@ def cmd_setup(args) -> None:
     # From here on the root exists: keep this invocation's console in it (the
     # run log the operator asked for, next to the reports it produces).
     begin_run_log("setup", root, sys.argv)
-    _ident = pipeline_identity()
-    ctx.state["pipeline"] = _ident
+    # The pipeline frozen into the root is the one RUNNING now; when the
+    # operator deliberately froze another root's snapshot, its provenance
+    # travels with it (see the guard above and `root_pipeline_staleness`).
+    ctx.state["pipeline"] = dict(_pipeline_state)
+    if _snap:
+        print(f"[setup] WARNING: freezing a PIPELINE SNAPSHOT from {_snap['root']} "
+              f"({_snap.get('frozen_at') or 'date unknown'}) although the origin tree "
+              f"{_snap.get('origin_path') or '(unknown)'} differs -- every later `run` in "
+              f"this root executes THIS copy, and fixes committed to the origin tree are "
+              f"NOT in it.")
     print(f"[setup] pipeline:                {Path(_ident['path']).name} v{_ident['version']} "
           f"sha256 {_ident['sha256'][:16]}... from {Path(_ident['path']).parent}  (THIS copy is "
           f"frozen into the root and is what every later `run` executes)")
@@ -35319,7 +35588,9 @@ def cmd_setup(args) -> None:
                  "judge_salt": os.urandom(8).hex(),
                  # WHICH PIPELINE created this root (see pipeline_identity_note):
                  # every later invocation compares its own digest with this one.
-                 "pipeline": _ident,
+                 # `snapshot_of`/`snapshot_origin` are set when the operator asked
+                 # for another root's frozen copy to be used on purpose.
+                 "pipeline": _pipeline_state,
                  "source": str(source)}
     ctx.state["original_captions"] = scan_captions_in_sources([(ctx.pristine, "", ())],
                                                               limit=caption_limit)
@@ -40223,6 +40494,80 @@ def _pkg2_url_query_value(line: str, start: int) -> bool:
     return "://" in token or "?" in token
 
 
+# PKG-3: a file NAME a to-be-submitted document points at, which this package
+# carries NOWHERE. The pointer verb matters: "the custom generators in
+# `data3from2.py` are seeded deterministically" (the 2026-10-15 CopyNumBench
+# Methods) points the reader at a file; a bare inventory row or a path inside a
+# code block does not. `in`/`from`/`by`/`see` are the shapes the operator's
+# report used, and the multiword forms below are the explicit "where the
+# material lives" spellings. Generic connectors ("with", "as", "at") are NOT
+# verbs here: "invoked with a single command: \code{snake.py}" is a command
+# line, not a pointer, and matching it turned a benchmark appendix into 30 rows.
+PKG3_POINTER_VERB_RE = re.compile(
+    r"(?i)\b(?:in|into|inside|from|by|see|produced by|generated by|written by|"
+    r"created by|built by|stored in|shipped (?:in|with)|distributed with|provided in|"
+    r"recorded in|listed in|contained in|called|named|supplied (?:in|by)|"
+    r"available (?:in|from|as)|described in|defined in)\b")
+# PKG-3's locator test is STRICTER than PKG-2's: PKG-2 may not delete a sentence
+# whose pointer "resolves" in the loose sense ("the deposited code"), while
+# PKG-3 only reports -- and "reproducible from the deposited code ... the custom
+# generators in data3from2.py" still names a file nobody can resolve. A real
+# locator (URL, repository, DOI, accession, a deposit named with its target) is
+# what suppresses a PKG-3 row.
+PKG3_LOCATOR_RE = re.compile(
+    r"(?i)https?://|www\.|\b(?:github|gitlab|bitbucket|sourceforge|zenodo|figshare|dryad|"
+    r"osf\.io|protocols\.io|doi\.org|repositor(?:y|ies)|repo\b|deposited (?:at|in|with)|"
+    r"archived at|available (?:at|from|on)|accession)\b")
+
+
+def _sentence_has_locator(line: str, start: int, end: int, pattern) -> bool:
+    """True when the SENTENCE of `line` around [start, end) matches `pattern`.
+
+    The same sentence-scoping `_pkg2_external_locator` uses (the formatter's own
+    `sentence_spans`, with a `. ` fallback), with the CALLER's pattern: PKG-2
+    asks the loose question ("does this sentence locate its material anywhere"),
+    PKG-3 the strict one (a URL, a repository, a DOI, an accession).
+    """
+    mod = _format_module()
+    if mod is not None and hasattr(mod, "sentence_spans"):
+        try:
+            for a, b in mod.sentence_spans(line):
+                if a <= start and end <= b:
+                    return bool(pattern.search(line[a:b]))
+        except Exception:                                             # noqa: BLE001
+            pass
+    lo = line.rfind(". ", 0, start)
+    lo = 0 if lo < 0 else lo + 2
+    hi = line.find(". ", end)
+    return bool(pattern.search(line[lo:hi if hi >= 0 else len(line)]))
+
+
+# PKG-3 is scoped to the manuscript PROSE surfaces (the main text, the cover
+# letter, a response letter) -- the documents a journal editor follows as prose
+# pointers to the authors' own material. A supplementary METHODS appendix that
+# inventories a public pipeline's own file layout ("(7) Per-cell evaluation is
+# performed by \code{scripts/evaluate_caller_vs_ginkgo.py}") is a description of
+# a repository the submission's availability statement names, not a promise to
+# ship those files; reporting them turned one benchmark supplement into 11
+# advisory rows and diluted the two real pointers the operator found. The
+# evidence pack still shows reviewers every PKG-2/PKG-3 row, so the appendix
+# names remain reviewable in prose.
+PKG3_PROSE_NAME_RE = re.compile(
+    r"(?i)(?:main[-_ ]?text|manuscript|cover[-_ ]?letter|response|reply|letter)")
+
+
+def _pkg3_prose_document(rel: str) -> bool:
+    """True when `rel` is a manuscript prose surface PKG-3 reports (see above)."""
+    name = str(rel or "")
+    base = name.rsplit("/", 1)[-1]
+    if not name.lower().endswith((".docx", ".tex", ".ltx", ".pdf")):
+        return False
+    role = docx_document_role(base)
+    if role in ("main", "cover"):
+        return True
+    return bool(PKG3_PROSE_NAME_RE.search(base))
+
+
 def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
     """PKG-2: shipped text files that refer at what the submission does not carry.
 
@@ -40275,7 +40620,7 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
             # A file inside a non-carried area is part of that area, never a
             # submission document: its own internal pointers are not findings.
             continue
-        if is_evidence_rel(rel) or is_word_owner_name(p.name) or _is_aux_doc(p.name) \
+        if is_evidence_rel(rel) or is_non_document_name(p.name) \
                 or is_bookkeeping_name(p.name) or is_non_submitted_readme_name(p.name):
             # A README*.md/.txt file is the author's own documentation and never
             # a submitted file: what it points at is the author's business.
@@ -40359,6 +40704,51 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
                 if _pkg2_url_query_value(line, m.start()):
                     continue
                 reason, where = _pkg2_name_resolution(m.group(0), index)
+                if reason == "unknown":
+                    # PKG-3 (2026-10-15): the document names a FILE this package
+                    # carries NOWHERE -- not in the submission, not in `code/`,
+                    # not in `raw_data/`. That is the other half of the operator's
+                    # report: the CopyNumBench Methods says the generators are "in
+                    # `data3from2.py`", and no reader (the journal, a reviewer, a
+                    # rebuild) can resolve that name, because the package never
+                    # carries it. A name that resolves somewhere the reader cannot
+                    # reach is PKG-2 (removable: the material is at hand); a name
+                    # that resolves NOWHERE is REPORTED ONLY -- the pipeline cannot
+                    # know whether the sentence should carry the file, a locator
+                    # instead, or neither, and deleting a Methods sentence about
+                    # where the analysis lives would destroy real information. The
+                    # sentence therefore reaches the review/revise evidence pack
+                    # (`submission_references`) for a rewriting agent to resolve,
+                    # and the package readiness lists it so it cannot ship unseen.
+                    # The pointer must be WRITTEN as a pointer ("in X.py",
+                    # "produced by X.py"), not merely listed as an inventory row
+                    # or a command line, and neither its sentence NOR the
+                    # paragraph it sits in may locate the material elsewhere
+                    # ("archived alongside them as hpep/aggregate.txt" resolves at
+                    # the repository URL the same paragraph carries). Without both
+                    # filters a benchmark appendix that documents a public
+                    # pipeline's own file layout produced 30 rows for files the
+                    # appendix never promises to ship.
+                    if not PKG3_POINTER_VERB_RE.search(line[:m.start()].rsplit(". ", 1)[-1]):
+                        continue
+                    if not _pkg3_prose_document(rel):
+                        continue
+                    if _sentence_has_locator(line, m.start(), m.end(), PKG3_LOCATOR_RE) \
+                            or PKG3_LOCATOR_RE.search(line):
+                        continue
+                    rows.append({
+                        "rule": "PKG-3", "file": rel, "line": i, "reference": m.group(0),
+                        "resolution": "unknown", "severity": "advisory",
+                        "detail": (f"this file is part of the submission but names "
+                                   f"{m.group(0)!r}, and the package carries no file with that "
+                                   f"name anywhere (not in the submission, not in the analysis "
+                                   f"code, not in the raw data): the journal, a reviewer and a "
+                                   f"rebuild all get a name nobody can resolve. Ship the file, "
+                                   f"replace the name with a locator, or drop the pointer"),
+                        "fix": "manual"})
+                    if len(rows) >= limit:
+                        return rows
+                    continue
                 if reason != "absent":
                     continue
                 if _pkg2_external_locator(line, m.start(), m.end()):
@@ -40744,7 +41134,19 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
         report["removed"] += len(entry["removed"])
         report["removed_links"] += len(entry.get("removed_links") or [])
         report["skipped"] += len(entry["skipped"])
-    report["remaining"] = non_submitted_reference_rows(dirp, report["areas"])
+    # `remaining` keeps the PKG-2 meaning: a pointer at material the package
+    # HOLDS but the submission does not carry, which the mechanical removal could
+    # not take out (a structural file, a sentence carrying a live citation field).
+    # The rows this scan also reports for a name the package carries NOWHERE
+    # (`PKG-3`: a script named in Methods that no file in the package matches) are
+    # NOT removals the pipeline may attempt, and they must not make this repair
+    # report itself "not clean" (2026-10-15: `ok` is a stage-postcheck input, and
+    # an advisory name would have failed a stage that had nothing to fix). They
+    # travel in their own key, and the publish-time package scan + readiness
+    # report them as advisory rows.
+    _scan = non_submitted_reference_rows(dirp, report["areas"])
+    report["remaining"] = [r for r in _scan if (r.get("rule") or "PKG-2") == "PKG-2"]
+    report["advisory"] = [r for r in _scan if (r.get("rule") or "PKG-2") != "PKG-2"]
     report["ok"] = not report["remaining"]
     if warns is not None:
         if report["removed"]:
@@ -40826,6 +41228,210 @@ def internal_artifact_rows(root: Path, limit: int = 40) -> list:
                 if len(rows) >= limit:
                     return rows
     return rows
+
+
+def package_front_matter_glue_rows(root: Path, limit: int = 20) -> list:
+    """FMT-X2 rows that SURVIVED the published copy's own repair.
+
+    The mechanical half of FMT-X2 inserts the space a fused front matter lost
+    (the label's colon; an address glued to the word before it when the address's
+    own local part ends that word). The other shape -- `<Name><address>` fused
+    inside ONE token, as in `* Correspondence:Zhen Xiezhenxie@tsinghua.edu.cn` --
+    cannot be split without knowing where the name ends, so it is REPORTED here
+    for the author instead of being re-spaced by guesswork. Only the front matter
+    is scanned: that is where a correspondence block lives.
+    """
+    rows = []
+    mod = _format_module()
+    root = Path(root)
+    if mod is None or not hasattr(mod, "correspondence_glue_rows") or not root.is_dir():
+        return rows
+    for p in sorted(root.rglob("*.docx")):
+        if not p.is_file() or is_non_document_name(p.name) or _is_aux_doc(p.name):
+            continue
+        if is_evidence_rel(p.relative_to(root).as_posix()):
+            continue
+        try:
+            paras = _docx_paragraphs(p)
+        except Exception:                                             # noqa: BLE001
+            continue
+        if not paras:
+            continue
+        for r in mod.correspondence_glue_rows(paras[:14], [False] * min(14, len(paras))):
+            rows.append(dict(r, document=p.relative_to(root).as_posix(), stage="published"))
+            if len(rows) >= limit:
+                return rows
+    return rows[:limit]
+
+
+# PKG-4 (2026-10-15): a display item the submission CITES (and often legends)
+# but carries nowhere. The operator's report was exactly this: "Figure S3 is
+# cited and has a legend, but it is not in the submission -- `figS3.png` is
+# under `code/out/`, which is not submitted, and the supplementary Word file
+# does not embed it." A cited figure the reader cannot see is not a nuance of
+# packaging: Results and the supplement both point at it. Advisory, not a
+# blocker: whether the fix is to ship the figure, embed it in the supplement, or
+# drop the citation is the author's call -- but the DELIVERED status must say it.
+PKG4_FIGURE_CITE_RE = re.compile(
+    r"(?i)\b(?:fig(?:ure)?s?\.?|supplementary\s+fig(?:ure)?s?\.?)\s*"
+    # The panel letter is CONSUMED, not captured: `Figure S3B` is a panel of
+    # Figure S3 (and `Fig. 1a` of Figure 1), so the label is the number. `(?!\w)`
+    # keeps `Figure 1st`/`S3beta` out.
+    r"(S?\d+)[a-z]?(?!\w)(?!\s*[-\u2013\u2014]\s*S?\d)")
+PKG4_FIGURE_FILE_RE = re.compile(r"(?i)(?:^|[^a-z0-9])(?:supp(?:lementary)?[ _-]?)?"
+                                 r"(?:fig(?:ure)?\.?[ _-]?)(S?\d+[a-z]?)(?![0-9])")
+PKG4_FIGURE_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".eps", ".svg", ".pdf",
+                    ".ai", ".ppt", ".pptx")
+
+
+def package_display_item_rows(root: Path, areas=None, limit: int = 20) -> list:
+    """PKG-4: cited figures the published package does not carry.
+
+    The inventory side is NAME-based on purpose: a submission names its figure
+    files (`figures/FigureS1.png`, `figS3.png`, `Figure_S3.pdf`), and the label
+    that comes out of the name is compared with the labels the documents cite.
+    A label with no file is reported with what the package DOES hold (a
+    same-labelled file inside a not-carried area, i.e. the exact shape the
+    operator reported), so the author sees both the gap and where the figure
+    actually lives.
+    """
+    rows = []
+    root = Path(root)
+    if not root.is_dir():
+        return rows
+    areas = [str(a).lower() for a in (areas or submission_not_carried_areas_plain())]
+    carried_labels, absent_labels = set(), {}
+    for p in sorted(root.rglob("*")):
+        if not p.is_file() or is_non_document_name(p.name):
+            continue
+        if p.suffix.lower() not in PKG4_FIGURE_EXTS:
+            continue
+        if is_evidence_rel(p.relative_to(root).as_posix()):
+            continue
+        m = PKG4_FIGURE_FILE_RE.search(p.name)
+        if not m:
+            continue
+        label = m.group(1).lower()
+        rel = p.relative_to(root).as_posix()
+        if rel.split("/", 1)[0].lower() in areas:
+            absent_labels.setdefault(label, []).append(rel)
+        else:
+            carried_labels.add(label)
+    if not carried_labels:
+        # No figure FILE carries a label: this package embeds its artwork in the
+        # documents themselves (the CopyNumBench main text carries five images
+        # and no `Figure*.png`), so a name-based check has nothing to compare
+        # against -- every citation would read as missing. Reported as a gap in
+        # the decision.json `readiness` note, never as a row per citation.
+        return rows
+    cited = {}
+    for p in sorted(root.rglob("*")):
+        if not p.is_file() or is_non_document_name(p.name) or _is_aux_doc(p.name):
+            continue
+        rel = p.relative_to(root).as_posix()
+        if rel.split("/", 1)[0].lower() in areas or is_evidence_rel(rel):
+            continue
+        if is_bookkeeping_name(p.name) or is_non_submitted_readme_name(p.name):
+            continue
+        if p.suffix.lower() == ".docx":
+            lines = _docx_paragraphs(p)
+        elif p.suffix.lower() in PACKAGE_TEXT_EXTS:
+            try:
+                if p.stat().st_size > PACKAGE_TEXT_BYTES_LIMIT:
+                    # Same cap the PKG-2 scan applies: a very large data dump is
+                    # not manuscript prose, and reading it here would make the
+                    # published-package scan pay for a file no citation lives in.
+                    continue
+                lines = p.read_text("utf-8", "replace").splitlines()
+            except OSError:
+                continue
+        else:
+            continue
+        for i, line in enumerate(lines or [], 1):
+            for m in PKG4_FIGURE_CITE_RE.finditer(line):
+                label = m.group(1).lower()
+                cited.setdefault(label, (rel, i, m.group(0)))
+    for label, (rel, line, text) in sorted(cited.items()):
+        if label in carried_labels:
+            continue
+        where = absent_labels.get(label) or []
+        detail = (f"this document cites {text!r}, and the submission carries no figure file for "
+                  f"that item")
+        if where:
+            detail += (f" -- the package holds it only as "
+                       + ", ".join(f"`{w}`" for w in where[:3])
+                       + ", in an area the submission does not carry")
+        else:
+            detail += (" (no file of that name exists anywhere in the package, and the "
+                       "document does not embed it)")
+        detail += (". A reader following the citation finds nothing: ship the figure, embed it "
+                   "in the document that legends it, or drop the citation")
+        rows.append({"rule": "PKG-4", "severity": "advisory", "file": rel, "line": line,
+                     "reference": text, "resolves_to": where[:3], "detail": detail,
+                     "fix": "manual"})
+        if len(rows) >= limit:
+            break
+    return rows[:limit]
+
+
+# FRONT-MATTER GAPS (2026-10-15): a rule the venue profile does NOT state is not
+# invented by this pipeline (AGENTS.md rule 4) -- so the two things an editor
+# looks for on a title page that this rule set cannot check are COUNTED AND
+# NAMED instead. The operator's audit of the CopyNumBench package reported "the
+# title page still has no article type (Article, Analysis, Resource, or
+# otherwise)"; the profile's `article_types` table records which type the run is
+# for, and the delivered status can say that the title page does not print it,
+# without claiming the venue requires it.
+def front_matter_gap_rows(ctx: Ctx, root: Path, limit: int = 8) -> list:
+    """Rows for title-page facts the RECORDED rule set cannot check."""
+    rows = []
+    root = Path(root)
+    if not root.is_dir():
+        return rows
+    profile = venue_profile_of(ctx, required=False)
+    label = ""
+    try:
+        label = str(getattr(profile, "article_type", "") or "")
+    except Exception:                                                 # noqa: BLE001
+        label = ""
+    if not label:
+        return rows
+    for p in sorted(root.rglob("*.docx")):
+        if not p.is_file() or is_non_document_name(p.name) or _is_aux_doc(p.name):
+            continue
+        rel = p.relative_to(root).as_posix()
+        if is_evidence_rel(rel) or docx_document_role(p.name) != "main":
+            continue
+        try:
+            paras = _docx_paragraphs(p) or []
+        except Exception:                                             # noqa: BLE001
+            continue
+        head = "\n".join(paras[:12])
+        if label.lower() in head.lower():
+            continue
+        rows.append({
+            "rule": "FMT-TP1", "severity": "advisory", "file": rel, "line": 1,
+            "reference": label,
+            "detail": (f"the title page (the first {min(12, len(paras))} paragraph(s) of {rel}) "
+                       f"does not name the content type `{label}` this run is configured for. "
+                       f"The venue profile records the type's limits but states NO rule that the "
+                       f"type must be printed on the title page, so this is reported as a GAP, "
+                       f"not as a requirement: confirm it with the journal's own guidelines "
+                       f"before submission"),
+            "fix": "manual"})
+        if len(rows) >= limit:
+            break
+    return rows[:limit]
+
+
+def submission_not_carried_areas_plain() -> list:
+    """`submission_not_carried_areas` without a root: the standing areas.
+
+    The published-package scans read the package AS a submission about to be
+    assembled, so the policy keys (`submit_code`) are not available there; the
+    standing answer is the one those scans always used.
+    """
+    return [str(n) for n in EVIDENCE_DIRNAMES] + [CODE_DIR]
 
 
 def package_pdf_rows(root: Path, limit: int = 40) -> list:
@@ -40998,6 +41604,11 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     # the DELIVERED copy is touched: the pin, the winner and the round base keep
     # the bytes they were hashed with (the pin digest above was verified first).
     hygiene["removed_word_owner_files"] = []
+    # OS by-products: an alternate-data-stream stub (`<name>:Zone.Identifier`)
+    # or a desktop index file. Neither is content, both make a package look
+    # broken, and one shipped inside `figures/` in the 2026-10-15 neohet package
+    # (a name that reads like a figure the submission does not contain).
+    hygiene["removed_platform_junk"] = []
     # The pipeline's own by-products never reach the published package (the copy
     # strips them by name, version token included): report which ones the
     # champion carried, so the operator sees the strip instead of guessing.
@@ -41015,7 +41626,10 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
             hygiene["raw_data_untouched"] += 1
             continue
         low = q.name.lower()
-        if is_word_owner_name(q.name):
+        if is_platform_junk_name(q.name):
+            hygiene["removed_platform_junk"].append(rel)
+            q.unlink()
+        elif is_word_owner_name(q.name):
             hygiene["removed_word_owner_files"].append(rel)
             q.unlink()
         elif low.endswith((".blg", ".bcf", ".run.xml", ".synctex.gz", ".aux", ".log", ".out",
@@ -41094,6 +41708,18 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     # deleted: the file belongs to the author, but the package must not ship it.
     hygiene["internal_artifacts"] = internal_artifact_rows(tmp)
     hygiene["pdf_artifacts"] = package_pdf_rows(tmp)
+    # Front-matter GLUE that the mechanical repair cannot resolve (the fused
+    # `<name><address>` token): reported, never re-spaced by guesswork.
+    hygiene["front_matter_glue"] = package_front_matter_glue_rows(tmp)
+    # PKG-4: a figure the documents cite (and legend) that the package carries
+    # nowhere. Computed on the PUBLISHED copy, i.e. after the counter increment,
+    # so the row names the file the author will actually hand over.
+    hygiene["display_items"] = package_display_item_rows(
+        tmp, submission_not_carried_areas(ctx))
+    # Title-page facts the recorded rule set cannot check (a rule the venue did
+    # not state is COUNTED AND NAMED, never invented): the content type this run
+    # is configured for, when the title page does not print it.
+    hygiene["front_matter_gaps"] = front_matter_gap_rows(ctx, tmp)
     # PKG-2 (AGENTS.md: nothing that ships points at what does not ship). The
     # journal submission's own assembly scans the copy it just stripped; THIS
     # path published every other deliverable, and it never ran the scan at all
@@ -41105,6 +41731,18 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     # submission does not.
     hygiene["non_submitted_references"] = non_submitted_reference_rows(
         tmp, submission_not_carried_areas(ctx))
+    # REV-1/REV-2: the champion's OWN open items. Computed HERE (not in the
+    # readme writer) so decision.json, the readiness block, `--require-ready`
+    # and the sibling hand-off file all read one derivation. Guarded like the
+    # PKG-2 repair above: reading a run's ledger is bookkeeping, and a damaged
+    # or pruned sandbox must degrade to "no items recorded", never abort a
+    # publication that has already verified its digests.
+    try:
+        open_items = collect_open_review_items(ctx, final)
+        open_items["sibling"] = write_open_items_sibling(ctx, open_items)
+    except Exception as e:                                            # noqa: BLE001
+        open_items = {"error": f"{type(e).__name__}: {e}", "items": [], "discarded": [],
+                      "statuses": {}, "sibling": None}
     # A filled XFA form cannot be FLATTENED offline (that needs Acrobat), but
     # its answers can be rendered readably -- so the decision readme points at
     # a text rendering of every answer instead of leaving the reviewer with the
@@ -41136,7 +41774,7 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
                     files=manifest["count"], renamed=counter["renamed"],
                     raw_data_untouched=counter.get("raw_data_untouched", 0),
                     modes_cleared=len(chmod_plan),
-                    format_fix=format_fix, hygiene=hygiene,
+                    format_fix=format_fix, hygiene=hygiene, open_items=open_items,
                     zip=write_final_clean_zip(dst, zip_path), action="unchanged")
     if dst.exists():
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -41148,7 +41786,7 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
                 files=manifest["count"], renamed=counter["renamed"],
                 raw_data_untouched=counter.get("raw_data_untouched", 0),
                 modes_cleared=len(chmod_plan),
-                format_fix=format_fix, hygiene=hygiene,
+                format_fix=format_fix, hygiene=hygiene, open_items=open_items,
                 zip=write_final_clean_zip(dst, zip_path), action="created")
 
 
@@ -41206,6 +41844,13 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
                  f"by-product -- it holds the opening user's name and is not a document): "
                  + ", ".join(f"`{n}`" for n in word_owner[:8])
                  + (" …" if len(word_owner) > 8 else ""))
+    junk = hygiene.get("removed_platform_junk") or []
+    if junk:
+        L.append(f"- {len(junk)} operating-system by-product file(s) were NOT published (a "
+                 f"download/desktop stub such as `<name>:Zone.Identifier` or `.DS_Store`: no "
+                 f"content, and a name that reads like a file the submission does not "
+                 f"contain): " + ", ".join(f"`{n}`" for n in junk[:8])
+                 + (" …" if len(junk) > 8 else ""))
     internal = hygiene.get("internal_artifacts") or []
     if internal:
         L.append("")
@@ -41247,6 +41892,37 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
                  f"citation field; the author must repair them:**")
         for r in ref_strip["remaining"][:12]:
             L.append(f"  - `{r.get('file')}` line {r.get('line')}: `{r.get('reference')}`")
+    # REV-1/REV-2: the champion's OWN open items (2026-10-15). This block is the
+    # reason the readme exists: a CERTIFIED verdict answers "did the process
+    # hold?", never "is anything left for the author". Without it the readme said
+    # "submission-ready" while the revision had handed the author 7-9 items --
+    # and the only pointer to them was a path inside the run's sandbox.
+    oi = (fc.get("open_items") or {})
+    oi_items = list(oi.get("items") or [])
+    oi_dropped = list(oi.get("discarded") or [])
+    if oi_items or oi_dropped or (oi.get("manual_steps") and oi.get("manual_steps_items")):
+        L.append("")
+        L.append(f"**Open item(s) the champion's own revision handed to the author "
+                 f"({len(oi_items)} unresolved"
+                 + (f", {len(oi_dropped)} discarded without the auditor's support"
+                    if oi_dropped else "")
+                 + ") -- the pipeline cannot fix these offline and they are NOT part of the "
+                   "certification verdict:**")
+        if oi.get("run"):
+            L.append(f"  - source: the champion's producing run `{oi['run']}` "
+                     f"({oi.get('kind') or 'stage'}); its hand-off list is copied beside this "
+                     f"file as `{FINAL_CLEAN_STEPS_NAME}`")
+        for it in oi_items[:14]:
+            L.append(f"  - `{it.get('id')}` [{it.get('status')}] "
+                     f"{it.get('check') or ''} {it.get('severity') or ''}".rstrip()
+                     + (f" -- {str(it.get('location'))[:160]}" if it.get("location") else ""))
+        if len(oi_items) > 14:
+            L.append(f"  - … and {len(oi_items) - 14} more (see `readiness.open_items` in "
+                     f"`reports/decision.json` and `{FINAL_CLEAN_STEPS_NAME}`)")
+        for it in oi_dropped[:6]:
+            L.append(f"  - `{it.get('id')}` [DISCARDED by the reviser, auditor verdict "
+                     f"`{it.get('audit_verdict') or 'none'}`] "
+                     + (f"-- {str(it.get('location'))[:160]}" if it.get("location") else ""))
     pdfs = hygiene.get("pdf_artifacts") or []
     if pdfs:
         L.append("")
@@ -41288,17 +41964,30 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
                  f"`format_policy.unlink_zotero_fields_at_publish: true`) to have the pipeline "
                  f"flatten the published copy.")
     package_findings = cert.get("package_findings") or []
-    if cert.get("certified") and package_findings:
+    _blocking = [f for f in package_findings if not f.get("advisory")]
+    _advisory = [f for f in package_findings if f.get("advisory")]
+    if cert.get("certified") and _blocking:
         L.append("")
-        L.append(f"**Submission readiness: NOT READY -- {len(package_findings)} package-level "
-                 f"finding(s) above must be resolved (or explicitly waived) before this package "
+        L.append(f"**Submission readiness: NOT READY -- {len(_blocking)} package-level "
+                 f"finding(s) above (including every open review item the champion's own "
+                 f"revision handed to the author) must be resolved (or explicitly waived) "
+                 f"before this package "
                  f"is uploaded.** The pipeline fixed everything it can fix offline (Zotero "
                  f"numbering/bibliography, reference-entry facts, formatting); the remaining "
                  f"items are listed here and in `reports/decision.json` "
                  f"(`readiness.findings`). `decide --require-ready` turns them into blockers.")
-    elif cert.get("submission_ready") is False and not package_findings:
+    elif cert.get("submission_ready") is False and not _blocking:
         L.append("")
         L.append("**Submission readiness: see `reports/decision.json` `readiness` block.**")
+    if _advisory:
+        L.append("")
+        L.append(f"{len(_advisory)} ADVISORY item(s) (reported, never gated -- the pipeline "
+                 f"cannot decide them):")
+        for _f in _advisory[:10]:
+            L.append(f"  - `{_f.get('document')}` [{_f.get('rule')}]: "
+                     f"{str(_f.get('detail'))[:220]}")
+        if len(_advisory) > 10:
+            L.append(f"  - … and {len(_advisory) - 10} more")
     L.append("")
     if cert.get("certified"):
         L.append(f"This directory is the certified champion corpus: "
@@ -41322,6 +42011,181 @@ def write_final_clean_readme(ctx: Ctx, certification: dict, final: dict,
     p = ctx.root / FINAL_CLEAN_README_NAME
     write_text_atomic(p, final_clean_readme_text(ctx, certification, final, final_clean))
     return p
+
+
+# ---- the champion's OWN open items (2026-10-15) -----------------------------
+# The revision stages hand their unfinishable work to the author in
+# `MANUAL_STEPS.md`, and the machine-readable ledger records one disposition per
+# frozen finding (`fixed`, `fixed-with-caveat`, `manual-required`, `discarded`).
+# Both live INSIDE the producing run's sandbox, which is never delivered: the
+# 2026-10-15 operator report on the two clean packages was the visible half of
+# this --
+#   * `final_clean_version.readme.md` said CERTIFIED / submission-ready while
+#     the champion's own revision had handed the author 7 (neohet) and 9 (cnb)
+#     `manual-required` items, including two Major artwork defects and a
+#     discarded-then-refuted data/manuscript contradiction;
+#   * `DECISION_REPORT.md` told the reader to "read the champion's hand-off list
+#     ... `revised/MANUAL_STEPS.md`" -- a path inside `runs/<id>/`, which the
+#     package does not carry and the author never sees.
+# The fix is a carrier, not a new judgement: the same rows the stage wrote are
+# listed in the published status (readiness findings REV-1/REV-2), the
+# MANUAL_STEPS file is copied to a SIBLING of the published directory
+# (`final_clean_version.manual_steps.md` -- never inside it, which would make it
+# manuscript content in the next run), and the decision report prints both.
+OPEN_ITEM_STATUSES = ("manual-required", "fixed-with-caveat", "unresolved")
+STAGE_REPORT_NAMES = ("revision_report.json", "integration_report.json")
+FINAL_CLEAN_STEPS_NAME = "final_clean_version.manual_steps.md"
+# `# MANUAL_STEPS — what the author must do (7 hand-off items, grouped ...)`
+MANUAL_STEPS_COUNT_RE = re.compile(r"\((\d+)\s+hand-off items?")
+
+
+def champion_producing_run(ctx: Ctx, final: dict) -> dict:
+    """The run record that produced the champion (its ledger is the source).
+
+    Resolved from the pin, which records `produced_by_run` when the champion is
+    a fresh arm (a rewrites/revise/integrate run). A champion that IS the round
+    base or the pristine original has no producing run: its open items are the
+    ones its own frozen review filed, which `collect_residuals` already carries.
+    """
+    stored = (final or {}).get("stored") or {}
+    pin = (final or {}).get("pin") or {}
+    rec = find_pin(ctx, stored.get("pin_id")) or pin or {}
+    rid = rec.get("produced_by_run") if isinstance(rec, dict) else None
+    run = (ctx.state.get("runs") or {}).get(rid) if rid else None
+    return run or {}
+
+
+def collect_open_review_items(ctx: Ctx, final: dict) -> dict:
+    """The champion's open review items + its own hand-off list.
+
+    Returns {"run", "kind", "statuses", "items", "discarded", "manual_steps",
+    "manual_steps_text", "manual_steps_items"}. `items` are the rows the
+    champion's revision left open for the author (`manual-required`,
+    `fixed-with-caveat`, `unresolved`); `discarded` are the rows the reviser
+    closed as `discarded` where the round's auditor did NOT support the drop --
+    a drop hides the finding from every later reader, so it is reported as its
+    own item (REV-2) instead of vanishing with the sandbox.
+    """
+    info = {"run": None, "kind": None, "statuses": {}, "items": [], "discarded": [],
+            "manual_steps": None, "manual_steps_text": None, "manual_steps_items": 0}
+    rec = champion_producing_run(ctx, final)
+    rid = rec.get("id")
+    if not rid:
+        return info
+    info["run"] = rid
+    info["kind"] = rec.get("kind")
+    sb = ctx.runs_dir / str(rid)
+    outdir = sb / output_dir_for_kind(rec.get("kind"))
+    report = None
+    for name in STAGE_REPORT_NAMES:
+        cand = outdir / name
+        if cand.is_file():
+            report = read_json(cand)
+            if report:
+                break
+    report = report or {}
+    info["statuses"] = {str(k): int(v) for k, v in
+                        (report.get("counts_by_status") or report.get("counts") or {}).items()
+                        if is_int(v)}
+    coverage = {str(r.get("id")): r for r in (report.get("coverage") or [])
+                if isinstance(r, dict) and r.get("id")}
+    findings = {str(f.get("id")): f for f in (report.get("findings") or [])
+                if isinstance(f, dict) and f.get("id")}
+    audit = read_json(sb / "audit" / "audit.json") or {}
+    verdicts = {str(r.get("id")): str(r.get("verdict") or "").lower()
+                for r in (audit.get("dispositions") or []) if isinstance(r, dict)}
+    for fid, row in sorted(coverage.items()):
+        status = str(row.get("final_status") or "")
+        f = findings.get(fid) or {}
+        item = {"id": fid, "status": status,
+                "check": f.get("check") or row.get("check"),
+                "severity": f.get("severity") or row.get("severity"),
+                "category": f.get("category"),
+                "location": f.get("location") or row.get("location"),
+                "evidence": (row.get("evidence") or f.get("rationale")
+                             or f.get("evidence") or f.get("explanation"))}
+        if status in OPEN_ITEM_STATUSES:
+            info["items"].append(item)
+        elif status == "discarded":
+            verdict = verdicts.get(fid, "")
+            item["audit_verdict"] = verdict or None
+            if verdict not in ("drop", "dropped"):
+                info["discarded"].append(item)
+    steps = outdir / "MANUAL_STEPS.md"
+    if steps.is_file():
+        try:
+            text = steps.read_text("utf-8", "replace")
+        except OSError:
+            text = None
+        if text:
+            info["manual_steps"] = steps.relative_to(ctx.root).as_posix()
+            info["manual_steps_text"] = text
+            m = MANUAL_STEPS_COUNT_RE.search(text)
+            if m:
+                info["manual_steps_items"] = int(m.group(1))
+            else:
+                info["manual_steps_items"] = len(re.findall(r"(?m)^\*\*?[A-Z]{1,2}\d+", text))
+    return info
+
+
+def open_items_text(open_items: dict, limit: int = 40) -> str:
+    """The hand-off list as one text block (the MANUAL_STEPS file, else the rows)."""
+    oi = open_items or {}
+    if oi.get("manual_steps_text"):
+        return oi["manual_steps_text"].rstrip() + "\n"
+    L = []
+    for it in (oi.get("items") or [])[:limit]:
+        L.append(f"* {it.get('id')} [{it.get('status')}] "
+                 f"{it.get('check') or ''} {it.get('severity') or ''}".rstrip())
+        if it.get("location"):
+            L.append(f"  *Where*: {it['location']}")
+        if it.get("evidence"):
+            L.append(f"  *Evidence*: {it['evidence']}")
+    for it in (oi.get("discarded") or [])[:limit]:
+        L.append(f"* {it.get('id')} [DISCARDED, not supported by the round's auditor] "
+                 f"{it.get('check') or ''} {it.get('severity') or ''}".rstrip())
+        if it.get("location"):
+            L.append(f"  *Where*: {it['location']}")
+        if it.get("evidence"):
+            L.append(f"  *Evidence*: {it['evidence']}")
+    return "\n".join(L) + ("\n" if L else "")
+
+
+def write_open_items_sibling(ctx: Ctx, open_items: dict) -> dict:
+    """Write `<root>/final_clean_version.manual_steps.md` (a SIBLING, never inside).
+
+    A sibling is the pipeline's own rule for status documents: anything written
+    INSIDE the published directory would become manuscript content in the next
+    run. When the producing stage left no `MANUAL_STEPS.md`, the ledger's own
+    open rows are written instead, so the item list is never empty-by-omission.
+    """
+    oi = open_items or {}
+    body = open_items_text(oi)
+    if not body.strip():
+        p = ctx.root / FINAL_CLEAN_STEPS_NAME
+        if p.is_file():
+            p.unlink()
+        return {"path": None, "items": 0}
+    head = [f"# Open items handed to the author — {ctx.root.name}",
+            "",
+            f"Generated: {utcnow()}  |  pipeline root: `{ctx.root}`  |  "
+            f"orchestrator v{VERSION}",
+            "",
+            (f"Source: the champion's own revision run `{oi.get('run')}` "
+             f"({oi.get('kind')}) — its `MANUAL_STEPS.md` and its finding ledger. "
+             f"These items are NOT fixed by the pipeline; every one of them changes a "
+             f"delivered document (or a read-only artifact the author owns), so the pipeline "
+             f"reports them instead of inventing content."),
+            f"Open item(s): {len(oi.get('items') or [])}"
+            + (f"; unsupported discard(s): {len(oi.get('discarded') or [])}"
+               if oi.get("discarded") else ""),
+            "",
+            "This file is a SIBLING of the published directory on purpose: the directory must "
+            "stay byte-clean manuscript corpus.",
+            ""]
+    p = ctx.root / FINAL_CLEAN_STEPS_NAME
+    write_text_atomic(p, "\n".join(head) + body)
+    return {"path": str(p), "items": len(oi.get("items") or [])}
 
 
 def package_readiness(final_clean: dict) -> dict:
@@ -41351,9 +42215,46 @@ def package_readiness(final_clean: dict) -> dict:
         findings.append({
             "rule": r.get("rule") or "PKG-2", "document": r.get("file"),
             "detail": detail})
+    # The PUBLISH-TIME scan's rows: PKG-2 pointers the mechanical repair could
+    # not remove, and the PKG-3 names the package carries nowhere. Until
+    # 2026-10-15 this list was computed, recorded in the readme's own hygiene
+    # block, and never reached `readiness.findings` -- so `--require-ready`
+    # could not gate on the very rows the scan exists for.
+    for r in hyg.get("non_submitted_references") or []:
+        rule = r.get("rule") or "PKG-2"
+        detail = (f"line {r.get('line')}: {r.get('reference')} -- {r.get('detail')}")
+        row = {"rule": rule, "document": r.get("file"), "detail": detail}
+        if str(r.get("severity") or "").lower() == "advisory" or rule == "PKG-3":
+            # A name the package carries NOWHERE is reported for the author to
+            # resolve, never gated: the pipeline cannot know whether the sentence
+            # should ship the file, name a locator, or drop the pointer.
+            row["advisory"] = True
+        findings.append(row)
     for r in hyg.get("pdf_artifacts") or []:
         findings.append({"rule": r.get("rule"), "document": r.get("document"),
                          "detail": r.get("detail")})
+    for r in hyg.get("front_matter_glue") or []:
+        # The shapes the mechanical repair cannot split. Advisory: the space is
+        # the author's (only they know where the name ends), but the delivered
+        # file must not carry it unseen.
+        findings.append({"rule": r.get("rule") or "FMT-X2",
+                         "document": r.get("document"),
+                         "advisory": True,
+                         "detail": f"{r.get('location') or ''}: {r.get('evidence')} -- "
+                                   f"{r.get('detail')}".strip(" -")})
+    for r in hyg.get("display_items") or []:
+        # PKG-4: a cited figure the submission carries nowhere. Advisory on
+        # purpose: shipping the figure, embedding it, or dropping the citation is
+        # the author's call -- but the delivered status must name it (the
+        # 2026-10-15 report: "Figure S3 is cited and has a legend, but it is not
+        # in the submission").
+        findings.append({"rule": r.get("rule") or "PKG-4", "document": r.get("file"),
+                         "advisory": True, "item": r.get("reference"),
+                         "detail": f"line {r.get('line')}: {r.get('reference')} -- "
+                                   f"{r.get('detail')}"})
+    for r in hyg.get("front_matter_gaps") or []:
+        findings.append({"rule": r.get("rule") or "FMT-TP1", "document": r.get("file"),
+                         "advisory": True, "detail": r.get("detail")})
     xfa = []
     for r in hyg.get("xfa_exports") or []:
         xfa.append({"document": r.get("document"), "export": r.get("export")})
@@ -41369,7 +42270,51 @@ def package_readiness(final_clean: dict) -> dict:
                            f"format_fix=off), so they were left live rather than frozen with "
                            f"unverified numbering; refresh it in Word/Zotero and re-run, or "
                            f"flatten it manually and re-verify")})
-    return {"submission_ready": not findings, "findings": findings, "xfa_exports": xfa}
+    # REV-1/REV-2: the champion's OWN open items. A package whose revision stage
+    # handed the author work is not "ready" merely because the mechanical gates
+    # are clean -- the 2026-10-15 audit of the two clean packages was exactly
+    # this: `submission_ready: true` beside a hand-off list naming a Major
+    # artwork defect and a data/manuscript contradiction. `readiness.findings`
+    # is the one list the readme, decision.json and `--require-ready` all read.
+    oi = (final_clean or {}).get("open_items") or {}
+    for it in (oi.get("items") or []):
+        findings.append({
+            "rule": "REV-1", "document": it.get("location") or it.get("id"),
+            "item": it.get("id"), "status": it.get("status"),
+            "check": it.get("check"), "severity": it.get("severity"),
+            "detail": (f"the champion's own revision handed this item to the author "
+                       f"({it.get('status')}; {it.get('check') or 'check'} "
+                       f"{it.get('severity') or ''}): "
+                       + str(it.get("evidence") or "see the hand-off list")).strip()})
+    for it in (oi.get("discarded") or []):
+        findings.append({
+            "rule": "REV-2", "document": it.get("location") or it.get("id"),
+            "item": it.get("id"), "status": "discarded",
+            "check": it.get("check"), "severity": it.get("severity"),
+            "detail": (f"the champion's revision DISCARDED this finding and the round's "
+                       f"auditor did not support the drop (audit verdict: "
+                       f"{it.get('audit_verdict') or 'none'}): {it.get('evidence') or ''} "
+                       f"-- a drop hides the finding from every later reader, so it is "
+                       f"listed here for the author to re-check").strip()})
+    if oi.get("manual_steps") and not (oi.get("items") or oi.get("discarded")):
+        findings.append({
+            "rule": "REV-1", "document": Path(str(oi["manual_steps"])).name,
+            "status": "manual-steps",
+            "detail": (f"the champion's revision handed the author "
+                       f"{oi.get('manual_steps_items') or 'an unstated number of'} manual "
+                       f"item(s) (`{oi['manual_steps']}`); the delivered list is the sibling "
+                       f"`{FINAL_CLEAN_STEPS_NAME}`")})
+    blocking = [f for f in findings if not f.get("advisory")]
+    return {"submission_ready": not blocking, "findings": findings,
+            "blocking_findings": len(blocking),
+            "advisory_findings": len(findings) - len(blocking), "xfa_exports": xfa,
+            "open_items": {"run": oi.get("run"), "kind": oi.get("kind"),
+                           "items": len(oi.get("items") or []),
+                           "discarded": len(oi.get("discarded") or []),
+                           "statuses": oi.get("statuses") or {},
+                           "manual_steps": oi.get("manual_steps"),
+                           "manual_steps_items": oi.get("manual_steps_items"),
+                           "list": (oi.get("items") or []) + (oi.get("discarded") or [])}}
 
 
 def readiness_gate_problems(readiness: dict, require_ready: bool) -> list:
@@ -41460,6 +42405,11 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
                           final_clean=None, revision_token=None, win_format=None,
                           format_gate: bool = False, format_problems=None,
                           certification: dict = None) -> str:
+    # Values the per-round loop below binds (`r`, `agg`, `stored`, `plan`).
+    # Defaulted here so a caller with NO completed round -- an observer, a test,
+    # a report rebuilt by hand -- gets a readable report instead of the
+    # UnboundLocalError the 2026-10-15 hand-off work hit (2026-10-15).
+    r, agg, stored, plan = 0, {}, {}, {}
     L = []
     L.append("# Round Pipeline — Decision Report")
     L.append("")
@@ -41561,6 +42511,36 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
                  f"{final_clean['skipped']}. (The directory is rebuilt on every `decide` when "
                  f"the champion corpus is available; the status file "
                  f"`{FINAL_CLEAN_README_NAME}` records the certification verdict either way.)")
+    if final_clean:
+        _oi = final_clean.get("open_items") or {}
+        _rows = list(_oi.get("items") or [])
+        _drops = list(_oi.get("discarded") or [])
+        if _rows or _drops or (_oi.get("manual_steps") and _oi.get("manual_steps_items")):
+            L.append("")
+            L.append(f"**Open item(s) the champion's own revision handed to the author "
+                     f"({len(_rows)} unresolved"
+                     + (f", {len(_drops)} discarded without the auditor's support"
+                        if _drops else "")
+                     + ").** Certification is about the PROCESS: these items do not block it, "
+                       "and the package is not submission-ready until they are resolved. They "
+                       "come from the champion's producing run "
+                       f"`{_oi.get('run')}` ({_oi.get('kind') or 'stage'})"
+                     + (", whose ledger counts by status are "
+                        + ", ".join(f"{k}={v}" for k, v in
+                                    sorted((_oi.get('statuses') or {}).items()))
+                        if _oi.get("statuses") else "")
+                     + f"; the full list is the sibling `{FINAL_CLEAN_STEPS_NAME}` and "
+                       f"`readiness.open_items` in `reports/decision.json`:")
+            for it in _rows[:16]:
+                L.append(f"  - `{it.get('id')}` [{it.get('status')}] "
+                         f"{str(it.get('check') or '')} {str(it.get('severity') or '')}".rstrip()
+                         + (f" -- {str(it.get('location'))[:150]}" if it.get("location") else ""))
+            if len(_rows) > 16:
+                L.append(f"  - … and {len(_rows) - 16} more")
+            for it in _drops[:6]:
+                L.append(f"  - `{it.get('id')}` [DISCARDED by the reviser; the auditor's "
+                         f"verdict was `{it.get('audit_verdict') or 'none'}`] "
+                         + (f"-- {str(it.get('location'))[:150]}" if it.get("location") else ""))
     L.append("")
     if revision_token and revision_token.get("token"):
         L.append(f"**Revision token of the final winner (content-hash version ID):** "
@@ -41855,15 +42835,18 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
 
     L.append("## 3. Method (deterministic; no LLM arithmetic)")
     L.append("")
+    if rounds_data:
+        r = rounds_data[-1].get("round", 0)
+        agg = rounds_data[-1].get("agg") or {}
     L.append("**Directed scores.** Each judge session scores the target against every opponent in "
              "the target's own direction only, one integer in -4..+4. V-vs-W comes from V's "
              "judges; W-vs-V comes from W's judges and is negated into V's frame, so a version's "
              f"score list is `{round_judges(ctx, r)}*(|field|-1)` own scores plus "
              f"`(|field|-1)*{round_judges(ctx, r)}` negated received scores = "
-             f"`2*judges*(|field|-1)` values (here: {agg['scores_per_version']} at "
-             f"judges={round_judges(ctx, r)}, |field|={agg['field_size']}). A version is only "
+             f"`2*judges*(|field|-1)` values (here: {agg.get('scores_per_version')} at "
+             f"judges={round_judges(ctx, r)}, |field|={agg.get('field_size')}). A version is only "
              f"ELIGIBLE to win when its own panel is complete (all "
-             f"{agg['scores_per_version']} scores collected); a FRESH arm additionally needs both "
+             f"{agg.get('scores_per_version')} scores collected); a FRESH arm additionally needs both "
              f"directions against the original (the anti-regression gate below), while the round's "
              f"base row needs the complete panel only. A partial panel is reported as a panel gap "
              f"and can never decide a round.")
@@ -42083,12 +43066,19 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
                  f"comparing the champion against the original by eye.")
     L.append("1. Open the final package and confirm the round champion is the version you want to "
              "submit.")
+    _oi = ((final_clean or {}).get("open_items") or {})
+    _oi_items = list(_oi.get("items") or [])
+    _oi_dropped = list(_oi.get("discarded") or [])
     L.append("2. Read the champion's hand-off list and complete every manual item (Zotero live "
-             "fields, in-figure numbers, subjective scientific judgments): "
-             "`revised/MANUAL_STEPS.md` for a reviewed-and-revised champion, "
-             "`integrated/MANUAL_STEPS.md` for an integrated champion, and "
-             "`rewritten/MANUAL_STEPS.md` (plus the `PROBLEMS SURFACED` section of "
-             "`rewritten/REWRITE_REPORT.md`) when a rewritten candidate won.")
+             "fields, in-figure numbers, subjective scientific judgments): the copy delivered "
+             f"beside the published package, `{FINAL_CLEAN_STEPS_NAME}`"
+             + (f" (it holds the hand-off list plus the {len(_oi_items) or _oi.get('manual_steps_items')} "
+                f"open ledger item(s) the "
+                f"champion's own revision run `{_oi.get('run')}` handed over)"
+                if _oi_items or _oi.get("manual_steps") else "")
+             + ". The producing run's own `MANUAL_STEPS.md` lives inside "
+               "`runs/<run id>/<stage dir>/`, which the delivered package does not carry: read "
+               "the sibling file, never that path.")
     L.append("3. Diff the champion against `pinned/` (and against the pristine original) with your "
              "own eyes on the FIGURES, not just the text.")
     L.append("4. Re-check the round where the champion first appeared: if its margin over the "
@@ -42106,6 +43096,11 @@ def cmd_status(args) -> None:
     ctx.load()
     print(f"pipeline root: {ctx.root}")
     print(f"source:        {ctx.cfg.get('source')}")
+    # WHICH code this root actually runs: the snapshot frozen at setup, and
+    # whether the origin tree has moved on since (see root_pipeline_staleness).
+    _snap_note = pipeline_snapshot_note(ctx)
+    if _snap_note:
+        print(_snap_note)
     for line in venue_status_lines(ctx):
         print(line)
     _vpack = venue_pack_dir(venue_id_of(ctx), ctx.root)
@@ -46754,6 +47749,13 @@ def build_parser() -> argparse.ArgumentParser:
                          "rewrites/revises/integrators/review-scope values come from the selected "
                          "schedule entries -- do not pass those flags with it; --judges still "
                          "applies")
+    ps.add_argument("--pipeline-snapshot-ok", action="store_true",
+                    help="allow freezing another pipeline root's SNAPSHOT of the script into "
+                         "the new root. `setup` normally refuses this: running a root's own "
+                         "`paper_pipeline.py` freezes THAT copy, so every later `run` in the new "
+                         "root executes code that may predate the fixes in the tree you "
+                         "maintain. Pass this flag only when the snapshot is what you intend to "
+                         "run, then read `status` for the staleness note")
     ps.add_argument("--judges", default=None,
                     help=f"independent judge sessions per version: an integer (--judges 3 "
                          f"applies it to every round) or a comma-separated list with one entry "

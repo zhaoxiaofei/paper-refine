@@ -140,6 +140,26 @@ the base's from this round's review) or to the arm's own marker. A `-` now means
   sibling `final_clean_version.readme.md` says so in plain words — never treat
   that package as a signed answer, and check the readme before reusing it.
 
+**Certified is not the same as submission-ready, and the status says both.**
+The verdict above answers "did the process hold"; the `readiness` block answers
+"can this package be uploaded", and it now carries the champion's OWN open items
+too: what the producing revision handed to the author (`manual-required` /
+`fixed-with-caveat` rows of its ledger, plus a `discarded` row the round's
+auditor did not support → `REV-1` / `REV-2`), the pointers a to-be-submitted
+document may not carry (PKG-2, removed, and PKG-3, a name the package carries
+nowhere), a cited figure the package does not carry (PKG-4), the mandatory form's
+own dataset (FMT-PDF4/5/6: filled-but-a-shell, an EMPTY live dataset whose
+answers sit in an unreferenced copy, a two-packet-set file), front-matter glue
+(FMT-X2), the title-page content type the profile states no rule for (FMT-TP1,
+counted and named as a gap) and every OS by-product (`:Zone.Identifier`,
+`.DS_Store`, a Word owner file — never documents, stripped from the delivered
+copy). Purely advisory rows are listed but never gate; `decide --require-ready`
+turns the blocking ones into exit-5 problems. The stage's own hand-off list is
+copied beside the published directory as
+`final_clean_version.manual_steps.md` (a SIBLING — anything inside the directory
+would become manuscript content in the next run), so the author never has to read
+a path inside `runs/<id>/`.
+
 ## Everyday commands
 
 | command | what it does |
@@ -2567,7 +2587,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 122 suites (a few
+any failure. They are independent, so run them in parallel — 123 suites (a few
 minutes at the default 24 parallel sessions; tens of minutes sequentially):
 
 ```bash
@@ -2646,6 +2666,15 @@ compatibility for a root with no `venue`/`article_type` key.
 ## Notes
 
 * `--root` and `--source` must not be nested; `setup` refuses a non-empty root.
+  `setup` also refuses to freeze another pipeline root's SNAPSHOT of the script
+  into the new root: running `<old-root>/paper_pipeline.py setup …` freezes THAT
+  copy, so every later `run` would execute code that may predate the fixes in the
+  tree you maintain (the 2026-10-15 neohet-12to13 root was set up that way, ran a
+  two-day-old snapshot for its whole life, and silently re-found defects the
+  origin tree had already closed). Run the origin tree's `paper_pipeline.py`, or
+  pass `--pipeline-snapshot-ok` when freezing that exact snapshot is what you
+  intend; `status` prints which code the root runs and whether the origin tree
+  has moved on since.
 * `--skip-hash` (accepted by every command except `selfcheck` and
   `adopt-sweep`) skips the integrity VERIFICATION
   passes for that ONE invocation — the pristine copy, the pinned champions, the
