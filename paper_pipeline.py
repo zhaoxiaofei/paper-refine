@@ -11363,6 +11363,15 @@ def root_pipeline_staleness(ctx: Ctx) -> dict:
     case: it was set up from an old root's copy, so all later commands ran
     commit e15c869's code and re-found defects the origin tree had already
     closed. This reports that state (used by `status`); it never changes a run.
+
+    The FROZEN COPY is measured too (2026-10-15): the 30to31/13to14 roots
+    recorded the CURRENT `paper_pipeline.py` sha256 while the file frozen beside
+    their `state.json` was four commits older -- the operator had opened late
+    sessions from the fixed repo, so the record said "frozen from here" while the
+    run still drove the stale bundle (the delivered neohet package shipped an OS
+    junk stub and a `code/README.md` full of stage notes because of it). A
+    recorded path that still hashes to the recorded value is therefore not proof:
+    `frozen_sha256` is what the next command in this root will actually execute.
     """
     recorded = (ctx.state or {}).get("pipeline") or {}
     origin_path = str(recorded.get("path") or "")
@@ -11370,11 +11379,16 @@ def root_pipeline_staleness(ctx: Ctx) -> dict:
     out = {"frozen": str(frozen) if frozen.is_file() else None,
            "frozen_at": None, "origin": origin_path or None,
            "recorded_sha256": str(recorded.get("sha256") or "") or None,
-           "origin_sha256": None, "origin_differs": False, "snapshot_of_root": None}
+           "origin_sha256": None, "origin_differs": False, "snapshot_of_root": None,
+           "frozen_sha256": None, "frozen_differs": False}
     if frozen.is_file():
         try:
             out["frozen_at"] = datetime.fromtimestamp(
                 frozen.stat().st_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except OSError:                                               # pragma: no cover
+            pass
+        try:
+            out["frozen_sha256"] = sha256_file(frozen)
         except OSError:                                               # pragma: no cover
             pass
         holder = frozen_snapshot_root(frozen)
@@ -11386,6 +11400,8 @@ def root_pipeline_staleness(ctx: Ctx) -> dict:
             pass
     out["origin_differs"] = bool(out["origin_sha256"] and out["recorded_sha256"]
                                  and out["origin_sha256"] != out["recorded_sha256"])
+    out["frozen_differs"] = bool(out["frozen_sha256"] and out["recorded_sha256"]
+                                 and out["frozen_sha256"] != out["recorded_sha256"])
     return out
 
 
@@ -11394,6 +11410,17 @@ def pipeline_snapshot_note(ctx: Ctx) -> str:
     st = root_pipeline_staleness(ctx)
     if not st.get("frozen"):
         return ""
+    if st.get("frozen_differs"):
+        # The record and the FILE disagree: state.json says one sha256, the
+        # frozen script hashes to another. That is not "origin moved on" -- it is
+        # a run that will execute code its own record does not describe, and the
+        # 2026-10-15 roots reached publication in exactly this state.
+        return (f"[pipeline] **WARNING**: this root runs the FROZEN {st['frozen']} "
+                f"(sha256 {str(st.get('frozen_sha256'))[:16]}...), which is NOT the copy its "
+                f"state.json records (sha256 {str(st.get('recorded_sha256'))[:16]}...). Fixes "
+                f"made in the recorded tree are not in effect here. Copy the recorded "
+                f"`paper_pipeline.py` over the frozen one (and re-run) if the run must carry "
+                f"them.")
     if not st.get("origin"):
         return (f"[pipeline] this root runs the pipeline frozen into it "
                 f"({st.get('frozen_at') or 'date unknown'}); the recorded origin is unknown")
@@ -11737,6 +11764,15 @@ def corpus_dir_manifest(dirp: Path, exclude_top=()) -> dict:
     directory has to pass `CORPUS_EXCLUDE_TOP` to see the same file set the pin,
     the judge view and the recorded digest use. Left empty (the default) the
     function is byte-compatible with every digest a root has already recorded.
+
+    This is NOT where an `is_non_shippable_name` file (the WSL/Windows
+    `figS3.png:Zone.Identifier` stub, a `*.pyc`, a Word `~$` owner file) is
+    filtered out (2026-10-15). It was tried and reverted: a filter here changes
+    the identity of every corpus built before it, so the 2026-10-15 neohet root
+    -- whose pin RECORDED the junk-included digest of 415 files -- failed its own
+    pin check and refused to publish anything at all. The junk is a DELIVERY
+    concern: `publish_final_clean` checks the copy against the pin first (same
+    bytes, same digest) and strips the junk only for the tree it hands over.
     """
     if not dirp.is_dir():
         return {"files": {}, "count": 0}
@@ -11753,11 +11789,26 @@ def corpus_dir_manifest(dirp: Path, exclude_top=()) -> dict:
     paths = [p for p in _iter_tree_files(dirp, follow_dir_links=True) if keep(p)]
     digs = sha256_files(paths)
     files = {p.relative_to(dirp).as_posix(): d for p, d in zip(paths, digs)}
+    # `count` is `len(files)`, not `len(paths)`: `manifest_digest` hashes this
+    # whole dict, so a count that included a file `keep()` rejected would put
+    # the junk class back into the identity through the back door (and make the
+    # pin check fail again the moment a delivery-side strip ran first).
     return {"files": files, "count": len(files)}
 
 
 def corpus_tree_digest(dirp: Path) -> str:
     return manifest_digest(corpus_tree_manifest(dirp))
+
+
+def manifest_file_list(manifest: dict) -> list:
+    """The corpus-relative PATHS of a manifest (the delivery surface, sorted).
+
+    A manifest maps `{relative path: content digest}`; two trees can carry the
+    same champion bytes and still differ in WHICH files they hand over (a
+    hygiene filter that now holds one back). Comparing this list is how
+    `publish_final_clean` tells "the same package" from "the same content".
+    """
+    return sorted((manifest or {}).get("files") or [])
 
 
 _JSON_SENTINELS = ("Infinity", "-Infinity", "NaN")
@@ -13349,7 +13400,12 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
             rows.extend(info.get("rows") or [])
         # TEXT sources (LaTeX/markdown/plain text): the same consistency rules,
         # report-only -- the agents edit these files, the OOXML fixer does not.
-        for p in sorted([q for suf in ("*.tex", "*.ltx", "*.md", "*.markdown", "*.txt")
+        # `.bib` is a TEXT source too (2026-10-15): the CNB supplementary
+        # bibliography -- the file the journal compiles its reference list from --
+        # carried comma-glued keyword lists ("DNA aneuploidy,Molecular subtyping")
+        # and no scan read it at all.
+        for p in sorted([q for suf in ("*.tex", "*.ltx", "*.md", "*.markdown", "*.txt",
+                                      "*.bib")
                          for q in src.rglob(suf)]):
             if not p.is_file() or _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
                 continue
@@ -15573,6 +15629,18 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
             "rows": display_provenance_rows(corpus_dir, submission_not_carried_areas(ctx))}
     except Exception as e:                                            # noqa: BLE001
         evidence["display_provenance"] = {"error": f"{type(e).__name__}: {e}"}
+    # PKG-6..9 (2026-10-15): statements the package makes ABOUT ITSELF that
+    # contradict each other -- an AI-use denial beside the AI workflow it denies,
+    # one identifier written at two lengths, and one comparison described with
+    # two units of analysis (the operator's result-driven audit of the two
+    # delivered packages found all three, and every existing rule compares a
+    # surface against itself or against the raw data, never two statements).
+    # Seeded so the review/revise arms can repair the PROSE -- the mechanical
+    # layer reports them and never rewrites a sentence it cannot adjudicate.
+    try:
+        evidence["contradictions"] = {"rows": package_contradiction_rows(corpus_dir)}
+    except Exception as e:                                            # noqa: BLE001
+        evidence["contradictions"] = {"error": f"{type(e).__name__}: {e}"}
     # WHICH FILES THE SUBMISSION ACTUALLY CARRIES: the package's own README may
     # declare the submitted set (a glob); when it does and the declaration is
     # plausible, the scans above already used it, and every session is told, so a
@@ -15783,6 +15851,8 @@ def evidence_pack_summary(ev: dict) -> str:
               f"{len((ev.get('display_items') or {}).get('rows') or [])}"
             + f"; PKG-5 producer contradiction(s) "
               f"{len((ev.get('display_provenance') or {}).get('rows') or [])}"
+            + f"; PKG-6/7/8/9 self-contradiction(s) "
+              f"{len((ev.get('contradictions') or {}).get('rows') or [])}"
             + (f"; submitted set from the package README "
                f"{(ev.get('submission_declaration') or {}).get('submitted_count')}"
                if (ev.get("submission_declaration") or {}).get("declared") else "")
@@ -16658,6 +16728,25 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
                              + " |")
         else:
             lines.append(f"(the check could not run: {prov.get('error')})")
+    contr = ev.get("contradictions") or {}
+    contr_rows = contr.get("rows") or []
+    if contr_rows or contr.get("error"):
+        lines += ["",
+                  "## Statements that contradict each other (PKG-6/7/8/9)", "",
+                  "Each row quotes TWO statements the same submission makes. The pipeline "
+                  "picks no side and never rewrites either one: decide which is true and make "
+                  "the other agree. PKG-6 = one text both denies generative-AI use and "
+                  "describes the AI workflow it used; PKG-7 = one identifier (commit hash, "
+                  "accession, DOI) written at two lengths, so the short one resolves to "
+                  "nothing; PKG-8 = the same comparison described with two different units of "
+                  "analysis (a caption counting cells while the table's note counts donors).", ""]
+        if contr_rows:
+            lines += ["| rule | file | the two statements |", "|---|---|---|"]
+            for r in contr_rows[:20]:
+                lines.append(f"| {r.get('rule')} | {r.get('file')} | "
+                             + str(r.get("evidence", "")).replace("|", "\\|")[:200] + " |")
+        else:
+            lines.append(f"(the check could not run: {contr.get('error')})")
     decl_ev = ev.get("submission_declaration") or {}
     if decl_ev.get("declared"):
         lines += ["",
@@ -17149,6 +17238,90 @@ def is_non_submitted_readme_name(name: str) -> bool:
     return bool(README_NAME_RE.match(str(name or "").strip()))
 
 
+# The author's README files are never submitted (see `is_non_submitted_readme_name`),
+# but the CORPUS carries them so the package's own submitted-set declaration
+# travels with it (`declared_submission_set`). One class of them must not travel
+# any further than that: the `code/README*.md` a revision session WRITES beside
+# the code it revised, narrating that session's findings and hand-offs. The
+# 2026-10-15 neohet package reached its certified state carrying one (PKG-1
+# reported it, and the delivered package shipped it anyway). These constants let
+# `publish_final_clean` hold such a file back -- the caller routes it to the
+# root's `reports/readme_notes/` and names it in the sibling status readme, so
+# the operator keeps the text while no future round, pin or delivered package
+# carries it as manuscript content.
+README_NOTE_HOLD_DIRNAME = "readme_notes"
+
+
+def readme_internal_note_rows(p: Path, limit: int = 12) -> list:
+    """The PKG-1 rows a `README*.md`/`README*.txt` file carries (see above).
+
+    Returns [{"line", "evidence"}] -- empty when the file reads as ordinary
+    documentation (an author's own README, or a `README_RERUN.md` written for a
+    reader who will actually run the code). An unreadable or oversized file
+    yields no rows: this is a hygiene filter, never a reader.
+    """
+    p = Path(p)
+    try:
+        if p.stat().st_size > PACKAGE_TEXT_BYTES_LIMIT:
+            return []
+        text = p.read_text("utf-8", "replace")
+    except OSError:
+        return []
+    rows = []
+    for i, line in enumerate(text.splitlines(), 1):
+        for _label, pattern in INTERNAL_ARTIFACT_RES:
+            if not pattern.search(line):
+                continue
+            rows.append({"line": i, "evidence": line.strip()[:180]})
+            break
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def hold_internal_readme_notes(dirp: Path, dest_dir: Path,
+                               warns: list = None) -> list:
+    """Move internal-note README files out of `dirp` into `dest_dir`.
+
+    Returns the moved records [{"file", "held_at", "rows"}]. `dest_dir` must be
+    OUTSIDE the package (the caller passes the root's `reports/`): the file is
+    documentation the OPERATOR asked for, but it may not be shipped, and a
+    sibling would become manuscript content in the next round -- the same reason
+    the status readme is a sibling of the published directory. A move that fails
+    leaves the file in place and is recorded in `warns`.
+    """
+    out = []
+    dirp, dest_dir = Path(dirp), Path(dest_dir)
+    for p in sorted(dirp.rglob("*")):
+        if not p.is_file() or not is_non_submitted_readme_name(p.name):
+            continue
+        rows = readme_internal_note_rows(p)
+        if not rows:
+            continue
+        rel = p.relative_to(dirp).as_posix()
+        target = dest_dir / rel
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists() and _same_file_bytes(p, target):
+                # The identical note is already held from an earlier decision:
+                # the destination is *idempotent*, so a second `decide` over the
+                # same package does not accumulate `README.md-2`, `-3`, ...
+                # copies of one file. Only a note whose TEXT changed gets a new
+                # name (the author's older wording is still worth keeping).
+                p.unlink()
+            elif target.exists():
+                target = unique_path(target)
+            if p.exists():
+                shutil.move(str(p), str(target))
+        except OSError as e:                                          # noqa: BLE001
+            if warns is not None:
+                warns.append(f"{rel}: the internal-note README could not be held back "
+                             f"({type(e).__name__}: {e}); it is still in the package")
+            continue
+        out.append({"file": rel, "held_at": str(target), "rows": rows})
+    return out
+
+
 # A Word OWNER (lock) file: `<~$><document name>` beside the document Word has
 # open. It is never manuscript content: it holds the opening user's name, it is
 # not a document (converting it fails "not a zip file"), and it matches no
@@ -17184,6 +17357,69 @@ def is_platform_junk_name(name: str) -> bool:
     if base.strip() in PLATFORM_JUNK_NAMES:
         return True
     return any(sfx in low for sfx in PLATFORM_JUNK_SUFFIXES)
+
+
+def is_bytecode_cache_name(name: str) -> bool:
+    """True for a Python bytecode-cache FILE name (`*.pyc`/`*.pyo`).
+
+    `is_bytecode_cache` answers the same question for a corpus-RELATIVE path
+    (it also recognises a `__pycache__` DIRECTORY in the path). This is the
+    name-only spelling a copytree ignore-callback and a directory sweep need,
+    so the two questions have one vocabulary each instead of three call sites
+    each spelling their own suffix list.
+    """
+    return str(name or "").strip().lower().endswith(BYTECODE_SUFFIXES)
+
+
+def is_non_shippable_name(name: str) -> bool:
+    """A file name that must NEVER reach a published/delivered package.
+
+    Three classes, one predicate, so the copy filter, the directory sweep and
+    the readiness scan can never disagree about what "junk" means:
+      * an OS by-product (`figS3.png:Zone.Identifier`, `.DS_Store`, ...);
+      * a Python bytecode cache (`foo.pyc` -- a side effect of RUNNING a helper
+        script, never a deliverable);
+      * a Word OWNER (lock) file (`~$doc.docx`).
+
+    A file that is AREA content by a different rule (`code/`, `raw_data/`) is
+    NOT in this class: this predicate is only about names no submission, no
+    corpus and no next round can use.
+    """
+    return bool(is_platform_junk_name(name) or is_bytecode_cache_name(name)
+                or is_word_owner_name(name))
+
+
+def strip_non_shippable_files_in_dir(dirp: Path) -> dict:
+    """Delete `is_non_shippable_name` files below `dirp`; return what went.
+
+    The last-resort sweep for a package that was BUILT before the filters ran
+    (the 2026-10-15 neohet and cnb roots were published by an older orchestrator,
+    so their delivered copies carry a `figures/*:Zone.Identifier` stub and a
+    top-level `*.pyc`). Files inside an EVIDENCE area are never touched -- that
+    subtree is read-only by contract (`raw_data/` is a byte-frozen input) -- and
+    `__pycache__/` DIRECTORIES are skipped on purpose: removing one would empty
+    the directory a bytecode file's name lives in, and an empty directory is
+    still a directory the next round would carry.
+
+    Returns `{"removed": [rel, ...], "kept_in_evidence": [rel, ...]}`.
+    """
+    out = {"removed": [], "kept_in_evidence": []}
+    dirp = Path(dirp)
+    if not dirp.is_dir():
+        return out
+    for q in sorted(dirp.rglob("*")):
+        if not q.is_file() or not is_non_shippable_name(q.name):
+            continue
+        rel = q.relative_to(dirp).as_posix()
+        if is_evidence_rel(rel):
+            out["kept_in_evidence"].append(rel)
+            continue
+        try:
+            q.unlink()
+        except OSError:
+            continue
+        out["removed"].append(rel)
+    return out
 
 
 def is_non_document_name(name: str) -> bool:
@@ -17540,6 +17776,17 @@ def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
     version, so handing them to a judge would leak provenance and let
     self-written claims influence a relative score. The sandbox keeps them for
     the postchecks, the manual-item count and the decision report.
+
+    An `is_non_shippable_name` file (the WSL/Windows `figS3.png:Zone.Identifier`
+    stub, a `*.pyc`, a Word `~$` owner file) is carried through a CORPUS copy
+    unchanged, junk included: a corpus materialized here is exactly the corpus
+    the judges scored, and its digest is checked against the pin -- a filter that
+    dropped a file mid-copy made `publish_final_clean` report "the clean copy
+    hashes to X but the pin recorded Y" and refuse to publish the very package
+    the filter was meant to clean. The never-ship rule belongs to the DELIVERED
+    copy: `publish_final_clean` strips these files before it checks/derives the
+    digest, and `strip_non_shippable_files_in_dir` sweeps any that a package
+    built by an older orchestrator still carries.
     normalize_mtime: give every copied file and directory ONE timestamp. Set by
     the same VERSION CORPUS callers: shutil.copy2 preserves the source mtimes, so
     a version written later (the integration stage) would otherwise carry newer
@@ -17645,6 +17892,23 @@ def unique_path(base: Path) -> Path:
         if not cand.exists():
             return cand
     return base.with_name(f"{base.name}-{os.getpid()}")
+
+
+def _same_file_bytes(a: Path, b: Path) -> bool:
+    """True when two files carry identical bytes (size first, then a hash).
+
+    Used where a MOVE would otherwise create a second copy of the same file
+    `unique_path`-style (`publish_final_clean` holding a package's internal-note
+    README outside it: a repeat decision over an unchanged package must not
+    accumulate `README.md-2`). Compares content, never mtime: the two copies are
+    written by different steps and their timestamps say nothing.
+    """
+    try:
+        if a.stat().st_size != b.stat().st_size:
+            return False
+        return sha256_file(a) == sha256_file(b)
+    except OSError:
+        return False
 
 
 def pid_alive(pid: int) -> bool:
@@ -37602,6 +37866,13 @@ def cmd_run(args) -> None:
     # The stages render prompts from the venue profile: refuse to start on a
     # venue that does not resolve, whatever --strict-venue says.
     venue_profile_of(ctx)
+    # WHICH CODE THIS RUN WILL EXECUTE, before it executes it: a root that froze
+    # an older bundle (or one whose frozen file no longer matches its recorded
+    # sha256) drives that older code for every stage below, so the note belongs
+    # in the run log, not only in `status` (2026-10-15).
+    _snap = pipeline_snapshot_note(ctx)
+    if _snap:
+        print(f"[run] {_snap}")
     with ctx.lock("run"):
         _cmd_run_locked(ctx, args)
 
@@ -40436,6 +40707,34 @@ INTERNAL_ARTIFACT_RES = (
     ("an internal working note that names this pipeline's stages",
      re.compile(r"(?i)\b(?:round\s*\d+\s*winner|a1\s*/\s*base|judge (?:sheet|wave)|"
                 r"stage postcheck)\b")),
+    # The 2026-10-15 neohet package shipped these two shapes in `code/README.md`
+    # -- the file the code stage writes beside the code -- and neither the
+    # identifier list above nor the stage-name pattern caught them:
+    #   * "No frozen finding asks for a code change." / "The 31 effective
+    #     findings of this round (17 F-*, 13 X-*, 1 AU-*)";
+    #   * "the pipeline's own ledger/report", "this run", "the decision".
+    # The SPELLINGS are quoted from that run's own hand-off records, so they
+    # identify the pipeline's vocabulary rather than an author's. `\bthis run\b`
+    # is deliberately NOT here: "in this run we used X" is ordinary Methods
+    # prose; the self-referential note always says which pass wrote it
+    # ("this run's ...", "in this run,"), and the phrases below are the ones the
+    # real notes use.
+    # "the 31 effective findings of this round" is the pipeline's own count of a
+    # review round; "the effective findings were summarized" is ordinary Methods
+    # prose, so the COUNT phrase requires the round, and the bare noun phrase is
+    # read as a finding id only in the pipeline's `F-012`/`X-907` shapes.
+    ("the pipeline's finding ledger (a review round's own item vocabulary)",
+     re.compile(r"(?i)\b\d[\d,\s]*\s+(?:effective|frozen|admitted)\s+"
+                r"(?:findings?|concerns?)\b"
+                r"|\b(?:the|its)\s+(?:effective|frozen|admitted)\s+"
+                r"(?:findings?|concerns?)\s+of\s+(?:this|the)\s+round\b"
+                r"|\bfindings? of this round\b"
+                r"|\b(?:F|X|AU)-\d{2,4}\b")),
+    ("a stage note that narrates HOW this package was produced",
+     re.compile(r"(?i)\bthe pipeline'?s own (?:ledger|report|bookkeeping|hand-?off)\b"
+                r"|\b(?:review|judge|audit|integration|revise|rewrite) session\b"
+                r"|\bthis run'?s\b|\bthe decision, with its evidence\b"
+                r"|\bwhat the author must do\b")),
 )
 PACKAGE_TEXT_EXTS = (".md", ".markdown", ".txt", ".tex", ".ltx", ".rst", ".json", ".csv",
                      ".tsv", ".bib", ".html", ".htm", ".xml", ".yml", ".yaml", ".ini",
@@ -41483,17 +41782,23 @@ def internal_artifact_rows(root: Path, limit: int = 40) -> list:
     about the SUBMISSION surface (and the case that prompted it sat at the
     corpus top level as `raw_data.README.md`). Rows never delete anything: the
     author decides whether a file is removed or rewritten.
+
+    The scan covers every text file the package calls manuscript-side content
+    (`code/` included: a revision session writes `code/README.md` there, and the
+    2026-10-15 neohet package shipped one naming its review round's own item
+    ids). It is NOT scoped to the declared submitted set -- a file the package
+    carries, that a READER can open, is part of what the package hands over,
+    whichever glob its name matches.
     """
     rows, seen = [], set()
     root = Path(root)
     if not root.is_dir():
         return rows
-    _decl, _decl_is_submitted = declared_submission_filter(root)
     for p in sorted(root.rglob("*")):
         if not p.is_file():
             continue
         rel = p.relative_to(root).as_posix()
-        if is_evidence_rel(rel) or not _decl_is_submitted(rel):
+        if is_evidence_rel(rel):
             continue
         if p.suffix.lower() not in PACKAGE_TEXT_EXTS:
             continue
@@ -41559,6 +41864,478 @@ def package_front_matter_glue_rows(root: Path, limit: int = 20) -> list:
             rows.append(dict(r, document=p.relative_to(root).as_posix(), stage="published"))
             if len(rows) >= limit:
                 return rows
+    return rows[:limit]
+
+
+# PKG-6..9 (2026-10-15): the CONTRADICTION class.
+#
+# The operator's result-driven audit of the two delivered packages found three
+# internal contradictions that no rule could see, because every existing rule
+# compares one surface against ITSELF (a legend against its figure, a reference
+# against its own entry) or against the raw data -- none compares two statements
+# the same submission makes about its own method, disclosure or identifiers:
+#
+#   * PKG-6 -- a document says the manuscript was drafted "without generative
+#     AI" and, in the same section, describes running a generative-AI revision
+#     workflow over it. Both packages shipped that pair (the cover letter AND
+#     the methods/acknowledgements), and a reviewer read it as a disclosure
+#     defect. The rule is local to ONE text (the two statements must be close),
+#     so it never fires from two unrelated use sites.
+#   * PKG-7 -- an identifier is DEFINED and USE-d at different lengths in the
+#     same package: the Reporting Summary printed the scRNA commit as
+#     `c30bc1ab52f083b5761e31bec6888d7f2fd` (35 hex) while the main text carried
+#     the full 40. A truncated commit is not the commit: a reader who resolves it
+#     gets no object (here it also broke the URL, which the PDF wrapped).
+#   * PKG-8 -- the same statistical comparison is described with two different
+#     units: the supplementary figures' caption said "pairwise comparisons used
+#     606-1,989 paired cells" while Table S2's own note defined n as "the number
+#     of donors whose paired differences ... enter the test" (n = 9). A reader
+#     cannot tell which analysis was run.
+#
+# All three BLOCK the submission-readiness verdict, like PKG-5: one of the two
+# statements is false (or the identifier is unusable) and only the AUTHOR can
+# say which, but a package that carries the pair is not one to upload. The
+# pipeline never rewrites either side -- it seeds the rows into every session's
+# evidence pack so the review/revise arms can repair the prose, and reports
+# them in the delivered status, `readiness.findings` and the console.
+
+# The unit names the two halves of a statistical statement can disagree about.
+# Deliberately short: a unit outside this list is reported nowhere, because the
+# rule has no way to know that "chips" and "libraries" are not the same thing.
+STATS_UNITS = ("cells", "donors", "patients", "samples", "organoids", "mice",
+               "libraries", "chips")
+
+
+def _pkg_text_of_doc(p: Path) -> str:
+    """The plain text of ONE deliverable document ("" when it cannot be read).
+
+    `.docx` through the same paragraph reader every other scan uses; `.pdf`
+    through `pdftotext` (the read-only external the PDF artifact scan already
+    requires); a text source read as text. Anything else -- a figure, an archive,
+    a data table -- has no prose to contradict, so it is skipped.
+
+    The size caps are per FORMAT because the failure modes differ: a 4.6 MB
+    manuscript `.docx` is ordinary (the CNB main text is one, and a single
+    global byte cap silently skipped it -- the bug this docstring records), a
+    huge PDF is where `pdftotext` gets slow, and a text source that big is not
+    prose. Every cap degrades to "" -- a scan never raises out of a package.
+    """
+    low = p.name.lower()
+    if low.endswith(".docx"):
+        try:
+            if p.stat().st_size > 200_000_000:
+                return ""
+        except OSError:
+            return ""
+        try:
+            return "\n".join(_docx_paragraphs(p))
+        except Exception:                                             # noqa: BLE001
+            return ""
+    if low.endswith(".pdf"):
+        try:
+            if p.stat().st_size > 200_000_000:
+                return ""
+        except OSError:
+            return ""
+        if not shutil.which("pdftotext"):
+            return ""
+        try:
+            proc = subprocess.run(["pdftotext", "-layout", str(p), "-"],
+                                  capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace", timeout=180)
+        except (OSError, subprocess.SubprocessError):                  # noqa: BLE001
+            return ""
+        return proc.stdout or ""
+    if low.endswith(PKG2_EDITABLE_TEXT_EXTS):
+        try:
+            if p.stat().st_size > 8_000_000:
+                return ""
+            return p.read_text("utf-8", "replace")
+        except OSError:
+            return ""
+    return ""
+
+
+def package_document_texts(root: Path, limit_files: int = 25) -> list:
+    """[(rel, text)] for every deliverable DOCUMENT the package carries.
+
+    Evidence areas are skipped (the author's own provenance is never read as
+    prose) and so is every non-document file -- a per-figure source-data export
+    (`supplementary_source_files/*.pdf`) is a chart, not a document whose prose
+    can contradict another statement, and pulling 30 of them through
+    `pdftotext` bought nothing. The `limit_files` cap keeps one pathological
+    package from turning `decide` into a batch job: the scanned set is sorted,
+    so which documents were read is reproducible.
+    """
+    out = []
+    root = Path(root)
+    if not root.is_dir():
+        return out
+    for p in sorted(root.rglob("*")):
+        if not p.is_file() or is_non_document_name(p.name) or _is_aux_doc(p.name):
+            continue
+        rel = p.relative_to(root).as_posix()
+        if is_evidence_rel(rel) or is_bookkeeping_name(p.name):
+            continue
+        parts = Path(rel).parts
+        if "supplementary_source_files" in parts[:-1] or "source_data" in parts[:-1]:
+            continue
+        if not p.name.lower().endswith((".docx", ".pdf", ".tex", ".ltx", ".md",
+                                        ".markdown", ".txt", ".bib", ".rst")):
+            continue
+        text = _pkg_text_of_doc(p)
+        if text.strip():
+            out.append((rel, text))
+        if len(out) >= limit_files:
+            break
+    return out
+
+
+# The two statement shapes PKG-6 pairs. The NON-USE sentence must carry an
+# explicit negation ("without generative AI", "no AI tools were used") and the
+# USE evidence must name a tool/workflow ("using our AI-based revision
+# workflow", "the Codex interface", "DeepSeek"). Either alone is ordinary prose.
+AI_NONUSE_RE = re.compile(
+    r"(?i)\b(?:without|no|never|did\s+not|not\s+(?:a|an|any))\b[^.;\n]{0,60}?"
+    r"\b(?:generative\s+AI|AI\s+tools?|AI\s+assistance|large\s+language\s+models?|"
+    r"LLMs?|machine[- ]generated\s+(?:text|content)|automated\s+writing)\b")
+# A SCOPED denial is not the defect: "no AI tools were used for the statistical
+# analysis" is a true, useful statement that can sit beside an AI WRITING
+# disclosure without contradicting it. Only a denial with no scope attached is
+# paired (the shipped shape: "drafted this manuscript without generative AI,
+# except ..."). The scope test looks at the clause between the negation and the
+# AI word, and at the 40 characters after it.
+AI_NONUSE_SCOPE_RE = re.compile(
+    r"(?i)\bfor\s+(?:the\s+)?(?:statistic|analys|analysis|figure|figures|table|"
+    r"tables|data|image|images|code|programming|writing\s+the\s+code|"
+    r"literature|language\s+edit|copy\s?edit)\w*"
+    r"|\bto\s+(?:generate|analy[sz]e|process|run|compute|plot)\b"
+    # `without AI assistance` directly followed by WHAT the assistance was not
+    # used for ("... for the figures", ": the figures", "in the figures").
+    r"|\b(?:figures?|tables?|panels?|plots?|images?|statistical\s+analysis)\b"
+    r"[^.;\n]{0,24}\b(?:were|was|are|is)\b"
+    r"|\b(?:generated|prepared|produced|made|created)\s+without\b")
+# An ARTIFACT-scoped denial: the AI was not used for one DRAFT/VERSION of the
+# work ("the initial draft was prepared without generative AI", "an earlier
+# version ... hand-written"). The naive reading took any denial as a claim
+# about the whole manuscript, which would flag the very sentence the fix for the
+# shipped defect produces -- this rule must stay quiet on its own advice.
+AI_NONUSE_ARTIFACT_SCOPE_RE = re.compile(
+    r"(?i)\b(?:initial|first|original|early|earlier|previous|prior|preliminary|"
+    r"pre-?AI)\s+(?:drafts?|versions?|manuscript|text|submission)\b")
+AI_USE_RE = re.compile(
+    r"(?i)\b(?:generative[- ]AI|AI-based|AI-assisted|AI-driven)\b[^.;\n]{0,40}?"
+    r"\b(?:workflow|pipeline|tool|model|assistant|interface|revision)\b"
+    r"|\b(?:used|using|employed|applied|ran|ran\s+the)\b[^.;\n]{0,60}?"
+    r"\b(?:ChatGPT|GPT-[0-9]|Claude|Gemini|Copilot|Codex|DeepSeek|GLM-|Llama|Mistral|"
+    r"Qwen)\b"
+    r"|\b(?:ChatGPT|GPT-[0-9]|Claude|Gemini|Copilot|Codex|DeepSeek|GLM-)\b"
+    r"[^.;\n]{0,40}?\b(?:to|for)\s+(?:refine|revise|draft|edit|rewrite|polish)\b")
+
+
+def ai_disclosure_contradiction_rows(texts, limit: int = 6) -> list:
+    """PKG-6: one text both denies and describes generative-AI use."""
+    rows = []
+    for rel, text in texts:
+        nonuse, use = None, None
+        for m in AI_NONUSE_RE.finditer(text):
+            window = text[max(0, m.start() - 60):m.end() + 60]
+            if AI_NONUSE_SCOPE_RE.search(window) or AI_NONUSE_ARTIFACT_SCOPE_RE.search(window):
+                continue                      # a scoped denial, not a blanket one
+            nonuse = (m, " ".join(text[max(0, m.start() - 10):m.end() + 10].split()))
+            break
+        if nonuse is None:
+            continue
+        for m in AI_USE_RE.finditer(text):
+            if abs(m.start() - nonuse[0].start()) < 40:
+                continue                      # the denying sentence's own clause
+            use = (m, " ".join(text[max(0, m.start() - 10):m.end() + 10].split()))
+            break
+        if use is None:
+            continue
+        rows.append({
+            "rule": "PKG-6", "severity": "high", "file": rel, "line": 1,
+            "evidence": (f"the same document both denies and describes AI use: "
+                         f"{nonuse[1]!r} ... {use[1]!r}"),
+            "detail": "this document says the manuscript was produced WITHOUT "
+                      "generative AI and, in the same text, describes running a "
+                      "generative-AI workflow (or names the tool/model) over it. A "
+                      "journal that requires AI disclosure reads the denial as a "
+                      "false statement -- rewrite the denial so it says what the "
+                      "AI was and was not used for (the design, the analysis, or "
+                      "the writing), and keep the two statements consistent.",
+            "fix": "manual"})
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def truncated_identifier_rows(texts, limit: int = 8) -> list:
+    """PKG-7: an identifier is written at two lengths in one package.
+
+    Only a STRICT PREFIX relation counts (`c30bc1ab...2fd` vs the full
+    `c30bc1ab...2fdc9ddb`): that is what makes one surface's value provably the
+    other's truncated form rather than a different object. Short hex-like tokens
+    are skipped -- a 7-hex token is a legitimate abbreviation, and the pipeline
+    would drown in them.
+    """
+    runs = []
+    for rel, text in texts:
+        for m in re.finditer(r"[0-9a-f]{20,64}", text):
+            runs.append((rel, m.group(0)))
+    by_value = {}
+    for rel, tok in runs:
+        by_value.setdefault(tok, set()).add(rel)
+    rows, seen = [], set()
+    for short in sorted(by_value, key=len):
+        if len(short) < 12:
+            continue
+        for long, long_files in by_value.items():
+            if long == short or not long.startswith(short):
+                continue
+            if long_files == by_value[short]:
+                continue                      # same surface, both spellings
+            key = (short, long)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({
+                "rule": "PKG-7", "severity": "medium",
+                "file": sorted(by_value[short])[0], "line": 1,
+                "evidence": (f"{short!r} ({len(short)} hex) in "
+                             f"{sorted(by_value[short])[0]} is a prefix of the "
+                             f"{len(long)}-hex value carried in "
+                             f"{sorted(long_files)[0]}"),
+                "detail": "one identifier is written at two lengths in this "
+                          "package: a reader who resolves the short one gets no "
+                          "object (a truncated commit hash, an accession, a DOI). "
+                          "Print the identifier at the length the PRODUCER uses "
+                          "everywhere.",
+                "fix": "manual"})
+            if len(rows) >= limit:
+                return rows
+    return rows
+
+
+STATS_UNIT_DEF_RE = re.compile(
+    r"(?i)\bn\s+is\s+(?:the\s+)?(?:effective\s+)?(?:sample\s+size|number|count)"
+    r"[^.\n]{0,80}?\b(" + "|".join(STATS_UNITS) + r")\b")
+STATS_UNIT_PAIRED_RE = re.compile(
+    r"(?i)\b(?:pairwise\s+comparisons?|paired\s+tests?)\b[^.\n]{0,80}?"
+    r"\b(?:paired\s+)?(" + "|".join(STATS_UNITS) + r")\b")
+STATS_UNIT_N_RE = re.compile(r"(?i)\bn\s*=\s*[\d,]+")
+
+
+def unit_of_analysis_rows(texts, limit: int = 6) -> list:
+    """PKG-8: the same comparison is described with two different units.
+
+    The shape is a figure caption that states the sample size and calls it one
+    unit ("pairwise comparisons used 606-1,989 paired CELLS"), while the table
+    the values come from declares n over another ("n is ... the number of DONORS
+    whose paired differences ... enter the test"). Both halves are required, and
+    the unit words must come from the short list above, so a caption that merely
+    counts something the table never characterizes stays silent.
+    """
+    declared, claimed = [], []
+    for rel, text in texts:
+        for m in STATS_UNIT_DEF_RE.finditer(text):
+            declared.append((rel, m.group(1).lower(),
+                             " ".join(text[max(0, m.start() - 20):m.end() + 20].split())))
+        for m in STATS_UNIT_PAIRED_RE.finditer(text):
+            window = text[max(0, m.start() - 160):m.end() + 40]
+            if not STATS_UNIT_N_RE.search(window):
+                continue                      # a caption with no sample-size claim
+            claimed.append((rel, m.group(1).lower(), " ".join(window.split())))
+    rows = []
+    seen = set()
+    for crel, cunit, cwin in claimed:
+        # ONE row per (document, caption unit, declared unit): the captions of
+        # S1-S22 are the SAME sentence repeated once per figure (22 occurrences
+        # in the shipped supplement), and a report that lists one defect 22
+        # times buries the other rows.
+        if (crel, cunit) in seen:
+            continue
+        for drel, dunit, dwin in declared:
+            if cunit == dunit:
+                continue
+            seen.add((crel, cunit))
+            rows.append({
+                "rule": "PKG-8", "severity": "medium", "file": crel, "line": 1,
+                "evidence": (f"a caption states a sample size in {cunit!r} "
+                             f"({cwin[-150:]!r}) while {drel} defines n in "
+                             f"{dunit!r} ({dwin!r})"),
+                "detail": "the same comparison is described with two different "
+                          "units of analysis: the caption's sample size counts "
+                          f"{cunit!r} but the table's own note says the test ran "
+                          f"over {dunit!r}. A reader cannot tell which analysis "
+                          "produced the values -- make the caption state the unit "
+                          "the test used.",
+                "fix": "manual"})
+            if len(rows) >= limit:
+                return rows
+            break
+    return rows
+
+
+# PKG-9 (2026-10-15): a table names a model TOOL and an AFFINITY quantity that
+# the prose never connects. The shipped case: MMH2's comparison table labelled
+# `MMP_aff` "Affinity (IC50) percentile" -- "Percentile rank of the predicted
+# IC50 of the pMHC pair (MixMHCpred)" -- while the Methods define the same
+# column as "the percentile rank of the MixMHCpred score against a
+# length- and allotype-matched background of random peptides". MixMHCpred does
+# not emit an IC50, and the two descriptions cannot both be right about what
+# the column is. NetMHCpan's row is the CONTROL: it carries the same claim and
+# IS supported, because the prose names NetMHCpan and IC50 in the same
+# sentence. The rule therefore requires BOTH halves -- a tool+metric claim in a
+# table row, and NO prose sentence naming that tool within reach of that metric
+# -- so it stays silent on the well-defined columns it must not touch.
+AFFINITY_METRIC_RE = re.compile(
+    r"(?i)\b(IC50|Kd|KD|dissociation constant|half-maximal inhibitory concentration)\b")
+# The tool of an affinity claim is the word in the DETAIL's parentheses -- the
+# table column that names the model the value comes from. Column ids
+# (`MixMHCpred_aff`), architecture labels (`PWM-derived`) and the value's own
+# row id (`MMP_aff`) are NOT tools, and pairing them produced six rows for one
+# defect before this was narrowed.
+AFFINITY_TOOL_RE = re.compile(r"\(([A-Za-z][A-Za-z0-9 .+_-]{2,40})\)")
+
+
+def _docx_table_rows(path: Path) -> list:
+    """The table rows of ONE docx as `"cell | cell"` strings ([] on any failure)."""
+    try:
+        import docx                                            # noqa: PLC0415
+    except Exception:                                          # noqa: BLE001
+        return []
+    try:
+        doc = docx.Document(str(path))
+    except Exception:                                          # noqa: BLE001
+        return []
+    out = []
+    try:
+        for t in doc.tables:
+            for row in t.rows:
+                cells = [c.text.strip() for c in row.cells]
+                if any(cells):
+                    out.append(" | ".join(cells))
+    except Exception:                                          # noqa: BLE001
+        return out
+    return out
+
+
+def _docx_prose_text(path: Path) -> str:
+    """The BODY paragraphs of one docx, table cells excluded ("" on failure).
+
+    `_docx_paragraphs` returns every `<w:p>`, which is what the formatting and
+    placeholder scans want (a cell's text is part of the document a reader
+    sees). A rule that compares a TABLE's claim against the prose that must
+    support it needs the other set: python-docx reads the body's own
+    paragraphs, and excludes those inside a `<w:tc>`.
+    """
+    try:
+        import docx                                            # noqa: PLC0415
+    except Exception:                                          # noqa: BLE001
+        return ""
+    try:
+        doc = docx.Document(str(path))
+    except Exception:                                          # noqa: BLE001
+        return ""
+    cell_elems = set()
+    try:
+        for t in doc.tables:
+            for row in t.rows:
+                for cell in row.cells:
+                    for para in cell.paragraphs:
+                        cell_elems.add(id(para._p))
+    except Exception:                                          # noqa: BLE001
+        pass
+    out = []
+    try:
+        for para in doc.paragraphs:
+            if id(para._p) in cell_elems:
+                continue
+            out.append(para.text)
+    except Exception:                                          # noqa: BLE001
+        return "\n".join(out)
+    return "\n".join(out)
+
+
+def affinity_definition_rows(root: Path, limit: int = 8) -> list:
+    """PKG-9: a table's affinity claim for a tool the prose never says it of."""
+    root = Path(root)
+    if not root.is_dir():
+        return []
+    # The SUPPORTING prose must be prose: `_docx_paragraphs` walks EVERY
+    # `<w:p>` (table cells included), and a table that says "Affinity (IC50)
+    # percentile ... (MixMHCpred)" was therefore read as the sentence that
+    # defines the column -- the first cut of this rule reported nothing on the
+    # very package it was written for.
+    prose_parts = []
+    for _rel, text in package_document_texts(root):
+        if _rel.lower().endswith(".docx"):
+            prose_parts.append(_docx_prose_text(Path(root) / _rel))
+        else:
+            prose_parts.append(text)
+    prose = "\n".join(p for p in prose_parts if p)
+    rows = []
+    for p in sorted(root.rglob("*.docx")):
+        if not p.is_file() or is_non_document_name(p.name) or _is_aux_doc(p.name):
+            continue
+        rel = p.relative_to(root).as_posix()
+        if is_evidence_rel(rel):
+            continue
+        table_rows = _docx_table_rows(p)
+        # (tool, the row that names it) for every row that pairs a tool with an
+        # affinity quantity. ONE entry per tool, so the evidence quotes a row
+        # that really carries the claim.
+        claimed = {}
+        for rowtext in table_rows:
+            if not AFFINITY_METRIC_RE.search(rowtext):
+                continue
+            for cell in rowtext.split("|"):
+                for tm in AFFINITY_TOOL_RE.finditer(cell):
+                    cand = tm.group(1).strip()
+                    if cand[:1].isupper() and re.search(re.escape(cand), prose):
+                        claimed.setdefault(cand, rowtext)
+        # SUPPORT means one SENTENCE that names the tool and the quantity
+        # together -- the shipped control is "NetMHCpan-predicted half-maximal
+        # inhibitory concentration (IC50) exceeds 10,000 nM". A character
+        # window instead of a sentence boundary read the table's own cell (it
+        # lands in the paragraph stream) and two unrelated paragraphs as
+        # support, which is how the first cut of this rule found nothing.
+        sentences = re.split(r"(?<=[.;])\s+", prose)
+        for tool, claim_row in sorted(claimed.items()):
+            supported = False
+            for s in sentences:
+                if re.search(re.escape(tool), s) and AFFINITY_METRIC_RE.search(s):
+                    supported = True
+                    break
+            if supported:
+                continue
+            claim_metric = AFFINITY_METRIC_RE.search(claim_row).group(1)
+            rows.append({
+                "rule": "PKG-9", "severity": "medium", "file": rel, "line": 1,
+                "evidence": (f"the table row {claim_row[:120]!r} states an affinity "
+                             f"output ({claim_metric!r}) for {tool!r}, and no sentence "
+                             f"in this package names {tool!r} near that metric"),
+                "detail": "a table defines a quantity as the tool's AFFINITY output "
+                          "(an IC50 or a Kd) while the prose that defines the same "
+                          "column never connects that tool to that quantity. One of "
+                          "the two is wrong: either the prose is missing the "
+                          "definition, or the table names an output the tool does "
+                          "not produce (a rank or a score is not an IC50).",
+                "fix": "manual"})
+            if len(rows) >= limit:
+                return rows
+    return rows
+
+
+def package_contradiction_rows(root: Path, texts=None, limit: int = 20) -> list:
+    """PKG-6..9 over one package: statements that contradict each other."""
+    if texts is None:
+        texts = package_document_texts(Path(root))
+    rows = (ai_disclosure_contradiction_rows(texts, limit=limit)
+            + truncated_identifier_rows(texts, limit=limit)
+            + unit_of_analysis_rows(texts, limit=limit)
+            + affinity_definition_rows(Path(root), limit=limit))
     return rows[:limit]
 
 
@@ -42034,6 +42811,49 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
         rmtree_force(tmp, ignore_errors=True)
         return dict(_meta, skipped=f"the clean copy hashes to {digest[:12]} but the pin "
                                    f"recorded {str(pin.get('digest'))[:12]}")
+    # DELIVERY HYGIENE, after the identity check and before the counter (2026-10-15).
+    # The delivered copy is what the author hands to the journal, so two classes
+    # of file are removed here, where their removal can be reported instead of
+    # silently changing a digest:
+    #   * `is_non_shippable_name` junk -- an OS download stub
+    #     (`figS3.png:Zone.Identifier`), a `*.pyc`, a Word `~$` owner file;
+    #   * a `README*.md`/`README*.txt` a REVISION SESSION wrote (it narrates the
+    #     finding ids and hand-off paths of the round that produced the package).
+    # ORDER MATTERS and was measured: the digest just checked is the one the PIN
+    # recorded, over the corpus AS IT WAS -- stripping first made the 2026-10-15
+    # neohet root compare 414 files against its pin's 415 and refuse to publish.
+    # The pin and the winner keep the bytes they were hashed with; only this
+    # delivered tree is cleaned.
+    hygiene = {"removed": [], "kept_bbl": [], "raw_data_untouched": 0,
+               "removed_word_owner_files": [], "removed_platform_junk": [],
+               "removed_bytecode_cache": []}
+    try:
+        _junk = strip_non_shippable_files_in_dir(tmp)
+    except Exception as e:                                            # noqa: BLE001
+        _junk = {"removed": [], "kept_in_evidence": []}
+        hygiene["strip_error"] = f"{type(e).__name__}: {e}"
+    for rel in _junk.get("removed") or []:
+        if is_bytecode_cache_name(Path(rel).name):
+            hygiene["removed_bytecode_cache"].append(rel)
+        elif is_word_owner_name(Path(rel).name):
+            hygiene["removed_word_owner_files"].append(rel)
+        else:
+            hygiene["removed_platform_junk"].append(rel)
+    if _junk.get("kept_in_evidence"):
+        hygiene["junk_left_in_evidence"] = list(_junk["kept_in_evidence"])
+    # Internal-note README files (see README_NOTE_HOLD_DIRNAME): the author's
+    # own README is carried by the corpus -- it is often the package's own
+    # submitted-set declaration -- but one a REVISION SESSION wrote beside the
+    # code it revised must not reach a pin, a winner or this package.
+    # `hold_internal_readme_notes` MOVES such a file to the root's `reports/`:
+    # the operator keeps the text, the package stays clean, and the move is
+    # named in the sibling status readme.
+    try:
+        hygiene["held_internal_readme_notes"] = hold_internal_readme_notes(
+            tmp, Path(ctx.reports_dir) / README_NOTE_HOLD_DIRNAME, warns=None)
+    except Exception as e:                                            # noqa: BLE001
+        hygiene["held_internal_readme_notes"] = []
+        hygiene["readme_hold_error"] = f"{type(e).__name__}: {e}"
     # The pin digest above is verified BEFORE the counter increment; the
     # published copy carries the incremented names and the repointed references.
     counter = _increment_final_clean_counters(tmp)
@@ -42048,20 +42868,6 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     # when no editable bibliography can regenerate it, and a PDF is a submission
     # deliverable when the configured venue accepts one (see the venue profile's
     # `submission` block and derived_outputs_rule()).
-    hygiene = {"removed": [], "kept_bbl": [], "raw_data_untouched": 0}
-    # A Word OWNER (lock) file is not a document: it holds the name of whoever
-    # had the file open, it matches no submission name pattern, and it is the
-    # one artifact a reviewer could not even convert ("not a zip file"). It is
-    # dropped from the delivered copy -- like a build by-product -- and named in
-    # the readme, so the author knows their Word session left it behind. Only
-    # the DELIVERED copy is touched: the pin, the winner and the round base keep
-    # the bytes they were hashed with (the pin digest above was verified first).
-    hygiene["removed_word_owner_files"] = []
-    # OS by-products: an alternate-data-stream stub (`<name>:Zone.Identifier`)
-    # or a desktop index file. Neither is content, both make a package look
-    # broken, and one shipped inside `figures/` in the 2026-10-15 neohet package
-    # (a name that reads like a figure the submission does not contain).
-    hygiene["removed_platform_junk"] = []
     # The pipeline's own by-products never reach the published package (the copy
     # strips them by name, version token included): report which ones the
     # champion carried, so the operator sees the strip instead of guessing.
@@ -42079,13 +42885,11 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
             hygiene["raw_data_untouched"] += 1
             continue
         low = q.name.lower()
-        if is_platform_junk_name(q.name):
-            hygiene["removed_platform_junk"].append(rel)
-            q.unlink()
-        elif is_word_owner_name(q.name):
-            hygiene["removed_word_owner_files"].append(rel)
-            q.unlink()
-        elif low.endswith((".blg", ".bcf", ".run.xml", ".synctex.gz", ".aux", ".log", ".out",
+        # (The never-ship classes -- OS junk, bytecode caches, Word lock files --
+        # were removed BEFORE the identity check above, where their removal can
+        # be reported without moving a digest. What remains here is the build
+        # by-product set.)
+        if low.endswith((".blg", ".bcf", ".run.xml", ".synctex.gz", ".aux", ".log", ".out",
                          ".fls", ".fdb_latexmk", ".toc", ".lof", ".lot", ".nav", ".snm",
                          ".vrb", ".idx", ".ilg", ".ind")):
             hygiene["removed"].append(rel)
@@ -42161,6 +42965,13 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     # deleted: the file belongs to the author, but the package must not ship it.
     hygiene["internal_artifacts"] = internal_artifact_rows(tmp)
     hygiene["pdf_artifacts"] = package_pdf_rows(tmp)
+    # PKG-6/7/8/9 (2026-10-15): statements the package makes about ITSELF that
+    # contradict each other (an AI-use denial beside the AI workflow it denies,
+    # one identifier at two lengths, one comparison described with two units).
+    # Computed on the PUBLISHED copy -- these rows name the files the reader
+    # actually receives -- and reported, never edited: which statement is true
+    # is the author's call.
+    hygiene["contradictions"] = package_contradiction_rows(tmp)
     # Front-matter GLUE that the mechanical repair cannot resolve (the fused
     # `<name><address>` token): reported, never re-spaced by guesswork.
     hygiene["front_matter_glue"] = package_front_matter_glue_rows(tmp)
@@ -42231,7 +43042,15 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
                                            "export": str(dest)})
     manifest = corpus_dir_manifest(tmp)
     final_digest = manifest_digest(manifest)
-    if dst.is_dir() and corpus_tree_digest(dst) == final_digest:
+    # "Unchanged" must mean the two trees carry the SAME FILES, not that the
+    # champion's bytes hash the same: this function's hygiene filters can change
+    # (2026-10-15: the platform-junk sweep learned to see a stub that had
+    # shipped inside `figures/`), and a reuse that compared only content digests
+    # would keep serving the package the OLD filters produced. `files` is the
+    # manifest's own path list, so the test is the delivery surface itself.
+    if dst.is_dir() and (corpus_tree_digest(dst) == final_digest
+                         or manifest_file_list(manifest)
+                         == manifest_file_list(corpus_dir_manifest(dst))):
         rmtree_force(tmp, ignore_errors=True)
         return dict(_meta, path=str(dst), digest=final_digest, pin_digest=digest,
                     files=manifest["count"], renamed=counter["renamed"],
@@ -42239,6 +43058,13 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
                     modes_cleared=len(chmod_plan),
                     format_fix=format_fix, hygiene=hygiene, open_items=open_items,
                     zip=write_final_clean_zip(dst, zip_path), action="unchanged")
+    if dst.is_dir():
+        # The file sets differ (a hygiene rule now holds a file back, or one
+        # appeared beside the manuscript): the delivered copy is STALE, and a
+        # stale copy is what the author hands to the journal. Republish it.
+        print(f"[decide] the published copy at {dst.name}/ no longer matches the "
+              f"package this decision produced; it is archived under "
+              f"{superseded_dir_of(ctx).name}/ and rebuilt")
     if dst.exists():
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         aside = unique_path(superseded_dir_of(ctx) / f"{fc_name}.{stamp}")
@@ -42314,6 +43140,24 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
                  f"content, and a name that reads like a file the submission does not "
                  f"contain): " + ", ".join(f"`{n}`" for n in junk[:8])
                  + (" …" if len(junk) > 8 else ""))
+    bytecode = hygiene.get("removed_bytecode_cache") or []
+    if bytecode:
+        L.append(f"- {len(bytecode)} Python bytecode cache file(s) (`*.pyc`) were NOT published "
+                 f"(a side effect of RUNNING a helper script -- never a deliverable): "
+                 + ", ".join(f"`{n}`" for n in bytecode[:8])
+                 + (" …" if len(bytecode) > 8 else ""))
+    held_readmes = hygiene.get("held_internal_readme_notes") or []
+    if held_readmes:
+        L.append(f"- {len(held_readmes)} `README*.md`/`README*.txt` file(s) carrying a revision "
+                 f"session's own working notes were NOT published (held outside the package at "
+                 f"`reports/{README_NOTE_HOLD_DIRNAME}/`; the author's documentation is carried "
+                 f"by the corpus, but a note that narrates how the package was produced may "
+                 f"not ship): " + ", ".join(f"`{r.get('file')}`" for r in held_readmes[:6])
+                 + (" …" if len(held_readmes) > 6 else ""))
+        for r in held_readmes[:3]:
+            _row = (r.get("rows") or [{}])[0]
+            L.append(f"  - `{r.get('file')}` line {_row.get('line')}: "
+                     f"{str(_row.get('evidence'))[:160]}")
     decl = hygiene.get("submission_declaration") or {}
     if decl.get("declared"):
         L.append(f"- the SUBMITTED SET comes from the package's own `{decl.get('readme')}`: "
@@ -42409,6 +43253,14 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
         for r in prov[:12]:
             L.append(f"  - `{r.get('file')}` [{r.get('rule')}] {r.get('item')}: "
                      f"{str(r.get('detail'))[:300]}")
+    contr = hygiene.get("contradictions") or []
+    if contr:
+        L.append("")
+        L.append(f"**{len(contr)} self-contradiction(s) in the published package (PKG-6/7/8/9) "
+                 f"-- the same submission makes two statements that cannot both hold; the "
+                 f"author must decide which is true:**")
+        for r in contr[:12]:
+            L.append(f"  - `{r.get('file')}` [{r.get('rule')}]: {str(r.get('evidence'))[:220]}")
     if pdfs:
         L.append("")
         L.append(f"**{len(pdfs)} PDF artifact finding(s) in the published package "
@@ -42744,6 +43596,14 @@ def package_readiness(final_clean: dict) -> dict:
         findings.append({"rule": r.get("rule") or "PKG-5", "document": r.get("file"),
                          "item": r.get("item"),
                          "detail": r.get("detail")})
+    for r in hyg.get("contradictions") or []:
+        # PKG-6/7/8/9 are BLOCKING like PKG-5, and for the same reason: one of the
+        # two statements is false (or the identifier is unusable), and only the
+        # author knows which. The operator's audit found the AI disclosure on BOTH
+        # packages, the truncated commit in the Reporting Summary and the
+        # caption/table unit mismatch -- none of which any delivered line named.
+        findings.append({"rule": r.get("rule") or "PKG-6", "document": r.get("file"),
+                         "detail": f"{r.get('evidence')} -- {r.get('detail')}".strip(" -")})
     for r in hyg.get("front_matter_gaps") or []:
         findings.append({"rule": r.get("rule") or "FMT-TP1", "document": r.get("file"),
                          "advisory": True, "detail": r.get("detail")})
@@ -44102,6 +44962,11 @@ def cmd_decide(args) -> None:
     ctx = Ctx(Path(args.root).resolve(),
               strict_venue=bool(getattr(args, "strict_venue", False)))
     ctx.load()
+    # Same note as `run` (see there): the decision is produced BY this code, so
+    # which code it is has to be in the log of the decision too.
+    _snap = pipeline_snapshot_note(ctx)
+    if _snap:
+        print(f"[decide] {_snap}")
     with ctx.lock("decide"):
         _cmd_decide_locked(ctx, args)
 
@@ -44619,6 +45484,9 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     for r in (_hyg.get("pdf_artifacts") or [])[:5]:
         print(f"[decide] PDF ARTIFACT ({r.get('rule')}, author action required): "
               f"{r.get('document')} -- {r.get('detail')}")
+    for r in (_hyg.get("contradictions") or [])[:5]:
+        print(f"[decide] PACKAGE CONTRADICTION ({r.get('rule')}, author action required): "
+              f"{r.get('file')} -- {str(r.get('evidence'))[:180]}")
     _stripped = _hyg.get("stripped_bookkeeping") or []
     if _stripped:
         print(f"[decide] pipeline by-product(s) stripped from the published package: "
@@ -44627,6 +45495,21 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     if _wo:
         print(f"[decide] Word owner (lock) file(s) not published (a Word by-product, not a "
               f"document): " + ", ".join(_wo[:6]) + (" …" if len(_wo) > 6 else ""))
+    _junk = _hyg.get("removed_platform_junk") or []
+    if _junk:
+        print(f"[decide] operating-system by-product(s) not published (a download/desktop "
+              f"stub such as `<name>:Zone.Identifier`): " + ", ".join(_junk[:6])
+              + (" …" if len(_junk) > 6 else ""))
+    _pyc = _hyg.get("removed_bytecode_cache") or []
+    if _pyc:
+        print(f"[decide] Python bytecode cache(s) (`*.pyc`) not published (a side effect of "
+              f"running a helper script, never a deliverable): " + ", ".join(_pyc[:6])
+              + (" …" if len(_pyc) > 6 else ""))
+    _held = _hyg.get("held_internal_readme_notes") or []
+    if _held:
+        print(f"[decide] {len(_held)} README file(s) carrying a revision session's own working "
+              f"notes were held out of the published package (see "
+              f"`reports/{README_NOTE_HOLD_DIRNAME}/`); the sibling readme names them")
     _ref = _hyg.get("removed_dangling_references") or {}
     if _ref.get("removed"):
         print(f"[decide] PKG-2: {_ref['removed']} sentence(s) referring to content this "

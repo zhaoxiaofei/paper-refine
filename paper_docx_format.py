@@ -1574,6 +1574,11 @@ FINDING_TIER_RULES = {
     # geometry the figure shows.
     "FMT-G1",    # a doubled article/preposition ("the the")
     "FMT-IM1",   # an embedded image rescaled without its aspect ratio
+    # A comma with no space after it inside a list ("Ginkgo d7c7790,
+    # AneuFinder 1.34.0,copynumber 1.38.0"): a copy-editing defect a reviewer
+    # raises, and one that has shipped twice (the CNB Reporting Summary PDF and
+    # the supplementary .bib's keyword lists, 2026-10-15).
+    "FMT-G4",
     # The venue's own TABLE rule (declared in the profile, never invented here):
     # a table without its caption, a caption on the wrong side, a table before
     # the tables area. An editor/copyeditor raises all three, so they are
@@ -3479,6 +3484,17 @@ def text_style_rows(paras: list, is_ref: list = None, headings: list = None,
     rows += confusable_pair_rows(prose)
     rows += concept_family_rows(paras, is_ref)
     rows += number_format_rows(prose)
+    # FMT-G4: comma-glued list items. The DOCX path reaches this through
+    # `hygiene_rows`; text sources (.tex, .md, .bib) have no OOXML hygiene pass,
+    # and the 2026-10-15 CNB package carried this defect in BOTH -- the
+    # Reporting Summary's rendered version list and the supplementary .bib's
+    # keyword lists -- with no row anywhere in the root.
+    for i, t in enumerate(paras):
+        if i < len(is_ref) and is_ref[i]:
+            continue
+        for r in comma_glue_rows(t):
+            rows.append({"rule": r["rule"], "severity": r["severity"],
+                         "evidence": r["evidence"], "detail": r["detail"]})
     for r in rows:
         r.setdefault("tier", tier_of(r.get("rule") or ""))
     return rows
@@ -5513,6 +5529,68 @@ _ZERO_WIDTH_RE = re.compile("[\u200b\u200e\u200f\u2060\ufeff]")
 _MATH_LINE_RE = re.compile(r"[=∑∈∉∕√±×÷≤≥≈∝∫∞]")
 _MISSING_SPACE_RE = re.compile(r"(?<![A-Za-z0-9/])([a-z]{2,}),([a-z]{2,})\b")
 
+# FMT-G4 (2026-10-15): a comma with NO space after it inside a list of names,
+# versions or keywords. `_MISSING_SPACE_RE` above covers the lowercase shape
+# ("default,however"); the shapes that SHIPPED and no rule saw are the other two:
+#   * "<version-or-id>,<Capitalised name>" -- the CNB Reporting Summary's own
+#     "AneuFinder 1.34.0,copynumber 1.38.0" / "FLCNA 89902690,SCYN eeef200" /
+#     "CaSpER 0.2.0,CONICSmat 0.0.0.1", rendered verbatim into the submitted PDF;
+#   * "<lowercase word>,<Capitalised word>" -- the CNB supplementary .bib's own
+#     keyword lists ("DNA aneuploidy,Molecular subtyping,Prognosis").
+# Both are the same editorial defect (an editor inserts one space). Each shape
+# is narrowed by the false positives the real corpora produced, and the test
+# suite names every one of them:
+#   * a version string (`1.34.0`, `0.2.0`) or an identifier that ends in a short
+#     hex/alnum run (`89902690`, `d7c7790`, `3c9047f`) -- the second lookahead
+#     needs TWO following characters, because a citation key continues with one
+#     ("(Mallory et al., 2020a,b)") and an item never does;
+#   * a lowercase word, or an acronym that contains a lowercase letter, followed
+#     by a Capitalised word -- the .bib keyword lists. A bare all-caps two-letter
+#     token ("AL,Mehling") is deliberately NOT matched: it is as likely to be an
+#     author's initials as a glued item, and `et al.,2020` never matches because
+#     what follows a comma there is not a word.
+_COMMA_GLUE_ID_RE = re.compile(
+    r"(?<![A-Za-z0-9,.;:/-])(?:[\w+-]*\d[0-9a-f]{3,}|(?:\d+\.)+\d+),(?=[A-Za-z0-9]{2})")
+_COMMA_GLUE_WORD_RE = re.compile(
+    r"(?<![A-Za-z0-9,.;:/-])(?:[a-z][a-z]+|(?:[A-Z]*[a-z])[A-Z]{2,}),(?=[A-Z][a-z])")
+
+
+def comma_glue_rows(text: str, limit: int = 24) -> list:
+    """FMT-G4 rows in ONE text (a paragraph, a .tex/.bib line, a PDF's text).
+
+    Returns [{"rule", "severity", "evidence", "detail"}] -- one row per glued
+    comma, with the surrounding words as evidence, so a reviewer can see the
+    list it belongs to instead of a bare offset. The rule is EDITORIAL: the
+    repair is one space, but a mechanical writer that guessed at it would also
+    rewrite the citation ranges this rule exists to leave alone.
+    """
+    rows = []
+    s = str(text or "")
+    seen = set()
+    for m in _COMMA_GLUE_ID_RE.finditer(s):
+        if m.end() in seen:
+            continue
+        seen.add(m.end())
+        rows.append({
+            "rule": "FMT-G4", "severity": "medium",
+            "evidence": f"no space after the comma: {s[max(0, m.start()-30):m.end()+30]!r}",
+            "detail": "a comma inside a list of names/versions/keywords is followed "
+                      "directly by the next item: insert one space after the comma"})
+        if len(rows) >= limit:
+            return rows
+    for m in _COMMA_GLUE_WORD_RE.finditer(s):
+        if m.end() in seen:
+            continue
+        seen.add(m.end())
+        rows.append({
+            "rule": "FMT-G4", "severity": "medium",
+            "evidence": f"no space after the comma: {s[max(0, m.start()-30):m.end()+30]!r}",
+            "detail": "a comma inside a list of names/versions/keywords is followed "
+                      "directly by the next item: insert one space after the comma"})
+        if len(rows) >= limit:
+            break
+    return rows
+
 
 def visual_text_lines(para: str) -> list:
     """[(start, end)] text-space spans of a paragraph's rendered lines.
@@ -5652,6 +5730,12 @@ def hygiene_spans(para: str) -> list:
                                 f"{text[max(0, m.start()-30):m.end()+30]!r}",
                     "detail": "insert one space after the comma unless the token is a "
                               "subscript or notation"})
+    for r in comma_glue_rows(text):
+        # FMT-G4 needs no offsets: the repair (one space) is editorial, and the
+        # row is disposed by the editing arms like every other `fix=editorial`
+        # hygiene row. The offset fields stay for the schema's shape.
+        out.append({"rule": r["rule"], "fix": "editorial", "start": -1, "end": -1,
+                    "repl": None, "evidence": r["evidence"], "detail": r["detail"]})
     return out
 
 
@@ -11863,7 +11947,48 @@ def pdf_artifact_rows(path: Path, text: str = None, pages=None) -> list:
                      "detail": "the PDF carries no extractable text and no embedded image: "
                                "an empty export rather than a rendered document",
                      "fix": "manual", "protected": False})
+    if body:
+        note = pdf_production_note(body)
+        if note:
+            rows.append({"rule": "FMT-PDF7", "severity": "medium", "document": name,
+                         "location": "-", "evidence": f"the opening text explains how the "
+                         f"document was produced: {note!r}",
+                         "detail": "a submitted document may not narrate its own PRODUCTION: "
+                                   "this reads as an internal step note to a reviewer, and it "
+                                   "tells the journal the file is a substitute for the "
+                                   "document it asked for. Ship the document itself (the "
+                                   "venue's own form where one was requested), or keep the "
+                                   "explanatory note outside the submission.",
+                         "fix": "manual", "protected": False})
     return rows
+
+
+# FMT-PDF7 (2026-10-15): a submitted PDF whose OPENING text narrates how the file
+# was produced. The CNB package shipped a rebuilt Reporting Summary whose first
+# paragraph read "Reporting Summary Nature Portfolio life-sciences reporting
+# summary: a static rendering of the form's own questions and the author's own
+# answers, because the submitted PDF is an Adobe LiveCycle form whose static page
+# shows only a viewer placeholder. Sections the form leaves empty are omitted."
+# -- a reviewer's opening line was an explanation of the pipeline's substitute,
+# and the round's own judge filed it (r1-D0016) while no delivered status line
+# mentioned it. The match is deliberately narrow: a MANUSCRIPT never opens with
+# these phrases, and the pattern is anchored to the first ~1200 characters so a
+# Methods sentence about "the rendering pipeline" cannot trigger it.
+PDF_PRODUCTION_NOTE_RE = re.compile(
+    r"(?i)\b(?:a\s+)?static\s+rendering\s+of\s+the\s+form\b"
+    r"|\bsubmitted\s+PDF\s+is\s+an?\s+(?:Adobe\s+)?(?:LiveCycle|XFA|AcroForm)\b"
+    r"|\bviewer\s+placeholder\b"
+    r"|\bsections\s+the\s+form\s+leaves\s+empty\s+are\s+omitted\b"
+    r"|\brendering\s+of\s+the\s+form'?s\s+own\s+questions\b")
+
+
+def pdf_production_note(text: str) -> str:
+    """The FMT-PDF7 evidence string for a PDF's text ("" = no production note)."""
+    head = str(text or "")[:1200]
+    m = PDF_PRODUCTION_NOTE_RE.search(head)
+    if not m:
+        return ""
+    return head[max(0, m.start() - 60):m.end() + 60].replace("\n", " ").strip()
 
 
 def check_pdf(path: Path, policy: dict) -> dict:

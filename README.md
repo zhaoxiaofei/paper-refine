@@ -155,7 +155,20 @@ counted and named as a gap) and every OS by-product (`:Zone.Identifier`,
 `.DS_Store`, a Word owner file — never documents, stripped from the delivered
 copy). Two shipped surfaces that attribute one display item to different tools
 are `PKG-5` (a resources-table row against the item's own legend — the pipeline
-reports it and picks NO side). Purely advisory rows are listed but never gate;
+reports it and picks NO side), and three classes of statement a package makes
+about ITSELF are `PKG-6/7/8/9` (2026-10-15): one text that both denies
+generative-AI use and describes the AI workflow it used (PKG-6, with scoped
+denials — "no AI tools were used for the statistical analysis" — deliberately
+silent); one identifier written at two lengths, the short form a strict prefix
+of the long (PKG-7 — the Reporting Summary printed a commit at 35 hex while the
+main text carried 40); one comparison described with two units of analysis
+(PKG-8 — a caption counting cells while the table's own note defines n over
+donors); and a table that names a model tool's AFFINITY output (an IC50 or a
+Kd) which no sentence in the package connects to that tool (PKG-9 — the
+MixMHCpred "Affinity (IC50) percentile" row against the Methods that define the
+same column as a percentile rank). All four are also seeded into every
+session's evidence pack as the "Statements that contradict each other" table.
+Purely advisory rows are listed but never gate;
 `decide --require-ready` turns the blocking ones into exit-5 problems. The
 stage's own hand-off list is copied beside the published directory as
 `final_clean_version.manual_steps.md` (a SIBLING — anything inside the directory
@@ -1763,6 +1776,19 @@ shipped through two rounds of a real run:
   arms, because equations (`G(y)  =  ...`) and notation (`N/Ab,c`) legitimately
   carry those shapes — the review records the exception, the revise/integrate
   arms fix the real ones.
+* **A comma-glued list item is its own rule** (2026-10-15, `FMT-G4`).
+  `FMT-G3` requires lowercase words on both sides of the comma, so the two
+  shapes that actually shipped read clean: the CNB Reporting Summary's own
+  version list (`AneuFinder 1.34.0,copynumber 1.38.0`, `FLCNA 89902690,SCYN
+  eeef200`, `CaSpER 0.2.0,CONICSmat 0.0.0.1`, rendered into the submitted PDF)
+  and the supplementary `.bib`'s keyword lists (`DNA aneuploidy,Molecular
+  subtyping,Prognosis`). `comma_glue_rows` matches a version/id token or a
+  lowercase word followed by a comma and the NEXT item, and is deliberately
+  blind to the look-alikes that are correct: a citation range (`11,12`), a
+  three-digit group (`684,498`), a quantity (`1,234.5`), a citation key
+  continuation (`(Mallory et al., 2020a,b)`) and initials (`AL,Mehling`). It is
+  a finding-tier row, and the `.bib` files are scanned as text sources now
+  (`scan_format_in_sources`, which used to read only `.tex/.ltx/.md/.txt`).
 * **Fonts, paragraphs, headings.** `FMT-T10a` mixed direct fonts, `FMT-T10b`
   vertical paragraph spacing, `FMT-T10c` indentation and `FMT-T10d` alignment
   drift inside one paragraph style, and `FMT-T10e` a heading-level jump are
@@ -1949,6 +1975,23 @@ URLs, the pipeline's own ledgers — must not ship) and `FMT-PDF1`–`PDF3` (an 
 form shell, an unfilled form, an empty export). `publish_final_clean` reports
 PKG-1/internal-URL hits and the PDF-artifact rows in the publish step; they are
 findings for the author, never silent edits.
+
+`FMT-PDF7` (2026-10-15) closes one more shape in that family: a submitted PDF
+whose OPENING text narrates how the file was produced. The CNB package shipped a
+rebuilt Reporting Summary whose first paragraph read "… a static rendering of
+the form's own questions and the author's own answers, because the submitted PDF
+is an Adobe LiveCycle form whose static page shows only a viewer placeholder."
+— a reviewer's opening line explained the pipeline's substitute instead of
+presenting the form, and the round's own judge filed it while no delivered line
+mentioned it. The rule is anchored to the first ~1200 characters and matches the
+form-rendering vocabulary only, so ordinary prose about a "rendering pipeline"
+is silent. The same round made the delivery hygiene executable rather than
+advisory: `publish_final_clean` now STRIPS the never-ship names
+(`:Zone.Identifier`/`.DS_Store`-class OS stubs, `*.pyc`, Word `~$` lock files)
+and HOLDS BACK a `README*.md` a revision session wrote about its own round
+(moved to `reports/readme_notes/`, named in the status readme) — both after the
+pin check and before the counter increment, so the copy the author receives is
+the one the panel certified with the junk gone.
 
 ## The code-side evidence pack (identical numbers in every session)
 
@@ -2603,7 +2646,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 123 suites (a few
+any failure. They are independent, so run them in parallel — 125 suites (a few
 minutes at the default 24 parallel sessions; tens of minutes sequentially):
 
 ```bash
