@@ -450,6 +450,144 @@ def test_xfa_live_packet():
 
 
 # --------------------------------------------------------------------------
+# 4b. What the package's own README declares as submitted
+# --------------------------------------------------------------------------
+
+DECL = ("# What will be submitted\n\n"
+        "Only files whose names match the following Bash extglob pattern will be submitted to "
+        "the venue/journal:\n\n`neo-*-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]"
+        ".@(docx|pdf)`\n\nAll other files will not be submitted. For example, this README file.\n\n"
+        "- Submitted files must not refer to any non-submitted files.\n")
+
+
+def test_declared_submission_set():
+    print()
+    print("== the package's own README declares the submitted set ==")
+    pkg = scratch("paper_decl_")
+    make_docx(pkg / "neo-2-mainText-abcdef0.docx", [
+        "A title",
+        "Methods. The per-figure numbers are in supplementary_source_files/table.tsv and the "
+        "generators in analysis_notes.py.",
+        "See also the compiled supplement."])
+    write(pkg / "supplementary_source_files" / "table.tsv", "a\tb\n1\t2\n")
+    write(pkg / "code" / "analysis_notes.py", "print()\n")
+    write(pkg / "neo-9-suppSource-abcdef0.tex",
+          "The supplement is rebuilt from supplementary_source_files/table.tsv beside this file.\n")
+    write(pkg / "README.md", DECL)
+    decl = pp.declared_submission_set(pkg)
+    check("the declaration is read from the package's own README",
+          decl["declared"] and decl["readme"] == "README.md"
+          and decl["files"] == ["neo-2-mainText-abcdef0.docx"],
+          json.dumps({k: v for k, v in decl.items() if k != "carried_not_submitted"})[:240])
+    check("everything else the package carries is listed as not submitted",
+          set(decl["carried_not_submitted"]) >=
+          {"README.md", "supplementary_source_files/table.tsv", "code/analysis_notes.py",
+           "neo-9-suppSource-abcdef0.tex"},
+          str(sorted(decl["carried_not_submitted"])))
+    rows = pp.non_submitted_reference_rows(pkg, ["code", "raw_data"])
+    refs = sorted(r["reference"] for r in rows)
+    check("a submitted document pointing at a carried-but-not-declared file is a PKG-2 row",
+          "supplementary_source_files/table.tsv" in refs, json.dumps(refs))
+    check("the row's advice names the declaration",
+          any("package's own README declares only" in str(r.get("detail"))
+              for r in rows if "supplementary_source_files" in str(r.get("reference"))),
+          json.dumps([r.get("detail") for r in rows])[:200])
+    check("a NON-submitted source file's own pointers are not rows (the 2026-10-15 MS1 case)",
+          all("suppSource" not in str(r.get("file")) for r in rows),
+          json.dumps([(r.get("file"), r.get("reference")) for r in rows])[:240])
+    # An implausible declaration must be IGNORED, never applied silently.
+    bad = scratch("paper_decl_bad_")
+    make_docx(bad / "main.docx", ["Title"])
+    write(bad / "README.md",
+          "# What will be submitted\n\nOnly files matching `nothing-*.xyz` will be submitted.\n")
+    bd = pp.declared_submission_set(bad)
+    check("a declaration matching nothing is ignored WITH a reason",
+          bd["declared"] is False and bd["ignored_reason"]
+          and "match no file" in bd["ignored_reason"], json.dumps(bd)[:200])
+    _decl, is_sub = pp.declared_submission_filter(bad)
+    check("the scans fall back to the pipeline's own model",
+          is_sub("main.docx") is True and is_sub("anything/else.txt") is True)
+    # The journal-submission ASSEMBLY is narrowed to the declared set too: what it
+    # copies is what ships, and a `.tex` source or figure asset the journal never
+    # receives must not sit in the submission folder pretending to.
+    root = make_root_with_revision("paper_decl_asm_")
+    winner = root / "round1_winner"
+    make_docx(winner / "neo-2-mainText-abcdef0.docx", ["Title", "Body"])
+    write(winner / "neo-9-suppSource-abcdef0.tex", "source\n")
+    write(winner / "README.md", DECL)
+    ctx = pp.Ctx(root)
+    ctx.load(need_cfg=False)
+    out = pp.publish_journal_submission(ctx, winner, "test-label")
+    shipped = sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file())
+    man = json.loads((root / "journal_submission.json").read_text(encoding="utf-8"))
+    check("the journal submission carries only the declared files",
+          shipped == ["neo-2-mainText-abcdef0.docx"], str(shipped))
+    check("the manifest names what the declaration kept out",
+          set(man.get("not_submitted_by_declaration") or []) ==
+          {"README.md", "neo-9-suppSource-abcdef0.tex"}
+          and man.get("declared_submission_patterns"), json.dumps(
+              man.get("not_submitted_by_declaration")))
+
+
+# --------------------------------------------------------------------------
+# 4c. PKG-5: two shipped surfaces disagree about a display item's producer
+# --------------------------------------------------------------------------
+
+def test_pkg5_producer_contradiction():
+    print()
+    print("== PKG-5: the resources table vs the legend ==")
+    pkg = scratch("paper_pkg5_")
+    make_docx(pkg / "neo-2-mainText-abcdef0.docx", [
+        "Results", "The design is shown in Figure 1.",
+        "Table 1. Resources used in this study.",
+        "Matplotlib, seaborn (Figures 2, 4 and S2)",
+        "BioRender (Figures 1 and S2)",
+        "Figure S2. A candidate mechanism for the substitution effect.",
+        "Schematic free-energy profile. Neither axis is quantitative."])
+    make_docx(pkg / "neo-3-supplement-abcdef0.docx", [
+        "Figure S2. A candidate mechanism for the substitution effect.",
+        "A schematic of the proposed preorganization, drawn as an instability energy. "
+        "Created with BioRender.com."])
+    write(pkg / "README.md", DECL)
+    rows = pp.display_provenance_rows(pkg, ["code", "raw_data"])
+    check("the contradiction is one row, naming both sides and the tools",
+          len(rows) == 1 and rows[0]["item"] == "figure s2"
+          and "Matplotlib" in rows[0]["reference"] and "seaborn" in rows[0]["reference"]
+          and "BioRender" in rows[0]["detail"],
+          json.dumps(rows)[:300])
+    # Silence: no legend producer, and a legend that names the SAME tool.
+    agree = scratch("paper_pkg5b_")
+    make_docx(agree / "neo-2-mainText-abcdef0.docx", [
+        "Matplotlib, seaborn (Figures 2 and S2)",
+        "Figure S2. A data figure.", "Values are plotted; created with matplotlib."])
+    check("a legend naming the same tool is not a contradiction",
+          pp.display_provenance_rows(agree, ["code"]) == [],
+          json.dumps(pp.display_provenance_rows(agree, ["code"]))[:200])
+    quiet = scratch("paper_pkg5c_")
+    make_docx(quiet / "neo-2-mainText-abcdef0.docx", [
+        "Matplotlib, seaborn (Figure 2)",
+        "Figure 2. A data figure.", "Every cell prints its value."])
+    check("an item whose legend names no producer is not a row",
+          pp.display_provenance_rows(quiet, ["code"]) == [])
+    prose = scratch("paper_pkg5d_")
+    make_docx(prose / "neo-2-mainText-abcdef0.docx", [
+        "Matplotlib, seaborn (Figure 2)",
+        "Figure 2. A data figure.",
+        "The variants generated by substituting MHC-anchor residues were ranked above chance, "
+        "and the logos were plotted in bits."])
+    check("a lowercase participle is not read as a producer (the case-sensitivity trap)",
+          pp.display_provenance_rows(prose, ["code"]) == [],
+          json.dumps(pp.display_provenance_rows(prose, ["code"]))[:200])
+    rec = {"hygiene": {"display_provenance": rows}, "open_items": {}}
+    readiness = pp.package_readiness(rec)
+    check("PKG-5 is BLOCKING in readiness (not advisory)",
+          readiness["submission_ready"] is False
+          and [f["rule"] for f in readiness["findings"]] == ["PKG-5"]
+          and not readiness["findings"][0].get("advisory"),
+          json.dumps(readiness["findings"])[:200])
+
+
+# --------------------------------------------------------------------------
 # 5b. The seeds reach the sessions that can ACT on them
 # --------------------------------------------------------------------------
 
@@ -547,6 +685,8 @@ def main():
     test_publish_carries_open_items()
     test_pkg3_unresolvable_names()
     test_pkg4_missing_display_item()
+    test_declared_submission_set()
+    test_pkg5_producer_contradiction()
     test_front_matter_and_junk()
     test_xfa_live_packet()
     test_seeds_reach_the_sessions()

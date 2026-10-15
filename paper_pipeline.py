@@ -6953,6 +6953,13 @@ EVIDENCE_INTEGRITY_REVIEW = """3f. The EVIDENCE-INTEGRITY sweeps M31-M36 (defini
      the code-side PKG-4 rows in `review/work/EVIDENCE_PACK.md` ("Display items the submission
      does not carry") are this class's packaging half: a document that CITES and legends a
      figure the package carries no file for -- ship the figure, embed it, or drop the citation;
+     the PKG-5 rows in the same pack ("Display-item provenance contradictions") are the
+     ATTRIBUTION half: a resources/software table row claiming an item whose own legend names a
+     different producer (the 2026-10-15 case: the table credited `Matplotlib, seaborn` with
+     Figure S2 while S2's legend says `Created with BioRender.com`). Two shipped surfaces
+     disagreeing about which tool made an item is a finding, and a legend that points at another
+     surface for a value ("the fold-changes quoted in the title", "as noted in the panel title")
+     while that surface does not carry it is the same class;
    * M32 HEADLINE STATISTIC vs the correction the paper states: for every numeric claim on a
      claim-bearing surface (abstract, cover letter, Results highlights, legends) check the
      test, the unit of analysis, n, the p-value and the correction the Methods/Statistics
@@ -15557,6 +15564,31 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
             "rows": package_display_item_rows(corpus_dir, submission_not_carried_areas(ctx))}
     except Exception as e:                                            # noqa: BLE001
         evidence["display_items"] = {"error": f"{type(e).__name__}: {e}"}
+    # PKG-5: two shipped surfaces disagreeing about a display item's PRODUCER
+    # (a resources-table row vs the item's own legend). Seeded so the review
+    # files it and the reviser reconciles it in prose -- the pipeline never picks
+    # a side.
+    try:
+        evidence["display_provenance"] = {
+            "rows": display_provenance_rows(corpus_dir, submission_not_carried_areas(ctx))}
+    except Exception as e:                                            # noqa: BLE001
+        evidence["display_provenance"] = {"error": f"{type(e).__name__}: {e}"}
+    # WHICH FILES THE SUBMISSION ACTUALLY CARRIES: the package's own README may
+    # declare the submitted set (a glob); when it does and the declaration is
+    # plausible, the scans above already used it, and every session is told, so a
+    # "does this reference resolve?" judgement is made against what ships.
+    try:
+        _decl = declared_submission_set(corpus_dir)
+        evidence["submission_declaration"] = {
+            "readme": _decl.get("readme"), "patterns": _decl.get("patterns") or [],
+            "declared": bool(_decl.get("declared")),
+            "ignored_reason": _decl.get("ignored_reason"),
+            "submitted_files": (_decl.get("files") or [])[:60],
+            "submitted_count": len(_decl.get("files") or []) if _decl.get("declared") else None,
+            "not_submitted_count": (len(_decl.get("carried_not_submitted") or [])
+                                    if _decl.get("declared") else None)}
+    except Exception as e:                                            # noqa: BLE001
+        evidence["submission_declaration"] = {"error": f"{type(e).__name__}: {e}"}
     try:
         evidence["front_matter_gaps"] = {"rows": front_matter_gap_rows(ctx, corpus_dir)}
     except Exception as e:                                            # noqa: BLE001
@@ -15749,6 +15781,11 @@ def evidence_pack_summary(ev: dict) -> str:
               f"{len((ev.get('submission_references') or {}).get('rows') or [])}"
             + f"; PKG-4 missing display items "
               f"{len((ev.get('display_items') or {}).get('rows') or [])}"
+            + f"; PKG-5 producer contradiction(s) "
+              f"{len((ev.get('display_provenance') or {}).get('rows') or [])}"
+            + (f"; submitted set from the package README "
+               f"{(ev.get('submission_declaration') or {}).get('submitted_count')}"
+               if (ev.get("submission_declaration") or {}).get("declared") else "")
             + (f"; FMT-TP1 title-page gap(s) "
                f"{len((ev.get('front_matter_gaps') or {}).get('rows') or [])}"
                if (ev.get("front_matter_gaps") or {}).get("rows") else "")
@@ -16602,6 +16639,44 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
                   "confirmation.", ""]
         for r in gap_rows[:8]:
             lines.append(f"- `{r.get('file')}`: {r.get('detail')}")
+    prov = ev.get("display_provenance") or {}
+    prov_rows = prov.get("rows") or []
+    if prov_rows or prov.get("error"):
+        lines += ["",
+                  "## Display-item provenance contradictions (PKG-5)", "",
+                  "Two shipped surfaces attribute ONE display item to different tools (a "
+                  "resources/software table row against the item's own legend). The pipeline "
+                  "reports it and picks no side: correct the table row or the legend, and check "
+                  "which item the real producer belongs to. M35's disclosure sweep is where this "
+                  "class is disposed.", ""]
+        if prov_rows:
+            lines += ["| file | item | tools the table claims | the legend's producer |",
+                      "|---|---|---|---|"]
+            for r in prov_rows[:20]:
+                lines.append(f"| {r.get('file')} | {r.get('item')} | `{r.get('reference')}` | "
+                             + str(r.get("detail", "")).split("attributes it to ", 1)[-1][:80]
+                             + " |")
+        else:
+            lines.append(f"(the check could not run: {prov.get('error')})")
+    decl_ev = ev.get("submission_declaration") or {}
+    if decl_ev.get("declared"):
+        lines += ["",
+                  "## What the submission actually carries", "",
+                  f"The package's own `{decl_ev.get('readme')}` declares the submitted set: "
+                  + " / ".join(f"`{p}`" for p in decl_ev.get("patterns") or [])
+                  + f" -- {decl_ev.get('submitted_count')} submitted file(s), "
+                  f"{decl_ev.get('not_submitted_count')} carried-but-NOT-submitted. Every "
+                  "reference judgement above was made against THAT set: a file this package "
+                  "carries but the declaration excludes is unreachable for the reader.", ""]
+        if decl_ev.get("submitted_files"):
+            for f in decl_ev["submitted_files"][:40]:
+                lines.append(f"- `{f}`")
+    elif decl_ev.get("ignored_reason"):
+        lines += ["",
+                  "## What the submission actually carries", "",
+                  f"The package's own README declares a submission rule that was IGNORED: "
+                  f"{decl_ev['ignored_reason']}. The scans fell back to the pipeline's own model "
+                  f"(the corpus minus the evidence areas, `code/` and the author's READMEs).", ""]
     lines += ["",
               "## Hand-off placeholders", "",
               f"- count: {plc.get('count', '?')}",
@@ -31648,12 +31723,36 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
     if dst.exists():
         rmtree_force(dst)
     dst.mkdir(parents=True, exist_ok=True)
+    # WHAT THE OPERATOR DECLARES AS SUBMITTED (2026-10-15): read the package's own
+    # README BEFORE the copy, because that file is itself stripped as non-submitted
+    # below. It may state the submitted set as a glob ("Only files whose names match
+    # `cnb-*-[0-9a-f]{7}.@(docx|pdf)` will be submitted ... Submitted files must
+    # not refer to any non-submitted files"). The assembly copy is what ships, so it
+    # is narrowed to that set when the declaration is plausible -- otherwise
+    # `journal_submission/` would carry `.tex`/`.bib` sources and figure assets the
+    # journal never receives, and the PKG-2 scan below would treat a reference into
+    # them as resolvable. A declaration that matches nothing is IGNORED with a
+    # recorded reason, and everything dropped is listed in the manifest. The
+    # pipeline-ADDED submission documents (the response letter, the marked-up
+    # copies) are placed AFTER this filter and are never dropped by it.
+    decl = declared_submission_set(target)
+    dropped_by_declaration = []
     copy_into(target, dst, exclude_top=("work",), skip_aux=True, strip_bookkeeping=True)
     include_code = submit_code_of(ctx)
     non_submitted = tuple(EVIDENCE_DIRNAMES) + (() if include_code else (CODE_DIR,))
     for name in non_submitted:
         if (dst / name).exists():
             rmtree_force(dst / name)
+    if decl.get("declared"):
+        keep = set(decl.get("files") or [])
+        for q in sorted(dst.rglob("*")):
+            if not q.is_file():
+                continue
+            rel = q.relative_to(dst).as_posix()
+            if rel in keep:
+                continue
+            dropped_by_declaration.append(rel)
+            q.unlink()
     response_files = []
     if response_dir is not None:
         for rel in (JOURNAL_RESPONSE_MD_REL, JOURNAL_RESPONSE_MAP_REL):
@@ -31740,6 +31839,12 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
                        "code_included": bool(include_code),
                        "readme_files_excluded": readme_dropped,
                        "word_owner_files_excluded": word_owner_dropped,
+                       # The operator's own declaration (its README) and what it
+                       # kept out of THIS copy.
+                       "declared_submission_patterns": list(decl.get("patterns") or []),
+                       "declared_submission_readme": decl.get("readme"),
+                       "declared_submission_ignored_reason": decl.get("ignored_reason"),
+                       "not_submitted_by_declaration": dropped_by_declaration,
                        "removed_dangling_references": [
                            {"file": f["file"], "sentences": f["removed"]}
                            for f in (reference_strip.get("files") or []) if f.get("removed")],
@@ -31763,6 +31868,16 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
               f"submitted (a Word by-product, not a document): "
               + ", ".join(f"`{r}`" for r in word_owner_dropped[:6])
               + (" …" if len(word_owner_dropped) > 6 else ""))
+    if dropped_by_declaration:
+        print(f"[journal] {len(dropped_by_declaration)} carried file(s) are NOT submitted: the "
+              f"package's own `{(decl.get('readme') or 'README')}` declares only "
+              + " / ".join(f"`{p}`" for p in decl.get("patterns") or [])
+              + f" (every one is listed in the manifest as `not_submitted_by_declaration`); e.g. "
+              + ", ".join(f"`{r}`" for r in dropped_by_declaration[:6])
+              + (" …" if len(dropped_by_declaration) > 6 else ""))
+    elif decl.get("ignored_reason"):
+        print(f"[journal] NOTE: the package's README declares a submission rule that was IGNORED "
+              f"({decl['ignored_reason']}); the copy keeps the pipeline's own submission model.")
     if dangling:
         print(f"[journal] {len(dangling)} reference(s) in the to-be-submitted files point into "
               f"an area this submission does NOT carry and could NOT be removed mechanically "
@@ -40419,7 +40534,7 @@ def _pkg2_external_locator(text: str, start: int, end: int) -> bool:
         text[line_start:line_end if line_end >= 0 else len(text)]))
 
 
-def _pkg2_name_index(root: Path, area_set: set) -> tuple:
+def _pkg2_name_index(root: Path, area_set: set, is_submitted=None) -> tuple:
     """Which written file names THIS package ships, and which it does not.
 
     Four lookup structures over one walk (following directory links, like every
@@ -40435,6 +40550,9 @@ def _pkg2_name_index(root: Path, area_set: set) -> tuple:
     """
     shipped_paths, shipped_names = set(), set()
     absent_paths, absent_names = {}, {}
+    _decl, _own_filter = declared_submission_filter(Path(root))
+    _is_submitted = is_submitted or _own_filter
+    _decl_patterns = tuple(_decl.get("patterns") or ())
     for p in _iter_tree_files(root, follow_dir_links=True):
         try:
             rel = p.relative_to(root).as_posix()
@@ -40443,13 +40561,21 @@ def _pkg2_name_index(root: Path, area_set: set) -> tuple:
         top = rel.split("/", 1)[0].lower()
         absent = (top in area_set or is_word_owner_name(p.name)
                   or _is_aux_doc(p.name) or is_bookkeeping_name(p.name))
+        if not absent and not _is_submitted(rel):
+            # The package's OWN README declares which files are submitted; a file
+            # it excludes is not carried by the submission, whatever the
+            # pipeline's default area model says (2026-10-15).
+            absent = True
         if absent:
             absent_names.setdefault(p.name.lower(), []).append(rel)
             absent_paths.setdefault(rel.lower(), rel)
         else:
             shipped_paths.add(rel.lower())
             shipped_names.add(p.name.lower())
-    return shipped_paths, shipped_names, absent_paths, absent_names
+    # The fifth element is the submission declaration the index was built under
+    # (empty when the package declares none): the caller's row hint names it, so
+    # the author reads WHY a carried file counts as not-submitted.
+    return shipped_paths, shipped_names, absent_paths, absent_names, _decl_patterns
 
 
 def _pkg2_name_resolution(ref: str, index: tuple):
@@ -40460,7 +40586,7 @@ def _pkg2_name_resolution(ref: str, index: tuple):
     actually lives -- the row names them, so the author sees which area the
     reader would have to reach into.
     """
-    shipped_paths, shipped_names, absent_paths, absent_names = index
+    shipped_paths, shipped_names, absent_paths, absent_names = index[:4]
     key = str(ref or "").strip().replace("\\", "/")
     while key.startswith("./"):
         key = key[2:]
@@ -40556,6 +40682,151 @@ PKG3_PROSE_NAME_RE = re.compile(
     r"(?i)(?:main[-_ ]?text|manuscript|cover[-_ ]?letter|response|reply|letter)")
 
 
+# ---- WHAT THE OPERATOR DECLARES AS SUBMITTED (2026-10-15) -------------------
+# A package may carry the operator's own README (`README*.md`, never submitted
+# itself) stating the rule for THIS package: "Only files whose names match the
+# following Bash extglob pattern will be submitted to the venue/journal:
+# `cnb-*-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].@(docx|pdf)`"
+# plus "Submitted files must not refer to any non-submitted files."
+#
+# The pipeline's own model of "the submission" is broader (the corpus minus the
+# evidence areas, `code/` and the author's READMEs), so without reading that
+# declaration the scans called a `.tex` source, a `.bib` or
+# `supplementary_source_files/…` "carried" while the journal never receives
+# them -- a dangling pointer the operator explicitly forbids would pass as
+# resolvable, and the non-submitted `.tex` sources were scanned as if they were
+# submission documents (their own build notes produced rows nobody needed).
+#
+# The declaration is honoured ONLY when it is plausible (see
+# `declared_submission_set`): at least one matching file must exist and at least
+# one of them must be a manuscript document. A declaration that matches nothing
+# is IGNORED with a reason, never silently applied -- a mis-parsed glob must not
+# turn every scan into "clean".
+SUBMISSION_DECLARATION_HINT_RE = re.compile(
+    r"(?i)(?:will be submitted|are submitted|is submitted|submitted to the\s+"
+    r"(?:venue|journal))")
+
+
+def _extglob_to_regex(pat: str):
+    """A bash extglob (`*`, `?`, `[a-f]`, `@(docx|pdf)`) as a regex, or None.
+
+    `*` never crosses a `/` (the patterns name files, and a directory-crossing
+    wildcard would silently widen the submitted set).
+    """
+    out, i, n = [], 0, len(str(pat or ""))
+    try:
+        while i < n:
+            c = pat[i]
+            if c == "*":
+                out.append("[^/]*")
+            elif c == "?":
+                out.append("[^/]")
+            elif pat.startswith("@(", i):
+                j = pat.index(")", i)
+                alts = [a for a in pat[i + 2:j].split("|") if a]
+                if not alts:
+                    return None
+                out.append("(?:" + "|".join(re.escape(a) for a in alts) + ")")
+                i = j
+            elif c == "[":
+                j = pat.index("]", i)
+                cls = pat[i:j + 1]
+                if not re.fullmatch(r"\[[^\]\\]{1,40}\]", cls):
+                    return None
+                out.append(cls)
+                i = j
+            else:
+                out.append(re.escape(c))
+            i += 1
+    except (ValueError, IndexError):
+        return None
+    return re.compile("^" + "".join(out) + "$")
+
+
+MANUSCRIPT_DOC_EXTS = (".docx", ".doc", ".pdf", ".tex", ".ltx", ".md", ".txt")
+
+
+def declared_submission_set(root: Path) -> dict:
+    """The submitted-file set the PACKAGE'S OWN README declares ({} when none).
+
+    Returns {"declared": bool, "patterns": [...], "files": [rel paths],
+    "carried_not_submitted": [rel paths], "ignored_reason": str|None,
+    "readme": rel path|None}. `files` are package-relative paths matching the
+    declared extglob patterns; everything else the package carries is NOT part
+    of the submission (the operator's rule), which is what the submission-surface
+    scans then use.
+    """
+    root = Path(root)
+    out = {"declared": False, "patterns": [], "files": [], "carried_not_submitted": [],
+           "ignored_reason": None, "readme": None}
+    if not root.is_dir():
+        return out
+    readme = None
+    for p in sorted(root.glob("README*")) + sorted(root.glob("*.README*")):
+        if p.is_file() and is_non_submitted_readme_name(p.name):
+            readme = p
+            break
+    if readme is None:
+        return out
+    try:
+        text = readme.read_text("utf-8", "replace")
+    except OSError:
+        return out
+    if not SUBMISSION_DECLARATION_HINT_RE.search(text):
+        return out
+    out["readme"] = readme.relative_to(root).as_posix()
+    patterns = []
+    for tok in re.findall(r"`([^`\n]{2,200})`", text):
+        tok = tok.strip()
+        if not tok or ("*" not in tok and "?" not in tok and "@(" not in tok):
+            continue
+        if _extglob_to_regex(tok) is not None and tok not in patterns:
+            patterns.append(tok)
+    if not patterns:
+        out["ignored_reason"] = (f"{out['readme']} names a submission rule but carries no "
+                                 f"parseable pattern")
+        return out
+    res = [_extglob_to_regex(p) for p in patterns]
+    carried, declared = [], []
+    for q in sorted(root.rglob("*")):
+        if not q.is_file():
+            continue
+        rel = q.relative_to(root).as_posix()
+        base = rel.rsplit("/", 1)[-1]
+        if any(rx.match(rel) or rx.match(base) for rx in res):
+            declared.append(rel)
+        else:
+            carried.append(rel)
+    if not declared:
+        out["ignored_reason"] = (f"the declared pattern(s) {patterns} match no file in the "
+                                 f"package")
+        out["patterns"] = patterns
+        return out
+    if not any(Path(f).suffix.lower() in MANUSCRIPT_DOC_EXTS for f in declared):
+        out["ignored_reason"] = (f"the declared pattern(s) {patterns} match no manuscript "
+                                 f"document ({len(declared)} file(s) matched)")
+        out["patterns"] = patterns
+        return out
+    out.update(declared=True, patterns=patterns, files=declared,
+               carried_not_submitted=carried)
+    return out
+
+
+def declared_submission_filter(root: Path):
+    """(declared record, `is_submitted(rel) -> bool`) for the scans.
+
+    When no declaration is honoured, every carried file counts as submitted
+    (the pipeline's own model, unchanged). When one is, ONLY the declared files
+    do -- and the scans skip the other carried files as documents, exactly like
+    the author's READMEs and the `code/` area.
+    """
+    decl = declared_submission_set(Path(root))
+    if not decl.get("declared"):
+        return decl, (lambda rel: True)
+    allowed = {str(f) for f in decl.get("files") or []}
+    return decl, (lambda rel: str(rel) in allowed)
+
+
 def _pkg3_prose_document(rel: str) -> bool:
     """True when `rel` is a manuscript prose surface PKG-3 reports (see above)."""
     name = str(rel or "")
@@ -40598,7 +40869,12 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
         return rows
     area_set = {n.lower() for n in names}
     patterns = _pkg2_area_patterns(names)
-    index = _pkg2_name_index(root, area_set)
+    # ONE declaration read for the whole scan: the index and the document filter
+    # must agree about the submitted set, and two calls in one walk could read two
+    # different trees on a mutating package.
+    _decl, is_submitted = declared_submission_filter(root)
+    index = _pkg2_name_index(root, area_set, is_submitted=is_submitted)
+    declared_patterns = tuple(index[4] if len(index) > 4 else ())
 
     def row(rel: str, line_no: int, ref: str, hint: str, resolves=()) -> dict:
         out = {
@@ -40616,6 +40892,13 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
         if not p.is_file():
             continue
         rel = p.relative_to(root).as_posix()
+        if not is_submitted(rel):
+            # The package's own README declares the submitted set; a file it
+            # excludes is not a submission document, so its own pointers are the
+            # author's business -- exactly like a file inside `code/`. Without
+            # this the non-submitted `.tex`/`.bib` sources were scanned as if the
+            # journal would receive them.
+            continue
         if rel.split("/", 1)[0].lower() in area_set:
             # A file inside a non-carried area is part of that area, never a
             # submission document: its own internal pointers are not findings.
@@ -40691,7 +40974,8 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
                 # (`raw_data\tables.tsv`), and splitting on "/" alone read the
                 # whole reference as the "head", so the row's advice named the
                 # README rule for a raw_data pointer.
-                rows.append(row(rel, i, ref, _pkg2_hint(ref, area_set)))
+                rows.append(row(rel, i, ref,
+                                _pkg2_hint(ref, area_set, declared_patterns)))
                 if len(rows) >= limit:
                     return rows
             # The NAME shape: a written filename that resolves, inside this very
@@ -40757,7 +41041,8 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
                     # package merely happens to carry a same-named copy).
                     continue
                 rows.append(row(rel, i, m.group(0),
-                                _pkg2_hint(where[0], area_set), resolves=where))
+                                _pkg2_hint(where[0], area_set, declared_patterns),
+                                resolves=where))
                 if len(rows) >= limit:
                     return rows
     return rows
@@ -40810,13 +41095,15 @@ def _pkg2_area_patterns(names: list) -> list:
     return patterns
 
 
-def _pkg2_hint(ref: str, area_set: set) -> str:
+def _pkg2_hint(ref: str, area_set: set, declared_patterns=()) -> str:
     """The one-fact reason a reference cannot be resolved, for the row's advice.
 
     `ref` is what the author wrote (`code/out/x.csv`) or where the package
     actually carries a bare name (`code/jf_supplement_analysis.py`), so one
     function covers both shapes -- and the prose spelling of an area itself
     ("code directory", "raw_data/"), where the area word is the first token.
+    When the package's own README declares a submission pattern, the row says so:
+    the file exists in the package but is not part of the submission.
     """
     parts = re.split(r"[/\\\s]", str(ref))
     head = (parts[0] or "").lower()
@@ -40831,6 +41118,14 @@ def _pkg2_hint(ref: str, area_set: set) -> str:
         return " (that area is a read-only input: it never ships)"
     if is_bookkeeping_name(base) or _is_aux_doc(base) or is_word_owner_name(base):
         return (" (it is one of the pipeline's own by-product files, which never ship)")
+    if declared_patterns:
+        # Nothing in the standing model explains it: the package's own README
+        # does. This is the 2026-10-15 gap -- a `.tex`/`.bib` source, a
+        # `supplementary_source_files/…` asset or any other carried file the
+        # declared submission set leaves out.
+        return (f" (the package's own README declares only "
+                f"{' / '.join(f'`{p}`' for p in declared_patterns[:2])} as submitted; this "
+                f"file is carried by the package but is NOT part of that set)")
     return " (the author's README*.md/README*.txt files are never submitted)"
 
 
@@ -41193,11 +41488,12 @@ def internal_artifact_rows(root: Path, limit: int = 40) -> list:
     root = Path(root)
     if not root.is_dir():
         return rows
+    _decl, _decl_is_submitted = declared_submission_filter(root)
     for p in sorted(root.rglob("*")):
         if not p.is_file():
             continue
         rel = p.relative_to(root).as_posix()
-        if is_evidence_rel(rel):
+        if is_evidence_rel(rel) or not _decl_is_submitted(rel):
             continue
         if p.suffix.lower() not in PACKAGE_TEXT_EXTS:
             continue
@@ -41246,10 +41542,12 @@ def package_front_matter_glue_rows(root: Path, limit: int = 20) -> list:
     root = Path(root)
     if mod is None or not hasattr(mod, "correspondence_glue_rows") or not root.is_dir():
         return rows
+    _decl, _decl_is_submitted = declared_submission_filter(root)
     for p in sorted(root.rglob("*.docx")):
         if not p.is_file() or is_non_document_name(p.name) or _is_aux_doc(p.name):
             continue
-        if is_evidence_rel(p.relative_to(root).as_posix()):
+        rel = p.relative_to(root).as_posix()
+        if is_evidence_rel(rel) or not _decl_is_submitted(rel):
             continue
         try:
             paras = _docx_paragraphs(p)
@@ -41300,6 +41598,7 @@ def package_display_item_rows(root: Path, areas=None, limit: int = 20) -> list:
     if not root.is_dir():
         return rows
     areas = [str(a).lower() for a in (areas or submission_not_carried_areas_plain())]
+    _decl, is_submitted = declared_submission_filter(root)
     carried_labels, absent_labels = set(), {}
     for p in sorted(root.rglob("*")):
         if not p.is_file() or is_non_document_name(p.name):
@@ -41315,8 +41614,13 @@ def package_display_item_rows(root: Path, areas=None, limit: int = 20) -> list:
         rel = p.relative_to(root).as_posix()
         if rel.split("/", 1)[0].lower() in areas:
             absent_labels.setdefault(label, []).append(rel)
-        else:
+        elif is_submitted(rel):
             carried_labels.add(label)
+        else:
+            # Carried by the package, but the declared submission set leaves it
+            # out: for a reader of the submission it is as unreachable as an area
+            # file, so the row names it too.
+            absent_labels.setdefault(label, []).append(rel)
     if not carried_labels:
         # No figure FILE carries a label: this package embeds its artwork in the
         # documents themselves (the CopyNumBench main text carries five images
@@ -41332,6 +41636,8 @@ def package_display_item_rows(root: Path, areas=None, limit: int = 20) -> list:
         if rel.split("/", 1)[0].lower() in areas or is_evidence_rel(rel):
             continue
         if is_bookkeeping_name(p.name) or is_non_submitted_readme_name(p.name):
+            continue
+        if not is_submitted(rel):
             continue
         if p.suffix.lower() == ".docx":
             lines = _docx_paragraphs(p)
@@ -41396,11 +41702,13 @@ def front_matter_gap_rows(ctx: Ctx, root: Path, limit: int = 8) -> list:
         label = ""
     if not label:
         return rows
+    _decl, _decl_is_submitted = declared_submission_filter(root)
     for p in sorted(root.rglob("*.docx")):
         if not p.is_file() or is_non_document_name(p.name) or _is_aux_doc(p.name):
             continue
         rel = p.relative_to(root).as_posix()
-        if is_evidence_rel(rel) or docx_document_role(p.name) != "main":
+        if is_evidence_rel(rel) or not _decl_is_submitted(rel) \
+                or docx_document_role(p.name) != "main":
             continue
         try:
             paras = _docx_paragraphs(p) or []
@@ -41424,6 +41732,150 @@ def front_matter_gap_rows(ctx: Ctx, root: Path, limit: int = 8) -> list:
     return rows[:limit]
 
 
+# PKG-5 (2026-10-15): two SHIPPED surfaces attribute one display item to
+# different tools. The operator's second audit found it in the delivered
+# NeoHeteroclitic package: the resources table says "Matplotlib, seaborn
+# (Figures 2, 4 and S2)" while Figure S2's own legend ends "Created with
+# BioRender.com" (and the BioRender row claims "Figures 1 and S2"), so the
+# matplotlib/seaborn row also steals the credit for the data figure that the
+# code actually produced (Figure S3). Neither a per-document scan nor M31 can
+# see it: the contradiction lives BETWEEN a table row and another document's
+# legend, and it is mechanical once both sides are parsed.
+PKG5_TOOL_ROW_RE = re.compile(r"^(?P<tools>[^()]{2,90}?)\((?P<items>[^)]{2,140})\)\s*$")
+PKG5_ITEM_LIST_RE = re.compile(
+    r"(?i)\b(fig(?:ure)?s?|tables?)\.?\s*"
+    r"((?:S?\d+[a-z]?)(?:\s*(?:,|and|&|;|\u2013|-)\s*S?\d+[a-z]?)*)")
+PKG5_LABEL_RE = re.compile(r"(?i)^\s*(fig(?:ure)?s?|tables?)\.?\s*(S?\d+)\b")
+# `Created with BioRender.com`, `plotted with matplotlib`, `made in R` ... The
+# captured name must START with a capital (or a digit-led product like `R 4.4`):
+# otherwise an ordinary participle matches ("variants generated by substituting
+# ...", "values are plotted with 10,000 bootstrap resamples") and every legend
+# would attribute its figure to prose.
+# The VERB half is case-insensitive, the NAME half is NOT: `[A-Z]` inside a
+# `(?i)` pattern matches lowercase too, and that made every legend "attribute"
+# its figure to the prose after it ("variants generated by substituting MHC-anchor
+# residues", "sequence logos, plotted in bits") -- five false rows on the package
+# that has exactly one real contradiction.
+PKG5_PRODUCER_RE = re.compile(
+    r"(?i:\b(?:created|generated|made|drawn|produced|prepared|plotted|visuali[sz]ed|"
+    r"assembled|rendered|composed)\s+(?:with|using|in|by)\s+)"
+    r"(?P<name>(?:[A-Z][\w.+-]{1,30}|R\s?\d[\w.]*)(?:\s?[A-Z0-9][\w.+-]{0,30}){0,3})")
+PKG5_KIND = {"fig": "figure", "figs": "figure", "figure": "figure", "figures": "figure",
+             "table": "table", "tables": "table"}
+
+
+def display_provenance_rows(root: Path, areas=None, limit: int = 20) -> list:
+    """PKG-5: a display item's declared PRODUCER disagrees between two surfaces.
+
+    Side A is a resources/software table row: `Tool, tool (Figures 2, 4 and S2)`.
+    Side B is the item's own legend, where the producer is named with a
+    production verb (`Created with BioRender.com`). When the legend of item X
+    names a producer and a table row claims X for a DIFFERENT tool, the two
+    shipped surfaces contradict each other and the author must reconcile them
+    (the pipeline cannot know which side is right).
+
+    Silent unless both sides are present for the same item, so a legend that
+    names no producer, or a table row for an item without a legend here, is not
+    a row. Titles are read from the legend block of the item itself (its label
+    paragraph plus the following paragraphs until the next label).
+    """
+    rows = []
+    root = Path(root)
+    if not root.is_dir():
+        return rows
+    areas = [str(a).lower() for a in (areas or submission_not_carried_areas_plain())]
+    _decl, is_submitted = declared_submission_filter(root)
+    claims, producers = {}, {}
+    docs = []
+    for p in sorted(root.rglob("*")):
+        if not p.is_file() or is_non_document_name(p.name):
+            continue
+        rel = p.relative_to(root).as_posix()
+        if rel.split("/", 1)[0].lower() in areas or is_evidence_rel(rel):
+            continue
+        if is_bookkeeping_name(p.name) or is_non_submitted_readme_name(p.name):
+            continue
+        if not is_submitted(rel):
+            continue
+        if p.suffix.lower() == ".docx":
+            lines = _docx_paragraphs(p)
+        elif p.suffix.lower() in PACKAGE_TEXT_EXTS:
+            try:
+                if p.stat().st_size > PACKAGE_TEXT_BYTES_LIMIT:
+                    continue
+                lines = p.read_text("utf-8", "replace").splitlines()
+            except OSError:
+                continue
+        else:
+            continue
+        if lines:
+            docs.append((rel, list(lines)))
+    for rel, lines in docs:
+        for i, line in enumerate(lines):
+            # Side A: a resources/software table row. It does NOT start with a
+            # display label (`Matplotlib, seaborn (Figures 2, 4 and S2)`), so the
+            # two sides are parsed INDEPENDENTLY: reading the claim only inside a
+            # label's own paragraph missed every table row and reported nothing on
+            # the very package that has the defect.
+            tm = PKG5_TOOL_ROW_RE.match(line.strip())
+            if tm:
+                for im in PKG5_ITEM_LIST_RE.finditer(tm.group("items")):
+                    kind = PKG5_KIND.get(im.group(1).lower(), "")
+                    if not kind:
+                        continue
+                    tools = [t.strip(" .") for t in
+                             re.split(r",|;|\band\b", tm.group("tools")) if t.strip(" .")]
+                    for num in re.findall(r"(?i)S?\d+", im.group(2)):
+                        for tool in tools:
+                            claims.setdefault((kind, num.lower()), {}).setdefault(tool, rel)
+            # Side B: the item's own legend block and the producer it names.
+            m = PKG5_LABEL_RE.match(line)
+            if not m:
+                continue
+            key = (PKG5_KIND.get(m.group(1).lower(), ""), m.group(2).lower())
+            if not key[0]:
+                continue
+            ends = [j for j in range(i + 1, min(i + 8, len(lines)))
+                    if PKG5_LABEL_RE.match(lines[j])]
+            stop = ends[0] if ends else min(i + 6, len(lines))
+            block = "\n".join(lines[i:stop])
+            for pm in PKG5_PRODUCER_RE.finditer(block):
+                producers.setdefault(key, {}).setdefault(pm.group("name").strip(), rel)
+    # ONE row per (contradicted item, the document whose table claims it), listing
+    # every contradicting tool: two rows for `Matplotlib` and `seaborn` would read
+    # as two defects where the author has one correction to make.
+    grouped = {}
+    for key, tools in sorted(claims.items()):
+        prods = producers.get(key)
+        if not prods:
+            continue
+        blob = " | ".join(prods).lower()
+        bad = sorted(t for t in tools if t.lower() not in blob)
+        if not bad:
+            continue
+        doc = sorted(tools[t] for t in bad)[0]
+        slot = grouped.setdefault((key, doc), {"tools": [], "prods": prods})
+        slot["tools"].extend(bad)
+    for (key, doc), slot in sorted(grouped.items()):
+        prods = slot["prods"]
+        rows.append({
+            "rule": "PKG-5", "severity": "high", "file": doc,
+            "item": f"{key[0]} {key[1]}",
+            "reference": ", ".join(sorted(set(slot["tools"]))),
+            "detail": (f"the resources table in `{doc}` claims "
+                       f"{' / '.join(repr(t) for t in sorted(set(slot['tools'])))} for "
+                       f"{key[0]} {key[1].upper()}, while that item's OWN legend attributes it "
+                       f"to {', '.join(repr(p) for p in sorted(prods))} "
+                       f"(in `{prods[sorted(prods)[0]]}`). Two shipped surfaces disagree about "
+                       f"which tool produced this item, so one of them is wrong: correct the "
+                       f"table row or the legend (and check the item the real producer belongs "
+                       f"to)"),
+            "fix": "manual"})
+        if len(rows) >= limit:
+            break
+    return rows[:limit]
+
+
 def submission_not_carried_areas_plain() -> list:
     """`submission_not_carried_areas` without a root: the standing areas.
 
@@ -41441,11 +41893,12 @@ def package_pdf_rows(root: Path, limit: int = 40) -> list:
     mod = _format_module()
     if mod is None or not root.is_dir():
         return rows
+    _decl, _decl_is_submitted = declared_submission_filter(root)
     for p in sorted(root.rglob("*.pdf")):
         if not p.is_file() or _is_aux_doc(p.name):
             continue
         rel = p.relative_to(root).as_posix()
-        if is_evidence_rel(rel):
+        if is_evidence_rel(rel) or not _decl_is_submitted(rel):
             continue
         try:
             # FMT-PDF3 (an empty export: no extractable text, no embedded
@@ -41716,6 +42169,16 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     # so the row names the file the author will actually hand over.
     hygiene["display_items"] = package_display_item_rows(
         tmp, submission_not_carried_areas(ctx))
+    # PKG-5: two shipped surfaces attributing one display item to different
+    # producers (a resources-table row vs the item's own legend). Reported at
+    # publication because no mechanical repair may choose between them.
+    hygiene["display_provenance"] = display_provenance_rows(
+        tmp, submission_not_carried_areas(ctx))
+    # WHAT THE SUBMISSION ACTUALLY CARRIES, per the package's own README: the
+    # declaration the scoped scans above already used (or the reason it was
+    # ignored). Recorded so the status document states the set the judgements were
+    # made against instead of leaving the operator to infer it.
+    hygiene["submission_declaration"] = declared_submission_set(tmp)
     # Title-page facts the recorded rule set cannot check (a rule the venue did
     # not state is COUNTED AND NAMED, never invented): the content type this run
     # is configured for, when the title page does not print it.
@@ -41851,6 +42314,19 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
                  f"content, and a name that reads like a file the submission does not "
                  f"contain): " + ", ".join(f"`{n}`" for n in junk[:8])
                  + (" …" if len(junk) > 8 else ""))
+    decl = hygiene.get("submission_declaration") or {}
+    if decl.get("declared"):
+        L.append(f"- the SUBMITTED SET comes from the package's own `{decl.get('readme')}`: "
+                 + " / ".join(f"`{p}`" for p in decl.get("patterns") or [])
+                 + f" ({decl.get('submitted_count', len(decl.get('files') or []))} file(s); every "
+                   f"submission-surface check above was made against that set -- the other "
+                   f"{len(decl.get('carried_not_submitted') or [])} carried file(s) are not part "
+                   f"of the submission)")
+    elif decl.get("ignored_reason"):
+        L.append(f"- the package's own README declares a submission rule that was IGNORED "
+                 f"({decl['ignored_reason']}); the submission-surface checks used the pipeline's "
+                 f"own model (the corpus minus the evidence areas, `code/` and the author's "
+                 f"READMEs)")
     internal = hygiene.get("internal_artifacts") or []
     if internal:
         L.append("")
@@ -41924,6 +42400,15 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
                      f"`{it.get('audit_verdict') or 'none'}`] "
                      + (f"-- {str(it.get('location'))[:160]}" if it.get("location") else ""))
     pdfs = hygiene.get("pdf_artifacts") or []
+    prov = hygiene.get("display_provenance") or []
+    if prov:
+        L.append("")
+        L.append(f"**{len(prov)} display-item provenance contradiction(s) (PKG-5) -- two shipped "
+                 f"surfaces attribute the same item to different tools; the author must say which "
+                 f"side is right:**")
+        for r in prov[:12]:
+            L.append(f"  - `{r.get('file')}` [{r.get('rule')}] {r.get('item')}: "
+                     f"{str(r.get('detail'))[:300]}")
     if pdfs:
         L.append("")
         L.append(f"**{len(pdfs)} PDF artifact finding(s) in the published package "
@@ -42252,6 +42737,13 @@ def package_readiness(final_clean: dict) -> dict:
                          "advisory": True, "item": r.get("reference"),
                          "detail": f"line {r.get('line')}: {r.get('reference')} -- "
                                    f"{r.get('detail')}"})
+    for r in hyg.get("display_provenance") or []:
+        # PKG-5 is BLOCKING, not advisory: the two shipped surfaces contradict
+        # each other about a fact, and the author is the only one who can say
+        # which side is right (the pipeline must not silently pick one).
+        findings.append({"rule": r.get("rule") or "PKG-5", "document": r.get("file"),
+                         "item": r.get("item"),
+                         "detail": r.get("detail")})
     for r in hyg.get("front_matter_gaps") or []:
         findings.append({"rule": r.get("rule") or "FMT-TP1", "document": r.get("file"),
                          "advisory": True, "detail": r.get("detail")})

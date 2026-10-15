@@ -153,12 +153,28 @@ answers sit in an unreferenced copy, a two-packet-set file), front-matter glue
 (FMT-X2), the title-page content type the profile states no rule for (FMT-TP1,
 counted and named as a gap) and every OS by-product (`:Zone.Identifier`,
 `.DS_Store`, a Word owner file — never documents, stripped from the delivered
-copy). Purely advisory rows are listed but never gate; `decide --require-ready`
-turns the blocking ones into exit-5 problems. The stage's own hand-off list is
-copied beside the published directory as
+copy). Two shipped surfaces that attribute one display item to different tools
+are `PKG-5` (a resources-table row against the item's own legend — the pipeline
+reports it and picks NO side). Purely advisory rows are listed but never gate;
+`decide --require-ready` turns the blocking ones into exit-5 problems. The
+stage's own hand-off list is copied beside the published directory as
 `final_clean_version.manual_steps.md` (a SIBLING — anything inside the directory
 would become manuscript content in the next run), so the author never has to read
 a path inside `runs/<id>/`.
+
+**What the submission actually carries is the package's own declaration.** Many
+packages ship the operator's `README*.md` stating the submitted set as a glob
+(`cnb-*-[0-9a-f]{7}.@(docx|pdf)`, plus `figures/*.png` in one of them) and adding
+"Submitted files must not refer to any non-submitted files". When that
+declaration is present and plausible (it matches at least one manuscript
+document), the submission-surface scans use it as the definition of "ships":
+only its files are read as submission documents, every other carried file (a
+`.tex`/`.bib` source, a `supplementary_source_files/…` asset) counts as
+not-submitted, and the same set narrows what `journal_submission/` copies. A
+declaration that matches nothing is ignored WITH a reason — a mis-parsed glob
+must never turn every scan into "clean" — and the honoured declaration is
+recorded in the status readme, `journal_submission.json` and every session's
+evidence pack.
 
 ## Everyday commands
 
