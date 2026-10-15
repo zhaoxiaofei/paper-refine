@@ -397,6 +397,178 @@ def test_delivered_packages_if_present():
               not attached, str(attached[:2]))
 
 
+def test_soft_breaks_are_separators():
+    """A `w:br` is a SEPARATOR: reading across one invented a glued address.
+
+    The 2026-10-15b neohet package renders
+
+        * Correspondence:
+        Zhen Xie
+        zhenxie@tsinghua.edu.cn
+
+    and the delivered status reported "the address is glued to the word before
+    it" (the operator's audit re-found it). The break is a DELIMITER: both
+    readers keep it as a newline, FMT-X2 folds it to a space for its checks, and
+    a genuinely glued `Zhen Xiezhenxie@…` -- which is what the OLD package
+    really has -- still reports.
+    """
+    import shutil
+    import tempfile
+    import zipfile
+    d = Path(tempfile.mkdtemp(prefix="hyg_br_"))
+    try:
+        doc = d / "corr.docx"
+        body = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            "<w:body><w:p>"
+            "<w:r><w:t>* Correspondence:</w:t></w:r>"
+            "<w:r><w:br/><w:t>Zhen Xie</w:t></w:r>"
+            "<w:r><w:br/><w:t>zhenxie@tsinghua.edu.cn</w:t></w:r>"
+            "</w:p></w:body></w:document>")
+        with zipfile.ZipFile(doc, "w") as z:
+            z.writestr("word/document.xml", body)
+        paras = pp._docx_paragraphs(doc)
+        check("the pipeline reader keeps the soft break (a separator, not glue)",
+              paras == ["* Correspondence:\nZhen Xie\nzhenxie@tsinghua.edu.cn"], str(paras))
+        fmt = pp._format_module()
+        if fmt is not None:
+            check("the format module's text_of keeps it too",
+                  fmt.text_of(body) == "* Correspondence:\nZhen Xie\nzhenxie@tsinghua.edu.cn",
+                  repr(fmt.text_of(body)))
+            check("FMT-X2 stays quiet on the separated block",
+                  not fmt.correspondence_glue_rows(paras, [False]),
+                  "reported a glued address")
+            check("FMT-X2 still fires on a REAL glue",
+                  bool(fmt.correspondence_glue_rows(
+                      ["* Correspondence:Zhen Xiezhenxie@tsinghua.edu.cn"], [False])))
+            check("the line-edge spaces are found around the break",
+                  [(sp["start"], sp["end"]) for sp in fmt.hygiene_spans(
+                      "<w:p><w:r><w:t xml:space=\"preserve\">* Correspondence: </w:t></w:r>"
+                      "<w:r><w:br/></w:r><w:r><w:t xml:space=\"preserve\">Zhen Xie</w:t>"
+                      "</w:r></w:p>") if sp["rule"] == "FMT-P4"] == [(17, 18)],
+                  str(fmt.hygiene_spans(
+                      "<w:p><w:r><w:t xml:space=\"preserve\">* Correspondence: </w:t></w:r>"
+                      "<w:r><w:br/></w:r><w:r><w:t xml:space=\"preserve\">Zhen Xie</w:t>"
+                      "</w:r></w:p>")))
+            # ... and the writer must not delete the break with the space.
+            para = ("<w:p><w:r><w:t xml:space=\"preserve\">* Correspondence: </w:t></w:r>"
+                    "<w:r><w:br/></w:r><w:r><w:t xml:space=\"preserve\">Zhen Xie</w:t></w:r>"
+                    "</w:p>")
+            spans = [(sp["start"], sp["end"], sp["repl"])
+                     for sp in fmt.hygiene_spans(para) if sp["fix"] == "mechanical"]
+            fixed, _applied = fmt.rewrite_text_spans(para, spans)
+            check("the writer keeps the break it deletes the space beside",
+                  fixed.count("<w:br/>") == 1
+                  and fmt.text_of(fixed) == "* Correspondence:\nZhen Xie",
+                  repr(fmt.text_of(fixed)))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_producer_extraction_boundaries():
+    """PKG-5's producer name: a section is not a tool, a sentence end is a stop."""
+    import tempfile
+    import shutil
+    try:
+        import docx                                              # noqa: PLC0415
+    except Exception:                                            # noqa: BLE001
+        print("skip: python-docx is not installed here")
+        return
+    d = Path(tempfile.mkdtemp(prefix="hyg_p5_"))
+    try:
+        # The 2026-10-15b shape: a legend that ends "... to the Results." must
+        # not become a producer named "Results", and the tables' own (correct)
+        # rows must not be reported either.
+        doc = docx.Document()
+        doc.add_paragraph("Figure S1. Heteroclitic peptides expand the pool. "
+                          "The analysis is a proof of concept for the design-space "
+                          "argument made in Results.")
+        doc.add_paragraph("Figure S2. A candidate mechanism. Created with BioRender.com.")
+        t = doc.add_table(rows=1, cols=2)
+        t.cell(0, 0).text = "Matplotlib, seaborn (Figures 2, 4, S1 and S3)"
+        t.cell(0, 1).text = "https://matplotlib.org"
+        doc.save(str(d / "supp.docx"))
+        rows = pp.display_provenance_rows(d)
+        check("a section name is not a producer (no PKG-5 row)", not rows,
+              str([(r.get("item"), r.get("reference")) for r in rows]))
+        # The CONTROL: the same table against a legend that really does name a
+        # different tool must still report.
+        doc2 = docx.Document()
+        doc2.add_paragraph("Figure S1. Schematic of the pipeline. Created with BioRender.com.")
+        t2 = doc2.add_table(rows=1, cols=2)
+        t2.cell(0, 0).text = "Matplotlib, seaborn (Figure S1)"
+        t2.cell(0, 1).text = "https://matplotlib.org"
+        doc2.save(str(d / "supp2.docx"))
+        (d / "supp.docx").unlink()
+        rows2 = pp.display_provenance_rows(d)
+        check("the real contradiction is still reported",
+              len(rows2) == 1 and "Matplotlib" in str(rows2[0].get("reference")),
+              str([(r.get("item"), r.get("reference")) for r in rows2]))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_stale_pipeline_chain_warning():
+    """A root that froze ANOTHER root's copy is warned about, the direct ones are not."""
+    import shutil
+    import tempfile
+    import json
+    d = Path(tempfile.mkdtemp(prefix="hyg_chain_"))
+    try:
+        repo_pipeline = WS / "paper_pipeline.py"
+        # an "old root" holding a stale frozen copy, and a "new root" that froze
+        # the old root's copy (the 2026-10-15b neohet shape)
+        old_root = d / "old-root"
+        old_root.mkdir()
+        (old_root / "paper_pipeline.py").write_bytes(b"# stale pipeline\n")
+        # The old root records the tree the operator MAINTAINS as its origin (that
+        # is what a real root's state.json holds); its own frozen copy is stale.
+        (old_root / "state.json").write_text(json.dumps(
+            {"pipeline": {"path": str(repo_pipeline), "sha256": "0" * 64}}),
+            encoding="utf-8")
+        new_root = d / "new-root"
+        new_root.mkdir()
+        shutil.copy2(old_root / "paper_pipeline.py", new_root / "paper_pipeline.py")
+        (new_root / "state.json").write_text(json.dumps(
+            {"pipeline": {"path": str(old_root / "paper_pipeline.py"),
+                          "sha256": pp.sha256_file(old_root / "paper_pipeline.py")}}),
+            encoding="utf-8")
+
+        class Ctx:                                                # noqa: D401
+            pass
+
+        ctx = Ctx()
+        ctx.root = new_root
+        ctx.state = json.loads((new_root / "state.json").read_text(encoding="utf-8"))
+        st = pp.root_pipeline_staleness(ctx)
+        check("the chain walk finds the maintained tree", bool(st.get("maintained_path")),
+              str(st)[:160])
+        check("a root that froze another root's copy is marked foreign",
+              bool(st.get("frozen_foreign")), str(st)[:160])
+        note = pp.pipeline_snapshot_note(ctx)
+        check("and it is warned about", "WARNING" in note, note[:120])
+        check("the maintained tree is the repo file", st.get("maintained_path") == str(repo_pipeline),
+              str(st.get("maintained_path")))
+
+        # A root whose origin IS the maintained tree is not "foreign": the
+        # ordinary origin-moved-on sentence covers it instead.
+        direct = d / "direct-root"
+        direct.mkdir()
+        shutil.copy2(repo_pipeline, direct / "paper_pipeline.py")
+        (direct / "state.json").write_text(json.dumps(
+            {"pipeline": {"path": str(repo_pipeline), "sha256": pp.sha256_file(repo_pipeline)}}),
+            encoding="utf-8")
+        ctx2 = Ctx()
+        ctx2.root = direct
+        ctx2.state = json.loads((direct / "state.json").read_text(encoding="utf-8"))
+        st2 = pp.root_pipeline_staleness(ctx2)
+        check("a root set up from the maintained tree is not foreign",
+              not st2.get("frozen_foreign"), str(st2)[:140])
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def main() -> int:
     test_name_classes()
     test_identity_vs_delivery_split()
@@ -407,6 +579,9 @@ def main() -> int:
     test_comma_glue_rule()
     test_pdf_production_note_rule()
     test_real_packages_are_clean_now()
+    test_soft_breaks_are_separators()
+    test_producer_extraction_boundaries()
+    test_stale_pipeline_chain_warning()
     test_delivered_packages_if_present()
     for d in TMPDIRS:
         shutil.rmtree(d, ignore_errors=True)

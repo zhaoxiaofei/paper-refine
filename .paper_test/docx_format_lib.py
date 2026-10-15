@@ -1407,9 +1407,15 @@ def test_stage_normalization():
     (pkg / "work").mkdir()
     make_package(pkg / "work" / "scratch.docx")          # scratch must be ignored
     scratch_before = _sha(pkg / "work" / "scratch.docx")
-    text_before = fmt.text_of("".join(
-        p[2] for p in fmt.paragraphs(
-            zipfile.ZipFile(pkg / "manuscript.docx").read("word/document.xml").decode("utf-8"))))
+    # The document TEXT, ignoring blank paragraphs: the repair MOVES a page break
+    # off an empty paragraph and deletes it, which the fixer records as an edit --
+    # the assertion below is about the prose, not about the blank lines.
+    def _doc_text(xml: str) -> str:
+        return "\n".join(t for t in (fmt.text_of(p[2]) for p in fmt.paragraphs(xml))
+                          if t.strip())
+
+    text_before = _doc_text(
+        zipfile.ZipFile(pkg / "manuscript.docx").read("word/document.xml").decode("utf-8"))
     left = (zipfile.ZipFile(pkg / "manuscript.docx")
             .read("word/document.xml").decode("utf-8"))
     warns = []
@@ -1428,7 +1434,8 @@ def test_stage_normalization():
     right = (zipfile.ZipFile(pkg / "manuscript.docx")
              .read("word/document.xml").decode("utf-8"))
     check("the repair did not change the document text",
-          text_before == fmt.text_of("".join(p[2] for p in fmt.paragraphs(right))))
+          text_before == _doc_text(right),
+          f"{text_before[:60]!r} != {_doc_text(right)[:60]!r}")
     # an already-clean package is a no-op
     warns2 = []
     summary2 = nb._format_fix_stage_package(ctx, rec, pkg, warns2)

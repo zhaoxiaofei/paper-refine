@@ -920,6 +920,57 @@ touching this area:
   skipped the 4.6 MB CNB main text, so the scan saw a package without its
   manuscript.
 
+* **The probe reads the OTHER direction, and its report must be earned**
+  (2026-10-16). Two independent audits of the delivered packages found the same
+  shape of defect twice: a submission that ships LESS than it promises (the CNB
+  main text citing a supplementary note the declared set does not carry; the
+  front-matter obligations the review itself enumerated). The probe — the
+  pipeline's cold-context discovery pass — was enumerating surfaces, so it could
+  not see a hole. Three changes:
+  * a THIRD seeded candidate list, `probe_review/OBLIGATIONS.md`
+    (`probe_obligation_rows`): the submitted set the package's own README
+    declares, every carried file as submitted or NOT, every written pointer the
+    submission makes and where it resolves, and every display item the documents
+    cite with no matching file — the completeness direction as a disposal task;
+  * the prompt's method gains "RUN THE TWO DIRECTIONS, NOT ONE": the declared
+    set vs what the documents depend on, the venue's recorded structure vs the
+    sections carried, and the submission's own promises (sections it announces,
+    denominators its statistics name, hashes and dates its front matter pins),
+    each disposed in `coverage.md` by name;
+  * an acceptance floor: an empty or short report must be JUSTIFIED with
+    positive evidence, area by area, and the prompt now states the stage's own
+    target verbatim ("There are still remaining issues in this manuscript
+    submission. Please identify these issues.") with the classes framed as ways
+    to look, never as a fence on what may be filed.
+* **The length status reaches the author** (2026-10-16). `decision.json` has
+  carried the M19 note ("main-text 3726 words OVER-VENUE-LIMIT (inside the
+  pipeline's margin)") while the SIBLING `final_clean_version.readme.md` — the
+  one document beside the package — did not, so the 2026-10-15b CNB package went
+  out at 3,726 words against Nature Biotechnology's own 3,000-word limit with no
+  delivered line saying so. The readme now prints the note AND, per section, the
+  words against the venue's OWN number with the margin's cap, because the venue's
+  number is what the journal enforces.
+* **Two PKG-5 / FMT-X2 false positives are closed** (2026-10-16). Both were
+  found by the operator's audits and both were the pipeline reporting a defect
+  the package does not have:
+  * `PKG-5` read a legend ending `... the design-space argument made in
+    Results.` as a producer named "Results" and contradicted the resources table
+    over it. The producer name is now finalized in `pkg5_producer_name`: the
+    name never runs into the next sentence, a sentence-final period is dropped
+    (`BioRender.com.` keeps its product punctuation), and a SECTION name is
+    refused outright;
+  * `FMT-X2` read the shipped three-line correspondence block
+    (`* Correspondence: / Zhen Xie / zhenxie@…`) as a glued address, because
+    both readers DROPPED the `w:br` between the name and the address. Breaks are
+    now a delimiter in `text_of` and `_docx_paragraphs` (one newline, counted in
+    every text offset), `visual_text_lines` counts it so a trailing space cannot
+    delete the break it sits beside, `rewrite_text_spans` walks both kinds of
+    piece in document order and splices the cover ranges at their own offsets
+    (a same-length replacement is no longer mistaken for untouched text), and
+    `correspondence_glue_rows` folds the break to a space for its checks while
+    remembering which spaces the breaks contributed — a real glue still reports,
+    and the OLD package's truly glued line still does too.
+
 ## Known, deliberate limits
 
 * The **skill packages** (`paper-skills/`) are standalone: their own prose still
