@@ -207,7 +207,8 @@ def test_refresh_document():
           "Main text." in joined and "1" in new_texts[1] and "2" in new_texts[2],
           repr([new_texts[1], new_texts[2]]))
     check("the bibliography was rebuilt in rank order (Alpha entry 1, Beta entry 2)",
-          "1.Alvarez" in new_texts[4].replace(" ", "") and "2.Bianchi" in new_texts[5].replace(" ", ""),
+          "1.Alvarez" in new_texts[4].replace(" ", "").replace("\n", "") \
+              and "2.Bianchi" in new_texts[5].replace(" ", "").replace("\n", ""),
           repr([new_texts[4][:40], new_texts[5][:40]]))
     res2 = fmt.zotero_refresh_document(new_xml, new_texts)
     check("the refresh is idempotent (a second pass is a no-op)", not res2["changed"])
@@ -247,8 +248,8 @@ def test_refresh_rebuilds_a_stale_bibliography_order():
           res["changed"] and res["reordered"], str(res.get("skip")))
     new_texts = [fmt.text_of(q[2]) for q in fmt.paragraphs(res["xml"])]
     check("the rebuilt list runs in rank order (Alpha entry 1, Beta entry 2)",
-          "1.Alvarez" in new_texts[4].replace(" ", "")
-          and "2.Bianchi" in new_texts[5].replace(" ", ""),
+          "1.Alvarez" in new_texts[4].replace(" ", "").replace("\n", "")
+          and "2.Bianchi" in new_texts[5].replace(" ", "").replace("\n", ""),
           repr([new_texts[4][:40], new_texts[5][:40]]))
     check("no FMT-Z2 row survives the rebuild",
           not [r for r in fmt.zotero_parity_rows(res["xml"], new_texts)

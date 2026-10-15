@@ -106,7 +106,7 @@ Everything lives under the root you passed to `setup`:
 | `reports/round<r>_review_findings.csv` | the round's review findings (id, check, category, severity, location, evidence, explanation), one row each |
 | `round<r>_winner/` | the champion of each round (content-addressed: identical content is never re-run) |
 | `final_clean_version_<root name>/` | the champion corpus, renamed for the next run's `--source`; ALWAYS built, certified or not |
-| `final_clean_version.readme.md` | the package's status document (sibling of the directory): certification verdict, blockers/notes, champion + digests, and the reuse hint |
+| `final_clean_version.readme.md` | the package's status document (sibling of the directory): certification verdict, blockers/notes, champion + digests, the M19 LENGTH status (including any section that is inside the pipeline's margin but above the venue's OWN limit, with the numbers — 2026-10-16), and the reuse hint |
 | `redlines/` | the pipeline's tracked-changes `.docx` per candidate and source pair (`from-base/`, `from-original/`, `from-setup-source/`) |
 | `tracking/` | one difference-tracking copy per baseline (`*.tracking-original.*`, `*.tracking-a1.*`, `*.tracking-w<k>.*`, `*.tracking-winner<r>.*`, or the matching `*.logging-*` fallback when a tool failed), mirrored from the version packages and published winners |
 | `pdfs/` | the compiled/converted PDFs per version (LaTeX via `latexmk`, DOCX via Word/MCP) -- persistent: `prune` never touches them |
@@ -781,9 +781,11 @@ probe with the review, while `retry --runs 1:review` stays exact (a retry resets
 operator names):
 
 * it is given the corpus and NOTHING else — no `review/`, no finding list, no sweeps; its sandbox
-  carries only `base/`, `non_revised/` and two seeded CANDIDATE inventories
-  (`probe_review/CLAIM_SURFACES.md`, `probe_review/PRODUCERS.md`), which it is told are starting
-  points, not a scope;
+  carries only `base/`, `non_revised/` and three seeded CANDIDATE inventories
+  (`probe_review/CLAIM_SURFACES.md`, `probe_review/PRODUCERS.md` and — since 2026-10-16 —
+  `probe_review/OBLIGATIONS.md`, what THIS submission promises: the submitted set its own README
+  declares, the display items the documents cite, the file names they write, and where each one
+  resolves), which it is told are starting points, not a scope;
 * it surveys the submission documents, the evidence areas (`raw_data/`, `code/`), the relations
   between them and the packaging itself (the checklist's discovery discipline: expected-but-absent,
   present-but-unexpected, boundary, sibling asymmetry, claim/pointer mismatch, stale or unusable
@@ -804,7 +806,14 @@ operator names):
   deterministically and the remap is recorded;
 * its report carries a `checked` inventory (every area examined, with candidate/finding counts)
   and `probe_review/coverage.md`, so a zero-finding pass is an examined corpus and not an unrun
-  one.
+  one. **The completeness direction is mandatory and its rows must be disposed** (2026-10-16):
+  the declared submitted set against what the documents depend on, the venue's recorded structure
+  against the sections the manuscript carries, and the submission's own promises (sections it
+  announces, denominators its statistics name, hashes and dates its front matter pins). A short
+  report has to be JUSTIFIED with positive evidence, area by area — "the surfaces look
+  consistent" is not a disposition — and the prompt states the stage's target verbatim ("There
+  are still remaining issues in this manuscript submission. Please identify these issues.") with
+  its classes framed as ways to look, never as a fence on what may be filed.
 
 `--probe-review {on,off}` (default `on`; `--no-probe-review` or `set-probe-review off` on an
 existing root) is the off switch; a root created before the feature carries no key and plans no

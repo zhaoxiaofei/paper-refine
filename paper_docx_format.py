@@ -120,6 +120,7 @@ import sys
 import tempfile
 import unicodedata
 import zipfile
+from bisect import bisect_right
 import zlib
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -237,6 +238,17 @@ BODY_BLOCK_TOKENS = re.compile(r"<w:(p|tbl)(?=[\s/>])")
 ROW_TOKENS = re.compile(r"<w:tr(?=[\s/>])|</w:tr>")
 CELL_TOKENS = re.compile(r"<w:tc(?=[\s/>])|</w:tc>")
 TEXT_RE = re.compile(r"<w:t(?:\s[^>]*)?>.*?</w:t>", re.S)
+# A soft break/tab inside a paragraph (`<w:br/>`, `<w:cr/>`, `<w:tab/>`).
+# `text_of` renders each as a NEWLINE: it is a delimiter, not content, so every
+# text comparison still sees the same words AND the line-edge rules see the
+# space a line edge carries. Dropping it made a three-line correspondence block
+# read as one glued token (FMT-X2, 2026-10-15b).
+BREAK_TOKENS = re.compile(r"<w:(?:br|cr|tab)(?=[\s/>])[^>]*/?>")
+# The same walk, in DOCUMENT ORDER, for the callers that need both kinds of
+# piece at once (the text writer splices a fragment's new text at its own
+# offset, so a break counts as one character exactly like `text_of` says).
+_FRAG_OR_BREAK_RE = re.compile(r"<w:t(?:\s[^>]*)?>.*?</w:t>"
+                               r"|<w:(?:br|cr|tab)(?=[\s/>])[^>]*/?>", re.S)
 RUN_RE = re.compile(r"<w:r(?=[\s/>]).*?</w:r>|<w:r(?=[\s/>])[^>]*/>", re.S)
 FIELD_CHAR_RE = re.compile(r"<w:fldChar[^>]*w:fldCharType=\"(\w+)\"[^>]*/?>")
 INSTR_RE = re.compile(r"<w:instrText(?:\s[^>]*)?>.*?</w:instrText>", re.S)
@@ -358,8 +370,25 @@ def runs(frag: str) -> list:
 
 
 def text_of(frag: str) -> str:
-    return "".join(unesc(m.group(0)[m.group(0).find(">") + 1:m.group(0).rfind("<")])
-                   for m in TEXT_RE.finditer(frag))
+    """The text of `frag`, with each soft break/tab rendered as a NEWLINE.
+
+    The offset table stays 1-for-1 with the piece each delimiter replaces, so a
+    caller that maps a span back into `frag` keeps working, and the text a
+    reader sees is the text these scans compare (a line break starts a new line
+    for FMT-P4).
+    """
+    # DOCUMENT ORDER: a break sits BETWEEN two `<w:t>` parts (and can also sit
+    # inside a run), so ONE walk over both kinds of token yields text and
+    # delimiters as it meets them -- emitting the markup that lies between two
+    # `<w:t>` parts would put the tags into the text.
+    parts = []
+    for m in _FRAG_OR_BREAK_RE.finditer(frag):
+        tok = m.group(0)
+        if BREAK_TOKENS.fullmatch(tok):
+            parts.append("\n")
+        else:
+            parts.append(unesc(tok[tok.find(">") + 1:tok.rfind("<")]))
+    return "".join(parts)
 
 
 def has_drawing(frag: str) -> bool:
@@ -3544,22 +3573,32 @@ def rewrite_text_spans(para: str, edits: list) -> tuple:
     everything else (formatting, breaks, drawings) is left alone. Returns the
     applied [(start, end, removed_text, replacement)] so callers can prove that
     NOTHING else in the document changed.
+
+    A BREAK (`w:br`/`w:cr`/`w:tab`) is one character of that text -- `text_of`
+    renders it as a newline -- so this walk counts it exactly like `text_of`
+    does, and an edit positioned after a break splices into the run it names
+    (before 2026-10-16 a line-edge space after a break was deleted from the NEXT
+    run's text, which tripped the fixer's own text-identity verification). The
+    break is emitted verbatim unless an edit's span covers its position, which
+    no rule does today.
     """
-    frags = _text_fragments(para)
+    # ONE walk over both kinds of piece, in DOCUMENT ORDER, each carrying the
+    # text offset it starts at. A `None` marker means "this piece is a break".
+    frags = []
+    for m in _FRAG_OR_BREAK_RE.finditer(para):
+        tok = m.group(0)
+        if BREAK_TOKENS.fullmatch(tok):
+            frags.append((m.start(), m.end(), "\n", None))
+        else:
+            frags.append((m.start(), m.end(),
+                          unesc(tok[tok.find(">") + 1:tok.rfind("<")]), tok))
     text = "".join(f[2] for f in frags)
     edits = sorted((s, e, r) for s, e, r in edits if 0 <= s <= e <= len(text) and (e > s or r))
     if not edits:
         return para, []
-    # The reconstruction below walks the text as a NON-OVERLAPPING sequence
-    # (`pos = e`), so an edit nested inside another one -- an FMT-P3 doubled
-    # space inside the journal segment an FMT-T8a drop removes -- was spliced at
-    # stale offsets: the returned `applied` ledger claimed it ran while the
-    # emitted text matched neither edit, and fix_document's own text-identity
-    # verification then refused the whole fix run with a generic mismatch.
-    # Keep the first edit of each overlapping group (the sort is by start then
-    # end, so the EARLIER-starting edit wins, and of two edits sharing a start
-    # the narrower one is kept) and drop what it subsumes, so `applied`
-    # describes exactly what the returned paragraph holds.
+    # Overlapping edits: keep the first-started of each group (the sort is by
+    # start then end, so of two sharing a start the narrower one wins) and drop
+    # what it subsumes, so `applied` describes exactly what the result holds.
     deduped = []
     for s, e, r in edits:
         if deduped and s < deduped[-1][1]:
@@ -3567,34 +3606,79 @@ def rewrite_text_spans(para: str, edits: list) -> tuple:
         deduped.append((s, e, r))
     edits = deduped
     applied = [(s, e, text[s:e], r) for s, e, r in edits]
+    # A NON-OVERLAPPING cover of the text as (start, end, new_text): the
+    # untouched gap before each edit, then the edit's own replacement ("" for a
+    # deletion). Each piece already carries the text that REPLACES its span, so
+    # the per-fragment splice below is a plain slice of `new_text`.
+    # Each cover piece carries (start, end, new_text, is_edit). The flag is what
+    # distinguishes a replacement from copied text -- inferring it from the
+    # LENGTH would keep the OLD text of an edit that happens to preserve the
+    # length (`tumour` -> `tumor `), which is the kind of silent no-op this walk
+    # must never produce.
     keep, pos = [], 0
-    for s, e, _r in edits:
-        keep.append((pos, s, None))
-        keep.append((s, e, _r))
+    for s, e, r in edits:
+        if s > pos:
+            keep.append((pos, s, text[pos:s], False))
+        keep.append((s, e, "" if r is None else r, True))
         pos = e
-    keep.append((pos, len(text), None))
-    pieces, cursor, offset = [], 0, 0
-    for start, end, old, raw in frags:
-        pieces.append(para[cursor:start])
-        local = offset
-        buf = []
-        for a, b, repl in keep:
-            if b <= local or a >= local + len(old):
+    if pos < len(text):
+        keep.append((pos, len(text), text[pos:], False))
+    keep_starts = [a for a, _b, _t, _e in keep]
+
+    def carry(local: int, old: str) -> str:
+        """The new text of ONE piece starting at text offset `local`."""
+        out, at = [], local
+        end = local + len(old)
+        while at < end:
+            # The cover piece holding `at`: the binary search finds the last
+            # piece that starts at or before it.
+            idx = bisect_right(keep_starts, at) - 1
+            if idx < 0:
+                out.append(old[at - local:end - local])
+                break
+            a, b, new_piece, is_edit = keep[idx]
+            if not is_edit:
+                # An untouched stretch: copy it -- and the FINAL stretch copies
+                # everything to the piece's end rather than stopping at `b`, so
+                # no text is lost when the cover and the fragments disagree
+                # about a boundary.
+                if idx == len(keep) - 1:
+                    out.append(old[at - local:end - local])
+                    break
+                take = min(b, end) - at
+                out.append(new_piece[at - a:at - a + take])
+                at += take
                 continue
-            if repl is not None:                       # replacement at its start run
-                if local <= a < local + len(old):
-                    buf.append(repl)
+            # An edit's replacement: it is emitted ONCE, by the first piece its
+            # span touches, then the span is consumed (so a span crossing a
+            # break does not repeat or drop the text around the break).
+            if at <= a:
+                out.append(new_piece)
+            at = min(b, end)
+        return "".join(out)
+
+    pieces, cursor, here = [], 0, 0
+    for start_at, end_at, old_text, raw in frags:
+        pieces.append(para[cursor:start_at])
+        cursor = end_at
+        local = here
+        here += len(old_text)
+        if raw is None:
+            # The break is kept unless an edit's span covers its position.
+            covered = next((r for s, e, r, is_edit in keep
+                            if is_edit and s <= local < e), None)
+            if covered:
+                pieces.append('<w:t xml:space="preserve">' + esc(covered) + "</w:t>")
             else:
-                buf.append(old[max(a - local, 0):max(min(b - local, len(old)), 0)])
-        new_text = "".join(buf)
+                pieces.append(para[start_at:end_at])
+            continue
+        new_text = carry(local, old_text)
         open_tag = raw[:raw.find(">") + 1]
         close_tag = raw[raw.rfind("<"):]
         keep_space = ' xml:space="preserve"' if (new_text != new_text.strip()
                                                  or "xml:space" in open_tag) else ""
         tag = "<w:t" + keep_space + ">"
         pieces.append(tag + esc(new_text) + close_tag if new_text else tag + close_tag)
-        cursor = end
-        offset += len(old)
     pieces.append(para[cursor:])
     new_para = "".join(pieces)
 
@@ -5596,7 +5680,10 @@ def visual_text_lines(para: str) -> list:
     """[(start, end)] text-space spans of a paragraph's rendered lines.
 
     `w:br`/`w:cr` start a new line; `w:tab` starts a new alignment field, and a
-    space right after one is redundant either way.
+    space right after one is redundant either way. The break itself is ONE
+    character of `text_of` (its newline) and sits BETWEEN the spans: a trailing
+    space is the last character of one line, and deleting it must not delete the
+    line break with it.
     """
     lines, start, offset = [], 0, 0
     for m in _TEXT_EDGE_TOKENS.finditer(para):
@@ -5605,6 +5692,7 @@ def visual_text_lines(para: str) -> list:
             offset += len(unesc(tok[tok.find(">") + 1:tok.rfind("<")]))
         else:
             lines.append((start, offset))
+            offset += 1                      # the break's own newline in text space
             start = offset
     lines.append((start, offset))
     return lines
@@ -6569,21 +6657,80 @@ FURNITURE_LABEL_RE = re.compile(
     r"affiliations?|orcid|keywords?)\s*:")
 
 
+def _glue_text(text: str) -> tuple:
+    """(folded text, break positions) for the FMT-X2 checks.
+
+    The folded text is what the READER sees on one line: each `w:br`/`w:cr`
+    becomes ONE space, and each resulting space is recorded in `breaks`, the
+    set of folded-text indices the break introduced. (`\n`, `\r` and the
+    two-character `\r\n` each fold to a single space; the other two spellings
+    never appear in a paragraph's text, and folding one to a space would leave
+    the position sets misaligned, so they are not detected.)
+
+    A caller whose text carries NO newlines gets an empty set: nothing was
+    folded, so nothing counts as a break-made separator.
+    """
+    s = text
+    if "\r\n" in s:
+        out = []
+        for i, ch in enumerate(s):
+            if ch == "\r" and i + 1 < len(s) and s[i + 1] == "\n":
+                continue
+            out.append(" " if ch in "\r\n" else ch)
+        s = "".join(out)
+    elif "\r" in s or "\n" in s:
+        s = s.replace("\r", " ").replace("\n", " ")
+    breaks = {i for i, ch in enumerate(s) if ch == " " and (
+        i < len(text) and text[i] in "\r\n")} if len(s) == len(text) else set()
+    return s, breaks
+
+
+def _glue_separated(s: str, at: int, breaks) -> bool:
+    """True when the character just before `at` is a REAL space or a break.
+
+    `at` is where the e-mail match starts. A break whose space sits directly
+    before it is a separator; a break one further left does not reach it (a
+    genuinely glued `Zhen Xiezhenxie@host` keeps its row).
+    """
+    j = at - 1
+    if j >= 0 and j in (breaks or ()):
+        return True
+    return j >= 0 and s[j] == " "
+
+
 def correspondence_glue_rows(paras: list, is_ref: list = None, limit: int = 12) -> list:
-    """FMT-X2: a fused word/address or a label with no space after its colon."""
+    """FMT-X2: a fused word/address or a label with no space after its colon.
+
+    A SOFT BREAK separates two words exactly like a space does, so the checks
+    run over the paragraph's visual lines with each `w:br`/`w:cr` folded to a
+    space. Reading ACROSS the break turned the perfectly normal three-line
+    correspondence block of the 2026-10-15b neohet package
+
+        * Correspondence:
+        Zhen Xie
+        zhenxie@tsinghua.edu.cn
+
+    into "the address is glued to the word before it" -- reported by the
+    delivered status and re-found by the operator's audit, on a line that
+    renders correctly. The zero-width fallback is what keeps this honest for a
+    caller that passes text WITHOUT the newlines (the fixer's own 1:1 coordinate
+    space): no newline means no separator was removed from the text.
+    """
     rows = []
     is_ref = list(is_ref or [False] * len(paras))
     for idx, text in enumerate(paras or []):
         if idx < len(is_ref) and is_ref[idx]:
             continue
-        s = str(text or "")
+        raw = str(text or "")
+        s, breaks = _glue_text(raw)
         evidence = None
         for m in EMAIL_RE.finditer(s):
             before = s[:m.start()]
             if EMAIL_GLUE_BEFORE_RE.search(before):
-                evidence = (f"{s[max(0, m.start() - 24):m.end() + 12]!r}: the address is glued "
-                            f"to the word before it")
-                break
+                if not _glue_separated(s, m.start(), breaks):
+                    evidence = (f"{s[max(0, m.start() - 24):m.end() + 12]!r}: the address is "
+                                f"glued to the word before it")
+                    break
             after = s[m.end():m.end() + 1]
             if after and after.isalpha():
                 evidence = (f"{s[max(0, m.start() - 12):m.end() + 16]!r}: the address is glued "

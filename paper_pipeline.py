@@ -10745,6 +10745,10 @@ Layout (paths relative to the sandbox root):
                            orchestrator's paragraph model found). A starting point, NOT the scope.
   probe_review/PRODUCERS.md — seeded CANDIDATE list (the corpus's data tables with their columns
                            and row counts, and its code files). A starting point, NOT the scope.
+  probe_review/OBLIGATIONS.md — seeded CANDIDATE list (what THIS submission promises: the
+                           submitted set its README declares, the display items the documents
+                           cite, the file names they write, and where each one resolves). A
+                           starting point, NOT the scope.
 
 === THE METHOD: LOOK EVERYWHERE, DISPOSE EVERYTHING, VERIFY WHAT CAN BE VERIFIED ===
 
@@ -10772,6 +10776,26 @@ Layout (paths relative to the sandbox root):
    For every AREA you examine, `coverage.md` states how many candidates you considered and how
    many findings came out of it. A candidate that turns out clean is a one-line disposition, not
    a finding.
+
+1b. RUN THE TWO DIRECTIONS, NOT ONE. Everything above starts from something the corpus SAYS and
+   asks whether it holds. That is HALF the work: a submission can be wrong by carrying LESS than
+   it promises, and no page looks broken when it does. Before you finish, run the other
+   direction on the submission's own declarations (`OBLIGATIONS.md` is the CANDIDATE list):
+     * the submitted set the package's README declares vs the files the documents actually
+       depend on — does a submitted document cite, quote or cross-reference something the
+       submission will not carry (a supplementary file, a table, a figure, an analysis script, a
+       data deposit)? Is every item the text CITES present, and does every item present MATCH
+       what the text says about it (label, number, caption)?
+     * the structure the venue's own recorded rule set requires for this article type vs the
+       sections the manuscript carries (a section the venue names and the manuscript lacks is a
+       finding even though nothing on the page is wrong);
+     * the submission's own promises to its reader: sections it announces, panels and items its
+       legends imply, denominators its statistics name, dates/versions/hashes its front matter
+       or availability statements pin — each one either resolves inside the submission or is a
+       finding (or a recorded limitation).
+   A completeness row that you decide is NOT a defect still needs its one-line disposition in
+   `coverage.md`: "shipped as X", "intentionally omitted because Y". A silent skip is a missing
+   deliverable, not a clean result.
 
 2. VERIFY BY COMPUTATION wherever you can: write a small script under `probe_review/scripts/`
    that reads the corpus's own files and prints its result as the LAST non-empty stdout line — a
@@ -10810,6 +10834,22 @@ Layout (paths relative to the sandbox root):
 4. WRITE `probe_review/coverage.md`: the `checked` areas with their candidate/finding counts,
    what you could NOT check and why, and the exact commands you re-ran to satisfy yourself.
    This round's honest limits are part of the deliverable.
+
+   AN EMPTY REPORT IS THE ONE RESULT THAT NEEDS JUSTIFYING. If your findings list is short, say
+   WHY in `coverage.md`, area by area, and the justification must be POSITIVE evidence (this
+   number was recomputed from that table and matched; this pointer resolves to that file). "The
+   surfaces look consistent" is not a disposition. A run whose coverage table lists only the two
+   or three easiest areas, or whose checked count is a handful, reads as an unfinished survey and
+   is treated as one.
+
+=== THE QUESTION TO KEEP ASKING ===
+
+The orchestrator's cleanest statement of this stage's target is short: "There are still remaining
+issues in this manuscript submission. Please identify these issues." Nothing above narrows that.
+The classes are prompts for how to LOOK, never a fence around what may be found: a defect that
+does not fit any class belongs in the findings file with its own `check` label. Ask yourself, for
+every page, every legend and every file: what would a hostile but fair reviewer say first? Then
+verify it, and file it.
 
 === WHAT FAILS THE RUN ===
   * a declared verifier whose re-run does not reproduce `computed` (a mismatch, a missing
@@ -11402,6 +11442,39 @@ def root_pipeline_staleness(ctx: Ctx) -> dict:
                                  and out["origin_sha256"] != out["recorded_sha256"])
     out["frozen_differs"] = bool(out["frozen_sha256"] and out["recorded_sha256"]
                                  and out["frozen_sha256"] != out["recorded_sha256"])
+    # THE MAINTENANCE CHAIN (2026-10-16): a root set up from ANOTHER root's copy
+    # records that copy as its origin, and the two then agree with each other
+    # while both drift from the tree the operator maintains. The 2026-10-15b
+    # neohet root is the case -- its recorded origin is the 2026-10-10
+    # neohet-10to11 root, whose own `pipeline.path` names this repository -- so
+    # `maintained_*` is the first link in the chain that is NOT a frozen
+    # snapshot (three hops is more than any real chain, and a cycle must not
+    # hang a status command).
+    out["maintained_path"] = None
+    out["maintained_sha256"] = None
+    out["maintained_differs"] = False
+    out["frozen_foreign"] = bool(origin_path and Path(origin_path).is_file()
+                                 and frozen_snapshot_root(origin_path))
+    seen, cursor = set(), origin_path
+    for _hop in range(3):
+        if not cursor or cursor in seen or not Path(cursor).is_file():
+            break
+        seen.add(cursor)
+        holder = frozen_snapshot_root(cursor)
+        if not holder:
+            out["maintained_path"] = cursor
+            try:
+                out["maintained_sha256"] = sha256_file(Path(cursor))
+            except OSError:                                           # pragma: no cover
+                out["maintained_sha256"] = None
+            break
+        try:
+            rec = read_json(Path(cursor).parent / "state.json") or {}
+        except Exception:                                             # noqa: BLE001
+            rec = {}
+        cursor = str((rec.get("pipeline") or {}).get("path") or "")
+    out["maintained_differs"] = bool(out["maintained_sha256"] and out["frozen_sha256"]
+                                     and out["maintained_sha256"] != out["frozen_sha256"])
     return out
 
 
@@ -11410,6 +11483,22 @@ def pipeline_snapshot_note(ctx: Ctx) -> str:
     st = root_pipeline_staleness(ctx)
     if not st.get("frozen"):
         return ""
+    if st.get("frozen_foreign") and st.get("maintained_differs"):
+        # The recorded origin is ANOTHER root's snapshot, and the tree the
+        # operator maintains has moved on: this root and its origin agree with
+        # each other while both run replaced code. A warning, never a refusal --
+        # the root still runs, reproducibly, on the code it froze. A root set up
+        # from the maintained tree is NOT warned about here: its origin is that
+        # tree, and the ordinary "origin has moved on" sentence below covers it.
+        return (f"[pipeline] **WARNING**: this root runs the FROZEN "
+                f"{st.get('frozen')} (sha256 {str(st.get('frozen_sha256'))[:16]}...), and that "
+                f"snapshot came from `{st.get('origin')}`, which is itself a root's copy. The "
+                f"tree being maintained ({st.get('maintained_path')}) has moved on since "
+                f"(sha256 {str(st.get('maintained_sha256'))[:16]}...). Every command here "
+                f"executes the frozen code, so fixes committed since the snapshot will NOT run "
+                f"in this root. Re-create the root from the maintained tree (same `--source`), "
+                f"or copy the current `paper_pipeline.py`, `paper_docx_format.py` and "
+                f"`paper_redlines_adapter.py` beside this root's `state.json`.")
     if st.get("frozen_differs"):
         # The record and the FILE disagree: state.json says one sha256, the
         # frozen script hashes to another. That is not "origin moved on" -- it is
@@ -12151,7 +12240,16 @@ def count_caption_words(text: str) -> int:
 
 
 def _docx_paragraphs(path: Path):
-    """Paragraph texts of a .docx, or None when it cannot be parsed."""
+    """Paragraph texts of a .docx, or None when it cannot be parsed.
+
+    A `w:br`/`w:cr` (a soft line break) and a `w:tab` render as a NEWLINE: the
+    text is the text a READER sees, and a caller that compares two written
+    forms (FMT-X2's correspondence block) must be able to tell a line break
+    from a missing space. Dropping the break made the shipped three-line
+    `* Correspondence: / Zhen Xie / zhenxie@…` read as one glued token and
+    FMT-X2 reported a line that renders perfectly (the 2026-10-15b neohet
+    package, re-found by the operator's audit).
+    """
     ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
     try:
         with zipfile.ZipFile(path) as z:
@@ -12160,7 +12258,16 @@ def _docx_paragraphs(path: Path):
     except (OSError, KeyError, zipfile.BadZipFile, ET.ParseError, RuntimeError,
             NotImplementedError):
         return None
-    return ["".join(t.text or "" for t in p.iter(ns + "t")) for p in root.iter(ns + "p")]
+    out = []
+    for para in root.iter(ns + "p"):
+        parts = []
+        for node in para.iter():
+            if node.tag in (ns + "br", ns + "cr", ns + "tab"):
+                parts.append("\n")
+            elif node.tag == ns + "t":
+                parts.append(node.text or "")
+        out.append("".join(parts))
+    return out
 
 
 def _tex_captions(text: str) -> list:
@@ -18764,6 +18871,15 @@ PROBE_COVERAGE_REL = f"{PROBE_DIR}/coverage.md"
 PROBE_REPRO_REL = f"{PROBE_DIR}/REPRODUCTION.md"
 PROBE_SURFACES_REL = f"{PROBE_DIR}/CLAIM_SURFACES.md"
 PROBE_PRODUCERS_REL = f"{PROBE_DIR}/PRODUCERS.md"
+# The third seeded CANDIDATE list (2026-10-16): what THIS submission promises,
+# and whether each promise resolves. The two audits of the 2026-10-15b packages
+# both found "the supplement the documents cite is not in the declared submitted
+# set" and "the main text requires sections the manuscript does not carry" --
+# structural-completeness defects, which a surface enumeration does not reach
+# because nothing on the page is WRONG. The ledger turns that direction into a
+# disposal task: every obligation is a row, and a row with no disposition is a
+# hole in `coverage.md`.
+PROBE_OBLIGATIONS_REL = f"{PROBE_DIR}/OBLIGATIONS.md"
 PROBE_SCRIPT_PREFIX = f"{PROBE_DIR}/scripts/"
 # The reserved finding-id block: probe findings are X-9xx, so a collision with the
 # discovery round's own sequential X-0xx ids is impossible by construction (and
@@ -21313,7 +21429,73 @@ def seeded_probe_paths(sb: Path) -> set:
     `leftovers_present` treats them as INPUTS: a freshly materialized probe
     sandbox must not read as "already worked in".
     """
-    return {sb / PROBE_SURFACES_REL, sb / PROBE_PRODUCERS_REL}
+    return {sb / PROBE_SURFACES_REL, sb / PROBE_PRODUCERS_REL,
+            sb / PROBE_OBLIGATIONS_REL}
+
+
+def probe_obligation_rows(root: Path, limit: int = 200) -> list:
+    """Rows for `PROBE_OBLIGATIONS.md`: what the submission promises, resolved.
+
+    Three families, each derived from the corpus's own declarations -- nothing
+    here reads a checklist or a rule the venue did not state:
+      * `submitted set` -- the package's own README declares a glob (when it
+        does); every other carried file is named as NOT submitted, so a
+        document that cites one is a completeness defect rather than a nuance;
+      * `cited display item` -- a figure/table label a submitted document cites,
+        with whether the declared set (or the corpus) carries a matching file;
+      * `written pointer` -- a file name a submitted document names, with where
+        (if anywhere) the package carries it.
+
+    This is a CANDIDATE list like the other two: the session still decides what
+    each row means, and an obligation it cannot resolve is a finding or a
+    recorded limitation, never a silent skip.
+    """
+    rows = []
+    root = Path(root)
+    if not root.is_dir():
+        return rows
+    try:
+        decl = declared_submission_set(root)
+    except Exception:                                             # noqa: BLE001
+        decl = {}
+    submitted = list(decl.get("files") or [])
+    carried = sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file())
+    if decl.get("declared"):
+        for rel in submitted[:60]:
+            rows.append({"family": "submitted set", "obligation": rel,
+                         "resolves": "yes (declared as submitted)", "where": rel})
+        for rel in (decl.get("carried_not_submitted") or [])[:40]:
+            rows.append({"family": "submitted set", "obligation": rel,
+                         "resolves": "no (carried, NOT submitted)",
+                         "where": f"corpus only: {rel}"})
+    else:
+        rows.append({"family": "submitted set",
+                     "obligation": "the package declares no submitted set",
+                     "resolves": "unknown",
+                     "where": decl.get("ignored_reason") or "no README declares a glob"})
+    # Written pointers and cited display items: the two shapes the submission
+    # itself creates, resolved against what the package actually carries.
+    try:
+        for r in non_submitted_reference_rows(root, submission_not_carried_areas_plain()):
+            rows.append({"family": "written pointer",
+                         "obligation": f"{r.get('reference')} (in {r.get('file')}:{r.get('line')})",
+                         "resolves": "no (the submission does not carry it)",
+                         "where": str(r.get("detail") or "")[:120]})
+    except Exception:                                             # noqa: BLE001
+        pass
+    try:
+        for r in package_display_item_rows(root):
+            rows.append({"family": "cited display item",
+                         "obligation": f"{r.get('reference')} (cited in {r.get('file')})",
+                         "resolves": "no (no matching file)",
+                         "where": str(r.get("detail") or "")[:120]})
+    except Exception:                                             # noqa: BLE001
+        pass
+    rows.append({"family": "coverage",
+                 "obligation": f"the corpus carries {len(carried)} file(s); "
+                               f"{len(submitted)} declared as submitted",
+                 "resolves": "context", "where": ""})
+    return rows[:limit]
 
 
 def probe_table_inventory(corpus: Path, limit: int = 400) -> list:
@@ -21402,6 +21584,25 @@ def seed_probe_surfaces(ctx: Ctx, sb: Path, r: int) -> dict:
             probe_table_inventory(corpus),
             ["file", "data rows", "columns (first 14)"],
             "no producer file (data table or code) was found in the corpus")
+        + "\n"))
+    write_text_atomic(sb / PROBE_OBLIGATIONS_REL, (
+        "# OBLIGATIONS — seeded CANDIDATE list (what THIS submission promises)\n\n"
+        "Completeness runs in TWO directions. The other two lists point at what the corpus SAYS "
+        "(claims, producers); this one points at what the corpus OWES its own reader — the "
+        "submitted set its README declares, the display items the documents cite, and the file "
+        "names they write. A row whose `resolves` column is 'no' is not automatically a finding "
+        "(the author may have decided deliberately), but it MUST be disposed in `coverage.md`: "
+        "either a finding, or a one-line statement of why the omission is intended. A submission "
+        "that ships less than it says it ships is a defect a reviewer sees on first read.\n\n"
+        "ALSO CHECK, and account for each in coverage.md: does the manuscript carry the structure "
+        "its OWN venue requires (every section the venue's recorded rule set names, every "
+        "deliverable the submission's own cross-references assume, every display item whose label "
+        "appears in the text)? A missing section or a cited-but-absent item belongs to this "
+        "family even though nothing on the page is wrong.\n\n"
+        + _evidence_artifact_table(
+            probe_obligation_rows(corpus),
+            ["family", "obligation", "resolves", "where"],
+            "no obligation could be derived (no README declaration, no pointer, no display item)")
         + "\n"))
     return {"claims": len(claim_rows)}
 
@@ -36146,6 +36347,20 @@ def cmd_setup(args) -> None:
     print(f"[setup] artifact policy:         {artifact_policy}: {_art_note}")
     print(f"[setup] per-round winners:       {root}/round<r>_winner/  (digest-verified against "
           f"the content-addressed pins)")
+    # WHICH CODE THIS ROOT WILL RUN (2026-10-16): `setup` froze the script that
+    # is running NOW, so a root created from another root's copy runs that
+    # copy's code for every later command -- silently, until this note. The
+    # 2026-10-15b neohet root was set up that way and its package never saw the
+    # checks committed two hours earlier.
+    try:
+        _ctx = Ctx(root)
+        _ctx.load()
+        _note = pipeline_snapshot_note(_ctx)
+        if _note:
+            print(f"[setup] {_note}")
+    except Exception as e:                                            # noqa: BLE001
+        print(f"[setup] note: the pipeline-snapshot check could not run "
+              f"({type(e).__name__}: {e})")
     print(f"[setup] next: python {root / script.name} run --root {root}")
     print(f"[setup] manual mode: add --agent manual (staging is respected; each round's revise "
           f"prompt appears only after its review marker)")
@@ -42537,6 +42752,47 @@ PKG5_PRODUCER_RE = re.compile(
     r"(?i:\b(?:created|generated|made|drawn|produced|prepared|plotted|visuali[sz]ed|"
     r"assembled|rendered|composed)\s+(?:with|using|in|by)\s+)"
     r"(?P<name>(?:[A-Z][\w.+-]{1,30}|R\s?\d[\w.]*)(?:\s?[A-Z0-9][\w.+-]{0,30}){0,3})")
+
+# A legend that ends `... the design-space argument made in Results.` must not
+# be read as a producer named "Results" (the 2026-10-15b neohet package: the
+# greedy name half takes the next sentence's first word, and the contradiction
+# row then sends the author hunting a defect that does not exist). The name is
+# finalized in Python, where a sentence boundary is unambiguous.
+PKG5_SECTION_NAMES = frozenset(
+    ("results", "result", "methods", "method", "materials", "introduction",
+     "discussion", "abstract", "conclusions", "conclusion", "background",
+     "supplementary", "references", "acknowledgements", "acknowledgments",
+     "appendix", "table", "figure", "fig", "data", "analysis", "this", "the",
+     "their", "our", "text", "study", "paper", "manuscript", "main"))
+
+
+def pkg5_producer_name(m: re.Match) -> str:
+    """The producer named by a PKG5_PRODUCER_RE match ("" = prose, not a name).
+
+    Three trims, each measured on a real package:
+      * the name never RUNS ON into the next sentence (`Results. The method`
+        matched "Results. The" before this);
+      * a sentence-final period is dropped (while `BioRender.com.` keeps its
+        product punctuation a dot after the domain is not a sentence end);
+      * a SECTION NAME is not a producer.
+    """
+    name = m.group("name")
+    cut = re.search(r"\.\s+[A-Z0-9]", name)
+    if cut:
+        name = name[:cut.start()]
+    elif name.endswith("."):
+        tail = (m.string[m.end():m.end() + 8] or "")
+        # `Created with BioRender.com.` is fine: the legend ENDS there. The
+        # shipped defect read `... made in Results. The method ...`, where the
+        # period is followed by the next sentence's subject.
+        if re.match(r"\s+[A-Z]", tail) or not tail:
+            name = name[:-1]
+    name = name.rstrip(" .;:,")
+    if not name or not re.match(r"[A-Z0-9]", name):
+        return ""
+    if name.lower() in PKG5_SECTION_NAMES:
+        return ""
+    return name
 PKG5_KIND = {"fig": "figure", "figs": "figure", "figure": "figure", "figures": "figure",
              "table": "table", "tables": "table"}
 
@@ -42617,7 +42873,9 @@ def display_provenance_rows(root: Path, areas=None, limit: int = 20) -> list:
             stop = ends[0] if ends else min(i + 6, len(lines))
             block = "\n".join(lines[i:stop])
             for pm in PKG5_PRODUCER_RE.finditer(block):
-                producers.setdefault(key, {}).setdefault(pm.group("name").strip(), rel)
+                name = pkg5_producer_name(pm)
+                if name:
+                    producers.setdefault(key, {}).setdefault(name, rel)
     # ONE row per (contradicted item, the document whose table claims it), listing
     # every contradicting tool: two rows for `Matplotlib` and `seaborn` would read
     # as two defects where the author has one correction to make.
@@ -43101,6 +43359,30 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
     L.append(f"- champion: `{stored.get('champion')}` (round {stored.get('round')}); "
              f"pin `{pin.get('id') or stored.get('pin_id')}`, digest "
              f"`{str(pin.get('digest'))[:12]}`")
+    # THE LENGTH STATUS (2026-10-16). `decision.json` has carried the M19
+    # `length_note` all along -- including "OVER-VENUE-LIMIT (inside the
+    # pipeline's margin)" -- and the SIBLING README, the one document the author
+    # actually reads beside the package, did not: the 2026-10-15b CNB package
+    # went out with a 3,726-word main text against Nature Biotechnology's own
+    # 3,000-word limit and a title page declaring 3,745, and no delivered line
+    # said so. The margin is the pipeline's own relaxation, so a submission that
+    # uses it MUST be visible where the package is handed over.
+    _lens = final.get("lengths") or {}
+    _note = str(final.get("length_note") or "").strip()
+    if _note:
+        L.append(f"- length status (M19): {_note}")
+        # A section that is inside the pipeline's RELAXED cap but above the
+        # venue's OWN number is the case this block exists for: `over_limit`
+        # only says "the relaxation held", so the comparison is against `base`.
+        _over = [r for r in (_lens.get("rows") or [])
+                 if isinstance(r.get("words"), int) and isinstance(r.get("base"), int)
+                 and r["words"] > r["base"]]
+        for _r in _over[:6]:
+            L.append(f"  - `{_r.get('document')}` [{_r.get('section')}]: "
+                     f"{_r.get('words')} word(s) against the venue's own "
+                     f"{_r.get('base')} (the pipeline's margin allowed up to "
+                     f"{_r.get('cap')}) -- the venue's own number is what the journal "
+                     f"enforces; trim or justify the excess before upload")
     if cert.get("blockers"):
         L.append("- blockers (why the decision is not certified):")
         L.extend(f"  - {b}" for b in cert["blockers"])
