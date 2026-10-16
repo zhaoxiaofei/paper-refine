@@ -667,6 +667,20 @@ AGENT BACKENDS
                      only servers that are actually installed, and they change
                      nothing about how the CLI sandboxes shell commands.
     --agent claude   `claude --permission-mode bypassPermissions --print`
+    --agent deepseek the DeepSeek Harness CLI (`dsh`): `dsh --profile headless
+                     --json -` (the stage's PROMPT.md piped via stdin, cwd = the
+                     sandbox, one fresh persisted session per attempt, `--json`
+                     so the opening `session` line carries the id a
+                     continuation adopts). The harness is a separate install
+                     (node >= 22, `npm i -g @deepseek-ai/dsh@alpha`; verified
+                     against dsh 0.2.1-alpha.4 and 0.2.0-rc.2) and its own home
+                     ($DSH_HOME, default ~/.dsh) owns the model, the
+                     DEEPSEEK_API_KEY credential and its MCP servers -- unlike
+                     the codex preset this argv carries no overrides for them.
+                     Prompts that tell an agent to reach an MCP tool (the
+                     docx-converter renderer, the docx-compare redline engine)
+                     fall back to the next converter in their list when the
+                     harness has no such server configured.
     --agent manual   the orchestrator builds every sandbox + PROMPT.md, prints
                      each prompt's path, and polls for the completion signal;
                      you paste each prompt into your agent yourself. Staging is
@@ -3804,9 +3818,33 @@ AGENT_PRESETS = {
     # backend is the same CLI at the cheapest reasoning effort, so the audit is
     # lightweight without needing a second model configuration.
     "codex-lite": ["codex", "exec", "-c", 'model_reasoning_effort="low"', "-"],
+    # The DeepSeek Harness CLI (`dsh`): `headless` is its one-shot driver, so a
+    # session is non-interactive and the stage ends with the process. The task
+    # is read from stdin (`-`, the delivery codex gets; `dsh` also accepts the
+    # task as a positional, but PROMPT.md is far too large for argv), and
+    # `--json` replaces the printed final message with a newline-delimited
+    # event stream whose opening `session` line carries the persisted session
+    # id a continuation adopts (`--session-id`, see resume_argv_for). The
+    # harness's own home ($DSH_HOME, default ~/.dsh) owns the model, the
+    # DEEPSEEK_API_KEY credential and its MCP servers, exactly as the codex
+    # profile owns the codex CLI's, so this preset carries no overrides the way
+    # the codex one does.
+    "deepseek": ["dsh", "--profile", "headless", "--json", "-"],
 }
+# The backends an operator may select BY NAME (each maps to a shipped argv;
+# `manual` is the no-CLI mode) -- one list, so every --agent/--judge-agent
+# parser accepts the same set. A custom `--agent-cmd`/PAPER_AGENT_CMD stays the
+# last route and is never named here.
+AGENT_CHOICES = ("codex", "claude", "deepseek", "manual")
+# The CLI each preset launches (`codex`, `claude`, `dsh`). Derived from the
+# preset table itself, so the checks that ask "is this the operator's real
+# agent CLI, or a test stub / foreign tool?" (see `_looks_like_preset_cmd`) and
+# that ask "was this preset's binary not installed?" (see `agent_install_hint`)
+# recognise a preset added above without a second list to keep in step.
+AGENT_PRESET_BINARIES = frozenset(os.path.basename(str(argv[0])).lower()
+                                  for argv in AGENT_PRESETS.values() if argv)
 # Choices for --conflict-agent (the audit is lightweight by default).
-CONFLICT_AGENT_CHOICES = ("codex-lite", "codex", "claude", "manual")
+CONFLICT_AGENT_CHOICES = ("codex-lite", *AGENT_CHOICES)
 
 MARKER_FILE = "_pipeline_done.json"
 SCORES_FILE = "scores.json"
@@ -27496,6 +27534,12 @@ RESUME_TIMEOUT_MAX = 5400
 # (`"session_id": "<uuid>"`); `_execute_attempt_in` tees both into `_agent.log`,
 # and that id is what `codex exec resume` / `claude --resume` consumes.
 SESSION_ID_RE = re.compile(r'(?:session[_ ]id[:\s]+|"session_id"\s*:\s*")([0-9a-fA-F-]{36})')
+# `dsh --json` opens its event stream with
+#   {"type":"session","sessionId":"session-<uuid>","cwd":"…"}
+# -- a camelCase key and a `session-` prefix, so the pattern above (codex's
+# banner form, claude's snake_case result object) cannot read it. The id is what
+# `dsh --profile headless --session-id <id>` adopts as a continuation.
+DSH_SESSION_ID_RE = re.compile(r'"sessionId"\s*:\s*"(session-[0-9a-fA-F-]{36})"')
 # Every artifact-quality message starts with this prefix (see
 # `check_artifact_quality`): it is how a repairable review failure is told apart
 # from every other kind without a second bookkeeping channel.
@@ -27636,10 +27680,13 @@ def capture_agent_session_id(ctx: Ctx, rec: dict) -> str:
     """The CLI session id of the attempt whose transcript is in this sandbox.
 
     The agents print `session id: <uuid>` in their banner (codex does; a claude
-    build that prints one is picked up the same way) and `_execute_attempt_in`
-    tees the whole session into `_agent.log`, so the id a CONTINUATION needs is
-    already on disk -- no extra channel and no guessing from timestamps. The LAST
-    id in the file wins (the transcript is appended per attempt).
+    build that prints one is picked up the same way), a claude
+    `--output-format json` run reports it in its result object, and `dsh --json`
+    opens its event stream with `"sessionId": "session-<uuid>"`;
+    `_execute_attempt_in` tees every one of them into `_agent.log`, so the id a
+    CONTINUATION needs is already on disk -- no extra channel and no guessing
+    from timestamps. The LAST id in the file wins (the transcript is appended
+    per attempt), whichever of the three forms it was written in.
     """
     try:
         sb = ctx.sandbox_of(rec)
@@ -27652,8 +27699,11 @@ def capture_agent_session_id(ctx: Ctx, rec: dict) -> str:
         text = log.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
-    hits = SESSION_ID_RE.findall(text)
-    return str(hits[-1]) if hits else ""
+    hits = [(m.start(), m.group(1))
+            for pattern in (SESSION_ID_RE, DSH_SESSION_ID_RE)
+            for m in pattern.finditer(text)]
+    hits.sort()
+    return str(hits[-1][1]) if hits else ""
 
 
 def resume_argv_for(cmd: list, session_id: str) -> list:
@@ -27666,6 +27716,11 @@ def resume_argv_for(cmd: list, session_id: str) -> list:
             `--resume <id>` (or `--continue`, which resumes the most recent
             conversation of THIS directory -- every run has its own sandbox, so
             that is this run's session -- when no id was captured)
+    dsh:    `dsh --profile headless --json -` -> the same argv plus
+            `--session-id <id>`, inserted BEFORE the `-` task positional (the
+            one-shot app reads its task from stdin and requires `-` to be its
+            only positional, and the id must be exact: an unknown one is an
+            error, so a continuation can never silently start a fresh session)
     Anything else (a custom --agent-cmd/PAPER_AGENT_CMD) has no known resume form
     and is left alone: the retry policy then runs a fresh attempt as before.
     """
@@ -27679,6 +27734,16 @@ def resume_argv_for(cmd: list, session_id: str) -> list:
         return [argv[0], "exec", "resume", session_id, *argv[2:]]
     if name.startswith("claude"):
         return [*argv, *(["--resume", session_id] if session_id else ["--continue"])]
+    if name.startswith("dsh"):
+        if not session_id:
+            # No `--continue` equivalent: the harness persists many sessions and
+            # adopts one only by exact id, which is precisely the continuation
+            # we want -- a fresh session would answer the continuation prompt
+            # with no memory of the work it is supposed to finish.
+            return []
+        if argv[-1] == "-":
+            return [*argv[:-1], "--session-id", session_id, "-"]
+        return [*argv, "--session-id", session_id]
     return []
 
 
@@ -27720,8 +27785,8 @@ def resume_gate(ctx: Ctx, rec: dict, cmd: list) -> tuple:
         return [], key, ""
     argv = resume_argv_for(cmd, sid)
     if not argv:
-        why = ("this backend has no resume form (only the codex/claude presets do), or no "
-               "session id was captured")
+        why = ("this backend has no resume form (only the codex/claude/deepseek presets do), or "
+               "no session id was captured")
         print(f"  [resume] {rec['id']}: no continuation -- {why}; a fresh attempt follows")
         return [], key, ""
     used = int((rec.get("resume_attempts") or {}).get(key) or 0)
@@ -34293,9 +34358,121 @@ def resolve_agent_cmd(agent_name: str, agent_cmd_arg: str, use_env: bool = True)
     if agent_name in AGENT_PRESETS:
         # Not AGENT_PRESETS directly: a codex session also needs the MCP
         # approval overrides, or its tools are denied before the model can use
-        # them (see MCP_APPROVALS).
-        return agent_argv(agent_name)
-    die(f"unknown agent '{agent_name}'; use codex|claude|manual, PAPER_AGENT_CMD, or --agent-cmd")
+        # them (see MCP_APPROVALS). The preset's CLI is then read for the one
+        # capability a preset cannot express as a flag: the DeepSeek Harness's
+        # one-shot form (see deepseek_harness_problem).
+        argv = agent_argv(agent_name)
+        harness_problem = deepseek_harness_problem(argv)
+        if harness_problem:
+            die(harness_problem)
+        return argv
+    die(f"unknown agent '{agent_name}'; use {'|'.join(AGENT_CHOICES)}, PAPER_AGENT_CMD, "
+        f"or --agent-cmd")
+
+
+def _probe_dsh_headless(exe: str) -> str:
+    """Read the installed harness's own headless help ('' = it declares the contract).
+
+    `dsh --profile headless --help` boots the profile and prints the one-shot
+    app's own flags, which is exactly the property being checked; the boot also
+    initializes a fresh $DSH_HOME once, serially, before the parallel wave (the
+    harness does that on its first session anyway). Every failure mode of the
+    probe itself -- the binary vanished, it hangs, it prints something we cannot
+    read -- reports '' (see deepseek_harness_problem).
+    """
+    try:
+        proc = subprocess.run([exe, "--profile", "headless", "--help"],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, encoding="utf-8", errors="replace", timeout=180)
+    except Exception:                                                # noqa: BLE001
+        return ""
+    text = proc.stdout or ""
+    # The harness is a Node >= 22 application (`node:util` parseEnv): under an
+    # older `node` on PATH it dies at import, and the box's own node may well be
+    # the older one while the harness was installed by a newer one. That crash
+    # names its own version, so it is read and reported -- otherwise every
+    # session would fail with the same stack trace inside its own log.
+    node = re.search(r"Node\.js v(\d+)\.", text)
+    if node and int(node.group(1)) < 22:
+        return ("the DeepSeek Harness cannot start under the `node` on PATH: `dsh` ran on "
+                f"Node.js v{node.group(1)}, and the harness needs node >= 22 (its first "
+                "import uses `node:util` parseEnv).\n"
+                "       Install AND run it under the same newer node (`nvm use 22` && "
+                "`npm i -g @deepseek-ai/dsh@alpha`, then run the pipeline with node 22 first "
+                "on PATH), or run the stages on another backend (--agent codex|claude|manual, "
+                "or --agent-cmd)")
+    # The other half of the same mistake: the harness IS started by a newer node
+    # than the one it was installed for, so its native binding does not match
+    # (`npm i -g` under node 18, then a node-22 PATH). The package's own error
+    # names it; the fix is a reinstall under the node that will run it.
+    if "no usable native binding" in text.lower():
+        return ("the DeepSeek Harness on PATH was installed for a different Node.js ABI than "
+                "the `node` running it (`dsh: host preparation failed: No usable native "
+                "binding found ...`), so it cannot boot.\n"
+                "       Reinstall it under the node the pipeline will use (`nvm use 22` && "
+                "`npm i -g @deepseek-ai/dsh@alpha`), or run the stages on another backend "
+                "(--agent codex|claude|manual, or --agent-cmd)")
+    if "headless" not in text.lower():
+        return ""                        # not the app this preset speaks to: say nothing
+    if "--json" in text and "stdin" in text:
+        return ""
+    return ("the installed DeepSeek Harness cannot run this pipeline's sessions: "
+            "`dsh --profile headless` declares neither `--json` nor the stdin task form "
+            "(`-`) in its own help, so every session of this backend would fail with a "
+            "usage error.\n"
+            "       Upgrade it (`npm i -g @deepseek-ai/dsh@alpha`; the contract is "
+            "verified against dsh 0.2.1-alpha.4 and 0.2.0-rc.2), run the stages on another "
+            "backend (--agent codex|claude|manual), or point --agent-cmd at your own CLI")
+
+
+_HARNESS_PROBE_CACHE = {}
+
+
+def deepseek_harness_problem(cmd) -> str:
+    """Why the PRESET's harness argv cannot run a session ('' = no problem found).
+
+    A preset can pin flags, not capabilities: `deepseek` drives the harness's
+    one-shot driver (the task on stdin, the `--json` event stream that carries
+    the session id a continuation adopts), and only the BUILDS whose headless
+    app declares that contract can honor it. A `dsh` that predates it would
+    fail every session of a wave with the same usage error, so the argv is
+    probed once per invocation and the gap is named before any session starts.
+    Only a positive finding stops the run; a probe that cannot read the help
+    (a custom --agent-cmd, a wrapper, a hang, a missing binary) reports '' and
+    lets the sessions speak for themselves.
+
+    The answer is cached per RESOLVED BINARY (what `dsh` resolves to on PATH,
+    plus the argv), not per name: a process that changes PATH between calls gets
+    the verdict for the binary it is about to run, never another one's.
+    """
+    argv = [str(x) for x in (cmd or [])]
+    exe = argv[0] if argv else ""
+    key = (shutil.which(exe) or exe, tuple(argv))
+    if key not in _HARNESS_PROBE_CACHE:
+        if argv and os.path.basename(argv[0]).lower() == str(AGENT_PRESETS["deepseek"][0]):
+            _HARNESS_PROBE_CACHE[key] = _probe_dsh_headless(argv[0])
+        else:
+            _HARNESS_PROBE_CACHE[key] = ""
+    return _HARNESS_PROBE_CACHE[key]
+
+
+def agent_install_hint(cmd) -> str:
+    """The extra guidance line for a preset whose CLI is not installed ('' if none).
+
+    The Codex/Claude CLIs an operator already runs need no explanation; the
+    DeepSeek Harness is a separate install (`dsh`), and its one-shot form is a
+    property of the installed build -- so the "executable not found" errors name
+    both the package and the npx form that needs no global install. Only a
+    preset's own binary is answered for: a custom --agent-cmd points wherever
+    the operator meant it to.
+    """
+    name = os.path.basename(str(cmd[0])).lower() if cmd else ""
+    if name == str(AGENT_PRESETS["deepseek"][0]):
+        return ("\n       the DeepSeek Harness CLI (`dsh`, node >= 22) is not installed: "
+                "`npm i -g @deepseek-ai/dsh@alpha`. Its own home ($DSH_HOME, default ~/.dsh) "
+                "holds the model, the MCP servers and the DeepSeek credential "
+                "(DEEPSEEK_API_KEY)")
+    return ""
 
 
 def _coerce_text(s) -> str:
@@ -34384,7 +34561,12 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
                                 start_new_session=True)
     except FileNotFoundError as e:
         proc = None
-        rc, exc = None, f"agent executable not found: {e}"
+        # The same install hint the run banner's "not on PATH" errors carry: a
+        # command that stages ONE session (conform, add-venue, the template-first
+        # stage, the audits) reports the gap on this attempt's record instead, and
+        # a missing DeepSeek Harness is not self-explanatory the way a missing
+        # `codex` is.
+        rc, exc = None, f"agent executable not found: {e}" + agent_install_hint(cmd)
     except Exception as e:  # noqa: BLE001
         proc = None
         rc, exc = None, f"execution error: {e}"
@@ -38214,7 +38396,8 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     cmd = None if manual else resolve_agent_cmd(args.agent, args.agent_cmd)
     if not manual and shutil.which(cmd[0]) is None:
         die(f"agent executable not found on PATH: {cmd[0]!r}\n"
-            f"       use --agent-cmd '[\"...\"]' or PAPER_AGENT_CMD to point at your CLI")
+            f"       use --agent-cmd '[\"...\"]' or PAPER_AGENT_CMD to point at your CLI"
+            + agent_install_hint(cmd))
     # The judge panel is manual only when it is asked for explicitly, or when
     # NOTHING judge-specific was given and the production stages are manual: an
     # explicit --judge-agent-cmd must never be silently replaced by manual
@@ -38236,7 +38419,8 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         judge_cmd = list(cmd)
     if not judge_manual and shutil.which(judge_cmd[0]) is None:
         die(f"judge agent executable not found on PATH: {judge_cmd[0]!r}\n"
-            f"       fix --judge-agent-cmd/--judge-agent or drop the override")
+            f"       fix --judge-agent-cmd/--judge-agent or drop the override"
+            + agent_install_hint(judge_cmd))
     # The optional cross-judge conflict audit (see write_round_judge_conflicts):
     # OFF by default (the LLM defect audit below covers the same ground); an
     # explicit --conflict-agent[-cmd] or PAPER_CONFLICT_AGENT_CMD turns the LLM
@@ -38262,7 +38446,8 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         conflict_audit_on = conflict_cmd is not None
     if conflict_cmd is not None and shutil.which(str(conflict_cmd[0])) is None:
         die(f"conflict-audit agent executable not found on PATH: {conflict_cmd[0]!r}\n"
-            f"       fix --conflict-agent-cmd/--conflict-agent or pass --no-conflict-agent")
+            f"       fix --conflict-agent-cmd/--conflict-agent or pass --no-conflict-agent"
+            + agent_install_hint(conflict_cmd))
     # The LLM defect audit (diagnostic; see write_round_defect_audit): ON by
     # default when the judge backend is a real agent, off for manual/custom
     # backends unless --defect-audit[-cmd] / PAPER_DEFECT_AUDIT_CMD asks for it.
@@ -38371,8 +38556,19 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         elif any(o in argv for o in configured_mcp_approvals()):
             note = "; pre-approved for the agent with the -c MCP approval override"
         else:
-            note = ("; NOTE: this argv carries no MCP approval override "
-                    "(--agent-cmd/PAPER_AGENT_CMD was given), so the call may be denied")
+            # Only the codex preset carries the `-c` overrides, and they are
+            # codex's own mechanism: a custom command, or a preset that is not
+            # codex (claude, deepseek), reaches the servers through ITS OWN
+            # configuration instead -- which this probe cannot see, so it says
+            # what it actually knows.
+            if getattr(args, "agent_cmd", None) or os.environ.get("PAPER_AGENT_CMD"):
+                note = ("; NOTE: this argv carries no MCP approval override "
+                        "(--agent-cmd/PAPER_AGENT_CMD was given), so the call may be denied")
+            else:
+                note = (f"; NOTE: the {str(getattr(args, 'agent', '') or 'selected')} preset "
+                        f"carries no MCP approval override (only the codex one adds them; a CLI's "
+                        f"own configuration decides which MCP servers it reaches), so the call "
+                        f"may be denied")
         first_choice = (f"the {DOCX_MCP_SERVER} MCP tool (`{DOCX_MCP_TOOL}`) -- agents call it "
                         f"before any other converter{note}")
     elif shutil.which("docx2pdf.sh"):
@@ -40240,9 +40436,15 @@ def _conflict_cmd_usable(cmd) -> bool:
 
 
 def _looks_like_preset_cmd(cmd) -> bool:
-    """True for the shipped codex/claude CLI invocations (not a stub or wrapper)."""
+    """True for a shipped preset's CLI invocation (not a stub or wrapper).
+
+    The binaries are the preset table's own (codex/claude/dsh, see
+    AGENT_PRESET_BINARIES): a test stub or a foreign tool reached through
+    --agent-cmd/PAPER_AGENT_CMD must not be handed a second protocol (the defect
+    audit) uninvited.
+    """
     try:
-        return bool(cmd) and os.path.basename(str(cmd[0])) in ("codex", "claude")
+        return bool(cmd) and os.path.basename(str(cmd[0])).lower() in AGENT_PRESET_BINARIES
     except Exception:                                                # noqa: BLE001
         return False
 
@@ -49091,8 +49293,8 @@ USAGE_EXAMPLES = """usage:
           only): declaring the type never borrows another type's caps.
   run     --root <dir> [--jobs N] [--timeout S] [--retries 2]
           [--retry-backoff 30] [--retry-backoff-max 600]
-          [--agent codex|claude|manual] [--agent-cmd '<json argv>']
-          [--judge-agent codex|claude|manual] [--judge-agent-cmd '<json argv>']
+          [--agent codex|claude|deepseek|manual] [--agent-cmd '<json argv>']
+          [--judge-agent codex|claude|deepseek|manual] [--judge-agent-cmd '<json argv>']
           [--poll S] [--skip-hash]
           drive rounds 1..R as a DEPENDENCY GRAPH: every session starts as soon
           as its inputs exist (the M rewrites and the round's review start
@@ -49349,6 +49551,16 @@ agent backends:
   --agent codex (default) `codex exec -`, plus a `-c` override per MCP server
   the prompts drive (an MCP call that wants approval is DENIED, not queued, in
   a non-interactive session: approval policy is `never`)   |   --agent claude
+  `claude --permission-mode bypassPermissions --print`   |   --agent deepseek
+  the DeepSeek Harness CLI: `dsh --profile headless --json -` (prompt on
+  stdin, one fresh persisted session per attempt; the harness's own home
+  $DSH_HOME owns the model, the DEEPSEEK_API_KEY credential and its MCP
+  servers, and a continuation adopts the session its `--json` stream named with
+  `--session-id`). A gap that would fail every session -- the binary not
+  installed, a build whose headless app declares neither `--json` nor the stdin
+  task form, a `node` the harness cannot run under (older than 22, or one it
+  was not installed for) -- is named with its fix before the wave starts
+  instead of once per session.
   --agent manual: the orchestrator builds every sandbox + PROMPT.md and polls
   for each completion signal; you paste each prompt into your agent yourself,
   with cwd = that sandbox. Manual mode respects the same dependencies, and
@@ -49783,7 +49995,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_opts.add_argument("--retry-backoff-max", type=int, default=DEFAULTS["retry_backoff_max"],
                     help=f"cap on a single backoff wait in seconds (default: "
                          f"{DEFAULTS['retry_backoff_max']})")
-    run_opts.add_argument("--agent", choices=["codex", "claude", "manual"], default=DEFAULTS["agent"])
+    run_opts.add_argument("--agent", choices=list(AGENT_CHOICES), default=DEFAULTS["agent"],
+                    help="the session backend: codex (default) = `codex exec -`, claude = "
+                         "`claude --permission-mode bypassPermissions --print`, deepseek = the "
+                         "DeepSeek Harness CLI (`dsh --profile headless --json -`, installed "
+                         "separately), manual = stage every prompt for a human; --agent-cmd "
+                         "overrides any of them")
     run_opts.add_argument("--no-template-stage", action="store_true",
                           help="do NOT author the package inside the journal's Word templates "
                                "before the round (the default is to run that stage first in "
@@ -49791,9 +50008,10 @@ def build_parser() -> argparse.ArgumentParser:
                                "submission the round starts from)")
     run_opts.add_argument("--agent-cmd", default=None,
                     help="JSON argv list overriding the agent command")
-    run_opts.add_argument("--judge-agent", choices=["codex", "claude", "manual"], default=None,
+    run_opts.add_argument("--judge-agent", choices=list(AGENT_CHOICES), default=None,
                     help="backend for judge sessions only (default: same as --agent); the judge "
-                         "panel dominates cost, so this lets it run on a different CLI/model")
+                         "panel dominates cost, so this lets it run on a different CLI/model "
+                         "(deepseek = the DeepSeek Harness `dsh`)")
     run_opts.add_argument("--judge-agent-cmd", default=None,
                     help="JSON argv list for judge sessions only (default: --agent-cmd)")
     run_opts.add_argument("--poll", type=int, default=DEFAULTS["poll"],
@@ -49959,8 +50177,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="audit only this round (default: every round that has judge sheets)")
     pcf.add_argument("--agent", choices=list(CONFLICT_AGENT_CHOICES), default="manual",
                      help="backend for the LLM conflict audit (default: manual = the "
-                          "deterministic check only; pass codex-lite/codex/claude, or set "
-                          "PAPER_CONFLICT_AGENT_CMD, to add the LLM pass)")
+                          "deterministic check only; pass codex-lite/codex/claude/deepseek, or "
+                          "set PAPER_CONFLICT_AGENT_CMD, to add the LLM pass)")
     pcf.add_argument("--agent-cmd", default=None,
                      help="JSON argv list overriding the agent command")
     pcf.add_argument("--conflict-agent", choices=list(CONFLICT_AGENT_CHOICES), default=None,
@@ -50114,7 +50332,7 @@ def build_parser() -> argparse.ArgumentParser:
     pav.add_argument("--article-type", default=None, metavar="ID",
                      help="the article type the exemplar download should target (e.g. "
                           "original-research); the profile itself still carries the whole table")
-    pav.add_argument("--agent", choices=["codex", "claude", "manual"],
+    pav.add_argument("--agent", choices=list(AGENT_CHOICES),
                      default=DEFAULTS["agent"], help="the agent that writes the profile and "
                                                      "downloads the exemplars (default: codex)")
     pav.add_argument("--agent-cmd", default=None, metavar="JSON",

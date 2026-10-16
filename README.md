@@ -209,7 +209,7 @@ evidence pack.
 | `--zotero off\|read\|edit\|apply` (`setup`; default `edit`) | the Zotero policy every stage prompt repeats: `off` = no Zotero tooling, `read` = resolve citations read-only, `edit` = the revised copy may add/edit/delete citation fields (the library stays read-only), `apply` = as `edit` plus the one allowed library write. Whichever mode is set, the code-side field-continuity gate fails a stage that drops, unlinks or malforms a live field |
 | `--vs-original-rule {median,sign}` (`setup`) | the anti-regression gate's rule: `median` (default) compares a pair's median directed score; `sign` instead requires the exact one-sided sign test over the pair's directed scores to be significant |
 | `--stop-after-no-progress K` (`setup`) | adaptive stop (default 0 = off): once K consecutive rounds pin the round's own base, `run` stops before the next round and `decide` treats the last completed round as the answer; `--rounds` stays the hard cap |
-| `--judge-agent {codex,claude,manual}` / `--judge-agent-cmd JSON` (`run`) | run the judge panel only on a different (e.g. cheaper) backend; defaults to `--agent` / `--agent-cmd` |
+| `--judge-agent {codex,claude,deepseek,manual}` / `--judge-agent-cmd JSON` (`run`) | run the judge panel only on a different (e.g. cheaper) backend; defaults to `--agent` / `--agent-cmd` |
 | `--retry-backoff S` / `--retry-backoff-max S` (`run`) | exponential retry wait: base S doubling per failed attempt (default 30s), capped per wait (default 600s); 0 retries immediately |
 | `--no-wait` (`run`, manual mode) | print every currently-runnable prompt at once instead of waiting for each dependency |
 | `--require-clean-captions` (`decide`) | print the suggested-length caption report; kept for CLI compatibility — caption length is advisory, so it never exits non-zero (use exit 4/5 for real problems) |
@@ -218,8 +218,9 @@ evidence pack.
 ## Requirements
 
 * Python 3.9+ (the pipeline and both companion tools are standard-library only).
-* An agent CLI for the stage sessions: `codex` (default), `claude`, or a custom
-  command via `--agent-cmd`; `--agent manual` stages prompts for a human.
+* An agent CLI for the stage sessions: `codex` (default), `claude`, the
+  DeepSeek Harness (`deepseek`, i.e. the `dsh` CLI), or a custom command via
+  `--agent-cmd`; `--agent manual` stages prompts for a human.
 * Optional, probed at runtime and never required: the `docx` CLI (read/render/
   diff/validate), a .docx→PDF converter (the `docx-converter` MCP tool,
   `docx2pdf.sh` + Word, `docx render`, LibreOffice, `pandoc`), `pdftotext`/
@@ -238,6 +239,35 @@ evidence pack.
   separated allowlist of the directories they may read/write. **Unset means no
   containment** (the tools may touch anything the process can), so set it when
   an LLM agent drives the servers.
+
+### `--agent deepseek`: the DeepSeek Harness (`dsh`) as the session backend
+
+`dsh` is a separate install (node >= 22, `npm i -g @deepseek-ai/dsh@alpha`), and
+the pipeline drives it the way it drives the other two CLIs: one non-interactive
+session per stage, `PROMPT.md` piped on stdin, cwd = the stage's sandbox. The
+argv is `dsh --profile headless --json -`: `headless` is the harness's one-shot
+driver (one fresh persisted session, print the result, exit), and `--json`
+turns its stdout into a newline-delimited event stream whose opening `session`
+line names the session -- which is what lets a stopped session be CONTINUED with
+`--session-id <id>` exactly like a codex one (see *A STOPPED session is
+continued, not restarted*). The harness's own home (`$DSH_HOME`, default
+`~/.dsh`) owns the model, the MCP servers and the DeepSeek credential
+(`DEEPSEEK_API_KEY`), the way `~/.codex/config.toml` owns the codex CLI's -- so
+this preset carries no overrides, and a prompt that wants an MCP tool the
+harness does not have falls back to the next converter in its own list. Since
+that one-shot contract belongs to the installed BUILD rather than to a flag,
+`--agent deepseek` reads the harness's own `dsh --profile headless --help` once
+per invocation and names the gap (with the upgrade) up front instead of letting
+every session of a wave fail one by one -- including the conditions that would
+otherwise only appear as a stack trace per session: a build without the one-shot
+flags, and a `node` the harness cannot run under (it needs node >= 22 AND must be
+installed for the node that runs it, so putting a v22 first on PATH does not fix
+a harness `npm i -g`-installed under v18 -- reinstall it under v22). A missing
+`dsh` gets the install line.
+Verified end to end against dsh 0.2.1-alpha.4 and 0.2.0-rc.2. Reached through a
+custom `--agent-cmd` instead (e.g. the npx form, for a machine with no global
+install), the sessions run exactly the same way but keep the custom-command
+rule: no continuation form, so a stopped session gets a fresh attempt.
 
 ## Evidence is not submission text: `raw_data/` and the review-feedback areas
 
@@ -709,10 +739,10 @@ schedule: `2 3` = two rounds following the schedule's rounds 2 and 3, `3`/`-1`
 `--judges N[,N…]`, `--rewrites M[,M…]`, `--revises N[,N…]`,
 `--integrators MASK[,MASK…]`,
 `--caption-limit N` (default: the venue profile's own),
-`--jobs N`, `--agent {codex,claude,manual}`, `--agent-cmd JSON`, `--retries N`,
+`--jobs N`, `--agent {codex,claude,deepseek,manual}`, `--agent-cmd JSON`, `--retries N`,
 `--poll S` (manual mode), `--no-redline`, `run --only 1,2` (only rounds 1 and
 2; see *Running only some of the steps*). Opt-in audits:
-`--defect-audit {codex-lite,codex,claude,manual}`, `--defect-audit-cmd JSON`,
+`--defect-audit {codex-lite,codex,claude,deepseek,manual}`, `--defect-audit-cmd JSON`,
 `--no-defect-audit` and `--conflict-agent {…}`, `--conflict-agent-cmd JSON`,
 `--no-conflict-agent` select the two optional LLM audits (the defect audit is
 on by default with an agent backend; the conflict LLM pass is off by default).
@@ -2332,7 +2362,7 @@ a clean panel. Each round's judge wave is followed by ITS OWN audit (two
 rounds produce two audits; `decide` only back-fills a round that has no audit
 yet). The LLM conflict auditor is OFF by default: only the mechanical conflicts
 are written, and every row keeps `origin: mechanical`. `--conflict-agent
-{codex-lite|codex|claude}` / `--conflict-agent-cmd JSON` (or the audit-specific
+{codex-lite|codex|claude|deepseek}` / `--conflict-agent-cmd JSON` (or the audit-specific
 `PAPER_CONFLICT_AGENT_CMD`) turn the LLM pass on for that invocation; its
 semantic candidates are schema-checked and merged, never trusted blindly
 (`--no-conflict-agent` and `--conflict-agent manual` keep it off). The separate
@@ -2363,8 +2393,9 @@ before, and a SECOND table then shows the same scores with `defects@K` and the
 severity totals re-counted over the TP rows only. **The champion selection
 still reads the non-audited aggregation**: the audited dict is a copy, `sel` is
 computed before it, and neither the pin nor the winner is touched. The audit is
-ON by default with a real agent backend (the judge-side `codex`/`claude`
-preset); `--defect-audit {codex-lite|codex|claude}`, `--defect-audit-cmd JSON`
+ON by default with a real agent backend (the judge-side
+`codex`/`claude`/`deepseek` preset); `--defect-audit
+{codex-lite|codex|claude|deepseek}`, `--defect-audit-cmd JSON`
 or `PAPER_DEFECT_AUDIT_CMD` choose/force a backend, and `--no-defect-audit`
 (or `--defect-audit manual`) writes only the non-audited reports. A manual or
 custom/stub judge backend does not silently get a second protocol -- opt in
@@ -2451,14 +2482,21 @@ written), and a fresh attempt would have re-read four corpora to redo work the
 session had already done. The CLI keeps such sessions, so the pipeline CONTINUES
 one instead:
 
-* the id the CLI prints in its banner (`session id: <uuid>`) is already in the
-  attempt's `_agent.log`, so no extra channel is needed; it is captured into
-  `runs.<id>.agent_session_id` and shown in the attempt history;
+* the id the CLI prints in its banner (`session id: <uuid>`), in a claude
+  `--output-format json` result object (`"session_id"`), or in the `deepseek`
+  preset's opening `--json` event (`"sessionId": "session-<uuid>"`) is already in
+  the attempt's `_agent.log`, so no extra channel is needed; the LAST one in the
+  file is captured into `runs.<id>.agent_session_id` and shown in the attempt
+  history;
 * an attempt that looks **unfinished** — a process-level failure (timeout/kill),
   or a postcheck error naming a deliverable that does not EXIST — is continued:
   `codex exec resume <session-id> <same overrides> -` (or, for the `claude`
   preset, `… --print --resume <session-id>`, falling back to `--continue`, which
-  resumes the most recent session of that sandbox's own directory). A custom
+  resumes the most recent session of that sandbox's own directory; or, for the
+  `deepseek` preset, `dsh --profile headless --json --session-id <session-id> -`,
+  the exact persisted session whose id its `--json` event stream named — the
+  harness adopts a session by exact id only, so there is no `--continue`
+  equivalent and no id means no continuation). A custom
   `--agent-cmd` has no known resume form and gets a fresh attempt as before; an
   attempt that *finished* and was rejected on content is not continued either —
   that is the retry/repair path's business;
@@ -2655,7 +2693,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 125 suites (a few
+any failure. They are independent, so run them in parallel — 126 suites (a few
 minutes at the default 24 parallel sessions; tens of minutes sequentially):
 
 ```bash
@@ -2678,7 +2716,11 @@ ls .paper_test/test_*.py | sed 's|.*/||' \
   | parallel -j 8 --joblog /tmp/paper-logs/joblog '.paper_test/run_one.sh {}'
 ```
 
-Highlights: `test_pipeline.py` (prompts, gates, ranking), `test_length_limits.py`
+Highlights: `test_pipeline.py` (prompts, gates, ranking),
+`test_deepseek_backend.py` (the DeepSeek Harness preset end to end through a fake
+`dsh`: PROMPT.md on stdin, cwd = the sandbox, the `--json` session line captured,
+a stalled session continued with `--session-id`, and a harness without the
+one-shot contract stopped up front), `test_length_limits.py`
 (M18/M19 length rules), the `test_docx_format_*_*.py` parts (OOXML formatting scan/fix, the
 setup/stage normalization, the seeded M20 artifact and its contract, plus a real
 LibreOffice render proving the blank page is gone), `test_stage_subset.py`
