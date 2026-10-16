@@ -2559,6 +2559,265 @@ def identifier_rows(docs) -> list:
     return rows
 
 
+# ---------------------------------------------------------------------------
+# M2 reference-integrity seed: the identifiers a reference list CARRIES
+# ---------------------------------------------------------------------------
+# The citation sweep (M2) pairs call-outs with entries and M10 judges an entry's
+# own format; neither can tell whether the identifier an entry carries is the
+# identifier OF THE WORK THE ENTRY NAMES. That is a fact about the entry, and a
+# one-character corruption (10.1890 -> 10.1891) leaves author, title, journal
+# and year untouched, so every format check passes and re-reading the line finds
+# nothing. This seed enumerates, per ENTRY, what the code can establish locally
+# (the entry's own year, the DOI's own year token, a DOI stated twice, a DOI the
+# syntax rejects) and hands the entry's DOI to the pipeline's lookup engine; the
+# review disposes every row against the entry's own text.
+# The heading that opens a reference list, normalized per line: markdown's `##`,
+# a list ordinal, emphasis markers and a trailing colon are furniture, and a
+# DOCX/markdown heading is the only thing that opens the region (a `.tex`
+# bibliography is found by its own `\bibitem` markers instead).
+REFERENCE_HEADING_WORDS = frozenset((
+    "references", "references cited", "reference list", "bibliography",
+    "literature cited", "works cited", "reference literature"))
+# The numbered markers are read anywhere whitespace precedes them: the corpus
+# scanner hands markdown/LaTeX text over as PARAGRAPHS (a reference list written
+# without blank lines between entries arrives as ONE paragraph), so an anchored
+# `^` pattern sees a single line and no entries at all.
+REFERENCE_NUMBERED_RE = re.compile(r"(?:^|\s)(?:\[(\d{1,3})\]|(\d{1,3})[.)])\s+")
+# An author-year entry opens with a surname run whose year follows in
+# parentheses or brackets ("Berg, J. K. (2016).", "Berg and Smith (2016)",
+# "Berg JK [2016]"): the same joined-paragraph problem, and a split that is
+# never made would leave every row's body holding the WHOLE list -- which would
+# make the resolved-title comparison vacuous (every title "appears" in it).
+REFERENCE_AY_START_RE = re.compile(
+    r"(?<=[\s.;])(?=[A-Z][A-Za-z'`\-]{1,24}[^()\[\]]{0,40}?[\(\[]\d{4}[\)\]](?:[.,]\s*)?)")
+REFERENCE_BIBITEM_RE = re.compile(
+    r"(?m)^[ \t]*\\bibitem[ \t]*(?:\[[^\]]*\])?[ \t]*\{([^}]*)\}")
+REFERENCE_BIBENTRY_RE = re.compile(r"(?m)^[ \t]*@\w+[ \t]*\{[ \t]*([^,\s]+)[ \t]*,")
+REFERENCE_YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
+# The entry SAYS it carries a DOI (`doi`, `DOI:`, `https://doi.org/`): only then
+# is a DOI-shaped token the syntax rejects worth a row.
+REFERENCE_DOI_CLAIM_RE = re.compile(r"(?i)(?:\bdoi\b[ \t]*[:\s]|https?://(?:dx\.)?doi\.org/)")
+REFERENCE_DOI_TOKEN_RE = re.compile(r"(?i)(?:doi[ \t]*[:\s]*|doi\.org/)[ \t]*(\S{4,90})")
+# Words a resolver's title shares with the entry for grammatical reasons: they
+# decide nothing about whether the entry and the record are the same work.
+REF_HIT_STOPWORDS = {
+    "the", "and", "for", "with", "from", "that", "this", "into", "over", "under",
+    "between", "using", "used", "are", "was", "were", "its", "their", "more",
+    "than", "not", "but", "data", "study", "studies", "analysis", "results",
+    "based", "among", "during", "after", "before", "across", "within", "without",
+}
+
+
+def _fold_space(text: str) -> str:
+    """One line, no runs of whitespace (the seeded cells are single lines)."""
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def _entry_year(body: str) -> str:
+    """The entry's own year token ('' when the entry carries none)."""
+    m = REFERENCE_YEAR_RE.search(body or "")
+    return m.group(1) if m else ""
+
+
+def _is_reference_heading(line: str) -> bool:
+    """True for a line that is ONLY a reference-list heading (any furniture)."""
+    t = str(line or "").strip().strip("*_#=\\{}").strip()
+    t = re.sub(r"^\d+[.)]\s*", "", t).strip().rstrip(":").strip()
+    return t.lower() in REFERENCE_HEADING_WORDS
+
+
+def _is_section_heading(line: str) -> bool:
+    """True for a line that opens a NEW section (which ends the region)."""
+    t = str(line or "").strip()
+    return bool(re.match(r"#{1,6}[ \t]+\S", t) or re.match(r"\\section\*?\{", t))
+
+
+def _split_reference_entries(text: str, allow_paragraphs: bool) -> list:
+    """[(label, entry_text)] for one reference-list region.
+
+    Markers first (`\\bibitem{key}` / `@type{key,` carry their own labels, then a
+    numbered list), because they delimit entries exactly; the numbered shape is
+    only trusted with three or more matches (a lone `1.` line is a list, not a
+    reference list). `allow_paragraphs` is True only after a reference HEADING:
+    an unlabelled author-year list is read as its paragraph blocks, and prose
+    that merely happens to sit in a file is never read that way.
+    """
+    for pattern, keyed, minimum in ((REFERENCE_BIBITEM_RE, True, 1),
+                                    (REFERENCE_BIBENTRY_RE, True, 1),
+                                    (REFERENCE_NUMBERED_RE, False, 3)):
+        spans = list(pattern.finditer(text))
+        if len(spans) < minimum:
+            continue
+        entries = []
+        for i, m in enumerate(spans):
+            end = spans[i + 1].start() if i + 1 < len(spans) else len(text)
+            label = (m.group(1) or "").strip() if keyed \
+                else str(m.group(1) or m.group(2) or "").strip()
+            entries.append((label, _fold_space(text[m.end():end])))
+        return entries
+    if not allow_paragraphs:
+        return []
+    # One sentinel space, so the FIRST entry (whose lookbehind has no character
+    # before it) is a start too, and every index shifts back by one.
+    starts = [m.start() - 1 for m in REFERENCE_AY_START_RE.finditer(" " + (text or ""))]
+    starts = [s for s in starts if s >= 0]
+    if len(starts) >= 2:
+        if starts[0] > 0:
+            starts = [0] + starts
+        ends = starts[1:] + [len(text)]
+        return [("", _fold_space(text[a:b])) for a, b in zip(starts, ends)]
+    blocks = [b for b in re.split(r"\n[ \t]*\n", text or "") if b.strip()]
+    return [("", _fold_space(b)) for b in blocks]
+
+
+def reference_entries(docs) -> list:
+    """[(document, label, entry_text)] for every reference entry the code can read.
+
+    DOCX paragraphs whose style map flags them as the bibliography are one entry
+    each; a LaTeX/BibTeX list is read from its own markers wherever it sits; a
+    plain-text list is read after a reference heading. A document with no
+    heading, no marker and no flagged paragraph yields NOTHING -- the seed never
+    guesses that prose is a reference list.
+    """
+    out = []
+    for name, rows in (docs or []):
+        if isinstance(rows, str):
+            rows = [(rows, False, False)]
+        rows = list(rows or [])
+        flagged = [r for r in rows
+                   if isinstance(r, (list, tuple)) and len(r) > 2 and r[1]]
+        if flagged:
+            for r in flagged:
+                body = _fold_space(str(r[0]))
+                if body:
+                    out.append((name, "", body))
+            continue
+        text = "\n".join(str(r[0]) if isinstance(r, (list, tuple)) else str(r)
+                         for r in rows)
+        lines = text.splitlines()
+        start = next((i for i, l in enumerate(lines) if _is_reference_heading(l)), None)
+        if start is not None:
+            # The region ends at the next section heading: a "Supplementary" or
+            # "Acknowledgements" section after the list is not more entries.
+            end = next((j for j in range(start + 1, len(lines))
+                        if _is_section_heading(lines[j])), len(lines))
+            region = "\n".join(lines[start + 1:end])
+        else:
+            region = text
+        for label, body in _split_reference_entries(region, allow_paragraphs=start is not None):
+            if body:
+                out.append((name, label, body))
+    return out
+
+
+def doi_year_token_signal(doi: str, year: str) -> str:
+    """'' when the DOI's own year token cannot contradict the entry's year.
+
+    A DOI frequently embeds the publication year in its SUFFIX (`gb-2019-0002`;
+    old Springer suffixes carry a two-digit one). The registrant prefix is
+    never read: `10.1111/...` is Wiley's prefix, and reading it as a year would
+    fire on every 2011 entry. A four-digit suffix token that agrees with the
+    entry's year only in its LAST TWO DIGITS and sits within a century of it is
+    the classic one-character corruption of that year (2019 -> 2119), and the
+    entry's own year is the only place the true value is written -- so the
+    disagreement is a SIGNAL for the reviewer to dispose, never a verdict. A
+    token whose last two digits differ is not the entry's year at all (a series
+    or volume number) and stays silent, and so does a date far outside the
+    entry's era.
+    """
+    year = str(year or "").strip()
+    if not re.fullmatch(r"\d{4}", year):
+        return ""
+    doi = str(doi or "")
+    suffix = doi.split("/", 1)[1] if "/" in doi else ""
+    for m in re.finditer(r"(?<!\d)(\d{4})(?!\d)", suffix):
+        tok = m.group(1)
+        delta = abs(int(tok) - int(year))
+        if tok != year and tok[-2:] == year[-2:] and 2 <= delta <= 100:
+            return (f"the DOI's own year token {tok} disagrees with the entry's {year} "
+                    f"(same last two digits: a one-character corruption?)")
+    return ""
+
+
+def reference_entry_hit_signal(entry_text: str, hit: dict) -> str:
+    """'' when the resolver's record agrees with the entry, else the disagreement.
+
+    Two comparisons, each only when the record carries enough to make one: the
+    year the resolver reports against the entry's own year (two years apart or
+    more), and the resolved TITLE against the entry's text. The title test asks
+    for an ABSOLUTE overlap, never a fraction of the record's own words: a
+    registration record often carries a subtitle, a species name and a
+    parenthetical the reference list legitimately abbreviates, so a fraction
+    calls a correct entry "a different work" (the 2026-10-16 check: a real
+    Crossref title ran 13 significant words against the entry's 8, and the
+    fraction rule fired on the entry that was RIGHT). A record too thin to
+    judge stays silent: the verdict itself is then all the reviewer has to
+    dispose, and guessing past that is what the seed exists to prevent.
+    """
+    out = []
+    year = _entry_year(entry_text)
+    hy = str((hit or {}).get("date") or "").strip()
+    if year and re.fullmatch(r"\d{4}", hy) and abs(int(hy) - int(year)) >= 2:
+        out.append(f"the resolved work's year {hy} disagrees with the entry's {year}")
+    title = str((hit or {}).get("title") or "")
+    toks = [t for t in re.findall(r"[A-Za-z][A-Za-z0-9\-]{3,}", title)
+            if t.lower() not in REF_HIT_STOPWORDS]
+    if len(toks) >= 3:
+        low = str(entry_text or "").lower()
+        present = [t for t in toks if t.lower() in low]
+        need = max(3, (len(toks) + 3) // 4)
+        if len(present) < need:
+            missing = [t for t in toks if t.lower() not in low][:6]
+            out.append(f"the resolved work's title ({_fold_space(title)[:80]!r}) is not this "
+                       f"entry's: only {len(present)} of its {len(toks)} significant words "
+                       f"appear in the entry (missing: {', '.join(missing)})")
+    return "; ".join(out)
+
+
+def reference_integrity_rows(docs) -> list:
+    """One row per reference ENTRY that carries a DOI (or claims one it lacks).
+
+    Row fields: `document`, `entry` (the entry's own label), `year` (the entry's
+    year token), `identifier`, `kind`, `signal` (what the code established
+    locally) and `evidence` (the quoted token the reviewer re-checks), plus the
+    entry text under `text` for the resolver comparison. The resolver verdict is
+    joined in by the orchestrator; this function never guesses a citation's
+    target and never touches the network.
+    """
+    entries = reference_entries(docs)
+    by_doi = {}
+    for doc, label, body in entries:
+        for doi in dict.fromkeys(m.group(0).rstrip(".,;") for m in DOI_RE.finditer(body)):
+            by_doi.setdefault(doi.lower(), []).append((doc, label))
+    rows = []
+    for doc, label, body in entries:
+        year = _entry_year(body)
+        dois = list(dict.fromkeys(m.group(0).rstrip(".,;") for m in DOI_RE.finditer(body)))
+        if not dois:
+            if REFERENCE_DOI_CLAIM_RE.search(body):
+                tok = REFERENCE_DOI_TOKEN_RE.search(body)
+                rows.append({"document": doc, "entry": label, "year": year, "identifier": "",
+                             "kind": "doi", "text": body, "signal": "doi-malformed",
+                             "evidence": "the entry names a DOI but no well-formed DOI can be "
+                                         "read beside it ("
+                                         + repr((tok.group(1) if tok else "")[:60]) + ")"})
+            continue
+        for doi in dois:
+            signal = doi_year_token_signal(doi, year)
+            evidence = ""
+            if signal:
+                evidence = signal
+            others = [f"{d} entry {l}" if l else d for d, l in by_doi.get(doi.lower(), [])
+                      if (d, l) != (doc, label)]
+            if others:
+                dup = "the same DOI appears on " + ", ".join(others[:3]) + " too"
+                signal = (signal + "; " + dup) if signal else "duplicate-doi"
+                evidence = (evidence + "; " + dup) if evidence else dup
+            rows.append({"document": doc, "entry": label, "year": year, "identifier": doi,
+                         "kind": "doi", "text": body, "signal": signal, "evidence": evidence})
+    return rows
+
+
 def lookup_kind(kind: str, query: str, timeout: int = 30) -> dict:
     """One public-API lookup, per identifier/placeholder class.
 
@@ -2596,15 +2855,101 @@ def lookup_kind(kind: str, query: str, timeout: int = 30) -> dict:
                 out["verdict"] = "absent"
         elif kind == "doi":
             doi = re.sub(r"^https?://doi\.org/", "", str(query).strip())
-            msg = json.loads(fetch("https://api.crossref.org/works/"
-                                   + urllib.parse.quote(doi)
-                                   + "?mailto=paper-pipeline@example.org"))["message"]
-            out["hits"] = [{"source": "crossref",
-                            "title": (msg.get("title") or [""])[0],
-                            "doi": msg.get("DOI"),
-                            "date": ((msg.get("issued", {}).get("date-parts")
-                                      or [[None]])[0] or [None])[0]}]
-            out["verdict"] = "found"
+            try:
+                msg = json.loads(fetch("https://api.crossref.org/works/"
+                                       + urllib.parse.quote(doi)
+                                       + "?mailto=paper-pipeline@example.org"))["message"]
+                out["hits"] = [{"source": "crossref",
+                                "title": (msg.get("title") or [""])[0],
+                                "doi": msg.get("DOI"),
+                                "date": ((msg.get("issued", {}).get("date-parts")
+                                          or [[None]])[0] or [None])[0]}]
+                out["verdict"] = "found"
+            except Exception as crossref_err:                         # noqa: BLE001
+                # A DOI is registered with ONE registration agency and Crossref
+                # answers only for its own: a DataCite DOI (Zenodo, OSF,
+                # Dataverse, Dryad, ...) 404s there, and recording that as
+                # `absent` turned a perfectly resolvable deposit into a
+                # "verified negative" -- wrong evidence for an availability
+                # statement and a false finding for a reference entry. The
+                # second registry is therefore asked before nonexistence is
+                # claimed, and `absent` now means BOTH registries answered no.
+                try:
+                    d = json.loads(fetch(
+                        "https://api.datacite.org/dois/" + urllib.parse.quote(doi),
+                        headers={"User-Agent": "paper-pipeline/3.5 (identifier lookup)",
+                                 "Accept": "application/vnd.api+json"}))
+                    attrs = ((d.get("data") or {}).get("attributes") or {})
+                    title = ((attrs.get("titles") or [{}])[0] or {}).get("title") or ""
+                    out["hits"] = [{"source": "datacite", "title": title,
+                                    "doi": (d.get("data") or {}).get("id"),
+                                    "date": attrs.get("publicationYear")
+                                    or str(attrs.get("published") or "")[:4],
+                                    "publisher": attrs.get("publisher")}]
+                    out["verdict"] = "found"
+                except Exception as datacite_err:                     # noqa: BLE001
+                    if getattr(crossref_err, "code", None) == 404 \
+                            and getattr(datacite_err, "code", None) == 404:
+                        # Neither metadata agency serves every DOI: mEDRA, CNKI,
+                        # JaLC and KISTI register DOIs of their own, and calling
+                        # one of theirs "not registered" would be a false
+                        # accusation. The handle registry answers for ALL
+                        # agencies (responseCode 1 = the handle exists, 100 =
+                        # it does not), so it is the arbiter and only its own
+                        # answer licenses `absent`.
+                        h, code = {}, -1
+                        try:
+                            h = json.loads(fetch("https://doi.org/api/handles/"
+                                                 + urllib.parse.quote(doi)))
+                            code = int(h.get("responseCode") or 0)
+                        except Exception as handle_err:               # noqa: BLE001
+                            # A nonexistent handle is answered with HTTP 404
+                            # (and `{"responseCode": 100}` in the body when the
+                            # registry sends one): the BODY is the answer where
+                            # there is one, and the status is the answer where
+                            # there is not -- reading the status alone turned
+                            # every unregistered DOI into a lookup ERROR instead
+                            # of the verified negative `absent` is for.
+                            body = ""
+                            if hasattr(handle_err, "read"):
+                                try:
+                                    body = handle_err.read().decode("utf-8", "replace")
+                                except Exception:                      # noqa: BLE001
+                                    body = ""
+                            try:
+                                h = json.loads(body)
+                                code = int(h.get("responseCode") or 0)
+                            except Exception:                          # noqa: BLE001
+                                h, code = {}, -1
+                            if code == -1 and getattr(handle_err, "code", None) == 404:
+                                # The handle is not there (both metadata agencies
+                                # have already said the same), so this IS the
+                                # verified negative -- never a lookup failure.
+                                code = 100
+                            if code != 100:
+                                out["errors"] += [f"crossref: {crossref_err}",
+                                                  f"datacite: {datacite_err}",
+                                                  f"doi.org: {handle_err}"]
+                                out["verdict"] = "error"
+                                return out
+                        if code == 1:
+                            url = next((((v.get("data") or {}).get("value") or "")
+                                        for v in (h.get("values") or [])
+                                        if str(v.get("type")) == "URL"), "")
+                            out["hits"] = [{"source": "doi.org", "title": "",
+                                            "doi": doi, "date": "", "url": url}]
+                            out["verdict"] = "found"
+                        elif code == 100:
+                            out["verdict"] = "absent"
+                        else:
+                            out["errors"].append(f"doi.org handle API: {str(h)[:120]}")
+                            out["verdict"] = "error"
+                            return out
+                    else:
+                        out["errors"] += [f"crossref: {crossref_err}",
+                                          f"datacite: {datacite_err}"]
+                        out["verdict"] = "error"
+                        return out
         elif kind == "accession":
             db = accession_database(query)
             d = json.loads(fetch("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"

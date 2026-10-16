@@ -117,7 +117,7 @@ def review_sandbox(tmp, submission_dir="./base", coverage=None, artifacts=True,
                       "M29_caption_schema.md", "M30_hierarchy_reconciliation.md",
                   "M31_artwork_legend.md", "M32_statistics.md", "M33_availability.md",
                   "M34_source_data_coverage.md", "M35_disclosures.md",
-                  "M36_zotero_parity.md"):
+                  "M36_zotero_parity.md", "M2_references.md"):
             (sb / "review/artifacts" / fname).write_text(
                 "| row | disposition |\n|---|---|\n| x | OK |\n", encoding="utf-8")
         (sb / "review/ARCHITECTURE.md").write_text(

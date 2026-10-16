@@ -1060,13 +1060,23 @@ Every non-judge sandbox now also receives a code-side **provenance pack**
 |---|---|
 | `NUMBERS_LEDGER.md` | every numeric literal, with the `source` the CODE could PROVE from a shipped data table (a column sum/min/max or a single cell — e.g. `45,365` = the sum of `n_cells_total`). A row whose source stays empty is the session's job |
 | `IDENTIFIERS.md` | every DOI / SRA-BioProject-GEO accession / repository URL+commit / ORCID, with the orchestrator's own public-API verdict (`found` / `absent` / `error` / `skipped`) |
+| `M2_references.md` | the reference-integrity seed: one row per reference ENTRY that carries a DOI, with the resolver's verdict for that DOI and what the code established itself — a year token inside the DOI that contradicts the entry's own year (`gb-2019` → `gb-2119`), the same DOI on two entries, and the comparison between the resolved record and the entry. A one-character DOI corruption leaves author, title, journal and year intact, so no format check and no re-reading can see it |
 | `PLACEHOLDER_LOOKUP.md` | the answers the pipeline already found for the `searchable` hand-off markers (`found` = the fact; `absent` = a VERIFIED NEGATIVE such as "not posted"). A marker this table answers may not ship |
 | `M24_concepts.md` + `GLOSSARY.md` | two term families competing for one concept (CN vs CNV vs CNA, simulate vs emulate, rank vs score), with counts per surface form, and the term decisions to conform to |
 
 The lookups run through a cached probe (`reports/LOOKUP_CACHE.json`, 14-day TTL):
 one cheap probe per process decides whether to query at all, results are reused
 across the sandboxes of a root, and `--placeholder-lookup off` records the
-questions and checks nothing (useful offline).
+questions and checks nothing (useful offline). The probe asks an API ENDPOINT,
+never a record, and any HTTP answer counts as reachable — a probe that named a
+record 404'd, and the raised error was read as "no network", which silently
+recorded `skipped` for every identifier, availability locator, gene symbol and
+reference DOI of every run. A DOI is resolved against Crossref, then against the
+second metadata agency (DataCite — a Zenodo/OSF/Dataverse/Dryad DOI 404s on
+Crossref), and finally against the handle registry, which answers for EVERY
+registration agency: `absent` means no agency returned a record and the handle
+itself is not registered, so a mEDRA/CNKI/JaLC/KISTI DOI is never called
+unregistered.
 
 The residual gate is **ON by default**: `decide` turns the recorded residuals
 into decision problems (exit 5) — a `searchable` marker the lookup engine
@@ -2693,7 +2703,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 127 suites (a few
+any failure. They are independent, so run them in parallel — 128 suites (a few
 minutes at the default 24 parallel sessions; tens of minutes sequentially):
 
 ```bash
@@ -2717,6 +2727,13 @@ ls .paper_test/test_*.py | sed 's|.*/||' \
 ```
 
 Highlights: `test_pipeline.py` (prompts, gates, ranking),
+`test_reference_integrity.py` (M2's integrity seed end to end: every
+reference-list shape the corpus hands over — a numbered or author-year list
+joined into ONE paragraph, `\bibitem`, `@type{key,`, DOCX paragraphs the style
+map flags — the local signals that need no network, the resolver's verdicts
+including the DataCite fallback and the probe that decides whether the lookup
+engine runs at all, the comparison between a resolved record and the entry in
+both directions, and the seeded table's disposition gate),
 `test_deepseek_backend.py` (the DeepSeek Harness preset end to end through a fake
 `dsh`: PROMPT.md on stdin, cwd = the sandbox, the `--json` session line captured,
 a stalled session continued with `--session-id`, and a harness without the

@@ -420,7 +420,7 @@ def build_review_sandbox(tmp: Path, short_rows: bool, marker_in_review: bool) ->
                   "M29_caption_schema.md", "M30_hierarchy_reconciliation.md",
                   "M31_artwork_legend.md", "M32_statistics.md", "M33_availability.md",
                   "M34_source_data_coverage.md", "M35_disclosures.md",
-                  "M36_zotero_parity.md"):
+                  "M36_zotero_parity.md", "M2_references.md"):
         write(art / fname, "| row | disposition |\n|---|---|\n| x | OK |\n")
     write(sb / "review" / "ARCHITECTURE.md",
           "| document | section | paragraphs | current structure | reader cost | "

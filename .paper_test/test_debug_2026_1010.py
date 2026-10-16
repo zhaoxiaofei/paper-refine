@@ -107,18 +107,35 @@ def _bibliography_para(number: int, text: str) -> str:
 # =====================================================================
 def test_lookup_budget():
     print("\n== C01 the per-class lookup budget keeps the leftovers ==")
+    # The pool must EXCEED the cap for the trimming to be exercised at all: a
+    # 36-target pool with the 24-cap of the day proved nothing about a raised
+    # cap, and the check silently passed on the early return (len <= budget).
     targets = ([{"source": "identifier", "kind": "doi", "query": f"10.1/{i}"}
-                for i in range(30)]
-               + [{"source": "gene", "kind": "gene", "query": f"G{i}"} for i in range(5)]
-               + [{"source": "placeholder", "kind": "preprint", "query": "T"}])
+                for i in range(40)]
+               + [{"source": "gene", "kind": "gene", "query": f"G{i}"} for i in range(20)]
+               + [{"source": "placeholder", "kind": "preprint", "query": f"T{i}"}
+                  for i in range(5)])
     picked = pp._select_lookup_targets(targets, pp.LOOKUP_MAX_TARGETS)
     srcs = Counter(t["source"] for t in picked)
     check("the lookup budget is filled to its cap when targets remain",
           len(picked) == pp.LOOKUP_MAX_TARGETS, f"{len(picked)} of {pp.LOOKUP_MAX_TARGETS}")
-    check("an identifier-heavy corpus checks more than the reserved four",
+    check("an identifier-heavy corpus checks more than its reserved share",
           srcs["identifier"] > pp.LOOKUP_BUDGET_SHARES["identifier"], str(dict(srcs)))
     check("every class keeps at least its reserved share",
-          srcs["gene"] >= 5 and srcs["placeholder"] >= 1, str(dict(srcs)))
+          srcs["gene"] >= pp.LOOKUP_BUDGET_SHARES["gene"]
+          and srcs["placeholder"] >= pp.LOOKUP_BUDGET_SHARES["placeholder"], str(dict(srcs)))
+    # A reference-heavy pool is the new default shape (M2's seed resolves the
+    # bibliography first): the leftover goes to the reference list, and NO other
+    # class may lose the reserve it was promised in exchange.
+    mixed = targets + [{"source": "reference", "kind": "doi", "query": f"10.2/{i}"}
+                       for i in range(30)]
+    picked_mixed = pp._select_lookup_targets(mixed, pp.LOOKUP_MAX_TARGETS)
+    srcs_mixed = Counter(t["source"] for t in picked_mixed)
+    check("a reference-heavy pool still leaves every other class its reserve",
+          len(picked_mixed) == pp.LOOKUP_MAX_TARGETS
+          and srcs_mixed["reference"] >= pp.LOOKUP_BUDGET_SHARES["reference"]
+          and all(srcs_mixed[k] >= pp.LOOKUP_BUDGET_SHARES[k]
+                  for k in ("identifier", "gene", "placeholder")), str(dict(srcs_mixed)))
     small = [{"source": "identifier", "kind": "doi", "query": "d"}]
     check("a pool within budget is returned unchanged",
           pp._select_lookup_targets(small, 24) == small)

@@ -358,7 +358,8 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
                        ("M33_availability.md", "M33"),
                        ("M34_source_data_coverage.md", "M34"),
                        ("M35_disclosures.md", "M35"),
-                       ("M36_zotero_parity.md", "M36")):
+                       ("M36_zotero_parity.md", "M36"),
+                       ("M2_references.md", "M2")):
         (out / "artifacts" / fname).write_text(
             f"# {cid} (stub)\n\n| row | disposition |\n|---|---|\n"
             f"| stub | OK - stub: nothing found |\n", encoding="utf-8")

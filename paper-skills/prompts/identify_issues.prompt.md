@@ -137,6 +137,7 @@ Truncation silently drops exactly the tail-end mechanical findings, so append ea
 
 
 ## APPENDIX: Sweeps M1–M36 and judgment passes J1–J5 (references/sweeps.md)
+
 # Sweeps M1–M36 and Judgment Passes J1–J5 — paper-review
 
 This file is the single source of truth for Phase 2. Follow it exactly.
@@ -483,6 +484,25 @@ and `.bib` entries (a commented-out or verbatim `\cite` is not a call-out),
 numbered and unnumbered reference lists. Extend it in WORK/ for other styles
 (e.g. superscript numbers) instead of eyeballing.
 
+The orchestrator ALSO seeds `review/artifacts/M2_references.md` (copied to
+`work/M2_references.md`): one row per reference ENTRY that carries a DOI, with
+its own public-API verdict for that DOI (`found` / `absent` / `error` /
+`skipped` / `not selected`), what the endpoint returned (year and title), and
+the code-side signals it could establish without the network — a year token
+inside the DOI that contradicts the entry's own year, the same DOI on two
+entries, a stated DOI the syntax rejects. That table is a decision table: every
+row gets a disposition (see the finding rules below). It exists because an
+entry's identifier is the one part of a citation no format check and no
+re-reading can verify: a one-character corruption (`10.1890` → `10.1891`)
+leaves author, title, journal and year untouched.
+
+The table is an INPUT the review disposes in place, and the review CONTRACT
+requires it to exist: when the orchestrator could not seed it (an older corpus,
+or `paper_docx_format.py` unavailable), derive the rows yourself — one row per
+reference entry that carries a DOI, with the entry's own text beside the
+identifier — resolve what you can in your own sandbox, and dispose every row the
+same way.
+
 **Artifact:** `M2_citations.md` — every reference-list entry (one row) and
 every in-text call-out (one row) + auto-derived mismatches.
 
@@ -492,6 +512,30 @@ every in-text call-out (one row) + auto-derived mismatches.
 - duplicate reference entries
 - misordered numeric call-outs / list numbering gaps
 - wrong citation content: authors, year, journal, volume/pages, DOI (verify against internal knowledge; flag suspected hallucinated/nonexistent references — flag, never guess)
+- **an entry's DOI that resolves to a DIFFERENT work than the entry names**
+  (`M2_references.md`: the resolver's record disagrees with the entry's title or
+  year). Evidence: the verdict row with the returned title/year beside the
+  entry's own text. This is a correctness finding, and the fix is the entry's
+  identifier — never deleting the DOI so the row disappears;
+- **an entry whose stated DOI is not registered** (verdict `absent`: neither
+  metadata agency — Crossref or DataCite — returned a record AND the DOI handle
+  registry itself has no such handle, so the DOI is registered with no agency at
+  all). The reader cannot resolve the source, so the entry carries a false
+  locator: a correctness finding with the verdict as evidence, unless the corpus
+  itself shows the DOI is a hand-off placeholder (then it is the pipeline's
+  placeholder rule). A DOI registered with an agency the metadata APIs do not
+  serve (mEDRA, CNKI, JaLC, KISTI) comes back `found` from the handle registry
+  and is disposed on what the entry then shows;
+- **a `code signal` row in `M2_references.md`**: a four-digit year token inside
+  the DOI that agrees with the entry's year only in its last two digits and
+  differs by two years or more (the `2019` → `2119` family), or the same DOI on
+  two entries. Dispose it with evidence (`OK — the token is the volume/series
+  number`) or file it: one of the two entries is quoting the wrong identifier;
+- **a verdict that is `error` / `skipped` / `not selected`**: record
+  `unable — the lookup did not answer (<why>)`, and re-derive it in your own
+  sandbox (the `zot` route, or the endpoint itself) before filing. A row that
+  was never answered is never disposed as clean, and a DOI is never removed
+  from an entry merely because the lookup could not run;
 - citation-style deviations from the journal's style
 - author-year ambiguity (two same-author-same-year entries without a/b disambiguation)
 
@@ -686,6 +730,11 @@ manuscript (name/content mismatch), stray personal/confidential files.
 style match (Nature-style abbreviations, author format), DOI presence/format
 where required, required fields per entry type (year, journal, volume, pages),
 italicization of journal names, en-dash ranges, "et al." usage limits.
+
+Whether the DOI an entry carries actually resolves to that entry's own work is
+NOT this sweep's question — `M2_references.md` enumerates it per entry (the
+resolver verdict and the code-side signals); read that seed before judging a
+DOI's format alone.
 
 **Artifact:** `M10_ref_format.md`: entry # | field | deviation | disposition.
 
@@ -1802,6 +1851,7 @@ and in each case a real submission shipped the defect.
 
 Every seeded row carries its `tier` (`finding` / `advisory`); the disposition
 bar above applies hardest to the `finding` tier.
+
 ## APPENDIX: Discovery round D0–D5 (references/discovery.md)
 
 # Discovery Round D0–D5 — paper-review (Phase 3)

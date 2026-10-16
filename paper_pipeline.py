@@ -4703,16 +4703,27 @@ ARTIFACT_POLICIES = ("on", ARTIFACT_POLICY_FIX, "off")
 DEFAULT_ARTIFACT_POLICY = "on"
 DEFAULT_RESIDUAL_GATE = True
 # How many identifier lookups one stage may spend. Each is a single request to a
-# public API with a 20-second cap; `off`/an unreachable network degrades to
-# recorded `error` rows, never to a failed stage.
-LOOKUP_MAX_TARGETS = 24
+# public API with a 20-second cap, cached for LOOKUP_CACHE_TTL_DAYS across the
+# root's sandboxes; `off`/an unreachable network degrades to recorded `error`
+# rows, never to a failed stage. The cap is spent in the reserved order below,
+# and the reference-list DOIs now sit first in that order: a manuscript's
+# reference list is the largest class by far (one entry each) and the only place
+# a one-character DOI corruption can be caught at all -- no format check and no
+# re-reading sees it (see M2_references.md).
+LOOKUP_MAX_TARGETS = 48
 LOOKUP_TIMEOUT = 10
 # One cheap probe per process decides whether the lookup engine runs at all;
 # without it every sandbox would pay a DNS/connect timeout per query (the
 # scheduling tests measure a round in seconds), and an offline operator would
-# see a slow pipeline instead of `skipped` rows.
-LOOKUP_PROBE_URL = ("https://api.crossref.org/works/10.1038/paper.4060"
-                    "?mailto=paper-pipeline@example.org")
+# see a slow pipeline instead of `skipped` rows. The probe asks the works
+# ENDPOINT (no specific record): a record is not a reachability test -- the old
+# probe named a DOI that answers HTTP 404, `urlopen` raised on the 404, and the
+# whole lookup engine (identifiers, availability locators, gene symbols,
+# placeholders, and the reference-integrity seed) then recorded `skipped`
+# everywhere while blaming the operator's network. Any HTTP ANSWER means the
+# API is reachable; only a connect/DNS/TLS failure is "not available".
+LOOKUP_PROBE_URL = ("https://api.crossref.org/works?rows=0"
+                    "&mailto=paper-pipeline@example.org")
 LOOKUP_PROBE_TIMEOUT = 2.5
 LOOKUP_CACHE_REL = "reports/LOOKUP_CACHE.json"
 LOOKUP_CACHE_TTL_DAYS = 14
@@ -7275,9 +7286,15 @@ DISPOSITION_MANDATE = """
 DECISION-ARTIFACT MANDATE — one disposition per seeded row, about THAT ROW's own bar:
   * Every seeded table under `review/artifacts/` (M18 caption words, M19 length, M20 formatting,
     M4/NUMBERS_LEDGER numbers, M8 terms, M24 concepts, GLOSSARY, IDENTIFIERS, PLACEHOLDERS,
-    PLACEHOLDER_LOOKUP, OUTLINE, CLAIM_STRENGTH, M30_hierarchy_reconciliation) must end with
-    exactly one row per instance and a disposition per row: a finding id, or
+    PLACEHOLDER_LOOKUP, OUTLINE, CLAIM_STRENGTH, M2_references, M30_hierarchy_reconciliation)
+    must end with exactly one row per instance and a disposition per row: a finding id, or
     `OK — <the bar this instance is inside, and why>`.
+    M2_references is the citation sweep's integrity seed: one row per reference entry that
+    carries a DOI, with the orchestrator's own public-API verdict for it (`absent` = BOTH
+    registries answered no -- a DOI the reader cannot resolve) and the code-side signals (a
+    year token inside the DOI that contradicts the entry's own year, one DOI on two entries).
+    A `found` record that names a DIFFERENT work than the entry is a finding; an
+    `error`/`skipped`/`not selected` row is `unable — <why>`, never a clean.
     M30_hierarchy_reconciliation is the sweep's seed: table A pairs every written number the
     shipped data tables do NOT prove with its candidate producer column(s) and the check the code
     could make; table B lists the code/config literals (the producer side of a Methods parameter).
@@ -16138,11 +16155,17 @@ def lookup_network_available(timeout: float = None) -> bool:
         return bool(_LOOKUP_PROBE["ok"])
     ok = False
     try:
+        import urllib.error
         import urllib.request
         rq = urllib.request.Request(
             LOOKUP_PROBE_URL, headers={"User-Agent": "paper-pipeline/3.5 (probe)"})
-        with urllib.request.urlopen(rq, timeout=timeout or LOOKUP_PROBE_TIMEOUT) as r:
-            ok = int(getattr(r, "status", 200)) == 200
+        try:
+            with urllib.request.urlopen(rq, timeout=timeout or LOOKUP_PROBE_TIMEOUT) as r:
+                ok = int(getattr(r, "status", 200)) == 200
+        except urllib.error.HTTPError:
+            # The API ANSWERED (any status): it is reachable, and the engine's
+            # own per-query verdicts are what the rows must record.
+            ok = True
     except Exception:                                                 # noqa: BLE001
         ok = False
     _LOOKUP_PROBE["ok"] = ok
@@ -16176,7 +16199,12 @@ def _lookup_cache_fresh(entry: dict) -> bool:
     return 0 <= age <= LOOKUP_CACHE_TTL_DAYS
 
 
-LOOKUP_BUDGET_SHARES = {"identifier": 4, "placeholder": 2, "gene": 10}
+# The order matters twice: each class first takes its reserved share, then the
+# REMAINDER of these lists is spent in this same order (see
+# _select_lookup_targets), so the reference list gets the leftover budget before
+# any other class -- and the other classes keep their own reserves, so a long
+# reference list can no longer crowd them out.
+LOOKUP_BUDGET_SHARES = {"reference": 16, "identifier": 8, "placeholder": 2, "gene": 10}
 
 
 def _select_lookup_targets(targets: list, budget: int) -> list:
@@ -16299,9 +16327,19 @@ def seed_provenance_pack(ctx: Ctx, sb: Path, sources: list, ev: dict,
     reconcile = mod.reconcile_number_rows(num_rows, tables)
     ident_rows = mod.identifier_rows(docs)
     gene_rows = mod.gene_symbol_rows(docs)
+    ref_rows = mod.reference_integrity_rows(docs)
     ph_rows = ((ev.get("placeholder_ledger") or {}).get("rows") or [])
     plan = mod.placeholder_lookup_plan(ph_rows, docs)
-    targets = [{"source": "identifier", "kind": r["kind"], "query": r["value"],
+    # The reference list's own DOIs are resolved FIRST (see _select_lookup_targets):
+    # a bibliography DOI is the entry's claim about WHERE the cited work lives, so
+    # an unanswered, absent or mismatching verdict is a correctness row, not a
+    # style one -- and it is the only way a one-character corruption of an
+    # identifier is ever seen (every format check passes on such an entry).
+    targets = [{"source": "reference", "kind": r["kind"], "query": r["identifier"],
+                "document": r["document"], "value": r["identifier"],
+                "entry": r.get("entry") or "", "year": r.get("year") or ""}
+               for r in ref_rows if r.get("identifier")]
+    targets += [{"source": "identifier", "kind": r["kind"], "query": r["value"],
                 "document": r["document"], "value": r["value"]} for r in ident_rows]
     targets += [{"source": "gene", "kind": "gene", "query": r["symbol"],
                  "document": r["document"], "value": r["symbol"]} for r in gene_rows]
@@ -16318,6 +16356,21 @@ def seed_provenance_pack(ctx: Ctx, sb: Path, sources: list, ev: dict,
     for row in lookups:
         if row.get("source") == "identifier":
             by_value[(row.get("kind"), row.get("value"))] = row
+    ref_hits = {(row.get("kind"), row.get("value")): row for row in lookups
+                if row.get("source") == "reference"}
+    for r in ref_rows:
+        hit = ref_hits.get((r["kind"], r["identifier"]))
+        r["verdict"] = (hit or {}).get("verdict") or "not selected"
+        r["resolved"] = ""
+        r["signal_extra"] = ""
+        if hit and (hit.get("hits") or []):
+            h = hit["hits"][0]
+            r["resolved"] = " ".join(
+                f"{h.get('date') or ''} {str(h.get('title') or '')[:80]}".split())
+            if hit.get("verdict") == "found":
+                r["signal_extra"] = mod.reference_entry_hit_signal(r.get("text") or "", h)
+        elif hit and hit.get("errors"):
+            r["resolved"] = " ".join("; ".join(hit["errors"])[:100].split())
     for r in ident_rows:
         hit = by_value.get((r["kind"], r["value"]))
         if hit:
@@ -16347,6 +16400,7 @@ def seed_provenance_pack(ctx: Ctx, sb: Path, sources: list, ev: dict,
         for r in mod.glossary_seed_rows(paras, is_ref):
             glossary_rows.append(dict(r, document=name))
     result = {"reconcile": reconcile, "identifiers": len(ident_rows),
+              "references": len(ref_rows),
               "genes": len(gene_rows), "lookups": lookups, "concepts": len(concept_rows),
               "glossary": len(glossary_rows)}
 
@@ -16379,7 +16433,10 @@ def seed_provenance_pack(ctx: Ctx, sb: Path, sources: list, ev: dict,
         "IDENTIFIERS — every DOI/accession/repository/ORCID, verified by the orchestrator\n\n"
         "The verification column is the pipeline's own public-API lookup (`found` / `absent` / "
         "`error` / `skipped`). `absent` is evidence too: it is what makes \"not posted\" or "
-        "\"not yet deposited\" a VERIFIED statement instead of a guess. A locator that does not "
+        "\"not yet deposited\" a VERIFIED statement instead of a guess -- a DOI is `absent` "
+        "only after Crossref, DataCite AND the handle registry each failed to find it, so a "
+        "deposit registered with another agency (mEDRA, CNKI, JaLC, KISTI) is never called "
+        "unregistered. A locator that does not "
         "resolve, or a claim the locator cannot support (a \"permanent archive\" carried by a "
         "version-pinned repository URL), is a finding. Limit: a DOCX bibliography that lives in "
         "a Zotero field is not text-readable here, so its entries are resolved through M2 / the "
@@ -16389,6 +16446,51 @@ def seed_provenance_pack(ctx: Ctx, sb: Path, sources: list, ev: dict,
           "verification": r.get("verification") or "not checked",
           "context": (r.get("context") or "")[:110]} for r in ident_rows],
         "no external identifier found")
+    # M2's reference-INTEGRITY seed: one row per reference ENTRY that carries a
+    # DOI, with the orchestrator's own verdict for that DOI and what the code
+    # could establish without the network. The M2 sweep pairs call-outs with
+    # entries and M10 judges an entry's format; neither can see that an entry's
+    # DOI belongs to a DIFFERENT work (a one-character corruption leaves author,
+    # title, journal and year intact, so every format check passes). This table
+    # is the only place that fact is enumerated, so it is disposed row by row
+    # and gated like the other decision tables.
+    write_both(
+        "M2_references.md",
+        "M2 — reference-integrity seed (one row per reference entry carrying a DOI)\n\n"
+        "`resolver` is the orchestrator's own public-API verdict for this entry's DOI "
+        "(`found` / `absent` = no registration agency returned a record AND the DOI handle "
+        "itself is not registered (Crossref, DataCite and the handle registry were all asked) "
+        "/ `error` / `skipped` / `not selected` = the lookup budget did not reach it); "
+        "`resolved work` is what the endpoint returned (its own year and title); "
+        "`code signal` is what the code established by itself -- the entry's own year against "
+        "a year token INSIDE the DOI, the same DOI on two entries, a stated DOI the syntax "
+        "rejects -- plus the comparison between the returned record and the entry. Dispose "
+        "EVERY row against the entry's own text:\n"
+        "  * `found` and the record agrees with the entry -> `OK — resolves: <year> <title>`;\n"
+        "  * `found` and the record is a DIFFERENT work (the code signal says so, or the "
+        "title/author/journal you read does) -> a finding: the entry's DOI belongs to another "
+        "work, which makes the cited source unresolvable for the reader;\n"
+        "  * `absent` -> a finding: the entry states a DOI that is not registered (evidence: "
+        "the verdict; every registry was asked, so this is a VERIFIED negative);\n"
+        "  * `error` / `skipped` / `not selected` -> `unable — the lookup did not answer "
+        "(<why>)`; re-derive it in your own sandbox (the `zot` route, or the endpoint itself) "
+        "before filing, and never mark such a row clean;\n"
+        "  * a `code signal` row -> dispose it with evidence (`OK — the year token is the "
+        "volume/series number`, `OK — both entries are the same work`) or file it (a DOI whose "
+        "own year contradicts the entry's is a corruption candidate; one DOI on two entries is "
+        "one of the two entries' mistake).\n"
+        "An entry that carries NO DOI has no row here -- M2's own artifact covers call-out "
+        "pairing and M10 the entry's format, and an entry without an identifier is not a "
+        "defect. A bibliography that only exists inside a Word/Zotero field is not readable "
+        "here: resolve those through M2 / the `zot` CLI.",
+        ["document", "entry", "year", "identifier", "code signal", "resolver", "resolved work"],
+        [{"document": r.get("document"), "entry": r.get("entry") or "—",
+          "year": r.get("year") or "", "identifier": r.get("identifier") or "(no DOI read)",
+          "code signal": "; ".join(x for x in (r.get("signal") or "",
+                                               r.get("signal_extra") or "") if x),
+          "resolver": r.get("verdict") or "not selected",
+          "resolved work": r.get("resolved") or ""} for r in ref_rows],
+        "no reference entry carrying a DOI found")
     write_both(
         "GENE_LEDGER.md",
         "GENE_LEDGER — gene/protein symbols the orchestrator RESOLVED against HGNC\n\n"
@@ -16455,6 +16557,7 @@ def seed_provenance_pack(ctx: Ctx, sb: Path, sources: list, ev: dict,
     try:
         (work / "PROVENANCE.json").write_text(
             json.dumps(_json_safe({"numbers": num_rows, "identifiers": ident_rows,
+                       "references": ref_rows,
                        "lookups": lookups, "glossary": glossary_rows,
                        "genes": gene_rows,
                                    "concepts": concept_rows}),
@@ -16553,6 +16656,7 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
             ev["provenance"] = {"numbers_proved":
                                 (prov.get("reconcile") or {}).get("filled"),
                                 "identifiers": prov.get("identifiers"),
+                                "references": prov.get("references"),
                                 "concepts": prov.get("concepts"),
                                 "lookups": [{k: r.get(k) for k in
                                              ("source", "kind", "query", "verdict")}
@@ -16996,7 +17100,8 @@ def seeded_evidence_paths(sb: Path) -> set:
     # materialized review sandbox looks "already worked in" and never starts.
     prov_stems = ("PROVENANCE.json", "NUMBERS_LEDGER.md", "IDENTIFIERS.md",
                   "GENE_LEDGER.md", "PLACEHOLDER_LOOKUP.md", "M24_concepts.md",
-                  "GLOSSARY.md", "CLAIM_STRENGTH.md", "M30_hierarchy_reconciliation.md")
+                  "GLOSSARY.md", "CLAIM_STRENGTH.md", "M2_references.md",
+                  "M30_hierarchy_reconciliation.md")
     rels += [f"work/{s}" for s in prov_stems]
     rels += [f"{REVIEW_DIR}/work/{s}" for s in prov_stems]
     rels += [f"{REVIEW_DIR}/work/OFFICIAL_TEMPLATE.json",
@@ -17013,6 +17118,7 @@ def seeded_evidence_paths(sb: Path) -> set:
              f"{REVIEW_DIR}/artifacts/PLACEHOLDERS.md",
              f"{REVIEW_DIR}/artifacts/CLAIM_STRENGTH.md",
              f"{REVIEW_DIR}/artifacts/M30_hierarchy_reconciliation.md",
+             f"{REVIEW_DIR}/artifacts/M2_references.md",
              f"{REVIEW_DIR}/artifacts/NUMBERS_LEDGER.md",
              f"{REVIEW_DIR}/artifacts/IDENTIFIERS.md",
              f"{REVIEW_DIR}/artifacts/GENE_LEDGER.md",
@@ -17028,7 +17134,8 @@ def evidence_pack_block(where: str) -> str:
         paths = ("`review/work/CODE_SCANS.json` / `review/work/EVIDENCE_PACK.md` (and the "
                  "seeded `review/artifacts/M18_caption_words.md`, `M19_length.md`, "
                  "`M20_formatting.md`, `M4_numbers.md`, `NUMBERS_LEDGER.md`, `M8_terms.md`, "
-                 "`M24_concepts.md`, `GLOSSARY.md`, `IDENTIFIERS.md`, `OUTLINE.md`, "
+                 "`M24_concepts.md`, `GLOSSARY.md`, `IDENTIFIERS.md`, `M2_references.md`, "
+                 "`OUTLINE.md`, "
                  "`PLACEHOLDERS.md`, `PLACEHOLDER_LOOKUP.md` and `CLAIM_STRENGTH.md` tables; "
                  "CLAIM_STRENGTH enumerates BOTH directions of the J3 claim-strength check, "
                  "`under` (a hedge the evidence may not require) and `over` (a maximal claim the "
@@ -17036,7 +17143,14 @@ def evidence_pack_block(where: str) -> str:
                  "`M30_hierarchy_reconciliation.md` is the source-hierarchy seed: table A pairs "
                  "the written values no shipped data table proves with their candidate producer "
                  "columns (and the check the code could make), table B lists the code/config "
-                 "literals; dispose both and ADD the producers the code cannot see)")
+                 "literals; dispose both and ADD the producers the code cannot see. "
+                 "`M2_references.md` is the reference-INTEGRITY seed: one row per reference "
+                 "entry that carries a DOI, with the orchestrator's own resolver verdict for it "
+                 "(`found` / `absent` = both registration agencies answered no / `error` / "
+                 "`skipped`) and the code-side signals (a year token inside the DOI that "
+                 "contradicts the entry's year, one DOI on two entries); a `found` record that "
+                 "names a DIFFERENT work than the entry, and an `absent` DOI an entry states, "
+                 "are both findings)")
     elif where == "audit":
         paths = ("`work/CODE_SCANS.json` / `EVIDENCE_PACK.md` next to your PROMPT.md, the "
                  "seeded `work/FORMAT_SCAN.json` rows (each with a `tier`), "
@@ -17044,7 +17158,11 @@ def evidence_pack_block(where: str) -> str:
                  "`work/M24_concepts.md`, `work/GLOSSARY.md` and `work/CLAIM_STRENGTH.md` (the "
                  "J3 claim-strength ledger, BOTH directions), and the reviewer's disposed tables "
                  "under `review/artifacts/` -- including the reviewer's disposed "
-                 "`review/artifacts/M30_hierarchy_reconciliation.md`")
+                 "`review/artifacts/M30_hierarchy_reconciliation.md` and the "
+                 "`review/artifacts/M2_references.md` seed it disposed row by row (each "
+                 "reference entry's DOI with the orchestrator's resolver verdict) -- a closure "
+                 "there is only as good as the verdict it names, so attack it: an `absent` DOI "
+                 "or a `found` record that names another work is a finding, not a formality")
     elif where == "judge":
         # BLINDING: a judge is handed NOTHING but the blinded packages. It must
         # derive every measurement itself (and its own discovery findings -- see
@@ -17082,7 +17200,11 @@ def evidence_pack_block(where: str) -> str:
                  "support -- your own edits must not move a claim in EITHER direction), plus "
                  "`work/M30_hierarchy_reconciliation.md` (the source-hierarchy seed: a written "
                  "value its own shipped code/raw data contradicts must be aligned to the "
-                 "authoritative side, never silently changed to match either)")
+                 "authoritative side, never silently changed to match either) and "
+                 "`work/M2_references.md` (the reference-integrity seed: every reference entry "
+                 "that carries a DOI, with the orchestrator's resolver verdict and the code-side "
+                 "signals -- an entry whose DOI does not resolve, or resolves to a DIFFERENT "
+                 "work than the entry names, is a wrong citation to correct, never to delete)")
     return f"""CODE-SIDE EVIDENCE PACK (identical measurements in every session) -- the
    orchestrator has already scanned this corpus with the same functions it uses at setup and at
    `decide`, and seeded the result as {paths}. Treat those numbers as the session's baseline:
@@ -25404,6 +25526,12 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
     #     goes; a review that never enumerated them leaves the revision arm
     #     with nothing to fix (the documented w1/w2-vs-a2 gap).
     parity = {"M25_artwork_parity.md": ("M25", "the rewrite-parity check"),
+              # M2's seed is the OTHER mechanical side of the citation sweep: the
+              # entries' own DOIs, the resolver's verdict for each and the
+              # code-side signals (a DOI whose own year contradicts the entry, one
+              # DOI on two entries). It is seeded by the orchestrator, so a
+              # zero-finding M2 is valid only with this artifact disposed.
+              "M2_references.md": ("M2", "the reference-integrity seed"),
               "M26_conventions.md": ("M26", "the rewrite-parity check"),
               "M27_evidence_coverage.md": ("M27", "the rewrite-parity check"),
               "M28_symmetry.md": ("M28", "the rewrite-parity check"),
@@ -27424,7 +27552,13 @@ DECISION_ARTIFACTS = ("artifacts/M20_formatting.md", "artifacts/M18_caption_word
                       "artifacts/M24_concepts.md", "artifacts/GLOSSARY.md",
                       "artifacts/PLACEHOLDERS.md", "artifacts/PLACEHOLDER_LOOKUP.md",
                       "artifacts/OUTLINE.md", "artifacts/CLAIM_STRENGTH.md",
-                      "artifacts/M30_hierarchy_reconciliation.md")
+                      "artifacts/M30_hierarchy_reconciliation.md",
+                      # M2's reference-integrity seed: the entries' own DOIs with
+                      # the resolver's verdict. Gated like every other seeded
+                      # table, because "the entry's DOI resolves to another work"
+                      # is exactly the class no format check and no re-reading
+                      # can see (see reference_integrity_rows).
+                      "artifacts/M2_references.md")
 
 
 def artifact_quality_report(review_dir: Path) -> dict:
