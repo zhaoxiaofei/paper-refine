@@ -178,7 +178,11 @@ def classify_context(fname):
     raw = os.path.basename(fname).lower()
     f = re.sub(r"\.(?:txt|md)$", "", raw)
     f = re.sub(r"\.[a-z0-9]{1,5}$", "", f)
-    if "cover" in f: return "cover letter"
+    # The WORD "cover" (or the camelCase "coverLetter"), never the substring: the bare
+    # test named `discovery.md`, `coverage_table.txt` and `recovered_samples.md` a cover
+    # letter and a "reply" name that merely contains "cover" was masked (see
+    # `_COVER_WORD_RE`, which `is_evidence_name` already uses).
+    if _COVER_WORD_RE.search(f): return "cover letter"
     if "title" in f: return "title page"
     # A bibliography is a bibliography even when it belongs to the supplement:
     # "suppAll-d.bib" matched the "supp" heuristic below and was swept as

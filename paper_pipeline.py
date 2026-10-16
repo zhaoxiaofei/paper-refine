@@ -11975,8 +11975,10 @@ def manifest_file_list(manifest: dict) -> list:
 
     A manifest maps `{relative path: content digest}`; two trees can carry the
     same champion bytes and still differ in WHICH files they hand over (a
-    hygiene filter that now holds one back). Comparing this list is how
-    `publish_final_clean` tells "the same package" from "the same content".
+    hygiene filter that now holds one back) -- this list is that surface.
+    `publish_final_clean` compares the whole MANIFESTS, not this list alone: a
+    same-list/different-bytes pair used to be read as "unchanged" while the
+    served directory still held the old bytes.
     """
     return sorted((manifest or {}).get("files") or [])
 
@@ -12296,9 +12298,15 @@ def _strip_latex(text: str) -> str:
     # overcount prose. Optional arguments first (`\cite[p.5]{x}` left `[p.5]` and
     # `x` behind as prose); then inline/single-line display math (`$p<0.05$`,
     # `\(x\)`, `\[x\]`), which is not prose either.
-    text = re.sub(r"\\(?:cite[a-zA-Z]*|ref|label|url|href)\s*"
+    # `[a-zA-Z]*ref` covers the whole reference family (`\pageref{p12}`,
+    # `\eqref{}`, `\autoref{}`, `\cref{}`): the bare `ref` alternative missed
+    # every prefixed form, so `\pageref{p12}` left the phantom word `p12` in the
+    # M19 count. And an ESCAPED dollar (`\$5`) is a literal, not math: the math
+    # pattern is lookbehind-guarded, so `\$5 to \$6` no longer swallows `5 to $`.
+    text = re.sub(r"\\(?:cite[a-zA-Z]*|[a-zA-Z]*ref|label|url|href)\s*"
                   r"(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text)
-    text = re.sub(r"\$\$[\s\S]*?\$\$|\$[^$]*\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)", " ",
+    text = re.sub(r"(?<!\\)\$\$[\s\S]*?\$\$|(?<!\\)\$[^$]*\$|\\\[[\s\S]*?\\\]|"
+                  r"\\\([\s\S]*?\\\)", " ",
                   text)
     text = re.sub(r"\\[a-zA-Z@]+\*?", " ", text)
     return re.sub(r"\s+", " ", text.replace("{", " ").replace("}", " ")).strip()
@@ -26185,13 +26193,28 @@ def _raw_data_key(rel: str) -> str:
 
 
 def raw_data_entries(dirp: Path) -> dict:
-    """{read-only key: (relative path, sha256)} for `dirp`'s raw-data directory."""
+    """{relative path: (relative path, sha256)} for `dirp`'s raw-data directory.
+
+    The key is the EXACT corpus-relative path; `raw_data_pairs` applies the
+    token-insensitive matching (see `_entries_in`).
+    """
     area = dirp / raw_data_dirname(dirp)
     return _entries_in(area, dirp)
 
 
 def _entries_in(area: Path, base: Path) -> dict:
-    """{read-only key: (relative path, sha256)} for ONE raw-data area directory."""
+    """{relative path: (relative path, sha256)} for ONE raw-data area directory.
+
+    The key is the EXACT path, not `_raw_data_key`'s token-stripped form: that
+    form is many-to-one (a trailing token or single letter is stripped, so
+    `cohort_a.tsv` and `cohort_b.tsv` both fold to `cohort.tsv`), and folding
+    two DISTINCT files into one dict key silently dropped one of them from
+    every byte verification and restore -- an edited data table could ship
+    (rule 2's byte-verification gap). The token-insensitive matching a package
+    needs (it may carry the base's token names) is applied by
+    `raw_data_pairs`, which pairs exact paths first and only then falls back to
+    the stripped key, and only when that fallback is unambiguous.
+    """
     out = {}
     if not area.is_dir():
         return out
@@ -26202,10 +26225,56 @@ def _entries_in(area: Path, base: Path) -> dict:
     for p in files:
         rel = p.relative_to(base).as_posix()
         try:
-            out[_raw_data_key(rel)] = (rel, sha256_file(p))
+            out[rel] = (rel, sha256_file(p))
         except OSError:
             continue
     return out
+
+
+def raw_data_pairs(want: dict, got: dict) -> tuple:
+    """Pair a package's raw-data entries (`got`) with the pristine `want`.
+
+    Both maps come from `_entries_in`. Returns `(pairs, extras)`:
+
+      * `pairs` -- `(pristine_rel, pristine_digest, candidate_rel|None,
+        candidate_digest|None)` in pristine order, so a caller can compare the
+        bytes and restore the ones that differ;
+      * `extras` -- the candidate's `(rel, digest)` entries the original does
+        not have (the drop list).
+
+    EXACT paths pair first (`cohort_a.tsv` with `cohort_a.tsv`), which is what
+    makes every file of a token-colliding pair visible. A pristine file with no
+    exact counterpart falls back to `_raw_data_key` (the token-stripped name),
+    so a package carrying the base's token names
+    (`dataset_summary-4f3a9c1.tsv`) is matched instead of overwritten; the
+    fallback is used only when EXACTLY ONE candidate file is left for that key,
+    because a wrong pairing would write one file's bytes over another's and
+    restoring is the safe outcome.
+    """
+    used = set()
+    pairs = []
+    by_key = {}
+    for rel in sorted(got):
+        by_key.setdefault(_raw_data_key(rel), []).append(rel)
+    for rel in sorted(want):
+        dig = want[rel][1]
+        if rel in got:
+            pairs.append((rel, dig, rel, got[rel][1]))
+            used.add(rel)
+            continue
+        # `c not in want`: a candidate file another pristine entry wants by its
+        # EXACT name is never used as a token-insensitive stand-in -- pairing
+        # `cohort_a.tsv` with the candidate's `cohort_b.tsv` would restore the
+        # wrong bytes. Restoring is the safe outcome for the unmatched file.
+        cands = [c for c in by_key.get(_raw_data_key(rel), [])
+                 if c not in used and c not in want]
+        if len(cands) == 1:
+            pairs.append((rel, dig, cands[0], got[cands[0]][1]))
+            used.add(cands[0])
+        else:
+            pairs.append((rel, dig, None, None))
+    extras = [(rel, got[rel][1]) for rel in sorted(got) if rel not in used]
+    return pairs, extras
 
 
 # Text-ish files whose REFERENCES to the raw-data directory are repointed when
@@ -26301,8 +26370,9 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
     if other.is_dir() and area.is_dir():
         # Both spellings present: a duplicate of the SAME directory is collapsed,
         # anything else is reported and left for the operator.
-        legacy_ok = all(want.get(k, (None, None))[1] == d
-                        for k, (_rel, d) in _entries_in(other, cand_dir).items())
+        _legacy_pairs, _legacy_extras = raw_data_pairs(want, _entries_in(other, cand_dir))
+        legacy_ok = (not _legacy_extras
+                     and all(cdig == dig for _rel, dig, _crel, cdig in _legacy_pairs))
         if legacy_ok:
             rmtree_force(other, ignore_errors=True)
             warns.append(f"READ-ONLY raw data: {other.relative_to(cand_dir).as_posix()}/ was a "
@@ -26312,6 +26382,7 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
                          f"{RAW_DATA_DIR}/ and {RAW_DATA_DIR_LEGACY}/; the legacy directory was "
                          f"left alone -- keep one of them")
     got = raw_data_entries(cand_dir)
+    pairs, extras = raw_data_pairs(want, got)
     # A DIRECTORY squatting on one of the original's file paths (agent scratch at
     # the wrong path) is the recovery layer's case: it refuses to delete real work
     # and fails the attempt. This layer must not delete inside it either.
@@ -26330,14 +26401,13 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
     mode_plan = make_tree_writable(area) if area.is_dir() else []
     restored, dropped = [], []
     try:
-        for key, (rel, dig) in want.items():
-            cur = got.get(key)
-            if cur is not None and cur[1] == dig:
+        for rel, dig, crel, cdig in pairs:
+            if cdig == dig:
                 continue
             # The candidate's OWN spelling of the directory wins (it is what its
             # documents reference); a file the original does not have yet is written
             # under the canonical name.
-            dest_rel = cur[0] if cur is not None else norm_raw_data_name(rel)
+            dest_rel = crel if crel is not None else norm_raw_data_name(rel)
             if (cand_dir / dest_rel).is_dir():
                 continue                # squatted: reported as a warning below
             dest = cand_dir / dest_rel
@@ -26354,8 +26424,8 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
                 warns.append(f"READ-ONLY raw data: could not restore {dest.name}: {e}")
                 continue
             restored.append(dest.relative_to(cand_dir).as_posix())
-        for key, (rel, _dig) in got.items():
-            if key not in want and not inside_squat(rel):
+        for rel, _dig in extras:
+            if not inside_squat(rel):
                 try:
                     (cand_dir / rel).unlink()
                 except OSError:
@@ -26582,8 +26652,12 @@ def raw_data_advisories(ctx: Ctx) -> list:
         seen.add(label)
         if want:
             got = raw_data_entries(d)
-            bad = sorted(rel for key, (rel, dig) in want.items()
-                         if (got.get(key) or (None, None))[1] != dig)
+            # Same pairing as `enforce_readonly_raw_data`: exact paths first,
+            # then the token-insensitive fallback -- a package that carries the
+            # base's token names (`dataset_summary-4f3a9c1.tsv`) is compliant,
+            # and reading it by exact path alone reported it as a deviation.
+            pairs, _extras = raw_data_pairs(want, got)
+            bad = sorted(rel for rel, dig, _crel, cdig in pairs if cdig != dig)
             if bad:
                 out.append(f"{label}/ carries {len(bad)} raw-data file(s) that differ from the "
                            f"pristine original ({', '.join(bad[:3])}"
@@ -41520,18 +41594,28 @@ def declared_submission_set(root: Path) -> dict:
            "ignored_reason": None, "readme": None}
     if not root.is_dir():
         return out
-    readme = None
-    for p in sorted(root.glob("README*")) + sorted(root.glob("*.README*")):
-        if p.is_file() and is_non_submitted_readme_name(p.name):
-            readme = p
-            break
-    if readme is None:
-        return out
+    # EVERY readme is a candidate, and the first one that actually CARRIES the
+    # declaration wins: stopping at the first readme by name let a non-declaring
+    # `README.md` (which sorts before `README_SUBMISSION.md`, `.` < `_`) hide the
+    # package's own submitted-set rule, and the scans then treated every carried
+    # file as submitted. One walk over the directory also matches the
+    # case-INSENSITIVE readme predicate the rest of the pipeline uses, so a
+    # lowercase `readme.md` that states the rule is honoured too.
+    readme, text = None, ""
     try:
-        text = readme.read_text("utf-8", "replace")
+        candidates = sorted(p for p in root.iterdir()
+                            if p.is_file() and is_non_submitted_readme_name(p.name))
     except OSError:
         return out
-    if not SUBMISSION_DECLARATION_HINT_RE.search(text):
+    for p in candidates:
+        try:
+            candidate_text = p.read_text("utf-8", "replace")
+        except OSError:
+            continue
+        if SUBMISSION_DECLARATION_HINT_RE.search(candidate_text):
+            readme, text = p, candidate_text
+            break
+    if readme is None:
         return out
     out["readme"] = readme.relative_to(root).as_posix()
     patterns = []
@@ -42540,20 +42624,28 @@ def truncated_identifier_rows(texts, limit: int = 8) -> list:
     would drown in them.
     """
     runs = []
+    # `[0-9a-fA-F]`: a PDF (or a LaTeX source) that prints the identifier in
+    # CAPS is the same identifier, and the scan used to go silent on it. The
+    # prefix relation is compared case-insensitively; the evidence keeps the
+    # document's own spelling.
     for rel, text in texts:
-        for m in re.finditer(r"[0-9a-f]{20,64}", text):
-            runs.append((rel, m.group(0)))
+        for m in re.finditer(r"[0-9a-fA-F]{20,64}", text):
+            runs.append((rel, m.group(0), m.group(0).lower()))
     by_value = {}
-    for rel, tok in runs:
-        by_value.setdefault(tok, set()).add(rel)
+    for rel, tok, low in runs:
+        by_value.setdefault(low, {"files": set(), "spellings": set()})
+        by_value[low]["files"].add(rel)
+        by_value[low]["spellings"].add(tok)
     rows, seen = [], set()
     for short in sorted(by_value, key=len):
         if len(short) < 12:
             continue
-        for long, long_files in by_value.items():
+        for long, long_info in by_value.items():
+            long_files = long_info["files"]
             if long == short or not long.startswith(short):
                 continue
-            if long_files == by_value[short]:
+            short_info = by_value[short]
+            if long_files == short_info["files"]:
                 continue                      # same surface, both spellings
             key = (short, long)
             if key in seen:
@@ -42561,9 +42653,9 @@ def truncated_identifier_rows(texts, limit: int = 8) -> list:
             seen.add(key)
             rows.append({
                 "rule": "PKG-7", "severity": "medium",
-                "file": sorted(by_value[short])[0], "line": 1,
-                "evidence": (f"{short!r} ({len(short)} hex) in "
-                             f"{sorted(by_value[short])[0]} is a prefix of the "
+                "file": sorted(short_info["files"])[0], "line": 1,
+                "evidence": (f"{sorted(short_info['spellings'])[0]!r} ({len(short)} hex) in "
+                             f"{sorted(short_info['files'])[0]} is a prefix of the "
                              f"{len(long)}-hex value carried in "
                              f"{sorted(long_files)[0]}"),
                 "detail": "one identifier is written at two lengths in this "
@@ -42609,6 +42701,16 @@ def unit_of_analysis_rows(texts, limit: int = 6) -> list:
     rows = []
     seen = set()
     for crel, cunit, cwin in claimed:
+        # A caption unit the package DOES define is not a contradiction: the
+        # package may state two units (one per experiment, exactly as the
+        # shipped methods do) and the caption's own unit is the supported one.
+        # Without this test the pairing below fired on the first DIFFERENT
+        # declaration it met and never looked for a matching one, so a package
+        # that says "n is the number of cells" beside the caption's "paired
+        # cells" (and, elsewhere, "n is the number of mice") was reported as
+        # inconsistent -- a blocking row on a correct package.
+        if any(dunit == cunit for _drel, dunit, _dwin in declared):
+            continue
         # ONE row per (document, caption unit, declared unit): the captions of
         # S1-S22 are the SAME sentence repeated once per figure (22 occurrences
         # in the shipped supplement), and a report that lists one defect 22
@@ -43545,15 +43647,17 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
                                            "export": str(dest)})
     manifest = corpus_dir_manifest(tmp)
     final_digest = manifest_digest(manifest)
-    # "Unchanged" must mean the two trees carry the SAME FILES, not that the
-    # champion's bytes hash the same: this function's hygiene filters can change
-    # (2026-10-15: the platform-junk sweep learned to see a stub that had
-    # shipped inside `figures/`), and a reuse that compared only content digests
-    # would keep serving the package the OLD filters produced. `files` is the
-    # manifest's own path list, so the test is the delivery surface itself.
-    if dst.is_dir() and (corpus_tree_digest(dst) == final_digest
-                         or manifest_file_list(manifest)
-                         == manifest_file_list(corpus_dir_manifest(dst))):
+    # "Unchanged" must mean the delivered tree carries the SAME FILES **and**
+    # the same bytes. The file-list test alone is not enough: this function's
+    # hygiene filters can change (2026-10-15: the platform-junk sweep learned to
+    # see a stub that had shipped inside `figures/`), but the ordinary re-decide
+    # can also change the champion's CONTENT under the same names (a formatter,
+    # a PKG-2 sentence strip, a Zotero refresh) -- and reusing the old directory
+    # then served stale bytes while the record reported the NEW digest.
+    # One manifest function on both sides (corpus_dir_manifest: the same one the
+    # pin check uses) makes the identity comparable; differing file sets and
+    # differing content both republish.
+    if dst.is_dir() and corpus_dir_manifest(dst) == manifest:
         rmtree_force(tmp, ignore_errors=True)
         return dict(_meta, path=str(dst), digest=final_digest, pin_digest=digest,
                     files=manifest["count"], renamed=counter["renamed"],
@@ -43562,9 +43666,11 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
                     format_fix=format_fix, hygiene=hygiene, open_items=open_items,
                     zip=write_final_clean_zip(dst, zip_path), action="unchanged")
     if dst.is_dir():
-        # The file sets differ (a hygiene rule now holds a file back, or one
-        # appeared beside the manuscript): the delivered copy is STALE, and a
-        # stale copy is what the author hands to the journal. Republish it.
+        # The delivered copy differs from what this decision produced -- a
+        # hygiene rule now holds a file back, one appeared beside the
+        # manuscript, or the champion's own bytes changed under the same names:
+        # the delivered copy is STALE, and a stale copy is what the author hands
+        # to the journal. Republish it.
         print(f"[decide] the published copy at {dst.name}/ no longer matches the "
               f"package this decision produced; it is archived under "
               f"{superseded_dir_of(ctx).name}/ and rebuilt")

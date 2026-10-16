@@ -139,12 +139,19 @@ def _strip_latex(text: str) -> str:
     # `x` behind as prose for `\cite[p.5]{x}` (and for the `\citep[see][p.5]{x}`
     # form), so M19 counted phantom words on exactly the manuscripts whose
     # counting must be trusted.
-    text = re.sub(r"\\(?:cite[a-zA-Z]*|ref|label|url|href)\s*"
+    # `[a-zA-Z]*ref` covers the whole reference family (`\pageref{p12}`,
+    # `\eqref{}`, `\autoref{}`, `\cref{}`): the bare `ref` alternative missed
+    # every prefixed form, so `\pageref{p12}` left the phantom word `p12` in the
+    # M19 count. An ESCAPED dollar (`\$5`) is a literal, not math: the math
+    # pattern is lookbehind-guarded (keep this in step with
+    # paper_pipeline._strip_latex).
+    text = re.sub(r"\\(?:cite[a-zA-Z]*|[a-zA-Z]*ref|label|url|href)\s*"
                   r"(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text)
     # Inline and single-line display math (`$p<0.05$`, `\(x\)`, `\[x\]`) is not
     # prose; only the command names used to be stripped, so the body's tokens
     # were counted.
-    text = re.sub(r"\$\$[\s\S]*?\$\$|\$[^$]*\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)", " ",
+    text = re.sub(r"(?<!\\)\$\$[\s\S]*?\$\$|(?<!\\)\$[^$]*\$|\\\[[\s\S]*?\\\]|"
+                  r"\\\([\s\S]*?\\\)", " ",
                   text)
     text = re.sub(r"\\[a-zA-Z@]+\*?", " ", text)
     return re.sub(r"\s+", " ", text.replace("{", " ").replace("}", " ")).strip()

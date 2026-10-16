@@ -3851,7 +3851,14 @@ def strip_reference_sentences(src: Path, out: Path, finder) -> dict:
     if "word/document.xml" not in parts:
         res["error"] = "unreadable DOCX package: no word/document.xml"
         return res
-    xml = parts["word/document.xml"].decode("utf-8")
+    try:
+        # OOXML is UTF-8 (or UTF-16 with a BOM, which `.decode("utf-8")` refuses):
+        # a wrongly encoded part is an unreadable document, reported through this
+        # function's own record -- the ValueError used to escape as a traceback.
+        xml = parts["word/document.xml"].decode("utf-8")
+    except UnicodeDecodeError as e:
+        res["error"] = f"unreadable DOCX package: word/document.xml is not UTF-8 ({e})"
+        return res
     paras = paragraphs(xml)
     edits, removed = [], []
     for index, (p0, p1, frag) in enumerate(paras):
@@ -9303,10 +9310,19 @@ def fix_document(xml: str, styles: dict, policy: dict,
                            f"are now plain text (refreshable in the Zotero copy only)")
 
     # 2. break-only empty paragraph -> pageBreakBefore on the next paragraph ----
+    # A paragraph inside a table cell is NEVER the target and never the
+    # paragraph the break moves onto: splicing a cell's only (empty) paragraph
+    # out leaves `<w:tc></w:tc>`, which Word reports as a corrupt file (the same
+    # hazard `_table_paragraph_indices` documents for step 2b), and a
+    # `w:pageBreakBefore` written into a cell is not the document-level break
+    # the rule means. The next BODY paragraph still receives the break.
     for _ in range(50):
         plist = paragraphs(xml)
+        in_table = _table_paragraph_indices(xml, plist)
         target = None
         for idx, (p0, p1, para) in enumerate(plist):
+            if idx in in_table:
+                continue
             if PAGEBREAK_RE.search(para) and not text_of(para).strip() \
                     and not has_drawing(para) and not has_field(para):
                 target = (idx, p0, p1, para)
@@ -9315,8 +9331,9 @@ def fix_document(xml: str, styles: dict, policy: dict,
             break
         idx, p0, p1, para = target
         edits = [(p0, p1, "")]
-        if idx + 1 < len(plist):
-            np0, np1, npara = plist[idx + 1]
+        nxt = next((j for j in range(idx + 1, len(plist)) if j not in in_table), None)
+        if nxt is not None:
+            np0, np1, npara = plist[nxt]
             edits.append((np0, np1, insert_into_ppr(npara, "<w:pageBreakBefore/>")))
             changes.append(f"moved the page break onto the following paragraph (was the empty p{idx})")
         else:

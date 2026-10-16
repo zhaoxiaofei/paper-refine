@@ -76,7 +76,14 @@ REPORTS = {"changelog.md", "manual_steps.md", "revision_report.md",
 BOOKKEEPING_NAME_RE = re.compile(
     r"^(?:replacement_ledger|diff_ledger|revision_report|rewrite_report|manual_steps|"
     r"visual_check|changelog|agent_log|worklog)"
-    r"(?:[-_.][A-Za-z0-9._\-]+)?\.(?:md|txt|json)$", re.IGNORECASE)
+    r"(?:[-_.][A-Za-z0-9._\-]+)?\.(?:md|txt|json)$"
+    # The pipeline's own MEASUREMENT artifacts (`code_scans/`, `format_scan/`,
+    # `format_fix/`, `pkg2`): written next to a run, never into a delivered
+    # package, and skipped by the pipeline's twin (paper_pipeline.py). Without
+    # them here the two implementations derived DIFFERENT tokens for the same
+    # package -- a false "edited after the token was applied" alarm.
+    r"|^(?:code_scans|format_scan|format_fix|pkg2)(?:[-_.][A-Za-z0-9._\-]+)?"
+    r"\.(?:md|txt|json)$", re.IGNORECASE)
 # Keep in step with paper_pipeline.TRACKING_AUX_NAME_RE (the two implementations
 # MUST derive the same token for the same package): a difference-tracking
 # auxiliary is "<name>.tracking-<token>.<ext>" or "<name>.logging-<token>.<ext>",
@@ -134,7 +141,13 @@ def tree_files(root: Path) -> list:
             elif p.is_file():
                 out.append(p)
 
-    walk(root, frozenset())
+    # Seed the ancestor set with the ROOT's own inode, exactly like
+    # paper_pipeline._iter_tree_files(follow_dir_links=True): a link that points
+    # back at the tree being walked (`loop -> .`) would otherwise duplicate
+    # every file once under the link's path and the two implementations would
+    # derive DIFFERENT tokens for the same package.
+    root_key = dir_key(root)
+    walk(root, frozenset({root_key}) if root_key is not None else frozenset())
     return out
 
 
@@ -152,9 +165,22 @@ def filename_token(name: str):
 
 
 def is_evidence_rel(rel: str) -> bool:
-    """True when a package-relative path lives inside a READ-ONLY evidence area."""
+    """True when a package-relative path lives inside a READ-ONLY evidence area.
+
+    Keep in step with paper_pipeline.is_evidence_rel: an area the operator
+    renamed to `<area>.disabled` / `.off` is INERT -- it is not evidence and not
+    part of the submission, so a version token inside it is not this package's
+    naming evidence either. Without the disabled-suffix rule the two
+    implementations disagreed about `consistent` for such a package.
+    """
     top = str(rel or "").replace("\\", "/").lstrip("/").split("/", 1)[0]
-    return top in EVIDENCE_DIRS
+    if top in EVIDENCE_DIRS:
+        return True
+    for area in EVIDENCE_DIRS:
+        if top.startswith(area + ".") \
+                and top[len(area) + 1:].strip().lower() in ("disabled", "off"):
+            return True
+    return False
 
 
 def content_token_free(data: bytes, tokens) -> bytes:

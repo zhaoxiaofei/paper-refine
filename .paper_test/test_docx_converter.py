@@ -75,6 +75,14 @@ def test_config_probe():
     script = tmp / "server" / "index.js"
     script.parent.mkdir(parents=True)
     script.write_text("// fake mcp server\n", encoding="utf-8")
+    # The probe asks whether the server is CONFIGURED **and startable**: it
+    # requires the shell script the tool drives beside the server (or on PATH,
+    # or via DOCX2PDF_SH). Without this companion the fixture passes or fails
+    # depending on the MACHINE (a clean checkout has no docx2pdf.sh on PATH) --
+    # put a stub beside the fake server so the check is hermetic.
+    companion = script.parent / "docx2pdf.sh"
+    companion.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    companion.chmod(0o755)
     node = tmp / "node"
     node.write_text("#!/bin/sh\n", encoding="utf-8")
     cfg = tmp / "config.toml"
@@ -319,6 +327,12 @@ def test_codex_exec_mcp_approval():
     script = tmp / "server" / "index.js"
     script.parent.mkdir(parents=True)
     script.write_text("// fake mcp server\n", encoding="utf-8")
+    # Hermetic companion, exactly as in `test_config_probe`: "configured" also
+    # means "the docx2pdf.sh its tool drives is reachable", so the fixture must
+    # provide it instead of relying on the machine's PATH.
+    companion = script.parent / "docx2pdf.sh"
+    companion.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    companion.chmod(0o755)
     cfg = tmp / "config.toml"
     cfg.write_text("[mcp_servers.docx-converter]\n"
                    f'command = "node"\nargs = ["{script}"]\n',

@@ -233,6 +233,11 @@ def main(argv):
         if not callable(fn):
             continue
         for args in ((base, revised, out), (base, revised)):
+            # A helper that exits 0/None is a CLEAN exit, not a result: the
+            # `wrote` check below decides (it may have written OUT and exited).
+            # Leaving `res` unbound for that path raised UnboundLocalError
+            # instead of the documented probe/exit code.
+            res = None
             try:
                 res = fn(*args)
             except SystemExit as exc:

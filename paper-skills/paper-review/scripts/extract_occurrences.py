@@ -73,7 +73,11 @@ def variant_pattern(term, mode):
     if mode == "value":
         # 0.031 ~ .031 ~ 0.0310 ~ 3.1e-2
         num = term.replace(",", ".")
-        pats = [re.escape(num)]
+        # The LITERAL spelling is always one of the forms: with a thousands
+        # separator (`1,234`) the decimal-normalised `num` is "1.234", which
+        # never matches the text that carries the number, so the sweep reported
+        # an occurrence the manuscript still carries as missing.
+        pats = [re.escape(num), esc]
         if num.startswith("0."):
             pats.append(re.escape(num[1:]))           # .031
         if num.startswith("."):

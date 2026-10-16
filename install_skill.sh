@@ -52,6 +52,11 @@ for docx_tool in converter compare; do
     rm -rf -- "$tool_path"
     mkdir -p -- "$tool_path"
     (cd -- "$repo_dir/${tool_name}" && tar cf - --exclude=./node_modules .) | (cd -- "$tool_path" && tar xf -)
+    # A same-day re-run names the SAME snapshot directory. `cp -r SRC DST` with
+    # DST already present copies SRC INTO it, so the snapshot's top level kept
+    # the previous run's bytes and the fresh copy sat one level down; remove the
+    # stale snapshot first (the version name identifies ONE install).
+    rm -rf -- "${tool_path}-${new_version}"
     cp -r -- "$tool_path" "${tool_path}-${new_version}"
     echo "installed mcp-tool: ${tool_path}"
     # Both node servers answer initialize() and then fail EVERY tool call with
