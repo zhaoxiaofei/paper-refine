@@ -42716,7 +42716,7 @@ def package_display_item_rows(root: Path, areas=None, limit: int = 20) -> list:
 
 
 # FRONT-MATTER GAPS (2026-10-15): a rule the venue profile does NOT state is not
-# invented by this pipeline (AGENTS.md rule 4) -- so the two things an editor
+# invented by this pipeline (AGENTS.md rule 3) -- so the two things an editor
 # looks for on a title page that this rule set cannot check are COUNTED AND
 # NAMED instead. The operator's audit of the CopyNumBench package reported "the
 # title page still has no article type (Article, Analysis, Resource, or
