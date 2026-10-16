@@ -59,8 +59,7 @@ serveStdio(() => {
       }),
     },
     async ({ docxPath }) => {
-      if (!path.isAbsolute(docxPath) || path.extname(docxPath).toLowerCase() !== '.docx'
-          || !existsSync(docxPath)) {
+      if (!path.isAbsolute(docxPath) || path.extname(docxPath).toLowerCase() !== '.docx') {
         return {
           content: [{ type: 'text', text: `refused: docxPath must be an existing absolute .docx `
                                           + `file: ${docxPath}` }],
@@ -68,6 +67,18 @@ serveStdio(() => {
         };
       }
       const abs = path.resolve(docxPath);
+      // The existence check is made on the RESOLVED path -- the one the
+      // converter opens. `existsSync` on the raw string follows symlinks and
+      // `..` through the KERNEL, so a path can name an existing file there and
+      // a different (or absent) one here, and the containment rule below would
+      // then judge a file the conversion never reads.
+      if (!existsSync(abs)) {
+        return {
+          content: [{ type: 'text', text: `refused: docxPath must be an existing absolute .docx `
+                                          + `file: ${abs}` }],
+          isError: true,
+        };
+      }
       if (!containsPath(abs, ALLOWED_ROOTS)) {
         return {
           content: [{ type: 'text', text: `refused: ${abs} is outside `

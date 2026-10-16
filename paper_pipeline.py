@@ -15960,13 +15960,23 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
     return evidence
 
 
-def corpus_text_documents(sources: list) -> list:
+def corpus_text_documents(sources: list, raw_text: bool = False,
+                          include_bib: bool = False) -> list:
     """[(document name, [(text, is_reference, is_heading)])] for the corpus.
 
     DOCX text is read with the full paragraph map (styles drive the reference
     and heading flags); .tex/.md text goes through the same LaTeX stripping the
     style rules use. Stage scratch (`work/`) and bookkeeping are skipped, exactly
     like every other corpus scan.
+
+    `raw_text` hands a TEXT source over as ONE row holding the file's own bytes
+    (decoded), and `include_bib` adds `*.bib` to the suffixes read. The M2
+    reference seed reads that view and every other scan keeps the stripped one:
+    the paragraph reader folds each paragraph onto one line and strips the LaTeX
+    scaffolding, which destroys the `\\bibitem{key}` marker a LaTeX bibliography
+    is found by -- so a `thebibliography` documented ZERO entries on the
+    production path, and a `.bib` file (whose `@type{key,` markers the same
+    reader knows) was never read at all.
     """
     mod = _format_module()
     out = []
@@ -16011,8 +16021,9 @@ def corpus_text_documents(sources: list) -> list:
                 rows.append((mod.text_of(para), style == "Bibliography",
                              bool(style and style.startswith("Heading"))))
             out.append((prefix + rel, rows))
-        for p in sorted([q for suf in ("*.tex", "*.ltx", "*.md", "*.markdown", "*.txt")
-                         for q in src.rglob(suf)]):
+        suffixes = ("*.tex", "*.ltx", "*.md", "*.markdown", "*.txt") \
+            + (("*.bib",) if include_bib else ())
+        for p in sorted([q for suf in suffixes for q in src.rglob(suf)]):
             if not p.is_file() or _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
                 continue
             if (prefix + p.relative_to(src).as_posix()) in overrides[i]:
@@ -16023,6 +16034,13 @@ def corpus_text_documents(sources: list) -> list:
             if is_non_manuscript_rel(rel):
                 continue        # evidence area, not submission prose (see above)
             if "work" in rel.split("/")[:-1]:
+                continue
+            if raw_text:
+                try:
+                    raw = p.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                out.append((prefix + rel, [(raw, False, False)]))
                 continue
             paras = text_source_paragraphs(p)
             out.append((prefix + rel, [(t, False, False) for t in paras]))
@@ -16327,7 +16345,16 @@ def seed_provenance_pack(ctx: Ctx, sb: Path, sources: list, ev: dict,
     reconcile = mod.reconcile_number_rows(num_rows, tables)
     ident_rows = mod.identifier_rows(docs)
     gene_rows = mod.gene_symbol_rows(docs)
-    ref_rows = mod.reference_integrity_rows(docs)
+    # The reference seed reads the sources' OWN text (`raw_text=True`,
+    # `include_bib=True`): the stripped paragraph view above has already folded
+    # every paragraph onto one line and removed the LaTeX scaffolding, so a
+    # `\bibitem{key}` marker -- the one thing a LaTeX reference list is read by
+    # -- could never reach `reference_entries()`, and a `.bib` file was not read
+    # at all. Both shapes carry the DOIs this seed exists to check, and the
+    # DOCX branch is unchanged (its style flags are what the flagged paragraphs
+    # need), so no other scan sees the raw text.
+    ref_rows = mod.reference_integrity_rows(
+        corpus_text_documents(sources, raw_text=True, include_bib=True))
     ph_rows = ((ev.get("placeholder_ledger") or {}).get("rows") or [])
     plan = mod.placeholder_lookup_plan(ph_rows, docs)
     # The reference list's own DOIs are resolved FIRST (see _select_lookup_targets):
@@ -22757,7 +22784,18 @@ def reset_run_record(rec: dict) -> None:
                 "scores": None, "summary": None})
     for k in ("stale_reason", "corpus_digest", "content_fingerprint", "captions",
               "document_set", "placeholders", "critical_findings_input",
-              "target_digest", "field_digests"):
+              "target_digest", "field_digests",
+              # The CLI session id names the attempt whose transcript is in THIS
+              # sandbox (see capture_agent_session_id) -- and every caller of this
+              # reset replaces that sandbox: `rebuild_sandbox` moves the old one
+              # to `runs/<id>_try<N>_failed/` and materializes a fresh tree, and
+              # the revalidation reset deletes it outright. A continuation that
+              # adopted the id would resume a superseded round's conversation
+              # inside the NEW sandbox, which is exactly the "the agent runs on
+              # content the round no longer contains" failure the reset exists to
+              # stop. `resume_attempts` stays: its keys are session ids, so an
+              # entry can never be charged to a session that is not running.
+              "agent_session_id"):
         rec.pop(k, None)
 
 
@@ -34624,10 +34662,18 @@ def _probe_dsh_headless(exe: str) -> str:
         return ""                        # not the app this preset speaks to: say nothing
     if "--json" in text and "stdin" in text:
         return ""
+    # Name the half that is MISSING: the predicate refuses a build that lacks
+    # either one, and reporting "declares neither" for a build that does carry
+    # `--json` sent the operator looking for a flag it already answers.
+    if "--json" not in text and "stdin" not in text:
+        missing = "neither `--json` nor the stdin task form (`-`)"
+    elif "--json" not in text:
+        missing = "no `--json` flag (the event stream that carries the session id)"
+    else:
+        missing = "no stdin task form (`-`)"
     return ("the installed DeepSeek Harness cannot run this pipeline's sessions: "
-            "`dsh --profile headless` declares neither `--json` nor the stdin task form "
-            "(`-`) in its own help, so every session of this backend would fail with a "
-            "usage error.\n"
+            f"`dsh --profile headless` declares {missing} in its own help, so every "
+            "session of this backend would fail with a usage error.\n"
             "       Upgrade it (`npm i -g @deepseek-ai/dsh@alpha`; the contract is "
             "verified against dsh 0.2.1-alpha.4 and 0.2.0-rc.2), run the stages on another "
             "backend (--agent codex|claude|manual), or point --agent-cmd at your own CLI")
@@ -42940,13 +42986,24 @@ def _docx_prose_text(path: Path) -> str:
             for row in t.rows:
                 for cell in row.cells:
                     for para in cell.paragraphs:
-                        cell_elems.add(id(para._p))
+                        # The ELEMENT itself, never `id(...)`: an lxml proxy is
+                        # freed once nothing references it, and the id it held
+                        # is then reused by the next object -- so an `id()`
+                        # membership test intermittently matched a BODY
+                        # paragraph against a cell's freed id and dropped that
+                        # paragraph from the prose (PKG-9 went silent on the
+                        # very table-vs-prose claim it exists to flag; the
+                        # id-reuse made it fail in roughly one run of twelve
+                        # under parallel load, and only under load). Holding the
+                        # elements keeps their proxies alive, so the comparison
+                        # is the identity it was always meant to be.
+                        cell_elems.add(para._p)
     except Exception:                                          # noqa: BLE001
         pass
     out = []
     try:
         for para in doc.paragraphs:
-            if id(para._p) in cell_elems:
+            if para._p in cell_elems:
                 continue
             out.append(para.text)
     except Exception:                                          # noqa: BLE001

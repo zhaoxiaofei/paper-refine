@@ -13,10 +13,20 @@ ways, and this suite pins both:
   * the LOCAL signals -- reference_entries() reading each list shape the corpus
     hands over (numbered markers inside ONE joined paragraph, author-year
     entries inside one paragraph, `\\bibitem`, `@type{key,`, DOCX paragraphs the
-    style map flags as the bibliography, and prose that must yield NOTHING);
-    doi_year_token_signal() firing on the corrupted-year family only (never on
-    a registrant prefix such as `10.1111` beside a 2011 entry); the same DOI on
-    two entries; an entry that says it carries a DOI and states a broken one;
+    style map flags as the bibliography, and prose that must yield NOTHING --
+    including prose that numbers its own sentences, which is the same shape a
+    numbered list has and is read only inside a reference region); the shapes
+    that LOOK like markers inside an entry (a co-author's surname before the
+    entry's parenthetical year, a journal volume `511.`/pages, a second year in
+    the same entry), which used to be split into phantom fragments that carried
+    the first author away from the row the reviewer disposes; the entry's own
+    year coming from a bibliographic position rather than a year inside its
+    title; doi_year_token_signal() firing on the corrupted-year family only
+    (never on a registrant prefix such as `10.1111` beside a 2011 entry); the
+    same DOI on two entries -- INCLUDING the two shapes that carry no label (a
+    flagged DOCX bibliography paragraph, an unlabelled author-year entry), for
+    which identity is the entry's position; an entry that says it carries a DOI
+    and states a broken one;
   * the RESOLVER side -- whats returned by lookup_kind() for a DOI (Crossref
     first, then the second registration agency, because a DataCite DOI is not
     an absent DOI), the probe that decides whether the engine runs at all (an
@@ -24,7 +34,9 @@ ways, and this suite pins both:
     the whole engine off, blaming the operator's network), and the comparison
     between the returned record and the entry (a record with a longer title
     must not make a correct, abbreviated entry look wrong; a record naming
-    another work must).
+    another work must -- and the comparison is made on WORDS with their
+    punctuation folded, so a hyphen or a spacing difference is not a different
+    work while a word that only occurs inside another word is not a match).
 """
 from __future__ import annotations
 
@@ -120,6 +132,64 @@ def test_parsing():
     mixed = docs_of("## References\n\n" + joined + "\n\n## Supplementary\n\n[1] Not an entry.")
     check("the region ends at the next section heading",
           len(fmt.reference_entries(mixed)) == 3, str(len(fmt.reference_entries(mixed))))
+    # The author-year start is a capitalized word NEAR a parenthetical year, and
+    # in a real entry a co-author's surname and a journal volume are exactly
+    # that shape. Splitting there left the first author on a ghost entry (no
+    # year, no DOI) and handed the reviewer a row whose text began at the SECOND
+    # author; `Nature 511. 430-440 (2014)` did the same to a numbered entry.
+    coauthored = ("Berg, J. K., & Smith, A. (2016). Forest dynamics. Ecology 97:1-9. "
+                  "doi:10.1890/15-0001.1 Rossi, P., & Tanaka, H. (2014). Tree growth. "
+                  "Trees 28:1-8. doi:10.1007/s11295-014-0004")
+    got_co = fmt.reference_entries(docs_of("References\n\n" + coauthored))
+    check("a co-author's surname does not start another entry",
+          len(got_co) == 2 and "Berg, J. K., & Smith" in got_co[0][2]
+          and "Rossi, P., & Tanaka" in got_co[1][2]
+          and [fmt._entry_year(b) for _d, _l, b in got_co] == ["2016", "2014"],
+          str([(b[:40], fmt._entry_year(b)) for _d, _l, b in got_co]))
+    per_line = ("Smith J. (2019). Alpha Growth Study. Ecology. "
+                "Jones B. (2020). Beta Field Survey of Tidal Marshes. Science 10.1000/cc.2020.")
+    got_line = fmt.reference_entries(docs_of("References\n\n" + per_line))
+    check("a title inside an author-year entry is not read as more entries",
+          [b for _d, _l, b in got_line]
+          == ["Smith J. (2019). Alpha Growth Study. Ecology.",
+              "Jones B. (2020). Beta Field Survey of Tidal Marshes. Science 10.1000/cc.2020."],
+          str([b for _d, _l, b in got_line]))
+    volumes = ("1. Smith J. Forest dynamics in temperate stands. Nature 511. 430-440 (2014). "
+               "doi:10.1038/nature12373 "
+               "2. Jones A. Soil carbon storage. Science 344. 123-125 (2014). "
+               "doi:10.1126/science.1245678 "
+               "3. Lee B. Tree growth under drought. Cell 157. 1-10 (2014). "
+               "doi:10.1016/j.cell.2014.01.001")
+    got_vol = fmt.reference_entries(docs_of("## References\n\n" + volumes))
+    check("a journal volume inside an entry is not a list marker",
+          [l for _d, l, _b in got_vol] == ["1", "2", "3"]
+          and all(b.startswith(t) for b, t in zip(
+              (b for _d, _l, b in got_vol), ("Smith J.", "Jones A.", "Lee B."))),
+          str([(l, b[:30]) for _d, l, b in got_vol]))
+    check("prose that merely numbers its own sentences is not a reference list",
+          fmt.reference_entries(docs_of(
+              "# Title\n\nTest 1. We measured growth. Test 2. We repeated it. "
+              "Test 3. The dataset DOI is https://doi.org/10.1000/ds.2019.")) == []
+          and fmt.reference_integrity_rows(docs_of(
+              "# Title\n\nTest 1. We measured growth. Test 2. We repeated it. "
+              "Test 3. The dataset DOI is https://doi.org/10.1000/ds.2019.")) == [])
+    notes = ("# Title\n\n## Introduction\n\nThe aligner [1] is standard [2] and fast [3] "
+             "(see doi:10.1093/bioinformatics/btp324).\n\n## References and Notes\n\n"
+             "[1] Berg JK. Forest dynamics. Ecology 2016. doi:10.1890/15-0001.1 "
+             "[2] Smith A. Soil carbon. Genome Biol 2019. doi:10.1186/gb-2119-0002 "
+             "[3] Rossi P. Tree growth. Trees 2014. doi:10.1007/s11295-014-0004")
+    got_notes = fmt.reference_entries(docs_of(notes))
+    check("`References and Notes` opens the region like `References`",
+          len(got_notes) == 3 and all("doi:" in b for _d, _l, b in got_notes)
+          and fmt._is_reference_heading("References and Notes"),
+          str([(l, b[:34]) for _d, l, b in got_notes]))
+    acked = docs_of("## References\n\n"
+                    "[1] Berg JK. Forest dynamics. Ecology 2016. doi:10.1890/15-0001.1\n\n"
+                    "**Acknowledgements**\n\nWe thank the funders.")
+    got_ack = fmt.reference_entries(acked)
+    check("a bold section line ends the region (no acknowledgement glued on)",
+          len(got_ack) == 1 and "Acknowledgements" not in got_ack[0][2],
+          str([b[-60:] for _d, _l, b in got_ack]))
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +224,30 @@ def test_local_signals():
     check("an entry that says it carries a DOI without stating a readable one is a signal",
           broken and broken[0]["identifier"] == "" and broken[0]["signal"] == "doi-malformed",
           str(broken[:1]))
+    # The two shapes with NO label (`""`) are the flagged DOCX bibliography and
+    # the unlabelled author-year list: keying the duplicate check on
+    # (document, label) made every pair of them look like the SAME entry, so the
+    # signal never fired for exactly the shapes the seed was extended to read.
+    flagged = [("Berg, J. K. (2016). Forest dynamics. doi:10.1890/15-0001.1", True, False),
+               ("Smith, A. (2019). Soil carbon. doi:10.1890/15-0001.1", True, False)]
+    dup_rows = fmt.reference_integrity_rows([("ms.docx", flagged)])
+    check("the same DOI on two FLAGGED DOCX paragraphs is a signal on both rows",
+          [r["signal"] for r in dup_rows] == ["duplicate-doi", "duplicate-doi"],
+          str([r["signal"] for r in dup_rows]))
+    alone = fmt.reference_integrity_rows(docs_of(
+        "## References\n\n[1] Berg JK. Forest dynamics. Ecology 2016. doi:10.1890/15-0001.1"))
+    check("a DOI that appears once is never reported as a duplicate",
+          alone and alone[0]["signal"] == "", str(alone[:1]))
+    check("the entry's year is its BIBLIOGRAPHIC one, not a year inside its title",
+          fmt._entry_year("[1] Smith J. The 2015 Paris Agreement and forest loss. "
+                          "Nature Climate Change 2021; 11:1-8. doi:10.1038/nclimate1234") == "2021"
+          and fmt._entry_year("Berg JK. Forest dynamics. Ecology 2016; 97:1-9. "
+                              "doi:10.1890/15-0001.1") == "2016"
+          and fmt._entry_year("[1] Smith A. Soil carbon. Genome Biol 2019. "
+                              "doi:10.1186/gb-2119-0002") == "2019"
+          and fmt._entry_year("Berg, J. K. (2016). Forest dynamics. doi:10.1890/15-0001.1") == "2016",
+          fmt._entry_year("[1] Smith J. The 2015 Paris Agreement and forest loss. "
+                          "Nature Climate Change 2021; 11:1-8. doi:10.1038/nclimate1234"))
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +276,23 @@ def test_hit_comparison():
     check("a record too thin to judge stays silent",
           fmt.reference_entry_hit_signal(entry, {"date": 2007, "title": "Data"}) == ""
           and fmt.reference_entry_hit_signal(entry, {}) == "")
+    # The comparison is made on WORDS with their punctuation folded: the hyphen
+    # is a typesetting choice, not a different work, and the bare substring test
+    # it replaced let a record's "cell" match the entry's "cells" -- which is how
+    # a record naming another work stayed silent.
+    spaced = {"date": 2020, "title": "Single-cell RNA sequencing of tumors"}
+    check("a hyphen/spacing difference is NOT a different work",
+          fmt.reference_entry_hit_signal("Chen L. Single cell RNA sequencing of tumors. "
+                                         "J Tests 2020. doi:10.1000/aa.2020", spaced) == "",
+          fmt.reference_entry_hit_signal("Chen L. Single cell RNA sequencing of tumors. "
+                                         "J Tests 2020. doi:10.1000/aa.2020", spaced))
+    other_work = {"date": 2020,
+                  "title": "CRISPR screening identifies regulators of T cell exhaustion"}
+    sig_other = fmt.reference_entry_hit_signal(
+        "Doe J. CRISPR screening in primary T cells reveals checkpoints. "
+        "J Tests 2020. doi:10.1000/bb.2020", other_work)
+    check("a record whose words only appear inside OTHER words is a different work",
+          "is not this entry's" in sig_other, sig_other)
 
 
 # ---------------------------------------------------------------------------

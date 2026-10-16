@@ -79,7 +79,7 @@ serveStdio(() => {
     async ({ originalPath, revisedPath, outputPath }) => {
       const inputs = [originalPath, revisedPath];
       for (const p of inputs) {
-        if (!path.isAbsolute(p) || !isDocx(p) || !existsSync(p)) {
+        if (!path.isAbsolute(p) || !isDocx(p)) {
           return {
             content: [{ type: 'text', text: `refused: every input must be an existing absolute `
                                             + `.docx file: ${p}` }],
@@ -90,6 +90,22 @@ serveStdio(() => {
       const absOriginal = path.resolve(originalPath);
       const absRevised = path.resolve(revisedPath);
       const absOutput = outputPath ? path.resolve(outputPath) : '';
+      // The existence check is made on the RESOLVED path -- the one execFile
+      // opens. `existsSync` on the raw string follows symlinks and `..` through
+      // the KERNEL, so `<dir>/link/../../x.docx` can name an existing file
+      // while `path.resolve()` of it names another (or none at all): the old
+      // check validated one document and handed a DIFFERENT one to the
+      // comparer, which is also how the containment rule below got to see a
+      // file the run never touched.
+      for (const p of [absOriginal, absRevised]) {
+        if (!existsSync(p)) {
+          return {
+            content: [{ type: 'text', text: `refused: every input must be an existing absolute `
+                                            + `.docx file: ${p}` }],
+            isError: true,
+          };
+        }
+      }
       if (outputPath && (!path.isAbsolute(outputPath) || !isDocx(outputPath))) {
         return {
           content: [{ type: 'text', text: `refused: outputPath must be an absolute .docx path: `

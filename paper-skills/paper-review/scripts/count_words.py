@@ -69,9 +69,23 @@ KEYWORDS = re.compile(r"^\s*(?:key\s?words?)\s*[:.\u2014\u2013-]", re.I)
 # levels rose ...") was subtracted as a legend, systematically undercounting the
 # main text toward a false "ok" -- `extract_numbers.FIG_CAPTION_RE` enforces the
 # same separator for exactly this reason.
-CAPTION_SEP = r"[.:|–—,](?:\s*\S|\s*$)"
-CAPTION = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?"
-                     r"(?:figure|fig\.?)\s*S?\d+\s*" + CAPTION_SEP, re.I)
+# The label, number and separator are the PIPELINE's own set
+# (`paper_pipeline.CAPTION_START_RE`): `Figures 2 | ...` and `Fig. 3(a). ...` are
+# captions there and were counted as main text here, and the counter's whole
+# contract is that it reads a document the way the M19 row the venue gate uses
+# reads it.
+CAPTION = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?fig(?:ure)?s?\.?\s*"
+                     r"(?:S?\d+[A-Za-z]?|[IVXivx]+)"
+                     r"(?:\s*\([A-Za-z0-9][A-Za-z0-9,.\u2013\-]*\))?"
+                     r"\s*(?:\||:|\u2014|\u2013|-|\.)\s*", re.I)
+# A caption-LOOKING line the strict pattern does NOT recognise: a bare label on a
+# line of its own ("Fig. S3", "Figure 3"), which two-column and PDF-extracted
+# text produce. The pipeline reports these as suspected captions and ENDS the
+# legend at them; merging one in subtracted the NEXT figure's legend from the
+# main text and reported fewer words than the pipeline's own row.
+CAPTION_SUSPECT = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?fig(?:ure)?s?\.?\s*"
+                             r"(?:S?\d+[A-Za-z]?|[IVXivx]+)"
+                             r"\s*(?:\([^)]*\)|$|[|:\u2014\u2013\-])", re.I)
 COVER_SALUTATION = re.compile(r"^\s*(?:dear\b|to the (?:editor|editors)\b)", re.I)
 COVER_CLOSING = re.compile(
     r"^\s*(?:sincerely|yours (?:sincerely|faithfully|truly)|best regards|kind regards|regards|"
@@ -308,9 +322,11 @@ def caption_ranges(lines: list) -> list:
     """(start, end) line ranges of figure legends, continuation lines merged.
 
     Mirrors the pipeline's ``_caption_units_from_lines`` boundary rule: a legend
-    continues while the next line is non-empty, is not a heading or a new
-    caption, and (once the legend text ends in sentence-final punctuation) does
-    not start a new flush-left paragraph.
+    continues while the next line is non-empty, is not a heading (markdown's
+    ``#`` or a bound section name), is not a new caption or a caption-SUSPECT
+    line (a bare "Fig. S3" label, which the pipeline ends the legend at), and
+    (once the legend text ends in sentence-final punctuation) does not start a
+    new flush-left paragraph.
     """
     ranges, i, n = [], 0, len(lines)
     while i < n:
@@ -321,7 +337,8 @@ def caption_ranges(lines: list) -> list:
         while j < n:
             raw = lines[j]
             nxt = raw.strip()
-            if not nxt or CAPTION.match(nxt) or SECTION_BOUND.match(nxt):
+            if not nxt or nxt.startswith("#") or CAPTION.match(nxt) \
+                    or CAPTION_SUSPECT.match(nxt) or SECTION_BOUND.match(nxt):
                 break
             if lines[j - 1].rstrip().endswith((".", "!", "?")) and not raw[:1].isspace():
                 break

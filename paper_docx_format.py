@@ -2576,20 +2576,28 @@ def identifier_rows(docs) -> list:
 # DOCX/markdown heading is the only thing that opens the region (a `.tex`
 # bibliography is found by its own `\bibitem` markers instead).
 REFERENCE_HEADING_WORDS = frozenset((
-    "references", "references cited", "reference list", "bibliography",
-    "literature cited", "works cited", "reference literature"))
+    "references", "references cited", "references and notes", "reference list",
+    "bibliography", "literature cited", "works cited", "reference literature"))
 # The numbered markers are read anywhere whitespace precedes them: the corpus
 # scanner hands markdown/LaTeX text over as PARAGRAPHS (a reference list written
 # without blank lines between entries arrives as ONE paragraph), so an anchored
 # `^` pattern sees a single line and no entries at all.
 REFERENCE_NUMBERED_RE = re.compile(r"(?:^|\s)(?:\[(\d{1,3})\]|(\d{1,3})[.)])\s+")
+REFERENCE_AY_YEAR_RE = re.compile(r"[\(\[]\d{4}[\)\]]")
 # An author-year entry opens with a surname run whose year follows in
 # parentheses or brackets ("Berg, J. K. (2016).", "Berg and Smith (2016)",
 # "Berg JK [2016]"): the same joined-paragraph problem, and a split that is
 # never made would leave every row's body holding the WHOLE list -- which would
 # make the resolved-title comparison vacuous (every title "appears" in it).
+# The run between the name and the year may hold the rest of the author block
+# (initials, commas, "&", "and") but NOT a digit and not a sentence boundary: a
+# journal volume ("Nature 511. 430-440 (2014)") carries digits, and a second
+# year inside the SAME entry ("Cell 165, 1-10 (2016)") is announced by "word.
+# Word" -- both put a capitalized word within 40 characters of a parenthetical
+# year, which is the shape this lookahead keys on.
 REFERENCE_AY_START_RE = re.compile(
-    r"(?<=[\s.;])(?=[A-Z][A-Za-z'`\-]{1,24}[^()\[\]]{0,40}?[\(\[]\d{4}[\)\]](?:[.,]\s*)?)")
+    r"(?<=[\s.;])(?=[A-Z][A-Za-z'`\-]{1,24}"
+    r"(?:[^()\[\]\d.]|\.(?!\s*[A-Za-z]{2,})){0,40}?[\(\[]\d{4}[\)\]](?:[.,]\s*)?)")
 REFERENCE_BIBITEM_RE = re.compile(
     r"(?m)^[ \t]*\\bibitem[ \t]*(?:\[[^\]]*\])?[ \t]*\{([^}]*)\}")
 REFERENCE_BIBENTRY_RE = re.compile(r"(?m)^[ \t]*@\w+[ \t]*\{[ \t]*([^,\s]+)[ \t]*,")
@@ -2614,9 +2622,31 @@ def _fold_space(text: str) -> str:
 
 
 def _entry_year(body: str) -> str:
-    """The entry's own year token ('' when the entry carries none)."""
-    m = REFERENCE_YEAR_RE.search(body or "")
-    return m.group(1) if m else ""
+    """The entry's own year token ('' when the entry carries none).
+
+    The FIRST year in the text is not always the entry's own: a title may carry
+    one ("The 2015 Paris Agreement and forest loss. Nature Climate Change 2021;
+    ..."), and every comparison downstream -- the resolver's year against it and
+    the DOI's own year token against it -- is made with this value, so reading
+    the title's year turned a correct entry into a year disagreement. A year in
+    a BIBLIOGRAPHIC position therefore wins: one in parentheses or brackets (the
+    author-year shape), else the first one the entry states as its own field
+    (followed by the punctuation that delimits one -- `;`, `,`, `.`, `)` or `]`,
+    or the end of the entry), which is also what keeps a year buried in a DOI
+    suffix (`gb-2019-0002`) from being read as the entry's. The first year in
+    the text stays the fallback for the shapes neither rule reaches.
+    """
+    body = body or ""
+    years = list(REFERENCE_YEAR_RE.finditer(body))
+    if not years:
+        return ""
+    for m in years:
+        if m.start() and body[m.start() - 1] in "([":
+            return m.group(1)
+    for m in years:
+        if body[m.end():m.end() + 1] in ("", ";", ",", ".", ")", "]"):
+            return m.group(1)
+    return years[0].group(1)
 
 
 def _is_reference_heading(line: str) -> bool:
@@ -2627,25 +2657,65 @@ def _is_reference_heading(line: str) -> bool:
 
 
 def _is_section_heading(line: str) -> bool:
-    """True for a line that opens a NEW section (which ends the region)."""
+    """True for a line that opens a NEW section (which ends the region).
+
+    Markdown's `#`/`##` heading and LaTeX's `\\section{}` are the two the region
+    reader was written for; a line that is ENTIRELY bold (`**Acknowledgements**`)
+    is a third shape the same text uses for a section, and without it the region
+    ran on through the acknowledgements and glued them onto the LAST reference
+    entry -- which made that entry's own text something other than the entry,
+    the one thing the seeded rows are compared against.
+    """
     t = str(line or "").strip()
-    return bool(re.match(r"#{1,6}[ \t]+\S", t) or re.match(r"\\section\*?\{", t))
+    return bool(re.match(r"#{1,6}[ \t]+\S", t) or re.match(r"\\section\*?\{", t)
+                or re.match(r"\*\*[^*]+\*\*$", t))
+
+
+def _numbered_marker_run(spans: list) -> list:
+    """The consecutive-number run inside the numbered marker's candidate spans.
+
+    `(?:^|\\s)(\\d{1,3})[.)]` is not only how a reference list numbers itself:
+    it is also how an ENTRY carries a journal volume ("Nature 511. 430-440") or
+    a figure reference ("Fig. 3."), and trusting those cut real entries in half
+    -- the row whose DOI the reviewer has to dispose then held "430-440 (2014).
+    doi:..." and had lost the title it belongs to. A reference list's own
+    markers run 1, 2, 3, ..., so the candidates are reduced to the longest run
+    that steps by one: an in-entry number is SKIPPED, never trusted, and a later
+    real marker is therefore not lost to it either.
+    """
+    best = []
+    for i, m in enumerate(spans):
+        run, n = [m], int(m.group(1) or m.group(2) or 0)
+        for other in spans[i + 1:]:
+            nxt = int(other.group(1) or other.group(2) or 0)
+            if nxt == n + 1:
+                run.append(other)
+                n = nxt
+        if len(run) >= len(best):
+            best = run
+    return best
 
 
 def _split_reference_entries(text: str, allow_paragraphs: bool) -> list:
     """[(label, entry_text)] for one reference-list region.
 
     Markers first (`\\bibitem{key}` / `@type{key,` carry their own labels, then a
-    numbered list), because they delimit entries exactly; the numbered shape is
-    only trusted with three or more matches (a lone `1.` line is a list, not a
-    reference list). `allow_paragraphs` is True only after a reference HEADING:
-    an unlabelled author-year list is read as its paragraph blocks, and prose
-    that merely happens to sit in a file is never read that way.
+    numbered list), because they delimit entries exactly; the numbered shape
+    needs three or more CONSECUTIVE markers (a lone `1.` line is a list, not a
+    reference list) and is read only inside a reference region.
+    `allow_paragraphs` is True only after a reference HEADING: an unlabelled
+    author-year list is read as its paragraph blocks, and prose that merely
+    happens to sit in a file is never read that way -- not even when it numbers
+    its own sentences ("Test 1. ... Test 2. ... Test 3. ..."), which is the same
+    shape and used to seed a row for a DOI the body merely mentioned.
     """
-    for pattern, keyed, minimum in ((REFERENCE_BIBITEM_RE, True, 1),
-                                    (REFERENCE_BIBENTRY_RE, True, 1),
-                                    (REFERENCE_NUMBERED_RE, False, 3)):
+    shapes = [(REFERENCE_BIBITEM_RE, True, 1), (REFERENCE_BIBENTRY_RE, True, 1)]
+    if allow_paragraphs:
+        shapes.append((REFERENCE_NUMBERED_RE, False, 3))
+    for pattern, keyed, minimum in shapes:
         spans = list(pattern.finditer(text))
+        if not keyed:
+            spans = _numbered_marker_run(spans)
         if len(spans) < minimum:
             continue
         entries = []
@@ -2659,8 +2729,18 @@ def _split_reference_entries(text: str, allow_paragraphs: bool) -> list:
         return []
     # One sentinel space, so the FIRST entry (whose lookbehind has no character
     # before it) is a start too, and every index shifts back by one.
-    starts = [m.start() - 1 for m in REFERENCE_AY_START_RE.finditer(" " + (text or ""))]
-    starts = [s for s in starts if s >= 0]
+    cands = [m.start() - 1 for m in REFERENCE_AY_START_RE.finditer(" " + (text or ""))]
+    cands = [s for s in cands if s >= 0]
+    # A candidate is only an entry START when the text it would close already
+    # carries a year of its own: the lookahead finds every capitalized word whose
+    # parenthetical year sits near it, and in a real entry a CO-AUTHOR surname
+    # ("Berg, J. K., & Smith, A. (2016).") is exactly that shape. Splitting
+    # there left the first author on a ghost entry -- with no year and no DOI --
+    # and handed the reviewer the row's text starting at the SECOND author.
+    starts = []
+    for s in cands:
+        if not starts or REFERENCE_AY_YEAR_RE.search(text[starts[-1]:s]):
+            starts.append(s)
     if len(starts) >= 2:
         if starts[0] > 0:
             starts = [0] + starts
@@ -2753,6 +2833,14 @@ def reference_entry_hit_signal(entry_text: str, hit: dict) -> str:
     fraction rule fired on the entry that was RIGHT). A record too thin to
     judge stays silent: the verdict itself is then all the reviewer has to
     dispose, and guessing past that is what the seed exists to prevent.
+
+    Both sides are compared as WORDS with their punctuation folded: a record's
+    "Single-cell RNA sequencing" and an entry's "Single cell RNA sequencing" are
+    the same title (the hyphen is a typesetting choice, and the entry was
+    reported as a different work for it), while a bare substring test let the
+    record's "cell" match the entry's "cells" and hid a record that really was
+    another work. Hyphens, dashes and other punctuation therefore become spaces
+    on both sides, and each record token must appear as a WORD of the entry.
     """
     out = []
     year = _entry_year(entry_text)
@@ -2763,11 +2851,16 @@ def reference_entry_hit_signal(entry_text: str, hit: dict) -> str:
     toks = [t for t in re.findall(r"[A-Za-z][A-Za-z0-9\-]{3,}", title)
             if t.lower() not in REF_HIT_STOPWORDS]
     if len(toks) >= 3:
-        low = str(entry_text or "").lower()
-        present = [t for t in toks if t.lower() in low]
+        low = _fold_space(re.sub(r"[^a-z0-9]+", " ", str(entry_text or "").lower()))
+
+        def _found(t: str) -> bool:
+            word = _fold_space(re.sub(r"[^a-z0-9]+", " ", t.lower()))
+            return bool(word) and re.search(r"\b" + re.escape(word) + r"\b", low) is not None
+
+        present = [t for t in toks if _found(t)]
         need = max(3, (len(toks) + 3) // 4)
         if len(present) < need:
-            missing = [t for t in toks if t.lower() not in low][:6]
+            missing = [t for t in toks if not _found(t)][:6]
             out.append(f"the resolved work's title ({_fold_space(title)[:80]!r}) is not this "
                        f"entry's: only {len(present)} of its {len(toks)} significant words "
                        f"appear in the entry (missing: {', '.join(missing)})")
@@ -2786,11 +2879,17 @@ def reference_integrity_rows(docs) -> list:
     """
     entries = reference_entries(docs)
     by_doi = {}
-    for doc, label, body in entries:
+    for i, (doc, label, body) in enumerate(entries):
         for doi in dict.fromkeys(m.group(0).rstrip(".,;") for m in DOI_RE.finditer(body)):
-            by_doi.setdefault(doi.lower(), []).append((doc, label))
+            # The OTHER entries are identified by their POSITION, never by
+            # (document, label): a flagged DOCX bibliography paragraph and an
+            # unlabelled author-year entry both carry the empty label, so keying
+            # on it made every pair of them look like the same entry and the
+            # duplicate-DOI signal never fired for the two shapes the seed was
+            # extended to read.
+            by_doi.setdefault(doi.lower(), []).append((i, doc, label))
     rows = []
-    for doc, label, body in entries:
+    for i, (doc, label, body) in enumerate(entries):
         year = _entry_year(body)
         dois = list(dict.fromkeys(m.group(0).rstrip(".,;") for m in DOI_RE.finditer(body)))
         if not dois:
@@ -2807,8 +2906,8 @@ def reference_integrity_rows(docs) -> list:
             evidence = ""
             if signal:
                 evidence = signal
-            others = [f"{d} entry {l}" if l else d for d, l in by_doi.get(doi.lower(), [])
-                      if (d, l) != (doc, label)]
+            others = [f"{d} entry {l}" if l else f"another entry of {d}"
+                      for j, d, l in by_doi.get(doi.lower(), []) if j != i]
             if others:
                 dup = "the same DOI appears on " + ", ".join(others[:3]) + " too"
                 signal = (signal + "; " + dup) if signal else "duplicate-doi"
