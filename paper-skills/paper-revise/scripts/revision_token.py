@@ -59,6 +59,11 @@ from pathlib import Path
 REPORTS = {"changelog.md", "manual_steps.md", "revision_report.md",
            "revision_report.json", "diff_ledger.md", "rewrite_report.md",
            "visual_check.md",
+           # The author's hand-off checklist (`author_to_complete: readme` in
+           # the orchestrator). It is not a manuscript payload document: it is
+           # created/updated/deleted as the author disposes items, and including
+           # it would change the package token after the stage applied it.
+           "readme-author-to-complete.md",
            # The pipeline's own completion signals: a misplaced
            # `_pipeline_done.json`/`scores.json` INSIDE a package must not
            # travel into the content fingerprint either (keep this in step with

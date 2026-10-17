@@ -799,23 +799,30 @@ touching this area:
   where the package actually holds the item, and stays silent when the package
   carries no labelled figure files at all (its artwork is embedded in the
   documents, and a name-based check has nothing to compare against).
-* **Hand-off markers are now an operator policy** (2026-10-17). The placeholder
-  convention is right for an internal round and wrong for an upload: the
-  deadline package's SUBMITTED main text still carried
+* **Hand-off items are now a three-way operator policy** (2026-10-17). The
+  placeholder convention is right for an internal round and wrong for an
+  upload: the deadline package's SUBMITTED main text still carried
   `[AUTHOR TO COMPLETE: versions of bedtools, Seurat, cellsnp-lite and UCSC
   liftOver]`, and the NeoHeteroclitic Reporting Summary was six markers and no
-  filled form. `--without-author-to-complete` (`set-author-to-complete off`)
-  replaces the marker rule in every prompt -- including the four master-prompt
-  excerpts and the end-of-prompt reminder that restated the opposite -- with a
-  no-marker rule: the missing item is left out of the document, a whole missing
-  file is not scaffolded as a document of instructions, and the item is recorded
-  in the package's own `MANUAL_STEPS.md`. Under `off`, a marker a stage ADDS
-  fails the attempt, a marker still in a delivered package is a gating residual,
-  and `package_readiness` names it as `AUTH-1` (under the default `on` it is an
-  advisory hand-off and, if the residual gate refuses the decision for it, the
-  readiness list now says so too -- the 2026-10-17 audit read
-  `submission_ready: true` beside `certified: false -- 6 hand-off markers`).
-  The probe session now receives the same rule; it never did before.
+  filled form. The default is now `readme`
+  (`--with-author-to-complete-in-readme`): no document carries the marker; each
+  missing item is recorded in ONE `README-AUTHOR-TO-COMPLETE.md` in the package
+  root, beside the cover letter and main text, and the submission copy drops it
+  because it matches `README*.md` (no shipped document may depend on it). The
+  prompt asks the stage to write the README; when a stage instead leaves the
+  item in `MANUAL_STEPS.md` in marker form, the postcheck moves the item into
+  the README. `--with-author-to-complete` keeps the old in-document marker
+  convention (`document`), and `--without-author-to-complete`
+  (`set-author-to-complete off`) still sends the item to `MANUAL_STEPS.md`.
+  Outside `document`, a marker a stage ADDS fails the attempt, a marker still
+  in a delivered package is a gating residual, and `package_readiness` names it
+  as `AUTH-1` (in `document` it is an advisory hand-off and, if the residual
+  gate refuses the decision for it, the readiness list now says so too -- the
+  2026-10-17 audit read `submission_ready: true` beside `certified: false -- 6
+  hand-off markers`). `AUTH-2` reports the README and its item count as a
+  blocking readiness finding until the author disposes it, and the README never
+  enters a judge view. The probe
+  session now receives the same rule; it never did before.
   Pinned by `.paper_test/test_manu_sub_audit_2026_1017.py`.
 * **An evidence-area file may be referenced only as a display item or through
   the parent's `.tex` closure** (2026-10-17, PKG-10). The operator's rule for

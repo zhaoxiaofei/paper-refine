@@ -136,10 +136,13 @@ def test_role_applicable_blocks():
     for label, needle in universal.items():
         missing = [role for role, text in P.items() if needle not in text]
         check(f"{label} is in all six sessions", not missing, f"missing in {missing}")
-    # The placeholder rule has exactly one documented variant: the comparison
-    # session's provenance-neutral wording.
-    check("the hand-off marker rule is in the five non-comparison sessions",
-          all("PIPELINE HAND-OFF PLACEHOLDERS" in P[r]
+    # The hand-off rule has exactly one documented variant: the comparison
+    # session's provenance-neutral wording. The default mode is `readme`, so a
+    # document carries no marker and the item lives in the package README.
+    check("the hand-off README rule is in the five non-comparison sessions",
+          all("PIPELINE HAND-OFF ITEMS" in P[r]
+              and "README-AUTHOR-TO-COMPLETE.md" in P[r]
+              and "PIPELINE HAND-OFF PLACEHOLDERS" not in P[r]
               for r in ("review", "audit", "rewrite", "revise", "integrate")))
     check("the comparison session carries the neutral placeholder rule instead",
           "PLACEHOLDER TEXT IN A PACKAGE" in P["judge"]

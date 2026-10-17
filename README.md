@@ -355,16 +355,23 @@ panel never reads a machine path.
 Every evidence area is hash-pinned, and any stage write into it is restored and
 reported.
 
-### Hand-off markers: `--with-author-to-complete` / `--without-author-to-complete`
+### Hand-off items: `--with-author-to-complete-in-readme` / `--with-author-to-complete` / `--without-author-to-complete`
 
 The revision stages are forbidden to invent content, so a missing mandatory item
 (a statement, an accession, an unreadable field, a whole required file) is
 handed to the author. **Where** that note lives is the operator's choice:
 
 ```bash
-# default (on): the marker convention -- a missing item is scaffolded with the
-# literal "[AUTHOR TO COMPLETE: ...]" token and listed for the author; the
-# marker itself is never a defect
+# default (readme): no document carries the marker. Each missing item is
+# recorded in ONE README-AUTHOR-TO-COMPLETE.md in the package root, beside the
+# cover letter and main text; the README is never submitted (README*.md is
+# dropped from journal_submission/), and a marker that still ships is a defect
+python paper_pipeline.py setup --source ./submission --root ./paper_rounds \
+    --with-author-to-complete-in-readme
+
+# document (the old default): the marker convention -- a missing item is
+# scaffolded with the literal "[AUTHOR TO COMPLETE: ...]" token and listed for
+# the author; the marker itself is a legitimate hand-off
 python paper_pipeline.py setup --source ./submission --root ./paper_rounds \
     --with-author-to-complete
 
@@ -375,22 +382,34 @@ python paper_pipeline.py setup --source ./submission --root ./paper_rounds \
 python paper_pipeline.py setup --source ./submission --root ./paper_rounds \
     --without-author-to-complete
 
-python paper_pipeline.py set-author-to-complete --root ./paper_rounds off   # flip later
+python paper_pipeline.py set-author-to-complete --root ./paper_rounds readme   # flip later
+# legacy `on` is accepted as an alias for `document`
 ```
 
 The switch rewrites the rule in EVERY prompt -- including the master-prompt
 excerpts and the end-of-prompt reminders that restate it -- and it reaches the
 probe, the auditor and the blind judge in their own provenance-free wording.
-Under `off`, a stage that ADDS a marker fails its attempt, a marker still in the
-delivered package is a gating residual and an `AUTH-1` readiness finding, and
-the rationale for *why* an item is missing moves to `MANUAL_STEPS.md` where a
-human reads it. The underlying gap counts exactly as before (AGENTS.md rule 5):
-the marker never made a package better or worse; only who carries the note --
-the manuscript (on) or the manual-steps list (off) -- changes. The delivered
-CopyNumBench main text still carried `[AUTHOR TO COMPLETE: versions of
+Under `readme` (the default) and `off`, a stage that ADDS a marker fails its
+attempt, a marker still in the delivered package is a gating residual and an
+`AUTH-1` readiness finding, and the item moves to
+`README-AUTHOR-TO-COMPLETE.md` (readme) or `MANUAL_STEPS.md` (off). The readme
+mode also moves an item a stage left in `MANUAL_STEPS.md` in marker form into
+the README mechanically, so the hand-off cannot disappear when the bookkeeping
+file is stripped from the version corpus. The README is dropped from
+`journal_submission/` exactly like every `README*.md`, is never part of a judge
+view, and no submitted document may depend on it; `AUTH-2` names it (and its
+item count) as a blocking readiness finding until the author disposes it. It is
+also excluded from the package's content-hash version token, so generating or
+updating the checklist never makes the stage's document names stale.
+
+The underlying gap counts exactly as before (AGENTS.md rule 5): the marker never
+made a package better or worse; only who carries the note -- the package README,
+the manuscript (document), or the manual-steps list (off) -- changes. The
+delivered CopyNumBench main text still carried `[AUTHOR TO COMPLETE: versions of
 bedtools, Seurat, cellsnp-lite and UCSC liftOver]`, and the NeoHeteroclitic
-Reporting Summary was six markers and no filled form; `off` is the setting for a
-package that is about to be uploaded.
+Reporting Summary was six markers and no filled form; `readme` is the default
+setting for a package that is about to be uploaded, and `off` remains available
+for an operator who wants every hand-off in the internal manual-steps report.
 
 ### What an evidence-area file may be referenced for (PKG-10)
 

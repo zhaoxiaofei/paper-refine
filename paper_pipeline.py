@@ -4941,6 +4941,13 @@ def _is_view_excluded_file(name: str, siblings=()) -> bool:
     only copy of the reference list.
     """
     low = name.strip().lower()
+    if is_author_to_complete_readme_name(name):
+        # The hand-off README is the author's checklist, never submission
+        # content. Its PRESENCE differs between a candidate that still owes the
+        # author an item and one that does not, so a judge must not see it: the
+        # underlying gap is scored from the package itself (the judge rule says
+        # so), and the checklist would otherwise be a provenance signal.
+        return True
     if _is_aux_doc(name) or low.startswith("~$"):
         return True
     if low.endswith((".pdf", ".bbl")):
@@ -7206,10 +7213,137 @@ PLACEHOLDER_RULE = """PIPELINE HAND-OFF PLACEHOLDERS — the literal token "[AUT
 # The switch never changes what is true about the package: the underlying gap
 # counts exactly as it did before (AGENTS.md rule 5: the marker never makes a
 # version worse or better). What changes is only who carries the note -- the
-# manuscript (on) or the manual-steps list (off) -- and whether a shipped marker
-# is a defect (off) or a neutral hand-off (on).
-AUTHOR_TO_COMPLETE_MODES = ("on", "off")
-DEFAULT_AUTHOR_TO_COMPLETE = "on"
+# manuscript (document), a README in the submission directory (readme), or the
+# manual-steps report (off) -- and whether a shipped marker is a defect.
+#
+# `readme` is the default: the hand-off items live in one README beside the
+# cover letter and main text, so the author sees them with the submission while
+# no submitted document carries the marker (a README*.md file is never submitted,
+# rule 9). `document` keeps the old in-document marker convention; `off` moves
+# the items out of the package into MANUAL_STEPS.md.
+AUTHOR_TO_COMPLETE_MODES = ("readme", "document", "off")
+# Accepted CLI spellings: `on` is the pre-2026-10-17 name for `document`, kept
+# so an existing command line keeps meaning the same policy.
+AUTHOR_TO_COMPLETE_CHOICES = AUTHOR_TO_COMPLETE_MODES + ("on",)
+DEFAULT_AUTHOR_TO_COMPLETE = "readme"
+# The hand-off README's name: it matches `README*.md`, which the submission copy
+# always drops (rule 9), so it can never ship by accident.
+AUTHOR_TO_COMPLETE_README = "README-AUTHOR-TO-COMPLETE.md"
+
+
+def _atc_mode(value=None) -> str:
+    """Normalise a policy value (mode string, bool or None) to a mode."""
+    if isinstance(value, bool):
+        return "document" if value else "off"
+    s = str(value or "").strip().lower()
+    if s in ("document", "on", "true", "yes", "1"):
+        return "document"
+    if s in ("off", "false", "no", "0"):
+        return "off"
+    if s == "readme":
+        return "readme"
+    return DEFAULT_AUTHOR_TO_COMPLETE
+
+
+def handoff_target(mode=None) -> str:
+    """Where a hand-off item belongs under `mode` (a file, or the manual steps)."""
+    return (AUTHOR_TO_COMPLETE_README if _atc_mode(mode) == "readme"
+            else "MANUAL_STEPS.md")
+
+
+_HANDOFF_MARKER_RE = re.compile(
+    r"\[\s*AUTHOR\s+TO\s+COMPLETE\s*:?\s*(.*?)\s*\]", re.I | re.S)
+
+
+def _handoff_items_from_manual_steps(text: str) -> list:
+    """The author-action lines a MANUAL_STEPS.md carries in marker form.
+
+    The readme mode's prompt tells a stage to write the hand-off README
+    directly. This extractor is the mechanical fallback for a stage that left
+    the same item in its MANUAL_STEPS.md with the literal marker: the item is
+    MOVED (marker removed, surrounding sentence kept), never invented, so a
+    missing README cannot silently drop the author's work item.
+    """
+    out, seen = [], set()
+    for raw in str(text or "").splitlines():
+        line = raw.strip()
+        if not line or not _HANDOFF_MARKER_RE.search(line):
+            continue
+        line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", line)
+        cleaned = _HANDOFF_MARKER_RE.sub(lambda m: m.group(1).strip(), line)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" .;:")
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(cleaned)
+    return out
+
+
+def ensure_handoff_readme(ctx: Ctx, pkg_dir: Path, warns: list = None,
+                          rec: dict = None) -> dict:
+    """Materialize the author hand-off README from a stage's MANUAL_STEPS.md.
+
+    `author_to_complete: readme` (the default) makes
+    `README-AUTHOR-TO-COMPLETE.md` the one place a missing submission item is
+    recorded. The stage prompt asks the session to write it; when a session
+    instead left the same item in `MANUAL_STEPS.md` with the literal marker,
+    this function extracts the item into the README and removes the marker
+    from the text it copies. The file lands in the package root beside the
+    cover letter and main text, and the submission copy drops it because it
+    matches `README*.md`.
+
+    Returns {"path", "items", "generated_from"} (empty when the mode is not
+    `readme` or there is nothing to move).
+    """
+    mode = author_to_complete_mode_of(ctx)
+    if mode != "readme":
+        return {}
+    pkg_dir = Path(pkg_dir)
+    manual = pkg_dir / "MANUAL_STEPS.md"
+    if not manual.is_file():
+        return {}
+    try:
+        items = _handoff_items_from_manual_steps(
+            manual.read_text("utf-8", "replace"))
+    except OSError:
+        return {}
+    if not items:
+        return {}
+    target = pkg_dir / AUTHOR_TO_COMPLETE_README
+    existing = ""
+    if target.is_file():
+        try:
+            existing = target.read_text("utf-8", "replace")
+        except OSError:
+            existing = ""
+    known = {re.sub(r"\s+", " ", re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", ln)).strip().lower()
+             for ln in existing.splitlines()
+             if re.match(r"^\s*(?:[-*+]|\d+[.)])\s+", ln)}
+    new = [it for it in items if it.lower() not in known]
+    if not new:
+        return {}
+    if not existing.strip():
+        existing = ("# Author to complete\n\n"
+                    "Items the submission still owes. Supply each item in the documents named "
+                    "below, then delete its row (and this file once no rows remain). This "
+                    "checklist is never submitted and no submitted document may depend on it.\n\n")
+    elif not existing.endswith("\n"):
+        existing += "\n"
+    block = "".join(f"- {it}\n" for it in new)
+    write_text_atomic(target, existing + block)
+    note = (f"the stage did not write {AUTHOR_TO_COMPLETE_README}; {len(new)} hand-off "
+            f"item(s) were moved there from MANUAL_STEPS.md (the marker text is removed, "
+            f"the surrounding instruction is kept)")
+    if warns is not None:
+        warns.append(note)
+    if rec is not None:
+        rec["handoff_readme"] = {"path": target.relative_to(pkg_dir).as_posix(),
+                                 "items": len(new), "generated_from": "MANUAL_STEPS.md"}
+    return {"path": str(target), "items": len(new),
+            "generated_from": "MANUAL_STEPS.md"}
 
 PLACEHOLDER_RULE_OFF = """PIPELINE HAND-OFF ITEMS — the operator turned the marker convention OFF
 (`--without-author-to-complete`), so the literal token "[AUTHOR TO COMPLETE..." MUST NOT APPEAR
@@ -7248,6 +7382,55 @@ anywhere in a file you write:
     that rests only on a placeholder input is `unable -- placeholder input; the real data is not
     in the corpus`, and the author must supply or remove the file."""
 
+# `readme` (the default): the hand-off items live in ONE README in the package
+# root, beside the cover letter and main text. The literal token stays forbidden
+# in every file (a submitted document in particular); the README is the author's
+# checklist and is never part of the submission (README*.md is dropped, rule 9).
+PLACEHOLDER_RULE_README = """PIPELINE HAND-OFF ITEMS — the operator chose the README hand-off
+(`--with-author-to-complete-in-readme`, the default), so the literal token "[AUTHOR TO COMPLETE..."
+MUST NOT APPEAR in any document or in the hand-off README:
+  * An item that is missing from the submission and cannot be reconstructed (a whole mandatory file
+    such as the cover letter or Reporting Summary, a statement, an accession number, a version, an
+    unreadable field) is NEVER written into a document. Leave the item out of the document -- and,
+    for a whole missing file, do not create a file that carries nothing but instructions -- and
+    record it in ONE file in the package root, `README-AUTHOR-TO-COMPLETE.md`, beside the cover
+    letter and main text. Give each item its own row: the document and section (or field), what is
+    missing, and the precise step the author must take (what to supply, where). Create the README
+    only when there is at least one item; update it as items are resolved and delete it when none
+    remain.
+  * The README is the author's checklist, never submission content: a submitted document may not
+    depend on it, and the submission copy drops it (it matches README*.md). Do not put prose,
+    citations or data in it.
+  * EXISTING DOCUMENT MARKERS. A review, audit or probe session never edits a package: it reports
+    the underlying gap as a finding and never scores the marker itself. A package-producing stage
+    (revise/rewrite/integrate) fills a marker ONLY when the missing content is verifiably present
+    elsewhere in the corpus (that is a normal edit and the marker goes away); otherwise REMOVE the
+    marker text from the document (keeping whatever surrounding content is real) and move the item
+    to the README. Never guess at the content, never write a bare "[TO BE COMPLETED]"-style
+    substitute, and never leave a marker in a document: a shipped marker is a defect of the
+    package, not a neutral hand-off.
+  * SEARCHABLE ITEMS ARE THE PIPELINE'S JOB. A missing findable fact -- a preprint/DOI/accession/
+    database id/ORCID/repository commit -- is classified `searchable`, and the orchestrator answers
+    it BEFORE your session with its own public-API lookups: read `work/PLACEHOLDER_LOOKUP.md` (and
+    `work/IDENTIFIERS.md`) and dispose every row.
+      - verdict `found`  -> write the fact into the document (naming the identifier it found);
+      - verdict `absent` -> write the VERIFIED NEGATIVE in the author's own voice, e.g. "Preprints:
+        not posted." or "not yet deposited (checked <date>)". This is NOT invention: a recorded,
+        dated, reproducible search that returned nothing is evidence;
+      - verdict `error`/`skipped` -> the lookup could not answer (offline / `--placeholder-lookup
+        off`): leave the item out of the document and put the failed query in the README;
+      - `author-only` facts (funding, consent, a decision, an identity you cannot confirm) go to
+        the README.
+  * The rule binds every file you write, including a scaffold you create for a mandatory item and
+    any report that ships beside the documents.
+  * PLACEHOLDER FILES. A corpus file can stand in for data it does not contain (a haplotype,
+    annotation or table copied from another sample, a dummy file). When your session receives the
+    evidence pack, its "Placeholder files -- ignored" list is authoritative -- and a file that
+    carries another sample's name/content is one even when no list names it. Never use one as a
+    producer, a source or a contradicting fact, and never "verify" a claim against one: a claim
+    that rests only on a placeholder input is `unable -- placeholder input; the real data is not
+    in the corpus`, and the author must supply or remove the file."""
+
 # The judge's half: the judge must not learn the pipeline's vocabulary, and under
 # `off` the marker is no longer neutral -- a package that ships one has content the
 # author still owes, and the judge scores that the same way it scores any other
@@ -7263,52 +7446,89 @@ PLACEHOLDER_RULE_JUDGE_OFF = """PLACEHOLDER TEXT IN A PACKAGE (handle exactly th
     completeness gap of that package: report it as such -- file, location, what is missing -- and
     never as a formatting nit."""
 
+PLACEHOLDER_RULE_JUDGE_README = """PLACEHOLDER TEXT IN A PACKAGE (handle exactly this way):
+  * A clearly marked placeholder (for example "[TO BE COMPLETED: ...]", a TODO note, or an
+    equivalent bracket) marks content the author must still supply. Score the UNDERLYING gap
+    exactly as you would score an otherwise identical package that simply omitted the item: the
+    marker's own wording, count and presence are not a separate difference, and you never "fix" one
+    by guessing at content.
+  * The package was prepared under a no-placeholder-in-document policy, so an item left as a marker
+    inside a document (instead of being supplied, or listed in the package's own hand-off README)
+    is a completeness gap of that package: report it as such -- file, location, what is missing --
+    and never as a formatting nit.
+  * A hand-off README (a README*.md file) is the author's checklist, not submission content: its
+    presence, absence or wording is never a scored difference."""
+
+
+def author_to_complete_mode_of(ctx=None) -> str:
+    """The root's hand-off policy: `readme` (default), `document` or `off`."""
+    raw = ((getattr(ctx, "cfg", None) if ctx is not None else None) or {}).get(
+        "author_to_complete")
+    return _atc_mode(raw)
+
 
 def author_to_complete_of(ctx=None) -> bool:
     """Whether the pipeline may write "[AUTHOR TO COMPLETE: ...]" hand-off markers.
 
-    `on` (the default, and the behaviour of every root created before the option
-    existed) keeps the marker convention; `off` (`--without-author-to-complete`,
-    or `set-author-to-complete off`) forbids the token in every written file and
-    makes a shipped marker a defect (see PLACEHOLDER_RULE_OFF).
+    True only for the legacy `document` mode (`--with-author-to-complete`, or
+    `set-author-to-complete document`). The default `readme` mode and `off` both
+    forbid the token in a document and make a shipped marker a defect; they differ
+    in where the hand-off item goes (the package's README vs MANUAL_STEPS.md).
     """
-    raw = ((getattr(ctx, "cfg", None) if ctx is not None else None) or {}).get(
-        "author_to_complete")
-    if isinstance(raw, bool):
-        return raw
-    return str(raw or "").strip().lower() not in ("off", "false", "no", "0")
+    return author_to_complete_mode_of(ctx) == "document"
 
 
-def placeholder_rule_text(author_to_complete: bool = True) -> str:
-    """The hand-off rule the working sessions receive (see the two texts above)."""
-    return PLACEHOLDER_RULE if author_to_complete else PLACEHOLDER_RULE_OFF
+def placeholder_rule_text(mode=None) -> str:
+    """The hand-off rule the working sessions receive for `mode`."""
+    mode = _atc_mode(mode)
+    if mode == "document":
+        return PLACEHOLDER_RULE
+    if mode == "readme":
+        return PLACEHOLDER_RULE_README
+    return PLACEHOLDER_RULE_OFF
 
 
-def placeholder_rule_judge_text(author_to_complete: bool = True) -> str:
+def placeholder_rule_judge_text(mode=None) -> str:
     """The same switch for the (provenance-free) comparison sessions."""
-    return PLACEHOLDER_RULE_JUDGE if author_to_complete else PLACEHOLDER_RULE_JUDGE_OFF
+    mode = _atc_mode(mode)
+    if mode == "document":
+        return PLACEHOLDER_RULE_JUDGE
+    if mode == "readme":
+        return PLACEHOLDER_RULE_JUDGE_README
+    return PLACEHOLDER_RULE_JUDGE_OFF
 
 
 # The master-prompt excerpts and the end-of-prompt reminders RESTATE the
 # scaffolding rule, and a restated opposite ("scaffold the missing item with the
 # marker") would override the policy block above -- which is exactly how the
-# contradiction would reach a session. Each pair is (the rule text the excerpts
-# carry, the same sentence under `--without-author-to-complete`).
+# contradiction would reach a session. Each row is (the text the excerpts carry,
+# the same sentence under `readme`, the same sentence under `off`).
 HANDOFF_PROMPT_REWRITES = (
     ('Missing mandatory items\n     are scaffolded only with clearly marked '
      '"[AUTHOR TO COMPLETE: ...]" placeholders, every one\n     listed in the final report.',
+     'Missing mandatory items are NOT marked inside a document (`author_to_complete: '
+     'readme`):\n     leave the item out of the document and record it in the package\'s '
+     '`README-AUTHOR-TO-COMPLETE.md`\n     (beside the cover letter and main text), with the '
+     'section, what is missing and the step to take.',
      'Missing mandatory items are NOT marked inside a document (`author_to_complete: off`,\n'
      '     `--without-author-to-complete`): leave the item out of the document and list it in\n'
      '     the final report.'),
     ('A\nmissing mandatory item is scaffolded ONLY with the literal "[AUTHOR TO COMPLETE: ...]" '
      'marker and\nlisted for the author: that marker is a hand-off item, never content to invent '
      'and never something\nto "clean up" by guessing.',
+     'A missing mandatory item is NOT marked inside the document (`author_to_complete: readme`): '
+     'leave it out of the file and record it in the package\'s `README-AUTHOR-TO-COMPLETE.md` -- '
+     'the item is never content to invent and never something to "clean up" by guessing.',
      'A missing mandatory item is NOT marked inside the document (`author_to_complete: off`, '
      '`--without-author-to-complete`): leave it out of the file and list it in MANUAL_STEPS.md -- '
      'the item is never content to invent and never something to "clean up" by guessing.'),
     ('Hand-off markers ("[AUTHOR TO COMPLETE: ...]") are manual items for\nthe author: preserve '
      "the base's markers, never invent the missing content, and never treat a marker\nas a defect "
      'or as a difference worth scoring.',
+     'Hand-off markers ("[AUTHOR TO COMPLETE: ...]") are not part of this package '
+     '(`author_to_complete: readme`): if the base carries one, remove the marker text (keeping '
+     'the real content around it) and record the item in `README-AUTHOR-TO-COMPLETE.md`; never '
+     'invent the missing content, and never score the marker itself.',
      'Hand-off markers ("[AUTHOR TO COMPLETE: ...]") may not exist in this package '
      '(`author_to_complete: off`, `--without-author-to-complete`): if the base carries one, remove '
      'the marker text (keeping the real content around it) and move the item to '
@@ -7317,25 +7537,48 @@ HANDOFF_PROMPT_REWRITES = (
      'accession number) is scaffolded ONLY with the literal\n     "[AUTHOR TO COMPLETE: ...]" '
      'marker and listed for the author.',
      'Anything missing from the submission (a whole mandatory file, a statement, an accession '
+     'number) is NOT marked inside the document (`author_to_complete: readme`): leave it out and '
+     'record it in `README-AUTHOR-TO-COMPLETE.md`.',
+     'Anything missing from the submission (a whole mandatory file, a statement, an accession '
      'number) is NOT marked inside the document (`author_to_complete: off`, '
      '`--without-author-to-complete`): leave it out and list it in MANUAL_STEPS.md.'),
+    # The rewrite prompt's canonical-output block restates the marker rule in a
+    # place the master-prompt excerpts above do not reach. The 2026-10-17
+    # README-mode audit found it still saying "required whenever the [AUTHOR TO
+    # COMPLETE ...] marker ... exists" under every mode.
+    ('  rewritten/MANUAL_STEPS.md    — every hand-off item for the author (required whenever the\n'
+     '        "[AUTHOR TO COMPLETE: ...]" marker, an unreadable live field, or an unfixable '
+     'formatting\n        problem exists), with precise step-by-step instructions.',
+     '  rewritten/MANUAL_STEPS.md    — every manual step the author must take (an unreadable\n'
+     '        live field or an unfixable formatting problem), with precise step-by-step '
+     'instructions.\n'
+     '  rewritten/README-AUTHOR-TO-COMPLETE.md — one row per missing submission item (a\n'
+     '        statement, a whole mandatory file, an accession number): the document and section,\n'
+     '        what is missing, and the step the author must take. Create it only when at least\n'
+     '        one item exists.',
+     '  rewritten/MANUAL_STEPS.md    — every hand-off item for the author (an unreadable live\n'
+     '        field or an unfixable formatting problem exists), with precise step-by-step\n'
+     '        instructions; a missing submission item is listed here too, never as a marker in a\n'
+     '        document.'),
 )
 
 
-def apply_author_to_complete_prompt(text: str, author_to_complete: bool = True) -> str:
+def apply_author_to_complete_prompt(text: str, mode=None) -> str:
     """Make every restatement of the scaffolding rule agree with the policy.
 
-    One place, applied to every prompt the pipeline writes: with the option off,
-    each excerpt that tells a session to scaffold a missing item with the literal
-    marker is replaced by the same sentence under the no-marker policy. The
+    One place, applied to every prompt the pipeline writes: in `readme` and
+    `off`, each excerpt that tells a session to scaffold a missing item with the
+    literal marker is replaced by the same sentence under that policy. The
     replacements are exact strings on purpose -- a rewrite that silently failed to
     match would leave two contradictory instructions in one prompt, so the
-    consistency suite asserts each pair still exists in the source.
+    consistency suite asserts each row still matches its prompt.
     """
-    if author_to_complete:
+    mode = _atc_mode(mode)
+    if mode == "document":
         return text
-    for on_text, off_text in HANDOFF_PROMPT_REWRITES:
-        text = text.replace(on_text, off_text)
+    idx = 1 if mode == "readme" else 2
+    for row in HANDOFF_PROMPT_REWRITES:
+        text = text.replace(row[0], row[idx])
     return text
 
 # ---------------------------------------------------------------------------
@@ -10766,7 +11009,7 @@ def review_prompt(sandbox: Path, run_id: str, r: int,
                   prior_round: bool = False, prior_failure: str = "",
                   split: str = None, split_mode: str = "phases",
                   scope: str = "full", venue=None, journal_block: str = "",
-                  venue_norm: str = "", author_to_complete: bool = True) -> str:
+                  venue_norm: str = "", author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE) -> str:
     """Phase 1 prompt: $paper-review only, writing review/* (Section C1)."""
     prof = _as_profile(venue)
     prior = (PRIOR_ROUND_RULE.replace("@@ROUND@@", str(int(r)))
@@ -10850,7 +11093,7 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
                   zotero: str = DEFAULT_ZOTERO_MODE,
                   prior_failure: str = "", audit: bool = False, venue=None,
                   journal_block: str = "", venue_norm: str = "",
-                  author_to_complete: bool = True) -> str:
+                  author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE) -> str:
     """Phase 2 prompt: $paper-revise, consuming the round's frozen review/ copy."""
     prof = _as_profile(venue)
     audit_block = ("""
@@ -10901,7 +11144,7 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
 
 def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
                  zotero: str = DEFAULT_ZOTERO_MODE, venue=None,
-                 venue_norm: str = "", author_to_complete: bool = True) -> str:
+                 venue_norm: str = "", author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE) -> str:
     """The AUDITOR prompt: review -> AUDIT -> revise.
 
     The auditor consumes the round's FROZEN review (read-only) and produces the
@@ -11158,7 +11401,7 @@ IN THE SANDBOX ROOT — next to PROMPT.md, NOT inside `probe_review/` — carryi
 
 
 def probe_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
-                 venue=None, author_to_complete: bool = True) -> str:
+                 venue=None, author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE) -> str:
     """The PROBE REVIEW prompt: a generic, cold-context independent discovery pass.
 
     Self-contained by design: the session is handed no checklist, no finding
@@ -11188,7 +11431,7 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
                      zotero: str = DEFAULT_ZOTERO_MODE,
                      prior_failure: str = "", venue=None, venue_norm: str = "",
                      discovery_ids: list = None, discovery_dropped: list = None,
-                     author_to_complete: bool = True) -> str:
+                     author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE) -> str:
     """Integration prompt: self/ reworked with ALL the other pool members.
 
     One run per pool member (there are no pairwise arms): the base stays the
@@ -11240,7 +11483,7 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
                    zotero: str = DEFAULT_ZOTERO_MODE,
                    prior_failure: str = "", level: str = "", venue=None,
                    journal_block: str = "", venue_norm: str = "",
-                   author_to_complete: bool = True) -> str:
+                   author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE) -> str:
     """The rewrite prompt: one of the round's M rewritten candidates.
 
     Staged FIRST in the round (before the review), and it is a CANDIDATE like
@@ -11290,7 +11533,7 @@ def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index
                  caption_limit: int = DEFAULT_CAPTION_LIMIT,
                  zotero: str = DEFAULT_ZOTERO_MODE,
                  field_first: bool = False, venue=None, dedup_mode: str = "off",
-                 venue_norm: str = "", author_to_complete: bool = True) -> str:
+                 venue_norm: str = "", author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE) -> str:
     """Relative-judgment prompt, one per (version, judge) session (Section C4)."""
     prof = _as_profile(venue)
     labels = ", ".join(opponent_labels)
@@ -15709,6 +15952,22 @@ def _format_fix_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, warns: list,
     if errs is None:
         errs = []
 
+    # `author_to_complete: readme` (the default): the stage's missing-item
+    # hand-off belongs in the package's README, beside the cover letter and main
+    # text. The prompt asks the session to write it; if the session instead left
+    # the item in MANUAL_STEPS.md in marker form, move it into the README here so
+    # the hand-off cannot disappear when the bookkeeping file is stripped from
+    # the version corpus. This is a MOVE of the stage's own text, never new
+    # content, and it runs before the package is fingerprinted.
+    if pkg_dir.is_dir():
+        try:
+            rec["handoff_readme"] = ensure_handoff_readme(ctx, pkg_dir, warns=warns, rec=rec)
+        except Exception as e:                                        # noqa: BLE001
+            rec["handoff_readme"] = {"error": f"{type(e).__name__}: {e}"}
+            warns.append(f"AUTH-2: the hand-off README could not be generated from "
+                         f"MANUAL_STEPS.md ({type(e).__name__}: {e}); the stage's own README "
+                         f"(when it wrote one) is unchanged")
+
     def _field_gate() -> dict:
         rep = zotero_field_continuity_check(inp, pkg_dir, rec["id"], errs, warns)
         rec["zotero_fields"] = rep
@@ -15819,22 +16078,24 @@ def _format_fix_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, warns: list,
                        f"{delta['placeholders']['before']} -> "
                        f"{delta['placeholders']['after']} (+{ph_delta}); they are the stage's "
                        f"declared hand-offs, never scored, and are listed in CODE_SCANS.json")
-                if author_to_complete_of(ctx):
+                _atc = author_to_complete_mode_of(ctx)
+                if _atc == "document":
                     warns.append(msg)
                 else:
-                    # `--without-author-to-complete`: the operator turned the
-                    # marker convention OFF, so a stage that WROTE one disobeyed
-                    # its own prompt -- the token may not appear anywhere. The
-                    # attempt FAILS (the declaration is what the operator asked
-                    # for, not a preference): the item belongs in MANUAL_STEPS.md.
+                    # `readme` / `off`: the operator forbade the marker in a
+                    # document, so a stage that WROTE one disobeyed its own
+                    # prompt. The attempt FAILS (the declaration is what the
+                    # operator asked for, not a preference): the item belongs in
+                    # the package's hand-off README or in MANUAL_STEPS.md.
                     (errs if isinstance(errs, list) else warns).append(
                         f"EVIDENCE: the stage ADDED {ph_delta} hand-off placeholder(s) "
                         f"({delta['placeholders']['before']} -> "
                         f"{delta['placeholders']['after']}) although this root runs with "
-                        f"`author_to_complete: off`: no file may carry the "
+                        f"`author_to_complete: {_atc}`: no document may carry the "
                         f"[AUTHOR TO COMPLETE: ...] token. Remove the marker(s) from the "
                         f"files (keeping whatever content around them is real) and record the "
-                        f"hand-off item(s) in the package's own MANUAL_STEPS.md / CHANGELOG.md "
+                        f"hand-off item(s) in the package's own {handoff_target(_atc)}"
+                        f"{' / CHANGELOG.md' if _atc == 'off' else ''} "
                         f"instead -- the rows are in CODE_SCANS_after.json")
                     warns.append(msg)
         rec["evidence_after"] = after
@@ -17682,6 +17943,11 @@ def collect_documents(sources: list) -> dict:
                 # document" or an "invented document" (its byte-level contract
                 # is enforced by verify_readonly_raw_data instead).
                 continue
+            if is_author_to_complete_readme_name(p.name):
+                # The hand-off README is generated/updated by the mode, never a
+                # manuscript document: its appearance or disappearance is not
+                # an invented/lost submission document.
+                continue
             if is_bookkeeping_name(p.name):
                 continue
             if p.suffix.lower() not in EDITABLE_DOC_EXTS:
@@ -17883,6 +18149,19 @@ def is_non_submitted_readme_name(name: str) -> bool:
     return bool(README_NAME_RE.match(str(name or "").strip()))
 
 
+def is_author_to_complete_readme_name(name: str) -> bool:
+    """True for the pipeline's own hand-off README (an author checklist).
+
+    The file matches `README*.md`, so the submission copy already drops it.
+    The distinct predicate exists because the PACKAGE-side hygiene must NOT
+    treat it like an author's stray internal note: it is the deliberate
+    hand-off surface of `author_to_complete: readme`, it sits beside the cover
+    letter and main text, and it must survive into the published package.
+    """
+    return (str(name or "").strip().lower()
+            == AUTHOR_TO_COMPLETE_README.lower())
+
+
 # The author's README files are never submitted (see `is_non_submitted_readme_name`),
 # but the CORPUS carries them so the package's own submitted-set declaration
 # travels with it (`declared_submission_set`). One class of them must not travel
@@ -17938,7 +18217,8 @@ def hold_internal_readme_notes(dirp: Path, dest_dir: Path,
     out = []
     dirp, dest_dir = Path(dirp), Path(dest_dir)
     for p in sorted(dirp.rglob("*")):
-        if not p.is_file() or not is_non_submitted_readme_name(p.name):
+        if not p.is_file() or not is_non_submitted_readme_name(p.name) \
+                or is_author_to_complete_readme_name(p.name):
             continue
         rows = readme_internal_note_rows(p)
         if not rows:
@@ -20396,6 +20676,12 @@ def _payload_files_of_dir(dirp: Path) -> list:
         rel = p.relative_to(dirp)
         if rel.parts and rel.parts[0] == "work":
             continue
+        if is_author_to_complete_readme_name(p.name):
+            # The hand-off checklist is not a manuscript payload document: it
+            # appears, changes and disappears as the author disposes items, and
+            # must not invalidate the package's content-hash version token (the
+            # postcheck may generate it AFTER the stage applied the token).
+            continue
         if is_bookkeeping_name(p.name) or _is_aux_doc(p.name):
             continue
         out.append(p)
@@ -21783,7 +22069,7 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
                                                 prior_failure=note,
                                                 level=rewrite_level_of(k, m),
                                                 venue=venue_profile_of(ctx),
-                                                author_to_complete=author_to_complete_of(ctx),
+                                                author_to_complete=author_to_complete_mode_of(ctx),
                                                 journal_block=(journal_rewrite_block(ctx)
                                                                if journal_has_feedback(ctx)
                                                                and not journal_is_scoped(ctx)
@@ -21858,7 +22144,7 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
                                                zotero=zotero_mode_of(ctx),
                                                prior_round=(sb / "prior_round").is_dir(),
                                                prior_failure=note,
-                                               author_to_complete=author_to_complete_of(ctx),
+                                               author_to_complete=author_to_complete_mode_of(ctx),
                                                journal_block=(journal_review_block(ctx, sb)
                                                               if journal_has_feedback(ctx)
                                                               and not journal_is_scoped(ctx)
@@ -21923,7 +22209,7 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
         write_text_atomic(prompt, audit_prompt(sb, rid, r, prior_failure=note,
                                               zotero=zotero_mode_of(ctx),
                                               venue=venue_profile_of(ctx),
-                                              author_to_complete=author_to_complete_of(ctx),
+                                              author_to_complete=author_to_complete_mode_of(ctx),
                                               venue_norm=venue_norm_for(ctx)))
     rec = ctx.register(rid, "audit", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=a1.get("source_id"))
@@ -22173,7 +22459,7 @@ def materialize_probe(ctx: Ctx, r: int) -> dict:
     if not prompt.is_file():
         write_text_atomic(prompt, probe_prompt(sb, rid, r, prior_failure=note,
                                                venue=venue_profile_of(ctx),
-                                               author_to_complete=author_to_complete_of(ctx)))
+                                               author_to_complete=author_to_complete_mode_of(ctx)))
     rec = ctx.register(rid, "probe", r, f"runs/{rid}",
                        upstream_run_id=rid_a1(r), source_id=a1.get("source_id"))
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
@@ -22670,7 +22956,7 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
                                                prior_failure=note,
                                                audit=audit_enabled(ctx),
                                                venue=venue_profile_of(ctx),
-                                               author_to_complete=author_to_complete_of(ctx),
+                                               author_to_complete=author_to_complete_mode_of(ctx),
                                                journal_block=(journal_revise_block(ctx)
                                                               if journal_has_feedback(ctx)
                                                               else ""),
@@ -22745,7 +23031,7 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
                                                   zotero=zotero_mode_of(ctx),
                                                   prior_failure=note,
                                                   venue=venue_profile_of(ctx),
-                                                  author_to_complete=author_to_complete_of(ctx),
+                                                  author_to_complete=author_to_complete_mode_of(ctx),
                                                   venue_norm=venue_norm_for(ctx),
                                                   discovery_ids=disc["ids"],
                                                   discovery_dropped=disc["dropped"]))
@@ -22914,7 +23200,7 @@ def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
                     zotero=zotero_mode_of(ctx),
                     venue=venue_profile_of(ctx),
                     dedup_mode=dedup_mode_of(ctx),
-                    author_to_complete=author_to_complete_of(ctx),
+                    author_to_complete=author_to_complete_mode_of(ctx),
                     venue_norm=venue_norm_for(ctx)))
             # One timestamp for the WHOLE judge sandbox (views, prompt and the
             # public tool alike): a listing must not be able to order the
@@ -29307,8 +29593,9 @@ def placeholder_residual_report(ctx: Ctx, sb: Path, sources: list, label: str,
     answerable = [r for r in searchable
                   if answers.get(str(r.get("kind") or "").strip().lower())]
     # EVERY marker in the delivered package, searchable or not: the count is a
-    # diagnostic under `author_to_complete: on` (the marker is the author's own
-    # checklist) and the shipped-marker gate under `off`. The scan is the same
+    # diagnostic under `author_to_complete: document` (the marker is the
+    # author's own checklist) and the shipped-marker gate under `readme`/`off`.
+    # The scan is the same
     # `scan_placeholders_in_sources` the evidence pack uses, so the two numbers
     # can never disagree.
     all_markers = {}
@@ -29321,16 +29608,18 @@ def placeholder_residual_report(ctx: Ctx, sb: Path, sources: list, label: str,
               "answered_kinds": sorted(answers),
               "handoff_markers": int(all_markers.get("count") or 0),
               "handoff_marker_files": list(all_markers.get("files") or [])}
-    if report["handoff_markers"] and not author_to_complete_of(ctx):
-        # `--without-author-to-complete`: the operator's policy is that NOTHING
-        # ships a marker, so a package that carries one is not deliverable --
-        # the residual gate blocks it instead of calling the marker a hand-off.
+    _atc = author_to_complete_mode_of(ctx)
+    if report["handoff_markers"] and _atc != "document":
+        # `readme` / `off`: the operator's policy is that no document carries a
+        # marker, so a package that carries one is not deliverable -- the
+        # residual gate blocks it instead of calling the marker a hand-off.
         (errs if enforce else warns).append(
             f"{label}: {report['handoff_markers']} hand-off marker(s) are still in the "
-            f"delivered package although this root runs with `author_to_complete: off` "
-            f"(--without-author-to-complete): {', '.join(report['handoff_marker_files'][:5])}. "
+            f"delivered package although this root runs with `author_to_complete: {_atc}`: "
+            f"{', '.join(report['handoff_marker_files'][:5])}. "
             f"Supply the missing item (or its verified negative) in the document, or leave it "
-            f"out of the document and record it in the package's own MANUAL_STEPS.md")
+            f"out of the document and record it in the package's own "
+            f"{handoff_target(_atc)}")
     for r in answerable:
         msg = (f"{label}: a `searchable` hand-off marker is still in the package although the "
                f"orchestrator answered it -- {str(r.get('payload'))[:90]!r} "
@@ -32783,14 +33072,24 @@ def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=()) ->
             ledger_text = ""
     for key in sorted(set(got) - set(want)):
         rel = got[key][0]
+        if is_author_to_complete_readme_name(Path(rel).name):
+            # The hand-off README is the mode's own surface, not a reviewer-
+            # requested manuscript document: a concern-scoped revision may
+            # create it (or replace a previous round's copy) without a ledger row.
+            continue
         errs.append(f"scoped revision added {rel!r}: a major/minor revision may not add a "
                     f"document (the reviewers asked for no new file)")
     for key in sorted(set(want) - set(got)):
         rel = want[key][0]
+        if is_author_to_complete_readme_name(Path(rel).name):
+            # Items resolved: the README is deleted, and that is the goal.
+            continue
         errs.append(f"scoped revision dropped {rel!r}: a major/minor revision may not remove a "
                     f"document; restore it")
     for key in sorted(k for k in set(want) & set(got) if want[k][1] != got[k][1]):
         rel = got[key][0]
+        if is_author_to_complete_readme_name(Path(rel).name):
+            continue
         if rel in pipeline_changed:
             continue
         if rel not in ledger_text and Path(rel).name not in ledger_text:
@@ -36923,15 +37222,16 @@ def cmd_setup(args) -> None:
                # area is revision content, never submitted unless asked for).
                "submit_code": str(getattr(args, "submit_code", DEFAULT_SUBMIT_CODE)
                                   or DEFAULT_SUBMIT_CODE),
-               # Whether the revision stages may write the literal
-               # "[AUTHOR TO COMPLETE: ...]" hand-off marker (default: on, the
-               # convention every root created before this key existed uses).
-               # `--without-author-to-complete` forbids the token in every file a
-               # stage writes and makes a shipped marker a defect; the item moves
-               # to the package's own MANUAL_STEPS.md instead.
-               "author_to_complete": str(getattr(args, "author_to_complete",
-                                                 DEFAULT_AUTHOR_TO_COMPLETE)
-                                         or DEFAULT_AUTHOR_TO_COMPLETE),
+               # Where a missing mandatory item goes (default: readme -- no
+               # document carries the literal "[AUTHOR TO COMPLETE: ...]" marker;
+               # the item is recorded in README-AUTHOR-TO-COMPLETE.md beside the
+               # cover letter and main text, and the README is never submitted).
+               # `document` (`--with-author-to-complete`) keeps the legacy
+               # in-document marker; `off` (`--without-author-to-complete`) moves
+               # the item to the package's own MANUAL_STEPS.md. Outside
+               # `document`, a shipped marker is a defect.
+               "author_to_complete": _atc_mode(getattr(
+                   args, "author_to_complete", DEFAULT_AUTHOR_TO_COMPLETE)),
                # Files the operator declares as PLACEHOLDERS (they stand in for
                # data they do not contain). They are ignored as evidence; see
                # `declared_placeholder_paths`.
@@ -37139,16 +37439,19 @@ def cmd_setup(args) -> None:
     print(f"[setup] hand-off placeholders:   {ph['count']} in the pristine original "
           f"(markers the revision stages must use instead of inventing content; counted and "
           f"reported, never scored)")
-    _atc = str(getattr(args, "author_to_complete", DEFAULT_AUTHOR_TO_COMPLETE)
-               or DEFAULT_AUTHOR_TO_COMPLETE)
-    print(f"[setup] hand-off markers:        {_atc} "
-          + ("(the stages scaffold a missing mandatory item with the literal "
-             "\"[AUTHOR TO COMPLETE: ...]\" token and list it for the author; the marker is "
-             "never a defect)"
-             if _atc == "on" else
-             "(--without-author-to-complete: no file may carry the marker -- a missing item is "
-             "left out of the document and recorded in the package's MANUAL_STEPS.md, and a "
-             "shipped marker is a defect rather than a hand-off)"))
+    _atc = _atc_mode(getattr(args, "author_to_complete", DEFAULT_AUTHOR_TO_COMPLETE))
+    _atc_note = {
+        "readme": (f"(no document carries the marker: each missing item is recorded in "
+                   f"{AUTHOR_TO_COMPLETE_README} beside the cover letter and main text; the "
+                   f"README is never submitted, and a shipped marker is a defect)"),
+        "document": ("(the stages scaffold a missing mandatory item with the literal "
+                     "\"[AUTHOR TO COMPLETE: ...]\" token and list it for the author; the "
+                     "marker is a legitimate hand-off)"),
+        "off": ("(--without-author-to-complete: no file may carry the marker -- a missing item "
+                "is left out of the document and recorded in the package's MANUAL_STEPS.md, "
+                "and a shipped marker is a defect rather than a hand-off)"),
+    }[_atc]
+    print(f"[setup] hand-off items:          {_atc} {_atc_note}")
     print("[setup] OOXML formatting scan:   " + format_note(ctx.state["original_format"])
           + "  (code-side proxy; the agents' category-4 formatting sweep is authoritative)")
     _zot_note = {
@@ -38579,19 +38882,22 @@ def cmd_set_submit_code(args) -> None:
 
 
 def cmd_set_author_to_complete(args) -> None:
-    """Set (or show) whether the stages may write "[AUTHOR TO COMPLETE: ...]" markers.
+    """Set (or show) where the stages put "[AUTHOR TO COMPLETE ...]" hand-off items.
 
-    "on" (the default, and the behaviour of every root created before this
-    policy existed) keeps the hand-off convention: a missing mandatory item is
-    scaffolded with the literal marker and listed for the author.
+    "readme" (the default) forbids the literal token in every document and records
+    each missing item in ONE `README-AUTHOR-TO-COMPLETE.md` in the package root,
+    beside the cover letter and main text. The README is the author's checklist
+    and is never submitted (README*.md is dropped, rule 9).
+
+    "document" (`--with-author-to-complete`, the old default) keeps the
+    in-document marker convention: a missing item is scaffolded with the literal
+    marker and listed for the author.
 
     "off" (`--without-author-to-complete`) forbids the token in every file the
-    stages write: a missing item is left out of the document -- a whole missing
-    file is not scaffolded as a document of instructions -- and recorded in the
-    package's own MANUAL_STEPS.md / CHANGELOG.md instead, and a marker that is
-    still present in a delivered package is a DEFECT of that package (the same
-    sentence the residual gate already uses for an *answered* marker), not a
-    neutral hand-off.
+    stages write: the item is left out of the document -- a whole missing file is
+    not scaffolded as a document of instructions -- and recorded in the package's
+    own MANUAL_STEPS.md / CHANGELOG.md instead. Outside "document", a marker that
+    is still present in a delivered package is a DEFECT of that package.
 
     Flipping the policy never changes a pin, a score or a champion, and it never
     changes what is TRUE about the package: the underlying gap counts exactly as
@@ -38604,16 +38910,26 @@ def cmd_set_author_to_complete(args) -> None:
     mode_arg = str(getattr(args, "mode", None) or "").strip().lower()
     show = bool(getattr(args, "show", False)) or not mode_arg
     if show:
-        on = author_to_complete_of(ctx)
-        how = ("a missing mandatory item is scaffolded with the literal "
-               f"{PLACEHOLDER_TOKEN}: ...] marker and listed for the author" if on else
-               "the stages may not write the marker: a missing item is left out of the "
-               "document and recorded in MANUAL_STEPS.md, and a shipped marker is a defect")
-        print(f"[set-author-to-complete] hand-off markers: {'on' if on else 'off'} ({how})")
+        mode = author_to_complete_mode_of(ctx)
+        how = {
+            "document": ("a missing mandatory item is scaffolded with the literal "
+                         f"{PLACEHOLDER_TOKEN}: ...] marker and listed for the author"),
+            "readme": ("no document carries the marker: each missing item is recorded in "
+                       f"{AUTHOR_TO_COMPLETE_README} in the package root (never submitted)"),
+            "off": ("no file carries the marker: the item is left out of the document and "
+                    "recorded in MANUAL_STEPS.md"),
+        }[mode]
+        print(f"[set-author-to-complete] hand-off items: {mode} ({how})")
         return
-    if mode_arg not in AUTHOR_TO_COMPLETE_MODES:
-        die(f"set-author-to-complete needs one of {', '.join(AUTHOR_TO_COMPLETE_MODES)} "
-            f"(got {mode_arg!r})", code=2)
+    # Accept the two legacy spellings (`on`/`off`) as well as the current mode
+    # names, but reject anything else BEFORE normalising: `_atc_mode` maps an
+    # unknown value to the default, which would silently turn a typo into
+    # `readme` and report success for a policy the operator did not ask for.
+    if mode_arg not in AUTHOR_TO_COMPLETE_CHOICES:
+        die(f"set-author-to-complete needs one of "
+            f"{', '.join(AUTHOR_TO_COMPLETE_MODES)} (legacy `on` = `document`); "
+            f"got {mode_arg!r}", code=2)
+    mode_arg = _atc_mode(mode_arg)
     begin_run_log("set-author-to-complete", ctx.root, sys.argv)
     with ctx.lock("set-author-to-complete"):
         ctx.cfg["author_to_complete"] = mode_arg
@@ -38621,14 +38937,19 @@ def cmd_set_author_to_complete(args) -> None:
         write_json_atomic(ctx.cfg_path, ctx.cfg)
         ctx.log("set-author-to-complete", detail=mode_arg)
         ctx.save_state()
-    detail = ("the stages mark a missing mandatory item with the literal "
-              "\"[AUTHOR TO COMPLETE: ...]\" token and list it for the author (the marker is a "
-              "hand-off, never a defect)"
-              if mode_arg == "on" else
-              "the stages may not write the marker: a missing item is left out of the document "
-              "and recorded in MANUAL_STEPS.md, and a marker still present in a delivered "
-              "package is a defect")
-    print(f"[set-author-to-complete] hand-off markers: {mode_arg} ({detail}; the next plain "
+    detail = {
+        "document": ("the stages mark a missing mandatory item with the literal "
+                     "\"[AUTHOR TO COMPLETE: ...]\" token and list it for the author (the "
+                     "marker is a hand-off, never a defect)"),
+        "readme": ("no document carries the marker; each missing item goes to "
+                   f"{AUTHOR_TO_COMPLETE_README} beside the cover letter and main text "
+                   "(never submitted), and a marker still present in a delivered package is "
+                   "a defect"),
+        "off": ("no file carries the marker; the item is left out of the document and "
+                "recorded in MANUAL_STEPS.md, and a marker still present in a delivered "
+                "package is a defect"),
+    }[mode_arg]
+    print(f"[set-author-to-complete] hand-off items: {mode_arg} ({detail}; the next plain "
           f"`run` writes its prompts under the new policy)")
 
 
@@ -42261,7 +42582,8 @@ def declared_submission_set(root: Path) -> dict:
     readme, text = None, ""
     try:
         candidates = sorted(p for p in root.iterdir()
-                            if p.is_file() and is_non_submitted_readme_name(p.name))
+                            if p.is_file() and is_non_submitted_readme_name(p.name)
+                            and not is_author_to_complete_readme_name(p.name))
     except OSError:
         return out
     for p in candidates:
@@ -42387,7 +42709,8 @@ def declared_placeholder_paths(root: Path, extra=()) -> dict:
         return out
     try:
         candidates = sorted(p for p in root.iterdir()
-                            if p.is_file() and is_non_submitted_readme_name(p.name))
+                            if p.is_file() and is_non_submitted_readme_name(p.name)
+                            and not is_author_to_complete_readme_name(p.name))
     except OSError:
         candidates = []
     for p in candidates:
@@ -44940,6 +45263,12 @@ def internal_artifact_rows(root: Path, limit: int = 40) -> list:
         rel = p.relative_to(root).as_posix()
         if is_evidence_rel(rel):
             continue
+        if is_author_to_complete_readme_name(p.name):
+            # The deliberate hand-off checklist of `author_to_complete: readme`.
+            # It is the author's surface, not a leaked stage note: scanning it
+            # for the pipeline's vocabulary would flag the very file the mode
+            # exists to produce (and it never ships anyway -- README*.md).
+            continue
         if p.suffix.lower() not in PACKAGE_TEXT_EXTS:
             continue
         try:
@@ -46796,8 +47125,27 @@ def write_open_items_sibling(ctx: Ctx, open_items: dict) -> dict:
     return {"path": str(p), "items": len(oi.get("items") or [])}
 
 
+def _handoff_readme_items(final_clean: dict) -> dict:
+    """{rel: item_count} for the hand-off README(s) in the published package."""
+    out = {}
+    base = Path(str((final_clean or {}).get("path") or ""))
+    if not base.is_dir():
+        return out
+    # The hand-off README belongs in the package ROOT, beside the cover letter
+    # and main text. A same-named file inside an evidence area is the author's
+    # own data, never this mode's checklist.
+    for p in sorted(base.iterdir()):
+        if not p.is_file() or not is_author_to_complete_readme_name(p.name):
+            continue
+        n = count_manual_steps(p)
+        if n is None:
+            continue
+        out[p.relative_to(base).as_posix()] = n
+    return out
+
+
 def package_readiness(final_clean: dict, residuals: dict = None,
-                      author_to_complete: bool = True) -> dict:
+                      author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE) -> dict:
     """The published package's own findings, as a readiness verdict.
 
     Certification answers "did the pipeline's process hold?"; readiness
@@ -46809,39 +47157,56 @@ def package_readiness(final_clean: dict, residuals: dict = None,
     verdict so "CERTIFIED" can never be read as "submission-ready" alone.
 
     `residuals` is the residual-gate record the same decision computed, and
-    `author_to_complete` the root's hand-off-marker policy. They are read here
-    so the two verdicts cannot contradict each other about the same shipped
-    fact: the 2026-10-17 audit read `submission_ready: true` beside
-    `certified: false -- hand-off markers still in the delivered package`, which
-    is one package described two ways. A marker the residual gate already
-    blocks on is named here too, and under `author_to_complete: off`
-    (`--without-author-to-complete`) every shipped marker is a defect of the
-    package rather than a neutral hand-off.
+    `author_to_complete` the root's hand-off policy (`readme` / `document` /
+    `off`). They are read here so the two verdicts cannot contradict each other
+    about the same shipped fact: the 2026-10-17 audit read
+    `submission_ready: true` beside `certified: false -- hand-off markers still
+    in the delivered package`, which is one package described two ways. A marker
+    the residual gate already blocks on is named here too, and outside
+    `document` every shipped marker is a defect of the package rather than a
+    neutral hand-off.
     """
     hyg = (final_clean or {}).get("hygiene") or {}
     findings = []
+    _atc = _atc_mode(author_to_complete)
     for it in ((residuals or {}).get("items") or []):
         it = str(it)
         if "hand-off marker" not in it:
             continue
-        if author_to_complete:
+        if _atc == "document":
             findings.append({
                 "rule": "AUTH-1", "advisory": True,
                 "detail": (f"the shipped package still carries the hand-off marker(s) the "
                            f"certification gate refuses on ({it}); under "
-                           f"`author_to_complete: on` the marker is a legitimate hand-off, "
+                           f"`author_to_complete: document` the marker is a legitimate hand-off, "
                            f"but this item is not submission-ready until the author "
                            f"disposes it")})
         else:
             findings.append({
                 "rule": "AUTH-1",
-                "detail": (f"this root runs with `author_to_complete: off` "
-                           f"(--without-author-to-complete), so no file may carry the "
+                "detail": (f"this root runs with `author_to_complete: {_atc}`, so no document "
+                           f"may carry the "
                            f"\"[AUTHOR TO COMPLETE: ...]\" marker: the item is supplied (or "
                            f"its verified negative written) in the document, or left out of "
-                           f"the document and recorded in the package's manual-steps report. "
+                           f"the document and recorded in the package's "
+                           f"{handoff_target(_atc)}. "
                            f"The certification gate already refuses this decision for it -- "
                            f"{it}")})
+    # The hand-off README itself: never submission content, but every item in it
+    # is a fact the submission still owes, so its presence makes the package NOT
+    # submission-ready. One blocking row names the file and its item count (a
+    # bullet/checkbox line or a Markdown table data row is one item). A README
+    # with zero items is reported
+    # too: it is the stale checklist the stage was told to delete.
+    if _atc == "readme":
+        for rel, rows in _handoff_readme_items(final_clean).items():
+            findings.append({
+                "rule": "AUTH-2", "document": rel,
+                "detail": (f"the package carries {rows} author-to-complete item(s) in "
+                           f"{rel} (a hand-off README beside the cover letter and main text; "
+                           f"it is never submitted, and no submitted document may depend on "
+                           f"it). Supply each item in the documents, then update or delete the "
+                           f"README")})
     for r in hyg.get("internal_artifacts") or []:
         findings.append({"rule": r.get("rule") or "PKG-1",
                          "document": r.get("file"), "detail": r.get("detail")})
@@ -47035,16 +47400,18 @@ def collect_residuals(ctx: Ctx) -> dict:
         kind, rid = rec.get("kind"), rec.get("id")
         res = rec.get("residual") or {}
         if kind in ("revise", "integrate", "rewrite"):
-            if res.get("handoff_markers") and not author_to_complete_of(ctx):
-                # `--without-author-to-complete`: the operator's own policy is
-                # that no file carries the "[AUTHOR TO COMPLETE: ...]" token, so
-                # every marker still in the delivered package is a defect of that
-                # package (not the neutral hand-off it is under the default).
+            _atc = author_to_complete_mode_of(ctx)
+            if res.get("handoff_markers") and _atc != "document":
+                # `readme` / `off`: the operator's policy is that no document
+                # carries the "[AUTHOR TO COMPLETE: ...]" token, so every marker
+                # still in the delivered package is a defect of that package
+                # (not the neutral hand-off it is under `document`).
                 add(f"{rid}: {res['handoff_markers']} hand-off marker(s) are still in the "
                     f"delivered package although this root runs with "
-                    f"`author_to_complete: off` (--without-author-to-complete) "
+                    f"`author_to_complete: {_atc}` "
                     f"({', '.join((res.get('handoff_marker_files') or [])[:5])}); the item "
-                    f"belongs in the document or in the package's own MANUAL_STEPS.md, never "
+                    f"belongs in the document or in the package's own "
+                    f"{handoff_target(_atc)}, never "
                     f"as a marker inside a file that ships", gate=True)
             if res.get("answerable_placeholders"):
                 add(f"{rid}: {res['answerable_placeholders']} searchable hand-off marker(s) "
@@ -48583,7 +48950,7 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
                                       flatten_zotero=bool(getattr(
                                           args, "unlink_zotero_fields", False)))
     readiness = package_readiness(final_clean, residuals=residuals,
-                                  author_to_complete=author_to_complete_of(ctx))
+                                  author_to_complete=author_to_complete_mode_of(ctx))
     gate_problems.extend(readiness_gate_problems(readiness,
                                                  bool(getattr(args, "require_ready", False))))
     _clean_reason = final_clean_reason(final, rounds_data, R, final_regression, chain_ok,
@@ -52569,28 +52936,38 @@ def build_parser() -> argparse.ArgumentParser:
                          "into it; with `on` the copy carries `code/` and the letter may cite it "
                          "(`set-submit-code on` flips an existing root)")
     ps.add_argument("--author-to-complete", dest="author_to_complete",
-                    choices=list(AUTHOR_TO_COMPLETE_MODES),
+                    choices=list(AUTHOR_TO_COMPLETE_CHOICES),
                     default=DEFAULT_AUTHOR_TO_COMPLETE,
-                    help="whether the revision stages may write the literal "
-                         "\"[AUTHOR TO COMPLETE: ...]\" hand-off marker into a document "
-                         "(default: on). `on` keeps the pipeline convention: an item missing "
-                         "from the submission that cannot be reconstructed is scaffolded with "
-                         "that token and listed for the author (the marker is never a defect). "
-                         "`off` forbids the token in every file a stage writes: the item is left "
-                         "out of the document -- a whole missing mandatory file is not "
-                         "scaffolded as a document of instructions -- and recorded in the "
-                         "package's own MANUAL_STEPS.md / CHANGELOG.md instead, and a marker "
-                         "still present in a delivered package becomes a defect rather than a "
-                         "neutral hand-off (`set-author-to-complete on|off` flips an existing "
-                         "root)")
+                    help="where the revision stages put a missing mandatory item (default: "
+                         "readme). `readme` forbids the literal \"[AUTHOR TO COMPLETE: ...]\" "
+                         "marker in every document and records each item in ONE "
+                         "`README-AUTHOR-TO-COMPLETE.md` in the package root, beside the cover "
+                         "letter and main text (the README is never submitted; README*.md is "
+                         "dropped from the submission copy). `document` keeps the old "
+                         "in-document marker convention. `off` forbids the token in every file "
+                         "the stages write: the item is left out of the document -- a whole "
+                         "missing mandatory file is not scaffolded as a document of "
+                         "instructions -- and recorded in the package's own MANUAL_STEPS.md / "
+                         "CHANGELOG.md instead. Outside `document`, a marker still present in a "
+                         "delivered package is a defect rather than a neutral hand-off "
+                         "(`set-author-to-complete readme|document|off` flips an existing "
+                         "root; legacy `on` is accepted as `document`)")
+    ps.add_argument("--with-author-to-complete-in-readme", dest="author_to_complete",
+                    action="store_const", const="readme",
+                    help="same as --author-to-complete readme (the default): no document "
+                         "carries the marker; each missing item is recorded in "
+                         "README-AUTHOR-TO-COMPLETE.md in the submission directory, beside the "
+                         "cover letter and main text")
     ps.add_argument("--without-author-to-complete", dest="author_to_complete",
                     action="store_const", const="off",
                     help="same as --author-to-complete off: never write the "
                          "\"[AUTHOR TO COMPLETE: ...]\" marker; hand the item to the author "
                          "through the package's own manual-steps report instead")
     ps.add_argument("--with-author-to-complete", dest="author_to_complete",
-                    action="store_const", const="on",
-                    help="same as --author-to-complete on (the default)")
+                    action="store_const", const="document",
+                    help="same as --author-to-complete document: scaffold a missing mandatory "
+                         "item with the literal \"[AUTHOR TO COMPLETE: ...]\" marker inside the "
+                         "document (the old default)")
     ps.add_argument("--placeholder-file", dest="placeholder_files", action="append",
                     default=None, metavar="GLOB",
                     help="declare a corpus file (package-relative path or glob, matched against "
@@ -53124,17 +53501,20 @@ def build_parser() -> argparse.ArgumentParser:
     psc.set_defaults(func=cmd_set_submit_code)
 
     pac = sub.add_parser("set-author-to-complete", parents=[common],
-                         help="set (or show) whether the revision stages may write the literal "
-                              "\"[AUTHOR TO COMPLETE: ...]\" hand-off marker into a document: "
-                              "on (default -- a missing mandatory item is marked and listed for "
-                              "the author) or off (no marker anywhere: the item is left out and "
-                              "recorded in the package's MANUAL_STEPS.md, and a shipped marker "
-                              "is a defect)")
-    pac.add_argument("mode", nargs="?", default=None, choices=list(AUTHOR_TO_COMPLETE_MODES),
+                         help="set (or show) where the revision stages put a missing mandatory "
+                              "item: readme (default -- no document carries the marker; each "
+                              "item goes to README-AUTHOR-TO-COMPLETE.md beside the cover letter "
+                              "and main text, never submitted), document (the literal "
+                              "\"[AUTHOR TO COMPLETE: ...]\" marker inside the document; legacy "
+                              "`on`), or off (no marker anywhere: the item goes to the "
+                              "package's MANUAL_STEPS.md, and a shipped marker is a defect)")
+    pac.add_argument("mode", nargs="?", default=None,
+                     choices=list(AUTHOR_TO_COMPLETE_CHOICES),
                      metavar="MODE",
-                     help="on or off. Omit, or pass --show, to print the current policy")
+                     help="readme, document (legacy alias: on), or off. Omit, or pass --show, "
+                          "to print the current policy")
     pac.add_argument("--show", action="store_true",
-                     help="print whether hand-off markers are allowed and exit")
+                     help="print where hand-off items go and exit")
     pac.set_defaults(func=cmd_set_author_to_complete)
 
     phf = sub.add_parser("set-placeholder-file", parents=[common],

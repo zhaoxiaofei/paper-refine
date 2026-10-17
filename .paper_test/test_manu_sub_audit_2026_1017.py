@@ -108,80 +108,224 @@ class Ctx:
 # 1. --without-author-to-complete / --with-author-to-complete
 # ---------------------------------------------------------------------------
 def test_author_to_complete_policy():
-    print("\n== author-to-complete policy ==")
-    on, off = Ctx("/tmp/x", {}), Ctx("/tmp/x", {"author_to_complete": "off"})
-    check("on is the default for a root without the key", pp.author_to_complete_of(on) is True)
-    check("the config key 'off' turns the marker convention off",
-          pp.author_to_complete_of(off) is False)
-    check("a JSON boolean false is honoured", pp.author_to_complete_of(
+    print("\n== author-to-complete policy (readme/document/off) ==")
+    default = Ctx("/tmp/x", {})
+    doc = Ctx("/tmp/x", {"author_to_complete": "document"})
+    off = Ctx("/tmp/x", {"author_to_complete": "off"})
+    check("readme is the default for a root without the key",
+          pp.author_to_complete_mode_of(default) == "readme")
+    check("the legacy in-document marker policy is `document`",
+          pp.author_to_complete_of(doc) is True)
+    check("readme and off both forbid the marker in a document",
+          pp.author_to_complete_of(default) is False
+          and pp.author_to_complete_of(off) is False)
+    check("a JSON boolean true is the legacy document mode",
+          pp.author_to_complete_mode_of(
+              Ctx("/tmp/x", {"author_to_complete": True})) == "document")
+    check("a JSON boolean false is off", pp.author_to_complete_of(
         Ctx("/tmp/x", {"author_to_complete": False})) is False)
+    check("the readme rule names the package README, not MANUAL_STEPS",
+          "README-AUTHOR-TO-COMPLETE.md" in pp.placeholder_rule_text("readme")
+          and "MANUAL_STEPS.md" not in pp.placeholder_rule_text("readme"))
+    check("the document rule keeps the marker convention",
+          "PIPELINE HAND-OFF PLACEHOLDERS" in pp.placeholder_rule_text("document"))
+    check("the off rule sends the item to MANUAL_STEPS",
+          "MANUAL_STEPS.md" in pp.placeholder_rule_text("off"))
     for fn in (pp.review_prompt, pp.audit_prompt, pp.probe_prompt,
                pp.revise_prompt, pp.integrate_prompt, pp.rewrite_prompt):
         args = (Path("/tmp/sb"), "r1_a1", 1) if fn is not pp.integrate_prompt else (
             Path("/tmp/sb"), "r1_i1", 1, "a1", ["a2"])
-        t_on = fn(*args, author_to_complete=True)
-        t_off = fn(*args, author_to_complete=False)
-        check(f"{fn.__name__}: ON carries the marker rule",
-              "PIPELINE HAND-OFF PLACEHOLDERS" in t_on)
-        check(f"{fn.__name__}: OFF carries the no-marker rule",
-              "PIPELINE HAND-OFF ITEMS" in t_off and "PIPELINE HAND-OFF PLACEHOLDERS" not in t_off)
-    t = pp.revise_prompt(Path("/tmp/sb"), "r1_a2", 1, author_to_complete=False)
-    check("revise OFF replaces every restated scaffolding sentence",
-          all(a not in t for a, _b in pp.HANDOFF_PROMPT_REWRITES))
-    # Each rewrite pair must still MATCH a real prompt: an excerpt edited upstream
+        t_readme = fn(*args, author_to_complete="readme")
+        t_doc = fn(*args, author_to_complete="document")
+        t_off = fn(*args, author_to_complete="off")
+        check(f"{fn.__name__}: README carries the hand-off-README rule",
+              "PIPELINE HAND-OFF ITEMS" in t_readme
+              and "PIPELINE HAND-OFF PLACEHOLDERS" not in t_readme
+              and "README-AUTHOR-TO-COMPLETE.md" in t_readme)
+        check(f"{fn.__name__}: DOCUMENT carries the marker rule",
+              "PIPELINE HAND-OFF PLACEHOLDERS" in t_doc)
+        check(f"{fn.__name__}: OFF carries the no-marker/manual-steps rule",
+              "PIPELINE HAND-OFF ITEMS" in t_off
+              and "PIPELINE HAND-OFF PLACEHOLDERS" not in t_off
+              and "MANUAL_STEPS.md" in t_off)
+    # Each rewrite row must still MATCH a real prompt: an excerpt edited upstream
     # would otherwise leave two contradictory instructions in one prompt.
-    revise_on = pp.revise_prompt(Path("/tmp/sb"), "r1_a2", 1, author_to_complete=True)
-    integrate_on = pp.integrate_prompt(Path("/tmp/sb"), "r1_i1", 1, "a1", ["a2"],
-                                      author_to_complete=True)
-    rewrite_on = pp.rewrite_prompt(Path("/tmp/sb"), "r1_w1", 1, author_to_complete=True)
-    carriers = [(revise_on, 0), (revise_on, 1), (integrate_on, 2), (rewrite_on, 3)]
-    for prompt_text, idx in carriers:
-        a, _b = pp.HANDOFF_PROMPT_REWRITES[idx]
-        check(f"excerpt {idx} is still present in its prompt (ON)", a in prompt_text)
-    for prompt_text, idx in carriers:
-        a, b = pp.HANDOFF_PROMPT_REWRITES[idx]
-        off = pp.apply_author_to_complete_prompt(prompt_text, False)
-        check(f"excerpt {idx} is replaced in its prompt (OFF)", a not in off and b in off)
-    j_on = pp.judge_prompt(Path("/tmp/sb"), "j1", 1, "t", 1, 1, ["a"],
-                           author_to_complete=True)
+    prompts = {
+        "review": pp.review_prompt(Path("/tmp/sb"), "r1_a1", 1,
+                                   author_to_complete="document"),
+        "audit": pp.audit_prompt(Path("/tmp/sb"), "r1_au", 1,
+                                 author_to_complete="document"),
+        "probe": pp.probe_prompt(Path("/tmp/sb"), "r1_p", 1,
+                                 author_to_complete="document"),
+        "revise": pp.revise_prompt(Path("/tmp/sb"), "r1_a2", 1,
+                                   author_to_complete="document"),
+        "integrate": pp.integrate_prompt(Path("/tmp/sb"), "r1_i1", 1, "a1", ["a2"],
+                                         author_to_complete="document"),
+        "rewrite": pp.rewrite_prompt(Path("/tmp/sb"), "r1_w1", 1,
+                                     author_to_complete="document"),
+    }
+    all_doc = "\n".join(prompts.values())
+    for idx, row in enumerate(pp.HANDOFF_PROMPT_REWRITES):
+        check(f"rewrite row {idx} is still present in a DOCUMENT prompt",
+              row[0] in all_doc)
+    for mode, col in (("readme", 1), ("off", 2)):
+        texts = {"review": pp.review_prompt(Path("/tmp/sb"), "r1_a1", 1,
+                                            author_to_complete=mode),
+                 "audit": pp.audit_prompt(Path("/tmp/sb"), "r1_au", 1,
+                                          author_to_complete=mode),
+                 "probe": pp.probe_prompt(Path("/tmp/sb"), "r1_p", 1,
+                                          author_to_complete=mode),
+                 "revise": pp.revise_prompt(Path("/tmp/sb"), "r1_a2", 1,
+                                            author_to_complete=mode),
+                 "integrate": pp.integrate_prompt(Path("/tmp/sb"), "r1_i1", 1, "a1",
+                                                  ["a2"], author_to_complete=mode),
+                 "rewrite": pp.rewrite_prompt(Path("/tmp/sb"), "r1_w1", 1,
+                                              author_to_complete=mode)}
+        all_text = "\n".join(texts.values())
+        for idx, row in enumerate(pp.HANDOFF_PROMPT_REWRITES):
+            check(f"rewrite row {idx} is replaced under {mode}",
+                  row[0] not in all_text and row[col] in all_text)
+    j_readme = pp.judge_prompt(Path("/tmp/sb"), "j1", 1, "t", 1, 1, ["a"],
+                               author_to_complete="readme")
+    j_doc = pp.judge_prompt(Path("/tmp/sb"), "j1", 1, "t", 1, 1, ["a"],
+                            author_to_complete="document")
     j_off = pp.judge_prompt(Path("/tmp/sb"), "j1", 1, "t", 1, 1, ["a"],
-                            author_to_complete=False)
-    check("the judge never sees the marker token in either mode",
-          "[AUTHOR TO COMPLETE" not in j_on and "[AUTHOR TO COMPLETE" not in j_off)
+                            author_to_complete="off")
+    check("the judge never sees the marker token in any mode",
+          "[AUTHOR TO COMPLETE" not in j_readme
+          and "[AUTHOR TO COMPLETE" not in j_doc
+          and "[AUTHOR TO COMPLETE" not in j_off)
+    check("the judge's readme rule never scores the README itself",
+          "hand-off README" in j_readme and "no-placeholder policy" not in j_readme)
     check("the judge's OFF rule scores the missing item, not the marker",
-          "no-placeholder policy" in j_off and "no-placeholder policy" not in j_on)
+          "no-placeholder policy" in j_off and "no-placeholder policy" not in j_doc)
     # Readiness must not say "ready" about a marker the certification gate refuses.
     fc = {"hygiene": {}}
     res = {"items": ["r1_a2_revise: 6 searchable hand-off marker(s) are still in the "
                      "delivered package and the sandbox carries no lookup verdict for them"]}
-    r_on = pp.package_readiness(fc, residuals=res, author_to_complete=True)
-    r_off = pp.package_readiness(fc, residuals=res, author_to_complete=False)
-    check("readiness names the shipped marker (ON: advisory hand-off)",
-          [f for f in r_on["findings"] if f.get("rule") == "AUTH-1"]
-          and all(f.get("advisory") for f in r_on["findings"] if f.get("rule") == "AUTH-1"))
-    check("readiness names the shipped marker (OFF: blocking defect)",
-          [f for f in r_off["findings"] if f.get("rule") == "AUTH-1"]
-          and not any(f.get("advisory") for f in r_off["findings"]
-                      if f.get("rule") == "AUTH-1"))
+    r_doc = pp.package_readiness(fc, residuals=res, author_to_complete="document")
+    r_readme = pp.package_readiness(fc, residuals=res, author_to_complete="readme")
+    r_off = pp.package_readiness(fc, residuals=res, author_to_complete="off")
+    check("readiness names the shipped marker (DOCUMENT: advisory hand-off)",
+          [f for f in r_doc["findings"] if f.get("rule") == "AUTH-1"]
+          and all(f.get("advisory") for f in r_doc["findings"]
+                  if f.get("rule") == "AUTH-1"))
+    for mode, r in (("readme", r_readme), ("off", r_off)):
+        check(f"readiness names the shipped marker ({mode}: blocking defect)",
+              [f for f in r["findings"] if f.get("rule") == "AUTH-1"]
+              and not any(f.get("advisory") for f in r["findings"]
+                          if f.get("rule") == "AUTH-1"))
+    # The README is the hand-off surface: it is named with its item count, and
+    # pending items make the package NOT submission-ready (a stale empty README
+    # is reported too, so the author deletes it).
+    pkg = scratch("atc_readme_")
+    (pkg / "README-AUTHOR-TO-COMPLETE.md").write_text(
+        "# Author to complete\n\n- Supply the accession number.\n- Confirm the ORCID.\n",
+        encoding="utf-8")
+    r_readme2 = pp.package_readiness({"path": str(pkg), "hygiene": {}},
+                                     residuals={"items": []},
+                                     author_to_complete="readme")
+    auth2 = [f for f in r_readme2["findings"] if f.get("rule") == "AUTH-2"]
+    check("readiness names the hand-off README and its item count",
+          auth2 and "2 author-to-complete item(s)" in auth2[0]["detail"]
+          and not auth2[0].get("advisory")
+          and r_readme2["submission_ready"] is False, str(auth2))
+    # A stage that leaves the item in MANUAL_STEPS.md in marker form has it
+    # MOVED into the package README (never invented, marker stripped).
+    stage = scratch("atc_stage_")
+    (stage / "MANUAL_STEPS.md").write_text(
+        "- Verify the accession number [AUTHOR TO COMPLETE: accession number]\n",
+        encoding="utf-8")
+    moved = pp.ensure_handoff_readme(Ctx("/tmp/x", {}), stage, warns=[])
+    text = (stage / "README-AUTHOR-TO-COMPLETE.md").read_text()
+    check("the postcheck generates the hand-off README from MANUAL_STEPS markers",
+          moved.get("items") == 1 and "Verify the accession number" in text
+          and "[AUTHOR TO COMPLETE" not in text, text)
+    check("the generated README is idempotent",
+          pp.ensure_handoff_readme(Ctx("/tmp/x", {}), stage, warns=[]) == {})
+    check("the hand-off README is never part of a judge view",
+          pp._is_view_excluded_file("README-AUTHOR-TO-COMPLETE.md"))
+    check("the hand-off README is never treated as the package's submitted-set declaration",
+          pp.is_author_to_complete_readme_name("README-AUTHOR-TO-COMPLETE.md")
+          and pp.is_non_submitted_readme_name("README-AUTHOR-TO-COMPLETE.md"))
+    # The published-package hygiene must not hold it back as an internal note,
+    # even when its rows name MANUAL_STEPS.md (the checklist's own vocabulary).
+    held_pkg = scratch("atc_hold_")
+    held_readme = held_pkg / "README-AUTHOR-TO-COMPLETE.md"
+    held_readme.write_text("- Move the item out of MANUAL_STEPS.md.\n", encoding="utf-8")
+    held = pp.hold_internal_readme_notes(held_pkg, scratch("atc_hold_dest_"))
+    check("the hand-off README survives the internal-README hold-back",
+          held == [] and held_readme.is_file(), str(held))
+    # It is a checklist, not a payload document: generating/updating/deleting it
+    # must not invalidate the content-hash token the stage already applied.
+    tok_dir = scratch("atc_token_")
+    (tok_dir / "ms-1.docx").write_bytes(b"PK\x03\x04payload")
+    (tok_dir / "README-AUTHOR-TO-COMPLETE.md").write_text("- Supply A.\n")
+    tok_with = pp.revision_token_for_dir(tok_dir)["token"]
+    (tok_dir / "README-AUTHOR-TO-COMPLETE.md").write_text("- Supply A.\n- Confirm B.\n")
+    tok_changed = pp.revision_token_for_dir(tok_dir)["token"]
+    (tok_dir / "README-AUTHOR-TO-COMPLETE.md").unlink()
+    tok_without = pp.revision_token_for_dir(tok_dir)["token"]
+    check("the hand-off README is not part of the content-hash token",
+          tok_with == tok_changed == tok_without and len(tok_with) == 7,
+          f"{tok_with}/{tok_changed}/{tok_without}")
 
 
 def test_author_to_complete_cli():
     print("\n== author-to-complete CLI ==")
     src = scratch("atc_src_")
     write_docx(src / "ms-1-mainText-abcdef0.docx", ["Title", "Body."])
-    root = scratch("atc_root_") / "root"
-    cmd = [sys.executable, str(WS / "paper_pipeline.py"), "setup", "--root", str(root),
-           "--source", str(src), "--rounds", "1", "--without-author-to-complete"]
-    r = __import__("subprocess").run(cmd, capture_output=True, text=True, timeout=300)
-    check("setup accepts --without-author-to-complete", r.returncode == 0, r.stderr[-300:])
-    cfg = json.loads((root / "pipeline_config.json").read_text())
-    check("setup records author_to_complete: off", cfg.get("author_to_complete") == "off")
-    r2 = __import__("subprocess").run(
-        [sys.executable, str(WS / "paper_pipeline.py"), "set-author-to-complete", "--root",
-         str(root), "on"], capture_output=True, text=True, timeout=120)
-    cfg = json.loads((root / "pipeline_config.json").read_text())
-    check("set-author-to-complete on flips the policy", r2.returncode == 0
-          and cfg.get("author_to_complete") == "on", r2.stderr[-200:])
+    run = __import__("subprocess").run
+
+    def setup_with(flag=None):
+        root = scratch("atc_root_") / "root"
+        cmd = [sys.executable, str(WS / "paper_pipeline.py"), "setup", "--root", str(root),
+               "--source", str(src), "--rounds", "1"]
+        if flag:
+            cmd.extend(flag.split())
+        r = run(cmd, capture_output=True, text=True, timeout=300)
+        cfg = (json.loads((root / "pipeline_config.json").read_text())
+               if (root / "pipeline_config.json").is_file() else {})
+        return root, r, cfg
+
+    root, r, cfg = setup_with()
+    check("setup defaults to author_to_complete: readme",
+          r.returncode == 0 and cfg.get("author_to_complete") == "readme",
+          r.stderr[-300:])
+    root_r, r_r, cfg_r = setup_with("--with-author-to-complete-in-readme")
+    check("setup accepts --with-author-to-complete-in-readme",
+          r_r.returncode == 0 and cfg_r.get("author_to_complete") == "readme",
+          r_r.stderr[-300:])
+    root_d, r_d, cfg_d = setup_with("--with-author-to-complete")
+    check("setup records --with-author-to-complete as document",
+          r_d.returncode == 0 and cfg_d.get("author_to_complete") == "document",
+          r_d.stderr[-300:])
+    _root_legacy, r_l, cfg_l = setup_with("--author-to-complete on")
+    check("setup accepts the legacy --author-to-complete on as document",
+          r_l.returncode == 0 and cfg_l.get("author_to_complete") == "document",
+          r_l.stderr[-300:])
+    root_o, r_o, cfg_o = setup_with("--without-author-to-complete")
+    check("setup accepts --without-author-to-complete",
+          r_o.returncode == 0 and cfg_o.get("author_to_complete") == "off",
+          r_o.stderr[-300:])
+    for mode in ("document", "off", "readme"):
+        r2 = run([sys.executable, str(WS / "paper_pipeline.py"), "set-author-to-complete",
+                  "--root", str(root_o), mode], capture_output=True, text=True, timeout=120)
+        cfg = json.loads((root_o / "pipeline_config.json").read_text())
+        check(f"set-author-to-complete {mode} flips the policy",
+              r2.returncode == 0 and cfg.get("author_to_complete") == mode,
+              r2.stderr[-200:])
+    r3 = run([sys.executable, str(WS / "paper_pipeline.py"), "set-author-to-complete",
+              "--root", str(root_o), "on"], capture_output=True, text=True, timeout=120)
+    cfg = json.loads((root_o / "pipeline_config.json").read_text())
+    check("legacy `set-author-to-complete on` is accepted as document",
+          r3.returncode == 0 and cfg.get("author_to_complete") == "document",
+          r3.stderr[-200:])
+    r4 = run([sys.executable, str(WS / "paper_pipeline.py"), "set-author-to-complete",
+              "--root", str(root_o), "bogus"], capture_output=True, text=True, timeout=120)
+    check("an invalid author-to-complete mode is rejected",
+          r4.returncode != 0 and "invalid choice" in (r4.stderr or "").lower(),
+          r4.stderr[-200:])
 
 
 # ---------------------------------------------------------------------------

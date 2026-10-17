@@ -85,6 +85,10 @@ def make_package(tmp: Path) -> Path:
     (tmp / "ms-a.logging-winner1.docx").write_bytes(b"winner auxiliary")
     (tmp / "work").mkdir()
     (tmp / "work" / "scratch.txt").write_text("scratch\n", encoding="utf-8")
+    # The author hand-off checklist is not a payload document: the postcheck
+    # may create or update it AFTER the stage applied the token.
+    (tmp / "README-AUTHOR-TO-COMPLETE.md").write_text(
+        "- Supply the accession number.\n", encoding="utf-8")
     return tmp
 
 
@@ -100,6 +104,13 @@ def test_agreement_and_identity():
     check("RT1 the token counts only the payload files",
           nb.revision_token_for_dir(tmp)["files"] == 4,
           str(nb.revision_token_for_dir(tmp)))
+    before = (s_tok, p_tok)
+    (tmp / "README-AUTHOR-TO-COMPLETE.md").write_text(
+        "- Supply the accession number.\n- Confirm the ORCID.\n", encoding="utf-8")
+    check("RT1 the hand-off README is excluded from the token in BOTH implementations",
+          script_token(tmp) == before[0]
+          and nb.revision_token_for_dir(tmp)["token"] == before[1],
+          f"{before} -> {script_token(tmp)}/{nb.revision_token_for_dir(tmp)['token']}")
 
 
 def test_stability_and_verification():

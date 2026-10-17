@@ -60,16 +60,27 @@ versions are the one gap already counted in C-1.
 
 ## 3. What the repo now does about these classes
 
-1. **`--with-author-to-complete` / `--without-author-to-complete`** (default
-   `on`; `set-author-to-complete`, config key `author_to_complete`).
-   `off` rewrites the rule in every prompt (all four master-prompt excerpts and
-   the two end-of-prompt reminders that restated the opposite included), forbids
-   the `[AUTHOR TO COMPLETE: …]` token in every written file, sends the missing
-   item to `MANUAL_STEPS.md`, fails a stage attempt that ADDS a marker, makes a
-   shipped marker a gating residual, and reports it in readiness as `AUTH-1`
-   (blocking under `off`; under `on` an advisory hand-off, so readiness and
-   certification can no longer contradict each other). The probe prompt now
-   carries the rule too (it carried none).
+1. **`--with-author-to-complete-in-readme` (default) /
+   `--with-author-to-complete` / `--without-author-to-complete`**
+   (`set-author-to-complete`, config key `author_to_complete`). The default
+   `readme` mode forbids the `[AUTHOR TO COMPLETE: …]` token in every document
+   and records each missing item in ONE `README-AUTHOR-TO-COMPLETE.md` in the
+   package root, beside the cover letter and main text; the submission copy
+   drops it as a `README*.md`, no submitted document may depend on it, and it
+   never enters a judge view. The stage prompt asks for the README; a stage
+   that instead leaves the item in `MANUAL_STEPS.md` in marker form has it
+   moved into the README by the postcheck. `document` keeps the old
+   in-document marker convention, and `off` sends the item to
+   `MANUAL_STEPS.md`. Every prompt (all four master-prompt excerpts, the
+   end-of-prompt reminders, the rewrite prompt's canonical-output block, and
+   the judge in its own provenance-free wording) carries the matching rule.
+   Outside `document`, a stage attempt that ADDS a marker fails, a shipped
+   marker is a gating residual, and readiness reports it as `AUTH-1`
+   (blocking under `readme`/`off`; under `document` an advisory hand-off, so
+   readiness and certification can no longer contradict each other); `AUTH-2`
+   names the hand-off README and its item count as a blocking readiness
+   finding. The probe prompt now carries
+   the rule too (it carried none).
 2. **PKG-10: evidence-area references.** A submitted file may reference a file
    inside `raw_data/` (or a sibling area) only when it is (a) a figure/table
    whose content the submission carries — bytes embedded in a submitted document,

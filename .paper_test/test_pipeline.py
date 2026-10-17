@@ -60,10 +60,13 @@ def test_prompts():
         check(f"prompt[{name}] no unresolved tokens", not unresolved, str(unresolved))
         # The judge gets the same rule in PROVENANCE-NEUTRAL wording (it must not
         # learn that there is a revision stage that writes the token); every
-        # other stage gets the pipeline's own wording.
-        check(f"prompt[{name}] carries the hand-off placeholder rule",
+        # other stage gets the pipeline's own wording. The default is the README
+        # hand-off: no document marker, the package README instead.
+        check(f"prompt[{name}] carries the hand-off rule",
               ("PLACEHOLDER TEXT IN A PACKAGE" in text) if name == "judge"
-              else ("PIPELINE HAND-OFF PLACEHOLDERS" in text))
+              else ("PIPELINE HAND-OFF ITEMS" in text
+                    and "README-AUTHOR-TO-COMPLETE.md" in text
+                    and "PIPELINE HAND-OFF PLACEHOLDERS" not in text))
         check(f"prompt[{name}] carries the auxiliary-file rule",
               "PIPELINE AUXILIARY FILES" in text)
         check(f"prompt[{name}] legends are always enumerated (M18)",
