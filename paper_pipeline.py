@@ -359,7 +359,7 @@ RULES CARRIED INTO EVERY PROMPT (AND WHERE THEY COME FROM)
       via WSL/PowerShell interop, the highest-fidelity renderer available. The
       prompts also insist that the conversion target is a COPY inside the
       stage's writable work directory, never a hash-verified read-only view
-      (`target/`, `field/*`, `base/`, `non_revised/`, `original/`), because
+      (`target/`, `field/*`, `base/`, `non_revised/`), because
       every converter writes its output next to the file it is handed.
       A prompt to call the tool is not by itself enough: `codex exec` is
       non-interactive and therefore runs with approval policy `never`, which
@@ -531,7 +531,7 @@ CODE-SIDE CHECKS (in addition to what the prompts ask the agents to do)
                           cannot be recomputed from (round, version id); the
                           token -> version-id map lives only in the run record.
                           What a judge can SEE is anonymous too: every view
-                          (target/, field/*, original/) is materialized with
+                          (target/, field/*) is materialized with
                           placeholder paths ("d01/", "f0001<ext>"), a per-view
                           random permutation (so the same document has a
                           different name in every view), one mtime, one mode and
@@ -745,7 +745,7 @@ DIRECTORY LAYOUT CREATED UNDER --root
                                     PROMPT.md: the k-th integration run, i.e.
                                     the k-th pool member reworked with the whole
                                     pool as donors
-    runs/r<R>_judge_<token>_j<J>/   target/, field/v1..vK, original/, PROMPT.md
+    runs/r<R>_judge_<token>_j<J>/   target/, field/v1..vK, PROMPT.md
                                     (<token> is the opaque session token, never
                                     the version id; the three view roots hold
                                     ANONYMIZED packages -- placeholder paths,
@@ -1277,12 +1277,11 @@ _DEFAULT_VENUE_PROFILE = {
              "abstract": {"base": 150, "relaxation": 1.10},
              "main_text": {"base": 3000, "relaxation": 1.25},
              "cover_letter": {
-                 "min": 300, "max": 500, "total_max": 650,
+                 "min": 300, "max": 500, "total_max": None,
                  "source": "master-prompt preference (300-500 words in the persuading part); "
                            "Nature Biotechnology's official guidance states no cover-letter "
-                           "word limit (checked 2026-09-19); the letter's TOTAL content "
-                           "(salutation, body, disclosures and signature) is capped at 650 "
-                           "words by the operator's default",
+                           "word limit (checked 2026-09-19), so no total-content cap is "
+                           "applied",
              },
          },
          "captions": {
@@ -2354,6 +2353,13 @@ def _name_is_article_type_manuscript(name, type_names=()) -> bool:
     return False
 
 
+def _document_role_tokens(name) -> set:
+    """Lowercase word tokens of a filename stem, including camelCase splits."""
+    stem = Path(str(name or "")).stem
+    stem = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", stem)
+    return set(re.findall(r"[a-z0-9]+", stem.lower()))
+
+
 def docx_document_role(name, manuscript_names=()) -> str:
     """The submission role a package DOCX name advertises: main/supp/cover.
 
@@ -2367,14 +2373,15 @@ def docx_document_role(name, manuscript_names=()) -> str:
     document is a letter ONLY in a run whose article type is not
     `letter-to-the-editor` (a cover letter keeps its `cover` spelling there).
     """
-    stem = Path(str(name)).stem.lower()
-    if "supp" in stem:
+    tokens = _document_role_tokens(name)
+    if "supp" in tokens or "suppl" in tokens or "supplement" in tokens \
+            or "supplementary" in tokens:
         return "supp"
-    if "cover" in stem:
+    if "cover" in tokens:
         return "cover"
-    if _name_is_article_type_manuscript(stem, manuscript_names):
+    if _name_is_article_type_manuscript(Path(str(name)).stem, manuscript_names):
         return "main"
-    if "letter" in stem:
+    if "letter" in tokens:
         return "cover"
     return "main"
 
@@ -2413,9 +2420,9 @@ def official_template_files(venue_id, root=None, profiles_dir=None) -> dict:
             else:
                 word.setdefault("main", p)
         elif p.suffix.lower() in (".tex", ".ltx"):
-            if "supp" not in low and "sample" not in latex:
+            if docx_document_role(p.name) != "supp" and "sample" not in latex:
                 latex["sample"] = p
-            elif "supp" in low and "supplementary" not in latex:
+            elif docx_document_role(p.name) == "supp" and "supplementary" not in latex:
                 latex["supplementary"] = p
         elif p.suffix.lower() == ".cls":
             latex.setdefault("cls", []).append(p)
@@ -4022,10 +4029,9 @@ JOURNAL_MODE_RESUBMIT = "resubmit"
 JOURNAL_MODE_MAJOR = "major"
 JOURNAL_MODE_MINOR = "minor"
 # The LLM-review mode: the round is revised against the false-positive-filtered
-# `llm_review_feedback/` area ONLY (no journal decision letter). It is
-# auto-detected from the directory's presence when the config records no
-# explicit mode, and the directory can be turned off by renaming it to
-# `llm_review_feedback.disabled` (an inert, never-submitted name).
+# `llm_review_feedback/` area ONLY (no journal decision letter). It is selected
+# explicitly; the directory's presence never changes an unconfigured root.
+# Renaming it to `llm_review_feedback.disabled` keeps the tree inert.
 JOURNAL_MODE_LLM = "llm"
 JOURNAL_MODE_CONTINUE = "continue"
 # The pre-rename spelling of `continue`: kept so existing roots (a config with
@@ -4176,16 +4182,15 @@ def journal_mode_of(ctx=None) -> str:
     as `config`). An unknown value is an error, not a silent 'continue': a typo
     in the mode would otherwise silently run the wrong workflow.
 
-    When NO mode is recorded, a non-empty `llm_review_feedback/` area in the
-    corpus's pristine copy turns the effective mode into `llm` automatically
-    (the operator's directory-driven switch; rename it to
-    `llm_review_feedback.disabled` or record an explicit mode to turn it off).
-    An EXPLICIT recorded mode always wins -- auto-detection never overrides it.
+    When NO mode is recorded, the historical review/revise path is used. A
+    directory that happens to contain `llm_review_feedback/` does not opt the
+    root into a journal mode: that would make the no-journal-mode path depend
+    on an input area. Select `llm` explicitly to use that area.
     """
     cfg = (getattr(ctx, "cfg", None) if ctx is not None else None) or {}
     raw = str(cfg.get("revision_mode") or "").strip()
     if not raw:
-        return auto_revision_mode_for(ctx) or JOURNAL_MODE_CONTINUE
+        return JOURNAL_MODE_CONTINUE
     mode = normalize_revision_mode(raw)
     if mode not in JOURNAL_MODES:
         die(f"pipeline_config.json records revision_mode {mode!r}, which is not one of "
@@ -4210,49 +4215,6 @@ def llm_feedback_present_in(dirp) -> bool:
         return any(p.is_file() and not is_bookkeeping_name(p.name) for p in area.rglob("*"))
     except OSError:
         return False
-
-
-def auto_revision_mode_for(ctx=None) -> str:
-    """The directory-driven mode (`llm`) or `""` when auto-detection is off.
-
-    Auto-detection is OFF whenever an explicit revision_mode is recorded (there
-    is no such value in a default root: `setup` writes no key for `continue`),
-    and when the LLM review area is absent, empty or renamed to its inert
-    `.disabled` spelling. The result is cached on the context: the pristine copy
-    cannot change during one invocation.
-    """
-    cfg = (getattr(ctx, "cfg", None) if ctx is not None else None) or {}
-    if str(cfg.get("revision_mode") or "").strip():
-        return ""
-    pristine = getattr(ctx, "pristine", None)
-    if pristine is None:
-        return ""
-    cached = getattr(ctx, "_auto_revision_mode", None)
-    if cached is None:
-        cached = JOURNAL_MODE_LLM if llm_feedback_present_in(pristine) else ""
-        try:
-            setattr(ctx, "_auto_revision_mode", cached)
-        except Exception:                                         # noqa: BLE001
-            pass
-    return cached
-
-
-def revision_mode_origin(ctx=None) -> str:
-    """`explicit` / `auto` / `default` for the effective revision mode."""
-    cfg = (getattr(ctx, "cfg", None) if ctx is not None else None) or {}
-    if str(cfg.get("revision_mode") or "").strip():
-        return "explicit"
-    return "auto" if auto_revision_mode_for(ctx) else "default"
-
-
-def revision_mode_note(ctx=None) -> str:
-    """One line to print when the mode came from the directory, not the config."""
-    if revision_mode_origin(ctx) != "auto":
-        return ""
-    return (f"revision mode auto-detected: {JOURNAL_MODE_LLM} "
-            f"({LLM_FEEDBACK_DIR}/ is present and non-empty; only that area is read). "
-            f"Rename it to {LLM_FEEDBACK_DIR}.disabled, or record an explicit mode "
-            f"(`--revision-mode continue`), to turn the auto-detection off.")
 
 
 def journal_feedback_streams(ctx=None) -> tuple:
@@ -4617,6 +4579,7 @@ FINAL_CLEAN_DIRNAME = "final_clean_version"
 # corpus (anything inside it would become manuscript content in the next run),
 # so the certification verdict and the package's provenance live beside it.
 FINAL_CLEAN_README_NAME = FINAL_CLEAN_DIRNAME + ".readme.md"
+FINAL_CLEAN_AUTHOR_README_NAME = FINAL_CLEAN_DIRNAME + ".author_to_complete.md"
 
 
 def final_clean_dirname(root: Path) -> str:
@@ -4635,12 +4598,11 @@ DOCX_FORMAT_MODULE = "paper_docx_format.py"
 # scan stays advisory.
 FORMAT_FIX_MODES = ("auto", "off")
 DEFAULT_FORMAT_FIX = "auto"
-# The published copy keeps its LIVE Zotero fields by default. The pipeline
-# refreshes them (repairs the numbering) but does NOT unlink them: unlinking is
-# the author's own step when the final submission file is prepared (the field
-# state stays editable in Zotero). Operators who want the pipeline to flatten
-# `final_clean_version/` set
-# `format_policy.unlink_zotero_fields_at_publish: true`.
+# The published copy keeps its LIVE Zotero fields by default because it must
+# remain the judged bytes. Operators who want the pipeline to flatten set
+# `format_policy.unlink_zotero_fields` (or the compatibility key
+# `unlink_zotero_fields_at_publish`) BEFORE `run`; the stage-side formatter then
+# flattens every candidate before it is pinned and scored.
 DEFAULT_PUBLISH_FLATTEN_ZOTERO = False
 # `run --only`: run a subset of the round's stages. `merge` is an alias for the
 # integration stage (the pipeline's "merge from the other versions" step), and
@@ -4909,10 +4871,17 @@ VIEW_STRIP_DERIVED_SUFFIXES = tuple(s for s in DERIVED_BUILD_SUFFIXES if s != ".
 # beside a figure PDF is not a source/derived pair.
 VIEW_DERIVED_SOURCE_EXTS = (".doc", ".docx", ".tex", ".ltx", ".rtf", ".md")
 
+DERIVED_DOC_VERSION_RE = re.compile(r"(?:[-_][0-9a-f]{7}|[-_][vV]\d+)$")
+
 
 def _doc_stem_key(name: str) -> str:
-    """A basename's stem without its version token (see DOC_TOKEN_RE)."""
-    return DOC_TOKEN_RE.sub("", Path(name).stem).lower()
+    """A basename's stem without a content/addressing version token.
+
+    A single trailing letter is not a version token here: `figure-a.pdf` is not
+    a rendering of `figure.docx`. Only the 7-hex content token and the explicit
+    `-vN` spelling identify a derived output's source.
+    """
+    return DERIVED_DOC_VERSION_RE.sub("", Path(name).stem).lower()
 
 
 def _is_view_excluded_file(name: str, siblings=()) -> bool:
@@ -4953,9 +4922,22 @@ def _is_view_excluded_file(name: str, siblings=()) -> bool:
         return True
     if low.endswith((".pdf", ".bbl")):
         sources = VIEW_DERIVED_SOURCE_EXTS if low.endswith(".pdf") else (".bib",)
+        if low.endswith(".bbl"):
+            # A compiled bibliography keeps the source's version token.
+            stem = DOC_TOKEN_RE.sub("", Path(name).stem).lower()
+            return any(
+                s.strip().lower().endswith(sources)
+                and DOC_TOKEN_RE.sub("", Path(s).stem).lower() == stem
+                for s in siblings)
+        # For a PDF, the output's own name is compared narrowly (figure-a.pdf
+        # is not figure.docx), while its editable source may carry a legacy
+        # one-letter token (supp-b.tex supplies supp-<hash>.pdf).
         stem = _doc_stem_key(name)
-        return any(s.strip().lower().endswith(sources) and _doc_stem_key(s) == stem
-                   for s in siblings)
+        return any(
+            s.strip().lower().endswith(sources)
+            and (_doc_stem_key(s) == stem
+                 or DOC_TOKEN_RE.sub("", Path(s).stem).lower() == stem)
+            for s in siblings)
     return low.endswith(VIEW_STRIP_DERIVED_SUFFIXES)
 
 
@@ -5716,9 +5698,9 @@ DEFAULT_LENGTH_LIMITS_SOURCE = _DEFAULT_VENUE_OBJ.length_limits_source
 COVER_LETTER_MIN_WORDS = _DEFAULT_LIMITS["cover letter"]["min"]
 COVER_LETTER_MAX_WORDS = _DEFAULT_LIMITS["cover letter"]["max"]
 COVER_LETTER_SOURCE = _DEFAULT_LIMITS["cover letter"]["source"]
-# The operator's TOTAL-content budget for the letter (salutation, body,
-# disclosures and signature): a cap, unlike the 300-500 persuading-part
-# preference. 650 words by default; a profile may override it.
+# An explicitly configured TOTAL-content budget for the letter (salutation,
+# body, disclosures and signature), unlike the 300-500 persuading-part
+# preference. None means the profile records no such cap.
 COVER_LETTER_TOTAL_MAX_WORDS = _DEFAULT_LIMITS["cover letter"].get("total_max")
 
 
@@ -7371,8 +7353,8 @@ def _clean_handoff_row(value) -> str:
 def _readme_action_rows(text: str) -> list:
     """Bullet/numbered and Markdown-table data rows from one checklist."""
     rows, seen = [], set()
-    in_table = False
     separator = re.compile(r"^\s*\|?[\s:\-|]+\|?\s*$")
+    table_lines = []
 
     def add(value) -> None:
         row = _clean_handoff_row(value)
@@ -7380,21 +7362,34 @@ def _readme_action_rows(text: str) -> list:
             seen.add(row.lower())
             rows.append(row)
 
+    def flush_table() -> None:
+        nonlocal table_lines
+        if not table_lines:
+            return
+        # A normal table has a header followed by its separator. A one-line
+        # table has no header: that line is the row the checklist author wrote.
+        if len(table_lines) == 1 and separator.match(table_lines[0]):
+            data = []
+        else:
+            data = (table_lines[2:]
+                    if len(table_lines) > 1 and separator.match(table_lines[1])
+                    else table_lines)
+        for line in data:
+            add(" | ".join(cell.strip()
+                           for cell in line.strip().strip("|").split("|")))
+        table_lines = []
+
     for raw in str(text or "").splitlines():
         bullet = re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*$", raw)
         if bullet:
+            flush_table()
             add(bullet.group(1))
-            in_table = False
             continue
-        if raw.count("|") >= 2 and not separator.match(raw):
-            if in_table:
-                add(" | ".join(cell.strip() for cell in raw.strip().strip("|").split("|")))
-            in_table = True
+        if raw.count("|") >= 2:
+            table_lines.append(raw)
             continue
-        if in_table and separator.match(raw):
-            continue
-        if raw.strip():
-            in_table = False
+        flush_table()
+    flush_table()
     return rows
 
 
@@ -7481,15 +7476,17 @@ def _handoff_marker_occurrences(root: Path, problems: list = None) -> list:
 
 
 def write_published_handoff_readme(root: Path, open_items: dict = None,
-                                   residuals: dict = None) -> dict:
-    """Write the author checklist into the PUBLISHED package root.
+                                   residuals: dict = None,
+                                   target_path: Path = None) -> dict:
+    """Write the author checklist for a published package.
 
     The stage prompts ask a revision session to write the README. A package
     generated before that rule existed (or by a stage that forgot it) still has
     the author work recorded in the revision ledger and in the residual gate.
-    This publisher-side pass copies those recorded items into ONE
-    `README-AUTHOR-TO-COMPLETE.md` beside the cover letter and main text. It
-    never edits a document and never invents an item: every row is derived from a
+    This publisher-side pass copies those recorded items into ONE checklist.
+    Publication passes `target_path` to keep it as a SIBLING of the judged
+    directory, so the delivered corpus stays byte-identical to the pin. It never
+    edits a document and never invents an item: every row is derived from a
     ledger/residual/marker row in the package itself. The rows it owns sit in a
     marked block that is REPLACED on every publish, so resolved items disappear;
     author text and bullets outside that block are preserved.
@@ -7497,36 +7494,39 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
     root = Path(root)
     rows, problems = [], []
     oi = open_items or {}
-    for key in ("items", "discarded"):
-        for it in oi.get(key) or []:
-            if not isinstance(it, dict):
-                continue
-            fid = str(it.get("id") or "").strip()
-            status = str(it.get("status") or key).strip()
-            check = str(it.get("check") or "").strip()
-            sev = str(it.get("severity") or "").strip()
-            loc = str(it.get("location") or "").strip()
-            ev = re.sub(r"\s+", " ", str(it.get("evidence") or "")).strip()
-            tag = " ".join(x for x in (check, sev) if x)
-            text = (f"{fid + ' ' if fid else ''}[{status}"
-                    f"{'; ' + tag if tag else ''}] "
-                    f"{loc + ': ' if loc else ''}{ev}").strip()
-            if text:
-                rows.append(_clean_handoff_row(text))
+    # "discarded" rows are findings the auditor refused, not work the author
+    # owes. Re-emitting one as a checklist item would make it impossible for
+    # the author to clear the checklist, and readiness already reports the
+    # unsupported discard separately.
+    for it in oi.get("items") or []:
+        if not isinstance(it, dict):
+            continue
+        fid = str(it.get("id") or "").strip()
+        status = str(it.get("status") or "item").strip()
+        check = str(it.get("check") or "").strip()
+        sev = str(it.get("severity") or "").strip()
+        loc = str(it.get("location") or "").strip()
+        ev = re.sub(r"\s+", " ", str(it.get("evidence") or "")).strip()
+        tag = " ".join(x for x in (check, sev) if x)
+        text = (f"{fid + ' ' if fid else ''}[{status}"
+                f"{'; ' + tag if tag else ''}] "
+                f"{loc + ': ' if loc else ''}{ev}").strip()
+        if text:
+            rows.append(_clean_handoff_row(text))
     markers = _handoff_marker_occurrences(root, problems=problems)
     for occ in markers:
         payload = _clean_handoff_row(occ["marker"])
         rows.append(f"{occ['file']}: missing {payload or 'the marked item'}")
-    if not rows:
-        # A summary residual can say "N hand-off markers" while the marker text
-        # sits in a format this package cannot parse (for example an image-only
-        # PDF). Keep the recorded author action visible rather than dropping it.
-        for it in (residuals or {}).get("items") or []:
-            if "hand-off marker" in str(it):
-                rows.append(_clean_handoff_row(it))
+    # A summary residual can say "N hand-off markers" while the marker text
+    # sits in a format this package cannot parse (for example an image-only
+    # PDF). It is additive: another parsed row must not hide the unparsed one.
+    for it in (residuals or {}).get("items") or []:
+        if "hand-off marker" in str(it):
+            rows.append(_clean_handoff_row(it))
     rows = [_clean_handoff_row(r) for r in rows if str(r).strip()]
     rows = list(dict.fromkeys(r for r in rows if r))
-    target = root / AUTHOR_TO_COMPLETE_README
+    target = Path(target_path) if target_path is not None \
+        else root / AUTHOR_TO_COMPLETE_README
     if not target.is_file() and not rows and not problems:
         return {}
     existing = ""
@@ -7538,18 +7538,11 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
                     "problems": problems}
     external, _managed_rows, had_block = _split_managed_handoff_readme(existing)
     header = AUTHOR_TO_COMPLETE_README_HEADER.strip()
-    if not had_block:
-        # A checklist written by the first version of this publisher (or by a
-        # stage) has the standard header plus bullets and no marker. Treat that
-        # shape as managed so its stale rows do not accumulate beside the new
-        # block; any extra prose means it is the author's file and is preserved.
-        body = external.strip()
-        if body.startswith(header):
-            remainder = body[len(header):].strip()
-            extra = [ln for ln in remainder.splitlines() if ln.strip()]
-            if not extra or all(re.match(r"^\s*(?:[-*+]|\d+[.)])\s+", ln)
-                                 for ln in extra):
-                external = AUTHOR_TO_COMPLETE_README_HEADER
+    # A stage-authored checklist has the standard header but no managed-block
+    # markers. Its bullets are author work, not a disposable generated block:
+    # preserve them exactly like any other text outside the managed region.
+    # Rows that duplicate a current ledger item are omitted from the generated
+    # block below, so this cannot duplicate an active row.
     external_rows = _readme_action_rows(external)
     known = {row.lower() for row in external_rows}
     managed_now = []
@@ -7563,7 +7556,8 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
     if not base:
         base = AUTHOR_TO_COMPLETE_README_HEADER.strip()
     base = re.sub(r"\n{3,}", "\n\n", base)
-    result = {"path": target.name, "items": len(managed_now),
+    result = {"path": (target.name if target.parent == root else str(target)),
+              "items": len(managed_now),
               "external_items": len(external_rows),
               "generated_from": ("revision ledger" if oi.get("items") or oi.get("discarded")
                                  else "package hand-off markers")}
@@ -8098,8 +8092,8 @@ def defect_class_rule(profile=None) -> str:
 
     The cover-letter total cap comes from the selected venue profile, exactly
     like the standing exemptions: a profile that configures no total cap must
-    not be told the default venue's 650 words in this block while
-    `length_rule_text` says no cap is configured.
+    not be given a number in this block while `length_rule_text` says no cap is
+    configured.
     """
     cover_total = _as_profile(profile).length_limits()["cover letter"].get("total_max")
     cover_clause = (f"within {cover_total} words" if cover_total is not None else
@@ -10386,9 +10380,6 @@ Layout (paths relative to the sandbox root):
   field/        — the OTHER @@K_OPPONENTS@@ packages of this blind field, one read-only corpus per
                   opponent, labeled @@OPPONENT_LABELS@@ (label -> version mapping is random and held
                   by the orchestrator; it is deliberately absent here). One corpus per label.
-  original/     — the pristine original submission, exposed openly as the regression reference.
-                  READ-ONLY (hash-verified). The same content may also be one of the opponents in
-                  field/, but its label is NOT revealed.
   judge_review/ — your working/output directory for the frozen-sweep review that grounds your
                   judgments (the skill's OUT): OUT = ./judge_review, WORK = ./judge_review/work.
                   Write your inventory, sweep artifacts and notes there.
@@ -10434,8 +10425,8 @@ absolute ratings re-compress into noise and the comparison this design exists to
    give exactly one integer score per opponent.
 3. Write scores.json (schema below), verify it parses as JSON, and then write the completion marker.
 
-Matching documents: match documents between target/, field/*, and original/ by CONTENT and ROLE, not
-by filename alone. Compliant packages carry ONE content-hash version token in the version slot
+Matching documents: match documents between target/ and field/* by CONTENT and ROLE, not by filename
+alone. Compliant packages carry ONE content-hash version token in the version slot
 (e.g. "...-4f3a9c1.docx", the same 7-hex token for every document of a package), which identifies
 their package and nothing about how it was produced; a LEGACY package may still carry a
 letter/digit token ("-b", "_v2") or a collision "_revN" suffix. A filename difference is therefore
@@ -10458,7 +10449,7 @@ package was produced, how many processing steps it went through, or how heavily 
     like everything else. The labels are identical in every view (the areas are inputs, restored
     byte-for-byte), so they cannot tell you which package is which -- but they tell you what the
     files ARE. See "THE EVIDENCE AREAS" below for how to use them;
-  * match documents between target/, field/* and original/ by CONTENT and ROLE, never by name;
+  * match documents between target/ and field/* by CONTENT and ROLE, never by name;
   * document references INSIDE a file (a LaTeX \\includegraphics{...}, a \\input, a
     \\addbibresource, a build script, a hyperlink to a sibling file) have been REWRITTEN to the
     anonymous names, so a LaTeX/TeX package can be compiled and rendered as-is inside this sandbox
@@ -10696,24 +10687,15 @@ versions differ decides the comparison, and no lower tier can offset it. When so
 disagree, the higher-priority source wins, in this order:
   @@SOURCE_HIERARCHY@@
 
-=== PRESERVATION SIGNAL (the orchestrator's anti-regression gate) ===
+=== PRESERVATION ===
 
-One of the opponents in field/ may BE the pristine original, byte-identical to original/. Identify
-that by CONTENT, never by label: the labels are a random permutation carrying no information, and
-the target_id/run_id in this prompt (and the sandbox directory name) are an OPAQUE session token
-plus bookkeeping: they are deliberately not the version's name and say nothing about quality,
-order, which process produced the target, or how it was produced -- do not infer anything from them
-and do not go looking for the version's own name or provenance. If an opponent IS the pristine
-original, then a
-POSITIVE score means the target improved on the original and a NEGATIVE score means the target
-REGRESSED against it. That single comparison becomes the field's anti-regression gate, so weigh it
-carefully against the original's own defects (which belong to correctness/consistency/completeness/
-writing/formatting, never to preservation).
+Every opponent has the same status: an anonymous package in the blind field. Do not try to infer
+which one, if any, is a starting version. A positive score means only that the target is better
+than that opponent; a negative score means it is worse. Judge preservation defects on the two
+packages in front of you, using the shared tier and severity scale.
 
-If the TARGET itself is byte-identical to original/ (that is possible: the pristine original is a
-field member in its own right), then judge it like any other comparison -- a positive score means
-the target/original is better than that opponent, and the opponent's own sheet carries the mirror
-score. Do not invert the direction just because you recognise the original.
+If two packages are byte-identical, judge that comparison like any other: the score is zero unless
+a real difference in the admitted evidence justifies otherwise.
 
 @@PLACEHOLDER_RULE@@
 
@@ -11989,6 +11971,16 @@ class RunLogStream:
 # of only in a disposable sandbox log.
 LOGGING_COMMANDS = ("setup", "run", "run-decide", "decide", "retry", "prune", "redline",
                     "conflicts", "conform", "add-venue", "track")
+# Every command that can change a root, its package, or its bookkeeping. The
+# read-only audit commands are deliberately absent. Keeping the list here makes
+# the stale-driver fence independent of which command function was extended.
+FOREIGN_GUARD_COMMANDS = (
+    "run", "run-decide", "decide", "redline", "track", "conflicts", "conform",
+    "retry", "prune", "add-venue", "build-venue-templates", "adopt-sweep",
+    "set-venue", "set-journal", "set-article-type", "set-revision-mode",
+    "set-submit-code", "set-author-to-complete", "set-placeholder-file",
+    "set-tiebreak-defect-floor", "set-dedup-mode", "set-probe-review",
+)
 # The path of the invocation's run log (set by `main`, recorded by
 # `save_state`): a root accumulates the console of its invocations, so the
 # retry/backoff lines and the judge advisories of an old run are still readable.
@@ -12678,12 +12670,10 @@ def corpus_dir_manifest(dirp: Path, exclude_top=()) -> dict:
 
     This is NOT where an `is_non_shippable_name` file (the WSL/Windows
     `figS3.png:Zone.Identifier` stub, a `*.pyc`, a Word `~$` owner file) is
-    filtered out (2026-10-15). It was tried and reverted: a filter here changes
-    the identity of every corpus built before it, so the 2026-10-15 neohet root
-    -- whose pin RECORDED the junk-included digest of 415 files -- failed its own
-    pin check and refused to publish anything at all. The junk is a DELIVERY
-    concern: `publish_final_clean` checks the copy against the pin first (same
-    bytes, same digest) and strips the junk only for the tree it hands over.
+    filtered out. It was tried here and reverted because that changed the
+    identity of every corpus built before it. The stage postcheck removes such
+    files before recording a candidate's identity; publication preserves the
+    pin's bytes and reports any legacy residue.
     """
     if not dirp.is_dir():
         return {"files": {}, "count": 0}
@@ -13761,7 +13751,7 @@ def _is_cover_letter_lines(lines: list, name: str = "", manuscript_names=()) -> 
     """
     if _name_is_article_type_manuscript(name, manuscript_names):
         return False
-    if "cover" in (name or "").lower():
+    if "cover" in _document_role_tokens(name):
         return True
     for raw in lines[:12]:
         if LENGTH_COVER_SALUTATION_RE.match((raw or "").strip()):
@@ -13863,7 +13853,7 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
                 continue
             doc = prefix + rel
             ext = p.suffix.lower()
-            if "supp" in p.name.lower():
+            if docx_document_role(p.name, manuscript_names) == "supp":
                 skipped.append(doc)         # supplementary text is not under the article caps
                 continue
             lines, caption_spans, abstract_end = None, [], None
@@ -14081,21 +14071,18 @@ def format_policy_of(ctx: Ctx) -> dict:
 
 
 def publication_format_policy(ctx: Ctx, policy: dict, cli_flatten: bool = False) -> tuple:
-    """(policy for the PUBLISHED copy, flatten_requested).
+    """(publication policy, whether a Zotero flatten was requested).
 
-    By default the published copy keeps LIVE Zotero fields: the formatter
-    refreshes them (repairs the numbering) at publish time, but unlinking them
-    is the AUTHOR's own step when the final submission file is prepared — the
-    run's corpora stay editable in Zotero, and the readme says the copy was
-    left live.
+    Publication preserves the judged bytes, so a flatten request cannot be
+    executed there. `pre_judge_format_policy` translates the recorded publish
+    preference into the stage-side formatter; a command-line request arriving
+    at `decide` is refused explicitly. By default the published copy keeps LIVE
+    Zotero fields, and unlinking them remains the author's own final step.
 
-    Unlinking is an EXPLICIT opt-in, never a default: pass `cli_flatten` (the
-    `decide --unlink-zotero-fields` option) or set
-    `format_policy.unlink_zotero_fields_at_publish: true`. The published copy
-    is then flattened (citations become plain text with the refreshed numbers,
-    so no journal conversion can renumber them). A flatten is refused whenever
-    the refresh could not make the document clean; the refused case is recorded
-    as readiness finding `FMT-Z7` rather than freezing unverified numbering.
+    This helper remains the one parser for the legacy `cli_flatten` flag and
+    `format_policy.unlink_zotero_fields_at_publish`; callers use its second
+    value to report or refuse a request whose timing is incompatible with the
+    pin.
     """
     cfg = (ctx.cfg or {}).get("format_policy") or {}
     if cli_flatten:
@@ -14273,6 +14260,12 @@ TEXT_CONSISTENCY_KEYS = ("citation_journal_names", "term_spelling", "term_hyphen
 def pre_judge_format_policy(ctx: Ctx) -> dict:
     """format_policy_of() with the text-level consistency rules left unfixed."""
     policy = format_policy_of(ctx)
+    configured = (ctx.cfg or {}).get("format_policy") or {}
+    if configured.get("unlink_zotero_fields_at_publish"):
+        # The old publication-time flatten cannot run after the panel has
+        # scored the bytes: the delivered package must remain the pin. Apply
+        # the request to every candidate before it is fingerprinted instead.
+        policy["unlink_zotero_fields"] = True
     for key in TEXT_CONSISTENCY_KEYS:
         policy[key] = "keep"
     return policy
@@ -16291,6 +16284,32 @@ def _format_fix_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, warns: list,
     # mechanical guarantee.
     if pkg_dir.is_dir():
         try:
+            rec["non_shippable_strip"] = strip_non_shippable_files_in_dir(pkg_dir)
+        except Exception as e:                                        # noqa: BLE001
+            rec["non_shippable_strip"] = {"error": f"{type(e).__name__}: {e}",
+                                          "removed": []}
+            warns.append(f"PKG-1: the non-shippable-file strip could not run "
+                         f"({type(e).__name__}: {e}); the package is reported, not repaired")
+        _reports_root = getattr(ctx, "reports_dir", None)
+        if _reports_root is None and getattr(ctx, "root", None) is not None:
+            _reports_root = Path(ctx.root) / "reports"
+        if _reports_root is not None:
+            try:
+                _held_before = list(rec.get("held_internal_readme_notes") or [])
+                _held_now = hold_internal_readme_notes(
+                    pkg_dir,
+                    Path(_reports_root) / README_NOTE_HOLD_DIRNAME / rec["id"],
+                    warns=warns)
+                _held_seen = {
+                    (str(h.get("file")), str(h.get("held_at"))) for h in _held_before}
+                rec["held_internal_readme_notes"] = _held_before + [
+                    h for h in _held_now
+                    if (str(h.get("file")), str(h.get("held_at"))) not in _held_seen]
+            except Exception as e:                                    # noqa: BLE001
+                rec["held_internal_readme_notes"] = []
+                warns.append(f"PKG-1: the internal-note README pass could not run "
+                             f"({type(e).__name__}: {e}); the package is reported")
+        try:
             rec["reference_strip"] = strip_dangling_references_in_dir(
                 pkg_dir, submission_not_carried_areas(ctx), rec["id"], warns=warns,
                 artifacts_dir=ctx.sandbox_of(rec),
@@ -18072,7 +18091,7 @@ def evidence_pack_block(where: str) -> str:
    each package on its CONTENT alone: names, timestamps and document metadata were stripped from
    every view precisely so that no package can be recognised, dated, ranked by anything but
    content, or identified as having (or not having) a history at all. Everything you write must be
-   derived by YOU from `target/`, `field/<label>/` and `original/` with the tools named in this
+   derived by YOU from `target/` and `field/<label>/` with the tools named in this
    prompt -- for code-side measurements use `python paper_docx_format.py scan <dir>` (and the
    counting in the sweeps) and record the rows in `judge_review/artifacts/`. If you find yourself
    relying on a file that is not part of a submission package, stop: that information is not
@@ -18412,8 +18431,7 @@ def _corpus_ignore(skip_aux: bool, strip_bookkeeping: bool):
 #   * deleting a tree the pipeline owns (a scratch copy, a pruned sandbox, a
 #     stale final_clean_version.tmp): unlinking an entry needs WRITE on the
 #     directory that holds it;
-#   * rewriting the pipeline's own copy of a package (incrementing the
-#     generation counter in the published package, repointing references,
+#   * rewriting the pipeline's own copy of a package (a stage-side repair or
 #     restoring raw_data from the pristine copy): writing a file needs WRITE on
 #     the file, and replacing an entry needs WRITE on its directory.
 # `make_tree_writable` hands the write bits back and returns a plan that
@@ -18473,10 +18491,10 @@ def is_author_to_complete_readme_name(name: str) -> bool:
 # the code it revised, narrating that session's findings and hand-offs. The
 # 2026-10-15 neohet package reached its certified state carrying one (PKG-1
 # reported it, and the delivered package shipped it anyway). These constants let
-# `publish_final_clean` hold such a file back -- the caller routes it to the
-# root's `reports/readme_notes/` and names it in the sibling status readme, so
-# the operator keeps the text while no future round, pin or delivered package
-# carries it as manuscript content.
+# the producing stage postcheck holds such a file back before the corpus digest,
+# routing it to the root's `reports/readme_notes/` and naming it in the sibling
+# status readme, so the operator keeps the text while no future round, pin or
+# delivered package carries it as manuscript content.
 README_NOTE_HOLD_DIRNAME = "readme_notes"
 
 
@@ -18512,11 +18530,11 @@ def hold_internal_readme_notes(dirp: Path, dest_dir: Path,
     """Move internal-note README files out of `dirp` into `dest_dir`.
 
     Returns the moved records [{"file", "held_at", "rows"}]. `dest_dir` must be
-    OUTSIDE the package (the caller passes the root's `reports/`): the file is
-    documentation the OPERATOR asked for, but it may not be shipped, and a
-    sibling would become manuscript content in the next round -- the same reason
-    the status readme is a sibling of the published directory. A move that fails
-    leaves the file in place and is recorded in `warns`.
+    OUTSIDE the package (the stage postcheck passes the root's
+    `reports/readme_notes/<run>/`): the file is documentation the operator may
+    want, but it may not be shipped, and a sibling would become manuscript
+    content in the next round. A move that fails leaves the file in place and is
+    recorded in `warns`.
     """
     out = []
     dirp, dest_dir = Path(dirp), Path(dest_dir)
@@ -18621,10 +18639,11 @@ def is_non_shippable_name(name: str) -> bool:
 def strip_non_shippable_files_in_dir(dirp: Path) -> dict:
     """Delete `is_non_shippable_name` files below `dirp`; return what went.
 
-    The last-resort sweep for a package that was BUILT before the filters ran
-    (the 2026-10-15 neohet and cnb roots were published by an older orchestrator,
-    so their delivered copies carry a `figures/*:Zone.Identifier` stub and a
-    top-level `*.pyc`). Files inside an EVIDENCE area are never touched -- that
+    The stage-side sweep before a package's corpus identity is recorded (and
+    the last-resort helper for a package built by an older orchestrator; a
+    publication that meets such a package preserves the pin and reports the
+    residue instead of changing judged bytes). Files inside an EVIDENCE area
+    are never touched -- that
     subtree is read-only by contract (`raw_data/` is a byte-frozen input) -- and
     `__pycache__/` DIRECTORIES are skipped on purpose: removing one would empty
     the directory a bytecode file's name lives in, and an empty directory is
@@ -19009,13 +19028,10 @@ def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
     An `is_non_shippable_name` file (the WSL/Windows `figS3.png:Zone.Identifier`
     stub, a `*.pyc`, a Word `~$` owner file) is carried through a CORPUS copy
     unchanged, junk included: a corpus materialized here is exactly the corpus
-    the judges scored, and its digest is checked against the pin -- a filter that
-    dropped a file mid-copy made `publish_final_clean` report "the clean copy
-    hashes to X but the pin recorded Y" and refuse to publish the very package
-    the filter was meant to clean. The never-ship rule belongs to the DELIVERED
-    copy: `publish_final_clean` strips these files before it checks/derives the
-    digest, and `strip_non_shippable_files_in_dir` sweeps any that a package
-    built by an older orchestrator still carries.
+    the judges scored. The stage postcheck removes these files BEFORE the
+    corpus digest is taken; `publish_final_clean` reports any that a package
+    built by an older orchestrator still carries rather than changing judged
+    bytes after the pin.
     normalize_mtime: give every copied file and directory ONE timestamp. Set by
     the same VERSION CORPUS callers: shutil.copy2 preserves the source mtimes, so
     a version written later (the integration stage) would otherwise carry newer
@@ -23379,8 +23395,31 @@ def producing_run_id(r: int, vid: str):
     return None   # a pinned champion's provenance lives in its pin record
 
 
+def drop_legacy_judge_original(sandbox: Path, rec: dict = None) -> bool:
+    """Remove an old openly named ``original/`` view from a judge sandbox.
+
+    Roots materialized before the 2026-10-17 blinding fix still carry it.
+    Reusing such a sandbox would hand the judge the pristine original again
+    even though the prompt no longer names it. The directory is a derived,
+    anonymized view, not agent work, so removing it preserves the session's
+    own output while restoring the blind layout.
+    """
+    legacy = Path(sandbox) / "original"
+    if not legacy.exists() and not legacy.is_symlink():
+        return False
+    if legacy.is_symlink():
+        legacy.unlink()
+    else:
+        rmtree_force(legacy)
+    if isinstance(rec, dict):
+        manifest = rec.get("inputs_manifest")
+        if isinstance(manifest, dict):
+            manifest.pop("original", None)
+    return True
+
+
 def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
-    """Judge sandboxes: target/, field/<random labels>, original/.
+    """Judge sandboxes: target/ and field/<random labels>.
 
     The label -> version map is written to the run record only; the sandbox
     gets the labels and nothing else about them.
@@ -23432,6 +23471,7 @@ def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
             sb = ctx.runs_dir / rid
             existing = ctx.run(rid)
             if existing is not None and sb.is_dir() and (sb / "PROMPT.md").is_file():
+                drop_legacy_judge_original(sb, existing)
                 # The sandbox was fully materialized once. Never rebuild it
                 # blindly (it may hold an agent's partial work), but do not hand
                 # a DAMAGED read-only view to an agent either: a truncated
@@ -23446,9 +23486,6 @@ def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
                     if judge_view_digest(sb / "target") != expected_view_digest(
                             ctx, r, vid, f"{view_seed}|target"):
                         problems.append("target/")
-                    if judge_view_digest(sb / "original") != expected_view_digest(
-                            ctx, r, ORIGINAL_ID, f"{view_seed}|original"):
-                        problems.append("original/")
                     for label, w in (existing.get("label_map") or {}).items():
                         if judge_view_digest(sb / "field" / label) != expected_view_digest(
                                 ctx, r, w, f"{view_seed}|{label}"):
@@ -23466,23 +23503,20 @@ def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
                 out.append(rid)
                 continue
             sb.mkdir(parents=True, exist_ok=True)
+            drop_legacy_judge_original(sb)
             # The seed mixes the per-root salt, THIS session's opaque token and
             # the judge index, so every view in every session is permuted
             # independently (and a rebuild of the same session reproduces it).
             view_seed = judge_view_seed_for(ctx, r, vid, j)
             ensure_judge_view(ctx, r, vid, sb / "target", view_stamp, f"{view_seed}|target")
-            ensure_judge_view(ctx, r, ORIGINAL_ID, sb / "original", view_stamp,
-                              f"{view_seed}|original")
             labels = sample_labels(r, vid, j, k_opp, salt=judge_salt_of(ctx))
             label_map = {}
             for label, w in zip(labels, others):
                 ensure_judge_view(ctx, r, w["id"], sb / "field" / label, view_stamp,
                                   f"{view_seed}|{label}")
                 label_map[label] = w["id"]
-            # ONE timestamp and one mode for every view this session can see --
-            # target/, field/* AND original/ (build_judge_view already does it;
-            # re-stamping is a cheap guarantee if a view was reused).
-            for rel in ("target", "original", "field"):
+            # ONE timestamp and one mode for every view this session can see.
+            for rel in ("target", "field"):
                 stamp_tree(sb / rel, view_stamp)
             # BLINDING: the judge gets NO orchestrator artifact. Even a scan
             # computed from its own target/ would hand it a pre-digested view of
@@ -23548,7 +23582,6 @@ def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
             rec["field_digests"] = [{"id": w["id"], "digest": recorded_version_digest(ctx, r, w["id"])}
                                     for w in others]
             rec["inputs_manifest"] = {"target": hash_manifest(sb / "target"),
-                                      "original": hash_manifest(sb / "original"),
                                       "field": hash_manifest(sb / "field")}
             out.append(rid)
     return out
@@ -23911,8 +23944,6 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
         tid = rec.get("target_id")
         if tid:
             probs.append(view_mismatch("target", tid))
-        if src_ok:
-            probs.append(view_mismatch("original", ORIGINAL_ID))
         labels = rec.get("label_map") or {}
         for label, vid in sorted(labels.items()):
             probs.append(view_mismatch(f"field/{label}", vid))
@@ -29542,7 +29573,7 @@ this sandbox. The manuscript/package itself is NOT yours to touch.
 Everything else must stay BYTE-IDENTICAL, above all:
   * the manuscript files/package contents (documents, code, figures) -- a repair never edits
     submission content, and never "fixes" a document, a citation or a number
-  * the corpus inputs (base/, non_revised/, self/, others/, target/, field/, original/) and the
+  * the corpus inputs (base/, non_revised/, self/, others/, target/, field/) and the
     other stages' deliverables (review/, audit/, scores.json as far as they are not yours)
   * the records this stage's own postcheck reads from the PACKAGE (a delivered document, a
     validation result) -- if one of those is broken, no repair can clear it and the attempt fails
@@ -32155,15 +32186,10 @@ def postcheck_judge(ctx: Ctx, rec: dict):
     derrs, dwarns = judge_discovery_problems(sb, rec)
     errs.extend(derrs)
     warns.extend(dwarns)
-    if word_docs_present([sb / "target", sb / "field", sb / "original"]):
+    if word_docs_present([sb / "target", sb / "field"]):
         check_visual_artifact(jr / "artifacts" / "VIS_visual.md",
                               f"the visual-inspection record {VISUAL_ARTIFACT_JUDGE}",
                               errs, warns, sandbox=sb, render_roots=[jr])
-    _r = int(rec["round"])
-    _seed = judge_view_seed_for(ctx, _r, rec.get("target_id"), rec.get("judge_index"))
-    _check_pristine_copy(
-        ctx, rec, "original", errs, content_only=True,
-        expected=expected_view_digest(ctx, _r, ORIGINAL_ID, f"{_seed}|original"), warns=warns)
     errs.extend(input_mismatches(ctx, rec))
     return (not errs), errs, warns, None
 
@@ -33925,7 +33951,7 @@ def rescue_misplaced_deliverable(ctx: Ctx, rec: dict) -> list:
     Deliberately narrow: only the names in `STAGE_DELIVERABLES[...]["required"]`,
     only from the sandbox root or the session's OWN `work/` scratch (never from a
     read-only input area: `base/`, `non_revised/`, `review/` for non-review
-    stages, `audit/`, `self/`, `others/`, `target/`, `field/`, `original/`), and
+    stages, `audit/`, `self/`, `others/`, `target/`, `field/`), and
     never for a manuscript document -- a document belongs to the package's
     document set and is handled by the recovery layer, which knows the corpus.
     """
@@ -34206,7 +34232,7 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
             derrs, dwarns = judge_discovery_problems(sb, jrec)
             errs.extend(derrs)
             warns.extend(dwarns)
-        if word_docs_present([sb / "target", sb / "field", sb / "original"]):
+        if word_docs_present([sb / "target", sb / "field"]):
             check_visual_artifact(jr / "artifacts" / "VIS_visual.md",
                                   f"the visual-inspection record {VISUAL_ARTIFACT_JUDGE}",
                                   errs, warns, sandbox=sb, render_roots=[jr])
@@ -34841,13 +34867,10 @@ def champion_issue_summary(vid, agg) -> dict:
 def champion_sort_key(row: dict) -> tuple:
     """cumulative defect count at the adaptive prefix -> median -> mean -> IQR -> digest.
 
-    The defect prefix now LEADS the key (2026-10-01, fourth calibration): the
-    number of defects the panel attributed to a version is the most direct
-    improvement signal, and the medians of a small panel are coarse. The panel's
-    median/mean/IQR stay the first TIE-BREAK below it, and the incumbent rule
-    (an exact median/mean/IQR tie keeps the base) is unchanged -- it is applied
-    after the sort, so a challenger with a lower prefix but a panel-statistic
-    tie does NOT retire the incumbent.
+    The defect prefix LEADS the key: the number of defects the panel attributed
+    to a version is the most direct improvement signal, and the medians of a
+    small panel are coarse. The panel's median/mean/IQR and the digest are the
+    tie-breaks below it. A difference in the leading term is not a tie.
     """
     med, mean, iqr = row.get("median"), row.get("mean"), row.get("iqr")
     return ((int(row.get("defect_prefix_total") or 0),)
@@ -35008,21 +35031,6 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
     # pipeline hands to the author, so ranking on it would reward under-reporting.
     rows.sort(key=champion_sort_key)
     champ_row = rows[0]
-    base_row = next((t for t in rows if t["is_base"]), None)
-    if base_row is not None and champ_row is not base_row \
-            and (champ_row["median"], champ_row["mean"], champ_row["iqr"]) == \
-            (base_row["median"], base_row["mean"], base_row["iqr"]):
-        # An exact statistical tie is not evidence of improvement: the incumbent
-        # is retained rather than replaced by a version the panel cannot
-        # distinguish from it (never reward a version merely for being different).
-        # This is strictly a panel-statistic rule (median/mean/IQR) and it
-        # OVERRIDES the leading defect prefix on purpose: a challenger with a
-        # lower defect count but an identical (median, mean, IQR) does not retire
-        # the incumbent -- a better defect count separates CHALLENGERS, it does
-        # not retire an incumbent the panel cannot distinguish from them.
-        trace.append(f"{champ_row['id']} and the base tie exactly on (median, mean, IQR) -> the "
-                     f"incumbent base is retained; a challenger must be measurably better")
-        champ_row = base_row
     trace.append(f"ranking key: (the cumulative defect count over the first "
                  f"{prefix_cells} cell(s) of the canonical severity_tier_category order "
                  f"(fatal->critical->major->minor, tier order, peer before own; the walk stops "
@@ -35033,8 +35041,8 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
                  "reported but no longer rank), median/mean/IQR are the field-wide panel "
                  "statistics below it, and the content digest is the provenance-free tie-break "
                  "(an arm's NAME never decides a tie). "
-                 "The incumbent-retention rule still fires on an exact (median, mean, IQR) "
-                 "tie: it overrides the prefix and keeps the base. "
+                 "A different leading defect count is not a statistical tie; the incumbent "
+                 "is retained only when the full ranking key ties. "
                  "vs_base is reported but NOT a ranking key: its 2*judges directed scores are few "
                  "enough that one outlier session flips the sign statistic, so the decision stays "
                  "on the field-wide list. MANUAL_STEPS.md is reported but never ranked on; "
@@ -37202,20 +37210,12 @@ def cmd_setup(args) -> None:
     # passed it: the historical workflow is unchanged.
     explicit_mode = str(getattr(args, "revision_mode", None) or "").strip()
     src_path = Path(args.source).resolve() if getattr(args, "source", None) else None
-    auto_llm = bool(src_path and src_path.is_dir() and llm_feedback_present_in(src_path))
-    if not explicit_mode and auto_llm:
-        print(f"[setup] revision mode auto-detected: {JOURNAL_MODE_LLM} (option "
-              f"{JOURNAL_MODES[JOURNAL_MODE_LLM]['option']}) -- --source carries a non-empty "
-              f"{LLM_FEEDBACK_DIR}/ area, and only that area is read. Rename it to "
-              f"{LLM_FEEDBACK_DIR}.disabled (or pass --revision-mode continue) to turn the "
-              f"auto-detection off.")
-        if human_feedback_files_in(src_path):
-            print(f"[setup] WARNING: {HUMAN_FEEDBACK_DIR}/ also carries feedback file(s); mode "
-                  f"{JOURNAL_MODE_LLM} reads ONLY {LLM_FEEDBACK_DIR}/. Pass an explicit journal "
-                  f"mode (transfer/resubmit/major/minor) if the human letter should drive the "
-                  f"revision.")
-    raw_revision_mode = (explicit_mode or (JOURNAL_MODE_LLM if auto_llm else "")
-                         or JOURNAL_MODE_CONTINUE).strip().lower()
+    if not explicit_mode and src_path and src_path.is_dir() \
+            and llm_feedback_present_in(src_path):
+        print(f"[setup] note: --source carries {LLM_FEEDBACK_DIR}/, but no journal mode is "
+              f"selected; the historical review/revise path will run. Pass "
+              f"`--revision-mode {JOURNAL_MODE_LLM}` to use that feedback.")
+    raw_revision_mode = (explicit_mode or JOURNAL_MODE_CONTINUE).strip().lower()
     revision_mode = normalize_revision_mode(raw_revision_mode)
     if raw_revision_mode != revision_mode:
         print(f"[setup] note: revision mode {raw_revision_mode!r} is the pre-rename spelling "
@@ -39474,9 +39474,8 @@ def cmd_set_revision_mode(args) -> None:
     transfer/resubmit only records the mode: the standard rounds still apply,
     with the journal feedback added as an input. `init` records the mode and
     runs the conform (template-first) stage before round 1 -- no feedback.
-    `llm` records the LLM-review mode; a root that never recorded a mode and
-    whose corpus carries a non-empty `llm_review_feedback/` already reports
-    `llm` here (the directory-driven switch).
+    `llm` records the LLM-review mode. A corpus that merely carries a non-empty
+    `llm_review_feedback/` does not select it.
     """
     ctx = Ctx(_venue_command_root(args, "set-revision-mode"),
               strict_venue=bool(getattr(args, "strict_venue", False)))
@@ -39493,11 +39492,6 @@ def cmd_set_revision_mode(args) -> None:
               f"rewrites: {'allowed' if info['rewrites'] else 'forbidden'}; "
               f"edits: {'concern-scoped only' if info['scoped'] else 'the full review findings'}")
         if info.get("feedback"):
-            origin = revision_mode_origin(ctx)
-            if origin == "auto":
-                print(f"[set-revision-mode] mode source: auto-detected from "
-                      f"{LLM_FEEDBACK_DIR}/ (rename it to {LLM_FEEDBACK_DIR}.disabled or set a "
-                      f"mode explicitly to override)")
             if mode == JOURNAL_MODE_LLM:
                 print("[set-revision-mode] feedback source: llm_review_feedback/ only "
                       "(false positives pre-filtered); no journal decision letter is read")
@@ -39505,7 +39499,7 @@ def cmd_set_revision_mode(args) -> None:
                 print(f"[set-revision-mode] feedback from: "
                       f"{(ctx.cfg or {}).get('journal_feedback_from') or '(not set)'}; "
                       f"named feedback file(s): "
-                      f"{', '.join(feedback) if feedback else '(auto-detected)'}")
+                      f"{', '.join(feedback) if feedback else '(not set)'}")
             llm_hits = [label for _p, label in journal_llm_feedback_files(ctx)]
             print(f"[set-revision-mode] LLM review file(s): "
                   f"{', '.join(llm_hits) if llm_hits else '(none found)'}")
@@ -39712,9 +39706,6 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             f"       Restore {ctx.pristine} (e.g. from your own copy of the corpus) or start a "
             f"fresh pipeline root with `setup`.")
     print(f"[run] pristine original: {detail}")
-    _mode_note = revision_mode_note(ctx)
-    if _mode_note:
-        print(f"[run] {_mode_note}")
 
     _only_probe = parse_only_spec(getattr(args, "only", None))
     if only_is_template_stage_only(_only_probe):
@@ -40069,7 +40060,30 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             rec_rr = ctx.round_rec(rr)
             if rec_rr.get("status") != "done":
                 continue
-            if str(rec_rr.get("champion")) == A1_ID:
+            sel_rr = rec_rr.get("selection") or {}
+            ranking = sel_rr.get("ranking") or []
+            base_row = next((row for row in ranking if row.get("is_base")), None)
+            champ_row = next(
+                (row for row in ranking if row.get("id") == sel_rr.get("champion")), None)
+
+            def measurable(row):
+                if not row:
+                    return None
+                med, mean, iqr = row.get("median"), row.get("mean"), row.get("iqr")
+                return (
+                    int(row.get("defect_prefix_total") or 0),
+                    -(med if med is not None else -99.0),
+                    -(mean if mean is not None else -99.0),
+                    iqr if iqr is not None else 99.0,
+                )
+
+            # The content digest may select a challenger when every measurable
+            # term ties. That is a deterministic identity choice, not evidence
+            # of progress, so it must not defeat the pre-registered stop.
+            champ_key, base_key = measurable(champ_row), measurable(base_row)
+            if str(sel_rr.get("champion")) == A1_ID \
+                    or (champ_key is not None and base_key is not None
+                        and champ_key >= base_key):
                 streak += 1
             else:
                 break
@@ -40082,14 +40096,17 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                 "no_progress_streak": streak,
                 "rule": f"--stop-after-no-progress {stop_k}",
                 "reason": ("the last round(s) pinned the incumbent base -- no demonstrable, "
-                           "non-regressing progress -- so further rounds are expected to cost a "
-                           "pool and a judge wave without a measurable gain"),
+                           "non-regressing progress -- or selected a challenger only on the "
+                           "digest tie-break, with no measurable gain. Further rounds are "
+                           "expected to cost a pool and a judge wave without improving the "
+                           "panel's measurable result"),
                 "at": utcnow(),
             }
             ctx.save_state()
             print(f"[run] STOPPING EARLY after round {r}/{R}: {streak} consecutive round(s) "
-                  f"pinned the incumbent base ({stop_k} configured). `decide` will treat round "
-                  f"{r} as the final answer and record the stop in decision.json.")
+                  f"showed no measurable improvement over their base ({stop_k} configured). "
+                  f"`decide` will treat round {r} as the final answer and record the stop in "
+                  f"decision.json.")
             break
 
     if journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_RESUBMIT) and only is None:
@@ -40522,7 +40539,7 @@ basis, reason and the full resolved[]/introduced[] ledgers) if you need the
 surrounding sheet context. `judge_runs.json` maps every judge session id to its
 target and its v1..vN label map, so a `vN` in a ledger resolves to a real
 version. The delivered corpora the judges saw live under `<root>/runs/<session
-id>/` (target/, field/, original/) if your environment can read them.
+id>/` (target/, field/) if your environment can read them.
 
 TASK
 For EVERY defect_id in `defects.json`, decide whether the row is a TRUE POSITIVE
@@ -42898,38 +42915,97 @@ def declared_submission_set(root: Path) -> dict:
            "ignored_reason": None, "readme": None}
     if not root.is_dir():
         return out
-    # EVERY readme is a candidate, and the first one that actually CARRIES the
-    # declaration wins: stopping at the first readme by name let a non-declaring
-    # `README.md` (which sorts before `README_SUBMISSION.md`, `.` < `_`) hide the
-    # package's own submitted-set rule, and the scans then treated every carried
-    # file as submitted. One walk over the directory also matches the
-    # case-INSENSITIVE readme predicate the rest of the pipeline uses, so a
-    # lowercase `readme.md` that states the rule is honoured too.
-    readme, text = None, ""
+    # EVERY readme is a candidate, and every declaration contributes. A later
+    # `README_SUBMISSION.md` must be able to add a pattern the general README
+    # does not mention.
+    readmes = []
     try:
         candidates = sorted(p for p in root.iterdir()
                             if p.is_file() and is_non_submitted_readme_name(p.name)
                             and not is_author_to_complete_readme_name(p.name))
     except OSError:
         return out
+
+    def declaration_patterns(text: str) -> list:
+        """Globs attached to a "will be submitted" statement.
+
+        Earlier code took every backtick glob in the first matching README, so
+        an unrelated example (`fig-*.png`, `*.log`) changed the submitted set.
+        Walk the sentence that carries the declaration and the immediately
+        following pattern lines; stop at the next prose line. The glob may sit
+        before OR after the hint (`Only \`ms-*.docx\` will be submitted` and
+        `The following will be submitted: \`ms-*.docx\`` are both declarations).
+        """
+        def globs_in(fragment: str) -> list:
+            return [
+                token.strip()
+                for token_match in re.finditer(r"`([^`\n]{2,200})`", fragment)
+                for token in (token_match.group(1),)
+                if ("*" in token or "?" in token or "@(" in token)
+                and _extglob_to_regex(token.strip()) is not None
+            ]
+
+        found = []
+        for match in SUBMISSION_DECLARATION_HINT_RE.finditer(text):
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            lines = text[line_start:].splitlines()[:24]
+            if not lines:
+                continue
+            first = lines[0]
+            local_start = match.start() - line_start
+            # A pattern's own dot (`ms-*.docx`) is inside backticks and is not
+            # the end of the declaration sentence.
+            in_quote = [False] * len(first)
+            quoted = False
+            for pos, char in enumerate(first):
+                in_quote[pos] = quoted
+                if char == "`":
+                    quoted = not quoted
+            sent_start = max(
+                [pos for pos in range(local_start)
+                 if not in_quote[pos] and first[pos] in ".!?"] or [-1]) + 1
+            sent_end_candidates = [
+                pos for pos in range(local_start, len(first))
+                if not in_quote[pos] and first[pos] in ".!?"
+            ]
+            sent_end = min(sent_end_candidates) if sent_end_candidates else len(first)
+            found.extend(globs_in(first[sent_start:sent_end]))
+            for raw in lines[1:]:
+                line = raw.strip()
+                globs = globs_in(line)
+                if globs:
+                    found.extend(globs)
+                    continue
+                if not line or re.fullmatch(r"(?:or|and)[.:]?", line, re.I):
+                    continue
+                break
+        return found
+
+    patterns = []
+    hint_readmes = []
     for p in candidates:
         try:
             candidate_text = p.read_text("utf-8", "replace")
         except OSError:
             continue
         if SUBMISSION_DECLARATION_HINT_RE.search(candidate_text):
-            readme, text = p, candidate_text
-            break
-    if readme is None:
+            hint_readmes.append(p)
+        found = declaration_patterns(candidate_text)
+        if found:
+            if p not in readmes:
+                readmes.append(p)
+            for token in found:
+                if token not in patterns:
+                    patterns.append(token)
+    if not readmes:
+        if hint_readmes:
+            out["readme"] = hint_readmes[0].relative_to(root).as_posix()
+            out["readmes"] = [p.relative_to(root).as_posix() for p in hint_readmes]
+            out["ignored_reason"] = (
+                f"{out['readme']} names a submission rule but carries no parseable pattern")
         return out
-    out["readme"] = readme.relative_to(root).as_posix()
-    patterns = []
-    for tok in re.findall(r"`([^`\n]{2,200})`", text):
-        tok = tok.strip()
-        if not tok or ("*" not in tok and "?" not in tok and "@(" not in tok):
-            continue
-        if _extglob_to_regex(tok) is not None and tok not in patterns:
-            patterns.append(tok)
+    out["readme"] = readmes[0].relative_to(root).as_posix()
+    out["readmes"] = [p.relative_to(root).as_posix() for p in readmes]
     if not patterns:
         out["ignored_reason"] = (f"{out['readme']} names a submission rule but carries no "
                                  f"parseable pattern")
@@ -42987,19 +43063,24 @@ def declared_submission_filter(root: Path):
 # publication-side check also covers legacy names and names whose token alone
 # does not reveal the role.
 DUP_ROLE_DOC_EXTS = (".doc", ".docx", ".pdf", ".tex", ".ltx", ".md", ".txt")
-DUP_ROLE_SOURCE_SUFFIX_RE = re.compile(
-    r"(?i)(?:[-_](?:frontiers?template|template|zotero|source|original|revised|"
-    r"final|preprint|copy|backup))+$")
+DUP_ROLE_VERSION_RE = re.compile(r"(?:[-_][0-9a-f]{7}|[-_][vV]\d+)$")
+DUP_ROLE_PROVENANCE_SUFFIX_RE = re.compile(
+    r"(?i)(?:[-_](?:frontiers?template|zotero))+$")
 
 
 def _duplicate_role_key(name: str) -> str:
-    """A document role key with the version token and source-copy suffix removed."""
+    """A document role key with only package/copy provenance removed.
+
+    A one-letter suffix is a real document label (`panel-a`, `panel-b`), and
+    words such as `revised`, `original` and `final` can name two documents a
+    package must ship together. Removing them invented duplicate roles.
+    """
     stem = Path(str(name)).stem.lower()
-    stem = DOC_TOKEN_RE.sub("", stem)
+    stem = DUP_ROLE_VERSION_RE.sub("", stem)
     prev = None
     while prev != stem:
         prev = stem
-        stem = DUP_ROLE_SOURCE_SUFFIX_RE.sub("", stem)
+        stem = DUP_ROLE_PROVENANCE_SUFFIX_RE.sub("", stem)
     return re.sub(r"[-_.]+", "-", stem).strip("-")
 
 
@@ -43038,15 +43119,15 @@ def duplicate_submission_role_rows(root: Path, limit: int = 20) -> list:
         key = _duplicate_role_key(p.name)
         if not key:
             continue
-        groups.setdefault((key, p.suffix.lower()), []).append(rel)
-    for (key, ext), files in sorted(groups.items()):
+        groups.setdefault((Path(rel).parent.as_posix(), key, p.suffix.lower()), []).append(rel)
+    for (parent, key, ext), files in sorted(groups.items()):
         if len(files) < 2:
             continue
         rows.append({
             "rule": "PKG-26", "severity": "high", "fix": "manual",
             "file": files[0], "reference": ", ".join(files[1:]),
             "detail": (f"the submitted set carries {len(files)} {ext} files for one "
-                       f"document role ({key!r}): {', '.join(files)}. One is a stale "
+                       f"document role ({key!r}) in {parent!r}: {', '.join(files)}. One is a stale "
                        f"pre-revision/source copy; the reader cannot tell which is current, "
                        f"and a journal upload carries both. Keep the current version and "
                        f"remove or rename the stale copy out of the submitted set.")})
@@ -43253,24 +43334,45 @@ def placeholder_files_report(root: Path, extra_globs=(), area_names=None) -> dic
     detected = detect_placeholder_copies(
         root, area_names if area_names is not None else submission_not_carried_areas_plain())
     declared = set(decl["files"])
-    # When the operator declared ONE side of a detected duplicate pair, the
-    # declaration says which side is the placeholder: the other side is the real
-    # data and stays usable evidence (the ACT-haplotype case: declaring the ACT
-    # copy must not silence the HG008 original). Only undeclared pairs fall back
-    # to the detected side.
+    ignored_for_row = {}
     for r in detected:
-        r["ignored"] = bool(r["file"] not in declared and r["duplicates"] not in declared)
-    ignored = sorted(declared | {r["file"] for r in detected if r["ignored"]})
+        pair = [r["file"], r["duplicates"]]
+        # A declaration identifies the placeholder side. Without one, neither
+        # label can be trusted as the real data: ignoring the alphabetically
+        # later path silently kept the placeholder and discarded the original.
+        if r["file"] in declared and r["duplicates"] not in declared:
+            row_ignored = [r["file"]]
+        elif r["duplicates"] in declared and r["file"] not in declared:
+            row_ignored = [r["duplicates"]]
+        else:
+            marked = [rel for rel in pair if PLACEHOLDER_NAME_RE.search(rel)]
+            row_ignored = marked if len(marked) == 1 else pair
+        r["ignored"] = r["file"] in row_ignored
+        r["ignored_files"] = sorted(set(row_ignored))
+        ignored_for_row[r["file"]] = row_ignored
+    ignored = sorted(declared | {
+        rel for row_ignored in ignored_for_row.values() for rel in row_ignored})
     reasons = dict(decl["reasons"])
     for r in detected:
-        if r["ignored"]:
-            reasons.setdefault(r["file"],
-                               f"placeholder copy: {r['reason']} (it duplicates "
-                               f"{r['duplicates']})")
-        else:
-            reasons.setdefault(r["file"],
-                               f"duplicate of the declared placeholder {r['duplicates']}: "
-                               f"treated as the real data")
+        for rel in r["ignored_files"]:
+            other = r["duplicates"] if rel == r["file"] else r["file"]
+            if len(r["ignored_files"]) == len(pair):
+                outcome = ("both copies are unavailable as evidence until a declaration "
+                           "identifies which side is real")
+            elif rel in declared:
+                outcome = "the operator declared this side to be the placeholder"
+            else:
+                outcome = "this name identifies it as the placeholder side"
+            reasons.setdefault(
+                rel,
+                f"placeholder copy: {r['reason']} (it duplicates {other}); "
+                f"{outcome}",
+            )
+        kept = [rel for rel in (r["file"], r["duplicates"])
+                if rel not in r["ignored_files"]]
+        for rel in kept:
+            reasons.setdefault(
+                rel, f"real-data partner of the placeholder {r['ignored_files'][0]}")
     return {"declared_patterns": decl["patterns"], "declared": decl["files"],
             "readme": decl["readme"], "detected_copies": detected,
             "ignored": ignored, "reasons": reasons}
@@ -43556,7 +43658,7 @@ MCB_P_SMALL_RULE_RE = re.compile(
     r"(?i)(?:small\s+\$?p\$?|p\s*(?:<|≤|<=)\s*(?:0?\.05|alpha)|small(?:er)?\s+(?:p|P)\b)")
 MCB_CI_RULE_RE = re.compile(
     r"(?i)(?:entirely\s+below\s+0|interval[^.]{0,60}below\s+0|CI[^.]{0,40}below\s+0|"
-    r"excludes?\s+0)")
+    r"exclu(?:de|ding|des|sion)[^.]{0,20}\b0)")
 PRIOR_SUBMISSION_CLAIM_RE = re.compile(
     r"(?i)(?:related\s+manuscripts?\s*[:：]\s*none|not\s+under\s+consideration\s+elsewhere|"
     r"has\s+not\s+been\s+(?:published|submitted)\s+previously)")
@@ -43573,18 +43675,19 @@ def _title_words(text: str) -> set:
             if w not in PRIOR_TITLE_STOPWORDS}
 
 
-def _same_work(a: str, b: str, minimum: int = 2) -> bool:
-    """True when two texts share at least `minimum` content words (a work's title).
+def _same_work(a: str, b: str, minimum: int = 3) -> bool:
+    """True when two texts share enough of a title to be the same work.
 
     The guard keeps an unrelated decision letter that a co-author left in the
     feedback area from being reported as this cover letter's undisclosed prior
-    submission. A feedback text with too few content words (a bare forwarded
-    note) cannot be compared and is accepted.
+    submission. A short forwarded note cannot establish identity, and two
+    generic domain words ("cancer patients") are not a title match.
     """
     wa, wb = _title_words(a), _title_words(b)
     if len(wa) < minimum or len(wb) < minimum:
-        return True
-    return len(wa & wb) >= minimum
+        return False
+    shared = wa & wb
+    return len(shared) >= minimum and len(shared) / min(len(wa), len(wb)) >= 0.4
 
 
 def _read_delimited_table(path: Path, max_bytes: int = 8 * 1024 * 1024):
@@ -43629,42 +43732,46 @@ def scan_column_name_near_misses(root: Path, limit: int = 24) -> list:
     # Every distinct spelling of one normalized name, with the files carrying it.
     spellings = {}
     for rel, header in headers:
+        parent = Path(rel).parent.as_posix()
         for name in header:
             norm = _norm_header(name)
             if len(norm) < NEAR_MISS_MIN_LEN:
                 continue
-            spellings.setdefault(norm, {}).setdefault(name, set()).add(rel)
+            spellings.setdefault(parent, {}).setdefault(norm, {}) \
+                .setdefault(name, set()).add(rel)
     rows = []
-    for norm, variants in sorted(spellings.items()):
-        if len(variants) < 2:
-            continue
-        names = sorted(variants)
-        # Pair each spelling with its nearest other spelling that is NOT an
-        # exact alias (a case-only difference counts: it is the failure mode).
-        for i, a in enumerate(names):
-            for b in names[i + 1:]:
-                ratio = difflib.SequenceMatcher(None, a, b).ratio()
-                if a == b or (a.lower() != b.lower() and ratio < NEAR_MISS_RATIO):
-                    continue
-                if variants[a] == variants[b]:
-                    continue
-                fa = sorted(variants[a])[0]
-                fb = sorted(variants[b])[0]
-                rows.append({
-                    "rule": "PKG-11", "severity": "medium", "fix": "manual",
-                    "file": fa, "line": 1, "reference": a,
-                    "detail": (f"these sibling tables spell one column differently: {a!r} in "
-                               f"{fa} but {b!r} in {fb}. A consumer that requires the exact "
-                               f"header name therefore drops one of them silently (the "
-                               f"2026-10-17 audit: a `MixMHCPred_aff`/`MixMHCpred_aff` "
-                               f"difference can silently exclude a whole antigen from the "
-                               f"aggregation and change a headline). Rename the odd header to the family's own "
-                               f"spelling, or make the consumer accept both and REPORT every "
-                               f"skipped input"),
-                    "counterpart": {"file": fb, "column": b},
-                })
-                if len(rows) >= limit:
-                    return rows
+    for _parent, by_norm in sorted(spellings.items()):
+        for norm, variants in sorted(by_norm.items()):
+            if len(variants) < 2:
+                continue
+            names = sorted(variants)
+            # Pair each spelling with its nearest other spelling in the SAME
+            # directory. Tables in unrelated directories are not a family, and
+            # ordinary header capitalization there is not a silent join.
+            for i, a in enumerate(names):
+                for b in names[i + 1:]:
+                    ratio = difflib.SequenceMatcher(None, a, b).ratio()
+                    if a == b or (a.lower() != b.lower() and ratio < NEAR_MISS_RATIO):
+                        continue
+                    if variants[a] == variants[b]:
+                        continue
+                    fa = sorted(variants[a])[0]
+                    fb = sorted(variants[b])[0]
+                    rows.append({
+                        "rule": "PKG-11", "severity": "medium", "fix": "manual",
+                        "file": fa, "line": 1, "reference": a,
+                        "detail": (f"these sibling tables spell one column differently: {a!r} in "
+                                   f"{fa} but {b!r} in {fb}. A consumer that requires the exact "
+                                   f"header name therefore drops one of them silently (the "
+                                   f"2026-10-17 audit: a `MixMHCPred_aff`/`MixMHCpred_aff` "
+                                   f"difference can silently exclude a whole antigen from the "
+                                   f"aggregation and change a headline). Rename the odd header to "
+                                   f"the family's own spelling, or make the consumer accept both "
+                                   f"and REPORT every skipped input"),
+                        "counterpart": {"file": fb, "column": b},
+                    })
+                    if len(rows) >= limit:
+                        return rows
     return rows
 
 
@@ -43680,10 +43787,25 @@ def _parse_ci(cell: str):
 
 def _parse_p(cell: str):
     t = re.sub(r"\\textbf\{|\\emph\{|\}", "", str(cell or "")).strip()
+    t = re.sub(r"^\$?(?:p|P)?\$?\s*(?:=|<=|>=|<|>|≤|≥)?\s*", "", t)
+    t = t.strip("$ ").rstrip("*")
     try:
         return float(t)
     except ValueError:
         return None
+
+
+def _p_reports_significant(cell: str, parsed=None) -> bool:
+    """Whether a p-value CELL states significance (star or inequality aware)."""
+    text = re.sub(r"\\textbf\{|\\emph\{|\}", "", str(cell or "")).strip()
+    if re.search(r"\*+\s*\$?\s*$", text):
+        return True
+    if re.search(r"(?:<|≤|<=)\s*\$?\s*\d", text):
+        return True
+    if re.search(r"(?:>|≥|>=)\s*\$?\s*\d", text):
+        return False
+    value = _parse_p(text) if parsed is None else parsed
+    return value is not None and value <= 0.05
 
 
 def _latex_command_bodies(text: str, command: str) -> list:
@@ -43773,8 +43895,8 @@ def scan_mcb_rule_conflicts(root: Path, limit: int = 24) -> list:
                 pval, ci = _parse_p(p_cell), _parse_ci(ci_cell)
                 if pval is None or ci is None:
                     continue
-                inferior_by_p = pval <= 0.05
-                inferior_by_ci = ci[1] < 0
+                inferior_by_p = _p_reports_significant(p_cell, pval)
+                inferior_by_ci = ci[0] > 0 or ci[1] < 0
                 if inferior_by_p == inferior_by_ci:
                     continue
                 rows.append({
@@ -43783,7 +43905,7 @@ def scan_mcb_rule_conflicts(root: Path, limit: int = 24) -> list:
                     "reference": (f"{metric} / {label}" if metric else label),
                     "detail": (f"this row's own two significance columns disagree under the "
                                f"rule the table's caption states (small p AND an interval "
-                               f"entirely below 0 both mean 'significantly inferior'): p = "
+                               f"excluding 0 both mark a significant difference): p = "
                                f"{pval:g} but the interval is [{ci[0]:g}, {ci[1]:g}]. One of "
                                f"the two columns is wrong; do not ship a table that defines "
                                f"one verdict two ways"),
@@ -43817,7 +43939,7 @@ def scan_mcb_rule_conflicts(root: Path, limit: int = 24) -> list:
 # columns, find the sibling `*units*.tsv` (same directory) and compare each
 # method's unit count and mean with the table's own. A caption file with the
 # same stem (`.tex`/`.md`) supplies the words the row quotes.
-POOLED_UNITS_VALUE_COLUMNS = ("pct_within", "value", "score", "mean")
+POOLED_UNITS_VALUE_COLUMNS = ("mean", "pct_within", "value", "score")
 
 
 def _pooled_units_by_method(path: Path) -> dict:
@@ -43922,9 +44044,23 @@ def scan_form_software_coverage(root: Path, limit: int = 12) -> list:
         main_paras.extend(_docx_paragraphs(p) or [])
     # A table header ("Software and algorithms") is not a software paragraph:
     # require a real sentence with a version-like token in it.
-    soft = "\n".join(t for t in main_paras
-                     if re.match(r"(?i)^\s*(software|software and code)\b", t.strip())
-                     and len(t.strip()) >= 60 and re.search(r"\d", t))
+    soft_paras = []
+    for index, text in enumerate(main_paras):
+        stripped = text.strip()
+        if re.fullmatch(r"(?i)software(?:\s+and\s+code)?\s*[:.]?", stripped):
+            # A Word heading and the inventory beneath it are separate
+            # paragraphs. Joining was previously limited to paragraphs that
+            # themselves began "Software" and carried a digit, so the usual
+            # heading + list form produced no row at all.
+            following = next(
+                (p.strip() for p in main_paras[index + 1:] if p.strip()), "")
+            if following:
+                soft_paras.append(f"Software. {following}")
+            continue
+        if re.match(r"(?i)^\s*(software|software and code)\b", stripped) \
+                and len(stripped) >= 25 and re.search(r"\d", stripped):
+            soft_paras.append(stripped)
+    soft = "\n".join(soft_paras)
     soft = re.sub(r"(?i)^\s*software(?:\s+and\s+code)?\s*[.:]?\s*", "", soft)
     if not soft:
         return []
@@ -43955,9 +44091,11 @@ def scan_form_software_coverage(root: Path, limit: int = 12) -> list:
                                     f"manuscript names {len(tools)} tool(s) and none could be "
                                     f"checked against it")})
             continue
-        low = text.lower()
         has_software_section = bool(re.search(r"(?i)\bsoftware\b", text))
-        missing = sorted(t for t in tools if t.lower() not in low)
+        missing = sorted(
+            tool for tool in tools
+            if re.search(r"(?<![A-Za-z0-9])" + re.escape(tool) + r"(?![A-Za-z0-9])",
+                         text, re.I) is None)
         if not has_software_section:
             rows.append({"rule": "PKG-16", "severity": "medium", "fix": "manual",
                          "advisory": True,
@@ -44199,7 +44337,11 @@ def scan_ranking_claim_conflicts(root: Path, texts=None, limit: int = 12) -> lis
                          for meth, vals in by_metric[best_metric].items() if vals}
                 if len(means) < 2:
                     continue
-                claimed_ids = [meth for meth in means if claimed.split()[0] in meth]
+                claimed_key = re.sub(r"[^a-z0-9]+", "", claimed)
+                claimed_ids = [
+                    meth for meth in means
+                    if re.sub(r"[^a-z0-9]+", "", meth.lower()) == claimed_key
+                ]
                 if not claimed_ids:
                     continue
                 claimed_mean = max(means[meth] for meth in claimed_ids)
@@ -44487,7 +44629,11 @@ def scan_cited_note_negations(root: Path, texts=None, limit: int = 8) -> list:
 
 
 REF_ENTRY_NUM_RE = re.compile(r"^\s*(\d{1,3})\.\s*$")
-INLINE_CITATION_RE = re.compile(r"([A-Za-z][A-Za-z\-]{2,})(\d{1,2})(?![\d.])")
+INLINE_CITATION_RE = re.compile(
+    r"(?<![A-Za-z])((?!(?:grch|chm|python|hg|mm)\d)[A-Za-z][A-Za-z\-]{2,})"
+    r"(\d{1,2})(?![\d.])",
+    re.I,
+)
 SINGLE_CELL_RE = re.compile(r"(?i)\bsingle[- ]cell\b")
 ASSEMBLY_TITLE_RE = re.compile(
     r"(?i)\b(?:complete sequence|genome assembly|reference genome|"
@@ -44764,7 +44910,20 @@ def scan_pooled_table_mismatches(root: Path, limit: int = 24) -> list:
             continue
         mi, ni, avi = header.index("method"), header.index("n_units"), header.index("mean")
         units = {}
-        for q in sorted(p.parent.glob("*units*.tsv")):
+        table_tokens = set(re.findall(
+            r"[a-z0-9]+", re.sub(r"\.tsv$", "", p.name.lower())))
+
+        def units_match(q: Path) -> tuple:
+            q_tokens = set(re.findall(
+                r"[a-z0-9]+", re.sub(r"\.tsv$", "", q.name.lower())))
+            return (
+                ("pooled" in q_tokens) == ("pooled" in table_tokens),
+                len(table_tokens & q_tokens),
+                -len(q.name),
+            )
+
+        candidates = sorted(p.parent.glob("*units*.tsv"), key=units_match, reverse=True)
+        for q in candidates:
             units = _pooled_units_by_method(q)
             if units:
                 units_file = q
@@ -46687,23 +46846,16 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     """Publish <root>/final_clean_version_<root dir name>/: the champion corpus
     for a new run.
 
-    The copy starts byte-identical to the pinned champion's corpus (that
-    identity is verified BEFORE the counter increment below). The winner
+    The copy starts byte-identical to the pinned champion's corpus and remains
+    byte-identical through publication. The winner
     directory is already materialized by build_corpus_dir(), which strips the
     process scratch (work/), the difference-tracking auxiliaries (see
     TRACKING_AUX_NAME_RE) and the pipeline's own bookkeeping
     (CHANGELOG.md, MANUAL_STEPS.md, REVISION_REPORT.md, revision_report.json,
     DIFF_LEDGER.md, REWRITE_REPORT.md, VISUAL_CHECK.md). Copying it therefore
-    gives the champion corpus a new `setup --source <dir>` needs. The ONE
-    deliberate addition is the `author_to_complete: readme` checklist
-    (`README*.md`, never submitted and excluded from the content token); every
-    other status document remains a sibling of the directory.
-
-    The generation counter in the filenames is then INCREMENTED by one
-    (`int(filename.split("-")[1])`, guarded for a missing/non-numeric field) and
-    the references inside text files are repointed to the new names, so the
-    published copy is the NEXT round's source under the user's naming
-    convention (cnb-11-* -> cnb-12-*, ...).
+    gives the champion corpus exactly what `setup --source <dir>` needs.
+    Filenames and references are preserved as judged; the author checklist and
+    every other status document remain siblings of the directory.
 
     The copy is ALWAYS attempted (2026-10-01): an uncertified champion's corpus
     is still materialized, and its certification verdict travels in the SIBLING
@@ -46720,10 +46872,9 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     Returns {"path", "digest", "pin_digest", "files", "renamed", "action",
     "certified", "certification_note", "zip"} or {"skipped": <reason>, ...}
     when the corpus itself cannot be built (no winner/pin on disk, empty
-    corpus, a digest mismatch, a name collision). The write is idempotent: an
-    existing copy that already hashes to the expected (incremented) tree is
-    left untouched; a superseded copy is archived under _superseded/, never
-    deleted.
+    corpus, or a digest mismatch). The write is idempotent: an existing copy
+    that already hashes to the pinned tree is left untouched; a superseded
+    copy is archived under _superseded/, never deleted.
     """
     pin = final.get("pin") or {}
     src = None
@@ -46735,6 +46886,11 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
         if d.is_dir():
             src = d
     _meta = {"certified": bool(certified), "certification_note": reason or None}
+    if flatten_zotero:
+        return dict(_meta, skipped=(
+            "post-pin Zotero-field flattening is disabled: publication must serve the "
+            "judged bytes. Set format_policy.unlink_zotero_fields before `run`, or "
+            "leave the live fields for the author."))
     if src is None:
         return dict(_meta, skipped="neither the published winner nor the pin is present on disk")
     fc_name = final_clean_dirname(ctx.root)
@@ -46759,59 +46915,19 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
         rmtree_force(tmp, ignore_errors=True)
         return dict(_meta, skipped=f"the clean copy hashes to {digest[:12]} but the pin "
                                    f"recorded {str(pin.get('digest'))[:12]}")
-    # DELIVERY HYGIENE, after the identity check and before the counter (2026-10-15).
-    # The delivered copy is what the author hands to the journal, so two classes
-    # of file are removed here, where their removal can be reported instead of
-    # silently changing a digest:
-    #   * `is_non_shippable_name` junk -- an OS download stub
-    #     (`figS3.png:Zone.Identifier`), a `*.pyc`, a Word `~$` owner file;
-    #   * a `README*.md`/`README*.txt` a REVISION SESSION wrote (it narrates the
-    #     finding ids and hand-off paths of the round that produced the package).
-    # ORDER MATTERS and was measured: the digest just checked is the one the PIN
-    # recorded, over the corpus AS IT WAS -- stripping first made the 2026-10-15
-    # neohet root compare 414 files against its pin's 415 and refuse to publish.
-    # The pin and the winner keep the bytes they were hashed with; only this
-    # delivered tree is cleaned.
+    # The delivered tree is the judged tree. Everything below SCANS that tree;
+    # none of the scans is allowed to rewrite it. A delivery cleanup here would
+    # make final_clean_version/ (and the next round's --source) a cousin of the
+    # bytes the panel scored, contradicting AGENTS.md rule 5.
     hygiene = {"removed": [], "kept_bbl": [], "raw_data_untouched": 0,
                "removed_word_owner_files": [], "removed_platform_junk": [],
-               "removed_bytecode_cache": []}
-    try:
-        _junk = strip_non_shippable_files_in_dir(tmp)
-    except Exception as e:                                            # noqa: BLE001
-        _junk = {"removed": [], "kept_in_evidence": []}
-        hygiene["strip_error"] = f"{type(e).__name__}: {e}"
-    for rel in _junk.get("removed") or []:
-        if is_bytecode_cache_name(Path(rel).name):
-            hygiene["removed_bytecode_cache"].append(rel)
-        elif is_word_owner_name(Path(rel).name):
-            hygiene["removed_word_owner_files"].append(rel)
-        else:
-            hygiene["removed_platform_junk"].append(rel)
-    if _junk.get("kept_in_evidence"):
-        hygiene["junk_left_in_evidence"] = list(_junk["kept_in_evidence"])
-    # Internal-note README files (see README_NOTE_HOLD_DIRNAME): the author's
-    # own README is carried by the corpus -- it is often the package's own
-    # submitted-set declaration -- but one a REVISION SESSION wrote beside the
-    # code it revised must not reach a pin, a winner or this package.
-    # `hold_internal_readme_notes` MOVES such a file to the root's `reports/`:
-    # the operator keeps the text, the package stays clean, and the move is
-    # named in the sibling status readme.
-    try:
-        hygiene["held_internal_readme_notes"] = hold_internal_readme_notes(
-            tmp, Path(ctx.reports_dir) / README_NOTE_HOLD_DIRNAME, warns=None)
-    except Exception as e:                                            # noqa: BLE001
-        hygiene["held_internal_readme_notes"] = []
-        hygiene["readme_hold_error"] = f"{type(e).__name__}: {e}"
-    # The pin digest above is verified BEFORE the counter increment; the
-    # published copy carries the incremented names and the repointed references.
-    counter = _increment_final_clean_counters(tmp)
-    if counter.get("collisions"):
-        rmtree_force(tmp, ignore_errors=True)
-        return dict(_meta, skipped="filenames collide after the +1 increment (nothing was "
-                                   "published): " + "; ".join(counter["collisions"][:4]))
-    # Hygiene: the published package is what the author hands over, so the build
-    # by-products of an editable source (LaTeX .blg/.bcf/.run.xml/.synctex.gz/
-    # .aux/.log/... and an EMPTY .bbl) are dropped -- a compile regenerates them.
+               "removed_bytecode_cache": [],
+               "publication_bytes": "pin-identical (no post-judgment rewrite)"}
+    hygiene["held_internal_readme_notes"] = []
+    counter = {"renamed": 0, "raw_data_untouched": 0, "collisions": []}
+    # Build by-products are REPORTED below, never removed here. If they should
+    # not ship, the stage that produced the version must remove them before the
+    # pin is taken; publication cannot clean a judged corpus.
     # A non-empty .bbl and the compiled PDFs stay: the .bbl is the reference list
     # when no editable bibliography can regenerate it, and a PDF is a submission
     # deliverable when the configured venue accepts one (see the venue profile's
@@ -46826,57 +46942,18 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
             continue
         rel = q.relative_to(tmp).as_posix()
         if is_evidence_rel(rel):
-            # READ-ONLY BY CONTRACT: the published package carries the author's
-            # evidence files (raw data, human review feedback) exactly as they
-            # are, build by-products included -- the pipeline neither deletes
-            # nor renames anything inside them.
             hygiene["raw_data_untouched"] += 1
-            continue
-        low = q.name.lower()
-        # (The never-ship classes -- OS junk, bytecode caches, Word lock files --
-        # were removed BEFORE the identity check above, where their removal can
-        # be reported without moving a digest. What remains here is the build
-        # by-product set.)
-        if low.endswith((".blg", ".bcf", ".run.xml", ".synctex.gz", ".aux", ".log", ".out",
-                         ".fls", ".fdb_latexmk", ".toc", ".lof", ".lot", ".nav", ".snm",
-                         ".vrb", ".idx", ".ilg", ".ind")):
-            hygiene["removed"].append(rel)
-            q.unlink()
-        elif low.endswith(".bbl"):
-            if q.stat().st_size == 0:
-                hygiene["removed"].append(rel)
-                q.unlink()
-            else:
-                hygiene["kept_bbl"].append(rel)
-    # Final formatting guarantee: the champion was already normalized in its own
-    # stage postcheck, but a package produced before this feature existed (or by
-    # an operator who ran the old script) reaches publication unnormalized.
-    # Normalize the PUBLISHED copy and record it; the pin digest above was
-    # verified before these repairs, and the `format_fix` block below states
-    # exactly what changed.
-    # The published copy is refreshed like every other corpus, but its Zotero
-    # fields are NOT unlinked by default: unlinking is the author's own step
-    # when the final submission file is prepared. `decide
-    # --unlink-zotero-fields` (or the `unlink_zotero_fields_at_publish` policy
-    # key) opts in and flattens the (already refreshed) fields so no
-    # journal-side conversion can renumber them; the working corpora (pinned/,
-    # the round winners) always keep their live fields. The pin digest above
-    # was verified before these repairs.
+        if q.name.lower().endswith(".bbl") and q.stat().st_size:
+            hygiene["kept_bbl"].append(rel)
+    # Publication is a byte-for-byte handoff of the pin. Formatting, Zotero
+    # flattening and dangling-reference removal happen in the stage that writes
+    # a candidate, before it is judged; doing them here would silently replace
+    # the artifact the panel selected.
     pub_policy, flatten_zotero = publication_format_policy(
         ctx, format_policy_of(ctx), cli_flatten=bool(flatten_zotero))
-    # PKG-2 repair (before the published copy is formatted): the pointers a
-    # to-be-submitted document may not carry are REMOVED, and the removal is
-    # recorded verbatim below. A package produced before the stage-side repair
-    # existed reaches publication with them; this is the publish-time guarantee.
-    try:
-        hygiene["removed_dangling_references"] = strip_dangling_references_in_dir(
-            tmp, submission_not_carried_areas(ctx), final_clean_dirname(ctx.root),
-            warns=None, artifacts_dir=ctx.reports_dir,
-            artifact_name=f"PKG2_{final_clean_dirname(ctx.root)}.json")
-    except Exception as e:                                            # noqa: BLE001
-        hygiene["removed_dangling_references"] = {"error": f"{type(e).__name__}: {e}"}
-    # Field counts BEFORE the published copy is refreshed/flattened, so the
-    # readme can say what actually happened instead of guessing.
+    hygiene["removed_dangling_references"] = {
+        "skipped": "publication preserves the judged bytes; see the publication scans"
+    }
     _fmt_z = _format_module()
     zot_before = {}
     if _fmt_z is not None and hasattr(_fmt_z, "zotero_report_for_docx"):
@@ -46886,15 +46963,17 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
             except Exception:                                      # noqa: BLE001
                 continue
             zot_before[q.name] = int((_zrep.get("counts") or {}).get("zotero", 0))
-    format_fix = ({"skipped": "format_fix=off"}
-                  if str((ctx.cfg or {}).get("format_fix") or DEFAULT_FORMAT_FIX) == "off"
-                  else normalize_formatting_in_dir(tmp, pub_policy,
-                                                   fc_name, warns=None,
-                                                   artifacts_dir=ctx.reports_dir,
-                                                   template=venue_word_templates(ctx) or None,
-                                                   containers=venue_containers(ctx)))
+    format_fix = {
+        "skipped": "publication preserves the judged bytes; formatting is a stage-side gate",
+        "policy": pub_policy,
+    }
     hygiene["zotero_unlinked"] = {"requested": bool(flatten_zotero),
-                                  "documents": [], "fields_before": zot_before}
+                                  "documents": [],
+                                  "fields_before": zot_before,
+                                  "deferred": (
+                                      "publication preserves the judged bytes; unlink Zotero "
+                                      "fields in the stage output before it is scored"
+                                      if flatten_zotero else None)}
     hygiene["zotero_live_fields"] = []
     if _fmt_z is not None and hasattr(_fmt_z, "zotero_report_for_docx"):
         for q in sorted(tmp.rglob("*.docx")):
@@ -46911,6 +46990,12 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     # scanned for internal material (PKG-1) and every shipped PDF for an
     # unfilled/blank artifact (FMT-PDF1..3). These are reported, never silently
     # deleted: the file belongs to the author, but the package must not ship it.
+    hygiene["present_non_shippable"] = sorted(
+        q.relative_to(tmp).as_posix()
+        for q in tmp.rglob("*")
+        if q.is_file() and is_non_shippable_name(q.name)
+        and not is_evidence_rel(q.relative_to(tmp).as_posix())
+    )
     hygiene["internal_artifacts"] = internal_artifact_rows(tmp)
     # PKG-26: two submitted files for one document role (a stale pre-revision
     # copy beside the current document). The reader cannot tell which is
@@ -46963,8 +47048,8 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     # `<name><address>` token): reported, never re-spaced by guesswork.
     hygiene["front_matter_glue"] = package_front_matter_glue_rows(tmp)
     # PKG-4: a figure the documents cite (and legend) that the package carries
-    # nowhere. Computed on the PUBLISHED copy, i.e. after the counter increment,
-    # so the row names the file the author will actually hand over.
+    # nowhere. Computed on the PUBLISHED copy, whose names and bytes are the
+    # judged ones, so the row names the file the author will actually hand over.
     hygiene["display_items"] = package_display_item_rows(
         tmp, submission_not_carried_areas(ctx))
     # PKG-5: two shipped surfaces attributing one display item to different
@@ -47004,13 +47089,29 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     except Exception as e:                                            # noqa: BLE001
         open_items = {"error": f"{type(e).__name__}: {e}", "items": [], "discarded": [],
                       "statuses": {}, "sibling": None}
+    # Non-shippable files were removed from the STAGE output before its corpus
+    # digest. Carry that stage-side record into the delivery report without
+    # touching the judged bytes again.
+    _champ_rec = ctx.run(open_items.get("run")) or {}
+    _strip_rec = _champ_rec.get("non_shippable_strip") or {}
+    for rel in _strip_rec.get("removed") or []:
+        if is_bytecode_cache_name(Path(rel).name):
+            hygiene["removed_bytecode_cache"].append(rel)
+        elif is_word_owner_name(Path(rel).name):
+            hygiene["removed_word_owner_files"].append(rel)
+        else:
+            hygiene["removed_platform_junk"].append(rel)
+    hygiene["held_internal_readme_notes"] = list(
+        _champ_rec.get("held_internal_readme_notes") or [])
     # `author_to_complete: readme`: the published package gets ONE README
     # checklist even when the stage forgot to write it. Every row is copied from
     # the revision ledger / residual record / a literal marker already in the
     # package; no document is edited and no item is invented.
     if author_to_complete_mode_of(ctx) == "readme":
         try:
-            _hreadme = write_published_handoff_readme(tmp, open_items, residuals)
+            _hreadme = write_published_handoff_readme(
+                tmp, open_items, residuals,
+                target_path=ctx.root / FINAL_CLEAN_AUTHOR_README_NAME)
             if _hreadme:
                 hygiene["handoff_readme"] = _hreadme
         except Exception as e:                                        # noqa: BLE001
@@ -47154,8 +47255,6 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
     else:
         L.append(f"- final_clean_version/: {fc.get('action', 'published')}; "
                  f"{fc.get('files', '?')} file(s), digest `{str(fc.get('digest'))[:12]}`"
-                 + (f", {fc['renamed']} filename counter(s) incremented"
-                    if fc.get("renamed") else "")
                  + f", {fc.get('raw_data_untouched', 0)} raw-data file(s) untouched")
         _zip = fc.get("zip") or {}
         if _zip.get("path"):
@@ -47174,6 +47273,15 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
                  f"by-product -- it holds the opening user's name and is not a document): "
                  + ", ".join(f"`{n}`" for n in word_owner[:8])
                  + (" …" if len(word_owner) > 8 else ""))
+    present_owner = [
+        rel for rel in (hygiene.get("present_non_shippable") or [])
+        if is_word_owner_name(Path(rel).name)
+    ]
+    if present_owner:
+        L.append(f"- {len(present_owner)} Word owner (lock) file(s) remain in the judged bytes "
+                 f"and cannot be removed without breaking the champion identity; the journal "
+                 f"submission assembly excludes them: "
+                 + ", ".join(f"`{n}`" for n in present_owner[:8]))
     junk = hygiene.get("removed_platform_junk") or []
     if junk:
         L.append(f"- {len(junk)} operating-system by-product file(s) were NOT published (a "
@@ -47187,6 +47295,14 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
                  f"(a side effect of RUNNING a helper script -- never a deliverable): "
                  + ", ".join(f"`{n}`" for n in bytecode[:8])
                  + (" …" if len(bytecode) > 8 else ""))
+    dangling = hygiene.get("non_submitted_references") or []
+    if dangling:
+        L.append(f"- **{len(dangling)} dangling reference(s) (PKG-2) remain in the judged "
+                 f"bytes** -- publication preserves the scored digest, so the author must "
+                 f"repair these before upload:")
+        for _row in dangling[:12]:
+            L.append(f"  - `{_row.get('file')}` line {_row.get('line')}: "
+                     f"`{_row.get('reference')}` -- {_row.get('detail')}")
     held_readmes = hygiene.get("held_internal_readme_notes") or []
     if held_readmes:
         L.append(f"- {len(held_readmes)} `README*.md`/`README*.txt` file(s) carrying a revision "
@@ -47649,6 +47765,19 @@ def package_readiness(final_clean: dict, residuals: dict = None,
                            f"it is never submitted, and no submitted document may depend on "
                            f"it). Supply each item in the documents, then update or delete the "
                            f"README")})
+        _handoff_rec = hyg.get("handoff_readme") or {}
+        _handoff_path = Path(str(_handoff_rec.get("path") or ""))
+        _published = Path(str((final_clean or {}).get("path") or ""))
+        if _handoff_path.is_file() and _published.is_dir() \
+                and _handoff_path.parent != _published:
+            _rows = count_manual_steps(_handoff_path)
+            findings.append({
+                "rule": "AUTH-2", "document": _handoff_path.name,
+                "detail": (f"the package's author-to-complete checklist is the SIBLING "
+                           f"`{_handoff_path.name}` with {_rows if _rows is not None else '?'} "
+                           f"item(s). It is outside the judged directory so publication can "
+                           f"preserve the champion digest; supply each item and delete the "
+                           f"checklist when it is empty")})
     handoff = hyg.get("handoff_readme") or {}
     if handoff.get("error"):
         findings.append({
@@ -47663,6 +47792,14 @@ def package_readiness(final_clean: dict, residuals: dict = None,
     for r in hyg.get("internal_artifacts") or []:
         findings.append({"rule": r.get("rule") or "PKG-1",
                          "document": r.get("file"), "detail": r.get("detail")})
+    for rel in hyg.get("present_non_shippable") or []:
+        findings.append({
+            "rule": "PKG-1", "document": rel,
+            "detail": ("this non-shippable by-product is present in the judged bytes; it was "
+                       "not removed after the pin because publication preserves the scored "
+                       "digest. The journal submission assembly excludes it; remove it from "
+                       "the source and re-run the round before treating the directory as a "
+                       "clean handoff.")})
     if hyg.get("duplicate_roles_error"):
         findings.append({
             "rule": "PKG-26", "advisory": True,
@@ -47685,7 +47822,10 @@ def package_readiness(final_clean: dict, residuals: dict = None,
             "detail": (f"the published-package length scan could not run "
                        f"({length_info['error']}); the abstract/main-text/cover-letter "
                        f"caps were NOT verified")})
-    for r in length_info.get("over_limit") or []:
+    length_rows = list(length_info.get("over_limit") or [])
+    length_rows += [r for r in (length_info.get("over_base") or [])
+                    if not r.get("over_limit")]
+    for r in length_rows:
         section = str(r.get("section") or "section")
         if section == "cover letter":
             cap = r.get("total_max")
@@ -47699,14 +47839,19 @@ def package_readiness(final_clean: dict, residuals: dict = None,
                 f"exception; never remove a claim about the work to meet the count")
         else:
             cap = r.get("cap")
-            if cap is None:
-                continue
             words = r.get("words")
-            detail = (
-                f"the {section} is {words} words against the venue's relaxed cap of "
-                f"{cap} (base {r.get('base')}, margin {r.get('relaxation')}): "
-                f"compress only by removing redundancy, or obtain an explicit venue "
-                f"exception; do not delete scientific content to meet the count")
+            if cap is None:
+                detail = (
+                    f"the {section} is {words} words against the venue's "
+                    f"{r.get('base')}-word base limit; this profile records no "
+                    f"relaxed cap that can waive it: trim or obtain an explicit "
+                    f"venue exception")
+            else:
+                detail = (
+                    f"the {section} is {words} words against the venue's base "
+                    f"limit of {r.get('base')} words (the pipeline's relaxed cap is "
+                    f"{cap}): the venue's own published number is the limit the "
+                    f"journal enforces; trim or obtain an explicit venue exception")
         findings.append({
             "rule": "FMT-M19", "document": r.get("document"), "detail": detail})
     # PKG-2 leftovers: the pointers the mechanical removal may not touch (a
@@ -48039,8 +48184,8 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
     if final_clean and final_clean.get("path"):
         L.append(f"**Clean version for a new round:** `{final_clean['path']}` "
                  f"({final_clean['files']} file(s), digest `{str(final_clean['digest'])[:16]}…`; "
-                 f"the copy verified against the pin `"
-                 f"{str(final_clean.get('pin_digest') or '')[:16]}…` BEFORE the counter increment). "
+                 f"the copy is byte-identical to the pin `"
+                 f"{str(final_clean.get('pin_digest') or '')[:16]}…`). "
                  f"It is the champion corpus with no scratch, no auxiliaries and no self-written "
                  f"reports, so it can seed the next pipeline run directly. Its certification "
                  f"status and provenance are in the SIBLING `{FINAL_CLEAN_README_NAME}` "
@@ -48050,13 +48195,6 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
             L.append(f"It is also compressed, the directory KEPT, as `{_zip['path']}` "
                      f"({_zip.get('files', '?')} file(s), {_zip.get('bytes', '?')} bytes) "
                      f"for handing the package over.")
-        if final_clean.get("renamed"):
-            L.append("")
-            L.append(f"Its filenames carry the generation counter INCREMENTED by one "
-                     f"(int(filename.split(\"-\")[1]) + 1: cnb-11-* -> cnb-12-*; a file whose "
-                     f"second dash-field is missing or not an integer keeps its name), and every "
-                     f"reference inside the text files was repointed to the new names "
-                     f"({final_clean['renamed']} file(s) renamed).")
         L.append("")
         L.append(f"```\npython paper_pipeline.py setup --source {final_clean['path']} "
                  f"--root <new-root>\n```")
@@ -48682,9 +48820,6 @@ def cmd_status(args) -> None:
         print(f"round indices: pipeline rounds 1..{len(_round_indices)} follow built-in "
               f"schedule round(s) {', '.join(str(i) for i in _round_indices)}")
     _jmode = journal_mode_of(ctx)
-    _mode_note = revision_mode_note(ctx)
-    if _mode_note:
-        print(f"mode source:   {_mode_note}")
     print(f"ranking:       adaptive severity_tier_category defect prefix LEADS; floor "
           f"{tiebreak_defect_floor_of(ctx)} "
           f"(`set-tiebreak-defect-floor N`; 0 = one cell only, 999999 = every cell)")
@@ -49179,6 +49314,14 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     # it writes decision.json, the round reports and final_clean_version/, so it
     # must hold the same root lock as run/retry/prune/redline.
     venue_profile_of(ctx)          # the report names the venue and quotes its limits
+    if getattr(args, "unlink_zotero_fields", False):
+        die("decide cannot unlink Zotero fields after the round has been judged: "
+            "final_clean_version/ must be the champion pin's bytes, and a post-pin "
+            "flatten would publish a different artifact. Set "
+            "`format_policy.unlink_zotero_fields` (or "
+            "`format_policy.unlink_zotero_fields_at_publish`) in pipeline_config.json "
+            "before `run`, so every candidate is flattened before it is scored, or "
+            "leave the live fields for the author to unlink manually.", code=2)
     if journal_is_scoped(ctx):
         # A major/minor revision is not decided: there is no field, no judge
         # panel and no champion choice -- the single concern-scoped revision is
@@ -49678,8 +49821,6 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         print(f"[decide] final clean version: {final_clean['path']} "
               f"({final_clean['files']} file(s), {final_clean.get('action')}, "
               f"digest {str(final_clean['digest'])[:12]}"
-              + (f", {final_clean['renamed']} filename counter(s) incremented"
-                 if final_clean.get("renamed") else "")
               + f") -- "
               + ("ready as " if certification["certified"]
                  else "NOT CERTIFIED, inspect before use; ")
@@ -53422,10 +53563,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "review-audit-revise), minor (option 4: as major, for a minor "
                          "revision), llm (option 5: revise against the false-positive-"
                          "filtered llm_review_feedback/ area ONLY; no journal letter, no "
-                         "response letter; when --revision-mode is omitted and --source "
-                         "carries a non-empty llm_review_feedback/, this mode is selected "
-                         "automatically -- rename the area to llm_review_feedback.disabled to "
-                         "turn that off). The human feedback file(s) are auto-detected in "
+                         "response letter; select it explicitly -- a non-empty area does "
+                         "not select a mode by itself). The human feedback file(s) are auto-detected in "
                          "--source by name (feedback/referee/reviewer/editor/decision), or "
                          "named with --journal-feedback")
     ps.add_argument("--journal-feedback", action="append", default=None, metavar="FILE",
@@ -53670,15 +53809,13 @@ def build_parser() -> argparse.ArgumentParser:
                                   "written to decision.json and the status readme; this flag only "
                                   "turns them into a gate.")
     decide_opts.add_argument("--unlink-zotero-fields", action="store_true",
-                             help="flatten the published copy's (already refreshed) Zotero "
-                                  "citation fields to plain text, so a journal-side conversion "
-                                  "cannot renumber them. OFF BY DEFAULT and never implied: the "
-                                  "pipeline does not unlink fields unless this flag (or "
-                                  "format_policy.unlink_zotero_fields_at_publish) asks for it, "
-                                  "because the author normally unlinks manually when preparing "
-                                  "the final submission file. Affects "
-                                  "final_clean_version_<root name>/ only; the pinned corpora "
-                                  "keep their live fields.")
+                             help="OFF BY DEFAULT. Refuse rather than silently ignore a "
+                                  "post-pin flatten: the "
+                                  "published copy must remain the judged pin. To flatten, set "
+                                  "format_policy.unlink_zotero_fields (or "
+                                  "unlink_zotero_fields_at_publish) before `run`, so every "
+                                  "candidate is flattened before it is scored; otherwise the "
+                                  "author unlinks fields manually.")
     # Shared by run / run-decide / decide: the optional LLM cross-judge conflict
     # audit (the deterministic pass and the manual TODO files always run).  The
     # LLM pass itself is OFF by default -- the LLM defect audit covers the same
@@ -54208,6 +54345,22 @@ def main() -> None:
     # run's log is readable.
     args = parser.parse_args()
     install_timestamped_streams()
+    cmd = getattr(args, "cmd", "")
+    # A root freezes the pipeline script that produced it. Refuse EVERY mutator
+    # driven by a different copy before even opening its run log; otherwise the
+    # same stale driver that corrupted a root through `run` can still change it
+    # through `retry`, `conform`, `prune`, or a `set-*` command.
+    if cmd in FOREIGN_GUARD_COMMANDS and getattr(args, "root", None) \
+            and Path(args.root).expanduser().is_dir():
+        guard_ctx = Ctx(
+            Path(args.root).resolve(),
+            strict_venue=bool(getattr(args, "strict_venue", False)),
+        )
+        # Loading a root can print informational notes. Keep the guard silent
+        # and JSON-safe; it speaks only when it refuses the command.
+        with contextlib.redirect_stdout(io.StringIO()):
+            guard_ctx.load(need_cfg=False)
+        refuse_foreign_pipeline(guard_ctx, cmd)
     # The commands that drive or mutate a root keep their console in the root
     # (`reports/<cmd>-<stamp>.log`, and `state.json` -> `run_logs`): the attempt
     # history holds each attempt's diagnostics, this holds the INVOCATION --

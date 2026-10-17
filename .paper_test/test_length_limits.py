@@ -177,12 +177,12 @@ def test_prompts():
           and "score 0" in texts["judge"])
     check("LT3 the judge-facing length wording carries no provenance label",
           "champion" not in texts["judge"].lower())
-    check("LT3 every M19 mandate carries the cover-letter TOTAL cap (650 words)",
-          all("650" in texts[k] for k in ("review", "revise", "integrate", "rewrite", "judge")),
+    check("LT3 no M19 mandate invents a cover-letter total cap",
+          all("650" not in texts[k] for k in ("review", "revise", "integrate", "rewrite",
+                                               "judge")),
           str({k: ("650" in texts[k]) for k in texts}))
-    check("LT3 the shared class rule names the cover-letter total cap",
-          "keep its TOTAL content" in " ".join(nb.defect_class_rule().split())
-          and "within 650 words" in " ".join(nb.defect_class_rule().split()))
+    check("LT3 the shared class rule invents no cover-letter total cap",
+          "with 650 words" not in " ".join(nb.defect_class_rule().split()))
     on = nb.review_prompt(Path("/tmp/x"), "r1_review", 1, caption_limit=300)
     off = nb.review_prompt(Path("/tmp/x"), "r1_review", 1, caption_limit=0)
     check("LT3 the caption rule now names both narrowed places",
@@ -263,26 +263,27 @@ def test_scanner():
     check("LT4 the cover-letter row names its provenance (user preference, no NBT limit)",
           cover and "not an NBT limit" in cover["note"] and "no cover-letter word limit"
           in cover["source"])
-    # The operator's TOTAL-content cap (default 650 words; every line counts).
+    # Every line is counted; the profile records no total cap.
     long_cover = rows.get(("long-cover.md", "cover letter"))
-    check("LT4 the cover-letter total cap is 650 by default",
-          nb.COVER_LETTER_TOTAL_MAX_WORDS == 650
-          and nb.length_limits()["cover letter"]["total_max"] == 650)
+    check("LT4 Nature Biotechnology records no cover-letter total cap",
+          nb.COVER_LETTER_TOTAL_MAX_WORDS is None
+          and nb.length_limits()["cover letter"]["total_max"] is None)
     check("LT4 a cover letter's TOTAL content is counted (every line, cap or not)",
           cover and cover["total_words"] > cover["words"]
-          and cover["total_max"] == 650 and cover["over_total_cap"] is False
+          and cover["total_max"] is None and cover["over_total_cap"] is False
           and cover["over_limit"] is False, str(cover))
-    check("LT4 a cover letter over the 650-word total cap is flagged",
+    check("LT4 a long cover letter is outside the preference, not an invented cap",
           long_cover and long_cover["total_words"] > 650
-          and long_cover["over_total_cap"] is True and long_cover["over_limit"] is True,
+          and long_cover["over_total_cap"] is False and long_cover["over_limit"] is False
+          and long_cover["over_preference"] is True,
           str(long_cover))
     note = nb.length_note(info)
     check("LT4 the one-line note reports the over-cap sections and the caps",
           "OVER" in note and "165" in note and "3750" in note, note)
     check("LT4 the note separates ranking advice from final-package readiness",
           "advisory for ranking" in note and "NOT submission-ready" in note)
-    check("LT4 the note names the cover-letter total cap and its breach",
-          "cover letter TOTAL 650" in note and "OVER-TOTAL-CAP" in note, note)
+    check("LT4 the note names no invented cover-letter total cap",
+          "cover letter TOTAL 650" not in note and "OVER-TOTAL-CAP" not in note, note)
     check("LT4 the scan carries its provenance",
           "nature.com/nbt/content" in info["source"]
           or "content-types table" in info["source"],

@@ -17,11 +17,10 @@ FALSE POSITIVE findings were filtered out upstream. It is:
   * VISIBLE TO JUDGES under the labeled `evidence/llm_review_feedback/`
     directory, where it is judged like the human concerns and never dismissed
     merely because a model wrote it.
-  * the trigger of the `llm` revision mode (option 5): when the config records
-    no explicit mode and the area is non-empty, it is auto-selected -- only that
-    area drives the concern ledger; renaming it to
-    `llm_review_feedback.disabled` (an inert, never-submitted name) turns the
-    mode off, and an EXPLICIT `--revision-mode continue` overrides it too.
+  * the trigger of the `llm` revision mode (option 5): it is selected ONLY by
+    an explicit mode; a non-empty area does not change the unconfigured
+    `continue` workflow. Once selected, only that area drives the concern
+    ledger; renaming it to `llm_review_feedback.disabled` keeps it inert.
 """
 from __future__ import annotations
 
@@ -286,27 +285,28 @@ def test_feedback_staging():
           and "not-applicable" in skill and "disagree" in skill)
 
 
-def test_llm_mode_e2e_autodetected():
+def test_llm_mode_e2e_explicit():
     print()
-    print("== LL5: the llm mode is auto-detected and runs end to end ==")
+    print("== LL5: the explicitly selected llm mode runs end to end ==")
     tmp = scratch("paper_llm_e2e_")
     src = make_source(tmp, with_human=False)
     (src / "manuscript.txt").write_text(
         "Abstract\nWe used scRNA-seq to profile the cells.\n\n"
         "Introduction\nscRNA-seq was performed once and the claims follow.\n", encoding="utf-8")
     root = tmp / "root"
-    # NO --revision-mode: the non-empty llm_review_feedback/ area selects it.
+    # The non-empty area is present, but only the explicit mode selects it.
     r = subprocess.run(
         [sys.executable, str(WS / "paper_pipeline.py"), "setup", "--source", str(src),
-         "--root", str(root), "--rounds", "1", "--rewrites", "0", "--revises", "1",
+         "--root", str(root), "--revision-mode", "llm", "--rounds", "1",
+         "--rewrites", "0", "--revises", "1",
          "--integrators", "0x0", "--judges", "1", "--journal", "iScience"],
         capture_output=True, text=True, timeout=600)
-    check("LL5 setup accepts an LLM-only corpus without --revision-mode", r.returncode == 0,
+    check("LL5 setup accepts the explicit llm mode", r.returncode == 0,
           (r.stdout + r.stderr)[-300:])
-    check("LL5 setup announces the directory-driven mode",
-          "revision mode auto-detected: llm" in r.stdout, r.stdout[-400:])
+    check("LL5 setup does not invent an automatic mode",
+          "auto-detected: llm" not in r.stdout, r.stdout[-400:])
     cfg = json.loads((root / "pipeline_config.json").read_text(encoding="utf-8"))
-    check("LL5 the auto-detected mode is recorded as llm",
+    check("LL5 the explicit mode is recorded as llm",
           cfg.get("revision_mode") == "llm", str(cfg.get("revision_mode")))
     r = subprocess.run(
         [sys.executable, str(WS / "paper_pipeline.py"), "run", "--root", str(root),
@@ -341,17 +341,19 @@ def test_mode_explicit_override_and_disable_switch():
     check("LL6 `--revision-mode llm` is accepted and recorded",
           r.returncode == 0 and cfg.get("revision_mode") == "llm",
           (r.stdout + r.stderr)[-200:])
-    # An explicit `continue` overrides the directory-driven mode.
+    # An absent mode remains the historical `continue` workflow even though the
+    # corpus carries the LLM review area.
     root2 = tmp / "root_continue"
     r = subprocess.run(
         [sys.executable, str(WS / "paper_pipeline.py"), "setup", "--source", str(src),
-         "--root", str(root2), "--revision-mode", "continue", "--rounds", "1"],
+         "--root", str(root2), "--rounds", "1"],
         capture_output=True, text=True, timeout=600)
     cfg2 = json.loads((root2 / "pipeline_config.json").read_text(encoding="utf-8")) \
         if (root2 / "pipeline_config.json").is_file() else {}
-    check("LL6 an explicit continue wins over the directory",
-          r.returncode == 0 and not str(cfg2.get("revision_mode") or "").strip(),
-          str(cfg2.get("revision_mode")))
+    check("LL6 a non-empty LLM area does not select a mode by itself",
+          r.returncode == 0 and not str(cfg2.get("revision_mode") or "").strip()
+          and "no journal mode is selected" in r.stdout,
+          str(cfg2.get("revision_mode")) + r.stdout[-250:])
     # The rename is the off-switch, and the renamed tree must stay inert.
     tmp3 = scratch("paper_llm_disabled_")
     src3 = make_source(tmp3, with_human=False)
@@ -373,7 +375,7 @@ def test_mode_explicit_override_and_disable_switch():
         capture_output=True, text=True, timeout=600)
     cfg3 = json.loads((root3 / "pipeline_config.json").read_text(encoding="utf-8")) \
         if (root3 / "pipeline_config.json").is_file() else {}
-    check("LL6 the disabled rename turns the auto-detection off",
+    check("LL6 the disabled rename leaves the default mode unchanged",
           r.returncode == 0 and not str(cfg3.get("revision_mode") or "").strip()
           and "auto-detected: llm" not in r.stdout,
           str(cfg3.get("revision_mode")) + r.stdout[-200:])
@@ -400,7 +402,7 @@ def main() -> int:
                 ("read-only", test_readonly_area),
                 ("judge", test_judge_view),
                 ("staging", test_feedback_staging),
-                ("e2e", test_llm_mode_e2e_autodetected),
+                ("e2e", test_llm_mode_e2e_explicit),
                 ("modes", test_mode_explicit_override_and_disable_switch))
     try:
         for name, fn in sections:

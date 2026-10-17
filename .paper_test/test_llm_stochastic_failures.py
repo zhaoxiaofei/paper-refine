@@ -385,9 +385,7 @@ def main() -> int:
         sb = ctx.runs_dir / rid
         sb.mkdir(parents=True)
         (sb / "target").mkdir()
-        (sb / "original").mkdir()
         (sb / "field").mkdir()
-        shutil.copytree(ctx.pristine, sb / "original", dirs_exist_ok=True)
         (sb / "field" / "v1").mkdir()
         shutil.copytree(ctx.pristine, sb / "field" / "v1", dirs_exist_ok=True)
         art = sb / "judge_review" / "artifacts"
@@ -413,7 +411,6 @@ def main() -> int:
         rec = ctx.register(rid, "judge", 1, "runs/" + rid, target_id="a2", judge_index=1,
                            label_map={"v1": "orig"}, judge_target_token="tABCDEF12")
         rec["inputs_manifest"] = {"target": nb.hash_manifest(sb / "target"),
-                                  "original": nb.hash_manifest(sb / "original"),
                                   "field": nb.hash_manifest(sb / "field")}
         result = run_postcheck(ctx, rec)
         return tmp, rec, result

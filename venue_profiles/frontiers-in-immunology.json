@@ -2,7 +2,7 @@
   "id": "frontiers-in-immunology",
   "label": "Frontiers in Immunology",
   "short": "Front Immunol",
-  "description": "Frontiers in Immunology (Frontiers). A single-journal Frontiers profile: the Article-types page carries the per-type maximum word counts (Original Research 12,000; Review 12,000; Mini Review 3,000; Brief Research Report 4,000; Case Report 3,000; Opinion 2,000; General Commentary 1,000; Conceptual Analysis 8,000; ...), and the profile applies each type's own maximum with no margin (relaxation 1.0). Frontiers publishes no separate abstract word limit, no legend word limit and no cover-letter limit, so those are counted without a cap; the submission system's 200-word scope statement is carried as the venue-level cover-letter preference on top of the operator's 650-word TOTAL-content cap. Frontiers requires an editable Word or LaTeX manuscript, so submission.pdf_accepted is false.",
+  "description": "Frontiers in Immunology (Frontiers). A single-journal Frontiers profile: the Article-types page carries the per-type maximum word counts (Original Research 12,000; Review 12,000; Mini Review 3,000; Brief Research Report 4,000; Case Report 3,000; Opinion 2,000; General Commentary 1,000; Conceptual Analysis 8,000; ...), and the profile applies each type's own maximum with no margin (relaxation 1.0). Frontiers publishes no separate abstract word limit, no legend word limit and no cover-letter limit, so those are counted without a cap; the submission system's 200-word scope statement is carried as the venue-level cover-letter preference. Frontiers requires an editable Word or LaTeX manuscript, so submission.pdf_accepted is false.",
   "default_article_type": "original-research",
   "article_type": "Original Research",
   "journals": [
@@ -52,8 +52,8 @@
     "cover_letter": {
       "min": null,
       "max": 200,
-      "total_max": 650,
-      "source": "Frontiers Author guidelines, 'Scope statement' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'When you submit your manuscript, you will be required to summarize in 200 words your manuscript's scope and its relevance to the journal and/or specialty section you're submitting to.' Frontiers publishes no cover-letter word limit; this profile carries the submission system's 200-word scope statement as the persuading-part preference. The 650-word total_max is the operator's own TOTAL-content cap (salutation, body, disclosures and signature), not a Frontiers rule"
+      "total_max": null,
+      "source": "Frontiers Author guidelines, 'Scope statement' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'When you submit your manuscript, you will be required to summarize in 200 words your manuscript's scope and its relevance to the journal and/or specialty section you're submitting to.' Frontiers publishes no cover-letter word limit; this profile carries the submission system's 200-word scope statement as the persuading-part preference. No total-content cap is applied."
     }
   },
   "captions": {
@@ -111,8 +111,8 @@
         "cover_letter": {
           "min": null,
           "max": 200,
-          "total_max": 650,
-          "source": "Frontiers Author guidelines, 'Scope statement' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'When you submit your manuscript, you will be required to summarize in 200 words your manuscript's scope and its relevance to the journal and/or specialty section you're submitting to.' Frontiers publishes no cover-letter word limit; this profile carries the submission system's 200-word scope statement as the persuading-part preference. The 650-word total_max is the operator's own TOTAL-content cap (salutation, body, disclosures and signature), not a Frontiers rule"
+          "total_max": null,
+          "source": "Frontiers Author guidelines, 'Scope statement' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'When you submit your manuscript, you will be required to summarize in 200 words your manuscript's scope and its relevance to the journal and/or specialty section you're submitting to.' Frontiers publishes no cover-letter word limit; this profile carries the submission system's 200-word scope statement as the persuading-part preference. No total-content cap is applied."
         }
       },
       "captions": {

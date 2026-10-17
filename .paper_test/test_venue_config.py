@@ -339,7 +339,7 @@ def test_frontiers_immunology_profile():
           str(lim["main text"]))
     check("VC1f the 200-word scope statement is the venue-level cover-letter preference",
           lim["cover letter"]["max"] == 200 and lim["cover letter"]["min"] is None
-          and lim["cover letter"]["total_max"] == 650
+          and lim["cover letter"]["total_max"] is None
           and nb._cover_preference_clause(prof) == "at most 200 words",
           str(lim["cover letter"]))
     check("VC1f it carries no legend word limit (counts only)",
@@ -370,7 +370,7 @@ def test_frontiers_immunology_profile():
     mini = prof.with_article_type("mini-review")
     check("VC1f a type with no cover-letter numbers inherits the venue preference",
           nb._cover_preference_clause(mini) == "at most 200 words"
-          and mini.length_limits()["cover letter"]["total_max"] == 650,
+          and mini.length_limits()["cover letter"]["total_max"] is None,
           str(mini.length_limits()["cover letter"]))
     root = Path(tempfile.mkdtemp(prefix="paper_frontiers_"))
     TMPDIRS.append(root)
@@ -932,7 +932,7 @@ def test_article_types():
     check("VC8 the venue-wide cover-letter preference is inherited by the type",
           brief.length_limits()["cover letter"]["min"] == 300
           and brief.length_limits()["cover letter"]["max"] == 500
-          and brief.length_limits()["cover letter"]["total_max"] == 650)
+          and brief.length_limits()["cover letter"]["total_max"] is None)
     check("VC8 the prompt names the selected type and states ITS numbers",
           "a Nature Biotechnology Brief Communication" in nb.length_rule_text(brief)
           and "abstract <= 70 words" in " ".join(nb.length_rule_text(brief).split())

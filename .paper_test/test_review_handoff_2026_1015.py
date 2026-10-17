@@ -236,10 +236,11 @@ def test_publish_carries_open_items():
     check("the hand-off list is written beside the published directory",
           sib.is_file() and "regenerate Figure S1" in sib.read_text(encoding="utf-8"),
           str(sib))
-    check("nothing extra was written INSIDE the published directory",
+    check("the checklist is a sibling, so the judged directory stays byte-identical",
           not (Path(rec["path"]) / pp.FINAL_CLEAN_STEPS_NAME).exists()
           and not (Path(rec["path"]) / "MANUAL_STEPS.md").exists()
-          and (Path(rec["path"]) / pp.AUTHOR_TO_COMPLETE_README).is_file(),
+          and not (Path(rec["path"]) / pp.AUTHOR_TO_COMPLETE_README).exists()
+          and (root / pp.FINAL_CLEAN_AUTHOR_README_NAME).is_file(),
           str(sorted(p.name for p in Path(rec["path"]).iterdir())))
     readiness = pp.package_readiness(rec)
     rules = [f["rule"] for f in readiness["findings"]]

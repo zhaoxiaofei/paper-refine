@@ -19,9 +19,8 @@ pipeline-owned copy inherits those modes. Asserts, with a fixture whose
     formatter never even opens a file under raw_data (a deliberately malformed
     `.docx` there is not reported as a failed repair);
   * a full stub round + `decide` publishes `final_clean_version/`: the manuscript
-    filenames get their +1 generation counter, while raw_data keeps its names,
-    its bytes and its read-only modes (a counter-looking file there is NOT
-    renamed), with no `final_clean_version.tmp` left behind and a repeat `decide`
+    keeps the judged filenames, while raw_data keeps its names, its bytes and
+    its read-only modes, with no `final_clean_version.tmp` left behind and a repeat `decide`
     reporting `unchanged`;
   * the ONE sanctioned write inside raw_data (restoring a package from the
     pristine original) still works when the file is read-only: `enforce_/
@@ -268,9 +267,9 @@ def test_round_and_publish(root: Path, src: Path):
         check("RO3 the published package carries raw_data/", False, str(sorted(clean.iterdir())))
         return
     names = sorted(p.name for p in clean.glob("cnb-*"))
-    check("RO3 the manuscript filenames carry the +1 generation counter",
-          any(n.startswith("cnb-14-2-mainText") for n in names)
-          and any(n.startswith("cnb-14-1-coverLetter") for n in names), str(names))
+    check("RO3 the manuscript filenames are the judged names",
+          any(n.startswith("cnb-13-2-mainText") for n in names)
+          and any(n.startswith("cnb-13-1-coverLetter") for n in names), str(names))
     raw_names = sorted(p.name for p in (clean / "raw_data").iterdir())
     check("RO3 raw_data keeps its names (nothing is renamed inside it)",
           raw_names == sorted(p.name for p in (src / "raw_data").iterdir()), str(raw_names))

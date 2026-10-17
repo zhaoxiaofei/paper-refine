@@ -264,8 +264,9 @@ def test_pipeline_prompt_and_limits():
               "None words" not in text and "None" not in text.split("COUNTING RULE")[0],
               [l.strip() for l in text.splitlines() if "None" in l][:2])
     nbt = nb.length_rule_text(nb.load_venue_profile("nature-biotechnology"))
-    check("nature-biotechnology still states its 650-word operator cap",
-          "SEPARATE cap of 650 words" in nbt)
+    check("nature-biotechnology states no invented cover-letter total cap",
+          "SEPARATE cap of 650 words" not in nbt
+          and "no TOTAL-content cap" in " ".join(nbt.split()))
     check("lenient_word_limit is an exact floor", nb.lenient_word_limit(100, 1.15) == 115
           and nb.lenient_word_limit(150, 1.10) == 165 and nb.lenient_word_limit(3000, 1.25) == 3750,
           f"{nb.lenient_word_limit(100, 1.15)} {nb.lenient_word_limit(150, 1.10)}")

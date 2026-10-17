@@ -93,23 +93,21 @@ def main() -> int:
     final = root / f"final_clean_version_{root.name}"
     names = sorted(p.name for p in final.rglob("*") if p.is_file()) if final.is_dir() else []
     check("FCV final_clean_version exists and carries files", bool(names), str(names))
-    check("FCV every cnb-11-* generation counter became cnb-12-*",
-          any(n.startswith("cnb-12-") for n in names)
-          and not any(n.startswith("cnb-11-") for n in names), str(names))
-    check("FCV the incremented reporting-summary name is present",
-          any(n.startswith("cnb-12-nr-reporting-summary") for n in names), str(names))
+    check("FCV publication preserves the judged cnb-11-* names",
+          any(n.startswith("cnb-11-") for n in names)
+          and not any(n.startswith("cnb-12-") for n in names), str(names))
+    check("FCV the judged reporting-summary name is present",
+          any(n.startswith("cnb-11-nr-reporting-summary") for n in names), str(names))
     check("FCV a name whose second dash-field is not an integer is untouched",
           "refs.bib" in names and "notes-final.md" in names)
     tex = next((p for p in final.rglob("*.tex")), None)
     tex_text = tex.read_text(encoding="utf-8") if tex else ""
-    check("FCV the LaTeX reference was repointed to the new bib name",
-          "cnb-12-3-supp" in tex_text and "cnb-11-" not in tex_text, tex_text[:120])
-    check("FCV decide announced the increment",
-          "filename counter" in out and "incremented" in out, out[-300:])
+    check("FCV the LaTeX references still name the judged bib",
+          "cnb-11-3-supp" in tex_text and "cnb-12-" not in tex_text, tex_text[:120])
     decision = json.loads((root / "reports" / "decision.json").read_text(encoding="utf-8"))
     info = decision["final"]["final_clean_version"]
-    check("FCV decision.json records the renamed count and both digests",
-          info.get("renamed", 0) >= 4 and info.get("pin_digest") != info.get("digest"),
+    check("FCV decision.json records the pin-identical publication",
+          info.get("renamed") == 0 and info.get("pin_digest") == info.get("digest"),
           json.dumps(info)[:200])
     cert = decision.get("certification") or {}
     check("FCV the decision records itself as CERTIFIED and the clean copy as published",
@@ -130,14 +128,14 @@ def main() -> int:
     if zpath.is_file():
         with zipfile.ZipFile(zpath) as zf:
             znames = sorted(zf.namelist())
-            zdoc = zf.read(f"final_clean_version_{root.name}/cnb-12-2-mainText-b.md") \
-                if f"final_clean_version_{root.name}/cnb-12-2-mainText-b.md" in znames else b""
+            zdoc = zf.read(f"final_clean_version_{root.name}/cnb-11-2-mainText-b.md") \
+                if f"final_clean_version_{root.name}/cnb-11-2-mainText-b.md" in znames else b""
     check("FCV the package is compressed into a sibling zip (directory KEPT)",
           zpath.is_file() and final.is_dir()
           and znames and all(n.startswith(f"final_clean_version_{root.name}/")
                              for n in znames)
-          and any(n.endswith("cnb-12-2-mainText-b.md") for n in znames)
-          and zdoc == (final / "cnb-12-2-mainText-b.md").read_bytes(),
+          and any(n.endswith("cnb-11-2-mainText-b.md") for n in znames)
+          and zdoc == (final / "cnb-11-2-mainText-b.md").read_bytes(),
           str(znames))
     check("FCV decision.json and the readme record the zip",
           (info.get("zip") or {}).get("path") == str(zpath)

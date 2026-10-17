@@ -127,7 +127,9 @@ def iter_head_dump(path: Path):
             if not line.strip():
                 continue
             # Drop a trailing shell prompt that ``head`` sessions sometimes append.
-            if line.startswith("(base) ") or line.endswith("$"):
+            # A CSV row can legitimately end in "$" (for example in a free-text
+            # reason column); prompt lines carry no comma-separated fields.
+            if "," not in line and (line.startswith("(base) ") or line.endswith("$")):
                 continue
             buffer.append(line)
     yield from flush()
@@ -237,13 +239,15 @@ def collect(inputs: list[Path], how: str, pool_rounds: bool, own_only: bool):
             if not member or not opponent or score is None or member == opponent:
                 skipped_incomplete += 1
                 continue
-            round_id = (row.get("round") or "").strip() or file_round or "1"
+            source_round = (row.get("round") or "").strip() or file_round or "1"
+            round_id = source_round
             if pool_rounds:
                 round_id = "all"
             judge = (row.get("source_judge_run") or "").strip()
             judge_index = (row.get("source_judge_index") or "").strip()
             dedupe_key = (
                 run,
+                source_round,
                 round_id,
                 member,
                 opponent,
@@ -298,14 +302,19 @@ def shared_name_prefix(names: list[str]) -> str:
 
 def sheet_stem(run: str, prefix: str) -> str:
     """Drop a leading ``cnb-`` / ``cnb_`` and any other shared prefix."""
-    text = run.strip()
+    original = run.strip()
+    text = original
     for token in ("cnb-", "cnb_"):
         if text.lower().startswith(token):
             text = text[len(token) :]
             break
+    # Callers may compute the shared prefix before or after dropping ``cnb-``.
+    # Accept both: strip it from the raw name when the raw name carries it.
+    if prefix and original.startswith(prefix):
+        text = original[len(prefix) :]
     if prefix and text.startswith(prefix):
         text = text[len(prefix) :]
-    return text.strip("-_") or run
+    return text.strip("-_") or original
 
 
 def sheet_tab(stem: str, round_id: str, used: set[str]) -> str:
@@ -501,7 +510,9 @@ def write_workbook(cubes, notes, output: Path, how: str) -> None:
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     used_names: set[str] = set()
-    name_prefix = shared_name_prefix(sorted(cubes))
+    # Compute the shared prefix AFTER the cnb- prefix is removed, because
+    # sheet_stem() removes cnb- before it tries to remove the shared prefix.
+    name_prefix = shared_name_prefix(sorted(sheet_stem(run, "") for run in cubes))
 
     def round_sort_key(label: str):
         return (0, int(label)) if str(label).isdigit() else (1, str(label))

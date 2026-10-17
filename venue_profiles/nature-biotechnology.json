@@ -26,8 +26,8 @@
         "cover_letter": {
           "min": 300,
           "max": 500,
-          "total_max": 650,
-          "source": "master-prompt preference (300-500 words in the persuading part). Nature Biotechnology states no cover-letter word limit; its Preparing your material page (https://www.nature.com/nbt/submission-guidelines/preparing-your-submission, checked 2026-10-01) says only that 'The cover letter should explain the importance of the work, and why you consider it appropriate for the diverse readership of Nature Biotechnology', that it should disclose related manuscripts, prior editorial discussions and (for double-anonymized peer review) author affiliations, and that it is not seen by peer reviewers. The 650-word total_max is the operator's own TOTAL-content cap (salutation, body, disclosures and signature), not an NBT rule."
+          "total_max": null,
+          "source": "master-prompt preference (300-500 words in the persuading part). Nature Biotechnology states no cover-letter word limit; its Preparing your material page (https://www.nature.com/nbt/submission-guidelines/preparing-your-submission, checked 2026-10-01) says only that 'The cover letter should explain the importance of the work, and why you consider it appropriate for the diverse readership of Nature Biotechnology', that it should disclose related manuscripts, prior editorial discussions and (for double-anonymized peer review) author affiliations, and that it is not seen by peer reviewers. No total-content cap is applied."
         }
       },
       "captions": {
@@ -347,8 +347,8 @@
     "cover_letter": {
       "min": 300,
       "max": 500,
-      "total_max": 650,
-      "source": "master-prompt preference (300-500 words in the persuading part). Nature Biotechnology states no cover-letter word limit; its Preparing your material page (https://www.nature.com/nbt/submission-guidelines/preparing-your-submission, checked 2026-10-01) says the letter 'should explain the importance of the work, and why you consider it appropriate for the diverse readership of Nature Biotechnology' and lists the disclosures it must carry. The 650-word total_max is the operator's own TOTAL-content cap (salutation, body, disclosures and signature), not an NBT rule."
+      "total_max": null,
+      "source": "master-prompt preference (300-500 words in the persuading part). Nature Biotechnology states no cover-letter word limit; its Preparing your material page (https://www.nature.com/nbt/submission-guidelines/preparing-your-submission, checked 2026-10-01) says the letter 'should explain the importance of the work, and why you consider it appropriate for the diverse readership of Nature Biotechnology' and lists the disclosures it must carry. No total-content cap is applied."
     }
   },
   "captions": {

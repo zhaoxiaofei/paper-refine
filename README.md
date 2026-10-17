@@ -1547,19 +1547,17 @@ stage. In the four journal modes the feedback file(s) are named with
 `--journal-feedback FILE` (repeatable) or auto-detected in the corpus by name — typically
 `raw_data/iScience_feedback_from_reviewers_and_editors.txt`.
 
-**`llm` (option 5)** is the directory-driven mode: it revises against the
-false-positive-filtered `llm_review_feedback/` area ONLY (no journal decision
-letter, no response letter). When `--revision-mode` is omitted and `--source`
-carries a NON-EMPTY `llm_review_feedback/`, `setup` selects this mode
-automatically and records it in `pipeline_config.json`; the run/status output
-says so. Renaming the directory to `llm_review_feedback.disabled` (or `.off`)
-turns the auto-detection off — the renamed tree is INERT (never read as
-feedback or evidence, never part of the submission, never shown to a judge) —
-and an explicit `--revision-mode continue` (or any other recorded mode)
-overrides the directory. If `human_review_feedback/` is present too, the
-auto-selected `llm` mode reads ONLY the LLM stream and says so loudly; pass an
-explicit journal mode (transfer/resubmit/major/minor) when the human letter
-should drive the revision.
+**`llm` (option 5)** revises against the false-positive-filtered
+`llm_review_feedback/` area ONLY (no journal decision letter, no response
+letter). It is selected only by an explicit `--revision-mode llm` (or
+`set-revision-mode llm`). A non-empty `llm_review_feedback/` in `--source` does
+not change the otherwise-unconfigured `continue` workflow; `setup` prints a
+note naming the explicit mode when the area is present. Renaming the directory
+to `llm_review_feedback.disabled` (or `.off`) keeps it INERT (never read as
+feedback or evidence, never part of the submission, never shown to a judge).
+If `human_review_feedback/` is present too, mode `llm` reads ONLY the LLM
+stream; pass an explicit journal mode (transfer/resubmit/major/minor) when the
+human letter should drive the revision.
 
 | option | mode | what it is | response to reviewers | rewrites | edits |
 |---|---|---|---|---|---|
@@ -1569,7 +1567,7 @@ should drive the revision.
 | option 2 | `resubmit` | new submission to the **same journal** | **required** | allowed | the round's full review + the concerns |
 | option 3 | `major` | complete a **major revision** at the same journal | **required** | forbidden | **concern-scoped only** — no general review, no audit, no judge panel |
 | option 4 | `minor` | as 3, for a **minor revision** | **required** | forbidden | concern-scoped only |
-| option 5 | `llm` | revise against the pre-filtered `llm_review_feedback/` area only (auto-selected when the area is present and no mode is recorded; rename to `.disabled` to turn it off) | **not written** | allowed | the round's full review + the LLM review's concerns |
+| option 5 | `llm` | revise against the pre-filtered `llm_review_feedback/` area only (explicit selection only; an unconfigured root remains on `continue`) | **not written** | allowed | the round's full review + the LLM review's concerns |
 
 How each mode runs:
 
@@ -1606,8 +1604,8 @@ How each mode runs:
   `llm_review_feedback/` feeds the ledger (a human letter in the same corpus is
   ignored as a concern source, though it stays evidence for the judges), and no
   response letter or `journal_submission/` package is produced — there is no
-  journal to submit to. The mode is selected automatically from the directory
-  (see above), or explicitly with `--revision-mode llm`.
+  journal to submit to. The mode is selected only with `--revision-mode llm`
+  (or `set-revision-mode llm`); the directory's presence is not a selector.
 * **Options 2–4** then run a response stage: `RESPONSE_TO_REVIEWERS.md` +
   `response_map.json`, one block/row per concern, every cited file verified to
   exist in the final package, `planned` rows forbidden from claiming results,
@@ -1912,8 +1910,9 @@ formatting used to be invisible to every stage. The pipeline now handles it:
   `review/artifacts/M20_formatting.md` (one row per finding to dispose) and the
   review contract requires an `M20` coverage row, like M18/M19.
 * `decide` re-scans the winner, reports it in `decision.json` /
-  `DECISION_REPORT.md`, and `publish_final_clean` normalizes + verifies the
-  published `final_clean_version_<root name>/` copy.
+  `DECISION_REPORT.md`, and `publish_final_clean` publishes the pin-identical
+  `final_clean_version_<root name>/` copy. Formatting and reference repairs run
+  in the producing stages, before the candidate is scored.
 * `decide --format-gate` promotes HIGH-severity findings (break-only
   paragraph/blank page, tracked changes, unreadable package) to decision
   problems (exit 5). The scan stays advisory without the flag.
@@ -1922,7 +1921,7 @@ Policy overrides (`setup --format-policy policy.json`): `journal_italics`,
 `quote_style`, `caption_line`, `caption_space`, `title_page_header`,
 `url_style`, `max_em_dashes_per_1000`, `unlink_zotero_fields`,
 `refresh_zotero_fields`, `repair_reference_entries`,
-`unlink_zotero_fields_at_publish`,
+`unlink_zotero_fields_at_publish` (applied before judging, never after the pin),
 `align_heading_sizes`, `blank_page_tolerance`, `max_empty_paragraph_run`,
 `empty_paragraph_slots`, `image_aspect_tolerance`.
 
@@ -2155,8 +2154,8 @@ policy) refuses to unlink a STALE document — flattening now would freeze the
 wrong numbers in the submission copy.
 
 **The pipeline REPAIRS the stale state itself (2026-10-11).** `fix_package`
-(every package-producing stage, plus publication) runs an offline refresh before
-the mechanical fixes: `zotero_refresh_document` re-derives every marker from the
+(every package-producing stage, before the candidate is pinned or judged) runs
+an offline refresh before the mechanical fixes: `zotero_refresh_document` re-derives every marker from the
 document's own citation order, rewrites the cached `formattedCitation` and the
 visible result runs, rebuilds a bibliography whose order/numbers disagree
 (matching every entry to its item's embedded `itemData`; all-or-nothing), and
@@ -2178,12 +2177,12 @@ when preparing the final submission file. When unlinking *is* requested, it
 always runs in this order (refresh → verify → unlink), so it can only freeze
 the CORRECT numbering. The explicit triggers are the CLI options
 `zotero-refresh FILE.docx --unlink`, `fix FILE.docx --out OUT
---unlink-zotero-fields`, and — for the published copy — `decide
---unlink-zotero-fields` (or `format_policy.unlink_zotero_fields_at_publish:
-true`); the published copy is otherwise left with refreshed, live fields, and
-the readme says so. When a requested flatten is refused (the refresh could not
-make the document clean) `readiness` records `FMT-Z7` ("live fields remain in
-the published copy") instead of freezing unverified numbers. A filled XFA form still needs the Adobe export when the venue
+--unlink-zotero-fields`, and — for a round run — `format_policy.
+unlink_zotero_fields: true` (or `unlink_zotero_fields_at_publish: true`), which
+flattens each candidate before it is pinned and judged. `decide
+--unlink-zotero-fields` is refused because a post-pin flatten would make the
+published package differ from the scored digest; the published copy otherwise
+keeps refreshed, live fields, and the readme says so. A filled XFA form still needs the Adobe export when the venue
 requires the journal's own form: the scanner reports `FMT-PDF4`
 (filled-but-not-flattened, never the false `FMT-PDF2` "unfilled" this pipeline
 itself used to emit), `xfa-export` writes a readable rendering of every answer,
@@ -2212,13 +2211,13 @@ is an Adobe LiveCycle form whose static page shows only a viewer placeholder."
 presenting the form, and the round's own judge filed it while no delivered line
 mentioned it. The rule is anchored to the first ~1200 characters and matches the
 form-rendering vocabulary only, so ordinary prose about a "rendering pipeline"
-is silent. The same round made the delivery hygiene executable rather than
-advisory: `publish_final_clean` now STRIPS the never-ship names
-(`:Zone.Identifier`/`.DS_Store`-class OS stubs, `*.pyc`, Word `~$` lock files)
-and HOLDS BACK a `README*.md` a revision session wrote about its own round
-(moved to `reports/readme_notes/`, named in the status readme) — both after the
-pin check and before the counter increment, so the copy the author receives is
-the one the panel certified with the junk gone.
+is silent. The never-ship names (`:Zone.Identifier`/`.DS_Store`-class OS stubs,
+`*.pyc`, Word `~$` lock files) are removed in the producing stage's postcheck,
+before its corpus digest is recorded. The same stage-side pass holds a
+revision-session `README*.md` note under `reports/readme_notes/<run>/`, while
+the author's own README stays. `publish_final_clean` reports any residue that a
+package from an older orchestrator still carries, and preserves the judged
+bytes instead of changing the package after the pin.
 
 ## The code-side evidence pack (identical numbers in every session)
 
@@ -2882,7 +2881,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 131 suites (a few
+any failure. They are independent, so run them in parallel — 132 suites (a few
 minutes at the default 24 parallel sessions; tens of minutes sequentially):
 
 ```bash

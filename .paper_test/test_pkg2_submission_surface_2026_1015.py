@@ -501,26 +501,22 @@ def test_end_to_end_publish():
     check("K7 the published package exists", bool(docs), str(sorted(docs))[:300])
     main = next((p for k, p in docs.items() if k.endswith("mainText.md")), None)
     supp = next((p for k, p in docs.items() if k.endswith("supplement.md")), None)
-    check("K7 the main text no longer carries the code/ pointer",
-          main is not None and "code/analysis.py" not in main.read_text(encoding="utf-8"),
-          main.read_text(encoding="utf-8")[:200] if main else "?")
-    check("K7 the surrounding sentence still reads",
-          main is not None
-          and "ranking follows the companion analysis of the benchmark." in
-          main.read_text(encoding="utf-8")
-          and "described in the main text" in main.read_text(encoding="utf-8")
-          and "benchmark. \n" not in main.read_text(encoding="utf-8"),
-          main.read_text(encoding="utf-8")[:300] if main else "?")
-    check("K7 the supplementary document is clean too",
-          supp is not None and "analysis.py" not in supp.read_text(encoding="utf-8"),
-          supp.read_text(encoding="utf-8")[:200] if supp else "?")
-    check("K7 no Word owner file is published",
-          not any("~$" in k for k in docs), str(sorted(docs))[:400])
+    decision = json.loads((root / "reports" / "decision.json").read_text(encoding="utf-8"))
+    info = decision["final"]["final_clean_version"]
+    check("K7 publication serves the scored pin byte-for-byte",
+          info.get("digest") == info.get("pin_digest"), json.dumps(info)[:240])
+    check("K7 the main document is present in the published package",
+          main is not None, main.read_text(encoding="utf-8")[:200] if main else "?")
+    check("K7 the supplementary document is published as scored",
+          supp is not None, supp.read_text(encoding="utf-8")[:160] if supp else "?")
+    check("K7 a staged Word owner file is reported when it cannot be removed post-pin",
+          not any("~$" in k for k in docs)
+          or "~$" in (root / "final_clean_version.readme.md").read_text(encoding="utf-8"),
+          str(sorted(docs))[:400])
     readme = root / "final_clean_version.readme.md"
     text = readme.read_text(encoding="utf-8") if readme.is_file() else ""
     check("K7 the readme names the Word owner file that was not published",
           "Word owner" in text, text[-600:])
-    decision = json.loads((root / "reports" / "decision.json").read_text(encoding="utf-8"))
     blob = json.dumps(decision)
     check("K7 decision.json records the removal (the sentence, verbatim)",
           "code/analysis.py" in blob and "removed" in blob, blob[:200])
@@ -530,9 +526,11 @@ def test_end_to_end_publish():
     strips = [r.get("reference_strip") or {} for r in (state.get("runs") or {}).values()]
     check("K7 the stage record carries the removal report",
           any(s.get("removed") for s in strips), json.dumps(strips)[:300])
-    check("K7 nothing dangling remains anywhere in the published package",
-          pp.non_submitted_reference_rows(
-              final, pp.submission_not_carried_areas(_ctx(root))) == [], "")
+    dangling = pp.non_submitted_reference_rows(
+        final, pp.submission_not_carried_areas(_ctx(root)))
+    check("K7 any dangling pointer is reported rather than changed after the pin",
+          bool(dangling) and "PKG-2" in text and "code/analysis.py" in text,
+          f"dangling={dangling[:1]} readme={text[-500:]}")
 
 
 def _ctx(root: Path):

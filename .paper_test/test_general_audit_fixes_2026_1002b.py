@@ -135,11 +135,10 @@ def test_cover_letter_total_cap_follows_profile():
         nbt_rule = ""
         print(f"[note] defect_class_rule(profile) not available yet: {e}")
     nbt_standing = nb.standing_exemptions_text(nbt)
-    check("Nature Biotechnology still states its 650-word cover-letter cap",
-          "650" in nbt_rule and "650" in nbt_standing)
-    check("the shared class rule keeps its pinned wording for the default venue",
-          "keep its TOTAL content" in " ".join(nbt_rule.split())
-          and "within 650 words" in " ".join(nbt_rule.split()))
+    check("Nature Biotechnology states no invented cover-letter total cap",
+          "650" not in nbt_rule and "650" not in nbt_standing)
+    check("the shared class rule applies no total cap the venue did not state",
+          "within 650 words" not in " ".join(nbt_rule.split()))
     example = nb.load_venue_profile("example-journal")
     mandates = " ".join(" ".join(v.split()) for v in nb.m19_blocks(example).values())
     check("a profile with no cover-letter total cap is not told to hit 'the configured cap'",

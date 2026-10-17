@@ -6,9 +6,9 @@ Run:  python3 .paper_test/test_audit_bugs.py
 Every check FAILS on the pre-fix tree and PASSES on the fixed one, so this file
 is both the reproduction and the guard for each finding:
 
-  A. judge bias      every view a judge can see (target/, field/*, original/) must
-                     carry ONE timestamp -- the original copy used to keep the
-                     author's real mtimes while the candidate views were stamped.
+  A. judge bias      every view a judge can see (target/, field/*) must carry
+                     ONE timestamp. The pristine original is an anonymous field
+                     opponent, never an openly named original/ view.
   B. data corruption materialization must be self-healing: a sandbox killed in
                      the middle of a copy used to freeze the PARTIAL input in
                      place (and record the truncation as the run's frozen
@@ -132,7 +132,7 @@ def register_fresh(ctx, vid, text):
 # =====================================================================
 
 def test_judge_views_share_one_timestamp():
-    print("== A. judge views carry ONE timestamp (target/field/original) ==")
+    print("== A. judge views carry ONE timestamp (target/field) ==")
     tmp = scratch("paper_bug_a_")
     ctx = build_root(tmp)
     # the pristine copy keeps the author's real (old) mtimes
@@ -148,8 +148,7 @@ def test_judge_views_share_one_timestamp():
     judge_ids = nb.materialize_judges(ctx, 1, field)
     sb = ctx.sandbox_of(ctx.run(judge_ids[0]))
     stamps = {}
-    for area, root in (("target", sb / "target"), ("original", sb / "original"),
-                       ("field", sb / "field")):
+    for area, root in (("target", sb / "target"), ("field", sb / "field")):
         for p in sorted(root.rglob("*")):
             if p.is_file():
                 stamps[p.relative_to(sb).as_posix()] = round(p.stat().st_mtime)
@@ -157,9 +156,10 @@ def test_judge_views_share_one_timestamp():
     check("A every judged view file shares one mtime", len(distinct) == 1,
           f"{len(distinct)} distinct mtime(s): "
           + ", ".join(f"{k}={v}" for k, v in sorted(stamps.items())[:6]))
-    check("A the original view is NOT the author's real timestamp",
+    check("A no judged view keeps the author's real timestamp",
           all(abs(v - old) > 3600 for v in stamps.values()) if stamps else False,
           f"author mtime={round(old)} view={distinct}")
+    check("A no openly named original/ view exists", not (sb / "original").exists())
     # a second judge session (same target) is stamped the same way
     sb2 = ctx.sandbox_of(ctx.run(judge_ids[1])) if len(judge_ids) > 1 else None
     if sb2 is not None:

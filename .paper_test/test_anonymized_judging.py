@@ -257,7 +257,7 @@ def test_judge_views_are_anonymous():
     original_stems = {Path(rel).stem for rel, _p in corpus}
     original_dirs = {Path(rel).parent.as_posix() for rel, _p in corpus} - {"."}
     view_paths = {}
-    for area in ("target", "original", "field"):
+    for area in ("target", "field"):
         for p in sorted((sb / area).rglob("*")):
             if p.is_file():
                 view_paths.setdefault(area, []).append(p.relative_to(sb / area).as_posix())
@@ -319,7 +319,7 @@ def test_by_products_never_reach_a_view():
     for vid in ("w1", "a2", "i1", "i2", "i3"):
         register_fresh(ctx, vid, f"# {vid}\n\nbody {vid}\n")
     sb = judge_sandbox(ctx)
-    areas = [sb / "target", sb / "original"] + sorted((sb / "field").iterdir())
+    areas = [sb / "target"] + sorted((sb / "field").iterdir())
     per_view = {p.relative_to(sb).as_posix(): sorted(q.suffix.lower()
                                                     for q in p.rglob("*") if q.is_file())
                 for p in areas}
@@ -328,24 +328,21 @@ def test_by_products_never_reach_a_view():
     check("no judge view carries a build by-product (.aux/.log/.synctex.gz)",
           not any(leaked.values()), str({k: v for k, v in leaked.items() if v}))
     check("the .bbl with no .bib beside it stays (it is the only copy)",
-          per_view["target"].count(".bbl") == 1 and per_view["original"].count(".bbl") == 1,
+          per_view["target"].count(".bbl") == 1,
           str(per_view))
     check("a .bbl whose .bib ships is dropped, the .bib stays",
           per_view["target"].count(".bib") == 1 and per_view["target"].count(".bbl") == 1,
           str(per_view))
     check("a PDF rendered from a shipped .docx is dropped, the .docx stays",
-          per_view["target"].count(".docx") == 1 and ".pdf" not in per_view["target"]
-          and per_view["original"].count(".docx") == 1 and ".pdf" not in per_view["original"],
+          per_view["target"].count(".docx") == 1 and ".pdf" not in per_view["target"],
           str(per_view))
     view_bytes = b"".join(q.read_bytes() for p in areas for q in p.rglob("*") if q.is_file())
     check("the build log's machine path and build date reach NO judge view",
           b"Somebody" not in view_bytes and b"20 SEP 2026" not in view_bytes)
     check("Word's '~$' owner file (its author's name) reaches NO judge view",
           b"OWNER-NAME-LAPTOP7" not in view_bytes)
-    # The rule is symmetric: the pristine original's view and a version's view
-    # cannot be told apart by which by-products survived a rebuild.
-    check("the pristine view and the target view expose the same file-type surface",
-          per_view["original"] == per_view["target"], str(per_view))
+    check("no openly named pristine-original view is materialized",
+          not (sb / "original").exists())
 
 
 def _docx_with_metadata() -> bytes:
@@ -475,7 +472,7 @@ def test_judge_metadata_is_uniform():
     for vid in ("w1", "a2", "i1", "i2", "i3"):
         register_fresh(ctx, vid, f"# {vid}\n")
     sb = judge_sandbox(ctx)
-    entries = [p for area in ("target", "original", "field")
+    entries = [p for area in ("target", "field")
                for p in (sb / area).rglob("*")]
     mtimes = {round(p.stat().st_mtime) for p in entries}
     modes = {stat.S_IMODE(p.stat().st_mode) for p in entries}
