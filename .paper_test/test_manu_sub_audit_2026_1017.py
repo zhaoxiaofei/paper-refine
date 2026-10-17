@@ -530,6 +530,213 @@ def test_word_numbers_are_numeric_artifacts():
           and "datasets" in str(seed[0]["candidate producer"]), str(seed[:1]))
 
 
+def test_pkg17_form_method_conflict():
+    print("\n== PKG-17 form design claims vs Methods ==")
+    root = scratch("pkg17_")
+    write_docx(root / "ms-4-reporting-summary-abcdef0.docx", [
+        "Reporting Summary",
+        "Where data were partitioned for evaluation, partitioning was done at the dataset "
+        "level, with no overlap between the data used for parameter selection and the data "
+        "used for evaluation. Thresholds were fixed before the final performance metrics "
+        "were inspected."])
+    write_docx(root / "ms-2-mainText-abcdef0.docx", [
+        "Methods",
+        "Cells with a diploid percentage below 85% were labeled as tumor. The 85% threshold "
+        "was selected empirically to match manual karyotyping on the cell-line datasets and "
+        "was held fixed across all 41 datasets."])
+    rows = pp.scan_form_method_conflicts(root)
+    check("the form's no-overlap claim is paired with the Methods' selection", len(rows) == 1,
+          str(rows))
+    if rows:
+        check("the row quotes both surfaces",
+              "no overlap" in rows[0]["detail"] and "selected empirically" in rows[0]["detail"])
+        check("the row blocks readiness", not rows[0].get("advisory"))
+
+
+def test_pkg18_ranking_claim():
+    print("\n== PKG-18 ranking claim vs shipped grid ==")
+    root = scratch("pkg18_")
+    (root / "raw_data" / "source_data").mkdir(parents=True)
+    (root / "raw_data" / "source_data" / "Fig5_scRNA_swarm_grid.tsv").write_text(
+        "dataset\tmethod\tmetric\tmean\n"
+        + "".join(f"d{i}\tnumbat\tTumor_normal_classification_ROC_AUC_demo\t{0.80 - i * 0.01}\n"
+                  f"d{i}\tcopykat\tTumor_normal_classification_ROC_AUC_demo\t{0.78 - i * 0.01}\n"
+                  for i in range(6)))
+    (root / "ms-9-supp.md").write_text(
+        "For tumor/normal classification (Supplementary Fig. S31), CopyKAT gave the highest "
+        "average ROC-AUC; Numbat followed closely.\n")
+    rows = pp.scan_ranking_claim_conflicts(root)
+    check("the contradicted 'highest average' claim is reported", len(rows) == 1, str(rows))
+    if rows:
+        check("the row names the top method and both means",
+              "numbat" in rows[0]["detail"] and "0.775" in rows[0]["detail"]
+              and "0.755" in rows[0]["detail"], rows[0]["detail"])
+        check("a claim citing an unshipped figure is advisory", rows[0].get("advisory") is True)
+
+
+def test_pkg19_recovered_structure():
+    print("\n== PKG-19 'recovered' claim with a fixed k ==")
+    root = scratch("pkg19_")
+    (root / "raw_data" / "source_data").mkdir(parents=True)
+    (root / "raw_data" / "source_data" / "ginkgo_clustermap.cluster_membership.tsv").write_text(
+        "cell\tcluster\n" + "".join(f"c{i}\t{1 if i < 81 else (2 if i < 113 else 3)}\n"
+                                    for i in range(120)))
+    (root / "ms-2-mainText-abcdef0.md").write_text(
+        "Ginkgo recovered the three karyotype-defined subpopulations from the scWGS data. "
+        "For each caller the dendrogram was cut at k = 3 to match the three subpopulations. "
+        "We did not compute a cluster-to-karyotype concordance statistic.\n")
+    rows = pp.scan_recovered_structure_claims(root)
+    check("the qualitative 'recovered' claim is seeded", len(rows) >= 1, str(rows))
+    if rows:
+        check("the row names the fixed k and the missing concordance statistic",
+              "k = 3" in rows[0]["detail"] and "concordance" in rows[0]["detail"])
+        check("the row carries the cluster sizes it could find",
+              "81" in rows[0]["detail"], rows[0]["detail"])
+
+
+def test_pkg20_sd_estimators():
+    print("\n== PKG-20 one symbol, two SD estimators ==")
+    root = scratch("pkg20_")
+    (root / "ms-9-supp.md").write_text(
+        "Table S1. Each value is computed over the 26 per-dataset values; SD is the "
+        "population standard deviation (denominator n) across the 26 datasets.\n\n"
+        "Table 4. SD across antigens is the sample standard deviation "
+        "(denominator n − 1) of those seven values.\n")
+    (root / "ms-2-mainText-abcdef0.md").write_text(
+        "Across the 26 binary datasets the methods have SDs across datasets of 0.14 to 0.23. "
+        "The PWM methods were more consistent across antigens (SD 0.077 versus 0.184).\n")
+    rows = pp.scan_sd_estimator_ambiguity(root)
+    check("the unqualified SD uses are reported", len(rows) >= 1, str(rows))
+    if rows:
+        check("the row quotes both denominators",
+              "denominator n" in rows[0]["detail"] and "n − 1" in rows[0]["detail"])
+
+
+def test_pkg21_definition_overreach():
+    print("\n== PKG-21 definition admits a distortion, then a strong inference ==")
+    root = scratch("pkg21_")
+    (root / "ms-2-mainText-abcdef0.md").write_text(
+        "G(y) is the sum of the per-clonotype ratios. Because the label is a sum of ratios, "
+        "a clonotype with a small non-zero parental response can contribute disproportionately "
+        "to G(y). A variant with G(y) > G(x) means that it activates more of the parental "
+        "repertoire, more strongly, than the parent does.\n")
+    rows = pp.scan_definition_overreach(root)
+    check("the caveat-then-inference paragraph is seeded", len(rows) == 1, str(rows))
+    if rows:
+        check("the row quotes the caveat and the inference",
+              "disproportionately" in rows[0]["detail"]
+              and "more strongly" in rows[0]["detail"])
+
+
+def test_pkg22_cited_note_negation():
+    print("\n== PKG-22 claim vs the note it cites ==")
+    root = scratch("pkg22_")
+    (root / "ms-2-mainText-abcdef0.md").write_text(
+        "The benchmark also exposed a purity floor: on low-purity primary tumors (inferred "
+        "purity < 0.20), all seven callers performed near-randomly across the datasets "
+        "(per-dataset results in Supplementary Note 1).\n")
+    (root / "ms-9-suppNote.md").write_text(
+        "Metrics also tended to approach chance levels in several datasets with low inferred "
+        "tumor purity. They should therefore not be interpreted as demonstrating an intrinsic "
+        "failure of a particular caller in low-purity samples.\n")
+    rows = pp.scan_cited_note_negations(root)
+    check("the claim that cites a contradicting note is seeded", len(rows) == 1, str(rows))
+    if rows:
+        check("the row quotes both the claim and the note",
+              "purity floor" in rows[0]["detail"]
+              and "not be interpreted" in rows[0]["detail"])
+    # A limitation in the note that does not deny the citing claim is not a row.
+    (root / "ms-2-mainText-abcdef0.md").write_text(
+        "The callers performed best on BAM-format data (Supplementary Note 1).\n")
+    (root / "ms-9-suppNote.md").write_text(
+        "Numbat and CopyKAT were compared in the low-purity datasets. We cannot test this "
+        "further with the present dataset collection.\n")
+    check("an unrelated note limitation produces no row",
+          pp.scan_cited_note_negations(root) == [])
+
+
+def test_pkg23_single_cell_citation():
+    print("\n== PKG-23 single-cell claim cited to a bulk assembly ==")
+    root = scratch("pkg23_")
+    write_docx(root / "ms-2-mainText-abcdef0.docx", [
+        "Title",
+        "In the future, single-cell telomere-to-telomere co-sequencing with other omics43 could "
+        "provide the complete DNA sequence of a cell.",
+        "References",
+        "43.",
+        "Nurk, S. et al. The complete sequence of a human genome. Science 376, 44–53 (2022)."])
+    rows = pp.scan_single_cell_citation_mismatch(root)
+    check("the mismatch is reported", len(rows) == 1, str(rows))
+    if rows:
+        check("the row names the reference and its title",
+              "ref. 43" in rows[0]["reference"]
+              and "complete sequence" in rows[0]["detail"], rows[0]["detail"])
+    # A single-cell method cited from a single-cell sentence is not a row.
+    write_docx(root / "ms-2-mainText-abcdef0.docx", [
+        "Title",
+        "Single-cell RNA-seq was analysed with Numbat12.",
+        "References",
+        "12.",
+        "Gao, T. et al. Haplotype-aware analysis of somatic copy number variations from "
+        "single-cell transcriptomes. Nat. Biotechnol. 41, 417–426 (2023)."])
+    check("a single-cell reference produces no row",
+          pp.scan_single_cell_citation_mismatch(root) == [])
+
+
+def test_pkg24_caption_definition():
+    print("\n== PKG-24 information-content caption definition ==")
+    root = scratch("pkg24_")
+    (root / "ms-2-mainText-abcdef0.md").write_text(
+        "Figure 4. Residues facing the TCR carry low information content in the MHC binding "
+        "motif. Information content is the per-position logo height in bits, derived from the "
+        "log-likelihood of the residue at that position relative to a uniform background.\n")
+    rows = pp.scan_caption_definition_gaps(root)
+    check("the single-residue definition is flagged", len(rows) == 1, str(rows))
+    if rows:
+        check("the row states the expected log-likelihood ratio",
+              "expected log-likelihood ratio" in rows[0]["detail"].lower()
+              and "frequency" in rows[0]["detail"])
+    (root / "ms-2-mainText-abcdef0.md").write_text(
+        "Figure 4. Information content is the expected log-likelihood ratio over residues "
+        "(sum p log2(p/q)), and each letter's height is its frequency times that value.\n")
+    check("a correct definition produces no row", pp.scan_caption_definition_gaps(root) == [])
+
+
+def test_pkg25_form_failure_claims():
+    print("\n== PKG-25 'failures are reported, not omitted' vs the table ==")
+    root = scratch("pkg25_")
+    write_docx(root / "ms-4-reporting-summary-abcdef0.docx", [
+        "Reporting Summary",
+        "Cases in which a tool failed to run or returned no calls are reported in the "
+        "deposited result tables rather than being omitted."])
+    (root / "ms-2-mainText-abcdef0.md").write_text(
+        "Two tools could not be evaluated on the ACT cohort: SCYN produced no output on any "
+        "ACT sample, and CHISEL was excluded because the runs were unphased.\n")
+    (root / "raw_data").mkdir()
+    (root / "raw_data" / "Fig3_balloons.tsv").write_text(
+        "tool\tplot\tdataset\tfailed\tvalue\n"
+        "ginkgo\tACT\tTN1\tFalse\t90\n"
+        "ginkgo\tACT\tTN2\tFalse\t91\n"
+        "chisel\tACT\tTN1\tFalse\t92\n")
+    rows = pp.scan_form_failure_claims(root)
+    refs = sorted(r["reference"] for r in rows)
+    check("SCYN's omitted failure and CHISEL's unmarked rows are reported",
+          "scyn / ACT" in refs and "chisel / ACT" in refs, str(refs))
+    scyn = [r for r in rows if r["reference"] == "scyn / ACT"]
+    check("the omission row names the table", bool(scyn)
+          and "Fig3_balloons.tsv" in scyn[0]["file"])
+    check("the CHISEL row names `failed = False`",
+          any("failed = False" in r["detail"] for r in rows
+              if r["reference"] == "chisel / ACT"), str(rows))
+    # A table that DOES mark the failure produces no row for it.
+    (root / "raw_data" / "Fig3_balloons.tsv").write_text(
+        "tool\tplot\tdataset\tfailed\tvalue\n"
+        "scyn\tACT\tTN1\tTrue\t\n"
+        "chisel\tACT\tTN1\tTrue\t\n")
+    check("a table that marks the failures produces no row",
+          pp.scan_form_failure_claims(root) == [])
+
+
 def main():
     try:
         test_author_to_complete_policy()
@@ -544,6 +751,15 @@ def main():
         test_pkg15_pooled_units()
         test_pkg16_form_software()
         test_word_numbers_are_numeric_artifacts()
+        test_pkg17_form_method_conflict()
+        test_pkg18_ranking_claim()
+        test_pkg19_recovered_structure()
+        test_pkg20_sd_estimators()
+        test_pkg21_definition_overreach()
+        test_pkg22_cited_note_negation()
+        test_pkg23_single_cell_citation()
+        test_pkg24_caption_definition()
+        test_pkg25_form_failure_claims()
     finally:
         cleanup()
     print()

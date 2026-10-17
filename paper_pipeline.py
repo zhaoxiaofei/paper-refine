@@ -16071,12 +16071,27 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
     # the author (rename a header / regenerate a table / correct a letter), so the
     # row must reach prose that says what was done.
     try:
+        _pkg_texts = _package_document_texts(corpus_dir)
         evidence["package_consistency"] = {
             "column_near_misses": scan_column_name_near_misses(corpus_dir),
             "mcb_rule_conflicts": scan_mcb_rule_conflicts(corpus_dir),
             "pooled_table_mismatches": scan_pooled_table_mismatches(corpus_dir),
             "form_software_coverage": scan_form_software_coverage(corpus_dir),
             "prior_submission_disclosure": scan_prior_submission_disclosure(corpus_dir),
+            "form_method_conflicts": scan_form_method_conflicts(corpus_dir, texts=_pkg_texts),
+            "ranking_claim_conflicts": scan_ranking_claim_conflicts(corpus_dir,
+                                                                   texts=_pkg_texts),
+            "recovered_structure_claims": scan_recovered_structure_claims(corpus_dir,
+                                                                         texts=_pkg_texts),
+            "sd_estimator_ambiguity": scan_sd_estimator_ambiguity(corpus_dir,
+                                                                 texts=_pkg_texts),
+            "definition_overreach": scan_definition_overreach(corpus_dir, texts=_pkg_texts),
+            "cited_note_negations": scan_cited_note_negations(corpus_dir, texts=_pkg_texts),
+            "single_cell_citation_mismatch": scan_single_cell_citation_mismatch(
+                corpus_dir, texts=_pkg_texts),
+            "caption_definition_gaps": scan_caption_definition_gaps(corpus_dir,
+                                                                   texts=_pkg_texts),
+            "form_failure_claims": scan_form_failure_claims(corpus_dir, texts=_pkg_texts),
         }
     except Exception as e:                                            # noqa: BLE001
         evidence["package_consistency"] = {"error": f"{type(e).__name__}: {e}"}
@@ -17269,13 +17284,18 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
     pc = ev.get("package_consistency") or {}
     pc_rows = []
     for key in ("column_near_misses", "mcb_rule_conflicts", "pooled_table_mismatches",
-                "form_software_coverage", "prior_submission_disclosure"):
+                "form_software_coverage", "prior_submission_disclosure",
+                "form_method_conflicts", "ranking_claim_conflicts",
+                "recovered_structure_claims", "sd_estimator_ambiguity",
+                "definition_overreach", "cited_note_negations",
+                "single_cell_citation_mismatch", "caption_definition_gaps",
+                "form_failure_claims"):
         pc_rows.extend(pc.get(key) or [])
     if pc.get("error"):
-        lines += ["", "## Package self-consistency (PKG-11/12/14/15/16)", "",
+        lines += ["", "## Package self-consistency (PKG-11 to PKG-25)", "",
                   f"(the scans could not run: {pc['error']})"]
     elif pc_rows:
-        lines += ["", "## Package self-consistency (PKG-11/12/14/15/16)", "",
+        lines += ["", "## Package self-consistency (PKG-11 to PKG-25)", "",
                   "Each row is one package surface contradicting another (or the analysis it "
                   "carries). The pipeline never edits these: renaming a table's header, "
                   "regenerating a statistics table and correcting a cover letter are the "
@@ -43233,6 +43253,767 @@ def scan_form_software_coverage(root: Path, limit: int = 12) -> list:
     return rows
 
 
+# ---- Cross-surface claim checks (2026-10-17, third pass) --------------------
+# The third audit round found classes that live BETWEEN two shipped surfaces
+# rather than inside one table:
+#   * a required form whose design claims (no selection/evaluation overlap,
+#     thresholds fixed before inspection) the Methods contradict ("selected
+#     empirically to match manual karyotyping on the cell-line datasets", a
+#     parameter relaxed because the defaults retained no cells);
+#   * a prose "X gave the highest average <metric>" the shipped per-dataset grid
+#     contradicts (CopyKAT 0.751 vs Numbat 0.759 on the tumor/normal ROC-AUC
+#     grid, while the claim cites a heatmap whose numbers are not shipped);
+#   * a "recovered the N subpopulations" claim made with a FIXED k while the
+#     same package admits no cluster-to-karyotype concordance statistic
+#     (CopyNumBench HG008: Ginkgo's 7/32/81 against cytogenetics spliced from
+#     two passages, 17:3 and 23:2);
+#   * one symbol ("SD") used for two different estimators (population across
+#     datasets in Table S1, sample across antigens in Table 4);
+#   * a definition that admits one term can distort the measure and then draws a
+#     comparative inference from the measure (the NeoHeteroclitic G(y) sum of
+#     ratios).
+#
+# These rows are seeded for the review/audit/revision arms and reach readiness
+# (the first two block; the judgment seeds are advisory). Each row quotes BOTH
+# surfaces so a session can dispose it without re-deriving the package.
+def _package_document_texts(root: Path, texts=None) -> list:
+    """[(rel, [paragraph, ...], full_text)] for the package's own documents.
+
+    Evidence areas (raw_data/, feedback, code/) and the author's READMEs are
+    not manuscript surfaces; bookkeeping and scratch are skipped like every
+    other corpus scan. `texts` lets a caller that runs several scans build the
+    (expensive, PDF-parsing) list once and share it.
+    """
+    if texts is not None:
+        return texts
+    root = Path(root)
+    out = []
+    # `supplementary_source_files/` is an INPUT area for the SI build (figure
+    # PDFs, table sources), not a prose surface: parsing its PDFs added seconds
+    # per scan and produced no claim.
+    areas = {str(a).lower() for a in EVIDENCE_DIRNAMES} | {"supplementary_source_files"}
+    for p in sorted(_iter_tree_files(root)):
+        if not p.is_file():
+            continue
+        ext = p.suffix.lower()
+        if ext not in (".docx", ".pdf", ".tex", ".ltx", ".md", ".txt"):
+            continue
+        try:
+            rel = p.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if rel.split("/", 1)[0].lower() in areas:
+            continue
+        if is_bookkeeping_name(p.name) or is_non_submitted_readme_name(p.name):
+            continue
+        if ext == ".docx":
+            paras = [t for t in (_docx_paragraphs(p) or []) if t.strip()]
+            text = "\n".join(paras)
+        elif ext == ".pdf":
+            text = _pdf_text(p)
+            paras = [t.strip() for t in re.split(r"\n\s*\n", text) if t.strip()]
+            if len(paras) <= 1:
+                # A PDF export without blank lines would otherwise read as ONE
+                # paragraph, and the paragraph-level scans (a caveat followed by
+                # an inference) would compare text from unrelated pages.
+                paras = [t for t in text.splitlines() if t.strip()]
+        else:
+            try:
+                text = p.read_text("utf-8", "replace")
+            except OSError:
+                continue
+            paras = [t for t in text.splitlines() if t.strip()]
+        if text.strip():
+            out.append((rel, paras, text))
+    return out
+
+
+def _sentences(text: str) -> list:
+    """Sentences of one text (whitespace-normalised)."""
+    body = re.sub(r"\s+", " ", str(text or ""))
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", body) if s.strip()]
+
+
+FORM_DESIGN_CLAIM_RE = re.compile(
+    r"(?i)(?:no overlap[^.]{0,160}(?:parameter|threshold|tuning|selection|evaluation)|"
+    r"(?:thresholds?|parameters?|method selection|evaluation code)[^.]{0,100}"
+    r"(?:were |was )?(?:fixed|set|chosen|determined)[^.]{0,80}"
+    r"(?:before)[^.]{0,100}(?:metric|performance|inspect|analysis))")
+METHOD_SELECTION_RE = re.compile(
+    r"(?i)(?:selected|chosen|tuned|optimized|optimised|calibrated|relaxed|lowered|"
+    r"raised|adjusted|set)[^.]{0,120}"
+    r"(?:empirically|to match|because the default|on the cell-line|on the [^.]{0,40}"
+    r"datasets|from the [^.]{0,30}datasets)")
+
+
+def scan_form_method_conflicts(root: Path, texts=None, limit: int = 8) -> list:
+    """PKG-17: a required form's design claims vs the Methods' own admissions."""
+    root = Path(root)
+    docs = _package_document_texts(root, texts)
+    if not docs:
+        return []
+    forms = [(rel, text) for rel, _paras, text in docs
+             if "reporting" in rel.lower() and "summary" in rel.lower()]
+    method_texts = [(rel, text) for rel, _paras, text in docs
+                    if rel not in {f[0] for f in forms}
+                    and docx_document_role(Path(rel).name) == "main"]
+    if not forms or not method_texts:
+        return []
+    rows = []
+    for frel, ftext in forms:
+        fclaims = [s for s in _sentences(ftext) if FORM_DESIGN_CLAIM_RE.search(s)]
+        if not fclaims:
+            continue
+        for mrel, mtext in method_texts:
+            for s in _sentences(mtext):
+                if not METHOD_SELECTION_RE.search(s):
+                    continue
+                if not re.search(r"(?i)\b(?:threshold|parameter|cutoff|cut-off|"
+                                 r"configuration|setting)s?\b", s):
+                    continue
+                rows.append({
+                    "rule": "PKG-17", "severity": "high", "fix": "manual",
+                    "file": frel, "line": 1, "reference": "selection/evaluation overlap",
+                    "detail": (f"the form states a design claim the Methods contradict. "
+                               f"Form: \"{fclaims[0][:220]}\" -- Methods ({mrel}): "
+                               f"\"{s[:260]}\". A parameter selected on data that are part of "
+                               f"the evaluation set is not a pre-specified threshold; either "
+                               f"the Methods' selection data are excluded from evaluation, or "
+                               f"the form's no-overlap/fixed-before statement must be scoped to "
+                               f"say what was selected and on which data"),
+                })
+                if len(rows) >= limit:
+                    return rows
+    return rows
+
+
+RANK_CLAIM_RE = re.compile(
+    r"(?i)\b([A-Za-z][A-Za-z0-9_.\-]{2,40}?)\s+(?:gave|had|showed|achieved)\s+the\s+"
+    r"highest\s+(?:average|mean)\s+([^.;]{3,160})")
+
+
+def scan_ranking_claim_conflicts(root: Path, texts=None, limit: int = 12) -> list:
+    """PKG-18: a prose "X gave the highest average <metric>" vs a shipped grid.
+
+    The grid is any `.tsv` with `method`, `metric`, `dataset` and a numeric
+    `mean` (the CopyNumBench Fig. 5 grid). The metric is matched by token overlap
+    with the grid's own metric names, the method by the grid's method ids, and
+    the per-method mean over datasets is recomputed. A sentence that cites a
+    DIFFERENT figure (whose numbers are not shipped) is advisory: the claim may
+    hold there, but the gap is stated.
+    """
+    root = Path(root)
+    docs = _package_document_texts(root, texts)
+    grids = []
+    for p in sorted(_iter_tree_files(root)):
+        if not p.is_file() or p.suffix.lower() != ".tsv" or "grid" not in p.name.lower():
+            continue
+        header, body = _read_delimited_table(p)
+        if not header:
+            continue
+        header = [h.strip() for h in header]
+        if not {"method", "metric", "dataset", "mean"}.issubset(header):
+            continue
+        try:
+            rel = p.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        grids.append((rel, header, body))
+    if not grids or not docs:
+        return []
+    rows = []
+    seen = set()
+    for rel, _paras, text in docs:
+        sentences = _sentences(text)
+        for idx, s in enumerate(sentences):
+            m = RANK_CLAIM_RE.search(s)
+            if not m:
+                continue
+            claimed = m.group(1).strip().lower()
+            # The metric name is usually in the sentence's own context ("For
+            # tumor/normal classification based on the scRNA-seq-derived
+            # aneuploidy score ... CopyKAT gave the highest average ROC-AUC"),
+            # not only in the few words after "highest average": matching the
+            # captured phrase alone tied every ROC-AUC metric at 2 tokens and
+            # picked the wrong column.
+            # The metric name can sit in the PREVIOUS sentence when a PDF line
+            # break splits "(Supplementary Fig. S31), CopyKAT gave the highest
+            # average ROC-AUC" into two sentences: the claim sentence then says
+            # only "ROC-AUC" and every ROC metric ties.
+            context = (sentences[idx - 1] if idx else "") + " " + s
+            metric_words = {w for w in re.findall(r"[a-z0-9]{3,}", context.lower())}
+            cites_figure = bool(re.search(
+                r"(?i)\b(?:supplementary\s+)?fig(?:ure)?\.?\s*S?\d+", context))
+            for grel, header, body in grids:
+                mi, me_i = header.index("method"), header.index("metric")
+                ds_i, mv_i = header.index("dataset"), header.index("mean")
+                by_metric = {}
+                for r in body:
+                    if len(r) <= max(mi, me_i, ds_i, mv_i):
+                        continue
+                    try:
+                        val = float(str(r[mv_i]).strip())
+                    except ValueError:
+                        continue
+                    met = str(r[me_i]).strip()
+                    by_metric.setdefault(met, {}).setdefault(
+                        str(r[mi]).strip().lower(), {})[str(r[ds_i]).strip()] = val
+                best_metric, best_score = None, 0
+                for met in by_metric:
+                    words = {w for w in re.findall(r"[a-z0-9]{3,}", met.lower())}
+                    score = len(words & metric_words)
+                    if score > best_score:
+                        best_metric, best_score = met, score
+                if best_metric is None or best_score < 2:
+                    continue
+                means = {meth: sum(vals.values()) / len(vals)
+                         for meth, vals in by_metric[best_metric].items() if vals}
+                if len(means) < 2:
+                    continue
+                claimed_ids = [meth for meth in means if claimed.split()[0] in meth]
+                if not claimed_ids:
+                    continue
+                claimed_mean = max(means[meth] for meth in claimed_ids)
+                top_method, top_mean = max(means.items(), key=lambda kv: kv[1])
+                if claimed_mean >= top_mean - 1e-9:
+                    continue
+                claim_key = (claimed, re.sub(r"[^a-z0-9]+", " ", m.group(2).lower()).strip(),
+                             best_metric)
+                if claim_key in seen:
+                    continue
+                seen.add(claim_key)
+                rows.append({
+                    "rule": "PKG-18", "severity": "medium", "fix": "manual",
+                    "advisory": bool(cites_figure),
+                    "file": rel, "line": 1,
+                    "reference": f"{m.group(1).strip()} / {best_metric}",
+                    "detail": (f"the text says {m.group(1).strip()!r} gave the highest average "
+                               f"{m.group(2).strip()[:60]!r}, but the shipped grid {grel} ranks "
+                               f"{top_method!r} above it on that metric ({top_mean:.3f} vs "
+                               f"{claimed_mean:.3f})."
+                               + (" The sentence cites a figure whose numbers are not shipped, "
+                                  "so the claim cannot be checked against the package -- name "
+                                  "the surface and ship its numbers."
+                                  if cites_figure else
+                                  " Correct the sentence or the grid; do not leave two shipped "
+                                  "surfaces disagreeing about the ranking.")),
+                })
+                if len(rows) >= limit:
+                    return rows
+    return rows
+
+
+RECOVERED_CLAIM_RE = re.compile(
+    r"(?i)\b(?:recover(?:ed|s)?|reproduc(?:ed|es)?)\b[^.]{0,120}"
+    r"\b(?:subpopulations?|clusters?|structure)\b")
+FIXED_K_RE = re.compile(
+    r"(?i)\b(?:cut(?:ting)?|partition(?:ed|ing)?|split|clustered)[^.]{0,80}"
+    r"\bk\s*=\s*(\d{1,2})\b|\bk\s*=\s*(\d{1,2})\b[^.]{0,80}\b(?:cut|cluster)")
+NO_CONCORDANCE_RE = re.compile(
+    r"(?i)\b(?:did not|do not|no)\b[^.]{0,80}\bconcordance\b")
+
+
+def scan_recovered_structure_claims(root: Path, texts=None, limit: int = 8) -> list:
+    """PKG-19: a "recovered the N subpopulations" claim with a fixed k and no
+    concordance statistic (a qualitative claim written as a validation)."""
+    root = Path(root)
+    docs = _package_document_texts(root, texts)
+    if not docs:
+        return []
+    claims, fixed_k, no_conc = [], [], []
+    for rel, _paras, text in docs:
+        for s in _sentences(text):
+            if RECOVERED_CLAIM_RE.search(s):
+                claims.append((rel, s))
+            m = FIXED_K_RE.search(s)
+            if m:
+                fixed_k.append((rel, s, int(m.group(1) or m.group(2))))
+            if NO_CONCORDANCE_RE.search(s):
+                no_conc.append((rel, s))
+    if not claims:
+        return []
+    rows = []
+    for rel, s in claims[:limit]:
+        k = next((k for r_, _s, k in fixed_k if r_ == rel), None)
+        conc = next((cs for cr, cs in no_conc if cr == rel), "")
+        sizes = ""
+        for meth in re.findall(r"(?i)\b(hmmcopy|copynumber|ginkgo|aneufinder|sccnv|chisel|"
+                               r"scyn|secnv|flcna|scabsolute)\b", s):
+            hit = next((q for q in _iter_tree_files(root)
+                        if "cluster_membership" in q.name.lower()
+                        and meth.lower() in q.name.lower()), None)
+            if hit is None:
+                continue
+            try:
+                lines = [ln for ln in hit.read_text("utf-8", "replace").splitlines()
+                         if ln.strip()]
+            except OSError:
+                continue
+            counts = {}
+            for line in lines[1:]:
+                cells = line.split("\t")
+                if cells:
+                    key = cells[-1].strip()
+                    counts[key] = counts.get(key, 0) + 1
+            sizes = (f" {meth}: "
+                     + "/".join(str(v) for v in sorted(counts.values(), reverse=True))
+                     + " cells per cluster")
+            break
+        rows.append({
+            "rule": "PKG-19", "severity": "medium", "fix": "manual", "advisory": True,
+            "file": rel, "line": 1, "reference": s[:80],
+            "detail": (f"the text says {s[:220]!r}"
+                       + (f", while the same package fixes the cut at k = {k} "
+                          f"(\"{next((fs for fr_, fs, fk in fixed_k if fr_ == rel), '')[:180]}\")"
+                          if k else "")
+                       + (f" and states \"{conc[:180]}\"" if conc else "")
+                       + sizes
+                       + ". A fixed cut imposes that many clusters, and without a concordance "
+                       "statistic the claim that the karyotype-defined structure was recovered "
+                       "is qualitative. State the measure (or the cluster-to-karyotype "
+                       "comparison) or soften 'recovered' to what was shown."),
+        })
+    return rows
+
+
+SD_POP_RE = re.compile(
+    r"(?i)population standard deviation[^.]{0,80}denominator\s*n\b|"
+    r"denominator\s*n\b[^.]{0,80}population standard deviation")
+SD_SAMPLE_RE = re.compile(
+    r"(?i)sample standard deviation[^.]{0,80}denominator\s*n\s*[−-]\s*1\b|"
+    r"denominator\s*n\s*[−-]\s*1\b[^.]{0,80}sample standard deviation")
+
+
+def scan_sd_estimator_ambiguity(root: Path, texts=None, limit: int = 6) -> list:
+    """PKG-20: one symbol ("SD") defined as two different estimators."""
+    root = Path(root)
+    docs = _package_document_texts(root, texts)
+    if not docs:
+        return []
+    pop = [(rel, m.group(0)) for rel, _p, t in docs for s in _sentences(t)
+           for m in [SD_POP_RE.search(s)] if m]
+    sample = [(rel, m.group(0)) for rel, _p, t in docs for s in _sentences(t)
+              for m in [SD_SAMPLE_RE.search(s)] if m]
+    if not pop or not sample:
+        return []
+    uses = []
+    for rel, paras, _t in docs:
+        if docx_document_role(Path(rel).name) != "main":
+            continue
+        for s in _sentences("\n".join(paras)):
+            if re.search(r"(?i)\bSDs?\b", s) and not re.search(
+                    r"(?i)\bpopulation\b|\bsample\b|\bdenominator\b", s):
+                uses.append((rel, s))
+    if not uses:
+        return []
+    rows = []
+    for rel, s in uses[:limit]:
+        rows.append({
+            "rule": "PKG-20", "severity": "low", "fix": "manual", "advisory": True,
+            "file": rel, "line": 1, "reference": "SD",
+            "detail": (f"the package defines SD two ways -- population over datasets "
+                       f"({pop[0][1][:150]!r}) and sample over antigens "
+                       f"({sample[0][1][:150]!r}) -- while this sentence uses 'SD' without "
+                       f"naming either: {s[:200]!r}. State the estimator (and its denominator) "
+                       f"where the prose compares the two, so the two SDs are not read as one "
+                       f"quantity"),
+        })
+    return rows
+
+
+DEFINITION_DISTORTION_RE = re.compile(
+    r"(?i)\b(?:can contribute disproportionately|can dominate|is dominated by|"
+    r"can distort|may distort|is sensitive to (?:a )?single)\b")
+DEFINITION_STRONG_RE = re.compile(
+    r"(?i)\b(?:means?|therefore|demonstrates?|proves?|shows?)\b[^.]{0,120}"
+    r"\b(?:more|stronger|higher|greater|larger)\b")
+
+
+def scan_definition_overreach(root: Path, texts=None, limit: int = 8) -> list:
+    """PKG-21: a definition that admits a distortion, then draws a strong inference."""
+    root = Path(root)
+    rows = []
+    for rel, paras, _t in _package_document_texts(root, texts):
+        for para in paras:
+            if not DEFINITION_DISTORTION_RE.search(para):
+                continue
+            if not DEFINITION_STRONG_RE.search(para):
+                continue
+            sentences = _sentences(para)
+            caveat = next((s for s in sentences if DEFINITION_DISTORTION_RE.search(s)), "")
+            inference = next((s for s in sentences if DEFINITION_STRONG_RE.search(s)), "")
+            rows.append({
+                "rule": "PKG-21", "severity": "medium", "fix": "manual", "advisory": True,
+                "file": rel, "line": 1, "reference": "definition vs inference",
+                "detail": (f"the same paragraph states that one term can distort the measure "
+                           f"(\"{caveat[:180]}\") and then draws a comparative inference "
+                           f"(\"{inference[:200]}\"). One dominating term can produce the "
+                           f"comparison without a repertoire-wide (or population-wide) change; "
+                           f"scope the inference to what the measure actually shows, or use a "
+                           f"measure that is not dominated by a single ratio"),
+            })
+            if len(rows) >= limit:
+                return rows
+    return rows
+
+
+NEGATED_NOTE_RE = re.compile(
+    # Only an INTERPRETATION denial counts ("should not be read as", "not
+    # evidence", "does not demonstrate"). A bare limitation ("we cannot test
+    # this") is not a contradiction of the citing sentence.
+    r"(?i)(?:should\s+(?:therefore\s+)?not|not\s+be\s+interpreted|"
+    r"cannot\s+be\s+interpreted|not\s+evidence|no\s+evidence|"
+    r"does\s+not\s+demonstrat\w*|does\s+not\s+show|not\s+an?\s+intrinsic|"
+    r"not\s+the\s+same\s+as)")
+ASSERTIVE_MAIN_RE = re.compile(
+    r"(?i)(?:\bexposed\b|\bdemonstrat\w*|\bshows? that\b|\breveals?\b|\bindicates?\b|"
+    r"\bconfirms?\b|\bproves?\b|\bperformed\s+(?:near-?)?randomly\b|"
+    r"\bperformed\s+(?:poorly|best|worst)\b|\boutperform\w*|\bunderperform\w*)")
+METHOD_TOKENS = frozenset({
+    "hmmcopy", "copynumber", "ginkgo", "aneufinder", "sccnv", "chisel", "scyn",
+    "secnv", "flcna", "scabsolute", "numbat", "copykat", "casper", "infercnv",
+    "infercna", "conicsmat", "scevan", "prime", "mixmhcpred", "mhcflurry",
+    "netmhcpan", "caller", "callers",
+})
+NOTE_CITATION_RE = re.compile(r"(?i)supplementary\s+(?:note|fig(?:ure)?)\.?\s*S?\d+")
+
+
+def _content_words(text: str) -> set:
+    """Comparable content words (>= 4 letters, common words removed)."""
+    stop = {"that", "this", "these", "those", "with", "from", "were", "have", "been",
+            "which", "their", "there", "they", "than", "then", "when", "where", "also",
+            "such", "more", "most", "less", "into", "over", "under", "about", "using"}
+    return {w for w in re.findall(r"[a-z]{4,}", str(text or "").lower()) if w not in stop}
+
+
+def scan_cited_note_negations(root: Path, texts=None, limit: int = 8) -> list:
+    """PKG-22: a main-text claim whose CITED supplementary note says not to read it so."""
+    root = Path(root)
+    docs = _package_document_texts(root, texts)
+    mains = [(rel, text) for rel, _p, text in docs
+             if docx_document_role(Path(rel).name) == "main"]
+    # "si" alone would match any file whose name contains it ("analysis.md"):
+    # only the supplement's own documents are note surfaces.
+    notes = [(rel, text) for rel, _p, text in docs
+             if any(k in rel.lower() for k in ("supp", "note"))]
+    if not mains or not notes:
+        return []
+    note_rows = []
+    for nrel, ntext in notes:
+        sents = _sentences(ntext)
+        for i, s in enumerate(sents):
+            context = (sents[i - 1] + " " if i else "") + s
+            note_rows.append((nrel, s, _content_words(context)))
+    if not note_rows:
+        return []
+    rows = []
+    for mrel, mtext in mains:
+        sentences = _sentences(mtext)
+        for idx, s in enumerate(sentences):
+            if not NOTE_CITATION_RE.search(s):
+                continue
+            # A citation often splits from its claim: "… performed
+            # near-randomly (per-dataset results in Supplementary Figs.
+            # S31–S36 and Supplementary Note 1)." -- the splitter stops at
+            # "Figs." Only a SHORT continuation fragment takes the previous
+            # sentence; a full sentence that merely follows another one keeps
+            # its own claim, or an unrelated neighbouring claim would be
+            # paired with the note.
+            claim_sentence = s
+            if len(s.split()) <= 8 and idx:
+                claim_sentence = sentences[idx - 1] + " " + s
+            if not ASSERTIVE_MAIN_RE.search(claim_sentence):
+                continue
+            mw = _content_words(claim_sentence)
+            best, best_overlap, best_words, best_shared = None, 0, set(), set()
+            for nrel, ns, nw in note_rows:
+                if not NEGATED_NOTE_RE.search(ns):
+                    continue
+                overlap = len(mw & nw)
+                if overlap > best_overlap:
+                    best, best_overlap, best_words = (nrel, ns), overlap, (mw & nw)
+                    best_shared = mw & _content_words(ns)
+            if best is None or best_overlap < 3:
+                continue
+            # The NEGATED sentence itself must name a shared, non-method subject
+            # (row 1: "purity"): method names alone pair two different claims
+            # about the same tools (the Song/CopyKAT sentence vs the note's
+            # low-purity limitation).
+            if not any(w not in METHOD_TOKENS for w in best_shared):
+                continue
+            rows.append({
+                "rule": "PKG-22", "severity": "medium", "fix": "manual", "advisory": True,
+                "file": mrel, "line": 1, "reference": "cited note",
+                "detail": (f"the main text says \"{claim_sentence[:220]}\" and cites the "
+                           f"supplementary "
+                           f"note; the note's closest sentence says \"{best[1][:220]}\" "
+                           f"({best[0]}, {best_overlap} shared content words). The note asks "
+                           f"that the result NOT be read the way the citing sentence reads it "
+                           f"-- reconcile the two (scope the main-text claim, or correct the "
+                           f"note's conclusion)"),
+            })
+            if len(rows) >= limit:
+                return rows
+    return rows
+
+
+REF_ENTRY_NUM_RE = re.compile(r"^\s*(\d{1,3})\.\s*$")
+INLINE_CITATION_RE = re.compile(r"([A-Za-z][A-Za-z\-]{2,})(\d{1,2})(?![\d.])")
+SINGLE_CELL_RE = re.compile(r"(?i)\bsingle[- ]cell\b")
+ASSEMBLY_TITLE_RE = re.compile(
+    r"(?i)\b(?:complete sequence|genome assembly|reference genome|"
+    r"telomere[- ]to[- ]telomere)\b")
+# A display-item label ("Figure 2") or a numbered sample is not a citation.
+CITATION_LABEL_WORDS = frozenset({
+    "figure", "fig", "table", "section", "note", "day", "dataset", "sample",
+    "patient", "donor", "step", "round", "group", "panel", "supplementary",
+})
+
+
+def _numbered_reference_titles(paras: list) -> dict:
+    """{number: entry text} from a numbered reference list (docx paragraphs)."""
+    out, current = {}, None
+    for p in paras:
+        text = p or ""
+        # The number and its entry share one paragraph in a Zotero bibliography
+        # field ("43.\nNurk, S. ...") and are separate paragraphs elsewhere.
+        m = re.match(r"^\s*(\d{1,3})\.\s*$", text) or re.match(
+            r"^\s*(\d{1,3})\.\s*\n\s*(\S.*)$", text, re.S)
+        if m:
+            current = int(m.group(1))
+            rest = (m.group(2) if m.lastindex and m.lastindex >= 2 else "") or ""
+            out[current] = rest.strip()
+            if rest.strip():
+                current = None
+            continue
+        if current is not None and text.strip():
+            out[current] = (out[current] + " " + text.strip()).strip()
+            current = None
+    return out
+
+
+def scan_single_cell_citation_mismatch(root: Path, texts=None, limit: int = 8) -> list:
+    """PKG-23: a single-cell claim cited to a bulk genome ASSEMBLY.
+
+    Narrow on purpose: the sentence must say "single-cell", the citation number
+    must resolve to an entry whose title is an assembly/complete-sequence paper,
+    and that title must not itself be single-cell. (CopyNumBench cited Nurk et
+    al., the bulk CHM13 assembly, for "single-cell telomere-to-telomere
+    co-sequencing with other omics".)
+    """
+    root = Path(root)
+    rows = []
+    for rel, paras, _text in _package_document_texts(root, texts):
+        if Path(rel).suffix.lower() != ".docx":
+            continue
+        if docx_document_role(Path(rel).name) != "main":
+            continue
+        refs = _numbered_reference_titles(paras)
+        if not refs:
+            continue
+        for s in _sentences("\n".join(paras)):
+            if not SINGLE_CELL_RE.search(s):
+                continue
+            for m in INLINE_CITATION_RE.finditer(s):
+                if m.group(1).lower() in CITATION_LABEL_WORDS:
+                    continue
+                num = int(m.group(2))
+                title = refs.get(num, "")
+                if not title or SINGLE_CELL_RE.search(title):
+                    continue
+                if not ASSEMBLY_TITLE_RE.search(title):
+                    continue
+                rows.append({
+                    "rule": "PKG-23", "severity": "medium", "fix": "manual",
+                    "advisory": True,
+                    "file": rel, "line": 1, "reference": f"ref. {num}",
+                    "detail": (f"the sentence claims single-cell capability "
+                               f"(\"{s[:180]}\") but its citation resolves to a bulk genome "
+                               f"assembly: ref. {num} \"{title[:180]}\". That work does not "
+                               f"demonstrate the single-cell (co-sequencing) claim; cite a "
+                               f"single-cell method or scope the sentence"),
+                })
+                if len(rows) >= limit:
+                    return rows
+            # The inline citation can also be a bare superscript number after a
+            # word ("omics43"); INLINE_CITATION_RE covers that form.
+    return rows
+
+
+def scan_caption_definition_gaps(root: Path, texts=None, limit: int = 8) -> list:
+    """PKG-24: an information-content caption defined as a single residue's log-likelihood."""
+    root = Path(root)
+    rows = []
+    for rel, paras, _text in _package_document_texts(root, texts):
+        for para in paras:
+            if not re.search(r"(?i)\b(?:fig(?:ure)?|table)\s*\.?\s*S?\d", para):
+                continue
+            if not re.search(r"(?i)\binformation content\b", para):
+                continue
+            if not re.search(r"(?i)log[- ]likelihood of the residue", para):
+                continue
+            if re.search(r"(?i)\bexpected\b|sum over|frequency|probability", para):
+                continue
+            rows.append({
+                "rule": "PKG-24", "severity": "low", "fix": "manual", "advisory": True,
+                "file": rel, "line": 1, "reference": "information content",
+                "detail": (f"the caption defines information content as \"derived from the "
+                           f"log-likelihood of the residue at that position\": {para[:220]!r}. "
+                           f"Position information content is the EXPECTED log-likelihood ratio "
+                           f"over residues (sum p log2(p/q), q = uniform background), and a "
+                           f"logo letter's height is its frequency times that quantity; a "
+                           f"single residue's log-likelihood is neither. State the standard "
+                           f"definition or the exact quantity plotted"),
+            })
+            if len(rows) >= limit:
+                return rows
+    return rows
+
+
+FORM_FAILURE_CLAIM_RE = re.compile(
+    r"(?i)(?:failed to run|returned no calls|no output|rather than being omitted|"
+    r"reported in the deposited result tables)")
+FAILURE_SENTENCE_RE = re.compile(
+    r"(?i)\b(?:produced no output|no output|could not be evaluated|was not evaluated|"
+    r"were not evaluated|failed to run|was excluded because|were discarded|"
+    r"discarded as biased)\b")
+TOOL_TOKEN_RE = re.compile(
+    r"(?i)\b(hmmcopy|copynumber|ginkgo|aneufinder|sccnv|chisel|scyn|secnv|flcna|"
+    r"scabsolute)\b")
+
+
+def scan_form_failure_claims(root: Path, texts=None, limit: int = 8) -> list:
+    """PKG-25: a form's "failures are reported, not omitted" vs the deposited tables.
+
+    CopyNumBench's Reporting Summary says "Cases in which a tool failed to run or
+    returned no calls are reported in the deposited result tables rather than
+    being omitted", while the ACT balloon table omits SCYN entirely (the text
+    says it produced no output on ACT) and its `failed` column is False for
+    every one of the 1,815 rows (CHISEL's non-evaluable ACT rows included).
+    """
+    root = Path(root)
+    docs = _package_document_texts(root, texts)
+    claim = next((s for rel, _p, text in docs if "reporting" in rel.lower()
+                  and "summary" in rel.lower() for s in _sentences(text)
+                  if FORM_FAILURE_CLAIM_RE.search(s)), "")
+    if not claim:
+        return []
+    tables = []
+    for p in sorted(_iter_tree_files(root)):
+        if not p.is_file() or p.suffix.lower() != ".tsv":
+            continue
+        header, body = _read_delimited_table(p)
+        if not header:
+            continue
+        header = [h.strip() for h in header]
+        tool_col = "tool" if "tool" in header else ("method" if "method" in header else None)
+        panel_col = next((c for c in ("plot", "dataset", "panel") if c in header), None)
+        if not tool_col or not panel_col:
+            continue
+        try:
+            rel = p.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        tables.append((rel, header, body, tool_col, panel_col))
+    if not tables:
+        return []
+    # The cohort vocabulary comes from the tables' own panel values, so a
+    # sentence that says "these samples" can be scoped by the paragraph it sits
+    # in ("For real cancer data, we used the ACT breast cancer dataset …").
+    cohorts = set()
+    for _trel, header, body, _tc, pc in tables:
+        pi = header.index(pc)
+        for r in body:
+            if len(r) > pi and str(r[pi]).strip():
+                cohorts.add(str(r[pi]).strip())
+    rows = []
+    seen = set()
+    for rel, paras, text in docs:
+        if "reporting" in rel.lower() and "summary" in rel.lower():
+            continue
+        sentences = _sentences(text)
+        for idx, s in enumerate(sentences):
+            # Pair a tool with the failure predicate in ITS OWN clause: "Two
+            # tools could not be evaluated on the ACT cohort: SCYN produced no
+            # output … , and CHISEL was excluded …" must not pair Ginkgo (a
+            # passing tool named elsewhere in the sentence) with a failure.
+            for clause in re.split(r"(?<=[:;])\s+|,\s+and\s+|\s+whereas\s+", s):
+                if not FAILURE_SENTENCE_RE.search(clause):
+                    continue
+                tool = TOOL_TOKEN_RE.search(clause)
+                if not tool:
+                    continue
+                tool_id = tool.group(1).lower()
+                cohort = ""
+                mc = re.search(r"(?i)\bon\s+(?:the\s+|any\s+|this\s+)?"
+                               r"([A-Z][A-Za-z0-9\-]{1,20})", clause)
+                if mc:
+                    cohort = mc.group(1)
+                if not cohort:
+                    back = s + " " + " ".join(sentences[max(0, idx - 2):idx])
+                    for cand in cohorts:
+                        if re.search(r"(?<![A-Za-z0-9])" + re.escape(cand) + r"(?![A-Za-z0-9])",
+                                     back, re.I):
+                            cohort = cand
+                            break
+                if not cohort:
+                    # An unscoped failure sentence cannot be matched to a table
+                    # panel; reporting it would flag every table that carries
+                    # the tool for a different cohort.
+                    continue
+                for trel, header, body, tool_col, panel_col in tables:
+                    key = (tool_id, cohort.lower(), trel)
+                    if key in seen:
+                        continue
+                    ti, pi = header.index(tool_col), header.index(panel_col)
+                    fi = header.index("failed") if "failed" in header else None
+                    if fi is None:
+                        # A statistics summary (MCB/pooled) has no per-row
+                        # `failed` column: it is not the "result table" a form's
+                        # failure-reporting claim refers to.
+                        continue
+                    panel_rows = [r for r in body
+                                  if len(r) > max(ti, pi)
+                                  and str(r[ti]).strip().lower().split("|")[0] == tool_id
+                                  and (not cohort or cohort.lower() in str(r[pi]).lower())]
+                    if cohort and not any(
+                            cohort.lower() in str(r[pi]).lower() for r in body if len(r) > pi):
+                        continue      # the table does not cover that cohort at all
+                    if not panel_rows:
+                        seen.add(key)
+                        rows.append({
+                            "rule": "PKG-25", "severity": "high", "fix": "manual",
+                            "file": trel, "line": 1, "reference": f"{tool_id} / {cohort}",
+                            "detail": (f"the form claims \"{claim[:200]}\" but this deposited "
+                                       f"table carries no {tool_id} row for "
+                                       f"{cohort or 'this panel'}, while the text says "
+                                       f"\"{clause[:200]}\" -- the failure is OMITTED from the "
+                                       f"table the form points at. Add the failed rows (marked "
+                                       f"as failed/no-output) or scope the form's claim"),
+                        })
+                        if len(rows) >= limit:
+                            return rows
+                        continue
+                    if fi is not None and len(panel_rows[0]) > fi:
+                        marks = {str(r[fi]).strip().lower() for r in panel_rows if len(r) > fi}
+                        if marks <= {"false", "0", ""}:
+                            seen.add(key)
+                            rows.append({
+                                "rule": "PKG-25", "severity": "medium", "fix": "manual",
+                                "file": trel, "line": 1, "reference": f"{tool_id} / {cohort}",
+                                "detail": (f"the form claims failures are reported in the "
+                                           f"deposited tables, but {len(panel_rows)} {tool_id} "
+                                           f"row(s) in this table carry `failed = False` "
+                                           f"({', '.join(sorted(marks))}), while the text says "
+                                           f"\"{clause[:200]}\" -- the rows exist but are not "
+                                           f"marked as not evaluable. Mark them, or scope the "
+                                           f"form's claim"),
+                            })
+                            if len(rows) >= limit:
+                                return rows
+    return rows
+
+
 def scan_pooled_table_mismatches(root: Path, limit: int = 24) -> list:
     """PKG-15: a pooled statistics table computed on fewer units than it claims."""
     root = Path(root)
@@ -45412,6 +46193,7 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     try:
         _submitted_docs = [rr.relative_to(tmp).as_posix() for rr in _iter_tree_files(tmp)
                            if rr.is_file()]
+        _pkg_texts = _package_document_texts(tmp)
         hygiene["package_consistency"] = {
             "column_near_misses": scan_column_name_near_misses(tmp),
             "mcb_rule_conflicts": scan_mcb_rule_conflicts(tmp),
@@ -45419,6 +46201,17 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
             "form_software_coverage": scan_form_software_coverage(tmp),
             "prior_submission_disclosure": scan_prior_submission_disclosure(
                 tmp, submitted_docs=_submitted_docs),
+            "form_method_conflicts": scan_form_method_conflicts(tmp, texts=_pkg_texts),
+            "ranking_claim_conflicts": scan_ranking_claim_conflicts(tmp, texts=_pkg_texts),
+            "recovered_structure_claims": scan_recovered_structure_claims(tmp,
+                                                                         texts=_pkg_texts),
+            "sd_estimator_ambiguity": scan_sd_estimator_ambiguity(tmp, texts=_pkg_texts),
+            "definition_overreach": scan_definition_overreach(tmp, texts=_pkg_texts),
+            "cited_note_negations": scan_cited_note_negations(tmp, texts=_pkg_texts),
+            "single_cell_citation_mismatch": scan_single_cell_citation_mismatch(
+                tmp, texts=_pkg_texts),
+            "caption_definition_gaps": scan_caption_definition_gaps(tmp, texts=_pkg_texts),
+            "form_failure_claims": scan_form_failure_claims(tmp, texts=_pkg_texts),
         }
     except Exception as e:                                            # noqa: BLE001
         hygiene["package_consistency"] = {"error": f"{type(e).__name__}: {e}"}
@@ -46125,7 +46918,12 @@ def package_readiness(final_clean: dict, residuals: dict = None,
                          "detail": (f"the package self-consistency scans could not run "
                                     f"({pc['error']}); these classes were NOT checked")})
     for key in ("column_near_misses", "mcb_rule_conflicts", "pooled_table_mismatches",
-                "form_software_coverage", "prior_submission_disclosure"):
+                "form_software_coverage", "prior_submission_disclosure",
+                "form_method_conflicts", "ranking_claim_conflicts",
+                "recovered_structure_claims", "sd_estimator_ambiguity",
+                "definition_overreach", "cited_note_negations",
+                "single_cell_citation_mismatch", "caption_definition_gaps",
+                "form_failure_claims"):
         for r in pc.get(key) or []:
             findings.append({"rule": r.get("rule") or "PKG-11",
                              "document": r.get("file"),

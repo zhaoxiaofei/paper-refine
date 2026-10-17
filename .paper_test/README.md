@@ -156,6 +156,17 @@ a software paragraph, and a manuscript with no Software paragraph produces no
 row), and that **spelled-out numbers are numeric artifacts** (`three datasets`,
 `four of the five`, `one row per sample` enter the M4 ledger and the M30 seed;
 pronoun and idiom uses such as `one of them`, `at once` and `Run two` do not).
+It also pins the cross-surface scorers: **PKG-17** (a form's no-overlap/fixed-
+threshold claim vs the Methods' selection sentence), **PKG-18** (a "highest
+average" claim recomputed from a shipped grid), **PKG-19** (a "recovered N
+subpopulations" claim with a fixed k and no concordance statistic), **PKG-20**
+(one symbol for two SD denominators), **PKG-21** (a caveat followed by a
+comparative inference), **PKG-22** (a claim citing a note that says not to read
+it that way), **PKG-23** (a single-cell claim cited to a bulk assembly) and
+**PKG-24** (an information-content caption defined as a single residue's
+log-likelihood), and **PKG-25** (a form's "failures are reported, not omitted"
+beside a result table that omits the failed tool for the named cohort or marks
+its rows `failed = False`).
 
 ## Running
 

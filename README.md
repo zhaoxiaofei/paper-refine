@@ -438,11 +438,13 @@ producer, and a claim resting only on one is `unable -- placeholder input`. The
 real partner of a DECLARED placeholder stays evidence (declaring the ACT copy
 must not silence the HG008 original).
 
-### Package self-consistency: PKG-11/12/14/15/16
+### Package self-consistency: PKG-11 to PKG-24
 
-Three scans run on every produced package and every published copy, and their
-rows block the readiness verdict (one of the two statements is wrong, and only
-the author can say which):
+Every scan below runs on each produced package and on every published copy, and
+its rows are seeded in the review/audit/revision evidence pack. The table-
+contradiction rows block the readiness verdict (one of the two statements is
+wrong, and only the author can say which); the claim-quality seeds are advisory
+because they need a judgment the code cannot make.
 
 * **PKG-11** -- sibling tables whose headers differ only by case or one
   character. A one-letter `MixMHCPred_aff`/`MixMHCpred_aff` difference made an
@@ -462,6 +464,36 @@ the author can say which):
 * **PKG-16** (advisory) -- a required form (e.g. the Reporting Summary) whose
   software inventory omits tools the manuscript's `Software.` paragraph names
   (CopyNumBench: bedtools, Seurat, cellsnp-lite, Eagle, UCSC liftOver).
+* **PKG-17** -- a required form's design claim the Methods contradict: "no
+  overlap between parameter selection and evaluation"/"thresholds fixed before
+  inspection" beside "selected empirically … on the cell-line datasets" or a
+  parameter relaxed because the defaults retained no cells.
+* **PKG-18** -- a prose "X gave the highest average <metric>" recomputed from a
+  shipped per-dataset grid (`method`/`metric`/`dataset`/`mean`); advisory when
+  the sentence cites a figure whose numbers are not shipped, blocking otherwise.
+* **PKG-19** (advisory) -- a "recovered the N subpopulations" claim made with a
+  fixed `k = N` and/or a stated absence of a cluster-to-karyotype concordance
+  statistic; the caller's shipped cluster sizes are quoted.
+* **PKG-20** (advisory) -- one symbol ("SD") defined with two different
+  denominators (population over datasets vs sample over antigens) while the
+  prose uses it unqualified.
+* **PKG-21** (advisory) -- a paragraph that admits one term can distort a measure
+  ("can contribute disproportionately") and then draws a comparative inference
+  ("means … more strongly") from it.
+* **PKG-22** (advisory) -- a main-text claim citing a supplementary note whose
+  closest negated sentence says the result must not be read that way ("should
+  not be interpreted as", "not evidence"); it requires a shared non-method
+  subject, so an unrelated note limitation is not paired.
+* **PKG-23** (advisory) -- a "single-cell …" claim whose citation resolves to a
+  bulk genome assembly (the reference list is parsed; narrow by design).
+* **PKG-24** (advisory) -- a caption defining information content as a single
+  residue's log-likelihood instead of the expected log-likelihood ratio
+  (Σ p log₂(p/q), letter height = frequency × IC).
+* **PKG-25** -- a form's "cases in which a tool failed to run … are reported in
+  the deposited result tables rather than being omitted" beside a result table
+  that omits the failed tool for the named cohort (CopyNumBench's ACT panel has
+  no SCYN row) or carries its rows with `failed = False` (the 15 CHISEL ACT
+  rows). The omission row is blocking; the unmarked-rows row is medium.
 
 To avoid duplicating gigabytes into every sandbox, the pipeline keeps **ONE**
 read-only copy of each evidence area per root (`<root>/non_revised/<area>`,

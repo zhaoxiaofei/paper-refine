@@ -904,6 +904,45 @@ touching this area:
   and idiom uses ("one of them", "one another", "no one", "at once", "Run two",
   "Patient three") are dropped so the ledger stays a checklist rather than a
   noise source. Pinned by `.paper_test/test_manu_sub_audit_2026_1017.py`.
+* **Cross-surface claim checks** (2026-10-17, third pass; PKG-17..24). The
+  `Additional_Issues` audit found classes that live between two shipped
+  surfaces, so they are now scanned and seeded for the review/audit/revise arms:
+  * PKG-17 (blocking) — a required form's "no selection/evaluation overlap" or
+    "thresholds fixed before inspection" beside the Methods' "selected
+    empirically to match manual karyotyping on the cell-line datasets" (the
+    cell lines are in the evaluated 41) or a parameter relaxed because the
+    defaults retained no cells.
+  * PKG-18 — a prose "X gave the highest average <metric>" recomputed from a
+    shipped `method`/`metric`/`dataset`/`mean` grid; advisory when the sentence
+    cites a figure whose numbers are not shipped (CopyKAT 0.751 vs Numbat
+    0.759), blocking otherwise.
+  * PKG-19 (advisory) — a "recovered the N subpopulations" claim with a fixed
+    `k = N` and/or the package's own admission that no cluster-to-karyotype
+    concordance statistic was computed; the shipped cluster sizes are quoted
+    (Ginkgo 7/32/81, HMMcopy one cluster).
+  * PKG-20 (advisory) — "SD" defined with two denominators (population over
+    datasets in Table S1, sample over antigens in Table 4) and used unqualified
+    in the prose.
+  * PKG-21 (advisory) — a definition that admits a single term can dominate the
+    measure, followed by a comparative inference from it (the NeoHeteroclitic
+    G(y) sum of ratios).
+  * PKG-22 (advisory) — a claim citing a supplementary note whose closest
+    negated sentence says the result must not be read that way (the
+    CopyNumBench "purity floor" beside the note's "should not be interpreted as
+    demonstrating an intrinsic failure"). It requires a shared non-method
+    subject, so an unrelated note limitation is not paired.
+  * PKG-23 (advisory) — a "single-cell …" claim whose citation resolves to a
+    bulk genome assembly (Nurk et al. cited for single-cell T2T co-sequencing).
+  * PKG-24 (advisory) — a caption defining information content as a single
+    residue's log-likelihood instead of the expected log-likelihood ratio.
+  * PKG-25 — a form's "failures are reported in the deposited result tables
+    rather than being omitted" beside a table that omits the failed tool for
+    the named cohort (CopyNumBench's ACT panel has no SCYN row) or carries its
+    rows with `failed = False` (the 15 CHISEL ACT rows the text says were
+    discarded). The omission row is blocking, the unmarked-rows row medium.
+  The two blocking classes (form-vs-methods and a bare contradicted ranking
+  claim) join the readiness verdict; the rest are claim-quality seeds the
+  review/audit must dispose. Pinned by the same suite.
 * **The b9 antigen is a documented exclusion, not a dropped study**
   (2026-10-17, second pass; correction). The NeoHeteroclitic Methods state that
   the Zhou et al. p15E series "fails the twelve-column inclusion rule and was

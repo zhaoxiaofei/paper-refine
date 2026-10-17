@@ -173,3 +173,66 @@ python3 .paper_test/test_manu_sub_audit_2026_1017.py
   that they did not contribute to the reported results.
 * N-10: scope the cover letter's corroboration sentence so it does not claim
   the D30 (null) TCR-clonotype result as corroboration.
+
+## 6. Third pass — the `Additional_Issues` list (same day)
+
+Every item was re-checked against the package (the source tables, the
+supplement and the reference list). Dispositions:
+
+| id | issue | status | evidence |
+|---|---|---|---|
+| A-1 | CopyNumBench: the purity-floor result contradicts the note it cites | **confirmed, with a nuance** | Main text: "on low-purity primary tumors (Ginkgo-inferred tumor purity < 0.20), all seven callers performed near-randomly … The weaker signal is expected: a sample with 5% tumor cells carries approximately 5% of the tumor CNV signal of a pure tumor sample." The cited Supplementary Note 1 agrees the metrics approach chance ("tended to approach chance levels in several datasets") but says "They should therefore **not be interpreted as demonstrating an intrinsic failure**", and its Limitations call the 85% rule an artifact ("The failure on the BCIS28T and related datasets is therefore **not evidence** that Numbat, CopyKAT, or other callers are inherently unable to handle low-purity samples"). So the note contradicts the *interpretation* (a caller "purity floor"), and the 5%-dilution sentence is bulk reasoning that does not apply to per-cell profiles; the observation itself is not contradicted |
+| A-2 | CopyNumBench: the reporting summary denies a threshold the Methods describe | **confirmed** | Summary: "no overlap between the data used for parameter selection and the data used for evaluation" / "thresholds … fixed before …". Methods: "The 85% threshold was selected empirically to match manual karyotyping on the cell-line datasets and was held fixed across all 41 datasets" — and the cell lines (A375, HCT116, MDA-MB-231, …) are among the 41. Separately, SCYN's Gini cutoff was relaxed 0.12 → 0.21 and `mapq20_thresh` set to 0.1 "because the default thresholds retained no cells" (Methods). The "fixed before the final metrics were inspected" half can stay true (selection used karyotyping, not the metrics); the no-overlap claim cannot |
+| A-3 | CopyNumBench: ref. 43 does not support its sentence | **confirmed** | "In the future, single-cell telomere-to-telomere co-sequencing with other omics43 …"; ref. 43 = Nurk et al., "The complete sequence of a human genome", Science 376, 44–53 (2022) — the bulk CHM13 assembly, not a single-cell co-sequencing method |
+| A-4 | CopyNumBench: "Ginkgo recovered the three karyotype-defined subpopulations" | **confirmed** (the batch sub-claim is not verifiable offline) | The three classes are spliced from two cultures (NIST passage 18: 17/20 at 34–36 + 3/20 WGD at 68–70; MGH passage 31: 2/25 >100, the other spreads not described as a class); the dendrogram is cut at k = 3 for every caller; the Methods admit "We did not compute a cluster-to-karyotype concordance statistic such as an adjusted Rand index". Ginkgo's cut is 7/32/81, HMMcopy's is one cluster of 120 — the proportions match neither 17:3 nor 23:2. The claimed batch (BioSkryb 0823p23) is not in the corpus, so that sub-claim was not independently checked |
+| A-5 | CopyNumBench: CopyKAT is not the highest tumor/normal average on the shipped grid | **confirmed against the only shipped numeric surface** | Supplementary Note 1: "CopyKAT gave the highest average ROC-AUC; Numbat, CaSpER, and SCEVAN followed closely" (cites Supplementary Fig. S31). `Fig5_scRNA_swarm_grid.tsv`: plain Numbat **0.759** (12 datasets) vs plain CopyKAT **0.751** (13); `copykat_cellline_autoInferRef` 0.713 and `copykat_autoInferRef` 0.683. The 34-dataset heatmap's numbers are not shipped, so the claim is unverifiable and contradicted on the available surface |
+| A-6 | NeoHeteroclitic: the heterocliticity definition contradicts its next clause | **confirmed** | G(y) = Σ N(c,y)/N(c,x); the text says "a clonotype with a small non-zero parental response can contribute disproportionately to G(y)", then "a variant with G(y) > G(x) activates more of the parental repertoire, more strongly, than the parent does". One inflated ratio produces the inequality; it does not show more clonotypes or a stronger response in each |
+| A-7 | NeoHeteroclitic: "SD" is two different estimators | **confirmed** | Table S1: "SD is the population standard deviation (denominator n) across the 26 datasets" (MixMHCpred affinity 0.137). Table 4: "SD across antigens is the sample standard deviation (denominator n − 1)". The prose uses "SD" for both without qualification ("SDs across datasets of 0.14 to 0.23"; "SD 0.077 versus 0.184") |
+| A-8 | NeoHeteroclitic: Figure 4's information content is not what the caption defines | **confirmed** | Caption: "Information content is the per-position logo height in bits … derived from the log-likelihood of the residue at that position relative to a uniform background." Position information content is the expected log-likelihood ratio, Σ p log₂(p/q) (q = uniform), and a letter's height is its frequency times that quantity; a single residue's log-likelihood is neither |
+| A-9 | CopyNumBench: the Reporting Summary says failures "are reported in the deposited result tables rather than being omitted", but they are omitted/unmarked | **confirmed (new in this pass)** | The form: "Cases in which a tool failed to run or returned no calls are reported in the deposited result tables rather than being omitted." `Fig3_ploidy_balloons.tsv` has **no SCYN row in the ACT panel** (the text says "SCYN produced no output on any ACT sample"), and its `failed` column is `False` on all 1,815 rows — including the 15 CHISEL ACT rows the text says were discarded as biased. So the failure is omitted from the table the form points at, and the column that should mark it never does |
+
+Guards added (all seeded in the evidence pack and reach readiness; blocking
+unless marked advisory):
+
+* **PKG-17** — a required form's design claim vs the Methods' own selection
+  sentence (A-2; blocking).
+* **PKG-18** — a prose "X gave the highest average <metric>" recomputed from a
+  shipped per-dataset grid (A-5; advisory when the sentence cites a figure whose
+  numbers are not shipped, blocking otherwise).
+* **PKG-19** — a "recovered the N subpopulations" claim with a fixed k and/or a
+  stated absence of a concordance statistic, with the caller's shipped cluster
+  sizes quoted (A-4; advisory).
+* **PKG-20** — one symbol ("SD") defined with two different denominators while
+  the prose uses it unqualified (A-7; advisory).
+* **PKG-21** — a paragraph that admits one term can distort a measure and then
+  draws a comparative inference from it (A-6; advisory).
+* **PKG-22** — a main-text claim citing a supplementary note whose closest
+  negated sentence says the result must not be read that way (A-1; advisory;
+  requires a shared non-method subject, so unrelated note limitations are not
+  paired).
+* **PKG-23** — a "single-cell …" claim whose citation resolves to a bulk genome
+  assembly (A-3; advisory; narrow by design).
+* **PKG-24** — a caption defining information content as a single residue's
+  log-likelihood (A-8; advisory).
+* **PKG-25** — a form's "failures are reported in the deposited tables, not
+  omitted" beside a table that omits the failed tool for the cohort (or carries
+  its rows with `failed = False`) while the text says it produced no output /
+  was excluded (A-9; the omission row is blocking, the unmarked-rows row is
+  medium).
+
+**Checked and rejected** (a candidate raised after the list above):
+
+* **The ACT expected-ploidy source** — "the supplementary tables have no ploidy
+  info measured by FACS with DAPI staining" is **not true**. Minussi et al.
+  (2021), Supplementary Table 1 ("Clinical Tumor Information and Sequencing
+  Metrics", PMC8049101), carries a per-sample `ploidy` column whose legend reads
+  "**FACS mean ploidy of the aneuploid cell population**": TN1 3.45, TN2 3.03,
+  TN3 3.44, TN4 3.76, TN5 2.65, TN6 3.17, TN7 3.15, TN8 3.95; MDA-MB-231 2.41,
+  MDA-MB-157 2.55, BT-20 2.70, MDA-MB-453 4.17. Those are exactly the
+  `expected_ploidy_mean` values shipped in
+  `raw_data/source_data/Fig3_ploidy_balloons.tsv`. The paper's Methods also
+  state the DAPI/FACS derivation ("Average tumor ploidy was calculated with DAPI
+  fluorescence values from FACS sorting data … the ratio of the mean DAPI
+  fluorescence from the gated aneuploid population over the mean DAPI
+  fluorescence of the 2N population was multiplied by 2"). The manuscript's
+  sentence is therefore supported by the cited table.
