@@ -378,6 +378,16 @@ def test_judge_prompt_and_ids():
     nb._marker_checks(rec, {"stage": "judge", "status": "complete", "run_id": rid}, "judge",
                       errs3, [])
     check("a completion marker without a round is accepted", errs3 == [], str(errs3))
+    errs3b, warns3b = [], []
+    nb._marker_checks(rec, {"status": "complete", "run_id": rid}, "judge", errs3b, warns3b)
+    check("a root marker that omits its stage is accepted with a note",
+          errs3b == [] and any("no 'stage' field" in w for w in warns3b),
+          f"{errs3b} / {warns3b}")
+    errs3c = []
+    nb._marker_checks(rec, {"stage": "review", "status": "complete", "run_id": rid}, "judge",
+                      errs3c, [])
+    check("a root marker naming a DIFFERENT stage still fails", any("stage mismatch" in e
+                                                                   for e in errs3c), str(errs3c))
     errs4, warns4 = [], []
     nb._marker_checks(rec, {"stage": "judge", "status": "complete", "run_id": rid, "round": 1},
                       "judge", errs4, warns4)

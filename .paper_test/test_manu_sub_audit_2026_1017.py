@@ -28,6 +28,7 @@ table), PKG-12 (a statistics row whose p and its own interval disagree), PKG-14
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import os
 import shutil
@@ -343,6 +344,38 @@ def test_author_to_complete_policy():
         "Only files whose names match `ms-*.docx` will be submitted.\n", encoding="utf-8")
     check("the declared submitted set scopes the marker scan",
           pp._handoff_marker_occurrences(declared) == [])
+    # Process scratch is not a delivered document. A marker in revised/work/
+    # must not fail the stage or trigger another 30-minute revision.
+    work_scan = scratch("atc_work_scan_")
+    work_sb = work_scan / "runs" / "r1_a2_revise"
+    work_rev = work_sb / "revised"
+    write_docx(work_rev / "ms-1-mainText-abcdef0.docx", ["Body."])
+    (work_rev / "work" / "baseline").mkdir(parents=True)
+    (work_rev / "work" / "baseline" / "M6_hygiene.md").write_text(
+        "- [AUTHOR TO COMPLETE: scratch-only note]\n", encoding="utf-8")
+    work_ctx = Ctx(work_scan, {"author_to_complete": "readme"})
+    work_errs = []
+    work_report = pp.placeholder_residual_report(
+        work_ctx, work_sb, [(work_rev, "", pp.CORPUS_EXCLUDE_TOP)],
+        "revise", enforce=True, errs=work_errs, warns=[])
+    check("a marker in revised/work scratch never fails the stage",
+          work_errs == [] and work_report.get("handoff_markers") == 0,
+          f"{work_errs} / {work_report}")
+    unexcluded_errs = []
+    pp.placeholder_residual_report(
+        work_ctx, work_sb, [(work_rev, "", ())],
+        "revise", enforce=True, errs=unexcluded_errs, warns=[])
+    check("the work-scratch exclusion is what prevents that false failure",
+          bool(unexcluded_errs), str(unexcluded_errs))
+    revise_source = inspect.getsource(pp.postcheck_revise)
+    check("every revise package scan excludes work/ scratch",
+          revise_source.count('[(rev, "", CORPUS_EXCLUDE_TOP)]') >= 3,
+          str(revise_source.count('[(rev, "", CORPUS_EXCLUDE_TOP)]')))
+    check("integrate/rewrite package scans exclude work/ scratch too",
+          inspect.getsource(pp.postcheck_integrate).count(
+              '[(out, "", CORPUS_EXCLUDE_TOP)]') >= 3
+          and inspect.getsource(pp.postcheck_rewrite).count(
+              '[(out, "", CORPUS_EXCLUDE_TOP)]') >= 2)
     # A running copy that differs from the frozen copy is detectable.
     stale = scratch("atc_stale_")
     (stale / "paper_pipeline.py").write_text("# stale\n")

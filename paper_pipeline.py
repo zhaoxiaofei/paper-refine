@@ -4844,6 +4844,13 @@ TRACKING_AUX_NAME_RE = re.compile(
 # A PLAIN trailing number ("-1", "-3") is NOT a version token: SI-Table-1.csv
 # and Figure-3.xlsx are distinct documents and must never be merged.
 DOC_TOKEN_RE = re.compile(r"(?:[-_][0-9a-f]{7}|[-_][vV]\d+|[-_][A-Za-z])$")
+# Source/provenance suffixes that describe where a document came from, not a
+# different submission role. A content-token rename may legitimately change
+# these (`mainText-FrontiersTemplate-zotero-<old>` ->
+# `mainText-<new>`); recovery must treat that as the same document renamed, not
+# as a lost old document plus an invented new one.
+DOC_PROVENANCE_SUFFIX_RE = re.compile(
+    r"(?i)(?:[-_](?:frontiers?template|zotero))+$")
 
 # Extensions that only ever hold a BUILD BY-PRODUCT of an editable source
 # (.aux/.log/.synctex.gz/...). The prompts prescribe leaving these out of
@@ -8115,7 +8122,26 @@ def shared_blocks() -> str:
     it was never told about. The comparison session receives the same two blocks
     (they carry no provenance); its extra blindness rule is added separately.
     """
-    return SHARED_DECISION_BLOCK + ADOPTED_SWEEPS_BLOCK + RAW_DATA_READONLY_RULE
+    return (SHARED_DECISION_BLOCK + ADOPTED_SWEEPS_BLOCK + RAW_DATA_READONLY_RULE
+            + CONTEXT_BUDGET_RULE)
+
+
+CONTEXT_BUDGET_RULE = """
+
+=== CONTEXT BUDGET — READ EVERYTHING, BUT DO NOT PASTE EVERYTHING ===
+  * Read large documents and evidence files sequentially in bounded slices, taking notes in
+    your work directory as you go. Never `cat` an entire large JSON/CSV/log, print thousands of
+    ledger rows, or re-read from the beginning after each edit.
+  * When a command can produce a large result, write it to a file and inspect the needed lines,
+    counts or columns. Keep your own decisions and evidence quotes in a compact work note
+    rather than carrying every source passage in the conversation.
+  * For rendered documents, inspect a CONTACT SHEET covering every page first, then open
+    full-resolution page images only for suspected defects and the key title/caption pages. Do
+    not reopen pages already inspected.
+  * This is a context-transport rule, not a coverage exemption: every file and page still has
+    to be examined. A provider request that exceeds its payload/context limit cannot be resumed;
+    finish the pass in one context by keeping working notes on disk.
+"""
 
 
 # The corpus's raw-data directory is an INPUT (see enforce_readonly_raw_data):
@@ -8434,6 +8460,12 @@ VISUAL_INSPECTION_RULE = """VISUAL INSPECTION — RENDER FIRST, THEN LOOK (a DOC
     or its manifest records a render error, compare against the read-only `venue_template/` file
     itself (extract its structure) and say in the artifact that the visual template render was
     unavailable.
+  * PAGE COVERAGE WITHOUT CONTEXT BLOW-UP: after rendering, build contact sheets that place
+    EVERY page in the document on a small number of composite images (ImageMagick `montage` or
+    a short Pillow script), and inspect those first.
+    Open an individual full-resolution page only when the contact sheet suggests a defect, or
+    when checking a title/caption/table page that needs detail. Record which contact sheets and
+    individual pages you examined; never re-open a page you already inspected.
   * What to look for, page by page: fonts too small/large for their part of the manuscript,
     justified main text (must be left-aligned), overlapping or clipped text/figures, tables that
     overflow or break badly, figures/tables split across pages, orphaned headings, uneven
@@ -18235,6 +18267,15 @@ def tracking_aux_suffix(token: str, ext: str, fallback: bool = False) -> str:
 def _doc_key(rel: str) -> str:
     p = Path(rel)
     stem = DOC_TOKEN_RE.sub("", p.stem)
+    # The stage's content token is not the only renameable part. A package
+    # produced from `mainText-FrontiersTemplate-zotero-<old>` may correctly
+    # become `mainText-<new>`; pairing only the token-stripped stem made the
+    # first look lost and the second look invented, so recovery restored the
+    # superseded copy and every retry recreated the same two-token package.
+    prev = None
+    while prev != stem:
+        prev = stem
+        stem = DOC_PROVENANCE_SUFFIX_RE.sub("", stem)
     parent = p.parent.as_posix()
     prefix = "" if parent in (".", "") else parent + "/"
     return prefix + stem.lower() + p.suffix.lower()
@@ -24391,8 +24432,18 @@ def _marker_checks(rec: dict, marker, stage: str, errs: list, warns: list,
         return
     if where:
         errs.append(f"the completion marker is NOT in the sandbox root: {where}")
-    if marker.get("stage") != stage:
-        errs.append(f"marker stage mismatch: expected {stage!r}, got {marker.get('stage')!r}")
+    marker_stage = marker.get("stage")
+    if marker_stage is None:
+        # The marker is already at THIS run's sandbox root, so the run's own
+        # context identifies the stage unambiguously. The audit marker from
+        # `cnb-to33` omitted `stage` and carried a valid summary; rebuilding a
+        # complete 13-minute audit over one optional label wasted a whole
+        # attempt. A WRONG non-empty stage is still a hard error, and a stray
+        # marker in an alternate directory still needs the field to be adopted.
+        warns.append(f"completion marker has no 'stage' field; accepted at the sandbox root "
+                     f"as stage {stage!r}")
+    elif marker_stage != stage:
+        errs.append(f"marker stage mismatch: expected {stage!r}, got {marker_stage!r}")
     if marker.get("run_id") not in (None, rec["id"]):
         errs.append(f"marker run_id mismatch: expected {rec['id']!r}, "
                     f"got {marker.get('run_id')!r}")
@@ -28721,6 +28772,24 @@ REPAIR_TIMEOUT_MAX = 3600
 # RESUME_ATTEMPT_LIMIT times per session id.
 RESUME_PROMPT_FILE = "RESUME_PROMPT.md"
 RESUME_ATTEMPT_LIMIT = 2
+# A provider request that already exceeded its payload/context limit keeps
+# exceeding it when resumed: `codex exec resume` resends the whole session.
+# Recognise that failure so the retry policy goes straight to a FRESH context
+# instead of spending continuation calls that can only fail again.
+AGENT_CONTEXT_OVERFLOW_RE = re.compile(
+    r"(?is)(?:unexpected status\s+413|request entity too large|payload too large|"
+    r"length limit exceeded|maximum context length|context (?:length|window)[^\n]{0,100}"
+    r"(?:exceed|too large)|request body[^\n]{0,80}(?:too large|limit exceeded))")
+
+
+def agent_failure_kind(stdout: str = "", stderr: str = "") -> str:
+    """A stable failure class read from the CLI's own transport errors."""
+    text = f"{stdout or ''}\n{stderr or ''}"
+    if AGENT_CONTEXT_OVERFLOW_RE.search(text):
+        return "context_overflow"
+    return ""
+
+
 # A continuation finishes a stage that is already 80% done: cap it well below
 # the stage timeout (which defaults to 4h).
 RESUME_TIMEOUT_MAX = 5400
@@ -28977,6 +29046,11 @@ def resume_gate(ctx: Ctx, rec: dict, cmd: list) -> tuple:
     key = sid or "__continue__"
     reason = resume_unfinished_reason(ctx, rec)
     if not reason:
+        return [], key, ""
+    if rec.get("last_failure_kind") == "context_overflow":
+        why = ("the provider already rejected this session's request as too large; "
+               "resuming resends the same context, so a FRESH attempt follows")
+        print(f"  [resume] {rec['id']}: no continuation -- {why}")
         return [], key, ""
     argv = resume_argv_for(cmd, sid)
     if not argv:
@@ -29821,11 +29895,13 @@ def finish_resume_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
     if res.get("error") or res.get("rc") not in (0,):
         rec["status"] = "failed"
         rec["last_error"] = (res.get("error") or f"agent exited rc={res.get('rc')}")[:600]
+        rec["last_failure_kind"] = str(res.get("failure_kind") or "")
         record_attempt(ctx, rec, False, [rec["last_error"]], [],
                        source="continuation (process failed)")
         print_failure(rec["id"], [rec["last_error"]],
                       note=f"after continuation {flight['session'][:8]}")
     else:
+        rec["last_failure_kind"] = ""
         postcheck(ctx, rec, source="continuation")
         if rec["status"] == "done":
             print(f"  [ok]   {rec['id']}: the CONTINUATION finished the stage "
@@ -30767,9 +30843,9 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     # must not ship (the reviewer of a real run saw one carried into a submitted
     # cover letter although the answer was a recorded lookup away), and a number
     # in the abstract or a legend that no shipped table proves is reported.
-    residual = placeholder_residual_report(ctx, sb, [(rev, "", ())],
+    residual = placeholder_residual_report(ctx, sb, [(rev, "", CORPUS_EXCLUDE_TOP)],
                                            "revise", enforce=True, errs=errs, warns=warns)
-    prov = number_provenance_report(sb, [(rev, "", ())])
+    prov = number_provenance_report(sb, [(rev, "", CORPUS_EXCLUDE_TOP)])
     residual.update({"unsourced_numbers_in_abstract_legends": prov.get("unsourced", 0),
                      "proved_numbers": prov.get("proved", 0),
                      "unsourced_examples": prov.get("examples", [])})
@@ -30790,7 +30866,8 @@ def postcheck_revise(ctx: Ctx, rec: dict):
                              f"{effect.get('added', 0)}")
     # W-12: the language pass of this stage (one row per change + one coverage
     # row per step) and the "no NEW finding-tier family" comparison.
-    add_stage_quality_checks(ctx, rec, [(sb / "base", "", ())], [(rev, "", ())],
+    add_stage_quality_checks(ctx, rec, [(sb / "base", "", ())],
+                             [(rev, "", CORPUS_EXCLUDE_TOP)],
                              rev, "revise", errs, warns)
     # HARD check: Phase 2 must not touch the frozen review/ copy.
     _check_pristine_copy(ctx, rec, pristine_dirname(ctx.sandbox_of(rec)), errs)
@@ -30992,9 +31069,9 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
         check_visual_artifact(out / "VISUAL_CHECK.md",
                               f"the visual-inspection record {VISUAL_ARTIFACT_INTEGRATED}",
                               errs, warns, sandbox=sb, render_roots=[out])
-    residual = placeholder_residual_report(ctx, sb, [(out, "", ())],
+    residual = placeholder_residual_report(ctx, sb, [(out, "", CORPUS_EXCLUDE_TOP)],
                                            "integrate", enforce=True, errs=errs, warns=warns)
-    prov = number_provenance_report(sb, [(out, "", ())])
+    prov = number_provenance_report(sb, [(out, "", CORPUS_EXCLUDE_TOP)])
     residual.update({"unsourced_numbers_in_abstract_legends": prov.get("unsourced", 0),
                      "proved_numbers": prov.get("proved", 0),
                      "unsourced_examples": prov.get("examples", [])})
@@ -31036,7 +31113,8 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
     else:
         warns.append("integrate: DIFF_LEDGER.md could not be parsed as a table (the per-difference "
                      "artifacts, the size classes and the finding-effect column cannot be checked)")
-    add_stage_quality_checks(ctx, rec, [(sb / "self", "", ())], [(out, "", ())],
+    add_stage_quality_checks(ctx, rec, [(sb / "self", "", ())],
+                             [(out, "", CORPUS_EXCLUDE_TOP)],
                              out, "integrate", errs, warns)
     _check_pristine_copy(ctx, rec, pristine_dirname(ctx.sandbox_of(rec)), errs)
     errs.extend(input_mismatches(ctx, rec))
@@ -31107,7 +31185,7 @@ def postcheck_rewrite(ctx: Ctx, rec: dict):
         check_visual_artifact(out / "VISUAL_CHECK.md",
                               f"the visual-inspection record {VISUAL_ARTIFACT_REWRITTEN}",
                               errs, warns, sandbox=sb, render_roots=[out])
-    rec["residual"] = placeholder_residual_report(ctx, sb, [(out, "", ())],
+    rec["residual"] = placeholder_residual_report(ctx, sb, [(out, "", CORPUS_EXCLUDE_TOP)],
                                                   "rewrite", enforce=True, errs=errs, warns=warns)
     # W-11/W-12: the arm's declared LEVEL, the language pass, and the
     # "no NEW finding-tier family" comparison against the arm's own base.
@@ -31128,7 +31206,8 @@ def postcheck_rewrite(ctx: Ctx, rec: dict):
                         f"{declared.group(1).lower()!r} but this arm is {level!r} -- the round "
                         f"stages one structural and one sentence-level arm so the pool has both "
                         f"kinds of difference")
-    add_stage_quality_checks(ctx, rec, [(sb / "base", "", ())], [(out, "", ())],
+    add_stage_quality_checks(ctx, rec, [(sb / "base", "", ())],
+                             [(out, "", CORPUS_EXCLUDE_TOP)],
                              out, "rewrite", errs, warns)
     _check_pristine_copy(ctx, rec, pristine_dirname(ctx.sandbox_of(rec)), errs)
     errs.extend(input_mismatches(ctx, rec))
@@ -35805,7 +35884,17 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
             f.write(f"===== rc={rc} dur={dur:.1f}s error={exc} =====\n")
     except OSError:
         pass
-    return {"rc": rc, "dur": dur, "error": exc, "log": str(logf)}
+    failure_kind = ""
+    if rc not in (0, None):
+        failure_kind = agent_failure_kind("", err)
+        if not failure_kind and not str(err).strip():
+            failure_kind = agent_failure_kind(out, "")
+    if failure_kind == "context_overflow":
+        exc = ("the agent request exceeded the provider's payload/context limit "
+               "(HTTP 413 / request too large); a continuation would resend the same "
+               "oversized context, so a fresh attempt is required")
+    return {"rc": rc, "dur": dur, "error": exc, "log": str(logf),
+            "failure_kind": failure_kind}
 
 
 def execute_wave(ctx: Ctx, ids: list, cmd: list, timeout: int, jobs: int) -> dict:
@@ -35835,6 +35924,7 @@ def apply_results(ctx: Ctx, results: dict) -> None:
         if res.get("error") or res.get("rc") not in (0,):
             rec["status"] = "failed"
             rec["last_error"] = (res.get("error") or f"agent exited rc={res.get('rc')}")[:600]
+            rec["last_failure_kind"] = str(res.get("failure_kind") or "")
             # The process died mid-session: its CLI session id is still in the
             # transcript, and a continuation may finish the work it started.
             sid = capture_agent_session_id(ctx, rec)
@@ -35846,6 +35936,7 @@ def apply_results(ctx: Ctx, results: dict) -> None:
             record_attempt(ctx, rec, False, [rec["last_error"]], [], source="process")
             print_failure(rid, [rec["last_error"]], note="the agent process failed")
         else:
+            rec["last_failure_kind"] = ""
             postcheck(ctx, rec)
             if rec["status"] == "done":
                 print(f"  [ok]   {rid} done ({fmt_dur(res.get('dur'))})"
@@ -42933,8 +43024,8 @@ def declared_submission_set(root: Path) -> dict:
         an unrelated example (`fig-*.png`, `*.log`) changed the submitted set.
         Walk the sentence that carries the declaration and the immediately
         following pattern lines; stop at the next prose line. The glob may sit
-        before OR after the hint (`Only \`ms-*.docx\` will be submitted` and
-        `The following will be submitted: \`ms-*.docx\`` are both declarations).
+        before OR after the hint (`Only `ms-*.docx` will be submitted` and
+        `The following will be submitted: `ms-*.docx`` are both declarations).
         """
         def globs_in(fragment: str) -> list:
             return [
@@ -43064,8 +43155,7 @@ def declared_submission_filter(root: Path):
 # does not reveal the role.
 DUP_ROLE_DOC_EXTS = (".doc", ".docx", ".pdf", ".tex", ".ltx", ".md", ".txt")
 DUP_ROLE_VERSION_RE = re.compile(r"(?:[-_][0-9a-f]{7}|[-_][vV]\d+)$")
-DUP_ROLE_PROVENANCE_SUFFIX_RE = re.compile(
-    r"(?i)(?:[-_](?:frontiers?template|zotero))+$")
+DUP_ROLE_PROVENANCE_SUFFIX_RE = DOC_PROVENANCE_SUFFIX_RE
 
 
 def _duplicate_role_key(name: str) -> str:

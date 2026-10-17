@@ -849,6 +849,32 @@ touching this area:
   `.paper_test/test_manu_sub_audit_2026_1017.py` and
   `.paper_test/test_review_handoff_2026_1015.py`; the score report is pinned
   by `.paper_test/test_pairwise_scores.py`.
+* **Retry sinks observed in the partial 2026-10-17 roots** (2026-10-18). The
+  `neohet-to15` reviser spent six attempts because the round base carried
+  `mainText-FrontiersTemplate-zotero-cd3034d`, the AI produced
+  `mainText-<new-token>`, and recovery restored the superseded old name as
+  "lost", creating a two-token package on every retry. The CNB reviser failed
+  once on an `[AUTHOR TO COMPLETE]` marker in `revised/work/baseline/`, which
+  is process scratch and never ships. The CNB auditor was rebuilt solely
+  because its root marker omitted the optional `stage` field. The review and
+  judge sessions then hit provider `413 Payload Too Large`, and each
+  continuation resent the already-oversized context and failed again. Four
+  changes remove those loops:
+  * document identity now strips source/provenance suffixes as well as the
+    content token, so an old-token to new-token + suffix rename is ONE
+    document for recovery and the document-set check;
+  * every delivered-package scan in the revise/integrate/rewrite postchecks
+    excludes that package's `work/` scratch;
+  * a completion marker at the sandbox root may omit `stage` (warning), while
+    a wrong non-empty stage remains an error;
+  * `413`/request-too-large failures are classified as `context_overflow` and
+    are never continued; the retry budget goes directly to a fresh context.
+    All prompts now require bounded reads and contact-sheet-first visual
+    inspection, with every page still examined.
+  Pinned by `.paper_test/test_document_recovery.py`,
+  `.paper_test/test_manu_sub_audit_2026_1017.py`,
+  `.paper_test/test_judge_blinding.py` and
+  `.paper_test/test_resume_continuation.py`.
 * **An evidence-area file may be referenced only as a display item or through
   the parent's `.tex` closure** (2026-10-17, PKG-10). The operator's rule for
   these packages: files in `raw_data/` (and its siblings) "cannot be referenced

@@ -2660,6 +2660,18 @@ already carries its completion marker (`sweep_artifacts`), the same postcheck ru
 — and if it fails on repairable bookkeeping, the scoped repair session runs right
 there, so a finished 45-minute review is not thrown away for two unfilled tables.
 
+The 2026-10-17 partial roots exposed deterministic failures that a blind retry
+could not fix, so they are repaired or accepted before another agent is spent:
+
+* process scratch under `revised|rewritten|integrated/work/` is excluded from
+  placeholder, number-provenance and formatting-regression scans (it is never
+  delivered);
+* a content-token rename may also drop `FrontiersTemplate`/`zotero` provenance
+  suffixes, and recovery treats old/new names with the same document role as ONE
+  renamed document instead of restoring the superseded copy;
+* a completion marker at the sandbox root may omit `stage` (accepted with a
+  warning); a marker that names a different stage still fails.
+
 ### A STOPPED session is continued, not restarted
 
 A session can end before its deliverables exist — a model that stops mid-turn, a
@@ -2698,6 +2710,12 @@ one instead:
   `RESUME_PROMPT.md` is written into the sandbox for the session and removed
   afterwards; the continuation never replaces the scoped artifact repair, it runs
   before it.
+* a provider `413 Payload Too Large` / context-length failure is never
+  continued: resuming resends the oversized context and failed again in
+  `neohet-to15` and `cnb-to33`. It is recorded as `context_overflow` and the
+  retry budget goes straight to a fresh context. Every prompt now also carries a
+  context-budget rule, requiring bounded reads and contact-sheet-first visual
+  inspection (every page is still examined; only the byte transfer is bounded).
 
 ### `--strict-artifacts fix`: one scoped repair session instead of a full re-run
 

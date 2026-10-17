@@ -161,6 +161,42 @@ def test_gate():
           and "Write the completion marker" in p and MARK in p and LED in p)
 
 
+def test_context_overflow_gate():
+    print()
+    print("== a 413/context-limit failure is never continued ==")
+    for label, text in (
+            ("status 413", "ERROR: unexpected status 413 Payload Too Large"),
+            ("request entity", "<title>413 Request Entity Too Large</title>"),
+            ("length limit", "Failed to buffer the request body: length limit exceeded"),
+            ("maximum context", "maximum context length exceeded")):
+        check(f"{label} is classified as context overflow",
+              nb.agent_failure_kind("", text) == "context_overflow", text)
+    check("an ordinary process failure has no context class",
+          nb.agent_failure_kind("", "agent exited rc=1") == "")
+
+    root = scratch("paper_resume_overflow_")
+    sb = root / "runs" / "r1_review"
+    sb.mkdir(parents=True)
+    ctx = nb.Ctx(root)
+    rec = {"id": "r1_review", "kind": "review", "round": 1, "sandbox": "runs/r1_review",
+           "status": "failed", "agent_session_id": SID,
+           "last_error": ("the agent request exceeded the provider's payload/context limit"),
+           "last_failure_kind": "context_overflow",
+           "postcheck": {"ok": False, "errors": [], "warnings": []}}
+    argv, key, reason = nb.resume_gate(ctx, rec, ["codex", "exec", "-"])
+    check("the gate refuses to resend the oversized session",
+          argv == [] and key == SID and reason == "", f"{argv} / {reason}")
+
+    prompts = (nb.review_prompt(Path("/tmp/sb"), "r1_review", 1),
+               nb.revise_prompt(Path("/tmp/sb"), "r1_a2_revise", 1),
+               nb.judge_prompt(Path("/tmp/sb"), "r1_judge", 1, "t", 1, 1, ["v1"]))
+    check("every session gets an explicit bounded-context rule",
+          all("CONTEXT BUDGET" in p and "CONTACT SHEET" in p for p in prompts))
+    check("the visual rule requires every page on a contact sheet first",
+          "EVERY page" in nb.VISUAL_INSPECTION_RULE
+          and "never re-open a page" in nb.VISUAL_INSPECTION_RULE)
+
+
 # ---------------------------------------------------------------------------
 # 4. end to end through a fake `codex` on PATH
 # ---------------------------------------------------------------------------
@@ -184,6 +220,9 @@ resumed = len(sys.argv) > 2 and sys.argv[1] == "exec" and sys.argv[2] == "resume
 sys.stderr.write(f"OpenAI Codex v0.155.1\\n--------\\nsession id: {{SID}}\\n")
 prompt = sys.stdin.read()
 if not resumed:
+    if MODE == "overflow":
+        sys.stderr.write("ERROR: unexpected status 413 Payload Too Large: length limit exceeded\\n")
+        sys.exit(1)
     sys.exit(0)                      # the stall: nothing written, rc=0
 sandbox = Path.cwd()
 (sandbox / "_fake_resume_count").write_text(
@@ -283,13 +322,37 @@ def test_end_to_end_limit():
           sources.count("continuation") == 2 and sources.count("postcheck") == 3, str(sources))
 
 
+def test_end_to_end_context_overflow():
+    print()
+    print("== a 413 process failure goes straight to a fresh attempt ==")
+    tmp = scratch("paper_resume_overflow_e2e_")
+    root = make_root(tmp)
+    proc = run_with_fake_codex(root, make_fake_codex(tmp / "bin"), "--retries", "1",
+                               mode="overflow")
+    out = proc.stdout + proc.stderr
+    state = json.loads((root / "state.json").read_text(encoding="utf-8"))
+    rec = state["runs"]["r1_w1"]
+    sources = [e.get("source") for e in rec.get("attempts_log") or []]
+    resume_counts = list((root / "runs").glob("r1_w1*/_fake_resume_count"))
+    check("the oversized session is never continued",
+          not resume_counts and "no continuation" in out
+          and "provider already rejected" in out, out[-500:])
+    check("both failures are recorded as fresh process attempts",
+          sources.count("process") == 2 and "continuation" not in sources, str(sources))
+    check("the run record classifies the failure",
+          rec.get("last_failure_kind") == "context_overflow"
+          and "payload/context limit" in str(rec.get("last_error")), str(rec.get("last_error")))
+
+
 def main() -> int:
     try:
         test_argv_forms()
         test_session_id_capture()
         test_gate()
+        test_context_overflow_gate()
         test_end_to_end_continuation()
         test_end_to_end_limit()
+        test_end_to_end_context_overflow()
     finally:
         cleanup()
     print()

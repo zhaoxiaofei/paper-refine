@@ -435,6 +435,27 @@ def main() -> int:
     check("D12 the restore is reported", any("Dataset-a.csv" in w for w in warns), str(warns))
     shutil.rmtree(tmp, ignore_errors=True)
 
+    # ---- D13: a token rename may also drop a source/provenance suffix ----
+    print("== D13: token + provenance-suffix rename is ONE document ==")
+    tmp = scratch("paper_rec_d13_")
+    base = tmp / "base"
+    old = base / "neohetero-16-2-mainText-FrontiersTemplate-zotero-cd3034d.docx"
+    make_docx(old, "main text before revision")
+    sb = tmp / "sandbox"
+    new = sb / "revised" / "neohetero-16-2-mainText-9a2cc25.docx"
+    make_docx(new, "main text after revision")
+    pre = nb.document_set_check([(base, "", ())], [(sb / "revised", "", ())])
+    check("D13 the old token family is not reported lost",
+          pre["missing"] == [], json.dumps({k: pre[k] for k in ("missing", "added")}))
+    check("D13 the new token family is not reported invented",
+          pre["added"] == [], json.dumps({k: pre[k] for k in ("missing", "added")}))
+    warns = []
+    info = nb.backfill_missing_files(_Ctx(), {"id": "r1_a2_revise", "kind": "revise"},
+                                     [(base, "", ())], warns)
+    check("D13 recovery does not resurrect the superseded old family",
+          info["restored"] == [] and old.name not in
+          {p.name for p in (sb / "revised").iterdir()}, str(info))
+
     for tmp in tmpdirs:
         shutil.rmtree(tmp, ignore_errors=True)
 
