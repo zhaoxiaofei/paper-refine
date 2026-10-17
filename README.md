@@ -513,6 +513,25 @@ because they need a judgment the code cannot make.
   that omits the failed tool for the named cohort (CopyNumBench's ACT panel has
   no SCYN row) or carries its rows with `failed = False` (the 15 CHISEL ACT
   rows). The omission row is blocking; the unmarked-rows row is medium.
+* **PKG-26** (blocking) -- the submitted set carries two files for one document
+  role. The NeoHeteroclitic `neohet-to17` package shipped both
+  `neohetero-18-2-mainText-9915d6e.docx` and the stale
+  `neohetero-18-2-mainText-FrontiersTemplate-zotero-bbb4e84.docx` (and the same
+  pair for the supplementary material), so the journal would receive two
+  different main texts. The comparison removes the version token and source
+  suffixes (`FrontiersTemplate`, `zotero`, `original`, `revised`, …), keeps the
+  extension, and is scoped to the package's own submitted set. A second,
+  distinct 7-hex token on editable documents also fails the producing stage's
+  postcheck. At publication the author checklist is rebuilt from current open
+  items in a marked block, so resolved rows cannot linger; markers outside the
+  declared submitted set do not become author work.
+
+A published package over the venue's relaxed M19 cap (or the configured
+cover-letter total cap) is also a blocking readiness finding (`FMT-M19`) even
+though the ranking never gates on a word count: the `neohet-to17` final copy was
+5,550 words against the 3,750-word relaxed Article cap. The length scan runs on
+the published files, including the pin-fallback path. Compression must remove
+redundancy only; scientific content is never deleted to meet a count.
 
 To avoid duplicating gigabytes into every sandbox, the pipeline keeps **ONE**
 read-only copy of each evidence area per root (`<root>/non_revised/<area>`,
@@ -2845,6 +2864,7 @@ its four integration runs never started.
 | path | purpose |
 |---|---|
 | `paper_pipeline.py` | the orchestrator (setup / run / run-decide / decide / retry / status / selfcheck / prune / redline / track) |
+| `pairwise_scores.py` | builds a per-round directed score workbook from `reports/round*_raw_scores.csv`; uses each judge's `own` frame and never invents the opposite direction from the derived `received` row |
 | `paper_docx_format.py` | OOXML style/formatting scanner, fixer and blank-page checker |
 | `paper_redlines_adapter.py` | tracked-changes bridge (`python-redlines[docxodus]`) |
 | `AGENT.md` | the agent-facing contract (rules the sessions and reviewers are held to) |
@@ -2862,7 +2882,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 130 suites (a few
+any failure. They are independent, so run them in parallel — 131 suites (a few
 minutes at the default 24 parallel sessions; tens of minutes sequentially):
 
 ```bash

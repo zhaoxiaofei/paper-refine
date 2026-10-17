@@ -238,17 +238,21 @@ def test_publish_carries_open_items():
           str(sib))
     check("nothing extra was written INSIDE the published directory",
           not (Path(rec["path"]) / pp.FINAL_CLEAN_STEPS_NAME).exists()
-          and not (Path(rec["path"]) / "MANUAL_STEPS.md").exists(),
+          and not (Path(rec["path"]) / "MANUAL_STEPS.md").exists()
+          and (Path(rec["path"]) / pp.AUTHOR_TO_COMPLETE_README).is_file(),
           str(sorted(p.name for p in Path(rec["path"]).iterdir())))
     readiness = pp.package_readiness(rec)
     rules = [f["rule"] for f in readiness["findings"]]
     # The publish path also runs the package scans: this fixture's title page does
     # not print the configured content type, so FMT-TP1 is reported ADVISORY -- it
-    # is listed, never gated (`blocking_findings` counts the REV rows only).
+    # is listed, never gated. The publisher also writes the author checklist
+    # from the same open items, so AUTH-2 is a blocking readiness row too.
     check("readiness is NOT ready, names the items and keeps the gap advisory",
           readiness["submission_ready"] is False
-          and [r for r in rules if r != "FMT-TP1"] == ["REV-1", "REV-1", "REV-2"]
-          and readiness["blocking_findings"] == 3
+          and [r for r in rules if r not in ("FMT-TP1", "AUTH-2")]
+          == ["REV-1", "REV-1", "REV-2"]
+          and "AUTH-2" in rules
+          and readiness["blocking_findings"] == 4
           and all(f.get("advisory") for f in readiness["findings"] if f["rule"] == "FMT-TP1"),
           json.dumps({"rules": rules,
                       "blocking": readiness["blocking_findings"],

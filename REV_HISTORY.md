@@ -824,6 +824,31 @@ touching this area:
   enters a judge view. The probe
   session now receives the same rule; it never did before.
   Pinned by `.paper_test/test_manu_sub_audit_2026_1017.py`.
+* **Published-package duplicate roles and stale drivers** (2026-10-17). The
+  `cnb-to35`/`neohet-to17` roots were created from the 6671581 snapshot but
+  their `run-decide` invocations used the older `cnb-to34`/`neohet-to16`
+  `paper_pipeline.py`. The log warned, yet the old driver stamped a decision:
+  the NeoHeteroclitic package ended with both the revised and the stale
+  `FrontiersTemplate-zotero` main-text/supplementary DOCX in the submitted set,
+  eight author markers, and `submission_ready: true` beside a gating residual.
+  State-changing `run`/`decide` commands now refuse a running script whose
+  sha256 differs from the copy frozen into the root; a revision package with
+  more than one 7-hex token on editable documents fails its postcheck; a new
+  `PKG-26` readiness check catches two submitted files for one document role;
+  and `publish_final_clean` writes the author checklist from the champion's
+  open ledger items or literal markers when a stage did not. Its marker scan
+  honors the package's submitted-set declaration, and the publisher owns a
+  marked checklist block that is replaced from current items on every publish,
+  so resolved rows cannot linger while author notes survive. An over-cap
+  published abstract/main text or cover-letter total is a blocking `FMT-M19`
+  readiness finding computed on the published files (including the pin
+  fallback), with a scanner failure recorded as a coverage gap. The pairwise
+  score report now uses the judge's `own` frame only: the CSV's `received`
+  rows are the same judgments' negations, and counting them had fabricated
+  missing opposite-direction scores. Pinned by
+  `.paper_test/test_manu_sub_audit_2026_1017.py` and
+  `.paper_test/test_review_handoff_2026_1015.py`; the score report is pinned
+  by `.paper_test/test_pairwise_scores.py`.
 * **An evidence-area file may be referenced only as a display item or through
   the parent's `.tex` closure** (2026-10-17, PKG-10). The operator's rule for
   these packages: files in `raw_data/` (and its siblings) "cannot be referenced

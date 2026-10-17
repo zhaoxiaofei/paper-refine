@@ -256,6 +256,146 @@ def test_author_to_complete_policy():
     held = pp.hold_internal_readme_notes(held_pkg, scratch("atc_hold_dest_"))
     check("the hand-off README survives the internal-README hold-back",
           held == [] and held_readme.is_file(), str(held))
+    # Duplicate submission roles and stale version tokens.
+    dup = scratch("atc_dup_")
+    write_docx(dup / "ms-2-mainText-aaaaaaa.docx", ["current main text"])
+    write_docx(dup / "ms-2-mainText-FrontiersTemplate-zotero-bbbbbbb.docx",
+               ["stale template copy"])
+    dup_rows = pp.duplicate_submission_role_rows(dup)
+    check("PKG-26 reports a stale pre-revision document beside the current one",
+          len(dup_rows) == 1 and dup_rows[0]["rule"] == "PKG-26"
+          and "stale" in dup_rows[0]["detail"], str(dup_rows))
+    dup_ready = pp.package_readiness(
+        {"path": str(dup), "hygiene": {"duplicate_roles": dup_rows}},
+        residuals={"items": []}, author_to_complete="readme")
+    check("PKG-26 makes the package NOT submission-ready",
+          dup_ready["submission_ready"] is False
+          and any(f.get("rule") == "PKG-26" for f in dup_ready["findings"]),
+          str(dup_ready["findings"]))
+    over_ready = pp.package_readiness(
+        {"path": str(dup), "hygiene": {}}, residuals={"items": []},
+        author_to_complete="readme",
+        lengths={"over_limit": [{"document": "ms.docx", "section": "main text",
+                                 "words": 5550, "base": 3000, "relaxation": 1.25,
+                                 "cap": 3750}]})
+    check("an over-cap published main text makes the package NOT submission-ready",
+          over_ready["submission_ready"] is False
+          and any(f.get("rule") == "FMT-M19" for f in over_ready["findings"]),
+          str(over_ready["findings"]))
+    rec = {}
+    rt_errs = []
+    pp._record_revision_token(rec, dup, [], errs=rt_errs)
+    check("two editable-document 7-hex tokens fail the stage",
+          bool(rt_errs) and "more than one 7-hex token" in rt_errs[0], str(rt_errs))
+    # The publisher-side README is built from recorded ledger/marker items.
+    pub = scratch("atc_pub_")
+    write_docx(pub / "ms-2-mainText-ccccccc.docx",
+               ["Funding: [AUTHOR TO COMPLETE: funder name]"])
+    hrec = pp.write_published_handoff_readme(
+        pub, {"items": [{"id": "F-001", "status": "manual-required",
+                         "check": "M13", "severity": "Major",
+                         "location": "main text", "evidence": "supply the form"}]},
+        {"items": []})
+    htext = (pub / "README-AUTHOR-TO-COMPLETE.md").read_text()
+    check("the publisher writes the author checklist from ledger and markers",
+          hrec.get("items") == 2 and "F-001" in htext
+          and "funder name" in htext and "[AUTHOR TO COMPLETE" not in htext, htext)
+    check("the published checklist has a machine-managed row block",
+          pp.AUTHOR_TO_COMPLETE_MANAGED_BEGIN in htext
+          and pp.AUTHOR_TO_COMPLETE_MANAGED_END in htext)
+    # The publisher owns only its marked block: re-publishing with fewer open
+    # items removes the resolved row and keeps an author's own note.
+    with open(pub / pp.AUTHOR_TO_COMPLETE_README, "a", encoding="utf-8") as fh:
+        fh.write("- Author note: verify the ORCID in the portal.\n")
+    write_docx(pub / "ms-2-mainText-ccccccc.docx", ["Funding: funder supplied."])
+    hrec2 = pp.write_published_handoff_readme(
+        pub, {"items": [{"id": "F-002", "status": "manual-required",
+                         "check": "M13", "severity": "Minor",
+                         "location": "cover letter", "evidence": "confirm the ORCID"}]},
+        {"items": []})
+    htext2 = (pub / pp.AUTHOR_TO_COMPLETE_README).read_text()
+    check("a re-publish replaces managed rows and drops the resolved item",
+          "F-001" not in htext2 and "F-002" in htext2
+          and "funder name" not in htext2 and hrec2.get("items") == 1,
+          htext2)
+    check("an author's note outside the managed block survives",
+          "Author note: verify the ORCID" in htext2)
+    gone = scratch("atc_gone_")
+    gone_readme = gone / pp.AUTHOR_TO_COMPLETE_README
+    gone_readme.write_text(
+        pp.AUTHOR_TO_COMPLETE_README_HEADER
+        + pp.AUTHOR_TO_COMPLETE_MANAGED_BEGIN + "\n- resolved item\n"
+        + pp.AUTHOR_TO_COMPLETE_MANAGED_END + "\n", encoding="utf-8")
+    gone1 = pp.write_published_handoff_readme(gone, {"items": []}, {"items": []})
+    gone2 = pp.write_published_handoff_readme(gone, {"items": []}, {"items": []})
+    check("an exhausted checklist is removed with a stable result",
+          not gone_readme.exists() and gone1 == gone2 == {}, f"{gone1} / {gone2}")
+    # The marker scan follows the package's own submitted-set declaration.
+    declared = scratch("atc_declared_")
+    write_docx(declared / "ms-1-mainText-abcdef0.docx", ["Body."])
+    (declared / "source").mkdir()
+    (declared / "source" / "build-notes.tex").write_text(
+        "% [AUTHOR TO COMPLETE: source-only build note]\n", encoding="utf-8")
+    check("a marker outside the declared submitted set is not an author item",
+          pp._handoff_marker_occurrences(declared)
+          and len(pp._handoff_marker_occurrences(declared)) == 1)
+    (declared / "README.md").write_text(
+        "Only files whose names match `ms-*.docx` will be submitted.\n", encoding="utf-8")
+    check("the declared submitted set scopes the marker scan",
+          pp._handoff_marker_occurrences(declared) == [])
+    # A running copy that differs from the frozen copy is detectable.
+    stale = scratch("atc_stale_")
+    (stale / "paper_pipeline.py").write_text("# stale\n")
+    (stale / "state.json").write_text(json.dumps(
+        {"version": 3, "runs": {}, "rounds": {}, "pinned": [],
+         "pipeline": {"path": str(WS / "paper_pipeline.py"), "sha256": "deadbeef",
+                      "version": "3.8.0"}}))
+    check("a foreign running pipeline is detected before a state-changing command",
+          pp.running_pipeline_mismatch(
+              pp.Ctx(stale))["mismatch"] is True)
+    try:
+        pp.refuse_foreign_pipeline(pp.Ctx(stale), "run")
+        refused = False
+    except SystemExit as e:
+        refused = e.code == 2
+    check("a foreign running pipeline is refused before mutating the root", refused)
+    matching = scratch("atc_matching_")
+    shutil.copy2(WS / "paper_pipeline.py", matching / "paper_pipeline.py")
+    (matching / "state.json").write_text(json.dumps(
+        {"version": 3, "runs": {}, "rounds": {}, "pinned": [],
+         "pipeline": {"path": str(WS / "paper_pipeline.py"), "sha256": "deadbeef",
+                      "version": "3.8.0"}}))
+    check("the root's own frozen copy is allowed to drive it",
+          pp.running_pipeline_mismatch(pp.Ctx(matching))["mismatch"] is False)
+    # Readiness handles cover-letter totals and scan gaps without a false cap.
+    cover_ready = pp.package_readiness(
+        {"path": str(dup), "hygiene": {}}, residuals={"items": []},
+        author_to_complete="readme",
+        lengths={"over_limit": [{"document": "cover.md", "section": "cover letter",
+                                 "words": 480, "total_words": 700, "total_max": 650,
+                                 "cap": None, "base": None, "relaxation": None}]})
+    cover_rows = [f for f in cover_ready["findings"] if f.get("rule") == "FMT-M19"]
+    check("an over-cap cover-letter total is reported with its real cap",
+          cover_ready["submission_ready"] is False and len(cover_rows) == 1
+          and "650-word" in cover_rows[0]["detail"]
+          and "cap of None" not in cover_rows[0]["detail"], str(cover_rows))
+    gap_ready = pp.package_readiness(
+        {"path": str(dup), "hygiene": {}}, residuals={"items": []},
+        author_to_complete="readme", lengths={"error": "scanner unavailable"})
+    gap_rows = [f for f in gap_ready["findings"] if f.get("rule") == "FMT-M19"]
+    check("a length-scan failure is stated as a coverage gap",
+          gap_rows and gap_rows[0].get("advisory") is True
+          and "NOT verified" in gap_rows[0]["detail"]
+          and "length scan failed" in pp.length_note({"error": "scanner unavailable"}),
+          str(gap_rows))
+    handoff_gap = pp.package_readiness(
+        {"path": str(dup), "hygiene": {
+            "handoff_readme": {"problems": [
+                {"file": "legacy.doc", "problem": "legacy DOC text could not be searched"}]}}},
+        residuals={"items": []}, author_to_complete="readme")
+    check("an unreadable hand-off surface is recorded, not silently clean",
+          any(f.get("rule") == "AUTH-3" and f.get("advisory")
+              for f in handoff_gap["findings"]), str(handoff_gap["findings"]))
     # It is a checklist, not a payload document: generating/updating/deleting it
     # must not invalidate the content-hash token the stage already applied.
     tok_dir = scratch("atc_token_")
@@ -326,6 +466,14 @@ def test_author_to_complete_cli():
     check("an invalid author-to-complete mode is rejected",
           r4.returncode != 0 and "invalid choice" in (r4.stderr or "").lower(),
           r4.stderr[-200:])
+    before = (root_d / "state.json").read_bytes()
+    (root_d / "paper_pipeline.py").write_text("# a foreign driver\n", encoding="utf-8")
+    r5 = run([sys.executable, str(WS / "paper_pipeline.py"), "run",
+              "--root", str(root_d)], capture_output=True, text=True, timeout=120)
+    after = (root_d / "state.json").read_bytes()
+    check("a foreign CLI driver is refused before state changes",
+          r5.returncode == 2 and "DIFFERENT paper_pipeline.py" in (r5.stderr or "")
+          and before == after, r5.stderr[-500:])
 
 
 # ---------------------------------------------------------------------------

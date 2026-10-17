@@ -809,6 +809,7 @@ import posixpath
 import queue
 import random
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -6072,11 +6073,14 @@ def length_rule_text(profile=None) -> str:
       minimum), never make a length-driven cut to text that is within the cap, and never
       strengthen or weaken a claim in either direction to reach one.
 {cover_para}
-    * LENGTH IS NEVER A GATE: no version is made ineligible, failed, rejected, de-ranked or
-      re-ordered as a whole because of a word count, and length may only ever enter a comparison
-      through the FORMATTING tier (a version within the cap may be preferred to one that is over it
-      by at most +/-1; two versions both over, or both within, are indistinguishable on this check
-      and score 0).
+    * LENGTH IS NEVER A RANKING OR CANDIDATE-ELIGIBILITY GATE: no version is made ineligible,
+      failed, rejected, de-ranked or re-ordered as a whole because of a word count, and length may
+      only ever enter a comparison through the FORMATTING tier (a version within the cap may be
+      preferred to one that is over it by at most +/-1; two versions both over, or both within,
+      are indistinguishable on this check and score 0). A FINAL PUBLISHED package that is still
+      over the venue's relaxed cap (or the cover-letter total cap) is NOT submission-ready: the
+      readiness verdict names the section and the cap, while the highest-ranked version keeps
+      its place.
     * A section that cannot be brought within the cap without losing content is left as it is and
       handed to the author as a manual item, exactly like an incompressible caption."""
 
@@ -6307,8 +6311,9 @@ on content and correctness only."""
 # stage therefore has a job -- the review enumerates and reports, the revision
 # and integration stages compress by removing redundancy only, the rewrite
 # surfaces without cutting, the judges treat length as formatting-tier evidence.
-# Nothing here gates a version: an over-cap section is a CATEGORY-4 formatting
-# item, exactly like an over-limit caption.
+# Nothing here gates a VERSION's eligibility or ranking: an over-cap section is a
+# CATEGORY-4 formatting item. The final PUBLISHED package is separately marked
+# not submission-ready when it remains over a configured cap (see package_readiness).
 def m19_blocks(profile=None) -> dict:
     """The five M19 mandate sentences, rendered from the venue profile.
 
@@ -6316,7 +6321,8 @@ def m19_blocks(profile=None) -> dict:
     over-cap sections by redundancy only; with a profile that states no cap
     (the shipped generic one) they enumerate and report against the target
     journal's own guidelines instead, and forbid length-driven cuts entirely.
-    Either way M19 is always active and never a gate.
+    Either way M19 is always active and never a ranking/eligibility gate; the
+    final package's readiness verdict carries an unresolved over-cap breach.
     """
     prof = _as_profile(profile)
     caps = _caps_clause(prof)
@@ -7229,6 +7235,17 @@ DEFAULT_AUTHOR_TO_COMPLETE = "readme"
 # The hand-off README's name: it matches `README*.md`, which the submission copy
 # always drops (rule 9), so it can never ship by accident.
 AUTHOR_TO_COMPLETE_README = "README-AUTHOR-TO-COMPLETE.md"
+AUTHOR_TO_COMPLETE_README_HEADER = (
+    "# Author to complete\n\n"
+    "Items the submission still owes. Supply each item in the documents named "
+    "below, then delete its row (and this file once no rows remain). This "
+    "checklist is never submitted and no submitted document may depend on it.\n\n")
+# The publisher owns only this block. Text and bullets outside it belong to the
+# author/revision session and survive a re-publish; rows inside it are replaced
+# from the CURRENT open-item ledger, so a resolved item cannot linger forever.
+AUTHOR_TO_COMPLETE_MANAGED_BEGIN = (
+    "<!-- pipeline-managed: author-to-complete rows; regenerated on publication -->")
+AUTHOR_TO_COMPLETE_MANAGED_END = "<!-- end pipeline-managed author-to-complete rows -->"
 
 
 def _atc_mode(value=None) -> str:
@@ -7326,10 +7343,7 @@ def ensure_handoff_readme(ctx: Ctx, pkg_dir: Path, warns: list = None,
     if not new:
         return {}
     if not existing.strip():
-        existing = ("# Author to complete\n\n"
-                    "Items the submission still owes. Supply each item in the documents named "
-                    "below, then delete its row (and this file once no rows remain). This "
-                    "checklist is never submitted and no submitted document may depend on it.\n\n")
+        existing = AUTHOR_TO_COMPLETE_README_HEADER
     elif not existing.endswith("\n"):
         existing += "\n"
     block = "".join(f"- {it}\n" for it in new)
@@ -7344,6 +7358,238 @@ def ensure_handoff_readme(ctx: Ctx, pkg_dir: Path, warns: list = None,
                                  "items": len(new), "generated_from": "MANUAL_STEPS.md"}
     return {"path": str(target), "items": len(new),
             "generated_from": "MANUAL_STEPS.md"}
+
+
+def _clean_handoff_row(value) -> str:
+    """One checklist row with marker syntax removed and whitespace collapsed."""
+    row = _HANDOFF_MARKER_RE.sub(lambda m: m.group(1).strip(), str(value or ""))
+    row = re.sub(r"\[\s*AUTHOR\s+TO\s+COMPLETE", "AUTHOR TO COMPLETE", row,
+                 flags=re.I)
+    return re.sub(r"\s+", " ", row).strip(" .;:")
+
+
+def _readme_action_rows(text: str) -> list:
+    """Bullet/numbered and Markdown-table data rows from one checklist."""
+    rows, seen = [], set()
+    in_table = False
+    separator = re.compile(r"^\s*\|?[\s:\-|]+\|?\s*$")
+
+    def add(value) -> None:
+        row = _clean_handoff_row(value)
+        if row and row.lower() not in seen:
+            seen.add(row.lower())
+            rows.append(row)
+
+    for raw in str(text or "").splitlines():
+        bullet = re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*$", raw)
+        if bullet:
+            add(bullet.group(1))
+            in_table = False
+            continue
+        if raw.count("|") >= 2 and not separator.match(raw):
+            if in_table:
+                add(" | ".join(cell.strip() for cell in raw.strip().strip("|").split("|")))
+            in_table = True
+            continue
+        if in_table and separator.match(raw):
+            continue
+        if raw.strip():
+            in_table = False
+    return rows
+
+
+def _split_managed_handoff_readme(text: str) -> tuple:
+    """(author text, managed rows, had_managed_block) for a hand-off README."""
+    pattern = re.compile(
+        re.escape(AUTHOR_TO_COMPLETE_MANAGED_BEGIN)
+        + r"\s*(.*?)\s*" + re.escape(AUTHOR_TO_COMPLETE_MANAGED_END),
+        re.S)
+    managed, had = [], False
+    if pattern.search(str(text or "")):
+        had = True
+
+    def take(match):
+        nonlocal managed
+        managed.extend(_readme_action_rows(match.group(1)))
+        return "\n"
+
+    outer = pattern.sub(take, str(text or ""))
+    return outer, managed, had
+
+
+def _handoff_marker_occurrences(root: Path, problems: list = None) -> list:
+    """Every literal hand-off marker in the package's submission-side files.
+
+    Returns [{"file", "marker", "quote"}]. Evidence areas, README files and
+    pipeline bookkeeping are skipped: their markers are not submission text.
+    When the package carries an honoured submitted-set declaration, only its
+    declared files are read -- a marker in a non-submitted `.tex` source must
+    not become an author-action row for the journal package.
+    """
+    root = Path(root)
+    out, seen = [], set()
+    if not root.is_dir():
+        return out
+    _decl, is_submitted = declared_submission_filter(root)
+    for p in sorted(_iter_tree_files(root, follow_dir_links=True)):
+        if not p.is_file():
+            continue
+        try:
+            rel = p.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if not is_submitted(rel):
+            continue
+        if is_evidence_rel(rel) or is_code_rel(rel):
+            continue
+        if is_bookkeeping_name(p.name) or _is_aux_doc(p.name) \
+                or is_non_submitted_readme_name(p.name):
+            continue
+        ext = p.suffix.lower()
+        blocks = []
+        try:
+            if ext == ".docx":
+                paras = _docx_paragraphs(p)
+                if paras is None and problems is not None:
+                    problems.append({"file": rel, "problem": "DOCX text could not be extracted"})
+                blocks = paras or []
+            elif ext == ".pdf":
+                _txt = _pdf_text(p)
+                blocks = _txt.splitlines() if _txt else []
+            elif ext in (".md", ".txt", ".tex", ".ltx", ".rtf", ".html", ".htm"):
+                blocks = p.read_text("utf-8", "replace").splitlines()
+            elif ext == ".doc":
+                if problems is not None:
+                    problems.append({
+                        "file": rel,
+                        "problem": "legacy DOC text could not be searched for hand-off markers"})
+        except Exception as e:                                    # noqa: BLE001
+            if problems is not None:
+                problems.append({"file": rel,
+                                 "problem": f"{type(e).__name__}: {e}"})
+            continue
+        for block in blocks:
+            for m in _HANDOFF_MARKER_RE.finditer(str(block)):
+                marker = re.sub(r"\s+", " ", m.group(0)).strip()
+                key = (rel, marker.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append({"file": rel, "marker": marker,
+                            "quote": re.sub(r"\s+", " ", str(block)).strip()[:320]})
+    return out
+
+
+def write_published_handoff_readme(root: Path, open_items: dict = None,
+                                   residuals: dict = None) -> dict:
+    """Write the author checklist into the PUBLISHED package root.
+
+    The stage prompts ask a revision session to write the README. A package
+    generated before that rule existed (or by a stage that forgot it) still has
+    the author work recorded in the revision ledger and in the residual gate.
+    This publisher-side pass copies those recorded items into ONE
+    `README-AUTHOR-TO-COMPLETE.md` beside the cover letter and main text. It
+    never edits a document and never invents an item: every row is derived from a
+    ledger/residual/marker row in the package itself. The rows it owns sit in a
+    marked block that is REPLACED on every publish, so resolved items disappear;
+    author text and bullets outside that block are preserved.
+    """
+    root = Path(root)
+    rows, problems = [], []
+    oi = open_items or {}
+    for key in ("items", "discarded"):
+        for it in oi.get(key) or []:
+            if not isinstance(it, dict):
+                continue
+            fid = str(it.get("id") or "").strip()
+            status = str(it.get("status") or key).strip()
+            check = str(it.get("check") or "").strip()
+            sev = str(it.get("severity") or "").strip()
+            loc = str(it.get("location") or "").strip()
+            ev = re.sub(r"\s+", " ", str(it.get("evidence") or "")).strip()
+            tag = " ".join(x for x in (check, sev) if x)
+            text = (f"{fid + ' ' if fid else ''}[{status}"
+                    f"{'; ' + tag if tag else ''}] "
+                    f"{loc + ': ' if loc else ''}{ev}").strip()
+            if text:
+                rows.append(_clean_handoff_row(text))
+    markers = _handoff_marker_occurrences(root, problems=problems)
+    for occ in markers:
+        payload = _clean_handoff_row(occ["marker"])
+        rows.append(f"{occ['file']}: missing {payload or 'the marked item'}")
+    if not rows:
+        # A summary residual can say "N hand-off markers" while the marker text
+        # sits in a format this package cannot parse (for example an image-only
+        # PDF). Keep the recorded author action visible rather than dropping it.
+        for it in (residuals or {}).get("items") or []:
+            if "hand-off marker" in str(it):
+                rows.append(_clean_handoff_row(it))
+    rows = [_clean_handoff_row(r) for r in rows if str(r).strip()]
+    rows = list(dict.fromkeys(r for r in rows if r))
+    target = root / AUTHOR_TO_COMPLETE_README
+    if not target.is_file() and not rows and not problems:
+        return {}
+    existing = ""
+    if target.is_file():
+        try:
+            existing = target.read_text("utf-8", "replace")
+        except OSError as e:
+            return {"error": f"could not read the existing checklist ({type(e).__name__}: {e})",
+                    "problems": problems}
+    external, _managed_rows, had_block = _split_managed_handoff_readme(existing)
+    header = AUTHOR_TO_COMPLETE_README_HEADER.strip()
+    if not had_block:
+        # A checklist written by the first version of this publisher (or by a
+        # stage) has the standard header plus bullets and no marker. Treat that
+        # shape as managed so its stale rows do not accumulate beside the new
+        # block; any extra prose means it is the author's file and is preserved.
+        body = external.strip()
+        if body.startswith(header):
+            remainder = body[len(header):].strip()
+            extra = [ln for ln in remainder.splitlines() if ln.strip()]
+            if not extra or all(re.match(r"^\s*(?:[-*+]|\d+[.)])\s+", ln)
+                                 for ln in extra):
+                external = AUTHOR_TO_COMPLETE_README_HEADER
+    external_rows = _readme_action_rows(external)
+    known = {row.lower() for row in external_rows}
+    managed_now = []
+    seen = set()
+    for row in rows:
+        if row.lower() in known or row.lower() in seen:
+            continue
+        seen.add(row.lower())
+        managed_now.append(row)
+    base = external.strip()
+    if not base:
+        base = AUTHOR_TO_COMPLETE_README_HEADER.strip()
+    base = re.sub(r"\n{3,}", "\n\n", base)
+    result = {"path": target.name, "items": len(managed_now),
+              "external_items": len(external_rows),
+              "generated_from": ("revision ledger" if oi.get("items") or oi.get("discarded")
+                                 else "package hand-off markers")}
+    author_text = external.strip()
+    if author_text == header:
+        author_text = ""
+    if not managed_now and not external_rows and not author_text:
+        if target.is_file():
+            target.unlink()
+        if problems:
+            result["problems"] = problems
+            return result
+        return {}
+    pieces = [base]
+    if managed_now:
+        pieces.append(AUTHOR_TO_COMPLETE_MANAGED_BEGIN + "\n"
+                      + "".join(f"- {row}\n" for row in managed_now)
+                      + AUTHOR_TO_COMPLETE_MANAGED_END)
+    text = "\n\n".join(pieces).rstrip() + "\n"
+    action = "unchanged" if existing == text else ("updated" if existing else "created")
+    if action != "unchanged":
+        write_text_atomic(target, text)
+    if problems:
+        result["problems"] = problems
+    return result
+
 
 PLACEHOLDER_RULE_OFF = """PIPELINE HAND-OFF ITEMS — the operator turned the marker convention OFF
 (`--without-author-to-complete`), so the literal token "[AUTHOR TO COMPLETE..." MUST NOT APPEAR
@@ -12050,6 +12296,59 @@ def pipeline_snapshot_note(ctx: Ctx) -> str:
             f"(same --source) when you want them.")
 
 
+def running_pipeline_mismatch(ctx: Ctx) -> dict:
+    """The RUNNING script vs the pipeline frozen into this root.
+
+    `setup` freezes one `paper_pipeline.py` into the root so every later
+    command is reproducible. A plain `python /another/root/paper_pipeline.py
+    run --root THIS_ROOT` bypassed that contract: the 2026-10-17 `cnb-to35` and
+    `neohet-to17` roots were created from this tree's 6671581 snapshot but
+    driven by the older `cnb-to34`/`neohet-to16` copies. Their decision records
+    then said `submission_ready: true` beside a gating marker residual the
+    current code already rejected, and the stale driver left duplicate
+    pre-revision documents in the published package. The run log warned about
+    this; the command still mutated the root and stamped a verdict. A warning
+    is not enough for a state-changing command: refuse before the lock unless
+    the operator deliberately replaces the frozen copy.
+    """
+    st = root_pipeline_staleness(ctx)
+    ident = pipeline_identity()
+    frozen = str(st.get("frozen_sha256") or "")
+    running = str(ident.get("sha256") or "")
+    return {"mismatch": bool(frozen and running and frozen != running),
+            "unverifiable": bool((st.get("frozen") and not frozen) or not running),
+            "frozen": st.get("frozen"), "frozen_sha256": frozen or None,
+            "running": ident.get("path"), "running_sha256": running or None,
+            "recorded": st.get("recorded_sha256")}
+
+
+def refuse_foreign_pipeline(ctx: Ctx, command: str) -> None:
+    """Refuse a state-changing command driven by another copy of the script."""
+    mm = running_pipeline_mismatch(ctx)
+    if not mm["mismatch"] and not mm["unverifiable"]:
+        return
+    if mm["unverifiable"]:
+        die(
+            f"{command} cannot verify which paper_pipeline.py this root would run: "
+            f"frozen={mm.get('frozen')!r} (sha256 {mm.get('frozen_sha256')}), "
+            f"running={mm.get('running')!r} (sha256 {mm.get('running_sha256')}).\n"
+            f"Refusing to mutate a root whose reproducibility cannot be established. "
+            f"Restore/read the root's frozen copy, or deliberately replace it with the "
+            f"copy you intend to run, then retry.", code=2)
+    die(
+        f"{command} is running a DIFFERENT paper_pipeline.py than the one frozen into this "
+        f"root:\n"
+        f"    running now : {mm['running']} (sha256 {str(mm['running_sha256'])[:16]}...)\n"
+        f"    frozen copy : {mm['frozen']} (sha256 {str(mm['frozen_sha256'])[:16]}...)\n"
+        f"Every stage prompt, postcheck and decision in this root must come from the frozen "
+        f"copy; otherwise the root's records describe code that did not run (the 2026-10-17 "
+        f"cnb-to35/neohet-to17 roots were driven by older root copies this way). Run:\n"
+        f"    python3 {shlex.quote(str(mm['frozen']))} {command} "
+        f"--root {shlex.quote(str(ctx.root))}\n"
+        f"or deliberately replace the frozen `paper_pipeline.py` with the copy you intend to "
+        f"run, then retry.", code=2)
+
+
 def nat_key(s: str):
     return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", str(s))]
 
@@ -13531,7 +13830,8 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
     """Abstract/main-text word counts over [(dir, prefix, excluded_top)] sources.
 
     A code-side PROXY for the agents' M19 sweep: it reports what it can measure
-    and says "not verified"/"skipped" where it cannot, and never gates anything.
+    and says "not verified"/"skipped" where it cannot. It never gates candidate
+    ranking, but an over-cap FINAL published package is reported by readiness.
     The caps and their provenance come from the venue profile: a profile without
     caps (the shipped `generic` one) yields counts with `cap: null` and
     `over_limit: false`, which is what the note and the decision report print.
@@ -13630,14 +13930,17 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
 
 
 def length_note(info) -> str:
-    """One line describing an M19 scan (advisory; never a gate).
+    """One line describing an M19 scan and the package-level consequence.
 
     A venue profile with no caps prints the counts and says so instead of
     naming a cap: the comparison is then the target journal's own guidelines'
-    job, exactly as the M19 mandates say.
+    job, exactly as the M19 mandates say. Length is advisory for ranking and
+    candidate eligibility; an over-cap final package is not submission-ready.
     """
     if not info:
         return "not verified (no scan recorded)"
+    if info.get("error"):
+        return f"not verified -- the length scan failed ({info['error']})"
     rows = info.get("rows") or []
     limits = info.get("limits") or length_limits()
     if not rows:
@@ -13670,7 +13973,8 @@ def length_note(info) -> str:
     if abs_cap is None and main_cap is None and cover_cap is None:
         caps_text = ("no venue cap configured: the counts are recorded for the author to compare "
                      "with the target journal's own guidelines")
-    tail = (f"; {over_n} over the cap (advisory only -- never a gate; compress by removing "
+    tail = (f"; {over_n} over the cap (advisory for ranking -- never a word-count gate; "
+            f"an over-cap FINAL package is NOT submission-ready; compress by removing "
             f"redundancy only)" if over_n else "; all within the relaxed caps")
     if band_n:
         margins = ", ".join(
@@ -20747,6 +21051,10 @@ def revision_token_for_dir(dirp: Path) -> dict:
     # with paper-revise/scripts/revision_token.py.
     hex_tokens = sorted({t for rel, t in named
                          if t and DOCHASH_HEX7_RE.match(t) and not is_evidence_rel(rel)})
+    doc_hex_tokens = sorted({t for rel, t in named
+                             if t and DOCHASH_HEX7_RE.match(t)
+                             and not is_evidence_rel(rel)
+                             and Path(rel).suffix.lower() in EDITABLE_DOC_EXTS})
     consistent = bool(hex_tokens) and all(t == token for t in hex_tokens)
     notes = []
     if not hex_tokens:
@@ -20756,17 +21064,20 @@ def revision_token_for_dir(dirp: Path) -> dict:
                      f"{token}")
     return {"token": token, "files": len(files),
             "tokens_seen": sorted({t for rel, t in named if t and not is_evidence_rel(rel)}),
-            "hex_tokens": hex_tokens, "consistent": consistent, "notes": notes}
+            "hex_tokens": hex_tokens, "doc_hex_tokens": doc_hex_tokens,
+            "consistent": consistent, "notes": notes}
 
 
-def _record_revision_token(rec: dict, dirp: Path, warns: list) -> None:
-    """Record a package's content-hash version token; warn only on a mismatch.
+def _record_revision_token(rec: dict, dirp: Path, warns: list,
+                           errs: list = None) -> None:
+    """Record a package's content-hash version token.
 
     A package that carries no 7-hex token (a legacy letter/digit name, or an
     agent that has not applied the naming rule) is recorded as-is WITHOUT a
     warning: older conventions stay readable. A filename token that CONTRADICTS
-    the content-derived token is a real inconsistency -- the name claims a hash
-    that does not describe the content -- and is surfaced as a warning.
+    the content-derived token is a real inconsistency; it is a stage ERROR when
+    the caller can fail and more than one editable-document token survived (a
+    stale pre-revision copy), otherwise a warning.
     """
     try:
         info = revision_token_for_dir(dirp)
@@ -20775,9 +21086,23 @@ def _record_revision_token(rec: dict, dirp: Path, warns: list) -> None:
         return
     rec["revision_token"] = info
     if info.get("token") and info.get("hex_tokens") and not info.get("consistent"):
-        warns.append(f"revision token mismatch: filename token(s) {info['tokens_seen']} vs the "
-                     f"content-derived token {info['token']} -- the package was edited after its "
-                     f"token was applied, or a token was copied from another package")
+        msg = (f"revision token mismatch: filename token(s) {info['tokens_seen']} vs the "
+               f"content-derived token {info['token']} -- the package was edited after its "
+               f"token was applied, or a token was copied from another package")
+        # More than one 7-hex token on EDITABLE DOCUMENTS is never a naming
+        # nuisance: it means the same document family travelled twice (a stale
+        # pre-revision copy plus the renamed copy). That is exactly the
+        # NeoHeteroclitic 2026-10-17 package: both `...mainText-9915d6e.docx`
+        # and the old `...mainText-FrontiersTemplate-zotero-bbb4e84.docx`
+        # matched the submitted set and would both reach the journal. A warning
+        # let the stage pass; the naming contract says ONE copy of each
+        # document, so this is a stage error whenever the caller can fail.
+        if errs is not None and len(info.get("doc_hex_tokens") or []) > 1:
+            errs.append(msg + "; the package carries more than one 7-hex token on editable "
+                        "documents, so at least one stale copy survived -- keep the current "
+                        "copy and remove the old one")
+        else:
+            warns.append(msg)
 
 
 def recorded_content_fingerprint(ctx: Ctx, r: int, vid: str):
@@ -30401,7 +30726,7 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     rec["raw_data"] = verify_readonly_raw_data(ctx, rev, warns)
     # AFTER the read-only repair: the recorded token describes the package that
     # ships, not the one the agent left before the repair.
-    _record_revision_token(rec, rev, warns)
+    _record_revision_token(rec, rev, warns, errs=errs)
     _caption_and_document_checks(ctx, rec, _rec_vid(rec), [(sb / "base", "", ())], errs, warns)
     if word_docs_present([rev]):
         check_visual_artifact(rev / "VISUAL_CHECK.md",
@@ -30629,7 +30954,7 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
     rec["backfill"] = backfill_missing_files(ctx, rec, [(sb / "self", "", ())], warns)
     errs.extend(f"document recovery failed: {e}" for e in rec["backfill"]["unresolved"])
     rec["raw_data"] = verify_readonly_raw_data(ctx, out, warns)
-    _record_revision_token(rec, out, warns)
+    _record_revision_token(rec, out, warns, errs=errs)
     _caption_and_document_checks(ctx, rec, freshness_vid(rec), [(sb / "self", "", ())],
                                  errs, warns)
     if word_docs_present([out]):
@@ -30744,7 +31069,7 @@ def postcheck_rewrite(ctx: Ctx, rec: dict):
     rec["backfill"] = backfill_missing_files(ctx, rec, [(sb / "base", "", ())], warns)
     errs.extend(f"document recovery failed: {e}" for e in rec["backfill"]["unresolved"])
     rec["raw_data"] = verify_readonly_raw_data(ctx, sb / REWRITTEN_DIR, warns)
-    _record_revision_token(rec, sb / REWRITTEN_DIR, warns)
+    _record_revision_token(rec, sb / REWRITTEN_DIR, warns, errs=errs)
     _caption_and_document_checks(ctx, rec, freshness_vid(rec) or A1_ID,
                                  [(sb / "base", "", ())], errs, warns)
     if word_docs_present([out]):
@@ -39355,6 +39680,7 @@ def cmd_run(args) -> None:
     ctx = Ctx(Path(args.root).resolve(),
               strict_venue=bool(getattr(args, "strict_venue", False)))
     ctx.load()
+    refuse_foreign_pipeline(ctx, "run")
     # The stages render prompts from the venue profile: refuse to start on a
     # venue that does not resolve, whatever --strict-venue says.
     venue_profile_of(ctx)
@@ -42647,6 +42973,86 @@ def declared_submission_filter(root: Path):
         return decl, (lambda rel: True)
     allowed = {str(f) for f in decl.get("files") or []}
     return decl, (lambda rel: str(rel) in allowed)
+
+
+# ---- duplicate submission roles (2026-10-17) --------------------------------
+# The NeoHeteroclitic `neohet-to17` package carried BOTH the revised family
+# `neohetero-18-2-mainText-9915d6e.docx` / `...supplementaryMaterial-9915d6e.docx`
+# and the old pre-revision family
+# `neohetero-18-2-mainText-FrontiersTemplate-zotero-bbb4e84.docx` /
+# `...supplementaryMaterial-FrontiersTemplate-zotero-bbb4e84.docx`. Both
+# families matched the package README's submitted-set glob, so the journal would
+# receive two different main texts and two different supplementary documents.
+# The revision-token check catches the two-token form at stage time; this
+# publication-side check also covers legacy names and names whose token alone
+# does not reveal the role.
+DUP_ROLE_DOC_EXTS = (".doc", ".docx", ".pdf", ".tex", ".ltx", ".md", ".txt")
+DUP_ROLE_SOURCE_SUFFIX_RE = re.compile(
+    r"(?i)(?:[-_](?:frontiers?template|template|zotero|source|original|revised|"
+    r"final|preprint|copy|backup))+$")
+
+
+def _duplicate_role_key(name: str) -> str:
+    """A document role key with the version token and source-copy suffix removed."""
+    stem = Path(str(name)).stem.lower()
+    stem = DOC_TOKEN_RE.sub("", stem)
+    prev = None
+    while prev != stem:
+        prev = stem
+        stem = DUP_ROLE_SOURCE_SUFFIX_RE.sub("", stem)
+    return re.sub(r"[-_.]+", "-", stem).strip("-")
+
+
+def duplicate_submission_role_rows(root: Path, limit: int = 20) -> list:
+    """PKG-26: one submitted document role carried by more than one file.
+
+    The check is scoped to the package's own submitted set (or the pipeline's
+    standing model when no declaration is honoured), so a source PDF beside a
+    DOCX, a figure asset, a non-submitted README or a bookkeeping file is not a
+    row. Same-extension files whose role keys collide are a real packaging
+    defect: the reader cannot tell which is the current document, and a journal
+    upload carries both.
+    """
+    root = Path(root)
+    rows = []
+    if not root.is_dir():
+        return rows
+    _decl, is_submitted = declared_submission_filter(root)
+    groups = {}
+    for p in sorted(_iter_tree_files(root, follow_dir_links=True)):
+        if not p.is_file():
+            continue
+        try:
+            rel = p.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if not is_submitted(rel):
+            continue
+        if is_evidence_rel(rel) or is_code_rel(rel):
+            continue
+        if p.suffix.lower() not in DUP_ROLE_DOC_EXTS:
+            continue
+        if is_bookkeeping_name(p.name) or _is_aux_doc(p.name) \
+                or is_non_submitted_readme_name(p.name):
+            continue
+        key = _duplicate_role_key(p.name)
+        if not key:
+            continue
+        groups.setdefault((key, p.suffix.lower()), []).append(rel)
+    for (key, ext), files in sorted(groups.items()):
+        if len(files) < 2:
+            continue
+        rows.append({
+            "rule": "PKG-26", "severity": "high", "fix": "manual",
+            "file": files[0], "reference": ", ".join(files[1:]),
+            "detail": (f"the submitted set carries {len(files)} {ext} files for one "
+                       f"document role ({key!r}): {', '.join(files)}. One is a stale "
+                       f"pre-revision/source copy; the reader cannot tell which is current, "
+                       f"and a journal upload carries both. Keep the current version and "
+                       f"remove or rename the stale copy out of the submitted set.")})
+        if len(rows) >= limit:
+            break
+    return rows
 
 
 # ---- Placeholder FILES (2026-10-17) ----------------------------------------
@@ -46277,7 +46683,7 @@ def write_final_clean_zip(dirp: Path, zip_path: Path) -> dict:
 
 
 def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = "",
-                        flatten_zotero: bool = False) -> dict:
+                        flatten_zotero: bool = False, residuals: dict = None) -> dict:
     """Publish <root>/final_clean_version_<root dir name>/: the champion corpus
     for a new run.
 
@@ -46288,9 +46694,10 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     TRACKING_AUX_NAME_RE) and the pipeline's own bookkeeping
     (CHANGELOG.md, MANUAL_STEPS.md, REVISION_REPORT.md, revision_report.json,
     DIFF_LEDGER.md, REWRITE_REPORT.md, VISUAL_CHECK.md). Copying it therefore
-    gives exactly the files a new `setup --source <dir>` needs -- necessary and
-    sufficient, with nothing added inside the directory (an extra README would
-    become manuscript content in the next round).
+    gives the champion corpus a new `setup --source <dir>` needs. The ONE
+    deliberate addition is the `author_to_complete: readme` checklist
+    (`README*.md`, never submitted and excluded from the content token); every
+    other status document remains a sibling of the directory.
 
     The generation counter in the filenames is then INCREMENTED by one
     (`int(filename.split("-")[1])`, guarded for a missing/non-numeric field) and
@@ -46505,6 +46912,14 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     # unfilled/blank artifact (FMT-PDF1..3). These are reported, never silently
     # deleted: the file belongs to the author, but the package must not ship it.
     hygiene["internal_artifacts"] = internal_artifact_rows(tmp)
+    # PKG-26: two submitted files for one document role (a stale pre-revision
+    # copy beside the current document). The reader cannot tell which is
+    # current, and the journal receives both.
+    try:
+        hygiene["duplicate_roles"] = duplicate_submission_role_rows(tmp)
+    except Exception as e:                                            # noqa: BLE001
+        hygiene["duplicate_roles"] = []
+        hygiene["duplicate_roles_error"] = f"{type(e).__name__}: {e}"
     hygiene["pdf_artifacts"] = package_pdf_rows(tmp)
     # PKG-6/7/8/9 (2026-10-15): statements the package makes about ITSELF that
     # contradict each other (an AI-use denial beside the AI workflow it denies,
@@ -46589,6 +47004,17 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     except Exception as e:                                            # noqa: BLE001
         open_items = {"error": f"{type(e).__name__}: {e}", "items": [], "discarded": [],
                       "statuses": {}, "sibling": None}
+    # `author_to_complete: readme`: the published package gets ONE README
+    # checklist even when the stage forgot to write it. Every row is copied from
+    # the revision ledger / residual record / a literal marker already in the
+    # package; no document is edited and no item is invented.
+    if author_to_complete_mode_of(ctx) == "readme":
+        try:
+            _hreadme = write_published_handoff_readme(tmp, open_items, residuals)
+            if _hreadme:
+                hygiene["handoff_readme"] = _hreadme
+        except Exception as e:                                        # noqa: BLE001
+            hygiene["handoff_readme"] = {"error": f"{type(e).__name__}: {e}"}
     # A filled XFA form cannot be FLATTENED offline (that needs Acrobat), but
     # its answers can be rendered readably -- so the decision readme points at
     # a text rendering of every answer instead of leaving the reviewer with the
@@ -46612,6 +47038,18 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
             write_text_atomic(dest, text)
             hygiene["xfa_exports"].append({"document": r.get("document"),
                                            "export": str(dest)})
+    # The readiness verdict must describe the files that were ACTUALLY
+    # published, not only the pre-publication winner directory: the pin fallback
+    # can publish when the winner directory is absent, and the delivery hygiene
+    # can change the tree. A scan failure is recorded as a coverage gap rather
+    # than silently reading as "within the cap".
+    try:
+        published_lengths = scan_lengths_in_sources(
+            [(tmp, "", ())], profile=venue_profile_of(ctx, required=False))
+    except Exception as e:                                            # noqa: BLE001
+        published_lengths = {"error": f"{type(e).__name__}: {e}",
+                             "over_limit": [], "rows": [], "checked": False}
+    hygiene["lengths"] = published_lengths
     manifest = corpus_dir_manifest(tmp)
     final_digest = manifest_digest(manifest)
     # "Unchanged" must mean the delivered tree carries the SAME FILES **and**
@@ -46631,6 +47069,7 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
                     raw_data_untouched=counter.get("raw_data_untouched", 0),
                     modes_cleared=len(chmod_plan),
                     format_fix=format_fix, hygiene=hygiene, open_items=open_items,
+                    lengths=published_lengths,
                     zip=write_final_clean_zip(dst, zip_path), action="unchanged")
     if dst.is_dir():
         # The delivered copy differs from what this decision produced -- a
@@ -46652,6 +47091,7 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
                 raw_data_untouched=counter.get("raw_data_untouched", 0),
                 modes_cleared=len(chmod_plan),
                 format_fix=format_fix, hygiene=hygiene, open_items=open_items,
+                lengths=published_lengths,
                 zip=write_final_clean_zip(dst, zip_path), action="created")
 
 
@@ -46685,8 +47125,9 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
     # 3,000-word limit and a title page declaring 3,745, and no delivered line
     # said so. The margin is the pipeline's own relaxation, so a submission that
     # uses it MUST be visible where the package is handed over.
-    _lens = final.get("lengths") or {}
-    _note = str(final.get("length_note") or "").strip()
+    _lens = (fc or {}).get("lengths") or final.get("lengths") or {}
+    _note = (length_note(_lens) if _lens
+             else str(final.get("length_note") or "").strip())
     if _note:
         L.append(f"- length status (M19): {_note}")
         # A section that is inside the pipeline's RELAXED cap but above the
@@ -47145,7 +47586,8 @@ def _handoff_readme_items(final_clean: dict) -> dict:
 
 
 def package_readiness(final_clean: dict, residuals: dict = None,
-                      author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE) -> dict:
+                      author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE,
+                      lengths: dict = None) -> dict:
     """The published package's own findings, as a readiness verdict.
 
     Certification answers "did the pipeline's process hold?"; readiness
@@ -47207,9 +47649,66 @@ def package_readiness(final_clean: dict, residuals: dict = None,
                            f"it is never submitted, and no submitted document may depend on "
                            f"it). Supply each item in the documents, then update or delete the "
                            f"README")})
+    handoff = hyg.get("handoff_readme") or {}
+    if handoff.get("error"):
+        findings.append({
+            "rule": "AUTH-3", "document": AUTHOR_TO_COMPLETE_README,
+            "detail": ("the publisher could not build/read the author checklist from the "
+                       f"recorded open items: {handoff['error']}")})
+    for problem in handoff.get("problems") or []:
+        findings.append({
+            "rule": "AUTH-3", "document": problem.get("file"), "advisory": True,
+            "detail": ("hand-off marker coverage is UNVERIFIED in this file: "
+                       f"{problem.get('problem') or problem}")})
     for r in hyg.get("internal_artifacts") or []:
         findings.append({"rule": r.get("rule") or "PKG-1",
                          "document": r.get("file"), "detail": r.get("detail")})
+    if hyg.get("duplicate_roles_error"):
+        findings.append({
+            "rule": "PKG-26", "advisory": True,
+            "detail": ("the duplicate-submission-role scan could not run: "
+                       f"{hyg['duplicate_roles_error']}")})
+    for r in hyg.get("duplicate_roles") or []:
+        findings.append({
+            "rule": r.get("rule") or "PKG-26",
+            "document": r.get("file"),
+            "detail": r.get("detail")})
+    # M19 is a formatting finding, but a published package that is over a
+    # configured limit is not submission-ready. The ranking never gates on a
+    # word count; readiness does, because the venue cap (or the operator's cover
+    # letter total) is a submission rule and the NeoHeteroclitic package reached
+    # `final_clean` at 5,550 words against a 3,750-word relaxed cap.
+    length_info = ((final_clean or {}).get("lengths") or lengths or {})
+    if length_info.get("error"):
+        findings.append({
+            "rule": "FMT-M19", "advisory": True,
+            "detail": (f"the published-package length scan could not run "
+                       f"({length_info['error']}); the abstract/main-text/cover-letter "
+                       f"caps were NOT verified")})
+    for r in length_info.get("over_limit") or []:
+        section = str(r.get("section") or "section")
+        if section == "cover letter":
+            cap = r.get("total_max")
+            if cap is None:
+                continue
+            words = r.get("total_words")
+            detail = (
+                f"the cover letter totals {words} words against the configured "
+                f"{cap}-word total-content cap (salutation, body, disclosures and "
+                f"signature): trim non-persuading boilerplate or obtain an explicit "
+                f"exception; never remove a claim about the work to meet the count")
+        else:
+            cap = r.get("cap")
+            if cap is None:
+                continue
+            words = r.get("words")
+            detail = (
+                f"the {section} is {words} words against the venue's relaxed cap of "
+                f"{cap} (base {r.get('base')}, margin {r.get('relaxation')}): "
+                f"compress only by removing redundancy, or obtain an explicit venue "
+                f"exception; do not delete scientific content to meet the count")
+        findings.append({
+            "rule": "FMT-M19", "document": r.get("document"), "detail": detail})
     # PKG-2 leftovers: the pointers the mechanical removal may not touch (a
     # structural file, a sentence carrying a live citation field). The ones it
     # DID remove are recorded in the readme/decision as resolved work, not as
@@ -48665,6 +49164,7 @@ def cmd_decide(args) -> None:
     ctx = Ctx(Path(args.root).resolve(),
               strict_venue=bool(getattr(args, "strict_venue", False)))
     ctx.load()
+    refuse_foreign_pipeline(ctx, "decide")
     # Same note as `run` (see there): the decision is produced BY this code, so
     # which code it is has to be in the log of the decision too.
     _snap = pipeline_snapshot_note(ctx)
@@ -48881,12 +49381,18 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
             + " | ".join(win_captions.get("suspected", [])[:5]) + " (verify M18 manually)")
     length_warnings = []
     if win_lengths and win_lengths.get("over_limit"):
+        def _length_brief(row):
+            if str(row.get("section") or "") == "cover letter":
+                return (f"{row.get('document')}: cover letter TOTAL "
+                        f"{row.get('total_words')} words (cap {row.get('total_max')})")
+            return (f"{row.get('document')}: {row.get('section')} {row.get('words')} words "
+                    f"(cap {row.get('cap')})")
         length_warnings.append(
-            f"{len(win_lengths['over_limit'])} abstract/main-text section(s) in the final winner "
-            f"exceed this pipeline's relaxed caps (advisory; the winner keeps its place and "
-            f"nothing is failed on a word count): "
-            + ", ".join(f"{r['document']}: {r['section']} {r['words']} words "
-                        f"(cap {r['cap']})" for r in win_lengths["over_limit"][:5]))
+            f"{len(win_lengths['over_limit'])} abstract/main-text/cover-letter limit(s) in "
+            f"the final winner "
+            f"exceed this pipeline's relaxed caps (advisory for ranking; the winner keeps its "
+            f"place, but an over-cap FINAL package is not submission-ready): "
+            + ", ".join(_length_brief(r) for r in win_lengths["over_limit"][:5]))
     if win_lengths and win_lengths.get("unparsed"):
         length_warnings.append("abstract/main-text text could not be parsed in: "
                                + ", ".join(win_lengths["unparsed"][:5])
@@ -48948,9 +49454,12 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     # `final_clean_reason` exists to prevent.
     final_clean = publish_final_clean(ctx, final, True, "",
                                       flatten_zotero=bool(getattr(
-                                          args, "unlink_zotero_fields", False)))
+                                          args, "unlink_zotero_fields", False)),
+                                      residuals=residuals)
+    published_lengths = final_clean.get("lengths") or win_lengths
     readiness = package_readiness(final_clean, residuals=residuals,
-                                  author_to_complete=author_to_complete_mode_of(ctx))
+                                  author_to_complete=author_to_complete_mode_of(ctx),
+                                  lengths=published_lengths)
     gate_problems.extend(readiness_gate_problems(readiness,
                                                  bool(getattr(args, "require_ready", False))))
     _clean_reason = final_clean_reason(final, rounds_data, R, final_regression, chain_ok,
@@ -49065,8 +49574,8 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
                   "caption_gate_ok": cap_ok,
                   "caption_note": cap_note,
                   "caption_warnings": caption_warnings,
-                  "length_note": length_note(win_lengths),
-                  "lengths": win_lengths,
+                  "length_note": length_note(published_lengths),
+                  "lengths": published_lengths,
                   "length_warnings": length_warnings,
                   "format_note": format_note(win_format),
                   "format": win_format,
@@ -49081,7 +49590,7 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     write_json_atomic(ctx.reports_dir / "decision.json", decision)
     csv_path = write_raw_scores(ctx, rounds_data)
     report = build_decision_report(ctx, rounds_data, integrity, problems, final,
-                                   win_lengths=win_lengths, final_clean=final_clean_json,
+                                   win_lengths=published_lengths, final_clean=final_clean_json,
                                    revision_token=win_token, win_format=win_format,
                                    format_gate=bool(getattr(args, "format_gate", False)),
                                    format_problems=format_problems,
@@ -49161,7 +49670,8 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     print(f"[decide] captions (final winner): {cap_note}")
     for w in caption_warnings:
         print(f"[decide] CAPTION NOTE (advisory, nothing is enforced): {w}")
-    print(f"[decide] abstract/main-text length (final winner): {length_note(win_lengths)}")
+    print(f"[decide] abstract/main-text length (published package): "
+          f"{length_note(published_lengths)}")
     for w in length_warnings:
         print(f"[decide] LENGTH NOTE (advisory, nothing is enforced): {w}")
     if final_clean.get("path"):

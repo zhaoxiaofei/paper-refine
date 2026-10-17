@@ -17,7 +17,8 @@ Asserts:
     old blanket exemption is gone;
   * the pipeline reserves M18, M19 AND M20, so discovery proposals start at M21 in
     both the caption-on and caption-off numbering sentences;
-  * length is never a gate in the prompt text (the winner keeps its place);
+  * length is never a ranking/candidate-eligibility gate in the prompt text
+    (the winner keeps its place; an over-cap FINAL package is not ready);
   * the code-side proxy scan counts an abstract and a body correctly, stops the
     main text at Methods/References, skips supplementary-named files and
     renderings, reports unparseable sources as "unparsed", and refuses to count
@@ -152,8 +153,9 @@ def test_prompts():
               "165" in text and "3750" in text)
         check(f"LT3 {name} prompt states the counting examples",
               '"state-of-the-art" is ONE' in text and '"2026" is ONE' in text)
-        check(f"LT3 {name} prompt says length is never a gate",
-              "LENGTH IS NEVER A GATE" in text)
+        check(f"LT3 {name} prompt separates ranking from package readiness",
+              "LENGTH IS NEVER A RANKING OR CANDIDATE-ELIGIBILITY GATE" in text
+              and "NOT submission-ready" in text)
         check(f"LT3 {name} prompt has dropped the blanket exemption",
               "LENGTH IS EXEMPT" not in text and "abstract or main-text word\n    limits, never"
               not in text)
@@ -173,6 +175,8 @@ def test_prompts():
     check("LT3 the judge prompt keeps length in the formatting tier",
           "Length is FORMATTING-tier evidence" in texts["judge"]
           and "score 0" in texts["judge"])
+    check("LT3 the judge-facing length wording carries no provenance label",
+          "champion" not in texts["judge"].lower())
     check("LT3 every M19 mandate carries the cover-letter TOTAL cap (650 words)",
           all("650" in texts[k] for k in ("review", "revise", "integrate", "rewrite", "judge")),
           str({k: ("650" in texts[k]) for k in texts}))
@@ -196,7 +200,7 @@ def test_prompts():
 
 def test_scanner():
     print()
-    print("== LT4: the code-side proxy scan (advisory, never a gate) ==")
+    print("== LT4: the code-side proxy scan (ranking advice + readiness) ==")
     tmp = scratch("paper_len_scan_")
     write(tmp / "ms-over.md",
           "Abstract\n\n" + ("word " * 200).strip() + "\n\nKeywords: a, b.\n\n"
@@ -275,8 +279,8 @@ def test_scanner():
     note = nb.length_note(info)
     check("LT4 the one-line note reports the over-cap sections and the caps",
           "OVER" in note and "165" in note and "3750" in note, note)
-    check("LT4 the note never claims a gate",
-          "advisory only -- never a gate" in note)
+    check("LT4 the note separates ranking advice from final-package readiness",
+          "advisory for ranking" in note and "NOT submission-ready" in note)
     check("LT4 the note names the cover-letter total cap and its breach",
           "cover letter TOTAL 650" in note and "OVER-TOTAL-CAP" in note, note)
     check("LT4 the scan carries its provenance",

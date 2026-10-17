@@ -4,6 +4,9 @@ audit_data/
 # ignore debugging info, which can be huge)
 debug_runs/
 
+# Local agent/file-bridge runtime state (SQLite database and WAL companions).
+agent-file-bridge.sqlite3*
+
 # `media/` commits the PNG figures the docs embed (README.md, AGENT.md, ...); a
 # local `.pdf` render beside them is NOT ignored (it shows in `git status` until
 # it is deleted or explicitly ignored).
