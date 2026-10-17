@@ -1554,6 +1554,165 @@ UNIT_RE = re.compile(
 NUMBER_RE = re.compile(r"(?<![\w.])(\d[\d,]*(?:\.\d+)?(?:[eE][+-]?\d+)?)(?![\w])")
 
 # --------------------------------------------------------------------------
+# Spelled-out numbers as NUMERIC artifacts (2026-10-17).
+#
+# The M4 ledger and the M30 seed read digits only, so a claim written in words
+# escaped both: "three karyotype-defined subpopulations", "seven parental
+# antigens", "four of the five neural-network outputs", "one row per sequencing
+# run". Those are counts a shipped table can prove or contradict exactly like a
+# digit, so they belong to the same artifact family -- otherwise a count claim
+# can be wrong and no mechanical check ever sees it.
+#
+# Precision matters more than recall here (every row asks a session to dispose
+# it): a word number is a COUNT only in a count context -- before a plural noun,
+# in "N of the M", before a unit, or in "one X per Y". The pronoun and idiom
+# uses ("one of them", "one another", "at once", "no one", "one may") are not
+# counts and are dropped by the context test below.
+NUMBER_WORD_UNITS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+    "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+    "seventy": 70, "eighty": 80, "ninety": 90,
+}
+NUMBER_WORD_TENS = ("twenty", "thirty", "forty", "fifty", "sixty", "seventy",
+                    "eighty", "ninety")
+_WORD_NUMBER_ALT = "|".join(sorted(list(NUMBER_WORD_UNITS) + ["hundred", "thousand"],
+                                   key=len, reverse=True))
+# "twenty-one", "twenty one", "one hundred", "one hundred and five".
+NUMBER_WORD_RE = re.compile(
+    r"(?<![\w-])((?:" + _WORD_NUMBER_ALT + r")"
+    r"(?:[-\s](?:and[-\s])?(?:" + _WORD_NUMBER_ALT + r")){0,2})(?![\w-])", re.I)
+# Plural nouns that are real count targets, plus the plural-looking words that
+# are not nouns (so "one is", "two was", "three as" never count).
+PLURAL_NOUN_EXCEPTIONS = frozenset({
+    "is", "was", "has", "does", "this", "his", "hers", "ours", "yours", "theirs",
+    "its", "as", "less", "always", "various", "perhaps", "across", "unless",
+    "thus", "plus", "versus", "towards", "afterwards", "nevertheless", "whereas",
+    "yes", "class", "process", "analysis", "basis", "status", "series", "species",
+    "means", "news", "physics", "mathematics", "economics", "genomics", "omics",
+})
+IRREGULAR_PLURALS = frozenset({
+    "data", "criteria", "phenomena", "analyses", "children", "people", "mice",
+    "indices", "matrices", "vertices", "axes", "genera", "loci", "taxa",
+})
+# Idiom/pronoun followers that make "one" (and only "one") a non-count.
+ONE_NON_COUNT_FOLLOWERS = frozenset({
+    "another", "hand", "side", "way", "thing", "time", "day", "bit", "step",
+    "of", "that", "which", "who", "whom", "whose", "where", "such", "may",
+    "can", "could", "should", "is", "was", "does", "did", "has", "had", "will",
+    "would", "must", "might", "shall", "needs", "wants", "might",
+})
+# A label noun immediately before the number makes it part of a NAME ("Run two",
+# "Patient three", "Table four"), not a count of that many things.
+WORD_NUMBER_LABEL_RE = re.compile(
+    r"(?i)\b(?:run|step|phase|group|round|patient|donor|sample|dataset|figure|"
+    r"table|experiment|trial|cohort|method|version|set|batch|replicate|timepoint|"
+    r"condition|arm|case|panel|clone|cell\s+line)\s+$")
+COUNT_ADJECTIVES = (
+    "additional", "further", "other", "more", "different", "independent",
+    "separate", "distinct", "major", "minor", "main", "key", "novel", "new",
+    "paired", "single", "principal", "primary", "secondary", "remaining",
+)
+
+
+def _word_number_value(words: str):
+    """The integer a spelled-out number denotes, or None when unparsable."""
+    total, current = 0, 0
+    for tok in re.split(r"[-\s]+", str(words or "").lower()):
+        if tok == "and":
+            continue
+        if tok == "hundred":
+            current = (current or 1) * 100
+        elif tok == "thousand":
+            total += (current or 1) * 1000
+            current = 0
+        elif tok in NUMBER_WORD_UNITS:
+            current += NUMBER_WORD_UNITS[tok]
+        else:
+            return None
+    value = total + current
+    return value if value > 0 else None
+
+
+def _word_number_is_count(text: str, start: int, end: int, written: str) -> bool:
+    """True when the spelled-out number at [start, end) is used as a count."""
+    tail = text[end:]
+    first = re.split(r"[-\s]+", (written or "").strip().lower())[0]
+    single_one = (written or "").strip().lower() == "one"
+    if WORD_NUMBER_LABEL_RE.search(text[max(0, start - 24):start]):
+        return False
+    if first in ("hundred", "thousand"):
+        return False
+    # "one another", "one of them", "one may", "no one", "at once": pronouns and
+    # idioms, not counts.
+    m = re.match(r"\s+([A-Za-z][A-Za-z'-]*)", tail)
+    follower = (m.group(1).lower() if m else "")
+    if first == "one" and follower in ONE_NON_COUNT_FOLLOWERS:
+        return False
+    if re.search(r"(?i)\b(?:no|for|at|in)\s+$", text[max(0, start - 12):start]) \
+            and first == "one":
+        return False
+    # "four of the five ...", "three of the nine donors": a count pair.
+    if re.match(r"\s+of\s+(?:the\s+|these\s+|those\s+|its\s+|their\s+)?"
+                r"(?:" + _WORD_NUMBER_ALT + r"|\d+)\b", tail, re.I):
+        return True
+    # "two orders of magnitude", "threefold", "four percent", "five times".
+    if re.match(r"\s*(?:percent|%|fold\b|times\b|orders?\s+of\s+magnitude)", tail, re.I):
+        return True
+    # "one row per sample", "three callers per dataset".
+    if re.match(r"\s+(?:[A-Za-z][A-Za-z-]*\s+){0,2}per\s+", tail):
+        return True
+    if single_one:
+        # A bare "one" is usually a pronoun or a label ("Run one used 3
+        # samples", "one currently requires ..."). It counts only when a
+        # determiner introduces it ("the one caller") -- the plural rule below
+        # then still applies -- or when a plural noun follows immediately.
+        before = text[max(0, start - 16):start].lower()
+        if not re.search(r"\b(?:the|a|an|this|that|these|those|its|their|our|all|"
+                         r"both|any|each|every|only|exactly)\s+$", before):
+            m_one = re.match(r"\s+([A-Za-z][A-Za-z-]*)\b", tail)
+            if not (m_one and (
+                    m_one.group(1).lower().strip("-") in IRREGULAR_PLURALS
+                    or (len(m_one.group(1)) >= 4
+                        and m_one.group(1).lower().endswith("s")
+                        and m_one.group(1).lower() not in PLURAL_NOUN_EXCEPTIONS))):
+                return False
+    # Number + (optional adjectives) + noun: the head noun must be PLURAL (or an
+    # irregular plural). Look a few tokens ahead because authors put attributive
+    # nouns and hyphenated compounds between the number and the head noun
+    # ("three karyotype-defined cell subpopulations", "seven parental antigens");
+    # a singular head ("one hand", "one case") is left out on purpose, which
+    # keeps the ledger's precision.
+    for tok in re.findall(r"[A-Za-z][A-Za-z-]*", tail)[:4]:
+        noun = tok.lower().strip("-")
+        if noun.endswith("ly"):
+            # An adverb between the number and its noun ("one currently
+            # requires ..."): skip it and keep looking.
+            continue
+        if noun in IRREGULAR_PLURALS:
+            return True
+        if len(noun) >= 4 and noun.endswith("s") and noun not in PLURAL_NOUN_EXCEPTIONS:
+            return True
+    return False
+
+
+def word_number_rows(text: str) -> list:
+    """[{start, end, number, written}] for spelled-out COUNT artifacts."""
+    out = []
+    for m in NUMBER_WORD_RE.finditer(str(text or "")):
+        written = m.group(1).strip()
+        value = _word_number_value(written)
+        if value is None:
+            continue
+        if not _word_number_is_count(text, m.start(), m.end(), written):
+            continue
+        out.append({"start": m.start(), "end": m.end(),
+                    "number": str(value), "written": written})
+    return out
+
+# --------------------------------------------------------------------------
 # Disposition tiers.
 #
 # A "finding"-tier row is not a style preference: it is a defect an editor, a
@@ -1813,22 +1972,35 @@ def number_ledger(paras: list) -> list:
             pos += len(sentence)
             while pos < len(text) and text[pos].isspace():
                 pos += 1
-        for m in NUMBER_RE.finditer(text):
+        # Digit artifacts and spelled-out count artifacts go through the same
+        # attribution: a word number is a NUMERIC artifact, so the ledger, the
+        # M30 seed and the provenance report treat it like any other count.
+        found = [(m.start(), m.end(), m.group(0), None)
+                 for m in NUMBER_RE.finditer(text)]
+        found += [(r["start"], r["end"], r["number"], r["written"])
+                  for r in word_number_rows(text)]
+        for start, end, number, written in sorted(found):
             # Attribute by the match POSITION, not by substring membership: a
             # paragraph that repeats a number would otherwise put every
             # instance in the first sentence that happens to contain the digits.
             idx = 0
-            for k, (start, _end) in enumerate(bounds):
-                if start <= m.start():
+            for k, (start_, _end) in enumerate(bounds):
+                if start_ <= start:
                     idx = k
                 else:
                     break
             sentence = sentences[idx] if sentences else text
-            rows.append({"document_paragraph": i, "number": m.group(0),
-                         "thousands_separated": "," in m.group(0),
-                         "unit": (UNIT_RE.match(text[m.end():]).group(0).strip()
-                                  if UNIT_RE.match(text[m.end():]) else None),
-                         "sentence": sentence.strip()[:200], "source": ""})
+            row = {"document_paragraph": i, "number": number,
+                   "thousands_separated": "," in number,
+                   "unit": (UNIT_RE.match(text[end:]).group(0).strip()
+                            if UNIT_RE.match(text[end:]) else None),
+                   "sentence": sentence.strip()[:200], "source": ""}
+            if written:
+                # Keep the author's spelling: the ledger row must be locatable in
+                # the sentence, and a session disposing it needs to see that the
+                # number is written as a word.
+                row["written"] = written
+            rows.append(row)
     return rows
 
 
@@ -3516,12 +3688,25 @@ TABLE_TOOL_HEADER_RE = re.compile(
 TABLE_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.\-]{1,24}$")
 
 
-def table_value_tokens(tables: list, max_tokens: int = 400, min_rows: int = 4) -> dict:
-    """{value token -> "column 'tool' in file X"} for tool-like table columns.
+def table_value_tokens(tables: list, max_tokens: int = 400, min_rows: int = 4,
+                       max_producers: int = 6) -> dict:
+    """{value token -> [(tool_like, where, context tokens), ...]}.
 
     Two column shapes qualify: a header that names a tool/method/caller field,
     and any column whose values are short, repeated, and few (a categorical
     column). Free-text columns never contribute tokens.
+
+    A token is kept under EVERY table that carries it (up to `max_producers`),
+    not just the first one: one caller's name appears in the simulated-data
+    table, the ACT table and the scRNA tables alike, and the 2026-10-17 audit of
+    the CopyNumBench package showed why that matters -- the Methods say CHISEL
+    was "not evaluated" on ACT while the ACT table carries its rows, but the
+    seed named the FIRST table where "chisel" appears (the germline MCB table,
+    where it WAS evaluated) and the session correctly disposed that pairing as a
+    false positive. The claim's own context (the word "ACT", a sample id) now
+    chooses among the producers instead of the file order. `context tokens` are
+    the other categorical values of the same table, so a sentence that names one
+    of them ranks that table first.
     """
     tokens = {}
     for name, text in tables or []:
@@ -3529,6 +3714,17 @@ def table_value_tokens(tables: list, max_tokens: int = 400, min_rows: int = 4) -
         if header is None or len(body) < min_rows:
             continue
         width = min(len(header), max(len(r) for r in body))
+        # First pass: which columns are categorical (the context vocabulary).
+        cat_values = {}
+        for c in range(width):
+            values = [str(r[c]).strip() for r in body if c < len(r) and str(r[c]).strip()]
+            if not values:
+                continue
+            distinct = set(values)
+            categorical = (len(distinct) <= 40 and len(distinct) < len(values)
+                           and all(len(v) <= 24 for v in distinct))
+            if categorical:
+                cat_values[c] = sorted(distinct)
         for c in range(width):
             values = [str(r[c]).strip() for r in body if c < len(r) and str(r[c]).strip()]
             if not values:
@@ -3543,11 +3739,21 @@ def table_value_tokens(tables: list, max_tokens: int = 400, min_rows: int = 4) -
                 if not TABLE_TOKEN_RE.match(v) or v.lower() in ("true", "false", "nan", "inf"):
                     continue
                 key = v.lower()
-                entry = (tool_like, f"value {v!r} of column {header[c]!r} in {name}")
+                ctx = set()
+                for c2, vals in cat_values.items():
+                    if c2 == c:
+                        continue
+                    ctx.update(x.lower() for x in vals if len(x) >= 2)
+                entry = (tool_like, f"value {v!r} of column {header[c]!r} in {name}",
+                         tuple(sorted(ctx))[:40])
+                bucket = tokens.setdefault(key, [])
                 # A tool-like column wins over a categorical one for the same
-                # token: the row exists to point at the method's own rows.
-                if key not in tokens or (entry[0] and not tokens[key][0]):
-                    tokens[key] = entry
+                # table; keep at most `max_producers` distinct tables.
+                if any(e[1] == entry[1] for e in bucket):
+                    continue
+                bucket.append(entry)
+                bucket.sort(key=lambda e: (not e[0], e[1]))
+                del bucket[max_producers:]
     out = {}
     for key in sorted(tokens)[:max_tokens]:
         out[key] = tokens[key]
@@ -3575,25 +3781,36 @@ def negative_claim_rows(texts: list, tables: list, limit: int = 40) -> list:
             claim_at = m.start() - max(0, m.start() - 200)
             method_only = NEGATIVE_SUBJECT_METHOD_ONLY_RE.search(m.group(0)) is not None
             hits = []
-            for token, (tool_like, where) in tokens.items():
+            for token, entries in tokens.items():
                 tm = re.search(r"(?<![A-Za-z0-9])" + re.escape(token)
                                + r"(?![A-Za-z0-9])", lowered)
                 if tm is None or tm.start() >= claim_at:
                     continue
-                if method_only and not tool_like:
-                    # "excluded"/"not included" is a claim about the samples
-                    # unless it names a tool/method column's own value.
-                    continue
-                hits.append((0 if tool_like else 1, token, where))
+                for tool_like, where, ctx in entries:
+                    if method_only and not tool_like:
+                        # "excluded"/"not included" is a claim about the samples
+                        # unless it names a tool/method column's own value.
+                        continue
+                    # The sentence's own context (a panel/sample name the table
+                    # also carries) decides WHICH producer the claim is about;
+                    # with no context the tool-like column still ranks first.
+                    ctx_hit = 1 if any(re.search(
+                        r"(?<![A-Za-z0-9])" + re.escape(x) + r"(?![A-Za-z0-9])", lowered)
+                        for x in ctx) else 0
+                    hits.append((-ctx_hit, 0 if tool_like else 1, token, where))
             # One sentence usually names ONE method and several of the table's
             # other categorical values (the cohort, the cell line). Report the
             # tool-like tokens first and cap the sentence's rows, so the seed
             # names the contradiction instead of the whole column.
-            for _rank, token, where in sorted(hits)[:2]:
+            per_token = {}
+            for _ctx, _rank, token, where in sorted(hits):
+                if per_token.get(token, 0) >= 2:
+                    continue
                 key = (token, where, sentence[:80])
                 if key in seen:
                     continue
                 seen.add(key)
+                per_token[token] = per_token.get(token, 0) + 1
                 rows.append({
                     "rule": "M30-NC", "severity": "medium",
                     "claim": sentence[:220], "token": token, "producer": where,
@@ -3604,6 +3821,8 @@ def negative_claim_rows(texts: list, tables: list, limit: int = 40) -> list:
                 })
                 if len(rows) >= limit:
                     return rows
+                if sum(per_token.values()) >= 4:
+                    break
     return rows
 
 

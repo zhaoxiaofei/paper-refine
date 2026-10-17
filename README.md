@@ -355,6 +355,114 @@ panel never reads a machine path.
 Every evidence area is hash-pinned, and any stage write into it is restored and
 reported.
 
+### Hand-off markers: `--with-author-to-complete` / `--without-author-to-complete`
+
+The revision stages are forbidden to invent content, so a missing mandatory item
+(a statement, an accession, an unreadable field, a whole required file) is
+handed to the author. **Where** that note lives is the operator's choice:
+
+```bash
+# default (on): the marker convention -- a missing item is scaffolded with the
+# literal "[AUTHOR TO COMPLETE: ...]" token and listed for the author; the
+# marker itself is never a defect
+python paper_pipeline.py setup --source ./submission --root ./paper_rounds \
+    --with-author-to-complete
+
+# off: no file may carry the token. The item is left out of the document (a
+# whole missing file is NOT scaffolded as a document of instructions) and
+# recorded in the package's own MANUAL_STEPS.md / CHANGELOG.md; a marker that
+# still reaches a delivered package is a DEFECT, not a neutral hand-off
+python paper_pipeline.py setup --source ./submission --root ./paper_rounds \
+    --without-author-to-complete
+
+python paper_pipeline.py set-author-to-complete --root ./paper_rounds off   # flip later
+```
+
+The switch rewrites the rule in EVERY prompt -- including the master-prompt
+excerpts and the end-of-prompt reminders that restate it -- and it reaches the
+probe, the auditor and the blind judge in their own provenance-free wording.
+Under `off`, a stage that ADDS a marker fails its attempt, a marker still in the
+delivered package is a gating residual and an `AUTH-1` readiness finding, and
+the rationale for *why* an item is missing moves to `MANUAL_STEPS.md` where a
+human reads it. The underlying gap counts exactly as before (AGENTS.md rule 5):
+the marker never made a package better or worse; only who carries the note --
+the manuscript (on) or the manual-steps list (off) -- changes. The delivered
+CopyNumBench main text still carried `[AUTHOR TO COMPLETE: versions of
+bedtools, Seurat, cellsnp-lite and UCSC liftOver]`, and the NeoHeteroclitic
+Reporting Summary was six markers and no filled form; `off` is the setting for a
+package that is about to be uploaded.
+
+### What an evidence-area file may be referenced for (PKG-10)
+
+The operator's rule for these packages: **files in `raw_data/` (and its
+siblings) cannot be referenced by the main manuscript**, except:
+
+* **figures and tables** the submission itself carries -- a figure file whose
+  bytes are embedded in a submitted document (the CopyNumBench main text embeds
+  `raw_data/Fig3_ploidy_balloons.png` byte for byte as `word/media/image3.png`),
+  or a display table the parent `.tex` typesets; and
+* **files inputted to `.tex` files in the area's parent directory**, directly or
+  through nested inputs -- `\input`, `\include`, `\includegraphics`,
+  `\includepdf`, `\addbibresource`, `\bibliography`, `\pgfplotstableread`,
+  `\lstinputlisting`, `\subfile`, `\import` -- because those are "treated as if
+  they are in the parent" (the same package README states this positive half).
+
+`tex_input_closure` computes that set transitively; the PKG-2 report and the
+mechanical sentence removal share it, so a legitimate pointer at a supplementary
+source the parent `.tex` really compiles is never deleted, while a pointer at a
+stale table that ships nowhere is reported (and removed from prose) instead of
+handed to the journal.
+
+### Placeholder files are ignored
+
+A corpus file can stand in for data it does not contain. The operator's example:
+*"the haplotypes in Chisel ACT are actually the HG008 haplotypes
+(placeholders)"*. Such a file is never evidence:
+
+```bash
+# declare one (package-relative path or glob; matched against the path and the
+# bare file name). Repeatable at setup; add/clear later with the set- command.
+python paper_pipeline.py setup --source ./submission --root ./paper_rounds \
+    --placeholder-file 'raw_data/**/ACT*hap*'
+python paper_pipeline.py set-placeholder-file --root ./paper_rounds 'raw_data/**/ACT*hap*'
+python paper_pipeline.py set-placeholder-file --root ./paper_rounds            # show
+```
+
+A package's own README may declare them (a line reading
+`Placeholder files: <path-or-glob>`), and
+the pipeline also DETECTS placeholder copies: two files inside the evidence
+areas with identical bytes under different sample/dataset names, where at least
+one is a haplotype/variant-style input. Every placeholder is listed in the
+evidence pack under **Placeholder files -- ignored**; no role may cite one as a
+producer, and a claim resting only on one is `unable -- placeholder input`. The
+real partner of a DECLARED placeholder stays evidence (declaring the ACT copy
+must not silence the HG008 original).
+
+### Package self-consistency: PKG-11/12/14/15/16
+
+Three scans run on every produced package and every published copy, and their
+rows block the readiness verdict (one of the two statements is wrong, and only
+the author can say which):
+
+* **PKG-11** -- sibling tables whose headers differ only by case or one
+  character. A one-letter `MixMHCPred_aff`/`MixMHCpred_aff` difference made an
+  aggregation skip a whole antigen silently.
+* **PKG-12** -- a statistics row whose p-value and its own interval give
+  opposite verdicts under the rule the table's caption states (CopyNumBench's
+  AneuFinder/Hap_1/nonintCN_PCC row: p = 0.115 beside [-0.51, -0.02]).
+* **PKG-14** -- a cover letter that says the work is not under consideration
+  elsewhere / lists no related manuscript while the package carries a dated
+  editorial decision for the same title.
+* **PKG-15** -- a `*mcb*pooled*.tsv` whose `n_units`/`mean` are computed on fewer
+  units than the sibling `*units*.tsv` carries, while its caption calls the
+  section "pooled over every donor" (CopyNumBench's pooled MCB: n = 9 germline
+  donors, caption "pools every donor of the four panels", sibling table 21
+  units, S3 n = 21). The row quotes the caption and names the complete-block
+  restriction as the legitimate explanation when that is what happened.
+* **PKG-16** (advisory) -- a required form (e.g. the Reporting Summary) whose
+  software inventory omits tools the manuscript's `Software.` paragraph names
+  (CopyNumBench: bedtools, Seurat, cellsnp-lite, Eagle, UCSC liftOver).
+
 To avoid duplicating gigabytes into every sandbox, the pipeline keeps **ONE**
 read-only copy of each evidence area per root (`<root>/non_revised/<area>`,
 chmod-protected) and the stage sandboxes carry **relative symlinks** to it —
@@ -1058,7 +1166,7 @@ Every non-judge sandbox now also receives a code-side **provenance pack**
 
 | artifact | what it carries |
 |---|---|
-| `NUMBERS_LEDGER.md` | every numeric literal, with the `source` the CODE could PROVE from a shipped data table (a column sum/min/max or a single cell — e.g. `45,365` = the sum of `n_cells_total`). A row whose source stays empty is the session's job |
+| `NUMBERS_LEDGER.md` | every numeric literal **and every spelled-out count** (`one` … `ninety-nine`, `one hundred and five`), with the `source` the CODE could PROVE from a shipped data table (a column sum/min/max or a single cell — e.g. `45,365` = the sum of `n_cells_total`). A word number is a count only in a count context (before a plural noun, in "four of the five", before a unit, or in "one row per sample"); pronoun and idiom uses ("one of them", "one another", "at once", "Run two") are not rows. A row whose source stays empty is the session's job |
 | `IDENTIFIERS.md` | every DOI / SRA-BioProject-GEO accession / repository URL+commit / ORCID, with the orchestrator's own public-API verdict (`found` / `absent` / `error` / `skipped`) |
 | `M2_references.md` | the reference-integrity seed: one row per reference ENTRY that carries a DOI, with the resolver's verdict for that DOI and what the code established itself — a year token inside the DOI that contradicts the entry's own year (`gb-2019` → `gb-2119`), the same DOI on two entries, and the comparison between the resolved record and the entry. A one-character DOI corruption leaves author, title, journal and year intact, so no format check and no re-reading can see it |
 | `PLACEHOLDER_LOOKUP.md` | the answers the pipeline already found for the `searchable` hand-off markers (`found` = the fact; `absent` = a VERIFIED NEGATIVE such as "not posted"). A marker this table answers may not ship |
@@ -2703,7 +2811,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 129 suites (a few
+any failure. They are independent, so run them in parallel — 130 suites (a few
 minutes at the default 24 parallel sessions; tens of minutes sequentially):
 
 ```bash

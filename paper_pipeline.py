@@ -798,6 +798,7 @@ import copy
 import contextlib
 import csv
 import difflib
+import fnmatch
 import hashlib
 import io
 import itertools
@@ -7172,7 +7173,170 @@ PLACEHOLDER_RULE = """PIPELINE HAND-OFF PLACEHOLDERS — the literal token "[AUT
       - `author-only` facts (funding, consent, a decision, an identity you cannot confirm) keep the
         marker and go to MANUAL_STEPS.md.
     A `searchable` marker whose lookup verdict is `found` or `absent` and is still present in a
-    delivered package is a FAILED run (the postcheck points at the exact lookup row)."""
+    delivered package is a FAILED run (the postcheck points at the exact lookup row).
+  * PLACEHOLDER FILES. A corpus file can stand in for data it does not contain (a haplotype,
+    annotation or table copied from another sample, a dummy file). When your session receives the
+    evidence pack, its "Placeholder files -- ignored" list is authoritative -- and a file that
+    carries another sample's name/content is one even when no list names it. Never use one as a
+    producer, a source or a contradicting fact, and never "verify" a claim against one: a claim
+    that rests only on a placeholder input is `unable -- placeholder input; the real data is not
+    in the corpus`, and the author must supply or remove the file."""
+
+# ---------------------------------------------------------------------------
+# `--without-author-to-complete` / `--with-author-to-complete` (2026-10-17).
+#
+# The placeholder above is a PIPELINE convention: a stage that must not invent
+# content writes "[AUTHOR TO COMPLETE: ...]" into the document and lists the item
+# for the author. That is the right default for an internal round -- the marker is
+# the author's checklist -- but it is the WRONG behaviour for a package that is
+# about to be uploaded: the 2026-10-17 audit of the two clean packages found
+# `[AUTHOR TO COMPLETE: versions of bedtools, Seurat, cellsnp-lite and UCSC
+# liftOver]` inside the SUBMITTED main text and a Reporting Summary that was
+# nothing but a scaffold of five markers. The operator therefore chooses:
+#
+#   on  (default)  the marker convention, unchanged: a stage scaffolds a missing
+#                  mandatory item with the token and lists it for the author.
+#   off            NOTHING may carry the token. A missing item is left out of the
+#                  document (or its scaffold) and written into the package's own
+#                  manual-steps report instead, where a human reads it; an item
+#                  the stage cannot supply is never marked inside a file that
+#                  ships, and a marker that is still present is a DEFECT of that
+#                  package rather than a neutral hand-off.
+#
+# The switch never changes what is true about the package: the underlying gap
+# counts exactly as it did before (AGENTS.md rule 5: the marker never makes a
+# version worse or better). What changes is only who carries the note -- the
+# manuscript (on) or the manual-steps list (off) -- and whether a shipped marker
+# is a defect (off) or a neutral hand-off (on).
+AUTHOR_TO_COMPLETE_MODES = ("on", "off")
+DEFAULT_AUTHOR_TO_COMPLETE = "on"
+
+PLACEHOLDER_RULE_OFF = """PIPELINE HAND-OFF ITEMS — the operator turned the marker convention OFF
+(`--without-author-to-complete`), so the literal token "[AUTHOR TO COMPLETE..." MUST NOT APPEAR
+anywhere in a file you write:
+  * An item that is missing from the submission and cannot be reconstructed (a whole mandatory file
+    such as the cover letter or Reporting Summary, a statement, an accession number, a version, an
+    unreadable field) is NEVER marked inside a document. Leave the item out of the document -- and,
+    for a whole missing file, do not create a file that carries nothing but instructions -- and
+    record it in the package's own MANUAL_STEPS.md / CHANGELOG.md / REVISION_REPORT.md with the
+    precise step the author must take (which file, which section or field, what to supply).
+  * Existing markers are yours to clear in the same spirit: fill one ONLY when the missing content
+    is verifiably present elsewhere in the corpus (that is a normal edit and the marker goes away);
+    otherwise REMOVE the marker text from the document (keeping whatever surrounding content is
+    real) and move the item to the manual-steps report. Never guess at the content, never write a
+    bare "[TO BE COMPLETED]"-style substitute, and never leave a marker in place: with this option
+    off, a shipped marker is a defect of the package, not a neutral hand-off.
+  * SEARCHABLE ITEMS ARE THE PIPELINE'S JOB. A missing findable fact -- a preprint/DOI/accession/
+    database id/ORCID/repository commit -- is classified `searchable`, and the orchestrator answers
+    it BEFORE your session with its own public-API lookups: read `work/PLACEHOLDER_LOOKUP.md` (and
+    `work/IDENTIFIERS.md`) and dispose every row.
+      - verdict `found`  -> write the fact into the document (naming the identifier it found);
+      - verdict `absent` -> write the VERIFIED NEGATIVE in the author's own voice, e.g. "Preprints:
+        not posted." or "not yet deposited (checked <date>)". This is NOT invention: a recorded,
+        dated, reproducible search that returned nothing is evidence;
+      - verdict `error`/`skipped` -> the lookup could not answer (offline / `--placeholder-lookup
+        off`): leave the item out of the document and put the failed query in MANUAL_STEPS.md;
+      - `author-only` facts (funding, consent, a decision, an identity you cannot confirm) go to
+        MANUAL_STEPS.md.
+  * The rule binds every file you write, including a scaffold you create for a mandatory item and
+    any report that ships beside the documents.
+  * PLACEHOLDER FILES. A corpus file can stand in for data it does not contain (a haplotype,
+    annotation or table copied from another sample, a dummy file). When your session receives the
+    evidence pack, its "Placeholder files -- ignored" list is authoritative -- and a file that
+    carries another sample's name/content is one even when no list names it. Never use one as a
+    producer, a source or a contradicting fact, and never "verify" a claim against one: a claim
+    that rests only on a placeholder input is `unable -- placeholder input; the real data is not
+    in the corpus`, and the author must supply or remove the file."""
+
+# The judge's half: the judge must not learn the pipeline's vocabulary, and under
+# `off` the marker is no longer neutral -- a package that ships one has content the
+# author still owes, and the judge scores that the same way it scores any other
+# missing content (never the marker's own wording).
+PLACEHOLDER_RULE_JUDGE_OFF = """PLACEHOLDER TEXT IN A PACKAGE (handle exactly this way):
+  * A clearly marked placeholder (for example "[TO BE COMPLETED: ...]", a TODO note, or an
+    equivalent bracket) marks content the author must still supply. Score the UNDERLYING gap
+    exactly as you would score an otherwise identical package that simply omitted the item: the
+    marker's own wording, count and presence are not a separate difference, and you never "fix" one
+    by guessing at content.
+  * The package was prepared under a no-placeholder policy, so an item left as a marker instead of
+    being supplied (or instead of being moved to the package's own manual-steps list) is a
+    completeness gap of that package: report it as such -- file, location, what is missing -- and
+    never as a formatting nit."""
+
+
+def author_to_complete_of(ctx=None) -> bool:
+    """Whether the pipeline may write "[AUTHOR TO COMPLETE: ...]" hand-off markers.
+
+    `on` (the default, and the behaviour of every root created before the option
+    existed) keeps the marker convention; `off` (`--without-author-to-complete`,
+    or `set-author-to-complete off`) forbids the token in every written file and
+    makes a shipped marker a defect (see PLACEHOLDER_RULE_OFF).
+    """
+    raw = ((getattr(ctx, "cfg", None) if ctx is not None else None) or {}).get(
+        "author_to_complete")
+    if isinstance(raw, bool):
+        return raw
+    return str(raw or "").strip().lower() not in ("off", "false", "no", "0")
+
+
+def placeholder_rule_text(author_to_complete: bool = True) -> str:
+    """The hand-off rule the working sessions receive (see the two texts above)."""
+    return PLACEHOLDER_RULE if author_to_complete else PLACEHOLDER_RULE_OFF
+
+
+def placeholder_rule_judge_text(author_to_complete: bool = True) -> str:
+    """The same switch for the (provenance-free) comparison sessions."""
+    return PLACEHOLDER_RULE_JUDGE if author_to_complete else PLACEHOLDER_RULE_JUDGE_OFF
+
+
+# The master-prompt excerpts and the end-of-prompt reminders RESTATE the
+# scaffolding rule, and a restated opposite ("scaffold the missing item with the
+# marker") would override the policy block above -- which is exactly how the
+# contradiction would reach a session. Each pair is (the rule text the excerpts
+# carry, the same sentence under `--without-author-to-complete`).
+HANDOFF_PROMPT_REWRITES = (
+    ('Missing mandatory items\n     are scaffolded only with clearly marked '
+     '"[AUTHOR TO COMPLETE: ...]" placeholders, every one\n     listed in the final report.',
+     'Missing mandatory items are NOT marked inside a document (`author_to_complete: off`,\n'
+     '     `--without-author-to-complete`): leave the item out of the document and list it in\n'
+     '     the final report.'),
+    ('A\nmissing mandatory item is scaffolded ONLY with the literal "[AUTHOR TO COMPLETE: ...]" '
+     'marker and\nlisted for the author: that marker is a hand-off item, never content to invent '
+     'and never something\nto "clean up" by guessing.',
+     'A missing mandatory item is NOT marked inside the document (`author_to_complete: off`, '
+     '`--without-author-to-complete`): leave it out of the file and list it in MANUAL_STEPS.md -- '
+     'the item is never content to invent and never something to "clean up" by guessing.'),
+    ('Hand-off markers ("[AUTHOR TO COMPLETE: ...]") are manual items for\nthe author: preserve '
+     "the base's markers, never invent the missing content, and never treat a marker\nas a defect "
+     'or as a difference worth scoring.',
+     'Hand-off markers ("[AUTHOR TO COMPLETE: ...]") may not exist in this package '
+     '(`author_to_complete: off`, `--without-author-to-complete`): if the base carries one, remove '
+     'the marker text (keeping the real content around it) and move the item to '
+     'MANUAL_STEPS.md; never invent the missing content, and never score the marker itself.'),
+    ('Anything missing from the submission (a whole mandatory\n     file, a statement, an '
+     'accession number) is scaffolded ONLY with the literal\n     "[AUTHOR TO COMPLETE: ...]" '
+     'marker and listed for the author.',
+     'Anything missing from the submission (a whole mandatory file, a statement, an accession '
+     'number) is NOT marked inside the document (`author_to_complete: off`, '
+     '`--without-author-to-complete`): leave it out and list it in MANUAL_STEPS.md.'),
+)
+
+
+def apply_author_to_complete_prompt(text: str, author_to_complete: bool = True) -> str:
+    """Make every restatement of the scaffolding rule agree with the policy.
+
+    One place, applied to every prompt the pipeline writes: with the option off,
+    each excerpt that tells a session to scaffold a missing item with the literal
+    marker is replaced by the same sentence under the no-marker policy. The
+    replacements are exact strings on purpose -- a rewrite that silently failed to
+    match would leave two contradictory instructions in one prompt, so the
+    consistency suite asserts each pair still exists in the source.
+    """
+    if author_to_complete:
+        return text
+    for on_text, off_text in HANDOFF_PROMPT_REWRITES:
+        text = text.replace(on_text, off_text)
+    return text
 
 # ---------------------------------------------------------------------------
 # THE SHARED RULE SET — injected VERBATIM into every session prompt.
@@ -10602,7 +10766,7 @@ def review_prompt(sandbox: Path, run_id: str, r: int,
                   prior_round: bool = False, prior_failure: str = "",
                   split: str = None, split_mode: str = "phases",
                   scope: str = "full", venue=None, journal_block: str = "",
-                  venue_norm: str = "") -> str:
+                  venue_norm: str = "", author_to_complete: bool = True) -> str:
     """Phase 1 prompt: $paper-review only, writing review/* (Section C1)."""
     prof = _as_profile(venue)
     prior = (PRIOR_ROUND_RULE.replace("@@ROUND@@", str(int(r)))
@@ -10653,7 +10817,7 @@ the surface, and the revisers may not change a claim here."""
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE)
             .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule(prof))
             .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
-            .replace("@@PLACEHOLDER_RULE@@", PLACEHOLDER_RULE)
+            .replace("@@PLACEHOLDER_RULE@@", placeholder_rule_text(author_to_complete))
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
             .replace("@@DERIVED_OUTPUTS_RULE@@", derived_outputs_rule(prof))
             .replace("@@VALIDATION_RULE@@", validation_block("review"))
@@ -10673,8 +10837,11 @@ the surface, and the revisers may not change a claim here."""
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(REVIEW_DIR))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("review", run_id, r))
-    return (text + shared_blocks() + split_block + scope_block + attached_head(prof) + "\n"
-            + attached_phase1(prof) + REVIEW_TAIL + journal_block + venue_norm)
+    text = apply_author_to_complete_prompt(
+        text + shared_blocks() + split_block + scope_block + attached_head(prof) + "\n"
+        + attached_phase1(prof) + REVIEW_TAIL + journal_block + venue_norm,
+        author_to_complete)
+    return text
 
 
 def revise_prompt(sandbox: Path, run_id: str, r: int,
@@ -10682,7 +10849,8 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
                   caption_limit: int = DEFAULT_CAPTION_LIMIT,
                   zotero: str = DEFAULT_ZOTERO_MODE,
                   prior_failure: str = "", audit: bool = False, venue=None,
-                  journal_block: str = "", venue_norm: str = "") -> str:
+                  journal_block: str = "", venue_norm: str = "",
+                  author_to_complete: bool = True) -> str:
     """Phase 2 prompt: $paper-revise, consuming the round's frozen review/ copy."""
     prof = _as_profile(venue)
     audit_block = ("""
@@ -10701,7 +10869,7 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@REVISE_TOTAL@@", str(int(total)))
             .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule(prof))
             .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
-            .replace("@@PLACEHOLDER_RULE@@", PLACEHOLDER_RULE)
+            .replace("@@PLACEHOLDER_RULE@@", placeholder_rule_text(author_to_complete))
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
             .replace("@@VISUAL_INSPECTION_RULE@@",
                      visual_inspection_block(VISUAL_ARTIFACT_REVISED))
@@ -10724,14 +10892,16 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(REVISED_DIR))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("revise", run_id, r))
-    return (text + shared_blocks() + attached_head(prof) + "\n" + ATTACHED_PHASE2
-            + REVISE_TAIL + journal_block + venue_norm)
+    text = apply_author_to_complete_prompt(
+        text + shared_blocks() + attached_head(prof) + "\n" + ATTACHED_PHASE2
+        + REVISE_TAIL + journal_block + venue_norm, author_to_complete)
+    return text
 
 
 
 def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
                  zotero: str = DEFAULT_ZOTERO_MODE, venue=None,
-                 venue_norm: str = "") -> str:
+                 venue_norm: str = "", author_to_complete: bool = True) -> str:
     """The AUDITOR prompt: review -> AUDIT -> revise.
 
     The auditor consumes the round's FROZEN review (read-only) and produces the
@@ -10748,7 +10918,7 @@ def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE)
             .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule(prof))
             .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
-            .replace("@@PLACEHOLDER_RULE@@", PLACEHOLDER_RULE)
+            .replace("@@PLACEHOLDER_RULE@@", placeholder_rule_text(author_to_complete))
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
             .replace("@@DERIVED_OUTPUTS_RULE@@", derived_outputs_rule(prof))
             .replace("@@VALIDATION_RULE@@", VALIDATION_RULE)
@@ -10763,7 +10933,8 @@ def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
     text = render_venue_tokens(text, prof)
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule("audit"))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("audit", run_id, r))
-    return text + shared_blocks() + AUDIT_TAIL + venue_norm
+    return apply_author_to_complete_prompt(text + shared_blocks() + AUDIT_TAIL + venue_norm,
+                                           author_to_complete)
 
 
 PROBE_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
@@ -10967,6 +11138,7 @@ The finding vocabulary below is the one every session uses — classify each fin
 
 @@DEFECT_CLASS_RULE@@
 @@STANDING_EXEMPTIONS@@
+@@PLACEHOLDER_RULE@@
 @@SELFCHECK@@
 """
 
@@ -10986,7 +11158,7 @@ IN THE SANDBOX ROOT — next to PROMPT.md, NOT inside `probe_review/` — carryi
 
 
 def probe_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
-                 venue=None) -> str:
+                 venue=None, author_to_complete: bool = True) -> str:
     """The PROBE REVIEW prompt: a generic, cold-context independent discovery pass.
 
     Self-contained by design: the session is handed no checklist, no finding
@@ -11003,9 +11175,11 @@ def probe_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
             .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE)
             .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule(prof))
             .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
+            .replace("@@PLACEHOLDER_RULE@@", placeholder_rule_text(author_to_complete))
             .replace("@@SELFCHECK@@", selfcheck_block("probe", run_id, r)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(PROBE_DIR))
-    return text + shared_blocks() + PROBE_TAIL
+    return apply_author_to_complete_prompt(text + shared_blocks() + PROBE_TAIL,
+                                           author_to_complete)
 
 
 def integrate_prompt(sandbox: Path, run_id: str, r: int,
@@ -11013,7 +11187,8 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
                      caption_limit: int = DEFAULT_CAPTION_LIMIT,
                      zotero: str = DEFAULT_ZOTERO_MODE,
                      prior_failure: str = "", venue=None, venue_norm: str = "",
-                     discovery_ids: list = None, discovery_dropped: list = None) -> str:
+                     discovery_ids: list = None, discovery_dropped: list = None,
+                     author_to_complete: bool = True) -> str:
     """Integration prompt: self/ reworked with ALL the other pool members.
 
     One run per pool member (there are no pairwise arms): the base stays the
@@ -11029,7 +11204,7 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@OTHER_COUNT@@", str(len(other_ids)))
             .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule(prof))
             .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
-            .replace("@@PLACEHOLDER_RULE@@", PLACEHOLDER_RULE)
+            .replace("@@PLACEHOLDER_RULE@@", placeholder_rule_text(author_to_complete))
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
             .replace("@@VISUAL_INSPECTION_RULE@@",
                      visual_inspection_block(VISUAL_ARTIFACT_INTEGRATED))
@@ -11053,8 +11228,10 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
     text = text.replace("@@SELFCHECK@@", selfcheck_block("integrate", run_id, r))
     text = apply_hierarchy_reconcile(text, "integrate")
     text = apply_evidence_integrity(text, "integrate")
-    return (text + shared_blocks() + attached_phase1(prof) + "\n" + ATTACHED_PHASE2
-            + INTEGRATE_TAIL + venue_norm)
+    text = apply_author_to_complete_prompt(
+        text + shared_blocks() + attached_phase1(prof) + "\n" + ATTACHED_PHASE2
+        + INTEGRATE_TAIL + venue_norm, author_to_complete)
+    return text
 
 
 def rewrite_prompt(sandbox: Path, run_id: str, r: int,
@@ -11062,7 +11239,8 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
                    caption_limit: int = DEFAULT_CAPTION_LIMIT,
                    zotero: str = DEFAULT_ZOTERO_MODE,
                    prior_failure: str = "", level: str = "", venue=None,
-                   journal_block: str = "", venue_norm: str = "") -> str:
+                   journal_block: str = "", venue_norm: str = "",
+                   author_to_complete: bool = True) -> str:
     """The rewrite prompt: one of the round's M rewritten candidates.
 
     Staged FIRST in the round (before the review), and it is a CANDIDATE like
@@ -11080,7 +11258,7 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@SOURCE_HIERARCHY@@", SOURCE_HIERARCHY)
             .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule(prof))
             .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
-            .replace("@@PLACEHOLDER_RULE@@", PLACEHOLDER_RULE)
+            .replace("@@PLACEHOLDER_RULE@@", placeholder_rule_text(author_to_complete))
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
             .replace("@@DERIVED_OUTPUTS_RULE@@", derived_outputs_rule(prof))
             .replace("@@VISUAL_INSPECTION_RULE@@",
@@ -11101,8 +11279,10 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
     text = text.replace("@@SELFCHECK@@", selfcheck_block("rewrite", run_id, r))
     text = apply_hierarchy_reconcile(text, "rewrite")
     text = apply_evidence_integrity(text, "rewrite")
-    return (text + shared_blocks() + attached_head(prof) + "\n" + attached_phase1(prof) + "\n"
-            + ATTACHED_PHASE2 + REWRITE_TAIL + journal_block + venue_norm)
+    text = apply_author_to_complete_prompt(
+        text + shared_blocks() + attached_head(prof) + "\n" + attached_phase1(prof) + "\n"
+        + ATTACHED_PHASE2 + REWRITE_TAIL + journal_block + venue_norm, author_to_complete)
+    return text
 
 
 def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index: int,
@@ -11110,7 +11290,7 @@ def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index
                  caption_limit: int = DEFAULT_CAPTION_LIMIT,
                  zotero: str = DEFAULT_ZOTERO_MODE,
                  field_first: bool = False, venue=None, dedup_mode: str = "off",
-                 venue_norm: str = "") -> str:
+                 venue_norm: str = "", author_to_complete: bool = True) -> str:
     """Relative-judgment prompt, one per (version, judge) session (Section C4)."""
     prof = _as_profile(venue)
     labels = ", ".join(opponent_labels)
@@ -11126,7 +11306,8 @@ def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index
             .replace("@@SOURCE_HIERARCHY@@", SOURCE_HIERARCHY)
             .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule(prof))
             .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
-            .replace("@@PLACEHOLDER_RULE@@", PLACEHOLDER_RULE_JUDGE)
+            .replace("@@PLACEHOLDER_RULE@@",
+                     placeholder_rule_judge_text(author_to_complete))
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
             .replace("@@DERIVED_OUTPUTS_RULE@@", derived_outputs_rule(prof))
             .replace("@@VALIDATION_RULE@@", validation_block("judge"))
@@ -11160,7 +11341,8 @@ def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index
         # The OPT-IN structured-location dedup needs machine-locatable evidence
         # rows; in the default mode this block is never concatenated.
         text += DEDUP_LOCATION_JUDGE_RULE
-    return text + shared_blocks() + venue_norm
+    return apply_author_to_complete_prompt(text + shared_blocks() + venue_norm,
+                                           author_to_complete)
 
 
 # Readable aliases for the structural summary in the specification.
@@ -15633,10 +15815,28 @@ def _format_fix_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, warns: list,
                     f"CODE_SCANS.json and the agents' M19 artifact is authoritative")
             ph_delta = delta["placeholders"]["after"] - delta["placeholders"]["before"]
             if ph_delta:
-                warns.append(
-                    f"EVIDENCE: hand-off placeholders {delta['placeholders']['before']} -> "
-                    f"{delta['placeholders']['after']} (+{ph_delta}); they are the stage's "
-                    f"declared hand-offs, never scored, and are listed in CODE_SCANS.json")
+                msg = (f"EVIDENCE: hand-off placeholders "
+                       f"{delta['placeholders']['before']} -> "
+                       f"{delta['placeholders']['after']} (+{ph_delta}); they are the stage's "
+                       f"declared hand-offs, never scored, and are listed in CODE_SCANS.json")
+                if author_to_complete_of(ctx):
+                    warns.append(msg)
+                else:
+                    # `--without-author-to-complete`: the operator turned the
+                    # marker convention OFF, so a stage that WROTE one disobeyed
+                    # its own prompt -- the token may not appear anywhere. The
+                    # attempt FAILS (the declaration is what the operator asked
+                    # for, not a preference): the item belongs in MANUAL_STEPS.md.
+                    (errs if isinstance(errs, list) else warns).append(
+                        f"EVIDENCE: the stage ADDED {ph_delta} hand-off placeholder(s) "
+                        f"({delta['placeholders']['before']} -> "
+                        f"{delta['placeholders']['after']}) although this root runs with "
+                        f"`author_to_complete: off`: no file may carry the "
+                        f"[AUTHOR TO COMPLETE: ...] token. Remove the marker(s) from the "
+                        f"files (keeping whatever content around them is real) and record the "
+                        f"hand-off item(s) in the package's own MANUAL_STEPS.md / CHANGELOG.md "
+                        f"instead -- the rows are in CODE_SCANS_after.json")
+                    warns.append(msg)
         rec["evidence_after"] = after
         rec["evidence_delta"] = delta
         write_json_atomic(sb / "CODE_SCANS_after.json", {"after": after, "before": before,
@@ -15818,6 +16018,18 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
             "rows": non_submitted_reference_rows(corpus_dir, areas)}
     except Exception as e:                                            # noqa: BLE001
         evidence["submission_references"] = {"error": f"{type(e).__name__}: {e}"}
+    # PLACEHOLDER FILES (2026-10-17): a file that stands in for data it does not
+    # contain (the operator's example: the ACT haplotypes are really HG008's) is
+    # NEVER evidence. The report names the declared placeholders and the detected
+    # duplicate-under-another-sample-name copies, and every role is told (in the
+    # evidence pack and the prompt rule) to ignore them as producers.
+    try:
+        evidence["placeholder_files"] = placeholder_files_report(
+            corpus_dir,
+            extra_globs=_placeholder_globs_from_ctx(ctx),
+            area_names=submission_not_carried_areas(ctx))
+    except Exception as e:                                            # noqa: BLE001
+        evidence["placeholder_files"] = {"error": f"{type(e).__name__}: {e}"}
     # The two families that only the PUBLISHED package used to see, seeded here
     # so a review/audit/revise session can ADDRESS them in prose (the mechanical
     # layer reports them; only the editing arms can ship a figure, embed it, or
@@ -15854,6 +16066,20 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
         evidence["contradictions"] = {"rows": package_contradiction_rows(corpus_dir)}
     except Exception as e:                                            # noqa: BLE001
         evidence["contradictions"] = {"error": f"{type(e).__name__}: {e}"}
+    # PKG-11/12/14/15/16 (2026-10-17): package self-consistency. Seeded for the
+    # review, audit and revision arms -- most of these can only be repaired by
+    # the author (rename a header / regenerate a table / correct a letter), so the
+    # row must reach prose that says what was done.
+    try:
+        evidence["package_consistency"] = {
+            "column_near_misses": scan_column_name_near_misses(corpus_dir),
+            "mcb_rule_conflicts": scan_mcb_rule_conflicts(corpus_dir),
+            "pooled_table_mismatches": scan_pooled_table_mismatches(corpus_dir),
+            "form_software_coverage": scan_form_software_coverage(corpus_dir),
+            "prior_submission_disclosure": scan_prior_submission_disclosure(corpus_dir),
+        }
+    except Exception as e:                                            # noqa: BLE001
+        evidence["package_consistency"] = {"error": f"{type(e).__name__}: {e}"}
     # WHICH FILES THE SUBMISSION ACTUALLY CARRIES: the package's own README may
     # declare the submitted set (a glob); when it does and the declaration is
     # plausible, the scans above already used it, and every session is told, so a
@@ -16942,6 +17168,13 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
         "a silent clean; a difference a stated unit, rounding, conversion or Methods-stated "
         "run-time override reconciles is `OK` with that reason. Never \"fix\" the code here: the "
         "review reports; rule C owns a code fix and a regenerated figure/table is a manual item.\n\n"
+        "A COUNT of the form \"N scenario-by-metric blocks\" is a written number with a shipped "
+        "producer: count the DISTINCT (scenario, metric) pairs in the deposited grid table the "
+        "figure is drawn from, and check the metric IDs the Results names against the figure's "
+        "OWN row labels (the 2026-10-17 audit: the CopyNumBench Results named six metric IDs "
+        "while Fig. 2 drew eight row labels -- breakpoint precision and recall included -- and "
+        "15 blocks, while the deposited MCB table keeps 16 because intCN_modal_frac is repeated "
+        "under both scenario labels).\n\n"
         "## A. written values with candidate producers\n\n"
         + _evidence_artifact_table(
             h_rows,
@@ -17006,6 +17239,53 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
                          + " |")
     else:
         lines.append("(no dangling reference in a to-be-submitted file)")
+    # PLACEHOLDER FILES: named so no role reads one as evidence (see the block
+    # above `declared_placeholder_paths`). Seeded for every working session; the
+    # judge's view never carries a producer list, so it is not appended there.
+    if where not in ("judge",):
+        pfr = ev.get("placeholder_files") or {}
+        if pfr.get("error"):
+            lines += ["", "## Placeholder files (ignored)", "",
+                      f"(the placeholder-file check could not run: {pfr['error']})"]
+        elif pfr.get("ignored"):
+            lines += ["", "## Placeholder files -- ignored", "",
+                      "These files stand in for data they do not contain (declared by the "
+                      "operator, or detected as identical bytes under another sample/dataset "
+                      "name). They are NOT evidence and NOT a producer: never cite one to "
+                      "support, strengthen or contradict a claim, and do not score a claim by "
+                      "them. A claim that rests only on one of them is `unable -- placeholder "
+                      "input; the real data is not in the corpus`, and the author is the one "
+                      "who supplies or removes the file.", "",
+                      "| file | why it is a placeholder |", "|---|---|"]
+            for rel in pfr["ignored"][:40]:
+                why = (pfr.get("reasons") or {}).get(rel, "placeholder")
+                lines.append(f"| `{rel}` | {why} |")
+        if pfr.get("declared_patterns"):
+            lines += ["", "Declared placeholder pattern(s): "
+                      + ", ".join(f"`{x}`" for x in pfr["declared_patterns"][:12])]
+    # PKG-11/12/14/15/16: package self-consistency. Every row is a defect of the
+    # package, not a style note -- the fix is a renamed header, a regenerated
+    # table, or a corrected letter, so the session must STATE what it did.
+    pc = ev.get("package_consistency") or {}
+    pc_rows = []
+    for key in ("column_near_misses", "mcb_rule_conflicts", "pooled_table_mismatches",
+                "form_software_coverage", "prior_submission_disclosure"):
+        pc_rows.extend(pc.get(key) or [])
+    if pc.get("error"):
+        lines += ["", "## Package self-consistency (PKG-11/12/14/15/16)", "",
+                  f"(the scans could not run: {pc['error']})"]
+    elif pc_rows:
+        lines += ["", "## Package self-consistency (PKG-11/12/14/15/16)", "",
+                  "Each row is one package surface contradicting another (or the analysis it "
+                  "carries). The pipeline never edits these: renaming a table's header, "
+                  "regenerating a statistics table and correcting a cover letter are the "
+                  "author's acts. Resolve or record each one in the change ledger and the "
+                  "manual-steps report; do not leave a row undisposed.", "",
+                  "| rule | file | line | detail |", "|---|---|---|---|"]
+        for r in pc_rows[:30]:
+            detail = str(r.get("detail") or "").replace("|", "/")[:260]
+            lines.append(f"| {r.get('rule')} | `{r.get('file')}` | {r.get('line')} | "
+                         f"{detail} |")
     dis = ev.get("display_items") or {}
     dis_rows = dis.get("rows") or []
     if dis_rows or dis.get("error"):
@@ -21483,6 +21763,7 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
                                                 prior_failure=note,
                                                 level=rewrite_level_of(k, m),
                                                 venue=venue_profile_of(ctx),
+                                                author_to_complete=author_to_complete_of(ctx),
                                                 journal_block=(journal_rewrite_block(ctx)
                                                                if journal_has_feedback(ctx)
                                                                and not journal_is_scoped(ctx)
@@ -21557,6 +21838,7 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
                                                zotero=zotero_mode_of(ctx),
                                                prior_round=(sb / "prior_round").is_dir(),
                                                prior_failure=note,
+                                               author_to_complete=author_to_complete_of(ctx),
                                                journal_block=(journal_review_block(ctx, sb)
                                                               if journal_has_feedback(ctx)
                                                               and not journal_is_scoped(ctx)
@@ -21621,6 +21903,7 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
         write_text_atomic(prompt, audit_prompt(sb, rid, r, prior_failure=note,
                                               zotero=zotero_mode_of(ctx),
                                               venue=venue_profile_of(ctx),
+                                              author_to_complete=author_to_complete_of(ctx),
                                               venue_norm=venue_norm_for(ctx)))
     rec = ctx.register(rid, "audit", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=a1.get("source_id"))
@@ -21869,7 +22152,8 @@ def materialize_probe(ctx: Ctx, r: int) -> dict:
     prompt = sb / PROMPT_FILE
     if not prompt.is_file():
         write_text_atomic(prompt, probe_prompt(sb, rid, r, prior_failure=note,
-                                               venue=venue_profile_of(ctx)))
+                                               venue=venue_profile_of(ctx),
+                                               author_to_complete=author_to_complete_of(ctx)))
     rec = ctx.register(rid, "probe", r, f"runs/{rid}",
                        upstream_run_id=rid_a1(r), source_id=a1.get("source_id"))
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
@@ -22366,6 +22650,7 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
                                                prior_failure=note,
                                                audit=audit_enabled(ctx),
                                                venue=venue_profile_of(ctx),
+                                               author_to_complete=author_to_complete_of(ctx),
                                                journal_block=(journal_revise_block(ctx)
                                                               if journal_has_feedback(ctx)
                                                               else ""),
@@ -22440,6 +22725,7 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
                                                   zotero=zotero_mode_of(ctx),
                                                   prior_failure=note,
                                                   venue=venue_profile_of(ctx),
+                                                  author_to_complete=author_to_complete_of(ctx),
                                                   venue_norm=venue_norm_for(ctx),
                                                   discovery_ids=disc["ids"],
                                                   discovery_dropped=disc["dropped"]))
@@ -22608,6 +22894,7 @@ def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
                     zotero=zotero_mode_of(ctx),
                     venue=venue_profile_of(ctx),
                     dedup_mode=dedup_mode_of(ctx),
+                    author_to_complete=author_to_complete_of(ctx),
                     venue_norm=venue_norm_for(ctx)))
             # One timestamp for the WHOLE judge sandbox (views, prompt and the
             # public tool alike): a listing must not be able to order the
@@ -28999,9 +29286,31 @@ def placeholder_residual_report(ctx: Ctx, sb: Path, sources: list, label: str,
     answers = _lookup_answers(sb)
     answerable = [r for r in searchable
                   if answers.get(str(r.get("kind") or "").strip().lower())]
+    # EVERY marker in the delivered package, searchable or not: the count is a
+    # diagnostic under `author_to_complete: on` (the marker is the author's own
+    # checklist) and the shipped-marker gate under `off`. The scan is the same
+    # `scan_placeholders_in_sources` the evidence pack uses, so the two numbers
+    # can never disagree.
+    all_markers = {}
+    try:
+        all_markers = scan_placeholders_in_sources(sources)
+    except Exception:                                                 # noqa: BLE001
+        all_markers = {}
     report = {"searchable_placeholders": len(searchable),
               "answerable_placeholders": len(answerable),
-              "answered_kinds": sorted(answers)}
+              "answered_kinds": sorted(answers),
+              "handoff_markers": int(all_markers.get("count") or 0),
+              "handoff_marker_files": list(all_markers.get("files") or [])}
+    if report["handoff_markers"] and not author_to_complete_of(ctx):
+        # `--without-author-to-complete`: the operator's policy is that NOTHING
+        # ships a marker, so a package that carries one is not deliverable --
+        # the residual gate blocks it instead of calling the marker a hand-off.
+        (errs if enforce else warns).append(
+            f"{label}: {report['handoff_markers']} hand-off marker(s) are still in the "
+            f"delivered package although this root runs with `author_to_complete: off` "
+            f"(--without-author-to-complete): {', '.join(report['handoff_marker_files'][:5])}. "
+            f"Supply the missing item (or its verified negative) in the document, or leave it "
+            f"out of the document and record it in the package's own MANUAL_STEPS.md")
     for r in answerable:
         msg = (f"{label}: a `searchable` hand-off marker is still in the package although the "
                f"orchestrator answered it -- {str(r.get('payload'))[:90]!r} "
@@ -36594,6 +36903,20 @@ def cmd_setup(args) -> None:
                # area is revision content, never submitted unless asked for).
                "submit_code": str(getattr(args, "submit_code", DEFAULT_SUBMIT_CODE)
                                   or DEFAULT_SUBMIT_CODE),
+               # Whether the revision stages may write the literal
+               # "[AUTHOR TO COMPLETE: ...]" hand-off marker (default: on, the
+               # convention every root created before this key existed uses).
+               # `--without-author-to-complete` forbids the token in every file a
+               # stage writes and makes a shipped marker a defect; the item moves
+               # to the package's own MANUAL_STEPS.md instead.
+               "author_to_complete": str(getattr(args, "author_to_complete",
+                                                 DEFAULT_AUTHOR_TO_COMPLETE)
+                                         or DEFAULT_AUTHOR_TO_COMPLETE),
+               # Files the operator declares as PLACEHOLDERS (they stand in for
+               # data they do not contain). They are ignored as evidence; see
+               # `declared_placeholder_paths`.
+               "placeholder_files": [str(x) for x in (getattr(
+                   args, "placeholder_files", None) or []) if str(x).strip()],
                "placeholder_lookup": str(getattr(args, "placeholder_lookup",
                                                  DEFAULT_PLACEHOLDER_LOOKUP)
                                          or DEFAULT_PLACEHOLDER_LOOKUP),
@@ -36796,6 +37119,16 @@ def cmd_setup(args) -> None:
     print(f"[setup] hand-off placeholders:   {ph['count']} in the pristine original "
           f"(markers the revision stages must use instead of inventing content; counted and "
           f"reported, never scored)")
+    _atc = str(getattr(args, "author_to_complete", DEFAULT_AUTHOR_TO_COMPLETE)
+               or DEFAULT_AUTHOR_TO_COMPLETE)
+    print(f"[setup] hand-off markers:        {_atc} "
+          + ("(the stages scaffold a missing mandatory item with the literal "
+             "\"[AUTHOR TO COMPLETE: ...]\" token and list it for the author; the marker is "
+             "never a defect)"
+             if _atc == "on" else
+             "(--without-author-to-complete: no file may carry the marker -- a missing item is "
+             "left out of the document and recorded in the package's MANUAL_STEPS.md, and a "
+             "shipped marker is a defect rather than a hand-off)"))
     print("[setup] OOXML formatting scan:   " + format_note(ctx.state["original_format"])
           + "  (code-side proxy; the agents' category-4 formatting sweep is authoritative)")
     _zot_note = {
@@ -38223,6 +38556,130 @@ def cmd_set_submit_code(args) -> None:
               "cite it")
     print(f"[set-submit-code] code/ in the submission: {mode_arg} ({detail}; the next plain "
           f"`run` re-assembles journal_submission/ once the revision is complete)")
+
+
+def cmd_set_author_to_complete(args) -> None:
+    """Set (or show) whether the stages may write "[AUTHOR TO COMPLETE: ...]" markers.
+
+    "on" (the default, and the behaviour of every root created before this
+    policy existed) keeps the hand-off convention: a missing mandatory item is
+    scaffolded with the literal marker and listed for the author.
+
+    "off" (`--without-author-to-complete`) forbids the token in every file the
+    stages write: a missing item is left out of the document -- a whole missing
+    file is not scaffolded as a document of instructions -- and recorded in the
+    package's own MANUAL_STEPS.md / CHANGELOG.md instead, and a marker that is
+    still present in a delivered package is a DEFECT of that package (the same
+    sentence the residual gate already uses for an *answered* marker), not a
+    neutral hand-off.
+
+    Flipping the policy never changes a pin, a score or a champion, and it never
+    changes what is TRUE about the package: the underlying gap counts exactly as
+    it did (AGENTS.md rule 5). It changes two things only -- what the stage
+    prompts instruct, and whether a shipped marker is a defect.
+    """
+    ctx = Ctx(_venue_command_root(args, "set-author-to-complete"),
+              strict_venue=bool(getattr(args, "strict_venue", False)))
+    ctx.load()
+    mode_arg = str(getattr(args, "mode", None) or "").strip().lower()
+    show = bool(getattr(args, "show", False)) or not mode_arg
+    if show:
+        on = author_to_complete_of(ctx)
+        how = ("a missing mandatory item is scaffolded with the literal "
+               f"{PLACEHOLDER_TOKEN}: ...] marker and listed for the author" if on else
+               "the stages may not write the marker: a missing item is left out of the "
+               "document and recorded in MANUAL_STEPS.md, and a shipped marker is a defect")
+        print(f"[set-author-to-complete] hand-off markers: {'on' if on else 'off'} ({how})")
+        return
+    if mode_arg not in AUTHOR_TO_COMPLETE_MODES:
+        die(f"set-author-to-complete needs one of {', '.join(AUTHOR_TO_COMPLETE_MODES)} "
+            f"(got {mode_arg!r})", code=2)
+    begin_run_log("set-author-to-complete", ctx.root, sys.argv)
+    with ctx.lock("set-author-to-complete"):
+        ctx.cfg["author_to_complete"] = mode_arg
+        ctx.state["config"] = ctx.cfg
+        write_json_atomic(ctx.cfg_path, ctx.cfg)
+        ctx.log("set-author-to-complete", detail=mode_arg)
+        ctx.save_state()
+    detail = ("the stages mark a missing mandatory item with the literal "
+              "\"[AUTHOR TO COMPLETE: ...]\" token and list it for the author (the marker is a "
+              "hand-off, never a defect)"
+              if mode_arg == "on" else
+              "the stages may not write the marker: a missing item is left out of the document "
+              "and recorded in MANUAL_STEPS.md, and a marker still present in a delivered "
+              "package is a defect")
+    print(f"[set-author-to-complete] hand-off markers: {mode_arg} ({detail}; the next plain "
+          f"`run` writes its prompts under the new policy)")
+
+
+def cmd_set_placeholder_file(args) -> None:
+    """Add, clear or show the root's PLACEHOLDER-FILE declarations.
+
+    A placeholder is a corpus file that stands in for data it does not contain
+    -- the operator's example: "the haplotypes in Chisel ACT are actually the
+    HG008 haplotypes (placeholders)". Placeholder files are IGNORED as evidence:
+    the evidence pack lists them, no session may cite one as a producer, and a
+    claim resting only on one is reported as unverified. Nothing is deleted; the
+    declaration only says how to read the file.
+
+    `set-placeholder-file 'raw_data/**/ACT*hap*'` adds a declaration (a
+    package-relative path or a glob, matched against the path and the bare file
+    name); `--clear` removes them all; no operand with `--show` prints the
+    current list and how many files each pattern resolves to.
+    """
+    ctx = Ctx(_venue_command_root(args, "set-placeholder-file"),
+              strict_venue=bool(getattr(args, "strict_venue", False)))
+    ctx.load()
+    patterns = [str(x).strip() for x in (getattr(args, "patterns", None) or [])
+                if str(x).strip()]
+    current = [str(x) for x in ((ctx.cfg or {}).get("placeholder_files") or [])]
+    if bool(getattr(args, "clear", False)):
+        with ctx.lock("set-placeholder-file"):
+            ctx.cfg["placeholder_files"] = []
+            ctx.state["config"] = ctx.cfg
+            write_json_atomic(ctx.cfg_path, ctx.cfg)
+            ctx.log("set-placeholder-file", detail="cleared")
+            ctx.save_state()
+        print("[set-placeholder-file] cleared (no file is treated as a placeholder)")
+        return
+    # The declarations name PACKAGE-relative paths; on an existing root the
+    # package that carries them is the pristine copy (non_revised/), so the
+    # report resolves them there rather than against the bookkeeping root.
+    pkg_root = ctx.root / PRISTINE_DIR if (ctx.root / PRISTINE_DIR).is_dir() else ctx.root
+    if not patterns:
+        report = placeholder_files_report(
+            pkg_root, extra_globs=current,
+            area_names=submission_not_carried_areas(ctx))
+        print(f"[set-placeholder-file] declared pattern(s): "
+              f"{', '.join(current) if current else '(none)'}")
+        if report.get("declared"):
+            print("[set-placeholder-file] files treated as placeholders (ignored as evidence):")
+            for rel in report["declared"]:
+                print(f"  - {rel}: {report['reasons'].get(rel, 'declared')}")
+        if report.get("detected_copies"):
+            print("[set-placeholder-file] detected placeholder copies (identical bytes under "
+                  "another sample/dataset name):")
+            for row in report["detected_copies"][:20]:
+                print(f"  - {row['file']} duplicates {row['duplicates']}")
+        return
+    merged = []
+    for pat in current + patterns:
+        if pat not in merged:
+            merged.append(pat)
+    begin_run_log("set-placeholder-file", ctx.root, sys.argv)
+    with ctx.lock("set-placeholder-file"):
+        ctx.cfg["placeholder_files"] = merged
+        ctx.state["config"] = ctx.cfg
+        write_json_atomic(ctx.cfg_path, ctx.cfg)
+        ctx.log("set-placeholder-file", detail=", ".join(merged))
+        ctx.save_state()
+    report = placeholder_files_report(pkg_root, extra_globs=merged,
+                                      area_names=submission_not_carried_areas(ctx))
+    print(f"[set-placeholder-file] declared {len(merged)} pattern(s); "
+          f"{len(report.get('declared') or [])} file(s) resolve to a placeholder and are "
+          f"ignored as evidence: "
+          + (", ".join(report.get("declared") or []) or "(none yet -- the pattern matches no "
+             "carried file; the next `run` re-checks it)"))
 
 
 def cmd_set_dedup_mode(args) -> None:
@@ -41850,6 +42307,226 @@ def declared_submission_filter(root: Path):
     return decl, (lambda rel: str(rel) in allowed)
 
 
+# ---- Placeholder FILES (2026-10-17) ----------------------------------------
+# A corpus can carry a file that stands in for data it does not contain: the
+# operator's 2026-10-17 note names the example, "the haplotypes in Chisel ACT are
+# actually the HG008 haplotypes (placeholders)". Such a file is not evidence, and
+# a role that read it as a producer would "verify" a claim against another
+# sample's data. The rule is therefore: PLACEHOLDER FILES ARE IGNORED.
+#
+# Two independent ways to know a file is a placeholder, because neither alone
+# can see every case:
+#   * DECLARED -- the operator names it (`--placeholder-file GLOB` at setup /
+#     `set-placeholder-file`, or a line in the package's own README:
+#     "Placeholder files: `raw_data/...`"). A declaration is authoritative.
+#   * DETECTED -- two files inside the evidence areas have IDENTICAL BYTES under
+#     different sample/dataset names, and at least one of them is the kind of
+#     input that is copied between samples (a haplotype, phasing, variant, SNP,
+#     VCF or BAM file, or a name carrying placeholder/dummy/stub). One of the two
+#     labels does not describe the content, so neither may be used as proof.
+#
+# Ignored means: the file is listed in the evidence pack under
+# "Placeholder files -- ignored", it is never a producer or source for a claim,
+# and a finding whose only evidence is one is not a finding. It is NOT deleted
+# and NOT hidden: the row says which file it duplicates, so the author can
+# rename, remove or confirm it.
+PLACEHOLDER_NAME_RE = re.compile(
+    r"(?i)(?:^|[^a-z])(?:placeholder|dummy|stub|fake|toy)(?:[^a-z]|$)")
+PLACEHOLDER_INPUT_RE = re.compile(
+    r"(?i)(?:^|[^a-z])(?:hap|haps|haplotype|phased|phasing|phase|variant|variants|"
+    r"snp|snps|allele|alleles|vcf|bam|fasta|fa)(?:[^a-z]|$)")
+PLACEHOLDER_DECL_LINE_RE = re.compile(
+    r"(?im)^[ \t]*(?:placeholder[ \t]+files?|placeholders?)[ \t]*[:=][ \t]*(.+)$")
+PLACEHOLDER_BULLET_RE = re.compile(r"(?im)^[ \t]*(?:[-*+]|\d+\.)[ \t]+(.+)$")
+BACKTICK_TOKEN_RE = re.compile(r"`([^`\n]{2,300})`")
+PLACEHOLDER_MAX_HASH_BYTES = 20 * 1024 * 1024
+
+
+def _placeholder_globs_from_ctx(ctx=None) -> list:
+    """The `placeholder_files` config key (the operator's explicit declarations)."""
+    raw = ((getattr(ctx, "cfg", None) if ctx is not None else None) or {}).get(
+        "placeholder_files") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    return [str(x).strip() for x in raw if str(x).strip()]
+
+
+def declared_placeholder_paths(root: Path, extra=()) -> dict:
+    """The placeholders a package DECLARES: {patterns, files, readme, reasons}.
+
+    Sources, in order: the `placeholder_files` config key (the
+    `--placeholder-file` / `set-placeholder-file` spelling), a README line
+    "Placeholder files: ...", and a README bullet that names a backticked path
+    together with the word placeholder. Glob patterns (`*`, `?`, `[...]`) are
+    matched against the package-relative path and the bare file name.
+    """
+    root = Path(root)
+    out = {"patterns": [], "files": [], "readme": None, "reasons": {}}
+    patterns = list(extra or ())
+    if not root.is_dir():
+        return out
+    try:
+        candidates = sorted(p for p in root.iterdir()
+                            if p.is_file() and is_non_submitted_readme_name(p.name))
+    except OSError:
+        candidates = []
+    for p in candidates:
+        try:
+            text = p.read_text("utf-8", "replace")
+        except OSError:
+            continue
+        found = False
+        for m in PLACEHOLDER_DECL_LINE_RE.finditer(text):
+            toks = BACKTICK_TOKEN_RE.findall(m.group(1)) or [
+                t.strip() for t in re.split(r"[,;]", m.group(1))]
+            for tok in toks:
+                if tok.strip():
+                    patterns.append(tok.strip())
+                    found = True
+        for m in PLACEHOLDER_BULLET_RE.finditer(text):
+            line = m.group(1)
+            if not re.search(r"(?i)\bplaceholders?\b", line):
+                continue
+            for tok in BACKTICK_TOKEN_RE.findall(line):
+                if "/" in tok or "." in tok.rsplit("/", 1)[-1]:
+                    patterns.append(tok)
+                    found = True
+        if found and out["readme"] is None:
+            out["readme"] = p.relative_to(root).as_posix()
+    seen, uniq = set(), []
+    for pat in patterns:
+        key = str(pat).strip()
+        if key and key not in seen:
+            seen.add(key)
+            uniq.append(key)
+    out["patterns"] = uniq
+    for p in sorted(_iter_tree_files(root)):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(root).as_posix()
+        base = Path(rel).name
+        for pat in uniq:
+            if fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(base, pat):
+                out["files"].append(rel)
+                out["reasons"][rel] = f"declared by the operator (`{pat}`)"
+                break
+    return out
+
+
+def _placeholder_subject_tokens(rel: str) -> set:
+    """Name tokens that distinguish one sample/dataset file from another."""
+    stem = str(rel).replace("\\", "/").rsplit("/", 1)[-1].lower()
+    tokens = set(re.split(r"[^a-z0-9]+", stem))
+    tokens.discard("")
+    stop = {
+        "tsv", "csv", "txt", "json", "gz", "tex", "pdf", "png", "jpg", "jpeg", "md",
+        "data", "table", "tables", "source", "sources", "summary", "full", "brief",
+        "all", "positions", "position", "pos", "from", "per", "and", "the", "of",
+        "step", "result", "results", "stats", "out", "output", "input", "raw",
+    }
+    return {t for t in tokens if t not in stop and len(t) > 1}
+
+
+def detect_placeholder_copies(root: Path, area_names=None,
+                              max_bytes: int = PLACEHOLDER_MAX_HASH_BYTES) -> list:
+    """Evidence-area files with identical bytes under different sample labels.
+
+    See the block above: a duplicate under a DIFFERENT subject token, where at
+    least one side is a haplotype/variant-style input or carries a
+    placeholder/dummy name, is a placeholder copy -- one of the two labels does
+    not describe the content. Only the evidence areas are walked (the submitted
+    documents' own duplicate media are normal), and only files below `max_bytes`
+    are hashed.
+    """
+    root = Path(root)
+    names = {str(a).strip().lower() for a in (area_names or ()) if str(a).strip()}
+    if not names or not root.is_dir():
+        return []
+    groups = {}
+    # Size first: a byte-identical copy has the same size, so only files whose
+    # size collides with another file's are worth hashing. A corpus with a few
+    # hundred distinct evidence files pays almost no hashing cost.
+    by_size = {}
+    for p in _iter_tree_files(root):
+        if not p.is_file():
+            continue
+        try:
+            rel = p.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if rel.split("/", 1)[0].lower() not in names:
+            continue
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        if not st.st_size or st.st_size > max_bytes:
+            continue
+        by_size.setdefault(st.st_size, []).append((p, rel))
+    for size, entries in by_size.items():
+        if len(entries) < 2:
+            continue
+        for p, rel in entries:
+            try:
+                digest = hashlib.sha256(p.read_bytes()).hexdigest()
+            except OSError:
+                continue
+            groups.setdefault(digest, []).append(rel)
+    rows = []
+    for digest, paths in sorted(groups.items()):
+        if len(paths) < 2:
+            continue
+        paths = sorted(paths)
+        tokens = {rel: _placeholder_subject_tokens(rel) for rel in paths}
+        interesting = any(PLACEHOLDER_INPUT_RE.search(rel) or PLACEHOLDER_NAME_RE.search(rel)
+                          for rel in paths)
+        if not interesting:
+            continue
+        canonical = paths[0]
+        for rel in paths[1:]:
+            if tokens[rel] == tokens[canonical]:
+                # Same subject tokens, just another spelling of the same name
+                # (`_from-table1` vs `-from-table1`): an alias, not a placeholder.
+                continue
+            rows.append({
+                "file": rel, "duplicates": canonical, "digest": digest,
+                "sample_tokens": sorted(tokens[rel]),
+                "duplicate_sample_tokens": sorted(tokens[canonical]),
+                "reason": ("identical bytes under a different sample/dataset name; one of "
+                           "the two labels does not describe the content"),
+            })
+    return rows
+
+
+def placeholder_files_report(root: Path, extra_globs=(), area_names=None) -> dict:
+    """{declared, detected_copies, ignored, reasons} -- one report per package."""
+    decl = declared_placeholder_paths(root, extra=extra_globs)
+    detected = detect_placeholder_copies(
+        root, area_names if area_names is not None else submission_not_carried_areas_plain())
+    declared = set(decl["files"])
+    # When the operator declared ONE side of a detected duplicate pair, the
+    # declaration says which side is the placeholder: the other side is the real
+    # data and stays usable evidence (the ACT-haplotype case: declaring the ACT
+    # copy must not silence the HG008 original). Only undeclared pairs fall back
+    # to the detected side.
+    for r in detected:
+        r["ignored"] = bool(r["file"] not in declared and r["duplicates"] not in declared)
+    ignored = sorted(declared | {r["file"] for r in detected if r["ignored"]})
+    reasons = dict(decl["reasons"])
+    for r in detected:
+        if r["ignored"]:
+            reasons.setdefault(r["file"],
+                               f"placeholder copy: {r['reason']} (it duplicates "
+                               f"{r['duplicates']})")
+        else:
+            reasons.setdefault(r["file"],
+                               f"duplicate of the declared placeholder {r['duplicates']}: "
+                               f"treated as the real data")
+    return {"declared_patterns": decl["patterns"], "declared": decl["files"],
+            "readme": decl["readme"], "detected_copies": detected,
+            "ignored": ignored, "reasons": reasons}
+
+
 def _pkg3_prose_document(rel: str) -> bool:
     """True when `rel` is a manuscript prose surface PKG-3 reports (see above)."""
     name = str(rel or "")
@@ -41860,6 +42537,901 @@ def _pkg3_prose_document(rel: str) -> bool:
     if role in ("main", "cover"):
         return True
     return bool(PKG3_PROSE_NAME_RE.search(base))
+
+
+# ---- PKG-10: what an evidence area's files may be referenced for (2026-10-17) ---
+# The operator's rule for these packages, verbatim:
+#
+#   "All files in `raw_data` and other such directories (other than figures,
+#    tables, and files that are inputted (including nested inputted or
+#    recursively inputted) to .tex files in the parent directory of `raw_data`)
+#    cannot be referenced by the main manuscript."
+#
+# and the same package's own README states the positive half: "Files that are
+# inputted (recursive nested input included) to .tex files in the parent
+# directory of `raw_data` are treated as if they are in the parent."
+#
+# So a submitted document that sends the reader to a file inside a non-carried
+# area is a defect UNLESS that file is one of:
+#   * a parent-directory file (the .tex sources beside the area -- what they
+#     compile into IS what the reader receives, e.g. the supplementary PDF);
+#   * a file a .tex file in that parent directory INPUTS, directly or through
+#     nested inputs: `\input`/`\include`/`\includegraphics`/`\includepdf`/
+#     `\addbibresource`/`\bibliography`/`\pgfplotstableread`/`\lstinputlisting`/
+#     `\subfile`/`\import` -- the recursive "treated as in the parent" closure,
+#     which is what makes a supplementary table's own source file referenceable;
+#   * a FIGURE or TABLE whose content the submission itself carries: a figure
+#     file whose bytes are embedded in a submitted document (the CopyNumBench
+#     main text displays `raw_data/Fig3_ploidy_balloons.png` byte for byte), or
+#     a display table the parent .tex typesets (the closure above).
+#
+# The row is a REPORT, never a mechanical edit: the reference becomes legitimate
+# once the author ships the file, and deleting the sentence would destroy the
+# information that the material exists. The operator's rule is categorical, so
+# the row reaches the readiness list rather than the advisory tail.
+TEX_INPUT_COMMANDS = (
+    "input", "include", "includegraphics", "includepdf", "addbibresource",
+    "bibliography", "pgfplotstableread", "pgfplotstabletypeset", "lstinputlisting",
+    "subfile", "subfileinclude",
+)
+# `\import{dir}{file}` and `\subimport{dir}{file}` carry TWO arguments and the
+# path is their JOIN. `\inputminted{lang}{file}` and `\DTLloaddb{name}{file}`
+# also carry two, but only the SECOND is a path (the first is a language or a
+# database name), so they are read separately.
+TEX_TWO_ARG_COMMANDS = ("import", "subimport", "includefrom", "inputfrom")
+TEX_SECOND_ARG_COMMANDS = ("inputminted", "DTLloaddb", "DTLloadrawdb")
+TEX_INPUT_MAX_DEPTH = 6
+FIGURE_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif", ".eps",
+               ".svg", ".emf", ".wmf", ".ps")
+TABLE_EXTS = (".tsv", ".csv", ".tab", ".xlsx", ".xls", ".ods", ".parquet")
+
+
+def _tex_strip_comments(text: str) -> str:
+    """LaTeX source without its comments (a commented-out \\input is not an input)."""
+    out = []
+    for line in str(text or "").splitlines():
+        cut = None
+        for i, ch in enumerate(line):
+            if ch == "%" and (i == 0 or line[i - 1] != "\\"):
+                cut = i
+                break
+        out.append(line if cut is None else line[:cut])
+    return "\n".join(out)
+
+
+def tex_input_targets(text: str) -> list:
+    """Every path a LaTeX source reads, as written (see TEX_INPUT_COMMANDS)."""
+    body = _tex_strip_comments(text)
+    targets = []
+    one = re.compile(r"\\(" + "|".join(re.escape(c) for c in TEX_INPUT_COMMANDS)
+                     + r")\*?\s*(?:\[[^\]]*\])?\s*\{([^{}]*)\}", re.I)
+    for m in one.finditer(body):
+        raw = m.group(2).strip()
+        if m.group(1).lower() == "bibliography":
+            for part in raw.split(","):
+                if part.strip():
+                    targets.append(part.strip())
+        elif raw:
+            targets.append(raw)
+    two = re.compile(r"\\(" + "|".join(re.escape(c) for c in TEX_TWO_ARG_COMMANDS)
+                     + r")\*?\s*\{([^{}]*)\}\s*\{([^{}]*)\}", re.I)
+    for m in two.finditer(body):
+        joined = (m.group(2).strip().rstrip("/") + "/" + m.group(3).strip()).lstrip("/")
+        if m.group(3).strip():
+            targets.append(joined)
+    second = re.compile(r"\\(" + "|".join(re.escape(c) for c in TEX_SECOND_ARG_COMMANDS)
+                        + r")\*?\s*\{[^{}]*\}\s*\{([^{}]*)\}", re.I)
+    for m in second.finditer(body):
+        if m.group(2).strip():
+            targets.append(m.group(2).strip())
+    return targets
+
+
+def _tex_target_candidates(target: str) -> list:
+    """A written target's plausible file names (LaTeX omits extensions)."""
+    # Escaped underscores first (`supp\_figs/x.pdf`), THEN the path separator:
+    # the reverse order would turn `\_` into `/_` and lose the file.
+    t = str(target or "").strip().replace("\\_", "_").replace("\\", "/")
+    t = re.sub(r"\\detokenize\s*\{([^{}]*)\}", r"\1", t).strip("{} ")
+    if not t or t.startswith("/") or re.match(r"^[A-Za-z]:", t):
+        return []
+    out = [t]
+    if not Path(t).suffix:
+        for ext in (".tex", ".pdf", ".png", ".jpg", ".tsv", ".csv", ".bib", ".ltx"):
+            out.append(t + ext)
+    if t.endswith(".tex"):
+        out.append(t[:-4])
+    return out
+
+
+def tex_input_closure(root: Path, area_names, depths: int = TEX_INPUT_MAX_DEPTH) -> tuple:
+    """(closure, sources) -- the files the parent-directory .tex files pull in.
+
+    The closure is the operator's "treated as if they are in the parent" set: the
+    files directly inside the area's parent directory (whichever directory of the
+    package carries an area with that name), plus every file the .tex files THERE
+    input, transitively. Paths are package-relative, `/`-separated and lowercased
+    (a bare basename is added too, so a reference written as a bare name still
+    matches); the second element lists the .tex sources the closure was built
+    from, so a row can say WHY a file counts as carried.
+    """
+    root = Path(root)
+    names = {str(a).strip().lower() for a in (area_names or ()) if str(a).strip()}
+    closure, sources, dirs = set(), [], set()
+    if not names:
+        return closure, sources
+    for p in root.rglob("*"):
+        try:
+            if p.is_dir() and p.name.lower() in names:
+                dirs.add(p.parent)
+        except OSError:
+            continue
+    for d in sorted(dirs):
+        for tex in sorted(d.glob("*.tex")):
+            sources.append(tex.relative_to(root).as_posix())
+            # The parent directory's .tex SOURCES are the things whose inputs are
+            # "treated as if they are in the parent"; an arbitrary sibling (a
+            # README, a stray archive) is NOT carried just because it sits there
+            # (the PKG-2 scan already treats a README as never-submitted).
+            try:
+                closure.add(tex.relative_to(root).as_posix().lower())
+            except ValueError:
+                continue
+    seen_tex, pending, depth = set(), [Path(root) / s for s in sources], 0
+    while pending and depth < depths:
+        nxt = []
+        for tex in pending:
+            key = str(tex)
+            if key in seen_tex:
+                continue
+            seen_tex.add(key)
+            try:
+                text = tex.read_text("utf-8", "replace")
+            except OSError:
+                continue
+            for target in tex_input_targets(text):
+                for cand in _tex_target_candidates(target):
+                    cand_path = (tex.parent / cand)
+                    try:
+                        resolved = cand_path.resolve()
+                        rel = resolved.relative_to(root.resolve()).as_posix()
+                    except (OSError, ValueError):
+                        continue
+                    if not resolved.is_file():
+                        continue
+                    closure.add(rel.lower())
+                    closure.add(Path(rel).name.lower())
+                    if resolved.suffix.lower() == ".tex":
+                        nxt.append(resolved)
+        pending = nxt
+        depth += 1
+    return closure, sources
+
+
+def embedded_media_digests(root: Path, rel_files) -> dict:
+    """{sha256 hex: [<rel file>::<part>, ...]} for submitted OOXML media parts.
+
+    A figure whose bytes appear inside a submitted document IS part of the
+    submission (the reader sees it as the figure), whatever the file it came from
+    is called, so a reference to that very file is not a dangling pointer. The
+    CopyNumBench case: `raw_data/Fig3_ploidy_balloons.png` is byte-identical to
+    `word/media/image3.png` of the submitted main text.
+    """
+    out = {}
+    for rel in rel_files or ():
+        p = Path(root) / rel
+        if p.suffix.lower() not in (".docx", ".docm", ".dotx", ".pptx", ".xlsx"):
+            continue
+        try:
+            with zipfile.ZipFile(p) as z:
+                for name in z.namelist():
+                    if name.endswith("/") or not name.startswith(
+                            ("word/media/", "ppt/media/", "xl/media/")):
+                        continue
+                    out.setdefault(hashlib.sha256(z.read(name)).hexdigest(), []).append(
+                        f"{rel}::{name}")
+        except (OSError, zipfile.BadZipFile, RuntimeError):
+            continue
+    return out
+
+
+def area_reference_exceptions(root: Path, areas, submitted_files) -> dict:
+    """The PKG-10 exception set for one package (see the block above)."""
+    closure, tex_sources = tex_input_closure(root, areas)
+    media = embedded_media_digests(root, submitted_files)
+    return {"closure": closure, "tex_sources": tex_sources, "media": media}
+
+
+def pkg10_reference_exempt(root: Path, target: str, exc: dict) -> tuple:
+    """(exempt?, reason) for a written reference that resolves inside an area."""
+    cands = [k for k in _tex_target_candidates(target) if k]
+    if any(k.lower() in (exc or {}).get("closure", ()) for k in cands):
+        return True, "a .tex file in the area's parent directory inputs it"
+    for cand in cands:
+        p = Path(root) / cand.replace("\\", "/")
+        try:
+            if not p.is_file():
+                continue
+            digest = _cached_sha256(p)
+        except OSError:
+            continue
+        where = ((exc or {}).get("media") or {}).get(digest)
+        if where:
+            return True, (f"its bytes are embedded in the submitted document "
+                          f"{where[0].split('::')[0]} (the reader sees this display item)")
+    return False, ""
+
+
+_FILE_DIGEST_CACHE = {}
+
+
+def _cached_sha256(p: Path) -> str:
+    """sha256 of a file, cached by (path, mtime_ns, size) -- one scan reads each
+    referenced figure/table once even when several sentences name it."""
+    try:
+        st = p.stat()
+    except OSError:
+        raise
+    key = (str(p), st.st_mtime_ns, st.st_size)
+    hit = _FILE_DIGEST_CACHE.get(key)
+    if hit is not None:
+        return hit
+    digest = hashlib.sha256(p.read_bytes()).hexdigest()
+    if len(_FILE_DIGEST_CACHE) > 512:
+        _FILE_DIGEST_CACHE.clear()
+    _FILE_DIGEST_CACHE[key] = digest
+    return digest
+
+
+# ---- Three package self-consistency scans added after the 2026-10-17 audit ----
+# PKG-11: a table header that differs from its sibling tables' header only by
+#   case or one character. The NeoHeteroclitic package lost a whole antigen
+#   (Zhou et al., 20 peptides, 2 positives) because one file spelled
+#   `MixMHCPred_aff` where the other 26 spelled `MixMHCpred_aff`, and the
+#   aggregation script skipped any table lacking all twelve columns WITHOUT
+#   naming it -- a one-letter header silently dropped a study and changed a
+#   headline ("no PWM-derived value falls below 0.50 on any antigen").
+# PKG-12: a statistics table whose own two significance columns disagree under
+#   the rule its caption states. The CopyNumBench MCB table prints, for
+#   AneuFinder on Hap_1 nonintCN_PCC, p = 0.115 beside a 95% interval of
+#   [-0.51, -0.02]; the caption says a small p AND an interval entirely below 0
+#   both mean "significantly inferior", so the row says both things at once.
+# PKG-14: a cover letter that says the work is not under consideration
+#   elsewhere / lists no related manuscript while the package itself carries a
+#   dated editorial decision for the same title (the iScience submission of
+#   2026-09-29 in the NeoHeteroclitic package).
+TABLE_TEXT_EXTS = (".tsv", ".csv", ".tab")
+NEAR_MISS_MIN_LEN = 6
+NEAR_MISS_RATIO = 0.90
+MCB_P_SMALL_RULE_RE = re.compile(
+    r"(?i)(?:small\s+\$?p\$?|p\s*(?:<|≤|<=)\s*(?:0?\.05|alpha)|small(?:er)?\s+(?:p|P)\b)")
+MCB_CI_RULE_RE = re.compile(
+    r"(?i)(?:entirely\s+below\s+0|interval[^.]{0,60}below\s+0|CI[^.]{0,40}below\s+0|"
+    r"excludes?\s+0)")
+PRIOR_SUBMISSION_CLAIM_RE = re.compile(
+    r"(?i)(?:related\s+manuscripts?\s*[:：]\s*none|not\s+under\s+consideration\s+elsewhere|"
+    r"has\s+not\s+been\s+(?:published|submitted)\s+previously)")
+PRIOR_DECISION_ID_RE = re.compile(r"\b([A-Za-z][A-Za-z ]{2,28})-([A-Z])-(\d{2})-(\d{4,8})\b")
+PRIOR_TITLE_STOPWORDS = frozenset(
+    "editorial decision thank you paper manuscript submission submitted journal article "
+    "review reviewers reviewer editor editors comments response revision revised dear "
+    "please find attached following".split())
+
+
+def _title_words(text: str) -> set:
+    """Comparable content words for a title-overlap guard (>= 6 letters)."""
+    return {w for w in re.findall(r"[a-z]{6,}", str(text or "").lower())
+            if w not in PRIOR_TITLE_STOPWORDS}
+
+
+def _same_work(a: str, b: str, minimum: int = 2) -> bool:
+    """True when two texts share at least `minimum` content words (a work's title).
+
+    The guard keeps an unrelated decision letter that a co-author left in the
+    feedback area from being reported as this cover letter's undisclosed prior
+    submission. A feedback text with too few content words (a bare forwarded
+    note) cannot be compared and is accepted.
+    """
+    wa, wb = _title_words(a), _title_words(b)
+    if len(wa) < minimum or len(wb) < minimum:
+        return True
+    return len(wa & wb) >= minimum
+
+
+def _read_delimited_table(path: Path, max_bytes: int = 8 * 1024 * 1024):
+    """(header, rows) of a small .tsv/.csv, or (None, []) when unreadable."""
+    try:
+        if path.stat().st_size > max_bytes:
+            return None, []
+        text = path.read_text("utf-8", "replace")
+    except OSError:
+        return None, []
+    sample = text[:4096]
+    delim = "\t" if path.suffix.lower() in (".tsv", ".tab") else \
+        ("," if sample.count(",") >= sample.count("\t") else "\t")
+    try:
+        rows = list(csv.reader(io.StringIO(text), delimiter=delim))
+    except csv.Error:
+        return None, []
+    if not rows:
+        return None, []
+    return rows[0], rows[1:]
+
+
+def _norm_header(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(name or "").lower())
+
+
+def scan_column_name_near_misses(root: Path, limit: int = 24) -> list:
+    """PKG-11: sibling tables whose header names differ only by case/one char."""
+    root = Path(root)
+    headers = []
+    for p in sorted(_iter_tree_files(root)):
+        if not p.is_file() or p.suffix.lower() not in TABLE_TEXT_EXTS:
+            continue
+        header, body = _read_delimited_table(p)
+        if not header or len(body) < 2:
+            continue
+        try:
+            rel = p.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        headers.append((rel, [str(x).strip() for x in header]))
+    # Every distinct spelling of one normalized name, with the files carrying it.
+    spellings = {}
+    for rel, header in headers:
+        for name in header:
+            norm = _norm_header(name)
+            if len(norm) < NEAR_MISS_MIN_LEN:
+                continue
+            spellings.setdefault(norm, {}).setdefault(name, set()).add(rel)
+    rows = []
+    for norm, variants in sorted(spellings.items()):
+        if len(variants) < 2:
+            continue
+        names = sorted(variants)
+        # Pair each spelling with its nearest other spelling that is NOT an
+        # exact alias (a case-only difference counts: it is the failure mode).
+        for i, a in enumerate(names):
+            for b in names[i + 1:]:
+                ratio = difflib.SequenceMatcher(None, a, b).ratio()
+                if a == b or (a.lower() != b.lower() and ratio < NEAR_MISS_RATIO):
+                    continue
+                if variants[a] == variants[b]:
+                    continue
+                fa = sorted(variants[a])[0]
+                fb = sorted(variants[b])[0]
+                rows.append({
+                    "rule": "PKG-11", "severity": "medium", "fix": "manual",
+                    "file": fa, "line": 1, "reference": a,
+                    "detail": (f"these sibling tables spell one column differently: {a!r} in "
+                               f"{fa} but {b!r} in {fb}. A consumer that requires the exact "
+                               f"header name therefore drops one of them silently (the "
+                               f"2026-10-17 audit: a `MixMHCPred_aff`/`MixMHCpred_aff` "
+                               f"difference can silently exclude a whole antigen from the "
+                               f"aggregation and change a headline). Rename the odd header to the family's own "
+                               f"spelling, or make the consumer accept both and REPORT every "
+                               f"skipped input"),
+                    "counterpart": {"file": fb, "column": b},
+                })
+                if len(rows) >= limit:
+                    return rows
+    return rows
+
+
+def _parse_ci(cell: str):
+    """(low, high) from `[-0.51, -0.02]`, or None."""
+    # U+2212 (the typographic minus a PDF export emits) is a minus sign here.
+    text = str(cell).replace("\u2212", "-")
+    m = re.match(r"^\s*\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]\s*$", text)
+    if not m:
+        return None
+    return float(m.group(1)), float(m.group(2))
+
+
+def _parse_p(cell: str):
+    t = re.sub(r"\\textbf\{|\\emph\{|\}", "", str(cell or "")).strip()
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+def _latex_command_bodies(text: str, command: str) -> list:
+    """The balanced `{...}` bodies of every `\\command{...}` (nested braces kept).
+
+    A caption is not brace-free (`\\qty{95}{\\percent}`), so the regex
+    `\\caption\\{([^{}]*)\\}` stops at the first nested brace and can cut the
+    sentence that states the very rule the scan is checking.
+    """
+    out = []
+    needle = "\\" + command
+    i = 0
+    while True:
+        j = text.find(needle, i)
+        if j < 0:
+            break
+        k = j + len(needle)
+        while k < len(text) and text[k] in " \t*":
+            k += 1
+        # `\captionof{table}{...}`: skip the first brace group, keep the second.
+        groups, pos = [], k
+        for _ in range(2):
+            while pos < len(text) and text[pos] != "{":
+                if text[pos] not in " \t\n":
+                    break
+                pos += 1
+            if pos >= len(text) or text[pos] != "{":
+                break
+            depth, start = 0, pos
+            while pos < len(text):
+                if text[pos] == "{":
+                    depth += 1
+                elif text[pos] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        groups.append(text[start + 1:pos])
+                        pos += 1
+                        break
+                pos += 1
+            if command != "captionof":
+                break
+        if groups:
+            out.append(groups[-1])
+        i = max(pos, j + len(needle))
+    return out
+
+
+def scan_mcb_rule_conflicts(root: Path, limit: int = 24) -> list:
+    """PKG-12: a table row whose p and its own interval say opposite things."""
+    root = Path(root)
+    rows = []
+    for p in sorted(_iter_tree_files(root)):
+        if not p.is_file() or p.suffix.lower() not in (".tex", ".ltx", ".txt", ".md"):
+            continue
+        try:
+            if p.stat().st_size > 4 * 1024 * 1024:
+                continue
+            text = p.read_text("utf-8", "replace")
+        except OSError:
+            continue
+        if "mcb" not in p.name.lower() and "MCB" not in text[:4000]:
+            continue
+        caption = " ".join(_latex_command_bodies(text, "captionof")
+                           + _latex_command_bodies(text, "caption"))
+        if not caption or not (MCB_P_SMALL_RULE_RE.search(caption)
+                               and MCB_CI_RULE_RE.search(caption)):
+            continue
+        try:
+            rel = p.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        for line_no, line in enumerate(text.splitlines(), 1):
+            if "&" not in line or line.lstrip().startswith("%"):
+                continue
+            cells = [c.strip() for c in re.sub(r"\\\\.*$", "", line).split("&")]
+            if len(cells) == 10:
+                blocks = [(cells[2], cells[3], cells[5]), (cells[6], cells[7], cells[9])]
+                label = cells[1]
+                metric = cells[0]
+            elif len(cells) == 5:
+                blocks = [(cells[1], cells[2], cells[4])]
+                label = cells[0]
+                metric = ""
+            else:
+                continue
+            for n_cell, p_cell, ci_cell in blocks:
+                pval, ci = _parse_p(p_cell), _parse_ci(ci_cell)
+                if pval is None or ci is None:
+                    continue
+                inferior_by_p = pval <= 0.05
+                inferior_by_ci = ci[1] < 0
+                if inferior_by_p == inferior_by_ci:
+                    continue
+                rows.append({
+                    "rule": "PKG-12", "severity": "medium", "fix": "manual",
+                    "file": rel, "line": line_no,
+                    "reference": (f"{metric} / {label}" if metric else label),
+                    "detail": (f"this row's own two significance columns disagree under the "
+                               f"rule the table's caption states (small p AND an interval "
+                               f"entirely below 0 both mean 'significantly inferior'): p = "
+                               f"{pval:g} but the interval is [{ci[0]:g}, {ci[1]:g}]. One of "
+                               f"the two columns is wrong; do not ship a table that defines "
+                               f"one verdict two ways"),
+                    "_strong": bool(inferior_by_ci and not inferior_by_p),
+                })
+    # The misleading direction first: the interval says "significantly inferior"
+    # while the p does not (the row an author is most likely to read as a
+    # significant result). The other direction (p significant, interval brackets
+    # 0) is the same caption/table conflict but reads as conservative.
+    rows.sort(key=lambda r: (not r.get("_strong"), r.get("file"), r.get("line")))
+    for r in rows:
+        r.pop("_strong", None)
+    return rows[:limit]
+
+
+# PKG-15 (2026-10-17, second pass): a DEPOSITED statistics table whose
+# "pooled" section is computed on a subset of the pooled units.
+#
+# The CopyNumBench package carries `Fig3_ploidy_pooled_units.tsv` (one row per
+# germline donor OR ACT sample: 9 + 12 = 21 units for most methods) and
+# `Fig3_ploidy_mcb_pooled.tsv`, whose caption says "The first section pools
+# every donor of the four panels (primary)". Its `n_units` is 9 for EVERY
+# method and its `mean` is the germline-only mean: AneuFinder 69.37 (pooled:
+# 80.94), FLCNA 54.45 (34.58), SCCNV 52.11 (27.76), Ginkgo-uncapped 98.88
+# (87.17). The manuscript's own Supplementary Table S3 pools the same 21 units
+# (n = 21 for those methods), so two deposited surfaces of the same analysis
+# disagree about the sample set -- and the Hsu table's ranking follows its own
+# subset (SCCNV above HMMcopy there, below it in the pooled data).
+#
+# The check is mechanical: for every `*mcb*.tsv` with `method`/`n_units`/`mean`
+# columns, find the sibling `*units*.tsv` (same directory) and compare each
+# method's unit count and mean with the table's own. A caption file with the
+# same stem (`.tex`/`.md`) supplies the words the row quotes.
+POOLED_UNITS_VALUE_COLUMNS = ("pct_within", "value", "score", "mean")
+
+
+def _pooled_units_by_method(path: Path) -> dict:
+    """{method: (n_units, mean of the value column)} for a pooled-units table."""
+    header, body = _read_delimited_table(path)
+    if not header or not body:
+        return {}
+    header = [h.strip() for h in header]
+    if "method" not in header:
+        return {}
+    col = next((c for c in POOLED_UNITS_VALUE_COLUMNS if c in header), None)
+    if col is None:
+        return {}
+    mi, vi = header.index("method"), header.index(col)
+    groups = {}
+    for r in body:
+        if len(r) <= max(mi, vi):
+            continue
+        try:
+            val = float(str(r[vi]).strip())
+        except ValueError:
+            continue
+        groups.setdefault(str(r[mi]).strip(), []).append(val)
+    return {m: (len(v), sum(v) / len(v)) for m, v in groups.items()}
+
+
+# PKG-16 (2026-10-17, second pass): the REQUIRED FORM's software list vs the
+# tools the manuscript says it used.
+#
+# The CopyNumBench Reporting Summary has a "Software and code" section that
+# lists ~30 tools, but it omits four the main text names -- bedtools, Seurat,
+# cellsnp-lite and UCSC liftOver -- which are exactly the four whose versions the
+# main text still marks "[AUTHOR TO COMPLETE]". The form therefore contradicts
+# the manuscript's own inventory: the summary reads as a complete software
+# list while the paper says four tools were used. The check compares the tool
+# tokens of the main text's "Software." paragraph against the form's text (whole
+# text, so a form that names a tool outside its list still counts) and reports
+# the tools the form never names; a form with no software inventory at all gets
+# ONE row instead of one per tool.
+FORM_STOP_TOKENS = {
+    "the", "and", "with", "for", "from", "using", "used", "study", "were", "their",
+    "its", "this", "these", "versions", "version", "additionally", "including",
+    "also", "has", "have", "been", "are", "was", "is", "of", "in", "on", "at", "by",
+    "as", "or", "commit", "which", "where", "publicly", "al", "all", "both",
+    "extension", "benchmark", "software",
+    "compute", "environment", "intel", "xeon", "gold", "cpu", "ghz",
+    "recorded", "seven", "eight", "nine", "ten", "four", "five", "six",
+}
+
+
+def _tool_tokens(text: str) -> set:
+    """Tool-like tokens of a software paragraph: the first token of each entry
+    (comma-, semicolon- or sentence-delimited), connectives removed."""
+    out = set()
+    # A sentence boundary ends an entry list too: "STAR 2.7.5c. The extension
+    # benchmark additionally used bedtools (bamtobed)" carries TWO tools, and
+    # splitting on commas alone kept only STAR.
+    body = re.sub(r"(?<=[.!?])\s+", ";", str(text or ""))
+    for chunk in re.split(r"[,;]", body):
+        c = chunk.strip()
+        c = re.sub(r"^(?:and|the|with|used|using|additionally|including|also|has|have|"
+                   r"were|was|of|in|on|at|by|as|or)\s+", "", c, flags=re.I)
+        c = re.sub(r"^(?:[A-Za-z]+\s+){0,3}?(?:used|including|additionally)\s+", "", c,
+                   flags=re.I)
+        c = re.sub(r"^(?:used|using|with)\s+", "", c, flags=re.I)
+        m = re.match(r"([A-Za-z][A-Za-z0-9_+.\-]{2,30})", c)
+        if m and m.group(1).lower() not in FORM_STOP_TOKENS:
+            out.add(m.group(1))
+    return out
+
+
+def _form_text(path: Path) -> str:
+    if path.suffix.lower() == ".pdf":
+        return _pdf_text(path)
+    if path.suffix.lower() == ".docx":
+        return "\n".join(_docx_paragraphs(path) or [])
+    try:
+        return path.read_text("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def scan_form_software_coverage(root: Path, limit: int = 12) -> list:
+    """PKG-16: the required form's software list omits tools the paper names."""
+    root = Path(root)
+    forms = []
+    mains = []
+    for p in sorted(_iter_tree_files(root)):
+        if not p.is_file():
+            continue
+        low = p.name.lower()
+        if ("reporting" in low and "summary" in low) and p.suffix.lower() in (
+                ".pdf", ".docx", ".doc"):
+            forms.append(p)
+        elif p.suffix.lower() == ".docx" and docx_document_role(p.name) == "main" \
+                and "supp" not in low and not ("reporting" in low and "summary" in low):
+            mains.append(p)
+    if not forms or not mains:
+        return []
+    main_paras = []
+    for p in mains:
+        main_paras.extend(_docx_paragraphs(p) or [])
+    # A table header ("Software and algorithms") is not a software paragraph:
+    # require a real sentence with a version-like token in it.
+    soft = "\n".join(t for t in main_paras
+                     if re.match(r"(?i)^\s*(software|software and code)\b", t.strip())
+                     and len(t.strip()) >= 60 and re.search(r"\d", t))
+    soft = re.sub(r"(?i)^\s*software(?:\s+and\s+code)?\s*[.:]?\s*", "", soft)
+    if not soft:
+        return []
+    tools = _tool_tokens(soft)
+    if not tools:
+        return []
+    rows = []
+    for form in forms:
+        if form.suffix.lower() == ".pdf" and not shutil.which("pdftotext"):
+            # No PDF text extractor: the class is UNEXAMINED for this form, and
+            # the row says so (a hidden gap would set its probability to zero).
+            rows.append({"rule": "PKG-16", "severity": "low", "fix": "manual",
+                         "advisory": True,
+                         "file": form.relative_to(root).as_posix(), "line": 1,
+                         "reference": "software inventory",
+                         "detail": ("the form is a PDF and no `pdftotext` is available in this "
+                                    "environment, so its software inventory could NOT be checked "
+                                    "against the manuscript's tools; install poppler-utils and "
+                                    "re-run, or check the list by hand")})
+            continue
+        text = _form_text(form)
+        if not text.strip():
+            rows.append({"rule": "PKG-16", "severity": "medium", "fix": "manual",
+                         "advisory": True,
+                         "file": form.relative_to(root).as_posix(), "line": 1,
+                         "reference": "software inventory",
+                         "detail": (f"the required form could not be read as text; the "
+                                    f"manuscript names {len(tools)} tool(s) and none could be "
+                                    f"checked against it")})
+            continue
+        low = text.lower()
+        has_software_section = bool(re.search(r"(?i)\bsoftware\b", text))
+        missing = sorted(t for t in tools if t.lower() not in low)
+        if not has_software_section:
+            rows.append({"rule": "PKG-16", "severity": "medium", "fix": "manual",
+                         "advisory": True,
+                         "file": form.relative_to(root).as_posix(), "line": 1,
+                         "reference": "software inventory",
+                         "detail": (f"the required form carries no software inventory at all, "
+                                    f"while the manuscript names {len(tools)} tool(s) "
+                                    f"({', '.join(sorted(tools)[:8])}...): a filled form must "
+                                    f"report the software the study used")})
+            continue
+        for name in missing[:limit]:
+            rows.append({"rule": "PKG-16", "severity": "medium", "fix": "manual",
+                         "advisory": True,
+                         "file": form.relative_to(root).as_posix(), "line": 1,
+                         "reference": name,
+                         "detail": (f"the manuscript's Software paragraph names {name!r} as a "
+                                    f"tool used in this study, but the required form never names "
+                                    f"it: the form's software inventory is incomplete (and the "
+                                    f"reader comparing the two surfaces sees a contradiction). "
+                                    f"Add it to the form with its version, or say in the "
+                                    f"manuscript that it was not used in the reported results")})
+    return rows
+
+
+def scan_pooled_table_mismatches(root: Path, limit: int = 24) -> list:
+    """PKG-15: a pooled statistics table computed on fewer units than it claims."""
+    root = Path(root)
+    rows = []
+    for p in sorted(_iter_tree_files(root)):
+        if not p.is_file() or "mcb" not in p.name.lower() or p.suffix.lower() != ".tsv":
+            continue
+        # Only the POOLED section is comparable with the pooled units table: a
+        # per-panel table (e.g. `..._mcb_perpanel.tsv`) legitimately tests that
+        # panel's own units, so comparing it with the pooled set would flag a
+        # correct table.
+        if "pooled" not in p.name.lower():
+            continue
+        header, body = _read_delimited_table(p)
+        if not header:
+            continue
+        header = [h.strip() for h in header]
+        if not {"method", "n_units", "mean"}.issubset(header):
+            continue
+        mi, ni, avi = header.index("method"), header.index("n_units"), header.index("mean")
+        units = {}
+        for q in sorted(p.parent.glob("*units*.tsv")):
+            units = _pooled_units_by_method(q)
+            if units:
+                units_file = q
+                break
+        if not units:
+            continue
+        caption = ""
+        caption_files = [p.with_suffix(ext) for ext in (".tex", ".ltx", ".md")]
+        # The generated .tex of a deposited table often carries a longer stem
+        # (`bench-results-...ploidy-plots.pooled.stats.mcb.tex`); take the
+        # directory's pooled MCB source when the same-stem file is absent.
+        if not any(c.is_file() for c in caption_files):
+            # The generated .tex may sit one level up (the copy that ships the
+            # table) as well as beside the table.
+            for d in (p.parent, p.parent.parent):
+                caption_files = [q for q in sorted(d.glob("*.tex"))
+                                 if "mcb" in q.name.lower() and "pooled" in q.name.lower()][:1]
+                if caption_files:
+                    break
+        for ext in (".tex", ".ltx", ".md"):
+            cq = p.with_suffix(ext)
+            if cq.is_file() or (ext == ".tex" and caption_files):
+                cq = cq if cq.is_file() else caption_files[0]
+                try:
+                    caption = " ".join(_latex_command_bodies(cq.read_text("utf-8", "replace"),
+                                                             "captionof"))
+                except OSError:
+                    caption = ""
+                break
+        for r in body:
+            if len(r) <= max(mi, ni, avi):
+                continue
+            method = str(r[mi]).strip()
+            if method not in units:
+                continue
+            try:
+                n_table = int(float(str(r[ni]).strip()))
+                mean_table = float(str(r[avi]).strip())
+            except ValueError:
+                continue
+            n_units, mean_units = units[method]
+            if n_table >= n_units and abs(mean_table - mean_units) <= max(
+                    0.01, 0.005 * abs(mean_units)):
+                continue
+            cap_quote = ""
+            if caption:
+                parts = [s.strip() for s in re.split(r"(?<=[.;])\s+", caption) if s.strip()]
+                pool_parts = [s for s in parts if re.search(r"(?i)\bpool", s)]
+                cap_quote = " ".join(pool_parts or parts[:2])[:240]
+            rows.append({
+                "rule": "PKG-15", "severity": "high", "fix": "manual",
+                "file": p.relative_to(root).as_posix(), "line": 1, "reference": method,
+                "detail": (f"this table reports n = {n_table} and mean = {mean_table:g} for "
+                           f"{method!r}, while its sibling {units_file.name} carries {n_units} "
+                           f"pooled units for that method (mean {mean_units:g})"
+                           + (f". Its caption says: \"{cap_quote}\"" if cap_quote else "")
+                           + ". A 'pooled' section that uses fewer units than the pooled set "
+                           f"changes the means and the ranking. If the reduction is the intended "
+                           f"complete-block restriction (a test that needs every method on every "
+                           f"unit), the caption and the mean column must SAY so and name the "
+                           f"units they use; otherwise the table is computed on the wrong "
+                           f"sample set. Two deposited surfaces of one analysis cannot describe "
+                           f"different populations under the same word"),
+            })
+            if len(rows) >= limit:
+                return rows
+    return rows
+
+
+def scan_prior_submission_disclosure(root: Path, submitted_docs=None, limit: int = 8) -> list:
+    """PKG-14: a cover letter that hides a prior editorial decision in the corpus."""
+    root = Path(root)
+    feedback = []
+    for area in EVIDENCE_DIRNAMES:
+        d = root / area
+        if not d.is_dir():
+            continue
+        for p in sorted(_iter_tree_files(d)):
+            if not p.is_file() or p.suffix.lower() not in (".txt", ".md", ".html", ".json"):
+                continue
+            try:
+                text = p.read_text("utf-8", "replace")
+            except OSError:
+                continue
+            for m in PRIOR_DECISION_ID_RE.finditer(text[:200000]):
+                feedback.append({
+                    "file": p.relative_to(root).as_posix(),
+                    "journal": m.group(1).strip(),
+                    "id": m.group(0),
+                    "date": _first_date(text[m.start():m.start() + 4000]),
+                    "snippet": text[max(0, m.start() - 400):m.start() + 4000],
+                })
+                break
+    if not feedback:
+        return []
+    letters = []
+    if submitted_docs is not None:
+        letters = [rel for rel in submitted_docs
+                   if docx_document_role(Path(rel).name) in ("cover", "main")]
+    if not letters:
+        letters = [p.relative_to(root).as_posix() for p in _iter_tree_files(root)
+                   if p.is_file() and p.suffix.lower() in (".docx", ".tex", ".ltx", ".pdf")
+                   and docx_document_role(p.name) in ("cover", "main")]
+    rows = []
+    for rel in sorted(letters):
+        p = root / rel
+        if p.suffix.lower() == ".docx":
+            paras = _docx_paragraphs(p) or []
+            text = "\n".join(paras)
+        elif p.suffix.lower() == ".pdf":
+            text = _pdf_text(p) or ""
+        else:
+            try:
+                text = p.read_text("utf-8", "replace")
+            except OSError:
+                continue
+        if not PRIOR_SUBMISSION_CLAIM_RE.search(text):
+            continue
+        low = text.lower()
+        for f in feedback:
+            journal = str(f.get("journal") or "")
+            if not journal:
+                continue
+            if journal.lower() in low or str(f.get("id") or "").lower() in low:
+                continue
+            if f.get("date") and f["date"] in text:
+                continue
+            if not _same_work(f.get("snippet") or "", text):
+                continue
+            rows.append({
+                "rule": "PKG-14", "severity": "high", "fix": "manual",
+                "file": rel, "line": 1,
+                "reference": f"{journal} ({f.get('id')})",
+                "detail": (f"this letter states that no related manuscript exists / the work "
+                           f"is not under consideration elsewhere, while the package itself "
+                           f"carries the {journal} editorial decision {f.get('id')}"
+                           + (f" dated {f['date']}" if f.get("date") else "")
+                           + f" ({f['file']}). The prior submission and its decision are "
+                           f"editor-relevant facts the letter must disclose (or the letter's "
+                           f"claim must be scoped so it stays true); nothing in the letter "
+                           f"mentions them"),
+            })
+            if len(rows) >= limit:
+                return rows
+    return rows
+
+
+def _first_date(text: str) -> str:
+    """The first ISO-ish date in `text` ('' when none)."""
+    m = re.search(r"\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b", text or "")
+    if m:
+        return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    m = re.search(r"\b(20\d{2})年(\d{1,2})月(\d{1,2})日", text or "")
+    if m:
+        return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    m = re.search(r"(?i)\b(january|february|march|april|may|june|july|august|september|"
+                  r"october|november|december)\s+(\d{1,2}),?\s+(20\d{2})", text or "")
+    if m:
+        months = ("january february march april may june july august september october "
+                  "november december").split()
+        return f"{m.group(3)}-{months.index(m.group(1).lower()) + 1:02d}-{int(m.group(2)):02d}"
+    return ""
+
+
+def _pdf_text(path: Path) -> str:
+    """Reader-visible text of a PDF through poppler's `pdftotext` ('' on failure)."""
+    exe = shutil.which("pdftotext")
+    if not exe:
+        return ""
+    try:
+        proc = subprocess.run([exe, "-layout", str(path), "-"], capture_output=True,
+                              timeout=120)
+        if proc.returncode == 0:
+            return proc.stdout.decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return ""
 
 
 def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
@@ -41898,6 +43470,20 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
     _decl, is_submitted = declared_submission_filter(root)
     index = _pkg2_name_index(root, area_set, is_submitted=is_submitted)
     declared_patterns = tuple(index[4] if len(index) > 4 else ())
+    # PKG-10's exception set: what inside a non-carried area still counts as
+    # "treated as if it were in the parent" (a parent-directory file, a file the
+    # parent's .tex files input, or a display item whose bytes the submission
+    # itself carries). Built once per scan.
+    try:
+        submitted_now = [pp.relative_to(root).as_posix()
+                         for pp in _iter_tree_files(root, follow_dir_links=True)
+                         if pp.is_file() and is_submitted(pp.relative_to(root).as_posix())]
+    except Exception:                                                 # noqa: BLE001
+        submitted_now = []
+    try:
+        pkg10_exc = area_reference_exceptions(root, names, submitted_now)
+    except Exception:                                                 # noqa: BLE001
+        pkg10_exc = {"closure": set(), "tex_sources": [], "media": {}}
 
     def row(rel: str, line_no: int, ref: str, hint: str, resolves=()) -> dict:
         out = {
@@ -41997,8 +43583,16 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
                 # (`raw_data\tables.tsv`), and splitting on "/" alone read the
                 # whole reference as the "head", so the row's advice named the
                 # README rule for a raw_data pointer.
-                rows.append(row(rel, i, ref,
-                                _pkg2_hint(ref, area_set, declared_patterns)))
+                # PKG-10: the operator's own rule for these packages exempts a
+                # reference into the area when the target is a parent-directory
+                # file, a file the parent's .tex sources input (recursively), or
+                # a figure/table whose bytes the submission itself carries.
+                _exempt, _why = pkg10_reference_exempt(root, ref, pkg10_exc)
+                if _exempt:
+                    continue
+                out = row(rel, i, ref, _pkg2_hint(ref, area_set, declared_patterns))
+                out["area_rule"] = "PKG-10"
+                rows.append(out)
                 if len(rows) >= limit:
                     return rows
             # The NAME shape: a written filename that resolves, inside this very
@@ -42063,9 +43657,20 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
                     # the pointer resolves there, so this is not a finding (the
                     # package merely happens to carry a same-named copy).
                     continue
-                rows.append(row(rel, i, m.group(0),
-                                _pkg2_hint(where[0], area_set, declared_patterns),
-                                resolves=where))
+                # PKG-10's exception for the name shape: when EVERY place the
+                # package holds this name is "treated as in the parent" (a
+                # parent-directory file, a file the parent .tex inputs, or a
+                # display item the submission embeds), the written name resolves
+                # for the reader and is not a dangling pointer.
+                _exempts = [pkg10_reference_exempt(root, w, pkg10_exc)[0] for w in where]
+                if _exempts and all(_exempts):
+                    continue
+                _out = row(rel, i, m.group(0),
+                           _pkg2_hint(where[0], area_set, declared_patterns),
+                           resolves=where)
+                if any(str(w).split("/", 1)[0].lower() in area_set for w in where):
+                    _out["area_rule"] = "PKG-10"
+                rows.append(_out)
                 if len(rows) >= limit:
                     return rows
     return rows
@@ -42177,17 +43782,24 @@ PKG2_NEVER_EDITED_NAMES = frozenset({
 })
 
 
-def pkg2_reference_spans(text: str, patterns: list, index: tuple) -> list:
+def pkg2_reference_spans(text: str, patterns: list, index: tuple, exempt=None) -> list:
     """[(start, end)] of the PKG-2 references inside ONE text (paragraph or file).
 
     The detector's rules, expressed over a string instead of over a walk: the
     area/README patterns plus the name shape resolved against the package's own
     file names. The repair uses it to widen a reference to its sentence.
+
+    `exempt(ref) -> bool` is PKG-10's exception test: a reference the operator's
+    raw-area rule treats as carried (a parent-directory file, a file the parent's
+    .tex sources input, or a display item the submission embeds) must NOT be
+    stripped from the prose -- the reader can reach it.
     """
     spans = []
     for pat in patterns:
         for m in pat.finditer(text):
             if _pkg2_url_query_value(text, m.start()):
+                continue
+            if exempt is not None and exempt(m.group(0)):
                 continue
             spans.append((m.start(), m.end()))
     for m in PKG2_NAME_RE.finditer(text):
@@ -42195,7 +43807,10 @@ def pkg2_reference_spans(text: str, patterns: list, index: tuple) -> list:
             continue
         if _pkg2_url_query_value(text, m.start()):
             continue
-        if _pkg2_name_resolution(m.group(0), index)[0] == "absent":
+        reason, where = _pkg2_name_resolution(m.group(0), index)
+        if reason == "absent":
+            if exempt is not None and where and all(exempt(w) for w in where):
+                continue
             if not _pkg2_external_locator(text, m.start(), m.end()):
                 spans.append((m.start(), m.end()))
     return sorted(set(spans))
@@ -42344,6 +43959,21 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
     patterns, index = _pkg2_build_index(dirp, areas)
     mod = _format_module()
     area_set = {str(a).lower() for a in (areas or ())}
+    # PKG-10: the references the operator's raw-area rule treats as carried are
+    # never stripped (the reader can reach them), so the mechanical layer and the
+    # report agree on what a dangling pointer is.
+    try:
+        _decl, _is_sub = declared_submission_filter(dirp)
+        pkg10_exc = area_reference_exceptions(
+            dirp, [str(a) for a in (areas or ())],
+            [q.relative_to(dirp).as_posix() for q in _iter_tree_files(dirp)
+             if q.is_file() and _is_sub(q.relative_to(dirp).as_posix())])
+    except Exception:                                                 # noqa: BLE001
+        pkg10_exc = {"closure": set(), "tex_sources": [], "media": {}}
+
+    def _exempt_ref(ref: str) -> bool:
+        return pkg10_reference_exempt(dirp, ref, pkg10_exc)[0]
+
     for p in sorted(dirp.rglob("*")):
         if not p.is_file():
             continue
@@ -42359,7 +43989,8 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
         if p.name in PKG2_NEVER_EDITED_NAMES:
             # Reported (the re-scan lists it), never edited -- see the constant.
             try:
-                if pkg2_reference_spans(p.read_text("utf-8", "replace"), patterns, index):
+                if pkg2_reference_spans(p.read_text("utf-8", "replace"), patterns, index,
+                                        exempt=_exempt_ref):
                     entry = {"file": rel, "removed": [],
                              "skipped": ["the response-to-reviewers letter is the authors' "
                                          "statement: reported, never edited"]}
@@ -42392,7 +44023,9 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
                                     entry["skipped"].append(f"docx link: {link_res['error']}")
                         # 2. The sentence that carries a text pointer.
                         res = mod.strip_reference_sentences(
-                            p, tmp_out, lambda t: pkg2_reference_spans(t, patterns, index))
+                            p, tmp_out,
+                            lambda t: pkg2_reference_spans(t, patterns, index,
+                                                           exempt=_exempt_ref))
                         if res.get("ok") and res.get("removed"):
                             os.replace(tmp_out, p)
                             entry["removed"] = [r.get("sentence") for r in res["removed"]]
@@ -42415,14 +44048,16 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
                 except (OSError, UnicodeDecodeError) as e:
                     entry["skipped"].append(f"{type(e).__name__}: {e}")
                 if text is not None and mod is not None and hasattr(mod, "sentence_windows"):
-                    spans = pkg2_reference_spans(text, patterns, index)
+                    spans = pkg2_reference_spans(text, patterns, index, exempt=_exempt_ref)
                     if spans:
                         new_text, removed, structural = _drop_reference_sentences_text(
                             text, spans)
                         if removed:
-                            after_spans = pkg2_reference_spans(new_text, patterns, index)
+                            after_spans = pkg2_reference_spans(new_text, patterns, index,
+                                                               exempt=_exempt_ref)
                             if len(after_spans) < len(
-                                    pkg2_reference_spans(text, patterns, index)):
+                                    pkg2_reference_spans(text, patterns, index,
+                                                         exempt=_exempt_ref)):
                                 write_text_atomic(p, new_text)
                                 entry["removed"] = removed
                             else:
@@ -42439,7 +44074,7 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
                     text = p.read_text("utf-8", "replace")
                 except OSError:
                     text = ""
-                if pkg2_reference_spans(text, patterns, index):
+                if pkg2_reference_spans(text, patterns, index, exempt=_exempt_ref):
                     entry["skipped"].append(
                         "a structural file (deleting a row/key would break it); the author "
                         "repairs it")
@@ -43768,6 +45403,25 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     # actually receives -- and reported, never edited: which statement is true
     # is the author's call.
     hygiene["contradictions"] = package_contradiction_rows(tmp)
+    # PKG-11/12/14/15/16 (2026-10-17): package self-consistency the audit found
+    # in the delivered copies -- a sibling table whose header differs by one
+    # letter (a silently dropped study), a statistics table whose p and its own
+    # interval give opposite verdicts, a "pooled" table computed on a subset, a
+    # form whose software list omits the paper's tools, and a cover letter that
+    # denies a prior submission the package itself documents.
+    try:
+        _submitted_docs = [rr.relative_to(tmp).as_posix() for rr in _iter_tree_files(tmp)
+                           if rr.is_file()]
+        hygiene["package_consistency"] = {
+            "column_near_misses": scan_column_name_near_misses(tmp),
+            "mcb_rule_conflicts": scan_mcb_rule_conflicts(tmp),
+            "pooled_table_mismatches": scan_pooled_table_mismatches(tmp),
+            "form_software_coverage": scan_form_software_coverage(tmp),
+            "prior_submission_disclosure": scan_prior_submission_disclosure(
+                tmp, submitted_docs=_submitted_docs),
+        }
+    except Exception as e:                                            # noqa: BLE001
+        hygiene["package_consistency"] = {"error": f"{type(e).__name__}: {e}"}
     # Front-matter GLUE that the mechanical repair cannot resolve (the fused
     # `<name><address>` token): reported, never re-spaced by guesswork.
     hygiene["front_matter_glue"] = package_front_matter_glue_rows(tmp)
@@ -44349,7 +46003,8 @@ def write_open_items_sibling(ctx: Ctx, open_items: dict) -> dict:
     return {"path": str(p), "items": len(oi.get("items") or [])}
 
 
-def package_readiness(final_clean: dict) -> dict:
+def package_readiness(final_clean: dict, residuals: dict = None,
+                      author_to_complete: bool = True) -> dict:
     """The published package's own findings, as a readiness verdict.
 
     Certification answers "did the pipeline's process hold?"; readiness
@@ -44359,9 +46014,41 @@ def package_readiness(final_clean: dict) -> dict:
     findings are always recorded; `decide --require-ready` additionally turns
     them into blockers (exit 5), and the status readme always prints the
     verdict so "CERTIFIED" can never be read as "submission-ready" alone.
+
+    `residuals` is the residual-gate record the same decision computed, and
+    `author_to_complete` the root's hand-off-marker policy. They are read here
+    so the two verdicts cannot contradict each other about the same shipped
+    fact: the 2026-10-17 audit read `submission_ready: true` beside
+    `certified: false -- hand-off markers still in the delivered package`, which
+    is one package described two ways. A marker the residual gate already
+    blocks on is named here too, and under `author_to_complete: off`
+    (`--without-author-to-complete`) every shipped marker is a defect of the
+    package rather than a neutral hand-off.
     """
     hyg = (final_clean or {}).get("hygiene") or {}
     findings = []
+    for it in ((residuals or {}).get("items") or []):
+        it = str(it)
+        if "hand-off marker" not in it:
+            continue
+        if author_to_complete:
+            findings.append({
+                "rule": "AUTH-1", "advisory": True,
+                "detail": (f"the shipped package still carries the hand-off marker(s) the "
+                           f"certification gate refuses on ({it}); under "
+                           f"`author_to_complete: on` the marker is a legitimate hand-off, "
+                           f"but this item is not submission-ready until the author "
+                           f"disposes it")})
+        else:
+            findings.append({
+                "rule": "AUTH-1",
+                "detail": (f"this root runs with `author_to_complete: off` "
+                           f"(--without-author-to-complete), so no file may carry the "
+                           f"\"[AUTHOR TO COMPLETE: ...]\" marker: the item is supplied (or "
+                           f"its verified negative written) in the document, or left out of "
+                           f"the document and recorded in the package's manual-steps report. "
+                           f"The certification gate already refuses this decision for it -- "
+                           f"{it}")})
     for r in hyg.get("internal_artifacts") or []:
         findings.append({"rule": r.get("rule") or "PKG-1",
                          "document": r.get("file"), "detail": r.get("detail")})
@@ -44428,6 +46115,22 @@ def package_readiness(final_clean: dict) -> dict:
         # caption/table unit mismatch -- none of which any delivered line named.
         findings.append({"rule": r.get("rule") or "PKG-6", "document": r.get("file"),
                          "detail": f"{r.get('evidence')} -- {r.get('detail')}".strip(" -")})
+    # PKG-11/12/14/15/16 (2026-10-17): the package's own tables and letter
+    # contradict each other or the analysis they carry. BLOCKING: one of the two
+    # statements is wrong (a dropped study, a verdict written two ways, a prior
+    # submission the letter denies), and only the author can say which side holds.
+    pc = hyg.get("package_consistency") or {}
+    if pc.get("error"):
+        findings.append({"rule": "PKG-11", "advisory": True,
+                         "detail": (f"the package self-consistency scans could not run "
+                                    f"({pc['error']}); these classes were NOT checked")})
+    for key in ("column_near_misses", "mcb_rule_conflicts", "pooled_table_mismatches",
+                "form_software_coverage", "prior_submission_disclosure"):
+        for r in pc.get(key) or []:
+            findings.append({"rule": r.get("rule") or "PKG-11",
+                             "document": r.get("file"),
+                             "advisory": bool(r.get("advisory")),
+                             "detail": f"line {r.get('line')}: {r.get('detail')}"})
     for r in hyg.get("front_matter_gaps") or []:
         findings.append({"rule": r.get("rule") or "FMT-TP1", "document": r.get("file"),
                          "advisory": True, "detail": r.get("detail")})
@@ -44534,6 +46237,17 @@ def collect_residuals(ctx: Ctx) -> dict:
         kind, rid = rec.get("kind"), rec.get("id")
         res = rec.get("residual") or {}
         if kind in ("revise", "integrate", "rewrite"):
+            if res.get("handoff_markers") and not author_to_complete_of(ctx):
+                # `--without-author-to-complete`: the operator's own policy is
+                # that no file carries the "[AUTHOR TO COMPLETE: ...]" token, so
+                # every marker still in the delivered package is a defect of that
+                # package (not the neutral hand-off it is under the default).
+                add(f"{rid}: {res['handoff_markers']} hand-off marker(s) are still in the "
+                    f"delivered package although this root runs with "
+                    f"`author_to_complete: off` (--without-author-to-complete) "
+                    f"({', '.join((res.get('handoff_marker_files') or [])[:5])}); the item "
+                    f"belongs in the document or in the package's own MANUAL_STEPS.md, never "
+                    f"as a marker inside a file that ships", gate=True)
             if res.get("answerable_placeholders"):
                 add(f"{rid}: {res['answerable_placeholders']} searchable hand-off marker(s) "
                     f"that the lookup engine answered are still in the delivered package "
@@ -46070,7 +47784,8 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     final_clean = publish_final_clean(ctx, final, True, "",
                                       flatten_zotero=bool(getattr(
                                           args, "unlink_zotero_fields", False)))
-    readiness = package_readiness(final_clean)
+    readiness = package_readiness(final_clean, residuals=residuals,
+                                  author_to_complete=author_to_complete_of(ctx))
     gate_problems.extend(readiness_gate_problems(readiness,
                                                  bool(getattr(args, "require_ready", False))))
     _clean_reason = final_clean_reason(final, rounds_data, R, final_regression, chain_ok,
@@ -50055,6 +51770,41 @@ def build_parser() -> argparse.ArgumentParser:
                          "to-be-submitted file (the response letter in particular) may not refer "
                          "into it; with `on` the copy carries `code/` and the letter may cite it "
                          "(`set-submit-code on` flips an existing root)")
+    ps.add_argument("--author-to-complete", dest="author_to_complete",
+                    choices=list(AUTHOR_TO_COMPLETE_MODES),
+                    default=DEFAULT_AUTHOR_TO_COMPLETE,
+                    help="whether the revision stages may write the literal "
+                         "\"[AUTHOR TO COMPLETE: ...]\" hand-off marker into a document "
+                         "(default: on). `on` keeps the pipeline convention: an item missing "
+                         "from the submission that cannot be reconstructed is scaffolded with "
+                         "that token and listed for the author (the marker is never a defect). "
+                         "`off` forbids the token in every file a stage writes: the item is left "
+                         "out of the document -- a whole missing mandatory file is not "
+                         "scaffolded as a document of instructions -- and recorded in the "
+                         "package's own MANUAL_STEPS.md / CHANGELOG.md instead, and a marker "
+                         "still present in a delivered package becomes a defect rather than a "
+                         "neutral hand-off (`set-author-to-complete on|off` flips an existing "
+                         "root)")
+    ps.add_argument("--without-author-to-complete", dest="author_to_complete",
+                    action="store_const", const="off",
+                    help="same as --author-to-complete off: never write the "
+                         "\"[AUTHOR TO COMPLETE: ...]\" marker; hand the item to the author "
+                         "through the package's own manual-steps report instead")
+    ps.add_argument("--with-author-to-complete", dest="author_to_complete",
+                    action="store_const", const="on",
+                    help="same as --author-to-complete on (the default)")
+    ps.add_argument("--placeholder-file", dest="placeholder_files", action="append",
+                    default=None, metavar="GLOB",
+                    help="declare a corpus file (package-relative path or glob, matched against "
+                         "the path and the bare file name) that is a PLACEHOLDER standing in "
+                         "for data it does not contain -- e.g. a haplotype file that is really "
+                         "another sample's. Placeholder files are IGNORED as evidence: the "
+                         "evidence pack lists them, no role may cite one as a producer, and a "
+                         "claim resting only on one is reported as unverified. Repeatable; "
+                         "`set-placeholder-file` adds or clears declarations on an existing "
+                         "root. A package's own README may declare them too (a line reading "
+                         "'Placeholder files: <path-or-glob>'), and identical bytes under two different "
+                         "sample names are detected as placeholder copies")
     ps.add_argument("--revises", default=None,
                     help=f"the number N of REVIEWED-AND-THEN-REVISED candidates per round: an "
                          f"integer or a comma-separated list, with the same rules as --rewrites "
@@ -50574,6 +52324,33 @@ def build_parser() -> argparse.ArgumentParser:
     psc.add_argument("--show", action="store_true",
                      help="print whether `code/` is part of the submission and exit")
     psc.set_defaults(func=cmd_set_submit_code)
+
+    pac = sub.add_parser("set-author-to-complete", parents=[common],
+                         help="set (or show) whether the revision stages may write the literal "
+                              "\"[AUTHOR TO COMPLETE: ...]\" hand-off marker into a document: "
+                              "on (default -- a missing mandatory item is marked and listed for "
+                              "the author) or off (no marker anywhere: the item is left out and "
+                              "recorded in the package's MANUAL_STEPS.md, and a shipped marker "
+                              "is a defect)")
+    pac.add_argument("mode", nargs="?", default=None, choices=list(AUTHOR_TO_COMPLETE_MODES),
+                     metavar="MODE",
+                     help="on or off. Omit, or pass --show, to print the current policy")
+    pac.add_argument("--show", action="store_true",
+                     help="print whether hand-off markers are allowed and exit")
+    pac.set_defaults(func=cmd_set_author_to_complete)
+
+    phf = sub.add_parser("set-placeholder-file", parents=[common],
+                         help="add, clear or show the PLACEHOLDER-FILE declarations of an "
+                              "existing root: a declared file stands in for data it does not "
+                              "contain (e.g. ACT haplotypes that are really HG008's) and is "
+                              "IGNORED as evidence by every session")
+    phf.add_argument("patterns", nargs="*", default=None, metavar="GLOB",
+                     help="package-relative path(s) or glob(s) to declare (matched against the "
+                          "path and the bare file name). With no operand, prints the current "
+                          "declarations and the files they resolve to")
+    phf.add_argument("--clear", action="store_true",
+                     help="remove every placeholder-file declaration and exit")
+    phf.set_defaults(func=cmd_set_placeholder_file)
 
     ptf = sub.add_parser("set-tiebreak-defect-floor", parents=[common],
                          help="set (or show) the adaptive defect-prefix walk's floor (the prefix "

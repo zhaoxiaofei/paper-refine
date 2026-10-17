@@ -799,6 +799,118 @@ touching this area:
   where the package actually holds the item, and stays silent when the package
   carries no labelled figure files at all (its artwork is embedded in the
   documents, and a name-based check has nothing to compare against).
+* **Hand-off markers are now an operator policy** (2026-10-17). The placeholder
+  convention is right for an internal round and wrong for an upload: the
+  deadline package's SUBMITTED main text still carried
+  `[AUTHOR TO COMPLETE: versions of bedtools, Seurat, cellsnp-lite and UCSC
+  liftOver]`, and the NeoHeteroclitic Reporting Summary was six markers and no
+  filled form. `--without-author-to-complete` (`set-author-to-complete off`)
+  replaces the marker rule in every prompt -- including the four master-prompt
+  excerpts and the end-of-prompt reminder that restated the opposite -- with a
+  no-marker rule: the missing item is left out of the document, a whole missing
+  file is not scaffolded as a document of instructions, and the item is recorded
+  in the package's own `MANUAL_STEPS.md`. Under `off`, a marker a stage ADDS
+  fails the attempt, a marker still in a delivered package is a gating residual,
+  and `package_readiness` names it as `AUTH-1` (under the default `on` it is an
+  advisory hand-off and, if the residual gate refuses the decision for it, the
+  readiness list now says so too -- the 2026-10-17 audit read
+  `submission_ready: true` beside `certified: false -- 6 hand-off markers`).
+  The probe session now receives the same rule; it never did before.
+  Pinned by `.paper_test/test_manu_sub_audit_2026_1017.py`.
+* **An evidence-area file may be referenced only as a display item or through
+  the parent's `.tex` closure** (2026-10-17, PKG-10). The operator's rule for
+  these packages: files in `raw_data/` (and its siblings) "cannot be referenced
+  by the main manuscript", except figures, tables, and files inputted --
+  recursively -- to `.tex` files in the area's parent directory (the same
+  package's README: "treated as if they are in the parent"). `tex_input_targets`
+  / `tex_input_closure` follow `\input`, `\include`, `\includegraphics`,
+  `\includepdf`, `\addbibresource`, `\bibliography`, `\pgfplotstableread`,
+  `\lstinputlisting`, `\subfile` and `\import` transitively; a figure whose
+  BYTES are embedded in a submitted document (the CopyNumBench main text embeds
+  `raw_data/Fig3_ploidy_balloons.png` as `word/media/image3.png`) is a display
+  item the reader receives. The report and the mechanical strip share the
+  exception, so the pipeline no longer deletes a sentence that points at a
+  supplementary source the parent `.tex` really compiles.
+* **Placeholder FILES are ignored** (2026-10-17). A file can stand in for data
+  it does not contain: the operator's example is "the haplotypes in Chisel ACT
+  are actually the HG008 haplotypes (placeholders)". Declared placeholders
+  (`--placeholder-file GLOB`, `set-placeholder-file`, or a `Placeholder files:`
+  line in the package README) and detected placeholder copies (identical bytes
+  under two different sample/dataset names, where at least one name is a
+  haplotype/variant-style input) are listed in the evidence pack under
+  "Placeholder files -- ignored"; no role may use one as a producer, and a claim
+  resting only on one is `unable -- placeholder input`. The real partner of a
+  DECLARED placeholder stays evidence (declaring the ACT copy must not silence
+  the HG008 original).
+* **Three package self-consistency scans** (2026-10-17; PKG-11/12/14), each
+  from a verified defect in the two packages:
+  * PKG-11 -- sibling tables whose headers differ only by case/one character.
+    `hpep-v07.b9.p15E…tsv` spelled `MixMHCPred_aff` where the other 26 tables
+    spelled `MixMHCpred_aff`; the aggregation skipped any table lacking all
+    twelve columns WITHOUT naming it. (That particular exclusion is documented
+    in the manuscript and the series is not part of its curated 30 datasets ---
+    see the correction bullet below --- but the hazard is real: any future study
+    with a one-letter header would vanish from the aggregation silently.)
+  * PKG-12 -- a statistics table row whose p-value and its own interval give
+    opposite verdicts under the rule the caption states. The CopyNumBench MCB
+    table prints AneuFinder/Hap_1/nonintCN_PCC with p = 0.115 beside
+    [-0.51, -0.02] while the caption calls both "significantly inferior".
+  * PKG-14 -- a cover letter that says the work is not under consideration
+    elsewhere / lists no related manuscript while the package carries a dated
+    editorial decision for the same title (the iScience decision of 2026-09-29
+    in the NeoHeteroclitic package, never mentioned in the 2026-10-01 letter).
+  PKG-11/12/14 reach the readiness verdict as blocking findings (one of the two
+  statements is wrong and only the author can say which), and the evidence pack
+  seeds them for the review/audit/revision arms.
+* **M30's negative-claim seed names the RIGHT producer** (2026-10-17). The
+  Methods say CHISEL "was not evaluated" on ACT while the ACT table carries its
+  rows; the seed reported CHISEL against the germline MCB table (where it WAS
+  evaluated) because `table_value_tokens` kept only the first table per token,
+  and the session correctly disposed that pairing as a false positive. The token
+  now keeps every producer (up to six) and the sentence's own context (the
+  table's categorical values, e.g. `ACT`) ranks the matching one first.
+* **A "pooled" statistics table must use the pooled units** (2026-10-17, second
+  pass; PKG-15). CopyNumBench's `Fig3_ploidy_mcb_pooled.tsv` reports
+  `n_units = 9` (the germline donors) for every method while its caption says
+  "The first section pools every donor of the four panels (primary)" and the
+  manuscript's Supplementary Table S3 pools 21 units (9 donors + 12 ACT
+  samples); its means follow its own subset (AneuFinder 69.37 vs 80.94, FLCNA
+  54.45 vs 34.58, SCCNV 52.11 vs 27.76). A complete-block restriction is a
+  legitimate reason for n = 9, but then the caption and the mean column must say
+  so. `scan_pooled_table_mismatches` compares every `*mcb*pooled*.tsv` with the
+  sibling `*units*.tsv` (per-method count and mean), quotes the caption, and
+  leaves per-panel tables alone; the rows block readiness.
+* **A form's software inventory must cover the manuscript's own list**
+  (2026-10-17, second pass; PKG-16, advisory). The CopyNumBench Reporting
+  Summary lists ~30 tools but omits bedtools, Seurat, cellsnp-lite, Eagle and
+  UCSC liftOver, all named in the main text's Software paragraph (the first four
+  are exactly the ones the main text still marked as missing versions).
+  `scan_form_software_coverage` compares the tool tokens of the `Software.`
+  paragraph with the form's text and reports the omissions; a table header
+  ("Software and algorithms") is not a software paragraph, and a manuscript with
+  no Software paragraph (NeoHeteroclitic keeps its tools in Table 1) produces no
+  row.
+* **Spelled-out numbers are numeric artifacts** (2026-10-17). The M4 ledger and
+  the M30 seed read digits only, so a count written in words escaped both:
+  "three karyotype-defined subpopulations", "seven parental antigens", "four of
+  the five neural-network outputs", "one row per sequencing run". Those are
+  claims a shipped table can prove or contradict exactly like a digit, so
+  `word_number_rows` now extracts them into the same ledger (the row keeps the
+  author's `written` form and the canonical `number`, and the M30 seed pairs
+  them with producer columns like any other count). The context test is
+  deliberately conservative: a word is a count before a plural noun (looking
+  past adjectives and hyphenated compounds such as "three karyotype-defined cell
+  subpopulations"), in "N of the M", before a unit, or in "one X per Y"; pronoun
+  and idiom uses ("one of them", "one another", "no one", "at once", "Run two",
+  "Patient three") are dropped so the ledger stays a checklist rather than a
+  noise source. Pinned by `.paper_test/test_manu_sub_audit_2026_1017.py`.
+* **The b9 antigen is a documented exclusion, not a dropped study**
+  (2026-10-17, second pass; correction). The NeoHeteroclitic Methods state that
+  the Zhou et al. p15E series "fails the twelve-column inclusion rule and was
+  therefore not assembled into the curated benchmark"; Table 3 lists the six
+  studies / 30 datasets actually used. The one-letter header (`MixMHCPred_aff`)
+  remains a silent-drop HAZARD and PKG-11 reports it, but no headline rests on
+  it.
 * **The mandatory form's OWN dataset decides filled-vs-blank** (2026-10-15):
   `xfa_live_packets` resolves the AcroForm's `/XFA` array (objects expanded from
   their object streams, LAST definition wins) instead of guessing from packet
