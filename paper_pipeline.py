@@ -9401,12 +9401,13 @@ same base/; you cannot see the other revise sessions and must not try to guess o
 they did. Your own package is judged on its merits.
 @@PRIOR_FAILURE@@
 Write ONLY inside this sandbox and never touch sibling sandboxes or parent directories. Reading is
-also confined to this sandbox, with exactly one exception: you MAY read (never write) the skill
-documents and scripts you are instructed to use ($paper-revise and $paper-review, their references and
-bundled scripts, the Zotero helper script, and the `$zotero-use` skill with its `zot` CLI when a
-citation or live field must be resolved or edited). Never read the manuscript sources, review
-outputs, or candidate packages of other runs. Keep your working directory
-at the sandbox root.
+also confined to this sandbox, with exactly two exceptions: (1) when the failure block above names
+./previous_attempt/, you MAY read (never write) that directory -- the rejected package copied into
+this sandbox; (2) you MAY read (never write) the skill documents and scripts you are instructed to
+use ($paper-revise and $paper-review, their references and bundled scripts, the Zotero helper
+script, and the `$zotero-use` skill with its `zot` CLI when a citation or live field must be
+resolved or edited). Never read the manuscript sources, review outputs, or candidate packages of
+other runs. Keep your working directory at the sandbox root.
 
 Layout (paths relative to the sandbox root):
   base/         — the round's base revision A1_@@ROUND@@. READ-ONLY (hash-verified after your run).
@@ -11201,8 +11202,10 @@ def prior_failure_text(rec: dict, limit: int = 16000) -> str:
     kept = last.get("sandbox_moved_to") or last.get("archive")
     if kept:
         parts.append(f"The failed attempt's own sandbox is preserved at {kept} -- its deliverables "
-                     f"as the postcheck judged them, its transcript and a record.json. Read it "
-                     f"before repeating an approach.")
+                     f"as the postcheck judged them, its transcript and a record.json.")
+        parts.append("When ./previous_attempt/ exists, it is a read-only copy of that "
+                     "attempt's rejected package inside THIS sandbox. Read it there before "
+                     "repeating an approach: the sibling path above is outside your sandbox.")
     note = "\n".join(parts)
     if len(note) > limit:
         return (note[:limit] + "\n... [truncated HERE only: the complete list is in state.json -> "
@@ -13917,7 +13920,8 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
         if not src.is_dir():
             continue
         for p in sorted(src.rglob("*")):
-            if not p.is_file() or _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
+            if not p.is_file() or _is_aux_doc(p.name) or is_bookkeeping_name(p.name) \
+                    or is_non_submitted_readme_name(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
             if excluded and rel.split("/", 1)[0] in excluded:
@@ -14395,10 +14399,19 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
     for i, (src, prefix, excluded) in enumerate(sources):
         if not src.is_dir():
             continue
+        # The package's OWN README declares the submitted set (`Only ... will be
+        # submitted`). A format sweep is about the submission surface: a carried
+        # README/MANUAL_STEPS/raw-data file is not manuscript prose, and gating a
+        # revision on it was a real false failure (a 667-word hand-off README
+        # produced an FMT-T9i row). When no declaration is honoured, every file
+        # counts as before.
+        _decl, is_submitted = declared_submission_filter(src)
         for p in _docx_files_under(src):
             if not p.is_file() or is_non_document_name(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
+            if not is_submitted(rel):
+                continue                      # carried, never submitted
             if (prefix + rel) in overrides[i]:
                 continue                      # a later source provides this path
             if excluded and rel.split("/", 1)[0] in excluded:
@@ -14410,7 +14423,7 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                 continue
             if "work" in rel.split("/")[:-1]:
                 continue                      # stage scratch is never corpus content
-            if is_bookkeeping_name(p.name):
+            if is_bookkeeping_name(p.name) or is_non_submitted_readme_name(p.name):
                 continue
             info = mod.analyse_package(p, policy)
             for r in info.get("rows") or []:
@@ -14426,9 +14439,12 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
         for p in sorted([q for suf in ("*.tex", "*.ltx", "*.md", "*.markdown", "*.txt",
                                       "*.bib")
                          for q in src.rglob(suf)]):
-            if not p.is_file() or _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
+            if not p.is_file() or _is_aux_doc(p.name) or is_bookkeeping_name(p.name) \
+                    or is_non_submitted_readme_name(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
+            if not is_submitted(rel):
+                continue                      # carried, never submitted
             if (prefix + rel) in overrides[i]:
                 continue                      # a later source provides this path
             if excluded and rel.split("/", 1)[0] in excluded:
@@ -14437,7 +14453,16 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                 continue        # evidence area, not submission prose (see above)
             if "work" in rel.split("/")[:-1]:
                 continue
-            paras = text_source_paragraphs(p)
+            if p.suffix.lower() == ".bib":
+                # A .bib is a DATABASE: its abstract/keyword/DOI fields are
+                # quotations, not the authors' prose. The CNB scan filed 44
+                # long-sentence rows on `abstract = {...}` fields.
+                try:
+                    paras = mod.bib_prose_paragraphs(p.read_text("utf-8", "replace"))
+                except OSError:
+                    paras = []
+            else:
+                paras = text_source_paragraphs(p)
             text_rows = list(mod.text_style_rows(paras))
             if p.suffix.lower() in (".tex", ".ltx"):
                 # The siunitx rule only has meaning in a LaTeX source (a DOCX
@@ -14454,6 +14479,50 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                              "evidence": r["evidence"], "detail": r["detail"],
                              "fix": "editorial", "protected": False,
                              "tier": r.get("tier") or mod.tier_of(r["rule"])})
+        # FIGURE LABELS (FMT-IM5): OCR the submitted figure rasters and compare
+        # their words with the manuscript's own vocabulary. Only declared
+        # figures, never an evidence area; a missing OCR engine is recorded as a
+        # gap by the rule itself.
+        if policy.get("figure_ocr", True):
+            try:
+                texts = []
+                for p in _docx_files_under(src):
+                    if not is_submitted(p.relative_to(src).as_posix()):
+                        continue
+                    try:
+                        with zipfile.ZipFile(p) as z:
+                            dxml = z.read("word/document.xml").decode("utf-8", "replace")
+                        texts.append("\n".join(mod.text_of(pp[2])
+                                                for pp in mod.paragraphs(dxml)))
+                    except (KeyError, zipfile.BadZipFile, OSError, RuntimeError,
+                            NotImplementedError):
+                        continue
+                images = []
+                for q in sorted(src.rglob("*")):
+                    if not q.is_file():
+                        continue
+                    if q.suffix.lower() not in (".png", ".jpg", ".jpeg", ".tif", ".tiff"):
+                        continue
+                    rel = q.relative_to(src).as_posix()
+                    if not is_submitted(rel) or is_evidence_rel(rel):
+                        continue
+                    images.append(q)
+                if images:
+                    for r in mod.figure_label_rows(images, mod.vocabulary_terms(texts)):
+                        r["document"] = prefix + r["document"]
+                        rows.append(r)
+            except Exception as e:                                    # noqa: BLE001
+                # OCR is a sampling pass, never a reason to abort the sweep; an
+                # unexpected failure is still a RECORDED gap (rule 8), not a
+                # silent pass over the figure-label class.
+                rows.append({
+                    "rule": "FMT-IM5", "severity": "low",
+                    "document": prefix + "figures", "location": "artwork text",
+                    "evidence": f"the figure-label OCR pass failed: {type(e).__name__}: {e}",
+                    "detail": ("the figure-label class was NOT examined in this sweep; "
+                               "re-run the scan / install tesseract and inspect the "
+                               "submitted figures"),
+                    "fix": "manual", "protected": False, "tier": "advisory"})
     by_rule = {}
     for r in rows:
         by_rule[r["rule"]] = by_rule.get(r["rule"], 0) + 1
@@ -16222,6 +16291,27 @@ def _package_rel_path(path, root) -> str:
     return Path(path).name if rel.startswith("..") else rel
 
 
+def _validation_targets(root: Path) -> list:
+    """The files validation may fail on: the declared submitted set, else all.
+
+    A stage's package also carries hand-off READMEs, ledgers and scratch. A
+    malformed scratch `.docx` under `work/` is not a deliverable, and failing an
+    attempt for it (the neohet revise attempt 1) is a false failure. When the
+    package declares its submitted set, validate exactly that; otherwise keep
+    the old whole-directory behaviour.
+    """
+    decl = declared_submission_set(Path(root))
+    if decl.get("declared") and decl.get("files"):
+        out = []
+        for rel in decl["files"]:
+            q = Path(root) / rel
+            if q.is_file() and q.suffix.lower() in (".docx", ".tex", ".ltx"):
+                out.append(q)
+        if out:
+            return out
+    return [Path(root)]
+
+
 def _validate_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, input_dir: Path,
                             errs: list, warns: list) -> dict:
     """DOCX-XML/schema + LaTeX-compile validation of a produced package.
@@ -16242,7 +16332,7 @@ def _validate_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, input_dir: Path,
     res = {"docx_ok": None, "tex_ok": None, "files": 0, "failures": []}
     if mod is None:
         return res
-    rep = mod.validate_paths([pkg_dir], timeout=VALIDATE_TEX_TIMEOUT)
+    rep = mod.validate_paths(_validation_targets(pkg_dir), timeout=VALIDATE_TEX_TIMEOUT)
     res["files"] = rep.get("files", 0)
     docx_fail = [r for r in rep["results"] if r["kind"] == "docx" and r["ok"] is False]
     tex_fail = [r for r in rep["results"] if r["kind"] == "tex" and r["ok"] is False]
@@ -16257,7 +16347,8 @@ def _validate_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, input_dir: Path,
     if tex_fail:
         base_by_rel, base_by_key = {}, {}
         if input_dir.is_dir():
-            brep = mod.validate_paths([input_dir], timeout=VALIDATE_TEX_TIMEOUT)
+            brep = mod.validate_paths(_validation_targets(input_dir),
+                                      timeout=VALIDATE_TEX_TIMEOUT)
             for r in brep["results"]:
                 if r["kind"] != "tex":
                     continue
@@ -21240,7 +21331,7 @@ def revision_token_for_dir(dirp: Path) -> dict:
 
 
 def _record_revision_token(rec: dict, dirp: Path, warns: list,
-                           errs: list = None) -> None:
+                           errs: list = None, pipeline_changed: bool = False) -> None:
     """Record a package's content-hash version token.
 
     A package that carries no 7-hex token (a legacy letter/digit name, or an
@@ -21257,9 +21348,17 @@ def _record_revision_token(rec: dict, dirp: Path, warns: list,
         return
     rec["revision_token"] = info
     if info.get("token") and info.get("hex_tokens") and not info.get("consistent"):
-        msg = (f"revision token mismatch: filename token(s) {info['tokens_seen']} vs the "
-               f"content-derived token {info['token']} -- the package was edited after its "
-               f"token was applied, or a token was copied from another package")
+        if pipeline_changed:
+            msg = (f"revision token: filename token(s) {info['tokens_seen']} vs the "
+                   f"content-derived token {info['token']} -- the orchestrator's OWN format "
+                   f"normalization rewrote a document after the token was applied (see the "
+                   f"run's FORMAT_FIX artifact); the delivered bytes are the ones with token "
+                   f"{info['token']}. Re-apply the token after normalization, or treat this "
+                   f"as a pipeline-side naming note")
+        else:
+            msg = (f"revision token mismatch: filename token(s) {info['tokens_seen']} vs the "
+                   f"content-derived token {info['token']} -- the package was edited after its "
+                   f"token was applied, or a token was copied from another package")
         # More than one 7-hex token on EDITABLE DOCUMENTS is never a naming
         # nuisance: it means the same document family travelled twice (a stale
         # pre-revision copy plus the renamed copy). That is exactly the
@@ -23438,6 +23537,24 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
         ensure_copy(ctx.sandbox_of(aud_rec) / "audit", sb / "audit")
         aud_manifest = hash_manifest(sb / "audit")
     (sb / REVISED_DIR).mkdir(exist_ok=True)
+    # A retry used to start from base/ with only the failure TEXT, while the
+    # prompt told the agent to read a sibling sandbox it was forbidden to open.
+    # Copy the rejected package INTO this sandbox so the retry can inspect (and
+    # repair) exactly what the postcheck judged.
+    try:
+        prev_dirs = sorted(
+            (p for p in ctx.runs_dir.glob(f"{rid}_try*_failed") if p.is_dir()),
+            key=lambda p: p.stat().st_mtime, reverse=True)
+        if prev_dirs and (prev_dirs[0] / REVISED_DIR).is_dir():
+            ensure_copy(prev_dirs[0] / REVISED_DIR,
+                        sb / "previous_attempt" / REVISED_DIR)
+            # A retry of a retry would otherwise nest one previous_attempt/
+            # inside the next, growing without bound.
+            nested = sb / "previous_attempt" / REVISED_DIR / "previous_attempt"
+            if nested.exists():
+                shutil.rmtree(nested, ignore_errors=True)
+    except OSError:
+        pass
     stage_venue_template(ctx, sb)
     seed_template_visuals(ctx, sb)
     seed_evidence_pack(ctx, sb, sb / "base", "stage")
@@ -28644,6 +28761,41 @@ def disposition_artifact_problems(rows: list, widths=None, header_width: int = 0
                             f"id: that is a boilerplate closure, not a disposition"
                             + (f" -- rows: {', '.join(where)}" if where else "")
                             + (f" (and {n - len(where)} more)" if where and n > len(where) else ""))
+    # TEMPLATED closures: a reason that differs only by the row's quoted token
+    # ("... the row is inside a bibliography abstract (<token>)") reads as
+    # different text to the exact-text test, yet it is one sentence. Compare a
+    # SKELETON (parentheticals/quotes/numbers removed) so a templated closure is
+    # still boilerplate. A group whose every row names a check/finding id is a
+    # legitimate template and is skipped.
+    def _skeleton(text: str) -> str:
+        s = re.sub(r"\([^)]*\)", "()", text)
+        s = re.sub(r"'[^']*'|\"[^\"]*\"|\u2018[^\u2019]*\u2019|\u201c[^\u201d]*\u201d",
+                   "''", s)
+        s = re.sub(r"\d+", "#", s)
+        return re.sub(r"\s+", " ", s).strip().lower()
+
+    by_skel = {}
+    for r in filled:
+        skel = _skeleton(str(r.get(key) or ""))
+        if len(skel) >= 40:
+            by_skel.setdefault(skel, []).append(r)
+    for skel, same in sorted(by_skel.items(), key=lambda kv: -len(kv[1]))[:2]:
+        n = len(same)
+        if n < DISPOSITION_BOILERPLATE_MIN_ROWS:
+            continue
+        if n / max(1, len(rows)) < DISPOSITION_BOILERPLATE_SHARE \
+                and n < DISPOSITION_BOILERPLATE_HARD_ROWS:
+            continue
+        if any(_names_check_or_finding(str(r.get(key) or "")) for r in same):
+            continue
+        where = [l for l in (row_label(r) for r in same) if l][:4]
+        problems.append(
+            f"{n} of {len(rows)} dispositions repeat one TEMPLATE sentence "
+            f"({_quote(skel, 160)}) with only the row's token changed: a templated "
+            f"closure is boilerplate, not a per-row disposition"
+            + (f" -- rows: {', '.join(where)}" if where else "")
+            + (f" (and {n - len(where)} more)" if where and n > len(where) else ""))
+
     # A COVER-LETTER STAMP row can be closed OK only with the journal's own
     # text: FMT-CL1 says the letter was formatted in the MANUSCRIPT template,
     # which is a defect unless the journal requires that formatting -- and the
@@ -30343,6 +30495,13 @@ def number_provenance_report(sb: Path, sources: list) -> dict:
                 proved[str(row.get("number") or "").strip()] = str(row.get("source"))
     unsourced = []
     for name, rows in corpus_text_documents(sources):
+        # A COVER LETTER is not the abstract/legend surface this report is about.
+        # `section_kinds` types every letter body paragraph as "front", so the
+        # letter was counted here (134 "unsourced" numbers on the neohet package,
+        # the first example a letter sentence). A number the letter quotes is
+        # the letter's to justify, not the manuscript's ledger.
+        if mod.is_cover_letter_doc(Path(name).name):
+            continue
         paras = [r[0] for r in rows]
         kinds = mod.section_kinds(paras, [r[2] for r in rows])
         for i, text in enumerate(paras):
@@ -30369,6 +30528,19 @@ AUDIT_ID_RE = re.compile(r"^AU-\d+$")
 # =====================================================================
 
 SCAN_REGRESSION_IGNORE = ("FMT-T9h",)      # a separator convention, advisory by design
+# The reporter's own advice per rule: the generic prose advice ("shorten the
+# sentence") is wrong for a layout rule and sent a real stage looking in the
+# wrong place. The repair command is named where one exists.
+RULE_REPAIR_ADVICE = {
+    "FMT-TB4": "make w:tblGrid agree with the cells' w:tcW "
+               "(`paper_docx_format.py repair-layout`)",
+    "FMT-TB5": "widen the column or shorten the identifier "
+               "(`paper_docx_format.py repair-layout`)",
+    "FMT-S10": "keep exactly one PAGE field in the referenced footer part",
+    "FMT-IM4": "re-export the image at the venue's effective resolution",
+    "FMT-IM5": "regenerate the artwork with the manuscript's spelling",
+    "FMT-AV3": "name a locator the submission carries, or say 'available from the authors'",
+}
 
 # The `writing` tier's rubric: twelve named checks so a prose judgement cites
 # something a second reader can re-check, instead of taste. Kept free of any
@@ -30483,7 +30655,8 @@ def check_language_pass(ctx: Ctx, rec: dict, pkg: Path, label: str,
 
 
 def scan_regression_problems(ctx: Ctx, before_sources: list, after_sources: list,
-                             label: str, fixer_reclassified=None) -> tuple:
+                             label: str, fixer_reclassified=None,
+                             policy: dict = None) -> tuple:
     """(errors, warnings): did the OUTPUT introduce a new finding-tier family?
 
     Every package-producing stage is compared with the package it started from,
@@ -30512,7 +30685,10 @@ def scan_regression_problems(ctx: Ctx, before_sources: list, after_sources: list
     mod = _format_module()
     if mod is None:
         return [], []
-    policy = format_policy_of(ctx)
+    # `policy` may be supplied by a caller with no Ctx (the sandbox self-check
+    # reads the sandbox's own format_policy.json): the pre-flight must reach the
+    # same verdict as the postcheck it previews.
+    policy = policy or (format_policy_of(ctx) if ctx is not None else None)
     before_info = scan_format_in_sources(before_sources, policy=policy)
     after_info = scan_format_in_sources(after_sources, policy=policy)
 
@@ -30547,11 +30723,21 @@ def scan_regression_problems(ctx: Ctx, before_sources: list, after_sources: list
                     f"edit -- recorded in the run's FORMAT_FIX artifact; the review disposes "
                     f"the row(s)")
                 continue
+            sample = [r for r in (after_info.get("rows") or [])
+                      if str(r.get("rule") or "") == rule][:3]
+            where = "; ".join(
+                f"{r.get('document') or '?'}"
+                + (f" / {r.get('location')}" if r.get("location") else "")
+                + (f" ({str(r.get('evidence') or '')[:70]})" if r.get("evidence") else "")
+                for r in sample)
+            advice = RULE_REPAIR_ADVICE.get(
+                rule, "shorten the sentence, split the paragraph, unwrap the parentheses, "
+                      "use siunitx")
             errs.append(
                 f"{label}: the delivered package introduces a NEW finding-tier defect family "
                 f"{rule} ({after[rule]} row(s); the package it started from had none) -- fix it "
-                f"(shorten the sentence, split the paragraph, unwrap the parentheses, use "
-                f"siunitx) or record why the ruler itself is wrong")
+                f"({advice}) or record why the ruler itself is wrong"
+                + (f" -- first row(s): {where}" if where else ""))
         else:
             warns.append(f"{label}: {rule} rows grew {before[rule]} -> {after[rule]} between the "
                          f"input and the delivered package")
@@ -31098,7 +31284,8 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     rec["raw_data"] = verify_readonly_raw_data(ctx, rev, warns)
     # AFTER the read-only repair: the recorded token describes the package that
     # ships, not the one the agent left before the repair.
-    _record_revision_token(rec, rev, warns, errs=errs)
+    _record_revision_token(rec, rev, warns, errs=errs,
+                           pipeline_changed=bool((rec.get("format_fix") or {}).get("changes")))
     _caption_and_document_checks(ctx, rec, _rec_vid(rec), [(sb / "base", "", ())], errs, warns)
     if word_docs_present([rev]):
         check_visual_artifact(rev / "VISUAL_CHECK.md",
@@ -34494,6 +34681,29 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tupl
                                                      "revised/revision_report.json")
             errs.extend(lerrs)
             warns.extend(lwarns)
+            # PRE-FLIGHT PARITY for the two postcheck families that failed the
+            # neohet reviser: deliverable validation and the "no new finding-tier
+            # family" regression. The postcheck runs both; a selfcheck that omits
+            # them reported "the paperwork checks passed" on a package the
+            # postcheck then rejected. The pre-flight applies the same detectors
+            # to the same declared submitted set, so the two verdicts agree.
+            mod = _format_module()
+            if mod is not None:
+                targets = _validation_targets(d)
+                if targets and targets != [d]:
+                    vrep = mod.validate_paths(targets, timeout=VALIDATE_TEX_TIMEOUT)
+                    for row in vrep.get("results") or []:
+                        if row.get("kind") == "docx" and row.get("ok") is False:
+                            first = (row.get("errors") or [row.get("detail") or "invalid"])[0]
+                            errs.append(f"VALIDATION: {Path(row['file']).name} is not a valid "
+                                        f"DOCX: {first}")
+                fpol = read_json(sb / "format_policy.json", revive=False, lenient=True)
+                if (sb / "base").is_dir() and isinstance(fpol, dict):
+                    rerrs, rwarns = scan_regression_problems(
+                        None, [(sb / "base", "", ())], [(d, "", CORPUS_EXCLUDE_TOP)],
+                        "revise", policy=fpol)
+                    errs.extend(rerrs)
+                    warns.extend(rwarns)
         if kind == "integrate":
             donors = [p.name for p in sorted((sb / "others").iterdir()) if p.is_dir()] \
                 if (sb / "others").is_dir() else []
@@ -43352,13 +43562,27 @@ def declared_submission_set(root: Path) -> dict:
             ]
             sent_end = min(sent_end_candidates) if sent_end_candidates else len(first)
             found.extend(globs_in(first[sent_start:sent_end]))
+            # The patterns may sit in a code block / next paragraph after a short
+            # lead-in ("... will be submitted to the venue/journal:"). Allow a
+            # bounded lead-in before the first glob, then stop at the first prose
+            # line AFTER a glob (an unrelated example must not widen the set).
+            seen_glob = bool(found)
+            lead = 0
             for raw in lines[1:]:
                 line = raw.strip()
                 globs = globs_in(line)
                 if globs:
+                    seen_glob = True
                     found.extend(globs)
                     continue
                 if not line or re.fullmatch(r"(?:or|and)[.:]?", line, re.I):
+                    continue
+                if not seen_glob and lead < 3 and (
+                        line.endswith(":") or line.endswith(".") or line.endswith("/")):
+                    lead += 1
+                    continue
+                if not seen_glob and lead < 3 and not ("`" in line):
+                    lead += 1
                     continue
                 break
         return found

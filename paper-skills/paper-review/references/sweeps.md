@@ -596,6 +596,12 @@ NOT this sweep's question — `M2_references.md` enumerates it per entry (the
 resolver verdict and the code-side signals); read that seed before judging a
 DOI's format alone.
 
+For an "et al."/author-truncation deviation, record the entry's ACTUAL author
+count (from the item metadata or the DOI) in the deviation cell before filing:
+the truncation threshold depends on the count, and a twelve-author paper is not
+a four-author one. A row that says "et al. on a short author list" without the
+count is not yet a finding.
+
 **Artifact:** `M10_ref_format.md`: entry # | field | deviation | disposition.
 
 ## M11 — Numeric/SI formatting sweep (scriptable: regex)

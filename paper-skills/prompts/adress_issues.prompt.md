@@ -610,6 +610,21 @@ edit per instance, ledgered under the M20 row, never a blanket replacement:
   consistently, and a heading-level jump (`FMT-T10e`): demote/restore the
   missing level.
 
+Two LAYOUT families now have a verifier and a repairer. `FMT-TB4` (a table's
+`w:tblGrid` disagrees with its cells' `w:tcW`) and `FMT-TB5` (an identifier
+cannot fit its column) are repaired together with:
+
+`python paper_docx_format.py repair-layout <file.docx> --out <file.fixed.docx>`
+
+which rewrites the grid from the cells, widens a column only where an
+identifier would break, verifies the visible text is unchanged, and refuses a
+merged/nested table. The same command removes duplicate plain-paragraph PAGE
+fields (`FMT-S10`); a page number inside a floating text box is left to you
+(delete that box in Word). `FMT-IM4` (effective image dpi), `FMT-IM5` (a figure
+label spelling a term differently from the text) and `FMT-AV3` (a "shipped" or
+"deposited" claim with no locator) are reported, never edited: fix the artwork,
+the dpi export, or the availability sentence.
+
 Re-run `python paper_docx_format.py scan <package dir> --policy
 format_policy.json` after the edits; the package you deliver must show no
 mechanical row and no new editorial instance. Record the pass in

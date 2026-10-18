@@ -15,6 +15,8 @@ spacing. This tool makes those defects checkable and fixes the mechanical ones.
     python3 paper_docx_format.py check-pdf FILE.pdf
     python3 paper_docx_format.py zotero-check   FILE.docx      # what a refresh would rewrite
     python3 paper_docx_format.py zotero-refresh FILE.docx      # repair it offline (in place)
+    python3 paper_docx_format.py scan-figures   FIGURES/ [--from-docx MS.docx]
+    python3 paper_docx_format.py repair-layout  FILE.docx --out FILE.fixed.docx
     python3 paper_docx_format.py xfa-export     FORM.pdf       # readable rendering of the answers
     # policy overrides:  --policy policy.json  (see POLICY_DEFAULTS)
 
@@ -140,6 +142,15 @@ LLM_FEEDBACK_DIR = "llm_review_feedback"
 EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR)
 
 POLICY_DEFAULTS = {
+    # FMT-IM4: a raster placed below this effective resolution is reported
+    # (advisory). 0 disables it; a venue profile that states a number sets it.
+    "min_image_dpi": 0,
+    "min_image_dpi_source": "0 = not gated; the venue profile may state a number",
+    # FMT-IM5: OCR the submitted figure rasters and compare their labels with the
+    # manuscript's own vocabulary. Off only for a scan that must not spend the
+    # OCR time; a missing tesseract is recorded as a gap by the rule itself.
+    "figure_ocr": True,
+
     "journal_italics": "refs-only",     # refs-only | everywhere | off
     # Text-level consistency (rules FMT-T8a/T8d/T8e). "drop" deletes the redundant
     # journal name from an author-year citation so one format is used throughout;
@@ -1273,6 +1284,36 @@ def run_is_italic(styles: dict, para_style: str | None, run: str) -> bool:
     rpr = rpr_of(run)
     return effective_emphasis(styles, para_style, elem_val(rpr, "rStyle"), rpr)
 
+def run_is_bold(styles: dict, para_style: str | None, run: str) -> bool:
+    """Is this run effectively bold (direct rPr > character style > paragraph style)?
+
+    The same precedence as `effective_emphasis`, for the `w:b`/`w:bCs` pair.
+    """
+    rpr = rpr_of(run) or ""
+    b_val = bcs_val = None
+    defaults = styles.get("@docDefaults") or {}
+    b_val = defaults.get("b") if b_val is None else b_val
+    for sid in style_chain(styles, para_style or "Normal"):
+        st = styles.get(sid) or {}
+        if st.get("b") is not None:
+            b_val = st["b"]
+    for sid in style_chain(styles, elem_val(rpr, "rStyle")):
+        st = styles.get(sid) or {}
+        if st.get("b") is not None:
+            b_val = st["b"]
+    for node, key in ((r"<w:b(?=[\s/>])[^>]*/?>", "b"),
+                      (r"<w:bCs(?=[\s/>])[^>]*/?>", "bCs")):
+        m = re.search(node, rpr)
+        if m:
+            val = re.search(r'w:val="([^"]*)"', m.group(0))
+            on = True if val is None else \
+                str(val.group(1)).strip().lower() not in ("0", "false", "off")
+            if key == "b":
+                b_val = on
+            else:
+                bcs_val = on
+    return bool(b_val) or bool(bcs_val)
+
 
 # Words that may sit between a journal title and the italic words that wrongly
 # continue its emphasis ("Nature Methods AND OTHER LEADING JOURNALS"). Articles
@@ -1762,6 +1803,16 @@ FINDING_TIER_RULES = {
     # geometry the figure shows.
     "FMT-G1",    # a doubled article/preposition ("the the")
     "FMT-IM1",   # an embedded image rescaled without its aspect ratio
+    # Layout integrity (2026-10-19): a table's grid disagrees with its cells, an
+    # identifier cannot fit its column, a footer carries two PAGE fields, or a
+    # figure's own label spells a manuscript term differently. All four are
+    # visible in the delivered artifact and are the classes a text scan misses.
+    "FMT-TB4",   # w:tblGrid disagrees with the cells' w:tcW
+    "FMT-TB5",   # an identifier token cannot fit its column
+    "FMT-S10",   # more than one PAGE field in a referenced header/footer part
+    "FMT-IM5",   # a figure label spells a manuscript term differently
+    "FMT-T6h",   # a bibliography bold run covers a year or a page range
+    "FMT-AV3",   # a "shipped/deposited" claim with no locator
     # A comma with no space after it inside a list ("Ginkgo d7c7790,
     # AneuFinder 1.34.0,copynumber 1.38.0"): a copy-editing defect a reviewer
     # raises, and one that has shipped twice (the CNB Reporting Summary PDF and
@@ -4868,6 +4919,12 @@ def _fix_kind(rule: str, policy: dict) -> str:
                 "FMT-G1",                    # a doubled article/preposition
                 "FMT-IM1"):                  # an image rescaled off its own ratio
         return "mechanical"
+    if rule in ("FMT-TB4", "FMT-TB5", "FMT-S10"):
+        return "mechanical"
+    if rule == "FMT-T6h":
+        return "style-field"
+    if rule in ("FMT-IM4", "FMT-IM5", "FMT-AV3"):
+        return "manual"
     if rule == "FMT-S3":
         return "mechanical" if policy["title_page_header"] == "suppress" else "policy"
     if rule == "FMT-S5":
@@ -4911,7 +4968,8 @@ MECHANICAL_RULES = {"FMT-S1", "FMT-S3", "FMT-S5", "FMT-T1", "FMT-T2a", "FMT-T2b"
                     "FMT-T2c", "FMT-T2d",
                     "FMT-T3a", "FMT-T3b", "FMT-T6a", "FMT-T6b", "FMT-T6c", "FMT-T6f",
                     "FMT-T6g", "FMT-T7a", "FMT-T7b", "FMT-T8a", "FMT-T8d", "FMT-T8e",
-                    "FMT-S6", "FMT-S8", "FMT-P4", "FMT-G1", "FMT-IM1"}
+                    "FMT-S6", "FMT-S8", "FMT-P4", "FMT-G1", "FMT-IM1",
+                    "FMT-TB4", "FMT-TB5", "FMT-S10"}
 
 
 # ---- layout consistency and page budgets (rules FMT-T8f/T8g/T8h) ----------
@@ -6977,6 +7035,24 @@ def drawing_geometry_rows(part_xml: str, rels: dict, sizes: dict, doc: str,
                 continue
             if cyf <= 0:
                 continue
+            # FMT-IM4: a raster placed below the policy's effective-resolution
+            # floor. Vector art (EMF/WMF/SVG) has no pixel grid and is skipped.
+            min_dpi = float(policy.get("min_image_dpi") or 0)
+            if (min_dpi and unit == "EMU" and target
+                    and RASTER_IMAGE_EXT_RE.search(str(target))):
+                dpi = pw / (cxf / 914400.0) if cxf else 0
+                if 0 < dpi < min_dpi:
+                    rows.append({
+                        "rule": "FMT-IM4", "severity": "medium", "document": doc,
+                        "location": f"{location_prefix}{idx}",
+                        "evidence": (f"image {(target or '').rsplit('/', 1)[-1]}: "
+                                     f"{pw}x{ph} px placed {cxf / 914400.0:.2f} in wide "
+                                     f"= {dpi:.0f} dpi (policy floor {min_dpi:g} dpi)"),
+                        "detail": ("a raster below the venue's effective-resolution floor "
+                                   "prints soft/pixelated; re-export at the stated dpi at "
+                                   "the placed width, never upsample a screenshot"),
+                        "fix": "manual", "protected": False, "tier": tier_of("FMT-IM4"),
+                        "_dpi": dpi})
             ratio = cxf / cyf
             err = abs(ratio - expected) / expected
             if err <= tol:
@@ -9720,6 +9796,13 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     rows.extend(table_rows)
     rows.extend(figure_rows)
 
+    # ---- layout integrity and rendered-bibliography emphasis -----------------
+    # These are independent of the venue's display rules: a malformed table grid
+    # or a bold year in a reference is wrong under any venue.
+    rows.extend(table_layout_rows(xml, styles, doc, policy))
+    rows.extend(reference_bold_rows(xml, styles, doc))
+    rows.extend(availability_claim_rows(para_texts, doc))
+
     return {"rows": rows, "paras": len(paras), "words": words, "legend_idx": legend_idx,
             "fields": [f[2][:60] for f in franges],
             "style_survey": style_survey(xml, styles),
@@ -9731,7 +9814,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
 
 def analyse_package(path: Path, policy: dict) -> dict:
     app_pages = None
-    sizes, doc_rels, aux_parts, aux_xml = {}, {}, [], {}
+    sizes, doc_rels, aux_parts, aux_xml, part_targets = {}, {}, [], {}, {}
     try:
         with zipfile.ZipFile(path) as pkg:
             styles = parse_styles(pkg)
@@ -9741,8 +9824,22 @@ def analyse_package(path: Path, policy: dict) -> dict:
             # where the logo lives).
             sizes = media_pixel_sizes(pkg)
             doc_rels = part_rels(pkg, "word/document.xml")
+            # Header/footer parts can carry a VENUE name (`footer_venue_default.xml`)
+            # as well as a numbered one; the old `\d*` regex read only the numbered
+            # parts, so the part actually printed was never scanned and an orphan
+            # numbered part produced the row instead.
+            rels_name = "word/_rels/document.xml.rels"
+            if rels_name in pkg.namelist():
+                rels_xml = pkg.read(rels_name).decode("utf-8", "replace")
+                for m in re.finditer(r"<Relationship(?=[\s/>])[^>]*/>", rels_xml):
+                    attrs = dict(re.findall(r'([A-Za-z]+)="([^"]*)"', m.group(0)))
+                    typ = attrs.get("Type", "")
+                    if attrs.get("Id") and (typ.endswith("/header") or typ.endswith("/footer")):
+                        target = attrs.get("Target", "").lstrip("/").replace("\\", "/")
+                        part_targets[attrs["Id"]] = (target if target.startswith("word/")
+                                                     else "word/" + target)
             for name in sorted(pkg.namelist()):
-                if re.match(r"word/(?:header|footer)\d*\.xml$", name):
+                if re.match(r"word/(?:header|footer)[A-Za-z0-9_\-]*\.xml$", name):
                     aux_parts.append((name, part_rels(pkg, name)))
                     aux_xml[name] = pkg.read(name).decode("utf-8", "replace")
             if "docProps/app.xml" in pkg.namelist():
@@ -9790,6 +9887,15 @@ def analyse_package(path: Path, policy: dict) -> dict:
                     "fix": "manual", "protected": True, "tier": tier_of("FMT-Z5")})
     except (zipfile.BadZipFile, KeyError, OSError):
         pass
+    # Only a REFERENCED header/footer part is printed: the template packages
+    # carry orphan numbered parts (footer2.xml) that Word never uses, and a row
+    # against one of those is a false positive.
+    ref_ids = set(re.findall(
+        r"<w:(?:header|footer)Reference[^>]*r:id=\"([^\"]+)\"", xml))
+    referenced = {part_targets[rid] for rid in ref_ids if rid in part_targets}
+    res["rows"].extend(page_field_rows(
+        [(name, aux_xml[name]) for name in sorted(referenced) if name in aux_xml],
+        path.name))
     for name, rels in aux_parts:
         aux_rows, _aux_fixes = drawing_geometry_rows(
             aux_xml.get(name, ""), rels, sizes, path.name, policy,
@@ -9869,6 +9975,30 @@ def scan_paths(paths: list, policy: dict) -> dict:
                 continue
             docs.append(analyse_package(f, policy))
     rows = [r for d in docs for r in d["rows"]]
+    if policy.get("figure_ocr", True):
+        texts = []
+        for d in docs:
+            try:
+                with zipfile.ZipFile(d["file"]) as z:
+                    dxml = z.read("word/document.xml").decode("utf-8", "replace")
+                texts.append("\n".join(text_of(pp[2]) for pp in paragraphs(dxml)))
+            except (OSError, zipfile.BadZipFile, KeyError, RuntimeError,
+                    NotImplementedError):
+                continue
+        images = []
+        for p in paths:
+            if not p.is_dir():
+                continue
+            for q in sorted(p.rglob("*")):
+                if not q.is_file() or q.suffix.lower() not in (".png", ".jpg", ".jpeg",
+                                                              ".tif", ".tiff"):
+                    continue
+                if any(part == "work" or part in EVIDENCE_DIRNAMES
+                       for part in q.parts[:-1]):
+                    continue
+                images.append(q)
+        if images:
+            rows.extend(figure_label_rows(images, vocabulary_terms(texts)))
     return {"files": [d["file"] for d in docs], "documents": docs, "rows": rows,
             "by_rule": dict(Counter(r["rule"] for r in rows)),
             "high": sum(1 for r in rows if r["severity"] == "high"),
@@ -12889,6 +13019,616 @@ def _missing_paths(paths) -> list:
     return [str(p) for p in paths if not Path(p).exists()]
 
 
+
+# =====================================================================
+# LAYOUT INTEGRITY (rules FMT-TB4, FMT-TB5, FMT-S10, FMT-IM4, FMT-IM5,
+# FMT-T6h) -- the classes a text-only scan cannot see and a renderer
+# resolves differently from Word.
+#
+# * FMT-TB4: `w:tblGrid` disagrees with the cells' `w:tcW`. Word lays a
+#   table out from the cell widths when they are present; LibreOffice (and
+#   several PDF converters) use the grid. A package edited on one side
+#   only therefore renders one way in Word and another in production. The
+#   repair rewrites the grid from the cells (the cells carry the content
+#   and sum to the table width).
+# * FMT-TB5: an identifier token (a dataset/accession id) cannot fit its
+#   column at the cell font size, so it breaks mid-token. The repair takes
+#   the deficit from the widest slacker column.
+# * FMT-S10: a referenced header/footer part carries more than one PAGE
+#   field, so an even page can print two page numbers (or a stale one).
+#   The repair keeps the first field-only paragraph and deletes the rest.
+# * FMT-IM4: a raster image is placed at a width that yields fewer than
+#   `policy["min_image_dpi"]` dpi (advisory by default; the venue profile
+#   may set the number it actually states).
+# * FMT-IM5: a figure's own label spells a manuscript term differently
+#   ("PRIME_BARank" vs "PRIME_BArank", "Hetero clitic" vs
+#   "Heteroclitic", "FastQ" vs "FASTQ"). OCR the submitted raster and
+#   compare against the manuscript's own vocabulary; no OCR engine is a
+#   recorded gap, never a silent pass.
+# * FMT-T6h: inside a bibliography entry, a bold run covers a year or a
+#   page range. The house style bolds the volume only; a field result that
+#   bolds more is a rendered-field defect (the cnb ref 15 shape).
+# --------------------------------------------------------------------------
+
+TABLE_IDENTIFIER_RE = re.compile(r"^[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)*\d[A-Z0-9]*$")
+TABLE_TOKEN_FALLBACK_PT = 10.0
+TABLE_CHAR_WIDTH_EM = 0.55          # conservative advance for a serif face
+TABLE_MIN_SLACK_TWIPS = 500         # never shrink a column below this slack
+PAGE_FIELD_INSTR_RE = re.compile(r"<w:instrText[^>]*>\s*PAGE\b", re.I)
+RASTER_IMAGE_EXT_RE = re.compile(r"\.(?:png|jpe?g|gif|bmp|tiff?)$", re.I)
+BIB_SKIP_FIELD_RE = re.compile(
+    r"(?is)\b(?:abstract|keywords?|annote|file|urldate|doi|issn|eprint)\s*=\s*\{.*?\}\s*,?")
+
+
+def _token_width_twips(token: str, font_pt: float) -> int:
+    """Conservative rendered width of one unbreakable token, in twips."""
+    return int(len(token) * font_pt * TABLE_CHAR_WIDTH_EM * 20)
+
+
+def _cell_font_pt(styles: dict, cell: str) -> float:
+    """The largest run size in a cell, else its paragraph style's, else 10 pt."""
+    sizes = [int(x) / 2.0 for x in re.findall(r'<w:sz[^>]*w:val="(\d+)"', cell)]
+    if sizes:
+        return max(sizes)
+    st = re.search(r'<w:pStyle[^>]*w:val="([^"]+)"', cell)
+    if st:
+        sz = style_sz(styles, st.group(1))
+        if sz:
+            try:
+                return int(sz) / 2.0
+            except ValueError:
+                pass
+    return TABLE_TOKEN_FALLBACK_PT
+
+
+def _table_grid_widths(tbl: str) -> list:
+    grid = re.search(r"<w:tblGrid(?=[\s/>]).*?</w:tblGrid>", tbl, re.S)
+    if not grid:
+        return []
+    return [int(x) for x in re.findall(r'<w:gridCol[^>]*w:w="(\d+)"', grid.group(0))]
+
+
+def _table_cell_widths(row: str) -> list:
+    """[(tcW | None, gridSpan), ...] for one table row, in column order."""
+    out = []
+    for _s, _e, cell in _spans(row, CELL_TOKENS):
+        tcpr = re.search(r"<w:tcPr(?=[\s/>]).*?</w:tcPr>", cell, re.S)
+        width, span = None, 1
+        if tcpr:
+            body = tcpr.group(0)
+            if "<w:tcW" in body:
+                m = re.search(r'<w:tcW[^>]*w:w="(\d+)"', body)
+                width = int(m.group(1)) if m else None
+            gs = re.search(r'<w:gridSpan[^>]*w:val="(\d+)"', body)
+            span = int(gs.group(1)) if gs else 1
+        out.append((width, span))
+    return out
+
+
+def _table_cell_margins(tbl: str) -> tuple:
+    m = re.search(r"<w:tblCellMar(?=[\s/>]).*?</w:tblCellMar>", tbl, re.S)
+    if not m:
+        return (108, 108)
+    left = re.search(r'<w:left[^>]*w:w="(\d+)"', m.group(0))
+    right = re.search(r'<w:right[^>]*w:w="(\d+)"', m.group(0))
+    return (int(left.group(1)) if left else 108,
+            int(right.group(1)) if right else 108)
+
+
+def table_layout_rows(xml: str, styles: dict, doc: str, policy: dict = None) -> list:
+    """FMT-TB4 (grid vs cells) and FMT-TB5 (an identifier cannot fit)."""
+    rows = []
+    for ti, (s, e) in enumerate(_table_spans(xml or "")):
+        tbl = xml[s:e]
+        # A nested table inside a cell makes the flat row/cell spans
+        # ambiguous; skip it (the visual check owns that shape).
+        if len(re.findall(r"<w:tbl(?=[\s>])", tbl)) > 1:
+            continue
+        grid = _table_grid_widths(tbl)
+        trs = _spans(tbl, ROW_TOKENS)
+        if not grid or not trs:
+            continue
+        first = _table_cell_widths(trs[0][2])
+        if len(first) != len(grid) or any(w is None for w, _sp in first):
+            continue
+        # A merged cell (gridSpan) means the column geometry is not a simple
+        # grid; a mechanical width rewrite could misalign it. Report nothing
+        # this tool cannot repair -- the visual check owns that table.
+        if any(sp != 1 for tr in trs for _w, sp in _table_cell_widths(tr[2])):
+            continue
+        cells = [w for w, _sp in first]
+        header = " ".join(table_first_row_cells(tbl))[:60]
+        left, right = _table_cell_margins(tbl)
+        if cells != grid:
+            rows.append({
+                "rule": "FMT-TB4", "severity": "medium", "document": doc,
+                "location": f"table {ti + 1} ({header})",
+                "evidence": (f"w:tblGrid = {grid}, but the header row's cells carry "
+                             f"w:tcW = {cells}; the two disagree about the column widths"),
+                "detail": ("Word lays the table out from the cells when w:tcW is present "
+                           "and LibreOffice from the grid, so the same package renders "
+                           "differently in Word and in a PDF converter (a column can break "
+                           "an identifier mid-token in one and not the other). Rewrite "
+                           "w:tblGrid from the cells, or edit both together"),
+                "fix": "mechanical", "protected": False, "tier": tier_of("FMT-TB4"),
+                "_table": ti, "_grid": grid, "_cells": cells})
+        widths = [min(g, c) for g, c in zip(grid, cells)]
+        widest = {}
+        for ci in range(len(grid)):
+            toks, pt = [], TABLE_TOKEN_FALLBACK_PT
+            for tr in trs:
+                cs = _table_cell_widths(tr[2])
+                if ci >= len(cs) or cs[ci][1] != 1:
+                    continue
+                cell = _spans(tr[2], CELL_TOKENS)[ci][2]
+                toks += [t for t in re.split(r"\s+", " ".join(text_of(cell).split()))
+                         if TABLE_IDENTIFIER_RE.match(t)]
+                pt = max(pt, _cell_font_pt(styles, cell))
+            if not toks:
+                continue
+            longest = max(set(toks), key=lambda t: (len(t), t))
+            need = _token_width_twips(longest, pt) + left + right
+            widest[ci] = need
+            if need > widths[ci]:
+                rows.append({
+                    "rule": "FMT-TB5", "severity": "medium", "document": doc,
+                    "location": f"table {ti + 1} ({header}) column {ci + 1}",
+                    "evidence": (f"the identifier {longest!r} needs about {need} twips at "
+                                 f"{pt:g} pt but the column is {widths[ci]} twips wide "
+                                 f"(usable {widths[ci] - left - right}); it will break "
+                                 f"mid-token"),
+                    "detail": ("an identifier may not wrap inside itself: widen the column "
+                               "or narrow the longest label; a broken id cannot be copied or "
+                               "matched to Table/Figure call-outs"),
+                    "fix": "mechanical", "protected": False, "tier": tier_of("FMT-TB5"),
+                    "_table": ti, "_col": ci, "_need": need, "_grid": grid,
+                    "_cells": cells, "_widths": widths})
+    return rows
+
+
+def table_layout_fixes(xml: str, rows: list) -> list:
+    """(start, end, new_table) edits for FMT-TB4/FMT-TB5, text untouched.
+
+    Every splice is computed against the ORIGINAL table string and applied
+    back-to-front: a grid replacement changes the string length, so editing the
+    already-replaced table at original row offsets would corrupt it.
+    """
+    by_table = {}
+    for r in rows:
+        if r.get("rule") in ("FMT-TB4", "FMT-TB5") and "_table" in r:
+            by_table.setdefault(r["_table"], []).append(r)
+    edits = []
+    spans = _table_spans(xml or "")
+    for ti, rs in sorted(by_table.items()):
+        if ti >= len(spans):
+            continue
+        s, e = spans[ti]
+        tbl = xml[s:e]
+        if len(re.findall(r"<w:tbl(?=[\s>])", tbl)) > 1:
+            continue
+        grid = _table_grid_widths(tbl)
+        trs = _spans(tbl, ROW_TOKENS)
+        if not grid or not trs:
+            continue
+        first = _table_cell_widths(trs[0][2])
+        if len(first) != len(grid) or any(w is None for w, _sp in first):
+            continue
+        if any(sp != 1 for tr in trs for _w, sp in _table_cell_widths(tr[2])):
+            continue
+        widths = [w for w, _sp in first]
+        for r in rs:
+            if r.get("rule") != "FMT-TB5":
+                continue
+            ci, need = r.get("_col"), r.get("_need")
+            if ci is None or need is None or need <= widths[ci]:
+                continue
+            deficit = need - widths[ci]
+            slack = [(widths[k] - TABLE_MIN_SLACK_TWIPS, k)
+                     for k in range(len(widths)) if k != ci and widths[k] > 800]
+            if not slack or max(slack)[0] < deficit:
+                continue
+            _give, donor = max(slack)
+            widths[ci] += deficit
+            widths[donor] -= deficit
+        edits_in_tbl = []
+        gm = re.search(r"<w:tblGrid(?=[\s/>]).*?</w:tblGrid>", tbl, re.S)
+        if gm:
+            edits_in_tbl.append((gm.start(), gm.end(),
+                                 "<w:tblGrid>" + "".join(
+                                     f'<w:gridCol w:w="{w}"/>' for w in widths)
+                                 + "</w:tblGrid>"))
+        for ri, (r0, r1, row) in enumerate(trs):
+            cs = _table_cell_widths(row)
+            if len(cs) != len(widths) or any(sp != 1 for _w, sp in cs):
+                continue
+            cells = _spans(row, CELL_TOKENS)
+            for ci, (_w, _sp) in enumerate(cs):
+                if ci >= len(cells):
+                    break
+                cell = cells[ci][2]
+                m = re.search(r'<w:tcW[^>]*w:w="(\d+)"', cell)
+                if not m:
+                    continue
+                abs_start = r0 + cells[ci][0] + m.start(1)
+                abs_end = r0 + cells[ci][0] + m.end(1)
+                edits_in_tbl.append((abs_start, abs_end, str(widths[ci])))
+        if edits_in_tbl:
+            edits.append((s, e, apply_edits(tbl, edits_in_tbl)))
+    return edits
+
+
+def page_field_rows(aux_parts: list, doc: str) -> list:
+    """FMT-S10: a referenced header/footer part carries more than one PAGE field."""
+    rows = []
+    for name, xml in aux_parts:
+        n = len(PAGE_FIELD_INSTR_RE.findall(xml or ""))
+        if n <= 1:
+            continue
+        boxed = 0
+        for m in re.finditer(r"<w:txbxContent(?=[\s/>]).*?</w:txbxContent>", xml or "", re.S):
+            boxed += len(PAGE_FIELD_INSTR_RE.findall(m.group(0)))
+        where = (f"; {boxed} of them sit in a floating text box" if boxed else "")
+        rows.append({
+            "rule": "FMT-S10", "severity": "medium", "document": doc,
+            "location": f"{name}",
+            "evidence": f"{n} PAGE fields in one referenced header/footer part{where}",
+            "detail": ("two page-number fields print two numbers (or one stale cached "
+                       "value) on a page; keep exactly one PAGE field per part"
+                       + (". A field inside a floating text box cannot be removed by "
+                          "paragraph surgery: delete that text box (or its field) in "
+                          "Word, or accept the single remaining field" if boxed else "")),
+            "fix": "manual" if boxed else "mechanical",
+            "protected": False, "tier": tier_of("FMT-S10"),
+            "_part": name})
+    return rows
+
+
+def page_field_fixes(part_xml: str) -> list:
+    """Delete the field-only paragraphs after the first PAGE paragraph."""
+    if "<w:txbxContent" in (part_xml or ""):
+        # A nested paragraph inside a text box breaks the flat paragraph-span
+        # model; deleting a span could remove the whole floating box or half of
+        # it. Leave this shape to the author (the scan still reports it).
+        return []
+    spans = [(s, e) for s, e, _frag in _spans(part_xml or "", PARA_TOKENS)
+             if PAGE_FIELD_INSTR_RE.search(part_xml[s:e])]
+    if len(spans) <= 1:
+        return []
+    edits = []
+    for s, e in spans[1:]:
+        para = part_xml[s:e]
+        # Only a paragraph whose VISIBLE text is the page number (the field's
+        # cached result) may be removed; a page number sharing a paragraph with
+        # other furniture needs the author.
+        visible = text_of(para).strip()
+        if visible and not re.fullmatch(r"[\d\s]+", visible):
+            continue
+        edits.append((s, e, ""))
+    return edits
+
+
+BIB_PROSE_FIELDS = ("title", "journaltitle", "booktitle", "maintitle", "subtitle",
+                    "shorttitle", "note", "series", "publisher", "school", "institution",
+                    "eventtitle")
+
+
+def bib_prose_paragraphs(text: str) -> list:
+    """The PROSE fields of a .bib file, without abstracts/keywords/authors/DOIs.
+
+    The text scan read `abstract = {...}` fields as manuscript prose and filed
+    44 long-sentence rows on the CNB `.bib` (each closed by hand). Author lists
+    are data too: a 40-name `author = {...}` is not a long sentence. Only the
+    fields that carry a printed title/venue/note are returned, one paragraph per
+    field; a value with nested braces is skipped rather than mis-parsed.
+    """
+    out = []
+    pat = re.compile(r"(?is)\b(" + "|".join(BIB_PROSE_FIELDS) + r")\s*=\s*\{(.*?)\}\s*,?")
+    for m in pat.finditer(text or ""):
+        value = re.sub(r"\s+", " ", re.sub(r"[{}]", "", m.group(2))).strip()
+        if value:
+            out.append(value)
+    if out:
+        return out
+    # No recognised field: fall back to the old cleaning rather than silently
+    # scanning nothing (a class the file does carry must not disappear).
+    cleaned = BIB_SKIP_FIELD_RE.sub(" ", text or "")
+    cleaned = re.sub(r"[{}@]", " ", cleaned)
+    return [p.strip() for p in re.split(r"\n\s*\n", cleaned) if p.strip()]
+
+
+def _ocr_text(path: Path) -> str | None:
+    if not shutil.which("tesseract"):
+        return None
+    try:
+        proc = subprocess.run(["tesseract", str(path), "-"], capture_output=True,
+                              text=True, encoding="utf-8", errors="replace", timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout if proc.returncode == 0 else ""
+
+
+def vocabulary_terms(texts: list, min_count: int = 2) -> list:
+    """Capitalised terms the manuscript itself uses at least `min_count` times."""
+    counts = Counter()
+    for text in texts or []:
+        for w in re.findall(r"\b[A-Za-z][A-Za-z0-9_]{3,}\b", text or ""):
+            if not any(ch.isupper() for ch in w):
+                continue
+            if w.lower() in {"this", "that", "these", "those", "with", "from", "table",
+                             "figure", "supplementary", "results", "methods", "discussion"}:
+                continue
+            counts[w] += 1
+    return [w for w, n in counts.items() if n >= min_count]
+
+
+def figure_label_rows(paths: list, terms: list) -> list:
+    """FMT-IM5: a figure's OCR text spells a manuscript term differently."""
+    rows = []
+    terms = [t for t in terms or () if t and len(t) >= 3]
+    if not shutil.which("tesseract"):
+        return [{"rule": "FMT-IM5", "severity": "low", "document": "-",
+                 "location": "figures", "evidence": "tesseract is not installed",
+                 "detail": ("figure-label OCR is a categorical gap in this environment: the "
+                            "class (artwork label spelling vs the manuscript's terms) was "
+                            "NOT examined for these files"),
+                 "fix": "manual", "protected": False, "tier": tier_of("FMT-IM5")}]
+    def split_form(term: str, text: str) -> bool:
+        """True when the term appears split by whitespace/hyphen/dash."""
+        for i in range(2, max(3, len(term) - 1)):
+            pat = re.escape(term[:i]) + r"[\s\-\u2013\u2014/]+" + re.escape(term[i:])
+            if re.search(pat, text, re.I):
+                return True
+        return False
+
+    def case_variant(term: str, text: str) -> bool:
+        """True for an acronym/identifier whose LETTER CASE differs in the figure."""
+        distinctive = ("_" in term or any(ch.isdigit() for ch in term)
+                       or (term.isupper() and 2 <= len(term) <= 8))
+        if not distinctive:
+            return False
+        return re.search(re.escape(term), text, re.I) is not None
+
+    for p in paths:
+        text = _ocr_text(Path(p))
+        if text is None:
+            continue
+        for term in terms:
+            if term in text:
+                continue
+            why = ""
+            if split_form(term, text):
+                why = "the term is split across a line/space"
+            elif case_variant(term, text):
+                why = "the term's letter case differs"
+            if not why:
+                continue
+            rows.append({
+                "rule": "FMT-IM5", "severity": "medium", "document": Path(p).name,
+                "location": "artwork text",
+                "evidence": (f"the figure prints a variant of {term!r}: {why}; the exact "
+                             f"spelling was not found in the OCR text"),
+                "detail": ("a figure's own label must spell the manuscript's term "
+                           "exactly; regenerate the artwork (OCR reads the delivered "
+                           "raster, so this is what a reader sees)"),
+                "fix": "manual", "protected": False, "tier": tier_of("FMT-IM5")})
+    return rows
+
+
+# "shipped" is a delivery claim in any form; "deposited" only as a VERB ("the
+# data were deposited"), because "the deposited code" is a normal adjective for
+# code that lives in a repository the Data Availability statement locates.
+AVAILABILITY_CLAIM_RE = re.compile(
+    r"\bshipped\b|\b(?:was|were|is|are|has been|have been)\s+deposited\b|"
+    r"\bin the (?:resource |public )?repository\b", re.I)
+AVAILABILITY_LOCATOR_RE = re.compile(
+    r"https?://|doi:\s*10\.|\b10\.\d{4,9}/", re.I)
+AVAILABILITY_FILE_RE = re.compile(
+    r"\b[\w./-]+\.(?:tsv|csv|zip|pdf|docx|tex|bib|py|r|txt|json|xlsx?)\b", re.I)
+
+
+def availability_claim_rows(para_texts: list, doc: str) -> list:
+    """FMT-AV3: a claim that material was shipped/deposited, with no locator.
+
+    The neohet supplement said its tables were "computed from the shipped
+    per-candidate tables" while the Data Availability Statement said the tables
+    were not in the repository; the submission carried neither. A reader cannot
+    resolve "shipped" without a URL, DOI, accession or a file the submission
+    carries. A sentence that names a real locator, a filename, or the
+    corresponding-author route is accepted.
+    """
+    rows = []
+    for idx, text in enumerate(para_texts or []):
+        for sentence in re.split(r"(?<=[.!?])\s+", text or ""):
+            if not AVAILABILITY_CLAIM_RE.search(sentence):
+                continue
+            if len(sentence.split()) < 6:
+                continue                      # a heading/group label ("Deposited data")
+            if re.search(r"\bshipped\s+with\b", sentence, re.I):
+                continue                      # "shipped with the tool" is a distribution fact
+            if "from the corresponding author" in sentence.lower():
+                continue
+            if AVAILABILITY_LOCATOR_RE.search(sentence):
+                continue
+            if AVAILABILITY_FILE_RE.search(sentence):
+                continue
+            rows.append({
+                "rule": "FMT-AV3", "severity": "medium", "document": doc,
+                "location": f"p{idx}",
+                "evidence": " ".join(sentence.split())[:160],
+                "detail": ("the sentence claims material was shipped/deposited but names no "
+                           "URL, DOI, accession, submitted file or corresponding-author route; "
+                           "a reader cannot resolve it. Name the locator the submission "
+                           "carries, or say the material is available from the authors"),
+                "fix": "manual", "protected": False, "tier": tier_of("FMT-AV3")})
+    return rows
+
+
+def reference_bold_rows(xml: str, styles: dict, doc: str) -> list:
+    """FMT-T6h: a bibliography bold run covers a year or a page range."""
+    rows = []
+    for idx, (_p0, _p1, para) in enumerate(paragraphs(xml or "")):
+        if elem_val(ppr_of(para), "pStyle") != "Bibliography":
+            continue
+        for r in runs(para):
+            text = text_of(r[2]).strip()
+            if not text or not run_is_bold(styles, "Bibliography", r[2]):
+                continue
+            if re.search(r"\(\d{4}[a-z]?\)", text) or re.search(r"\d+\s*[-\u2013]\s*\d+", text):
+                rows.append({
+                    "rule": "FMT-T6h", "severity": "medium", "document": doc,
+                    "location": f"p{idx}",
+                    "evidence": f"bold run over a year/page range: {text[:60]!r}",
+                    "detail": ("the house style bolds the volume only; a field result that "
+                               "bolds the year or the page range is a rendered-bibliography "
+                               "defect (fix the CSL/field, then refresh; a submission copy "
+                               "may be unlinked and repaired)"),
+                    "fix": "style-field", "protected": True, "tier": tier_of("FMT-T6h")})
+    return rows
+
+
+def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
+    """Mechanical layout repair: FMT-TB4/TB5 (table widths) and FMT-S10 (PAGE fields).
+
+    Writes `out` with only the affected XML parts changed, verifies the visible
+    text of the body is unchanged, and re-scans the result. Returns a report.
+    """
+    src, out = Path(src), Path(out)
+    policy = dict(POLICY_DEFAULTS, **(policy or {}))
+    report = {"source": str(src), "output": str(out), "changes": [], "remaining": [],
+              "ok": False}
+    try:
+        with zipfile.ZipFile(src) as z:
+            names = z.namelist()
+            data = {n: z.read(n) for n in names}
+            styles = parse_styles(z)
+    except (OSError, zipfile.BadZipFile) as exc:
+        report["error"] = f"unreadable DOCX package: {exc}"
+        return report
+    if "word/document.xml" not in data:
+        report["error"] = "no word/document.xml"
+        return report
+
+    def visible(xml_text: str) -> str:
+        return "\n".join(text_of(p[2]) for p in paragraphs(xml_text))
+
+    doc_xml = data["word/document.xml"].decode("utf-8")
+    before_text = visible(doc_xml)
+    rows = table_layout_rows(doc_xml, styles, src.name, policy)
+    edits = table_layout_fixes(doc_xml, rows)
+    if edits:
+        new_doc = apply_edits(doc_xml, edits)
+        if visible(new_doc) == before_text:
+            data["word/document.xml"] = new_doc.encode("utf-8")
+            report["changes"].append(f"rewrote the column grid of {len(edits)} table(s) "
+                                     f"from their cell widths")
+        else:
+            report["error"] = "table repair would change visible text; refused"
+            return report
+    for name in names:
+        if not re.match(r"word/(?:header|footer)[A-Za-z0-9_\-]*\.xml$", name):
+            continue
+        part = data[name].decode("utf-8")
+        part_edits = page_field_fixes(part)
+        if part_edits:
+            data[name] = apply_edits(part, part_edits).encode("utf-8")
+            report["changes"].append(f"removed {len(part_edits)} duplicate PAGE field "
+                                     f"paragraph(s) from {name}")
+    if not report["changes"]:
+        report["ok"] = True
+        report["remaining"] = rows
+        return report
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(out.suffix + ".tmp")
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        for name in names:
+            z.writestr(name, data[name])
+    os.replace(tmp, out)
+    # Re-scan the written copy: only the fixed rows may be left.
+    with zipfile.ZipFile(out) as z:
+        out_doc = z.read("word/document.xml").decode("utf-8")
+        out_styles = parse_styles(z)
+        rels_name = "word/_rels/document.xml.rels"
+        targets = {}
+        if rels_name in z.namelist():
+            rels_xml = z.read(rels_name).decode("utf-8", "replace")
+            for m in re.finditer(r"<Relationship(?=[\s/>])[^>]*/>", rels_xml):
+                attrs = dict(re.findall(r'([A-Za-z]+)="([^"]*)"', m.group(0)))
+                typ = attrs.get("Type", "")
+                if attrs.get("Id") and (typ.endswith("/header") or typ.endswith("/footer")):
+                    tgt = attrs.get("Target", "").lstrip("/").replace("\\", "/")
+                    targets[attrs["Id"]] = (tgt if tgt.startswith("word/") else "word/" + tgt)
+        ref_ids = re.findall(r'<w:(?:header|footer)Reference[^>]*r:id="([^"]+)"', out_doc)
+        aux = [(targets[rid], z.read(targets[rid]).decode("utf-8"))
+               for rid in ref_ids if rid in targets and targets[rid] in z.namelist()]
+    left = [r for r in table_layout_rows(out_doc, out_styles, out.name, policy)
+            if r.get("rule") in ("FMT-TB4", "FMT-TB5")]
+    left += [r for r in page_field_rows(aux, out.name) if r.get("rule") == "FMT-S10"]
+    report["remaining"] = left
+    report["ok"] = not left
+    return report
+
+def cmd_scan_figures(args) -> int:
+    """FMT-IM5 over one or more figure files."""
+    terms = []
+    if getattr(args, "terms", None):
+        terms = [x.strip() for x in re.split(r"[,;]", args.terms) if x.strip()]
+    texts = []
+    for f in getattr(args, "from_docx", None) or []:
+        try:
+            with zipfile.ZipFile(f) as z:
+                xml = z.read("word/document.xml").decode("utf-8", "replace")
+            texts.append("\n".join(text_of(p[2]) for p in paragraphs(xml)))
+        except (OSError, zipfile.BadZipFile, KeyError) as e:
+            log(f"error: cannot read {f}: {e}")
+            return 2
+    if texts:
+        terms = vocabulary_terms(texts) + terms
+    paths = []
+    for p in args.paths:
+        p = Path(p)
+        if p.is_dir():
+            paths += [q for q in sorted(p.rglob("*"))
+                      if q.is_file() and q.suffix.lower() in (".png", ".jpg", ".jpeg",
+                                                              ".tif", ".tiff")]
+        elif p.is_file():
+            paths.append(p)
+        else:
+            log(f"error: no such file or directory: {p}")
+            return 2
+    rows = figure_label_rows(paths, terms)
+    out = {"files": [str(p) for p in paths], "terms": terms, "rows": rows,
+           "by_rule": dict(Counter(r["rule"] for r in rows))}
+    if args.json:
+        Path(args.json).write_text(json.dumps(out, indent=2, ensure_ascii=False),
+                                   encoding="utf-8")
+    print(format_note({"rows": rows}))
+    for r in rows:
+        print(f"  [{r['severity']:6s}] {r['rule']:9s} {r['document']}  {r['evidence'][:100]}")
+    return 1 if (args.strict and rows) else 0
+
+
+def cmd_repair_layout(args) -> int:
+    """FMT-TB4/TB5 + FMT-S10 mechanical repair, with a verification re-scan."""
+    policy = load_policy(args.policy)
+    src, out = Path(args.file), Path(args.out)
+    if src.resolve() == out.resolve():
+        log("error: --out must differ from the input")
+        return 2
+    rep = repair_layout_package(src, out, policy)
+    if args.json:
+        Path(args.json).write_text(json.dumps(rep, indent=2, ensure_ascii=False),
+                                   encoding="utf-8")
+    for c in rep.get("changes") or []:
+        log(f"  [fixed] {c}")
+    for r in rep.get("remaining") or []:
+        log(f"  [left]  {r['rule']} {r['location']}: {r['evidence'][:100]}")
+    if not rep.get("ok"):
+        log(f"error: {rep.get('error') or 'layout repair left findings; see the report'}")
+        return 1
+    log(f"layout repair verified: {out}")
+    return 0
+
+
 def cmd_scan(args) -> int:
     policy = load_policy(args.policy)
     missing = _missing_paths(args.paths)
@@ -13285,6 +14025,22 @@ def main(argv=None) -> int:
     lk.add_argument("--json")
     lk.add_argument("--timeout", type=int, default=30)
     lk.set_defaults(func=cmd_lookup)
+    sf = sub.add_parser("scan-figures", help="OCR submitted figure rasters and compare "
+                                              "their labels with the manuscript's vocabulary")
+    sf.add_argument("paths", nargs="+")
+    sf.add_argument("--terms", help="extra expected terms, comma/semicolon separated")
+    sf.add_argument("--from-docx", action="append", help="derive expected terms from this "
+                                                         "manuscript DOCX (repeatable)")
+    sf.add_argument("--json")
+    sf.add_argument("--strict", action="store_true")
+    sf.set_defaults(func=cmd_scan_figures)
+    rl = sub.add_parser("repair-layout", help="repair table grid/identifier wrapping and "
+                                              "duplicate PAGE fields, then verify")
+    rl.add_argument("file")
+    rl.add_argument("--out", required=True)
+    rl.add_argument("--policy")
+    rl.add_argument("--json")
+    rl.set_defaults(func=cmd_repair_layout)
     args = ap.parse_args(argv)
     return args.func(args)
 
