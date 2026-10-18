@@ -667,7 +667,7 @@ AGENT BACKENDS
                      only servers that are actually installed, and they change
                      nothing about how the CLI sandboxes shell commands.
     --agent claude   `claude --permission-mode bypassPermissions --print`
-    --agent deepseek the DeepSeek Harness CLI (`dsh`): `dsh --profile headless
+    --agent dsh      the DeepSeek Harness CLI (`dsh`): `dsh --profile headless
                      --json -` (the stage's PROMPT.md piped via stdin, cwd = the
                      sandbox, one fresh persisted session per attempt, `--json`
                      so the opening `session` line carries the id a
@@ -2374,10 +2374,19 @@ def docx_document_role(name, manuscript_names=()) -> str:
     `letter-to-the-editor` (a cover letter keeps its `cover` spelling there).
     """
     tokens = _document_role_tokens(name)
-    if "supp" in tokens or "suppl" in tokens or "supplement" in tokens \
-            or "supplementary" in tokens:
+    # `supplemental` (the common US spelling) and the concatenated
+    # `supplementarymaterial` were missing from the exact-token set, so
+    # `Supplemental_Material.docx`/`.tex` was classified as `main` and its words
+    # were charged to the article caps (or it could be chosen as the main LaTeX
+    # sample). The prefix test covers every `supplement*` compound; `support`
+    # does not start with `supplement` and stays `main` (see the role tests).
+    if "supp" in tokens or "suppl" in tokens \
+            or any(t.startswith("supplement") for t in tokens):
         return "supp"
-    if "cover" in tokens:
+    # `coverletter` is the conventional concatenated spelling; camel-case
+    # `CoverLetter` already splits into `cover` + `letter`, but the lowercase
+    # form must not fall through to `main`.
+    if "cover" in tokens or "coverletter" in tokens:
         return "cover"
     if _name_is_article_type_manuscript(Path(str(name)).stem, manuscript_names):
         return "main"
@@ -3838,13 +3847,13 @@ AGENT_PRESETS = {
     # DEEPSEEK_API_KEY credential and its MCP servers, exactly as the codex
     # profile owns the codex CLI's, so this preset carries no overrides the way
     # the codex one does.
-    "deepseek": ["dsh", "--profile", "headless", "--json", "-"],
+    "dsh": ["dsh", "--profile", "headless", "--json", "-"],
 }
 # The backends an operator may select BY NAME (each maps to a shipped argv;
 # `manual` is the no-CLI mode) -- one list, so every --agent/--judge-agent
 # parser accepts the same set. A custom `--agent-cmd`/PAPER_AGENT_CMD stays the
 # last route and is never named here.
-AGENT_CHOICES = ("codex", "claude", "deepseek", "manual")
+AGENT_CHOICES = ("codex", "claude", "dsh", "manual")
 # The CLI each preset launches (`codex`, `claude`, `dsh`). Derived from the
 # preset table itself, so the checks that ask "is this the operator's real
 # agent CLI, or a test stub / foreign tool?" (see `_looks_like_preset_cmd`) and
@@ -4130,15 +4139,16 @@ def is_journal_feedback_name(name) -> bool:
 # as the letter (the cover letter is the common trap -- "editor" is in its name).
 JOURNAL_AUTHORED_REPLY_RE = re.compile(
     r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point"
-    r"|(?-i:(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))(?:[Cc]over|COVER)(?![a-z]))", re.I)
-# The WORD "cover" (or the camelCase "coverLetter"/"plainLetter"), never the
-# substring: a bare `cover` also matched `discovery.md`, `coverage_table.txt`
-# and `recovered_notes.tex`, which then read as the letter (or hid a reply whose
-# name merely contains the substring). A word starts at the string's start,
-# after a non-letter, or at a lower->UPPER camelCase boundary, and ends at a
-# non-lowercase character.
+    r"|(?-i:(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))(?:[Cc]over|COVER)(?![a-z]))"
+    r"|(?<![A-Za-z])coverletter", re.I)
+# The WORD "cover" (or the camelCase "coverLetter"/"plainLetter", or the
+# concatenated `coverletter`), never the substring: a bare `cover` also matched
+# `discovery.md`, `coverage_table.txt` and `recovered_notes.tex`, which then read
+# as the letter (or hid a reply whose name merely contains the substring). A
+# word starts at the string's start, after a non-letter, or at a lower->UPPER
+# camelCase boundary, and ends at a non-lowercase character.
 _COVER_WORD_RE = re.compile(
-    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))(?:[Cc]over|COVER)(?![a-z])")
+    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))(?:[Cc]over|COVER|(?i:coverletter))(?![a-z])")
 # The reply-only spelling for the written-surface scans: a cover letter IS a
 # submission document (M19 counts it as one), a response-to-reviewers is not
 # manuscript prose.
@@ -8144,6 +8154,20 @@ CONTEXT_BUDGET_RULE = """
 """
 
 
+def with_context_budget(text: str) -> str:
+    """Append the context-budget rule to a prompt that does not carry it.
+
+    `shared_blocks()` covers the stages that use it, but the one-shot prompts
+    (template/guideline conformation, continuation, artifact repair, add-venue)
+    and the two independent audit sessions build their text directly. The README
+    promises EVERY prompt carries the rule, so those builders pass through this
+    one wrapper instead of repeating the block (or silently missing it).
+    """
+    if "=== CONTEXT BUDGET" in (text or ""):
+        return text
+    return (text or "").rstrip() + "\n" + CONTEXT_BUDGET_RULE
+
+
 # The corpus's raw-data directory is an INPUT (see enforce_readonly_raw_data):
 # this block is what makes a session leave it alone in the first place, and what
 # keeps the rule from being read as a scoring criterion by the comparison
@@ -9751,8 +9775,10 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
 
 @@MARKER_ROOT@@
 Write `_pipeline_done.json` there as the very last step, after the self-check below, carrying
-`{"findings_total": N, "confirmed": N, "dropped": N, "added": N, "finding_tier_rows_examined": N,
-  "promoted": N}`. Your deliverables (`audit.json`, `AUDIT.md`, `DISPOSITION_AUDIT.md`, `work/`)
+`{"stage": "audit", "status": "complete", "error": null,
+  "findings_total": N, "confirmed": N, "dropped": N, "added": N,
+  "finding_tier_rows_examined": N, "promoted": N}`. Your deliverables (`audit.json`, `AUDIT.md`,
+`DISPOSITION_AUDIT.md`, `work/`)
 live in `audit/`; the MARKER does not -- it is the orchestrator's completion signal, not one of
 your records, and a marker inside `audit/` is invisible to the orchestrator (the stage is then
 treated as unfinished).
@@ -9793,8 +9819,9 @@ drop-with-evidence), promote the reviewer's boilerplate closures into real findi
 when they are defects, keep base/, non_revised/ and review/ byte-identical, write every record
 inside `audit/`, and finish with `_pipeline_done.json` (stage="audit") IN THE SANDBOX ROOT --
 next to PROMPT.md, NOT inside `audit/` -- carrying
-`{"findings_total": N, "confirmed": N, "dropped": N, "added": N, "finding_tier_rows_examined": N,
-  "promoted": N}`.
+`{"stage": "audit", "status": "complete", "error": null,
+  "findings_total": N, "confirmed": N, "dropped": N, "added": N,
+  "finding_tier_rows_examined": N, "promoted": N}`.
 """
 
 
@@ -13783,7 +13810,8 @@ def _is_cover_letter_lines(lines: list, name: str = "", manuscript_names=()) -> 
     """
     if _name_is_article_type_manuscript(name, manuscript_names):
         return False
-    if "cover" in _document_role_tokens(name):
+    tokens = _document_role_tokens(name)
+    if "cover" in tokens or "coverletter" in tokens:
         return True
     for raw in lines[:12]:
         if LENGTH_COVER_SALUTATION_RE.match((raw or "").strip()):
@@ -14885,7 +14913,7 @@ def apply_template_prompt(ctx: Ctx, sb: Path, src: Path, templates: dict) -> str
                  "the source letter, a plain submission letter: recipient block, date, salutation,\n"
                  "         body, closing and signature -- the letter's own convention (never the\n"
                  "         manuscript's Title/Author List/Abstract styles)")
-    return f"""TEMPLATE-FIRST REWRITE -- fill {label}'s own Word templates with this submission's content
+    return with_context_budget(f"""TEMPLATE-FIRST REWRITE -- fill {label}'s own Word templates with this submission's content
 
 The deliverable of THIS session is the ENTIRE submission package authored INSIDE
 the journal's official Word templates. The files you hand back ARE copies of the
@@ -15051,7 +15079,7 @@ WRITE (only inside out/):
 
 @@DOCX_CLI_RULE@@
 """ .replace("@@VISUAL_INSPECTION_RULE@@", visual_inspection_block("out/VISUAL_CHECK.md")) \
-    .replace("@@DOCX_CLI_RULE@@", docx_cli_block())
+    .replace("@@DOCX_CLI_RULE@@", docx_cli_block()))
 
 
 def apply_guideline_conform_prompt(ctx: Ctx, src: Path) -> str:
@@ -15078,7 +15106,7 @@ def apply_guideline_conform_prompt(ctx: Ctx, src: Path) -> str:
     guidelines = ("\n".join(guideline_lines) if guideline_lines
                   else "  * (this profile records no guideline text: use established academic "
                        "convention)")
-    return f"""SUBMISSION CONFORM -- author this submission to {label}'s own rules
+    return with_context_budget(f"""SUBMISSION CONFORM -- author this submission to {label}'s own rules
 
 This venue ships NO official Word template (`venue_template/` is empty), so
 there is no template layout to copy. The deliverable is the WHOLE submission
@@ -15155,7 +15183,7 @@ WRITE (only inside out/):
 
 @@DOCX_CLI_RULE@@
 """ .replace("@@VISUAL_INSPECTION_RULE@@", visual_inspection_block("out/VISUAL_CHECK.md")) \
-    .replace("@@DOCX_CLI_RULE@@", docx_cli_block())
+    .replace("@@DOCX_CLI_RULE@@", docx_cli_block()))
 
 
 def _docx_paragraph_texts(path: Path) -> list:
@@ -16314,14 +16342,17 @@ def _format_fix_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, warns: list,
     # means that pass sees the final text (and cleans up an emptied paragraph).
     # The session was told the rule by the code-side pack; this is the
     # mechanical guarantee.
+    try:
+        # BOTH corpus halves: corpus_sources() folds the run's code/ area into
+        # the version corpus, so sweeping only the package let a .pyc reach the
+        # digest/pin/publication.
+        rec["non_shippable_strip"] = strip_stage_non_shippable(sb, pkg_dir)
+    except Exception as e:                                            # noqa: BLE001
+        rec["non_shippable_strip"] = {"error": f"{type(e).__name__}: {e}",
+                                      "removed": []}
+        warns.append(f"PKG-1: the non-shippable-file strip could not run "
+                     f"({type(e).__name__}: {e}); the package is reported, not repaired")
     if pkg_dir.is_dir():
-        try:
-            rec["non_shippable_strip"] = strip_non_shippable_files_in_dir(pkg_dir)
-        except Exception as e:                                        # noqa: BLE001
-            rec["non_shippable_strip"] = {"error": f"{type(e).__name__}: {e}",
-                                          "removed": []}
-            warns.append(f"PKG-1: the non-shippable-file strip could not run "
-                         f"({type(e).__name__}: {e}); the package is reported, not repaired")
         _reports_root = getattr(ctx, "reports_dir", None)
         if _reports_root is None and getattr(ctx, "root", None) is not None:
             _reports_root = Path(ctx.root) / "reports"
@@ -18708,6 +18739,32 @@ def strip_non_shippable_files_in_dir(dirp: Path) -> dict:
         except OSError:
             continue
         out["removed"].append(rel)
+    return out
+
+
+def strip_stage_non_shippable(sb: Path, pkg_dir: Path) -> dict:
+    """The stage-side sweep over BOTH halves of the version corpus.
+
+    `corpus_sources()` folds the run's `code/` directory into the corpus under
+    the `code/` prefix, but the postcheck used to sweep only the stage package:
+    a `code/__pycache__/*.pyc` (or a `.DS_Store`) therefore entered the corpus
+    digest, the pin and the published copy. Both halves are swept BEFORE the
+    digest is recorded; the return shape keeps the package's own `removed` list
+    (the delivery report's existing consumer) and adds the code area separately.
+    """
+    sb, pkg_dir = Path(sb), Path(pkg_dir)
+    out = {"removed": [], "kept_in_evidence": [], "package": {},
+           "code": {}}
+    if pkg_dir.is_dir():
+        out["package"] = strip_non_shippable_files_in_dir(pkg_dir)
+        out["removed"].extend(out["package"].get("removed") or [])
+        out["kept_in_evidence"].extend(out["package"].get("kept_in_evidence") or [])
+    code = sb / CODE_DIR
+    if code.is_dir():
+        out["code"] = strip_non_shippable_files_in_dir(code)
+        out["removed"].extend(f"{CODE_DIR}/{rel}" for rel in (out["code"].get("removed") or []))
+        out["kept_in_evidence"].extend(
+            f"{CODE_DIR}/{rel}" for rel in (out["code"].get("kept_in_evidence") or []))
     return out
 
 
@@ -24462,7 +24519,17 @@ def _marker_checks(rec: dict, marker, stage: str, errs: list, warns: list,
     if marker.get("status") == "failed":
         errs.append(f"agent reported failure: {str(marker.get('error'))[:300]}")
     elif marker.get("status") != "complete":
-        warns.append(f"marker status is {marker.get('status')!r} (expected 'complete')")
+        # The marker is the pipeline's ONLY completion signal. Accepting an
+        # absent status made an empty `{}` (and any file with an unrelated JSON
+        # body) a successful stage; `stage` may be omitted at the run's own
+        # sandbox root, but the COMPLETION claim may not. The audit prompt used
+        # to ask for counters only, so it now names this field too.
+        if marker.get("status") is None:
+            errs.append("completion marker has no 'status' field (write "
+                        "\"status\": \"complete\" -- a marker is not a completion signal "
+                        "without it)")
+        else:
+            errs.append(f"marker status is {marker.get('status')!r} (expected 'complete')")
     summ = marker.get("summary")
     if isinstance(summ, dict):
         rec["summary"] = summ
@@ -25119,14 +25186,29 @@ RENDER_EVIDENCE_EXTS = (".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff")
 
 
 def render_evidence_files(render_roots) -> list:
-    """Rendered page files (PDF/PNG/...) anywhere under the given directories."""
+    """Rendered page files (PDF/PNG/...) in a version's `work/` scratch.
+
+    The visual-inspection rule tells every session to COPY the document into its
+    own `OUT/work/` and render there (`VISUAL_INSPECTION_RULE`), precisely so the
+    render cannot touch a read-only input. Scanning the whole package instead
+    made any shipped figure asset (`figures/fig1.png`) count as a rendered page,
+    so a session could satisfy the "I looked at the pages" gate with a figure it
+    never rendered. Only the documented scratch location is evidence; a package
+    figure or a shipped PDF is submission content, not proof of inspection.
+    """
     out = []
     for root in render_roots or ():
         try:
             if not root.is_dir():
                 continue
             for p in sorted(root.rglob("*")):
-                if p.is_file() and p.suffix.lower() in RENDER_EVIDENCE_EXTS:
+                if not p.is_file() or p.suffix.lower() not in RENDER_EVIDENCE_EXTS:
+                    continue
+                try:
+                    parts = p.relative_to(root).parts
+                except ValueError:
+                    continue
+                if "work" in parts[:-1]:
                     out.append(p)
         except OSError:
             continue
@@ -28777,9 +28859,26 @@ RESUME_ATTEMPT_LIMIT = 2
 # Recognise that failure so the retry policy goes straight to a FRESH context
 # instead of spending continuation calls that can only fail again.
 AGENT_CONTEXT_OVERFLOW_RE = re.compile(
-    r"(?is)(?:unexpected status\s+413|request entity too large|payload too large|"
-    r"length limit exceeded|maximum context length|context (?:length|window)[^\n]{0,100}"
-    r"(?:exceed|too large)|request body[^\n]{0,80}(?:too large|limit exceeded))")
+    r"(?im)(?:"
+    # `unexpected status 413`, `HTTP 413: ...`, `status code 413`
+    r"^\s*(?:error[:\s]+)?(?:unexpected\s+)?(?:status(?:\s+code)?|http(?:/\d(?:\.\d+)?)?)"
+    r"[:\s]+413\b"
+    r"|^\s*(?:error[:\s]+)?[^\n]{0,80}\brequest entity too large\b"
+    r"|^\s*(?:error[:\s]+)?payload too large\b"
+    # a bare status line (`413 Payload Too Large`, `Error: 413 - payload too
+    # large`): the status number makes it error-shaped even without the word
+    # `HTTP`/`status` in front, so the anchored patterns above miss it.
+    r"|\b413\b[^\n]{0,60}\b(?:payload|request|entity)\b[^\n]{0,30}\btoo large\b"
+    r"|\bcontext_length_exceeded\b"
+    r"|\bmaximum context length\b"
+    # both word orders: "context window ... exceeded" and "exceeds ... context window"
+    r"|\bcontext (?:length|window)\b[^\n]{0,100}\b(?:exceed(?:s|ed)?|too (?:large|long))\b"
+    r"|\b(?:exceed(?:s|ed)?|too (?:large|long))\b[^\n]{0,100}\bcontext (?:length|window)\b"
+    r"|\b(?:prompt|input|request)\b[^\n]{0,50}\btoo (?:long|large)\b"
+    r"|\btoo many tokens\b"
+    r"|\blength limit exceeded\b"
+    r"|\brequest body\b[^\n]{0,80}\b(?:too large|limit exceeded)\b"
+    r")")
 
 
 def agent_failure_kind(stdout: str = "", stderr: str = "") -> str:
@@ -29054,7 +29153,7 @@ def resume_gate(ctx: Ctx, rec: dict, cmd: list) -> tuple:
         return [], key, ""
     argv = resume_argv_for(cmd, sid)
     if not argv:
-        why = ("this backend has no resume form (only the codex/claude/deepseek presets do), or "
+        why = ("this backend has no resume form (only the codex/claude/dsh presets do), or "
                "no session id was captured")
         print(f"  [resume] {rec['id']}: no continuation -- {why}; a fresh attempt follows")
         return [], key, ""
@@ -29070,7 +29169,7 @@ def resume_gate(ctx: Ctx, rec: dict, cmd: list) -> tuple:
 def resume_prompt(rec: dict, problems: list, reason: str, used: int) -> str:
     """The CONTINUATION prompt: finish the stage's own work, marker last."""
     listed = "\n".join(f"  {i + 1}. {p}" for i, p in enumerate(problems)) or "  (none recorded)"
-    return (
+    return with_context_budget((
         "CONTINUATION - YOUR OWN SESSION STOPPED BEFORE IT FINISHED.\n\n"
         f"Run: {rec['id']}   stage: {rec.get('kind')}   round: {rec.get('round')}\n"
         f"This is continuation {used + 1} of at most {RESUME_ATTEMPT_LIMIT} for this session.\n"
@@ -29094,7 +29193,7 @@ def resume_prompt(rec: dict, problems: list, reason: str, used: int) -> str:
         "`unable — manual verification required: <what the author must check>` in the ledger / "
         "language pass / visual record, record the item in MANUAL_STEPS.md, and say so in the "
         "marker.\n"
-        "  * Stay inside this sandbox; never touch sibling sandboxes or parent directories.\n")
+        "  * Stay inside this sandbox; never touch sibling sandboxes or parent directories.\n"))
 
 
 def repairable_artifact_failure(ctx: Ctx, rec: dict) -> list:
@@ -29614,7 +29713,7 @@ def repair_guard_problems(sb: Path, guard: dict, rec: dict = None) -> list:
     if len(problems) < 6 and kind == "judge":
         problems.extend(_repair_judge_problems(sb, guard))
     return problems[:6]
-def repair_prompt(ctx: Ctx, rec: dict, problems: list) -> str:
+def _repair_prompt_body(ctx: Ctx, rec: dict, problems: list) -> str:
     """The scoped repair session's prompt: the problems, the rules, the limits.
 
     One prompt per stage, built from that stage's profile: what it may write, what
@@ -29745,6 +29844,11 @@ Everything else must stay BYTE-IDENTICAL, above all:
     reading and measuring, never guessing.
 """ + REPAIR_TAIL
     return common_head + REPAIR_TAIL
+
+
+def repair_prompt(ctx: Ctx, rec: dict, problems: list) -> str:
+    """The scoped repair prompt, with the shared context-budget rule."""
+    return with_context_budget(_repair_prompt_body(ctx, rec, problems))
 
 
 REPAIR_TAIL = """
@@ -30015,7 +30119,16 @@ def placeholder_residual_report(ctx: Ctx, sb: Path, sources: list, label: str,
     """Searchable hand-off markers that the orchestrator could already answer."""
     mod = _format_module()
     if mod is None:
-        return {}
+        # The same categorical gap as a raising scanner: without the OOXML
+        # engine the .docx marker state cannot be read, so the package is not
+        # "clean", it is UNKNOWN. The report keeps the shape its callers update.
+        msg = "the OOXML engine is unavailable, so .docx marker content cannot be read"
+        (errs if enforce else warns).append(
+            f"{label}: the hand-off-marker scan did not run ({msg}); the package's marker "
+            f"state is UNKNOWN, not clean")
+        return {"searchable_placeholders": 0, "answerable_placeholders": 0,
+                "answered_kinds": [], "handoff_markers": 0,
+                "handoff_marker_files": [], "handoff_marker_scan_error": msg}
     docs = corpus_text_documents(sources)
     searchable = []
     for name, rows in docs:
@@ -30031,15 +30144,26 @@ def placeholder_residual_report(ctx: Ctx, sb: Path, sources: list, label: str,
     # `scan_placeholders_in_sources` the evidence pack uses, so the two numbers
     # can never disagree.
     all_markers = {}
+    scan_error = ""
     try:
         all_markers = scan_placeholders_in_sources(sources)
-    except Exception:                                                 # noqa: BLE001
+    except Exception as e:                                            # noqa: BLE001
+        # A scanner failure is a CATEGORICAL GAP, not a clean package: the gate
+        # used to turn an unreadable package / scanner bug into "0 markers" and
+        # report no error, so the stage passed with its marker state unknown.
+        scan_error = f"{type(e).__name__}: {e}"
         all_markers = {}
     report = {"searchable_placeholders": len(searchable),
               "answerable_placeholders": len(answerable),
               "answered_kinds": sorted(answers),
               "handoff_markers": int(all_markers.get("count") or 0),
-              "handoff_marker_files": list(all_markers.get("files") or [])}
+              "handoff_marker_files": list(all_markers.get("files") or []),
+              "handoff_marker_scan_error": scan_error}
+    if scan_error:
+        (errs if enforce else warns).append(
+            f"{label}: the hand-off-marker scan FAILED ({scan_error}); the package's marker "
+            f"state is UNKNOWN, not clean. Fix the unreadable/broken file and re-run the "
+            f"stage -- do not ship on the strength of a scan that never ran")
     _atc = author_to_complete_mode_of(ctx)
     if report["handoff_markers"] and _atc != "document":
         # `readme` / `off`: the operator's policy is that no document carries a
@@ -33677,6 +33801,11 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
         elif is_non_submitted_readme_name(q.name):
             readme_dropped.append(q.relative_to(dst).as_posix())
             q.unlink()
+    # The generic non-shippable sweep also runs on the SUBMISSION COPY: a legacy
+    # or base pin that predates the stage-side sweep must not hand a `.pyc`, a
+    # `.DS_Store` or a `:Zone.Identifier` stub to the journal. This is a derived
+    # copy (the pin keeps its judged bytes), so the sweep is legal here.
+    non_shippable_dropped = strip_non_shippable_files_in_dir(dst).get("removed") or []
     # `name`, not `p.name`: `p` is the tracked-changes copy loop's variable
     # above, so the old generator raised UnboundLocalError whenever the guard
     # fired without any redline to copy (and otherwise named the last redline
@@ -33716,6 +33845,7 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
                        "code_included": bool(include_code),
                        "readme_files_excluded": readme_dropped,
                        "word_owner_files_excluded": word_owner_dropped,
+                       "non_shippable_files_excluded": non_shippable_dropped,
                        # The operator's own declaration (its README) and what it
                        # kept out of THIS copy.
                        "declared_submission_patterns": list(decl.get("patterns") or []),
@@ -35110,6 +35240,21 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
     # pipeline hands to the author, so ranking on it would reward under-reporting.
     rows.sort(key=champion_sort_key)
     champ_row = rows[0]
+    base_row = next((t for t in rows if t["is_base"]), None)
+    if base_row is not None and champ_row is not base_row \
+            and (champ_row["median"], champ_row["mean"], champ_row["iqr"]) == \
+            (base_row["median"], base_row["mean"], base_row["iqr"]):
+        # An exact statistical tie is not evidence of improvement: the incumbent
+        # is retained rather than replaced by a version the panel cannot
+        # distinguish from it (never reward a version merely for being different).
+        # This is strictly a panel-statistic rule (median/mean/IQR) and it
+        # OVERRIDES the leading defect prefix on purpose: a challenger with a
+        # lower defect count but an identical (median, mean, IQR) does not retire
+        # the incumbent -- a better defect count separates CHALLENGERS, it does
+        # not retire an incumbent the panel cannot distinguish from them.
+        trace.append(f"{champ_row['id']} and the base tie exactly on (median, mean, IQR) -> "
+                     f"the incumbent base is retained; a challenger must be measurably better")
+        champ_row = base_row
     trace.append(f"ranking key: (the cumulative defect count over the first "
                  f"{prefix_cells} cell(s) of the canonical severity_tier_category order "
                  f"(fatal->critical->major->minor, tier order, peer before own; the walk stops "
@@ -35120,8 +35265,9 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
                  "reported but no longer rank), median/mean/IQR are the field-wide panel "
                  "statistics below it, and the content digest is the provenance-free tie-break "
                  "(an arm's NAME never decides a tie). "
-                 "A different leading defect count is not a statistical tie; the incumbent "
-                 "is retained only when the full ranking key ties. "
+                 "An exact (median, mean, IQR) tie still keeps the incumbent base: that rule "
+                 "overrides the prefix, so a different defect count separates challengers but "
+                 "does not retire a base the panel cannot distinguish from them. "
                  "vs_base is reported but NOT a ranking key: its 2*judges directed scores are few "
                  "enough that one outlier session flips the sign statistic, so the decision stays "
                  "on the field-wide list. MANUAL_STEPS.md is reported but never ranked on; "
@@ -35646,9 +35792,9 @@ def resolve_agent_cmd(agent_name: str, agent_cmd_arg: str, use_env: bool = True)
         # approval overrides, or its tools are denied before the model can use
         # them (see MCP_APPROVALS). The preset's CLI is then read for the one
         # capability a preset cannot express as a flag: the DeepSeek Harness's
-        # one-shot form (see deepseek_harness_problem).
+        # one-shot form (see dsh_harness_problem).
         argv = agent_argv(agent_name)
-        harness_problem = deepseek_harness_problem(argv)
+        harness_problem = dsh_harness_problem(argv)
         if harness_problem:
             die(harness_problem)
         return argv
@@ -35664,7 +35810,7 @@ def _probe_dsh_headless(exe: str) -> str:
     initializes a fresh $DSH_HOME once, serially, before the parallel wave (the
     harness does that on its first session anyway). Every failure mode of the
     probe itself -- the binary vanished, it hangs, it prints something we cannot
-    read -- reports '' (see deepseek_harness_problem).
+    read -- reports '' (see dsh_harness_problem).
     """
     try:
         proc = subprocess.run([exe, "--profile", "headless", "--help"],
@@ -35722,10 +35868,10 @@ def _probe_dsh_headless(exe: str) -> str:
 _HARNESS_PROBE_CACHE = {}
 
 
-def deepseek_harness_problem(cmd) -> str:
+def dsh_harness_problem(cmd) -> str:
     """Why the PRESET's harness argv cannot run a session ('' = no problem found).
 
-    A preset can pin flags, not capabilities: `deepseek` drives the harness's
+    A preset can pin flags, not capabilities: `dsh` drives the harness's
     one-shot driver (the task on stdin, the `--json` event stream that carries
     the session id a continuation adopts), and only the BUILDS whose headless
     app declares that contract can honor it. A `dsh` that predates it would
@@ -35743,7 +35889,7 @@ def deepseek_harness_problem(cmd) -> str:
     exe = argv[0] if argv else ""
     key = (shutil.which(exe) or exe, tuple(argv))
     if key not in _HARNESS_PROBE_CACHE:
-        if argv and os.path.basename(argv[0]).lower() == str(AGENT_PRESETS["deepseek"][0]):
+        if argv and os.path.basename(argv[0]).lower() == str(AGENT_PRESETS["dsh"][0]):
             _HARNESS_PROBE_CACHE[key] = _probe_dsh_headless(argv[0])
         else:
             _HARNESS_PROBE_CACHE[key] = ""
@@ -35761,7 +35907,7 @@ def agent_install_hint(cmd) -> str:
     the operator meant it to.
     """
     name = os.path.basename(str(cmd[0])).lower() if cmd else ""
-    if name == str(AGENT_PRESETS["deepseek"][0]):
+    if name == str(AGENT_PRESETS["dsh"][0]):
         return ("\n       the DeepSeek Harness CLI (`dsh`, node >= 22) is not installed: "
                 "`npm i -g @deepseek-ai/dsh@alpha`. Its own home ($DSH_HOME, default ~/.dsh) "
                 "holds the model, the MCP servers and the DeepSeek credential "
@@ -35886,9 +36032,13 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
         pass
     failure_kind = ""
     if rc not in (0, None):
-        failure_kind = agent_failure_kind("", err)
-        if not failure_kind and not str(err).strip():
-            failure_kind = agent_failure_kind(out, "")
+        # BOTH streams, unconditionally: a CLI that puts the provider's 413 on
+        # stdout and an unrelated warning on stderr used to be classified as ""
+        # because the stdout scan ran only when stderr was empty, and the retry
+        # then resumed the same oversized session. The patterns are anchored to
+        # error-shaped lines, so scanning stdout does not flag a manuscript that
+        # merely mentions "payload too large".
+        failure_kind = agent_failure_kind(out, err)
     if failure_kind == "context_overflow":
         exc = ("the agent request exceeded the provider's payload/context limit "
                "(HTTP 413 / request too large); a continuation would resend the same "
@@ -38446,7 +38596,7 @@ def add_venue_prompt(venue_id: str, dest: Path, journal: str = "",
                     "@@VENUE@@", venue_id)
     if journal:
         text += f"\n\nTarget journal (for `journals` and the prompts): {journal}.\n"
-    return text
+    return with_context_budget(text)
 
 
 def _merge_tree(src: Path, dst: Path) -> int:
@@ -40018,7 +40168,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         else:
             # Only the codex preset carries the `-c` overrides, and they are
             # codex's own mechanism: a custom command, or a preset that is not
-            # codex (claude, deepseek), reaches the servers through ITS OWN
+            # codex (claude, dsh), reaches the servers through ITS OWN
             # configuration instead -- which this probe cannot see, so it says
             # what it actually knows.
             if getattr(args, "agent_cmd", None) or os.environ.get("PAPER_AGENT_CMD"):
@@ -40618,7 +40768,7 @@ DEFECT_AUDIT_FIELDS = tuple(DEFECT_LIST_FIELDS) + ("audit_label", "audit_reason"
 
 
 def _defect_audit_prompt(r: int, n_rows: int) -> str:
-    return F"""You are the pipeline's DEFECT AUDITOR for round {int(r)}.
+    return with_context_budget(F"""You are the pipeline's DEFECT AUDITOR for round {int(r)}.
 
 The round's judge panel filed {int(n_rows)} defect rows. They are in
 `defects.json` in this directory: one object per row of
@@ -40659,7 +40809,7 @@ Write `audit.json` in this directory with EXACTLY this schema (no extra text):
 }}
 Every defect_id from `defects.json` must appear exactly once, with label "TP" or
 "FP". Write only `audit.json`; do not modify any other file.
-"""
+""")
 
 
 def _normalize_defect_audit(data, valid_ids) -> dict:
@@ -41625,7 +41775,7 @@ def _normalize_llm_conflicts(data) -> list:
 
 
 def _judge_conflict_agent_prompt(r: int) -> str:
-    return F"""You are the pipeline's cross-judge CONFLICT AUDITOR for round {int(r)}.
+    return with_context_budget(F"""You are the pipeline's cross-judge CONFLICT AUDITOR for round {int(r)}.
 
 The pipeline has just collected the round's independent judge sessions. Two judges
 can legitimately differ by a point, but they can also CONTRADICT each other about a
@@ -41676,7 +41826,7 @@ Write `conflicts.json` in this directory with EXACTLY this schema (no extra text
 flips a comparison, `major` for a factual conflict that changes a reported value,
 and `minor` for a same-sign or bookkeeping conflict. Write only `conflicts.json`;
 do not modify any other file.
-"""
+""")
 
 
 def run_judge_conflict_agent(ctx: Ctx, r: int, payload: dict, cmd: list,
@@ -45218,6 +45368,10 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
     with a dangling pointer.
     """
     rows, names = [], [str(a) for a in (areas or ())]
+    # `work/` is process scratch: it is never carried by the submission (see
+    # CORPUS_EXCLUDE_TOP), so a written pointer at it is dangling even though the
+    # file exists in the package's working tree.
+    names += [n for n in CORPUS_EXCLUDE_TOP if n not in names]
     root = Path(root)
     if not root.is_dir():
         return rows
@@ -45270,6 +45424,10 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
         if rel.split("/", 1)[0].lower() in area_set:
             # A file inside a non-carried area is part of that area, never a
             # submission document: its own internal pointers are not findings.
+            continue
+        if rel.split("/", 1)[0].lower() in CORPUS_EXCLUDE_TOP:
+            # The stage's process scratch is never submitted; a reference in a
+            # working note is not a shipped dangling pointer.
             continue
         if is_evidence_rel(rel) or is_non_document_name(p.name) \
                 or is_bookkeeping_name(p.name) or is_non_submitted_readme_name(p.name):
@@ -45577,6 +45735,10 @@ def pkg2_reference_spans(text: str, patterns: list, index: tuple, exempt=None) -
 
 def _pkg2_build_index(dirp: Path, areas) -> tuple:
     names = [str(a) for a in (areas or ())]
+    # Process scratch is not shipped (CORPUS_EXCLUDE_TOP), so its files are
+    # "absent" for reference resolution -- a shipped sentence pointing into
+    # `work/` is dangling exactly like one pointing into `raw_data/`.
+    names += [n for n in CORPUS_EXCLUDE_TOP if n not in names]
     return (_pkg2_area_patterns(names),
             _pkg2_name_index(dirp, {n.lower() for n in names}))
 
@@ -45738,6 +45900,12 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
             continue
         rel = p.relative_to(dirp).as_posix()
         if rel.split("/", 1)[0].lower() in area_set or is_evidence_rel(rel):
+            continue
+        if rel.split("/", 1)[0].lower() in CORPUS_EXCLUDE_TOP:
+            # `work/` is the stage's own process scratch (the same exclusion
+            # every delivered-content scan and corpus manifest uses). Editing it
+            # destroyed working notes and reported scratch references as author
+            # actions; only the bytes that ship are the pointer repair's object.
             continue
         if is_word_owner_name(p.name) or _is_aux_doc(p.name) or is_bookkeeping_name(p.name) \
                 or is_non_submitted_readme_name(p.name):
@@ -48135,6 +48303,13 @@ def collect_residuals(ctx: Ctx) -> dict:
         res = rec.get("residual") or {}
         if kind in ("revise", "integrate", "rewrite"):
             _atc = author_to_complete_mode_of(ctx)
+            if res.get("handoff_marker_scan_error"):
+                # The marker COUNT is unknown; a gate that could not run must
+                # not be reported as a clean package.
+                add(f"{rid}: the hand-off-marker scan FAILED "
+                    f"({res['handoff_marker_scan_error']}); the delivered package's marker "
+                    f"state is UNKNOWN -- repair the unreadable/broken file and re-run the "
+                    f"stage before shipping", gate=True)
             if res.get("handoff_markers") and _atc != "document":
                 # `readme` / `off`: the operator's policy is that no document
                 # carries the "[AUTHOR TO COMPLETE: ...]" token, so every marker
@@ -53211,8 +53386,8 @@ USAGE_EXAMPLES = """usage:
           only): declaring the type never borrows another type's caps.
   run     --root <dir> [--jobs N] [--timeout S] [--retries 2]
           [--retry-backoff 30] [--retry-backoff-max 600]
-          [--agent codex|claude|deepseek|manual] [--agent-cmd '<json argv>']
-          [--judge-agent codex|claude|deepseek|manual] [--judge-agent-cmd '<json argv>']
+          [--agent codex|claude|dsh|manual] [--agent-cmd '<json argv>']
+          [--judge-agent codex|claude|dsh|manual] [--judge-agent-cmd '<json argv>']
           [--poll S] [--skip-hash]
           drive rounds 1..R as a DEPENDENCY GRAPH: every session starts as soon
           as its inputs exist (the M rewrites and the round's review start
@@ -53469,7 +53644,7 @@ agent backends:
   --agent codex (default) `codex exec -`, plus a `-c` override per MCP server
   the prompts drive (an MCP call that wants approval is DENIED, not queued, in
   a non-interactive session: approval policy is `never`)   |   --agent claude
-  `claude --permission-mode bypassPermissions --print`   |   --agent deepseek
+  `claude --permission-mode bypassPermissions --print`   |   --agent dsh
   the DeepSeek Harness CLI: `dsh --profile headless --json -` (prompt on
   stdin, one fresh persisted session per attempt; the harness's own home
   $DSH_HOME owns the model, the DEEPSEEK_API_KEY credential and its MCP
@@ -53956,7 +54131,7 @@ def build_parser() -> argparse.ArgumentParser:
                          f"{DEFAULTS['retry_backoff_max']})")
     run_opts.add_argument("--agent", choices=list(AGENT_CHOICES), default=DEFAULTS["agent"],
                     help="the session backend: codex (default) = `codex exec -`, claude = "
-                         "`claude --permission-mode bypassPermissions --print`, deepseek = the "
+                         "`claude --permission-mode bypassPermissions --print`, dsh = the "
                          "DeepSeek Harness CLI (`dsh --profile headless --json -`, installed "
                          "separately), manual = stage every prompt for a human; --agent-cmd "
                          "overrides any of them")
@@ -53970,7 +54145,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_opts.add_argument("--judge-agent", choices=list(AGENT_CHOICES), default=None,
                     help="backend for judge sessions only (default: same as --agent); the judge "
                          "panel dominates cost, so this lets it run on a different CLI/model "
-                         "(deepseek = the DeepSeek Harness `dsh`)")
+                         "(dsh = the DeepSeek Harness CLI)")
     run_opts.add_argument("--judge-agent-cmd", default=None,
                     help="JSON argv list for judge sessions only (default: --agent-cmd)")
     run_opts.add_argument("--poll", type=int, default=DEFAULTS["poll"],
@@ -54136,7 +54311,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="audit only this round (default: every round that has judge sheets)")
     pcf.add_argument("--agent", choices=list(CONFLICT_AGENT_CHOICES), default="manual",
                      help="backend for the LLM conflict audit (default: manual = the "
-                          "deterministic check only; pass codex-lite/codex/claude/deepseek, or "
+                          "deterministic check only; pass codex-lite/codex/claude/dsh, or "
                           "set PAPER_CONFLICT_AGENT_CMD, to add the LLM pass)")
     pcf.add_argument("--agent-cmd", default=None,
                      help="JSON argv list overriding the agent command")

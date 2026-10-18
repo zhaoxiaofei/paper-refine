@@ -244,13 +244,14 @@ def main() -> int:
                                  render_roots=[tmp])
         check("F3a a full visual claim with NO rendered files now FAILS",
               bool(errs) and any("no rendered page" in e for e in errs), f"errs={errs[:1]}")
-        (tmp / "page-1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (tmp / "work").mkdir()
+        (tmp / "work" / "page-1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
         errs, warns = [], []
         nb.check_visual_artifact(art, "the visual-inspection record", errs, warns,
                                  render_roots=[tmp])
         check("F3b the same claim with a rendered page passes",
               not errs, f"errs={errs[:1]}")
-        (tmp / "page-1.png").unlink()
+        (tmp / "work" / "page-1.png").unlink()
         art.write_text("Renderer: none available. All pages NOT visually verified; "
                        "rendering handed to the author in MANUAL_STEPS.md.\n")
         errs, warns = [], []

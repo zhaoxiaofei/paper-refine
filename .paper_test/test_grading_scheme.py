@@ -295,15 +295,15 @@ check("B2 a floor of 0 stops at the first cell and falls through to the digest",
       f"champion={sel_floor0['champion']} used={sel_floor0['tiebreak']['cells_used']}")
 ctx.cfg.pop("tiebreak_defect_floor", None)
 
-# An exact score tie is resolved below the leading defect prefix. A challenger
-# with a strictly better census therefore wins; it is not overridden by the
-# incumbent on median/mean/IQR alone.
+# The incumbent-retention rule stays strictly statistical: a challenger with a
+# better census cannot dethrone a base the panel cannot distinguish on
+# (median, mean, IQR).
 ctx3 = make_ctx(tmp)
 full_panel(ctx3, {})
 sel3 = np.select_champion(ctx3, 2, np.aggregate_round(ctx3, 2, FIELD))
-check("B2 a better census wins an otherwise exact score tie",
-      sel3["champion"] != "a1"
-      and all("incumbent base is retained" not in ln for ln in sel3["trace"]),
+check("B2 the census never dethrones the incumbent on an exact statistical tie",
+      sel3["champion_rep"] == "r1_a2"
+      and any("incumbent base is retained" in ln for ln in sel3["trace"]),
       f"champion={sel3['champion']} rep={sel3['champion_rep']}")
 
 # the frozen-review cross-check source: category 2 only

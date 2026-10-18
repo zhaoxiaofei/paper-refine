@@ -454,16 +454,22 @@ def _champion_fixture(root: Path):
 
 
 def test_champion_prefix() -> None:
-    print("\n== C21: the defect prefix leads the champion ranking ==")
+    print("\n== C21: the defect prefix orders the field; an exact panel tie keeps the base ==")
     root = scratch("serial_c21_")
     ctx, field = _champion_fixture(root)
     aggregate = pp.aggregate_round(ctx, 2, field)
     selected = pp.select_champion(ctx, 2, aggregate)
     ranking = {row["id"]: row for row in selected["ranking"]}
-    check("C21 the base does not win an equal-statistic tie with a worse prefix",
-          selected["champion"] != "a1"
+    # The prefix still ORDERS the rows (the base with 8 defects is last), but the
+    # documented incumbent-retention rule overrides it when the base and the
+    # leader tie exactly on (median, mean, IQR): a better defect count separates
+    # CHALLENGERS, it does not retire a base the panel cannot distinguish from
+    # them. See AGENTS.md rule 6 and README "an exact ... tie keeps the incumbent".
+    check("C21 the prefix orders the field and an exact panel tie keeps the incumbent base",
+          selected["champion"] == "a1"
           and ranking["a1"]["defect_prefix_total"] == 8
-          and min(row["defect_prefix_total"] for row in selected["ranking"]) == 0,
+          and min(row["defect_prefix_total"] for row in selected["ranking"]) == 0
+          and any("incumbent base is retained" in ln for ln in selected["trace"]),
           f"champion={selected['champion']} ranking="
           f"{[(r['id'], r['defect_prefix_total']) for r in selected['ranking']]}")
 

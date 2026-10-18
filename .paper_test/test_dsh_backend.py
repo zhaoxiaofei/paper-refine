@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""`--agent deepseek`: the DeepSeek Harness CLI (`dsh`) as a session backend.
+"""`--agent dsh`: the DeepSeek Harness CLI (`dsh`) as a session backend.
 
-Run:  python3 .paper_test/test_deepseek_backend.py
+Run:  python3 .paper_test/test_dsh_backend.py
 
-The pipeline drives `codex` and `claude` through their presets; `deepseek` is
+The pipeline drives `codex` and `claude` through their presets; `dsh` is
 the third one, and it is the only preset whose one-shot contract is a property
 of the INSTALLED build rather than of the flags the pipeline passes (the task
 on stdin via `-`, and the `--json` event stream whose opening `session` line
@@ -16,7 +16,7 @@ carries the id a continuation adopts). These checks pin every part of that:
     a fresh session would answer the continuation prompt from memory it does
     not have) -- and `capture_agent_session_id()` reading the JSON form while
     still reading the codex/claude banner forms (the LAST id wins);
-  * `deepseek_harness_problem()`: a harness whose own `--help` declares neither
+  * `dsh_harness_problem()`: a harness whose own `--help` declares neither
     `--json` nor the stdin task form is a POSITIVE finding (the run stops with
     the fix named, before a wave of sessions fails one by one), while a probe
     that cannot read the help stays silent;
@@ -42,14 +42,14 @@ from pathlib import Path
 
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
 TESTDIR = WS / ".paper_test"
-spec = importlib.util.spec_from_file_location("paper_deepseek", str(WS / "paper_pipeline.py"))
+spec = importlib.util.spec_from_file_location("paper_dsh", str(WS / "paper_pipeline.py"))
 nb = importlib.util.module_from_spec(spec)
-sys.modules["paper_deepseek"] = nb
+sys.modules["paper_dsh"] = nb
 spec.loader.exec_module(nb)
 
 FAILS = []
 TMPDIRS = []
-PRESET = list(nb.AGENT_PRESETS["deepseek"])
+PRESET = list(nb.AGENT_PRESETS["dsh"])
 # The harness names its sessions `session-<uuid>` (dsh 0.2.x).
 DSH_SID = "session-d041d42a-c2e2-4ae3-8af5-2c78d9f8bae1"
 # A codex-banner id, to prove the two id forms are read side by side.
@@ -82,8 +82,8 @@ def test_preset():
     check("the preset is the harness's one-shot form: task on stdin, JSON events",
           PRESET == ["dsh", "--profile", "headless", "--json", "-"], str(PRESET))
     check("agent_argv() returns it unchanged (no codex-only MCP `-c` overrides)",
-          nb.agent_argv("deepseek") == PRESET, str(nb.agent_argv("deepseek")))
-    # The resolver reads the INSTALLED harness (see deepseek_harness_problem), so
+          nb.agent_argv("dsh") == PRESET, str(nb.agent_argv("dsh")))
+    # The resolver reads the INSTALLED harness (see dsh_harness_problem), so
     # this check runs against a controlled PATH: the machine's own `dsh` must
     # not decide whether the suite passes (it is what the probe is for, and
     # test_probe covers every verdict on it).
@@ -94,7 +94,7 @@ def test_preset():
     os.environ["FAKE_DSH_MODE"] = "finish"
     try:
         check("resolve_agent_cmd() accepts the preset name",
-              nb.resolve_agent_cmd("deepseek", None, use_env=False) == PRESET)
+              nb.resolve_agent_cmd("dsh", None, use_env=False) == PRESET)
     finally:
         os.environ["PATH"] = real_path
         if real_mode is None:
@@ -103,18 +103,18 @@ def test_preset():
             os.environ["FAKE_DSH_MODE"] = real_mode
         nb._HARNESS_PROBE_CACHE.clear()
     check("every --agent/--judge-agent parser offers it, and 'manual' stays offered",
-          list(nb.AGENT_CHOICES) == ["codex", "claude", "deepseek", "manual"]
-          and list(nb.CONFLICT_AGENT_CHOICES) == ["codex-lite", "codex", "claude", "deepseek",
+          list(nb.AGENT_CHOICES) == ["codex", "claude", "dsh", "manual"]
+          and list(nb.CONFLICT_AGENT_CHOICES) == ["codex-lite", "codex", "claude", "dsh",
                                                  "manual"],
           str(nb.AGENT_CHOICES))
     parser = nb.build_parser()
-    got = parser.parse_args(["run", "--root", "/tmp/x", "--agent", "deepseek",
-                             "--judge-agent", "deepseek"])
-    check("`run --agent deepseek --judge-agent deepseek` parses",
-          got.agent == "deepseek" and got.judge_agent == "deepseek")
+    got = parser.parse_args(["run", "--root", "/tmp/x", "--agent", "dsh",
+                             "--judge-agent", "dsh"])
+    check("`run --agent dsh --judge-agent dsh` parses",
+          got.agent == "dsh" and got.judge_agent == "dsh")
     check("the conflict audit offers it too",
-          parser.parse_args(["conflicts", "--root", "/tmp/x", "--agent", "deepseek"]).agent
-          == "deepseek")
+          parser.parse_args(["conflicts", "--root", "/tmp/x", "--agent", "dsh"]).agent
+          == "dsh")
     check("the harness binary counts as a shipped preset CLI (not a stub)",
           nb._looks_like_preset_cmd(PRESET)
           and not nb._looks_like_preset_cmd(["python3", "stub_agent.py"]))
@@ -192,7 +192,7 @@ def test_probe():
             os.environ["PATH"] = f"{bindir}{os.pathsep}{real}"
             os.environ["FAKE_DSH_MODE"] = mode
             nb._HARNESS_PROBE_CACHE.clear()
-            problem = nb.deepseek_harness_problem(PRESET)
+            problem = nb.dsh_harness_problem(PRESET)
             check(f"{why}: problem={'named' if expect_problem else 'silent'}",
                   bool(problem) is expect_problem, problem[:120])
         # The verdict is cached per RESOLVED BINARY: pointing PATH at a good
@@ -202,17 +202,17 @@ def test_probe():
         os.environ["PATH"] = f"{bindir}{os.pathsep}{real}"
         os.environ["FAKE_DSH_MODE"] = "finish"
         check("the probe's cache follows PATH, not the bare name",
-              nb.deepseek_harness_problem(PRESET) == "")
+              nb.dsh_harness_problem(PRESET) == "")
         # An operator's own command is never probed and never blocked, whatever
         # the `dsh` on PATH looks like.
         bindir = make_fake_dsh(tmp / "bin_old_again", mode="old")
         os.environ["PATH"] = f"{bindir}{os.pathsep}{real}"
         os.environ["FAKE_DSH_MODE"] = "old"
         check("an explicit --agent-cmd wins over the preset and is not probed",
-              nb.resolve_agent_cmd("deepseek", '["myagent", "--flag"]') == ["myagent", "--flag"])
+              nb.resolve_agent_cmd("dsh", '["myagent", "--flag"]') == ["myagent", "--flag"])
         with contextlib.redirect_stderr(io.StringIO()):       # the die prints its reason
             try:
-                nb.resolve_agent_cmd("deepseek", None, use_env=False)
+                nb.resolve_agent_cmd("dsh", None, use_env=False)
                 refused = False
             except SystemExit:
                 refused = True
@@ -221,7 +221,7 @@ def test_probe():
         os.environ["PATH"] = real
         nb._HARNESS_PROBE_CACHE.clear()
         check("a binary that does not run at all stays silent (the sessions will speak)",
-              nb.deepseek_harness_problem(["definitely-not-a-real-dsh-binary"]) == "")
+              nb.dsh_harness_problem(["definitely-not-a-real-dsh-binary"]) == "")
     finally:
         os.environ["PATH"] = real
         if real_mode is None:
@@ -247,7 +247,7 @@ def test_probe():
 # Every invocation appends one JSON line to $FAKE_DSH_LOG: argv, cwd, the
 # sha256 of the stdin text, and the adopted session id (when one was given).
 FAKE_DSH = '''#!/usr/bin/env python3
-"""A stand-in for `dsh` (see .paper_test/test_deepseek_backend.py)."""
+"""A stand-in for `dsh` (see .paper_test/test_dsh_backend.py)."""
 import hashlib, json, os, sys
 
 TESTDIR = "__TESTDIR__"
@@ -364,7 +364,7 @@ def run_with_fake_dsh(root: Path, bindir: Path, *extra):
     env["FAKE_DSH_MODE"] = (bindir / "mode").read_text(encoding="utf-8").strip()
     env["FAKE_DSH_LOG"] = str(bindir.parent / "calls.jsonl")
     return subprocess.run([sys.executable, str(root / "paper_pipeline.py"), "run",
-                           "--root", str(root), "--only", "rewrite", "--agent", "deepseek",
+                           "--root", str(root), "--only", "rewrite", "--agent", "dsh",
                            *extra],
                           capture_output=True, text=True, timeout=1800, env=env)
 
@@ -471,11 +471,11 @@ def main() -> int:
         cleanup()
     print()
     if FAILS:
-        print(f"{len(FAILS)} DEEPSEEK-BACKEND CHECK(S) FAILED")
+        print(f"{len(FAILS)} DSH-BACKEND CHECK(S) FAILED")
         for f in FAILS:
             print(f"  - {f}")
         return 1
-    print("ALL DEEPSEEK-BACKEND CHECKS PASSED")
+    print("ALL DSH-BACKEND CHECKS PASSED")
     return 0
 
 

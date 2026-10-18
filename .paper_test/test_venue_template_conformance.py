@@ -2108,8 +2108,8 @@ def test_visual_template_render_and_comparison():
     # The record gate: with the template render seeded, the visual artifact must
     # name each template document with its page count and report the comparison.
     target = sb / "target"
-    target.mkdir()
-    (target / "rendered.pdf").write_bytes(b"%PDF-1.4\n")
+    (target / "work").mkdir(parents=True)
+    (target / "work" / "rendered.pdf").write_bytes(b"%PDF-1.4\n")
     art = sb / "VISUAL_CHECK.md"
     art.write_text(
         "Rendered every page with the fake Word renderer and looked at them.\n\n"
@@ -2140,8 +2140,8 @@ def test_visual_template_render_and_comparison():
     # against, so the gate stays open -- the record's own honesty rules apply.
     sb2 = tmp / "sandbox2"
     (sb2 / "visual_template").mkdir(parents=True)
-    (sb2 / "target").mkdir()
-    (sb2 / "target" / "rendered.pdf").write_bytes(b"%PDF-1.4\n")
+    (sb2 / "target" / "work").mkdir(parents=True)
+    (sb2 / "target" / "work" / "rendered.pdf").write_bytes(b"%PDF-1.4\n")
     nb.write_json_atomic(sb2 / "visual_template" / "manifest.json",
                          {"renderer": "none",
                           "documents": [{"role": "main", "source": "Fake_Template.docx",

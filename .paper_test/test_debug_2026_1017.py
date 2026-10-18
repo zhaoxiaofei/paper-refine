@@ -186,7 +186,7 @@ def test_harness_probe_names_the_missing_half():
         fake.chmod(0o755)
         os.environ["PATH"] = f"{bindir}{os.pathsep}{real_path}"
         pp._HARNESS_PROBE_CACHE.clear()
-        problem = pp.deepseek_harness_problem(["dsh", "--profile", "headless", "--json", "-"])
+        problem = pp.dsh_harness_problem(["dsh", "--profile", "headless", "--json", "-"])
         check("a build WITHOUT the stdin task form is still refused",
               "cannot run this pipeline's sessions" in problem, problem[:90])
         check("and the report names the half that is actually missing",
@@ -200,7 +200,7 @@ def test_harness_probe_names_the_missing_half():
             "  exit 0;;\nesac\nexit 1\n", encoding="utf-8")
         (bindir / "dsh").chmod(0o755)
         pp._HARNESS_PROBE_CACHE.clear()
-        problem2 = pp.deepseek_harness_problem(["dsh", "--profile", "headless", "--json", "-"])
+        problem2 = pp.dsh_harness_problem(["dsh", "--profile", "headless", "--json", "-"])
         check("a build WITHOUT `--json` is named the same way",
               "no `--json` flag" in problem2 and "declares neither" not in problem2,
               problem2[:200])
