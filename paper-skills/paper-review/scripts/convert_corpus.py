@@ -72,10 +72,14 @@ BINARY_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".gif", ".svg", ".eps",
 ROLE_PATTERNS = [
     ("title page", re.compile(r"title|titlepage|first_page", re.I)),
     ("abstract", re.compile(r"abstract", re.I)),
-    ("main text", re.compile(r"manuscript|main|article|paper|(?:^|[_\-. ])ms(?:[_\-. ]|$)", re.I)),
+    ("main text", re.compile(
+        r"(?<![a-z])(?:manuscript|main(?:text)?|article|paper)(?![a-z])"
+        r"|(?:^|[_\-. ])ms(?:[_\-. ]|$)", re.I)),
     ("methods", re.compile(r"methods|m&m", re.I)),
     ("references", re.compile(r"\brefs?\b|\breferences?\b|bibliograph|\.bib$", re.I)),
-    ("supplementary", re.compile(r"supp|extended_?data|appendix", re.I)),
+    ("supplementary", re.compile(
+        r"(?<![a-z])supp(?:l(?:ement\w*)?|lement\w*)?(?![a-z])"
+        r"|extended_?data|appendix", re.I)),
     ("figure", re.compile(r"\bfig|figure|legend", re.I)),
     ("table", re.compile(r"table", re.I)),
     ("reporting summary", re.compile(r"reporting|summary", re.I)),
@@ -90,7 +94,8 @@ ROLE_PATTERNS = [
 # `coverLetter` and `plainLetter` are the letter while `discovery`, `coverage`
 # and `newsletter` are not.
 COVER_LETTER_ROLE_RE = re.compile(
-    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))(?:[Cc]over|COVER)(?![a-z])"
+    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))"
+    r"(?:[Cc]over|COVER|(?i:coverletter|plainletter))(?![a-z])"
     r"|(?i:letter_to_editor|tocover)")
 
 RAW_DATA_DIRNAMES = ("raw_data", "raw_figs")

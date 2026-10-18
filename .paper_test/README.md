@@ -2,8 +2,12 @@
 
 Self-contained repro/regression suites for `paper_pipeline.py`,
 `paper_docx_format.py`, `paper_redlines_adapter.py` and the `paper-skills/`
-pack. They need nothing but
-Python 3 (standard library); a suite takes seconds to a few minutes (the slowest
+pack. They need Python 3, plus two third-party packages for two suites:
+`python-docx` (the Word fixtures in
+`test_debug_2026_1017_serial_audit.py`) and `openpyxl` (the workbook checks in
+`test_pairwise_scores.py`). Install them with
+`python3 -m pip install python-docx openpyxl`; every other suite uses only the
+standard library. A suite takes seconds to a few minutes (the slowest
 ones wait on stub-agent sleeps, LibreOffice and pdflatex), and every suite
 prints one `[ok ]`/`[FAIL]` line per check and exits non-zero if any check
 fails.

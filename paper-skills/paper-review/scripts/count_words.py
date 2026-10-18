@@ -22,7 +22,8 @@ text is a legend even though its "Figure N" label is added at typesetting time.
 
 The cover letter is counted twice: its PERSUADING part against the user's
 300-500-word preference, and its TOTAL content (salutation, body, disclosures
-and signature) against the operator's 650-word default cap.
+and signature) against the profile's `cover_letter.total_max` when one is set;
+the shipped profiles record no total cap.
 
 This script assumes NO journal: without a profile it only COUNTS (no cap). Pass
 `--venue-profile venue_profiles/<id>.json` to read the limits from the profile
@@ -128,7 +129,10 @@ def strip_tex_comment(text: str) -> str:
 ABSTRACT_RELAXATION = 1.10
 MAIN_TEXT_RELAXATION = 1.25
 COVER_LETTER_MIN = 300
-COVER_LETTER_TOTAL_MAX = 650   # the operator's TOTAL-content cap (salutation..signature)
+# No built-in TOTAL-content cap: the shipped profiles record none, and the
+# pipeline reports no total cap for them. A profile may set
+# `cover_letter.total_max`; that value is the operator's cap.
+COVER_LETTER_TOTAL_MAX = None
 COVER_LETTER_MAX = 500
 
 
@@ -448,7 +452,8 @@ AUTHORED_REPLY_RE = re.compile(
 # substring. A word starts at the start, after a non-letter, or at a lower->UPPER
 # camelCase boundary; it ends at a non-lowercase character.
 _COVER_WORD_RE = re.compile(
-    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))(?:[Cc]over|COVER)(?![a-z])")
+    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))"
+    r"(?:[Cc]over|COVER|(?i:coverletter|plainletter))(?![a-z])")
 
 
 def is_evidence_path(path: str) -> bool:
@@ -606,12 +611,9 @@ def main(argv=None) -> int:
         cover_min = cover.get("min", cover_min)
         cover_max = cover.get("max", cover_max)
         # A profile is authoritative: an absent total_max MEANS "no TOTAL cap"
-        # (the pipeline's rule), never the built-in default venue's 650. Only
-        # the no-profile path keeps the built-in default.
-        if args.venue_profile:
-            cover_total_max = cover.get("total_max")
-        else:
-            cover_total_max = cover.get("total_max", cover_total_max)
+        # (the pipeline's rule). The no-profile path has no built-in cap either,
+        # so the total count is reported without one.
+        cover_total_max = cover.get("total_max") if args.venue_profile else None
         if not limits:
             print(f"note: {args.venue_profile} carries no numbers for "
                   f"{type_id or 'its default type'}; reporting counts with no cap",

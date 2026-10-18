@@ -5932,7 +5932,7 @@ def cover_letter_page_row(path: Path, pages, source: str) -> dict:
 # "cover_letters.docx" still names the letter.
 _WORD_EDGE = r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))"
 COVER_LETTER_NAME_RE = re.compile(
-    _WORD_EDGE + r"(?:[Cc]over|COVER)(?![a-z])"
+    _WORD_EDGE + r"(?:[Cc]over|COVER|(?i:coverletter))(?![a-z])"
     r"|" + _WORD_EDGE + r"(?:[Ll]etter|LETTER)s?(?![a-z])")
 NON_COVER_LETTER_NAME_RE = re.compile(
     r"response|repl(?:y|ies)|rebuttal|point[\s_-]?by[\s_-]?point|"

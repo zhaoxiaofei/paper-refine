@@ -4148,7 +4148,8 @@ JOURNAL_AUTHORED_REPLY_RE = re.compile(
 # word starts at the string's start, after a non-letter, or at a lower->UPPER
 # camelCase boundary, and ends at a non-lowercase character.
 _COVER_WORD_RE = re.compile(
-    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))(?:[Cc]over|COVER|(?i:coverletter))(?![a-z])")
+    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))"
+    r"(?:[Cc]over|COVER|(?i:coverletter|plainletter))(?![a-z])")
 # The reply-only spelling for the written-surface scans: a cover letter IS a
 # submission document (M19 counts it as one), a response-to-reviewers is not
 # manuscript prose.
@@ -5912,14 +5913,14 @@ def _caps_clause(profile: VenueProfile, *, article: bool = False) -> str:
     return clause
 
 
-def _cover_preference_clause(profile: VenueProfile) -> str:
-    """The cover-letter preference as words (`300-500`, `at most 200`, `at least 300`).
+def _cover_bound_text(lo, hi) -> str:
+    """A cover-letter preference in words, one-sided bounds included.
 
-    A venue may state only one side (Frontiers states a 200-word maximum for the
-    submission system's scope statement); the clause then carries that side alone.
+    `300-500 words`, `at most 200 words`, `at least 300 words`, or "" when the
+    profile states neither side. The row note and the decision line both read
+    this, so a one-sided profile can never render as "None-200" or as "no
+    preference" while `within_preference` is false.
     """
-    cover = _as_profile(profile).length_limits()["cover letter"]
-    lo, hi = cover.get("min"), cover.get("max")
     if lo is None and hi is None:
         return ""
     if lo is None:
@@ -5927,6 +5928,16 @@ def _cover_preference_clause(profile: VenueProfile) -> str:
     if hi is None:
         return f"at least {lo} words"
     return f"{lo}-{hi} words"
+
+
+def _cover_preference_clause(profile: VenueProfile) -> str:
+    """The cover-letter preference as words (`300-500`, `at most 200`, `at least 300`).
+
+    A venue may state only one side (Frontiers states a 200-word maximum for the
+    submission system's scope statement); the clause then carries that side alone.
+    """
+    cover = _as_profile(profile).length_limits()["cover letter"]
+    return _cover_bound_text(cover.get("min"), cover.get("max"))
 
 
 def cover_letter_guidance(profile=None) -> dict:
@@ -13811,7 +13822,7 @@ def _is_cover_letter_lines(lines: list, name: str = "", manuscript_names=()) -> 
     if _name_is_article_type_manuscript(name, manuscript_names):
         return False
     tokens = _document_role_tokens(name)
-    if "cover" in tokens or "coverletter" in tokens:
+    if "cover" in tokens or "coverletter" in tokens or "letter" in tokens:
         return True
     for raw in lines[:12]:
         if LENGTH_COVER_SALUTATION_RE.match((raw or "").strip()):
@@ -13853,6 +13864,15 @@ def _cover_letter_row(lines: list, doc: str, limits: dict = None, profile=None) 
     over_total = total_max is not None and total_words > total_max
     within = ((pref_min is None or words >= pref_min)
               and (pref_max is None or words <= pref_max))
+    pref_text = _cover_bound_text(pref_min, pref_max)
+    if pref_min is not None and pref_max is not None:
+        pref_clause = (f"; the {pref_min}-{pref_max} range is the user's preference, not "
+                       f"{_indefinite(prof.short)} limit")
+    elif pref_text:
+        pref_clause = (f"; the user's preference is {pref_text}, not "
+                       f"{_indefinite(prof.short)} limit")
+    else:
+        pref_clause = "; this venue profile configures no cover-letter preference"
     return {"document": doc, "section": "cover letter", "words": words,
             "total_words": total_words, "total_max": total_max,
             "base": None, "relaxation": None, "cap": None,
@@ -13869,9 +13889,7 @@ def _cover_letter_row(lines: list, doc: str, limits: dict = None, profile=None) 
             "source": cover.get("source") or "",
             "note": (f"persuading part only (salutation, signature and required disclosures "
                      f"excluded)"
-                     + (f"; the {pref_min}-{pref_max} range is the user's preference, not "
-                        f"{_indefinite(prof.short)} limit" if pref_min is not None else
-                        "; this venue profile configures no cover-letter preference")
+                     + pref_clause
                      + (f"; TOTAL content {total_words} words against the operator's "
                         f"{total_max}-word cap" if total_max is not None else ""))}
 
@@ -14038,7 +14056,9 @@ def length_note(info) -> str:
     cover_max = limits["cover letter"].get("max")
     if pref_n:
         # Name the venue the preference is NOT: "not an NBT limit" for the
-        # default profile, the generic noun when the profile has no brand.
+        # default profile, the generic noun when the profile has no brand. A
+        # one-sided profile is printed as that side ("at most 200 words"), never
+        # as "None-200" or "no preference".
         preference_owner = "a venue limit"
         venue_id = str(info.get("venue") or "").strip()
         if venue_id:
@@ -14046,9 +14066,13 @@ def length_note(info) -> str:
                 preference_owner = f"{_indefinite(load_venue_profile(venue_id).short)} limit"
             except VenueProfileError:
                 pass
-        tail += (f"; {pref_n} cover letter(s) outside the user's {cover_min}-"
-                 f"{cover_max}-word preference (the user's preference, not {preference_owner}, "
-                 f"never a gate)")
+        if cover_min is not None and cover_max is not None:
+            pref_label = f"the user's {cover_min}-{cover_max}-word preference"
+        else:
+            pref_label = (f"the user's cover-letter preference "
+                          f"({_cover_bound_text(cover_min, cover_max)})")
+        tail += (f"; {pref_n} cover letter(s) outside {pref_label} (the user's preference, "
+                 f"not {preference_owner}, never a gate)")
     return (f"{len(rows)} section(s) "
             f"[{', '.join(parts[:6])}] ({caps_text}{tail})")
 
@@ -16309,6 +16333,22 @@ def _format_fix_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, warns: list,
     if errs is None:
         errs = []
 
+    # A stage package is the session's OWN output directory, written inside the
+    # sandbox. A symlinked `revised/` (or `rewritten/`, `integrated/`) is not
+    # that directory: every destructive pass below would follow the link and
+    # rewrite/delete the TARGET's files while the postcheck reports a normal
+    # package. Refuse it before any helper runs -- the hand-off README move,
+    # the format normalizer and the non-shippable/PKG-2 sweeps all write.
+    if Path(pkg_dir).is_symlink():
+        errs.append(
+            f"{rec['id']}: {Path(pkg_dir).name}/ is a SYMLINK; a stage package must be a "
+            f"real directory inside the run sandbox. Refusing to normalize or sweep it "
+            f"(the linked target is outside this stage's output)")
+        rec["format_fix"] = {"label": rec.get("id"),
+                             "skipped": "symlinked package root",
+                             "symlink": str(Path(pkg_dir))}
+        return rec["format_fix"]
+
     # `author_to_complete: readme` (the default): the stage's missing-item
     # hand-off belongs in the package's README, beside the cover letter and main
     # text. The prompt asks the session to write it; if the session instead left
@@ -18227,6 +18267,17 @@ def scan_placeholders_in_sources(sources: list) -> dict:
             texts = None
             if ext == ".docx":
                 texts = _docx_paragraphs(p)
+            elif ext == ".pdf":
+                # An accepted PDF is a submission rendering, not a document the
+                # OOXML reader can open. Read its text when poppler exists (so a
+                # real letter/statement is still marker-scanned); only an
+                # untextractable PDF is UNKNOWN below.
+                _pdf_text_value = _pdf_text(p)
+                if _pdf_text_value:
+                    texts = _pdf_text_value.splitlines()
+                else:
+                    unparsed.append(prefix + rel)
+                    continue
             elif ext in PLACEHOLDER_SOURCE_EXTS:
                 try:
                     texts = p.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -18725,6 +18776,12 @@ def strip_non_shippable_files_in_dir(dirp: Path) -> dict:
     """
     out = {"removed": [], "kept_in_evidence": []}
     dirp = Path(dirp)
+    if dirp.is_symlink():
+        # `rglob` would descend through a root link and `unlink()` the target's
+        # files. A package root is a real directory; a link is a different tree
+        # and is never this function's to delete.
+        out["skipped_symlink"] = str(dirp)
+        return out
     if not dirp.is_dir():
         return out
     for q in sorted(dirp.rglob("*")):
@@ -25208,7 +25265,11 @@ def render_evidence_files(render_roots) -> list:
                     parts = p.relative_to(root).parts
                 except ValueError:
                     continue
-                if "work" in parts[:-1]:
+                if parts and parts[0] == "work":
+                    # The documented scratch location is the TOP-LEVEL `work/`
+                    # of the session's own OUT. A package figure under
+                    # `figures/work/` (or any other nested `work/`) is still
+                    # submission content, not evidence of a render.
                     out.append(p)
         except OSError:
             continue
@@ -28881,9 +28942,61 @@ AGENT_CONTEXT_OVERFLOW_RE = re.compile(
     r")")
 
 
+# A stdout line is evidence of a PROVIDER failure only when the line itself is
+# error-shaped. The overflow regex above must stay broad enough to recognise a
+# provider's own wording; applied to a session's normal output it also matched
+# manuscript prose ("... the maximum context length ..." / "413 cells ... too
+# large"). stderr is the provider's error channel and is scanned whole; stdout
+# is filtered to these line starts first.
+_ERROR_SHAPED_STDOUT_RE = re.compile(
+    r"(?i)^\s*(?:\[?\d{4}-\d{2}-\d{2}[T ][0-9:.,+\-Z]+\]?\s*)?"
+    r"(?:\[?(?:error|fatal|panic)\]?[:\s]+)?"
+    r"(?:error\b|fatal\b|panic\b|http(?:/\d(?:\.\d+)?)?\b|status(?:\s+code)?\b"
+    r"|unexpected\b"
+    # A bare status is error-shaped only with a payload/limit word after it:
+    # `413 cells in the request group were too large` is prose, not a status.
+    r"|\d{3}\s*[-:]?\s*(?:payload|request(?:\s+entity)?|too\s+large)\b"
+    r"|payload\b|request\s+entity\b|context_length\b"
+    r"|maximum\s+context\b|context\s+(?:length|window)\b"
+    # `prompt`/`input`/`request` alone are ordinary nouns; require the
+    # error-shaped continuation the overflow wording uses.
+    r"|prompt\s+(?:is|was|too|exceeds?|exceeded|length)\b"
+    r"|input\s+(?:is|was|too|exceeds?|exceeded|length|tokens?)\b"
+    r"|request\s+(?:body|entity|is|was|too|exceeds?|exceeded|header|size|payload)\b"
+    r"|too\s+many\s+tokens\b|length\s+limit\b"
+    # Structured error records and HTML error pages are error-shaped even when
+    # their message does not start with a keyword.
+    r"|\{\s*\"(?:error|level)\"\s*:"
+    r"|\{\s*\"type\"\s*:\s*\"[^\"]*(?:error|exceeded)\""
+    r"|<\s*(?:!doctype|html|head|title)\b)")
+
+
 def agent_failure_kind(stdout: str = "", stderr: str = "") -> str:
-    """A stable failure class read from the CLI's own transport errors."""
-    text = f"{stdout or ''}\n{stderr or ''}"
+    """A stable failure class read from the CLI's own transport errors.
+
+    Only error-shaped stdout lines are considered (the process already failed,
+    but its normal output can quote a manuscript); stderr is the error channel
+    and is read whole.
+    """
+    stdout_errors = "\n".join(
+        line for line in (stdout or "").splitlines()
+        if _ERROR_SHAPED_STDOUT_RE.match(line))
+    # A pretty-printed JSON error record is ONE document: the line filter sees
+    # only `{` / `"error": ...` lines and would drop it. A dict carrying an
+    # `error` key (or an error/exceeded `type`) is the provider's structured
+    # error channel, so its whole text is scanned.
+    _stdout_text = (stdout or "").strip()
+    if _stdout_text.startswith("{"):
+        try:
+            _structured = json.loads(_stdout_text)
+        except (TypeError, ValueError):
+            _structured = None
+        if isinstance(_structured, dict) and (
+                "error" in _structured
+                or str(_structured.get("type") or "").lower().endswith(
+                    ("error", "exceeded"))):
+            stdout_errors = f"{stdout_errors}\n{_stdout_text}"
+    text = f"{stdout_errors}\n{stderr or ''}"
     if AGENT_CONTEXT_OVERFLOW_RE.search(text):
         return "context_overflow"
     return ""
@@ -30128,7 +30241,8 @@ def placeholder_residual_report(ctx: Ctx, sb: Path, sources: list, label: str,
             f"state is UNKNOWN, not clean")
         return {"searchable_placeholders": 0, "answerable_placeholders": 0,
                 "answered_kinds": [], "handoff_markers": 0,
-                "handoff_marker_files": [], "handoff_marker_scan_error": msg}
+                "handoff_marker_files": [], "handoff_marker_unparsed": [],
+                "handoff_marker_scan_error": msg}
     docs = corpus_text_documents(sources)
     searchable = []
     for name, rows in docs:
@@ -30153,18 +30267,45 @@ def placeholder_residual_report(ctx: Ctx, sb: Path, sources: list, label: str,
         # report no error, so the stage passed with its marker state unknown.
         scan_error = f"{type(e).__name__}: {e}"
         all_markers = {}
+    _atc = author_to_complete_mode_of(ctx)
+    unparsed_markers = list(all_markers.get("unparsed") or [])
+    # A PDF/PPT is an accepted submission RENDERING the pipeline does not edit:
+    # it is reported as unparsed, but it must not fail a normal package that
+    # ships one (the repository accepts PDF reporting summaries/figures). An
+    # editable document the scan could not read IS a gating unknown.
+    _marker_doc_exts = (".doc", ".docx", ".rtf")
+    unparsed_docs = [rel for rel in unparsed_markers
+                     if Path(rel).suffix.lower() in _marker_doc_exts]
+    if unparsed_docs and _atc != "document":
+        # The scanner RETURNS the files it could not read (a malformed DOCX, an
+        # unreadable file) instead of raising. Under `readme`/`off` a marker in
+        # one of those files is a defect the gate cannot see, so the count is
+        # UNKNOWN -- never "0 markers, clean". Under `document` the marker is
+        # legitimate, so this stays a warning below.
+        _gap = ("the hand-off-marker scan could not READ "
+                + ", ".join(unparsed_docs[:5])
+                + (f" (+{len(unparsed_docs) - 5} more)"
+                   if len(unparsed_docs) > 5 else "")
+                + " (no text extractor for that format, or the file is unreadable)")
+        scan_error = f"{scan_error}; {_gap}" if scan_error else _gap
     report = {"searchable_placeholders": len(searchable),
               "answerable_placeholders": len(answerable),
               "answered_kinds": sorted(answers),
               "handoff_markers": int(all_markers.get("count") or 0),
               "handoff_marker_files": list(all_markers.get("files") or []),
+              "handoff_marker_unparsed": unparsed_markers,
               "handoff_marker_scan_error": scan_error}
     if scan_error:
         (errs if enforce else warns).append(
             f"{label}: the hand-off-marker scan FAILED ({scan_error}); the package's marker "
             f"state is UNKNOWN, not clean. Fix the unreadable/broken file and re-run the "
             f"stage -- do not ship on the strength of a scan that never ran")
-    _atc = author_to_complete_mode_of(ctx)
+    elif unparsed_markers:
+        warns.append(
+            f"{label}: {len(unparsed_markers)} document(s) could not be read for hand-off "
+            f"markers ({', '.join(unparsed_markers[:5])}); under "
+            f"`author_to_complete: {_atc}` a marker in one would be invisible to this scan, "
+            f"so the marker count is a LOWER BOUND, not a clean result")
     if report["handoff_markers"] and _atc != "document":
         # `readme` / `off`: the operator's policy is that no document carries a
         # marker, so a package that carries one is not deliverable -- the
@@ -45874,6 +46015,13 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
     report = {"label": label, "areas": [str(a) for a in (areas or ())],
               "files": [], "removed": 0, "removed_links": 0, "skipped": 0,
               "remaining": [], "ok": True}
+    if dirp.is_symlink():
+        # `rglob` follows the root link, so the loop below would rewrite
+        # documents in the TARGET tree. The package root is a real directory;
+        # a link is never the stage's own package to edit.
+        report["skipped_note"] = f"{dirp} is a symlink; refusing to rewrite through it"
+        report["ok"] = False
+        return report
     if not dirp.is_dir():
         report["skipped_note"] = f"{dirp} is not a directory"
         return report
@@ -45897,6 +46045,11 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
 
     for p in sorted(dirp.rglob("*")):
         if not p.is_file():
+            continue
+        if p.is_symlink():
+            # A document symlink points at a file this package does not own:
+            # `read_text`/`write_text` would rewrite the target. The link is
+            # reported by the re-scan, never edited.
             continue
         rel = p.relative_to(dirp).as_posix()
         if rel.split("/", 1)[0].lower() in area_set or is_evidence_rel(rel):

@@ -37,7 +37,14 @@ _REPLY_RE = re.compile(r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?poin
 # `recovered_samples.md` a cover letter (forcing them into the submission runs)
 # and masked a reply file whose name merely contains the substring.
 _COVER_WORD_RE = re.compile(
-    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))(?:[Cc]over|COVER)(?![a-z])")
+    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))"
+    r"(?:[Cc]over|COVER|(?i:coverletter|plainletter))(?![a-z])")
+# The supplement role is a WORD too: the old `"supp" in f` swept `support.docx`
+# and `suppress.md` as supplementary text, exactly the files the pipeline keeps
+# as main text. `supp`, `suppl`, `supplement*` and `supplementary` still match.
+SUPP_ROLE_RE = re.compile(
+    r"(?<![a-z])supp(?:l(?:ement\w*)?|lement\w*)?(?![a-z])"
+    r"|extended_?data|appendix", re.I)
 
 
 def is_non_manuscript(name: str) -> bool:
@@ -195,7 +202,7 @@ def classify_context(fname):
     if REF_ROLE_RE.search(f) or "bibliograph" in f or re.search(r"\.bib(\.|$)", raw):
         return "references"
     if "abstract" in f: return "abstract"
-    if "supp" in f or "extended_data" in f or "appendix" in f: return "supplementary"
+    if SUPP_ROLE_RE.search(f): return "supplementary"
     if "method" in f or "m&m" in f: return "Methods"
     if "fig" in f or "legend" in f: return "figure legend"
     if "table" in f: return "table"

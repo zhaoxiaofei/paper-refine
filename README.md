@@ -582,13 +582,14 @@ submission:
   root records the selected type, and the prompts, the M19 caps and the
   decision report follow it.
 
-The **cover letter** has two separate budgets, both reported (never gates): its
+The **cover letter** has two separate reported budgets (neither gates): its
 *persuading part* against the operator's 300–500-word preference, and its
-**TOTAL content** — salutation, body, disclosures and signature — against the
-**650-word operator cap** that ships with the default profile
-(`cover_letter.total_max`; a profile may override it). Over the total cap, the
-fix is to trim the non-persuading boilerplate first, never a claim about the
-work.
+**TOTAL content** — salutation, body, disclosures and signature — against a
+profile's `cover_letter.total_max` when one is configured. The shipped profiles
+record no total cap (Nature Biotechnology's own guidance states none), so the
+total count is reported without a cap; add `total_max` to your own profile when
+you want an operator cap enforced. Over a configured total cap, the fix is to
+trim the non-persuading boilerplate first, never a claim about the work.
 
 **Tables and figures are venue facts too (`tables`, `figures`).** A profile may
 state where a kind of display item belongs (`placement`: `end` = together in
@@ -2899,7 +2900,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 133 suites (a few
+any failure. They are independent, so run them in parallel — 134 suites (a few
 minutes at the default 24 parallel sessions; tens of minutes sequentially):
 
 ```bash

@@ -165,7 +165,8 @@ _REPLY_RE = re.compile(r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?poin
 # `recovered_samples.md` a cover letter (forcing them into the submission runs)
 # and masked a reply file whose name merely contains the substring.
 _COVER_WORD_RE = re.compile(
-    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))(?:[Cc]over|COVER)(?![a-z])")
+    r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))"
+    r"(?:[Cc]over|COVER|(?i:coverletter|plainletter))(?![a-z])")
 
 
 def _non_manuscript(name: str) -> bool:
