@@ -209,7 +209,7 @@ evidence pack.
 | `--zotero off\|read\|edit\|apply` (`setup`; default `edit`) | the Zotero policy every stage prompt repeats: `off` = no Zotero tooling, `read` = resolve citations read-only, `edit` = the revised copy may add/edit/delete citation fields (the library stays read-only), `apply` = as `edit` plus the one allowed library write. Whichever mode is set, the code-side field-continuity gate fails a stage that drops, unlinks or malforms a live field |
 | `--vs-original-rule {median,sign}` (`setup`) | the anti-regression gate's rule: `median` (default) compares a pair's median directed score; `sign` instead requires the exact one-sided sign test over the pair's directed scores to be significant |
 | `--stop-after-no-progress K` (`setup`) | adaptive stop (default 0 = off): once K consecutive rounds pin the round's own base, `run` stops before the next round and `decide` treats the last completed round as the answer; `--rounds` stays the hard cap |
-| `--judge-agent {codex,claude,dsh,manual}` / `--judge-agent-cmd JSON` (`run`) | run the judge panel only on a different (e.g. cheaper) backend; defaults to `--agent` / `--agent-cmd` |
+| `--judge-agent {codex,claude,dsh,qwen,manual}` / `--judge-agent-cmd JSON` (`run`) | run the judge panel only on a different (e.g. cheaper) backend; defaults to `--agent` / `--agent-cmd` |
 | `--retry-backoff S` / `--retry-backoff-max S` (`run`) | exponential retry wait: base S doubling per failed attempt (default 30s), capped per wait (default 600s); 0 retries immediately |
 | `--no-wait` (`run`, manual mode) | print every currently-runnable prompt at once instead of waiting for each dependency |
 | `--require-clean-captions` (`decide`) | print the suggested-length caption report; kept for CLI compatibility — caption length is advisory, so it never exits non-zero (use exit 4/5 for real problems) |
@@ -219,7 +219,8 @@ evidence pack.
 
 * Python 3.9+ (the pipeline and both companion tools are standard-library only).
 * An agent CLI for the stage sessions: `codex` (default), `claude`, the
-  DeepSeek Harness (`dsh`, the CLI of the same name), or a custom command via
+  DeepSeek Harness (`dsh`, the CLI of the same name), Qwen3.8-27B through an
+  OpenAI-compatible vLLM endpoint (`--agent qwen`), or a custom command via
   `--agent-cmd`; `--agent manual` stages prompts for a human.
 * Optional, probed at runtime and never required: the `docx` CLI (read/render/
   diff/validate), a .docx→PDF converter (the `docx-converter` MCP tool,
@@ -268,6 +269,52 @@ Verified end to end against dsh 0.2.1-alpha.4 and 0.2.0-rc.2. Reached through a
 custom `--agent-cmd` instead (e.g. the npx form, for a machine with no global
 install), the sessions run exactly the same way but keep the custom-command
 rule: no continuation form, so a stopped session gets a fresh attempt.
+
+### `--agent qwen`: Qwen3.8-27B through an OpenAI-compatible vLLM endpoint
+
+`--agent qwen` points an existing harness at a vLLM server instead of
+reimplementing the agent loop. The adapter, `paper_qwen_agent.py`, is copied
+beside the root's driver at `setup` and travels through `sync-code`. It chooses
+the harness with `PAPER_QWEN_HARNESS`:
+
+* `codex` (default) — `codex exec` with a custom `model_provider=qwen` route.
+  The installed codex accepts only `wire_api="responses"`; vLLM exposes
+  `/v1/responses`, so the route uses it. Qwen rejects codex's `max` reasoning
+  effort; the adapter defaults to `low` (`PAPER_QWEN_REASONING_EFFORT`).
+* `dsh` — `dsh --profile headless` plus a generated `llm-pi-ai` provider patch
+  and an `agent-default-model` override for the qwen route.
+* `chat` — a direct `/v1/chat/completions` call (text-only; no tools).
+
+The endpoint is `PAPER_QWEN_BASE_URL` (default
+`http://127.0.0.1:18000/v1`), model `PAPER_QWEN_MODEL` (default
+`qwen3.8-27b`), and key `PAPER_QWEN_API_KEY` (default `dummy`; vLLM usually
+needs none). When the endpoint is not reachable the adapter starts the SSH
+tunnel:
+
+```
+ssh -p 52080 -N -L 18000:127.0.0.1:8000 zxf@101.6.31.113
+```
+
+(`PAPER_QWEN_SSH_HOST`, `PAPER_QWEN_SSH_PORT`, `PAPER_QWEN_TUNNEL_LOCAL`,
+`PAPER_QWEN_TUNNEL_REMOTE`; `PAPER_QWEN_TUNNEL=off` forbids starting it). A
+tunnel the adapter started is stopped on exit; an operator's existing tunnel is
+left alone. Check the route without running a session:
+
+```
+python3 paper_qwen_agent.py --probe          # endpoint, model, tool support
+python3 paper_qwen_agent.py --check-tools    # exit 0/1 on tool_choice=auto
+printf 'Summarize this file: ...' | python3 paper_qwen_agent.py --chat
+```
+
+**Agentic sessions need tool calls.** vLLM accepts `tool_choice=auto` only
+when started with `--enable-auto-tool-choice --tool-call-parser <parser>` (and
+a model tool template). Without that flag, dsh fails a tool-using turn and
+codex's tools are not executed; the adapter warns on a dsh run and reports the
+gap in `--probe`. `--harness chat` is a text-only route and does not complete a
+pipeline stage that must write artifacts. Set `PAPER_QWEN_REQUIRE_TOOLS=1` to
+make the tool probe a hard preflight for a production run (the default is
+warn-and-run so the adapter can still be exercised against a text-only
+endpoint).
 
 ## Evidence is not submission text: `raw_data/` and the review-feedback areas
 
@@ -2028,6 +2075,53 @@ shipped through two rounds of a real run:
   the width and restores the height — two supplementary figures of the
   2026-10-04 run were delivered 31% and 16% off their true ratio.
 
+### Round-2 regression rules (2026-10-19)
+
+The CNB and NeoHeteroclitic round-2 winners shipped classes that every
+sentence-local rule missed. These rules now enumerate them; the tests are in
+`.paper_test/test_round2_regressions_2026_1019.py`.
+
+* **`FMT-IM6`** measures a DOCX-placed raster's own text height (OCR word boxes)
+  against the placed width and the venue's `figure_text.min_pt` (Nature 5 pt,
+  Frontiers 8 pt). The CNB Figs. 2–5 measure 1.5–3.1 pt; the neohet figures
+  2.8–7.9 pt at 6.5 in.
+* **`FMT-IM4`** is now finding-tier when the venue profile states a dpi floor
+  (`image_dpi.min_dpi`: Nature 450, Frontiers 300), for embedded and standalone
+  figures.
+* **`FMT-IM5`** runs the split/case checks even when the term appears intact
+  elsewhere in the artwork, and adds an inverted/thresholded OCR pass for
+  black-on-dark labels (`Hetero`/`clitic`); a missing ImageMagick is recorded as
+  a gap, never a silent pass.
+* **`FMT-TB5`** covers allele names (`HLA-A*02:01`, `H2-K^b^`) and hyphenated
+  categorical labels; the normal `fix` path now applies the same table geometry
+  repair as `repair-layout`, so a wide MHC column no longer makes `fix` reject
+  its own output.
+* **`FMT-T9L` / `FMT-T9A` / `FMT-T9U`** enumerate logic inversions, missing
+  antecedents, and undefined coined terms (`near-invariance`, `purity floor`,
+  `metric-dependent`, `invert the downsampling`, `tests whether … because`,
+  `expected … which implies`).
+* **`FMT-CN1`** catches a count sentence ("the six metrics are …") that names
+  fewer items; **`FMT-LG1/LG2`** catch a descriptive legend that argues the
+  paper's conclusion and one enumeration with several connectives.
+* **`FMT-ST1`** parses a table's n/p rows and caption family (PDF layout and
+  LaTeX), computes the attainable Wilcoxon minimum and the Holm floor, and flags
+  a p below it (the CNB Table S3 case).
+* **`FMT-SR1`** finds an unanswered Reporting Summary field (the CNB "Eukaryotic
+  cell lines" field).
+* **`J6-CONTRADICTION` / `FMT-AV4`** compare submitted surfaces: held-out vs
+  not-screened, shipped vs not-in-repository, no-overlap vs overlap,
+  no-manual-scoring vs descriptive reading, negligible vs not-negligible,
+  near-invariance vs variability.
+* **PDF submissions** are scanned for those rules (the CNB supplement and
+  Reporting Summary are PDFs; the scan previously opened only DOCX/text).
+* **`sync-code --root <root>`** copies the maintained module bundle
+  (`paper_pipeline.py`, `paper_docx_format.py`, `paper_redlines_adapter.py`,
+  `paper_qwen_agent.py`) into a root and records their digests. A
+  post-manifest root whose maintained modules have changed refuses a
+  state-changing command until it is synced or recreated; `status` prints the
+  same warning. `setup` records the module manifest, so a new driver with an
+  old formatter cannot recur silently.
+
 ### Journal / emphasis consistency (M20, rules FMT-T6c–T6g)
 
 Character formatting that lives in a **style** used to be invisible: the scanner
@@ -2900,7 +2994,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 135 suites (a few
+any failure. They are independent, so run them in parallel — 137 suites (a few
 minutes at the default 24 parallel sessions; tens of minutes sequentially):
 
 ```bash

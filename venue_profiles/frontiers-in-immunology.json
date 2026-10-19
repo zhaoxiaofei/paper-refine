@@ -566,5 +566,13 @@
     "latex_templates": "https://www.frontiersin.org/design/zip/Frontiers_LaTeX_Templates.zip",
     "checked": "2026-10-01",
     "note": "every word count in this file is quoted from the two Frontiers pages above, retrieved 2026-10-01; no number is inferred"
+  },
+  "figure_text": {
+    "min_pt": 8,
+    "source": "Frontiers author guidelines, 'Figures and images: style guidelines': 'The smallest visible text should be no less than eight points in height when viewed at actual size.' (checked 2026-10-01.)"
+  },
+  "image_dpi": {
+    "min_dpi": 300,
+    "source": "Frontiers author guidelines, 'Figures and images: style guidelines': 'All images must have a resolution of 300 dpi at final size.' (checked 2026-10-01.)"
   }
 }

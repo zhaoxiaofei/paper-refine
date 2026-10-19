@@ -103,9 +103,9 @@ def test_preset():
             os.environ["FAKE_DSH_MODE"] = real_mode
         nb._HARNESS_PROBE_CACHE.clear()
     check("every --agent/--judge-agent parser offers it, and 'manual' stays offered",
-          list(nb.AGENT_CHOICES) == ["codex", "claude", "dsh", "manual"]
+          list(nb.AGENT_CHOICES) == ["codex", "claude", "dsh", "qwen", "manual"]
           and list(nb.CONFLICT_AGENT_CHOICES) == ["codex-lite", "codex", "claude", "dsh",
-                                                 "manual"],
+                                                 "qwen", "manual"],
           str(nb.AGENT_CHOICES))
     parser = nb.build_parser()
     got = parser.parse_args(["run", "--root", "/tmp/x", "--agent", "dsh",

@@ -150,6 +150,13 @@ POLICY_DEFAULTS = {
     # manuscript's own vocabulary. Off only for a scan that must not spend the
     # OCR time; a missing tesseract is recorded as a gap by the rule itself.
     "figure_ocr": True,
+    # FMT-IM6: the smallest visible text in a raster figure, measured at the
+    # placed width. 0 = not gated (no venue rule recorded); Nature's guide says
+    # 5 pt and Frontiers' says 8 pt, so a venue profile supplies the number and
+    # its source. `figure_print_width_in` is the fallback for a standalone figure
+    # file (a DOCX-embedded image uses its own wp:extent instead).
+    "min_figure_text_pt": 0,
+    "figure_print_width_in": 6.5,
 
     "journal_italics": "refs-only",     # refs-only | everywhere | off
     # Text-level consistency (rules FMT-T8a/T8d/T8e). "drop" deletes the redundant
@@ -336,6 +343,21 @@ def load_policy(path) -> dict:
     pol = dict(POLICY_DEFAULTS)
     if path:
         pol.update(json.loads(Path(path).read_text(encoding="utf-8")))
+    # A venue profile writes the measured rules as `image_dpi`/`figure_text`;
+    # the formatter's own scalars are what the scans read. Derive them here so a
+    # profile passed with --policy behaves the same as the pipeline's
+    # format_policy (which does this derivation in format_policy_of).
+    if not pol.get("min_image_dpi"):
+        _dpi_block = pol.get("image_dpi")
+        _dpi = (_dpi_block.get("min_dpi")
+                if isinstance(_dpi_block, dict) else None)
+        if _dpi:
+            pol["min_image_dpi"] = float(_dpi)
+    if not pol.get("min_figure_text_pt"):
+        _ft_block = pol.get("figure_text")
+        _pt = (_ft_block.get("min_pt") if isinstance(_ft_block, dict) else None)
+        if _pt:
+            pol["min_figure_text_pt"] = float(_pt)
     return pol
 
 
@@ -1803,6 +1825,7 @@ FINDING_TIER_RULES = {
     # geometry the figure shows.
     "FMT-G1",    # a doubled article/preposition ("the the")
     "FMT-IM1",   # an embedded image rescaled without its aspect ratio
+    "FMT-IM4",   # a raster placed below the venue's stated resolution floor
     # Layout integrity (2026-10-19): a table's grid disagrees with its cells, an
     # identifier cannot fit its column, a footer carries two PAGE fields, or a
     # figure's own label spells a manuscript term differently. All four are
@@ -1811,8 +1834,21 @@ FINDING_TIER_RULES = {
     "FMT-TB5",   # an identifier token cannot fit its column
     "FMT-S10",   # more than one PAGE field in a referenced header/footer part
     "FMT-IM5",   # a figure label spells a manuscript term differently
+    "FMT-IM6",   # a figure's own text is below the venue's printed-point floor
     "FMT-T6h",   # a bibliography bold run covers a year or a page range
     "FMT-AV3",   # a "shipped/deposited" claim with no locator
+    "FMT-AV4",   # two submitted surfaces make opposite availability claims
+    # Cross-surface / argument-level defects (2026-10-19): these are the classes
+    # the two round-2 winners shipped while every sentence-local rule passed.
+    "FMT-T9L",   # a logic inversion (test asserts its premise; expectation implies a result)
+    "FMT-T9A",   # "the X described above" with no antecedent X
+    "FMT-T9U",   # a coined/quantified term the manuscript never defines
+    "FMT-CN1",   # a count sentence ("the six metrics are ...") enumerates a different number
+    "FMT-LG1",   # a legend asserts the paper's conclusion from a descriptive panel
+    "FMT-LG2",   # one legend enumeration uses several connectives
+    "FMT-ST1",   # a Holm-adjusted p is below the stated family's floor
+    "FMT-SR1",   # a Reporting Summary field is unanswered
+    "J6-CONTRADICTION",  # two submitted surfaces/paragraphs make opposite claims
     # A comma with no space after it inside a list ("Ginkgo d7c7790,
     # AneuFinder 1.34.0,copynumber 1.38.0"): a copy-editing defect a reviewer
     # raises, and one that has shipped twice (the CNB Reporting Summary PDF and
@@ -4227,6 +4263,15 @@ def text_style_rows(paras: list, is_ref: list = None, headings: list = None,
     rows += confusable_pair_rows(prose)
     rows += concept_family_rows(paras, is_ref)
     rows += number_format_rows(prose)
+    # Argument-level and cross-claim checks (2026-10-19). They read the prose as
+    # an argument, not as isolated sentences: the round-2 winners satisfied every
+    # sentence-local rule while shipping a premise asserted as its own test, an
+    # expectation offered as evidence, a count that did not match its list, and a
+    # legend that argued the paper's conclusion.
+    rows += logic_rows(paras, is_ref)
+    rows += count_claim_rows(prose)
+    rows += stats_floor_rows(prose)
+    rows += legend_claim_rows(prose)
     # FMT-G4: comma-glued list items. The DOCX path reaches this through
     # `hygiene_rows`; text sources (.tex, .md, .bib) have no OOXML hygiene pass,
     # and the 2026-10-15 CNB package carried this defect in BOTH -- the
@@ -7072,6 +7117,237 @@ def drawing_geometry_rows(part_xml: str, rels: dict, sizes: dict, doc: str,
             for s, e, new in _ratio_fixes(block, expected):
                 fixes.append((p0 + m.start() + s, p0 + m.start() + e, new))
     return rows, fixes
+
+
+# --------------------------------------------------------------------------
+# FIGURE TEXT SIZE (FMT-IM6).
+#
+# FMT-IM4 answers "is the raster sharp enough" (dpi); it does not answer "can a
+# reader read the labels at the printed width". The CNB round-2 winner shipped
+# Figs. 2-5 at 2.0-3.2 pt and the SI panels at 2-4 pt while every dpi check
+# passed, because a 300-dpi image drawn at half its native width still halves
+# the type. This rule measures the OCR word-box height in the placed raster and
+# converts it to points at the placed width; the venue profile supplies the
+# floor (Nature 5 pt, Frontiers 8 pt) and its source, never this file.
+# --------------------------------------------------------------------------
+
+def _median(values: list) -> float:
+    vals = sorted(float(v) for v in values if v is not None)
+    if not vals:
+        return 0.0
+    i = len(vals) // 2
+    return vals[i] if len(vals) % 2 else (vals[i - 1] + vals[i]) / 2.0
+
+
+_OCR_HEIGHT_CACHE: dict = {}
+
+
+def _ocr_word_heights(data: bytes) -> list:
+    """Word-box heights (px) from tesseract TSV, or [] when OCR cannot read it.
+
+    The same image bytes are measured by `analyse_package` and by the
+    standalone-figure loop; a content hash keeps one scan from paying tesseract
+    twice for the same raster.
+    """
+    if not shutil.which("tesseract"):
+        return []
+    try:
+        key = hashlib.sha256(data).hexdigest()
+    except (TypeError, ValueError):
+        key = ""
+    if key and key in _OCR_HEIGHT_CACHE:
+        return _OCR_HEIGHT_CACHE[key]
+    try:
+        proc = subprocess.run(
+            ["tesseract", "stdin", "stdout", "--psm", "11", "tsv"],
+            input=data, capture_output=True, timeout=180)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0 or not proc.stdout:
+        return []
+    out = []
+    for line in proc.stdout.decode("utf-8", "replace").splitlines()[1:]:
+        cols = line.split("\t")
+        if len(cols) < 12:
+            continue
+        try:
+            h = int(cols[9])
+            conf = float(cols[10])
+        except (TypeError, ValueError):
+            continue
+        text = cols[11].strip()
+        if conf >= 50 and text and len(text) >= 1 and 3 <= h <= 200:
+            out.append(h)
+    if key:
+        _OCR_HEIGHT_CACHE[key] = out
+    return out
+
+
+def figure_text_size_rows(docx_path: Path, policy: dict = None) -> list:
+    """FMT-IM6: embedded raster figures whose own text is below the floor."""
+    policy = dict(POLICY_DEFAULTS, **(policy or {}))
+    floor = float(policy.get("min_figure_text_pt")
+                  or ((policy.get("figure_text") or {}).get("min_pt")) or 0)
+    if floor <= 0:
+        return []
+    rows = []
+    if not shutil.which("tesseract"):
+        return [{
+            "rule": "FMT-IM6", "severity": "low", "document": Path(docx_path).name,
+            "location": "figures",
+            "evidence": "tesseract is not installed",
+            "detail": ("the figure-text size class was NOT examined: OCR is the only "
+                       "way to measure the placed raster's own type size; install "
+                       "tesseract or measure the artwork manually"),
+            "fix": "manual", "protected": False, "tier": "advisory"}]
+    try:
+        with zipfile.ZipFile(docx_path) as pkg:
+            xml = pkg.read("word/document.xml").decode("utf-8", "replace")
+            sizes = media_pixel_sizes(pkg)
+            rels = part_rels(pkg, "word/document.xml")
+            seen = set()
+            for idx, (_p0, _p1, para) in enumerate(paragraphs(xml)):
+                for m in re.finditer(
+                        r"<w:(?:drawing|pict)(?=[\s/>]).*?</w:(?:drawing|pict)>",
+                        para, re.S):
+                    block = m.group(0)
+                    emb = re.search(r'r:(?:embed|id|link)="([^"]+)"', block)
+                    if not emb:
+                        continue
+                    target = rels.get(emb.group(1))
+                    if not target or not RASTER_IMAGE_EXT_RE.search(str(target)):
+                        continue                       # vector art has no pixel grid
+                    size = _pixel_size_for(sizes, target)
+                    if not size:
+                        continue
+                    pw, ph = size
+                    ext = re.search(r"<wp:extent(?=[\s/>])[^>]*/>", block)
+                    if not ext:
+                        continue
+                    cx = _attr_any(ext.group(0), "cx")
+                    try:
+                        cx = float(cx)
+                    except (TypeError, ValueError):
+                        continue
+                    if cx <= 0:
+                        continue
+                    key = (str(target), round(cx))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    zip_name = "word/" + str(target).lstrip("/").replace("\\", "/")
+                    try:
+                        data = pkg.read(zip_name)
+                    except KeyError:
+                        continue
+                    heights = _ocr_word_heights(data)
+                    if not heights:
+                        continue
+                    printed_in = cx / 914400.0
+                    dpi = pw / printed_in if printed_in else 0
+                    if dpi <= 0:
+                        continue
+                    med = _median(heights)
+                    p25 = sorted(heights)[max(0, int(len(heights) * 0.25) - 1)]
+                    pt_med = med / dpi * 72.0
+                    pt_small = p25 / dpi * 72.0
+                    if pt_small >= floor:
+                        continue
+                    rows.append({
+                        "rule": "FMT-IM6", "severity": "high",
+                        "document": Path(docx_path).name,
+                        "location": f"p{idx} ({Path(str(target)).name})",
+                        "evidence": (f"{pw}x{ph} px placed {printed_in:.2f} in wide "
+                                     f"({dpi:.0f} dpi); OCR text height {pt_small:.1f}-"
+                                     f"{pt_med:.1f} pt at the printed width (floor "
+                                     f"{floor:g} pt)"),
+                        "detail": ("the figure's own labels are below the venue's printed-"
+                                   "point floor. Re-export from the vector source at the "
+                                   "placed width so the text is 5-7 pt (or the venue's "
+                                   "stated minimum); do not merely upsample the raster"),
+                        "fix": "manual", "protected": False, "tier": tier_of("FMT-IM6")})
+    except (OSError, zipfile.BadZipFile, KeyError, UnicodeDecodeError):
+        return rows
+    return rows
+
+
+def image_resolution_rows(path: Path, printed_in: float = 6.5,
+                          policy: dict = None) -> list:
+    """FMT-IM4 for a standalone submitted raster (no DOCX extent to read).
+
+    The neohet package ships `figures/*.png` separately, so the DOCX-only
+    `drawing_geometry_rows` never saw their effective dpi. The venue's own floor
+    (Frontiers 300, Nature 450) is in the profile and its source.
+    """
+    policy = dict(POLICY_DEFAULTS, **(policy or {}))
+    floor = float(policy.get("min_image_dpi") or 0)
+    if floor <= 0 or printed_in <= 0:
+        return []
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return []
+    size = image_pixel_size(data)
+    if not size:
+        return []
+    pw, ph = size
+    dpi = pw / float(printed_in)
+    if dpi >= floor:
+        return []
+    return [{
+        "rule": "FMT-IM4", "severity": "medium", "document": Path(path).name,
+        "location": "artwork",
+        "evidence": (f"{pw}x{ph} px at a {printed_in:.2f} in print width = {dpi:.0f} dpi "
+                     f"(venue floor {floor:g} dpi)"),
+        "detail": ("a raster below the venue's stated resolution prints soft/pixelated; "
+                   "re-export at the stated dpi at the final width (do not upsample a "
+                   "screenshot)"),
+        "fix": "manual", "protected": False, "tier": tier_of("FMT-IM4")}]
+
+
+def figure_text_size_for_image(path: Path, printed_in: float = 6.5,
+                               policy: dict = None) -> list:
+    """FMT-IM6 for a standalone submitted figure (no DOCX extent to read)."""
+    policy = dict(POLICY_DEFAULTS, **(policy or {}))
+    floor = float(policy.get("min_figure_text_pt")
+                  or ((policy.get("figure_text") or {}).get("min_pt")) or 0)
+    if floor <= 0:
+        return []
+    if not shutil.which("tesseract"):
+        return [{
+            "rule": "FMT-IM6", "severity": "low", "document": Path(path).name,
+            "location": "artwork text",
+            "evidence": "tesseract is not installed",
+            "detail": ("the standalone figure's text size was NOT examined; install "
+                       "tesseract or measure the artwork manually"),
+            "fix": "manual", "protected": False, "tier": "advisory"}]
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return []
+    size = image_pixel_size(data)
+    if not size:
+        return []
+    pw, _ph = size
+    heights = _ocr_word_heights(data)
+    if not heights or printed_in <= 0:
+        return []
+    dpi = pw / float(printed_in)
+    med = _median(heights)
+    p25 = sorted(heights)[max(0, int(len(heights) * 0.25) - 1)]
+    pt_med = med / dpi * 72.0
+    pt_small = p25 / dpi * 72.0
+    if pt_small >= floor:
+        return []
+    return [{
+        "rule": "FMT-IM6", "severity": "high", "document": Path(path).name,
+        "location": "artwork text",
+        "evidence": (f"{pw}x{_ph} px at a {printed_in:.2f} in print width "
+                     f"({dpi:.0f} dpi); OCR text height {pt_small:.1f}-{pt_med:.1f} pt "
+                     f"(floor {floor:g} pt)"),
+        "detail": ("the figure's own labels are below the venue's printed-point floor; "
+                   "re-export the artwork at the final size with legible type"),
+        "fix": "manual", "protected": False, "tier": tier_of("FMT-IM6")}]
 
 
 # --------------------------------------------------------------------------
@@ -9929,6 +10205,9 @@ def analyse_package(path: Path, policy: dict) -> dict:
     # header/footer part hashes, so a stamped letter is a deterministic row --
     # never only an agent's visual impression.
     res["rows"].extend(cover_letter_stamp_rows(path, policy))
+    # FMT-IM6: the placed raster's own type size (FMT-IM4 only checks dpi;
+    # a 300-dpi image drawn at half width still halves the printed type).
+    res["rows"].extend(figure_text_size_rows(path, policy))
     counts = Counter(r["rule"] for r in res["rows"])
     return {"file": str(path), "rows": res["rows"], "by_rule": dict(counts),
             "high": sum(1 for r in res["rows"] if r["severity"] == "high"),
@@ -10641,6 +10920,18 @@ def fix_document(xml: str, styles: dict, policy: dict,
             changes.append(f"restored the aspect ratio of {len(geo_fixes)} embedded "
                            f"image extent(s) from the image's own pixels")
 
+    # 10b. table geometry (FMT-TB4/TB5) ----------------------------------------
+    # The same width repair `repair-layout` performs, applied in the normal fix
+    # path. Without it `fix` reported FMT-TB5 as a remaining mechanical rule and
+    # rejected its own output (the round-2 neohet Table 3 is the case). The
+    # repair changes only w:tblGrid/w:tcW, never text.
+    _layout_rows = table_layout_rows(xml, styles, "stage", policy)
+    _layout_edits = table_layout_fixes(xml, _layout_rows)
+    if _layout_edits:
+        xml = apply_edits(xml, _layout_edits)
+        changes.append(f"repaired the geometry of {len(_layout_edits)} table(s) "
+                       f"(grid/cells and identifier-column widths)")
+
     return xml, changes, {"text_edits": text_edits, "text_stage_xml": text_stage_xml,
                           "caption_joins": joins, "text_baseline": joined_baseline}
 
@@ -10669,7 +10960,7 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
             sizes = media_pixel_sizes(pkg)
             doc_rels = part_rels(pkg, "word/document.xml")
             for name in sorted(pkg.namelist()):
-                if re.match(r"word/(?:header|footer)\d*\.xml$", name):
+                if re.match(r"word/(?:header|footer)[A-Za-z0-9_\-]*\.xml$", name):
                     aux[name] = (pkg.read(name).decode("utf-8", "replace"),
                                  part_rels(pkg, name))
         xml_before = parts["word/document.xml"].decode("utf-8")
@@ -10765,6 +11056,14 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
             parts_new[name] = apply_edits(axml, afixes).encode("utf-8")
             changes.append(f"restored the aspect ratio of {len(afixes)} embedded "
                            f"image extent(s) in {posixpath.basename(name)}")
+        # FMT-S10: a referenced footer/header part with two PAGE fields. The
+        # normal `fix` path must repair it too, or the fixer's own verification
+        # finds a remaining mechanical rule and rejects the output.
+        _pf = page_field_fixes(axml)
+        if _pf:
+            parts_new[name] = apply_edits(axml, _pf).encode("utf-8")
+            changes.append(f"removed {len(_pf)} duplicate PAGE field paragraph(s) from "
+                           f"{posixpath.basename(name)}")
     try:
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
             for name, data in parts_new.items():
@@ -13050,7 +13349,28 @@ def _missing_paths(paths) -> list:
 #   bolds more is a rendered-field defect (the cnb ref 15 shape).
 # --------------------------------------------------------------------------
 
-TABLE_IDENTIFIER_RE = re.compile(r"^[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)*\d[A-Z0-9]*$")
+# A token the table must NOT break inside. Three shapes the round-2 CNB/neohet
+# packages shipped as broken cells:
+#   * dataset/accession ids (`D01M07AA0`, `SRR28357490`) -- the original rule;
+#   * allele names (`HLA-A*02:01`, `H2-K^b^`, `H-2Db`) -- the MHC column of the
+#     neohet Table 3 printed `HLA-` / `A*02:01`;
+#   * hyphenated compound labels that read as one term (`MHC-anchor`,
+#     `TCR-facing`) -- the same table printed `MHC-` / `anchor` and
+#     `TCR-` / `facing`.
+# `*`, `^`, `:` and `.` are part of an identifier; whitespace is the only
+# separator the width test needs.
+TABLE_IDENTIFIER_RE = re.compile(
+    r"^(?:"
+    r"[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)*\d[A-Z0-9]*"            # D01M07AA0
+    r"|HLA-[A-Z]\*?\d{2}:\d{2}"                               # HLA-A*02:01
+    r"|H2-[A-Za-z0-9^]+"                                      # H2-K^b^
+    r"|H-2[A-Za-z0-9^]+"                                      # H-2Db
+    # Structural table labels, not every hyphenated adjective: `PWM-derived`
+    # may break at its hyphen, while `MHC-anchor`/`TCR-facing` are the cell
+    # values that read as one term.
+    r"|(?:MHC|TCR|HLA|H2|H-2|CNV|CN|DNA|RNA|scWGS|scRNA|FISH|PCR)"
+    r"-(?:anchor|facing|specific|derived|based|positive|negative|like|dependent)"
+    r")$")
 TABLE_TOKEN_FALLBACK_PT = 10.0
 TABLE_CHAR_WIDTH_EM = 0.55          # conservative advance for a serif face
 TABLE_MIN_SLACK_TWIPS = 500         # never shrink a column below this slack
@@ -13336,15 +13656,58 @@ def bib_prose_paragraphs(text: str) -> list:
     return [p.strip() for p in re.split(r"\n\s*\n", cleaned) if p.strip()]
 
 
-def _ocr_text(path: Path) -> str | None:
+def _ocr_text(path: Path, psm: str = "3") -> str | None:
     if not shutil.which("tesseract"):
         return None
     try:
-        proc = subprocess.run(["tesseract", str(path), "-"], capture_output=True,
-                              text=True, encoding="utf-8", errors="replace", timeout=120)
+        proc = subprocess.run(["tesseract", str(path), "-", "--psm", str(psm)],
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=120)
     except (OSError, subprocess.SubprocessError):
         return None
     return proc.stdout if proc.returncode == 0 else ""
+
+
+def _ocr_text_variants(path: Path) -> list | None:
+    """OCR the delivered raster normally and, when ImageMagick is available,
+    once more on an inverted/thresholded copy.
+
+    The neohet Figure 1 insets print black type on a dark purple/red disc. The
+    normal pass reads the top 'Heteroclitic' and `FastQ` but not the inset
+    `Hetero`/`clitic`; a negated grayscale copy reads both. A missing
+    `convert` is a recorded gap only for that second pass, never a silent pass
+    (the normal pass still runs). None means tesseract itself is missing.
+    """
+    base = _ocr_text(path)
+    if base is None:
+        return None
+    out = [base]
+    if shutil.which("convert"):
+        tmp = None
+        try:
+            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            tmp.close()
+            proc = subprocess.run(
+                ["convert", str(path), "-colorspace", "Gray", "-negate",
+                 "-threshold", "55%", tmp.name],
+                capture_output=True, timeout=120)
+            if proc.returncode == 0:
+                # psm 6 (uniform block) reads the inset labels that the
+                # default page-segmentation pass drops; psm 3 on the normal
+                # copy keeps the top-line terms and the acronym spellings.
+                for psm in ("6", "11"):
+                    inv = _ocr_text(Path(tmp.name), psm=psm)
+                    if inv:
+                        out.append(inv)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        finally:
+            if tmp is not None:
+                try:
+                    Path(tmp.name).unlink()
+                except OSError:
+                    pass
+    return out
 
 
 def vocabulary_terms(texts: list, min_count: int = 2) -> list:
@@ -13364,7 +13727,15 @@ def vocabulary_terms(texts: list, min_count: int = 2) -> list:
 def figure_label_rows(paths: list, terms: list) -> list:
     """FMT-IM5: a figure's OCR text spells a manuscript term differently."""
     rows = []
-    terms = [t for t in terms or () if t and len(t) >= 3]
+    # Manuscript terms are only one source of truth. A standard acronym the
+    # manuscript happens not to use (the neohet main text never writes "FASTQ")
+    # still has one correct spelling, and a figure that prints "FastQ" is a
+    # typographic defect even when no manuscript occurrence exists to compare
+    # with. Keep the canonical set small and unambiguous.
+    canonical = ("FASTQ", "TCR", "MHC", "pMHC", "HLA", "ROC", "AUPRC", "CNV")
+    terms = [t for t in dict.fromkeys(
+        [t for t in terms or () if t and len(t) >= 3] + list(canonical))
+        if len(t) >= 3]
     if not shutil.which("tesseract"):
         return [{"rule": "FMT-IM5", "severity": "low", "document": "-",
                  "location": "figures", "evidence": "tesseract is not installed",
@@ -13373,44 +13744,96 @@ def figure_label_rows(paths: list, terms: list) -> list:
                             "NOT examined for these files"),
                  "fix": "manual", "protected": False, "tier": tier_of("FMT-IM5")}]
     def split_form(term: str, text: str) -> bool:
-        """True when the term appears split by whitespace/hyphen/dash."""
-        for i in range(2, max(3, len(term) - 1)):
-            pat = re.escape(term[:i]) + r"[\s\-\u2013\u2014/]+" + re.escape(term[i:])
-            if re.search(pat, text, re.I):
-                return True
+        """True when the term's two halves appear as SEPARATE words.
+
+        The original pattern only allowed whitespace/hyphens BETWEEN the two
+        halves. In the delivered neohet artwork the inset labels are split over
+        two lines with other OCR words between them ("Hetero" on one line,
+        "clitic" several tokens later), so that pattern never matched. This
+        version looks for the prefix as a whole word and the suffix as a whole
+        word on the same or a nearby line; an intact `Heteroclitic` has no word
+        boundary after `Hetero`, so it never matches.
+        """
+        lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+        if not lines:
+            return False
+        for i in range(3, max(4, len(term) - 2)):
+            a, b = term[:i], term[i:]
+            if len(a) < 3 or len(b) < 3:
+                continue
+            for j, line in enumerate(lines):
+                if not re.search(r"(?<![A-Za-z])" + re.escape(a) + r"(?![A-Za-z])",
+                                 line, re.I):
+                    continue
+                for k in range(j, min(len(lines), j + 8)):
+                    if re.search(r"(?<![A-Za-z])" + re.escape(b) + r"(?![A-Za-z])",
+                                 lines[k], re.I):
+                        if k > j or re.search(r"\s", line):
+                            return True
         return False
 
     def case_variant(term: str, text: str) -> bool:
-        """True for an acronym/identifier whose LETTER CASE differs in the figure."""
+        """True when a token matches `term` case-insensitively but NOT exactly.
+
+        The old test was `re.search(term, text, re.I) is not None`, so ANY
+        occurrence -- including the exact spelling -- counted as a case variant.
+        That both fired on clean figures and, worse, was masked by the caller's
+        `if term in text: continue`: one intact occurrence hid every split or
+        mis-cased occurrence of the same term in the artwork.
+        """
         distinctive = ("_" in term or any(ch.isdigit() for ch in term)
                        or (term.isupper() and 2 <= len(term) <= 8))
         if not distinctive:
             return False
-        return re.search(re.escape(term), text, re.I) is not None
+        for m in re.finditer(r"(?<![A-Za-z0-9_])" + re.escape(term)
+                             + r"(?![A-Za-z0-9_])", text or "", re.I):
+            if m.group(0) != term:
+                return True
+        return False
 
+    if not shutil.which("convert"):
+        rows.append({
+            "rule": "FMT-IM5", "severity": "low", "document": "-",
+            "location": "figures",
+            "evidence": "ImageMagick `convert` is not installed",
+            "detail": ("the inverted/thresholded OCR pass was skipped: a split label "
+                       "printed black-on-dark (the neohet inset case) may not be read; "
+                       "install ImageMagick or inspect the artwork visually"),
+            "fix": "manual", "protected": False, "tier": "advisory"})
     for p in paths:
-        text = _ocr_text(Path(p))
-        if text is None:
+        texts = _ocr_text_variants(Path(p))
+        if texts is None:
             continue
+        seen = set()
         for term in terms:
-            if term in text:
-                continue
-            why = ""
-            if split_form(term, text):
-                why = "the term is split across a line/space"
-            elif case_variant(term, text):
-                why = "the term's letter case differs"
-            if not why:
-                continue
-            rows.append({
-                "rule": "FMT-IM5", "severity": "medium", "document": Path(p).name,
-                "location": "artwork text",
-                "evidence": (f"the figure prints a variant of {term!r}: {why}; the exact "
-                             f"spelling was not found in the OCR text"),
-                "detail": ("a figure's own label must spell the manuscript's term "
-                           "exactly; regenerate the artwork (OCR reads the delivered "
-                           "raster, so this is what a reader sees)"),
-                "fix": "manual", "protected": False, "tier": tier_of("FMT-IM5")})
+            # The split/case checks must run even when an intact occurrence of
+            # the same term exists elsewhere in the figure: `Heteroclitic` at
+            # the top of the neohet artwork did not make the split
+            # `Hetero`/`clitic` in the inset any less broken.
+            for text in texts:
+                # A short term split into two common words ("Het" + "Mut") is
+                # usually an OCR line-wrap artifact in a legend, not a broken
+                # label; the long manuscript terms are the class this rule owns.
+                split = len(term) >= 10 and split_form(term, text)
+                case = case_variant(term, text)
+                if not split and not case:
+                    continue
+                why = ("the term is split across a line/space" if split
+                       else "the term's letter case differs")
+                key = (term, why)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append({
+                    "rule": "FMT-IM5", "severity": "medium", "document": Path(p).name,
+                    "location": "artwork text",
+                    "evidence": (f"the figure prints a variant of {term!r}: {why}"
+                                 + (" (an intact occurrence elsewhere does not repair "
+                                    "the split one)" if split else "")),
+                    "detail": ("a figure's own label must spell the manuscript's term "
+                               "exactly; regenerate the artwork (OCR reads the delivered "
+                               "raster, so this is what a reader sees)"),
+                    "fix": "manual", "protected": False, "tier": tier_of("FMT-IM5")})
     return rows
 
 
@@ -13418,8 +13841,7 @@ def figure_label_rows(paths: list, terms: list) -> list:
 # data were deposited"), because "the deposited code" is a normal adjective for
 # code that lives in a repository the Data Availability statement locates.
 AVAILABILITY_CLAIM_RE = re.compile(
-    r"\bshipped\b|\b(?:was|were|is|are|has been|have been)\s+deposited\b|"
-    r"\bin the (?:resource |public )?repository\b", re.I)
+    r"\bshipped\b|\b(?:was|were|is|are|has been|have been)\s+deposited\b", re.I)
 AVAILABILITY_LOCATOR_RE = re.compile(
     r"https?://|doi:\s*10\.|\b10\.\d{4,9}/", re.I)
 AVAILABILITY_FILE_RE = re.compile(
@@ -13483,6 +13905,422 @@ def reference_bold_rows(xml: str, styles: dict, doc: str) -> list:
                                "defect (fix the CSL/field, then refresh; a submission copy "
                                "may be unlinked and repaired)"),
                     "fix": "style-field", "protected": True, "tier": tier_of("FMT-T6h")})
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# CROSS-SURFACE CLAIMS AND ARGUMENT-LEVEL LOGIC (2026-10-19)
+#
+# The round-2 winners passed every sentence-local rule while shipping claims
+# that contradict another paragraph or another submitted document:
+#   * neohet: "every parental antigen is ... a held-out antigen" vs the same
+#     Methods' "the parental peptides themselves were not screened";
+#   * neohet: the supplement's "shipped per-candidate tables" vs Data
+#     Availability's "not part of that repository";
+#   * CNB: the Reporting Summary's "no overlap" vs Methods' overlapping
+#     threshold selection; "no manual scoring" vs the descriptive HG008 read;
+#   * CNB: "the near-invariance described above" with no such description, and
+#     "negligible" residual aneuploidy vs "does not establish ... negligible".
+# These functions enumerate the PAIR, not a verdict: a session must reconcile
+# the two quotes, and the audit can drop the pair with evidence.
+# ---------------------------------------------------------------------------
+
+_CLAIM_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+
+def _claim_sentences(text: str) -> list:
+    return [s.strip() for s in _CLAIM_SENT_SPLIT.split(text or "") if s.strip()]
+
+
+def _claim_find(docs: list, pattern: str) -> list:
+    """[(doc, sentence)] for every sentence matching `pattern` (case-insens.)."""
+    hits = []
+    rx = re.compile(pattern, re.I)
+    for name, text in docs or ():
+        for sentence in _claim_sentences(text):
+            if rx.search(sentence):
+                hits.append((name, sentence))
+    return hits
+
+
+def claim_contradiction_rows(docs: list) -> list:
+    """J6/FMT-AV4: opposite claims on two surfaces (or two paragraphs).
+
+    `docs` is [(document_name, full_text)].  Only pairs whose SUBJECT is the
+    same are reported: a positive pattern and its negation are matched
+    independently, and a row carries both sentences and both documents.  The
+    function is deliberately narrow -- every pattern below is a claim shape
+    that actually shipped -- so it does not turn ordinary hedging into a
+    contradiction.
+    """
+    rows = []
+    docs = [(str(n), str(t)) for n, t in (docs or ()) if t]
+
+    def add(rule, pos_name, pos_pat, neg_name, neg_pat, detail):
+        pos = _claim_find(docs, pos_pat)
+        neg = _claim_find(docs, neg_pat)
+        if not pos or not neg:
+            return
+        a_name, a_sent = pos[0]
+        b_name, b_sent = neg[0]
+        # The same sentence is not a pair (a sentence can quote both sides).
+        if a_name == b_name and a_sent == b_sent:
+            return
+        rows.append({
+            "rule": rule, "severity": "high" if rule in ("J6-CONTRADICTION", "FMT-AV4")
+            else "medium", "document": f"{a_name} + {b_name}",
+            "location": "cross-surface claim",
+            "evidence": f"A: {a_sent[:220]!r} || B: {b_sent[:220]!r}",
+            "detail": detail,
+            "fix": "manual", "protected": False, "tier": tier_of(rule)})
+
+    add("J6-CONTRADICTION",
+        "held-out", r"\b(?:every|all|the)\s+parental\s+antigens?\b[^.]{0,80}\bheld[-\s]?out\b",
+        "not-screened", r"\bparental\s+peptides?\b[^.]{0,100}\bnot\s+screened\b"
+        r"|\bnot\s+screened\b[^.]{0,100}\bparental\b",
+        ("the paper says the parents are held-out and also that the parents were not "
+         "screened against the training pool. A held-out claim needs a parent-overlap "
+         "check; if there is none, use the structural within-parent argument instead"))
+    add("FMT-AV4",
+        "shipped", r"\bshipped\b[^.]{0,60}\b(?:per-candidate|benchmark|tables?|data|results?)\b",
+        "not-in-repo", r"\bnot\s+part\s+of\b[^.]{0,80}\b(?:repository|resource)\b"
+        r"|\bavailable\s+from\s+the\s+corresponding\s+author\b",
+        ("a submitted surface says the material was shipped while another says it is not "
+         "in the repository/only available from the authors. Use ONE route: the shipped "
+         "file, a public locator, or the corresponding-author sentence, never two"))
+    add("J6-CONTRADICTION",
+        "no-overlap", r"\bno\s+overlap\s+between\b",
+        "overlap-eval", r"\boverlap(?:s|ped|ping)?\s+the\s+evaluation\s+set\b",
+        ("the Reporting Summary says parameter selection and evaluation do not overlap, "
+         "while the Methods say the selection data are among the evaluated datasets. "
+         "Either disclose the overlap in both places or rerun held out"))
+    add("J6-CONTRADICTION",
+        "no-manual", r"\bno\s+manual\s+scoring\b|\bno\s+manual\s+scoring\s+or\s+subjective\b",
+        "manual-read", r"\bqualitative\s+reading\b|\bdescriptive\s+visual\s+reading\b"
+        r"|\bvisual\s+reading\b|\bdescriptive\s+comparison\b",
+        ("the form says there was no manual scoring/subjective assessment, while the "
+         "manuscript describes a descriptive visual reading. Disclose the manual read "
+         "or replace it with a pre-specified statistic"))
+    add("J6-CONTRADICTION",
+        "negligible", r"\bare\s+negligible\s+relative\s+to\b",
+        "not-negligible", r"\bnot\s+establish\s+that\b[^.]{0,80}\bnegligible\b",
+        ("the design premise calls residual aneuploidy/CNP negligible while the Results "
+         "say the data do not establish that it is. Qualify the premise or report the "
+         "correction as a limitation"))
+    add("FMT-T9A",
+        "near-invariance", r"\bnear-invariance\s+described\s+above\b",
+        "variability", r"\bmetric-?\s+and\s+caller-specific\b|\bvariability\b",
+        ("'the near-invariance described above' has no antecedent: the surrounding result "
+         "describes metric- and caller-specific variability. Name the actual result or "
+         "delete the phrase"))
+    return rows
+
+
+_NUMBER_WORDS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+                 "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+_COUNT_CLAIM_RE = re.compile(
+    r"\bthe\s+(two|three|four|five|six|seven|eight|nine|ten)\s+([a-z][a-z-]{2,})\s+are\b",
+    re.I)
+_METRIC_ID_RE = re.compile(
+    r"\b(?:intCN_[A-Za-z_]+|nonintCN_[A-Za-z_]+|CN_[A-Za-z_]+|breakpoint_[A-Za-z_]+)\b")
+
+
+def count_claim_rows(paras: list) -> list:
+    """FMT-CN1: 'The six metrics are ...' but fewer than six are enumerated.
+
+    The CNB Fig. 2 legend listed five metric ids under a 'six metrics' lead.
+    The rule only fires when the sentence itself names metric ids; a count
+    sentence whose items are ordinary words is left to the reviewer.
+    """
+    rows = []
+    for text in paras or ():
+        for sentence in _claim_sentences(text):
+            m = _COUNT_CLAIM_RE.search(sentence)
+            if not m:
+                continue
+            want = _NUMBER_WORDS.get(m.group(1).lower())
+            ids = list(dict.fromkeys(_METRIC_ID_RE.findall(sentence)))
+            if want and ids and len(ids) < want:
+                rows.append({
+                    "rule": "FMT-CN1", "severity": "medium", "document": "-",
+                    "location": "document",
+                    "evidence": (f"{m.group(0)!r} enumerates {len(ids)} metric id(s): "
+                                 f"{', '.join(ids) or '(none)'}"),
+                    "detail": (f"the sentence says {want} items but names {len(ids)}; "
+                               "either add the missing item or correct the count"),
+                    "fix": "manual", "protected": False, "tier": tier_of("FMT-CN1")})
+    return rows
+
+
+_LOGIC_PATTERNS = (
+    (r"\btests?\s+whether\b[^.]{0,160}\bbecause\b", "FMT-T9L",
+     "a test whose 'because' clause asserts the premise it is supposed to test"),
+    (r"\binvert(?:ing|s|ed)?\s+the\s+downsampling\b", "FMT-T9L",
+     "the method downsamples and merges; it does not invert a downsampling"),
+    (r"\bwill\s+be\s+flagged\s+as\b", "FMT-T9L",
+     "'flagged' by what? the benchmark scores callers; it has no flag mechanism"),
+    (r"\bwhich\s+it\s+needs\b", "FMT-T9L",
+     "'which' has more than one possible antecedent"),
+    (r"\baccompanied\s+chiefly\s+by\b|\bchiefly\s+accompanied\s+by\b", "FMT-T9L",
+     "the adverb has no clear verb to modify; say what is associated with what"),
+    (r"\bapproximately\s+any\b", "FMT-T9U",
+     "'approximately any' is an undefined quantifier"),
+    (r"\bmetric-dependent\b", "FMT-T9U",
+     "'metric-dependent' is undefined (which metric? which set?)"),
+    (r"\bpurity\s+floor\b", "FMT-T9U",
+     "'purity floor' is a coined term; define it or use the plain description"),
+)
+_LIMITATIONS_RE = re.compile(
+    r"\bthis\s+study\s+has\s+the\s+following\s+limitations\b[\s\S]{0,80}\bfirst\b", re.I)
+_EXPECT_IMPLIES_RE = re.compile(
+    r"\b(?:we\s+)?(?:therefore\s+)?expected?\b[\s\S]{0,260}\bwhich\s+implies\b", re.I)
+_THEREFORE_OPEN_RE = re.compile(r"^\s*we\s+therefore\b", re.I)
+_CAUSAL_CUE_RE = re.compile(
+    r"\b(?:because|since|thus|hence|so|as\s+a\s+result|therefore|accordingly)\b", re.I)
+
+
+def logic_rows(paras: list, is_ref: list = None) -> list:
+    """FMT-T9L/T9U: deterministic argument-level defects.
+
+    Each row carries the sentence and a one-line explanation.  The patterns are
+    the shapes that shipped in the CNB/neohet round-2 winners; they are
+    questions for the reviser, not a style preference.
+    """
+    rows = []
+    is_ref = list(is_ref or [False] * len(paras))
+    for i, text in enumerate(paras or ()):
+        if i < len(is_ref) and is_ref[i]:
+            continue
+        for pattern, rule, why in _LOGIC_PATTERNS:
+            for sentence in _claim_sentences(text):
+                if re.search(pattern, sentence, re.I):
+                    rows.append({
+                        "rule": rule, "severity": "medium", "document": "-",
+                        "location": f"p{i}",
+                        "evidence": sentence[:220],
+                        "detail": why + "; rewrite the sentence so the claim and its "
+                                  "evidence are in the right order",
+                        "fix": "manual", "protected": False, "tier": tier_of(rule)})
+                    break
+        if _EXPECT_IMPLIES_RE.search(text or ""):
+            rows.append({
+                "rule": "FMT-T9L", "severity": "medium", "document": "-",
+                "location": f"p{i}",
+                "evidence": _first_marker_sentence(
+                    text or "", re.compile(r"which\s+implies", re.I)),
+                "detail": ("an expectation ('we expected ...') is offered as evidence "
+                           "('which implies ...'); state the observed result and its "
+                           "implication separately"),
+                "fix": "manual", "protected": False, "tier": tier_of("FMT-T9L")})
+        if _LIMITATIONS_RE.search(text or ""):
+            rows.append({
+                "rule": "FMT-T9L", "severity": "low", "document": "-",
+                "location": f"p{i}",
+                "evidence": _first_marker_sentence(
+                    text or "", re.compile(r"this\s+study\s+has\s+the\s+following", re.I)),
+                "detail": ("formulaic 'the following limitations. First...' enumeration; "
+                           "name the limitation in the sentence instead of counting it"),
+                "fix": "manual", "protected": False, "tier": tier_of("FMT-T9L")})
+        # A paragraph that opens "We therefore" needs a premise in the paragraph
+        # before it; the CNB Results opened one after a publication-year remark.
+        if i and _THEREFORE_OPEN_RE.match(text or ""):
+            prev = paras[i - 1] if i - 1 < len(paras) else ""
+            # A "We therefore ..." at a section open has no premise at all; the
+            # same words mid-section usually follow an argument the previous
+            # paragraph just made (the neohet "We therefore do not claim" case).
+            if (len((prev or "").split()) <= 10
+                    and not _CAUSAL_CUE_RE.search(prev or "")):
+                rows.append({
+                    "rule": "FMT-T9L", "severity": "medium", "document": "-",
+                    "location": f"p{i}",
+                    "evidence": (text or "").strip()[:220],
+                    "detail": ("the paragraph opens with 'We therefore' but the previous "
+                               "paragraph states no premise; add the premise or drop the "
+                               "connective"),
+                    "fix": "manual", "protected": False, "tier": tier_of("FMT-T9L")})
+        # "the X described above" requires an earlier X.
+        for m in re.finditer(r"\bthe\s+([a-z][a-z-]{3,})\s+described\s+above\b",
+                             text or "", re.I):
+            term = m.group(1)
+            before = "\n".join(paras[:i]) + "\n" + (text or "")[:m.start()]
+            if len(re.findall(r"\b" + re.escape(term) + r"\b", before, re.I)) <= 0:
+                rows.append({
+                    "rule": "FMT-T9A", "severity": "medium", "document": "-",
+                    "location": f"p{i}",
+                    "evidence": (text or "")[max(0, m.start() - 80):m.end() + 80],
+                    "detail": (f"the phrase points at {term!r} 'described above', but that "
+                               "term does not occur in the preceding text"),
+                    "fix": "manual", "protected": False, "tier": tier_of("FMT-T9A")})
+    return rows
+
+
+_SCI_P_RE = re.compile(
+    r"(?P<mant>[\d.]+)\s*(?:"
+    r"(?:[×x]|\\times)\s*10\s*\^?\s*\{?\s*(?P<sign>[−-])?\s*(?P<exp>\d+)\s*\}?"
+    r"|[eE](?P<sign2>[−-])?(?P<exp2>\d+))")
+_PLAIN_P_RE = re.compile(r"^(?P<p>\d+(?:\.\d+)?)$")
+
+
+def _parse_p(token: str) -> float | None:
+    token = (token or "").strip()
+    m = _SCI_P_RE.search(token)
+    if m:
+        try:
+            exp = int(m.group("exp") or m.group("exp2") or 0)
+            if m.group("sign") or m.group("sign2"):
+                exp = -exp
+            return float(m.group("mant")) * (10 ** exp)
+        except (TypeError, ValueError):
+            return None
+    m = _PLAIN_P_RE.match(token)
+    return float(m.group("p")) if m else None
+
+
+def stats_floor_rows(paras: list) -> list:
+    """FMT-ST1: a Holm-adjusted p below the floor implied by its family size.
+
+    For a two-sided Wilcoxon signed-rank test on n pairs the smallest attainable
+    p is 2/2^n; in a family of m tests the smallest Holm-adjusted p is
+    m * 2/2^n.  The CNB Table S3 caption says one 19-test family, its n=9 rows
+    print 0.030 (the 8-test floor) and its n=21 rows print 1.81e-5 (the 19-test
+    floor): the same table uses two families.  The parser is conservative --
+    it only runs when the text says "single pooled family" and at least five
+    rows parse -- so it does not flag a table whose family is described
+    differently.
+    """
+    text = "\n".join(str(p or "") for p in (paras or ()))
+    if not re.search(r"single\s+pooled\s+family", text, re.I):
+        return []
+    if not re.search(r"Holm", text, re.I):
+        return []
+    rows = []
+    parsed = []
+    for line in text.splitlines():
+        if not re.search(r"\b(?:10|none)\b", line):
+            continue
+        # PDF layout: Method ... 10 9 0.030 1.00 [...]
+        m = re.search(
+            r"\b(?P<cap>10|none)\s+(?P<n>\d{1,3})\s+"
+            r"(?P<p>\d+(?:\.\d+)?(?:\s*[×x]\s*10\s*[−-]?\s*\d+)?)\b", line)
+        if not m:
+            # LaTeX: Method & 10 & 9 & \textbf{0.030} & ...
+            m2 = re.search(
+                r"&\s*(?P<cap>10|none)\s*&\s*(?P<n>\d{1,3})\s*&\s*"
+                r"(?:\\textbf\{)?(?P<p>\d+(?:\.\d+)?(?:\s*\\times\s*10\^\{?[−-]?\d+\}?)?)",
+                line)
+            if not m2:
+                continue
+            m = m2
+        try:
+            n = int(m.group("n"))
+        except (TypeError, ValueError):
+            continue
+        p = _parse_p(m.group("p"))
+        if p is None or n < 5:
+            continue
+        parsed.append((n, p, line.strip()[:120]))
+    if len(parsed) < 5:
+        return []
+    family = len(parsed)
+    for n, p, line in parsed:
+        floor = family * 2.0 / (2 ** n)
+        # A table rounds its adjusted p (1.81e-5 vs the exact 1.812e-5); a 2%
+        # relative tolerance accepts the rounded floor and still catches the
+        # 0.030-vs-0.074 n=9 case.
+        if p < floor - max(1e-12, floor * 0.02):
+            rows.append({
+                "rule": "FMT-ST1", "severity": "high", "document": "-",
+                "location": "table caption/rows",
+                "evidence": (f"n={n}, p={p:.3g}; the stated {family}-test family's "
+                             f"smallest Holm p is {floor:.3g} ({line!r})"),
+                "detail": ("the reported adjusted p is below the floor its own family "
+                           "allows. Either the caption's family size is wrong (the n=9 "
+                           "rows look like an 8-test family) or the p values were not "
+                           "adjusted as stated; do not hand-edit a single p"),
+                "fix": "manual", "protected": False, "tier": tier_of("FMT-ST1")})
+    return rows
+
+
+# Only the Materials & experimental systems FIELDS that take a Yes/No/n-a
+# answer. "Methods", "Human participants" and "Reporting on sex and gender" are
+# section headings whose answers are prose, not fields; treating them as fields
+# produced six false rows on the first CNB run.
+_RS_LABELS = (
+    "antibodies", "eukaryotic cell lines", "palaeontology and archaeology",
+    "animals and other organisms", "clinical data", "dual use research of concern",
+    "plants", "chip-seq", "flow cytometry", "mri", "functional magnetic",
+    "electrophysiology", "neurological disease",
+)
+
+
+def reporting_summary_gap_rows(text: str) -> list:
+    """FMT-SR1: a Reporting Summary section label with no answer.
+
+    The CNB form prints 'Eukaryotic cell lines Involved in the study' and then
+    the next section, with no Yes/No/n-a. This is a required field, not a
+    styling difference.
+    """
+    lines = [ln.strip() for ln in (text or "").splitlines()]
+    rows = []
+    for i, line in enumerate(lines):
+        low = line.lower()
+        # The field label opens the line ("Eukaryotic cell lines Involved in the
+        # study"); a prose mention of "Methods" mid-sentence is not a field.
+        label = next((lab for lab in _RS_LABELS if low.startswith(lab)), "")
+        if not label:
+            continue
+        # An answer may be on the same line after the label.
+        tail = low.split(label, 1)[1].strip(" :-")
+        answered = bool(re.match(r"^(?:yes|no|n/?a|not applicable)\b", tail))
+        if not answered:
+            j = i + 1
+            while j < len(lines) and not lines[j]:
+                j += 1
+            if j < len(lines) and not any(lab in lines[j].lower() for lab in _RS_LABELS):
+                answered = bool(re.match(
+                    r"^(?:yes|no|n/?a|not applicable)\b", lines[j].lower()))
+        if not answered:
+            rows.append({
+                "rule": "FMT-SR1", "severity": "medium", "document": "-",
+                "location": f"line {i + 1}",
+                "evidence": line[:160] or label,
+                "detail": ("a Reporting Summary section has no Yes/No/n-a answer; the form "
+                           "is a submitted document and an unanswered required field is a "
+                           "completeness defect. Fill the answer and re-export"),
+                "fix": "manual", "protected": False, "tier": tier_of("FMT-SR1")})
+    return rows
+
+
+def legend_claim_rows(paras: list) -> list:
+    """FMT-LG1/FMT-LG2: a legend that argues or that mixes connectives."""
+    rows = []
+    for text in paras or ():
+        t = text or ""
+        if not re.match(r"^\s*(?:Fig\.?|Figure)\s*[A-Z]?\d+", t, re.I):
+            continue
+        # The title of a quantitative figure may state its result; the class is
+        # a DESCRIPTIVE panel whose legend argues the paper's conclusion
+        # ("This pattern is consistent with Ginkgo's leading overall balance").
+        if re.search(r"\bconsistent\s+with\b[^.]{0,100}\b(?:leading|best|outperform)",
+                     t, re.I) and not re.search(
+                r"\b(?:p\s*[<=>]|statistic|descriptive|descriptively)\b", t, re.I):
+            rows.append({
+                "rule": "FMT-LG1", "severity": "medium", "document": "-",
+                "location": "legend",
+                "evidence": t[:220],
+                "detail": ("the legend asserts a comparative/conclusion claim from a "
+                           "descriptive panel; report what the panel shows and keep the "
+                           "ranking claim in Results, or name the statistic"),
+                "fix": "manual", "protected": False, "tier": tier_of("FMT-LG1")})
+        if re.search(r"from\s+top\s+to\s+bottom", t, re.I) and re.search(
+                r"\b(?:below\s+them|this\s+is\s+followed\s+by|next,?)\b", t, re.I):
+            rows.append({
+                "rule": "FMT-LG2", "severity": "low", "document": "-",
+                "location": "legend",
+                "evidence": t[:220],
+                "detail": ("one enumeration uses several connectives ('from top to "
+                           "bottom', 'below them', 'this is followed by'); use one"),
+                "fix": "manual", "protected": False, "tier": tier_of("FMT-LG2")})
     return rows
 
 

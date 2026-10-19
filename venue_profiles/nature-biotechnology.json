@@ -393,5 +393,13 @@
     "official_chemdraw_stylesheet": "https://www.nature.com/documents/nr-chemdraw-stylesheet.cds",
     "checked": "2026-10-01",
     "note": "Every word count in this file is quoted from the Nature Biotechnology (or Springer Nature) pages above, retrieved 2026-10-01. Where a content type has no published number the profile carries null and says so in that entry's note, rather than borrowing another type's caps or inventing a limit. The Article type keeps the +10%/+25% margins the pipeline was originally written with; every other type is applied with no margin (relaxation 1.0)."
+  },
+  "figure_text": {
+    "min_pt": 5,
+    "source": "Nature portfolio figure guidelines: the smallest text in a figure should be at least 5 pt at the printed size (checked 2026-10-01)."
+  },
+  "image_dpi": {
+    "min_dpi": 450,
+    "source": "Nature portfolio figure guidelines: images should be at least 450 dpi at final size (checked 2026-10-01)."
   }
 }

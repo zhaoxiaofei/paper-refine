@@ -174,10 +174,12 @@ def test_dag_scheduling():
     # a 0.3 s session could start after its sibling had already finished (overlap
     # assertion) or the revise's own chain (review + audit + two postchecks) could
     # outlast a 3 s rewrite -- both failed for the machine's load, not for a
-    # scheduling barrier. The slow rewrites are therefore 20 s and the phases
-    # whose PARALLELISM is asserted are 1.5 s / 1.0 s, so the suite measures the
-    # graph, not the CPU.
-    sleeps = {"PAPER_TIMING_SLEEP_W": 20.0,    # rewrites: the slowest production arm
+    # scheduling barrier. The slow rewrites are therefore 60 s (a 24-way run on
+    # a 20-core box can delay the review's own boot past 20 s; the review still
+    # starts as soon as its dependency exists, but the wall-clock windows must
+    # be wider than that scheduling noise) and the phases whose PARALLELISM is
+    # asserted are 1.5 s / 1.0 s, so the suite measures the graph, not the CPU.
+    sleeps = {"PAPER_TIMING_SLEEP_W": 60.0,    # rewrites: the slowest production arm
               "PAPER_TIMING_SLEEP_R": 0.6,     # review: finishes long before them
               "PAPER_TIMING_SLEEP_AU": 0.4,    # auditor: between the review and the revise
               "PAPER_TIMING_SLEEP_V": 0.5,     # revise

@@ -681,6 +681,26 @@ AGENT BACKENDS
                      docx-converter renderer, the docx-compare redline engine)
                      fall back to the next converter in their list when the
                      harness has no such server configured.
+    --agent qwen     Qwen3.8-27B through an OpenAI-compatible vLLM endpoint,
+                     wrapped around the harness the operator already uses. The
+                     adapter (`paper_qwen_agent.py`, copied beside the driver)
+                     defaults to `PAPER_QWEN_HARNESS=codex`; `dsh` generates an
+                     `llm-pi-ai` provider patch for its headless profile, and
+                     `chat` is a text-only completion mode. The endpoint is
+                     `PAPER_QWEN_BASE_URL` (default
+                     http://127.0.0.1:18000/v1), model
+                     `PAPER_QWEN_MODEL` (default qwen3.8-27b), key
+                     `PAPER_QWEN_API_KEY` (default `dummy`). When the endpoint
+                     is not already reachable the adapter starts the SSH tunnel
+                     `ssh -p 52080 -N -L 18000:127.0.0.1:8000
+                     zxf@101.6.31.113` (configurable with PAPER_QWEN_SSH_HOST/
+                     PORT/TUNNEL_LOCAL/TUNNEL_REMOTE; PAPER_QWEN_TUNNEL=off
+                     forbids starting it). `python3 paper_qwen_agent.py
+                     --probe` reports endpoint/model/tool-call support, and
+                     `--check-tools` exits 0/1 on whether the server accepts
+                     `tool_choice=auto`: the agentic harness needs that; a
+                     server started without `--enable-auto-tool-choice
+                     --tool-call-parser` fails a tool-using turn.
     --agent manual   the orchestrator builds every sandbox + PROMPT.md, prints
                      each prompt's path, and polls for the completion signal;
                      you paste each prompt into your agent yourself. Staging is
@@ -1080,6 +1100,12 @@ from pathlib import Path
 #   had read the very table and reported "no anomalies".
 VERSION = "3.8.0"
 STATE_VERSION = 3
+# The driver executes these siblings; a root freezes all of them. Recording only
+# the driver let a root run new code with an old formatter (the round-2 case).
+# The Qwen adapter is a fourth module because the `qwen` agent preset executes it
+# from the same directory; a root without it could not run that preset.
+PIPELINE_MODULE_FILES = ("paper_pipeline.py", "paper_docx_format.py",
+                         "paper_redlines_adapter.py", "paper_qwen_agent.py")
 
 # The Zotero tooling policy carried in pipeline_config.json (`setup --zotero`):
 #   off   -- never run the `zot` CLI; live fields stay on the skills' manual route
@@ -1260,6 +1286,15 @@ _DEFAULT_VENUE_PROFILE = {
     # A preprint is not a published article: report one so the author decides
     # whether the venue accepts it (FMT-R5).
     "references": {"flag_preprints": True},
+    # The venue's own figure-type floor (FMT-IM6). The JSON profile carries the
+    # same block; this is the stripped-single-file fallback.
+    "figure_text": {"min_pt": 5,
+                    "source": "Nature portfolio figure guidelines: the smallest text "
+                              "in a figure should be at least 5 pt at the printed size "
+                              "(checked 2026-10-01)"},
+    "image_dpi": {"min_dpi": 450,
+                  "source": "Nature portfolio figure guidelines: images at least 450 "
+                            "dpi at final size (checked 2026-10-01)"},
     # The venue's content types. Only `article` carries numbers here (the ones
     # this pipeline has always used, from the venue's content-types table); the
     # other entries exist so a submission can DECLARE its type, and a type with
@@ -1790,6 +1825,46 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
         problems.append("'sources' must be an object of name -> URL/string (the profile's "
                         "provenance map); got " + type(raw_sources).__name__)
 
+    # The venue's own raster-resolution floor (FMT-IM4). Like figure_text, it is
+    # a measured rule with a source, and a profile that states none gets no gate.
+    image_dpi_raw = out.get("image_dpi") or {}
+    clean_image_dpi = {}
+    if image_dpi_raw:
+        if not isinstance(image_dpi_raw, dict):
+            problems.append("'image_dpi' must be an object")
+        else:
+            try:
+                min_dpi = float(image_dpi_raw.get("min_dpi") or 0)
+            except (TypeError, ValueError):
+                problems.append("image_dpi.min_dpi must be a number")
+                min_dpi = 0
+            if min_dpi <= 0:
+                problems.append("image_dpi.min_dpi must be > 0 when the block is present")
+            else:
+                clean_image_dpi = {"min_dpi": min_dpi,
+                                   "source": str(image_dpi_raw.get("source") or "").strip()}
+    # The venue's own figure-type minimum (FMT-IM6). It is a measured rule with
+    # a source, not a pipeline default: a profile that does not state it gets no
+    # gate. Validate it here so a typo cannot silently disable the rule.
+    figure_text_raw = out.get("figure_text") or {}
+    clean_figure_text = {}
+    if figure_text_raw:
+        if not isinstance(figure_text_raw, dict):
+            problems.append("'figure_text' must be an object")
+        else:
+            try:
+                min_pt = float(figure_text_raw.get("min_pt") or 0)
+            except (TypeError, ValueError):
+                problems.append("figure_text.min_pt must be a number")
+                min_pt = 0
+            if min_pt <= 0:
+                problems.append("figure_text.min_pt must be > 0 when the block is present")
+            else:
+                clean_figure_text = {
+                    "min_pt": min_pt,
+                    "source": str(figure_text_raw.get("source") or "").strip(),
+                }
+
     if problems:
         raise VenueProfileError(f"{origin}: " + "; ".join(problems))
 
@@ -1831,6 +1906,8 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
         "leftover_phrases": leftover,
         "numbering": numbering,
         "references": clean_references,
+        "figure_text": clean_figure_text,
+        "image_dpi": clean_image_dpi,
         "submission": {
             "pdf_accepted": pdf_accepted,
             "formats": formats,
@@ -3848,12 +3925,25 @@ AGENT_PRESETS = {
     # profile owns the codex CLI's, so this preset carries no overrides the way
     # the codex one does.
     "dsh": ["dsh", "--profile", "headless", "--json", "-"],
+    # Qwen3.8-27B through an OpenAI-compatible vLLM endpoint (the SSH-tunnel
+    # route documented in `paper_qwen_agent.py`). The adapter is a thin
+    # provider-config layer around the harness the operator already uses:
+    # PAPER_QWEN_HARNESS=codex (default) or dsh. It starts the tunnel only when
+    # the endpoint is not already reachable, and a `chat` mode is available for
+    # text-only jobs. The model's provider/model/base-url are environment
+    # settings (PAPER_QWEN_*; see the adapter's docstring), not pipeline
+    # config: the endpoint is deployment-specific, never manuscript content.
+    # The adapter is its own executable (shebang `#!/usr/bin/env python3`), not
+    # `[sys.executable, path]`: `AGENT_PRESET_BINARIES` is then the adapter's
+    # name, and a plain `python3 stub_agent.py` passed through --agent-cmd still
+    # does not look like a shipped preset (the dsh suite checks that).
+    "qwen": [str(Path(__file__).resolve().with_name("paper_qwen_agent.py"))],
 }
 # The backends an operator may select BY NAME (each maps to a shipped argv;
 # `manual` is the no-CLI mode) -- one list, so every --agent/--judge-agent
-# parser accepts the same set. A custom `--agent-cmd`/PAPER_AGENT_CMD stays the
+# parser accepts the same set. A custom --agent-cmd/PAPER_AGENT_CMD stays the
 # last route and is never named here.
-AGENT_CHOICES = ("codex", "claude", "dsh", "manual")
+AGENT_CHOICES = ("codex", "claude", "dsh", "qwen", "manual")
 # The CLI each preset launches (`codex`, `claude`, `dsh`). Derived from the
 # preset table itself, so the checks that ask "is this the operator's real
 # agent CLI, or a test stub / foreign tool?" (see `_looks_like_preset_cmd`) and
@@ -11125,7 +11215,27 @@ def agent_argv(agent_name: str) -> list:
     The overrides are options of the `exec` subcommand, so they are spliced in
     directly after it -- before the PROMPT positional (`-`), which stays last.
     An operator-supplied --agent-cmd/PAPER_AGENT_CMD is never touched here.
+
+    `qwen` is the one preset whose harness is chosen at run time
+    (PAPER_QWEN_HARNESS=codex|dsh|chat): the adapter binary is fixed, and the
+    harness name plus the codex MCP approvals are passed as its arguments.
+    A dsh Qwen session gets its provider patch generated by the adapter; a
+    codex one gets the same `-c` approval overrides as the native codex preset.
     """
+    if agent_name == "qwen":
+        argv = list(AGENT_PRESETS["qwen"])
+        harness = (os.environ.get("PAPER_QWEN_HARNESS") or "codex").strip().lower()
+        argv += ["--harness", harness]
+        if harness == "codex":
+            extra = codex_mcp_overrides()
+            if extra:
+                argv += ["--codex-extra-args", json.dumps(extra)]
+        # A production run needs a tool-using agent. The adapter's default is
+        # warn-and-run (so a text-only `chat` test is possible); the operator
+        # can make the capability a hard preflight with this env.
+        if os.environ.get("PAPER_QWEN_REQUIRE_TOOLS", "").lower() in ("1", "true", "yes"):
+            argv.append("--require-tools")
+        return argv
     argv = list(AGENT_PRESETS[agent_name])
     if agent_name != "codex" or len(argv) < 2:
         return argv
@@ -12136,20 +12246,40 @@ def begin_run_log(cmd: str, root, argv=None) -> Path:
 
 
 def pipeline_identity() -> dict:
-    """{path, sha256, version} of the script that is RUNNING right now.
+    """{path, sha256, version, modules} of the script RUNNING right now.
 
     `setup` records it on the root, so a later invocation can say whether the copy
     it is executing is the one the root was created with. The 2026-09-22 roots made
     this worth printing: `setup` had been run from a stale checkout, so the root
     contained a pipeline WITHOUT the scoped-repair code, silently -- five hours of
     retries later the operator asked why `--strict-artifacts fix` never fired.
+
+    `modules` records every sibling module a run executes (the docx formatter,
+    the redlines adapter and the Qwen adapter). The 2026-10-19 round-2 roots showed why
+    the driver's digest alone is insufficient: the roots ran an old
+    `paper_pipeline.py` AND an old `paper_docx_format.py`, so the layout rules
+    added to the workspace never executed even though the driver version string
+    was unchanged.
     """
     p = Path(__file__).resolve()
     try:
         digest = sha256_file(p)
     except OSError:
         digest = ""
-    return {"path": str(p), "sha256": digest, "version": VERSION}
+    return {"path": str(p), "sha256": digest, "version": VERSION,
+            "modules": module_manifest(p.parent)}
+
+
+def module_manifest(base_dir: Path) -> dict:
+    """{filename: sha256} for the driver's sibling modules that a run executes."""
+    out = {}
+    for name in PIPELINE_MODULE_FILES:
+        q = Path(base_dir) / name
+        try:
+            out[name] = sha256_file(q) if q.is_file() else None
+        except OSError:
+            out[name] = None
+    return out
 
 
 def pipeline_identity_note(ctx: Ctx) -> str:
@@ -12254,7 +12384,10 @@ def root_pipeline_staleness(ctx: Ctx) -> dict:
            "frozen_at": None, "origin": origin_path or None,
            "recorded_sha256": str(recorded.get("sha256") or "") or None,
            "origin_sha256": None, "origin_differs": False, "snapshot_of_root": None,
-           "frozen_sha256": None, "frozen_differs": False}
+           "frozen_sha256": None, "frozen_differs": False,
+           "recorded_modules": dict(recorded.get("modules") or {}),
+           "frozen_modules": module_manifest(ctx.root),
+           "maintained_modules": {}, "module_diffs": []}
     if frozen.is_file():
         try:
             out["frozen_at"] = datetime.fromtimestamp(
@@ -12309,6 +12442,23 @@ def root_pipeline_staleness(ctx: Ctx) -> dict:
         cursor = str((rec.get("pipeline") or {}).get("path") or "")
     out["maintained_differs"] = bool(out["maintained_sha256"] and out["frozen_sha256"]
                                      and out["maintained_sha256"] != out["frozen_sha256"])
+    # The module manifest (2026-10-19): a root can run a fresh driver with
+    # a stale formatter, and the driver digest alone cannot see it. Compare the
+    # FROZEN modules with the MAINTAINED tree's modules when the maintenance
+    # chain names one.
+    if out.get("maintained_path"):
+        out["maintained_modules"] = module_manifest(Path(out["maintained_path"]).parent)
+        for name in PIPELINE_MODULE_FILES:
+            # The driver has its own, stronger check (`running_pipeline_mismatch`
+            # / `frozen_differs`): including it here made a foreign driver die
+            # with the generic "stale sibling module" message instead of the
+            # actionable "DIFFERENT paper_pipeline.py" one.
+            if name == "paper_pipeline.py":
+                continue
+            a = out["frozen_modules"].get(name)
+            b = out["maintained_modules"].get(name)
+            if a and b and a != b:
+                out["module_diffs"].append(name)
     return out
 
 
@@ -12317,6 +12467,13 @@ def pipeline_snapshot_note(ctx: Ctx) -> str:
     st = root_pipeline_staleness(ctx)
     if not st.get("frozen"):
         return ""
+    if st.get("module_diffs"):
+        return (f"[pipeline] **WARNING**: this root's frozen bundle differs from the "
+                f"maintained tree in {', '.join(st['module_diffs'])}. Every command here "
+                f"still executes the frozen copy, so rules added to the maintained tree "
+                f"after setup do NOT run. Run `python3 <maintained>/paper_pipeline.py "
+                f"sync-code --root {ctx.root}` (or recreate the root from the maintained "
+                f"tree) before the next stage if the new rules must apply.")
     if st.get("frozen_foreign") and st.get("maintained_differs"):
         # The recorded origin is ANOTHER root's snapshot, and the tree the
         # operator maintains has moved on: this root and its origin agree with
@@ -12332,7 +12489,8 @@ def pipeline_snapshot_note(ctx: Ctx) -> str:
                 f"executes the frozen code, so fixes committed since the snapshot will NOT run "
                 f"in this root. Re-create the root from the maintained tree (same `--source`), "
                 f"or copy the current `paper_pipeline.py`, `paper_docx_format.py` and "
-                f"`paper_redlines_adapter.py` beside this root's `state.json`.")
+                f"`paper_redlines_adapter.py` and `paper_qwen_agent.py` beside this "
+                f"root's `state.json`.")
     if st.get("frozen_differs"):
         # The record and the FILE disagree: state.json says one sha256, the
         # frozen script hashes to another. That is not "origin moved on" -- it is
@@ -12388,7 +12546,31 @@ def running_pipeline_mismatch(ctx: Ctx) -> dict:
 
 
 def refuse_foreign_pipeline(ctx: Ctx, command: str) -> None:
-    """Refuse a state-changing command driven by another copy of the script."""
+    """Refuse a state-changing command driven by another copy of the script.
+
+    2026-10-19: the root also freezes `paper_docx_format.py` and
+    `paper_redlines_adapter.py` and `paper_qwen_agent.py`. A root created after the module manifest
+    existed (`state.pipeline.modules`) must not run when the maintained tree's
+    formatter or adapter differs from the frozen one: the round-2 roots ran an
+    old formatter while the workspace already carried FMT-AV3/IM5/TB5/T6h, so
+    defects those rules target shipped although the driver looked current. The
+    deliberate escape is `sync-code` (copy the maintained modules and record
+    their digests), not an environment variable.
+    """
+    st = root_pipeline_staleness(ctx)
+    if st.get("recorded_modules") and st.get("module_diffs"):
+        die(
+            f"{command} would run this root with STALE sibling module(s): "
+            f"{', '.join(st['module_diffs'])}.\n"
+            f"    frozen     : {ctx.root}\n"
+            f"    maintained : {st.get('maintained_path')}\n"
+            f"The root's state.json records a module manifest; the maintained tree's "
+            f"copy of at least one of them has changed since. The stage prompts, scans and "
+            f"postchecks must come from the same bundle. Run:\n"
+            f"    python3 {shlex.quote(str(Path(__file__).resolve()))} sync-code "
+            f"--root {shlex.quote(str(ctx.root))}\n"
+            f"to copy the maintained modules into the root and record the new digests, "
+            f"then retry.", code=2)
     mm = running_pipeline_mismatch(ctx)
     if not mm["mismatch"] and not mm["unverifiable"]:
         return
@@ -14144,6 +14326,10 @@ def format_policy_of(ctx: Ctx) -> dict:
     for key, block in _venue_display_blocks(ctx).items():
         if key not in configured:
             policy[key] = copy.deepcopy(block)
+    if "min_image_dpi" not in configured:
+        _dpi = (policy.get("image_dpi") or {}).get("min_dpi")
+        if _dpi:
+            policy["min_image_dpi"] = float(_dpi)
     if "empty_paragraph_slots" not in configured:
         policy["empty_paragraph_slots"] = _venue_empty_paragraph_slots(ctx)
     if "cover_letter" not in configured:
@@ -14326,6 +14512,15 @@ def _venue_display_blocks(ctx: Ctx) -> dict:
             block = prof.data.get(name) or {}
             if _declares_display_rule(block):
                 blocks[name] = copy.deepcopy(block)
+        # The venue's recorded figure-type minimum (Nature 5 pt, Frontiers 8 pt)
+        # is a measured rule, not a formatting preference: carry it into the
+        # format policy so FMT-IM6 runs with the venue's own number and source.
+        figure_text = prof.data.get("figure_text") or {}
+        if isinstance(figure_text, dict) and figure_text.get("min_pt"):
+            blocks["figure_text"] = copy.deepcopy(figure_text)
+        image_dpi = prof.data.get("image_dpi") or {}
+        if isinstance(image_dpi, dict) and image_dpi.get("min_dpi"):
+            blocks["image_dpi"] = copy.deepcopy(image_dpi)
     try:
         ctx._venue_display_blocks = (key, blocks)
     except Exception:                                       # noqa: BLE001 -- stub ctx
@@ -14396,6 +14591,11 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
     # one of them a file the corpus builder never ships.
     overrides = corpus_source_overrides(sources)
     docs, rows = [], []
+    # Every submitted surface's text, for the cross-document claim check at the
+    # end of the sweep. The CNB Reporting Summary and the neohet supplement are
+    # separate documents from the main text; a contradiction between them is
+    # invisible to a per-file scan, so collect first and compare once.
+    claim_docs = []
     for i, (src, prefix, excluded) in enumerate(sources):
         if not src.is_dir():
             continue
@@ -14430,6 +14630,14 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                 r["document"] = prefix + r["document"]
             docs.append(info)
             rows.extend(info.get("rows") or [])
+            try:
+                with zipfile.ZipFile(p) as z:
+                    dxml = z.read("word/document.xml").decode("utf-8", "replace")
+                claim_docs.append((prefix + rel, "\n".join(
+                    mod.text_of(pp[2]) for pp in mod.paragraphs(dxml))))
+            except (KeyError, zipfile.BadZipFile, OSError, RuntimeError,
+                    NotImplementedError):
+                pass
         # TEXT sources (LaTeX/markdown/plain text): the same consistency rules,
         # report-only -- the agents edit these files, the OOXML fixer does not.
         # `.bib` is a TEXT source too (2026-10-15): the CNB supplementary
@@ -14463,6 +14671,7 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                     paras = []
             else:
                 paras = text_source_paragraphs(p)
+            claim_docs.append((prefix + rel, "\n".join(paras)))
             text_rows = list(mod.text_style_rows(paras))
             if p.suffix.lower() in (".tex", ".ltx"):
                 # The siunitx rule only has meaning in a LaTeX source (a DOCX
@@ -14479,6 +14688,65 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                              "evidence": r["evidence"], "detail": r["detail"],
                              "fix": "editorial", "protected": False,
                              "tier": r.get("tier") or mod.tier_of(r["rule"])})
+        # PDF SUBMISSIONS. The CNB supplement and the Reporting Summary are the
+        # documents the journal actually reads as PDFs; before 2026-10-19 the
+        # scan opened only DOCX/text, so the supplement's Table S3 arithmetic,
+        # the Summary's unanswered "Eukaryotic cell lines" field and every
+        # availability claim in them were outside the sweep.
+        for p in sorted(src.rglob("*.pdf")):
+            if not p.is_file() or _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
+                continue
+            rel = p.relative_to(src).as_posix()
+            if not is_submitted(rel):
+                continue
+            if (prefix + rel) in overrides[i]:
+                continue
+            if excluded and rel.split("/", 1)[0] in excluded:
+                continue
+            if is_non_manuscript_rel(rel):
+                continue
+            if "work" in rel.split("/")[:-1]:
+                continue
+            text = _pdf_text(p)
+            if not text or len(text.split()) < 80:
+                # An image-only PDF has no reader-visible prose to scan; the
+                # visual checks own its figures. The PDF path is a text scan,
+                # never a claim that the document is clean.
+                continue
+            claim_docs.append((prefix + rel, text))
+            pdf_paras = [" ".join(block.split())
+                         for block in re.split(r"\n\s*\n", text) if block.strip()]
+            # Targeted rules only: a PDF is a rendered document, not the
+            # manuscript source, and running the full text-style sweep over 52
+            # pages produced 170 long-sentence rows that buried the three real
+            # findings. The argument-level rules and the statistics/summary
+            # checks are the ones that need the reader-visible PDF text.
+            for _fn in ("logic_rows", "count_claim_rows", "legend_claim_rows"):
+                _f = getattr(mod, _fn, None)
+                if _f is None:
+                    continue
+                try:
+                    for r in _f(pdf_paras):
+                        rows.append({"rule": r["rule"], "severity": r["severity"],
+                                     "document": prefix + rel, "location": "document",
+                                     "evidence": r["evidence"], "detail": r["detail"],
+                                     "fix": "editorial", "protected": False,
+                                     "tier": r.get("tier") or mod.tier_of(r["rule"])})
+                except Exception:                                     # noqa: BLE001
+                    pass
+            if hasattr(mod, "availability_claim_rows"):
+                for r in mod.availability_claim_rows(pdf_paras, prefix + rel):
+                    r["document"] = prefix + rel
+                    rows.append(r)
+            if hasattr(mod, "stats_floor_rows"):
+                for r in mod.stats_floor_rows(text.splitlines()):
+                    r["document"] = prefix + rel
+                    rows.append(r)
+            if (hasattr(mod, "reporting_summary_gap_rows")
+                    and re.search(r"reporting[-_ ]?summary", p.name, re.I)):
+                for r in mod.reporting_summary_gap_rows(text):
+                    r["document"] = prefix + rel
+                    rows.append(r)
         # FIGURE LABELS (FMT-IM5): OCR the submitted figure rasters and compare
         # their words with the manuscript's own vocabulary. Only declared
         # figures, never an evidence area; a missing OCR engine is recorded as a
@@ -14511,6 +14779,23 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                     for r in mod.figure_label_rows(images, mod.vocabulary_terms(texts)):
                         r["document"] = prefix + r["document"]
                         rows.append(r)
+                    width = float(policy.get("figure_print_width_in") or 6.5)
+                    if hasattr(mod, "figure_text_size_for_image"):
+                        for q in images:
+                            try:
+                                for r in mod.figure_text_size_for_image(q, width, policy):
+                                    r["document"] = prefix + r["document"]
+                                    rows.append(r)
+                            except Exception:                         # noqa: BLE001
+                                continue
+                    if hasattr(mod, "image_resolution_rows"):
+                        for q in images:
+                            try:
+                                for r in mod.image_resolution_rows(q, width, policy):
+                                    r["document"] = prefix + r["document"]
+                                    rows.append(r)
+                            except Exception:                         # noqa: BLE001
+                                continue
             except Exception as e:                                    # noqa: BLE001
                 # OCR is a sampling pass, never a reason to abort the sweep; an
                 # unexpected failure is still a RECORDED gap (rule 8), not a
@@ -14523,6 +14808,37 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                                "re-run the scan / install tesseract and inspect the "
                                "submitted figures"),
                     "fix": "manual", "protected": False, "tier": "advisory"})
+    # CROSS-SURFACE CLAIMS (J6/FMT-AV4): compare the submitted surfaces once,
+    # after every DOCX/text/PDF paragraph has been collected. A per-file scan
+    # cannot see the supplement saying "shipped" while the main text says "not
+    # in the repository", or the Summary saying "no overlap" while Methods say
+    # the threshold was tuned on evaluated data.
+    if claim_docs and hasattr(mod, "claim_contradiction_rows"):
+        try:
+            rows.extend(mod.claim_contradiction_rows(claim_docs))
+        except Exception as e:                                        # noqa: BLE001
+            rows.append({
+                "rule": "J6-CONTRADICTION", "severity": "low",
+                "document": "cross-surface", "location": "claim scan",
+                "evidence": f"the cross-surface claim scan failed: {type(e).__name__}: {e}",
+                "detail": ("the cross-document contradiction class was NOT examined in "
+                           "this sweep; re-run the scan or read the submitted surfaces "
+                           "against each other"),
+                "fix": "manual", "protected": False, "tier": "advisory"})
+    # Deduplicate the same row reached by two passes (the DOCX figure-text rule
+    # and the standalone figure loop; a PDF paragraph scan and the explicit
+    # table scan). The key includes the document, location and evidence so two
+    # genuinely different instances of one rule are kept.
+    _seen = set()
+    _unique = []
+    for r in rows:
+        key = (r.get("rule"), r.get("document"), r.get("location"),
+               str(r.get("evidence") or "")[:300])
+        if key in _seen:
+            continue
+        _seen.add(key)
+        _unique.append(r)
+    rows = _unique
     by_rule = {}
     for r in rows:
         by_rule[r["rule"]] = by_rule.get(r["rule"], 0) + 1
@@ -31199,6 +31515,30 @@ def postcheck_revise(ctx: Ctx, rec: dict):
                                              frozen_findings_total(ctx, rec))
     errs.extend(lerrs)
     warns.extend(lwarns)
+    # WHOLE-PARAGRAPH RE-READ (2026-10-19): a revision that edits only the
+    # quoted sentence can leave the paragraph's other sentence contradicting it
+    # (the round-2 "chiefly accompanied by" and "near-invariance" cases). Ask for
+    # one REREAD note per fixed finding; a missing note is reported, not gated
+    # (the audit may still find the residue).
+    try:
+        _rr = read_json(rev / "revision_report.json", revive=False, lenient=True) or {}
+        _rows = _rr.get("ledger") or _rr.get("findings") or _rr.get("coverage") or []
+        _fixed = [str(r.get("id")) for r in _rows if isinstance(r, dict)
+                  and str(r.get("final_status") or r.get("status") or "") in
+                  ("fixed", "fixed-with-caveat")]
+        _notes = list((rev / "work").glob("REREAD_*.md"))
+        _missing = [fid for fid in _fixed
+                    if not any(fid in q.name for q in _notes)]
+        if _missing:
+            warns.append(
+                f"{len(_missing)} fixed finding(s) have no revised/work/REREAD_<id>.md "
+                f"note ({', '.join(_missing[:6])}): a sentence-local edit must re-read "
+                f"the containing paragraph and its neighbour, or the next round will find "
+                f"the contradiction the edit left behind")
+    except Exception as e:                                            # noqa: BLE001
+        warns.append(f"the REREAD-note check could not read the revision ledger "
+                     f"({type(e).__name__}: {e}); the whole-paragraph re-read is not "
+                     f"verified for this stage")
     # REWRITE-PARITY EVIDENCE: the frozen review may carry the classes a
     # from-scratch rewrite fixes as it goes (M25-M30) and the scope-level
     # architecture findings (J5). Their fixes have their own required
@@ -36145,6 +36485,11 @@ def resolve_agent_cmd(agent_name: str, agent_cmd_arg: str, use_env: bool = True)
         # capability a preset cannot express as a flag: the DeepSeek Harness's
         # one-shot form (see dsh_harness_problem).
         argv = agent_argv(agent_name)
+        if agent_name == "qwen" and argv and not Path(argv[0]).is_file():
+            die(f"the qwen adapter is missing next to the driver: {argv[0]}\n"
+                f"       A root created before the adapter existed must be synced first:\n"
+                f"       python3 {Path(__file__).resolve()} sync-code --root <root>\n"
+                f"       (or recreate the root from the maintained tree).")
         harness_problem = dsh_harness_problem(argv)
         if harness_problem:
             die(harness_problem)
@@ -38073,6 +38418,12 @@ def cmd_setup(args) -> None:
     _adapter = script.with_name(REDLINE_ADAPTER_NAME)
     if _adapter.is_file():
         shutil.copy(_adapter, root / REDLINE_ADAPTER_NAME)
+    # The Qwen adapter is executed by the `qwen` agent preset, which resolves
+    # its path next to the running driver. A root that lacks it cannot run that
+    # preset; copy it at setup and let the module manifest gate a later drift.
+    _qwen = script.with_name("paper_qwen_agent.py")
+    if _qwen.is_file():
+        shutil.copy(_qwen, root / "paper_qwen_agent.py")
     # The venue profiles travel with the root too: the root stays
     # self-contained, `set-venue --profile` has a directory to install into,
     # and a root-local edit overrides the shipped copy. The config's snapshot is
@@ -43082,9 +43433,17 @@ def decide_certification(gate_problems, rounds_data, chain_ok, panel_gaps, final
 
 
 def certification_label(certification) -> str:
-    """`CERTIFIED` / `PROVISIONAL` / `NOT CERTIFIED` for one certification dict."""
+    """`CERTIFIED` / `PROVISIONAL` / `NOT CERTIFIED` for one certification dict.
+
+    A panel-certified answer whose published package still carries readiness
+    findings is NOT labelled a bare `CERTIFIED`: the round-2 readmes said
+    `Certification: CERTIFIED` at the top and `Submission readiness: NOT READY`
+    thirty lines later, and a reader could not tell which was the verdict.
+    """
     cert = certification or {}
     if cert.get("certified"):
+        if cert.get("submission_ready") is False:
+            return "CERTIFIED (panel) — NOT SUBMISSION-READY"
         return "CERTIFIED"
     if cert.get("provisional") and not cert.get("blockers"):
         return "PROVISIONAL"
@@ -48119,9 +48478,15 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
             L.append(f"  - … and {len(_advisory) - 10} more")
     L.append("")
     if cert.get("certified"):
-        L.append(f"This directory is the certified champion corpus: "
-                 f"`setup --source {ctx.root / final_clean_dirname(ctx.root)}` starts the next "
-                 f"run from it.")
+        if cert.get("submission_ready") is False:
+            L.append("This directory is the champion corpus. The panel completed and signed "
+                     "the comparison; the readiness findings above still block upload. "
+                     f"`setup --source {ctx.root / final_clean_dirname(ctx.root)}` starts the "
+                     "next run from these bytes.")
+        else:
+            L.append(f"This directory is the certified champion corpus: "
+                     f"`setup --source {ctx.root / final_clean_dirname(ctx.root)}` starts the "
+                     f"next run from it.")
     else:
         L.append("> **Do not treat this directory as a certified answer.** It is the champion "
                  "corpus this decision produced; the blockers above say why the decision was "
@@ -49422,6 +49787,82 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
              "before submission; the pipeline never touches it.")
     L.append("")
     return "\n".join(L)
+
+
+def cmd_sync_code(args) -> None:
+    """Copy the maintained module bundle into a root and record it.
+
+    `setup` freezes the driver and its sibling modules for reproducibility. When
+    the maintained tree gains a rule (the 2026-10-19 layout scans), an existing
+    root keeps running the old bundle until the operator deliberately replaces
+    it. This command is that deliberate replacement: it copies the maintained
+    `paper_pipeline.py`, `paper_docx_format.py`, `paper_redlines_adapter.py` and
+    `paper_qwen_agent.py` into the root, records their new digests (so
+    `refuse_foreign_pipeline` can
+    tell a synced root from a drifted one) and prints what changed. It never
+    touches the package, the pinned bytes, the review or any manuscript file.
+    """
+    root = Path(args.root).resolve()
+    if not (root / "state.json").is_file():
+        die(f"sync-code: {root} is not a pipeline root (no state.json)")
+    if frozen_snapshot_root(Path(__file__).resolve()):
+        die("sync-code must be run from the MAINTAINED tree, not from a root's frozen "
+            "paper_pipeline.py; use `/home/.../paper-refine/paper_pipeline.py sync-code` "
+            "or another checkout you mean to ship.")
+    src = Path(__file__).resolve().parent
+    if src.resolve() == root.resolve():
+        die("sync-code: the maintained tree and the root are the same directory; nothing "
+            "to copy.")
+    ctx = Ctx(root)
+    ctx.load(need_cfg=False)
+    holder = _root_lock_holder(root)
+    if holder:
+        die(f"sync-code: {root} is locked by pid {holder[0]} ({holder[1]}); stop the live "
+            f"run before replacing the code it is executing.")
+    changed, unchanged = [], []
+    for name in PIPELINE_MODULE_FILES:
+        s, d = src / name, root / name
+        if not s.is_file():
+            die(f"sync-code: the maintained tree has no {name}; refusing a partial bundle")
+        try:
+            same = d.is_file() and sha256_file(s) == sha256_file(d)
+        except OSError:
+            same = False
+        if same:
+            unchanged.append(name)
+            continue
+        # Replace atomically: a `run` that starts while the bundle is being
+        # synced must read a whole module, never a half-written one.
+        tmp = d.with_name(d.name + ".sync-tmp")
+        shutil.copy2(s, tmp)
+        os.replace(tmp, d)
+        changed.append(name)
+    ident = pipeline_identity()
+    ident["synced_at"] = utcnow()
+    ctx.state["pipeline"] = ident
+    ctx.save_state()
+    print(f"[sync-code] root: {root}")
+    print(f"[sync-code] source tree: {src}")
+    print(f"[sync-code] copied: {', '.join(changed) if changed else '(nothing changed)'}")
+    if unchanged:
+        print(f"[sync-code] already current: {', '.join(unchanged)}")
+    print(f"[sync-code] recorded module manifest: "
+          f"{', '.join(f'{k}={str(v)[:12]}' for k, v in ident['modules'].items())}")
+    if (root / VENUE_PROFILES_DIRNAME).is_dir():
+        print(f"[sync-code] note: {root / VENUE_PROFILES_DIRNAME} is a ROOT-LOCAL copy and "
+              f"was NOT replaced. If it predates a venue rule the maintained tree now "
+              f"carries (e.g. figure_text/image_dpi), refresh it with "
+              f"`{Path(__file__).name} set-venue <id> --profile "
+              f"{Path(__file__).resolve().parent / VENUE_PROFILES_DIRNAME}/<id>.json` "
+              f"or recreate the root from the maintained tree.")
+    if (root / "pipeline_config.json").is_file():
+        print("[sync-code] note: pipeline_config.json's recorded `format_policy` snapshot is "
+              "NOT rewritten either. A rule added to the maintained formatter that depends on "
+              "a new policy key (e.g. min_figure_text_pt / min_image_dpi) stays OFF in this "
+              "root until the operator refreshes the venue snapshot (`set-venue`/`setup`); "
+              "the formatter treats a missing key as 'not gated', never as a clean result.")
+    print("[sync-code] the next `run`/`decide` in this root executes the copied bundle; "
+          "earlier verdicts remain the bytes they were.")
 
 
 def cmd_status(args) -> None:
@@ -54510,8 +54951,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="the session backend: codex (default) = `codex exec -`, claude = "
                          "`claude --permission-mode bypassPermissions --print`, dsh = the "
                          "DeepSeek Harness CLI (`dsh --profile headless --json -`, installed "
-                         "separately), manual = stage every prompt for a human; --agent-cmd "
-                         "overrides any of them")
+                         "separately), qwen = Qwen3.8-27B through an OpenAI-compatible vLLM "
+                         "endpoint (the adapter wraps codex/dsh; set PAPER_QWEN_* and see "
+                         "paper_qwen_agent.py --probe), manual = stage every prompt for a "
+                         "human; --agent-cmd overrides any of them")
     run_opts.add_argument("--no-template-stage", action="store_true",
                           help="do NOT author the package inside the journal's Word templates "
                                "before the round (the default is to run that stage first in "
@@ -54621,6 +55064,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     pst = sub.add_parser("status", parents=[common], help="show round/run status")
     pst.set_defaults(func=cmd_status)
+
+    psync = sub.add_parser(
+        "sync-code", parents=[common],
+        help="copy the maintained paper_pipeline.py/paper_docx_format.py/"
+             "paper_redlines_adapter.py/paper_qwen_agent.py into a root and record "
+             "their digests")
+    psync.set_defaults(func=cmd_sync_code)
 
     ptr = sub.add_parser("trend", parents=[common],
                          help="report the improvement chain across several pipeline roots "
