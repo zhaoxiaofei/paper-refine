@@ -10207,7 +10207,19 @@ def analyse_package(path: Path, policy: dict) -> dict:
     res["rows"].extend(cover_letter_stamp_rows(path, policy))
     # FMT-IM6: the placed raster's own type size (FMT-IM4 only checks dpi;
     # a 300-dpi image drawn at half width still halves the printed type).
-    res["rows"].extend(figure_text_size_rows(path, policy))
+    # `figure_ocr=false` turns off OCR; FMT-IM6 cannot be measured without it,
+    # so it becomes a recorded gap instead of an unconditional tesseract call.
+    if policy.get("figure_ocr", True):
+        res["rows"].extend(figure_text_size_rows(path, policy))
+    elif sizes and float(policy.get("min_figure_text_pt")
+                         or (policy.get("figure_text") or {}).get("min_pt") or 0) > 0:
+        res["rows"].append({
+            "rule": "FMT-IM6", "severity": "low", "document": path.name,
+            "location": "figures", "evidence": "figure_ocr is off",
+            "detail": ("the embedded figure-text-size class (FMT-IM6) was NOT examined: "
+                       "measure the artwork's type at the printed width or re-run with "
+                       "figure_ocr on"),
+            "fix": "manual", "protected": False, "tier": "advisory"})
     counts = Counter(r["rule"] for r in res["rows"])
     return {"file": str(path), "rows": res["rows"], "by_rule": dict(counts),
             "high": sum(1 for r in res["rows"] if r["severity"] == "high"),
@@ -11051,17 +11063,25 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
     parts_new = dict(parts)
     parts_new["word/document.xml"] = xml_after.encode("utf-8")
     for name, (axml, arels) in aux.items():
+        # The two repairs are applied in sequence against the SAME evolving
+        # string. Each fix set's offsets are computed on the string it is
+        # applied to; applying both to the original overwrote the first result
+        # (a header needing both a geometry and a PAGE-field repair kept the
+        # distorted image while the report claimed both were fixed).
         _arows, afixes = drawing_geometry_rows(axml, arels, sizes, src.name, policy)
-        if afixes:
-            parts_new[name] = apply_edits(axml, afixes).encode("utf-8")
-            changes.append(f"restored the aspect ratio of {len(afixes)} embedded "
-                           f"image extent(s) in {posixpath.basename(name)}")
+        axml_fixed = apply_edits(axml, afixes) if afixes else axml
         # FMT-S10: a referenced footer/header part with two PAGE fields. The
         # normal `fix` path must repair it too, or the fixer's own verification
         # finds a remaining mechanical rule and rejects the output.
-        _pf = page_field_fixes(axml)
+        _pf = page_field_fixes(axml_fixed)
         if _pf:
-            parts_new[name] = apply_edits(axml, _pf).encode("utf-8")
+            axml_fixed = apply_edits(axml_fixed, _pf)
+        if afixes or _pf:
+            parts_new[name] = axml_fixed.encode("utf-8")
+        if afixes:
+            changes.append(f"restored the aspect ratio of {len(afixes)} embedded "
+                           f"image extent(s) in {posixpath.basename(name)}")
+        if _pf:
             changes.append(f"removed {len(_pf)} duplicate PAGE field paragraph(s) from "
                            f"{posixpath.basename(name)}")
     try:
@@ -11111,6 +11131,21 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
     mech_before = {r["rule"] for r in before_rows if r["rule"] in MECHANICAL_RULES and r["fix"] == "mechanical"}
     mech_after = {r["rule"] for r in after_rows if r["fix"] == "mechanical"}
     remaining = sorted(mech_before & mech_after)
+    # The body-only analyse_document() call above cannot see a header/footer
+    # part. Re-read every aux part the fixer touched (and every other one) so a
+    # repair that failed there -- or that was overwritten by a second edit set --
+    # fails the same `ok` fence as a body repair.
+    aux_remaining = []
+    for name, (_axml, arels) in aux.items():
+        fixed = parts_new.get(name, _axml.encode("utf-8")).decode("utf-8", "replace")
+        _aux_rows, _aux_fixes = drawing_geometry_rows(fixed, arels, sizes, src.name,
+                                                      policy)
+        aux_remaining += [r["rule"] for r in _aux_rows
+                          if r["rule"] in MECHANICAL_RULES
+                          and r.get("fix") == "mechanical"]
+        aux_remaining += [r["rule"] for r in page_field_rows([(name, fixed)], src.name)
+                          if r.get("fix") == "mechanical"]
+    remaining = sorted(set(remaining) | set(aux_remaining))
     schema = validate_package(out)
     verified = {
         "zip_readable": True,
@@ -13374,7 +13409,13 @@ TABLE_IDENTIFIER_RE = re.compile(
 TABLE_TOKEN_FALLBACK_PT = 10.0
 TABLE_CHAR_WIDTH_EM = 0.55          # conservative advance for a serif face
 TABLE_MIN_SLACK_TWIPS = 500         # never shrink a column below this slack
-PAGE_FIELD_INSTR_RE = re.compile(r"<w:instrText[^>]*>\s*PAGE\b", re.I)
+# A PAGE field is serialized in one of two shapes: the long `w:fldChar`/
+# `w:instrText` form, or a single `w:fldSimple w:instr=" PAGE ..."` element
+# (the shape this module's own `_SIMPLE_PAGE_FOOTER` emits). Both are PAGE
+# fields to Word, so both count here.
+PAGE_FIELD_INSTR_RE = re.compile(
+    r"<w:instrText[^>]*>\s*PAGE\b"
+    r"|<w:fldSimple\b[^>]*\bw:instr\s*=\s*[\"']\s*PAGE\b", re.I)
 RASTER_IMAGE_EXT_RE = re.compile(r"\.(?:png|jpe?g|gif|bmp|tiff?)$", re.I)
 BIB_SKIP_FIELD_RE = re.compile(
     r"(?is)\b(?:abstract|keywords?|annote|file|urldate|doi|issn|eprint)\s*=\s*\{.*?\}\s*,?")
@@ -13926,19 +13967,43 @@ def reference_bold_rows(xml: str, styles: dict, doc: str) -> list:
 # ---------------------------------------------------------------------------
 
 _CLAIM_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
+_CLAUSE_SPLIT = re.compile(r"[.;:!?]")
+# `n't` needs no leading word boundary (the "n" follows a letter in "isn't");
+# with `\b(?:...|n't)\b` the contraction branch could never match at all.
+_NEGATION_RE = re.compile(
+    r"\b(?:not|no|none|never|without|neither|nor|cannot)\b"
+    r"|n['\u2019]t\b", re.I)
 
 
 def _claim_sentences(text: str) -> list:
     return [s.strip() for s in _CLAIM_SENT_SPLIT.split(text or "") if s.strip()]
 
 
+def _affirmative_at(sentence: str, start: int) -> bool:
+    """True when the sentence/clause before `start` carries no negation.
+
+    The claim/logic regexes describe positive shapes ("shipped ...",
+    "tests whether ..."), but a negative sentence contains the same words:
+    "We have not shipped the per-candidate tables" matched the positive
+    `shipped` pattern and paired with its own negation as a contradiction.
+    A negation in the SAME sentence or clause (before `;`/`:` or a sentence
+    boundary) means the predicate is not affirmative, so the positive-shape
+    pattern must not fire. The sentence boundary matters for the paragraph-level
+    `_EXPECT_IMPLIES_RE`: a negation in an EARLIER sentence must not suppress a
+    later affirmative one.
+    """
+    prefix = _CLAUSE_SPLIT.split(sentence[:start])[-1]
+    return not _NEGATION_RE.search(prefix)
+
+
 def _claim_find(docs: list, pattern: str) -> list:
-    """[(doc, sentence)] for every sentence matching `pattern` (case-insens.)."""
+    """[(doc, sentence)] for every AFFIRMATIVE sentence matching `pattern`."""
     hits = []
     rx = re.compile(pattern, re.I)
     for name, text in docs or ():
         for sentence in _claim_sentences(text):
-            if rx.search(sentence):
+            m = rx.search(sentence)
+            if m and _affirmative_at(sentence, m.start()):
                 hits.append((name, sentence))
     return hits
 
@@ -14093,7 +14158,8 @@ def logic_rows(paras: list, is_ref: list = None) -> list:
             continue
         for pattern, rule, why in _LOGIC_PATTERNS:
             for sentence in _claim_sentences(text):
-                if re.search(pattern, sentence, re.I):
+                m = re.search(pattern, sentence, re.I)
+                if m and _affirmative_at(sentence, m.start()):
                     rows.append({
                         "rule": rule, "severity": "medium", "document": "-",
                         "location": f"p{i}",
@@ -14102,7 +14168,8 @@ def logic_rows(paras: list, is_ref: list = None) -> list:
                                   "evidence are in the right order",
                         "fix": "manual", "protected": False, "tier": tier_of(rule)})
                     break
-        if _EXPECT_IMPLIES_RE.search(text or ""):
+        _expect = _EXPECT_IMPLIES_RE.search(text or "")
+        if _expect and _affirmative_at(text or "", _expect.start()):
             rows.append({
                 "rule": "FMT-T9L", "severity": "medium", "document": "-",
                 "location": f"p{i}",
@@ -14372,6 +14439,17 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
             report["changes"].append(f"removed {len(part_edits)} duplicate PAGE field "
                                      f"paragraph(s) from {name}")
     if not report["changes"]:
+        # The command's contract is "write the repaired package to --out", so a
+        # clean input still produces an output. Returning without writing one
+        # made `repair-layout FILE --out OUT` print "verified: OUT" and exit 0
+        # with no file there (a downstream fix/publish step then read nothing
+        # or a stale file). A byte-for-byte copy preserves the no-change proof.
+        out.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(src, out)
+        except OSError as exc:
+            report["error"] = f"could not write the repaired copy: {exc}"
+            return report
         report["ok"] = True
         report["remaining"] = rows
         return report

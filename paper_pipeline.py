@@ -12442,6 +12442,20 @@ def root_pipeline_staleness(ctx: Ctx) -> dict:
         cursor = str((rec.get("pipeline") or {}).get("path") or "")
     out["maintained_differs"] = bool(out["maintained_sha256"] and out["frozen_sha256"]
                                      and out["maintained_sha256"] != out["frozen_sha256"])
+    # A module the state.json manifest RECORDS must still hash to the recorded
+    # value. `module_diffs` only compares a frozen file with the maintained
+    # tree, so an edited or deleted frozen sibling (the maintained copy
+    # unchanged) produced no diff at all and `refuse_foreign_pipeline` let the
+    # root run. Record that local drift separately: it is a different repair
+    # from "the maintained tree has moved on".
+    out["recorded_module_diffs"] = []
+    for name in PIPELINE_MODULE_FILES:
+        if name == "paper_pipeline.py":
+            continue
+        recorded_hash = out["recorded_modules"].get(name)
+        frozen_hash = out["frozen_modules"].get(name)
+        if recorded_hash and recorded_hash != frozen_hash:
+            out["recorded_module_diffs"].append(name)
     # The module manifest (2026-10-19): a root can run a fresh driver with
     # a stale formatter, and the driver digest alone cannot see it. Compare the
     # FROZEN modules with the MAINTAINED tree's modules when the maintenance
@@ -12462,18 +12476,46 @@ def root_pipeline_staleness(ctx: Ctx) -> dict:
     return out
 
 
+def _sync_code_hint(root, maintained_path=None) -> str:
+    """The command that actually works: sync-code from the maintained checkout.
+
+    `sync-code` refuses when run from a root's frozen `paper_pipeline.py`, so a
+    recovery message may never suggest the running `__file__` when that file is
+    the root's snapshot. Name the maintained driver when the maintenance chain
+    has one, else tell the operator what to run instead of inventing a path.
+    """
+    if maintained_path and Path(maintained_path).is_file() \
+            and not frozen_snapshot_root(maintained_path):
+        return (f"python3 {shlex.quote(str(maintained_path))} sync-code "
+                f"--root {shlex.quote(str(root))}")
+    return ("run `sync-code` from the MAINTAINED checkout (the tree holding the "
+            "`paper_pipeline.py` you mean to ship), not from this root's frozen copy")
+
+
 def pipeline_snapshot_note(ctx: Ctx) -> str:
     """One paragraph for `status`: which code this root actually runs."""
     st = root_pipeline_staleness(ctx)
     if not st.get("frozen"):
         return ""
+    if st.get("recorded_module_diffs"):
+        # The record and the FILE disagree: state.json records one digest, the
+        # frozen sibling hashes to another (or is gone). This is LOCAL drift --
+        # not "the maintained tree moved on" -- and the two have different
+        # repairs, so say which one it is.
+        return (f"[pipeline] **WARNING**: this root's frozen bundle does NOT match the "
+                f"module manifest in its state.json: "
+                f"{', '.join(st['recorded_module_diffs'])}. The frozen copy was edited or "
+                f"deleted after setup, so every command here runs code its own record does "
+                f"not describe. Restore the recorded copy, or deliberately replace the "
+                f"bundle: {_sync_code_hint(ctx.root, st.get('maintained_path'))}.")
     if st.get("module_diffs"):
         return (f"[pipeline] **WARNING**: this root's frozen bundle differs from the "
                 f"maintained tree in {', '.join(st['module_diffs'])}. Every command here "
                 f"still executes the frozen copy, so rules added to the maintained tree "
-                f"after setup do NOT run. Run `python3 <maintained>/paper_pipeline.py "
-                f"sync-code --root {ctx.root}` (or recreate the root from the maintained "
-                f"tree) before the next stage if the new rules must apply.")
+                f"after setup do NOT run. Run "
+                f"{_sync_code_hint(ctx.root, st.get('maintained_path'))} (or recreate the "
+                f"root from the maintained tree) before the next stage if the new rules "
+                f"must apply.")
     if st.get("frozen_foreign") and st.get("maintained_differs"):
         # The recorded origin is ANOTHER root's snapshot, and the tree the
         # operator maintains has moved on: this root and its origin agree with
@@ -12558,6 +12600,17 @@ def refuse_foreign_pipeline(ctx: Ctx, command: str) -> None:
     their digests), not an environment variable.
     """
     st = root_pipeline_staleness(ctx)
+    if st.get("recorded_modules") and st.get("recorded_module_diffs"):
+        die(
+            f"{command} would run this root with sibling module(s) that do NOT match its "
+            f"state.json manifest: {', '.join(st['recorded_module_diffs'])}.\n"
+            f"    frozen     : {ctx.root}\n"
+            f"The frozen copy was edited or deleted after setup; every stage prompt, scan and "
+            f"postcheck would come from code the root's own record does not describe. "
+            f"Restore the recorded bundle, or deliberately replace it from the maintained "
+            f"tree:\n"
+            f"    {_sync_code_hint(ctx.root, st.get('maintained_path'))}\n"
+            f"then retry.", code=2)
     if st.get("recorded_modules") and st.get("module_diffs"):
         die(
             f"{command} would run this root with STALE sibling module(s): "
@@ -12567,8 +12620,7 @@ def refuse_foreign_pipeline(ctx: Ctx, command: str) -> None:
             f"The root's state.json records a module manifest; the maintained tree's "
             f"copy of at least one of them has changed since. The stage prompts, scans and "
             f"postchecks must come from the same bundle. Run:\n"
-            f"    python3 {shlex.quote(str(Path(__file__).resolve()))} sync-code "
-            f"--root {shlex.quote(str(ctx.root))}\n"
+            f"    {_sync_code_hint(ctx.root, st.get('maintained_path'))}\n"
             f"to copy the maintained modules into the root and record the new digests, "
             f"then retry.", code=2)
     mm = running_pipeline_mismatch(ctx)
@@ -14554,11 +14606,23 @@ def pre_judge_format_policy(ctx: Ctx) -> dict:
     return policy
 
 
+def _files_under_ci(dirp: Path, suffixes) -> list:
+    """Files under `dirp` whose extension matches case-INsensitively.
+
+    `Path.rglob("*.pdf")` is case-sensitive on Linux, so a Reporting Summary
+    saved as `REPORTING_SUMMARY.PDF` (or a Word-authored `REPORT.DOCX`) was
+    invisible to every scan while the corpus carried it. Symlinks are not
+    submission content (see `copy_into`) and are not followed here either.
+    """
+    want = {s.lower() for s in suffixes}
+    return sorted({p for p in Path(dirp).rglob("*")
+                   if p.is_file() and not p.is_symlink()
+                   and p.suffix.lower() in want})
+
+
 def _docx_files_under(dirp: Path) -> list:
-    """Every .docx/.DOCX under a directory (see paper_docx_format.docx_files_under):
-    `rglob("*.docx")` is case-sensitive on Linux, so an uppercase extension was
-    invisible to every corpus formatting scan."""
-    return sorted(set(dirp.rglob("*.docx")) | set(dirp.rglob("*.DOCX")))
+    """Every .docx under a directory, EITHER extension case (and mixed case)."""
+    return _files_under_ci(dirp, (".docx",))
 
 
 def scan_format_in_sources(sources: list, policy=None) -> dict:
@@ -14644,10 +14708,9 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
         # bibliography -- the file the journal compiles its reference list from --
         # carried comma-glued keyword lists ("DNA aneuploidy,Molecular subtyping")
         # and no scan read it at all.
-        for p in sorted([q for suf in ("*.tex", "*.ltx", "*.md", "*.markdown", "*.txt",
-                                      "*.bib")
-                         for q in src.rglob(suf)]):
-            if not p.is_file() or _is_aux_doc(p.name) or is_bookkeeping_name(p.name) \
+        for p in _files_under_ci(src, (".tex", ".ltx", ".md", ".markdown",
+                                       ".txt", ".bib")):
+            if _is_aux_doc(p.name) or is_bookkeeping_name(p.name) \
                     or is_non_submitted_readme_name(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
@@ -14693,8 +14756,9 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
         # scan opened only DOCX/text, so the supplement's Table S3 arithmetic,
         # the Summary's unanswered "Eukaryotic cell lines" field and every
         # availability claim in them were outside the sweep.
-        for p in sorted(src.rglob("*.pdf")):
-            if not p.is_file() or _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
+        _pdf_tool = shutil.which("pdftotext")
+        for p in _files_under_ci(src, (".pdf",)):
+            if _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
             if not is_submitted(rel):
@@ -14707,8 +14771,22 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                 continue
             if "work" in rel.split("/")[:-1]:
                 continue
+            if not _pdf_tool:
+                # A missing poppler is an ENVIRONMENT gap, not a clean PDF.
+                # Record it per unexamined file (rule 8) instead of letting the
+                # absence of rows read as "no PDF findings".
+                rows.append({
+                    "rule": "FMT-PDF0", "severity": "low",
+                    "document": prefix + rel, "location": "PDF text scan",
+                    "evidence": "pdftotext is not installed",
+                    "detail": ("the PDF text class (logic/count/availability/statistics/"
+                               "Reporting Summary claims) was NOT examined for this file; "
+                               "install poppler-utils or read the PDF against the submitted "
+                               "surfaces"),
+                    "fix": "manual", "protected": False, "tier": "advisory"})
+                continue
             text = _pdf_text(p)
-            if not text or len(text.split()) < 80:
+            if not text:
                 # An image-only PDF has no reader-visible prose to scan; the
                 # visual checks own its figures. The PDF path is a text scan,
                 # never a claim that the document is clean.
@@ -14750,36 +14828,48 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
         # FIGURE LABELS (FMT-IM5): OCR the submitted figure rasters and compare
         # their words with the manuscript's own vocabulary. Only declared
         # figures, never an evidence area; a missing OCR engine is recorded as a
-        # gap by the rule itself.
-        if policy.get("figure_ocr", True):
-            try:
-                texts = []
-                for p in _docx_files_under(src):
-                    if not is_submitted(p.relative_to(src).as_posix()):
-                        continue
-                    try:
-                        with zipfile.ZipFile(p) as z:
-                            dxml = z.read("word/document.xml").decode("utf-8", "replace")
-                        texts.append("\n".join(mod.text_of(pp[2])
-                                                for pp in mod.paragraphs(dxml)))
-                    except (KeyError, zipfile.BadZipFile, OSError, RuntimeError,
-                            NotImplementedError):
-                        continue
-                images = []
-                for q in sorted(src.rglob("*")):
-                    if not q.is_file():
-                        continue
-                    if q.suffix.lower() not in (".png", ".jpg", ".jpeg", ".tif", ".tiff"):
-                        continue
-                    rel = q.relative_to(src).as_posix()
-                    if not is_submitted(rel) or is_evidence_rel(rel):
-                        continue
-                    images.append(q)
-                if images:
+        # gap by the rule itself. FMT-IM4 is NOT OCR: `figure_ocr=false` must
+        # not switch off a deterministic resolution check, so the image loop
+        # runs either way and only FMT-IM5/FMT-IM6 are gated below.
+        ocr_on = policy.get("figure_ocr", True)
+        images = []
+        try:
+            for q in sorted(src.rglob("*")):
+                if not q.is_file():
+                    continue
+                if q.suffix.lower() not in (".png", ".jpg", ".jpeg", ".tif", ".tiff"):
+                    continue
+                rel = q.relative_to(src).as_posix()
+                if not is_submitted(rel) or is_evidence_rel(rel):
+                    continue
+                images.append(q)
+        except Exception as e:                                        # noqa: BLE001
+            rows.append({
+                "rule": "FMT-IM4", "severity": "low",
+                "document": prefix + "figures", "location": "artwork",
+                "evidence": f"the figure scan failed: {type(e).__name__}: {e}",
+                "detail": ("the figure resolution/OCR classes were NOT examined in this "
+                           "sweep; re-run the scan or inspect the submitted figures"),
+                "fix": "manual", "protected": False, "tier": "advisory"})
+        if images:
+            width = float(policy.get("figure_print_width_in") or 6.5)
+            if ocr_on:
+                try:
+                    texts = []
+                    for p in _docx_files_under(src):
+                        if not is_submitted(p.relative_to(src).as_posix()):
+                            continue
+                        try:
+                            with zipfile.ZipFile(p) as z:
+                                dxml = z.read("word/document.xml").decode("utf-8", "replace")
+                            texts.append("\n".join(mod.text_of(pp[2])
+                                                    for pp in mod.paragraphs(dxml)))
+                        except (KeyError, zipfile.BadZipFile, OSError, RuntimeError,
+                                NotImplementedError):
+                            continue
                     for r in mod.figure_label_rows(images, mod.vocabulary_terms(texts)):
                         r["document"] = prefix + r["document"]
                         rows.append(r)
-                    width = float(policy.get("figure_print_width_in") or 6.5)
                     if hasattr(mod, "figure_text_size_for_image"):
                         for q in images:
                             try:
@@ -14788,26 +14878,40 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                                     rows.append(r)
                             except Exception:                         # noqa: BLE001
                                 continue
-                    if hasattr(mod, "image_resolution_rows"):
-                        for q in images:
-                            try:
-                                for r in mod.image_resolution_rows(q, width, policy):
-                                    r["document"] = prefix + r["document"]
-                                    rows.append(r)
-                            except Exception:                         # noqa: BLE001
-                                continue
-            except Exception as e:                                    # noqa: BLE001
-                # OCR is a sampling pass, never a reason to abort the sweep; an
-                # unexpected failure is still a RECORDED gap (rule 8), not a
-                # silent pass over the figure-label class.
+                except Exception as e:                                    # noqa: BLE001
+                    # OCR is a sampling pass, never a reason to abort the sweep; an
+                    # unexpected failure is still a RECORDED gap (rule 8), not a
+                    # silent pass over the figure-label class.
+                    rows.append({
+                        "rule": "FMT-IM5", "severity": "low",
+                        "document": prefix + "figures", "location": "artwork text",
+                        "evidence": f"the figure-label OCR pass failed: {type(e).__name__}: {e}",
+                        "detail": ("the figure-label class was NOT examined in this sweep; "
+                                   "re-run the scan / install tesseract and inspect the "
+                                   "submitted figures"),
+                        "fix": "manual", "protected": False, "tier": "advisory"})
+            elif float(policy.get("min_figure_text_pt")
+                       or (policy.get("figure_text") or {}).get("min_pt") or 0) > 0:
+                # OCR is the only way to measure FMT-IM6. When the operator
+                # deliberately turns OCR off, the class is a recorded gap rather
+                # than a silent pass.
                 rows.append({
-                    "rule": "FMT-IM5", "severity": "low",
+                    "rule": "FMT-IM6", "severity": "low",
                     "document": prefix + "figures", "location": "artwork text",
-                    "evidence": f"the figure-label OCR pass failed: {type(e).__name__}: {e}",
-                    "detail": ("the figure-label class was NOT examined in this sweep; "
-                               "re-run the scan / install tesseract and inspect the "
-                               "submitted figures"),
+                    "evidence": "figure_ocr is off",
+                    "detail": ("the figure-text-size class (FMT-IM6) was NOT examined: "
+                               "measure the artwork's type at the printed width or re-run "
+                               "with figure_ocr on"),
                     "fix": "manual", "protected": False, "tier": "advisory"})
+            # FMT-IM4 needs no OCR and is always checked.
+            if hasattr(mod, "image_resolution_rows"):
+                for q in images:
+                    try:
+                        for r in mod.image_resolution_rows(q, width, policy):
+                            r["document"] = prefix + r["document"]
+                            rows.append(r)
+                    except Exception:                             # noqa: BLE001
+                        continue
     # CROSS-SURFACE CLAIMS (J6/FMT-AV4): compare the submitted surfaces once,
     # after every DOCX/text/PDF paragraph has been collected. A per-file scan
     # cannot see the supplement saying "shipped" while the main text says "not
@@ -17356,10 +17460,10 @@ def corpus_text_documents(sources: list, raw_text: bool = False,
                 rows.append((mod.text_of(para), style == "Bibliography",
                              bool(style and style.startswith("Heading"))))
             out.append((prefix + rel, rows))
-        suffixes = ("*.tex", "*.ltx", "*.md", "*.markdown", "*.txt") \
-            + (("*.bib",) if include_bib else ())
-        for p in sorted([q for suf in suffixes for q in src.rglob(suf)]):
-            if not p.is_file() or _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
+        suffixes = (".tex", ".ltx", ".md", ".markdown", ".txt") \
+            + ((".bib",) if include_bib else ())
+        for p in _files_under_ci(src, suffixes):
+            if _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
                 continue
             if (prefix + p.relative_to(src).as_posix()) in overrides[i]:
                 continue                      # a later source provides this path
@@ -19600,14 +19704,37 @@ def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
     timestamps into a judge's sandbox than one written earlier (the revise
     stage) -- an ordering signal the blind protocol must not hand over. Content
     hashes are unaffected.
+
+    Symlinks are NEVER followed: a link inside a submission may point at a local
+    secret outside the package, and copying its target leaked that file into the
+    pristine root, sandboxes, judge views and the published package. The one
+    exception is a TOP-LEVEL evidence area (`raw_data/`, `human_review_feedback/`,
+    ...): a version corpus legitimately carries the root's canonical evidence
+    link, and materializing it is what keeps the corpus digest equal to the
+    recorded input manifest. Nested links inside that area are still skipped.
+    Every skipped link is named in a warning so the loss is visible instead of
+    silent.
     """
     dst.mkdir(parents=True, exist_ok=True)
+    skipped = []
+
+    def _ignore(dirpath, names):
+        out = set(_corpus_ignore(skip_aux, strip_bookkeeping)(dirpath, names) or ())
+        for name in names:
+            if os.path.islink(os.path.join(dirpath, name)):
+                skipped.append(os.path.join(dirpath, name))
+                out.add(name)
+        return sorted(out)
+
     for entry in sorted(src.iterdir()):
         if entry.name in exclude_top:
             continue
         if is_disabled_evidence_rel(entry.name):
             # `<evidence area>.disabled/` is inert: never carried into a
             # version corpus, a sandbox copy or a published package.
+            continue
+        if entry.is_symlink() and not is_evidence_rel(entry.name):
+            skipped.append(str(entry))
             continue
         if skip_aux and _is_aux_doc(entry.name):
             continue
@@ -19616,10 +19743,14 @@ def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
             continue
         target = dst / entry.name
         if entry.is_dir():
-            shutil.copytree(entry, target, dirs_exist_ok=True,
-                            ignore=_corpus_ignore(skip_aux, strip_bookkeeping))
+            shutil.copytree(entry, target, dirs_exist_ok=True, ignore=_ignore)
         elif entry.is_file():
             shutil.copy2(entry, target)
+    if skipped:
+        print(f"warning: skipped {len(skipped)} symlink(s) while copying {src} -> {dst} "
+              f"(a link is not package content; its target may be outside the package): "
+              + ", ".join(sorted(str(s) for s in skipped)[:5])
+              + (" ..." if len(skipped) > 5 else ""), file=sys.stderr)
     if normalize_mtime:
         # One timestamp for the whole view (the copy just completed, so any
         # moment is honest); an mtime a judge can read is a provenance leak.
@@ -31000,7 +31131,16 @@ def scan_regression_problems(ctx: Ctx, before_sources: list, after_sources: list
     """
     mod = _format_module()
     if mod is None:
-        return [], []
+        # An unavailable OOXML engine is a COVERAGE GAP, not a clean comparison:
+        # returning ([], []) let a stage pass with every formatting rule
+        # unexamined. The manifest fence refuses a root with a missing/tampered
+        # frozen module; this covers a scanner that cannot load for any other
+        # reason (a syntax error, a stripped copy) and every caller -- including
+        # `--format-gate`, which otherwise sees no rows and certifies.
+        return ([f"{label}: the OOXML formatting scanner ({DOCX_FORMAT_MODULE}) is "
+                 f"UNAVAILABLE next to the driver, so no formatting rule was examined; "
+                 f"restore the module (or run from a root whose bundle is complete) "
+                 f"and re-check"], [])
     # `policy` may be supplied by a caller with no Ctx (the sandbox self-check
     # reads the sandbox's own format_policy.json): the pre-flight must reach the
     # same verdict as the postcheck it previews.
@@ -36486,9 +36626,18 @@ def resolve_agent_cmd(agent_name: str, agent_cmd_arg: str, use_env: bool = True)
         # one-shot form (see dsh_harness_problem).
         argv = agent_argv(agent_name)
         if agent_name == "qwen" and argv and not Path(argv[0]).is_file():
+            # A frozen root's own driver cannot run sync-code (it refuses by
+            # design), so name the maintained checkout when we can identify it.
+            _snap = frozen_snapshot_root()
+            _origin = str((_snap or {}).get("origin_path") or "")
+            _where = (f"python3 {shlex.quote(_origin)} sync-code --root <root>"
+                      if _origin and Path(_origin).is_file()
+                      and not frozen_snapshot_root(_origin)
+                      else "run `sync-code` from the maintained checkout -- not from this "
+                           "root's frozen paper_pipeline.py")
             die(f"the qwen adapter is missing next to the driver: {argv[0]}\n"
                 f"       A root created before the adapter existed must be synced first:\n"
-                f"       python3 {Path(__file__).resolve()} sync-code --root <root>\n"
+                f"       {_where}\n"
                 f"       (or recreate the root from the maintained tree).")
         harness_problem = dsh_harness_problem(argv)
         if harness_problem:
@@ -38386,7 +38535,29 @@ def cmd_setup(args) -> None:
           f"sha256 {_ident['sha256'][:16]}... from {Path(_ident['path']).parent}  (THIS copy is "
           f"frozen into the root and is what every later `run` executes)")
     print(f"[setup] copying {len(files)} file(s) from {source} -> {ctx.pristine}")
-    shutil.copytree(source, ctx.pristine)
+    _skipped_links = []
+    _source_root = Path(source).resolve()
+
+    def _ignore_symlinks(_dir, names):
+        out = []
+        # A top-level evidence area may legitimately be a link to the operator's
+        # read-only store; setup materializes it (as the old follow-all copy
+        # did) because the pipeline's own input manifests must see the evidence.
+        # Every other link is skipped, including links nested inside that area.
+        at_source_root = Path(_dir).resolve() == _source_root
+        for name in names:
+            if os.path.islink(os.path.join(_dir, name)) \
+                    and not (at_source_root and is_evidence_rel(name)):
+                _skipped_links.append(os.path.join(_dir, name))
+                out.append(name)
+        return out
+
+    shutil.copytree(source, ctx.pristine, ignore=_ignore_symlinks)
+    if _skipped_links:
+        print(f"[setup] WARNING: skipped {len(_skipped_links)} symlink(s) in --source "
+              f"(a link is not package content and its target may be outside the package): "
+              + ", ".join(sorted(_skipped_links)[:5])
+              + (" ..." if len(_skipped_links) > 5 else ""))
     _protected = 0
     for _name in evidence_areas_of(ctx.pristine):
         # The root's canonical evidence areas are read-only: sandboxes SYMLINK
@@ -49805,10 +49976,16 @@ def cmd_sync_code(args) -> None:
     root = Path(args.root).resolve()
     if not (root / "state.json").is_file():
         die(f"sync-code: {root} is not a pipeline root (no state.json)")
-    if frozen_snapshot_root(Path(__file__).resolve()):
+    _snap = frozen_snapshot_root(Path(__file__).resolve())
+    if _snap:
+        origin = str(_snap.get("origin_path") or "")
+        hint = (f"use `python3 {shlex.quote(origin)} sync-code --root "
+                f"{shlex.quote(str(root))}`"
+                if origin and Path(origin).is_file()
+                and not frozen_snapshot_root(origin)
+                else "run `sync-code` from the maintained checkout you mean to ship")
         die("sync-code must be run from the MAINTAINED tree, not from a root's frozen "
-            "paper_pipeline.py; use `/home/.../paper-refine/paper_pipeline.py sync-code` "
-            "or another checkout you mean to ship.")
+            f"paper_pipeline.py; {hint}.")
     src = Path(__file__).resolve().parent
     if src.resolve() == root.resolve():
         die("sync-code: the maintained tree and the root are the same directory; nothing "
@@ -50628,12 +50805,19 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     # paragraph, tracked changes, a rendered blank page) then become decision
     # problems, so the champion is not certified with a submission-ready label.
     format_problems = []
+    format_unavailable = ""
     if win_format:
         format_problems = [f"formatting: {r['document']} {r['location']}: {r['evidence']}"
                            for r in (win_format.get("rows") or [])
                            if r.get("severity") == "high"]
+        if win_format.get("unavailable"):
+            format_unavailable = (f"the OOXML formatting scanner was UNAVAILABLE: "
+                                  f"{win_format['unavailable']}")
         if getattr(args, "format_gate", False):
             problems.extend(format_problems)
+            if format_unavailable:
+                problems.append(f"formatting: {format_unavailable} -- the scan cannot "
+                                f"certify the winner under --format-gate")
     # RESIDUAL gate (opt-in): the pipeline's own artefacts can leave a champion
     # with items it already knows how to state -- an answerable `searchable`
     # hand-off marker, a review whose decision tables were boilerplate or
@@ -50648,6 +50832,8 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     if getattr(args, "format_gate", False) and format_problems:
         gate_problems.append(f"{len(format_problems)} HIGH-severity formatting finding(s) in the "
                              f"final winner (--format-gate)")
+    if getattr(args, "format_gate", False) and format_unavailable:
+        gate_problems.append(f"{format_unavailable} (--format-gate)")
     if residuals.get("gating") and getattr(args, "residual_gate",
                                             DEFAULT_RESIDUAL_GATE):
         gate_problems.append(f"{len(residuals['gating'])} gated residual(s) "

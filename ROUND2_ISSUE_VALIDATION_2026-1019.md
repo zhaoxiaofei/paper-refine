@@ -182,14 +182,15 @@ defect (N14).
    * Standalone figure files get `FMT-IM5`, `FMT-IM6` and `FMT-IM4` rows.
    * Scan rows are deduplicated by rule/document/location/evidence, so the
      DOCX path and the standalone figure path cannot double-report one defect.
-   * `pipeline_identity()` records a **three-module manifest**
+   * `pipeline_identity()` records a **four-module manifest**
      (`paper_pipeline.py`, `paper_docx_format.py`,
-     `paper_redlines_adapter.py`).
+     `paper_redlines_adapter.py`, `paper_qwen_agent.py`).
    * `root_pipeline_staleness()` compares the frozen modules with the
      maintained tree; `pipeline_snapshot_note()` warns; `refuse_foreign_pipeline()`
      refuses a state-changing command when a post-manifest root's modules have
-     drifted.
-   * `sync-code --root <root>` copies the maintained three-module bundle into
+     drifted (and when a frozen module no longer matches its own recorded
+     digest).
+   * `sync-code --root <root>` copies the maintained four-module bundle into
      a root, records the new digests, refuses while a root is locked, and
      refuses if run from a frozen snapshot. (Tested on a temp root.)
    * `certification_label()` returns
@@ -244,7 +245,7 @@ defect (N14).
 * New: `.paper_test/test_round2_regressions_2026_1019.py` — 22 checks covering
   the claim pairs, logic rows, count row, Holm floor (PDF and LaTeX forms),
   Reporting Summary gap, Figure 1 split, Figure S1 no-false-positive, Table 3
-  allele token, CNB figure text size, and the three-module manifest.
+  allele token, CNB figure text size, and the four-module manifest.
 * Existing suites re-run and passing: `test_decide_antiregression.py`,
   `test_review_handoff_2026_1015.py`, `test_venue_config.py`,
   `test_attempt_history.py`, `test_docx_format_1_scan_fix.py` …
