@@ -401,7 +401,10 @@ def test_missing_pdftotext_is_a_gap_row(tmp_path, monkeypatch):
 # F12
 # ---------------------------------------------------------------------------
 def test_round2_validation_doc_matches_the_module_manifest():
-    text = (WS / "ROUND2_ISSUE_VALIDATION_2026-1019.md").read_text(encoding="utf-8")
+    # The dated working records live in revision_history/ (repo bookkeeping,
+    # never submitted), not in the repository root.
+    text = (WS / "revision_history" / "ROUND2_ISSUE_VALIDATION_2026-1019.md"
+            ).read_text(encoding="utf-8")
     assert "three-module" not in text, "the validation record still says three modules"
     assert "paper_qwen_agent.py" in text
     assert len(pp.PIPELINE_MODULE_FILES) == 4

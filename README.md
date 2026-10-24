@@ -2990,8 +2990,9 @@ its four integration runs never started.
 | `paper_docx_format.py` | OOXML style/formatting scanner, fixer and blank-page checker |
 | `paper_redlines_adapter.py` | tracked-changes bridge (`python-redlines[docxodus]`) |
 | `AGENTS.md` | the agent-facing contract (rules the sessions and reviewers are held to) |
-| `REMAINING_ISSUES_TRIAGE_2026-1009.md` | the 2026-10-09 human triage of the two audited final packages |
-| `ZOTERO_REFRESH_FORENSICS_2026-1009.md` | the 2026-10-09 Zotero live-field forensics that M36/FMT-Z grew from |
+| `revision_history/` | the dated working records — audit findings, revision plans, validation ledgers and the history log; repository bookkeeping, never submitted |
+| `revision_history/REMAINING_ISSUES_TRIAGE_2026-1009.md` | the 2026-10-09 human triage of the two audited final packages |
+| `revision_history/ZOTERO_REFRESH_FORENSICS_2026-1009.md` | the 2026-10-09 Zotero live-field forensics that M36/FMT-Z grew from |
 | `docx2pdf.sh` | Word→PDF conversion via PowerShell (WSL/Git Bash) |
 | `docxcompare.sh` | Word→redline comparison via PowerShell (WSL/Git Bash) |
 | `mcp-docx-converter/` | the `docx-converter` MCP tool used as the first-choice renderer |
