@@ -56,6 +56,24 @@
       "source": "Frontiers Author guidelines, 'Scope statement' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'When you submit your manuscript, you will be required to summarize in 200 words your manuscript's scope and its relevance to the journal and/or specialty section you're submitting to.' Frontiers publishes no cover-letter word limit; this profile carries the submission system's 200-word scope statement as the persuading-part preference. No total-content cap is applied."
     }
   },
+  "counting": {
+    "main_text": {
+      "excludes": [
+        "abstract",
+        "references",
+        "figure-legends",
+        "table-captions",
+        "acknowledgements",
+        "author-contributions",
+        "data-availability",
+        "competing-interests",
+        "funding",
+        "supplementary"
+      ],
+      "source": "Frontiers Author guidelines, 'Manuscript length' (https://www.frontiersin.org/guidelines/author-guidelines, checked 2026-10-01): 'The manuscript length includes only the main body of the text, footnotes, and all citations within it. It excludes the abstract, section titles, figure and table captions, contents of tables and boxes, funding statement, acknowledgments, and references in the bibliography.' Methods is NOT in that exclusion list.",
+      "note": "Frontiers counts the main body WITH Methods and the in-text citations; the abstract, references and figure/table captions are outside. The pipeline's default convention (the Nature Biotechnology Article) stops at Methods, so it would undercount a Frontiers manuscript against Frontiers' own 12,000-word number."
+    }
+  },
   "captions": {
     "published_limit": null,
     "default_cap": 0,

@@ -251,8 +251,11 @@ RULES CARRIED INTO EVERY PROMPT (AND WHERE THEY COME FROM)
       <= 3,000 words (excluding abstract, Methods, references and figure
       legends), relaxed by the operator's margins -- +10% on the abstract
       (<= 165 words) and +25% on the main text (<= 3,750 words). A profile may
-      carry different numbers, or none at all (the stages then count and name
-      the limit the target journal's guidelines state). Words are counted as
+      carry different numbers and its own main-text COUNTING CONVENTION (which
+      sections its limit leaves out: Frontiers counts Methods, NBT's Brief
+      Communication counts abstract/references/legends), or none at all (the
+      stages then count and name the limit the target journal's guidelines
+      state). Words are counted as
       maximal runs of NON-SPACE characters with a newline treated as space
       (so "state-of-the-art" is one word and "2026" is one word). An over-limit
       section is a formatting-tier item (M19): reported by the review,
@@ -1484,6 +1487,74 @@ def _slugify_article_type(label: str) -> str:
     return slug or "default"
 
 
+# ---- The venue's MAIN-TEXT COUNTING CONVENTION (check id M19) -------------
+#
+# What a venue's word limit MEANS is part of the venue's rule, not a pipeline
+# assumption: Nature Biotechnology's Article counts main text with the abstract,
+# Methods, references and figure legends excluded, its Brief Communication counts
+# 1,000-1,500 words INCLUDING abstract, references and figure legends, and
+# Frontiers counts the main body WITH Methods and in-text citations. A counter
+# that always stops at Methods under-counts a Frontiers manuscript against
+# Frontiers' own number. The profile therefore states, per venue (and per article
+# type where the types differ), which section kinds its main-text count EXCLUDES;
+# unlisted kinds are inside the count.
+#
+# `DEFAULT_MAIN_TEXT_EXCLUDES` is the pipeline's historical behaviour (the NBT
+# Article convention), kept as the default so a profile written before this
+# field, or one that states no convention, counts exactly as it always did.
+MAIN_TEXT_SECTION_KINDS = ("abstract", "methods", "references", "figure-legends",
+                          "acknowledgements", "author-contributions",
+                          "data-availability", "competing-interests", "funding",
+                          "supplementary", "table-captions")
+# Table captions are a caption KIND, not a section heading: a venue states them
+# only when it groups them with figure legends (Frontiers' "figure and table
+# captions"). The historical default excluded figure legends only, so the new
+# kind is opt-in and never changes a profile that does not name it.
+DEFAULT_MAIN_TEXT_EXCLUDES = tuple(
+    kind for kind in MAIN_TEXT_SECTION_KINDS if kind != "table-captions")
+
+
+def _clean_counting(counting, prefix: str, problems: list):
+    """Validate ONE `counting` block (the venue's or an article type's).
+
+    `None` means "this profile states no convention": the pipeline's default
+    (the NBT Article convention) applies. An explicit block MUST state
+    `main_text.excludes`; an empty list is meaningful and means "nothing is
+    excluded" (a venue that counts the whole document).
+    """
+    if counting is None:
+        return None
+    if not isinstance(counting, dict):
+        problems.append(f"{prefix} must be an object, or null for the pipeline's default "
+                        f"counting convention (got {type(counting).__name__})")
+        return None
+    main = counting.get("main_text")
+    if not isinstance(main, dict):
+        problems.append(f"{prefix}.main_text must be an object stating 'excludes' (the "
+                        f"section kinds the venue leaves OUT of its main-text count)")
+        return None
+    raw = main.get("excludes")
+    if not isinstance(raw, list):
+        problems.append(f"{prefix}.main_text.excludes must be a list of section kinds "
+                        f"({', '.join(MAIN_TEXT_SECTION_KINDS)}); an empty list means "
+                        f"nothing is excluded")
+        raw = []
+    excludes: list = []
+    for item in raw:
+        kind = str(item or "").strip().lower().replace("_", "-")
+        if kind not in MAIN_TEXT_SECTION_KINDS:
+            problems.append(f"{prefix}.main_text.excludes entry {item!r} is not a section "
+                            f"kind ({', '.join(MAIN_TEXT_SECTION_KINDS)})")
+            continue
+        if kind in excludes:
+            problems.append(f"{prefix}.main_text.excludes lists {kind!r} twice")
+            continue
+        excludes.append(kind)
+    return {"main_text": {"excludes": excludes,
+                          "source": str(main.get("source") or "").strip(),
+                          "note": str(main.get("note") or "").strip()}}
+
+
 def _clean_length_limits(limits, prefix: str, problems: list):
     """Validate ONE `length_limits` block (the venue's or an article type's).
 
@@ -1740,10 +1811,12 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
                                                   problems),
             "captions": _clean_captions(entry.get("captions"),
                                         f"article_types[{type_id}].captions", problems),
+            "counting": _clean_counting(entry.get("counting"),
+                                        f"article_types[{type_id}].counting", problems),
         })
     if not clean_types:
         clean_types = [{"id": "default", "label": article_type, "source": "",
-                        "length_limits": None, "captions": None}]
+                        "length_limits": None, "captions": None, "counting": None}]
     default_type_id = (str(out.get("default_article_type") or "").strip().lower()
                        or clean_types[0]["id"])
     type_ids = [t["id"] for t in clean_types]
@@ -1818,6 +1891,10 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
             clean_references["flag_preprints"] = bool(flag)
     clean_tables = _clean_display_rules(out.get("tables"), "tables", problems)
     clean_figures = _clean_display_rules(out.get("figures"), "figures", problems)
+    # The venue's M19 main-text counting convention (which section kinds its
+    # word limit leaves out); a type entry may state its own, because one
+    # venue's types can count differently (NBT Article vs Brief Communication).
+    clean_counting = _clean_counting(out.get("counting"), "counting", problems)
     # The profile's own provenance map (C15 preserves it): a non-object value
     # is a malformed field like any other and must be reported, not dropped.
     raw_sources = out.get("sources")
@@ -1899,6 +1976,7 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
         "accepts_any_journal": bool(out.get("accepts_any_journal")),
         "default_journal": str(out.get("default_journal") or "").strip(),
         "length_limits": clean_limits,
+        "counting": clean_counting,
         "captions": clean_captions,
         "tables": clean_tables or copy.deepcopy(EMPTY_TABLES),
         "figures": clean_figures or copy.deepcopy(EMPTY_FIGURES),
@@ -2033,6 +2111,29 @@ class VenueProfile:
     @property
     def caption_default(self) -> int:
         return int(self.captions.get("default_cap") or 0)
+
+    @property
+    def counting(self) -> dict:
+        """The M19 main-text counting convention for the SELECTED article type.
+
+        A type entry that states no convention inherits the profile-level block;
+        a profile that states none gets the pipeline's default, which is the
+        convention the counter always applied (the abstract, Methods, references
+        and figure legends are outside the main-text count). `excludes` lists
+        the section kinds left OUT of the count; every other kind is inside it.
+        """
+        entry = self._type_entry()
+        block = entry.get("counting")
+        if block is None:
+            block = self.data.get("counting")
+        if block is None:
+            return {"main_text": {"excludes": list(DEFAULT_MAIN_TEXT_EXCLUDES),
+                                  "source": "", "note": ""}}
+        return copy.deepcopy(block)
+
+    def main_text_excludes(self) -> list:
+        """The section kinds this venue/article type leaves OUT of its count."""
+        return list((self.counting.get("main_text") or {}).get("excludes") or [])
 
     @property
     def tables(self) -> dict:
@@ -3659,6 +3760,21 @@ def _inherited_display_rules(venue_id: str, root, missing: tuple) -> dict:
         if "leftover_phrases" in missing and (fresh.data.get("leftover_phrases") or ()):
             inherited["leftover_phrases"] = copy.deepcopy(
                 list(fresh.data["leftover_phrases"]))
+        # The M19 counting convention is the same kind of field: a snapshot
+        # recorded before it existed would count every venue with the NBT
+        # Article convention, including a Frontiers root (which counts Methods).
+        if "counting" in missing:
+            if fresh.data.get("counting"):
+                inherited["counting"] = copy.deepcopy(fresh.data["counting"])
+            # A TYPE's own block (NBT's Brief Communication counts the abstract,
+            # references and legends) must travel too: the venue-level block is
+            # the default type's, so a Brief root that inherited only that would
+            # silently count like an Article.
+            type_counting = {str(t.get("id")): copy.deepcopy(t["counting"])
+                             for t in (fresh.data.get("article_types") or [])
+                             if isinstance(t, dict) and t.get("counting")}
+            if type_counting:
+                inherited["_type_counting"] = type_counting
     _DISPLAY_RULE_INHERIT_CACHE[key] = inherited
     return inherited
 
@@ -3673,17 +3789,28 @@ def _snapshot_profile(cfg: dict, venue_id: str, root=None):
     file, each one only when the snapshot does not carry its key at all (a
     snapshot that carries an explicit block, including an empty one, is
     authoritative, and re-recording with `set-venue` keeps working as before).
+    The M19 counting convention inherits the same way, INCLUDING each article
+    type's own block when that type counts differently from the venue default.
     """
     snapshot = cfg.get("venue_profile")
     if not isinstance(snapshot, dict):
         return None
     missing = tuple(k for k in ("tables", "figures", "references", "numbering",
-                                "leftover_phrases") if k not in snapshot)
+                                "leftover_phrases", "counting") if k not in snapshot)
     if missing:
         inherited = _inherited_display_rules(venue_id, root, missing)
         if inherited:
+            inherited = dict(inherited)
+            type_counting = inherited.pop("_type_counting", None)
             snapshot = dict(snapshot)
             snapshot.update(inherited)
+            if type_counting and isinstance(snapshot.get("article_types"), list):
+                snapshot["article_types"] = [
+                    dict(entry,
+                         counting=copy.deepcopy(type_counting[str(entry.get("id"))]))
+                    if (isinstance(entry, dict) and entry.get("counting") is None
+                        and str(entry.get("id")) in type_counting) else entry
+                    for entry in snapshot["article_types"]]
     try:
         prof = VenueProfile(snapshot, origin="recorded snapshot")
     except VenueProfileError:
@@ -4900,6 +5027,15 @@ CAPTION_SUSPECT_RE = re.compile(
     _CAPTION_LABEL_RE + _CAPTION_NUM_RE +
     r"\s*(?:\([^)]*\)|$|[|:\u2014\u2013\-])",
     re.IGNORECASE)
+# Table captions are counted as a display-caption span only for a profile whose
+# `counting.main_text.excludes` names `table-captions` (Frontiers groups "figure
+# and table captions" in its main-body rule). They are not figure legends: the
+# M18 legend scan keeps its figure-only patterns.
+TABLE_CAPTION_START_RE = re.compile(
+    r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?tables?\.?\s*"
+    r"(S?\d+[A-Za-z]?|[IVXivx]+)"
+    r"\s*(?:\||:|\u2014|\u2013|-|\.)\s*",
+    re.IGNORECASE)
 
 # ---- code-side document-set checking --------------------------------------
 # Editable submission documents that must survive a rewrite/revision/integration
@@ -5998,8 +6134,8 @@ def _caps_clause(profile: VenueProfile, *, article: bool = False) -> str:
         parts.append(f"main text <= {main['cap']} words")
     clause = "; ".join(parts)
     if article:
-        clause += (f" for {_article_phrase(profile)}, excluding abstract, Methods, references "
-                   f"and figure legends")
+        clause += (f" for {_article_phrase(profile)}, "
+                   f"{_main_text_counting_short(profile)}")
     return clause
 
 
@@ -6063,6 +6199,91 @@ def cover_letter_guidance_clause(guide: dict) -> str:
     return "; ".join(bits)
 
 
+# The section kinds the M19 renderers NAME when they describe a counting rule:
+# the four that actually change a main-text word count. Back-matter kinds
+# (acknowledgements, funding, ...) end the span too, but naming all ten in every
+# prompt bloats it without telling the agent anything it must decide.
+_NAMED_COUNTING_KINDS = (("abstract", "the abstract"), ("methods", "Methods"),
+                         ("references", "references"),
+                         ("figure-legends", "figure legends"))
+# Back-matter kinds are named separately: a venue whose ONLY exclusions are
+# these still leaves six sections out (the NBT Brief Communication), so the
+# renderer must not say "nothing EXCLUDED" for it.
+_BACK_MATTER_COUNTING_KINDS = (
+    ("acknowledgements", "acknowledgements"),
+    ("author-contributions", "author contributions"),
+    ("data-availability", "data availability"),
+    ("competing-interests", "competing interests"),
+    ("funding", "funding"),
+    ("supplementary", "supplementary material"),
+)
+
+
+def _join_words(items) -> str:
+    items = list(items)
+    if not items:
+        return "nothing"
+    if len(items) == 1:
+        return items[0]
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def _back_matter_counting_text(excludes) -> str:
+    """`; acknowledgements ... are outside the count` ("" when none is out)."""
+    out = [label for kind, label in _BACK_MATTER_COUNTING_KINDS if kind in excludes]
+    if not out:
+        return ""
+    return ("; " + _join_words(out)
+            + (" is" if len(out) == 1 else " are") + " outside the count")
+
+
+def main_text_counting_text(profile=None) -> str:
+    """One clause naming what the venue's main-text count leaves OUT and IN.
+
+    The counting convention is profile data (M19): Nature Biotechnology's
+    Article excludes the abstract, Methods, references and figure legends,
+    Frontiers counts Methods, and NBT's Brief Communication counts the abstract,
+    references and figure legends too. Every M19 renderer that describes the
+    counted span reads this clause, so a prompt can never tell an agent to count
+    the NBT Article way under another venue's or profile's own convention.
+    """
+    prof = _as_profile(profile)
+    excludes = set(prof.main_text_excludes())
+    left_out = [label for kind, label in _NAMED_COUNTING_KINDS if kind in excludes]
+    inside = [label for kind, label in _NAMED_COUNTING_KINDS if kind not in excludes]
+    back_out = _back_matter_counting_text(excludes)
+    if not inside:
+        return ("the main text is counted with " + _join_words(left_out)
+                + " EXCLUDED" + back_out)
+    left = (_join_words(left_out) if left_out
+            else "no named front/mid section")
+    return ("the main text is counted with " + left + " EXCLUDED, and with "
+            + _join_words(inside) + " INSIDE the count" + back_out)
+
+
+def _main_text_counting_short(profile=None) -> str:
+    """The counting convention as a compact prepositional phrase.
+
+    `main_text_counting_text()` is a full sentence for the length rule and the
+    review mandate; this is the form the cap clause needs ("... main text
+    <= 12,000 words for a Frontiers Original Research, with the abstract,
+    references and figure legends excluded, and Methods counted inside").
+    """
+    prof = _as_profile(profile)
+    excludes = set(prof.main_text_excludes())
+    left_out = [label for kind, label in _NAMED_COUNTING_KINDS if kind in excludes]
+    inside = [label for kind, label in _NAMED_COUNTING_KINDS if kind not in excludes]
+    back_out = [label for kind, label in _BACK_MATTER_COUNTING_KINDS if kind in excludes]
+    parts = []
+    if left_out:
+        parts.append(f"with {_join_words(left_out)} excluded")
+    if inside:
+        parts.append(f"with {_join_words(inside)} counted inside")
+    if back_out:
+        parts.append(f"with {_join_words(back_out)} outside")
+    return ", and ".join(parts) if parts else "with nothing excluded"
+
+
 def length_rule_text(profile=None) -> str:
     """The M19 length rule, rendered from the venue profile (see M19 below).
 
@@ -6073,6 +6294,8 @@ def length_rule_text(profile=None) -> str:
     limits = prof.length_limits()
     abstract, main = limits["abstract"], limits["main text"]
     source = prof.length_limits_source
+    counting_clause = main_text_counting_text(prof)
+    counting_sentence = counting_clause[:1].upper() + counting_clause[1:]
     if abstract["cap"] is None and main["cap"] is None:
         limits_para = (
             f"      carries): this venue profile publishes no abstract or main-text number for\n"
@@ -6097,9 +6320,8 @@ def length_rule_text(profile=None) -> str:
         limits_para = (
             f"      carries): the limits below DO apply, in their relaxed form. For "
             f"{_article_phrase(prof)} the base limits\n"
-            f"      are {' and '.join(base_bits)},\n"
-            f"      counted with the abstract, Methods, references and figure legends EXCLUDED "
-            f"from the main text ({source}). This pipeline allows\n"
+            f"      are {' and '.join(base_bits)}.\n"
+            f"      {counting_sentence} ({source}). This pipeline allows\n"
             f"      {' and '.join(relaxed_bits)}. This run is submitted as "
             f"{_article_phrase(prof)}:\n"
             f"      the venue profile's article-type table carries every type the venue "
@@ -6434,6 +6656,7 @@ def m19_blocks(profile=None) -> dict:
     caps_article = _caps_clause(prof, article=True)
     cover_clause = _cover_preference_clause(prof)
     has_caps = not caps.startswith("this venue profile sets no")
+    counting_clause = main_text_counting_text(prof)
     cover_total = prof.length_limits()["cover letter"].get("total_max")
     cover_total_note = (
         f"the cover letter's TOTAL content must stay within {cover_total} words (every line "
@@ -6498,9 +6721,9 @@ def m19_blocks(profile=None) -> dict:
    cap ({caps_article}; {cover_note}) | disposition
    (OK / over cap -> finding id / over cap but not compressible without losing content -> manual
    verification item). Count with the pipeline's definition (maximal runs of NON-SPACE characters;
-   a newline is a space) and say in the artifact which text you counted as the main text (the
-   abstract, Methods, references and figure legends are excluded, exactly as the venue excludes
-   them). Give M19 its own coverage row, exactly like the skill's sweeps, and report every
+   a newline is a space) and say in the artifact which text you counted as the main text
+   ({counting_clause}, exactly as the venue profile's counting rule states).
+   Give M19 its own coverage row, exactly like the skill's sweeps, and report every
    over-cap section as a CATEGORY-4 (technical formatting) finding. M19 is mandatory (the skill's
    references/sweeps.md defines the same sweep as always-on) and it is NEVER a gate: an over-cap
    section never makes a version ineligible. The cover-letter row adds a MINOR formatting finding
@@ -13435,7 +13658,25 @@ def _tex_captions(text: str) -> list:
     return out
 
 
-def _caption_units(texts, with_spans: bool = False) -> list:
+def _caption_match(line: str, kinds=("figure",)):
+    """(label prefix, regex match) for one caption line, or (None, None).
+
+    `kinds` is the set of caption kinds the caller recognises. The M18 legend
+    scan asks for figures only; the M19 subtraction adds table captions when the
+    venue profile excludes them.
+    """
+    if "figure" in kinds:
+        m = CAPTION_START_RE.match(line)
+        if m:
+            return "Figure", m
+    if "table" in kinds:
+        m = TABLE_CAPTION_START_RE.match(line)
+        if m:
+            return "Table", m
+    return None, None
+
+
+def _caption_units(texts, with_spans: bool = False, kinds=("figure",)) -> list:
     """(label, text) -- or (label, text, start, end) -- for docx paragraph captions.
 
     The paragraph index span is what lets the M19 subtraction stay inside the
@@ -13446,14 +13687,14 @@ def _caption_units(texts, with_spans: bool = False) -> list:
     units = []
     for i, t in enumerate(texts):
         t = (t or "").strip()
-        m = CAPTION_START_RE.match(t)
+        prefix, m = _caption_match(t, kinds)
         if m:
-            label = f"Figure {m.group(1)}"
+            label = f"{prefix} {m.group(1)}"
             units.append((label, t, i, i + 1) if with_spans else (label, t))
     return units
 
 
-def _caption_units_from_lines(lines, with_spans: bool = False) -> list:
+def _caption_units_from_lines(lines, with_spans: bool = False, kinds=("figure",)) -> list:
     """(label, text) for line-oriented captions (md/txt); continuation lines merged.
 
     A caption that wraps over several lines has to be counted in full: counting
@@ -13475,11 +13716,11 @@ def _caption_units_from_lines(lines, with_spans: bool = False) -> list:
                 units.append((cur[0], cur[1], start, idx) if with_spans else cur)
                 cur = None
             continue
-        m = CAPTION_START_RE.match(line)
+        prefix, m = _caption_match(line, kinds)
         if m:
             if cur:
                 units.append((cur[0], cur[1], start, idx) if with_spans else cur)
-            cur = (f"Figure {m.group(1)}", line)
+            cur = (f"{prefix} {m.group(1)}", line)
             start = idx
             continue
         indented = bool(raw) and raw[:1].isspace()
@@ -13734,13 +13975,53 @@ LENGTH_SECTION_BOUND_RE = re.compile(
     r"references?|bibliography|figure legends?|acknowledg\w*|author contributions?|"
     r"data availability|competing interests?|conflict of interest|funding|"
     r"supplementary (?:information|methods|figures|tables|notes))\s*[:.\u2014\u2013-]?\s*$", re.I)
-LENGTH_MAIN_END_RE = re.compile(
-    r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:materials and methods|online methods?|methods?|"
-    r"star methods|experimental procedures|"
-    r"references?|bibliography|figure legends?|acknowledg\w*|author contributions?|"
-    r"data availability|competing interests?|conflict of interest|funding|"
-    r"supplementary (?:information|methods|figures|tables|notes))"
-    r"\s*(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)
+# The SAME boundary headings, classified by the section kind that a profile's
+# `counting.main_text.excludes` names. The scan ends the main-text span at the
+# first boundary heading whose kind the venue EXCLUDES; a kind the venue counts
+# (Frontiers counts Methods) does not end it, and legends are not subtracted
+# when the venue counts them.
+LENGTH_SECTION_KIND_RES = (
+    ("methods", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:materials and methods|online methods?|methods?|"
+        r"star methods|experimental procedures)\s*(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+    ("references", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:references?|bibliography)\s*"
+        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+    ("figure-legends", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?figure legends?\s*"
+        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+    ("acknowledgements", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?acknowledg\w*\s*(?:[:.\u2014\u2013-]\s*|\s*$)",
+        re.I)),
+    ("author-contributions", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?author contributions?\s*"
+        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+    ("data-availability", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?data availability\s*"
+        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+    ("competing-interests", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:competing interests?|conflict of interest)\s*"
+        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+    ("funding", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?funding\s*(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+    ("supplementary", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?supplementary "
+        r"(?:information|methods|figures|tables|notes)\s*"
+        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+)
+
+
+def _length_section_kind(line: str) -> str:
+    """The M19 counting-convention kind of a boundary heading ("" when not one)."""
+    text = (line or "").strip()
+    if not text:
+        return ""
+    for kind, pattern in LENGTH_SECTION_KIND_RES:
+        if pattern.match(text):
+            return kind
+    return ""
+
+
 LENGTH_KEYWORDS_RE = re.compile(r"^\s*(?:key\s?words?)\s*[:.\u2014\u2013-]", re.I)
 LENGTH_COVER_SALUTATION_RE = re.compile(
     r"^\s*(?:dear\b|to the (?:editor|editors)\b)", re.I)
@@ -13944,13 +14225,19 @@ def _tex_length_lines(text: str) -> list:
 
 def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
                            abstract_end: int = None, limits: dict = None,
-                           whole_doc_as_main: bool = False) -> list:
+                           whole_doc_as_main: bool = False, counting: dict = None) -> list:
     """M19 rows (abstract and/or main text) for one document's text lines.
 
     ``caption_spans`` are (start, end) line spans of the document's captions and
     ``abstract_end`` an explicit end index (LaTeX's ``\\end{abstract}``); only
     the captions inside the main-text span are subtracted, because only those
     words are inside the text this row counts.
+
+    ``counting`` is the venue/article type's main-text counting convention
+    (`VenueProfile.counting()`): its `main_text.excludes` names the section
+    kinds the venue leaves OUT of its count, so a venue that counts Methods
+    (Frontiers) or the abstract/references/legends (NBT Brief Communication)
+    is counted the way its own rule says, not the NBT Article way.
 
     ``whole_doc_as_main`` is for a document the run's OWN article type names
     (`Correspondence.docx`, `letter-to-the-editor.docx`): a letter-format
@@ -13959,6 +14246,11 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
     skipped as unshaped.
     """
     limits = limits or length_limits()
+    counting = counting or {"main_text": {"excludes": list(DEFAULT_MAIN_TEXT_EXCLUDES)}}
+    excludes = set((counting.get("main_text") or {}).get("excludes") or [])
+    include_abstract = "abstract" not in excludes
+    subtract_captions = ("figure-legends" in excludes
+                         or "table-captions" in excludes)
     n = len(lines)
 
     def clean(s):
@@ -13991,23 +14283,38 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
             main_start = i + 1
             break
     if abs_start is None and main_start is None:
-        if not whole_doc_as_main:
+        if not whole_doc_as_main and not include_abstract:
             return []                # not manuscript-shaped: skip, never guess
-        caption_words = sum(count_caption_words(" ".join(lines[max(a, 0):min(b, n)]))
-                            for a, b in (caption_spans or []) if a < n and b > 0)
-        words = max(0, count_words(" ".join(lines)) - caption_words)
-        main_cap = limits["main text"].get("cap")
-        main_base = limits["main text"].get("base")
-        return [{"document": doc, "section": "main text", "words": words,
-                 "base": main_base,
-                 "relaxation": limits["main text"].get("relaxation"),
-                 "cap": main_cap,
-                 "over_base": main_base is not None and words > main_base,
-                 "base_margin": (words - main_base) if main_base is not None else None,
-                 "over_limit": main_cap is not None and words > main_cap,
-                 "note": "no Abstract/Introduction heading found: this document carries the "
-                         "selected article type's own name, so the whole text is counted "
-                         "against the main-text cap"}]
+        if whole_doc_as_main:
+            # A document the run's own article type names (Correspondence, a
+            # letter to the editor) carries no Abstract/Introduction heading by
+            # design: the type's cap applies to its WHOLE text (the LT4
+            # contract), so this branch stays unfiltered.
+            caption_words = 0
+            if subtract_captions:
+                caption_words = sum(
+                    count_caption_words(" ".join(lines[max(a, 0):min(b, n)]))
+                    for a, b in (caption_spans or []) if a < n and b > 0)
+            words = max(0, count_words(" ".join(lines)) - caption_words)
+            main_cap = limits["main text"].get("cap")
+            main_base = limits["main text"].get("base")
+            return [{"document": doc, "section": "main text", "words": words,
+                     "base": main_base,
+                     "relaxation": limits["main text"].get("relaxation"),
+                     "cap": main_cap,
+                     "over_base": main_base is not None and words > main_base,
+                     "base_margin": (words - main_base) if main_base is not None else None,
+                     "over_limit": main_cap is not None and words > main_cap,
+                     "note": ("no Abstract/Introduction heading found: this document carries "
+                              "the selected article type's own name, so the whole text is "
+                              "counted against the main-text cap")}]
+        # A venue that counts the abstract inside the main text (the NBT Brief
+        # Communication: "contains no headings") starts at line 0, but it does
+        # NOT thereby count the whole document: the same excluded-kind end scan
+        # and body filtering below apply, so back matter the profile leaves out
+        # (acknowledgements, references, funding, ...) is not charged to the
+        # main-text cap. Falling through to the shaped path keeps the two
+        # counters (count_words.py and this scan) on one span.
     rows = []
     if abs_start is not None:
         words = count_words(" ".join(lines[abs_start:abs_end]))
@@ -14020,15 +14327,28 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
                      "over_base": abs_base is not None and words > abs_base,
                      "base_margin": (words - abs_base) if abs_base is not None else None,
                      "over_limit": abs_cap is not None and words > abs_cap, "note": ""})
-    start = abs_end if abs_end is not None else main_start
+    # The main-text span starts after an excluded abstract; when the venue counts
+    # the abstract INSIDE the main text, it starts at the abstract's own text.
+    if abs_start is not None:
+        start = abs_start if include_abstract else abs_end
+    elif main_start is not None:
+        start = main_start
+    else:
+        start = 0 if include_abstract else None
     # The abstract block ends ON the next heading line ("Introduction" in most
     # venues' Articles, which is written without a heading in the final layout):
-    # drop that heading line itself from the main-text count.
-    if start is not None and start < n and LENGTH_SECTION_BOUND_RE.match(clean(lines[start])):
+    # drop that heading line itself from the main-text count. Do NOT drop a
+    # heading whose own section kind the venue EXCLUDES: advancing past it would
+    # start the count inside the excluded section and charge its body to the
+    # main text (an Abstract followed directly by Methods counted the Methods).
+    if start is not None and start < n and not include_abstract \
+            and LENGTH_SECTION_BOUND_RE.match(clean(lines[start])) \
+            and _length_section_kind(clean(lines[start])) not in excludes:
         start += 1
     end, end_found = n, False
     for i in range(start or 0, n):
-        if LENGTH_MAIN_END_RE.match(clean(lines[i])):
+        kind = _length_section_kind(clean(lines[i]))
+        if kind and kind in excludes:
             end, end_found = i, True
             break
     body = [ln for ln in lines[start or 0:end]
@@ -14036,19 +14356,35 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
                     or LENGTH_MAIN_START_RE.match(clean(ln))
                     or LENGTH_KEYWORDS_RE.match(clean(ln)))]
     span_start = start or 0
-    caption_words = sum(count_caption_words(" ".join(lines[max(a, span_start):min(b, end)]))
-                        for a, b in (caption_spans or [])
-                        if a < end and b > span_start)
+    caption_words = 0
+    if subtract_captions:
+        caption_words = sum(count_caption_words(" ".join(lines[max(a, span_start):min(b, end)]))
+                            for a, b in (caption_spans or [])
+                            if a < end and b > span_start)
     words = max(0, count_words(" ".join(body)) - caption_words)
     notes = []
     if abs_start is None:
-        notes.append("no Abstract heading found; the count starts at the beginning of the document "
-                     "(title/author block included)")
+        if main_start is None:
+            notes.append("no Abstract/Introduction heading found; the count starts at the "
+                         "beginning of the document (title/author block included)")
+        else:
+            notes.append("no Abstract heading found; the count starts after the main-text "
+                         "heading (title/author block excluded)")
     if not end_found:
-        notes.append("no Methods/References/legends heading found; the count runs to the end of "
-                     "the document")
+        if set(excludes) != set(DEFAULT_MAIN_TEXT_EXCLUDES):
+            notes.append("counted through the sections the venue includes; no excluded "
+                         "section heading found")
+        else:
+            notes.append("no Methods/References/legends heading found; the count runs to the end "
+                         "of the document")
     if caption_words:
-        notes.append(f"{int(caption_words)} word(s) of figure captions subtracted")
+        notes.append(f"{int(caption_words)} caption word(s) subtracted")
+    counting_inside = [kind for kind in ("abstract", "methods", "references", "figure-legends")
+                       if kind not in excludes]
+    if counting_inside:
+        notes.append("the venue's counting rule includes "
+                     + ", ".join(kind.replace("-", " ") for kind in counting_inside)
+                     + " in the main text")
     main_cap = limits["main text"].get("cap")
     main_base = limits["main text"].get("base")
     rows.append({"document": doc, "section": "main text", "words": words,
@@ -14161,6 +14497,15 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
     # manuscript: its opening salutation (a Letter to the Editor) must not
     # divert the count to the cover-letter preference.
     manuscript_names = _normalized_article_type_names(prof)
+    # Which display captions this venue leaves out: figure legends always for
+    # "figure-legends", table captions only when "table-captions" is named.
+    # Passing the selected kinds (rather than one global caption list) keeps a
+    # profile that excludes only one of them from subtracting the other.
+    _excludes = set(prof.main_text_excludes())
+    caption_kinds = tuple(
+        kind for kind, section in (("figure", "figure-legends"),
+                                   ("table", "table-captions"))
+        if section in _excludes)
     overrides = corpus_source_overrides(sources)
     rows, unparsed, skipped, rendered, docs = [], [], [], [], set()
     for i, (src, prefix, excluded) in enumerate(sources):
@@ -14193,7 +14538,8 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
                     continue
                 lines = paras
                 caption_spans = [(a, b) for _, _, a, b
-                                 in _caption_units(paras, with_spans=True)]
+                                 in _caption_units(paras, with_spans=True,
+                                                   kinds=caption_kinds)]
             elif ext in LENGTH_TEX_EXTS:
                 try:
                     text = p.read_text(encoding="utf-8", errors="replace")
@@ -14207,7 +14553,8 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
                     text = ""
                 lines = text.splitlines()
                 caption_spans = [(a, b) for _, _, a, b
-                                 in _caption_units_from_lines(lines, with_spans=True)]
+                                 in _caption_units_from_lines(lines, with_spans=True,
+                                                              kinds=caption_kinds)]
             elif ext in LENGTH_UNPARSED_EXTS:
                 unparsed.append(doc)
                 continue
@@ -14223,6 +14570,7 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
                 continue
             found = _length_rows_for_lines(lines, doc, caption_spans=caption_spans,
                                            abstract_end=abstract_end, limits=limits,
+                                           counting=prof.counting,
                                            whole_doc_as_main=bool(
                                                _name_is_article_type_manuscript(
                                                    p.name, manuscript_names)))
@@ -14239,7 +14587,8 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
     # and the M19 mandates). Without this the abstract of a 150-word venue can
     # sit at 164 words and no row exists anywhere.
     over_base = [r for r in rows if r.get("over_base") and not r["over_limit"]]
-    return {"limits": limits, "source": source, "venue": prof.id,
+    return {"limits": limits, "counting": prof.counting, "source": source,
+            "venue": prof.id,
             "rows": rows, "count": len(rows), "over_limit": over,
             "over_base": over_base,
             "unparsed": sorted(set(unparsed)), "skipped": sorted(set(skipped)),
@@ -18234,6 +18583,7 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
         _seed_write(art / "M19_length.md", "# M19 — abstract/main-text length (code-side enumeration)\n\n"
             f"Caps: {json.dumps((lng.get('limits') or {}).get('abstract', {}))} / "
             f"{json.dumps((lng.get('limits') or {}).get('main text', {}))}. "
+            f"Counting rule: {main_text_counting_text(venue_profile_of(ctx, required=False))}. "
             "Dispose every row.\n\n"
             + _evidence_artifact_table(len_rows,
                                        ["document", "section", "words", "cap", "note"],
@@ -47428,22 +47778,54 @@ AFFINITY_METRIC_RE = re.compile(
 # defect before this was narrowed.
 AFFINITY_TOOL_RE = re.compile(r"\(([A-Za-z][A-Za-z0-9 .+_-]{2,40})\)")
 
+# PKG-9 must run on every installation: the pipeline is documented as
+# standard-library only, and python-docx was an undeclared optional import that
+# made this check silently return no rows (see README.md "Requirements"). The
+# DOCX readers below use the same zip/XML path as `_docx_paragraphs`.
+DOCX_W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+def _docx_body(path: Path):
+    """The `<w:body>` element of one DOCX, or None when it cannot be parsed."""
+    try:
+        with zipfile.ZipFile(path) as z:
+            data = z.read("word/document.xml")
+        root = ET.fromstring(data)
+    except (OSError, KeyError, zipfile.BadZipFile, ET.ParseError, RuntimeError,
+            NotImplementedError):
+        return None
+    return root.find(DOCX_W_NS + "body")
+
+
+def _docx_paragraph_text(paragraph) -> str:
+    """The text of one `<w:p>`, with a break/tab rendered as a newline."""
+    parts = []
+    for node in paragraph.iter():
+        if node.tag in (DOCX_W_NS + "br", DOCX_W_NS + "cr", DOCX_W_NS + "tab"):
+            parts.append("\n")
+        elif node.tag == DOCX_W_NS + "t":
+            parts.append(node.text or "")
+    return "".join(parts)
+
 
 def _docx_table_rows(path: Path) -> list:
-    """The table rows of ONE docx as `"cell | cell"` strings ([] on any failure)."""
-    try:
-        import docx                                            # noqa: PLC0415
-    except Exception:                                          # noqa: BLE001
-        return []
-    try:
-        doc = docx.Document(str(path))
-    except Exception:                                          # noqa: BLE001
+    """The table rows of ONE docx as `"cell | cell"` strings ([] on any failure).
+
+    Body-level tables only, like python-docx's `doc.tables`; a nested table is
+    part of its parent cell's text and is not a second top-level table.
+    """
+    body = _docx_body(path)
+    if body is None:
         return []
     out = []
     try:
-        for t in doc.tables:
-            for row in t.rows:
-                cells = [c.text.strip() for c in row.cells]
+        for table in body.findall(DOCX_W_NS + "tbl"):
+            for row in table.findall(DOCX_W_NS + "tr"):
+                cells = []
+                for cell in row.findall(DOCX_W_NS + "tc"):
+                    texts = [_docx_paragraph_text(p).strip()
+                             for p in cell.findall(DOCX_W_NS + "p")]
+                    cells.append("\n".join(t for t in texts if t).strip())
                 if any(cells):
                     out.append(" | ".join(cells))
     except Exception:                                          # noqa: BLE001
@@ -47457,46 +47839,14 @@ def _docx_prose_text(path: Path) -> str:
     `_docx_paragraphs` returns every `<w:p>`, which is what the formatting and
     placeholder scans want (a cell's text is part of the document a reader
     sees). A rule that compares a TABLE's claim against the prose that must
-    support it needs the other set: python-docx reads the body's own
-    paragraphs, and excludes those inside a `<w:tc>`.
+    support it needs the other set: the body's OWN direct paragraphs, exactly
+    the set python-docx's `doc.paragraphs` returned.
     """
-    try:
-        import docx                                            # noqa: PLC0415
-    except Exception:                                          # noqa: BLE001
+    body = _docx_body(path)
+    if body is None:
         return ""
-    try:
-        doc = docx.Document(str(path))
-    except Exception:                                          # noqa: BLE001
-        return ""
-    cell_elems = set()
-    try:
-        for t in doc.tables:
-            for row in t.rows:
-                for cell in row.cells:
-                    for para in cell.paragraphs:
-                        # The ELEMENT itself, never `id(...)`: an lxml proxy is
-                        # freed once nothing references it, and the id it held
-                        # is then reused by the next object -- so an `id()`
-                        # membership test intermittently matched a BODY
-                        # paragraph against a cell's freed id and dropped that
-                        # paragraph from the prose (PKG-9 went silent on the
-                        # very table-vs-prose claim it exists to flag; the
-                        # id-reuse made it fail in roughly one run of twelve
-                        # under parallel load, and only under load). Holding the
-                        # elements keeps their proxies alive, so the comparison
-                        # is the identity it was always meant to be.
-                        cell_elems.add(para._p)
-    except Exception:                                          # noqa: BLE001
-        pass
-    out = []
-    try:
-        for para in doc.paragraphs:
-            if para._p in cell_elems:
-                continue
-            out.append(para.text)
-    except Exception:                                          # noqa: BLE001
-        return "\n".join(out)
-    return "\n".join(out)
+    return "\n".join(_docx_paragraph_text(p)
+                     for p in body.findall(DOCX_W_NS + "p"))
 
 
 def affinity_definition_rows(root: Path, limit: int = 8) -> list:
@@ -54390,7 +54740,9 @@ USAGE_EXAMPLES = """usage:
           own limits apply in their relaxed form (for the default
           nature-biotechnology Article: abstract <= 150 words and main text
           <= 3,000 words excluding abstract, Methods, references and figure
-          legends, relaxed by +10% -> <= 165 and +25% -> <= 3,750), with words
+          legends, relaxed by +10% -> <= 165 and +25% -> <= 3,750; another
+          profile may count its main body differently, and its `counting` block
+          states which sections its own limit leaves out), with words
           counted as runs of non-space characters and a newline treated as
           space. Check id M19 is always active: the review enumerates and
           reports, the revision/integration stages compress by removing

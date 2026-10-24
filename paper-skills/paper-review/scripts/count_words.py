@@ -12,10 +12,15 @@ treated as space, so `state-of-the-art` is ONE word and `2026` is ONE word.
 
 `auto` (the default) reports the abstract and the main text when the document
 has a manuscript shape (an "Abstract" heading, or an Introduction/Main-text
-heading); otherwise it reports the whole file and says so. The main text stops
-at the first Methods / References / Figure-legends / Acknowledgements heading
-(those are excluded from the journal's main-text limit) and subtracts detected
-figure captions INSIDE that span, which the journal also excludes. `.tex`/`.ltx`
+heading); otherwise it reports the whole file and says so. WHICH sections end
+the main-text span is the VENUE's own counting convention, read from the
+profile's `counting.main_text.excludes` (see venue_profiles/README.md): the
+default is the Nature Biotechnology Article rule (the abstract, Methods,
+references and figure legends are outside the count), Frontiers counts the main
+body WITH Methods and in-text citations, and NBT's Brief Communication counts
+the abstract, references and figure legends too. Detected figure legends are
+subtracted only when the venue leaves figure legends out; table captions are
+subtracted only when the profile names `table-captions`. `.tex`/`.ltx`
 sources are read as LaTeX: the abstract environment's own `\end{abstract}` ends
 the abstract (paragraph breaks inside it do not), and `\caption`/`\captionof`
 text is a legend even though its "Figure N" label is added at typesetting time.
@@ -56,13 +61,60 @@ SECTION_BOUND = re.compile(
     r"references?|bibliography|figure legends?|acknowledg\w*|author contributions?|"
     r"data availability|competing interests?|conflict of interest|funding|"
     r"supplementary (?:information|methods|figures|tables|notes))\s*[:.\u2014\u2013-]?\s*$", re.I)
-MAIN_END = re.compile(
-    r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:materials and methods|online methods?|methods?|"
-    r"star methods|experimental procedures|"
-    r"references?|bibliography|figure legends?|acknowledg\w*|author contributions?|"
-    r"data availability|competing interests?|conflict of interest|funding|"
-    r"supplementary (?:information|methods|figures|tables|notes))"
-    r"\s*(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)
+# The venue's main-text counting convention (check id M19): the section kinds a
+# word limit may leave OUT of its count. A profile states them in
+# `counting.main_text.excludes` (per venue, or per article type where the types
+# differ); a kind NOT listed is INSIDE the count. Without a profile the
+# pipeline's historical default applies -- the Nature Biotechnology Article
+# convention -- so a profile written before this field counts as it always did.
+MAIN_TEXT_SECTION_KINDS = ("abstract", "methods", "references", "figure-legends",
+                           "acknowledgements", "author-contributions",
+                           "data-availability", "competing-interests", "funding",
+                           "supplementary", "table-captions")
+# Table captions are opt-in profile data (Frontiers groups "figure and table
+# captions"); the historical default excludes figure legends only.
+DEFAULT_MAIN_TEXT_EXCLUDES = tuple(
+    kind for kind in MAIN_TEXT_SECTION_KINDS if kind != "table-captions")
+SECTION_KIND_RES = (
+    ("methods", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:materials and methods|online methods?|methods?|"
+        r"star methods|experimental procedures)\s*(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+    ("references", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:references?|bibliography)\s*"
+        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+    ("figure-legends", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?figure legends?\s*"
+        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+    ("acknowledgements", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?acknowledg\w*\s*(?:[:.\u2014\u2013-]\s*|\s*$)",
+        re.I)),
+    ("author-contributions", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?author contributions?\s*"
+        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+    ("data-availability", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?data availability\s*"
+        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+    ("competing-interests", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:competing interests?|conflict of interest)\s*"
+        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+    ("funding", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?funding\s*(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+    ("supplementary", re.compile(
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?supplementary "
+        r"(?:information|methods|figures|tables|notes)\s*"
+        r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
+)
+
+
+def section_kind(line: str) -> str:
+    """The M19 counting-convention kind of a boundary heading ("" when not one)."""
+    text = (line or "").strip()
+    if not text:
+        return ""
+    for kind, pattern in SECTION_KIND_RES:
+        if pattern.match(text):
+            return kind
+    return ""
 KEYWORDS = re.compile(r"^\s*(?:key\s?words?)\s*[:.\u2014\u2013-]", re.I)
 # A caption line starts with the label, the number AND its separator ("Figure 2
 # | ...", "Fig. 1: ...", "Figure 3. ..."). Without the separator guard a BODY
@@ -87,6 +139,13 @@ CAPTION = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?fig(?:u
 CAPTION_SUSPECT = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?fig(?:ure)?s?\.?\s*"
                              r"(?:S?\d+[A-Za-z]?|[IVXivx]+)"
                              r"\s*(?:\([^)]*\)|$|[|:\u2014\u2013\-])", re.I)
+# Table captions are a display-caption span only for a profile whose
+# `counting.main_text.excludes` names `table-captions` (Frontiers groups
+# "figure and table captions" in its main-body rule). They are never read as
+# figure legends for the M18 scan.
+TABLE_CAPTION = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?tables?\.?\s*"
+                           r"(S?\d+[A-Za-z]?|[IVXivx]+)"
+                           r"\s*(?:\||:|\u2014|\u2013|-|\.)\s*", re.I)
 COVER_SALUTATION = re.compile(r"^\s*(?:dear\b|to the (?:editor|editors)\b)", re.I)
 COVER_CLOSING = re.compile(
     r"^\s*(?:sincerely|yours (?:sincerely|faithfully|truly)|best regards|kind regards|regards|"
@@ -322,8 +381,24 @@ def _abstract_end(lines, start):
     return j
 
 
-def caption_ranges(lines: list) -> list:
-    """(start, end) line ranges of figure legends, continuation lines merged.
+def _caption_match(line: str, kinds=("figure",)):
+    """The regex match for one caption line of a selected kind, or None."""
+    if "figure" in kinds:
+        m = CAPTION.match(line)
+        if m:
+            return m
+    if "table" in kinds:
+        m = TABLE_CAPTION.match(line)
+        if m:
+            return m
+    return None
+
+
+def caption_ranges(lines: list, kinds=("figure",)) -> list:
+    """(start, end) line ranges of captions, continuation lines merged.
+
+    `kinds` is the caption kinds the venue excludes: figure legends always for
+    `figure-legends`, table captions only for `table-captions`.
 
     Mirrors the pipeline's ``_caption_units_from_lines`` boundary rule: a legend
     continues while the next line is non-empty, is not a heading (markdown's
@@ -334,14 +409,14 @@ def caption_ranges(lines: list) -> list:
     """
     ranges, i, n = [], 0, len(lines)
     while i < n:
-        if not CAPTION.match(lines[i].strip()):
+        if not _caption_match(lines[i].strip(), kinds):
             i += 1
             continue
         j = i + 1
         while j < n:
             raw = lines[j]
             nxt = raw.strip()
-            if not nxt or nxt.startswith("#") or CAPTION.match(nxt) \
+            if not nxt or nxt.startswith("#") or _caption_match(nxt, kinds) \
                     or CAPTION_SUSPECT.match(nxt) or SECTION_BOUND.match(nxt):
                 break
             if lines[j - 1].rstrip().endswith((".", "!", "?")) and not raw[:1].isspace():
@@ -352,13 +427,26 @@ def caption_ranges(lines: list) -> list:
     return ranges
 
 
-def sections(text: str, abstract_end=None, caption_lines=None) -> list:
+def sections(text: str, abstract_end=None, caption_lines=None, excludes=None) -> list:
     """[(section, words, note)] for a document's text lines.
 
     `abstract_end` and `caption_lines` are the explicit LaTeX boundaries from
     `tex_lines()`: the abstract stops there whatever blank lines it contains,
     and only captions inside the counted main-text span are subtracted.
+    `excludes` is the venue's counting convention (the section kinds its
+    main-text limit leaves OUT, from `counting.main_text.excludes`); None keeps
+    the pipeline's default (the Nature Biotechnology Article convention). The
+    abstract is still reported as its own row when the venue counts it inside
+    the main text, and figure legends / table captions are subtracted only when
+    the venue excludes that caption kind.
     """
+    excludes = set(DEFAULT_MAIN_TEXT_EXCLUDES if excludes is None else excludes)
+    include_abstract = "abstract" not in excludes
+    caption_kinds = tuple(
+        kind for kind, section in (("figure", "figure-legends"),
+                                   ("table", "table-captions"))
+        if section in excludes)
+    subtract_captions = bool(caption_kinds)
     lines = (text or "").splitlines()
     n = len(lines)
     abs_start = abs_end = None
@@ -373,36 +461,48 @@ def sections(text: str, abstract_end=None, caption_lines=None) -> list:
         if MAIN_START.match(raw.strip()):
             main_start = i + 1
             break
-    if abs_start is None and main_start is None:
+    if abs_start is None and main_start is None and not include_abstract:
         return [("whole file", count_words(text), "no abstract/main-text shape detected")]
     rows = []
     if abs_start is not None:
         rows.append(("abstract", count_words(" ".join(lines[abs_start:abs_end])), ""))
-    start = abs_end if abs_end is not None else main_start
-    if start is not None and start < n and SECTION_BOUND.match(lines[start].strip()):
+    # The main-text span starts after an excluded abstract; when the venue
+    # counts the abstract inside the main text, it starts at the abstract's own
+    # text (title/author block stays out), or at the beginning of a document
+    # with no headings at all (NBT's Brief Communication).
+    if abs_start is not None:
+        start = abs_start if include_abstract else abs_end
+    elif main_start is not None:
+        start = main_start
+    else:
+        start = 0
+    if start < n and not include_abstract and SECTION_BOUND.match(lines[start].strip()) \
+            and section_kind(lines[start]) not in excludes:
         start += 1
     end, end_found = n, False
-    for i in range(start or 0, n):
-        if MAIN_END.match(lines[i].strip()):
+    for i in range(start, n):
+        kind = section_kind(lines[i])
+        if kind and kind in excludes:
             end, end_found = i, True
             break
-    body = [ln for ln in lines[start or 0:end]
+    body = [ln for ln in lines[start:end]
             if not (SECTION_BOUND.match(ln.strip()) or MAIN_START.match(ln.strip())
                     or KEYWORDS.match(ln.strip()))]
-    offset = start or 0
+    offset = start
     segment = lines[offset:end]
-    if caption_lines is None:
-        cap_ranges = caption_ranges(segment)
-    else:
-        cap_ranges = []
-        for i in sorted(set(caption_lines)):
-            if not (offset <= i < end):
-                continue                       # outside the counted span
-            rel = i - offset
-            if cap_ranges and rel == cap_ranges[-1][1]:
-                cap_ranges[-1][1] = rel + 1
-            else:
-                cap_ranges.append([rel, rel + 1])
+    cap_ranges = []
+    if subtract_captions:
+        if caption_lines is None:
+            cap_ranges = caption_ranges(segment, kinds=caption_kinds)
+        else:
+            for i in sorted(set(caption_lines)):
+                if not (offset <= i < end):
+                    continue                       # outside the counted span
+                rel = i - offset
+                if cap_ranges and rel == cap_ranges[-1][1]:
+                    cap_ranges[-1][1] = rel + 1
+                else:
+                    cap_ranges.append([rel, rel + 1])
     captions = sum(count_words(" ".join(segment[a:b])) for a, b in cap_ranges)
     words = max(0, count_words(" ".join(body)) - captions)
     notes = []
@@ -415,9 +515,19 @@ def sections(text: str, abstract_end=None, caption_lines=None) -> list:
                      if not start else
                      "no Abstract heading; counted from after the main-text heading")
     if not end_found:
-        notes.append("no Methods/References heading; counted to the end")
+        if set(excludes) != set(DEFAULT_MAIN_TEXT_EXCLUDES):
+            notes.append("counted through the sections the venue includes; no excluded "
+                         "section heading found")
+        else:
+            notes.append("no Methods/References heading; counted to the end")
     if captions:
         notes.append(f"{captions} caption word(s) subtracted")
+    counting_inside = [kind for kind in ("abstract", "methods", "references", "figure-legends")
+                       if kind not in excludes]
+    if counting_inside and set(excludes) != set(DEFAULT_MAIN_TEXT_EXCLUDES):
+        notes.append("the venue's counting rule includes "
+                     + ", ".join(kind.replace("-", " ") for kind in counting_inside)
+                     + " in the main text")
     rows.append(("main text", words, "; ".join(notes)))
     return rows
 
@@ -526,6 +636,7 @@ def main(argv=None) -> int:
     rel_abstract, rel_main = ABSTRACT_RELAXATION, MAIN_TEXT_RELAXATION
     cover_min, cover_max = COVER_LETTER_MIN, COVER_LETTER_MAX
     cover_total_max = COVER_LETTER_TOTAL_MAX
+    counting_excludes = None
     venue = "(no venue profile: counts only, no cap)"
     if args.venue_profile:
         try:
@@ -618,6 +729,17 @@ def main(argv=None) -> int:
             print(f"note: {args.venue_profile} carries no numbers for "
                   f"{type_id or 'its default type'}; reporting counts with no cap",
                   file=sys.stderr)
+        # The MAIN-TEXT COUNTING CONVENTION is profile data too: the selected
+        # article type's own block wins, else the venue's, else the pipeline
+        # default. An explicit empty list means "nothing is excluded".
+        counting = (entry or {}).get("counting") if types else None
+        if counting is None:
+            counting = (profile or {}).get("counting")
+        if isinstance(counting, dict):
+            spec = counting.get("main_text") or {}
+            if isinstance(spec.get("excludes"), list):
+                counting_excludes = [str(kind).strip().lower().replace("_", "-")
+                                     for kind in spec["excludes"] if str(kind).strip()]
     caps = {"abstract": (lenient_cap(base_abstract, rel_abstract)
                          if base_abstract is not None and rel_abstract is not None else None),
             "main text": (lenient_cap(base_main, rel_main)
@@ -664,11 +786,13 @@ def main(argv=None) -> int:
                       "the whole file (requested with --section whole)")]
                     if args.section == "whole"
                     else sections(prepared, abstract_end=abstract_end,
-                                  caption_lines=caption_lines))
+                                  caption_lines=caption_lines,
+                                  excludes=counting_excludes))
         else:
             rows = ([("whole file", count_words(text),
                       "the whole file (requested with --section whole)")]
-                    if args.section == "whole" else sections(text))
+                    if args.section == "whole"
+                    else sections(text, excludes=counting_excludes))
         if (args.section in ("auto", "cover-letter")) and is_cover_letter(text, p.name):
             rows = [("cover letter", cover_letter_words(text),
                      cover_pref_note),
@@ -713,7 +837,11 @@ def main(argv=None) -> int:
                                  f"whole file was counted instead ({whole} words)"})
         out.extend(keep)
     if args.json:
-        print(json.dumps({"caps": caps, "rows": out}, indent=2))
+        print(json.dumps({"caps": caps,
+                          "counting": {"main_text": {"excludes": list(
+                              DEFAULT_MAIN_TEXT_EXCLUDES if counting_excludes is None
+                              else counting_excludes)}},
+                          "rows": out}, indent=2))
     else:
         cap_text = (f"abstract <= {caps['abstract']} words, main text <= {caps['main text']} "
                     f"words" if caps["abstract"] is not None and caps["main text"] is not None
@@ -721,12 +849,22 @@ def main(argv=None) -> int:
         _cov = (f"{cover_min}-{cover_max} words" if cover_min is not None and cover_max is not None
                 else f"at most {cover_max} words" if cover_min is None and cover_max is not None
                 else f"at least {cover_min} words" if cover_min is not None else "")
+        counting_note = ""
+        if counting_excludes is not None \
+                and set(counting_excludes) != set(DEFAULT_MAIN_TEXT_EXCLUDES):
+            inside = [kind for kind in ("abstract", "methods", "references", "figure-legends")
+                      if kind not in counting_excludes]
+            if inside:
+                counting_note = ("; main text counted with "
+                                 + ", ".join(kind.replace("-", " ") for kind in inside)
+                                 + " inside")
         print(f"venue: {venue}; caps: {cap_text}; cover letter "
               + (f"{_cov} in the persuading part (user preference)" if _cov
                  else "no preference configured")
               + (f"; TOTAL content <= {cover_total_max} words (operator cap)"
                  if cover_total_max is not None else "")
-              + " -- words = non-space runs, newline = space")
+              + " -- words = non-space runs, newline = space"
+              + counting_note)
         for r in out:
             mark = ("OUTSIDE-PREFERENCE" if r["section"] == "cover letter"
                     and not r.get("within_preference") else

@@ -638,6 +638,16 @@ total count is reported without a cap; add `total_max` to your own profile when
 you want an operator cap enforced. Over a configured total cap, the fix is to
 trim the non-persuading boilerplate first, never a claim about the work.
 
+**A venue's word limit also decides what counts toward it (`counting`).** The
+main-text number is not one universal span: Nature Biotechnology's Article counts with
+the abstract, Methods, references and figure legends excluded, its Brief Communication
+counts 1,000–1,500 words INCLUDING abstract, references and figure legends, and
+Frontiers counts the main body WITH Methods and the in-text citations. A profile states
+its own rule in `counting.main_text.excludes`, and both `scripts/count_words.py` and the
+pipeline's code-side M19 scan follow it (the `--venue-profile`/`--article-type` pair
+counts the same span the orchestrator does); with no block anywhere the historical
+Nature Biotechnology Article convention applies.
+
 **Tables and figures are venue facts too (`tables`, `figures`).** A profile may
 state where a kind of display item belongs (`placement`: `end` = together in
 that kind's area at the end of the manuscript, `inline`/`any` = not pinned),
@@ -2994,7 +3004,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 139 suites (a few
+any failure. They are independent, so run them in parallel — 141 suites (a few
 minutes at the default 24 parallel sessions; tens of minutes sequentially):
 
 ```bash

@@ -85,6 +85,9 @@ documentation.
 | `length_limits.abstract` | `{base, relaxation}` | the abstract's own limit and the margin this pipeline relaxes it by (both `null` = the profile sets none). |
 | `length_limits.main_text` | `{base, relaxation}` | same, for the main text. |
 | `length_limits.cover_letter` | `{min, max, total_max, source}` | the preference for the persuading part: a range (`min`+`max`), a one-sided bound (`max` alone = "at most N words", as Frontiers' 200-word scope statement; `min` alone = "at least N words"), or `null`/`null` = none. `total_max` is optional and applies only when the venue's own text records a TOTAL-content cap for the letter (salutation, body, disclosures and signature); it must not sit below `max`. Never a gate. |
+| `counting` | object or absent | the venue's **main-text counting convention** (M19): which section kinds its word limit leaves OUT of the count. Absent = the pipeline default, the Nature Biotechnology Article rule (the abstract, Methods, references and figure legends are outside, as is back matter). See below. |
+| `counting.main_text.excludes` | list | the section kinds left OUT: `abstract`, `methods`, `references`, `figure-legends`, `acknowledgements`, `author-contributions`, `data-availability`, `competing-interests`, `funding`, `supplementary`, and `table-captions`. A kind NOT listed is INSIDE the count; an empty list = nothing excluded (the whole document). `table-captions` is a caption kind, not a heading: it is opt-in, for a venue that groups table captions with figure captions (Frontiers), and it is never read as a figure legend by the M18 scan. |
+| `counting.main_text.source` / `.note` | string | where the convention comes from (the venue's own sentence, quoted) and free-text context. Both are carried through the resolved profile and returned in the M19 scan payload (`scan_lengths_in_sources()["counting"]`); they are provenance, not interpolated into the prompt or artifact text (the renderers name `excludes`, and `length_limits.source` is the quoted source they print). |
 | `captions.published_limit` | int or `null` | the venue's own published legend limit, when there is one. |
 | `captions.default_cap` | int | the legend cap used when `setup` was run without `--caption-limit`; `0` = counts only. |
 | `captions.source` | string | what the venue says about legend length (quoted in the M18 rule). |
@@ -156,6 +159,7 @@ Each entry is one content type of the venue:
 | `source` | string | where the type (and its numbers) come from — quoted when the profile carries no numbers for it. |
 | `length_limits` | object or `null` | the type's own limits, exactly like the top-level block above. **`null` (or a block with `base: null` for abstract/main_text) means "this profile carries no numbers for this type"**: the stages count the section and name the limit the venue's own content-types table states — they never borrow another type's caps. |
 | `captions` | object or `null` | the type's legend policy; `null`/absent inherits the default type's policy (the legend rule is venue-wide in practice). |
+| `counting` | object or absent | the type's own **main-text counting convention**, same schema as the venue-level block. Absent = the venue-level block; when both are absent the pipeline default applies. A type that counts differently (Nature Biotechnology's Brief Communication counts the abstract, references and figure legends inside its 1,000–1,500-word main text) states it here. |
 
 Abstract and main-text limits are **per type**. The cover-letter preference, its
 **`total_max`** (an explicitly recorded TOTAL-content cap for the letter —
@@ -164,6 +168,21 @@ legend policy are **per venue**: a type that does not state them inherits the
 default type's, so a venue's "300–500 words in the persuading part" is not
 re-declared for every type. `total_max` must not be below the persuading-part
 `max` — a letter that cannot even hold its persuading part is a schema error.
+
+The **main-text counting convention** is the venue's own definition of what its
+number measures, so it is profile data, never a pipeline assumption: Nature
+Biotechnology's Article limit excludes the abstract, Methods, references and figure
+legends, its Brief Communication counts 1,000–1,500 words INCLUDING abstract,
+references and figure legends, and Frontiers counts the main body WITH Methods and
+in-text citations. `counting.main_text.excludes` names the kinds left out;
+`table-captions` is a display-caption kind for a venue whose rule covers table
+captions as well as figure legends (Frontiers quotes "figure and table
+captions"), and it is opt-in: the historical default excludes figure legends
+only. `scripts/count_words.py` (with `--venue-profile`/`--article-type`) and the
+pipeline's code-side M19 scan both read it, so the count an agent takes and the
+count the orchestrator records agree. With no block anywhere the pipeline default
+applies — the Nature Biotechnology Article convention, exactly what the counter
+did before the field existed.
 
 Validation is strict and reports **every** problem at once: an unknown id, a
 non-positive `base`, a `relaxation` below 1.0, a lone `base` without its
@@ -416,7 +435,7 @@ and the skills' sweeps, and they surface as manual items:
 | situation | what happens today |
 |---|---|
 | the venue's rule is not a **word count** (page limits, character limits, reference/citation counts, display-item or supplementary limits, "total length") | not modelled: the profile has no field for it, so no code-side scan and no gate; the agents can still report it as a finding against the guidelines they read. |
-| a **structured abstract** (Background/Methods/Results with separate limits) or a main text that is not one contiguous span | the abstract is counted as ONE block and the main text as the venue's single "excluding Methods/references/legends" span; per-subsection limits are not enforced. |
+| a **structured abstract** (Background/Methods/Results with separate limits) or a main text that is not one contiguous span | the abstract is counted as ONE block and the main text as ONE contiguous span; WHICH sections that span contains is the profile's `counting` convention (the default leaves the abstract, Methods, references and figure legends out), but per-subsection limits are not enforced. |
 | limits that are **per section** ("Methods up to X") or given as ranges | not modelled; put the wording in `length_limits.source` so every stage reads it and hands the decision to the author. |
 | **stage-dependent** rules (initial submission vs revision vs appeal) | one profile per root/run: use two profiles (or `set-venue`/`set-article-type` between runs) when a venue changes its limits between stages. |
 | a **non-English** submission, or section headings the scan does not know | the code-side M18/M19 scans recognise the usual English headings; the agents' sweeps remain authoritative. A profile can rename the venue, not teach the scanner a language. |
