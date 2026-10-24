@@ -133,6 +133,9 @@ def test_rows():
     check("the round row carries the champion and its paired margins",
           (a1["round"], a1["champion"], a1["vs_input"], a1["vs_incumbent"]) == (1, "i1", 2.0, 2.0),
           str(a1))
+    b1 = rr[1]
+    check("vs_input is the run-input margin, distinct from the previous champion's",
+          (b1["round"], b1["vs_input"], b1["vs_incumbent"]) == (2, 2.0, 1.0), str(b1))
     check("the champion's census is reported per tier and per severity",
           a1["correctness"] == 3 and a1["writing"] == 1 and a1["major"] == 3
           and a1["minor"] == 1 and a1["critical"] == 0, str(a1))

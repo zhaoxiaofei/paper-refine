@@ -9,8 +9,8 @@ link is still followed, the package's own files are still copied, and a missing
 * C01: `setup`/`copy_into` followed a TOP-LEVEL evidence symlink (`raw_data/`
   -> an arbitrary directory or file outside the package), materializing local
   files into the pipeline root. The canonical per-root evidence store
-  (`<root>/non_revised/<area>`) must still be followed -- that is the one link
-  a version corpus legitimately carries.
+  (`<root>/non_revised/<area>`) must still be followed when the copy names the
+  root that owns it -- and only then.
 * C02: a legend line without terminal punctuation merged the following bound
   section heading and its body into the caption span, so the pipeline's
   main-text count disagreed with `count_words.py` (3 vs 15 words) and the
@@ -99,7 +99,8 @@ def test_copy_into_evidence_symlink():
           not (dst2 / "raw_data").exists()
           or (dst2 / "raw_data").read_text(encoding="utf-8") != "TOP SECRET\n")
 
-    # The canonical link a version corpus really carries MUST still be followed.
+    # The canonical link a version corpus really carries MUST still be followed
+    # -- but only against the root that OWNS the store (`store` here).
     base3 = tmpdir("c01_canonical")
     store = base3 / "store" / "non_revised" / "raw_data"
     store.mkdir(parents=True)
@@ -109,7 +110,7 @@ def test_copy_into_evidence_symlink():
     (pkg / "ms.md").write_text("body\n", encoding="utf-8")
     os.symlink(os.path.relpath(store, pkg), pkg / "raw_data")
     out = base3 / "out"
-    nb.copy_into(pkg, out)
+    nb.copy_into(pkg, out, root=base3 / "store")
     check("copy_into still follows the canonical <root>/non_revised/<area> link",
           (out / "raw_data" / "table.csv").is_file(),
           str(sorted(p.relative_to(out).as_posix() for p in out.rglob("*"))))
@@ -137,7 +138,9 @@ def test_setup_evidence_symlink():
           "skipped" in (r.stdout + r.stderr) and "symlink" in (r.stdout + r.stderr),
           (r.stdout + r.stderr)[-300:])
 
-    # The canonical store a corpus legitimately carries is still materialized.
+    # A link to ANOTHER root's canonical store is not THIS root's evidence:
+    # setup refuses it exactly like an arbitrary outside link (the old check
+    # followed any target whose parent was named non_revised).
     base2 = tmpdir("c01_setup_canonical")
     store = base2 / "store" / "non_revised" / "raw_data"
     store.mkdir(parents=True)
@@ -149,10 +152,13 @@ def test_setup_evidence_symlink():
     root2 = base2 / "root"
     r2 = run([str(WS / "paper_pipeline.py"), "setup", "--source", str(src2),
               "--root", str(root2), "--rounds", "1"])
-    check("setup still follows the canonical <root>/non_revised/<area> link",
+    check("setup refuses a link to another root's canonical store",
           r2.returncode == 0
-          and (root2 / "non_revised" / "raw_data" / "table.csv").is_file(),
+          and not (root2 / "non_revised" / "raw_data" / "table.csv").is_file(),
           f"rc={r2.returncode} out={(r2.stdout + r2.stderr)[-300:]!r}")
+    check("setup names the refused store link in a warning",
+          "skipped" in (r2.stdout + r2.stderr) and "symlink" in (r2.stdout + r2.stderr),
+          (r2.stdout + r2.stderr)[-300:])
 
 
 # ---------------------------------------------------------------------------

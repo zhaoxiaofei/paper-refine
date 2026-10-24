@@ -2282,18 +2282,19 @@ def available_venue_profiles(root=None) -> dict:
                 continue
             if profile.id in found and found[profile.id].get("path") != str(path):
                 # Two files claiming one id: the later one is loadable by
-                # nothing (load_venue_profile resolves by id) and used to be
-                # invisible in `set-venue --list` -- the command whose job is to
-                # show why an id is missing. It is listed under its own stem
-                # with the reason; the winner keeps the id (root files win over
-                # shipped ones, and the first of two same-directory files wins
-                # deterministically by filename order).
-                found.setdefault(path.stem, {
+                # nothing under that id, so it is listed under its own stem
+                # with the reason. A guaranteed-free key is used even when the
+                # stem equals the winner's id, or `setdefault` would hide the
+                # duplicate entirely.
+                key = path.stem
+                if key in found:
+                    key = f"{path.stem}#duplicate-{len(found)}"
+                found[key] = {
                     "id": path.stem, "label": path.stem,
                     "error": (f"{path}: the profile id {profile.id!r} is already provided by "
                               f"{found[profile.id].get('path') or 'another file'}; rename one id "
                               f"or remove the duplicate"),
-                    "origin": origin, "path": str(path)})
+                    "origin": origin, "path": str(path)}
                 continue
             found.setdefault(profile.id, {"id": profile.id, "label": profile.label,
                                           "description": profile.description,
@@ -2332,6 +2333,21 @@ def load_venue_profile(venue_id, root=None) -> VenueProfile:
         origin = "root-local profile" if root is not None and \
             Path(d) == Path(root) / VENUE_PROFILES_DIRNAME else "shipped profile"
         return VenueProfile(data, origin=origin, path=path)
+    # A hand-authored file may be named differently from its internal `id`
+    # (`my-venue.json` with `"id": "myvenue"`): `set-venue --list` advertises
+    # the id, so resolution must accept it too. The filename stays the first
+    # (exact) match; this pass is only a fallback.
+    for d in venue_profile_search_dirs(root):
+        for path in sorted(Path(d).glob(f"*{VENUE_PROFILE_SUFFIX}")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if str(data.get("id") or "").strip().lower() != vid:
+                continue
+            origin = "root-local profile" if root is not None and \
+                Path(d) == Path(root) / VENUE_PROFILES_DIRNAME else "shipped profile"
+            return VenueProfile(data, origin=origin, path=path)
     if vid in BUILTIN_VENUE_PROFILES:
         return VenueProfile(BUILTIN_VENUE_PROFILES[vid], origin="built-in")
     raise VenueProfileError(f"unknown venue {venue_id!r}", unknown=True)
@@ -2563,7 +2579,11 @@ def docx_document_role(name, manuscript_names=()) -> str:
     # sample). The prefix test covers every `supplement*` compound; `support`
     # does not start with `supplement` and stays `main` (see the role tests).
     if "supp" in tokens or "suppl" in tokens \
-            or any(t.startswith("supplement") for t in tokens):
+            or any(t.startswith("supplement") for t in tokens) \
+            or any(re.fullmatch(r"supp(?:l(?:ement\w*)?)?\d*", t) for t in tokens):
+        # The last form is the concatenated `Supp1`/`Suppl2` spelling: the
+        # tokenizer keeps the digit, so the exact-token tests missed it and a
+        # supplementary document was counted as the MAIN manuscript.
         return "supp"
     # `coverletter` is the conventional concatenated spelling; camel-case
     # `CoverLetter` already splits into `cover` + `letter`, but the lowercase
@@ -2882,10 +2902,17 @@ def scan_template_conformance(sources: list, requirements: dict,
     doc_headings = []           # (doc, title) in document order
     caption_rows = []           # (doc, is_table, number)
     docx_paths = {}             # doc -> Path
+    seen_section_keys = set()   # every heading label met anywhere in the corpus
+
+    def _section_key(value) -> str:
+        """A heading label without its section number ("2.1 Results" -> results)."""
+        return _heading_key(re.sub(r"^\s*\d+(?:\.\d+)*\s*[.)]?\s+", "",
+                                   str(value or "")))
+
     for src, prefix, excluded in sources:
         if not src.is_dir():
             continue
-        for p in sorted(src.rglob("*")):
+        for p in _iter_tree_files(src, follow_dir_links=True):
             if not p.is_file() or is_non_document_name(p.name) \
                     or is_bookkeeping_name(p.name):
                 continue
@@ -2907,6 +2934,8 @@ def scan_template_conformance(sources: list, requirements: dict,
                 for para in paras:
                     line = para.strip()
                     key = _heading_key(line)
+                    if key:
+                        seen_section_keys.add(_section_key(line))
                     if key in order_index and key not in seen:
                         seen.add(key)
                         doc_headings.append((doc, order_titles[order_index[key]]))
@@ -2923,6 +2952,8 @@ def scan_template_conformance(sources: list, requirements: dict,
                 docs.add(doc)
                 for m in TEX_SECTION_RE.finditer(text):
                     key = _heading_key(m.group(2))
+                    if key:
+                        seen_section_keys.add(_section_key(m.group(2)))
                     if key in order_index:
                         doc_headings.append((doc, order_titles[order_index[key]]))
                 for line in text.splitlines():
@@ -2942,6 +2973,8 @@ def scan_template_conformance(sources: list, requirements: dict,
                 docs.add(doc)
                 for m in MD_HEADING_RE.finditer(text):
                     key = _heading_key(m.group(2))
+                    if key:
+                        seen_section_keys.add(_section_key(m.group(2)))
                     if key in order_index:
                         doc_headings.append((doc, order_titles[order_index[key]]))
                 for line in text.splitlines():
@@ -2951,7 +2984,12 @@ def scan_template_conformance(sources: list, requirements: dict,
                                              int(m.group(2))))
     blob = "\n".join(texts)
     low = blob.lower()
-    missing_sections = [s for s in mandatory if s.strip().lower() not in low]
+    # A required section must be a SECTION: its label may not be satisfied by
+    # the word appearing in a Results sentence somewhere in the corpus. Section
+    # numbering is dropped, so "## 2. Materials and Methods" matches the
+    # requirement "Materials and Methods".
+    missing_sections = [s for s in mandatory
+                        if _section_key(s) not in seen_section_keys]
     # A statement requirement matches by its PATTERN, not by the canonical
     # label: a template that says "Conflict of Interest" satisfies the
     # "Competing interests" requirement, and one that says "Data Availability
@@ -2979,7 +3017,7 @@ def scan_template_conformance(sources: list, requirements: dict,
                               < order_index.get(_heading_key(seq[i]), -1)), None)
             if inversion is not None:
                 order_rows.append(
-                    f"{doc}: section {seq[inversion]!r} appears before {seq[i]!r} "
+                    f"{doc}: section {seq[inversion]!r} appears after {seq[i]!r} "
                     f"(order basis: {order_basis}: {' > '.join(order_titles)})")
                 break
     # Figure/table labels: first occurrences must be ascending and gap-free.
@@ -4738,8 +4776,9 @@ def seed_concern_candidates(text: str) -> list:
     # "- Item" never split (only the unusual "1.Comment" did), and the
     # docstring's "numbered-point markers" were dead.
     head_re = re.compile(
-        r"^\s*(?:(?:reviewer|referee|editor|comments?|major|minor|point|query)\b|"
-        r"\d+\s*[.)]|[-*•]\s+)", re.I)
+        r"^\s*(?:(?:reviewer|referee|editor|comments?|major|minor)\b|"
+        r"point\b(?=\s*(?:\d|[:.]))|"
+        r"\d+\s*[.)](?=\s|$)|[-*•]\s+)", re.I)
     for i, ln in enumerate(lines):
         if head_re.match(ln):
             starts.append(i)
@@ -5041,7 +5080,7 @@ CAPTION_SUSPECT_RE = re.compile(
 # M18 legend scan keeps its figure-only patterns.
 TABLE_CAPTION_START_RE = re.compile(
     r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?tables?\.?\s*"
-    r"(S?\d+[A-Za-z]?|[IVXivx]+)"
+    r"(S?\d+[A-Za-z]?|(?-i:[IVXLCDM]+))"
     r"\s*(?:\||:|\u2014|\u2013|-|\.)\s*",
     re.IGNORECASE)
 
@@ -5466,7 +5505,7 @@ def round_counts(ctx, r: int) -> tuple:
         plan = (ctx.round_get(int(r)) or {}).get("plan") or {}
     except Exception:                                        # noqa: BLE001
         plan = {}
-    if isinstance(plan.get("rewrites"), int) and isinstance(plan.get("revises"), int):
+    if is_int(plan.get("rewrites")) and is_int(plan.get("revises")):
         return max(0, int(plan["rewrites"])), max(0, int(plan["revises"]))
     rounds = config_rounds(ctx)
     idx = round_index(r, rounds)
@@ -5573,7 +5612,7 @@ def judge_item_parts(item: str):
     if re.fullmatch(r"\d+", tok):            # `judge_1` -> index 1
         return r, None, int(tok)
     k = None
-    m = re.fullmatch(r"(.+?)[_:/.-]?j(\d+)", tok)
+    m = re.fullmatch(r"(.+?)[_:/.-]j(\d+)", tok)
     if m:
         tok, k = m.group(1), int(m.group(2))
     elif re.fullmatch(r"j[_:/.-]?\d+", tok):  # a bare `j1`
@@ -5595,7 +5634,7 @@ def parse_judges_enabled(spec: str, rounds: int, pool_of, judges_of) -> set:
     out = set()
     for item in [i for i in re.split(r"[,\s]+", spec) if i]:
         r, vid, k = judge_item_parts(item)
-        rs = [r] if r else list(range(1, int(rounds) + 1))
+        rs = [r] if r is not None else list(range(1, int(rounds) + 1))
         matched = False
         for rr in rs:
             if not (1 <= rr <= int(rounds)):
@@ -7710,7 +7749,7 @@ def _clean_handoff_row(value) -> str:
 def _readme_action_rows(text: str) -> list:
     """Bullet/numbered and Markdown-table data rows from one checklist."""
     rows, seen = [], set()
-    separator = re.compile(r"^\s*\|?[\s:\-|]+\|?\s*$")
+    separator = re.compile(r"^\s*\|?[\s:\-|]*\-[\s:\-|]*\|?\s*$")
     table_lines = []
 
     def add(value) -> None:
@@ -13139,7 +13178,11 @@ def _iter_tree_files(root: Path, follow_dir_links: bool = False) -> list:
                 if key is None or key in ancestors:
                     continue
                 walk(p, ancestors | {key})
-            elif p.is_file():
+            elif p.is_file() and not p.is_symlink():
+                # A FILE symlink is not package content: copy_into() refuses it,
+                # so hashing its target here made the input manifest/digest claim
+                # bytes the sandbox never received -- ensure_copy/dir_matches then
+                # saw a mismatch on every call and rebuilt forever.
                 out.append(p)
 
     # Seed the ancestor set with the ROOT's own inode: a link that points back
@@ -13380,12 +13423,49 @@ def _json_from_text(text: str, lenient: bool):
         except ValueError:
             return None
     decoder = json.JSONDecoder()
-    stripped = text.strip()
-    total = len(stripped)
-    found = []                       # (start, end, value)
+    total = len(text)
+    # Only BALANCED TOP-LEVEL values are document candidates. Trying every
+    # `{`/`[` made a truncated payload quadratic: each start re-scanned to its
+    # failure point, so a 64 MiB file with many braces stalled for a very long
+    # time before the malformed-output retry could fire. A nested value is never
+    # the document (the outer value, when it parses, is), and a start with no
+    # matching close cannot parse, so recording the balanced span first keeps the
+    # total decode work proportional to the text. The cap bounds the pathological
+    # prose case where a file carries hundreds of `{...}` snippets.
+    starts = []                      # (start, end) of balanced top-level values
+    stack = []                       # expected closers, innermost last
+    in_string = False
+    escaped = False
+    cand_start = None
     for i, ch in enumerate(text):
-        if ch not in "{[":
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
             continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            if not stack:
+                if len(starts) >= 64:
+                    break
+                cand_start = i
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if stack and stack[-1] == ch:
+                stack.pop()
+                if not stack:
+                    starts.append((cand_start, i + 1))
+                    cand_start = None
+            elif stack:
+                # Mismatched prose brackets: no value can start here.
+                stack.clear()
+                cand_start = None
+    found = []                       # (start, end, value)
+    for i, _end in starts:
         try:
             obj, end = decoder.raw_decode(text, i)
         except ValueError:
@@ -13662,15 +13742,22 @@ def _tex_captions(text: str) -> list:
     out = []
     # \*? -- \caption*{...} is the unnumbered form of the same caption.
     for m in re.finditer(r"\\caption(?:of)?\*?\s*(?:\{[^{}]*\}\s*)?(?:\[[^\]]*\]\s*)?\{", text):
-        i, depth, j = m.end() - 1, 0, m.end() - 1
+        i, depth, j, esc = m.end() - 1, 1, m.end(), False
         while j < len(text):
-            if text[j] == "{":
+            ch = text[j]
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == "{":
                 depth += 1
-            elif text[j] == "}":
+            elif ch == "}":
                 depth -= 1
                 if depth == 0:
                     break
             j += 1
+        if depth:                      # unbalanced: never swallow the rest of the file
+            continue
         out.append(text[i + 1:j])
     return out
 
@@ -13817,7 +13904,7 @@ def scan_captions_in_sources(sources: list, limit=None) -> dict:
     for i, (src, prefix, excluded) in enumerate(sources):
         if not src.is_dir():
             continue
-        for p in sorted(src.rglob("*")):
+        for p in _iter_tree_files(src, follow_dir_links=True):
             if not p.is_file():
                 continue
             if is_non_document_name(p.name):
@@ -13994,7 +14081,8 @@ LENGTH_SECTION_BOUND_RE = re.compile(
     r"star methods|experimental procedures|"
     r"references?|bibliography|figure legends?|acknowledg\w*|author contributions?|"
     r"data availability|competing interests?|conflict of interest|funding|"
-    r"supplementary (?:information|methods|figures|tables|notes))\s*[:.\u2014\u2013-]?\s*$", re.I)
+    r"supplementary (?:information|materials?|methods|figures|tables|notes?))"
+    r"\s*[:.\u2014\u2013-]?\s*$", re.I)
 # The SAME boundary headings, classified by the section kind that a profile's
 # `counting.main_text.excludes` names. The scan ends the main-text span at the
 # first boundary heading whose kind the venue EXCLUDES; a kind the venue counts
@@ -14026,7 +14114,7 @@ LENGTH_SECTION_KIND_RES = (
         r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?funding\s*(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
     ("supplementary", re.compile(
         r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?supplementary "
-        r"(?:information|methods|figures|tables|notes)\s*"
+        r"(?:information|materials?|methods|figures|tables|notes?)\s*"
         r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
 )
 
@@ -14293,17 +14381,27 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
             else:
                 j = i + 1
                 seen_text = False
+                first_blank = None
+                boundary = False
                 while j < n:
                     line = clean(lines[j])
-                    if LENGTH_SECTION_BOUND_RE.match(line) or LENGTH_KEYWORDS_RE.match(line):
+                    if LENGTH_SECTION_BOUND_RE.match(line) or LENGTH_MAIN_START_RE.match(line) \
+                            or LENGTH_KEYWORDS_RE.match(line):
+                        boundary = True
                         break
                     if not line:
-                        if seen_text:
-                            break           # the abstract's paragraph ended
+                        if seen_text and first_blank is None:
+                            first_blank = j
                         j += 1              # leading blanks right after the heading
                         continue
                     seen_text = True
                     j += 1
+                # A multi-paragraph abstract is legitimate; only a document
+                # with no section boundary at all falls back to its first
+                # blank line, so the later paragraphs are not charged to the
+                # main text.
+                if not boundary and first_blank is not None:
+                    j = first_blank
             abs_start, abs_end = i + 1, j
             break
     main_start = None
@@ -14365,31 +14463,37 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
     else:
         start = 0 if include_abstract else None
     # The abstract block ends ON the next heading line ("Introduction" in most
-    # venues' Articles, which is written without a heading in the final layout):
-    # drop that heading line itself from the main-text count. Do NOT drop a
-    # heading whose own section kind the venue EXCLUDES: advancing past it would
-    # start the count inside the excluded section and charge its body to the
-    # main text (an Abstract followed directly by Methods counted the Methods).
-    if start is not None and start < n and not include_abstract \
-            and LENGTH_SECTION_BOUND_RE.match(clean(lines[start])) \
-            and _length_section_kind(clean(lines[start])) not in excludes:
-        start += 1
-    end, end_found = n, False
-    for i in range(start or 0, n):
-        kind = _length_section_kind(clean(lines[i]))
-        if kind and kind in excludes:
-            end, end_found = i, True
-            break
-    body = [ln for ln in lines[start or 0:end]
-            if not (LENGTH_SECTION_BOUND_RE.match(clean(ln))
-                    or LENGTH_MAIN_START_RE.match(clean(ln))
-                    or LENGTH_KEYWORDS_RE.match(clean(ln)))]
+    # venues' Articles, which is written without a heading in the final layout).
+    # Build the counted set line by line: an excluded section heading starts a
+    # skip, and a later heading whose kind the venue does NOT exclude resumes
+    # the count. Truncating at the first excluded heading dropped a Results or
+    # Discussion section after a mid-paper Methods block even though the
+    # profile says that kind is inside the count.
     span_start = start or 0
+    included = [False] * n
+    excluded_now = False
+    end_found = False
+    for i in range(span_start, n):
+        line = clean(lines[i])
+        if LENGTH_SECTION_BOUND_RE.match(line) or LENGTH_MAIN_START_RE.match(line) \
+                or LENGTH_KEYWORDS_RE.match(line):
+            kind = _length_section_kind(line)
+            if kind and kind in excludes:
+                excluded_now = True
+                end_found = True
+            else:
+                excluded_now = False
+            continue
+        included[i] = not excluded_now
+    body = [lines[i] for i in range(span_start, n) if included[i]]
     caption_words = 0
     if subtract_captions:
-        caption_words = sum(count_caption_words(" ".join(lines[max(a, span_start):min(b, end)]))
-                            for a, b in (caption_spans or [])
-                            if a < end and b > span_start)
+        caption_words = sum(
+            count_caption_words(" ".join(lines[max(a, span_start):min(b, n)]))
+            for a, b in (caption_spans or [])
+            if a < n and b > span_start
+            and any(included[i] for i in range(max(a, span_start), min(b, n)))
+        )
     words = max(0, count_words(" ".join(body)) - caption_words)
     notes = []
     if abs_start is None:
@@ -15244,6 +15348,15 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                 rel = q.relative_to(src).as_posix()
                 if not is_submitted(rel) or is_evidence_rel(rel):
                     continue
+                if (prefix + rel) in overrides[i]:
+                    continue                  # a later source provides this path
+                if excluded and rel.split("/", 1)[0] in excluded:
+                    continue
+                if "work" in rel.split("/")[:-1]:
+                    continue                  # stage scratch is never corpus content
+                if _is_aux_doc(q.name) or is_bookkeeping_name(q.name) \
+                        or is_non_submitted_readme_name(q.name):
+                    continue
                 images.append(q)
         except Exception as e:                                        # noqa: BLE001
             rows.append({
@@ -15254,7 +15367,17 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                            "sweep; re-run the scan or inspect the submitted figures"),
                 "fix": "manual", "protected": False, "tier": "advisory"})
         if images:
-            width = float(policy.get("figure_print_width_in") or 6.5)
+            try:
+                width = float(policy.get("figure_print_width_in") or 6.5)
+            except (TypeError, ValueError):
+                width = 6.5
+                rows.append({
+                    "rule": "FMT-IM4", "severity": "low",
+                    "document": prefix + "figures", "location": "artwork",
+                    "evidence": "figure_print_width_in is not numeric",
+                    "detail": ("the figure-text-size class used the 6.5 in default because the "
+                               "policy value is not a number; re-run after fixing the policy"),
+                    "fix": "manual", "protected": False, "tier": "advisory"})
             if ocr_on:
                 try:
                     texts = []
@@ -15292,19 +15415,32 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                                    "re-run the scan / install tesseract and inspect the "
                                    "submitted figures"),
                         "fix": "manual", "protected": False, "tier": "advisory"})
-            elif float(policy.get("min_figure_text_pt")
-                       or (policy.get("figure_text") or {}).get("min_pt") or 0) > 0:
-                # OCR is the only way to measure FMT-IM6. When the operator
-                # deliberately turns OCR off, the class is a recorded gap rather
-                # than a silent pass.
-                rows.append({
-                    "rule": "FMT-IM6", "severity": "low",
-                    "document": prefix + "figures", "location": "artwork text",
-                    "evidence": "figure_ocr is off",
-                    "detail": ("the figure-text-size class (FMT-IM6) was NOT examined: "
-                               "measure the artwork's type at the printed width or re-run "
-                               "with figure_ocr on"),
-                    "fix": "manual", "protected": False, "tier": "advisory"})
+            else:
+                try:
+                    min_text_pt = float(policy.get("min_figure_text_pt")
+                                        or (policy.get("figure_text") or {}).get("min_pt")
+                                        or 0)
+                except (TypeError, ValueError):
+                    min_text_pt = 0.0
+                    rows.append({
+                        "rule": "FMT-IM6", "severity": "low",
+                        "document": prefix + "figures", "location": "artwork text",
+                        "evidence": "min_figure_text_pt is not numeric",
+                        "detail": ("the figure-text-size class was not examined because the "
+                                   "policy value is not a number"),
+                        "fix": "manual", "protected": False, "tier": "advisory"})
+                if min_text_pt > 0:
+                    # OCR is the only way to measure FMT-IM6. When the operator
+                    # deliberately turns OCR off, the class is a recorded gap rather
+                    # than a silent pass.
+                    rows.append({
+                        "rule": "FMT-IM6", "severity": "low",
+                        "document": prefix + "figures", "location": "artwork text",
+                        "evidence": "figure_ocr is off",
+                        "detail": ("the figure-text-size class (FMT-IM6) was NOT examined: "
+                                   "measure the artwork's type at the printed width or re-run "
+                                   "with figure_ocr on"),
+                        "fix": "manual", "protected": False, "tier": "advisory"})
             # FMT-IM4 needs no OCR and is always checked.
             if hasattr(mod, "image_resolution_rows"):
                 for q in images:
@@ -16991,7 +17127,9 @@ def rebuild_package_from_templates(templates: dict, src: Path, dest: Path,
         return {"ok": False, "error": f"the source package {src} is not a directory"}
     if is_within(dest, src) or is_within(src, dest):
         return {"ok": False, "error": "the source and the destination must not be nested"}
-    if dest.exists():
+    if dest.exists() and not dest.is_dir():
+        return {"ok": False, "error": f"{dest} exists and is not a directory"}
+    if dest.is_dir():
         if not any(dest.iterdir()):
             pass
         elif force:
@@ -19785,19 +19923,23 @@ def is_evidence_rel(rel: str) -> bool:
     return bool(evidence_area_of(rel)) or is_disabled_evidence_rel(rel)
 
 
-def is_canonical_evidence_link(link: Path) -> bool:
-    """True when `link` is a symlink to one root's canonical evidence area.
+def is_canonical_evidence_link(link: Path, root: Path = None) -> bool:
+    """True when `link` is a symlink to THIS root's canonical evidence area.
 
     The ONE evidence link a corpus legitimately carries is the relative
     `<root>/non_revised/<area>` (or legacy `non-revised`) link that
     `ensure_pristine_input` creates. A top-level entry *named* `raw_data` is not
     evidence by itself: following it would copy whatever local directory or file
     it points at into the pristine root, every judge view and the published
-    package. The name alone never authorizes the follow; the resolved target
-    must be the canonical store this pipeline created.
+    package. The name alone never authorizes the follow; the resolved target must
+    be the canonical store of the root that owns the copy (`root`). Without a
+    root there is nothing to prove containment against, so the link is refused.
     """
+    if root is None:
+        return False
     try:
         link = Path(link)
+        root = Path(root).resolve(strict=True)
         if not link.is_symlink():
             return False
         target = link.resolve(strict=True)
@@ -19807,7 +19949,13 @@ def is_canonical_evidence_link(link: Path) -> bool:
         return False
     if target.name != link.name or not is_evidence_rel(link.name):
         return False
-    return target.parent.name in PRISTINE_DIRNAMES
+    for dirname in PRISTINE_DIRNAMES:
+        try:
+            if (root / dirname / link.name).resolve(strict=True) == target:
+                return True
+        except (OSError, RuntimeError):
+            continue
+    return False
 
 
 def is_human_feedback_rel(rel: str) -> bool:
@@ -20096,13 +20244,13 @@ def ensure_pristine_input(ctx: Ctx, dst: Path) -> dict:
     if dst.exists():
         rmtree_force(dst, ignore_errors=True)
     dst.mkdir(parents=True, exist_ok=True)
-    copy_into(ctx.pristine, dst, exclude_top=set(areas))
+    copy_into(ctx.pristine, dst, exclude_top=set(areas), root=ctx.root)
     for name in areas:
         link = dst / name
         if _try_symlink_dir(want[name], link):
             info["linked"].append(name)
         else:
-            copy_into(want[name], link)
+            copy_into(want[name], link, root=ctx.root)
             info["copied"].append(name)
             if info["fallback_reason"] is None:
                 info["fallback_reason"] = ("symlinks are unavailable on this filesystem; the "
@@ -20113,8 +20261,13 @@ def ensure_pristine_input(ctx: Ctx, dst: Path) -> dict:
 
 def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
               strip_bookkeeping: bool = False, normalize_mtime: bool = False,
-              mtime_stamp: float = None) -> None:
+              mtime_stamp: float = None, root: Path = None) -> None:
     """Copy the CONTENTS of src into dst (idempotent; overwrites files).
+
+    root: the pipeline root that owns `src`. A top-level evidence link is
+    followed only when it resolves to THIS root's canonical
+    `<root>/non_revised/<area>` store (see `is_canonical_evidence_link`); a
+    caller that omits it follows no evidence link at all.
 
     exclude_top: top-level entry names to skip (used to keep a candidate's
     process scratch, e.g. revised/work/, out of its submission corpus).
@@ -20177,7 +20330,7 @@ def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
             # version corpus, a sandbox copy or a published package.
             continue
         if entry.is_symlink() and not (
-                is_evidence_rel(entry.name) and is_canonical_evidence_link(entry)):
+                is_evidence_rel(entry.name) and is_canonical_evidence_link(entry, root)):
             # A top-level link is followed ONLY when it is the canonical
             # `<root>/non_revised/<area>` store; the NAME alone never authorizes
             # copying an arbitrary target into a corpus, sandbox or judge view.
@@ -22152,7 +22305,10 @@ def _payload_files_of_dir(dirp: Path) -> list:
         if not p.is_file():
             continue
         rel = p.relative_to(dirp)
-        if rel.parts and rel.parts[0] == "work":
+        if any(part == "work" for part in rel.parts[:-1]):
+            # `work/` at ANY depth is stage scratch; only the top-level check
+            # let `supp/work/render.png` change the content-hash token while
+            # being invisible to the scans.
             continue
         if is_author_to_complete_readme_name(p.name):
             # The hand-off checklist is not a manuscript payload document: it
@@ -22208,10 +22364,12 @@ def revision_token_for_dir(dirp: Path) -> dict:
             tokens.append(token)
         named.append((rel, token))
     digs = []
+    unreadable = []
     for p in files:
         try:
             digs.append(hashlib.sha256(_normalize_version_refs(p.read_bytes(), tokens)).hexdigest())
-        except OSError:
+        except OSError as e:
+            unreadable.append(f"{p.relative_to(dirp).as_posix()}: {e.strerror or e}")
             continue
     if not digs:
         return {"token": "", "files": 0, "tokens_seen": [], "consistent": False,
@@ -22231,6 +22389,10 @@ def revision_token_for_dir(dirp: Path) -> dict:
                              and Path(rel).suffix.lower() in EDITABLE_DOC_EXTS})
     consistent = bool(hex_tokens) and all(t == token for t in hex_tokens)
     notes = []
+    if unreadable:
+        notes.append(f"{len(unreadable)} payload file(s) could not be read and are EXCLUDED "
+                     f"from the content hash: {'; '.join(unreadable[:3])}"
+                     + (f" (+{len(unreadable) - 3} more)" if len(unreadable) > 3 else ""))
     if not hex_tokens:
         notes.append("no 7-hex filename token yet (legacy letter/digit tokens or none applied)")
     elif not consistent:
@@ -22346,7 +22508,7 @@ def build_corpus_dir(ctx: Ctx, r: int, vid: str, dst: Path,
         copy_into(src, target, exclude_top=excluded, skip_aux=True,
                   strip_bookkeeping=True,
                   normalize_mtime=mtime_stamp is not None,
-                  mtime_stamp=mtime_stamp)
+                  mtime_stamp=mtime_stamp, root=ctx.root)
 
 
 def corpus_files_for_view(ctx: Ctx, r: int, vid: str) -> list:
@@ -22595,13 +22757,35 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
 
         text = cmd_pat.sub(cmd_repl, text)
     if dir_map:
-        def gp_repl(m):
-            def one(mm):
-                d = mm.group(1).rstrip("/")
-                return "{" + (dir_map.get(d, d) or ".") + "/}"
-            return "\\graphicspath{" + re.sub(r"\{([^{}]*)\}", one, m.group(1)) + "}"
+        def one(mm):
+            d = mm.group(1).rstrip("/")
+            return "{" + (dir_map.get(d, d) or ".") + "/}"
 
-        text = re.sub(r"\\graphicspath\s*\{(.*?)\}", gp_repl, text, flags=re.S)
+        # `\graphicspath{{figures/}}` has TWO brace levels. The old non-greedy
+        # regex stopped at the first `}`, so group(1) was "{figures/" and the
+        # inner `{dir}` substitution never matched: the directory rename was
+        # dead code and a judge view kept pointing at the old figure directory.
+        # Scan the argument's balanced braces instead.
+        out, pos = [], 0
+        for m in re.finditer(r"\\graphicspath\s*\{", text):
+            if m.start() < pos:
+                continue
+            depth, j = 1, m.end()
+            while j < len(text) and depth:
+                if text[j] == "{":
+                    depth += 1
+                elif text[j] == "}":
+                    depth -= 1
+                j += 1
+            if depth:                  # unclosed argument: leave it untouched
+                break
+            out.append(text[pos:m.start()])
+            out.append("\\graphicspath{")
+            out.append(re.sub(r"\{([^{}]*)\}", one, text[m.end():j - 1]))
+            out.append("}")
+            pos = j
+        out.append(text[pos:])
+        text = "".join(out)
     return text
 
 
@@ -22880,17 +23064,29 @@ def _sanitize_pdf_bytes(data: bytes) -> tuple:
             notes.append("PDF /Info object is compressed/unparsable; its metadata was left as is")
     else:
         notes.append("no uncompressed PDF /Info dictionary found; metadata was left as is")
-    # /ID lives in the trailer / xref stream at the END of the file: restrict the
-    # blanking to that window so a literal "/ID [<...>...]" inside a content
-    # stream can never be hit.
-    tail_start = max(0, len(data) - 8192)
-    tail = data[tail_start:]
-    new_tail = re.sub(
-        rb"(/ID\s*\[\s*)<([0-9A-Fa-f\s]*)>(\s*)<([0-9A-Fa-f\s]*)>",
-        lambda mm: (mm.group(1) + b"<" + b"0" * len(mm.group(2)) + b">" + mm.group(3)
-                    + b"<" + b"0" * len(mm.group(4)) + b">"), tail)
-    if new_tail != tail:
-        data = data[:tail_start] + new_tail
+    # /ID is in the trailer/xref at the END of the file, but a LINEARIZED PDF
+    # also carries its ID in the first-page hint at the head. Blank every /ID
+    # array outside a stream body (a literal in a content stream is text, not
+    # the document ID), so the blind view cannot be correlated by file ID.
+    # Both the hex `<...>` and the string `(...)` spellings are accepted.
+    stream_spans = [(m.start(), m.end())
+                    for m in re.finditer(rb"stream\r?\n.*?endstream", data, re.S)]
+
+    def _not_in_stream(pos: int) -> bool:
+        return not any(a <= pos < b for a, b in stream_spans)
+
+    def _blank_id(mm):
+        if not _not_in_stream(mm.start()):
+            return mm.group(0)
+        return (mm.group(1) + _blank_pdf_value(mm.group(2)) + mm.group(3)
+                + _blank_pdf_value(mm.group(4)))
+
+    new_data = re.sub(
+        rb"(/ID\s*\[\s*)(<[0-9A-Fa-f\s]*>|\((?:\\.|[^()\\])*\))"
+        rb"(\s*)(<[0-9A-Fa-f\s]*>|\((?:\\.|[^()\\])*\))",
+        _blank_id, data)
+    if new_data != data:
+        data = new_data
         changed += 1
     xm = re.search(rb"/Metadata\s+(\d+)\s+0\s+R", data)
     if xm:
@@ -23497,7 +23693,7 @@ def materialize_a1(ctx: Ctx, r: int) -> dict:
         # CHANGELOG the corpus rule strips).
         rmtree_force(base)
     if not base.exists():
-        copy_into(src_dir, base)
+        copy_into(src_dir, base, root=ctx.root)
     # The pristine input is materialized with the read-only evidence areas
     # SYMLINKED to the root's canonical copy (see ensure_pristine_input); the
     # helper is idempotent and repairs a partial or tampered copy itself.
@@ -23989,7 +24185,7 @@ def _probe_value_equal(declared, produced) -> bool:
     if not a or not b:
         return False
     try:
-        return math.isclose(float(a), float(b), rel_tol=1e-6, abs_tol=1e-12)
+        return float(a) == float(b)
     except (TypeError, ValueError):
         return False
 
@@ -25065,7 +25261,14 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
         if tgt_rel:
             tgt = ctx.root / tgt_rel
             if tgt.is_dir() and (sb / "target").is_dir():
-                probs.append(mismatch("target", hash_manifest(tgt)))
+                # The sandbox target/ is copied with exclude_top=("work",) and
+                # skip_aux=True; comparing it with the FULL source manifest made
+                # the mismatch permanent, so every re-entry reset a completed
+                # response run.
+                want = hash_manifest(tgt, exclude_top=("work",))
+                files = {rel: dig for rel, dig in (want.get("files") or {}).items()
+                         if not _is_aux_doc(Path(rel).name)}
+                probs.append(mismatch("target", {"files": files, "count": len(files)}))
         src_rec = ctx.run(rid_concerns(r) if journal_is_scoped(ctx) else rid_feedback(r))
         if src_rec is not None and src_rec.get("status") == "done" \
                 and (sb / "concerns").is_dir():
@@ -25297,6 +25500,10 @@ SIGNAL_ALT_DIRS = {
     "rewrite": (REWRITTEN_DIR,),
     "revise": (REVISED_DIR,),
     "integrate": (INTEGRATED_DIR,),
+    # The journal stages write their own ledgers, not a revised/ package.
+    "feedback": ("concerns",),
+    "concerns": ("concerns",),
+    "response": ("response",),
 }
 
 
@@ -25537,6 +25744,15 @@ def leftovers_present(ctx: Ctx, rec: dict) -> bool:
             return False
         seeded = seeded_probe_paths(sb)
         return any(p.is_file() and p not in seeded for p in d.rglob("*"))
+    if rec["kind"] in ("feedback", "concerns"):
+        # The journal stages' deliverables live in concerns/, not revised/;
+        # without this branch a partial JF_concerns.json was invisible and a
+        # second agent was launched into the first one's work.
+        d = sb / "concerns"
+        return d.is_dir() and any(d.iterdir())
+    if rec["kind"] == "response":
+        d = sb / "response"
+        return d.is_dir() and any(d.iterdir())
     # rewrite / revise / integrate: the output package and code/ are the agent's.
     for rel in (output_dir_of(rec), CODE_DIR):
         d = sb / rel
@@ -26982,7 +27198,8 @@ def check_visual_artifact(path: Path, label: str, errs: list, warns: list,
                     pages = str(d.get("pages") or "")
                     if name and name not in text:
                         missing.append(name)
-                    elif pages and pages not in text:
+                    elif pages and not re.search(
+                            rf"\b{re.escape(pages)}\s*page\b", text, re.I):
                         missing.append(f"{name} ({pages} page(s))")
                 if "template" not in text:
                     missing.append("a template-comparison section")
@@ -28654,7 +28871,12 @@ def canonicalize_raw_data_dir(cand_dir: Path, warns: list) -> dict:
         warns.append(f"READ-ONLY raw data: could not rename {RAW_DATA_DIR_LEGACY}/ to "
                      f"{RAW_DATA_DIR}/: {e}")
         return {"renamed": False, "repointed": []}
-    old, new = (RAW_DATA_DIR_LEGACY + "/").encode(), (RAW_DATA_DIR + "/").encode()
+    # Match the legacy name only as a WHOLE path segment. A blind byte replace
+    # also rewrote `x_raw_figs/…` and a URL path `https://host/raw_figs/…`,
+    # corrupting submission content that merely contained the substring.
+    ref_re = re.compile(rb"(?<![A-Za-z0-9_./-])" + re.escape(
+        (RAW_DATA_DIR_LEGACY + "/").encode()))
+    new = (RAW_DATA_DIR + "/").encode()
     repointed = []
     for p in sorted(cand_dir.rglob("*")):
         # The renamed directory is the READ-ONLY input area: `enforce_readonly_
@@ -28670,10 +28892,10 @@ def canonicalize_raw_data_dir(cand_dir: Path, warns: list) -> dict:
             data = p.read_bytes()
         except OSError:
             continue
-        if old not in data:
+        if not ref_re.search(data):
             continue
         try:
-            p.write_bytes(data.replace(old, new))
+            p.write_bytes(ref_re.sub(new, data))
         except OSError as e:
             warns.append(f"READ-ONLY raw data: {p.name} still references "
                          f"{RAW_DATA_DIR_LEGACY}/ and could not be repointed: {e}")
@@ -29095,9 +29317,14 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
     cand_digests = set()
     for key, p in cand_files:
         try:
-            cand_digests.add(sha256_file(p))
+            dig = sha256_file(p)
         except OSError:
-            pass
+            continue
+        # Every empty file shares EMPTY_SHA256; treating it as a rename match
+        # let a dropped 0-byte base file "survive" because any unrelated empty
+        # scratch file happened to exist.
+        if dig != EMPTY_SHA256:
+            cand_digests.add(dig)
     # Rename-family bookkeeping (see the family skip in the main loop). A
     # candidate document can stand in for ONE base document whose name changed,
     # but only if it is not itself the exact-name survivor of another base
@@ -29209,6 +29436,10 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
                 try:
                     if dest.is_file() and dest.stat().st_size == 0 \
                             and p.stat().st_size > 0:
+                        try:
+                            dest.chmod(0o644)     # a read-only 0-byte file blocks copy2
+                        except OSError:
+                            pass
                         shutil.copy2(p, dest)
                         restored.append(rel)
                         warns.append(f"RECOVERY: {rel} existed in the candidate as an EMPTY "
@@ -32162,7 +32393,7 @@ def postcheck_revise(ctx: Ctx, rec: dict):
                   ("fixed", "fixed-with-caveat")]
         _notes = list((rev / "work").glob("REREAD_*.md"))
         _missing = [fid for fid in _fixed
-                    if not any(fid in q.name for q in _notes)]
+                    if not any(_finding_id_mentioned(fid, q.name) for q in _notes)]
         if _missing:
             warns.append(
                 f"{len(_missing)} fixed finding(s) have no revised/work/REREAD_<id>.md "
@@ -32457,7 +32688,7 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
         except OSError as e:                                          # noqa: BLE001
             text = ""
             warns.append(f"{INTEGRATION_LEDGER_REL} could not be read ({e})")
-        missing = [d for d in donors if d not in text]
+        missing = [d for d in donors if not _finding_id_mentioned(str(d), text)]
         if missing:
             warns.append(f"{INTEGRATION_LEDGER_REL} does not mention donor(s) {missing}; every "
                          f"donor of the pool must appear in the ledger (a donor with nothing to "
@@ -34865,7 +35096,7 @@ def postcheck_response(ctx: Ctx, rec: dict):
                 and str(src_row.get("action") or "") == "new-experiment" and not new_data:
             errs.append(f"response row {cid!r}: the concern needs a new experiment; an "
                         f"'addressed' answer must cite the new data file(s)")
-        if cid and letter and cid not in letter:
+        if cid and letter and not _finding_id_mentioned(str(cid), letter):
             errs.append(f"response letter does not mention concern {cid!r}")
     # Like every sibling postcheck: the response session must not rewrite the
     # read-only package copy its letter is verified against (target/), or the
@@ -34875,11 +35106,14 @@ def postcheck_response(ctx: Ctx, rec: dict):
 
 
 def _scope_tree_files(root: Path) -> dict:
-    """{version-stripped key: (rel, sha256)} of a package's submission files.
+    """{exact relative path: (rel, sha256)} of a package's submission files.
 
-    The key strips the content-hash version token, so the revision skill's
-    token rename (`main-4f3a9c1.docx` -> `main-9b2c7e4.docx`) is the SAME
-    document, not an add + delete.
+    The key is the EXACT path, not `_doc_key`: two distinct documents that
+    differ by a trailing single letter (`appendix-a.docx` / `appendix-b.docx`)
+    both reduce to `appendix.docx`, and the old dict let the second overwrite
+    the first in `want`/`got` -- the guard then missed a dropped sibling and
+    compared one document's digest against another's. A version-token rename is
+    paired later, only when the stripped key is unambiguous on both sides.
     """
     out = {}
     if not root.is_dir():
@@ -34893,7 +35127,7 @@ def _scope_tree_files(root: Path) -> dict:
         if "work" in rel.split("/")[:-1] or is_bookkeeping_name(p.name):
             continue
         try:
-            out[_doc_key(rel)] = (rel, sha256_file(p))
+            out[rel] = (rel, sha256_file(p))
         except OSError:
             continue
     return out
@@ -34926,8 +35160,25 @@ def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=()) ->
             ledger_text = lp.read_text(encoding="utf-8", errors="replace")
         except OSError:
             ledger_text = ""
-    for key in sorted(set(got) - set(want)):
-        rel = got[key][0]
+    added = sorted(set(got) - set(want))
+    dropped = sorted(set(want) - set(got))
+    # A version-token rename (`main-4f3a9c1.docx` -> `main-9b2c7e4.docx`) is
+    # the SAME document. Pair it by the stripped key ONLY when exactly one
+    # dropped and one added path share that key; a collision means two real
+    # documents (or a genuine drop + add) and the exact-path verdict stands.
+    by_key_want, by_key_got = {}, {}
+    for rel in dropped:
+        by_key_want.setdefault(_doc_key(rel), []).append(rel)
+    for rel in added:
+        by_key_got.setdefault(_doc_key(rel), []).append(rel)
+    renamed = []
+    for key, olds in by_key_want.items():
+        news = by_key_got.get(key) or []
+        if len(olds) == 1 and len(news) == 1:
+            renamed.append((olds[0], news[0]))
+            dropped.remove(olds[0])
+            added.remove(news[0])
+    for rel in added:
         if is_author_to_complete_readme_name(Path(rel).name):
             # The hand-off README is the mode's own surface, not a reviewer-
             # requested manuscript document: a concern-scoped revision may
@@ -34935,15 +35186,16 @@ def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=()) ->
             continue
         errs.append(f"scoped revision added {rel!r}: a major/minor revision may not add a "
                     f"document (the reviewers asked for no new file)")
-    for key in sorted(set(want) - set(got)):
-        rel = want[key][0]
+    for rel in dropped:
         if is_author_to_complete_readme_name(Path(rel).name):
             # Items resolved: the README is deleted, and that is the goal.
             continue
         errs.append(f"scoped revision dropped {rel!r}: a major/minor revision may not remove a "
                     f"document; restore it")
-    for key in sorted(k for k in set(want) & set(got) if want[k][1] != got[k][1]):
-        rel = got[key][0]
+    changed = [(rel, rel) for rel in sorted(set(want) & set(got))
+               if want[rel][1] != got[rel][1]]
+    changed += [(old, new) for old, new in renamed if want[old][1] != got[new][1]]
+    for _old_rel, rel in sorted(changed, key=lambda pair: pair[1]):
         if is_author_to_complete_readme_name(Path(rel).name):
             continue
         if rel in pipeline_changed:
@@ -35040,7 +35292,8 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
     # copies) are placed AFTER this filter and are never dropped by it.
     decl = declared_submission_set(target)
     dropped_by_declaration = []
-    copy_into(target, dst, exclude_top=("work",), skip_aux=True, strip_bookkeeping=True)
+    copy_into(target, dst, exclude_top=("work",), skip_aux=True,
+              strip_bookkeeping=True, root=ctx.root)
     include_code = submit_code_of(ctx)
     non_submitted = tuple(EVIDENCE_DIRNAMES) + (() if include_code else (CODE_DIR,))
     for name in non_submitted:
@@ -35326,8 +35579,6 @@ def postcheck(ctx: Ctx, rec: dict, source: str = "postcheck") -> bool:
         if note:
             warns = list(warns) + [note]
             rec["postcheck"]["warnings"] = warns
-    if kind != "a1":
-        record_attempt(ctx, rec, ok, errs, warns, source=source)
     if ok:
         vid = freshness_vid(rec)
         if vid:
@@ -35355,6 +35606,11 @@ def postcheck(ctx: Ctx, rec: dict, source: str = "postcheck") -> bool:
             rec["last_error"] = "; ".join(errs)[:600]
     else:
         rec["last_error"] = "; ".join(errs)[:600]
+    # Record AFTER the digest verification: this line used to run first, so the
+    # attempt history stored `"ok": true` for the very attempt the digest then
+    # failed.
+    if kind != "a1":
+        record_attempt(ctx, rec, ok, errs, warns, source=source)
     ctx.log("postcheck", rec["id"], "ok" if ok else "failed")
     return ok
 
@@ -35397,6 +35653,12 @@ STAGE_DELIVERABLES = {
     "audit": {"required": ("audit/audit.json",),
               "expected": ("audit/AUDIT.md", "audit/DISPOSITION_AUDIT.md",
                            "audit/PROBE_AUDIT.md")},
+    "feedback": {"required": (JOURNAL_CONCERNS_JSON_REL,),
+                 "expected": (JOURNAL_CONCERNS_MD_REL,)},
+    "concerns": {"required": (JOURNAL_CONCERNS_JSON_REL,),
+                 "expected": (JOURNAL_CONCERNS_MD_REL,)},
+    "response": {"required": (JOURNAL_RESPONSE_MAP_REL,),
+                 "expected": (JOURNAL_RESPONSE_MD_REL,)},
     "rewrite": {"required": (REWRITE_REPORT_REL,),
                 "expected": (f"{REWRITTEN_DIR}/VISUAL_CHECK.md",
                              f"{REWRITTEN_DIR}/MANUAL_STEPS.md")},
@@ -37499,6 +37761,11 @@ def manual_run_one(ctx: Ctx, rec: dict, poll: int, timeout: int) -> None:
                     rec["last_error"] = "malformed structured output: " + "; ".join(bad)[:400]
                     rec["postcheck"] = {"ok": False, "errors": bad, "warnings": [],
                                         "checked_at": utcnow()}
+                    # Count this failure BEFORE recording it: record_attempt
+                    # replaces the last entry when the attempt number is
+                    # unchanged, so the old order overwrote the previous
+                    # attempt's history and left the retry budget unmoved.
+                    bump_attempt(rec)
                     record_attempt(ctx, rec, False, bad, [], source="malformed-output")
                     ctx.log("malformed-output", rec["id"], "; ".join(bad)[:300])
                     ctx.save_state()
@@ -39045,7 +39312,7 @@ def cmd_setup(args) -> None:
             path = Path(_dir) / name
             if os.path.islink(path):
                 canonical = (at_source_root and is_evidence_rel(name)
-                             and is_canonical_evidence_link(path))
+                             and is_canonical_evidence_link(path, root))
                 if not canonical:
                     _skipped_links.append(os.path.join(_dir, name))
                     out.append(name)
@@ -40019,7 +40286,10 @@ def _merge_readme_row(staged: Path, dest: Path, vid: str,
     if not dest.is_file():
         write_text_atomic(dest, row + "\n")
         return "created"
-    lines = dest.read_text(encoding="utf-8").splitlines()
+    try:
+        lines = dest.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as e:
+        return f"unreadable ({e}); the profile was published but its README row was not merged"
     for i, ln in enumerate(lines):
         if ln.startswith("|") and f"`{vid}`" in ln:
             if ln == row:
@@ -41463,6 +41733,10 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         print("[run] note: producers and judges use the same backend "
               f"({Path(str(cmd[0])).name}); this is recorded in decision.json "
               "(judge_provider) -- the panel is not an independent measure")
+    if args.timeout is not None and args.timeout < 0:
+        # A negative value is truthy, so the subprocess deadline was computed
+        # in the past and every attempt died as an immediate "timeout".
+        die("--timeout must be a non-negative number of seconds")
     timeout = args.timeout if args.timeout is not None else (0 if manual else DEFAULTS["timeout"])
     # ADOPTION comes after the command/timeout are known: an adopted run whose
     # postcheck fails on repairable bookkeeping gets its scoped repair session
@@ -44508,7 +44782,13 @@ def _extglob_to_regex(pat: str):
                 cls = pat[i:j + 1]
                 if not re.fullmatch(r"\[[^\]\\]{1,40}\]", cls):
                     return None
-                out.append(cls)
+                if cls[1] in ("!", "^"):
+                    body = cls[2:-1]
+                    if not body:
+                        return None
+                    out.append("[^" + body + "]")
+                else:
+                    out.append(cls)
                 i = j
             else:
                 out.append(re.escape(c))
@@ -46588,14 +46868,22 @@ def scan_pooled_table_mismatches(root: Path, limit: int = 24) -> list:
                     break
         for ext in (".tex", ".ltx", ".md"):
             cq = p.with_suffix(ext)
-            if cq.is_file() or (ext == ".tex" and caption_files):
-                cq = cq if cq.is_file() else caption_files[0]
-                try:
-                    caption = " ".join(_latex_command_bodies(cq.read_text("utf-8", "replace"),
-                                                             "captionof"))
-                except OSError:
-                    caption = ""
-                break
+            if not cq.is_file():
+                # The fallback list only helps the .tex branch, and an entry
+                # that does not exist must not shadow the .ltx/.md file that
+                # DOES: selecting it made the read fail and broke the loop
+                # before the real caption was reached.
+                if ext != ".tex":
+                    continue
+                cq = next((c for c in caption_files if c.is_file()), None)
+                if cq is None:
+                    continue
+            try:
+                caption = " ".join(_latex_command_bodies(cq.read_text("utf-8", "replace"),
+                                                         "captionof"))
+            except OSError:
+                continue
+            break
         for r in body:
             if len(r) <= max(mi, ni, avi):
                 continue
@@ -46690,7 +46978,11 @@ def scan_prior_submission_disclosure(root: Path, submitted_docs=None, limit: int
             journal = str(f.get("journal") or "")
             if not journal:
                 continue
-            if journal.lower() in low or str(f.get("id") or "").lower() in low:
+            # The journal NAME is not a disclosure: the letter is addressed to
+            # the journal that issued the decision, so matching the addressee
+            # suppressed exactly the flagship case. Only the decision id or its
+            # date shows the decision itself was disclosed.
+            if str(f.get("id") or "").lower() in low:
                 continue
             if f.get("date") and f["date"] in text:
                 continue
@@ -48589,7 +48881,8 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     zip_path = ctx.root / (fc_name + ".zip")
     if tmp.exists():
         rmtree_force(tmp)
-    copy_into(src, tmp, exclude_top=CORPUS_EXCLUDE_TOP, skip_aux=True, strip_bookkeeping=True)
+    copy_into(src, tmp, exclude_top=CORPUS_EXCLUDE_TOP, skip_aux=True,
+              strip_bookkeeping=True, root=ctx.root)
     # The staging copy is the pipeline's own, but copy2/copytree preserved the
     # source's modes: a read-only manuscript file (or a read-only DIRECTORY the
     # counter has to rename inside) would otherwise make publication fail on
@@ -48857,7 +49150,7 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
         rmtree_force(tmp, ignore_errors=True)
         return dict(_meta, path=str(dst), digest=final_digest, pin_digest=digest,
                     files=manifest["count"], renamed=counter["renamed"],
-                    raw_data_untouched=counter.get("raw_data_untouched", 0),
+                    raw_data_untouched=hygiene["raw_data_untouched"],
                     modes_cleared=len(chmod_plan),
                     format_fix=format_fix, hygiene=hygiene, open_items=open_items,
                     lengths=published_lengths,
@@ -48879,7 +49172,7 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     os.replace(tmp, dst)
     return dict(_meta, path=str(dst), digest=final_digest, pin_digest=digest,
                 files=manifest["count"], renamed=counter["renamed"],
-                raw_data_untouched=counter.get("raw_data_untouched", 0),
+                raw_data_untouched=hygiene["raw_data_untouched"],
                 modes_cleared=len(chmod_plan),
                 format_fix=format_fix, hygiene=hygiene, open_items=open_items,
                 lengths=published_lengths,
@@ -49143,10 +49436,12 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
     elif zu and zu.get("requested") is False and fields_before and live_fields:
         L.append("")
         L.append(f"Citation fields: refreshed and left LIVE in the published copy "
-                 f"({fields_before} field(s)) — unlinking is the author's own step for the final "
-                 f"submission file; run `decide --unlink-zotero-fields` (or set "
-                 f"`format_policy.unlink_zotero_fields_at_publish: true`) to have the pipeline "
-                 f"flatten the published copy.")
+                 f"({fields_before} field(s)) — publication preserves the judged bytes, so "
+                 f"unlinking them in the final submission file is the author's own step. To "
+                 f"have the pipeline flatten every candidate BEFORE it is judged, set "
+                 f"`format_policy.unlink_zotero_fields: true` (or the stage-side "
+                 f"`unlink_zotero_fields_at_publish`) and re-run; `decide` cannot flatten a "
+                 f"judged package.")
     package_findings = cert.get("package_findings") or []
     _blocking = [f for f in package_findings if not f.get("advisory")]
     _advisory = [f for f in package_findings if f.get("advisory")]
@@ -50822,6 +51117,12 @@ def trend_rows(roots: list) -> tuple:
             row = {"run": root.name, "round": r.get("round"),
                    "champion": sel.get("champion") or r.get("stored_champion"),
                    "median": st.get("median"), "mean": st.get("mean"), "n": st.get("n"),
+                   # `vs_input` is the champion against the version THIS RUN
+                   # started from: the root's pristine original (`vs_original`).
+                   # `vs_incumbent` is the round's base (`vs_base`). The two are
+                   # distinct from round 2 on and are deliberately NOT collapsed:
+                   # the first is the run-level input margin, the second the
+                   # previous champion's.
                    "vs_input": st.get("vs_original"), "vs_incumbent": st.get("vs_base")}
             for tier in BASIS_TIERS:
                 row[tier] = (tiers.get(tier) or {}).get("total")
@@ -51572,7 +51873,7 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
             tmp = ctx.root / "final.tmp"
             if tmp.exists():
                 rmtree_force(tmp)
-            copy_into(src, tmp)
+            copy_into(src, tmp, root=ctx.root)
             dst = ctx.root / "final"
             if dst.exists():
                 stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

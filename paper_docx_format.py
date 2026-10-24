@@ -110,6 +110,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import csv
 import hashlib
 import json
 import os
@@ -308,7 +309,7 @@ def esc(text: str) -> str:
 
 
 def unesc(text: str) -> str:
-    """XML text with entities decoded, including numeric character references.
+    """XML text with entities decoded exactly once.
 
     `xml.sax.saxutils.unescape` only knows `&amp;`/`&lt;`/`&gt;`, but Word also
     writes `&#8212;`-style references for dashes and smart quotes; leaving those
@@ -316,10 +317,14 @@ def unesc(text: str) -> str:
     entities `&quot;`/`&apos;` are decoded for the same reason: `esc()` escapes
     the resulting `&`, so a paragraph carrying `&quot;` used to be re-written as
     `&amp;quot;` and Word printed the reference itself.
-    """
-    text = xml_unescape(text or "", {"&quot;": '"', "&apos;": "'"})
 
-    def charref(m, base):
+    The decode is ONE pass: decoding `&amp;` first and then looking for numeric
+    references decoded `&amp;#38;` (the literal text `&#38;`) into an ampersand.
+    """
+    named = {"amp": "&", "lt": "<", "gt": ">", "quot": '"', "apos": "'"}
+    ref_re = re.compile(r"&(?:#x([0-9a-fA-F]+)|#(\d+)|(amp|lt|gt|quot|apos));")
+
+    def repl(m):
         """The decoded character, or the literal reference when it is not valid.
 
         A hand-edited/LLM-edited `&#x110000;` (or an absurd decimal) raised
@@ -327,16 +332,17 @@ def unesc(text: str) -> str:
         parses the XML, so nothing caught it and one bad reference took the
         whole formatting run down. Invalid references stay literal.
         """
+        if m.group(3):
+            return named[m.group(3)]
         try:
-            cp = int(m.group(1), base)
+            cp = int(m.group(1) or m.group(2), 16 if m.group(1) else 10)
         except (ValueError, OverflowError):
             return m.group(0)
         if 0 <= cp <= 0x10FFFF and not (0xD800 <= cp <= 0xDFFF):
             return chr(cp)
         return m.group(0)
 
-    text = re.sub(r"&#x([0-9a-fA-F]+);", lambda m: charref(m, 16), text)
-    return re.sub(r"&#(\d+);", lambda m: charref(m, 10), text)
+    return ref_re.sub(repl, text or "")
 
 
 def load_policy(path) -> dict:
@@ -442,13 +448,32 @@ def has_field(frag: str) -> bool:
     return bool(FIELD_CHAR_RE.search(frag) or INSTR_RE.search(frag))
 
 
+def _property_element(frag: str, tag: str) -> str | None:
+    """The WHOLE `<w:tag>` property element, balanced through nested copies.
+
+    A tracked-formatting paragraph carries `<w:pPrChange><w:pPr>…</w:pPr>
+    </w:pPrChange>` INSIDE its own pPr (and a run's rPr can carry
+    `<w:rPrChange>`); the lazy regex used to stop at the inner closing tag, so a
+    caller that spliced the returned block back replaced only its prefix and
+    left the rest of the element dangling. `element_span` is the balanced reader
+    the pPrChange-aware edits already use.
+    """
+    m = re.search(rf"<w:{tag}(?=[\s/>])", frag)
+    if not m:
+        return None
+    s, e = element_span(frag, m.start(), tag)
+    block = frag[s:e]
+    if block.endswith("/>") or block.endswith(f"</w:{tag}>"):
+        return block
+    return None
+
+
 def ppr_of(frag: str) -> str | None:
     # The self-closing form comes FIRST: `python-docx` writes an empty
     # properties element as `<w:pPr/>`, and the old single-lookahead pattern
     # matched it as "no pPr at all" -- every later insertion then ADDED a
     # second `<w:pPr>` (invalid OOXML) instead of filling the existing one.
-    m = re.search(r"<w:pPr(?=[\s/>])[^>]*/>|<w:pPr(?=[\s/>]).*?</w:pPr>", frag, re.S)
-    return m.group(0) if m else None
+    return _property_element(frag, "pPr")
 
 
 def first_section_props(xml: str) -> str | None:
@@ -467,8 +492,7 @@ def first_section_props(xml: str) -> str | None:
 
 
 def rpr_of(frag: str) -> str | None:
-    m = re.search(r"<w:rPr(?=[\s/>])[^>]*/>|<w:rPr(?=[\s/>]).*?</w:rPr>", frag, re.S)
-    return m.group(0) if m else None
+    return _property_element(frag, "rPr")
 
 
 def attr(frag: str | None, name: str) -> str | None:
@@ -1132,8 +1156,11 @@ def docx_front_matter_report(path: Path, template: Path = None, containers=()) -
     sects = SECT_READ_RE.findall(doc)
     sect = first_section_props(doc) or (sects[-1] if sects else "")
     refs = {}
-    for m in re.finditer(r'<w:(header|footer)Reference w:type="(\w+)" r:id="([^"]+)"', sect):
-        refs[(m.group(1), m.group(2))] = m.group(3)
+    for m in re.finditer(r"<w:(header|footer)Reference\b[^>]*>", sect):
+        typ = attr_of(m.group(0), "w:type")
+        rid = attr_of(m.group(0), "r:id")
+        if typ and rid:
+            refs[(m.group(1), typ)] = rid
 
     def part(kind: str, typ: str) -> str:
         rid = refs.get((kind, typ))
@@ -1485,9 +1512,11 @@ def _rpr_set_emphasis(rpr: str | None, on: bool) -> tuple:
     at = len(rpr) - len("</w:rPr>")
     for tag in after_tags:
         m = re.search(rf"<w:{tag}(?=[\s/>])", rpr)
-        if m and m.start() < at:
-            at = m.start()
-            break
+        if m:
+            # The EARLIEST schema-successor wins, not the first tag in this
+            # list that happens to be present: with <w:sz/> before <w:color/>
+            # the old `break` inserted <w:i/> after sz, violating CT_RPr order.
+            at = min(at, m.start())
     rpr = rpr[:at] + insert + rpr[at:]
     return rpr, rpr != before
 
@@ -1641,19 +1670,27 @@ NUMBER_WORD_UNITS = {
 }
 NUMBER_WORD_TENS = ("twenty", "thirty", "forty", "fifty", "sixty", "seventy",
                     "eighty", "ninety")
-_WORD_NUMBER_ALT = "|".join(sorted(list(NUMBER_WORD_UNITS) + ["hundred", "thousand"],
-                                   key=len, reverse=True))
-# "twenty-one", "twenty one", "one hundred", "one hundred and five".
+_WORD_NUMBER_ALT = "|".join(
+    sorted(list(NUMBER_WORD_UNITS) + ["hundred", "thousand", "million", "billion"],
+           key=len, reverse=True))
+# "twenty-one", "twenty one", "one hundred", "one hundred and five",
+# "one hundred and twenty five", "two million". A bounded number of tokens
+# covers every count a manuscript states (the scale words carry the magnitude),
+# and the whole phrase must match: the old three-token cap split
+# "one hundred and twenty five" into 120 and 5, and the missing million/billion
+# alternatives read "two million" as 2.
 NUMBER_WORD_RE = re.compile(
     r"(?<![\w-])((?:" + _WORD_NUMBER_ALT + r")"
-    r"(?:[-\s](?:and[-\s])?(?:" + _WORD_NUMBER_ALT + r")){0,2})(?![\w-])", re.I)
+    r"(?:[-\s](?:and[-\s])?(?:" + _WORD_NUMBER_ALT + r")){0,20})(?![\w-])", re.I)
 # Plural nouns that are real count targets, plus the plural-looking words that
 # are not nouns (so "one is", "two was", "three as" never count).
 PLURAL_NOUN_EXCEPTIONS = frozenset({
     "is", "was", "has", "does", "this", "his", "hers", "ours", "yours", "theirs",
     "its", "as", "less", "always", "various", "perhaps", "across", "unless",
     "thus", "plus", "versus", "towards", "afterwards", "nevertheless", "whereas",
-    "yes", "class", "process", "analysis", "basis", "status", "series", "species",
+    "yes", "class", "process", "analysis", "basis", "status",
+    "hypothesis", "synthesis", "emphasis", "diagnosis", "prognosis", "thesis",
+    "crisis", "focus", "virus", "apparatus", "census", "consensus", "bias",
     "means", "news", "physics", "mathematics", "economics", "genomics", "omics",
 })
 IRREGULAR_PLURALS = frozenset({
@@ -1691,6 +1728,12 @@ def _word_number_value(words: str):
         elif tok == "thousand":
             total += (current or 1) * 1000
             current = 0
+        elif tok == "million":
+            total += (current or 1) * 1_000_000
+            current = 0
+        elif tok == "billion":
+            total += (current or 1) * 1_000_000_000
+            current = 0
         elif tok in NUMBER_WORD_UNITS:
             current += NUMBER_WORD_UNITS[tok]
         else:
@@ -1706,21 +1749,24 @@ def _word_number_is_count(text: str, start: int, end: int, written: str) -> bool
     single_one = (written or "").strip().lower() == "one"
     if WORD_NUMBER_LABEL_RE.search(text[max(0, start - 24):start]):
         return False
-    if first in ("hundred", "thousand"):
+    if first in ("hundred", "thousand", "million", "billion"):
         return False
     # "one another", "one of them", "one may", "no one", "at once": pronouns and
     # idioms, not counts.
     m = re.match(r"\s+([A-Za-z][A-Za-z'-]*)", tail)
     follower = (m.group(1).lower() if m else "")
+    # "four of the five ...", "three of the nine donors": a count pair. This
+    # must win BEFORE the pronoun test: `one` has `of` as a non-count follower,
+    # which silently dropped the most common count-pair subject ("one of the
+    # five donors").
+    if re.match(r"\s+of\s+(?:the\s+|these\s+|those\s+|its\s+|their\s+)?"
+                r"(?:" + _WORD_NUMBER_ALT + r"|\d+)\b", tail, re.I):
+        return True
     if first == "one" and follower in ONE_NON_COUNT_FOLLOWERS:
         return False
     if re.search(r"(?i)\b(?:no|for|at|in)\s+$", text[max(0, start - 12):start]) \
             and first == "one":
         return False
-    # "four of the five ...", "three of the nine donors": a count pair.
-    if re.match(r"\s+of\s+(?:the\s+|these\s+|those\s+|its\s+|their\s+)?"
-                r"(?:" + _WORD_NUMBER_ALT + r"|\d+)\b", tail, re.I):
-        return True
     # "two orders of magnitude", "threefold", "four percent", "five times".
     if re.match(r"\s*(?:percent|%|fold\b|times\b|orders?\s+of\s+magnitude)", tail, re.I):
         return True
@@ -2776,7 +2822,10 @@ def gene_symbol_rows(docs) -> list:
             if sym in GENE_STOPWORDS or sym in seen:
                 continue
             ctx = re.sub(r"\s+", " ", masked[max(0, m.start() - 60):m.end() + 60]).strip()
-            if re.search(r"(?:Fig|Table|Eq|Ref|Supplementary|Section)\.?\s*$", ctx[:80]):
+            # The guard must look at the text BEFORE the symbol, not at an
+            # 80-char window that mostly lies after it.
+            before = re.sub(r"\s+", " ", masked[max(0, m.start() - 80):m.start()]).strip()
+            if re.search(r"(?:Fig|Table|Eq|Ref|Supplementary|Section)\.?\s*$", before):
                 continue
             if re.match(r"^S\d{1,3}$", sym):
                 continue                      # a supplementary figure/table label
@@ -3614,7 +3663,11 @@ def _simple_table(text: str):
                 line = line[1:]
             if line.endswith("|"):
                 line = line[:-1]
-        return [c.strip() for c in line.split(delim)]
+        # csv.reader honours quoted delimiters: `"Smith, Jr.",1,ok` is three
+        # columns, not four. The pipe form has already had its outer pipes
+        # stripped above.
+        return [c.strip() for c in next(csv.reader([line], delimiter=delim,
+                                                   skipinitialspace=True))]
 
     header = cells(head)
     body = [cells(l) for l in lines[1:]]
@@ -4505,8 +4558,8 @@ def delete_text_spans(para: str, spans: list) -> tuple:
 # needs a name context (start of text, a comma/paren, or an introducer such as
 # "by"); a wrong SPLIT only narrows a deletion window, a wrong MERGE widens it.
 SENTENCE_ABBREV_TAIL_RE = re.compile(
-    r"(?:(?i:\b(?:e\.g|i\.e|c\.f|cf|vs|al|approx|ca|dr|prof|st|no|vol|pp|p|fig|figs|"
-    r"eq|eqs|ref|refs|sec|tab|suppl|supp|ext|data)\.)|(?:\b[A-Z]\.\s*){2,3})$")
+    r"(?:(?i:\b(?:e\.g|i\.e|c\.f|cf|vs|al|approx|ca|dr|prof|mr|mrs|ms|st|no|vol|pp|p|fig|figs|"
+    r"eq|eqs|ref|refs|sec|tab|suppl|supp|ext)\.)|(?:\b[A-Z]\.\s*){2,3})$")
 # A sentence that resumes with one of these after a terminator+space did not end
 # there ("... (Figure 2). ..." vs "... the value).").
 SENTENCE_CONTINUATION_CHARS = ")]}\u201d\u2019'\""
@@ -4630,15 +4683,25 @@ def _wt_fragments(frag: str) -> list:
 
 
 def _xml_span_for_text_range(frag: str, a: int, b: int):
-    """The XML range of a paragraph whose TEXT range [a, b) lives, or None."""
+    """The XML range of a paragraph whose TEXT range [a, b) lives, or None.
+
+    Walks the SAME pieces as `text_of`/`rewrite_text_spans`: a `w:br`/`w:cr`/
+    `w:tab` is one character of text (its rendered newline), so an offset after
+    a break maps to the right XML fragment.
+    """
     lo = hi = None
     pos = 0
-    for s, e, t in _wt_fragments(frag):
-        if pos + len(t) > a and lo is None:
-            lo = s
+    for m in _FRAG_OR_BREAK_RE.finditer(frag):
+        tok = m.group(0)
+        if BREAK_TOKENS.fullmatch(tok):
+            length = 1
+        else:
+            length = len(unesc(tok[tok.find(">") + 1:tok.rfind("<")]))
+        if pos + length > a and lo is None:
+            lo = m.start()
         if pos < b:
-            hi = e
-        pos += len(t)
+            hi = m.end()
+        pos += length
     if lo is None or hi is None:
         return None
     return (lo, hi) if lo <= hi else None
@@ -4694,7 +4757,11 @@ def strip_reference_sentences(src: Path, out: Path, finder) -> dict:
     paras = paragraphs(xml)
     edits, removed = [], []
     for index, (p0, p1, frag) in enumerate(paras):
-        text = "".join(t for _s, _e, t in _wt_fragments(frag))
+        # `text_of`, not a plain join of the w:t pieces: `rewrite_text_spans`
+        # (and the expected-text fence below) count each w:br/w:cr/w:tab as one
+        # newline. Joining only w:t put the spans in a different coordinate
+        # space, so every cleanup in a break-containing paragraph refused itself.
+        text = text_of(frag)
         spans = [tuple(s) for s in (finder(text) or ())]
         if not spans:
             continue
@@ -4730,7 +4797,13 @@ def strip_reference_sentences(src: Path, out: Path, finder) -> dict:
                 f"paragraph {index}: the text edit could not be applied (a match crossing "
                 f"formatted runs)")
             continue
-        if parts_has_field(frag) and zotero_field_report(new_frag) != fields_before:
+        if parts_has_field(frag) and (
+                zotero_field_signature(zotero_field_report(new_frag))
+                != zotero_field_signature(fields_before)):
+            # Compare the FIELD SIGNATURE, not the raw report: the report
+            # carries begin/end offsets and the paragraph text, both of which
+            # change with any prose edit, so the old comparison rejected every
+            # citation-bearing paragraph even when no field was touched.
             res["skipped"].append(
                 f"paragraph {index}: the removal would change the paragraph's citation fields")
             continue
@@ -4740,8 +4813,7 @@ def strip_reference_sentences(src: Path, out: Path, finder) -> dict:
             pos = b
         expected.append(text[pos:])
         expected_text = "".join(expected)
-        got_text = "".join(t for _s, _e, t in _wt_fragments(new_frag))
-        if got_text != expected_text or text_of(new_frag) != expected_text:
+        if text_of(new_frag) != expected_text:
             res["skipped"].append(
                 f"paragraph {index}: the edit did not reproduce the text it was supposed to "
                 f"(refused rather than shipped)")
@@ -4810,7 +4882,8 @@ def parts_has_field(frag: str) -> bool:
 LOCAL_PATH_TARGET_RE = re.compile(r"^(?:file:|[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/]|[\\/]{2,}\?)")
 ATTACHED_TEMPLATE_REL = ("http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
                          "attachedTemplate")
-_REL_ENTRY_RE = re.compile(r"<Relationship\b[^>]*/>")
+_REL_ENTRY_RE = re.compile(
+    r"<Relationship\b[^>]*(?:/>|>.*?</Relationship>)", re.S)
 
 
 def local_path_link_rows(path: Path) -> list:
@@ -6652,8 +6725,21 @@ def hygiene_spans(para: str) -> list:
                     "detail": "an invisible control character; remove it unless the text "
                               "is RTL and the mark is meaningful"})
     for m in _DOUBLED_WORD_RE.finditer(text):
-        out.append({"rule": "FMT-G1", "fix": "mechanical", "start": m.start(), "end": m.end(),
-                    "repl": m.group(1),
+        # A soft break between the two words is part of the match. Replacing the
+        # whole match with the bare word deleted the break, and a replacement
+        # that spans the break is refused by rewrite_text_spans. Delete only the
+        # SECOND word (and any spaces after the last break), keeping the break.
+        second_start = m.end() - len(m.group(1))
+        sep = text[m.end(1):second_start]
+        start, end, repl = m.start(), m.end(), m.group(1)
+        if "\n" in sep or "\r" in sep:
+            start = second_start - (len(sep) - (sep.rfind("\n") + 1))
+            end = m.end()
+            while end < len(text) and text[end] in " \t":
+                end += 1              # the space after the deleted duplicate
+            repl = ""
+        out.append({"rule": "FMT-G1", "fix": "mechanical", "start": start, "end": end,
+                    "repl": repl,
                     "evidence": f"doubled word: {text[max(0, m.start()-30):m.end()+30]!r}",
                     "detail": "the same article/preposition twice in a row"})
     for m in _MISSING_SPACE_RE.finditer(text):
@@ -7294,13 +7380,26 @@ def figure_text_size_rows(docx_path: Path, policy: dict = None) -> list:
                         continue
                     pw, ph = size
                     ext = re.search(r"<wp:extent(?=[\s/>])[^>]*/>", block)
-                    if not ext:
-                        continue
-                    cx = _attr_any(ext.group(0), "cx")
-                    try:
-                        cx = float(cx)
-                    except (TypeError, ValueError):
-                        continue
+                    if ext:
+                        cx = _attr_any(ext.group(0), "cx")
+                        try:
+                            cx = float(cx)
+                        except (TypeError, ValueError):
+                            continue
+                    else:
+                        # Legacy `w:pict`/VML figures carry the placed width in
+                        # the shape's style, not in `<wp:extent>`
+                        # (drawing_geometry_rows already reads that fallback).
+                        vm = re.search(r"<v:shape(?=[\s/>])[^>]*>", block)
+                        style = re.search(r'style="([^"]*)"', vm.group(0)) if vm else None
+                        wm = re.search(r"width:\s*([0-9.]+)\s*([a-z%]+)",
+                                       style.group(1) if style else "", re.I)
+                        factor = {"in": 914400.0, "pt": 12700.0, "cm": 360000.0,
+                                  "mm": 36000.0, "px": 9525.0}.get(
+                                      (wm.group(2).lower() if wm else ""))
+                        if not wm or factor is None:
+                            continue
+                        cx = float(wm.group(1)) * factor
                     if cx <= 0:
                         continue
                     key = (str(target), round(cx))
@@ -7573,7 +7672,7 @@ def reference_entry_rows(paras: list, is_ref: list, policy: dict = None,
 # from the caption blocks), profile-gated by `"numbering": "citation"`.
 # --------------------------------------------------------------------------
 
-_DISPLAY_ITEM_TOKEN = r"(?:S?\d+[A-Za-z]?|[IVXLC]+)"
+_DISPLAY_ITEM_TOKEN = r"(?:S?\d{1,3}[A-Za-z]?(?!\d)|[IVXLC]+)"
 # The tokens a CONJUNCTION/range list may continue with: the digit form only.
 # A trailing English word that happens to be roman-numeral letters must not
 # date a phantom item -- "Figure 1 and C. elegans ..." is not a call-out of
@@ -7620,18 +7719,35 @@ ROMAN_NUMERAL_RE = re.compile(r"^[IVXLC]+$")
 # figures (the main/supplementary split the row logic promises above). Reading
 # only the keyword+token shape recorded both as MAIN figures, so a later
 # "Figure 1" produced a false FMT-O1.
-DISPLAY_SUPP_PREFIX_RE = re.compile(r"(?i)(?:supplementary|supplemental|suppl\.?)\s*$")
+DISPLAY_SUPP_PREFIX_RE = re.compile(
+    r"(?i)(?:supplementary|supplemental|suppl\.?)"
+    r"(?:\s+(?:information|materials?|data|methods?|figures?|tables?|notes?|appendix))?\s*$")
 DISPLAY_EDATA_PREFIX_RE = re.compile(r"(?i)extended\s+data\s*$")
 
 
 def _display_family_prefix(before: str):
     """The family a call-out phrase's PREFIX names, or "" for the token's own."""
-    zone = (before or "")[-24:]
+    # 64 chars, not 24: "Supplementary Information " alone is 27, so the
+    # prefix was already truncated before the family regex saw it.
+    zone = (before or "")[-64:]
     if DISPLAY_EDATA_PREFIX_RE.search(zone):
         return "edata"
     if DISPLAY_SUPP_PREFIX_RE.search(zone):
         return "supp"
     return ""
+
+
+_ROMAN_PAIRS = ((100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+                (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"))
+
+
+def _roman_canonical(value: int) -> str:
+    out = []
+    for amount, digits in _ROMAN_PAIRS:
+        while value >= amount:
+            out.append(digits)
+            value -= amount
+    return "".join(out)
 
 
 def _roman_value(token: str):
@@ -7643,7 +7759,12 @@ def _roman_value(token: str):
         v = vals[ch]
         total = total - v if v < prev else total + v
         prev = max(prev, v)
-    return total or None
+    # Reject non-standard forms (IIX, IL, VX, VV, IC, IIII): they have a
+    # numeric value but are not the numeral an author wrote, and two spellings
+    # of one number collided in the first-citation map.
+    if total <= 0 or total >= 400 or _roman_canonical(total) != token.upper():
+        return None
+    return total
 
 
 def _display_item_key(kind: str, token: str):
@@ -7686,6 +7807,7 @@ def display_order_rows(paras: list, is_ref: list = None, is_caption: list = None
         return []
     is_ref = list(is_ref or [False] * len(paras))
     first = {}
+    callout_order = 0
     for idx, text in enumerate(paras or []):
         if idx < len(is_ref) and is_ref[idx]:
             continue
@@ -7706,31 +7828,56 @@ def display_order_rows(paras: list, is_ref: list = None, is_caption: list = None
                         key = (key[0], prefix_family, key[2], key[3])
                     if (is_range and prev is not None and prev[0] == key[0]
                             and prev[1] == key[1]
-                            and 0 < key[2] - prev[2] <= _DISPLAY_RANGE_MAX):
-                        filled.extend((key[0], key[1], n, str(n))
-                                      for n in range(prev[2] + 1, key[2]))
+                            and 0 < abs(key[2] - prev[2]) <= _DISPLAY_RANGE_MAX):
+                        if key[2] > prev[2]:
+                            filled.extend((key[0], key[1], n, str(n))
+                                          for n in range(prev[2] + 1, key[2]))
+                            filled.append(key)
+                        else:
+                            # "Figures 5 to 3" mentions 3, 4 and 5. Record them
+                            # in ASCENDING order: a descending range is not
+                            # itself a numbering violation.
+                            if filled and filled[-1] == prev:
+                                filled.pop()
+                            filled.extend((key[0], key[1], n, str(n))
+                                          for n in range(key[2], prev[2] + 1))
+                        prev = key
+                        continue
+                    if (is_range and prev is not None and prev[0] == key[0]
+                            and prev[1] == key[1]):
+                        # A wider-than-100 gap is not a display-item range. Do
+                        # not record its far endpoint as a first citation: the
+                        # earlier "Figure 1" stays, and a later "Figure 2" is
+                        # not reported as cited after 200.
+                        prev = None
+                        continue
                     filled.append(key)
                     prev = key
                 for key in filled:
                     if key not in first:
-                        first[key] = idx
+                        # (paragraph, order within it). Sorting by the number
+                        # before this hid an inversion INSIDE one paragraph
+                        # ("Figure 3 is cited before Figure 1").
+                        first[key] = (idx, callout_order)
+                        callout_order += 1
     rows = []
     for (kind, family) in sorted({(k[0], k[1]) for k in first}):
-        seq = sorted(((idx, key) for key, idx in first.items()
+        seq = sorted(((slot, key) for key, slot in first.items()
                       if key[0] == kind and key[1] == family))
         seen_after = []
-        for idx, key in seq:
-            for prev_idx, prev_key in seen_after:
+        for slot, key in seq:
+            idx = slot[0]
+            for prev_slot, prev_key in seen_after:
                 if key[2] < prev_key[2]:
                     rows.append({
                         "rule": "FMT-O1", "severity": "medium", "location": f"p{idx}",
                         "evidence": f"{key[3]} first cited at p{idx} after {prev_key[3]} "
-                                    f"(p{prev_idx})",
+                                    f"(p{prev_slot[0]})",
                         "detail": (f"the {kind} numbering does not follow the order of first "
                                    f"citation: {prev_key[3]} is cited before {key[3]}"),
                         "protected": False})
                     break
-            seen_after.append((idx, key))
+            seen_after.append((slot, key))
     return rows
 
 
@@ -7752,6 +7899,22 @@ EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 # absorbed into the match), so the branch was dead code.
 _EMAIL_ROLE_PREFIXES = ("correspondence", "correspondingauthor", "affiliations",
                         "affiliation", "keywords", "contact", "orcid", "email")
+# The residue after a role word is a PERSONAL NAME in the glued shipped shape
+# (`contactzhenxie@`), not a routine mailbox word. `emailupdates@list.edu` is a
+# healthy address whose local part merely begins with a role word; the old cut
+# split it into "email updates". These are the words a mailbox local part uses
+# after a role prefix; a residue in this set (or one with no vowel at all, like
+# `contactsxyz@` -> "sxyz") is not a name and is never cut.
+_EMAIL_MAILBOX_WORDS = frozenset({
+    "updates", "update", "info", "support", "admin", "office", "team", "list",
+    "lists", "news", "alerts", "notifications", "events", "press", "media",
+    "sales", "help", "service", "services", "enquiries", "inquiries", "careers",
+    "jobs", "billing", "accounts", "privacy", "legal", "security", "noreply",
+    "webmaster", "postmaster", "hello", "mail", "marketing", "research",
+    "editorial", "submissions", "authors", "reviewers", "permissions",
+    "reprints", "subscriptions", "feedback", "questions", "comments", "general",
+    "reception", "hr", "it", "contact", "email",
+})
 
 
 def _email_glue_cut(text: str, m) -> tuple:
@@ -7768,6 +7931,11 @@ def _email_glue_cut(text: str, m) -> tuple:
     for word in _EMAIL_ROLE_PREFIXES:
         if low.startswith(word) and len(local) - len(word) >= 3 \
                 and low[len(word)].isalpha():
+            residue = low[len(word):]
+            if residue in _EMAIL_MAILBOX_WORDS or not re.search(r"[aeiou]", residue):
+                # A routine mailbox word, or a consonant run that is not a name:
+                # the address is valid as written, so do not cut inside it.
+                continue
             return m.start() + len(word), "before"
     # The TLD class `[A-Za-z]{2,}` otherwise absorbs the following word
     # ("cnHowever"). Only a lower->upper transition inside the FINAL label is
@@ -8329,7 +8497,8 @@ def zotero_citation_state(xml: str, para_texts: list = None,
         for ci in (js or {}).get("citationItems") or []:
             if not isinstance(ci, dict):
                 continue
-            uri = (ci.get("uris") or [ci.get("uri") or ""])[0]
+            uris = ci.get("uris")
+            uri = uris[0] if isinstance(uris, list) and uris else (ci.get("uri") or "")
             items.append(str(uri or ci.get("id") or ""))
             data.append(ci.get("itemData") or {})
         fields.append({"citationID": f.get("citationID"), "marker": marker,
@@ -9485,18 +9654,23 @@ def _bib_record_for_entry(entry_text: str, records: list):
         for r in records:
             if r.get("doi") and r["doi"].lower().rstrip(".,;)") in dois:
                 return r
-    low = text.lower()
+    low = re.sub(r"[^a-z0-9 ]+", " ", text.lower())
+    low = re.sub(r"\s+", " ", low).strip()
     best, best_score = None, 0
     for r in records:
         score = 0
         fam = (r.get("first_family") or "").lower()
-        if fam and fam in low:
+        # Word boundaries, not `in`: the family "He" matched "The method …"
+        # and the title token "model" matched "Remodeling …", so a wrong .bib
+        # record could be selected and its volume/pages written into the entry.
+        if fam and _zotero_word_in(low, fam):
             score += 3
         if r.get("year") and f"({r['year']})" in text:
             score += 1
         title = str(r.get("title") or "")
         for t in re.sub(r"[^a-z0-9 ]+", " ", title.lower()).split():
-            if len(t) > 4 and t not in ZOTERO_TOKEN_STOPWORDS and t in low:
+            if len(t) > 4 and t not in ZOTERO_TOKEN_STOPWORDS \
+                    and _zotero_word_in(low, t):
                 score += 1
         if score > best_score:
             best, best_score = r, score
@@ -9953,11 +10127,16 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # ---- URLs / emails --------------------------------------------------------
     treatments = defaultdict(set)
     for idx, (_, _, para) in enumerate(paras):
-        in_link = "<w:hyperlink" in para
+        # A hyperlink is a run CONTAINER: `"<w:hyperlink" in para` classified
+        # every URL run in a mixed paragraph as a link, so a plain URL beside a
+        # hyperlinked one never produced the FMT-T7a mixed-treatment row.
+        link_spans = [(m.start(), m.end()) for m in
+                      re.finditer(r"<w:hyperlink\b[^>]*>.*?</w:hyperlink>", para, re.S)]
         for r0, r1, run in runs(para):
             rtext = text_of(run)
             if not URL_RE.search(rtext):
                 continue
+            in_link = any(a <= r0 < b for a, b in link_spans)
             rpr = rpr_of(run)
             t = ("link" if in_link else "plain",
                  elem_val(rpr, "rStyle") or "-",
@@ -10327,7 +10506,7 @@ def analyse_package(path: Path, policy: dict) -> dict:
     # a 300-dpi image drawn at half width still halves the printed type).
     # `figure_ocr=false` turns off OCR; FMT-IM6 cannot be measured without it,
     # so it becomes a recorded gap instead of an unconditional tesseract call.
-    if policy.get("figure_ocr", True):
+    if _policy_flag(policy, "figure_ocr", True):
         res["rows"].extend(figure_text_size_rows(path, policy))
     elif sizes and float(policy.get("min_figure_text_pt")
                          or (policy.get("figure_text") or {}).get("min_pt") or 0) > 0:
@@ -10384,7 +10563,7 @@ def scan_paths(paths: list, policy: dict) -> dict:
                 continue
             docs.append(analyse_package(f, policy))
     rows = [r for d in docs for r in d["rows"]]
-    if policy.get("figure_ocr", True):
+    if _policy_flag(policy, "figure_ocr", True):
         texts = []
         for d in docs:
             try:
@@ -10480,7 +10659,13 @@ def insert_into_ppr(para: str, element: str, after=("pStyle", "keepNext", "keepL
 
 def _unlink_fields(xml: str) -> tuple:
     """Drop fldChar/instrText runs; keep field RESULT runs (Zotero unlinking)."""
-    edits, depth, removed = [], 0, 0
+    # A `w:fldSimple` is a live field too, but it carries no fldChar/instrText
+    # runs: the old loop left the element (and therefore the field) in place.
+    # Removing only its tags keeps the RESULT runs as plain text.
+    simple_opens = re.findall(r"<w:fldSimple\b[^>]*>", xml)
+    if simple_opens:
+        xml = re.sub(r"<w:fldSimple\b[^>]*/>|<w:fldSimple\b[^>]*>|</w:fldSimple>", "", xml)
+    edits, depth, removed = [], 0, len(simple_opens)
     for m in RUN_RE.finditer(xml):
         run = m.group(0)
         fld = FIELD_CHAR_RE.search(run)
@@ -11994,6 +12179,27 @@ def _template_front_layout(tpl_doc: str) -> dict:
     return out
 
 
+def _correspondence_lead(para_xml: str) -> int:
+    """Leading spaces/tabs of the FIRST text-bearing correspondence run.
+
+    `_CORRESP_RE` is matched against the paragraph's STRIPPED text, while the run
+    walk starts at the unstripped paragraph: leading spaces therefore consumed
+    the start of the label window ("  * Correspondence: Zhen Xie" bolded
+    "  * Correspondenc" and left "e: ..." roman). Only the first text-bearing
+    run's own leading whitespace extends that window -- a whitespace-only run
+    before it is skipped by the walk itself, so counting its characters here
+    would shift the bold span into the name.
+    """
+    for rm in re.finditer(r"<w:r\b[\s\S]*?</w:r>", para_xml):
+        tm = re.search(r"<w:t[^>]*>([\s\S]*?)</w:t>", rm.group(0))
+        if not tm:
+            continue
+        text = unesc(tm.group(1))
+        if text.strip():
+            return len(text) - len(text.lstrip(" \t"))
+    return 0
+
+
 def _bold_label_runs(para_xml: str) -> str:
     """Make the leading `* Correspondence:` label BOLD (template's own look).
 
@@ -12003,10 +12209,11 @@ def _bold_label_runs(para_xml: str) -> str:
     """
     RPR_RE = re.compile(r"<w:rPr(?=[\s/>])(?:[^>]*/>|[^>]*>[\s\S]*?</w:rPr>)")
 
-    m = _CORRESP_RE.match(text_of(para_xml).strip())
+    raw_text = text_of(para_xml)
+    m = _CORRESP_RE.match(raw_text.strip())
     if not m:
         return para_xml
-    left = len(m.group(0))
+    left = len(m.group(0)) + _correspondence_lead(para_xml)
     out = para_xml
     for rm in list(re.finditer(r"<w:r\b[\s\S]*?</w:r>", out)):
         run = rm.group(0)
@@ -12063,10 +12270,11 @@ def _bold_label_runs(para_xml: str) -> str:
 
 def _label_is_bold(para_xml: str) -> bool:
     """Is the `* Correspondence: ` label (up to the colon) actually bold?"""
-    m = _CORRESP_RE.match(text_of(para_xml).strip())
+    raw_text = text_of(para_xml)
+    m = _CORRESP_RE.match(raw_text.strip())
     if not m:
         return False
-    left = len(m.group(0))
+    left = len(m.group(0)) + _correspondence_lead(para_xml)
     for run in re.findall(r"<w:r\b[\s\S]*?</w:r>", para_xml):
         text = "".join(unesc(t) for t in re.findall(r"<w:t[^>]*>([^<]*)</w:t>", run))
         if not text.strip():
@@ -12812,7 +13020,8 @@ def validate_paths(paths: list, json_out: Path = None, timeout: int = 300) -> di
             files += [q for q in docx_files_under(p)
                       if not q.name.startswith("~$") and not _is_aux_name(q.name)
                       and not any(part in EVIDENCE_DIRNAMES for part in q.parts[:-1])]
-            files += [q for q in sorted(p.rglob("*.tex")) + sorted(p.rglob("*.ltx"))
+            files += [q for q in sorted(p.rglob("*"))
+                      if q.is_file() and q.suffix.lower() in (".tex", ".ltx")
                       if not any(part in EVIDENCE_DIRNAMES for part in q.parts[:-1])
                       # A difference-tracking copy (a latexdiff file, or the
                       # commented-out logging fallback) is not a document of the
@@ -14404,8 +14613,8 @@ def logic_rows(paras: list, is_ref: list = None) -> list:
 
 _SCI_P_RE = re.compile(
     r"(?P<mant>[\d.]+)\s*(?:"
-    r"(?:[×x]|\\times)\s*10\s*\^?\s*\{?\s*(?P<sign>[−-])?\s*(?P<exp>\d+)\s*\}?"
-    r"|[eE](?P<sign2>[−-])?(?P<exp2>\d+))")
+    r"(?:[×x]|\\times)\s*10\s*\^?\s*\{?\s*(?P<sign>[+−-])?\s*(?P<exp>\d+)\s*\}?"
+    r"|[eE](?P<sign2>[+−-])?(?P<exp2>\d+))")
 _PLAIN_P_RE = re.compile(r"^(?P<p>\d+(?:\.\d+)?)$")
 
 
@@ -14415,7 +14624,7 @@ def _parse_p(token: str) -> float | None:
     if m:
         try:
             exp = int(m.group("exp") or m.group("exp2") or 0)
-            if m.group("sign") or m.group("sign2"):
+            if (m.group("sign") or m.group("sign2")) in ("−", "-"):
                 exp = -exp
             return float(m.group("mant")) * (10 ** exp)
         except (TypeError, ValueError):
@@ -14449,12 +14658,12 @@ def stats_floor_rows(paras: list) -> list:
         # PDF layout: Method ... 10 9 0.030 1.00 [...]
         m = re.search(
             r"\b(?P<cap>10|none)\s+(?P<n>\d{1,3})\s+"
-            r"(?P<p>\d+(?:\.\d+)?(?:\s*[×x]\s*10\s*[−-]?\s*\d+)?)\b", line)
+            r"(?P<p>\d+(?:\.\d+)?(?:\s*[×x]\s*10\s*[+−-]?\s*\d+|[eE][+−-]?\d+)?)\b", line)
         if not m:
             # LaTeX: Method & 10 & 9 & \textbf{0.030} & ...
             m2 = re.search(
                 r"&\s*(?P<cap>10|none)\s*&\s*(?P<n>\d{1,3})\s*&\s*"
-                r"(?:\\textbf\{)?(?P<p>\d+(?:\.\d+)?(?:\s*\\times\s*10\^\{?[−-]?\d+\}?)?)",
+                r"(?:\\textbf\{)?(?P<p>\d+(?:\.\d+)?(?:\s*\\times\s*10\^\{?[+−-]?\d+\}?|[eE][+−-]?\d+)?)",
                 line)
             if not m2:
                 continue
@@ -14469,7 +14678,13 @@ def stats_floor_rows(paras: list) -> list:
         parsed.append((n, p, line.strip()[:120]))
     if len(parsed) < 5:
         return []
-    family = len(parsed)
+    # The caption's own family size wins when it states one; otherwise the
+    # rows that parsed ARE the family. Never call a fallback "stated".
+    stated = re.search(r"(?i)\b(\d{1,3})[-\s]+tests?[-\s]+family\b", text)
+    if stated is None:
+        stated = re.search(r"(?i)\bfamily\s+of\s+(\d{1,3})\b", text)
+    family = int(stated.group(1)) if stated else len(parsed)
+    family = max(family, len(parsed))
     for n, p, line in parsed:
         floor = family * 2.0 / (2 ** n)
         # A table rounds its adjusted p (1.81e-5 vs the exact 1.812e-5); a 2%
@@ -14479,7 +14694,7 @@ def stats_floor_rows(paras: list) -> list:
             rows.append({
                 "rule": "FMT-ST1", "severity": "high", "document": "-",
                 "location": "table caption/rows",
-                "evidence": (f"n={n}, p={p:.3g}; the stated {family}-test family's "
+                "evidence": (f"n={n}, p={p:.3g}; the {family}-test family's "
                              f"smallest Holm p is {floor:.3g} ({line!r})"),
                 "detail": ("the reported adjusted p is below the floor its own family "
                            "allows. Either the caption's family size is wrong (the n=9 "
@@ -14524,7 +14739,8 @@ def reporting_summary_gap_rows(text: str) -> list:
             j = i + 1
             while j < len(lines) and not lines[j]:
                 j += 1
-            if j < len(lines) and not any(lab in lines[j].lower() for lab in _RS_LABELS):
+            if j < len(lines) and not any(lines[j].lower().lstrip().startswith(lab)
+                                          for lab in _RS_LABELS):
                 answered = bool(re.match(
                     r"^(?:yes|no|n/?a|not applicable)\b", lines[j].lower()))
         if not answered:

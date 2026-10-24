@@ -51,6 +51,12 @@ from pathlib import Path
 
 ABSTRACT_HEAD = re.compile(
     r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:abstract|summary)\s*[:.\u2014\u2013-]?\s*$", re.I)
+# The common inline layout: "Abstract: We studied ..." on one line. The heading
+# itself must be recognised so the abstract is not left inside the main text;
+# the remainder is its first paragraph.
+INLINE_ABSTRACT_HEAD = re.compile(
+    r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:abstract|summary)\s*[:.\u2014\u2013-]\s*(\S.*)$",
+    re.I)
 MAIN_START = re.compile(
     r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:introduction|main text|background)\s*[:.\u2014\u2013-]?\s*$",
     re.I)
@@ -60,7 +66,8 @@ SECTION_BOUND = re.compile(
     r"star methods|experimental procedures|"
     r"references?|bibliography|figure legends?|acknowledg\w*|author contributions?|"
     r"data availability|competing interests?|conflict of interest|funding|"
-    r"supplementary (?:information|methods|figures|tables|notes))\s*[:.\u2014\u2013-]?\s*$", re.I)
+    r"supplementary (?:information|materials?|methods|figures|tables|notes?))"
+    r"\s*[:.\u2014\u2013-]?\s*$", re.I)
 # The venue's main-text counting convention (check id M19): the section kinds a
 # word limit may leave OUT of its count. A profile states them in
 # `counting.main_text.excludes` (per venue, or per article type where the types
@@ -101,7 +108,7 @@ SECTION_KIND_RES = (
         r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?funding\s*(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
     ("supplementary", re.compile(
         r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?supplementary "
-        r"(?:information|methods|figures|tables|notes)\s*"
+        r"(?:information|materials?|methods|figures|tables|notes?)\s*"
         r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
 )
 
@@ -137,7 +144,7 @@ CAPTION = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?fig(?:u
 # text produce. The pipeline reports these as suspected captions and ENDS the
 # legend at them; merging one in subtracted the NEXT figure's legend from the
 # main text and reported fewer words than the pipeline's own row.
-CAPTION_SUSPECT = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?fig(?:ure)?s?\.?\s*"
+CAPTION_SUSPECT = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?fig(?:ure)?s?\.?\s*\|?\s*"
                              r"(?:S?\d+[A-Za-z]?|(?-i:[IVXLCDM]+))"
                              r"\s*(?:\([^)]*\)|$|[|:\u2014\u2013\-])", re.I)
 # Table captions are a display-caption span only for a profile whose
@@ -145,7 +152,7 @@ CAPTION_SUSPECT = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)
 # "figure and table captions" in its main-body rule). They are never read as
 # figure legends for the M18 scan.
 TABLE_CAPTION = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?tables?\.?\s*"
-                           r"(S?\d+[A-Za-z]?|[IVXivx]+)"
+                           r"(S?\d+[A-Za-z]?|(?-i:[IVXLCDM]+))"
                            r"\s*(?:\||:|\u2014|\u2013|-|\.)\s*", re.I)
 COVER_SALUTATION = re.compile(r"^\s*(?:dear\b|to the (?:editor|editors)\b)", re.I)
 COVER_CLOSING = re.compile(
@@ -339,6 +346,14 @@ def tex_lines(text: str):
                 if after:
                     lines.append(after)
             continue
+        if re.search(r"\\begin\s*\{thebibliography\}", line) \
+                or re.search(r"\\bibliography\s*\{", line):
+            # The reference list is not main text when the venue excludes
+            # references. `\begin{thebibliography}` is stripped as an
+            # environment token and `\bibliography{...}` as scaffold, so without
+            # this heading every entry was counted inside the main-text span.
+            lines.append("References")
+            continue
         m = TEX_SECTION.match(line)
         if m:
             lines.append(m.group(1).strip())
@@ -369,20 +384,29 @@ def tex_lines(text: str):
 
 
 def _abstract_end(lines, start):
+    """Index where the abstract's text ends.
+
+    A section heading (or the Keywords line) is the boundary the manuscript
+    itself states. A blank line is only a fallback for a document that has no
+    such boundary at all: a multi-paragraph abstract is legitimate, and
+    stopping at its first blank line undercounted the abstract while charging
+    the later paragraphs to the main text.
+    """
     j = start
     seen_text = False
+    first_blank = None
     while j < len(lines):
         line = lines[j].strip()
-        if SECTION_BOUND.match(line) or KEYWORDS.match(line):
-            break
+        if SECTION_BOUND.match(line) or MAIN_START.match(line) or KEYWORDS.match(line):
+            return j
         if not line:
-            if seen_text:
-                break
+            if seen_text and first_blank is None:
+                first_blank = j
             j += 1
             continue
         seen_text = True
         j += 1
-    return j
+    return first_blank if first_blank is not None else j
 
 
 def _caption_match(line: str, kinds=("figure",)):
@@ -455,6 +479,15 @@ def sections(text: str, abstract_end=None, caption_lines=None, excludes=None) ->
     n = len(lines)
     abs_start = abs_end = None
     for i, raw in enumerate(lines):
+        inline = INLINE_ABSTRACT_HEAD.match(raw.strip())
+        if inline:
+            # Keep the remainder as the abstract's first paragraph; the heading
+            # itself is not counted.
+            lines[i] = inline.group(1)
+            abs_start = i
+            abs_end = (max(abs_start, min(int(abstract_end), n)) if abstract_end is not None
+                       else _abstract_end(lines, abs_start))
+            break
         if ABSTRACT_HEAD.match(raw.strip()):
             abs_start = i + 1
             abs_end = (max(abs_start, min(int(abstract_end), n)) if abstract_end is not None
@@ -480,34 +513,40 @@ def sections(text: str, abstract_end=None, caption_lines=None, excludes=None) ->
         start = main_start
     else:
         start = 0
-    if start < n and not include_abstract and SECTION_BOUND.match(lines[start].strip()) \
-            and section_kind(lines[start]) not in excludes:
-        start += 1
-    end, end_found = n, False
-    for i in range(start, n):
-        kind = section_kind(lines[i])
-        if kind and kind in excludes:
-            end, end_found = i, True
-            break
-    body = [ln for ln in lines[start:end]
-            if not (SECTION_BOUND.match(ln.strip()) or MAIN_START.match(ln.strip())
-                    or KEYWORDS.match(ln.strip()))]
     offset = start
-    segment = lines[offset:end]
+    # Build the counted set line by line. An excluded section heading starts a
+    # skip; a later heading whose kind the venue does NOT exclude resumes the
+    # count. Stopping at the first excluded heading silently dropped a Results
+    # or Discussion section that follows a mid-paper Methods block, although
+    # the profile says that kind is inside the count.
+    included = [False] * n
+    excluded_now = False
+    end_found = False
+    for i in range(start, n):
+        stripped = lines[i].strip()
+        if SECTION_BOUND.match(stripped) or MAIN_START.match(stripped) \
+                or KEYWORDS.match(stripped):
+            kind = section_kind(stripped)
+            if kind and kind in excludes:
+                excluded_now = True
+                end_found = True
+            else:
+                excluded_now = False
+            continue
+        included[i] = not excluded_now
+    body = [lines[i] for i in range(start, n) if included[i]]
     cap_ranges = []
     if subtract_captions:
         if caption_lines is None:
-            cap_ranges = caption_ranges(segment, kinds=caption_kinds)
+            cap_ranges = [(offset + a, offset + b)
+                          for a, b in caption_ranges(lines[offset:], kinds=caption_kinds)]
         else:
-            for i in sorted(set(caption_lines)):
-                if not (offset <= i < end):
-                    continue                       # outside the counted span
-                rel = i - offset
-                if cap_ranges and rel == cap_ranges[-1][1]:
-                    cap_ranges[-1][1] = rel + 1
-                else:
-                    cap_ranges.append([rel, rel + 1])
-    captions = sum(count_words(" ".join(segment[a:b])) for a, b in cap_ranges)
+            cap_ranges = [(i, i + 1) for i in sorted(set(caption_lines))]
+    captions = sum(
+        count_words(" ".join(lines[max(a, start):min(b, n)]))
+        for a, b in cap_ranges
+        if any(included[i] for i in range(max(a, start), min(b, n)))
+    )
     words = max(0, count_words(" ".join(body)) - captions)
     notes = []
     if abs_start is None:
@@ -614,6 +653,27 @@ def cover_letter_words(text: str) -> int:
     return count_words(" ".join(body))
 
 
+def _venue_profile_path(value: str) -> Path:
+    """The profile FILE a `--venue-profile` argument names.
+
+    The sweep documents show `--venue-profile <id>` (the profile's id, not a
+    path). A bare id resolves against the repository's `venue_profiles/` (or the
+    current directory's), while an existing path keeps working exactly as
+    before: a caller that already passes `venue_profiles/<id>.json` is not
+    touched.
+    """
+    p = Path(str(value)).expanduser()
+    if p.is_file():
+        return p
+    raw = str(value).strip()
+    if raw and not raw.lower().endswith(".json") and "/" not in raw and "\\" not in raw:
+        for base in (Path(__file__).resolve().parents[3], Path.cwd()):
+            candidate = base / "venue_profiles" / f"{raw}.json"
+            if candidate.is_file():
+                return candidate
+    return p
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -626,10 +686,10 @@ def main(argv=None) -> int:
     ap.add_argument("--base-main-text", type=int, default=None,
                     help="article-type main-text base for a profile-less use "
                          "(default: no cap)")
-    ap.add_argument("--venue-profile", metavar="FILE",
-                    help="venue profile JSON (venue_profiles/<id>.json): take the abstract/"
-                         "main-text base and margins and the cover-letter preference from its "
-                         "article_types table")
+    ap.add_argument("--venue-profile", metavar="ID_OR_FILE",
+                    help="venue profile id or JSON file (venue_profiles/<id>.json): take the "
+                         "abstract/main-text base and margins and the cover-letter preference "
+                         "from its article_types table")
     ap.add_argument("--article-type", default=None, metavar="ID",
                     help="which of the profile's article types this submission is (default: the "
                          "profile's default_article_type); a type the profile carries no numbers "
@@ -643,11 +703,12 @@ def main(argv=None) -> int:
     counting_excludes = None
     venue = "(no venue profile: counts only, no cap)"
     if args.venue_profile:
+        profile_path = _venue_profile_path(args.venue_profile)
         try:
-            profile = json.loads(Path(args.venue_profile).read_text(encoding="utf-8"))
+            profile = json.loads(profile_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
-            print(f"error: cannot read --venue-profile {args.venue_profile}: {e}",
-                  file=sys.stderr)
+            print(f"error: cannot read --venue-profile {args.venue_profile} "
+                  f"(resolved {profile_path}): {e}", file=sys.stderr)
             return 2
         # The profile's article_types table is authoritative; a profile written in
         # the older single-type shape (top-level length_limits) is read as one
@@ -702,7 +763,16 @@ def main(argv=None) -> int:
             relaxation = spec.get("relaxation", default_relaxation)
             if base is None or relaxation is None:
                 return None, None           # the profile carries no number here
-            return base, float(relaxation)
+            try:
+                return float(base), float(relaxation)
+            except (TypeError, ValueError):
+                # A hand-edited profile can carry `"base": "abc"`. The tool's
+                # contract is a clean row with no cap, not a float() traceback
+                # out of the middle of the count.
+                print(f"warning: venue profile {args.venue_profile!r} has a "
+                      f"non-numeric {key!r} length limit; reporting no cap",
+                      file=sys.stderr)
+                return None, None
 
         if limits.get("abstract") is not None or limits.get("main_text") is not None:
             base_abstract, rel_abstract = _limit("abstract", base_abstract, rel_abstract)

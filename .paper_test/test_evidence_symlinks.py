@@ -192,7 +192,8 @@ def test_tamper_detection_and_enforcement(tmp: Path, root: Path, ctx):
               nb._candidate_corpus_files(cand_sb, out_dir="revised")),
           str(nb._candidate_corpus_files(cand_sb, out_dir="revised")))
     materialized = tmp / "pkg_materialized"
-    nb.copy_into(pkg, materialized, skip_aux=True, strip_bookkeeping=True)
+    nb.copy_into(pkg, materialized, skip_aux=True, strip_bookkeeping=True,
+                 root=ctx.root)
     check("the materialized corpus hashes exactly like the recorded manifest",
           nb.manifest_digest(nb.corpus_dir_manifest(materialized)) == recorded
           and "raw_data/table.csv" in (nb.corpus_dir_manifest(materialized).get("files") or {}),

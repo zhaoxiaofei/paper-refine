@@ -642,16 +642,38 @@ def main():
     os.makedirs(evidence_dir, exist_ok=True)
 
     files = []
+    skipped_links = []
     for root, dirs, names in os.walk(sub):
-        dirs[:] = sorted(
-            d for d in dirs
-            if not is_disabled_evidence_rel(os.path.relpath(os.path.join(root, d), sub)))
+        kept_dirs = []
+        for d in sorted(dirs):
+            dp = os.path.join(root, d)
+            if os.path.islink(dp):
+                # os.walk(followlinks=False) does not descend into a linked
+                # directory, but naming it in the warning keeps the omission
+                # visible instead of silently dropping part of the submission.
+                skipped_links.append(os.path.relpath(dp, sub))
+                continue
+            if not is_disabled_evidence_rel(os.path.relpath(dp, sub)):
+                kept_dirs.append(d)
+        dirs[:] = kept_dirs
         for n in sorted(names):
             p = os.path.join(root, n)
             rel = os.path.relpath(p, sub)
+            if os.path.islink(p):
+                # A submission link is not package content: open()/convert_one
+                # would follow it and copy an arbitrary local file into
+                # WORK/corpus as the authors' text. The pipeline's copy_into
+                # refuses exactly this, so the review corpus must too.
+                skipped_links.append(rel)
+                continue
             if is_disabled_evidence_rel(rel):
                 continue
             files.append(rel)
+    if skipped_links:
+        print("WARNING: skipped %d symlink(s) in SUBMISSION_DIR (a link is not package "
+              "content and its target may be outside the submission): %s"
+              % (len(skipped_links), ", ".join(sorted(skipped_links)[:5])
+                 + (" ..." if len(skipped_links) > 5 else "")))
     if not files:
         print("ERROR: SUBMISSION_DIR %s is empty. Stop and ask the user." % sub)
         sys.exit(2)
