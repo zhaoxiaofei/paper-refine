@@ -4383,12 +4383,31 @@ def rewrite_text_spans(para: str, edits: list) -> tuple:
     if pos < len(text):
         keep.append((pos, len(text), text[pos:], False))
     keep_starts = [a for a, _b, _t, _e in keep]
+    # Insertions are emitted at most once ACROSS fragments: one anchored on a
+    # `w:t` boundary is reached both as the previous piece's end and as the next
+    # piece's start, so a per-piece set emitted it twice ("abcX" + "Xdef").
+    emitted_zero = set()
 
     def carry(local: int, old: str) -> str:
         """The new text of ONE piece starting at text offset `local`."""
         out, at = [], local
         end = local + len(old)
+
+        def emit_zero_edits(at_pos: int) -> None:
+            """Emit every zero-length insertion anchored exactly at `at_pos`.
+
+            `keep_starts` holds the edit and the FOLLOWING untouched piece at
+            the same start (and the untouched piece wins `bisect_right`), so a
+            zero-length insertion used to be skipped while `applied` reported it
+            as done -- the FMT-X2 repair was silently a no-op.
+            """
+            for i, (a, b, new_piece, is_edit) in enumerate(keep):
+                if is_edit and a == b == at_pos and i not in emitted_zero:
+                    emitted_zero.add(i)
+                    out.append(new_piece)
+
         while at < end:
+            emit_zero_edits(at)
             # The cover piece holding `at`: the binary search finds the last
             # piece that starts at or before it.
             idx = bisect_right(keep_starts, at) - 1
@@ -4414,6 +4433,9 @@ def rewrite_text_spans(para: str, edits: list) -> tuple:
             if at <= a:
                 out.append(new_piece)
             at = min(b, end)
+        # An insertion anchored at the END of this piece has no `at < end`
+        # iteration to reach it; emit it here (once, across fragments).
+        emit_zero_edits(end)
         return "".join(out)
 
     pieces, cursor, here = [], 0, 0
@@ -4444,6 +4466,7 @@ def rewrite_text_spans(para: str, edits: list) -> tuple:
     def _drop_empty_runs(mm):
         body = mm.group(0)
         if re.search(r"<w:(?:drawing|pict|object|br|cr|tab|ptab|fldChar|instrText|"
+                     r"lastRenderedPageBreak|"
                      r"noBreakHyphen|sym|commentReference|footnoteReference|"
                      r"endnoteReference|delText|softHyphen|footnoteRef|"
                      r"annotationRef)(?=[\s/>])", body):
@@ -4474,13 +4497,47 @@ def delete_text_spans(para: str, spans: list) -> tuple:
 
 # Tokens whose trailing period does NOT end a sentence: abbreviations and
 # initials ("e.g.", "et al.", "J. Smith", "Fig. 2"). Over-merging only widens a
-# window a caller is about to DELETE, so the set stays small and explicit.
+# window a caller is about to DELETE, so the set stays small and explicit. A
+# SINGLE-letter tail is not evidence by itself: "github.com/a/y." and "...cluster
+# A." are sentence ends, not initials, and merging them into the next sentence
+# made `strip_reference_sentences` delete that sentence too. The conservative
+# single-initial case is handled by `_single_initial_continues` below, which
+# needs a name context (start of text, a comma/paren, or an introducer such as
+# "by"); a wrong SPLIT only narrows a deletion window, a wrong MERGE widens it.
 SENTENCE_ABBREV_TAIL_RE = re.compile(
-    r"(?i)(?:\b(?:e\.g|i\.e|c\.f|cf|vs|al|approx|ca|dr|prof|st|no|vol|pp|p|fig|figs|"
-    r"eq|eqs|ref|refs|sec|tab|suppl|supp|ext|data)\.|(?:\b[A-Za-z]\.|\b[A-Z]\.){1,3})$")
+    r"(?:(?i:\b(?:e\.g|i\.e|c\.f|cf|vs|al|approx|ca|dr|prof|st|no|vol|pp|p|fig|figs|"
+    r"eq|eqs|ref|refs|sec|tab|suppl|supp|ext|data)\.)|(?:\b[A-Z]\.\s*){2,3})$")
 # A sentence that resumes with one of these after a terminator+space did not end
 # there ("... (Figure 2). ..." vs "... the value).").
 SENTENCE_CONTINUATION_CHARS = ")]}\u201d\u2019'\""
+# Words that introduce a personal initial ("written by J. Smith"). Only these
+# let a ONE-letter tail continue the sentence; any other preceding word makes it
+# a sentence end.
+_SENTENCE_INITIAL_INTRODUCERS = {
+    "by", "from", "with", "and", "of", "for", "et", "al", "dr", "prof", "mr",
+    "mrs", "ms", "miss", "sir", "dame",
+}
+
+
+def _single_initial_continues(text: str, start: int, boundary: int) -> bool:
+    """True when the text before `boundary` ends in one INITIAL, not a sentence.
+
+    `text[start:boundary]` is the candidate sentence. A single capital followed
+    by "." is an initial only in a name context: at the start of the text, after
+    an opening/comma, or after one of the introducer words. `... cluster A.` and
+    `... github.com/a/y.` have none of those, so the period ends the sentence.
+    """
+    tail = text[start:boundary].strip()
+    m = re.search(r"(?<![A-Za-z0-9])([A-Z])\.$", tail)
+    if not m:
+        return False
+    before = tail[:m.start()].rstrip()
+    if not before:
+        return True
+    if before[-1] in ",([{:\"'":
+        return True
+    word = re.search(r"([A-Za-z]+)$", before)
+    return bool(word and word.group(1).lower() in _SENTENCE_INITIAL_INTRODUCERS)
 
 
 def sentence_spans(text: str) -> list:
@@ -4501,6 +4558,8 @@ def sentence_spans(text: str) -> list:
         if nxt and (nxt.islower() or nxt in SENTENCE_CONTINUATION_CHARS):
             continue
         if SENTENCE_ABBREV_TAIL_RE.search(text[start:m.start()].strip()):
+            continue
+        if _single_initial_continues(text, start, m.start()):
             continue
         spans.append((start, m.start()))
         start = m.end()
@@ -4542,7 +4601,21 @@ def sentence_windows(text: str, spans: list, eat_whitespace: bool = True) -> lis
             while a > 0 and text[a - 1].isspace():
                 a -= 1
         fixed.append((a, b))
-    return fixed
+    # The last window's leading-whitespace eat can reach into the whitespace a
+    # previous window already consumed, producing overlapping windows
+    # ([(0,50),(49,99)]). `rewrite_text_spans` keeps only the first of an
+    # overlapping group, so the second edit vanished and the whole removal was
+    # refused as "the edit did not reproduce the text". Clamp instead: the
+    # whitespace belongs to the earlier window, and a window fully consumed by
+    # its predecessor is dropped (nothing of its sentence is left to remove).
+    clamped, prev_end = [], 0
+    for a, b in fixed:
+        a = max(a, prev_end)
+        if b <= a:
+            continue
+        clamped.append((a, b))
+        prev_end = b
+    return clamped
 
 
 def _wt_fragments(frag: str) -> list:
@@ -4834,13 +4907,15 @@ def strip_local_path_links(src: Path, out: Path) -> dict:
         new_settings = settings_xml
         for rid in ids:
             # Both element spellings (Word writes the empty element; be safe
-            # about the paired form) and both with and without the `r:id`.
+            # about the paired form). Only elements that reference THIS dropped
+            # relationship are removed: the old unconditional `<w:attachedTemplate
+            # .../>` alternative also deleted an attachedTemplate whose `r:id`
+            # named a REMOTE template, killing a link that was not a local path.
             rid_pat = re.escape(rid)
             new_settings = re.sub(
                 r"<w:attachedTemplate\b[^>]*r:id=\"" + rid_pat + r"\"[^>]*/>"
                 r"|<w:attachedTemplate\b[^>]*r:id=\"" + rid_pat
-                + r"\"[^>]*>.*?</w:attachedTemplate>"
-                r"|<w:attachedTemplate\b[^>]*/>", "", new_settings)
+                + r"\"[^>]*>.*?</w:attachedTemplate>", "", new_settings)
         # NO dangling reference may survive: the relationship is gone, so every
         # element that referenced it must be gone too (a live `r:id` naming a
         # dropped relationship is what makes Word offer "unreadable content").
@@ -6461,7 +6536,10 @@ def visual_text_lines(para: str) -> list:
     lines, start, offset = [], 0, 0
     for m in _TEXT_EDGE_TOKENS.finditer(para):
         tok = m.group(0)
-        if tok.startswith("<w:t"):
+        # `<w:tab/>` also starts with "<w:t", so the old prefix test read it as
+        # a text token of length 0: the tab neither advanced the text offset nor
+        # split the line, and every line-edge span after it was mispositioned.
+        if re.match(r"<w:t(?=[\s>])", tok):
             offset += len(unesc(tok[tok.find(">") + 1:tok.rfind("<")]))
         else:
             lines.append((start, offset))
@@ -6507,29 +6585,23 @@ def hygiene_spans(para: str) -> list:
                     "detail": "insert the missing space between the front-matter label and its "
                               "value"})
     for m in EMAIL_RE.finditer(text):
-        word_m = EMAIL_GLUE_BEFORE_RE.search(text[:m.start()])
-        local = m.group(0).split("@", 1)[0]
-        cut = None
-        if word_m:
-            word = word_m.group(0)
-            if local and len(word) > len(local) and word.lower().endswith(local.lower()):
-                cut = m.start() - len(local)
-            elif local and len(word) > len(local) and word.lower().startswith(local.lower()):
-                cut = m.start() + len(local)
+        cut, kind = _email_glue_cut(text, m)
         if cut is None:
-            # The match ITSELF carries the glue (`Xiezhenxie@host`). Splitting it
-            # needs to know where the author's name ends and the address begins,
-            # and a guess here REWRITES a correct address into a wrong one (the
-            # first cut of this repair turned a healthy
-            # `zhenxie@tsinghua.edu.cn` into `zhen xie@tsinghua.edu.cn`). No span
-            # is emitted: the FMT-X2 row stands, the review/revise arms fix it in
-            # prose, and the published copy keeps the glue REPORTED (advisory)
-            # rather than silently re-spaced.
+            # The match carries a glue shape we cannot split without guessing
+            # (`Xiezhenxie@host`): no span is emitted, the FMT-X2 row stands and
+            # the review/revise arms fix it in prose. (The first cut of this
+            # repair turned a healthy `zhenxie@tsinghua.edu.cn` into
+            # `zhen xie@tsinghua.edu.cn`.)
             continue
+        where = ("glued to the word before it" if kind == "before"
+                 else "glued to the text after it")
         out.append({"rule": "FMT-X2", "fix": "mechanical", "start": cut, "end": cut, "repl": " ",
                     "evidence": f"{text[max(0, m.start() - 24):m.end() + 12]!r}: the address is "
-                                f"glued to the word before it",
-                    "detail": "insert the missing space between the name and the e-mail address"})
+                                f"{where}",
+                    "detail": ("insert the missing space between the name and the e-mail address"
+                               if kind == "before" else
+                               "insert the missing space between the e-mail address and the "
+                               "following text")})
     for s, e in visual_text_lines(para):
         seg = text[s:e]
         if not seg:
@@ -7673,7 +7745,41 @@ def display_order_rows(paras: list, is_ref: list = None, is_caption: list = None
 # --------------------------------------------------------------------------
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
-EMAIL_GLUE_BEFORE_RE = re.compile(r"[A-Za-z0-9]{2,}$")
+# Role words a front-matter line puts directly before the address. A match that
+# STARTS with one and continues is glued: `lead contactzhenxie@host` is the
+# documented shipped shape. The old probe looked for alphanumerics BEFORE
+# `m.start()`, which `EMAIL_RE`'s greedy local part makes impossible (they are
+# absorbed into the match), so the branch was dead code.
+_EMAIL_ROLE_PREFIXES = ("correspondence", "correspondingauthor", "affiliations",
+                        "affiliation", "keywords", "contact", "orcid", "email")
+
+
+def _email_glue_cut(text: str, m) -> tuple:
+    """(cut_offset, kind) for an address glued INSIDE its own token, else None.
+
+    Kinds: "before" (`contactzhenxie@`) and "after"
+    (`zhenxie@tsinghua.edu.cnHowever`). Both are detectable from the match
+    itself -- no word-boundary guess outside it -- so the mechanical repair can
+    insert exactly one space without re-spacing a healthy address.
+    """
+    token = m.group(0)
+    local, host = token.split("@", 1)
+    low = local.lower()
+    for word in _EMAIL_ROLE_PREFIXES:
+        if low.startswith(word) and len(local) - len(word) >= 3 \
+                and low[len(word)].isalpha():
+            return m.start() + len(word), "before"
+    # The TLD class `[A-Za-z]{2,}` otherwise absorbs the following word
+    # ("cnHowever"). Only a lower->upper transition inside the FINAL label is
+    # glue: an uppercase letter in an earlier label ("myExample.com") is a
+    # legitimate address and must not be re-spaced.
+    final = host.rfind(".")
+    for i in range(max(1, final + 1), len(host)):
+        if host[i - 1].islower() and host[i].isupper():
+            return m.start() + len(local) + 1 + i, "after"
+    return None, None
+
+
 FURNITURE_LABEL_RE = re.compile(
     r"(?i)\b(?:correspondence|corresponding author|e-?mail|contact|author list|"
     r"affiliations?|orcid|keywords?)\s*:")
@@ -7707,19 +7813,6 @@ def _glue_text(text: str) -> tuple:
     return s, breaks
 
 
-def _glue_separated(s: str, at: int, breaks) -> bool:
-    """True when the character just before `at` is a REAL space or a break.
-
-    `at` is where the e-mail match starts. A break whose space sits directly
-    before it is a separator; a break one further left does not reach it (a
-    genuinely glued `Zhen Xiezhenxie@host` keeps its row).
-    """
-    j = at - 1
-    if j >= 0 and j in (breaks or ()):
-        return True
-    return j >= 0 and s[j] == " "
-
-
 def correspondence_glue_rows(paras: list, is_ref: list = None, limit: int = 12) -> list:
     """FMT-X2: a fused word/address or a label with no space after its colon.
 
@@ -7744,17 +7837,15 @@ def correspondence_glue_rows(paras: list, is_ref: list = None, limit: int = 12) 
         if idx < len(is_ref) and is_ref[idx]:
             continue
         raw = str(text or "")
-        s, breaks = _glue_text(raw)
+        s, _breaks = _glue_text(raw)
         evidence = None
         for m in EMAIL_RE.finditer(s):
-            before = s[:m.start()]
-            if EMAIL_GLUE_BEFORE_RE.search(before):
-                if not _glue_separated(s, m.start(), breaks):
-                    evidence = (f"{s[max(0, m.start() - 24):m.end() + 12]!r}: the address is "
-                                f"glued to the word before it")
-                    break
-            after = s[m.end():m.end() + 1]
-            if after and after.isalpha():
+            _cut, kind = _email_glue_cut(s, m)
+            if kind == "before":
+                evidence = (f"{s[max(0, m.start() - 24):m.end() + 12]!r}: the address is "
+                            f"glued to the word before it")
+                break
+            if kind == "after":
                 evidence = (f"{s[max(0, m.start() - 12):m.end() + 16]!r}: the address is glued "
                             f"to the text after it")
                 break
@@ -8226,7 +8317,13 @@ def zotero_citation_state(xml: str, para_texts: list = None,
                 js, _end = json.JSONDecoder().raw_decode(f["instr"][m.start(1):].strip())
         except (ValueError, TypeError):
             js = None
-        props = (js or {}).get("properties") or {}
+        # The decoded value is whatever the instruction carries: a hand- or
+        # LLM-edited field can put a list (or a scalar) where the object's
+        # `properties` belongs. Malformed citation JSON is in-scope input (the
+        # sibling readers guard the same shapes and report `bad-citation-json`),
+        # so a non-dict here must not escape as an AttributeError.
+        js = js if isinstance(js, dict) else {}
+        props = js.get("properties") if isinstance(js.get("properties"), dict) else {}
         marker = props.get("formattedCitation") or props.get("formatted citation") or ""
         items, data = [], []
         for ci in (js or {}).get("citationItems") or []:
@@ -8931,7 +9028,12 @@ def zotero_refresh_document(xml: str, para_texts: list = None,
             out["skip"] = "a citation field's JSON does not parse"
             return out
         js_start, js_end, js = js_span
-        props = js.get("properties") or {}
+        # Same malformed-input class as `zotero_citation_state`: the field's
+        # `properties` is not guaranteed to be an object.
+        if not isinstance(js, dict):
+            out["skip"] = "a citation field's JSON is not an object"
+            return out
+        props = js.get("properties") if isinstance(js.get("properties"), dict) else {}
         marker = props.get("formattedCitation") or ""
         cluster = _zotero_marker_cluster(marker)
         if cluster is None:
@@ -9631,6 +9733,12 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
             break
 
     # ---- structural -----------------------------------------------------------
+    # The fixer refuses an in-table paragraph by design (deleting a cell's only
+    # paragraph makes Word report a corrupt file). The scanner must not file a
+    # mechanical FMT-S1 row it knows the fixer will refuse: one in-table page
+    # break otherwise made the whole document's fix verify as failed and threw
+    # away every other repair.
+    in_table = _table_paragraph_indices(xml, paras)
     for idx, (p0, p1, para) in enumerate(paras):
         text = text_of(para)
         # A field run is CONTENT, never an empty paragraph: the fixer refuses to
@@ -9639,9 +9747,13 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
         # whole fix verify as failed. The two sides read the same definition.
         empty = not text.strip() and not has_drawing(para) and not has_field(para)
         if PAGEBREAK_RE.search(para) and empty:
+            # In a table cell the fixer cannot move/delete the paragraph (that
+            # would leave an empty `<w:tc>`); report the defect as manual rather
+            # than filing a mechanical row the fixer refuses by design.
             row("FMT-S1", "high", f"p{idx}", "empty paragraph holding a page break",
                 "break-only paragraphs render as a blank page (or a stray empty line); delete it "
-                "and put w:pageBreakBefore on the paragraph that should start the page")
+                "and put w:pageBreakBefore on the paragraph that should start the page",
+                fix=("manual" if idx in in_table else None))
         ppr = ppr_of(para)
         style = elem_val(ppr, "pStyle")
         if style and style.startswith("Heading"):
@@ -10173,6 +10285,12 @@ def analyse_package(path: Path, policy: dict) -> dict:
         [(name, aux_xml[name]) for name in sorted(referenced) if name in aux_xml],
         path.name))
     for name, rels in aux_parts:
+        if name not in referenced:
+            # The SAME rule as FMT-S10 above: an orphan part is not printed, and
+            # the fixer now neither repairs nor verifies it. Scanning its image
+            # geometry would file a mechanical FMT-IM1 row that `fix` reports as
+            # resolved but never repairs (scan: 2 rows, fix: ok, scan again: 1).
+            continue
         aux_rows, _aux_fixes = drawing_geometry_rows(
             aux_xml.get(name, ""), rels, sizes, path.name, policy,
             location_prefix=f"{posixpath.basename(name)} p")
@@ -10843,10 +10961,28 @@ def fix_document(xml: str, styles: dict, policy: dict,
     # the three consistency rules below are policy-gated (`keep` pre-judge).
     doc_field_results = _field_result_spans(xml)
     bodies = []
-    for idx, (p0, p1, para) in enumerate(paragraphs(xml)):
-        if elem_val(ppr_of(para), "pStyle") == "Bibliography":
+    step9_paras = paragraphs(xml)
+    step9_texts = [text_of(p[2]) for p in step9_paras]
+    step9_is_ref = [elem_val(ppr_of(p[2]), "pStyle") == "Bibliography"
+                    for p in step9_paras]
+    if not any(step9_is_ref):
+        # A template-restyled package carries its reference list under another
+        # style id. The scanner's FMT-R rules already fall back to the numbered
+        # entries under an explicit bibliography heading; step 9 must use the
+        # same definition, or it rewrites reference TITLES ("Colour" -> "Color")
+        # even though the module promises the reference list is never rewritten
+        # (its titles are quotations).
+        bib_start = _bibliography_entry_start(step9_texts)
+        if bib_start > 0:
+            step9_is_ref = [
+                step9_is_ref[i]
+                or (i >= bib_start
+                    and bool(re.match(r"^\s*\d+\s*[\.\)]\s*\S", step9_texts[i])))
+                for i in range(len(step9_is_ref))]
+    for idx, (p0, p1, para) in enumerate(step9_paras):
+        if step9_is_ref[idx]:
             continue
-        bodies.append((idx, p0, p1, para, text_of(para)))
+        bodies.append((idx, p0, p1, para, step9_texts[idx]))
     blob = "\n".join(b[4] for b in bodies)
     spell_target = (spelling_minority_targets([b[4] for b in bodies])
                     if want_spell else {})
@@ -10980,6 +11116,7 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
             RuntimeError, NotImplementedError) as e:
         return {"source": str(src), "output": str(out), "changes": [], "verified": {},
                 "error": f"unreadable DOCX package: {type(e).__name__}: {e}", "ok": False}
+    referenced_aux = referenced_header_footer_parts(parts, xml_before)
 
     # 0. THE LOCAL ZOTERO REFRESH (and the style-store reconcile), so every
     # later rule -- and the delivered file -- sees the numbering a Word/Zotero
@@ -11063,6 +11200,10 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
     parts_new = dict(parts)
     parts_new["word/document.xml"] = xml_after.encode("utf-8")
     for name, (axml, arels) in aux.items():
+        if name not in referenced_aux:
+            # An orphan part is not printed and the scanner ignores it by design;
+            # repairing it changed bytes the scan never judged.
+            continue
         # The two repairs are applied in sequence against the SAME evolving
         # string. Each fix set's offsets are computed on the string it is
         # applied to; applying both to the original overwrote the first result
@@ -11132,11 +11273,12 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
     mech_after = {r["rule"] for r in after_rows if r["fix"] == "mechanical"}
     remaining = sorted(mech_before & mech_after)
     # The body-only analyse_document() call above cannot see a header/footer
-    # part. Re-read every aux part the fixer touched (and every other one) so a
-    # repair that failed there -- or that was overwritten by a second edit set --
-    # fails the same `ok` fence as a body repair.
+    # part. Re-read every REFERENCED aux part the fixer touched (orphan parts are
+    # ignored by the scanner and must not fail the fence here).
     aux_remaining = []
     for name, (_axml, arels) in aux.items():
+        if name not in referenced_aux:
+            continue
         fixed = parts_new.get(name, _axml.encode("utf-8")).decode("utf-8", "replace")
         _aux_rows, _aux_fixes = drawing_geometry_rows(fixed, arels, sizes, src.name,
                                                       policy)
@@ -13618,6 +13760,32 @@ def table_layout_fixes(xml: str, rows: list) -> list:
     return edits
 
 
+def referenced_header_footer_parts(parts: dict, document_xml: str) -> set:
+    """{part name} of the header/footer parts the document actually references.
+
+    `analyse_package` deliberately ignores orphan numbered parts (`footer2.xml`
+    a template carries but Word never prints). The fixer and its verification
+    must use the same set: repairing or failing on an orphan part made a
+    scan-clean document's `fix` return `ok: false`.
+    """
+    rels_name = "word/_rels/document.xml.rels"
+    if rels_name not in parts:
+        return set()
+    rels_xml = parts[rels_name].decode("utf-8", "replace") \
+        if isinstance(parts[rels_name], bytes) else str(parts[rels_name])
+    targets = {}
+    for m in re.finditer(r"<Relationship(?=[\s/>])[^>]*/>", rels_xml):
+        attrs = dict(re.findall(r'([A-Za-z]+)="([^"]*)"', m.group(0)))
+        typ = attrs.get("Type", "")
+        if attrs.get("Id") and (typ.endswith("/header") or typ.endswith("/footer")):
+            target = attrs.get("Target", "").lstrip("/").replace("\\", "/")
+            targets[attrs["Id"]] = (target if target.startswith("word/")
+                                    else "word/" + target)
+    ref_ids = re.findall(r'<w:(?:header|footer)Reference[^>]*r:id="([^"]+)"',
+                         document_xml or "")
+    return {targets[rid] for rid in ref_ids if rid in targets}
+
+
 def page_field_rows(aux_parts: list, doc: str) -> list:
     """FMT-S10: a referenced header/footer part carries more than one PAGE field."""
     rows = []
@@ -13683,13 +13851,26 @@ def bib_prose_paragraphs(text: str) -> list:
     field; a value with nested braces is skipped rather than mis-parsed.
     """
     out = []
+    saw_field = False
     pat = re.compile(r"(?is)\b(" + "|".join(BIB_PROSE_FIELDS) + r")\s*=\s*\{(.*?)\}\s*,?")
     for m in pat.finditer(text or ""):
-        value = re.sub(r"\s+", " ", re.sub(r"[{}]", "", m.group(2))).strip()
+        saw_field = True
+        raw_value = m.group(2)
+        if "{" in raw_value:
+            # The non-greedy pattern stops at the first `}`, so a nested-brace
+            # value (`title = {Growth was {100} percent...}`) would be returned
+            # TRUNCATED. The docstring's contract is to skip it, not mis-parse.
+            continue
+        value = re.sub(r"\s+", " ", re.sub(r"[{}]", "", raw_value)).strip()
         if value:
             out.append(value)
     if out:
         return out
+    if saw_field:
+        # Recognised fields WERE present; only nested/empty values were skipped.
+        # Falling back to the whole-text scan would re-introduce the truncated
+        # nested value the loop just refused.
+        return []
     # No recognised field: fall back to the old cleaning rather than silently
     # scanning nothing (a class the file does carry must not disappear).
     cleaned = BIB_SKIP_FIELD_RE.sub(" ", text or "")

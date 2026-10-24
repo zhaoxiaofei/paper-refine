@@ -128,7 +128,8 @@ KEYWORDS = re.compile(r"^\s*(?:key\s?words?)\s*[:.\u2014\u2013-]", re.I)
 # contract is that it reads a document the way the M19 row the venue gate uses
 # reads it.
 CAPTION = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?fig(?:ure)?s?\.?\s*"
-                     r"(?:S?\d+[A-Za-z]?|[IVXivx]+)"
+                     r"\|?\s*"
+                     r"(?:S?\d+[A-Za-z]?|(?-i:[IVXLCDM]+))"
                      r"(?:\s*\([A-Za-z0-9][A-Za-z0-9,.\u2013\-]*\))?"
                      r"\s*(?:\||:|\u2014|\u2013|-|\.)\s*", re.I)
 # A caption-LOOKING line the strict pattern does NOT recognise: a bare label on a
@@ -137,7 +138,7 @@ CAPTION = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?fig(?:u
 # legend at them; merging one in subtracted the NEXT figure's legend from the
 # main text and reported fewer words than the pipeline's own row.
 CAPTION_SUSPECT = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?fig(?:ure)?s?\.?\s*"
-                             r"(?:S?\d+[A-Za-z]?|[IVXivx]+)"
+                             r"(?:S?\d+[A-Za-z]?|(?-i:[IVXLCDM]+))"
                              r"\s*(?:\([^)]*\)|$|[|:\u2014\u2013\-])", re.I)
 # Table captions are a display-caption span only for a profile whose
 # `counting.main_text.excludes` names `table-captions` (Frontiers groups
@@ -148,8 +149,11 @@ TABLE_CAPTION = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?t
                            r"\s*(?:\||:|\u2014|\u2013|-|\.)\s*", re.I)
 COVER_SALUTATION = re.compile(r"^\s*(?:dear\b|to the (?:editor|editors)\b)", re.I)
 COVER_CLOSING = re.compile(
+    # The phrase must END the line's sentence (optionally with punctuation). A
+    # `\b` alone read "Regards the statistical concern, ..." and "Best regards
+    # are due to ..." as the close and reported 0 persuading words.
     r"^\s*(?:sincerely|yours (?:sincerely|faithfully|truly)|best regards|kind regards|regards|"
-    r"with (?:best|kind) regards)\b|"
+    r"with (?:best|kind) regards)\s*[,.;!]?\s*$|"
     # A bare courtesy line closes the letter; "Thank you for considering our
     # manuscript ..." is a body OPENER, and treating it as the closing set the
     # persuading count to 0 and reported a false OUTSIDE-PREFERENCE row.

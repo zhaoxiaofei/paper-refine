@@ -130,6 +130,11 @@ def run_tests(namespace: dict) -> int:
     if failures:
         print(f"[FAIL] {len(failures)} check(s) failed: {failures}")
         return 1
+    if not tests:
+        # Zero tests is not a pass: a filtered suite used to print
+        # "[ok ] 0 check(s) passed" and the runner counted it green.
+        print("[FAIL] no test ran: the module defines no runnable test_* function")
+        return 1
     print(f"[ok ] {len(tests)} check(s) passed")
     return 0
 

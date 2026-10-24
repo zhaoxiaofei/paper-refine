@@ -1576,7 +1576,11 @@ def _clean_length_limits(limits, prefix: str, problems: list):
         if spec is None:
             spec = {}
         if isinstance(spec, (int, float)) and not isinstance(spec, bool):
-            spec = {"base": spec}          # a bare number = base words, no relaxation
+            # A bare number = base words, no relaxation. Leaving `relaxation`
+            # unset made the pairing validator below reject every such profile
+            # ("base and relaxation must be given together"), so the documented
+            # shorthand could never load.
+            spec = {"base": spec, "relaxation": 1.0}
         if not isinstance(spec, dict):
             problems.append(f"{prefix}.{key} must be an object with 'base' and "
                             f"'relaxation' (or null for both)")
@@ -2957,7 +2961,11 @@ def scan_template_conformance(sources: list, requirements: dict,
         s for s in statements
         if not ((pats[s].search(blob) if s in pats else None)
                 or s.strip().lower() in low)]
-    class_ok = (not want_class or not have_class or have_class == want_class)
+    # A required class cannot be satisfied by a corpus with NO LaTeX: `have_class`
+    # stays "" for a Word-only submission, and treating that as "no check needed"
+    # made the requirement silently disappear from both the evidence table and
+    # the row list. The requirement is absent only when the venue states none.
+    class_ok = (not want_class or have_class == want_class)
     # Architecture order: the first inversion per document, against the official
     # order (or the labelled advisory order when the official pack yields none).
     order_rows = []
@@ -5012,7 +5020,7 @@ def is_bookkeeping_name(name: str) -> bool:
 # Caption start patterns: "Figure 1 |", "Fig. 2.", "Supplementary Figure 3:", ...
 _CAPTION_LABEL_RE = (r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?fig(?:ure)?s?\.?\s*"
                      r"\|?\s*")
-_CAPTION_NUM_RE = r"(S?\d+[A-Za-z]?|[IVXivx]+)"
+_CAPTION_NUM_RE = r"(S?\d+[A-Za-z]?|(?-i:[IVXLCDM]+))"
 # The panel group "(a)", "(a,b)" or "(a-b)" sits between the number and the
 # separator: "Figure 2(a) |" is a caption, "Figure 2 is a schematic" is not.
 _CAPTION_PANEL_RE = r"(?:\s*\([A-Za-z0-9][A-Za-z0-9,.\u2013\-]*\))?"
@@ -5294,7 +5302,9 @@ def parse_round_counts(values, rounds: int, flag: str) -> list:
             continue
         # A command-line value arrives as ONE string ("3", "2,1", "2, 1"); a
         # config value may already be a list of ints. Both shapes are accepted.
-        parts = re.split(r"[,;\s]+", str(v).strip()) if isinstance(v, str) else [v]
+        # `_` is a separator too: `int("1_2")` is 12, so without this a list
+        # written as `1_2` silently became ONE round count of twelve.
+        parts = re.split(r"[,;_\s]+", str(v).strip()) if isinstance(v, str) else [v]
         vals.extend(p for p in parts if str(p).strip() != "")
     counts = []
     for v in vals:
@@ -13539,13 +13549,20 @@ def count_manual_steps(path: Path):
     except OSError:
         return None
     lines = text.splitlines()
-    n = sum(1 for line in lines
-            if re.match(r"^\s*(?:[-*+]|\d+[.)])\s+\S", line))
+    # A numbered item is at most two digits: `2024. We repeated the assay.` is a
+    # sentence starting with a year, not step 2024. The same pattern lets the
+    # table loop below tell a bullet that happens to contain pipes from a table
+    # row (the old code counted such a bullet twice).
+    bullet = re.compile(r"^\s*(?:[-*+]|\d{1,2}[.)])\s+\S")
+    n = sum(1 for line in lines if bullet.match(line))
     # One header row PER TABLE, not one for the whole file: subtracting a single
     # header from every table row at once over-counts by one per extra table.
     separator = re.compile(r"^\s*\|?[\s:\-|]+\|?\s*$")
     in_table = False
     for line in lines:
+        if bullet.match(line):
+            in_table = False
+            continue
         if line.count("|") >= 2 and not separator.match(line):
             if in_table:
                 n += 1                  # a data row
@@ -14029,8 +14046,12 @@ LENGTH_KEYWORDS_RE = re.compile(r"^\s*(?:key\s?words?)\s*[:.\u2014\u2013-]", re.
 LENGTH_COVER_SALUTATION_RE = re.compile(
     r"^\s*(?:dear\b|to the (?:editor|editors)\b)", re.I)
 LENGTH_COVER_CLOSING_RE = re.compile(
+    # A closing phrase must END the line's sentence: `\b` alone matched a body
+    # line that merely STARTS with "Regards the statistical concern, ..." or
+    # "Best regards are due to ...", cutting the persuading body at that line.
+    # A comma/period after the phrase still closes ("Sincerely, The Authors").
     r"^\s*(?:sincerely|yours (?:sincerely|faithfully|truly)|best regards|kind regards|regards|"
-    r"with (?:best|kind) regards)\b|"
+    r"with (?:best|kind) regards)\s*[,.;!]?\s*$|"
     # A BARE courtesy line closes the letter; "Thank you for considering our
     # manuscript ..." is a body OPENER. The old bare `|thank you)\b` alternative
     # matched that opener and reported 0 persuading words (see count_words.py,
@@ -14169,7 +14190,7 @@ def _tex_length_scan(text: str):
         raw = raw_lines[i]
         i += 1
         line = strip_tex_comment(raw).strip()
-        begins = re.match(r"\\begin\{abstract\}", line)
+        begins = re.search(r"\\begin\{abstract\}", line)
         ends = re.search(r"\\end\{abstract\}", line)
         if begins or ends:
             # Both environment tokens may sit ANYWHERE on the line: a one-line
@@ -16123,9 +16144,17 @@ def _docx_hf_signature(path: Path) -> dict:
     # module, so the fallback was the only path.
     sects = re.findall(r"<w:sectPr(?=[\s/>])[^>]*/>|<w:sectPr(?=[\s>])[\s\S]*?</w:sectPr>", doc)
     roles, seen = [], set()
-    for m in re.finditer(r'<w:(header|footer)Reference w:type="(\w+)"',
+    # OOXML attribute ORDER is not significant: Word writes `r:id` before
+    # `w:type` in some files, and the old positional regex then read no roles at
+    # all and reported the template's furniture as missing. Read the attributes
+    # by name instead.
+    for m in re.finditer(r"<w:(header|footer)Reference(?=[\s/>])[^>]*/?>",
                          sects[0] if sects else ""):
-        key = (m.group(1), m.group(2))
+        tag = m.group(0)
+        typ = re.search(r'\bw:type="([^"]*)"', tag)
+        if not typ:
+            continue
+        key = (m.group(1), typ.group(1))
         if key not in seen:
             seen.add(key)
             roles.append(key)
@@ -19975,6 +20004,11 @@ def make_tree_readonly(root: Path, skip_top=()) -> int:
     """
     changed = 0
     root = Path(root)
+    if root.is_symlink():
+        # `is_dir()` follows the link, and `rglob` then walks the TARGET; the
+        # docstring promises no symlink is followed, but chmod cleared the write
+        # bits on a foreign raw-data tree when the evidence root was a link.
+        return 0
     if not root.is_dir():
         return 0
     dirs = []
@@ -21189,13 +21223,31 @@ class DepsNotMet(RuntimeError):
     """A sandbox cannot be (re)materialized because an upstream run is not done."""
 
 
-def upstream_deps(rec: dict) -> list:
-    """Run ids that must be 'done' before this sandbox can be (re)materialized."""
+def upstream_deps(rec: dict, ctx=None) -> list:
+    """Run ids that must be 'done' before this sandbox can be (re)materialized.
+
+    `ctx` is optional only because the dependency split is also exercised as a
+    pure function in the tests; the retry/rebuild path always passes it, and
+    the journal-modes branch needs it to see the configured revision mode.
+    """
     kind, r = rec.get("kind"), int(rec.get("round") or 0)
     if kind == "rewrite":
-        return [rid_a1(r)]
+        # In a real submission-attempt mode the materializer also copies the
+        # concern ledger (`_journal_concern_source` -> `_require_done`), so the
+        # feedback run is a dependency even though the base is the only
+        # corpus input. Omitting it let `retry` reach that RuntimeError as an
+        # unhandled traceback instead of deferring the run as stale.
+        deps = [rid_a1(r)]
+        if ctx is not None and journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER,
+                                                        JOURNAL_MODE_RESUBMIT):
+            deps.append(rid_feedback(r))
+        return deps
     if kind == "review":
-        return [rid_a1(r)]
+        deps = [rid_a1(r)]
+        if ctx is not None and journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER,
+                                                        JOURNAL_MODE_RESUBMIT):
+            deps.append(rid_feedback(r))
+        return deps
     if kind == "probe":
         # The probe review is materialized from the round base, like every other
         # base-consuming kind. Without this branch `upstream_deps` returned []
@@ -21239,7 +21291,7 @@ def upstream_deps(rec: dict) -> list:
 
 def unmet_deps(ctx: Ctx, rec: dict) -> list:
     out = []
-    for rid in upstream_deps(rec):
+    for rid in upstream_deps(rec, ctx):
         r = ctx.run(rid)
         if r is None or r.get("status") != "done":
             out.append(f"{rid} ({(r or {}).get('status', 'missing')})")
@@ -27028,6 +27080,16 @@ def _discovery_status_cells(row) -> list:
     return out
 
 
+def _unable_reason_present(rest: str) -> bool:
+    """True when an `unable -- ...` status states a reason (>= 2 words).
+
+    The token list is case-insensitive: an all-caps reason ("HPC QUOTA
+    EXCEEDED") is exactly as usable as a lowercase one, and the old
+    `[0-9a-z]+` read it as no reason at all and failed a valid session.
+    """
+    return len(re.findall(r"[0-9A-Za-z]+", rest or "")) >= 2
+
+
 def discovery_gap_summary(sb: Path) -> dict:
     """{rows, covered, uncovered, unmarked} of review/round2/gap_table.md."""
     covered = uncovered = unmarked = 0
@@ -27189,7 +27251,7 @@ def discovery_contract_problems(sb: Path) -> tuple:
         if not statuses:
             bad_probe_rows.append(f"{pid} has no status cell (state pending/executed/unable)")
         for token, rest in statuses:
-            if token == "unable" and len(re.findall(r"[0-9a-z]+", rest)) < 2:
+            if token == "unable" and not _unable_reason_present(rest):
                 bad_probe_rows.append(f"{pid} is `unable` with no reason")
     if _discovery_nonempty(r2 / "probes.md") and gap["uncovered"]:
         have = len(probe_ids) + limitations
@@ -27232,10 +27294,10 @@ def discovery_contract_problems(sb: Path) -> tuple:
         if "pending" in tokens:
             result_problems.append(f"{pid} is still `pending` (`executed`/`unable` required)")
         for token, rest in statuses:
-            if token == "unable" and len(re.findall(r"[0-9a-z]+", rest)) < 2:
+            if token == "unable" and not _unable_reason_present(rest):
                 unable_short.append(pid)
         if "unable" not in tokens and "unable" in low:
-            if len(re.findall(r"[0-9a-z]+", low.split("unable", 1)[1])) < 2:
+            if not _unable_reason_present(low.split("unable", 1)[1]):
                 unable_short.append(pid)
         if re.search(r"\bno anomalies?\b", low):
             tail = re.split(r"\bchecked\b", low, maxsplit=1)
@@ -28595,6 +28657,13 @@ def canonicalize_raw_data_dir(cand_dir: Path, warns: list) -> dict:
     old, new = (RAW_DATA_DIR_LEGACY + "/").encode(), (RAW_DATA_DIR + "/").encode()
     repointed = []
     for p in sorted(cand_dir.rglob("*")):
+        # The renamed directory is the READ-ONLY input area: `enforce_readonly_
+        # raw_data` byte-compares it against the pristine digest afterwards, so a
+        # repoint INSIDE it is both forbidden by the contract and undone by the
+        # enforcer -- which then records the pipeline's own edit as the stage
+        # tampering. Only references outside the area are repointed.
+        if canonical in p.parents:
+            continue
         if not p.is_file() or p.suffix.lower() not in _TEXT_REF_EXTS:
             continue
         try:
@@ -31822,6 +31891,21 @@ def audit_artifact_problems(audit, frozen_ids) -> list:
     return problems
 
 
+def audit_effect_summary(split: dict) -> dict:
+    """The audit statistics recorded on the run (pure, testable).
+
+    `kept` is the frozen findings the auditor did NOT drop -- exactly the
+    confirmed ones -- and `added` is a disjoint set of new AU-* findings. The
+    record used to subtract `added` from `kept`, which made a run with one drop
+    and two adds report 7 confirmed out of 10 frozen findings, and could go
+    negative once the auditor added more findings than were kept.
+    """
+    return {"confirmed": len(split["kept"]),
+            "dropped": len(split["dropped"]),
+            "added": len(split["added"]),
+            "effective": len(split["effective"])}
+
+
 def apply_audit_to_findings(findings, audit) -> dict:
     """Split a finding list by an audit record (pure, testable)."""
     drops = {str(d.get("id") or "").strip()
@@ -31942,14 +32026,11 @@ def postcheck_audit(ctx: Ctx, rec: dict):
         errs.extend(problems)
         if not problems:
             split = apply_audit_to_findings(frozen, audit)
-            rec["audit_effect"] = {
-                "confirmed": len(split["kept"]) - len(split["added"]),
-                "dropped": len(split["dropped"]),
-                "added": len(split["added"]),
-                "effective": len(split["effective"]),
-                "dropped_ids": [str(f.get("id")) for f in split["dropped"]],
-                "added_ids": [str(f.get("id")) for f in split["added"]],
-            }
+            rec["audit_effect"] = dict(
+                audit_effect_summary(split),
+                dropped_ids=[str(f.get("id")) for f in split["dropped"]],
+                added_ids=[str(f.get("id")) for f in split["added"]],
+            )
             if split["dropped"]:
                 warns.append(
                     f"the auditor dropped {len(split['dropped'])} of the frozen review's "
@@ -45569,6 +45650,12 @@ def _form_text(path: Path) -> str:
         return _pdf_text(path)
     if path.suffix.lower() == ".docx":
         return "\n".join(_docx_paragraphs(path) or [])
+    if path.suffix.lower() == ".doc":
+        # A legacy binary `.doc` is not UTF-8 text. Decoding it with "replace"
+        # produced non-empty garbage, so the non-empty guard passed and the
+        # scan reported "no software inventory" for a form it never read. The
+        # caller's own empty-text branch records "could not be read as text".
+        return ""
     try:
         return path.read_text("utf-8", "replace")
     except OSError:
@@ -46183,7 +46270,10 @@ def scan_cited_note_negations(root: Path, texts=None, limit: int = 8) -> list:
 
 REF_ENTRY_NUM_RE = re.compile(r"^\s*(\d{1,3})\.\s*$")
 INLINE_CITATION_RE = re.compile(
-    r"(?<![A-Za-z])((?!(?:grch|chm|python|hg|mm)\d)[A-Za-z][A-Za-z\-]{2,})"
+    # The word must END in a letter: a hyphen is a word separator here, not part
+    # of the citation stem, so "COVID-19" is not a citation of reference 19
+    # (`[A-Za-z\-]{2,}` used to absorb the trailing hyphen and bind the 19).
+    r"(?<![A-Za-z])((?!(?:grch|chm|python|hg|mm)\d)[A-Za-z][A-Za-z\-]{1,}[A-Za-z])"
     r"(\d{1,2})(?![\d.])",
     re.I,
 )
@@ -52058,7 +52148,13 @@ def _emit_text(out: list, text: str, spans: list, marks: list, start: int, end: 
 
     events = []                                    # ("text", pieces) | ("mark", atom)
     pos = start
-    for at, atom in sorted([(a, m) for a, m in marks if start <= a < end],
+    # A mark at the paragraph's FINAL offset (a trailing soft line break) is
+    # part of this range: `< end` dropped it, and accepting the redline then did
+    # not reproduce the revised paragraph. Boundary marks between two ops are
+    # still emitted by exactly one side (the later op's `start`).
+    for at, atom in sorted([(a, m) for a, m in marks
+                            if start <= a < end
+                            or (a == end and end == len(text) and start < end)],
                            key=lambda pair: pair[0]):
         if at > pos:
             events.append(("text", text_pieces(pos, at)))
@@ -53382,7 +53478,14 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
         if wdir is None or not wdir.is_dir():
             continue
         winner_srcs = [(wdir, "", ())]
-        champ_vid = str(wrec.get("winner_id") or f"round{r}_winner")
+        # The round record carries `champion` (`finalize_round`), not
+        # `winner_id`: that key exists only on reports/round<r>_winner.json.
+        # Reading it here always fell back to the literal "round<r>_winner",
+        # which never matches a redlines-manifest candidate id, so the winner's
+        # copy was re-driven through the full compare chain instead of reusing
+        # the round-close redline.
+        champ_vid = str(wrec.get("champion") or wrec.get("champion_rep")
+                        or f"round{r}_winner")
         winner_baselines = winner_tracking_baselines(ctx, r)
         stored_winner = prev_versions.get((str(r), f"round{r}_winner"))
         if skip_fresh and stored_winner and tracking_entry_is_fresh(

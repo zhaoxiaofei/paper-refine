@@ -52,6 +52,10 @@ RUN_ONE = HERE / "run_one.sh"
 # an EMPTY log (or imports-only module) still does not.
 NO_CHECK_RC = 97
 CHECK_LINE_RE = re.compile(r"(?im)^\s*(?:\[(?:ok |fail|skip)\]|ok\b|fail\b|skip\b)")
+# A FAILure MARKER must start its check line: a passing check's detail can quote
+# `[FAIL]` (attempt-history does), and counting that as a failure hides a real
+# pass while the zero-exit guard is doing its job.
+FAIL_CHECK_RE = re.compile(r"(?im)^\s*\[FAIL\]")
 # The operator's standing request for this box: use 24 parallel sessions by
 # default (`-j 24`). The effective default is capped only by the number of
 # suites to run; `-j N` caps it on a smaller box, `-j 1` is the old sequential
@@ -119,11 +123,18 @@ def engine_python(todo: list, jobs: int, rundir: Path, python: str) -> None:
 
 
 def tail_failures(suite: str, rundir: Path, limit: int = 6) -> list:
+    """The suite's own `[FAIL]` CHECK lines (not a `[FAIL]` quoted in a detail).
+
+    A passing check may print `[ok ] ... -- [FAIL] ...` as its evidence (the
+    attempt-history suite does). Matching the marker anywhere in the line made
+    that pass look like a failure to the zero-exit guard, so the marker must
+    start the check line.
+    """
     log = rundir / f"{suite}.log"
     if not log.is_file():
         return []
     lines = [ln.rstrip() for ln in log.read_text(encoding="utf-8", errors="replace").splitlines()
-             if "[FAIL]" in ln]
+             if FAIL_CHECK_RE.search(ln)]
     return lines[:limit]
 
 
@@ -202,6 +213,12 @@ def main() -> int:
         engine_python(todo, jobs, rundir, python)
     for suite in todo:
         results[suite] = result_of(suite, rundir)
+    # A FAIL line is evidence that the suite ran, but it is also evidence that a
+    # check failed: a suite that prints `[FAIL] ...` and forgets `sys.exit(1)`
+    # must not be reported PASS just because its exit status is zero.
+    for suite in todo:
+        if results[suite][0] == 0 and tail_failures(suite, rundir):
+            results[suite] = (1, results[suite][1])
     # A zero exit is not enough: the suite must have RUN something. A pytest
     # module without a `__main__` entry point exits 0 after its imports and used
     # to be reported as PASS with zero checks.
@@ -238,15 +255,20 @@ def main() -> int:
             quiet.mkdir(exist_ok=True)
             run_one(suite, quiet, python)
             rc, secs = result_of(suite, quiet)
+            if rc == 0 and tail_failures(suite, quiet):
+                # Same guard as the parallel pass: a zero exit with a printed
+                # FAIL is a failure, not a load-sensitive pass.
+                rc = 1
+            where = f"{secs:.0f}s" if secs is not None else "no timing recorded"
             if rc == 0 and not ran_checks(suite, quiet):
                 print(f"[tests] {suite}: NO CHECKS alone either -- real failure")
             elif rc == 0:
                 flaky.append(suite)
-                print(f"[tests] {suite}: FLKY -- passed alone in {secs:.0f}s "
+                print(f"[tests] {suite}: FLKY -- passed alone in {where} "
                       f"(load-sensitive, not a real failure); full log: "
                       f"{quiet / f'{suite}.log'}")
             else:
-                print(f"[tests] {suite}: FAILS ALONE TOO ({secs:.0f}s) -- real failure")
+                print(f"[tests] {suite}: FAILS ALONE TOO ({where}) -- real failure")
         failed = [s for s in failed if s not in flaky]
 
     for suite in failed:
