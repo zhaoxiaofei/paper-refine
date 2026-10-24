@@ -173,9 +173,13 @@ direction, never a neutral preference for caution. The review's J3 rows and the
 claim-strength pair; the other pairs are stated in their own sweep (M5, M21,
 M22, M27/M29) and in the class table above.
 
-Conflict resolution priority (which occurrence is authoritative when documents
-disagree — extends the reference-chat order):
+Propagation order (which occurrence you update FIRST when a correction
+propagates — never which value wins):
 **supplementary tables > supplementary figures/notes > main figures & legends > Methods > main text (Results/Discussion) > abstract > cover letter.**
+When two sources disagree about a VALUE, the standing source hierarchy decides
+which value is authoritative (`github code > data in raw_data/ > main figures >
+supplementary figures > main tables > supplementary tables > main text >
+supplementary text`); this list only orders the occurrences you update.
 If the authoritative value cannot be determined (e.g., only visible inside a
 read-only image), mark the finding `unresolvable — manual verification required`.
 
@@ -302,7 +306,7 @@ form as written | excerpt) -- audit each of those rows individually.
 - (e) two or more different acronyms for the same entity
 - (f) redefined in main text after first definition
 - (g) non-standard acronym used in a figure legend or table footnote without a local definition
-- (h) non-exempt acronym in the title, or in the abstract that is not defined at first use within the abstract. Label these `[recommended]` (Minor) unless the current author guide makes them mandatory; the target venue may ask titles to avoid abbreviations (Nature Biotechnology does), but never present a convenience convention as a blocking requirement, and respect the standing exemption on length-driven cuts.
+- (h) non-exempt acronym in the title, or in the abstract that is not defined at first use within the abstract. Label these `[recommended]` (Minor) unless the current author guide makes them mandatory; the target venue may ask titles to avoid abbreviations (Nature Biotechnology does), but never present a convenience convention as a blocking requirement.
 - (i) inconsistent formatting (scRNAseq vs scRNA-seq; HSP vs HSPs; hyphenation; case)
 - (j) acronym coined for a term used fewer than 3 times in total
 - (k) the un-abbreviated long form is used again after that context's own first

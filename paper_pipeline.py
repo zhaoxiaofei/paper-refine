@@ -6121,6 +6121,11 @@ def length_rule_text(profile=None) -> str:
             f"never reported\n"
             f"      clean, because the venue's published number is the base one.")
     cover_clause = _cover_preference_clause(prof)
+    cover_source = str(limits['cover letter'].get('source') or '')
+    cover_is_master = cover_source.lower().startswith("master-prompt preference")
+    cover_origin = ("The master prompt's own preference is therefore applied as written: "
+                    if cover_is_master else
+                    "The preference recorded by the venue profile is therefore applied as written: ")
     cover_total = limits['cover letter'].get('total_max')
     cover_total_clause = (
         f"is a SEPARATE cap of {cover_total} words (the operator's default): trim the "
@@ -6130,10 +6135,10 @@ def length_rule_text(profile=None) -> str:
         "no\n      total-word limit is applied to it.")
     if cover_clause:
         cover_para = (
-            f"    * THE COVER LETTER — A USER PREFERENCE, NOT {_indefinite(prof.short).upper()} "
-            f"RULE. Provenance, stated honestly:\n"
+            f"    * THE COVER LETTER — A RECORDED PREFERENCE, NOT A COVER-LETTER WORD LIMIT. "
+            f"Provenance, stated honestly:\n"
             f"      {limits['cover letter'].get('source') or 'the venue profile states no official cover-letter limit.'}\n"
-            f"      The master prompt's own preference is therefore applied as written: the "
+            f"      {cover_origin}the "
             f"PERSUADING part (the body explaining the\n"
             f"      work's importance and its suitability for the journal -- excluding the "
             f"salutation, the\n"
@@ -6157,7 +6162,7 @@ def length_rule_text(profile=None) -> str:
             f"      content {cover_total_clause}")
     return f"""ABSTRACT / MAIN-TEXT LENGTH — THE JOURNAL'S LIMITS, RELAXED BY THIS PIPELINE:
     * This REPLACES the blanket "abstract/main-text length is exempt" standing exemption (the same
-      exemption the skills inherit, and the wording the attached master-prompt excerpt below still
+      exemption the skills inherit, and the wording the attached master-prompt excerpt below no longer
 {limits_para}
     * COUNTING RULE, for every word count in this pipeline: a word is a maximal run of NON-SPACE
       characters, with a newline treated as space. "state-of-the-art" is ONE word, "2026" is ONE
@@ -6169,8 +6174,8 @@ def length_rule_text(profile=None) -> str:
       or needed methodological detail. A hedge that carries the claim's own strength (a
       limitation, an uncertainty the evidence supports, a result reported as uncertain because
       it is) is CONTENT: stripping it would turn an accurate claim into an overclaim, so it
-      stays. Never flag UNDER-length text (the pipeline relaxes upper limits only and invents no
-      minimum), never make a length-driven cut to text that is within the cap, and never
+      stays. Never flag UNDER-length abstract or main text (the pipeline relaxes upper limits only and
+      invents no minimum; the cover-letter preference is the one configured floor), never make a length-driven cut to text that is within the cap, and never
       strengthen or weaken a claim in either direction to reach one.
 {cover_para}
     * LENGTH IS NEVER A RANKING OR CANDIDATE-ELIGIBILITY GATE: no version is made ineligible,
@@ -6278,11 +6283,12 @@ def caption_rule_template(profile=None) -> str:
     guess and do not cut: leave the caption as it is and say so explicitly, listing it for manual
     action (revise: MANUAL_STEPS.md; review: the manual-verification list; judge: the comparison
     reason/notes).
-  * Precedence, stated so you do not have to guess: the master prompt's blanket "never make
-    length-driven cuts in either direction" is narrowed by this pipeline in exactly TWO places:
+  * Precedence, stated so you do not have to guess: the master prompt's blanket rule against
+    length-driven cuts is narrowed by this pipeline in exactly TWO places:
     the redundancy-only compression of figure captions (this suggestion, check id M18) and the
     redundancy-only compression of an over-cap abstract or main text (the length rule, check id
-    M19). The cover letter keeps that blanket rule unchanged.
+    M19). The cover letter keeps that rule for its persuading part; only a profile-configured
+    TOTAL-content cap may authorise trimming non-persuading boilerplate (M19).
   * When judging, caption length sits in the FORMATTING tier of the priority order
     (correctness > preservation > completeness > consistency > writing > formatting). A
     caption-length difference alone never justifies a score beyond +/-1, and two versions that are
@@ -6310,8 +6316,7 @@ def caption_report_text(profile=None) -> str:
     normal clarity/formatting finding if it is otherwise defective, but its WORD COUNT alone is
     not a defect here.
   * Do NOT compress, reword, score or rank a legend because of its length while no cap is
-    configured, and never make a length-driven cut: the master prompt's "never make
-    length-driven cuts in either direction" applies in full. Two versions whose legends are
+    configured, and never make a length-driven cut. Two versions whose legends are
     both long (or both short) are indistinguishable on M18, and a version is never ineligible,
     de-ranked or failed because of a legend's word count."""
 
@@ -6337,10 +6342,10 @@ M18_REVIEW_SWEEP_ON = """3. The PIPELINE-MANDATED caption sweep M18 (see the cap
    references/sweeps.md defines the same sweep). An M18 row is a formatting-tier item and never
    makes a version ineligible: the orchestrator reports caption lengths, it never gates on them.
    M18 is RESERVED by this pipeline for the caption sweep: if your discovery round proposes new
-   sweeps, number them from M37 upwards in review/round2/new_sweeps.md. (The discovery guide says
-   proposals start at M18, and this pipeline always reserves M18 for its caption sweep and M19 for
-   its abstract/main-text length sweep, and M20 for the OOXML formatting sweep, so proposals
-   start at M37, after the adopted M21-M36. Say so in new_sweeps.md so the
+   sweeps, number them from M37 upwards in review/round2/new_sweeps.md. (This pipeline always
+   reserves M18 for its caption sweep and M19 for its abstract/main-text length sweep, and M20
+   for the OOXML formatting sweep, so proposals start at M37, after the adopted M21-M36. Say so
+   in new_sweeps.md so the
    operator can renumber when adopting them into the skill.)"""
 M18_REVIEW_SWEEP_REPORT = """3. The PIPELINE-MANDATED legend-length sweep M18 (see the legend rule below; NO cap is
    configured this run): enumerate EVERY figure legend in the corpus into
@@ -6665,10 +6670,10 @@ M20_REVISE_RULE = f"""OOXML formatting uniformity (check id M20; see the formatt
      FMT-CL1 (the cover letter formatted in the MANUSCRIPT template) is a defect you FIX: when
      the venue ships no cover-letter template, restyle the letter as a plain submission letter
      (recipient block, date, salutation, body, closing, signature) and drop the manuscript
-     template's Title/Author-List front matter, logo header and page furniture. Fix it only when
+     template's Title/Author-List front matter, logo header and page furniture. LEAVE it only when
      the journal's own template/guideline text REQUIRES that formatting -- and then quote that
-     text in MANUAL_STEPS.md/CHANGELOG.md. The postcheck fails a delivered package that still
-     carries the row.
+     text in MANUAL_STEPS.md/CHANGELOG.md; otherwise fix it. The postcheck fails a delivered
+     package that NEWLY introduces the row (and an OK closure without the quoted requirement).
 
 @@DISPLAY_RULE@@"""
 M20_INTEGRATE_RULE = f"""OOXML formatting (check id M20) is a difference class of its own: the
@@ -7066,8 +7071,8 @@ HIERARCHY_RECONCILE_REVISE = """14. SOURCE-HIERARCHY findings (M30) - resolve th
     in the ledger row, and re-run the code-side scan (V3) after the edit."""
 
 HIERARCHY_RECONCILE_REWRITE = """SOURCE-HIERARCHY (check id M30, review-side): where a written statement and its producer
-   (code, raw data, figure/table source) disagree, resolve it only when the hierarchy decides
-   unambiguously; otherwise record the conflict under PROBLEMS SURFACED with BOTH sides and the
+   (code, raw data, figure/table source) disagree, do NOT resolve it here, even when the hierarchy
+   decides unambiguously; record the conflict under PROBLEMS SURFACED with BOTH sides and the
    producer's file:line. Never rewrite a claim to match a figure, and never edit the code: a
    rewrite that silently "fixes" one side of such a conflict hides the finding the revision
    stage has to resolve under rule C/E12."""
@@ -7191,7 +7196,7 @@ EVIDENCE_INTEGRITY_REVISE = """15. EVIDENCE-INTEGRITY findings (M31-M36) - resol
       only to what the artwork really shows and put the regeneration step in MANUAL_STEPS.md;
       never leave a legend sentence whose job is to explain a defect;
     * M32: move the caveat into the claim (or remove the claim from the abstract) so the level
-      reported is the level the stated correction reaches; never adjust a number;
+      reported is the level the stated correction reaches; never adjust a number to make the stated correction pass (a source-hierarchy correction under E12 is a separate rule);
     * M33: an availability statement is aligned only by naming where the data/code ARE; a
       deposit that has not happened is MANUAL_STEPS.md, and two pins become one. A sentence of
       a to-be-submitted document that points at what the submission does not carry (the
@@ -7205,10 +7210,11 @@ EVIDENCE_INTEGRITY_REVISE = """15. EVIDENCE-INTEGRITY findings (M31-M36) - resol
     * M35: rewrite a disclosure that names a client/CLI as a model+version disclosure, move it
       to the venue's required placement, and REMOVE internal working material from the package
       (report the file in MANUAL_STEPS.md when it carries author content);
-    * M36: NEVER edit a Zotero field result. A stale marker is resolved by the AUTHOR refreshing
-      the fields in Word (Zotero -> Refresh) and re-running the code-side check; record the
-      exact file and the row the refresh must clear in MANUAL_STEPS.md, and state that the fields
-      may be flattened (`unlink_zotero_fields`) ONLY after the check is clean."""
+    * M36: NEVER edit a Zotero field result. A stale marker is normally cleared by the postcheck's
+      automatic offline `zotero-refresh`; only when that refresh refuses is it resolved by the
+      AUTHOR refreshing in Word (Zotero -> Refresh), after which the code-side check is re-run.
+      Record the exact file and the row the refresh must clear in MANUAL_STEPS.md, and state that
+      the fields may be flattened (`unlink_zotero_fields`) ONLY after the check is clean."""
 
 EVIDENCE_INTEGRITY_GENERIC = """EVIDENCE-INTEGRITY (check ids M31-M36, review-side): the classes above are reported,
    not silently repaired. An availability locator, an artwork label, a source-data selection
@@ -9055,8 +9061,10 @@ At minimum — and not limited to — the review must surface:
    or formatting discrepancies. The entire manuscript should be 1.5-spaced (except that figure
    caption texts are single-spaced).
 
-Standing exemption (my preference, applies to every mode): never flag abstract/main-text word
-limits and never make length-driven cuts in either direction.
+Length rule (withdraws this master prompt's blanket preference): the "never flag abstract/main-text
+word limits" preference is WITHDRAWN here -- the M19 rule above governs the abstract and main text,
+the M18 caption suggestion governs figure legends, and the cover letter keeps its own M19 rule.
+Never make length-driven cuts outside those M18/M19 rules.
 
 Zotero live fields: if you cannot properly read a live field, ignore the field contents and add
 it to a manual-verification list for me to verify in Word. (Zotero skill:
@@ -9076,7 +9084,7 @@ Proceed immediately after finishing Phase 1 (which found issues) without asking 
 Run the complete revision workflow as specified by the skill — R0 through V5 — including
 the programmatic A1 ledger (every finding ID from findings.json and findings_extra.json must
 appear exactly once; "not addressed" is not a status), the CAREFUL re-verification of every finding
-with a recorded verdict and rationale, the sequenced edit plan, the edit rules E1–E6, consistency
+with a recorded verdict and rationale, the sequenced edit plan, the edit rules E1–E12, consistency
 propagation P1 with the conflict-priority order, the code-revision step C if source code is in
 scope, and validation V1–V5 (round-trip integrity, diff locality with no unmapped hunks, full
 mechanical rescan of the revised corpus, checksum re-verification of the untouched originals,
@@ -9562,7 +9570,7 @@ the artifacts landing in ./revised. Read the skill's SKILL.md and its references
       recorded rationale; ambiguous wording becomes "clarification"; unverifiable becomes
       "manual-required".
   R2  copy the editable documents into revised/ (doc/docx/tex/bib/md/txt/xlsx; never pdf/png).
-  R3  sequenced edit plan A4; E apply the edits one at a time under rules E1-E6; P propagation A6
+  R3  sequenced edit plan A4; E apply the edits one at a time under rules E1-E12; P propagation A6
       (supplementary tables > supplementary figures/notes > main figures & legends > Methods >
       main text > abstract > cover letter) for every corrected number/label/term/claim; C code
       revisions if in scope; V1-V5 validation (round-trip integrity, diff locality with no unmapped
@@ -9697,7 +9705,7 @@ sandbox root with exactly this structure:
                "critical_remaining": <int>, "writing_remaining": <int>, "manual_items": <int>}}
 IMPROVEMENT ROWS: an edit that repairs a defect the frozen review did NOT name is legal when it is
 recorded, not hidden -- add an `I-xxx` row to revised/revision_report.json with its check id
-(M1-M20 / J1-J4), tier, severity and one line of evidence with a location; ONE row per instance
+(M1-M36 / J1-J5), tier, severity and one line of evidence with a location; ONE row per instance
 (five fixed instances are five rows). Rigor repairs are legal under E6: n, confidence intervals,
 error-bar definitions, sample sizes, seeds, software versions and accessions the package already
 implies, plus leakage/baseline/validation statements the Methods already support. Scientific
@@ -9980,7 +9988,7 @@ difference you find into exactly one class:
       under the source hierarchy                        -> PORT the donor's fix, and record the
                                                            rejected base fix in the ledger
   (c) the base fixed something the donor did not        -> KEEP AS-IS (base wins)
-  (d) a defect present in the base AND in at least one donor
+  (d) a defect present in the base AND in EVERY donor (no donor fixed it)
                                                         -> LEAVE UNTOUCHED (do not "improve" the
                                                            shared majority: touching it is a
                                                            regression risk with no evidence of
@@ -10095,9 +10103,11 @@ integrated/CHANGELOG.md, because downstream judges and the human gate receive on
      (supplementary tables > ... > main text > abstract > cover letter) only decides which
      occurrences you update first, never which value wins.
   2. V1-V5 validation: round-trip integrity, diff locality with no unmapped hunks, a full mechanical
-     rescan of the integrated corpus (the M1-M17 + J1-J4 sweeps of $paper-review, as the revision
-     skill's V3 requires), checksum verification that self/, every others/<id>/ and non_revised/
-     are untouched, and the final reports.
+     rescan of the integrated corpus with the pipeline's frozen integration rescan set (the
+     M1-M17 + J1-J4 sweeps of $paper-review; this stage's M18-M20 and M30-M36 blocks cover the
+     rest; the revision skill's V3 covers a wider set than this stage does), checksum
+     verification that self/, every others/<id>/ and non_revised/ are untouched, and the final
+     reports.
      NOTE: this sandbox intentionally has no review/ directory, so the revision skill's V3 pointer to
      "./review/round2/new_sweeps.md" is vacuous here. Rescan with the standard frozen set
      (M1-M17 + J1-J4)@@M18_INTEGRATE_CLAUSE@@; if some other sweep file is genuinely absent, record
@@ -10190,8 +10200,8 @@ Layout (paths relative to the sandbox root):
   rewritten/    — YOU create this; THE OUTPUT DIRECTORY. Your complete rewritten candidate goes
                   here (documents at its top level, process scratch under rewritten/work/).
   code/         — if the base package carries analysis code, carry it through UNCHANGED into this
-                  sandbox's code/ directory (the rewrite does not change the code); only touch it
-                  if the rewritten text genuinely requires it, and then never change behaviour.
+                  sandbox's code/ directory. Do not edit it: a code change is the revision stage's
+                  job (rule C/E12), and the rewrite only carries the base's code through unchanged.
 
 === THIS IS A REWRITE, NOT A REVISION, AND NOT A REVIEW ===
 
@@ -10268,12 +10278,11 @@ the original.
   7. USE WHAT THE BASE ALREADY CONTAINS: read the whole base package, including figure files and
      supplementary assets, before rewriting the text that refers to them. Where you can verify a
      statement from the corpus, keep its content exactly; where two sources disagree, do NOT
-     invent a resolution. RESOLVE a source conflict only when the standing source hierarchy
-     decides it unambiguously (raw data / code over prose, main over extension); record the
-     resolution as an improvement row (I-xxx, check id, tier, severity, evidence) and list it
-     under PROBLEMS SURFACED with the sources it came from. When the hierarchy does not decide it,
-     do not invent a resolution -- record the conflict under PROBLEMS SURFACED and leave the base's
-     wording (the master prompt's source hierarchy is @@SOURCE_HIERARCHY@@).
+     invent a resolution and do NOT resolve it here, even when the standing source hierarchy
+     decides it unambiguously (raw data / code over prose, main over extension). RECORD the
+     conflict under PROBLEMS SURFACED with both sides and the producer's file:line; the revision
+     stage resolves it under E12. When the hierarchy does not decide it, record the conflict and
+     leave the base's wording (the master prompt's source hierarchy is @@SOURCE_HIERARCHY@@).
 @@HIERARCHY_RECONCILE@@
 
 @@EVIDENCE_INTEGRITY@@
@@ -10419,7 +10428,11 @@ LANGUAGE_PASS_RULE = """LANGUAGE PASS — a bounded, iterative pass over every e
        another sentence; a claim STRONGER than the evidence, an overclaim; or a claim WEAKER
        than the evidence, an underclaim -- a supported result left as "may"/"could"/"suggests"/
        "a trend"; both directions are this step, and a hedge the evidence genuinely requires is
-       correct and stays)
+       correct and stays). CLAIM CALIBRATION IS GATED: the overclaim/underclaim half of L1 is
+       allowed ONLY when a frozen finding authorises that exact claim (a J3/CLAIM_STRENGTH row in
+       revise, a frozen X-* row in integrate); a rewrite surfaces it in PROBLEMS SURFACED
+       instead. The factual-error half (a claim contradicted by the data or another sentence)
+       still applies.
     L2 formal-logic slips (converse/inverse swapped, "A therefore B" where only B-with-A holds)
     L3 logic jumps (the conclusion needs a step the text does not state)
     L4 coherence (sentence-to-sentence and inside one sentence: referents, connectors, tense; the

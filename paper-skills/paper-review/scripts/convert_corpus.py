@@ -618,7 +618,7 @@ def convert_one(path: str, rel: str) -> dict:
             notes.append("image — visually unverifiable without OCR/VLM")
         if ext in (".py", ".r", ".ipynb"):
             notes.append("code file — reviewed only if code findings are in scope; "
-                         "copy into CODE/ before editing")
+                         "copy into code/ before editing")
     else:
         status = "read-only/unknown-ext"
     return {"path": rel, "abs": path, "ext": ext, "text": text, "notes": notes,

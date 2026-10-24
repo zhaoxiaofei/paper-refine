@@ -13,7 +13,8 @@ untouched text. The A7 diff log must show this — unmapped hunks get reverted.
 
 Two scoped exceptions lift this rule, and only them: the M19/M18 length
 compression below, and **E11's scoped restructuring** for the review's
-architecture findings (J5) and rewrite-parity findings (M25–M29). Every other
+architecture findings (J5), plus E11's in-place parity edits for the
+rewrite-parity findings (M25–M29). Every other
 "it would read better" edit is out of scope for this stage.
 
 **E12's source-hierarchy alignment (M30) is NOT a reflow exception**: it edits a
@@ -218,11 +219,16 @@ leave it, propose wordings, `manual-required`.
 
 ## P1 — Consistency propagation
 
-When a mismatched number/label/term/claim is corrected, the authoritative
-value follows the review's resolution priority:
+When a mismatched number/label/term/claim is corrected, this propagation order
+decides which OCCURRENCE you update first — it never decides which VALUE wins:
 
 **supplementary tables > supplementary figures/notes > main figures &
 legends > Methods > main text (Results/Discussion) > abstract > cover letter**
+
+When two sources disagree about a VALUE, the standing source hierarchy in E12
+decides which value is authoritative (`github code > data in raw_data/ > main
+figures > supplementary figures > main tables > supplementary tables > main
+text > supplementary text`); this list only orders the occurrences you update.
 
 For EVERY correction (not just the convenient ones):
 1. script-extract all occurrences of the old value AND the new value across the whole revised corpus (`extract_occurrences.py --value ...` / `--term ...`);
@@ -260,7 +266,7 @@ for that occurrence — never the reverse:
 ## C — Code revisions (only if analysis code is part of the submission)
 
 Locate the relevant repository (path in the submission directory, or URL
-supplied by the user); copy it to `CODE/` and edit only the copy.
+supplied by the user); copy it to `code/` and edit only the copy.
 
 **Scientific integrity rule: never change analysis code merely to make
 outputs match manuscript numbers.** First determine the ground-truth value
@@ -274,7 +280,7 @@ Make minimal, targeted changes; run available tests/linters if the
 environment can be set up; otherwise perform a static review and say so.
 Record changes in A9.
 
-Write `CODE/README_RERUN.md`: environment setup (language, package manager,
+Write `code/README_RERUN.md`: environment setup (language, package manager,
 exact dependency versions, random seeds), data locations/accessions, the
 exact commands in order, expected outputs mapped to the manuscript
 figure/table/number each one feeds, approximate runtime, and post-run
@@ -529,7 +535,7 @@ tables > supplementary tables > main text > supplementary text`).
   the value to every occurrence (P1). Record the before → after and the producer
   (`file:symbol/row`) in the ledger row.
 * **The CODE is the wrong side**: rule C owns the fix — a minimal, targeted code
-  edit under `CODE/`, a `CODE/README_RERUN.md`, and the dependent numbers,
+  edit under `code/`, a `code/README_RERUN.md`, and the dependent numbers,
   figures and tables become `manual-required` with the rerun instructions (never
   guess a new value, never regenerate a figure here). Say so in the ledger row
   and in `MANUAL_STEPS.md`.
@@ -575,7 +581,7 @@ a number is a `preservation`-tier change: record it in CHANGELOG.md.
 ## E13 — A to-be-submitted document may not point at what the submission does not carry
 
 The submission ships a FIXED set of files (the documents, the figures and whatever the operator
-explicitly submits); everything else in the corpus — the analysis code under `CODE/`, the
+explicitly submits); everything else in the corpus — the analysis code under `code/`, the
 `raw_data/` evidence (and the feedback areas), and every `README*.md` / `README*.txt` file — is
 left out, so a pointer at one of them is a reference no reader, editor or reviewer can resolve.
 The orchestrator seeds the rows (`work/EVIDENCE_PACK.md`, "Submission-surface references",
@@ -590,7 +596,7 @@ published — so a pointer left in place costs whatever the sentence said. REWRI
 * never invent a locator, never deposit anything, and never cite a file the submission does not
   carry "because the reviewers have the package";
 * it is NEVER a reason to edit, delete or extend the excluded area (`raw_data/`, the feedback
-  areas and the author's README files are read-only evidence; `CODE/` is revised only under rule
+  areas and the author's README files are read-only evidence; `code/` is revised only under rule
   C and only when the operator submits it) — the MANUSCRIPT is the side that changes;
 * a pointer inside a live Zotero field, or inside a structural file (`.csv`, `.json`, `.bib`),
   is not removed mechanically: record it in `MANUAL_STEPS.md` with the sentence quoted, or, when

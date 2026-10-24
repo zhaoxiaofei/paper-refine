@@ -187,7 +187,8 @@ def test_prompts():
     off = nb.review_prompt(Path("/tmp/x"), "r1_review", 1, caption_limit=0)
     check("LT3 the caption rule now names both narrowed places",
           "check id M19" in on and "cover letter keeps" in on
-          and "blanket rule unchanged" in on)
+          and "for its persuading part" in on
+          and "blanket rule unchanged" not in on)
     check("LT3 discovery proposals start at M37 with the caption rule on",
           "M37" in on and "number them from M37 upwards" in on and "M36" in on)
     check("LT3 discovery proposals start at M37 with the caption rule off",

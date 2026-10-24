@@ -2507,7 +2507,7 @@ The artifact *process* is shared as well; the differences are deliberate:
 
 | artifacts | sessions | why this shape |
 |---|---|---|
-| `inventory.md` + `artifacts/M<id>_*.md` (ENUMERATE → ARTIFACT → AUDIT) + the M18/M19/M20 tables | review, judge | the judge runs the same frozen sweep set as the review; it must derive its own rows from the blinded packages |
+| `inventory.md` + `artifacts/M<id>_*.md` (ENUMERATE → ARTIFACT → AUDIT) + the M18/M19/M20 tables | review, judge | the judge runs its own frozen M1–M24 + J1–J4 set (the review's adopted M25–M36/J5 checks are review-side); it must derive its own rows from the blinded packages |
 | `work/CODE_SCANS.json` + `EVIDENCE_PACK.md` (the orchestrator's own M18/M19/M20/placeholder counts and corpus identity, from one set of functions) | review, rewrite, revise, integrate | one measurement of one corpus, so no session re-estimates a number; the scans use the same file-set rules as the pin and the judge view (`work/` scratch, auxiliaries, bookkeeping and derived outputs never counted) |
 | nothing seeded at all; `postcheck_judge` re-scans the blinded target outside the sandbox, and the judge's OWN discovery pass is written by the agent under `judge_review/discovery/` (one disposed file per side) | judge | a pre-computed row would be an answer key, and another session's findings (or the round's discovery list) would identify how a package was produced; the discovery classes are re-derived by the judge itself, with identical candidates and depth for every side |
 | `CHANGELOG.md` + `MANUAL_STEPS.md` inside the package | rewrite, revise, integrate | the package's own record of what changed and what the author must still do |
@@ -2994,7 +2994,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 138 suites (a few
+any failure. They are independent, so run them in parallel — 139 suites (a few
 minutes at the default 24 parallel sessions; tens of minutes sequentially):
 
 ```bash
