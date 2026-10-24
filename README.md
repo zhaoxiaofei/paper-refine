@@ -2998,6 +2998,7 @@ its four integration runs never started.
 | `mcp-docx-converter/` | the `docx-converter` MCP tool used as the first-choice renderer |
 | `mcp-docx-compare/` | the `docx-compare` MCP tool (Word's own compare engine, first choice for tracked changes) |
 | `paper-skills/` | the bundled review (`paper-review`) and revision (`paper-revise`) skills + prompts |
+| `scripts/` | operator-side helpers — the Codex→DSH MCP importer (`install-codex-mcp.mjs`/`.sh`, documented in `scripts/README-codex-mcp.md`) |
 | `venue_profiles/` | the venue profiles (the submission rule sets) + their schema documentation |
 | `media/` | the figures the docs embed — `paper-refine-one-revision-round.png` (shown above) |
 | `.paper_test/` | the offline regression suites (stub agents; no network) |
