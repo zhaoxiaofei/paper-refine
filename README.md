@@ -2989,7 +2989,7 @@ its four integration runs never started.
 | `pairwise_scores.py` | builds a per-round directed score workbook from `reports/round*_raw_scores.csv`; uses each judge's `own` frame and never invents the opposite direction from the derived `received` row |
 | `paper_docx_format.py` | OOXML style/formatting scanner, fixer and blank-page checker |
 | `paper_redlines_adapter.py` | tracked-changes bridge (`python-redlines[docxodus]`) |
-| `AGENT.md` | the agent-facing contract (rules the sessions and reviewers are held to) |
+| `AGENTS.md` | the agent-facing contract (rules the sessions and reviewers are held to) |
 | `REMAINING_ISSUES_TRIAGE_2026-1009.md` | the 2026-10-09 human triage of the two audited final packages |
 | `ZOTERO_REFRESH_FORENSICS_2026-1009.md` | the 2026-10-09 Zotero live-field forensics that M36/FMT-Z grew from |
 | `docx2pdf.sh` | Word→PDF conversion via PowerShell (WSL/Git Bash) |
@@ -3004,7 +3004,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 141 suites (a few
+any failure. They are independent, so run them in parallel — 142 suites (a few
 minutes at the default 24 parallel sessions; tens of minutes sequentially):
 
 ```bash

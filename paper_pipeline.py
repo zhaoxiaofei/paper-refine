@@ -13699,7 +13699,9 @@ def _caption_units_from_lines(lines, with_spans: bool = False, kinds=("figure",)
 
     A caption that wraps over several lines has to be counted in full: counting
     only the first line under-reports the word count. Continuation stops at a
-    blank line, a heading, the start of another caption, or -- when the caption
+    blank line, a heading (markdown's ``#`` or a bound section name, the SAME
+    test ``caption_ranges`` in count_words.py uses), the start of another
+    caption, or -- when the caption
     already ends in sentence-final punctuation -- at a line that starts in column
     0 with further prose (that is usually the next paragraph; merging it made a
     short legend look far longer than it is). An INDENTED continuation is always
@@ -13727,6 +13729,7 @@ def _caption_units_from_lines(lines, with_spans: bool = False, kinds=("figure",)
         sentence_done = bool(re.search(r"[.!?]\s*$", cur[1])) if cur else False
         if cur is not None and not line.startswith("#") \
                 and not CAPTION_SUSPECT_RE.match(line) \
+                and not LENGTH_SECTION_BOUND_RE.match(line) \
                 and (indented or not sentence_done):
             cur = (cur[0], cur[1] + " " + line)
             continue
@@ -14027,7 +14030,12 @@ LENGTH_COVER_SALUTATION_RE = re.compile(
     r"^\s*(?:dear\b|to the (?:editor|editors)\b)", re.I)
 LENGTH_COVER_CLOSING_RE = re.compile(
     r"^\s*(?:sincerely|yours (?:sincerely|faithfully|truly)|best regards|kind regards|regards|"
-    r"with (?:best|kind) regards|thank you)\b", re.I)
+    r"with (?:best|kind) regards)\b|"
+    # A BARE courtesy line closes the letter; "Thank you for considering our
+    # manuscript ..." is a body OPENER. The old bare `|thank you)\b` alternative
+    # matched that opener and reported 0 persuading words (see count_words.py,
+    # whose COVER_CLOSING carries the same rule).
+    r"^\s*thank you(?:\s+(?:very much|again))?[.,!]?\s*$", re.I)
 LENGTH_COVER_DISCLOSURE_RE = re.compile(
     r"^\s*(?:manuscript title|title|authors?|author list|affiliations?|corresponding author|"
     r"running title|related manuscripts?|prior discussions?|suggested reviewers?|"
@@ -15147,11 +15155,22 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                                "surfaces"),
                     "fix": "manual", "protected": False, "tier": "advisory"})
                 continue
-            text = _pdf_text(p)
+            text, pdf_error = _pdf_text_info(p)
             if not text:
                 # An image-only PDF has no reader-visible prose to scan; the
                 # visual checks own its figures. The PDF path is a text scan,
-                # never a claim that the document is clean.
+                # never a claim that the document is clean. A pdftotext FAILURE
+                # (corrupt/encrypted/unsupported PDF) is NOT image-only: its text
+                # class was not examined, so record the gap instead of silence.
+                if pdf_error:
+                    rows.append({
+                        "rule": "FMT-PDF0", "severity": "low",
+                        "document": prefix + rel, "location": "PDF text scan",
+                        "evidence": f"pdftotext failed: {pdf_error}",
+                        "detail": ("the PDF text class (logic/count/availability/statistics/"
+                                   "Reporting Summary claims) was NOT examined for this file; "
+                                   "repair the PDF or read it against the submitted surfaces"),
+                        "fix": "manual", "protected": False, "tier": "advisory"})
                 continue
             claim_docs.append((prefix + rel, text))
             pdf_paras = [" ".join(block.split())
@@ -19737,6 +19756,31 @@ def is_evidence_rel(rel: str) -> bool:
     return bool(evidence_area_of(rel)) or is_disabled_evidence_rel(rel)
 
 
+def is_canonical_evidence_link(link: Path) -> bool:
+    """True when `link` is a symlink to one root's canonical evidence area.
+
+    The ONE evidence link a corpus legitimately carries is the relative
+    `<root>/non_revised/<area>` (or legacy `non-revised`) link that
+    `ensure_pristine_input` creates. A top-level entry *named* `raw_data` is not
+    evidence by itself: following it would copy whatever local directory or file
+    it points at into the pristine root, every judge view and the published
+    package. The name alone never authorizes the follow; the resolved target
+    must be the canonical store this pipeline created.
+    """
+    try:
+        link = Path(link)
+        if not link.is_symlink():
+            return False
+        target = link.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    if not target.is_dir():
+        return False
+    if target.name != link.name or not is_evidence_rel(link.name):
+        return False
+    return target.parent.name in PRISTINE_DIRNAMES
+
+
 def is_human_feedback_rel(rel: str) -> bool:
     """True when a path lives in the human editors'/reviewers' feedback area."""
     return evidence_area_of(rel) == HUMAN_FEEDBACK_DIR
@@ -20071,10 +20115,12 @@ def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
     Symlinks are NEVER followed: a link inside a submission may point at a local
     secret outside the package, and copying its target leaked that file into the
     pristine root, sandboxes, judge views and the published package. The one
-    exception is a TOP-LEVEL evidence area (`raw_data/`, `human_review_feedback/`,
-    ...): a version corpus legitimately carries the root's canonical evidence
+    exception is a TOP-LEVEL link to the root's CANONICAL evidence store
+    (`<root>/non_revised/<area>`): a version corpus legitimately carries that
     link, and materializing it is what keeps the corpus digest equal to the
-    recorded input manifest. Nested links inside that area are still skipped.
+    recorded input manifest. A top-level entry merely NAMED `raw_data` does not
+    qualify (`is_canonical_evidence_link`) -- its target may be any local
+    directory or file. Nested links inside the area are still skipped.
     Every skipped link is named in a warning so the loss is visible instead of
     silent.
     """
@@ -20096,7 +20142,11 @@ def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
             # `<evidence area>.disabled/` is inert: never carried into a
             # version corpus, a sandbox copy or a published package.
             continue
-        if entry.is_symlink() and not is_evidence_rel(entry.name):
+        if entry.is_symlink() and not (
+                is_evidence_rel(entry.name) and is_canonical_evidence_link(entry)):
+            # A top-level link is followed ONLY when it is the canonical
+            # `<root>/non_revised/<area>` store; the NAME alone never authorizes
+            # copying an arbitrary target into a corpus, sandbox or judge view.
             skipped.append(str(entry))
             continue
         if skip_aux and _is_aux_doc(entry.name):
@@ -38903,16 +38953,21 @@ def cmd_setup(args) -> None:
 
     def _ignore_symlinks(_dir, names):
         out = []
-        # A top-level evidence area may legitimately be a link to the operator's
-        # read-only store; setup materializes it (as the old follow-all copy
-        # did) because the pipeline's own input manifests must see the evidence.
-        # Every other link is skipped, including links nested inside that area.
+        # A top-level evidence area may legitimately be a link to the canonical
+        # `<root>/non_revised/<area>` store; setup materializes that one because
+        # the pipeline's own input manifests must see the evidence. A link that
+        # is merely NAMED `raw_data` is not evidence: its target may be any local
+        # directory or file, so it is skipped like every other link (including
+        # links nested inside an evidence area).
         at_source_root = Path(_dir).resolve() == _source_root
         for name in names:
-            if os.path.islink(os.path.join(_dir, name)) \
-                    and not (at_source_root and is_evidence_rel(name)):
-                _skipped_links.append(os.path.join(_dir, name))
-                out.append(name)
+            path = Path(_dir) / name
+            if os.path.islink(path):
+                canonical = (at_source_root and is_evidence_rel(name)
+                             and is_canonical_evidence_link(path))
+                if not canonical:
+                    _skipped_links.append(os.path.join(_dir, name))
+                    out.append(name)
         return out
 
     shutil.copytree(source, ctx.pristine, ignore=_ignore_symlinks)
@@ -46586,19 +46641,36 @@ def _first_date(text: str) -> str:
     return ""
 
 
-def _pdf_text(path: Path) -> str:
-    """Reader-visible text of a PDF through poppler's `pdftotext` ('' on failure)."""
+def _pdf_text_info(path: Path) -> tuple:
+    """(text, failure) of a PDF through poppler's `pdftotext`.
+
+    `failure` is "" when the converter SUCCEEDED -- `text` may still be empty,
+    which is an image-only PDF. A nonempty failure means the tool did not run,
+    timed out, or exited nonzero: the PDF's reader-visible text was never
+    examined, so the caller must record a coverage gap, not skip it silently.
+    """
     exe = shutil.which("pdftotext")
     if not exe:
-        return ""
+        return "", "pdftotext is not installed"
     try:
         proc = subprocess.run([exe, "-layout", str(path), "-"], capture_output=True,
                               timeout=120)
-        if proc.returncode == 0:
-            return proc.stdout.decode("utf-8", "replace")
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return ""
+    except subprocess.TimeoutExpired:
+        return "", "timed out after 120s"
+    except (OSError, subprocess.SubprocessError) as e:
+        return "", f"{type(e).__name__}: {e}"
+    if proc.returncode == 0:
+        return proc.stdout.decode("utf-8", "replace"), ""
+    detail = proc.stderr.decode("utf-8", "replace").strip().splitlines()
+    msg = f"exit {proc.returncode}"
+    if detail:
+        msg += f": {detail[-1][:200]}"
+    return "", msg
+
+
+def _pdf_text(path: Path) -> str:
+    """Reader-visible text of a PDF through poppler's `pdftotext` ('' on failure)."""
+    return _pdf_text_info(path)[0]
 
 
 def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
@@ -52673,7 +52745,10 @@ def run_redlines(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
 def cmd_redline(args) -> None:
     ctx = Ctx(Path(args.root).resolve(),
               strict_venue=bool(getattr(args, "strict_venue", False)))
-    ctx.load(need_cfg=False)
+    # A pipeline root has a config/state; an apparent root produced by a typo
+    # (or an empty directory) is refused instead of answered with an empty
+    # manifest and exit 0.
+    ctx.load()
     with ctx.lock("redline"):
         _cmd_redline_locked(ctx, args)
 
@@ -53981,7 +54056,8 @@ def tracking_readme(manifest: dict) -> str:
 def cmd_track(args) -> None:
     ctx = Ctx(Path(args.root).resolve(),
               strict_venue=bool(getattr(args, "strict_venue", False)))
-    ctx.load(need_cfg=False)
+    # See cmd_redline: an empty/typo root is not a pipeline root.
+    ctx.load()
     with ctx.lock("track"):
         _cmd_track_locked(ctx, args)
 
@@ -55989,12 +56065,26 @@ def main() -> None:
     args = parser.parse_args()
     install_timestamped_streams()
     cmd = getattr(args, "cmd", "")
+    # A path is a pipeline root only when it is an existing directory carrying
+    # one of the root's OWN files. `Ctx.load` creates `runs/` and `reports/` on
+    # success, and `start_run_log` creates `reports/` with parents=True, so any
+    # code that opens/loads a path BEFORE this check manufactures a root out of a
+    # typo: `redline`/`track` then wrote empty manifests and exited 0. Both the
+    # foreign-driver guard (which calls `load`) and the run log are therefore
+    # gated on this test; a command's own validation still sees the path as the
+    # operator wrote it.
+    _root_arg = getattr(args, "root", None)
+    _log_root = Path(_root_arg) if _root_arg else None
+    if _log_root is not None and (
+            not _log_root.is_dir()
+            or not ((_log_root / "pipeline_config.json").is_file()
+                    or (_log_root / "state.json").is_file())):
+        _log_root = None
     # A root freezes the pipeline script that produced it. Refuse EVERY mutator
     # driven by a different copy before even opening its run log; otherwise the
     # same stale driver that corrupted a root through `run` can still change it
     # through `retry`, `conform`, `prune`, or a `set-*` command.
-    if cmd in FOREIGN_GUARD_COMMANDS and getattr(args, "root", None) \
-            and Path(args.root).expanduser().is_dir():
+    if cmd in FOREIGN_GUARD_COMMANDS and _log_root is not None:
         guard_ctx = Ctx(
             Path(args.root).resolve(),
             strict_venue=bool(getattr(args, "strict_venue", False)),
@@ -56011,8 +56101,8 @@ def main() -> None:
     # (`setup` starts its own log once the root exists -- see cmd_setup: writing
     # into a not-yet-created root would make it non-empty and fail its own check.)
     if getattr(args, "cmd", "") in LOGGING_COMMANDS \
-            and getattr(args, "cmd", "") != "setup" and getattr(args, "root", None):
-        begin_run_log(args.cmd, args.root, sys.argv)
+            and getattr(args, "cmd", "") != "setup" and _log_root is not None:
+        begin_run_log(args.cmd, _root_arg, sys.argv)
     # The digest cache is enabled only for a quiescent READ-ONLY audit (and only
     # when no other pipeline process holds the root lock); see the block comment
     # above sha256_file(). The emitted note warns when a live run forced it off.

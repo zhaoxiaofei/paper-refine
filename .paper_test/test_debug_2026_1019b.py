@@ -19,7 +19,8 @@ Each test pins a failure that was reproduced against the pre-fix tree:
 * F09: `.PDF`/`.MD` were invisible to the case-sensitive glob, short PDFs were
   dropped, and a missing `pdftotext` produced no gap row.
 
-Run: python3 -m pytest -q .paper_test/test_debug_2026_1019b.py
+Run: python3 .paper_test/test_debug_2026_1019b.py
+     (the harness form; `python3 -m pytest -q ...` also works)
 """
 from __future__ import annotations
 
@@ -34,7 +35,10 @@ import zipfile
 import zlib
 from pathlib import Path
 
-import pytest
+try:
+    import pytest
+except ModuleNotFoundError:                     # the script runner has no pytest
+    from pytest_shim import pytest
 
 WS = Path(__file__).resolve().parent.parent
 
@@ -368,15 +372,16 @@ def test_pdf_and_text_enumeration_is_case_insensitive(tmp_path):
 
 def test_short_pdf_is_scanned(tmp_path, monkeypatch):
     (tmp_path / "short.pdf").write_bytes(b"%PDF-1.4\n")
-    # `_pdf_text` is stubbed, but the scan still gates on `shutil.which`;
-    # declare the tool present so the test does not depend on the host.
+    # `_pdf_text_info` is stubbed (the scan needs the text/error pair), but the
+    # scan still gates on `shutil.which`; declare the tool present so the test
+    # does not depend on the host.
     real_which = shutil.which
     monkeypatch.setattr(pp.shutil, "which",
                         lambda name: "/usr/bin/pdftotext" if name == "pdftotext"
                         else real_which(name))
-    monkeypatch.setattr(pp, "_pdf_text", lambda _p: (
+    monkeypatch.setattr(pp, "_pdf_text_info", lambda _p: (
         "The six metrics are intCN_accuracy, intCN_PCC, nonintCN_PCC, "
-        "CN_genome_cov_frac, and intCN_modal_frac."))
+        "CN_genome_cov_frac, and intCN_modal_frac.", ""))
     info = pp.scan_format_in_sources([(tmp_path, "", ())])
     assert any(r["rule"] == "FMT-CN1" and r["document"].endswith("short.pdf")
                for r in info["rows"]), info["rows"]
@@ -444,6 +449,14 @@ def test_qwen_main_surfaces_tunnel_failure(monkeypatch, capsys):
     monkeypatch.setattr(qa, "ensure_tunnel", lambda _cfg: "no tunnel")
     assert qa.main(["--tunnel", "off"]) == 2
     assert "no tunnel" in capsys.readouterr().err
+
+
+if __name__ == "__main__":
+    # `run_all.py` executes suites as scripts; without this block the file ran
+    # only its imports and exited 0, which the harness counted as PASS with zero
+    # checks (and failed outright when pytest was not installed).
+    from pytest_shim import run_tests
+    raise SystemExit(run_tests(globals()))
 
 
 

@@ -2,15 +2,23 @@
 
 Self-contained repro/regression suites for `paper_pipeline.py`,
 `paper_docx_format.py`, `paper_redlines_adapter.py` and the `paper-skills/`
-pack. They need Python 3, plus two third-party packages for two suites:
+pack. They need Python 3, plus three third-party packages for three suites:
 `python-docx` (the Word fixtures in
-`test_debug_2026_1017_serial_audit.py`) and `openpyxl` (the workbook checks in
-`test_pairwise_scores.py`). Install them with
-`python3 -m pip install python-docx openpyxl`; every other suite uses only the
-standard library. A suite takes seconds to a few minutes (the slowest
+`test_debug_2026_1017_serial_audit.py`), `openpyxl` (the workbook checks in
+`test_pairwise_scores.py`) and `lxml` (the XML reads in
+`test_round2_regressions_2026_1019.py`). Install them with
+`python3 -m pip install python-docx openpyxl lxml`; every other suite uses only
+the standard library. `pytest` is NOT required: the two pytest-style suites
+(`test_layout_integrity_2026_1019.py`, `test_debug_2026_1019b.py`) run their
+`test_*` functions through `pytest_shim.py` when the harness executes them as
+scripts, and still run under real pytest when collected. A suite takes seconds
+to a few minutes (the slowest
 ones wait on stub-agent sleeps, LibreOffice and pdflatex), and every suite
-prints one `[ok ]`/`[FAIL]` line per check and exits non-zero if any check
-fails.
+prints one check line per check (`[ok ]`/`[FAIL]`, or its own `OK`/`FAIL`
+form) and exits non-zero if any check
+fails. `run_all.py` enforces that contract: a suite that exits 0 without
+printing a single check line is reported `NOCHK` and counted as a failure, not
+as a pass.
 
 The round the suites exercise — base, rewrites, review, revises, integrations,
 judging, pinning — is diagrammed in
@@ -74,6 +82,9 @@ ls .paper_test/test_*.py | sed 's|.*/||' \
 | `test_focused_audit_2026_1009.py` | The 2026-10-09 focused round-2 audit (the second candidate set, `audit_data/2026-1009-1945-round2-focused-audit-202963b/`): D0's dedup audit is class- AND location-aware (the literal "X" class made the comparison vacuous and the report told sessions to drop legitimate findings); the review contract and `adopt-sweep` share ONE proposal reader (a `## M37 Foo` block without the `-- <name>` separator used to pass the contract and then be refused at adoption); hyphenated "not-covered"/"partially covered" gap rows count as UNCOVERED; every probe-result ROW is judged (a stale `pending` row after a good one used to hide); a formatting-writing session's selfcheck applies its own scope instead of demanding the content rounds' artifacts; the fixer never splices out a table cell's only paragraph (`<w:tc></w:tc>` is a corrupt DOCX); FMT-Z2 reads entries only from the bibliography region (a numbered heading used to hijack entry 1); FMT-AV2 knows `/commit/` pins; `w:u val="none"` is not an underline; the legend-spacing splice lands after an existing `numPr` (schema order); a break-only FIELD paragraph is no longer an unfixable mechanical FMT-S1 row; `count_words.py` requires a caption separator and refuses flattened `raw_data__x` names; the RTF `\uNNNN` delimiter no longer eats the next escape's backslash; an xlsx row without `r=` keeps document order; `extract_citations.py` compiles warning-free; and the redlines adapter drops a failed probe's partial OUT instead of reporting exit 0. |
 | `test_document_recovery.py` | The document-recovery layer: a dropped base file is restored with a warning instead of failing the round; a content-token + `FrontiersTemplate`/`zotero` provenance rename is recognized as ONE document, so recovery never resurrects the superseded family; plus the per-invocation retry budget, sibling-key non-merging and judge-label normalization. |
 | `test_llm_stochastic_failures.py` | The stochastic-LLM contract: fenced/prose/BOM JSON, wrong-typed or half-written markers and ledgers, documents replaced by symlinks or directories, unreadable files/directories, judge sheets with null entries or fractional scores. Asserts every case either repairs with a warning or fails the attempt cleanly -- never a crash, never a silent accept. |
+| `test_layout_integrity_2026_1019.py` | Layout-integrity and submission-surface rules: FMT-TB4/TB5 (a `w:tblGrid` that disagrees with its cells, an identifier that cannot fit), FMT-S10 (two PAGE fields in one referenced footer), FMT-AV3 (a "shipped/deposited" claim with no locator), the `.bib` prose model, the declared-submission parser, `_validation_targets` (scratch under `work/` cannot fail a stage), templated disposition closures and the split figure label. Runs under `pytest_shim.py` as a plain script (9 checks). |
+| `test_debug_2026_1019b.py` | The 2026-10-19 audit regressions: header geometry kept when a duplicate PAGE is removed, `repair_layout` always writes its output, `w:fldSimple` PAGE detection, OCR-off still runs the non-OCR figure check, the frozen-module mismatch/missing-module fences, `copy_into` skipping a non-evidence symlink, negation-blind claims, case-insensitive PDF/text enumeration, short-PDF scanning, the missing-`pdftotext` gap row, the module-manifest document, `sync-code` copying/refusing the right tree and the Qwen tunnel failure. Runs under `pytest_shim.py` as a plain script (18 checks). |
+| `test_debug_2026_1024b.py` | The 2026-10-24 debug round: a top-level evidence symlink is followed only when it resolves to the canonical `<root>/non_revised/<area>` store (`setup` and `copy_into`), a legend without terminal punctuation stops at a bound section heading (pipeline and `count_words.py` agree), a "Thank you for considering ..." cover-letter opener is body (19 words, not 0), `redline`/`track` refuse a nonexistent or non-root `--root` without creating it, and a PDF `pdftotext` cannot parse is a recorded `FMT-PDF0` gap. Each defect check fails on the pre-fix tree (the four control checks pass before and after). |
 | `test_change_requests_*.py` | The pool/integration change requests: every round stages `M` REWRITTEN candidates first and `N` reviewed-and-then-revised candidates from ONE shared review pass, then reworks EVERY pool member once with the WHOLE pool as donors (`i1 = a1 <- (w1..wM, a2..)`, ... -- no pairwise arms); `--rewrites` / `--revises` accept an integer or a per-round list (short lists repeat their last element); the optional `docx` CLI (including `docx diff`) is probed and documented in every prompt; the defaults are `--rounds 3` / `--jobs 255` / `--rewrites 2,0,0` / `--revises 1,1,1`. Ends with two real stub-agent rounds (default plan and a custom plan). Split into 5 parts: `_1_plan` (plan/ids), `_2_integration` (integration arms), `_3_cli` (cli surface), `_4_e2e_default`, `_5_e2e_custom` (`<base>_lib.py` holds the shared helpers). |
 | `stub_agent.py` | Deterministic offline stand-in for an LLM session, used by the end-to-end runs. |
 | `test_docx_converter.py` | The `docx-converter` MCP tool is the FIRST-choice .docx->.pdf converter: the Codex-config probe (`[mcp_servers.docx-converter]`, CODEX_HOME aware, refuses a deleted server script), the probe list/summary order (MCP tool first, then docx2pdf.sh, `docx render`, LibreOffice, ...), every prompt demanding `convert_docx_to_pdf` before any other converter plus the "render into a writable work dir, never into a read-only view" rule, the `-c mcp_servers.docx-converter.default_tools_approval_mode="approve"` override that makes the call legal in a non-interactive `codex exec` session (approval policy `never` denies an unapproved MCP call; no bypass flag is used, only installed servers are named, and an explicit `--agent-cmd` is never rewritten), and a live MCP handshake (tools/list); the real conversion runs only with `PAPER_TEST_DOCX_MCP=1`. |

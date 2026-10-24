@@ -21,6 +21,11 @@ timing-sensitive suite that only failed because 15 others were competing is
 reported as `flaky` instead of a false alarm -- and a suite that fails alone too
 is a real failure, with its `[FAIL]` lines quoted.
 
+A zero EXIT is not a pass by itself: a suite that exits 0 without printing a
+single check line (`[ok ]`/`[FAIL]`, `OK ...`, or `  ok  ...`) is reported
+`NOCHK` and counted as a failure. A pytest module with no `__main__` entry point
+used to exit 0 after its imports and be reported as `PASS` with zero checks run.
+
 Exit status: 0 when every suite passed (a flaky suite that passed alone counts as
 passed, but is named), 1 when one failed both ways, 2 on a usage error.
 """
@@ -29,6 +34,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures as futures
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -39,6 +45,13 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 WS = HERE.parent
 RUN_ONE = HERE / "run_one.sh"
+# A suite that exits 0 after printing NO check line did not pass: it ran
+# nothing (a pytest module with no `__main__` used to be counted as PASS 0.0s).
+# Suites report their checks in one of three shapes used in this tree --
+# `[ok ]`/`[FAIL]`, `OK ...`, and `  ok  ...` -- so all three count as evidence;
+# an EMPTY log (or imports-only module) still does not.
+NO_CHECK_RC = 97
+CHECK_LINE_RE = re.compile(r"(?im)^\s*(?:\[(?:ok |fail|skip)\]|ok\b|fail\b|skip\b)")
 # The operator's standing request for this box: use 24 parallel sessions by
 # default (`-j 24`). The effective default is capped only by the number of
 # suites to run; `-j N` caps it on a smaller box, `-j 1` is the old sequential
@@ -114,8 +127,21 @@ def tail_failures(suite: str, rundir: Path, limit: int = 6) -> list:
     return lines[:limit]
 
 
-def summary_line(suite: str, rc: int, secs: float, width: int) -> str:
-    tag = "PASS" if rc == 0 else "FAIL"
+def ran_checks(suite: str, rundir: Path) -> bool:
+    """True when the suite's log carries the documented per-check evidence."""
+    log = rundir / f"{suite}.log"
+    if not log.is_file():
+        return False
+    try:
+        return bool(CHECK_LINE_RE.search(
+            log.read_text(encoding="utf-8", errors="replace")))
+    except OSError:
+        return False
+
+
+def summary_line(suite: str, rc: int, secs: float, width: int,
+                 tag: str = None) -> str:
+    tag = tag or ("PASS" if rc == 0 else "FAIL")
     dur = f"{secs:.1f}s" if secs is not None else "-"
     return f"  {tag:<5} {suite:<{width}} {dur:>8}"
 
@@ -176,15 +202,28 @@ def main() -> int:
         engine_python(todo, jobs, rundir, python)
     for suite in todo:
         results[suite] = result_of(suite, rundir)
+    # A zero exit is not enough: the suite must have RUN something. A pytest
+    # module without a `__main__` entry point exits 0 after its imports and used
+    # to be reported as PASS with zero checks.
+    no_checks = {s for s in todo
+                 if results[s][0] == 0 and not ran_checks(s, rundir)}
+    for suite in no_checks:
+        results[suite] = (NO_CHECK_RC, results[suite][1])
     phase_wall = time.time() - started
 
     width = max(len(s) for s in todo)
     for suite in todo:
         rc, secs = results[suite]
-        line = summary_line(suite, rc, secs, width)
+        line = summary_line(suite, rc, secs, width,
+                            tag="NOCHK" if suite in no_checks else None)
         if rc == 0 and args.verbose:
             line += f"   {rundir / f'{suite}.log'}"
         print(line)
+
+    for suite in sorted(no_checks):
+        print(f"[tests] {suite}: NO CHECKS -- exited 0 without printing a single "
+              f"check line ([ok ]/FAIL/OK); a suite that runs nothing is not a pass "
+              f"(full log: {rundir / f'{suite}.log'})")
 
     failed = [s for s in todo if results[s][0] != 0]
     flaky = []
@@ -192,11 +231,16 @@ def main() -> int:
         print(f"\n[tests] {len(failed)} suite(s) failed under load; re-running each ALONE "
               f"(--no-rerun disables this)")
         for suite in failed:
+            if suite in no_checks:
+                print(f"[tests] {suite}: NOT re-run -- it printed no checks at all")
+                continue
             quiet = rundir / "alone"
             quiet.mkdir(exist_ok=True)
             run_one(suite, quiet, python)
             rc, secs = result_of(suite, quiet)
-            if rc == 0:
+            if rc == 0 and not ran_checks(suite, quiet):
+                print(f"[tests] {suite}: NO CHECKS alone either -- real failure")
+            elif rc == 0:
                 flaky.append(suite)
                 print(f"[tests] {suite}: FLKY -- passed alone in {secs:.0f}s "
                       f"(load-sensitive, not a real failure); full log: "

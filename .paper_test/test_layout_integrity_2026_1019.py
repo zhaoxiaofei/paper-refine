@@ -13,7 +13,8 @@ package:
 * `_validation_targets` (a scratch docx under work/ cannot fail a stage);
 * templated disposition closures (only the row's token changes).
 
-Run:  python3 -m pytest -q .paper_test/test_layout_integrity_2026_1019.py
+Run:  python3 .paper_test/test_layout_integrity_2026_1019.py
+      (the harness form; `python3 -m pytest -q ...` also works)
 """
 from __future__ import annotations
 
@@ -192,3 +193,11 @@ def test_figure_label_split_form(monkeypatch):
     rows = fmt.figure_label_rows([Path("Fig1.png")], ["Heteroclitic", "FastQ"])
     assert len(rows) == 1, rows
     assert "Heteroclitic" in rows[0]["evidence"]
+
+
+if __name__ == "__main__":
+    # `run_all.py` executes suites as scripts; without this block the file ran
+    # only its imports and exited 0, which the harness counted as PASS with zero
+    # checks. The shim supplies the pytest fixtures the functions use.
+    from pytest_shim import run_tests
+    raise SystemExit(run_tests(globals()))
