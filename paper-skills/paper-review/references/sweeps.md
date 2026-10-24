@@ -799,6 +799,16 @@ base and its source. A venue profile that declares different numbers (or none)
 replaces all of them: read the limits from the profile of the run you are in
 (`venue_profiles/README.md` documents the schema).
 
+**Which sections the main text CONTAINS is the venue's own rule, not a fixed
+span.** The profile states it as `counting.main_text.excludes` (per venue, or
+per article type where the types differ). The pipeline default — the Nature
+Biotechnology Article rule used above — leaves the abstract, Methods,
+references and figure legends out; a Frontiers profile counts Methods and the
+in-text citations inside its 12,000-word main body; NBT's Brief Communication
+counts the abstract, references and figure legends too.
+`scripts/count_words.py --venue-profile <id> --article-type <id>` applies the
+profile's own rule, and the artifact must say which span it counted.
+
 **Counting rule (all word counts):** a word is a maximal run of NON-SPACE
 characters, with a newline treated as space — `state-of-the-art` is ONE word and
 `2026` is ONE word. `scripts/count_words.py` implements this exactly (`--json`

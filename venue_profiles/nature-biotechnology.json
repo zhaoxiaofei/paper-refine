@@ -53,6 +53,20 @@
           "note": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Brief Communication' format: 'Main text - 1,000-1,500 words, including abstract, references and figure legends, and contains no headings.' The profile uses the range's upper bound (1,500) as base, applies no margin (relaxation 1.0) and does not model the venue's floor of 1,000 words. The same entry caps the title at 10 words (or 90 characters) and display items at 2."
         }
       },
+      "counting": {
+        "main_text": {
+          "excludes": [
+            "acknowledgements",
+            "author-contributions",
+            "data-availability",
+            "competing-interests",
+            "funding",
+            "supplementary"
+          ],
+          "source": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Brief Communication' format: 'Main text - 1,000-1,500 words, including abstract, references and figure legends, and contains no headings.'",
+          "note": "NBT counts the Brief Communication's abstract, references and figure legends INSIDE the 1,000-1,500-word main text (the type carries no headings); only back matter (acknowledgements, funding, ...) stays outside."
+        }
+      },
       "captions": null
     },
     {
@@ -349,6 +363,24 @@
       "max": 500,
       "total_max": null,
       "source": "master-prompt preference (300-500 words in the persuading part). Nature Biotechnology states no cover-letter word limit; its Preparing your material page (https://www.nature.com/nbt/submission-guidelines/preparing-your-submission, checked 2026-10-01) says the letter 'should explain the importance of the work, and why you consider it appropriate for the diverse readership of Nature Biotechnology' and lists the disclosures it must carry. No total-content cap is applied."
+    }
+  },
+  "counting": {
+    "main_text": {
+      "excludes": [
+        "abstract",
+        "methods",
+        "references",
+        "figure-legends",
+        "acknowledgements",
+        "author-contributions",
+        "data-availability",
+        "competing-interests",
+        "funding",
+        "supplementary"
+      ],
+      "source": "https://www.nature.com/nbt/content (checked 2026-10-01), 'Article' format: 'Main text - up to 3,000 words, excluding abstract, Methods, references and figure legends.'",
+      "note": "The Article's main-text count excludes the abstract, Methods, references and figure legends (back matter such as acknowledgements and funding is outside too). This is the pipeline's default convention when a profile states none."
     }
   },
   "captions": {

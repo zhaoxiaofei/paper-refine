@@ -192,6 +192,22 @@ check("C26 README states the judge's own frozen M1-M24 + J1-J4 set",
       "the judge runs the same frozen sweep set as the review" not in flat(readme)
       and "M1–M24 + J1–J4" in readme)
 
+# ---------------------------------------------------------------- C27
+brief = pp.load_venue_profile("nature-biotechnology", root=str(WS)).with_article_type(
+    "brief-communication")
+check("C27 Frontiers counts Methods inside its main text (not the NBT Article rule)",
+      "methods" not in frontiers.main_text_excludes()
+      and "Methods INSIDE the count" in flat(pp.length_rule_text(frontiers)))
+check("C27 the default profile keeps the NBT Article convention (Methods excluded)",
+      "methods" in prof.main_text_excludes()
+      and "the abstract, Methods, references and figure legends EXCLUDED"
+      in flat(pp.length_rule_text(prof)))
+check("C27 the Brief Communication counts abstract/references/legends inside",
+      {"abstract", "references", "figure-legends"}.isdisjoint(brief.main_text_excludes())
+      and "INSIDE the count" in flat(pp.length_rule_text(brief)))
+check("C27 the counting convention is profile data, not prompt prose",
+      "counting.main_text.excludes" in flat(sweeps))
+
 # ---------------------------------------------------------------- C28
 check("C28 no dangling reference-chat pointer",
       "reference-chat" not in sweeps)
