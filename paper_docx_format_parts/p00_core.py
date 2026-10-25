@@ -252,7 +252,18 @@ def unesc(text: str) -> str:
 def load_policy(path) -> dict:
     pol = dict(POLICY_DEFAULTS)
     if path:
-        pol.update(json.loads(Path(path).read_text(encoding="utf-8")))
+        # Every other bad CLI input exits 2 with a message; a missing or
+        # malformed --policy used to escape as a raw traceback.
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            print(f"error: cannot read --policy {path}: {e}", file=sys.stderr)
+            raise SystemExit(2)
+        if not isinstance(data, dict):
+            print(f"error: --policy {path} must be a JSON object, not "
+                  f"{type(data).__name__}", file=sys.stderr)
+            raise SystemExit(2)
+        pol.update(data)
     # A venue profile writes the measured rules as `image_dpi`/`figure_text`;
     # the formatter's own scalars are what the scans read. Derive them here so a
     # profile passed with --policy behaves the same as the pipeline's
@@ -495,9 +506,16 @@ def field_result_text_ranges(para: str, doc_spans=None, para_start: int = 0) -> 
     which the paragraph-scoped stack could not see.
     """
     runs, pos = [], 0
-    for m in TEXT_RE.finditer(para):
-        raw = m.group(0)
-        text = unesc(raw[raw.find(">") + 1:raw.rfind("<")])
+    for m in _FRAG_OR_BREAK_RE.finditer(para):
+        tok = m.group(0)
+        if BREAK_TOKENS.fullmatch(tok):
+            # `text_of` renders each break/tab as one character. Advancing only
+            # over `<w:t>` shifted every later protected range by one per
+            # preceding tab/break, so a hygiene edit could land inside a live
+            # Zotero field result.
+            pos += 1
+            continue
+        text = unesc(tok[tok.find(">") + 1:tok.rfind("<")])
         runs.append((m.start(), m.end(), pos, pos + len(text)))
         pos += len(text)
     if doc_spans is None:
@@ -630,10 +648,18 @@ def zotero_field_report(xml: str) -> dict:
                     if stack[-1]["separate"] is None:
                         stack[-1]["separate"] = m.start()
                     else:
+                        # Name the field kind when it is Zotero's: the
+                        # consumer (`zotero_structural_faults`) deliberately
+                        # ignores a duplicate separator on an arbitrary Word
+                        # field, so a message without the kind made a broken
+                        # citation field print CLEAN.
+                        _kind = _zotero_field_kind("".join(stack[-1]["instr"]))
+                        _kind_note = (f"the {_kind} field; " if _kind != "other" else "")
                         fail("duplicate-separate",
                              f"a second field separator at byte {m.start()} is inside one "
-                             f"field (the first is at byte {stack[-1]['separate']}); Word "
-                             f"renders the extra separator unpredictably")
+                             f"field ({_kind_note}the first is at byte "
+                             f"{stack[-1]['separate']}); Word renders the extra separator "
+                             f"unpredictably")
                 else:
                     fail("separate-outside-field",
                          f"a field separator at byte {m.start()} is outside any field")
@@ -1052,8 +1078,7 @@ def docx_front_matter_report(path: Path, template: Path = None, containers=()) -
                         if n.startswith(("word/header", "word/footer")) and n.endswith(".xml")}
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return {}
-    rel_map = {m.group(1): (m.group(2).lower(), m.group(3))
-               for m in _RELS_RE.finditer(rels)}
+    rel_map = {e["id"]: (e["type"], e["target"]) for e in _rels_entries(rels)}
     # The section that governs page 1 decides the FIRST-PAGE furniture (see
     # `first_section_props`): reading the last one let a two-section manuscript
     # whose page 1 was not the venue's layout report no gap at all.

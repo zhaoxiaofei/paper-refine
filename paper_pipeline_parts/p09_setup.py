@@ -489,8 +489,8 @@ def cmd_setup(args) -> None:
             f"parts).")
     _asset_dirs = copy_asset_dirs(script.parent, root)
     if _asset_dirs:
-        print(f"[setup] pipeline parts:          copied {', '.join(_asset_dirs)}/ "
-              f"(the loaders execute these files in order)")
+        print(f"[setup] pipeline assets:         copied {', '.join(_asset_dirs)}/ "
+              f"(the loaders execute the parts; the skills pack is read beside the driver)")
     # The OOXML formatting scanner is a companion module (see
     # scan_format_in_sources); copy it next to the script so the root stays
     # self-contained and `python <root>/paper_pipeline.py` keeps working.
@@ -511,6 +511,13 @@ def cmd_setup(args) -> None:
     _qwen = script.with_name("paper_qwen_agent.py")
     if _qwen.is_file():
         shutil.copy(_qwen, root / "paper_qwen_agent.py")
+    # The render/track shims are resolved beside the running driver
+    # (`visual_renderer_choices`, the MCP probes). A root without them silently
+    # loses the highest-fidelity renderer/comparer, so they travel too.
+    for _shim_name in ("docx2pdf.sh", "docxcompare.sh"):
+        _shim = script.with_name(_shim_name)
+        if _shim.is_file():
+            shutil.copy2(_shim, root / _shim_name)
     # The venue profiles travel with the root too: the root stays
     # self-contained, `set-venue --profile` has a directory to install into,
     # and a root-local edit overrides the shipped copy. The config's snapshot is
@@ -894,6 +901,7 @@ def _print_venue_list(root, as_json: bool) -> None:
                                           "path": v.get("path"),
                                           "default_journal": v.get("default_journal"),
                                           "description": v.get("description"),
+                                          "note": v.get("note"),
                                           "error": v.get("error")}
                                          for v in sorted(profiles.values(),
                                                          key=lambda x: x["id"])]},
@@ -908,6 +916,8 @@ def _print_venue_list(root, as_json: bool) -> None:
         print(f"  {v['id']:<24} {v.get('label')} [{v.get('origin')}]{default}")
         if v.get("description"):
             print(f"  {'':<24} {v['description']}")
+        if v.get("note"):
+            print(f"  {'':<24} note: {v['note']}")
     print()
     print("Select one with `set-venue <id>`; add your own with")
     print(f"  set-venue <id> --profile /path/to/<id>{VENUE_PROFILE_SUFFIX} "

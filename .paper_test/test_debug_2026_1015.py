@@ -657,8 +657,11 @@ def test_venue_profile_duplicate_id():
         prof["label"] = label
         (d / name).write_text(json.dumps(prof), encoding="utf-8")
     found = nb.available_venue_profiles(tmp)
-    check("P17 the winner keeps the id", found[base["id"]]["label"] == "First",
-          str(found.get(base["id"], {}).get("label")))
+    # Resolution is by FILE NAME (the 2026-10-25 F034 contract): the winner is
+    # listed under the id `set-venue aaa` accepts, not under its duplicated
+    # internal id.
+    check("P17 the winner keeps its file-name id", found["aaa"]["label"] == "First",
+          str(found.get("aaa", {}).get("label")))
     check("P17 the shadowed FILE is visible with its reason",
           "bbb" in found and "already provided by" in (found.get("bbb", {}).get("error") or ""),
           str(found.get("bbb", {}))[:200])

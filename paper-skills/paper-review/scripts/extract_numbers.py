@@ -70,12 +70,14 @@ LABEL_PATTERNS = [
     # them from the M4 inventory, so an abstract/results conflict on such a
     # p-value was never compared.
     ("p-value", re.compile(
-        r"\b[pP](?:\s*[-_]?\s*[vV]alue)?\s*(?:<=|>=|[=<>≤≥])\s*"
+        r"\b[pP](?:\s*[-_]?\s*[vV]alues?)?\s*(?:<=|>=|[=<>≤≥]|\bof\b)\s*"
         r"((?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)")),
-    ("n", re.compile(r"\b[nN]\s*=\s*(\d+)\b")),
+    # `n = 1,234` is one count and `n = 12.5` is not a count at all; the old
+    # `(\d+)\b` read them as 1 and 12, inventing a conflict with `n = 1234`.
+    ("n", re.compile(r"\b[nN]\s*=\s*(\d{1,3}(?:,\d{3})+|\d+)\b(?![.,]\d)")),
     ("AUC", re.compile(
         r"\bAU(?:C|ROC)\s*(?:was|is|of|=|:|approximately)?\s*"
-        r"((?:\d+\.?\d*|\.\d+))\b", re.I)),
+        r"((?:0?\.\d+|1(?:\.0+)?|0(?:\.0+)?))\b", re.I)),
     ("percentage", re.compile(r"\b(\d{1,3}(?:\.\d+)?)\s*%")),
     ("CI", re.compile(r"\bCI\s*[:=,]?\s*(\d+\.?\d*)\s*(?:[–-]|to)\s*(\d+\.?\d*)", re.I)),
     # The exponent is mandatory: without it a plain Pearson "r = 0.8" was
@@ -83,23 +85,55 @@ LABEL_PATTERNS = [
     ("R2", re.compile(r"\bR(?:\^?2|²)\s*[:=]\s*(0?\.\d+|\d\.\d+)\b", re.I)),
     ("fold", re.compile(r"\b(\d+\.?\d*)[- ]?fold\b", re.I)),
 ]
+
+
+def _metric_key(label: str, val) -> str:
+    """A label's value in one canonical spelling for conflict comparison.
+
+    `p = 0.05`, `p = 0.050` and `p = .05` are the same number (and `1` and
+    `1.0` are the same perfect AUC); the raw capture is kept in the occurrence
+    excerpt, but the comparison key is numeric.
+    """
+    text = str(val)
+    if label == "CI":
+        parts = text.split("-")
+        if len(parts) == 2:
+            try:
+                return "-".join(format(float(p), ".15g") for p in parts)
+            except ValueError:
+                return text
+        return text
+    if label in ("p-value", "AUC", "R2", "n", "percentage", "fold"):
+        try:
+            return format(float(text.replace(",", "")), ".15g")
+        except ValueError:
+            return text
+    return text
 # A lower/upper range printed in reverse order. The M4 label checks same-metric
 # conflicts, but a unit-bearing physical range (an elevation, depth, time or
 # concentration range) is an ordered interval too and was previously left to
 # attention. This is a TRIAGE row, not an automatic finding: a directional
 # sequence can legitimately run backwards, so the reviewer disposes each row.
-# The unit class omits the sentence period, so `30 m.` still yields unit `m`.
+# The unit class accepts compound units too (`mg/L`, `mmol/L`, `µg/mL`): the
+# old short whitelist rejected them after matching, dropping exactly the
+# concentration ranges this sweep exists for.
 _RANGE_UNIT = r"(?:%|°C|[A-Za-zµμ][A-Za-z0-9/·^-]*)"
 _RANGE_UNITS = {
     "m", "km", "cm", "mm", "nm", "um", "µm", "μm", "kg", "g", "mg", "µg", "ug",
-    "s", "ms", "min", "h", "hr", "d", "day", "days", "week", "weeks", "yr",
+    "μg", "s", "ms", "min", "h", "hr", "d", "day", "days", "week", "weeks", "yr",
     "year", "years", "%", "°c", "pa", "kpa", "mpa", "hz", "khz", "mhz", "ghz",
-    "l", "ml", "µl", "ul", "mol", "mmol", "m/s", "km/h", "ha", "db", "fold",
+    "l", "ml", "µl", "μl", "ul", "mol", "mmol", "μmol", "m/s", "km/h", "ha", "db",
+    "fold",
 }
 RANGE_RE = re.compile(
-    r"\b(?:from\s+)?(?P<low>-?\d+(?:\.\d+)?)\s*(?P<u1>" + _RANGE_UNIT + r")"
+    # No leading `\b`: a word boundary cannot sit between the space and the
+    # minus of "-80 C", so the old pattern started at the digit and dropped the
+    # sign, turning an ascending -80..-60 range into a false descending one.
+    r"(?<![A-Za-z0-9])(?:from\s+)?(?P<low>-?\d+(?:\.\d+)?)\s*(?P<u1>" + _RANGE_UNIT + r")"
     r"\s+(?:to|through)\s+"
-    r"(?P<high>-?\d+(?:\.\d+)?)\s*(?P<u2>" + _RANGE_UNIT + r")\b"
+    # `%` is a non-word character, so a trailing `\b` can never match after it;
+    # reject a word character instead, which allows "90% to 10%".
+    r"(?P<high>-?\d+(?:\.\d+)?)\s*(?P<u2>" + _RANGE_UNIT + r")(?![A-Za-z0-9])"
 )
 ACCESSION_RE = re.compile(r"\b(GSE\d+|PRJNA\d+|SR[APRX]\d+|E-MTAB-\d+|zenodo\.\d+)\b", re.I)
 VERSION_RE = re.compile(r"\b(?:v(?:er(?:sion)?)?\.?\s?)(\d+(?:\.\d+)+)\b", re.I)
@@ -324,7 +358,20 @@ def main():
                         continue  # "95% CI" is a confidence level, not a metric
                     if label == "CI" and m.lastindex and m.group(2):
                         val = "%s-%s" % (m.group(1), m.group(2))
-                    metrics[(label, str(val))].append({
+                        try:
+                            _lo, _hi = float(m.group(1)), float(m.group(2))
+                        except ValueError:
+                            _lo = _hi = None
+                        if _lo is not None and _lo > _hi:
+                            # A lower bound above the upper bound is the same
+                            # ordered-interval defect as a reversed physical
+                            # range; the CI path used to store only the string
+                            # and never run this check.
+                            descending_ranges.append({
+                                "file": fname, "line": li, "unit": "CI",
+                                "low": m.group(1), "high": m.group(2),
+                                "context": ctx, "excerpt": raw.strip()[:200]})
+                    metrics[(label, _metric_key(label, val))].append({
                         "file": fname, "line": li, "context": ctx,
                         "excerpt": raw.strip()[:120]})
             for m in ACCESSION_RE.finditer(raw):
@@ -335,7 +382,10 @@ def main():
                                              "excerpt": raw.strip()[:120]})
             for m in RANGE_RE.finditer(raw):
                 u1, u2 = m.group("u1").casefold(), m.group("u2").casefold()
-                if u1 != u2 or u1 not in _RANGE_UNITS:
+                # Any unit spelled the same on both ends is a range: the short
+                # whitelist dropped mg/L, mmol/L, µg/mL and the Greek-mu forms
+                # that casefold produces from the micro sign.
+                if u1 != u2:
                     continue
                 try:
                     low, high = float(m.group("low")), float(m.group("high"))

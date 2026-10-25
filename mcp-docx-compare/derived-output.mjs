@@ -27,3 +27,10 @@ export function derivedOutput(original, revised) {
   return path.join(path.dirname(originalReal),
                    `${stem(originalReal)}-vs-${stem(revisedReal)}-redline.docx`);
 }
+
+// The in-flight serialization key. It is the path the comparer writes, folded
+// to lower case because the destination is commonly a case-insensitive
+// Windows/drvfs path (`Report.docx` and `report.docx` are one file).
+export function inFlightKey(original, revised, outputPath) {
+  return (outputPath || derivedOutput(original, revised)).toLowerCase();
+}

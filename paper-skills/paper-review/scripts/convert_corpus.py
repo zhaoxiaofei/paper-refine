@@ -179,7 +179,11 @@ def is_feedback_rel(rel_path: str) -> bool:
 
 # ---------------------------------------------------------------- docx / xlsx
 
-TEXT_RUN_RE = re.compile(r"<w:(?:instrText|t)(?:\s[^>]*)?>(.*?)</w:(?:instrText|t)>", re.S)
+TEXT_RUN_RE = re.compile(
+    # Word stores a tab/soft break as its own element; extracting only w:t
+    # glued "Dose[tab]50" into "Dose50" and two lines into one word.
+    r"<w:(instrText|t)(?:\s[^>]*)?>(.*?)</w:\1>"
+    r"|<w:(br|cr|tab)(?=[\s/>])[^>]*/?>", re.S)
 
 
 def docx_part_to_lines(xml: str):
@@ -192,12 +196,17 @@ def docx_part_to_lines(xml: str):
             notes.append("tracked-deletion present in a paragraph")
         texts = []
         for m in TEXT_RUN_RE.finditer(para):
-            tag = m.group(0)
-            content = _html_unescape(m.group(1))
+            if m.group(3):
+                # The pipeline's own `text_of` renders br/cr as a newline and a
+                # tab as a separator; the converter must agree or the sweeps
+                # read words the author never wrote glued together.
+                texts.append("\n" if m.group(3) in ("br", "cr") else " ")
+                continue
+            content = _html_unescape(m.group(2))
             # Test the TAG NAME, never a substring of the whole match: a visible
             # w:t whose sentence merely mentions "instrText" became a fake
             # [[FIELD: ...]] marker that polluted every downstream sweep.
-            if re.match(r"<w:instrText(?=[\s/>])", tag):
+            if m.group(1) == "instrText":
                 texts.append("[[FIELD: %s]]" % content.strip())
                 notes.append("live field instruction present (possible Zotero citation)")
             else:

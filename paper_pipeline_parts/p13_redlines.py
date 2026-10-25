@@ -560,9 +560,11 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
 
     Paragraph- and word-level w:ins/w:del built from the BASE package, so the
     surrounding document survives. Unchanged paragraphs are copied verbatim;
-    a changed paragraph is rebuilt from plain text (character formatting inside
-    it is not carried over) -- that limitation is why this backend is last in
-    the chain and is named as such in the manifest.
+    a changed paragraph is rebuilt from its own runs, and each run's `rPr`
+    (character formatting) is carried into the w:del/w:ins copy, so only the
+    changed paragraph's text is re-derived. This backend is still last in the
+    chain and is named as such in the manifest: it cannot represent edits
+    inside tables/content controls (see below).
 
     What it canNOT represent: non-paragraph body content. Tables, content
     controls (w:sdt) and section properties are copied verbatim from the base, so

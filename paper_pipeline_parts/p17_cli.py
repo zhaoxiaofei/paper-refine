@@ -955,8 +955,8 @@ def build_parser() -> argparse.ArgumentParser:
     ptrk.add_argument("--tool", choices=list(REDLINE_TOOLS), default="auto",
                       help="the .docx backend(s) to try: auto (default) uses the docx-compare "
                            "MCP tool (Word's own compare engine) first, then the redline chain; "
-                           "`none` writes no .docx comparison (the logging fallback still "
-                           "carries the reason)")
+                           "`none` writes NO .docx copy at all (not even a logging "
+                           "fallback); a skipped comparison row records the reason")
     ptrk.add_argument("--redline-cmd", default=None,
                       help="JSON argv list for any other .docx differ, with {base} {revised} "
                            "{out} placeholders")

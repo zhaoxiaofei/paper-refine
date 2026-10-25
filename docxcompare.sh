@@ -65,6 +65,15 @@ if [[ -z "$OUTPUT" ]]; then
     REVISED_BASE="$(basename -- "$REVISED_REAL")"
     OUTPUT="$ORIG_DIR/${ORIG_BASE%.*}-vs-${REVISED_BASE%.*}-redline.docx"
 fi
+# SaveAs2 format 16 writes a DOCX package whatever the name says; a .pdf
+# output would be reported as a redline and then fail to open as one.
+case "${OUTPUT,,}" in
+    *.docx) ;;
+    *)
+        echo "Error: output must be a .docx file: $OUTPUT" >&2
+        exit 2
+        ;;
+esac
 
 if ! command -v powershell.exe >/dev/null 2>&1; then
     echo "Error: powershell.exe not found. Run from WSL or Git Bash on Windows." >&2

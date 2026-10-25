@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import * as z from 'zod/v4';
 import { allowedRoots, containsPath } from './containment.mjs';
+import { pdfKey } from './in-flight.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -86,7 +87,9 @@ serveStdio(() => {
           isError: true,
         };
       }
-      const pdf = abs.replace(/\.docx$/i, '.pdf');
+      // docx2pdf.sh writes beside the REAL input, and the destination may be
+      // case-insensitive; `pdfKey` computes that destination once.
+      const key = pdfKey(abs);
       // 900_000 matches the orchestrator's render budget
       // (paper_pipeline.render_docx_visual(timeout=900)); a smaller server-side
       // cap would kill a slow-but-valid Word conversion before the caller's
@@ -94,9 +97,9 @@ serveStdio(() => {
       // fallback.
       const run = () => execFileAsync(CONVERTER, [abs],
                                       { timeout: 900_000, maxBuffer: 4 * 1024 * 1024 });
-      const previous = inFlight.get(pdf) ?? Promise.resolve();
+      const previous = inFlight.get(key) ?? Promise.resolve();
       const next = previous.catch(() => {}).then(run);
-      inFlight.set(pdf, next);
+      inFlight.set(key, next);
       try {
         // 调用 docx2pdf.sh 脚本；脚本内部会处理路径转换和 PowerShell 调用。
         const { stdout, stderr } = await next;
@@ -116,7 +119,7 @@ serveStdio(() => {
           isError: true,
         };
       } finally {
-        if (inFlight.get(pdf) === next) inFlight.delete(pdf);
+        if (inFlight.get(key) === next) inFlight.delete(key);
       }
     }
   );

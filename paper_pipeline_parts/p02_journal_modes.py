@@ -23,9 +23,10 @@ from __future__ import annotations
 #               workflow does not run.
 #   4 minor     as 3, for a MINOR revision.
 #
-# The default mode is "none" and the historical pipeline is byte-for-byte
-# unchanged there: every journal-specific code path below is entered only when
-# `journal_mode_of(ctx) != "none"`.
+# The default (unset) mode is "continue": the historical pipeline is entered
+# exactly as before, and every journal-specific code path below runs only when
+# `journal_mode_of(ctx)` is one of the explicit journal modes. `none` is not a
+# mode any more and is refused rather than silently treated as `continue`.
 # =====================================================================
 
 JOURNAL_MODE_TRANSFER = "transfer"
@@ -313,8 +314,10 @@ def journal_feedback_files(ctx: Ctx) -> list:
          authored reply (the area exists for exactly this content, so it needs
          no name heuristic -- a Chinese-named or generically named report works);
       3. the legacy name heuristic over the whole corpus (`feedback`/`referee`/
-         `reviewer`/`editor`/`decision` in the file name), which keeps the
-         earlier design working when the letter lives in `raw_data/`.
+         `reviewer`/`editor`, or a `decision`-letter/notice/email name), which
+         keeps the earlier design working when the letter lives in `raw_data/`.
+         A bare `decision.pdf` is not in this heuristic; name it
+         `decision-letter.pdf` or pass it with `setup --journal-feedback`.
     A file the AUTHORS wrote (`response_to_reviewers.docx`, `cover_letter_to_
     editor.docx`, `point-by-point.md`) is never read as the journal's letter.
 
@@ -330,13 +333,22 @@ def journal_feedback_files(ctx: Ctx) -> list:
         return []
     named = journal_feedback_paths(ctx)
     if named:
-        out = []
+        out, seen = [], set()
         for p in named:
             if not p.is_file():
                 die(f"--journal-feedback {p} does not exist (or is not a file). Give the "
                     f"decision letter / reviewer report(s) explicitly, or drop the flag and let "
                     f"the pipeline find them in the corpus's human_review_feedback/ area.")
-            out.append((p, p.name))
+            label = p.name
+            if label in seen:
+                # Two operator-named reports from different directories: a
+                # basename-only label staged one over the other, and the ledger
+                # then quoted only the survivor.
+                label = (f"{p.stem}-"
+                         f"{hashlib.sha1(str(p.resolve()).encode('utf-8')).hexdigest()[:8]}"
+                         f"{p.suffix}")
+            seen.add(label)
+            out.append((p, label))
         return out
     if not ctx.pristine.is_dir():
         return []
@@ -1315,8 +1327,8 @@ def auto_champion_vid(ctx, r: int, mode: str = None) -> str:
         die(f"--champion-select integrate promotes '{target}', the integration of the revised "
             f"candidate {revise_vid(1)}, but round {r}'s integrator mask "
             f"0x{round_integrators(ctx, r):X} does not plan that arm. Select pool member "
-            f"{m + 2} of [{', '.join(round_pool_ids(m, n))}] (bit {1 << (m + 1)}) or use "
-            f"--champion-select revise.")
+            f"{m + 2} of [{', '.join(round_pool_ids(m, n))}] (bit index {m + 1}, "
+            f"mask value {1 << (m + 1)}) or use --champion-select revise.")
     return target
 
 
@@ -2058,7 +2070,8 @@ def cover_letter_guidance_clause(guide: dict) -> str:
 # prompt bloats it without telling the agent anything it must decide.
 _NAMED_COUNTING_KINDS = (("abstract", "the abstract"), ("methods", "Methods"),
                          ("references", "references"),
-                         ("figure-legends", "figure legends"))
+                         ("figure-legends", "figure legends"),
+                         ("table-captions", "table captions"))
 # Back-matter kinds are named separately: a venue whose ONLY exclusions are
 # these still leaves six sections out (the NBT Brief Communication), so the
 # renderer must not say "nothing EXCLUDED" for it.
@@ -2162,11 +2175,13 @@ def length_rule_text(profile=None) -> str:
         if abstract["cap"] is not None:
             margin = int(round((float(abstract["relaxation"]) - 1.0) * 100))
             cap_bits.append(f"the abstract <= {abstract['cap']} words"
-                            + ("" if margin == 0 else f" (+{margin}% = {abstract['cap']})"))
+                            + ("" if margin == 0 else
+                               f" (base {abstract.get('base')} +{margin}% = {abstract['cap']})"))
         if main["cap"] is not None:
             margin = int(round((float(main["relaxation"]) - 1.0) * 100))
             cap_bits.append(f"the main text <= {main['cap']} words"
-                            + ("" if margin == 0 else f" (+{margin}% = {main['cap']})"))
+                            + ("" if margin == 0 else
+                               f" (base {main.get('base')} +{margin}% = {main['cap']})"))
         limits_para = (
             f"      carries): the limits below DO apply in their RELAXED form. For "
             f"{_article_phrase(prof)} the allowed\n"

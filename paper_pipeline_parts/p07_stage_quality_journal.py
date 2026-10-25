@@ -630,7 +630,10 @@ def postcheck_review(ctx: Ctx, rec: dict):
                             f"genuinely clean; check the coverage table)")
             check_review_contract(ctx, sb, fj, errs, warns,
                                   scope=round_review_scope(ctx, int(rec.get("round") or 1)))
-            if journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_RESUBMIT):
+            if journal_has_feedback(ctx) and not journal_is_scoped(ctx):
+                # `llm` mode has a feedback ledger too, and the review block
+                # tells it to reconcile every concern; skipping the coverage
+                # check let a session silently drop the whole ledger and pass.
                 errs.extend(journal_review_coverage_problems(ctx, rec, sb, fj))
     # DISPOSITION QUALITY: the reviewer's own decision tables. Recorded always;
     # it FAILS the attempt only under `setup --strict-artifacts on`, and
@@ -2448,7 +2451,7 @@ def _write_journal_feedback_inputs(ctx: Ctx, sb: Path) -> list:
             f"{LLM_FEEDBACK_DIR}/ area (any file name), or name the letter with "
             f"`setup --journal-feedback FILE` (or `set-revision-mode ... --journal-feedback "
             f"FILE`). The legacy shape also works: a feedback-named file anywhere in the corpus "
-            f"(feedback / referee / reviewer / editor / decision in its name), typically under "
+            f"(feedback / referee / reviewer / editor, or decision-letter/notice/email in its name), typically under "
             f"raw_data/.")
     previous = journal_previous_responses(ctx)
     (sb / "feedback" / "files").mkdir(parents=True, exist_ok=True)

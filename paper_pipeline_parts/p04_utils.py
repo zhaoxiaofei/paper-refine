@@ -503,7 +503,7 @@ def root_pipeline_staleness(ctx: Ctx) -> dict:
     # root run. Record that local drift separately: it is a different repair
     # from "the maintained tree has moved on".
     out["recorded_module_diffs"] = []
-    for name in PIPELINE_MODULE_FILES + PIPELINE_ASSET_DIRS:
+    for name in PIPELINE_MODULE_FILES + PIPELINE_ASSET_DIRS + PIPELINE_SKILL_ASSET_DIRS:
         if name == "paper_pipeline.py":
             continue
         recorded_hash = out["recorded_modules"].get(name)
@@ -513,10 +513,11 @@ def root_pipeline_staleness(ctx: Ctx) -> dict:
     # The module manifest (2026-10-19): a root can run a fresh driver with
     # a stale formatter, and the driver digest alone cannot see it. Compare the
     # FROZEN modules with the MAINTAINED tree's modules when the maintenance
-    # chain names one.
+    # chain names one. The skills pack is part of the frozen bundle too (setup
+    # copies and records it), so a stale skills copy must be visible here.
     if out.get("maintained_path"):
         out["maintained_modules"] = module_manifest(Path(out["maintained_path"]).parent)
-        for name in PIPELINE_MODULE_FILES + PIPELINE_ASSET_DIRS:
+        for name in PIPELINE_MODULE_FILES + PIPELINE_ASSET_DIRS + PIPELINE_SKILL_ASSET_DIRS:
             # The driver has its own, stronger check (`running_pipeline_mismatch`
             # / `frozen_differs`): including it here made a foreign driver die
             # with the generic "stale sibling module" message instead of the
@@ -1922,7 +1923,8 @@ def _length_section_kind(line: str) -> str:
     return ""
 
 
-LENGTH_KEYWORDS_RE = re.compile(r"^\s*(?:key\s?words?)\s*[:.\u2014\u2013-]", re.I)
+LENGTH_KEYWORDS_RE = re.compile(
+    r"^\s*(?:key\s?words?)\s*(?:[:.\u2014\u2013-]|$)", re.I)
 LENGTH_COVER_SALUTATION_RE = re.compile(
     r"^\s*(?:dear\b|to the (?:editor|editors)\b)", re.I)
 LENGTH_COVER_CLOSING_RE = re.compile(
@@ -2261,8 +2263,15 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
     for i in range(span_start, n):
         line = clean(lines[i])
         heading = _length_heading_text(line)
+        if LENGTH_KEYWORDS_RE.match(heading):
+            # A Keywords line is a boundary, not a section kind: the generic
+            # branch below reset `excluded_now` for it, which put the keyword
+            # list (and any Methods prose after it) back into the main-text
+            # count. count_words.py's M19 counter already keeps the state; this
+            # is the same rule for the deterministic scan.
+            continue
         if LENGTH_SECTION_BOUND_RE.match(heading) or \
-                LENGTH_MAIN_START_RE.match(heading) or LENGTH_KEYWORDS_RE.match(heading):
+                LENGTH_MAIN_START_RE.match(heading):
             kind = _length_section_kind(heading)
             if kind and kind in excludes:
                 excluded_now = True
@@ -4741,11 +4750,22 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
                                  "source_superscripts": n, "output_superscripts": got_sup[text]})
             elif text not in got_sup and text in " ".join(out_text.values()):
                 # The paragraph was merged into a longer one by a DECLARED
-                # re-wrap: the exact paragraph key cannot exist any more, and
-                # reporting it as "superscripts dropped" refused a compliant
-                # package. The parity gate above already checks the re-wrap's
-                # content; do not also require the old paragraph boundary.
-                if declared_rewrap_sources.get(text, 0):
+                # re-wrap: the exact paragraph key cannot exist any more, so
+                # require the superscripts on the declared OUTPUT paragraph
+                # instead of demanding the old paragraph boundary. Skipping the
+                # check outright let a re-wrap drop a marker and still pass.
+                merged_outputs = [
+                    _template_norm_para(e.get("output") or "")
+                    for e in rewraps
+                    if _template_norm_para(e.get("source") or "") == text
+                    and e.get("output")]
+                if merged_outputs:
+                    got = max(got_sup.get(o, 0) for o in merged_outputs)
+                    if got >= n:
+                        continue
+                    sub_lost.append({"file": doc.name, "text": text[:80],
+                                     "source_superscripts": n,
+                                     "output_superscripts": got})
                     continue
                 sub_lost.append({"file": doc.name, "text": text[:80],
                                  "source_superscripts": n, "output_superscripts": 0})

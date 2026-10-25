@@ -1067,54 +1067,95 @@ def venue_profile_search_dirs(root=None) -> list:
 
 
 def available_venue_profiles(root=None) -> dict:
-    """Every venue profile this pipeline can see: id -> descriptor.
+    """Every venue profile this pipeline can see: FILE-NAME id -> descriptor.
 
-    Root-local files win over shipped files of the same id, and both win over
-    the built-in copies. A file that does not parse or does not validate is
+    Resolution is by file name (`load_venue_profile`), so the listing is too: a
+    profile is shown under the id `set-venue <id>` will actually accept. A file
+    whose JSON declares a different internal id is listed under its file name
+    with a `note`; the declared id is carried by `VenueProfile` only after the
+    file-name override, because the README makes the file name authoritative.
+
+    Root-local files win over shipped files of the same file name, and both win
+    over the built-in copies. A file that does not parse or does not validate is
     listed with its `error` instead of being silently ignored, because
     `set-venue --list` is where the operator finds out why an id is missing.
     """
     found: dict = {}
+    declared_owner: dict = {}
+    seen_dirs = set()
     for d in venue_profile_search_dirs(root):
         if not d.is_dir():
             continue
+        try:
+            dir_key = str(Path(d).resolve())
+        except OSError:                                       # pragma: no cover -- d exists
+            dir_key = str(d)
+        if dir_key in seen_dirs:
+            continue
+        seen_dirs.add(dir_key)
         for path in sorted(d.glob(f"*{VENUE_PROFILE_SUFFIX}")):
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as e:
-                found.setdefault(path.stem, {"id": path.stem, "label": path.stem,
-                                             "error": f"{path}: not readable JSON: {e}",
-                                             "origin": str(d), "path": str(path)})
+            key = path.stem.lower()
+            if key in found and Path(str(found[key].get("path") or "")).parent != path.parent:
+                # The same FILE NAME in a lower-precedence directory is the
+                # normal post-setup state: the root carries a frozen copy and
+                # the checkout carries the shipped one. The root copy wins.
                 continue
             origin = f"root: {d}" if root is not None and \
                 Path(d) == Path(root) / VENUE_PROFILES_DIRNAME else f"shipped: {d}"
             try:
-                profile = VenueProfile(data, origin=origin, path=path)
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as e:
+                found.setdefault(key, {"id": key, "label": key,
+                                       "error": f"{path}: not readable JSON: {e}",
+                                       "origin": origin, "path": str(path)})
+                continue
+            declared = (str(data.get("id") or "").strip().lower()
+                        if isinstance(data, dict) else "")
+            # The FILE NAME is what resolves, so it is the profile's identity:
+            # overriding a disagreeing internal id here keeps the listing and
+            # `set-venue` on one rule (a hand-added my-venue.json declaring id
+            # "other" used to be advertised as "other", which then resolved to
+            # nothing). `set-venue --profile` still refuses the mismatch when a
+            # file is deliberately installed.
+            try:
+                profile = VenueProfile(
+                    dict(data, id=key) if isinstance(data, dict) else data,
+                    origin=origin, path=path)
             except VenueProfileError as e:
-                found.setdefault(path.stem, {"id": path.stem, "label": path.stem,
-                                             "error": str(e), "origin": origin,
-                                             "path": str(path)})
+                found.setdefault(key, {"id": key, "label": key,
+                                       "error": str(e), "origin": origin,
+                                       "path": str(path)})
                 continue
-            if profile.id in found and found[profile.id].get("path") != str(path):
-                # Two files claiming one id: the later one is loadable by
-                # nothing under that id, so it is listed under its own stem
-                # with the reason. A guaranteed-free key is used even when the
-                # stem equals the winner's id, or `setdefault` would hide the
-                # duplicate entirely.
-                key = path.stem
-                if key in found:
-                    key = f"{path.stem}#duplicate-{len(found)}"
-                found[key] = {
-                    "id": path.stem, "label": path.stem,
-                    "error": (f"{path}: the profile id {profile.id!r} is already provided by "
-                              f"{found[profile.id].get('path') or 'another file'}; rename one id "
-                              f"or remove the duplicate"),
-                    "origin": origin, "path": str(path)}
-                continue
-            found.setdefault(profile.id, {"id": profile.id, "label": profile.label,
-                                          "description": profile.description,
-                                          "origin": origin, "path": str(path),
-                                          "default_journal": profile.default_journal})
+            descriptor = {"id": key, "label": profile.label,
+                          "description": profile.description,
+                          "origin": origin, "path": str(path),
+                          "default_journal": profile.default_journal}
+            if declared and declared != key:
+                descriptor["note"] = (
+                    f"the file declares id {declared!r}; the file name {path.name!r} is "
+                    f"the id `set-venue` resolves -- rename the file to {declared}.json "
+                    f"or fix its id")
+                owner = declared_owner.get(declared)
+                if owner is not None and owner[1].parent == path.parent and owner[0] != key:
+                    # Two files in the SAME directory declaring one id: name the
+                    # duplicate instead of hiding it. The file whose NAME is the
+                    # declared id is the rightful owner; the other one is the
+                    # duplicate.
+                    if key == declared:
+                        prior = found.get(owner[0])
+                        if prior is not None and not prior.get("error"):
+                            prior["error"] = (
+                                f"{path}: the profile id {declared!r} is also declared by "
+                                f"{owner[1]}; rename one id or remove the duplicate")
+                        declared_owner[declared] = (key, path)
+                    else:
+                        descriptor["error"] = (
+                            f"{path}: the profile id {declared!r} is already provided by "
+                            f"{found.get(owner[0], {}).get('path') or owner[1]}; rename one "
+                            f"id or remove the duplicate")
+            if declared and declared not in declared_owner:
+                declared_owner[declared] = (key, path)
+            found.setdefault(key, descriptor)
     for vid, data in BUILTIN_VENUE_PROFILES.items():
         # NOT setdefault(): its default argument is evaluated EAGERLY, so a
         # shipped profile whose id is already in `found` could still raise
@@ -1147,22 +1188,14 @@ def load_venue_profile(venue_id, root=None) -> VenueProfile:
             raise VenueProfileError(f"{path}: not readable JSON: {e}")
         origin = "root-local profile" if root is not None and \
             Path(d) == Path(root) / VENUE_PROFILES_DIRNAME else "shipped profile"
+        # Resolution is by FILE NAME. A hand-added file whose JSON declares a
+        # different internal id must not resolve under that id (the old second
+        # pass did, while `set-venue --profile` refused the same file), and the
+        # id the root records must be the one later commands can resolve, so the
+        # file name is the profile's identity.
+        if isinstance(data, dict):
+            data = dict(data, id=vid)
         return VenueProfile(data, origin=origin, path=path)
-    # A hand-authored file may be named differently from its internal `id`
-    # (`my-venue.json` with `"id": "myvenue"`): `set-venue --list` advertises
-    # the id, so resolution must accept it too. The filename stays the first
-    # (exact) match; this pass is only a fallback.
-    for d in venue_profile_search_dirs(root):
-        for path in sorted(Path(d).glob(f"*{VENUE_PROFILE_SUFFIX}")):
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            if str(data.get("id") or "").strip().lower() != vid:
-                continue
-            origin = "root-local profile" if root is not None and \
-                Path(d) == Path(root) / VENUE_PROFILES_DIRNAME else "shipped profile"
-            return VenueProfile(data, origin=origin, path=path)
     if vid in BUILTIN_VENUE_PROFILES:
         return VenueProfile(BUILTIN_VENUE_PROFILES[vid], origin="built-in")
     raise VenueProfileError(f"unknown venue {venue_id!r}", unknown=True)

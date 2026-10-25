@@ -64,6 +64,22 @@ HYPHEN_COMPOUNDS = (("copy-number", "copy number"), ("single-cell", "single cell
                     ("whole-genome", "whole genome"), ("long-read", "long read"),
                     ("short-read", "short read"))
 
+# Function words that introduce the compound's NOUN use ("the copy number of a
+# locus", "a single cell was counted") rather than an attributive noun. The
+# fixer must leave those open: the rule's own documentation promises the noun
+# use is untouched, and a mechanical rewrite cannot know a following open-class
+# word is a noun, but these are unambiguous. The coordinators "and"/"or" stay
+# here on purpose: "a single cell and its nucleus" coordinates nouns, and a
+# mechanical rewrite of it ("a single-cell and its nucleus") would corrupt the
+# text; a coordinated ATTRIBUTIVE use ("single cell and bulk RNA-seq") is a
+# reported-only gap rather than a safe automatic edit.
+HYPHEN_NOUN_FOLLOWERS = ("of", "the", "a", "an", "and", "or", "in", "on", "at",
+                         "to", "for", "with", "from", "by", "as", "that", "which",
+                         "who", "whose", "is", "are", "was", "were", "be", "been",
+                         "being", "has", "have", "had", "does", "do", "did", "can",
+                         "could", "may", "might", "must", "should", "would", "will",
+                         "per")
+
 # Words that make a repeated phrase part of the document scaffolding rather than
 # a distinctive name ("Supplementary Table S1 three times in a paragraph").
 REPETITION_STOPWORDS = {"supplementary", "note", "figure", "table", "section", "extended",
@@ -100,7 +116,12 @@ UNIT_RE = re.compile(
 # The exponent is part of the number: reading `1.2e-4` as the two numbers `1`
 # and `4` put values the author never wrote into the M30 numbers ledger (and
 # left the real p-value out of it).
-NUMBER_RE = re.compile(r"(?<![\w.])(\d[\d,]*(?:\.\d+)?(?:[eE][+-]?\d+)?)(?![\w])")
+NUMBER_RE = re.compile(
+    # Thin/NBSP separators are thousands separators too (`12 000` with U+2009
+    # must be one number, not 12 and 000). The exponent sign may be the
+    # typographic minus Word/journals emit, or `1.2e−4` splits into 1 and 4.
+    r"(?<![\w.])(\d[\d,\u2009\u202f\u00a0]*(?:\.\d+)?"
+    r"(?:[eE][+\-\u2212]?\d+)?)(?![\w])")
 
 # --------------------------------------------------------------------------
 # Spelled-out numbers as NUMERIC artifacts (2026-10-17).
@@ -453,7 +474,8 @@ def _table_row_like(text: str) -> bool:
 ABSTRACT_HEAD_RE = re.compile(r"^\s*(?:abstract|summary)\s*:?\s*$", re.I)
 KEYWORDS_HEAD_RE = re.compile(r"^\s*(?:key\s?words?|keywords)\b", re.I)
 METHODS_HEAD_RE = re.compile(
-    r"^\s*(?:\d+[.)]?\s*)?(?:materials and methods|online methods|methods)\s*$", re.I)
+    r"^\s*(?:\d+[.)]?\s*)?(?:materials\s*(?:&|and)\s*methods|online methods|methods)"
+    r"\s*$", re.I)
 BODY_HEAD_RE = re.compile(
     r"^\s*(?:\d+[.)]?\s*)?(?:introduction|results|discussion|conclusions?|background|"
     r"related work)\s*:?\s*$", re.I)
@@ -2142,7 +2164,9 @@ def _simple_table(text: str):
 
 def _cell_number(cell: str):
     """The float a table cell carries, or None (empty/NaN/non-numeric)."""
-    v = str(cell or "").replace(",", "").replace("$", "").replace("%", "").strip()
+    v = (str(cell or "").replace(",", "").replace("$", "").replace("%", "")
+         .replace("\u2009", "").replace("\u202f", "").replace("\u00a0", "")
+         .replace("\u2212", "-").strip())
     if v.lower() in ("", "nan", "na", "n/a", "-"):
         return None
     try:
@@ -2718,17 +2742,37 @@ def term_repetition_rows(paras: list, is_ref: list) -> list:
     return rows
 
 
-def variant_rows(paras: list, is_ref: list) -> list:
-    """FMT-T8d (US/UK spelling) and FMT-T8e (attributive hyphenation)."""
+def variant_rows(paras: list, is_ref: list, field_spans: list = None) -> list:
+    """FMT-T8d (US/UK spelling) and FMT-T8e (attributive hyphenation).
+
+    `field_spans` (per-paragraph live-field result ranges) marks a row whose
+    offending occurrence the fixer is forbidden to edit: the row is reported
+    as field-held rather than mechanical, so the fixer's self-verification does
+    not demand an edit it must refuse.
+    """
     rows = []
     prose = [(i, t) for i, t in enumerate(paras)
              if not (i < len(is_ref) and is_ref[i])]
+
+    def field_held(i, start, end) -> bool:
+        if not field_spans or i >= len(field_spans):
+            return False
+        spans = field_spans[i]
+        return bool(spans) and in_field_result(spans, start, end)
+
     targets = spelling_minority_targets([t for _i, t in prose])
     for a, b in SPELLING_PAIRS:
         ca = sum(len(re.findall(rf"\b{re.escape(a)}\b", t, re.I)) for _i, t in prose)
         cb = sum(len(re.findall(rf"\b{re.escape(b)}\b", t, re.I)) for _i, t in prose)
         if ca and cb:
             target = targets.get(a) or targets.get(b) or ""
+            minority = (a if target == b else b) if target else ""
+            held = False
+            if minority:
+                held = any(
+                    field_held(i, m.start(), m.end())
+                    for i, t in prose
+                    for m in re.finditer(rf"\b{re.escape(minority)}\b", t, re.I))
             rows.append({"rule": "FMT-T8d", "severity": "medium",
                          "evidence": f"spelling variants in body text: {a!r} x{ca} and "
                                      f"{b!r} x{cb}"
@@ -2736,28 +2780,44 @@ def variant_rows(paras: list, is_ref: list) -> list:
                                         if ca == cb and target else ""),
                          "detail": "one spelling per submission (policy "
                                    "term_spelling='dominant' normalizes the minority form "
-                                   "outside the reference list)", "protected": False})
+                                   "outside the reference list)", "protected": held})
+    hy_noun_follow = "|".join(re.escape(w) for w in HYPHEN_NOUN_FOLLOWERS)
     for hy, split in HYPHEN_COMPOUNDS:
-        attr_split = sum(len(re.findall(rf"\b{re.escape(split)}(?=\s+[A-Za-z])", t))
-                         for _i, t in prose)
-        attr_hy = sum(len(re.findall(rf"\b{re.escape(hy)}(?=\s+[A-Za-z])", t))
-                      for _i, t in prose)
+        # Count only ATTRIBUTIVE uses. "the copy number of a locus" is the
+        # documented noun use and must not make the scanner demand a fix the
+        # fixer (correctly) refuses to apply.
+        split_re = re.compile(
+            rf"\b{re.escape(split)}(?=\s+(?!(?:{hy_noun_follow})\b)[A-Za-z])")
+        attr_split = sum(len(split_re.findall(t)) for _i, t in prose)
+        attr_hy = sum(len(re.findall(
+            rf"\b{re.escape(hy)}(?=\s+(?!(?:{hy_noun_follow})\b)[A-Za-z])", t))
+            for _i, t in prose)
         if attr_split and attr_hy:
+            # The fixer rewrites the open form; an open-form occurrence it must
+            # leave inside a field result keeps this rule alive, so the row is
+            # field-held rather than mechanical.
+            held = any(field_held(i, m.start(), m.end())
+                       for i, t in prose for m in split_re.finditer(t))
             rows.append({"rule": "FMT-T8e", "severity": "low",
                          "evidence": f"attributive {hy!r} x{attr_hy} vs {split!r} "
                                      f"x{attr_split} before a noun",
                          "detail": "a compound modifier is hyphenated when it precedes the "
                                    "noun (policy term_hyphenation='dominant' hyphenates the "
-                                   "minority attributive form)", "protected": False})
+                                   "minority attributive form)", "protected": held})
     return rows
 
 
 def text_style_rows(paras: list, is_ref: list = None, headings: list = None,
-                    in_container: list = None, in_area: list = None) -> list:
+                    in_container: list = None, in_area: list = None,
+                    field_spans: list = None) -> list:
     """All FMT-T8/T9 rows for a document's paragraphs.
 
     Every row carries `tier` (see FINDING_TIER_RULES): finding-tier rows must be
     decided against their own bar, advisory rows are recorded and disposed.
+    `field_spans` is the per-paragraph live-field result ranges (the same
+    `field_result_text_ranges` the fixer fences edits with): a spelling or
+    hyphenation occurrence the fixer may not touch must make its row
+    field-held, never mechanical.
     """
     is_ref = list(is_ref or [False] * len(paras))
     prose = [t for i, t in enumerate(paras) if not (i < len(is_ref) and is_ref[i])]
@@ -2767,7 +2827,7 @@ def text_style_rows(paras: list, is_ref: list = None, headings: list = None,
         rows.append(cit)
     rows += nested_parentheses_rows(paras)
     rows += term_repetition_rows(paras, is_ref)
-    rows += variant_rows(paras, is_ref)
+    rows += variant_rows(paras, is_ref, field_spans=field_spans)
     rows += long_text_rows(paras, is_ref, section_kinds(paras, headings),
                            headings=headings, in_container=in_container,
                            in_area=in_area)

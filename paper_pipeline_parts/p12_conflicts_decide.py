@@ -374,11 +374,13 @@ def _merge_judge_conflicts(mechanical: list, llm: list) -> list:
         if key in index:
             merge_into(merged[index[key]], c)
             continue
-        # An LLM row (no subject) attaches to the unique same-base conflict when
-        # there is one; two mechanical subjects for the same base stay separate.
+        # An LLM row attaches only to the UNIQUE same-base conflict. A
+        # subjectless row among two mechanical subjects used to merge into the
+        # first one, overwriting its summary/severity and leaving the other
+        # untouched; refusing is a visible extra row, merging is silent harm.
         candidates = [i for i, x in enumerate(merged)
                       if base_of(x) == base and (not x.get("subject") or not subject)]
-        if candidates and (not subject or len(candidates) == 1):
+        if len(candidates) == 1:
             merge_into(merged[candidates[0]], c)
             continue
         index[key] = len(merged)
@@ -969,7 +971,12 @@ def cmd_conflicts(args) -> None:
               + (" ".join(cmd) if cmd else "none (deterministic check only)"))
         rounds = ([int(args.round)] if getattr(args, "round", None)
                   else [r for r in range(1, ctx.rounds_count() + 1)
-                        if round_judge_opinions(ctx, r)])
+                        # A DONE judge sheet is the entry condition, not the
+                        # extraction: a round whose comparisons cannot be read
+                        # must reach write_round_judge_conflicts' empty-audit
+                        # guard instead of disappearing as "nothing to audit".
+                        if any(rec.get("status") == "done"
+                               for rec in ctx.runs(kind="judge", round_no=r))])
         if not rounds:
             print("[conflicts] no round with judge sheets; nothing to audit")
             return
@@ -3663,7 +3670,9 @@ INLINE_CITATION_RE = re.compile(
     # of the citation stem, so "COVID-19" is not a citation of reference 19
     # (`[A-Za-z\-]{2,}` used to absorb the trailing hyphen and bind the 19).
     r"(?<![A-Za-z])((?!(?:grch|chm|python|hg|mm)\d)[A-Za-z][A-Za-z\-]{1,}[A-Za-z])"
-    r"(\d{1,2})(?![\d.])",
+    # A citation glued to the sentence period ("omics43.") is the usual form;
+    # reject only a digit or a decimal continuation, not the full stop.
+    r"(\d{1,2})(?!\d|\.\d)",
     re.I,
 )
 SINGLE_CELL_RE = re.compile(r"(?i)\bsingle[- ]cell\b")
@@ -3921,6 +3930,17 @@ def scan_form_failure_claims(root: Path, texts=None, limit: int = 8) -> list:
     return rows
 
 
+def _pooled_table_caption(caption_file: Path) -> str:
+    """The caption text of a pooled-table source, standard and float forms.
+
+    The standard `\\caption{...}` is the common form; reading only
+    `\\captionof` left the row's quote empty and skipped the caption comparison.
+    """
+    text = Path(caption_file).read_text("utf-8", "replace")
+    return " ".join(_latex_command_bodies(text, "caption")
+                    + _latex_command_bodies(text, "captionof"))
+
+
 def scan_pooled_table_mismatches(root: Path, limit: int = 24) -> list:
     """PKG-15: a pooled statistics table computed on fewer units than it claims."""
     root = Path(root)
@@ -3988,8 +4008,7 @@ def scan_pooled_table_mismatches(root: Path, limit: int = 24) -> list:
                 if cq is None:
                     continue
             try:
-                caption = " ".join(_latex_command_bodies(cq.read_text("utf-8", "replace"),
-                                                         "captionof"))
+                caption = _pooled_table_caption(cq)
             except OSError:
                 continue
             break
@@ -4607,8 +4626,37 @@ def is_structural_reference_line(before: str) -> bool:
 
 
 _FACT_LABEL_RE = re.compile(
-    r"\b(?:fig(?:ure)?|table|section|eq(?:uation)?|appendix|supp(?:lementary)?|"
-    r"data|code)\.?\s*[A-Za-z]?\d+[A-Za-z0-9.-]*", re.I)
+    r"\b(?:fig(?:ure)?|table|section|eq(?:uation)?|appendix|supp(?:lementary)?)\.?\s*"
+    r"[A-Za-z]?\d+[A-Za-z0-9.-]*", re.I)
+# `Data S2` / `Code S1` are labels; `data 12` states a count. Requiring the
+# supplementary letter keeps the count in the fact test (the old shared pattern
+# stripped "data 12"/"code 45" and then saw no digit).
+_FACT_DATA_LABEL_RE = re.compile(r"\b(?:data|code)\.?\s*[ST]\d+[A-Za-z0-9.-]*", re.I)
+# Fallback when the formatter module is not beside the driver: a number word
+# *might* be a count, so keep the sentence (never silently delete a fact)
+# rather than guess it away.
+_SPELLED_NUMBER_RE = re.compile(
+    r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|"
+    r"thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|"
+    r"billion|trillion)\b", re.I)
+
+
+def _spelled_number_is_count(text: str) -> bool:
+    """True when `text` states a spelled-out COUNT (not "one of them", "no one").
+
+    The formatter's word-number ledger already decides this for the M30 scan;
+    sharing it keeps the PKG-2 fact test from calling every "one" a numeric
+    fact (which held an ordinary dangling-reference sentence for a rewrite and
+    blocked readiness on a sentence that carried no number).
+    """
+    mod = _format_module()
+    if mod is None or not hasattr(mod, "NUMBER_WORD_RE"):
+        return bool(_SPELLED_NUMBER_RE.search(text))
+    for m in mod.NUMBER_WORD_RE.finditer(text):
+        if mod._word_number_is_count(text, m.start(), m.end(), m.group(1).strip()):
+            return True
+    return False
 
 
 def sentence_carries_scientific_fact(text: str) -> bool:
@@ -4617,10 +4665,11 @@ def sentence_carries_scientific_fact(text: str) -> bool:
     The PKG-2 mechanical removal is a packaging repair, not a finding
     resolution: a sentence that carries a measured value, count, p-value or
     other numeric fact must be rewritten by the revision, not silently deleted.
-    A bare label (`Figure S3`, `Table 2`) is not a fact.
+    A bare label (`Figure S3`, `Table 2`, `Data S1`) is not a fact.
     """
     stripped = _FACT_LABEL_RE.sub(" ", str(text or ""))
-    return bool(re.search(r"\d", stripped))
+    stripped = _FACT_DATA_LABEL_RE.sub(" ", stripped)
+    return bool(re.search(r"\d", stripped) or _spelled_number_is_count(stripped))
 
 
 def _drop_reference_sentences_text(text: str, spans: list) -> tuple:
@@ -5535,11 +5584,50 @@ def package_contradiction_rows(root: Path, texts=None, limit: int = 20) -> list:
 # blocker: whether the fix is to ship the figure, embed it in the supplement, or
 # drop the citation is the author's call -- but the DELIVERED status must say it.
 PKG4_FIGURE_CITE_RE = re.compile(
-    r"(?i)\b(?:fig(?:ure)?s?\.?|supplementary\s+fig(?:ure)?s?\.?)\s*"
-    # The panel letter is CONSUMED, not captured: `Figure S3B` is a panel of
-    # Figure S3 (and `Fig. 1a` of Figure 1), so the label is the number. `(?!\w)`
-    # keeps `Figure 1st`/`S3beta` out.
-    r"(S?\d+)[a-z]?(?!\w)(?!\s*[-\u2013\u2014]\s*S?\d)")
+    r"(?i)\b(?P<kw>fig(?:ure)?s?\.?|supplementary\s+fig(?:ure)?s?\.?)\s*"
+    # A LIST after a PLURAL keyword is still one citation group: "Figures 2, 4
+    # and S2" cites three items, and the old single-label capture saw only 2.
+    # A singular "Fig. 2, 3 clusters" is a fig reference followed by a count,
+    # not a list, so the caller passes the keyword's plurality to the splitter.
+    # The token pattern consumes a panel letter but not an ordinal suffix, and
+    # refuses a digit continuation or a thousands grouping ("Figure 2 and 3,000
+    # cells" must not yield labels 3 and 000).
+    r"(?P<labels>(?:S?\d+(?!(?:st|nd|rd|th)\b)(?!\d)(?!,\d{3}(?!\d))[a-z]?)"
+    r"(?:\s*(?:,|and|&|;|\u2013|-)\s*S?\d+(?!(?:st|nd|rd|th)\b)(?!\d)"
+    r"(?!,\d{3}(?!\d))[a-z]?)*)")
+
+
+def _pkg4_cited_labels(expr: str, plural: bool = True) -> list:
+    """The figure labels one citation expression names, in written order.
+
+    Comma/and lists yield each token; a same-prefix numeric range expands
+    ("Figures 2-4" cites 2, 3 and 4), capped so a typo cannot enumerate a
+    thousand labels. A comma-separated token is a LIST item only when the
+    keyword is plural or another separator follows it: "Fig. 2, 3 clusters"
+    is a citation of Figure 2 followed by the count 3, not a two-item list.
+    """
+    out = []
+    # Keep the separators so a comma can be told apart from "and"/"&"/";".
+    parts = re.split(r"\s*(,|and\b|&|;)\s*", str(expr or ""), flags=re.I)
+    for i in range(0, len(parts), 2):
+        token = parts[i].strip()
+        if not token:
+            continue
+        sep = parts[i - 1].strip().lower() if i else ""
+        next_sep = parts[i + 1].strip().lower() if i + 1 < len(parts) else ""
+        if sep == "," and not plural and not next_sep:
+            continue
+        m = re.fullmatch(
+            r"(?i)(S?)(\d+)[a-z]?\s*[\u2013-]\s*(S?)(\d+)[a-z]?", token)
+        if m and m.group(1).lower() == m.group(3).lower():
+            lo, hi = int(m.group(2)), int(m.group(4))
+            if lo <= hi and hi - lo <= 50:
+                out.extend(f"{(m.group(1) or '').lower()}{n}" for n in range(lo, hi + 1))
+                continue
+        out.extend(lab.lower() for lab in (
+            m.group(1) for m in re.finditer(
+                r"(?i)(S?\d+)(?!(?:st|nd|rd|th)\b)[a-z]?", token)))
+    return list(dict.fromkeys(out))
 PKG4_FIGURE_FILE_RE = re.compile(r"(?i)(?:^|[^a-z0-9])(?:supp(?:lementary)?[ _-]?)?"
                                  r"(?:fig(?:ure)?\.?[ _-]?)(S?\d+[a-z]?)(?![0-9])")
 PKG4_FIGURE_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".eps", ".svg", ".pdf",
@@ -5619,8 +5707,9 @@ def package_display_item_rows(root: Path, areas=None, limit: int = 20) -> list:
             continue
         for i, line in enumerate(lines or [], 1):
             for m in PKG4_FIGURE_CITE_RE.finditer(line):
-                label = m.group(1).lower()
-                cited.setdefault(label, (rel, i, m.group(0)))
+                plural = bool(re.search(r"(?i)fig(?:ure)?s\.?$", m.group("kw").strip()))
+                for label in _pkg4_cited_labels(m.group("labels"), plural=plural):
+                    cited.setdefault(label, (rel, i, m.group(0)))
     for label, (rel, line, text) in sorted(cited.items()):
         if label in carried_labels:
             continue
@@ -6850,7 +6939,11 @@ def package_readiness(final_clean: dict, residuals: dict = None,
     _atc = _atc_mode(author_to_complete)
     for it in ((residuals or {}).get("items") or []):
         it = str(it)
-        if "hand-off marker" not in it:
+        # `collect_residuals` writes the unknown-state row as the hyphenated
+        # "hand-off-marker scan FAILED"; the old space-only filter let that
+        # blocker through, so readiness said submission_ready while
+        # certification refused the same package.
+        if "hand-off marker" not in it and "hand-off-marker" not in it:
             continue
         if _atc == "document":
             findings.append({
@@ -7119,9 +7212,16 @@ def readiness_gate_problems(readiness: dict, require_ready: bool) -> list:
     if not require_ready or (readiness or {}).get("submission_ready"):
         return []
     findings = (readiness or {}).get("findings") or []
-    return [f"{len(findings)} package-level finding(s) in the published package "
+    # Only non-advisory findings gate; naming an advisory ("reported, never
+    # gated") rule as the refusal reason, and counting it in the total, made
+    # the message describe a different decision than the one computed.
+    blocking = [f for f in findings if not f.get("advisory")]
+    if not blocking:
+        return []
+    return [f"{len(blocking)} package-level finding(s) in the published package "
             f"(--require-ready): "
-            + "; ".join(f"{f.get('rule')} on {f.get('document')}" for f in findings[:4])]
+            + "; ".join(f"{f.get('rule')} on {f.get('document') or '(package)'}"
+                        for f in blocking[:4])]
 
 
 def collect_residuals(ctx: Ctx) -> dict:
@@ -7290,7 +7390,7 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
     L.append("## 1. Final answer")
     L.append("")
     pin = final["pin"] or {}
-    L.append(f"The round-{ctx.rounds_count()} champion is **{final['stored'].get('champion')}**, "
+    L.append(f"The round-{final['round']} champion is **{final['stored'].get('champion')}**, "
              f"pinned at `{final['stored'].get('pin_path')}` "
              f"(digest `{str(pin.get('digest'))[:16]}…`).")
     L.append("")
@@ -7965,6 +8065,23 @@ def cmd_sync_code(args) -> None:
         s = src / name
         if not s.is_dir():
             die(f"sync-code: the maintained tree has no {name}/; refusing a partial bundle")
+        try:
+            same = asset_dir_digest(src, name) == asset_dir_digest(root, name)
+        except OSError:
+            same = False
+        if same:
+            unchanged.append(name + "/")
+            continue
+        copy_asset_dirs(src, root, names=(name,))
+        changed.append(name + "/")
+    # The skills pack is frozen and manifest-recorded too (F132). A trimmed
+    # checkout may legitimately omit it (module_manifest records None), so a
+    # missing maintained pack is not a partial bundle; a root that lacks it
+    # when the maintained tree has it is brought up to date.
+    for name in PIPELINE_SKILL_ASSET_DIRS:
+        s = src / name
+        if not s.is_dir():
+            continue
         try:
             same = asset_dir_digest(src, name) == asset_dir_digest(root, name)
         except OSError:

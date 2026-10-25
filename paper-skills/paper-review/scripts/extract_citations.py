@@ -83,7 +83,7 @@ def is_non_manuscript(name: str) -> bool:
     return bool(_NON_MANUSCRIPT_RE.search(base))
 
 
-NUM_CIT_RE = re.compile(r"\[(\d{1,3}(?:\s*[,;–-]\s*\d{1,3})*)\]")
+NUM_CIT_RE = re.compile(r"\[(\d{1,4}(?:\s*[,;–-]\s*\d{1,4})*)\]")
 AY_CIT_RE = re.compile(
     r"(?P<a1>[A-Z][A-Za-z'\-]+)\s+et al\.?\s*,?\s*\(?(?P<y1>(?:19|20)\d{2}[a-z]?)\)?"
     r"|(?P<a2>[A-Z][A-Za-z'\-]+)\s+(?:and|&)\s+(?P<a2b>[A-Z][A-Za-z'\-]+)\s*,?\s*"
@@ -103,7 +103,10 @@ SUSPECT_PRECEDERS = re.compile(
 # `[\].)]`). Without it a `1) Smith J. Nature 2019.` list parsed to ZERO
 # entries, so the orphan/uncited/duplicate checks silently fell back to the
 # cross-file union and the M2 inventory was wrong for that style.
-REF_ENTRY_RE = re.compile(r"^\s*\[?(\d{1,3})[\].)]\s*(.*)$")
+# A bracket may be omitted, and a following non-digit may be glued to the
+# number ("[1]Smith"); a DIGIT after the separator is a decimal, not a new
+# entry ("12.5 mg was given" is not reference 12).
+REF_ENTRY_RE = re.compile(r"^\s*\[?(\d{1,4})[\].)](?!\d)\s*(.*)$")
 BIB_ENTRY_RE = re.compile(r"@\w+\s*\{\s*([^,]+),")
 # LaTeX: the call-out is a KEY inside a \cite-family macro (`\cite`, `\citep`,
 # `\citet`, `\citealp`, `\textcite`, `\parencite`, `\autocite`, `\nocite`, ...),
@@ -463,6 +466,24 @@ def main():
         if e["num"] is not None:
             lists_by_file[e["file"]].append(e["num"])
     all_listed = {n for nums in lists_by_file.values() for n in nums}
+    # A bracketed publication year or year range ("[2015-2020]") is prose, not a
+    # numeric call-out. NUM_CIT_RE accepts four digits for reference numbers
+    # >999; without this guard every bracketed year became a phantom citation
+    # (six orphan call-outs, an order violation, and an inflated max_cited). A
+    # year-shaped number that IS in this document's reference list is a real
+    # call-out and is kept.
+    kept_callouts = []
+    for c in callouts:
+        if c.get("style") == "numeric":
+            space = (set(lists_by_file[c["file"]]) if c["file"] in lists_by_file
+                     else all_listed)
+            kept = [r for r in c["refs"]
+                    if not (isinstance(r, int) and 1900 <= r <= 2099 and r not in space)]
+            if not kept:
+                continue
+            c["refs"] = kept
+        kept_callouts.append(c)
+    callouts = kept_callouts
     cited_by_file = defaultdict(list)
     for c in callouts:
         for r in c["refs"]:

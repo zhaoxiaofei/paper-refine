@@ -136,11 +136,18 @@ def rewrite_text_spans(para: str, edits: list) -> tuple:
         local = here
         here += len(old_text)
         if raw is None:
-            # The break is kept unless an edit's span covers its position.
-            covered = next((r for s, e, r, is_edit in keep
-                            if is_edit and s <= local < e), None)
-            if covered:
-                pieces.append('<w:t xml:space="preserve">' + esc(covered) + "</w:t>")
+            # The break is consumed by an edit that covers its position. An
+            # EMPTY replacement consumes it too (the old `if covered` treated
+            # "" as "no edit" and left the break in place); and a replacement
+            # that began inside the preceding text fragment was already emitted
+            # by `carry`, so emit it here only when the edit begins AT the
+            # break, never twice.
+            cover = next(((s, e, r) for s, e, r, is_edit in keep
+                          if is_edit and s <= local < e), None)
+            if cover is not None:
+                s, _e, repl = cover
+                if repl and s == local:
+                    pieces.append('<w:t xml:space="preserve">' + esc(repl) + "</w:t>")
             else:
                 pieces.append(para[start_at:end_at])
             continue
@@ -1097,7 +1104,13 @@ def caption_block_ranges(paras: list, areas: list = None, containers=(),
 # signature compare in `fix_package`) rejects the file if it does not.
 CAPTION_MERGE_REFUSE_RE = re.compile(
     r"<w:(?:drawing|pict|object|txbxContent|footnoteReference|"
-    r"endnoteReference|commentReference|sdt|ins|del|moveFrom|moveTo|cellIns|cellDel)"
+    r"endnoteReference|commentReference|sdt|ins|del|moveFrom|moveTo|cellIns|cellDel|"
+    # The merge keeps the label's pPr and drops the continuation's, so any
+    # tracked property change there is revision history the "mechanical" fix
+    # would silently delete. Refuse every *PrChange (and the table-cell merge
+    # mark) the pipeline's own OTHER_REVISION_MARK_RE treats as a revision.
+    r"pPrChange|rPrChange|tblPrChange|trPrChange|tcPrChange|sectPrChange|"
+    r"numberingChange|cellMerge)"
     r"(?=[\s/>])")
 JOIN_SEP = " "
 # CT_RPr child order (ECMA-376 17.3.2): the merge's own overrides are spliced
@@ -1293,7 +1306,14 @@ def _caption_para_split(para: str):
     if head_end <= 0:
         return None
     head, inner = para[:head_end], para[head_end:]
-    ppr = ppr_of(para) or ""
+    ppr = ppr_of(para)
+    if ppr is None:
+        # No pPr at all is the normal body shape. A `<w:pPr` that ppr_of could
+        # not balance is not: falling through would treat the malformed block
+        # as content and drop it from the merged paragraph.
+        if inner.startswith("<w:pPr"):
+            return None
+        ppr = ""
     if ppr and not inner.startswith(ppr):
         return None
     content = inner[len(ppr):]
@@ -2113,6 +2133,7 @@ def stray_empty_paragraph_groups(paras: list, policy: dict, xml: str = None) -> 
                 and not has_drawing(paras[i][2])
                 and not has_field(paras[i][2])                # a field run is content
                 and not PAGEBREAK_RE.search(paras[i][2])       # FMT-S1 owns breaks
+                and "<w:sectPr" not in paras[i][2]             # a section break is layout
                 for i in range(len(paras))]
 
     def heading_adjacent(i: int) -> bool:
@@ -2193,7 +2214,11 @@ _SPACE_BEFORE_PUNCT_RE = re.compile(r" +(?=[,.;:!?])")
 _SPACE_AFTER_OPEN_RE = re.compile(r"(?<=[([])[ \t]+")
 _ZERO_WIDTH_RE = re.compile("[\u200b\u200e\u200f\u2060\ufeff]")
 _MATH_LINE_RE = re.compile(r"[=∑∈∉∕√±×÷≤≥≈∝∫∞]")
-_MISSING_SPACE_RE = re.compile(r"(?<![A-Za-z0-9/])([a-z]{2,}),([a-z]{2,})\b")
+_MISSING_SPACE_RE = re.compile(
+    # A URL's query/fragment is not prose: `?x=ab,cd`, `#ab,cd` and `&ab,cd`
+    # are one address, so the character before the lowercase run excludes the
+    # URL delimiters too (the original class covered only a path segment).
+    r"(?<![A-Za-z0-9/=&#?])([a-z]{2,}),([a-z]{2,})\b")
 
 # FMT-G4 (2026-10-15): a comma with NO space after it inside a list of names,
 # versions or keywords. `_MISSING_SPACE_RE` above covers the lowercase shape
@@ -2394,7 +2419,11 @@ def hygiene_spans(para: str) -> list:
         sep = text[m.end(1):second_start]
         start, end, repl = m.start(), m.end(), m.group(1)
         if "\n" in sep or "\r" in sep:
-            start = second_start - (len(sep) - (sep.rfind("\n") + 1))
+            # Delete the second word only; the whitespace after the break is
+            # FMT-P4's span. Starting at the space made both spans share a
+            # start, and the overlap policy (narrower wins) then dropped G1
+            # while the summary still claimed the duplicate was cleaned.
+            start = second_start
             end = m.end()
             while end < len(text) and text[end] in " \t":
                 end += 1              # the space after the deleted duplicate
@@ -2837,6 +2866,14 @@ def drawing_geometry_rows(part_xml: str, rels: dict, sizes: dict, doc: str,
         for m in re.finditer(r"<w:(?:drawing|pict)(?=[\s/>]).*?</w:(?:drawing|pict)>",
                              para, re.S):
             block = m.group(0)
+            # A GROUP drawing has one canvas extent plus a geometry per child;
+            # the first child's pixel ratio says nothing about the other
+            # extents. Rewriting every `a:ext` from that ratio squashed the
+            # portrait panels of a grouped figure, so skip the group (the
+            # visual check owns composite geometry).
+            if re.search(r"<wpg:(?:wgp|grpSp)(?=[\s/>])", block) or \
+                    "drawingml/2006/wordprocessingGroup" in block:
+                continue
             # A 90/270-degree rotation swaps the displayed axes: the extent
             # cannot be compared with the source ratio directly, so skip a
             # deliberately rotated drawing instead of "repairing" it.
@@ -3958,7 +3995,11 @@ def _marker_range_numbers(a: int, b: int) -> list:
     endpoint SET and the same CAP (80), so a one-number cluster and an 81-200
     range read the same on both sides.
     """
-    if 1000 <= a and b <= 2999:
+    if 1900 <= a <= 2099 and 1900 <= b <= 2099:
+        # A plausible publication-year range ("2019-2020") is not a citation
+        # range. The old 1000..2999 window also swallowed expandable citation
+        # ranges such as 1000-1020 and backwards spans such as 2019-3, which
+        # the written-order endpoint rule must keep.
         return []
     if 0 < b - a <= _MARKER_RANGE_MAX:
         return list(range(a, b + 1))
@@ -5493,7 +5534,11 @@ def repair_reference_entries(xml: str, records: list) -> dict:
             elif rec.get("eprint") and "arxiv" in (rec.get("url") or "").lower():
                 locator = f"Preprint at https://arxiv.org/abs/{rec['eprint']}"
             elif rec.get("doi"):
-                locator = f"Preprint at https://doi.org/{rec['doi']}"
+                # A DOI is a locator, not evidence that the record is a
+                # preprint. Calling every DOI-bearing article "Preprint at"
+                # invented a publication type (and fired FMT-R5 on the text the
+                # repair itself added).
+                locator = f"Available at https://doi.org/{rec['doi']}"
             if locator and year:
                 ym = re.search(r"\(\s*" + re.escape(year) + r"\s*\)", entry)
                 if ym:

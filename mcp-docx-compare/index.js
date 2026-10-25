@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import * as z from 'zod/v4';
 import { allowedRoots, containsPath } from './containment.mjs';
+import { inFlightKey } from './derived-output.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -141,7 +142,10 @@ serveStdio(() => {
       // redline to a lower-fidelity fallback.
       const run = () => execFileAsync(COMPARER, argv,
                                       { timeout: 900_000, maxBuffer: 4 * 1024 * 1024 });
-      const key = absOutput || `${absOriginal}->${absRevised}`;
+      // Key on the path the comparer will actually write, not the input pair:
+      // two revised files that share a basename derive the same redline path.
+      // `inFlightKey` also case-folds it (a case-insensitive destination).
+      const key = inFlightKey(absOriginal, absRevised, absOutput);
       const previous = inFlight.get(key) ?? Promise.resolve();
       const next = previous.catch(() => {}).then(run);
       inFlight.set(key, next);

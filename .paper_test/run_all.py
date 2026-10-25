@@ -69,12 +69,18 @@ def suites() -> list:
     return sorted(p.name for p in HERE.glob("test_*.py"))
 
 
+def usage_error(message: str) -> None:
+    """A command-line misuse, exit 2 (the documented contract)."""
+    print(message, file=sys.stderr)
+    raise SystemExit(2)
+
+
 def run_dir_under(path: str = None) -> Path:
     """A fresh directory for logs/status/tmp (or the one the operator named)."""
     if path:
         p = Path(path).resolve()
         if p.exists() and any(p.iterdir()):
-            sys.exit(f"--logs {p} is not empty; choose a fresh directory")
+            usage_error(f"--logs {p} is not empty; choose a fresh directory")
         p.mkdir(parents=True, exist_ok=True)
         return p
     return Path(tempfile.mkdtemp(prefix="paper-tests-"))
@@ -180,20 +186,20 @@ def main() -> int:
         print("\n".join(all_suites))
         return 0
     if not all_suites:
-        sys.exit(f"no test_*.py suites under {HERE}")
+        usage_error(f"no test_*.py suites under {HERE}")
     todo = all_suites
     if args.only:
         wanted = {n if n.endswith(".py") else f"{n}.py" for n in args.only}
         unknown = sorted(wanted - set(all_suites))
         if unknown:
-            sys.exit(f"unknown suite(s): {', '.join(unknown)} (see --list)")
+            usage_error(f"unknown suite(s): {', '.join(unknown)} (see --list)")
         todo = [s for s in all_suites if s in wanted]
 
     engine = args.engine
     if engine == "auto":
         engine = "parallel" if parallel_available() else "python"
     if engine == "parallel" and not parallel_available():
-        sys.exit("--engine parallel was asked for, but `parallel` is not on PATH")
+        usage_error("--engine parallel was asked for, but `parallel` is not on PATH")
     # The operator asked for 32 parallel sessions by default (`-j 32`); the
     # default is capped only by the number of suites, so the box is never
     # oversubscribed beyond what there is to run. `-j N` caps it on a smaller

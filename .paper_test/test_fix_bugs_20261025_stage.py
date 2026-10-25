@@ -46,6 +46,18 @@ def load(name: str, path: Path):
     return mod
 
 
+def mini_docx(path: Path, body: str) -> Path:
+    """A minimal readable .docx whose document body is `body` (wordprocessingML)."""
+    ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    xml = (f'<w:document xmlns:w="{ns}"><w:body>{body}<w:sectPr/></w:body></w:document>')
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("[Content_Types].xml",
+                   '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/'
+                   'package/2006/content-types"/>')
+        z.writestr("word/document.xml", xml)
+    return path
+
+
 def cleanup():
     for d in TMPDIRS:
         shutil.rmtree(d, ignore_errors=True)
@@ -187,6 +199,57 @@ def test_docx_cli_rules():
               res["ok"] is None)
     finally:
         fmt.shutil.which = real_which
+    empty_path = scratch("stage_nopath_")
+    env = dict(os.environ, PATH=str(empty_path))
+    proc = subprocess.run([sys.executable, str(WS / "paper_docx_format.py"),
+                           "check-pdf", str(bad)],
+                          cwd=str(WS), text=True, capture_output=True, env=env)
+    check("the check-pdf CLI says NOT CHECKED and exits 1 without pdftotext",
+          proc.returncode == 1 and "NOT CHECKED" in proc.stdout,
+          f"rc={proc.returncode} out={proc.stdout[-120:]!r} err={proc.stderr[-120:]!r}")
+
+    # F015/F123: a spelling/hyphenation occurrence inside a live field result
+    # cannot be edited by the fixer; the row must be field-held, never
+    # mechanical, or fix_package rejects the whole file it just repaired.
+    def p(t):
+        return f'<w:p><w:r><w:t xml:space="preserve">{t}</w:t></w:r></w:p>'
+
+    field = ('<w:p><w:r><w:t>A field: </w:t></w:r>'
+             '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+             '<w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>'
+             '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+             '<w:r><w:t>colour</w:t></w:r>'
+             '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>')
+    d = scratch("stage_fieldspell_")
+    pkg = mini_docx(d / "spell.docx",
+                    p("We used color profiles.") + p("Another color analysis.")
+                    + p("A third color result.") + field)
+    rows = [r for r in fmt.analyse_package(pkg, fmt.load_policy(None))["rows"]
+            if r["rule"] == "FMT-T8d"]
+    check("a spelling variant held in a field result is field-held, not mechanical",
+          len(rows) == 1 and rows[0]["fix"] == "style-field" and rows[0]["protected"],
+          str(rows))
+    res = fmt.fix_package(pkg, d / "spell.out.docx", fmt.load_policy(None))
+    check("a field-held spelling variant does not reject the repaired file",
+          res.get("ok") is True
+          and not res.get("verified", {}).get("remaining_mechanical_rules"),
+          str(res.get("verified", {}).get("remaining_mechanical_rules")))
+
+    # The fixer must not act on a use the scanner classifies as the noun use.
+    # "single-cell and" is excluded by the same follower rule on both sides: no
+    # FMT-T8e row, and no unaudited hyphenation of the unrelated open form.
+    m_paras = ["We compared single-cell and bulk RNA-seq in this study.",
+               "We prepared single cell suspensions from the tissue."]
+    rows = fmt.variant_rows(m_paras, [False, False])
+    check("a noun-coordinating use is not an FMT-T8e row",
+          not any(r["rule"] == "FMT-T8e" for r in rows), str(rows))
+    md = scratch("stage_hytarget_")
+    mpkg = mini_docx(md / "hy.docx",
+                     p(m_paras[0]) + p(m_paras[1]))
+    mres = fmt.fix_package(mpkg, md / "hy.out.docx", fmt.load_policy(None))
+    check("the fixer makes no unaudited hyphenation edit",
+          not any("hyphenat" in c for c in mres.get("changes") or []),
+          str(mres.get("changes")))
 
 
 # ---------------------------------------------------------------- F054/F074/F072/F122/F043/F148/F036
@@ -274,6 +337,18 @@ def test_pipeline_corpus():
     check("the rewritten \\input points at the anonymous .tex",
           "\\input{" in out and file_map["chapters/methods.tex"].rsplit(".", 1)[0] in out, out)
 
+    # A standalone source and its compiled target share a stem; the stem maps
+    # must not compete for it.
+    dirs, fmap = pp._view_layout([("figs/plot.tex", "s"), ("figs/plot.pdf", "s"),
+                                  ("main.tex", "s")], 1, "v", "figseed")
+    inc = pp._rewrite_view_references(r"\includegraphics{plot}", "main.tex",
+                                      fmap["main.tex"], fmap)
+    inp = pp._rewrite_view_references(r"\input{plot}", "main.tex", fmap["main.tex"], fmap)
+    check("\\includegraphics maps a stem to the target, never the source",
+          inc == "\\includegraphics{" + Path(fmap["figs/plot.pdf"]).stem + "}", inc)
+    check("\\input maps a stem to the source, never the target",
+          inp == "\\input{" + Path(fmap["figs/plot.tex"]).stem + "}", inp)
+
     nested = ('<w:document xmlns:w="http://x"><w:body><w:p>'
               '<w:del w:id="1" w:author="a"><w:r><w:t>A</w:t></w:r>'
               '<w:del w:id="2" w:author="a"><w:r><w:t>B</w:t></w:r></w:del>'
@@ -292,6 +367,25 @@ def test_pipeline_corpus():
           b"A" not in got and b"B" not in got and b"C" not in got and b"D" in got, got)
     check("the accepted document stays well-formed",
           __import__("xml.etree.ElementTree", fromlist=["fromstring"]).fromstring(got) is not None)
+
+    # A SELF-CLOSING nested mark must not pair with the outer element's close.
+    selfclosed = ('<w:document xmlns:w="http://x"><w:body><w:p>'
+                  '<w:del w:id="1"><w:r><w:t>A</w:t></w:r><w:del w:id="2"/></w:del>'
+                  '<w:r><w:t>D</w:t></w:r></w:p></w:body></w:document>')
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("[Content_Types].xml", '<?xml version="1.0"?><Types/>')
+        z.writestr("word/document.xml", selfclosed)
+    out2, _notes = pp._sanitize_ooxml_bytes(buf.getvalue())
+    with zipfile.ZipFile(io.BytesIO(out2)) as z:
+        got2 = z.read("word/document.xml")
+    try:
+        __import__("xml.etree.ElementTree", fromlist=["fromstring"]).fromstring(got2)
+        wf = True
+    except Exception:                                            # noqa: BLE001
+        wf = False
+    check("a self-closing nested revision mark leaves well-formed XML", wf, got2)
+
 
     W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
@@ -325,6 +419,22 @@ def test_pipeline_corpus():
     check("an unchanged table cell is not marked BEFORE",
           "[BEFORE: Table cell A]" not in text and "[BEFORE: Table cell B]" not in text)
 
+    # A table-only edit must not be reported as "no textual difference".
+    d2 = scratch("stage_logfb_table_")
+    base2, cand2, out2 = d2 / "base.docx", d2 / "cand.docx", d2 / "out.docx"
+    for path, payload in ((base2, doc(["A", "B"], tbl("x", "y"))),
+                          (cand2, doc(["A", "B"], tbl("x2", "y")))):
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("[Content_Types].xml", '<?xml version="1.0"?><Types/>')
+            z.writestr("word/document.xml", payload)
+    rep2 = pp.write_docx_logging_fallback(base2, cand2, out2, "original", "test")
+    with zipfile.ZipFile(out2) as z:
+        text2 = z.read("word/document.xml").decode()
+    check("a table-only change is recorded, not called no-difference",
+          rep2.get("ok") and "no textual difference" not in text2
+          and "[BEFORE: x]" in text2 and "[AFTER: x2]" in text2, text2[:400])
+
+
 
 # ---------------------------------------------------------------- extract_numbers cluster
 def test_extract_numbers():
@@ -348,8 +458,11 @@ def test_extract_numbers():
     check("0.05/.05/0.050 normalize to one key",
           en._metric_key("p-value", "0.05") == en._metric_key("p-value", ".05")
           == en._metric_key("p-value", "0.050"))
-    check("a 1000-1020 citation range is not mistaken for a year",
-          not (1900 <= 1000 <= 2099 and 1900 <= 1020 <= 2099))
+    check("a bare publication-year range is not a physical range",
+          en.RANGE_RE.search("2019-2020") is None)
+    check("2019-2020 is a year range, 1000-1020 an expandable citation range",
+          fmt._marker_range_numbers(2019, 2020) == []
+          and fmt._marker_range_numbers(1000, 1020) == list(range(1000, 1021)))
 
 
 # ---------------------------------------------------------------- node helpers
@@ -473,15 +586,35 @@ def test_more_fixes():
     check("a second table uses its own header",
           ("C1", "raw text") in pp._repair_table_rows(two), str(pp._repair_table_rows(two)))
 
-    # F048: a list citation names every item.
+    # F048: a list citation names every item, but a comma after a SINGULAR
+    # keyword followed by a count is not a list.
     check("a figure list names every cited label",
           pp._pkg4_cited_labels("2, 4 and S2") == ["2", "4", "s2"])
     check("a figure range expands",
           pp._pkg4_cited_labels("2-4") == ["2", "3", "4"])
+    check("'Fig. 2, 3 clusters' cites Figure 2 only",
+          pp._pkg4_cited_labels("2, 3", plural=False) == ["2"])
+    check("'Figures 2, 4' cites both",
+          pp._pkg4_cited_labels("2, 4", plural=True) == ["2", "4"])
+    check("a thousands grouping is not a figure label",
+          [m.group(0) for m in pp.PKG4_FIGURE_CITE_RE.finditer("Figure 2 and 3,000 cells")]
+          == ["Figure 2"])
 
-    # F050: both \caption and \captionof are read.
+    # F050: the pooled-table CAPTION READER reads both forms. (The helper alone
+    # always did; the defect was the call site that passed only "captionof".)
+    cap = d / "pooled.tex"
+    cap.write_text(r"Results. \caption{A pooled table} \captionof{table}{Also pooled.}",
+                   encoding="utf-8")
+    quoted = pp._pooled_table_caption(cap)
     check("the standard caption command is read too",
-          pp._latex_command_bodies(r"\caption{A pooled table}", "caption") == ["A pooled table"])
+          "A pooled table" in quoted and "Also pooled." in quoted, quoted)
+
+    # F140: a number word is a fact only when it is a COUNT.
+    check("'one of the scripts' is not a numeric fact",
+          not pp.sentence_carries_scientific_fact(
+              "One of the scripts is one of the deposited files in code/."))
+    check("'Twelve donors were excluded' is a numeric fact",
+          pp.sentence_carries_scientific_fact("Twelve donors were excluded."))
 
     # F062: a malformed structured output reaches the scoped repair.
     f = d / "bad.json"
@@ -607,6 +740,156 @@ def test_more_fixes():
           manifest.get("paper-skills") and manifest.get("docx2pdf.sh")
           and manifest.get("docxcompare.sh"), str(sorted(manifest)))
 
+    # K: a moved-aside DOCX render must not land on another DOCX's own name.
+    pdfdir = scratch("stage_pdfname_")
+    latex = {(pdfdir / "main.pdf").resolve()}
+    defaults = {(pdfdir / "main.pdf").resolve(), (pdfdir / "main-docx.pdf").resolve()}
+    check("a moved-aside DOCX render avoids another DOCX's own name",
+          pp._docx_pdf_target(pdfdir, "main", latex, defaults, set()).name
+          == "main-docx-2.pdf", pp._docx_pdf_target(pdfdir, "main", latex, defaults, set()).name)
+
+
+# ---------------------------------------------------------------- stage-review fixes
+def test_review_regressions():
+    print("\n== regressions found in the change-set review ==")
+    # F105 parity: the pipeline's M19 scan and the review skill must agree on a
+    # bare Keywords heading (it is a boundary and never resumes an excluded
+    # section).
+    kw = ("Abstract\nShort abstract.\n\nIntroduction\nAlpha beta.\n\nMethods\n"
+          "Methods words here today.\n\nKeywords\ncell, assay, beta\n\nResults\nGamma delta.\n")
+    kmain = next(w for s, w, _n in cw.sections(kw) if s == "main text")
+    pmain = next(r["words"] for r in pp._length_rows_for_lines(kw.split("\n"), "x.md")
+                 if r["section"] == "main text")
+    check("the M19 scan and count_words agree after a Keywords heading",
+          kmain == pmain == 4, f"count_words={kmain} pipeline={pmain}")
+
+    # F105 raw-profile fallback mirrors the normalizer: an id-less FIRST type is
+    # still the default, so its cover-letter block is inherited.
+    wd = scratch("stage_cover_")
+    prof = wd / "mixed.json"
+    prof.write_text(json.dumps({"article_types": [
+        {"label": "Research Article",
+         "length_limits": {"cover_letter": {"min": 200, "max": 400}}},
+        {"id": "brief", "length_limits": {}}]}), encoding="utf-8")
+    cover = wd / "cover.txt"
+    cover.write_text("Dear editor, we submit this manuscript for your consideration please.\n",
+                     encoding="utf-8")
+    proc = subprocess.run([sys.executable,
+                           str(WS / "paper-skills/paper-review/scripts/count_words.py"),
+                           str(cover), "--section", "cover-letter",
+                           "--venue-profile", str(prof)],
+                          cwd=str(WS), text=True, capture_output=True)
+    check("an id-less first article type supplies the cover-letter rule",
+          proc.returncode == 0 and "200-400" in proc.stdout and "300-500" not in proc.stdout,
+          proc.stdout[-300:])
+
+    # F102: a bracketed publication year/range is prose, not a numeric call-out;
+    # a genuine four-digit reference still counts.
+    work = scratch("stage_cites_")
+    (work / "corpus").mkdir()
+    (work / "corpus" / "ms.md.txt").write_text(
+        "We searched the literature [2015-2020] and the guideline [2020].\n"
+        "As shown previously [1,2], the effect is real [3].\n"
+        "References\n\n1. Smith J. Nature 2019.\n2. Doe A. Science 2020.\n"
+        "3. Roe B. Cell 2021.\n", encoding="utf-8")
+    cite_out = work / "out"
+    cite_out.mkdir()
+    proc = subprocess.run([sys.executable,
+                           str(WS / "paper-skills/paper-review/scripts/extract_citations.py"),
+                           "--work", str(work), "--out", str(cite_out)],
+                          cwd=str(WS), text=True, capture_output=True)
+    try:
+        cit = json.loads((cite_out / "artifacts" / "M2_citations.json").read_text())
+    except (OSError, ValueError):
+        cit = {}
+    check("bracketed years are not phantom citations",
+          proc.returncode == 0 and cit.get("orphan_callouts") == []
+          and cit.get("order_violations") == [], proc.stderr[-300:])
+
+    # F066/F005: an `llm` review consumes the feedback ledger, so the feedback
+    # run is an upstream dependency (a pending one must defer, not crash).
+    class LlmCtx:
+        cfg = {"revision_mode": "llm"}
+
+    class ContinueCtx:
+        cfg = {}
+
+    check("an llm review depends on its feedback run",
+          pp.rid_feedback(1) in pp.upstream_deps({"kind": "review", "round": 1}, LlmCtx()))
+    check("a continue review has no feedback dependency",
+          pp.rid_feedback(1) not in pp.upstream_deps(
+              {"kind": "review", "round": 1}, ContinueCtx()))
+
+    # F004: a GENERAL (non-scoped) revise arm still freshness-checks its review
+    # copy; the scoped-only branch had silently dropped that check.
+    root = scratch("stage_fresh_")
+    sb = root / "runs" / "r1_revise1"
+    upstream = root / "runs" / "r1_review"
+    (sb / "review").mkdir(parents=True)
+    (upstream / "review").mkdir(parents=True)
+    (sb / "review" / "a.json").write_text("new", encoding="utf-8")
+    (upstream / "review" / "a.json").write_text("old", encoding="utf-8")
+    revise_rec = {"kind": "revise", "round": 1}
+
+    class FreshCtx:
+        cfg = {}
+        source_manifest = {}
+
+        def run(self, rid):
+            return {"status": "done"} if rid == pp.rid_review(1) else None
+
+        def sandbox_of(self, rec):
+            return sb if rec is revise_rec else upstream
+
+    probs = pp._input_freshness_problems(FreshCtx(), revise_rec)
+    check("a general revise arm is stale when its review copy changed",
+          any("no longer matches" in p for p in probs), str(probs))
+
+    # F057: a DECLARED re-wrap is exempt from the old paragraph-boundary check,
+    # but its OUTPUT must still keep the source paragraph's superscripts.
+    def sup_docx(path, merged, with_sup):
+        rpr = ('<w:rPr><w:vertAlign w:val="superscript"/></w:rPr>' if with_sup else "")
+        tail = ('<w:r><w:t xml:space="preserve"> for their time.</w:t></w:r>'
+                if merged else "")
+        xml = ('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/'
+               '2006/main"><w:body><w:p>'
+               '<w:r><w:t xml:space="preserve">We thank the reviewers</w:t></w:r>'
+               f'<w:r>{rpr}<w:t>1</w:t></w:r>' + tail + '</w:p><w:sectPr/></w:body></w:document>')
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("[Content_Types].xml", '<?xml version="1.0"?><Types/>')
+            z.writestr("word/document.xml", xml)
+
+    sup = scratch("stage_sup_")
+    ssrc, ssb = sup / "src", sup / "sb"
+    ssrc.mkdir()
+    (ssb / "out").mkdir(parents=True)
+    sup_docx(ssrc / "main.docx", False, True)
+    (ssb / "out" / "REPLACEMENT_LEDGER.md").write_text("```json\n" + json.dumps({
+        "exceptions": [{"kind": "rewrap", "source": "We thank the reviewers1",
+                        "output": "We thank the reviewers1 for their time.",
+                        "reason": "a template row"}]}) + "\n```\n", encoding="utf-8")
+    sup_docx(ssb / "out" / "main.docx", True, True)
+    rep = pp.template_rewrite_postcheck(ssb, ssrc, {}, {})
+    check("a compliant declared re-wrap passes the superscript gate",
+          not [e for e in rep.get("errors", []) if "superscript" in e],
+          str([e for e in rep.get("errors", []) if "superscript" in e]))
+    sup_docx(ssb / "out" / "main.docx", True, False)
+    rep = pp.template_rewrite_postcheck(ssb, ssrc, {}, {})
+    check("a declared re-wrap that drops a superscript still fails",
+          any("superscript" in e for e in rep.get("errors", [])),
+          str(rep.get("errors", [])[:2]))
+
+    # F132: the recorded skills digest is part of the manifest drift check.
+    frozen = scratch("stage_skilldrift_")
+    shutil.copy2(WS / "paper_pipeline.py", frozen / "paper_pipeline.py")
+    (frozen / "paper-skills").mkdir()
+    (frozen / "paper-skills" / "x.txt").write_text("x", encoding="utf-8")
+    ctx = pp.Ctx(frozen)
+    ctx.state = {"pipeline": {"modules": {"paper-skills": "0" * 64}}}
+    st = pp.root_pipeline_staleness(ctx)
+    check("a recorded paper-skills digest that no longer matches is detected",
+          "paper-skills" in st["recorded_module_diffs"], str(st["recorded_module_diffs"]))
+
 
 def main() -> int:
     try:
@@ -619,6 +902,7 @@ def main() -> int:
         test_extract_numbers()
         test_node_keys()
         test_more_fixes()
+        test_review_regressions()
     finally:
         cleanup()
     print()

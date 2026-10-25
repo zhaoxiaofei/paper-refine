@@ -240,7 +240,7 @@ def test_docx_fix_paths():
     check("D4 the repaired document is still well-formed XML", well_formed)
     texts = [fmt.text_of(p[2]) for p in fmt.paragraphs(res["xml"])]
     check("D4 both repairs are in the emitted entry",
-          len(texts) == 2 and "11, 565825" in texts[1] and "Preprint at" in texts[1],
+          len(texts) == 2 and "11, 565825" in texts[1] and "Available at https://doi.org/" in texts[1],
           str(texts[1:])[:200])
 
     para = ('<w:p><w:r><w:t xml:space="preserve">'

@@ -464,7 +464,15 @@ function transformServer(server, opts, usedNames, usedIds, pluginName) {
   }
 
   if (server.tool_timeout_sec != null) {
-    config.toolCallTimeoutMs = Math.round(Number(server.tool_timeout_sec) * 1000);
+    // A non-numeric value used to become `toolCallTimeoutMs: NaN`, which the
+    // generated YAML then carried as a literal. Only a finite positive number
+    // is a timeout; record the bad input instead of writing it.
+    const seconds = Number(server.tool_timeout_sec);
+    if (Number.isFinite(seconds) && seconds > 0) {
+      config.toolCallTimeoutMs = Math.round(seconds * 1000);
+    } else {
+      warnings.push(`tool_timeout_sec=${JSON.stringify(server.tool_timeout_sec)} is not a positive number; no per-server timeout was written`);
+    }
   }
   if (server.startup_timeout_sec != null) {
     warnings.push(`startup_timeout_sec=${server.startup_timeout_sec} has no DSH per-server equivalent; connection errors are logged and the harness continues`);

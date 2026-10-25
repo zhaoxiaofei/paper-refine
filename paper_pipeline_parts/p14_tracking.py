@@ -318,15 +318,15 @@ def write_docx_logging_fallback(base: Path, cand: Path, out: Path, baseline: str
         body = cand_root.find(_w("body"))
         if body is None:
             raise RuntimeError("the revised document carries no w:body")
-        base_texts = [_para_text(p) for p in _docx_root(base)[1].iter(_w("p"))]
-        # DEEP on both sides: `.iter` descends into table cells, so a table
-        # paragraph on the base side is compared against the SAME paragraph on
-        # the candidate side. `body.findall` (top level only) made every table
-        # paragraph look deleted, printing phantom `[BEFORE: …]` markers for
-        # text the revision never touched (and dropping the candidate's own
-        # table paragraphs), while the sibling `_before_after_lines` compares
-        # `.iter` against `.iter`.
-        cand_paras = list(body.iter(_w("p")))
+        # Body-level paragraphs only. Table-cell paragraphs are represented by
+        # their whole `w:tbl` block, which is copied once below as non-paragraph
+        # body content: lifting them with `.iter(w:p)` appended each cell again
+        # at top level AND inside the copied table, doubling every unchanged
+        # cell and leaving changed cells both marked and unmarked.
+        base_body = _docx_root(base)[1].find(_w("body"))
+        base_texts = ([_para_text(p) for p in base_body.findall(_w("p"))]
+                      if base_body is not None else [])
+        cand_paras = list(body.findall(_w("p")))
         new_body = ET.Element(_w("body"))
         new_body.append(copy.deepcopy(_note_para(note)))
         sm = difflib.SequenceMatcher(None, base_texts,
@@ -349,8 +349,20 @@ def write_docx_logging_fallback(base: Path, cand: Path, out: Path, baseline: str
         for p in cand_paras[cursor:]:
             new_body.append(copy.deepcopy(p))
         if not emitted:
-            new_body.append(copy.deepcopy(_note_para(
-                "[no textual difference found between the two documents]")))
+            # The body paragraphs are identical; the difference may still be
+            # inside a table or another non-paragraph object, which is copied
+            # verbatim above. Record those changed cell/paragraph texts the
+            # same way `_before_after_lines` does -- the old blanket "no
+            # textual difference" line hid a table-only edit entirely.
+            deep_diff = _before_after_lines(base, cand)
+            if deep_diff and deep_diff != ["[no textual difference found between the two documents]"]:
+                new_body.append(copy.deepcopy(_note_para(
+                    "[the body text is unchanged; the difference is inside a table/object]")))
+                for line in deep_diff[:400]:
+                    new_body.append(copy.deepcopy(_note_para(line)))
+            else:
+                new_body.append(copy.deepcopy(_note_para(
+                    "[no textual difference found between the two documents]")))
         # Keep any trailing non-paragraph body content (a sectPr) so the copy
         # stays a complete Word document.
         for child in list(body):
@@ -1321,7 +1333,8 @@ def tracking_summary(manifest: dict, rounds=None) -> None:
                if c.get("ok") and c.get("tool"))
     fb_n = sum(1 for v in versions for c in v["comparisons"]
                if c.get("ok") and not c.get("tool"))
-    bad_n = sum(1 for v in versions for c in v["comparisons"] if not c.get("ok"))
+    bad_n = sum(1 for v in versions for c in v["comparisons"]
+                if not c.get("ok") and not c.get("skipped"))
     skip_n = sum(1 for v in versions for c in v["comparisons"] if c.get("skipped"))
     tools = sorted({c["tool"] for v in versions for c in v["comparisons"]
                     if c.get("ok") and c.get("tool")})

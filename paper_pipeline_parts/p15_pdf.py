@@ -142,17 +142,28 @@ def _pdf_previous_records(stored: dict) -> dict:
     return out
 
 
-def _docx_pdf_target(out_dir: Path, stem: str, latex_targets: set) -> Path:
+def _docx_pdf_target(out_dir: Path, stem: str, latex_targets: set,
+                     docx_defaults=(), chosen=()) -> Path:
     """The DOCX render path, moved aside when a LaTeX root owns `<stem>.pdf`.
 
     A package may legitimately carry `main.tex` and `main.docx`; both used to
     write `pdfs/<label>/main.pdf`, and the DOCX conversion silently overwrote
-    the LaTeX render while both manifest rows reported ok.
+    the LaTeX render while both manifest rows reported ok. The moved-aside name
+    must itself be free: a document actually named `main-docx.docx` renders to
+    `main-docx.pdf`, so that name is skipped too.
     """
     target = Path(out_dir) / (stem + ".pdf")
-    if target.resolve() in latex_targets:
-        return Path(out_dir) / (stem + "-docx.pdf")
-    return target
+    if target.resolve() not in latex_targets and target.resolve() not in chosen:
+        return target
+    base = stem + "-docx"
+    n = 1
+    while True:
+        candidate = Path(out_dir) / (base + (".pdf" if n == 1 else f"-{n}.pdf"))
+        resolved = candidate.resolve()
+        if resolved not in latex_targets and resolved not in docx_defaults \
+                and resolved not in chosen:
+            return candidate
+        n += 1
 
 
 def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
@@ -166,6 +177,16 @@ def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
             continue
         for rel in latex_root_documents(src):
             latex_targets.add((Path(out_root) / Path(rel).with_suffix(".pdf")).resolve())
+    # Every DOCX's default render path. A moved-aside name must avoid these:
+    # `main-docx.docx` legitimately renders to `main-docx.pdf`, which is exactly
+    # the name the colliding `main.docx` would otherwise be moved to.
+    docx_defaults = set()
+    for f in list_track_files(sources, exts=(".docx",)):
+        if f["rel"].split("/", 1)[0] == CODE_DIR:
+            continue
+        docx_defaults.add(
+            (Path(out_root) / Path(f["rel"]).with_suffix(".pdf")).resolve())
+    chosen = set()
     for src, _prefix, excluded in pkg_sources:
         if not src.is_dir():
             continue
@@ -189,7 +210,9 @@ def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
             docx = f["path"]
             rel = f["rel"]
             out_dir = out_root / Path(rel).parent
-            out_pdf = _docx_pdf_target(out_dir, docx.stem, latex_targets)
+            out_pdf = _docx_pdf_target(out_dir, docx.stem, latex_targets,
+                                       docx_defaults, chosen)
+            chosen.add(out_pdf.resolve())
             rec = _reuse_pdf_record(previous, label, rel, f["digest"], out_pdf, "docx")
             if rec is None:
                 if out_pdf.name == docx.stem + ".pdf":

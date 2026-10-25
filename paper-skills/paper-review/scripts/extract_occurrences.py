@@ -113,8 +113,12 @@ def variant_pattern(term, mode):
             # with a U+2212 minus ("3.1 × 10−2"); those occurrences were
             # invisible to the M4 sweep.
             pats.append(re.escape(mant + " × 10" + str(int(exp))))
-            for mul in (" × 10^", " × 10"):
-                pats.append(re.escape(mant + mul + "\u2212" + str(abs(int(exp)))))
+            # The U+2212 spelling is the SAME value only when the exponent is
+            # negative. Emitting it for a positive exponent also matched the
+            # different value ("1.5 × 10^−3" for a target of 1500).
+            if int(exp) < 0:
+                for mul in (" × 10^", " × 10"):
+                    pats.append(re.escape(mant + mul + "\u2212" + str(abs(int(exp)))))
             # Unicode superscripts ("3.1 × 10⁻²") and the LaTeX \times forms
             # ("3.1 \times 10^{-2}") are the same value in other manuscripts.
             _sup = str(int(exp)).translate(str.maketrans(
@@ -123,7 +127,8 @@ def variant_pattern(term, mode):
             for mul in (r" \times 10^", r" \times 10^{"):
                 close = r"\}" if mul.endswith("{") else ""
                 pats.append(re.escape(mant + mul + str(int(exp))) + close)
-                pats.append(re.escape(mant + mul + "\u2212" + str(abs(int(exp)))) + close)
+                if int(exp) < 0:
+                    pats.append(re.escape(mant + mul + "\u2212" + str(abs(int(exp)))) + close)
         except ValueError:
             pass
         # A trailing comma or period is only a separator when no digit follows:

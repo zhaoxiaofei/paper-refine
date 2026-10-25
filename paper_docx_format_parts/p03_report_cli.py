@@ -455,7 +455,8 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
                          "protected": False, "tier": tier_of(r["rule"])})
     for r in text_style_rows(para_texts, para_is_ref, para_is_head,
                              in_container=para_in_container,
-                             in_area=para_in_area):
+                             in_area=para_in_area,
+                             field_spans=field_result_text):
         fix = _fix_kind(r["rule"], policy)
         if r.get("protected") and fix == "mechanical":
             fix = "style-field"
@@ -893,6 +894,14 @@ def fix_document(xml: str, styles: dict, policy: dict,
                 continue
             pstyle = elem(ppr_of(para), "pStyle")
             if pstyle is None:
+                # The scanner reports an unstyled minority caption as
+                # mechanical, so the fixer must give it a style (or drop the
+                # row to editorial); skipping it left the row unfixed and the
+                # whole file's repairs were then rejected.
+                if majority:
+                    edits.append((plist[i][0], plist[i][1],
+                                  _set_para_style(para, majority)))
+                    n += 1
                 continue
             at = plist[i][0] + para.find(pstyle)
             replacement = f'<w:pStyle w:val="{majority}"/>' if majority else ""
@@ -1297,9 +1306,15 @@ def fix_document(xml: str, styles: dict, policy: dict,
     spell_target = (spelling_minority_targets([b[4] for b in bodies])
                     if want_spell else {})
     hy_target = set()
+    # Only an attributive use takes the hyphen. A following function word
+    # ("the copy number of a locus") starts the noun use, which the rule
+    # documents as correct without one. The scanner applies the same exclusion;
+    # arming on a noun use made the fixer edit text no FMT-T8e row reported.
+    hy_noun_follow = "|".join(re.escape(w) for w in HYPHEN_NOUN_FOLLOWERS)
     if want_hy:
         for hy, split in HYPHEN_COMPOUNDS:
-            if re.search(rf"\b{re.escape(hy)}(?=\s+[A-Za-z])", blob):
+            if re.search(rf"\b{re.escape(hy)}(?=\s+(?!(?:{hy_noun_follow})\b)[A-Za-z])",
+                         blob):
                 hy_target.add((hy, split))
     edits = []
     for idx, p0, p1, para, text in bodies:
@@ -1329,12 +1344,18 @@ def fix_document(xml: str, styles: dict, policy: dict,
         if want_spell:
             for minority, majority in spell_target.items():
                 for m in re.finditer(rf"\b{re.escape(minority)}\b", text, re.I):
+                    if in_field_result(protected, m.start(), m.end()):
+                        continue
                     rep = (majority.capitalize()
                            if m.group(0)[:1].isupper() else majority)
                     spans.append((m.start(), m.end(), rep))
         if want_hy:
             for hy, split in hy_target:
-                for m in re.finditer(rf"\b{re.escape(split)}(?=\s+[A-Za-z])", text):
+                for m in re.finditer(
+                        rf"\b{re.escape(split)}(?=\s+(?!(?:{hy_noun_follow})\b)[A-Za-z])",
+                        text):
+                    if in_field_result(protected, m.start(), m.end()):
+                        continue
                     spans.append((m.start(), m.end(), hy))
         if not spans:
             continue
@@ -1722,8 +1743,25 @@ _DIRECT_FORMAT_PATTERNS = (
     r"<w:szCs(?=[\s/>])[^>]*/>",
 )
 _SECT_RE = re.compile(r"<w:sectPr(?=[\s>])[\s\S]*?</w:sectPr>")
-_RELS_RE = re.compile(r'<Relationship Id="([^"]+)"[^>]*Type="[^"]*/([a-zA-Z]+)"'
-                      r'[^>]*Target="([^"]+)"')
+_RELS_TAG_RE = re.compile(r"<Relationship\b[^>]*>")
+
+
+def _rels_entries(xml: str) -> list:
+    """[{id, type, target}] from a `.rels` part, in any attribute order.
+
+    OOXML attributes are unordered; a `Target`-before-`Type` template must
+    yield the same header/footer role map as the canonical order.
+    """
+    out = []
+    for m in _RELS_TAG_RE.finditer(xml or ""):
+        tag = m.group(0)
+        rid, typ, target = attr_of(tag, "Id"), attr_of(tag, "Type"), attr_of(tag, "Target")
+        if rid is None or target is None:
+            continue
+        out.append({"id": rid, "type": (typ or "").rsplit("/", 1)[-1].lower(),
+                    "target": target})
+    return out
+
 # Another publisher's block headings ("Lead contact", "Key resources", ...) are
 # VENUE DATA, never pipeline knowledge: the calling venue profile passes its own
 # `foreign_container_headings` list and this default is empty, so the formatter
@@ -1883,8 +1921,7 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
                 if "word/settings.xml" in tnames else "")
     except (KeyError, OSError, RuntimeError, NotImplementedError):
         return {}
-    rel_map = {m.group(1): (m.group(2).lower(), m.group(3))
-               for m in _RELS_RE.finditer(trels)}
+    rel_map = {e["id"]: (e["type"], e["target"]) for e in _rels_entries(trels)}
     refs = {"header": {}, "footer": {}}
     sect = _SECT_RE.findall(tdoc)
     ref_re = r'<w:(header|footer)Reference w:type="(\w+)" r:id="([^"]+)"'
@@ -1918,15 +1955,15 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
         rels_name = f"word/_rels/{src_name}.rels"
         if rels_name in tnames:
             rxml = tpkg.read(rels_name).decode("utf-8", "replace")
-            for rm in list(_RELS_RE.finditer(rxml)):
-                if rm.group(2).lower() != "image":
+            for rm in _rels_entries(rxml):
+                if rm["type"] != "image":
                     continue
                 # The relationship target is RELATIVE TO THE HEADER/FOOTER PART
                 # (`word/`), so the rewritten target must keep the media
                 # directory: `media/logo.png` -> `media/venue_logo.png`, never a
                 # bare `venue_logo.png` (which resolves to word/venue_logo.png,
                 # a missing part -- the logo then renders as an empty frame).
-                media = rm.group(3)
+                media = rm["target"]
                 src_media = posixpath.normpath(posixpath.join("word", media))
                 if not src_media.startswith("word/") or ".." in Path(src_media).parts:
                     continue
@@ -3161,6 +3198,16 @@ def validate_paths(paths: list, json_out: Path = None, timeout: int = 300) -> di
             results.append(validate_docx_parts(p))
         elif p.suffix.lower() in (".tex", ".ltx"):
             results.append(validate_latex(p, timeout=timeout))
+        else:
+            # An explicitly named file of an unsupported type is not a
+            # zero-file success: report it as a failure, the false-clean the
+            # `_missing_paths` check exists to prevent.
+            results.append({
+                "file": str(p), "kind": (p.suffix.lower().lstrip(".") or "file")[:4],
+                "ok": False,
+                "errors": [f"unsupported document type {p.suffix or '(none)'}; "
+                           f"expected .docx, .tex or .ltx"],
+                "detail": "not a document this validator can check"})
     bad = [r for r in results if r["ok"] is False]
     report = {"files": len(results), "failed": len(bad), "results": results,
               "ok": not bad}
@@ -3925,16 +3972,29 @@ def _table_grid_widths(tbl: str) -> list:
 
 
 def _table_cell_widths(row: str) -> list:
-    """[(tcW | None, gridSpan), ...] for one table row, in column order."""
+    """[(tcW | None, gridSpan), ...] for one table row, in column order.
+
+    Only a `dxa` width is a number of twips. `pct` says percent and `auto`
+    says "let Word decide"; treating either as twips made a 50% column read as
+    2500 twips and a 4500-twip table get rewritten to 2500. A non-dxa cell
+    yields None, which makes the caller skip the table rather than "repair" it
+    from a number that measures something else.
+    """
     out = []
     for _s, _e, cell in _spans(row, CELL_TOKENS):
         tcpr = re.search(r"<w:tcPr(?=[\s/>]).*?</w:tcPr>", cell, re.S)
         width, span = None, 1
         if tcpr:
             body = tcpr.group(0)
-            if "<w:tcW" in body:
-                m = re.search(r'<w:tcW[^>]*w:w="(\d+)"', body)
-                width = int(m.group(1)) if m else None
+            m = re.search(r"<w:tcW(?=[\s/>])[^>]*>", body)
+            if m:
+                kind = (attr_of(m.group(0), "w:type") or "dxa").lower()
+                raw = attr_of(m.group(0), "w:w")
+                if kind == "dxa" and raw is not None:
+                    try:
+                        width = int(raw)
+                    except ValueError:
+                        width = None
             gs = re.search(r'<w:gridSpan[^>]*w:val="(\d+)"', body)
             span = int(gs.group(1)) if gs else 1
         out.append((width, span))
@@ -4066,6 +4126,10 @@ def table_layout_fixes(xml: str, rows: list) -> list:
             _give, donor = max(slack)
             widths[ci] += deficit
             widths[donor] -= deficit
+        if widths == grid:
+            # No TB5 need could be met (and no TB4 mismatch), so rebuilding an
+            # identical grid would only log a repair that changed nothing.
+            continue
         edits_in_tbl = []
         gm = re.search(r"<w:tblGrid(?=[\s/>]).*?</w:tblGrid>", tbl, re.S)
         if gm:
@@ -4808,7 +4872,6 @@ def stats_floor_rows(paras: list) -> list:
     if stated is None:
         stated = re.search(r"(?i)\bfamily\s+of\s+(\d{1,3})\b", text)
     family = int(stated.group(1)) if stated else len(parsed)
-    family = max(family, len(parsed))
     for n, p, line in parsed:
         floor = family * 2.0 / (2 ** n)
         # A table rounds its adjusted p (1.81e-5 vs the exact 1.812e-5); a 2%
@@ -5138,10 +5201,18 @@ def cmd_fix(args) -> int:
 def cmd_check_pdf(args) -> int:
     policy = load_policy(args.policy)
     res = check_pdf(Path(args.pdf), policy)
-    print(f"{args.pdf}: {res['pages']} page(s); blank pages: {res['blank_pages'] or 'none'}")
+    if res["ok"] is None:
+        # A skipped check is not a measured pass (Rule 10). Do not print the
+        # 0-page clean summary; exit non-zero with the reason.
+        detail = ((res.get("rows") or [{}])[0].get("detail")
+                  or "the PDF could not be checked")
+        print(f"{args.pdf}: NOT CHECKED: {detail}")
+    else:
+        print(f"{args.pdf}: {res['pages']} page(s); blank pages: "
+              f"{res['blank_pages'] or 'none'}")
     if args.json:
         write_json(args.json, res)
-    return 0 if res["ok"] is not False else 1
+    return 0 if res["ok"] is True else 1
 
 
 # Field-integrity faults that are Zotero's own shapes ("bad-citation-json", a

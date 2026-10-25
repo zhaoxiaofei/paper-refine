@@ -1503,6 +1503,21 @@ def _child_output(raw) -> str:
     return raw or ""
 
 
+def _page_png_names(out_dir: Path, stem: str) -> list:
+    """The page PNGs pdftoppm wrote for `stem`, in PAGE order.
+
+    `stem` is matched literally (a stem like `Papers[1]` is not a glob
+    character class), and the trailing page number sorts numerically so
+    page-10 follows page-2.
+    """
+    def key(name: str):
+        m = re.search(r"-(\d+)\.png$", name)
+        return (int(m.group(1)) if m else 10 ** 9, name)
+    return sorted((p.name for p in Path(out_dir).iterdir()
+                   if p.is_file() and p.name.startswith(stem + "-")
+                   and p.suffix.lower() == ".png"), key=key)
+
+
 def render_docx_visual(docx: Path, out_dir: Path, renderer=None,
                        timeout: float = 900, page_images: bool = True) -> dict:
     """Render ONE DOCX to PDF + page PNGs under `out_dir`.
@@ -1570,15 +1585,28 @@ def render_docx_visual(docx: Path, out_dir: Path, renderer=None,
         shutil.move(str(pdf), str(final_pdf))
         pages = _pdf_page_count(final_pdf)
         pngs = []
+        warnings = []
         if page_images and shutil.which("pdftoppm"):
             prefix = out_dir / docx.stem
-            subprocess.run(["pdftoppm", "-r", str(VISUAL_PAGE_DPI), "-png",
-                            str(final_pdf), str(prefix)],
-                           capture_output=True, timeout=600)
-            pngs = sorted(p.name for p in out_dir.glob(docx.stem + "-*.png"))
+            try:
+                subprocess.run(["pdftoppm", "-r", str(VISUAL_PAGE_DPI), "-png",
+                                str(final_pdf), str(prefix)],
+                               capture_output=True, timeout=600)
+            except (OSError, subprocess.SubprocessError) as e:      # noqa: BLE001
+                # The PDF has already been moved into place: a page-image
+                # timeout must not turn a successful render into a failure and
+                # send the chain to a lower-fidelity renderer.
+                warnings.append(f"page images not produced ({type(e).__name__}: {e})")
+            # Page numbers sort numerically (page-10 after page-2), and the
+            # stem is matched literally: a stem like `Papers[1]` made the old
+            # glob a character class and returned zero pages.
+            pngs = _page_png_names(out_dir, docx.stem)
             pages = pages or len(pngs)
-        return {"ok": True, "renderer": name, "pdf": final_pdf.name,
-                "pages": pages or 0, "pngs": pngs}
+        result = {"ok": True, "renderer": name, "pdf": final_pdf.name,
+                  "pages": pages or 0, "pngs": pngs}
+        if warnings:
+            result["warnings"] = warnings
+        return result
     except (OSError, subprocess.SubprocessError) as e:                  # noqa: BLE001
         return {"ok": False, "renderer": name, "error": f"{type(e).__name__}: {e}"}
     finally:
@@ -1768,8 +1796,12 @@ def cover_letter_row_survival_problems(ctx: Ctx, sb: Path) -> list:
     try:
         policy = format_policy_of(ctx)
         info = scan_format_in_sources([(sb / "base", "", CORPUS_EXCLUDE_TOP)], policy=policy)
-    except Exception:                                          # noqa: BLE001 -- never gate on scan
-        return []
+    except Exception as e:                                     # noqa: BLE001 -- never gate on scan
+        # A skipped scan is UNKNOWN, not clean: returning [] let a review that
+        # deleted every seeded FMT-CL1 row ship whenever the scan crashed.
+        return [f"{REVIEW_DIR}/artifacts/M20_formatting.md cannot be verified: the code-side "
+                f"FMT-CL1 scan FAILED ({type(e).__name__}: {e}); the row state is UNKNOWN, "
+                f"not clean"]
     want = {str(r.get("document") or "").strip()
             for r in (info.get("rows") or [])
             if str(r.get("rule") or "").upper() in COVER_LETTER_STAMP_RULES}
@@ -4831,7 +4863,11 @@ REPAIR_MARKER_PATTERNS = (r"^completion marker _pipeline_done\.json missing ",
 REPAIR_STRUCTURED_PATTERNS = (r" is EMPTY/unfinished \(structured output\)",
                               r" could not be read \(",
                               r" is \d+ bytes \(over the ",
-                              r" does not parse as ")
+                              r" does not parse as ",
+                              # `_structured_problem_for` says "is malformed
+                              # JSON (...)" for a truncated ledger; without this
+                              # the cheap scoped repair never saw it.
+                              r" is malformed [A-Za-z]+ \(")
 REPAIR_VISUAL_PATTERN = r"^the visual-inspection record \S+ is missing: "
 REPAIR_LANGUAGE_PATTERNS = tuple(
     rf"^{label}: no work/R6_language\.md " for label in ("rewrite", "revise", "integrate")) \
@@ -5283,20 +5319,38 @@ def _repair_table_rows(md_text: str) -> list:
     reorders the table, rewrites a row's evidence, or adds a row fails the guard
     even though the artifact still parses.
     """
-    out, header = [], None
+    out, header, after_header = [], None, False
     for line in str(md_text or "").splitlines():
         s = line.strip()
         if not s.startswith("|"):
+            # A blank line or a heading ends the table block; the next `|`
+            # line is a NEW table's header, not another row of the old one.
+            header, after_header = None, False
             continue
         cells = _m1b_cells(s)
-        if not cells or _m1b_separator(cells):
+        if not cells:
             continue
         if header is None:
             header = [c.strip().lower() for c in cells]
+            after_header = True
             continue
-        if len(cells) == len(header) and all(c.strip().lower() == header[i]
-                                             for i, c in enumerate(cells)):
+        # Only the row immediately below the header is the divider. A mid-table
+        # dash-only row is DATA (GFM renders it as a row) and must keep its
+        # identity for the repair guard.
+        if after_header and _m1b_separator(cells):
+            after_header = False
+            continue
+        if len(cells) != len(header):
+            # A different column count means a new table block (the documented
+            # M20 artifact carries a seeded table and the session's coverage
+            # table); take this line as the new header, exactly as
+            # _repair_table_skeleton already does.
+            header = [c.strip().lower() for c in cells]
+            after_header = True
+            continue
+        if all(c.strip().lower() == header[i] for i, c in enumerate(cells)):
             continue                          # a repeated header, not a row
+        after_header = False
         keep = [i for i, h in enumerate(header) if h not in REPAIR_EDITABLE_CELLS]
         out.append(tuple((cells[i].strip() if i < len(cells) else "") for i in keep))
     return out
@@ -5311,7 +5365,7 @@ def _repair_table_skeleton(md_text: str) -> str:
     judged cells removed. Only cells a repair may fill can differ between two
     files with the same skeleton.
     """
-    out, header = [], None
+    out, header, after_header = [], None, False
     for line in str(md_text or "").splitlines():
         s = line.strip()
         if not s.startswith("|"):
@@ -5320,18 +5374,30 @@ def _repair_table_skeleton(md_text: str) -> str:
             # a NEW table's header, with its own column names (the M1 artifact
             # carries an inventory table and the M1b table side by side).
             if not s or s.startswith("#"):
-                header = None
+                header, after_header = None, False
             continue
         cells = _m1b_cells(s)
-        if not cells or _m1b_separator(cells):
+        if not cells:
             out.append(line)
             continue
         # A different column count means a new table (or a ragged row): take it as
         # the block's header rather than blanking cells against the wrong columns.
         if header is None or len(cells) != len(header):
             header = [c.strip().lower() for c in cells]
+            after_header = True
             out.append(line)
             continue
+        # The divider is the row immediately under the header; a mid-table
+        # dash-only row is data and must be blanked like any other row, or the
+        # guard's two parsers disagree about which row is which.
+        if after_header and _m1b_separator(cells):
+            after_header = False
+            out.append(line)
+            continue
+        if all(c.strip().lower() == header[i] for i, c in enumerate(cells)):
+            out.append(line)
+            continue
+        after_header = False
         blanked = [("" if header[i] in REPAIR_EDITABLE_CELLS else cells[i])
                    for i in range(min(len(cells), len(header)))]
         blanked += cells[len(header):]

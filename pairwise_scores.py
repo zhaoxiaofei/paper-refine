@@ -86,6 +86,10 @@ def parse_score(value: str | None) -> float | None:
     text = str(value).strip()
     if text == "":
         return None
+    # CSV exports from Word/Excel often carry a typographic minus (U+2212) or
+    # an en/em dash; `float` rejects them, so a real negative score used to be
+    # dropped from the matrix. Normalize the sign forms a score can carry.
+    text = text.replace("\u2212", "-").replace("\u2013", "-").replace("\u2014", "-")
     try:
         score = float(text)
     except ValueError:

@@ -239,8 +239,12 @@ def upstream_deps(rec: dict, ctx=None) -> list:
         return deps
     if kind == "review":
         deps = [rid_a1(r)]
-        if ctx is not None and journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER,
-                                                        JOURNAL_MODE_RESUBMIT):
+        # `materialize_review` now stages the concern ledger for EVERY feedback
+        # mode that is not scoped -- transfer/resubmit AND `llm` -- because the
+        # llm review reconciles that ledger too. List it here as well, or a
+        # retry with a pending feedback run bypasses the unmet-deps gate and
+        # dies inside the materializer instead of deferring cleanly.
+        if ctx is not None and journal_has_feedback(ctx) and not journal_is_scoped(ctx):
             deps.append(rid_feedback(r))
         return deps
     if kind == "probe":
@@ -1476,6 +1480,10 @@ VIEW_TEXT_NAMES = ("makefile", "gnumakefile", "cmakelists.txt", "latexmkrc")
 VIEW_OOXML_EXTS = (".docx", ".docm", ".xlsx", ".xlsm", ".pptx", ".pptm")
 VIEW_PDF_EXTS = (".pdf",)
 VIEW_LATEX_TARGET_EXTS = (".pdf", ".png", ".jpg", ".jpeg", ".eps", ".ps", ".svg")
+# LaTeX source files are addressed WITHOUT their extension by \input,
+# \include, \bibliography, \addbibresource and \subfile. Their stems must be
+# rewritten too, or the renamed view cannot compile.
+VIEW_LATEX_SOURCE_EXTS = (".tex", ".ltx", ".bib", ".sty", ".cls")
 VIEW_FIXED_ZIP_TIME = (2020, 1, 1, 0, 0, 0)
 VIEW_FIXED_DATE = "2020-01-01T00:00:00Z"
 _VIEW_EXPECT_CACHE = {}
@@ -1515,19 +1523,38 @@ def _view_layout(files: list, r: int, vid: str, view_seed: str) -> tuple:
     shuffled = normal_dirs[:]
     rng.shuffle(shuffled)
     dir_names = {d: f"d{i:02d}" for i, d in enumerate(shuffled)}
+    # A same-depth sibling must not get the same anonymous name: two evidence
+    # subdirectories otherwise collapse to one view directory, and their files
+    # (numbered per parent) overwrite each other. Index each anonymous segment
+    # among the siblings under its real parent; ancestors are included even
+    # when they hold no file directly, so an intermediate segment has an index
+    # too. The labels stay identical in every view (evidence areas are
+    # byte-identical inputs), so this leaks no cross-view correlation.
+    evidence_tree = set(evidence_dirs)
+    for d in evidence_dirs:
+        segs = d.split("/")
+        for i in range(2, len(segs)):
+            evidence_tree.add("/".join(segs[:i]))
+    siblings = {}
+    for d in sorted(evidence_tree):
+        siblings.setdefault(str(Path(d).parent.as_posix()), []).append(d)
+    sibling_index = {d: i for kids in siblings.values()
+                     for i, d in enumerate(kids, 1)}
     for d in evidence_dirs:
         top = evidence_area_of(d)
         area = RAW_DATA_DIR if top in RAW_DATA_DIRNAMES else top
         rest = d.split("/")[1:]
         parts = []
+        cur = top
         for i, seg in enumerate(rest, 1):
+            cur = f"{cur}/{seg}" if cur else seg
             if (i == 1 and top == HUMAN_FEEDBACK_DIR
                     and seg == ORIGINAL_SUBMISSION_DIRNAME):
                 # Fixed, identical in every view: the judge must be able to tell
                 # the reviewer-visible manuscript from a submission document.
                 parts.append(ORIGINAL_SUBMISSION_DIRNAME)
             else:
-                parts.append(f"s{i:02d}")
+                parts.append(f"s{sibling_index.get(cur, 1):02d}")
         dir_names[d] = "/".join([EVIDENCE_VIEW_ROOT, area] + parts)
     by_dir = {}
     for rel, src in files:
@@ -1565,6 +1592,7 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
     new_dir = posixpath.dirname(new_rel) or "."
     subs = {}
     stems = {}
+    stems_target = {}
     dir_map = {}
 
     def add(mapping, old, new):
@@ -1576,7 +1604,12 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
         o_rel, n_rel = posixpath.relpath(o, old_dir), posixpath.relpath(n, new_dir)
         add(subs, o_rel, n_rel)
         add(subs, o_base, n_base)
-        if Path(o).suffix.lower() in VIEW_LATEX_TARGET_EXTS:
+        suffix = Path(o).suffix.lower()
+        if suffix in VIEW_LATEX_TARGET_EXTS:
+            # A target (`plot.pdf`) is what \includegraphics{plot} means.
+            add(stems_target, _latex_stem(o_rel), _latex_stem(n_rel))
+            add(stems_target, _latex_stem(o_base), _latex_stem(n_base))
+        if suffix in (VIEW_LATEX_TARGET_EXTS + VIEW_LATEX_SOURCE_EXTS):
             add(stems, _latex_stem(o_rel), _latex_stem(n_rel))
             add(stems, _latex_stem(o_base), _latex_stem(n_base))
         o_dir, n_dir = posixpath.dirname(o), posixpath.dirname(n)
@@ -1588,14 +1621,23 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
                          + r")(?![A-Za-z0-9_])")
         text = pat.sub(lambda m: subs[m.group(1)], text)
     if stems:
-        cmd_pat = re.compile(r"\\(?:" + "|".join(LATEX_REF_CMDS)
+        cmd_pat = re.compile(r"\\(?P<cmd>" + "|".join(LATEX_REF_CMDS)
                              + r")\b(\s*\[[^\]]*\])?\s*\{([^{}]*)\}")
 
         def cmd_repl(m):
-            arg = m.group(2)
-            new = stems.get(arg.strip())
-            return (m.group(0).replace("{" + arg + "}", "{" + new + "}")
-                    if new else m.group(0))
+            arg = m.group(3)
+            # \bibliography{refs,intro} and \addbibresource{refs,intro} carry
+            # a comma-separated list; looking the whole string up left both
+            # keys pointing at names the renamed tree no longer has.
+            pieces = arg.split(",")
+            # \includegraphics{plot} means the PLOTTED file (`plot.pdf`), never
+            # the standalone source (`plot.tex`) that happens to share its stem:
+            # a source and a target of one stem must not compete for one key.
+            table = stems_target if m.group("cmd") == "includegraphics" else stems
+            mapped = [table.get(piece.strip(), piece) for piece in pieces]
+            if mapped == pieces:
+                return m.group(0)
+            return m.group(0).replace("{" + arg + "}", "{" + ",".join(mapped) + "}")
 
         text = cmd_pat.sub(cmd_repl, text)
     if dir_map:
@@ -1752,7 +1794,31 @@ def _sanitize_ooxml_bytes(data: bytes) -> tuple:
         new = re.sub(rb"<w:attachedTemplate\b[^>]*/>", b"", new)
         new = re.sub(rb"<w:docVars\b[^>]*>.*?</w:docVars>", b"", new, flags=re.S)
         new = re.sub(rb"<w:trackChanges\b[^>]*/>", b"", new)
-        new = re.sub(rb"<w:del\b[^>]*>.*?</w:del>", b"", new, flags=re.S)
+        def _drop_nested(tag: bytes) -> None:
+            """Remove a nested revision wrapper innermost-first.
+
+            A single non-greedy pass pairs the OUTER open with the INNER close
+            and leaves the rest of the outer element (including its close tag)
+            behind: text that should have been deleted is resurrected and the
+            XML can stop being well-formed. Repeat on the innermost match
+            until the tag is gone. A SELF-CLOSING mark (`<w:del .../>`) is
+            removed on its own and never consumes the enclosing element's close
+            tag, which would leave the outer mark open.
+            """
+            nonlocal new
+            pat = re.compile(
+                rb"<w:" + tag + rb"\b[^>]*/>"
+                rb"|<w:" + tag + rb"\b[^>]*>(?:(?!<w:" + tag
+                + rb"\b(?![^>]*/>)).)*?</w:" + tag + rb">", re.S)
+            for _ in range(64):
+                stripped = pat.sub(b"", new)
+                if stripped == new:
+                    return
+                new = stripped
+
+        _drop_nested(b"del")
+        _drop_nested(b"cellDel")
+        _drop_nested(b"moveFrom")
         new = re.sub(rb"<w:del\b[^>]*/>", b"", new)
         new = re.sub(rb"<w:delText\b[^>]*>.*?</w:delText>", b"", new, flags=re.S)
         new = re.sub(rb"<w:(rPrChange|pPrChange|tblPrChange|trPrChange|tcPrChange|"
@@ -2633,9 +2699,11 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
     sb.mkdir(parents=True, exist_ok=True)
     ensure_copy(ctx.sandbox_of(a1) / "base", sb / "base")
     ensure_pristine_input(ctx, sb / PRISTINE_DIR)
-    if journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_RESUBMIT):
-        # The review reconciles the real decision letter: the concern ledger
-        # travels beside the corpus (never inside it).
+    if journal_has_feedback(ctx) and not journal_is_scoped(ctx):
+        # The review reconciles the feedback ledger (a decision letter, or the
+        # false-positive-filtered LLM review in `llm` mode): it travels beside
+        # the corpus (never inside it). Staging only transfer/resubmit told an
+        # llm-mode reviewer to read `concerns/` files that did not exist.
         fb = _journal_concern_source(ctx, r)
         ensure_copy(fb / "concerns", sb / "concerns")
         if (fb / "feedback").is_dir():
@@ -3311,18 +3379,24 @@ def probe_findings_rows(ctx: Ctx, r: int) -> list:
 def probe_review_upstream_doc(ctx: Ctx, r: int) -> dict:
     """The UNMERGED review `round2/findings_extra.json` doc ({} when none).
 
-    Resolved like every other downstream consumer: session B under a split
-    review, the single review run otherwise, then the archived copy -- so a
-    pruned root still yields the base the merge is computed from.
+    Resolved like every other downstream consumer: the concerns run in a scoped
+    (major/minor) revision, session B under a split review, the single review
+    run otherwise, then the archived copy -- so a pruned root still yields the
+    base the merge is computed from.
     """
-    rid = rid_review_b(r) if review_split_of(ctx) != "off" else rid_review(r)
+    if journal_is_scoped(ctx):
+        rid, archive = rid_concerns(r), f"round{int(r)}_concerns"
+    elif review_split_of(ctx) != "off":
+        rid, archive = rid_review_b(r), f"round{int(r)}_review"
+    else:
+        rid, archive = rid_review(r), f"round{int(r)}_review"
     rec = ctx.run(rid)
     if rec is not None and str(rec.get("status") or "") == "done":
         doc = read_json(ctx.sandbox_of(rec) / REVIEW_DIR / "round2" / "findings_extra.json",
                         revive=False, lenient=True)
         if isinstance(doc, dict):
             return doc
-    doc = read_json(ctx.reports_dir / f"round{int(r)}_review" / "findings_extra.json",
+    doc = read_json(ctx.reports_dir / archive / "findings_extra.json",
                     revive=False, lenient=True)
     return doc if isinstance(doc, dict) else {}
 
@@ -4071,13 +4145,12 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
         rev_rec = ctx.run(rev_rid)
         if rev_rec is None or rev_rec.get("status") != "done":
             probs.append("upstream review/concerns run is not done")
-        elif journal_is_scoped(ctx):
-            probs.append(mismatch("review",
-                                  hash_manifest(ctx.sandbox_of(rev_rec) / REVIEW_DIR)))
         else:
-            # The general review path merges the probe findings into this copy
-            # (see _review_copy_mismatch): compare against the merge, not the raw
-            # upstream bytes.
+            # BOTH revise paths receive the probe merge (materialize_revise
+            # calls merge_probe_into_review_copy): a scoped revise on the
+            # concerns review, a general revise on the review. Compare against
+            # the merged copy in either case -- the old scoped-only branch left
+            # the general path with no review check at all after F004.
             probs.append(_review_copy_mismatch(ctx, r, sb,
                                                ctx.sandbox_of(rev_rec) / REVIEW_DIR))
     elif kind == "probe":

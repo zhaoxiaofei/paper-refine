@@ -310,12 +310,23 @@ STATE_VERSION = 3
 # The Qwen adapter is a fourth module because the `qwen` agent preset executes it
 # from the same directory; a root without it could not run that preset.
 PIPELINE_MODULE_FILES = ("paper_pipeline.py", "paper_docx_format.py",
-                         "paper_redlines_adapter.py", "paper_qwen_agent.py")
+                         "paper_redlines_adapter.py", "paper_qwen_agent.py",
+                         # The render/track shims are read beside the running
+                         # driver (`visual_renderer_choices`), so a root that
+                         # lacks them silently loses the highest-fidelity
+                         # renderer. They are frozen and manifest-recorded like
+                         # the modules.
+                         "docx2pdf.sh", "docxcompare.sh")
 # The two loaders above are thin; their implementation lives in ordered parts
 # directories. A root/stage is self-contained only when it carries both, and the
 # module manifest records each directory as ONE digest (name + sha256 of every
-# part), so a partial or stale bundle is visible to `status`/`sync-code`.
+# file), so a partial or stale bundle is visible to `status`/`sync-code`.
 PIPELINE_ASSET_DIRS = ("paper_pipeline_parts", "paper_docx_format_parts")
+# Skills are read from beside the running driver too (adopt-sweep's default
+# sweeps.md and the review/revise prompt assets), so a root freezes them; a
+# trimmed checkout without the skills pack still creates a root (the copy is
+# recorded as None rather than aborting setup).
+PIPELINE_SKILL_ASSET_DIRS = ("paper-skills",)
 
 # The Zotero tooling policy carried in pipeline_config.json (`setup --zotero`):
 #   off   -- never run the `zot` CLI; live fields stay on the skills' manual route

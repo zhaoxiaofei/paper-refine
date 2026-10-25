@@ -122,7 +122,7 @@ def section_kind(line: str) -> str:
         if pattern.match(text):
             return kind
     return ""
-KEYWORDS = re.compile(r"^\s*(?:key\s?words?)\s*[:.\u2014\u2013-]", re.I)
+KEYWORDS = re.compile(r"^\s*(?:key\s?words?)\s*(?:[:.\u2014\u2013-]|$)", re.I)
 # A caption line starts with the label, the number AND its separator ("Figure 2
 # | ...", "Fig. 1: ...", "Figure 3. ..."). Without the separator guard a BODY
 # sentence that merely opens with a figure reference ("Figure 2A shows that p53
@@ -524,8 +524,12 @@ def sections(text: str, abstract_end=None, caption_lines=None, excludes=None) ->
     end_found = False
     for i in range(start, n):
         stripped = lines[i].strip()
-        if SECTION_BOUND.match(stripped) or MAIN_START.match(stripped) \
-                or KEYWORDS.match(stripped):
+        if KEYWORDS.match(stripped):
+            # A Keywords line is not a section kind: the old generic branch
+            # resumed the count after it, putting the keyword list and any
+            # Methods prose after it back into the main text.
+            continue
+        if SECTION_BOUND.match(stripped) or MAIN_START.match(stripped):
             kind = section_kind(stripped)
             if kind and kind in excludes:
                 excluded_now = True
@@ -674,6 +678,24 @@ def _venue_profile_path(value: str) -> Path:
     return p
 
 
+def _article_type_id(entry: dict) -> str:
+    """The id a raw article-type entry resolves to, exactly as the pipeline does.
+
+    `normalize_venue_profile` derives a missing id from the label
+    (`Brief Communication` -> `brief-communication`) and only then falls back
+    to `default`; reading only `entry["id"]` skipped a legal first entry and
+    inherited the cover-letter rule from a later type.
+    """
+    if not isinstance(entry, dict):
+        return ""
+    explicit = str(entry.get("id") or "").strip().lower()
+    if explicit:
+        return explicit
+    slug = re.sub(r"[^a-z0-9]+", "-",
+                  str(entry.get("label") or "").strip().lower()).strip("-")
+    return slug or "default"
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -787,9 +809,17 @@ def main(argv=None) -> int:
             # the pipeline does. An explicit block with null min/max MEANS
             # "none" (venue_profiles/README.md), so it is not inherited.
             default_id = str((profile or {}).get("default_article_type") or "").strip().lower()
+            if not default_id:
+                # The pipeline's normalizer fills `default_article_type` with
+                # the FIRST type when the raw file omits it, deriving a missing
+                # id from that entry's label; this tool reads the raw file, so
+                # it must apply the same fallback instead of silently using the
+                # built-in preference (or skipping an id-less first entry).
+                first = next((c for c in types if isinstance(c, dict)), None)
+                default_id = _article_type_id(first) if first is not None else ""
             for candidate in types:
                 if isinstance(candidate, dict) and \
-                        str(candidate.get("id") or "").strip().lower() == default_id:
+                        _article_type_id(candidate) == default_id:
                     cover = ((candidate.get("length_limits") or {}).get("cover_letter")
                              or cover)
                     break
