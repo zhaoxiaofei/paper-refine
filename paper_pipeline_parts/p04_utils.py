@@ -2200,13 +2200,9 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
                     for a, b in (caption_spans or []) if a < n and b > 0)
             words = max(0, count_words(" ".join(lines)) - caption_words)
             main_cap = limits["main text"].get("cap")
-            main_base = limits["main text"].get("base")
             return [{"document": doc, "section": "main text", "words": words,
-                     "base": main_base,
                      "relaxation": limits["main text"].get("relaxation"),
                      "cap": main_cap,
-                     "over_base": main_base is not None and words > main_base,
-                     "base_margin": (words - main_base) if main_base is not None else None,
                      "over_limit": main_cap is not None and words > main_cap,
                      "note": ("no Abstract/Introduction heading found: this document carries "
                               "the selected article type's own name, so the whole text is "
@@ -2222,13 +2218,9 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
     if abs_start is not None:
         words = count_words(" ".join(lines[abs_start:abs_end]))
         abs_cap = limits["abstract"].get("cap")
-        abs_base = limits["abstract"].get("base")
         rows.append({"document": doc, "section": "abstract", "words": words,
-                     "base": abs_base,
                      "relaxation": limits["abstract"].get("relaxation"),
                      "cap": abs_cap,
-                     "over_base": abs_base is not None and words > abs_base,
-                     "base_margin": (words - abs_base) if abs_base is not None else None,
                      "over_limit": abs_cap is not None and words > abs_cap, "note": ""})
     # The main-text span starts after an excluded abstract; when the venue counts
     # the abstract INSIDE the main text, it starts at the abstract's own text.
@@ -2295,13 +2287,9 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
                      + ", ".join(kind.replace("-", " ") for kind in counting_inside)
                      + " in the main text")
     main_cap = limits["main text"].get("cap")
-    main_base = limits["main text"].get("base")
     rows.append({"document": doc, "section": "main text", "words": words,
-                 "base": main_base,
                  "relaxation": limits["main text"].get("relaxation"),
                  "cap": main_cap,
-                 "over_base": main_base is not None and words > main_base,
-                 "base_margin": (words - main_base) if main_base is not None else None,
                  "over_limit": main_cap is not None and words > main_cap,
                  "note": "; ".join(notes)})
     return rows
@@ -2370,7 +2358,7 @@ def _cover_letter_row(lines: list, doc: str, limits: dict = None, profile=None) 
         pref_clause = "; this venue profile configures no cover-letter preference"
     return {"document": doc, "section": "cover letter", "words": words,
             "total_words": total_words, "total_max": total_max,
-            "base": None, "relaxation": None, "cap": None,
+            "relaxation": None, "cap": None,
             "min": pref_min, "max": pref_max,
             "within_preference": within,
             # `over_limit` is the TOTAL-content cap only: the 300-500
@@ -2489,17 +2477,9 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
             docs.add(doc)
             rows.extend(found)
     over = [r for r in rows if r["over_limit"]]
-    # The BAND: over the venue's own (base) number but inside the pipeline's
-    # relaxation. It is not an over-limit row -- the margin is the pipeline's
-    # deliberate tolerance -- but it is never silent either: a section here is
-    # reported so the session states the margin it is using (see `length_note`
-    # and the M19 mandates). Without this the abstract of a 150-word venue can
-    # sit at 164 words and no row exists anywhere.
-    over_base = [r for r in rows if r.get("over_base") and not r["over_limit"]]
     return {"limits": limits, "counting": prof.counting, "source": source,
             "venue": prof.id,
             "rows": rows, "count": len(rows), "over_limit": over,
-            "over_base": over_base,
             "unparsed": sorted(set(unparsed)), "skipped": sorted(set(skipped)),
             "rendered": sorted(set(rendered)),
             "needs_manual": sorted(set(rendered)) if not rows else [],
@@ -2535,11 +2515,8 @@ def length_note(info) -> str:
                          + ("" if r.get("within_preference") else " OUTSIDE-PREFERENCE"))
         else:
             parts.append(f"{r['section'].replace('main text', 'main-text')} {r['words']} words"
-                         + (" OVER" if r.get("over_limit")
-                            else (" OVER-VENUE-LIMIT (inside the pipeline's margin)"
-                                  if r.get("over_base") else "")))
+                         + (" OVER" if r.get("over_limit") else ""))
     over_n = len([r for r in rows if r.get("over_limit")])
-    band_n = len([r for r in rows if r.get("over_base") and not r.get("over_limit")])
     pref_n = len([r for r in rows if r["section"] == "cover letter"
                   and not r.get("within_preference")])
     abs_cap, main_cap = limits["abstract"].get("cap"), limits["main text"].get("cap")
@@ -2553,14 +2530,6 @@ def length_note(info) -> str:
     tail = (f"; {over_n} over the cap (advisory for ranking -- never a word-count gate; "
             f"an over-cap FINAL package is NOT submission-ready; compress by removing "
             f"redundancy only)" if over_n else "; all within the relaxed caps")
-    if band_n:
-        margins = ", ".join(
-            f"{r['section'].replace('main text', 'main-text')} +{r.get('base_margin')} over the "
-            f"venue's own {r.get('base')}" for r in rows
-            if r.get("over_base") and not r.get("over_limit"))
-        tail += (f"; {band_n} section(s) above the venue's OWN number but inside the pipeline's "
-                 f"relaxation ({margins}) -- report the margin used, then trim or justify "
-                 f"before submission")
     cover_min = limits["cover letter"].get("min")
     cover_max = limits["cover letter"].get("max")
     if pref_n:

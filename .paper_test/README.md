@@ -2,13 +2,17 @@
 
 Self-contained repro/regression suites for `paper_pipeline.py`,
 `paper_docx_format.py`, `paper_redlines_adapter.py` and the `paper-skills/`
-pack. They need Python 3, plus three third-party packages for three suites:
-`python-docx` (the Word fixtures in
-`test_debug_2026_1017_serial_audit.py`), `openpyxl` (the workbook checks in
-`test_pairwise_scores.py`) and `lxml` (the XML reads in
-`test_round2_regressions_2026_1019.py`). Install them with
-`python3 -m pip install python-docx openpyxl lxml`; every other suite uses only
-the standard library. `pytest` is NOT required: the two pytest-style suites
+pack. They need Python 3.12, plus two third-party packages:
+`python-docx` (the Word fixtures and the DOCX scanner/parity suites; it brings
+`lxml`) and `openpyxl` (the workbook checks in `test_pairwise_scores.py`).
+Create the reproducible environment with:
+
+```bash
+bash scripts/create-test-env.sh
+conda run -n paper-refine-test python .paper_test/run_all.py --engine python -j 8
+```
+
+Every other suite uses only the standard library. `pytest` is NOT required: the two pytest-style suites
 (`test_layout_integrity_2026_1019.py`, `test_debug_2026_1019b.py`) run their
 `test_*` functions through `pytest_shim.py` when the harness executes them as
 scripts, and still run under real pytest when collected. A suite takes seconds

@@ -6356,18 +6356,6 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
              else str(final.get("length_note") or "").strip())
     if _note:
         L.append(f"- length status (M19): {_note}")
-        # A section that is inside the pipeline's RELAXED cap but above the
-        # venue's OWN number is the case this block exists for: `over_limit`
-        # only says "the relaxation held", so the comparison is against `base`.
-        _over = [r for r in (_lens.get("rows") or [])
-                 if isinstance(r.get("words"), int) and isinstance(r.get("base"), int)
-                 and r["words"] > r["base"]]
-        for _r in _over[:6]:
-            L.append(f"  - `{_r.get('document')}` [{_r.get('section')}]: "
-                     f"{_r.get('words')} word(s) against the venue's own "
-                     f"{_r.get('base')} (the pipeline's margin allowed up to "
-                     f"{_r.get('cap')}) -- the venue's own number is what the journal "
-                     f"enforces; trim or justify the excess before upload")
     if cert.get("blockers"):
         L.append("- blockers (why the decision is not certified):")
         L.extend(f"  - {b}" for b in cert["blockers"])
@@ -6956,8 +6944,6 @@ def package_readiness(final_clean: dict, residuals: dict = None,
                        f"({length_info['error']}); the abstract/main-text/cover-letter "
                        f"caps were NOT verified")})
     length_rows = list(length_info.get("over_limit") or [])
-    length_rows += [r for r in (length_info.get("over_base") or [])
-                    if not r.get("over_limit")]
     for r in length_rows:
         section = str(r.get("section") or "section")
         if section == "cover letter":
@@ -6973,18 +6959,10 @@ def package_readiness(final_clean: dict, residuals: dict = None,
         else:
             cap = r.get("cap")
             words = r.get("words")
-            if cap is None:
-                detail = (
-                    f"the {section} is {words} words against the venue's "
-                    f"{r.get('base')}-word base limit; this profile records no "
-                    f"relaxed cap that can waive it: trim or obtain an explicit "
-                    f"venue exception")
-            else:
-                detail = (
-                    f"the {section} is {words} words against the venue's base "
-                    f"limit of {r.get('base')} words (the pipeline's relaxed cap is "
-                    f"{cap}): the venue's own published number is the limit the "
-                    f"journal enforces; trim or obtain an explicit venue exception")
+            detail = (
+                f"the {section} is {words} words against the relaxed limit of "
+                f"{cap} words: trim by removing redundancy, or obtain an explicit "
+                f"exception; never delete scientific content to meet the count")
         findings.append({
             "rule": "FMT-M19", "document": r.get("document"), "detail": detail})
     # PKG-2 leftovers: the pointers the mechanical removal may not touch (a

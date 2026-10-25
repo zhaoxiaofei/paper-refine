@@ -11,8 +11,9 @@ article type), and both counters read it.
 
 Asserts:
   * the default (and the `generic` profile) keeps the NBT Article convention --
-    abstract, Methods, references and figure legends excluded -- so a profile
-    written before the field counts exactly as it always did;
+    abstract, Methods, references and figure legends excluded -- and an
+    included section after an excluded one is still counted (the `excludes`
+    list names sections, not a truncation point);
   * the Frontiers profile counts Methods inside the main text, its figure
     captions still outside, and stops at References; every article type that
     does not state its own block inherits the venue-level one;
@@ -86,6 +87,8 @@ def main_row(payload):
 
 # A manuscript shaped so every convention produces a different number:
 #   abstract 3, introduction 4, Methods 6, caption 8, results 2, references 3.
+# The default excludes Methods, so the included main text is Introduction 4 +
+# Results 2; Methods/abstract/references/legends are outside it.
 MANUSCRIPT = """Abstract
 
 one two three
@@ -143,15 +146,15 @@ def test_default():
     ms = write(tmp / "ms.md", MANUSCRIPT)
     payload, err = counter(ms)
     row = main_row(payload)
-    check("CT1 the counter (no profile) stops the main text at Methods",
-          row is not None and row["words"] == 4, f"{row} {err}")
+    check("CT1 the counter excludes Methods and counts the later Results section",
+          row is not None and row["words"] == 6, f"{row} {err}")
     check("CT1 the counter's JSON reports the convention it applied",
           (payload or {}).get("counting", {}).get("main_text", {}).get("excludes")
           == list(nb.DEFAULT_MAIN_TEXT_EXCLUDES), str((payload or {}).get("counting")))
     info = nb.scan_lengths_in_sources([(tmp, "", ())])
     scan = {(r["document"], r["section"]): r["words"] for r in info["rows"]}
     check("CT1 the code-side scan applies the same default (parity)",
-          scan.get(("ms.md", "main text")) == 4, str(scan))
+          scan.get(("ms.md", "main text")) == 6, str(scan))
 
 
 # =====================================================================

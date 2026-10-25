@@ -103,7 +103,7 @@ SUSPECT_PRECEDERS = re.compile(
 # `[\].)]`). Without it a `1) Smith J. Nature 2019.` list parsed to ZERO
 # entries, so the orphan/uncited/duplicate checks silently fell back to the
 # cross-file union and the M2 inventory was wrong for that style.
-REF_ENTRY_RE = re.compile(r"^\s*\[?(\d{1,3})[\].)]\s+(.*)$")
+REF_ENTRY_RE = re.compile(r"^\s*\[?(\d{1,3})[\].)]\s*(.*)$")
 BIB_ENTRY_RE = re.compile(r"@\w+\s*\{\s*([^,]+),")
 # LaTeX: the call-out is a KEY inside a \cite-family macro (`\cite`, `\citep`,
 # `\citet`, `\citealp`, `\textcite`, `\parencite`, `\autocite`, `\nocite`, ...),
@@ -346,6 +346,12 @@ def main():
             continue  # a letter or a data table carries no manuscript citations
         text = open(os.path.join(corpus, fname), encoding="utf-8", errors="replace").read()
         lines = text.split("\n")
+        # Call-outs are read from the compilable text (LaTeX comments and
+        # verbatim bodies removed) while reference-list entries keep the
+        # source lines. Without this a commented-out `% see [7]` became a
+        # numeric call-out and an orphan.
+        callout_lines = (latex_source_text(text).split("\n")
+                         if fname.endswith((".tex.txt", ".ltx.txt")) else lines)
         if fname.endswith(".bib.txt"):
             for m in BIB_ENTRY_RE.finditer(text):
                 bib_entries.append({"file": fname, "key": m.group(1).strip()})
@@ -411,8 +417,9 @@ def main():
                 prev_line = raw
                 continue
             prev_line = raw
-            for m in NUM_CIT_RE.finditer(raw):
-                before = raw[:m.start()].rstrip()
+            scan_raw = callout_lines[li - 1] if li - 1 < len(callout_lines) else raw
+            for m in NUM_CIT_RE.finditer(scan_raw):
+                before = scan_raw[:m.start()].rstrip()
                 suspect = bool(SUSPECT_PRECEDERS.search(before))
                 inner = m.group(1)
                 # An interval SHAPE after a measurement word ("in the interval
@@ -423,7 +430,7 @@ def main():
                                       or re.search(r"\d\s*[\u2013\u2014-]\s*\d", inner))
                 if suspect and interval_shape:
                     suspect_brackets.append({"file": fname, "line": li, "raw": m.group(0),
-                                             "excerpt": raw.strip()[:120],
+                                             "excerpt": scan_raw.strip()[:120],
                                              "why": "bracketed range after a measurement word"})
                     continue
                 if suspect:
@@ -435,20 +442,20 @@ def main():
                     # It IS counted, and still recorded here (and flagged
                     # `suspect` in the call-out) for the human to check.
                     suspect_brackets.append({"file": fname, "line": li, "raw": m.group(0),
-                                             "excerpt": raw.strip()[:120],
+                                             "excerpt": scan_raw.strip()[:120],
                                              "why": "single bracketed number after a "
                                                     "measurement word (counted; verify)"})
                 callouts.append({"file": fname, "line": li, "raw": m.group(0),
                                  "refs": parse_nums(inner),
-                                 "excerpt": raw.strip()[:120], "style": "numeric",
+                                 "excerpt": scan_raw.strip()[:120], "style": "numeric",
                                  "suspect": suspect})
-            for m in AY_CIT_RE.finditer(raw):
+            for m in AY_CIT_RE.finditer(scan_raw):
                 if is_date_prose(m):
                     continue
                 raw_cit, author, year = ay_callout(m)
                 callouts.append({"file": fname, "line": li, "raw": raw_cit,
                                  "refs": ["%s %s" % (author, year)],
-                                 "excerpt": raw.strip()[:120], "style": "author-year"})
+                                 "excerpt": scan_raw.strip()[:120], "style": "author-year"})
 
     # ---- per-document bookkeeping (each numbered list is its own space)
     lists_by_file = defaultdict(list)

@@ -115,21 +115,30 @@ def test_duplicate_roles() -> None:
           == pp._duplicate_role_key("manuscript-v2.docx"))
 
 
-def test_readiness_venue_base() -> None:
-    print("\n== C05: readiness uses the venue base limit ==")
+def test_readiness_relaxed_cap() -> None:
+    print("\n== C05: readiness uses only the relaxed cap ==")
     root = scratch("serial_c05_")
-    row = {"document": "main.docx", "section": "main text", "words": 3726,
-           "base": 3000, "relaxation": 1.25, "cap": 3750,
-           "over_base": True, "over_limit": False}
+    under = {"document": "main.docx", "section": "main text", "words": 3726,
+             "relaxation": 1.25, "cap": 3750, "over_limit": False}
     ready = pp.package_readiness(
         {"path": str(root), "hygiene": {}}, {"items": []},
         author_to_complete="readme",
-        lengths={"rows": [row], "over_base": [row], "over_limit": []},
+        lengths={"rows": [under], "over_limit": []},
     )
-    check("C05 text above the venue base is not submission-ready",
-          ready["submission_ready"] is False
-          and any(f.get("rule") == "FMT-M19" for f in ready["findings"]),
+    check("C05 text within the relaxed cap is submission-ready",
+          ready["submission_ready"] is True
+          and not any(f.get("rule") == "FMT-M19" for f in ready["findings"]),
           json.dumps(ready["findings"])[:500])
+    over = dict(under, words=3800, over_limit=True)
+    blocked = pp.package_readiness(
+        {"path": str(root), "hygiene": {}}, {"items": []},
+        author_to_complete="readme",
+        lengths={"rows": [over], "over_limit": [over]},
+    )
+    check("C05 text over the relaxed cap is not submission-ready",
+          blocked["submission_ready"] is False
+          and any(f.get("rule") == "FMT-M19" for f in blocked["findings"]),
+          json.dumps(blocked["findings"])[:500])
 
 
 def test_stale_driver_guard() -> None:
@@ -555,7 +564,7 @@ def main() -> int:
     try:
         test_handoff_checklist()
         test_duplicate_roles()
-        test_readiness_venue_base()
+        test_readiness_relaxed_cap()
         test_stale_driver_guard()
         test_pairwise()
         test_placeholder_selection()

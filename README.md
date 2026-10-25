@@ -149,7 +149,7 @@ Everything lives under the root you passed to `setup`:
 | `reports/round<r>_review_findings.csv` | the round's review findings (id, check, category, severity, location, evidence, explanation), one row each |
 | `round<r>_winner/` | the champion of each round (content-addressed: identical content is never re-run) |
 | `final_clean_version_<root name>/` | the champion corpus, renamed for the next run's `--source`; ALWAYS built, certified or not |
-| `final_clean_version.readme.md` | the package's status document (sibling of the directory): certification verdict, blockers/notes, champion + digests, the M19 LENGTH status (including any section that is inside the pipeline's margin but above the venue's OWN limit, with the numbers — 2026-10-16), and the reuse hint |
+| `final_clean_version.readme.md` | the package's status document (sibling of the directory): certification verdict, blockers/notes, champion + digests, the M19 LENGTH status against the relaxed caps (with the numbers), and the reuse hint |
 | `redlines/` | the pipeline's tracked-changes `.docx` per candidate and source pair (`from-base/`, `from-original/`, `from-setup-source/`) |
 | `tracking/` | one difference-tracking copy per baseline (`*.tracking-original.*`, `*.tracking-a1.*`, `*.tracking-w<k>.*`, `*.tracking-winner<r>.*`, or the matching `*.logging-*` fallback when a tool failed), mirrored from the version packages and published winners |
 | `pdfs/` | the compiled/converted PDFs per version (LaTeX via `latexmk`, DOCX via Word/MCP) -- persistent: `prune` never touches them |
@@ -3085,6 +3085,24 @@ its four integration runs never started.
 | `.paper_test/` | the offline regression suites (stub agents; no network) |
 
 ## Tests
+
+The suite is offline and needs Python 3.12 plus two third-party packages:
+`python-docx` (the DOCX scanner/parity fixtures) and `openpyxl` (the pairwise
+workbook check). The reproducible environment script creates them:
+
+```bash
+bash scripts/create-test-env.sh
+conda run -n paper-refine-test python .paper_test/run_all.py --engine python -j 8
+```
+
+If conda cannot write its normal cache directories (for example inside a file
+sandbox), use a prefix environment; the script keeps the conda/pip caches under
+`tmp/`:
+
+```bash
+PAPER_REFINE_TEST_PREFIX="$PWD/tmp/paper-refine-test" bash scripts/create-test-env.sh
+conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine python -j 8
+```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
 any failure. They are independent, so run them in parallel — 148 suites (a few

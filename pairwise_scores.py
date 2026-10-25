@@ -228,8 +228,10 @@ def collect(inputs: list[Path], how: str, pool_rounds: bool, own_only: bool):
             member = (row.get("member") or "").strip()
             opponent = opponent_of(row)
             score = parse_score(row.get("credited"))
+            score_from_written = False
             if score is None:
                 score = parse_score(row.get("score_as_written"))
+                score_from_written = True
             direction = (row.get("direction") or "").strip()
             if direction:
                 directions_seen.add(direction)
@@ -239,6 +241,16 @@ def collect(inputs: list[Path], how: str, pool_rounds: bool, own_only: bool):
             if not member or not opponent or score is None or member == opponent:
                 skipped_incomplete += 1
                 continue
+            # A received row is the opponent's frame: when the caller asks to
+            # keep both directions for audit, its credited value is the
+            # NEGATION of the judgment, never a second identical observation.
+            if direction.lower() == "received" and score_from_written:
+                # A received row with no credited value carries the opponent's
+                # frame in `score_as_written`; the credited value is absent
+                # because the direction is derived. A received row that already
+                # carries `credited` (the normal pipeline twin) is already the
+                # negation and is kept verbatim for the audit.
+                score = -score
             source_round = (row.get("round") or "").strip() or file_round or "1"
             round_id = source_round
             if pool_rounds:
@@ -256,7 +268,9 @@ def collect(inputs: list[Path], how: str, pool_rounds: bool, own_only: bool):
                 score,
                 (row.get("sheet_target") or "").strip(),
             )
-            if dedupe_key in seen:
+            # A bare judge identity ("", "") is not an identity: two blank-
+            # identity rows can be two independent judgments, so they are kept.
+            if dedupe_key in seen and (judge or judge_index):
                 continue
             seen.add(dedupe_key)
             # Keep this direction only. Never store (opponent, member) = -score.

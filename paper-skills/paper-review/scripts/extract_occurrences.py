@@ -151,7 +151,7 @@ def variant_pattern(term, mode):
     # matches) and tolerate a non-word edge on either side. An empty term used to
     # compile to `(?i)(?<!\\w)(?:es|s)?(?!\\w)`, which MATCHED empty strings in
     # every word (6 matches inside a three-word sentence).
-    pat = r"(?i)(?<!\w)" + r"[\s\-]*".join(parts) + r"(?:es|s)?(?!\w)"
+    pat = r"(?i)(?<!\w)" + r"[\s\-\u2013\u2014]*".join(parts) + r"(?:es|s)?(?!\w)"
     return re.compile(pat)
 
 

@@ -94,8 +94,8 @@ def test_docx():
         rows = fmt.word_number_rows(phrase)
         check(f"a real plural noun counts: {phrase!r}", bool(rows), str(rows))
     rows = fmt.word_number_rows("one of the five donors was excluded")
-    check("'one of the five' keeps both count rows",
-          [r["number"] for r in rows] == ["1", "5"], str(rows))
+    check("'one of the five' treats one as a pronoun and five as the count",
+          [r["number"] for r in rows] == ["5"], str(rows))
 
     check("'data.' ends a sentence",
           [t for t in [fmt.sentence_spans(
@@ -304,7 +304,10 @@ def test_pairwise():
 
 
 def _env_with(path_entries):
-    return dict(os.environ, PATH=os.pathsep.join(path_entries + [os.environ["PATH"]]))
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("DSH_PROFILE", "DSH_HOME", "CODEX_HOME")}
+    env["PATH"] = os.pathsep.join(path_entries + [os.environ["PATH"]])
+    return env
 
 
 def test_installer():

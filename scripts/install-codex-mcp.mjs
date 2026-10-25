@@ -146,6 +146,7 @@ function which(command) {
     if (!dir) continue;
     const candidate = path.join(dir, command);
     try {
+      if (!fs.statSync(candidate).isFile()) continue;
       fs.accessSync(candidate, fs.constants.X_OK);
       return candidate;
     } catch {
@@ -389,7 +390,7 @@ function transformServer(server, opts, usedNames, usedIds, pluginName) {
   const display = server.name || 'server';
   const warnings = [];
 
-  if (!server.enabled && !opts.includeDisabled) {
+  if (server.enabled === false && !opts.includeDisabled) {
     return { skipped: true, reason: 'disabled in Codex (use --include-disabled to import)' };
   }
 
@@ -411,7 +412,7 @@ function transformServer(server, opts, usedNames, usedIds, pluginName) {
     config.command = String(t.command);
     if (Array.isArray(t.args) && t.args.length > 0) config.args = t.args.map(String);
 
-    const env = {};
+    const env = Object.create(null);
     for (const [key, value] of Object.entries(t.env || {})) env[key] = String(value);
     for (const entry of t.env_vars || []) {
       const name = typeof entry === 'string' ? entry : entry?.name;
@@ -554,7 +555,7 @@ function stripManagedBlock(text) {
   const escapedBegin = BEGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const escapedEnd = END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const re = new RegExp(`(?:^|\\n)${escapedBegin}[\\s\\S]*?${escapedEnd}\\n?`, 'g');
-  return text.replace(re, '\n').replace(/\n{3,}/g, '\n\n');
+  return text.replace(re, '\n');
 }
 
 function isEffectivelyEmpty(text) {
@@ -584,8 +585,13 @@ function mergePatch(existing, block) {
 }
 
 function backup(file) {
-  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
-  const target = `${file}.bak-codex-mcp-${stamp}`;
+  const stamp = new Date().toISOString()
+    .replace(/[-:]/g, '').replace('T', '-').replace('Z', '');
+  let target = `${file}.bak-codex-mcp-${stamp}`;
+  let suffix = 2;
+  while (fs.existsSync(target)) {
+    target = `${file}.bak-codex-mcp-${stamp}-${suffix++}`;
+  }
   fs.writeFileSync(target, fs.readFileSync(file), { mode: 0o600 });
   return target;
 }

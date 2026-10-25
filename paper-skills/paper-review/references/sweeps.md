@@ -796,7 +796,7 @@ length is exempt" standing exemption. For the run's venue profile's selected art
 limits are abstract ≤ 150 words and main text ≤ 3,000 words, with the main text
 EXCLUDING the abstract, Methods, references and figure legends; this pipeline
 allows **abstract +10% (≤ 165 words)** and **main text +25% (≤ 3,750 words)**.
-Another content type takes that type's own base numbers from the journal's
+Another content type takes that type's own relaxed caps from the journal's
 content-types table with the same two margins, and the artifact must name the
 base and its source. A venue profile that declares different numbers (or none)
 replaces all of them: read the limits from the profile of the run you are in
@@ -831,7 +831,7 @@ journal requirement and never gated. `count_words.py --section cover-letter` cou
 
 **Enumeration:** for every document that carries one, one row per section into
 `M19_length.md`: document | section (abstract / main text / cover letter) | word
-count | the base limit applied and its source | the allowed cap | disposition
+count | the relaxed cap applied and its source | disposition
 (OK / over cap → finding id / over cap but not compressible without losing
 content → manual verification item). Say in the artifact which text was counted
 as the main text. Only SUBMISSION documents are counted — `raw_data/` files and

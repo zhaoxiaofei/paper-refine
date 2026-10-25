@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The 2026-10-09 package-integrity round (checks M19 band, FMT-R*/O1/X2/L1/AV*/PDF*, PKG-1, M30-NC).
+"""The 2026-10-09 package-integrity round (checks M19 relaxed caps, FMT-R*/O1/X2/L1/AV*/PDF*, PKG-1, M30-NC).
 
 Run:  python3 .paper_test/test_package_integrity_2026_1009.py
 
@@ -8,7 +8,7 @@ defects the pipeline could not see, because nothing enumerated them:
 
   * the abstract of a 150-word venue sat at 164 words -- inside the pipeline's
     +10% relaxation, so only the relaxed 165-word cap was ever compared
-    (M19 must report the BAND and name the venue's own base number);
+    (M19 enforces the relaxed cap only; the venue's base number is not a second limit);
   * reference entries with a malformed journal field, no venue at all, a bare
     GitHub URL, a bioRxiv-style identifier with a foreign DOI prefix, and
     preprints/trial-in-progress abstracts (FMT-R1..R5);
@@ -81,9 +81,9 @@ def _words(n: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 1. M19 -- the band between the venue's own number and the relaxation
+# 1. M19 -- only the relaxed cap is enforced
 # ---------------------------------------------------------------------------
-def test_m19_band():
+def test_m19_relaxed_caps():
     root = scratch("pi_m19_")
     d = root / "corpus"
     d.mkdir()
@@ -96,29 +96,30 @@ def test_m19_band():
     abstract, main = rows.get("abstract", {}), rows.get("main text", {})
     check("M19 counts the abstract", abstract.get("words") == 164, str(abstract.get("words")))
     check("a 164-word abstract is inside the relaxed 165-word cap",
-          abstract.get("over_limit") is False)
-    check("M19 reports it as OVER the venue's own base number",
-          abstract.get("over_base") is True and abstract.get("base") == 150,
-          json.dumps({k: abstract.get(k) for k in ("words", "base", "cap", "over_base")}))
-    check("M19 names the margin spent", abstract.get("base_margin") == 14,
-          str(abstract.get("base_margin")))
-    check("a 3,100-word main text is over the base 3,000 and inside the 3,750 cap",
-          main.get("over_base") is True and main.get("over_limit") is False)
-    check("the scan exposes the band as its own list", len(info.get("over_base") or []) == 2,
-          str(len(info.get("over_base") or [])))
+          abstract.get("cap") == 165 and abstract.get("over_limit") is False)
+    check("the base number is not emitted as a second limit",
+          "base" not in abstract and "over_base" not in abstract
+          and "base_margin" not in abstract,
+          json.dumps({k: abstract.get(k) for k in ("words", "cap", "over_limit")}))
+    check("a 3,100-word main text is inside the relaxed 3,750-word cap",
+          main.get("words") == 3100 and main.get("cap") == 3750
+          and main.get("over_limit") is False)
+    check("the scan exposes no base-band list",
+          "over_base" not in info and not (info.get("over_limit") or []),
+          str(sorted(info.keys())))
     note = pp.length_note(info)
-    check("the M19 note says a section is above the venue's OWN number",
-          "above the venue's OWN number" in note and "+14" in note, note[:160])
+    check("the M19 note reports all sections within the relaxed caps",
+          "within the relaxed caps" in note and "OWN number" not in note, note[:180])
     for where in ("review", "revise", "integrate", "rewrite", "judge"):
         block = pp.m19_blocks(prof)[where]
-        check(f"the M19 {where} mandate carries the band rule",
-              "ABOVE the venue's own base number" in block
-              or "above the venue's own base number" in block)
-    # A venue with no caps must not grow a band row.
+        check(f"the M19 {where} mandate uses the relaxed cap only",
+              "base number is" not in block and "ABOVE the venue's own base number" not in block)
+    # A venue with no caps must not grow a base-band row either.
     generic = pp.scan_lengths_in_sources([(d, "", set())],
                                          profile=pp.load_venue_profile("generic"))
-    check("a profile with no caps reports no band row",
-          all(not r.get("over_base") for r in generic["rows"]))
+    check("a profile with no caps reports no base-band row",
+          "over_base" not in generic
+          and all(not r.get("over_limit") for r in generic["rows"]))
 
 
 # ---------------------------------------------------------------------------
@@ -489,7 +490,7 @@ def test_wiring():
 
 
 def main() -> int:
-    sections = [("m19_band", test_m19_band),
+    sections = [("m19_relaxed_caps", test_m19_relaxed_caps),
                 ("references", test_references),
                 ("order_glue_leftovers", test_order_glue_leftovers),
                 ("availability", test_availability),

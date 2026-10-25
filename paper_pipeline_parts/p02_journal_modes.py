@@ -2154,28 +2154,26 @@ def length_rule_text(profile=None) -> str:
             f"      carries): this venue profile publishes no abstract or main-text number for\n"
             f"      {_article_phrase(prof)}, so there is no relaxed cap to apply here. The limits "
             f"that DO\n"
-            f"      apply are the venue's own: every stage COUNTS the abstract and the main text, "
-            f"and each\n"
+            f"      apply are the target journal's own: every stage COUNTS the abstract and "
+            f"the main text, and each\n"
             f"      artifact names the limit it applied and the source it came from ({source}).")
     else:
-        base_bits = []
-        if abstract["base"] is not None:
-            base_bits.append(f"abstract <= {abstract['base']:,} words")
-        if main["base"] is not None:
-            base_bits.append(f"main text <= {main['base']:,} words")
-        relaxed_bits = []
+        cap_bits = []
         if abstract["cap"] is not None:
             margin = int(round((float(abstract["relaxation"]) - 1.0) * 100))
-            relaxed_bits.append(f"the abstract +{margin}% (<= {abstract['cap']} words)")
+            cap_bits.append(f"the abstract <= {abstract['cap']} words"
+                            + ("" if margin == 0 else f" (+{margin}% = {abstract['cap']})"))
         if main["cap"] is not None:
             margin = int(round((float(main["relaxation"]) - 1.0) * 100))
-            relaxed_bits.append(f"the main text +{margin}% (<= {main['cap']} words)")
+            cap_bits.append(f"the main text <= {main['cap']} words"
+                            + ("" if margin == 0 else f" (+{margin}% = {main['cap']})"))
         limits_para = (
-            f"      carries): the limits below DO apply, in their relaxed form. For "
-            f"{_article_phrase(prof)} the base limits\n"
-            f"      are {' and '.join(base_bits)}.\n"
-            f"      {counting_sentence} ({source}). This pipeline allows\n"
-            f"      {' and '.join(relaxed_bits)}. This run is submitted as "
+            f"      carries): the limits below DO apply in their RELAXED form. For "
+            f"{_article_phrase(prof)} the allowed\n"
+            f"      caps are {' and '.join(cap_bits)} ({source}). The relaxed cap is the ONLY\n"
+            f"      limit this pipeline applies to the manuscript; it does not separately "
+            f"enforce a base number.\n"
+            f"      {counting_sentence}. This run is submitted as "
             f"{_article_phrase(prof)}:\n"
             f"      the venue profile's article-type table carries every type the venue "
             f"publishes, and\n"
@@ -2183,18 +2181,12 @@ def length_rule_text(profile=None) -> str:
             f"number for\n"
             f"      is COUNTED and named from the venue's own table, never measured against "
             f"these caps; a\n"
-            f"      submission of another content type uses that type's own base numbers and "
+            f"      submission of another content type uses that type's own caps and "
             f"margins from\n"
-            f"      the same venue table.\n"
-            f"      THE MARGIN IS NOT A LICENCE: a section inside the relaxed cap but ABOVE the "
-            f"venue's own\n"
-            f"      base number is REPORTED with the margin it uses, and the review must either "
-            f"trim it to the\n"
-            f"      base number or record, in the M19 artifact, why the margin is being spent "
-            f"(a counting\n"
-            f"      convention, a quoted passage that cannot be cut). A section in that band is "
-            f"never reported\n"
-            f"      clean, because the venue's published number is the base one.")
+            f"      the same venue table. A section within its relaxed cap is within the "
+            f"limit; a section\n"
+            f"      over it is reported and compressed by redundancy only, never by deleting "
+            f"content.")
     cover_clause = _cover_preference_clause(prof)
     cover_source = str(limits['cover letter'].get('source') or '')
     cover_is_master = cover_source.lower().startswith("master-prompt preference")
@@ -2560,17 +2552,13 @@ def m19_blocks(profile=None) -> dict:
     # margin, not a second cap. A section between the two used to be reported
     # clean everywhere, which is how an abstract of 164 words passed a 150-word
     # venue: the band clause makes it a row every stage must dispose.
-    band_clause = (
-        "A section inside the relaxed cap but ABOVE the venue's own base number is a REPORTED "
-        "finding too, never a clean row: name the margin it uses (words over the base) and either "
-        "trim it to the base number or state why the margin is being spent."
-        if has_caps else "")
+    band_clause = ""
     review = f"""3b. The PIPELINE-MANDATED length sweep M19 (see the length rule in the standing
    exemptions): enumerate the ABSTRACT and the MAIN TEXT of every submission document that carries
    one -- and the PERSUADING PART of the cover letter -- into review/artifacts/M19_length.md, one
    row per section: document | section
    (abstract / main text / cover letter) | word count (for the cover letter also its TOTAL word
-   count) | the base limit you applied and its source | the allowed
+   count) | the relaxed limit you applied and its source | the allowed
    cap ({caps_article}; {cover_note}) | disposition
    (OK / over cap -> finding id / over cap but not compressible without losing content -> manual
    verification item). Count with the pipeline's definition (maximal runs of NON-SPACE characters;

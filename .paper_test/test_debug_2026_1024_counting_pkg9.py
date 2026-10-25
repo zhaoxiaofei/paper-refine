@@ -4,7 +4,8 @@
 Each check reproduces one candidate from
 ``debug_runs/20261024-141221/01_find/findings`` on the current tree:
 
-  * C01 -- the M19 no-heading branch honours ``counting.main_text.excludes``;
+  * C01 -- the M19 no-heading branch honours ``counting.main_text.excludes``:
+    it skips the excluded back matter and still counts a later included section;
   * C02 -- ``count_words.py`` normalizes ``_`` in a section kind like the
     pipeline does (script/pipeline parity);
   * C03 -- the M19 renderer names the back-matter exclusions instead of saying
@@ -118,7 +119,7 @@ def make_docx(path: Path, prose, rows) -> Path:
 
 def test_c01_no_heading_excludes():
     print()
-    print("== C01: a no-heading Brief stops at the first excluded back-matter heading ==")
+    print("== C01: a no-heading Brief skips excluded back matter and counts References ==")
     brief = nb.load_venue_profile("nature-biotechnology", root=str(WS)) \
         .with_article_type("brief-communication")
     doc = ("A short title\n\nA. Author, B. Author\n\n"
@@ -134,8 +135,8 @@ def test_c01_no_heading_excludes():
                            str(WS / "venue_profiles" / "nature-biotechnology.json"),
                            "--article-type", "brief-communication")
     srow = main_row(payload)
-    check("C01 the pipeline stops the Brief main text before Acknowledgements",
-          row is not None and row["words"] == 23, f"{row} {err}")
+    check("C01 the pipeline skips Acknowledgements but counts the included References",
+          row is not None and row["words"] == 29, f"{row} {err}")
     check("C01 the note no longer claims the whole document is counted",
           row is not None and "whole document" not in row["note"], str(row))
     check("C01 count_words.py returns the same span (parity)",

@@ -218,7 +218,9 @@ def _word_number_is_count(text: str, start: int, end: int, written: str) -> bool
     # five donors").
     if re.match(r"\s+of\s+(?:the\s+|these\s+|those\s+|its\s+|their\s+)?"
                 r"(?:" + _WORD_NUMBER_ALT + r"|\d+)\b", tail, re.I):
-        return True
+        # "Four of the five ..." is a count pair; "one of the five ..." uses
+        # `one` as a pronoun, so only the explicit count is a numeric artifact.
+        return not single_one
     if first == "one" and follower in ONE_NON_COUNT_FOLLOWERS:
         return False
     if re.search(r"(?i)\b(?:no|for|at|in)\s+$", text[max(0, start - 12):start]) \
