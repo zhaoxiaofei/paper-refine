@@ -142,11 +142,30 @@ def _pdf_previous_records(stored: dict) -> dict:
     return out
 
 
+def _docx_pdf_target(out_dir: Path, stem: str, latex_targets: set) -> Path:
+    """The DOCX render path, moved aside when a LaTeX root owns `<stem>.pdf`.
+
+    A package may legitimately carry `main.tex` and `main.docx`; both used to
+    write `pdfs/<label>/main.pdf`, and the DOCX conversion silently overwrote
+    the LaTeX render while both manifest rows reported ok.
+    """
+    target = Path(out_dir) / (stem + ".pdf")
+    if target.resolve() in latex_targets:
+        return Path(out_dir) / (stem + "-docx.pdf")
+    return target
+
+
 def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
                    previous: dict = None) -> list:
     """Compile/convert every document of ONE (label, sources) set; never raises."""
     docs, previous = [], previous or {}
     pkg_sources = [s for s in sources if not s[1]]
+    latex_targets = set()
+    for src, _prefix, _excluded in pkg_sources:
+        if not src.is_dir():
+            continue
+        for rel in latex_root_documents(src):
+            latex_targets.add((Path(out_root) / Path(rel).with_suffix(".pdf")).resolve())
     for src, _prefix, excluded in pkg_sources:
         if not src.is_dir():
             continue
@@ -170,10 +189,29 @@ def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
             docx = f["path"]
             rel = f["rel"]
             out_dir = out_root / Path(rel).parent
-            out_pdf = out_dir / (docx.stem + ".pdf")
+            out_pdf = _docx_pdf_target(out_dir, docx.stem, latex_targets)
             rec = _reuse_pdf_record(previous, label, rel, f["digest"], out_pdf, "docx")
             if rec is None:
-                res = convert_docx_to_pdf_persistent(docx, out_dir)
+                if out_pdf.name == docx.stem + ".pdf":
+                    res = convert_docx_to_pdf_persistent(docx, out_dir)
+                else:
+                    # The renderer always writes `<out_dir>/<stem>.pdf`, so give
+                    # the colliding DOCX its own directory and move the result
+                    # to the distinct name; the LaTeX render is never touched.
+                    # `out_dir` exists only when the LaTeX compile above
+                    # succeeded (or the caller pre-created it), so create it
+                    # before mkdtemp: a failed LaTeX render must still leave the
+                    # DOCX attempt recorded, never raise out of render_pdf_set.
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    _tmp = Path(tempfile.mkdtemp(prefix=".docx-pdf-", dir=str(out_dir)))
+                    try:
+                        res = convert_docx_to_pdf_persistent(docx, _tmp)
+                        _made = _tmp / (docx.stem + ".pdf")
+                        if res.get("ok") and _made.is_file():
+                            out_dir.mkdir(parents=True, exist_ok=True)
+                            shutil.move(str(_made), str(out_pdf))
+                    finally:
+                        shutil.rmtree(_tmp, ignore_errors=True)
                 rec = {"rel": rel, "kind": "docx",
                        "out": out_pdf.relative_to(ctx.root).as_posix(),
                        "sha256": f["digest"], "ok": bool(res.get("ok")),

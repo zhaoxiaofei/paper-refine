@@ -269,18 +269,22 @@ def pipeline_identity() -> dict:
 
 
 def asset_dir_digest(base_dir: Path, name: str):
-    """One digest for an ordered parts directory (None when it is absent).
+    """One digest for a frozen asset directory (None when it is absent).
 
-    Only the source parts are hashed; `__pycache__`/`.pyc` are execution
-    by-products (they differ between a checkout that ran and a fresh copy) and
-    must never make a frozen bundle look edited.
+    Every shipped file is hashed, not just `*.py`: the skills pack's prompts and
+    reference tables change a stage's behaviour as much as a script does. Only
+    `__pycache__`/`.pyc` are skipped -- execution by-products differ between a
+    checkout that ran and a fresh copy and must never make a frozen bundle look
+    edited.
     """
     dirp = Path(base_dir) / name
     if not dirp.is_dir():
         return None
     try:
-        paths = sorted(p for p in dirp.rglob("*.py")
-                       if "__pycache__" not in p.parts and p.is_file())
+        paths = sorted(p for p in dirp.rglob("*")
+                       if p.is_file()
+                       and "__pycache__" not in p.parts
+                       and p.suffix.lower() not in (".pyc", ".pyo"))
         digest = hashlib.sha256()
         for p in paths:
             digest.update(p.relative_to(dirp).as_posix().encode("utf-8"))
@@ -291,7 +295,7 @@ def asset_dir_digest(base_dir: Path, name: str):
 
 
 def module_manifest(base_dir: Path) -> dict:
-    """{name: sha256} for the driver's sibling modules and parts directories."""
+    """{name: sha256} for the driver's sibling modules and frozen asset dirs."""
     out = {}
     for name in PIPELINE_MODULE_FILES:
         q = Path(base_dir) / name
@@ -299,13 +303,13 @@ def module_manifest(base_dir: Path) -> dict:
             out[name] = sha256_file(q) if q.is_file() else None
         except OSError:
             out[name] = None
-    for name in PIPELINE_ASSET_DIRS:
+    for name in PIPELINE_ASSET_DIRS + PIPELINE_SKILL_ASSET_DIRS:
         out[name] = asset_dir_digest(base_dir, name)
     return out
 
 
 def copy_asset_dirs(src_dir, dst_dir, names=None) -> list:
-    """Copy the ordered parts directories, atomically and without bytecode.
+    """Copy the ordered parts/skills directories, atomically and without bytecode.
 
     Returns the directory names actually copied. A missing source directory is
     skipped (a trimmed checkout may legitimately carry only the pipeline parts),
@@ -313,7 +317,9 @@ def copy_asset_dirs(src_dir, dst_dir, names=None) -> list:
     bundle is incomplete instead of silently executing a loader with no parts.
     """
     copied = []
-    for name in (names or PIPELINE_ASSET_DIRS):
+    wanted = (PIPELINE_ASSET_DIRS + PIPELINE_SKILL_ASSET_DIRS
+              if names is None else names)
+    for name in wanted:
         src = Path(src_dir) / name
         if not src.is_dir():
             continue
@@ -1895,9 +1901,19 @@ LENGTH_SECTION_KIND_RES = (
 )
 
 
+def _length_heading_text(line: str) -> str:
+    """A heading line with a Markdown ATX prefix removed.
+
+    The M19 scan reads .md too, and `## Methods` is the same heading as
+    `Methods`; the anchored patterns saw the hashes as text and never matched,
+    so the excluded section stayed in the count.
+    """
+    return re.sub(r"^\s*#{1,6}\s+", "", (line or "").strip())
+
+
 def _length_section_kind(line: str) -> str:
     """The M19 counting-convention kind of a boundary heading ("" when not one)."""
-    text = (line or "").strip()
+    text = _length_heading_text(line)
     if not text:
         return ""
     for kind, pattern in LENGTH_SECTION_KIND_RES:
@@ -2151,7 +2167,7 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
 
     abs_start = abs_end = None
     for i in range(n):
-        if LENGTH_ABSTRACT_HEAD_RE.match(clean(lines[i])):
+        if LENGTH_ABSTRACT_HEAD_RE.match(_length_heading_text(lines[i])):
             if abstract_end is not None:
                 j = max(i + 1, min(int(abstract_end), n))
             else:
@@ -2161,8 +2177,9 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
                 boundary = False
                 while j < n:
                     line = clean(lines[j])
-                    if LENGTH_SECTION_BOUND_RE.match(line) or LENGTH_MAIN_START_RE.match(line) \
-                            or LENGTH_KEYWORDS_RE.match(line):
+                    heading = _length_heading_text(line)
+                    if LENGTH_SECTION_BOUND_RE.match(heading) or \
+                            LENGTH_MAIN_START_RE.match(heading) or LENGTH_KEYWORDS_RE.match(heading):
                         boundary = True
                         break
                     if not line:
@@ -2182,7 +2199,7 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
             break
     main_start = None
     for i in range(n):
-        if LENGTH_MAIN_START_RE.match(clean(lines[i])):
+        if LENGTH_MAIN_START_RE.match(_length_heading_text(lines[i])):
             main_start = i + 1
             break
     if abs_start is None and main_start is None:
@@ -2243,9 +2260,10 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
     end_found = False
     for i in range(span_start, n):
         line = clean(lines[i])
-        if LENGTH_SECTION_BOUND_RE.match(line) or LENGTH_MAIN_START_RE.match(line) \
-                or LENGTH_KEYWORDS_RE.match(line):
-            kind = _length_section_kind(line)
+        heading = _length_heading_text(line)
+        if LENGTH_SECTION_BOUND_RE.match(heading) or \
+                LENGTH_MAIN_START_RE.match(heading) or LENGTH_KEYWORDS_RE.match(heading):
+            kind = _length_section_kind(heading)
             if kind and kind in excludes:
                 excluded_now = True
                 end_found = True
@@ -3127,7 +3145,21 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
                 try:
                     texts = []
                     for p in _docx_files_under(src):
-                        if not is_submitted(p.relative_to(src).as_posix()):
+                        rel = p.relative_to(src).as_posix()
+                        # The SAME filters as the image loop above: evidence
+                        # (read-only review feedback), a later source's
+                        # override, an excluded top, scratch and non-content
+                        # names are not "the manuscript's own vocabulary".
+                        if not is_submitted(rel) or is_evidence_rel(rel):
+                            continue
+                        if (prefix + rel) in overrides[i]:
+                            continue
+                        if excluded and rel.split("/", 1)[0] in excluded:
+                            continue
+                        if "work" in rel.split("/")[:-1]:
+                            continue
+                        if _is_aux_doc(p.name) or is_bookkeeping_name(p.name) \
+                                or is_non_submitted_readme_name(p.name):
                             continue
                         try:
                             with zipfile.ZipFile(p) as z:
@@ -4554,10 +4586,18 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
         errs.append(f"{len(leftover)} template guide sentence(s) survive in the outputs "
                     f"(the templates must be FILLED, not paraphrased): "
                     + "; ".join(repr(l["text"][:60]) for l in leftover[:3]))
-    declared_rewrap_sources = Counter(e["source"] for e in rewraps if e["source"])
-    declared_rewrap_outputs = Counter(e["output"] for e in rewraps if e["output"])
-    declared_additions = Counter(e["output"] for e in additions if e["output"])
-    declared_drops = Counter(e["source"] for e in drops if e["source"])
+    # The parity counters are normalized (whitespace-collapsed, lower-case);
+    # the declared exceptions must use the SAME key or a re-wrap whose source
+    # differs only in case/spacing excuses nothing (and the superscript check
+    # above could not recognize it).
+    declared_rewrap_sources = Counter(
+        _template_norm_para(e["source"]) for e in rewraps if e["source"])
+    declared_rewrap_outputs = Counter(
+        _template_norm_para(e["output"]) for e in rewraps if e["output"])
+    declared_additions = Counter(
+        _template_norm_para(e["output"]) for e in additions if e["output"])
+    declared_drops = Counter(
+        _template_norm_para(e["source"]) for e in drops if e["source"])
     missing = []
     for text in sorted(src_counter):
         want_n = src_counter[text]
@@ -4700,6 +4740,13 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
                 sub_lost.append({"file": doc.name, "text": text[:80],
                                  "source_superscripts": n, "output_superscripts": got_sup[text]})
             elif text not in got_sup and text in " ".join(out_text.values()):
+                # The paragraph was merged into a longer one by a DECLARED
+                # re-wrap: the exact paragraph key cannot exist any more, and
+                # reporting it as "superscripts dropped" refused a compliant
+                # package. The parity gate above already checks the re-wrap's
+                # content; do not also require the old paragraph boundary.
+                if declared_rewrap_sources.get(text, 0):
+                    continue
                 sub_lost.append({"file": doc.name, "text": text[:80],
                                  "source_superscripts": n, "output_superscripts": 0})
     if sub_lost:
@@ -8125,7 +8172,26 @@ def ensure_copy(src: Path, dst: Path, **kw) -> bool:
     and no later check could see the loss (the candidate was compared against
     the truncated base). Returns True when dst had to be rebuilt.
     """
-    want = hash_manifest(src).get("files") or {}
+    # The destination was built WITH the caller's copy options, so the expected
+    # manifest must use them too: comparing a full source manifest against a
+    # copy that deliberately left `work/` (or an auxiliary/bookkeeping file)
+    # out made the mismatch permanent and rebuilt the whole directory on every
+    # re-entry.
+    want = hash_manifest(
+        src, exclude_top=tuple(kw.get("exclude_top") or ())).get("files") or {}
+    # An inert `<area>.disabled/` is never copied (copy_into skips it
+    # unconditionally), so it must not make the expected manifest mismatch.
+    want = {rel: dig for rel, dig in want.items()
+            if not is_disabled_evidence_rel(rel)}
+    if kw.get("skip_aux"):
+        want = {rel: dig for rel, dig in want.items()
+                if not _is_aux_doc(Path(rel).name)}
+    if kw.get("strip_bookkeeping"):
+        # copy_into's ignore-callback strips a bookkeeping NAME at any depth,
+        # so the expected manifest must do the same or a nested report makes
+        # the copy rebuild forever.
+        want = {rel: dig for rel, dig in want.items()
+                if not is_bookkeeping_name(Path(rel).name)}
     if dir_matches(dst, want):
         return False
     if dst.exists():

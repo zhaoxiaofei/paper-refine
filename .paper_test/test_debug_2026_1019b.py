@@ -406,7 +406,11 @@ def test_round2_validation_doc_matches_the_module_manifest():
             ).read_text(encoding="utf-8")
     assert "three-module" not in text, "the validation record still says three modules"
     assert "paper_qwen_agent.py" in text
-    assert len(pp.PIPELINE_MODULE_FILES) == 4
+    # The module manifest also freezes the two render/track shims (2026-10-25
+    # fix stage, F132); the validation record's four modules must all remain.
+    assert {"paper_pipeline.py", "paper_docx_format.py",
+            "paper_redlines_adapter.py", "paper_qwen_agent.py"} \
+        <= set(pp.PIPELINE_MODULE_FILES)
 
 
 # ---------------------------------------------------------------------------
