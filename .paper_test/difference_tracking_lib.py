@@ -401,7 +401,7 @@ def test_tracking_pass_outputs():
     tracked_rels = [c["revised_rel"] for v in mf1["versions"] + mf2["versions"]
                     for c in v["comparisons"]]
     check("no EVIDENCE file is ever tracked",
-          not any(r.startswith(("raw_data/", "raw_figs/", "human_review_feedback/",
+          not any(r.startswith(("raw_data/", "raw_data/", "human_review_feedback/",
                                 "llm_review_feedback/"))
                   for r in tracked_rels), str(tracked_rels))
     readme = (ctx.root / "tracking/README.md").read_text(encoding="utf-8")
@@ -1037,7 +1037,7 @@ def test_pdf_pass_is_persistent_and_nonfatal():
           "pdfs" not in nb.CORPUS_EXCLUDE_TOP
           and (ctx.root / "pdfs").is_dir())
     check("no EVIDENCE file is ever compiled or rendered",
-          not any(d["rel"].startswith(("raw_data/", "raw_figs/", "human_review_feedback/",
+          not any(d["rel"].startswith(("raw_data/", "raw_data/", "human_review_feedback/",
                                        "llm_review_feedback/"))
                   for d in docs), str([d["rel"] for d in docs]))
 

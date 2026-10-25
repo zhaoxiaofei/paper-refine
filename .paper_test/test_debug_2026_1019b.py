@@ -35,6 +35,7 @@ import zipfile
 import zlib
 from pathlib import Path
 
+from bundle_source_lib import copy_bundle
 try:
     import pytest
 except ModuleNotFoundError:                     # the script runner has no pytest
@@ -164,8 +165,7 @@ def _sha(path: Path) -> str:
 def _temp_root(tmp_path: Path) -> Path:
     root = tmp_path / "root"
     root.mkdir()
-    for name in ("paper_pipeline.py", "paper_docx_format.py"):
-        shutil.copy2(WS / name, root / name)
+    copy_bundle(WS, root)
     (root / "pipeline_config.json").write_text("{}", encoding="utf-8")
     (root / "state.json").write_text(json.dumps({
         "version": 3, "runs": {}, "rounds": {}, "pinned": [], "log": [],
@@ -173,8 +173,7 @@ def _temp_root(tmp_path: Path) -> Path:
             "path": str(WS / "paper_pipeline.py"),
             "sha256": _sha(root / "paper_pipeline.py"),
             "version": pp.VERSION,
-            "modules": {name: _sha(root / name)
-                        for name in ("paper_pipeline.py", "paper_docx_format.py")},
+            "modules": pp.module_manifest(root),
         },
     }), encoding="utf-8")
     return root

@@ -2,7 +2,7 @@
 """Regression tests for the document-recovery layer (candidate C01).
 
 repro of the observed r1_a2_revise failure: the revise agent drops
-`raw_figs/entire_pipeline.git-snapshot.txt` from its package on every attempt,
+`raw_data/entire_pipeline.git-snapshot.txt` from its package on every attempt,
 and v2.1.0 turns that recoverable drop into a hard failure -> rebuild sandbox ->
 full 45-minute agent session -> identical failure x3 -> round incomplete
 (~3 h wall clock thrown away by a 900-byte file).
@@ -59,30 +59,30 @@ def build_root(tmp: Path):
     """A pipeline root whose pristine copy mimics the real SOURCE_DIR layout."""
     root = tmp / "root"
     src = tmp / "source"
-    (src / "raw_figs").mkdir(parents=True)
+    (src / "raw_data").mkdir(parents=True)
     make_docx(src / "cnb01A-1-coverLetter-b.docx", "cover letter v b")
     make_docx(src / "cnb01B-2-mainText-b.docx", "main text v b")
     (src / "cnb01A-3-suppAll-b.tex").write_text("\\documentclass{article}\n")
     (src / "cnb01A-3-suppAll-b.pdf").write_bytes(b"%PDF-compiled-supp")
     (src / "nr-reporting-summary-filled-b.pdf").write_bytes(b"%PDF-reporting-summary")
-    # raw_figs assets: data + the file that broke the real run
-    (src / "raw_figs" / "entire_pipeline.git-snapshot.txt").write_text("commit abc123\n")
-    (src / "raw_figs" / "dataset_summary.tsv").write_text("sample\tcells\n")
-    (src / "raw_figs" / "Fig5_scRNA_swarm_grid.png").write_bytes(b"\x89PNG-fake")
-    (src / "raw_figs" / "Fig5_scRNA_swarm_grid.pdf").write_bytes(b"%PDF-fig5")
-    (src / "raw_figs" / "cnb01-Fig1-full.pptx").write_bytes(b"PK-fake-pptx")
+    # raw_data assets: data + the file that broke the real run
+    (src / "raw_data" / "entire_pipeline.git-snapshot.txt").write_text("commit abc123\n")
+    (src / "raw_data" / "dataset_summary.tsv").write_text("sample\tcells\n")
+    (src / "raw_data" / "Fig5_scRNA_swarm_grid.png").write_bytes(b"\x89PNG-fake")
+    (src / "raw_data" / "Fig5_scRNA_swarm_grid.pdf").write_bytes(b"%PDF-fig5")
+    (src / "raw_data" / "cnb01-Fig1-full.pptx").write_bytes(b"PK-fake-pptx")
     # derived build outputs the agent is told to leave out
     (src / "cnb01A-3-suppAll-b.aux").write_text("\\relax\n")
     (src / "cnb01A-3-suppAll-b.log").write_text("latex log\n")
     (src / "cnb01A-3-suppAll-b.synctex.gz").write_bytes(b"\x1f\x8b-fake")
 
     root.mkdir(parents=True)
-    shutil.copytree(src, root / "non-revised")
+    shutil.copytree(src, root / "non_revised")
     (root / "pipeline_config.json").write_text(json.dumps(
         {"rounds": 1, "judges": 1, "source": str(src)}))
     ctx = nb.Ctx(root)
     ctx.state = {"version": nb.STATE_VERSION, "runs": {}, "rounds": {}, "pinned": [],
-                 "log": [], "source_manifest": nb.hash_manifest(root / "non-revised"),
+                 "log": [], "source_manifest": nb.hash_manifest(root / "non_revised"),
                  "original_digest": "x", "judge_salt": "testsalt"}
     ctx.cfg = {"rounds": 1, "judges": 1, "source": str(src), "caption_limit": 0}
     return ctx
@@ -94,7 +94,7 @@ def build_revise_sandbox(ctx, drop=(), empty=(), rename=False, edited_pdf_twin=T
     sb = ctx.runs_dir / rid
     sb.mkdir(parents=True)
     shutil.copytree(ctx.pristine, sb / "base")
-    shutil.copytree(ctx.pristine, sb / "non-revised")
+    shutil.copytree(ctx.pristine, sb / "non_revised")
     (sb / "review").mkdir()
     (sb / "review" / "findings.json").write_text(json.dumps(
         {"submission_dir": "./base", "guidelines_source": "test",
@@ -138,7 +138,7 @@ def build_revise_sandbox(ctx, drop=(), empty=(), rename=False, edited_pdf_twin=T
     rec = ctx.register(rid, "revise", 1, f"runs/{rid}", upstream_run_id="r1_a2_review",
                        source_id="a1")
     rec["inputs_manifest"] = {"base": nb.hash_manifest(sb / "base"),
-                              "non-revised": nb.hash_manifest(sb / "non-revised"),
+                              "non_revised": nb.hash_manifest(sb / "non_revised"),
                               "review": nb.hash_manifest(sb / "review")}
     return rec, sb
 
@@ -152,10 +152,10 @@ def main() -> int:
         return tmp
 
     # ---- D1: THE observed failure -------------------------------------
-    print("== D1: the agent drops raw_figs/entire_pipeline.git-snapshot.txt ==")
+    print("== D1: the agent drops raw_data/entire_pipeline.git-snapshot.txt ==")
     tmp = scratch("paper_rec_d1_")
     ctx = build_root(tmp)
-    rec, sb = build_revise_sandbox(ctx, drop=("raw_figs/entire_pipeline.git-snapshot.txt",))
+    rec, sb = build_revise_sandbox(ctx, drop=("raw_data/entire_pipeline.git-snapshot.txt",))
     ok = nb.postcheck(ctx, rec)
     pc = rec["postcheck"]
     warn_text = " ".join(pc["warnings"])
@@ -170,7 +170,7 @@ def main() -> int:
           not (rec.get("document_set") or {}).get("missing"))
     check("D1 the drop is recorded on the run record",
           (rec.get("backfill") or {}).get("restored")
-          == ["raw_figs/entire_pipeline.git-snapshot.txt"])
+          == ["raw_data/entire_pipeline.git-snapshot.txt"])
     check("D1 corpus digest computed over the REPAIRED package",
           bool(rec.get("corpus_digest")))
 
@@ -178,8 +178,8 @@ def main() -> int:
     print("== D2: dropped non-editable assets (png/pdf/pptx/tsv) are restored ==")
     tmp = scratch("paper_rec_d2_")
     ctx = build_root(tmp)
-    drop = ("raw_figs/Fig5_scRNA_swarm_grid.png", "raw_figs/Fig5_scRNA_swarm_grid.pdf",
-            "raw_figs/cnb01-Fig1-full.pptx", "raw_figs/dataset_summary.tsv")
+    drop = ("raw_data/Fig5_scRNA_swarm_grid.png", "raw_data/Fig5_scRNA_swarm_grid.pdf",
+            "raw_data/cnb01-Fig1-full.pptx", "raw_data/dataset_summary.tsv")
     rec, sb = build_revise_sandbox(ctx, drop=drop)
     ok = nb.postcheck(ctx, rec)
     restored = set((rec.get("backfill") or {}).get("restored") or [])
@@ -244,7 +244,7 @@ def main() -> int:
     print("== D6: zero-byte (truncated) candidate file is restored ==")
     tmp = scratch("paper_rec_d6_")
     ctx = build_root(tmp)
-    rec, sb = build_revise_sandbox(ctx, empty=("raw_figs/entire_pipeline.git-snapshot.txt",))
+    rec, sb = build_revise_sandbox(ctx, empty=("raw_data/entire_pipeline.git-snapshot.txt",))
     ok = nb.postcheck(ctx, rec)
     f = sb / "revised" / "raw_data" / "entire_pipeline.git-snapshot.txt"
     check("D6 run ok", ok, str(rec["postcheck"]["errors"]))
@@ -261,7 +261,7 @@ def main() -> int:
     sb17 = ctx.runs_dir / "r1_i1"
     shutil.copytree(sb / "revised", sb17 / "self", dirs_exist_ok=True)
     shutil.copytree(sb / "revised", sb17 / "others" / "w1", dirs_exist_ok=True)
-    shutil.copytree(ctx.pristine, sb17 / "non-revised")
+    shutil.copytree(ctx.pristine, sb17 / "non_revised")
     rev17 = sb17 / "integrated"
     rev17.mkdir()
     for p in sorted((sb17 / "self").rglob("*")):
@@ -269,7 +269,7 @@ def main() -> int:
             dst = rev17 / p.relative_to(sb17 / "self")
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(p, dst)
-    (rev17 / "raw_figs" / "entire_pipeline.git-snapshot.txt").unlink()
+    (rev17 / "raw_data" / "entire_pipeline.git-snapshot.txt").unlink()
     (rev17 / "DIFF_LEDGER.md").write_text("| D1 | (a) | ported |\n")
     (rev17 / "CHANGELOG.md").write_text("# changelog\n")
     (sb17 / "_pipeline_done.json").write_text(json.dumps(
@@ -279,7 +279,7 @@ def main() -> int:
                      "critical_remaining": 0, "manual_items": 0}}))
     recb["inputs_manifest"] = {"self": nb.hash_manifest(sb17 / "self"),
                                "others": nb.hash_manifest(sb17 / "others"),
-                               "non-revised": nb.hash_manifest(sb17 / "non-revised")}
+                               "non_revised": nb.hash_manifest(sb17 / "non_revised")}
     ok = nb.postcheck(ctx, recb)
     check("D7 integration run ok, git snapshot restored from self/",
           ok and (rev17 / "raw_data" / "entire_pipeline.git-snapshot.txt").is_file(),
@@ -289,14 +289,14 @@ def main() -> int:
     print("== D8: names-first missing-file message ==")
     tmp = scratch("paper_rec_d8_")
     ctx = build_root(tmp)
-    rec, sb = build_revise_sandbox(ctx, drop=("raw_figs/entire_pipeline.git-snapshot.txt",))
+    rec, sb = build_revise_sandbox(ctx, drop=("raw_data/entire_pipeline.git-snapshot.txt",))
     # Make the file un-restorable: backfill refuses to delete a non-empty
     # directory, so the pipeline itself (not this test) formats the names-first
     # warning. A raw-data path is EVIDENCE, not a submission document, so the
     # document-set check does not own it; the recovery layer's
     # "backfill could not restore" warning and the raw-data contract's
     # "READ-ONLY raw data:" squat warning both name the file first.
-    ghost = sb / "revised" / "raw_figs" / "entire_pipeline.git-snapshot.txt"
+    ghost = sb / "revised" / "raw_data" / "entire_pipeline.git-snapshot.txt"
     ghost.mkdir()
     (ghost / "keep").write_text("agent scratch\n")
     nb.postcheck(ctx, rec)

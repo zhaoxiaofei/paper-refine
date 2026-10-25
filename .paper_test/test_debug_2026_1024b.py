@@ -131,7 +131,7 @@ def test_setup_evidence_symlink():
     r = run([str(WS / "paper_pipeline.py"), "setup", "--source", str(src),
              "--root", str(root), "--rounds", "1"])
     leaked = ((root / "non_revised" / "raw_data" / "key").is_file()
-              or (root / "non-revised" / "raw_data" / "key").is_file())
+              or (root / "non_revised" / "raw_data" / "key").is_file())
     check("setup does not materialize an outside evidence link",
           r.returncode == 0 and not leaked, f"rc={r.returncode} leaked={leaked}")
     check("setup names the skipped evidence link in a warning",

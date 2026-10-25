@@ -25,6 +25,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from bundle_source_lib import bundle_tree, source_text
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
 
 
@@ -315,7 +316,7 @@ def test_check_id_coverage():
           and "M1–M24|J1–J4" not in format_line
           and "M1–M20|J1–J4" not in format_line,
           format_line[:160])
-    src = (WS / "paper_pipeline.py").read_text(encoding="utf-8")
+    src = source_text(WS / "paper_pipeline.py", encoding="utf-8")
     check("the review postcheck's required-coverage list names M21-M24",
           'wanted += ["M21", "M22", "M23", "M24"]' in src)
     # The rewrite-parity checks exist on the review -> audit -> revise path
@@ -399,8 +400,10 @@ def test_defaults_and_flags():
     check("DEFAULT_STRICT_ARTIFACTS is True", nb.DEFAULT_STRICT_ARTIFACTS is True)
     check("DEFAULT_RESIDUAL_GATE is True", nb.DEFAULT_RESIDUAL_GATE is True)
     setup_help = cli("setup", "--help").stdout
-    for flag in ("--no-audit", "--no-placeholder-lookup", "--non-strict-artifacts"):
+    for flag in ("--no-audit", "--no-placeholder-lookup", "--strict-artifacts"):
         check(f"setup documents {flag}", flag in setup_help)
+    check("setup no longer documents the removed --non-strict-artifacts",
+          "--non-strict-artifacts" not in setup_help)
     decide_help = cli("decide", "--help").stdout
     check("decide documents --non-residual-gate", "--non-residual-gate" in decide_help)
     tmp = scratch("paper_consistency_cfg_")
@@ -413,24 +416,24 @@ def test_defaults_and_flags():
     cfg = json.loads((tmp / "root" / "pipeline_config.json").read_text(encoding="utf-8"))
     check("a fresh root records the new defaults",
           cfg.get("audit") == "on" and cfg.get("placeholder_lookup") == "online"
-          and cfg.get("strict_artifacts") is True,
+          and cfg.get("artifact_policy") == "on",
           json.dumps({k: cfg.get(k) for k in ("audit", "placeholder_lookup",
-                                              "strict_artifacts")}))
+                                              "artifact_policy")}))
     ctx = type("C", (), {"cfg": cfg})()
     check("audit_enabled/strict_dispositions read those defaults",
           nb.audit_enabled(ctx) is True and nb.strict_dispositions(ctx) is True)
     # The `--no-…` flags must actually switch the policy off.
     r2 = cli("setup", "--source", str(src), "--root", str(tmp / "root2"), "--rounds", "1",
              "--judges", "1", "--rewrites", "0", "--revises", "1",
-             "--no-audit", "--no-placeholder-lookup", "--non-strict-artifacts")
+             "--no-audit", "--no-placeholder-lookup", "--strict-artifacts", "off")
     cfg2 = json.loads((tmp / "root2" / "pipeline_config.json").read_text(encoding="utf-8"))
     ctx2 = type("C", (), {"cfg": cfg2})()
     check("the --no-... flags restore the advisory, two-step plan",
           cfg2.get("audit") == "off" and cfg2.get("placeholder_lookup") == "off"
-          and cfg2.get("strict_artifacts") is False
+          and cfg2.get("artifact_policy") == "off"
           and nb.audit_enabled(ctx2) is False and nb.strict_dispositions(ctx2) is False,
           json.dumps({k: cfg2.get(k) for k in ("audit", "placeholder_lookup",
-                                               "strict_artifacts")}))
+                                               "artifact_policy")}))
     check("the resolve-aware flags parse in one invocation",
           r2.returncode == 0, (r2.stderr or r2.stdout)[-200:])
 

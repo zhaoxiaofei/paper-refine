@@ -16,10 +16,10 @@ target journal's own author guide and say which source you used.
 
 ## Paths
 
-- `SUBMISSION_DIR` = `./non-revised` (override: any explicit path or argument from the user)
+- `SUBMISSION_DIR` = `./non_revised` (override: any explicit path or argument from the user)
 - `OUT` = `./review` — create it; ALL outputs land here
 - `WORK` = `./review/work` — corpus, scripts, state
-- `raw_data/` (legacy spelling `raw_figs/`) — when SUBMISSION_DIR carries it: the **evidence
+- `raw_data/` (the raw-data area) — when SUBMISSION_DIR carries it: the **evidence
   area**, not submission content (see below)
 - `ZOTERO_SKILL` = `/mnt/d/software/plugins/plugins/zotero/skills/zotero/scripts/zotero.py` (override if the user provides one; if absent → fall back to manual-verification)
 - `ZOT_CLI` = `zot` (pyzotero-cli) and the `$zotero-use` skill — the reference route for resolving citations read-only (`zot --local ... items list|get|citation|bib`, `zot fulltext get`). This skill never edits a citation field and never writes to the Zotero library (see M2 and Phase 1).
@@ -32,7 +32,7 @@ working directory (or contains it), put `OUT`/`WORK` in a sibling directory and
 say where they went.
 
 **The EVIDENCE areas are not the submission.** A corpus carries
-`raw_data/` (an older corpus spells it `raw_figs/`) with the data tables,
+`raw_data/` with the data tables,
 figure/table sources and the analysis snapshot the author's own scripts
 regenerate, and `human_review_feedback/` (its sibling) with the REAL
 editors'/reviewers' comments from the previous submission — decision letters,

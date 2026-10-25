@@ -69,8 +69,8 @@ def review_sandbox(tmp, submission_dir="./base", coverage=None, artifacts=True,
             z.writestr("word/document.xml",
                        f'<?xml version="1.0"?><w:document {ns}><w:body><w:p><w:r>'
                        f'<w:t>text</w:t></w:r></w:p></w:body></w:document>')
-    (sb / "non-revised").mkdir(parents=True, exist_ok=True)
-    (sb / "non-revised/manuscript-o.md").write_text("text\n", encoding="utf-8")
+    (sb / "non_revised").mkdir(parents=True, exist_ok=True)
+    (sb / "non_revised/manuscript-o.md").write_text("text\n", encoding="utf-8")
     (sb / "review").mkdir(parents=True, exist_ok=True)
     findings = [{"id": i, "location": "base/manuscript-o.md", "category": 0, "check": "M1",
                  "severity": "Minor", "evidence": "e", "explanation": "x",
@@ -138,13 +138,13 @@ print("F02/F03 - review contract is enforced")
 tmp = Path(tempfile.mkdtemp())
 ctx = make_ctx(tmp)
 sb = review_sandbox(tmp)
-ctx.state["source_manifest"] = np.hash_manifest(sb / "non-revised")
+ctx.state["source_manifest"] = np.hash_manifest(sb / "non_revised")
 rec = ctx.register("r1_a2_review", "review", 1, "runs/r1_a2_review")
 rec["inputs_manifest"] = {"base": np.hash_manifest(sb / "base"),
-                          "non-revised": np.hash_manifest(sb / "non-revised")}
+                          "non_revised": np.hash_manifest(sb / "non_revised")}
 ok, errs, warns, _ = np.postcheck_review(ctx, rec)
 check("well-formed review passes", ok, str(errs)[:120])
-for label, kw in (("wrong submission_dir", dict(submission_dir="./non-revised")),
+for label, kw in (("wrong submission_dir", dict(submission_dir="./non_revised")),
                   ("missing coverage rows",
                    dict(coverage=[{"check": "M1", "disposition": "clean"}])),
                   ("no artifacts dir", dict(artifacts=False)),
@@ -154,10 +154,10 @@ for label, kw in (("wrong submission_dir", dict(submission_dir="./non-revised"))
     tmp2 = Path(tempfile.mkdtemp())
     ctx2 = make_ctx(tmp2)
     sb2 = review_sandbox(tmp2, **kw)
-    ctx2.state["source_manifest"] = np.hash_manifest(sb2 / "non-revised")
+    ctx2.state["source_manifest"] = np.hash_manifest(sb2 / "non_revised")
     r2 = ctx2.register("r1_a2_review", "review", 1, "runs/r1_a2_review")
     r2["inputs_manifest"] = {"base": np.hash_manifest(sb2 / "base"),
-                             "non-revised": np.hash_manifest(sb2 / "non-revised")}
+                             "non_revised": np.hash_manifest(sb2 / "non_revised")}
     ok2, errs2, _w, _ = np.postcheck_review(ctx2, r2)
     check(f"review with {label} FAILS", not ok2, str(errs2)[:110])
     shutil.rmtree(tmp2, ignore_errors=True)
@@ -179,7 +179,7 @@ for kind, files, expect_fail in (("revise", ["revision_report.json"], False),
     xf.write_language_pass(sb / out_dir)          # every package stage owes L1-L11
     (sb / out_dir / "manuscript.md").write_text("x\n", encoding="utf-8")
     (sb / out_dir / "CHANGELOG.md").write_text("x\n", encoding="utf-8")
-    (sb / "non-revised").mkdir()
+    (sb / "non_revised").mkdir()
     for f in files:
         (sb / out_dir / f).write_text(json.dumps({"ok": 1}) if f.endswith(".json") else "x",
                                       encoding="utf-8")
@@ -189,7 +189,7 @@ for kind, files, expect_fail in (("revise", ["revision_report.json"], False),
     np.write_json_atomic(sb / np.MARKER_FILE, {"stage": kind, "run_id": rid, "round": 1,
                                                "status": "complete"})
     rec = ctx.register(rid, kind, 1, f"runs/{rid}")
-    rec["inputs_manifest"] = {"non-revised": np.hash_manifest(sb / "non-revised")}
+    rec["inputs_manifest"] = {"non_revised": np.hash_manifest(sb / "non_revised")}
     if kind == "integrate":
         rec["inputs_manifest"]["self"] = np.hash_manifest(sb / "self")
         # an integration run consumes the WHOLE pool: it always has others/
@@ -245,8 +245,12 @@ check("salted token is not brute-forceable from (round, vid)",
       not unsalted_match and t_salted != np.judge_target_token(1, "a2"),
       f"salted={t_salted} unsalted={np.judge_target_token(1, 'a2')}")
 tmp3 = Path(tempfile.mkdtemp())
-check("legacy root keeps the unsalted token",
-      np.judge_token_for(make_ctx(tmp3), 1, "a2") == np.judge_target_token(1, "a2"))
+try:
+    np.judge_token_for(make_ctx(tmp3), 1, "a2")
+    rejected = False
+except SystemExit as e:
+    rejected = e.code not in (None, 0)
+check("a root without judge_salt is refused, never given the unsalted token", rejected)
 shutil.rmtree(tmp, ignore_errors=True)
 shutil.rmtree(tmp3, ignore_errors=True)
 

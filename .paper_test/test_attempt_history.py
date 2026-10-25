@@ -81,8 +81,8 @@ def build_root(tmp: Path) -> nb.Ctx:
     root = tmp / "root"
     (root / "runs").mkdir(parents=True)
     (root / "reports").mkdir()
-    shutil.copytree(source, root / "non-revised")
-    pristine = root / "non-revised"
+    shutil.copytree(source, root / "non_revised")
+    pristine = root / "non_revised"
     ctx = nb.Ctx(root)
     ctx.cfg = {"rounds": 1, "judges": 1, "rewrites": [1], "revises": [1], "audit": "off",
                "review_split": "off", "placeholder_lookup": "off", "caption_limit": 0,

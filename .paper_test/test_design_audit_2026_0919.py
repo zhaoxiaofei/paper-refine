@@ -40,6 +40,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+from bundle_source_lib import bundle_tree, source_text
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
 spec = importlib.util.spec_from_file_location("paper_design_audit", str(WS / "paper_pipeline.py"))
 nb = importlib.util.module_from_spec(spec)
@@ -287,7 +288,7 @@ def test_m18_coverage_contract():
           "not in references/sweeps.md" not in flat)
     check("D6 the header docstring matches the postcheck",
           "M1-M17/J1-J4 (+M18 only when the caption" not in
-          (WS / "paper_pipeline.py").read_text(encoding="utf-8"))
+          source_text(WS / "paper_pipeline.py", encoding="utf-8"))
 
 
 # =====================================================================

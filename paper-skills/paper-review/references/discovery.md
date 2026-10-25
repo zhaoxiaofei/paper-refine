@@ -10,7 +10,7 @@ sweeps that improve the next checklist run. Run it only AFTER the standard
 Phase 2 sweeps.
 
 **Inputs:**
-- `SUBMISSION_DIR` = the reviewed directory (default `./non-revised`)
+- `SUBMISSION_DIR` = the reviewed directory (default `./non_revised`)
 - `PRIOR` = `./review/findings.json` (canonical prior findings; also `./review/findings.md`)
 - `WORK` = `./review/work` — converted corpus from the prior run; REUSE it (reconvert only missing files)
 - `OUT2` = `./review/round2` (create it; ALL outputs here)
@@ -155,7 +155,7 @@ Statement of what this round could NOT check (honest limits).
 ## The orchestrator's contract (what is verified)
 
 The pipeline reads the D0–D5 deliverables and REFUSES the review (under the
-default `--strict-artifacts on`; a warning under `--non-strict-artifacts`, and
+default `--strict-artifacts on`; a warning under `--strict-artifacts off`, and
 a gating residual for `decide --residual-gate`) when any of the following is
 missing or unfulfilled. Everything below is structural — the truth of a
 disposition stays the auditor's and the revisers' job:

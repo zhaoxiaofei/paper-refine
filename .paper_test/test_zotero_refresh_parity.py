@@ -43,6 +43,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+from bundle_source_lib import bundle_tree, source_text
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
 
 
@@ -305,7 +306,7 @@ def test_wiring():
     for rid in ("FMT-Z1", "FMT-Z2", "FMT-Z3", "FMT-Z4", "FMT-Z5"):
         check(f"sweeps.md documents {rid}", f"`{rid}`" in sweeps)
     check("sweeps.md announces M1-M36", "M1–M36" in sweeps)
-    src = (WS / "paper_pipeline.py").read_text(encoding="utf-8")
+    src = source_text(WS / "paper_pipeline.py", encoding="utf-8")
     check("the review coverage contract requires M36",
           '"M31", "M32", "M33", "M34", "M35", "M36"' in src)
     check("the M36 artifact is part of the review contract",

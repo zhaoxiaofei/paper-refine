@@ -104,7 +104,7 @@ def make_docx(path: Path, paras: list) -> None:
                    f'<w:document {W_NS}><w:body>{body}</w:body></w:document>')
 
 
-AREAS = ["raw_data", "raw_figs", "human_review_feedback", "llm_review_feedback", "code"]
+AREAS = ["raw_data", "raw_data", "human_review_feedback", "llm_review_feedback", "code"]
 
 
 def _pkg(prefix: str) -> Path:

@@ -40,6 +40,7 @@ import zipfile
 import zlib
 from pathlib import Path
 
+from bundle_source_lib import bundle_tree, source_text
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
 
 
@@ -471,7 +472,7 @@ def test_wiring():
         encoding="utf-8")
     check("the identify-issues prompt appendix carries M31-M35", "## M31 —" in identify
           and "## New code-side rule ids" in identify)
-    src = (WS / "paper_pipeline.py").read_text(encoding="utf-8")
+    src = source_text(WS / "paper_pipeline.py", encoding="utf-8")
     check("the EVIDENCE_INTEGRITY block is substituted into every stage prompt",
           src.count("@@EVIDENCE_INTEGRITY@@") == 6
           and src.count("apply_evidence_integrity(text, ") == 5)

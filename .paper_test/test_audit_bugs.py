@@ -89,12 +89,12 @@ def build_root(tmp: Path, judges=1, rewrites=1, revises=1):
     source = tmp / "source"
     write(source / "manuscript-b.md", "title\n")
     write(source / "refs-b.bib", "refs\n")
-    write(source / "raw_figs" / "data.tsv", "a\tb\n")
+    write(source / "raw_data" / "data.tsv", "a\tb\n")
     root = tmp / "root"
     (root / "runs").mkdir(parents=True)
     (root / "reports").mkdir()
-    shutil.copytree(source, root / "non-revised")
-    pristine = root / "non-revised"
+    shutil.copytree(source, root / "non_revised")
+    pristine = root / "non_revised"
     ctx = nb.Ctx(root)
     # `audit: "off"` keeps this suite about MATERIALIZATION repair: the default
     # (auditor on) would make every revise materialization wait for r1_audit.

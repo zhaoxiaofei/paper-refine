@@ -341,7 +341,8 @@ def test_stub_round_sessions():
         if not p.is_file():
             continue
         rel = p.relative_to(first).as_posix()
-        if rel.startswith(("target/", "field/", "original/", nb.VISUAL_TEMPLATE_DIR + "/")) \
+        if rel.startswith(("target/", "field/", "original/", nb.VISUAL_TEMPLATE_DIR + "/",
+                           "paper_docx_format_parts/")) \
                 or rel in ("PROMPT.md", nb.DOCX_FORMAT_MODULE, "format_policy.json"):
             continue
         leaked.append(rel)

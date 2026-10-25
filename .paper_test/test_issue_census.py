@@ -34,6 +34,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from bundle_source_lib import bundle_tree, source_text
 WS = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location("paperp", WS / "paper_pipeline.py")
 np = importlib.util.module_from_spec(spec)
@@ -312,7 +313,7 @@ def test_direction_flips(tmp):
     check("the pair where both sides claim to be better IS reported",
           len(flips) == 1 and flips[0].startswith("orig vs w1"), str(flips))
     report_gloss = "the two sides' judges disagree about who is better"
-    src = (WS / "paper_pipeline.py").read_text(encoding="utf-8")
+    src = source_text(WS / "paper_pipeline.py", encoding="utf-8")
     check("the report's gloss for the list matches the fixed condition",
           report_gloss in " ".join(src.split()))
 

@@ -516,7 +516,7 @@ def do_response(sb: Path, name: str, round_no: int) -> int:
     # The areas a letter must not cite while they are not submitted: the
     # evidence areas (never) and the analysis-code area (unless the root ships
     # it; see postcheck_response's code/ rejection).
-    non_submission_dirs = ("raw_data", "raw_figs", "human_review_feedback",
+    non_submission_dirs = ("raw_data", "raw_data", "human_review_feedback",
                            "llm_review_feedback", "code")
     # ... and the author's own README files are never submitted either.
     readme_name_re = re.compile(r"^readme.*\.(?:md|txt)$", re.I)

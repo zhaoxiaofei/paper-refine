@@ -27,7 +27,7 @@ stable).
 says the corpus, it means the SUBMISSION corpus (the converted text under
 `WORK/corpus/`: manuscript, cover letter, title page, supplementary documents,
 figure/table sources of the submission itself). A corpus carries `raw_data/`
-(legacy spelling `raw_figs/`) with data tables, figure sources and the analysis
+(the raw-data area) with data tables, figure sources and the analysis
 snapshot, and `human_review_feedback/` with the REAL editors'/reviewers'
 comments from the previous submission (and any previous response as context),
 and — when the operator supplies one — `llm_review_feedback/` with a
@@ -1418,8 +1418,8 @@ without the other is an unfilled artifact.
 
 ## M30 — Source-hierarchy reconciliation (submission ↔ code ↔ raw data)
 
-**Purpose.** The hierarchy — **github code > data in raw_data/ (an older
-corpus spells that directory raw_figs/) > main figures > supplementary figures >
+**Purpose.** The hierarchy — **github code > data in raw_data/ > main figures >
+supplementary figures >
 main tables > supplementary tables > main text > supplementary text** — is
 stated as a RESOLUTION rule: it decides which side wins once two sources
 already disagree. Its DETECTION side had no enumerating check, so a written

@@ -124,7 +124,7 @@ def main() -> int:
     corpus_files = sorted(p.name for p in (work / "corpus").iterdir())
     evidence_files = sorted(p.name for p in (work / "evidence").iterdir())
     check("E1 no raw_data text is written into WORK/corpus",
-          not any(n.startswith(("raw_data__", "raw_figs__")) for n in corpus_files),
+          not any(n.startswith(("raw_data__", "raw_data__")) for n in corpus_files),
           str(corpus_files))
     check("E1 raw_data text goes to WORK/evidence",
           any("iScience_feedback" in n for n in evidence_files)
@@ -144,7 +144,7 @@ def main() -> int:
     check("E2 the artifact header carries the evidence-exclusion section",
           "Raw-data evidence / external feedback excluded" in md)
     check("E2 no M1 row cites a raw_data file",
-          "raw_data__" not in md and "raw_figs__" not in md)
+          "raw_data__" not in md and "raw_data__" not in md)
     # Defense in depth for a WORK/corpus/ produced by an older converter or an
     # adapted workflow: a stray evidence file must be skipped AND named.
     (work / "corpus" / "raw_data__legacy_feedback.txt.txt").write_text(

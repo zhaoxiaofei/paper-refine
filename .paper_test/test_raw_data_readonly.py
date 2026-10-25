@@ -157,7 +157,7 @@ def test_helpers():
     print()
     print("== RO1: write-bit helpers and force-rmtree ==")
     check("RO1 raw-data paths are recognised in both spellings",
-          nb.is_raw_data_rel("raw_data/x/y.csv") and nb.is_raw_data_rel("raw_figs/a.pdf")
+          nb.is_raw_data_rel("raw_data/x/y.csv") and nb.is_raw_data_rel("raw_data/a.pdf")
           and not nb.is_raw_data_rel("figures/raw_data-ish.csv")
           and not nb.is_raw_data_rel("ms.md"))
     tmp = scratch("paper_ro_helper_")

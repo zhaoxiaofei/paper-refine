@@ -17,7 +17,7 @@ type -- use the profile and type of the run you are in.
 - `FINDINGS_MD` = `./review/findings.md` — human-readable report from paper-review
 - `FINDINGS_JSON` = `./review/findings.json` — machine-readable; **CANONICAL list of finding IDs**
 - `EXTRA_JSON` = `./review/round2/findings_extra.json` — discovery-round findings; merge if present
-- `ORIGINALS` = the reviewed submission directory (default `./non-revised`; use the directory recorded in the findings report if present). **READ-ONLY, always.**
+- `ORIGINALS` = the reviewed submission directory (default `./non_revised`; use the directory recorded in the findings report if present). **READ-ONLY, always.**
 - `REVISED` = `./revised` · `WORK` = `./revised/work` · `CODE` = `./code`
 - `ZOTERO_SKILL` = `/mnt/d/software/plugins/plugins/zotero/skills/zotero/scripts/zotero.py` (override or absent → manual instructions)
 - `ZOT_CLI` = `zot` (pyzotero-cli) and the `$zotero-use` skill — reference resolution and, under the operator's Zotero policy, guarded citation-field edits (rule E2)

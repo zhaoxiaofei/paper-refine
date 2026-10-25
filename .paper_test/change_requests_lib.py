@@ -224,8 +224,8 @@ def build_round1_root(tmp: Path, judges=1, pristine: Path = None):
     if pristine is None:
         write(tmp / "source" / "manuscript-b.md", "identical base text\n")
         pristine = tmp / "source"
-    shutil.copytree(pristine, root / "non-revised")
-    pristine = root / "non-revised"
+    shutil.copytree(pristine, root / "non_revised")
+    pristine = root / "non_revised"
     ctx = nb.Ctx(root)
     ctx.cfg = {"rounds": 1, "judges": judges, "rewrites": [1], "revises": [1]}
     ctx.state = {"version": nb.STATE_VERSION, "runs": {}, "rounds": {}, "pinned": [],
@@ -629,7 +629,7 @@ def test_end_to_end_default_plan():
     source = tmp / "source"
     write(source / "manuscript-b.md", "title\n")
     write(source / "refs-b.bib", "x\n")
-    write(source / "raw_figs" / "data.tsv", "a\tb\n")
+    write(source / "raw_data" / "data.tsv", "a\tb\n")
     root = tmp / "root"
     proc = run_pipeline(root, source)            # CR4: all defaults
     out = proc.stdout + proc.stderr

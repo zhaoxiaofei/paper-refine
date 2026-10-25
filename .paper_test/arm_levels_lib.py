@@ -253,15 +253,15 @@ def test_language_pass_contract_and_prompts():
           set(rep3["missing"]) == {f"L{i}" for i in range(1, 12)} - {"L4", "L9"},
           str(rep3["missing"])[:80])
     # 2026-09-22: strict is the DEFAULT, so an uncovered step fails the attempt;
-    # `--non-strict-artifacts` is the opt-out that records it as a warning.
+    # `--strict-artifacts off` is the opt-out that records it as a warning.
     ctx_strict = type("C", (), {"cfg": {}})()
     errs2, warns2 = [], []
     nb.check_language_pass(ctx_strict, {"id": "r1_w1"}, pkg, "rewrite", errs2, warns2)
     check("under the default (strict) policy the gap is an ERROR", bool(errs2), str(errs2)[:160])
-    ctx = type("C", (), {"cfg": {"strict_artifacts": False}})()
+    ctx = type("C", (), {"cfg": {"artifact_policy": "off"}})()
     errs, warns = [], []
     nb.check_language_pass(ctx, {"id": "r1_w1"}, pkg, "rewrite", errs, warns)
-    check("under --non-strict-artifacts the gap is a recorded WARNING",
+    check("under --strict-artifacts off the gap is a recorded WARNING",
           not errs and any("language pass" in w for w in warns), str(warns)[:160])
 
 

@@ -68,9 +68,9 @@ def cleanup():
 def run_round(tmp: Path, *, rewrites: str, revises: str, jobs: int, sleeps: dict,
               retries: str = "0", extra_env: dict = None):
     source = tmp / "source"
-    (source / "raw_figs").mkdir(parents=True)
+    (source / "raw_data").mkdir(parents=True)
     (source / "manuscript-b.md").write_text("title\n", encoding="utf-8")
-    (source / "raw_figs" / "data.tsv").write_text("a\tb\n", encoding="utf-8")
+    (source / "raw_data" / "data.tsv").write_text("a\tb\n", encoding="utf-8")
     root = tmp / "root"
     log = tmp / "timing.log"
     subprocess.run([sys.executable, str(WS / "paper_pipeline.py"), "setup",

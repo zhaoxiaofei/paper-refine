@@ -14,7 +14,7 @@ content digests of every PAYLOAD file in DIR. Payload = every file except:
     was compared against (`original`, a version id such as a1/w2/a3, or a
     published round winner such as winner1);
   * (for the naming evidence only) any name inside a READ-ONLY evidence area --
-    raw_data/, legacy raw_figs/, human_review_feedback/: those areas keep the
+    raw_data/, human_review_feedback/: those areas keep the
     ORIGINAL file names, so a 7-hex token in one of them belongs to the run
     that produced the source corpus, never to this package (keep in step with
     paper_pipeline.revision_token_for_dir, whose `hex_tokens`/`tokens_seen`
@@ -99,7 +99,7 @@ AUX_NAME_RE = re.compile(r"\.(?:tracking|logging)-(?:original|winner[0-9]+|[awi]
 
 # Keep in step with paper_pipeline.EVIDENCE_DIRNAMES: the READ-ONLY input areas
 # whose file names are never this package's naming evidence.
-EVIDENCE_DIRS = {"raw_data", "raw_figs", "human_review_feedback", "llm_review_feedback"}
+EVIDENCE_DIRS = {"raw_data", "human_review_feedback", "llm_review_feedback"}
 
 # "-a" / "_v2" / "_V2" / "-4f3a9c1" at the very end of a stem (the version slot).
 TOKEN_RE = re.compile(r"^(?P<base>.*?)[-_](?P<tok>[0-9a-f]{7}|[A-Za-z]|[vV]\d+)$")
@@ -120,7 +120,7 @@ def tree_files(root: Path) -> list:
     """Every file under `root`, descending into symlinked DIRECTORIES.
 
     Keep in step with paper_pipeline._iter_tree_files(follow_dir_links=True): a
-    sandbox package carries its READ-ONLY evidence areas (raw_data/, raw_figs/,
+    sandbox package carries its READ-ONLY evidence areas (raw_data/,
     human_review_feedback/) as symlinks to the root's canonical copy (see
     ensure_pristine_input), and the payload must see the same files whether the
     area is linked or copied. An ancestor-inode set keeps a link cycle finite.

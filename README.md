@@ -55,6 +55,29 @@ and a clean, ready-to-use package.
   no rewrites and no general review-audit-revise. **4** `minor` — the same, for
   a minor revision.
 
+## Backward-compatibility removals (2026-10-25)
+
+This tree deliberately keeps **no** compatibility aliases. The breaking changes
+an older command line or root can hit:
+
+* input areas have ONE canonical name each: `non_revised/` and `raw_data/`.
+  `non-revised/` and `raw_figs/` are refused by `setup` and by every command
+  that loads a root — rename once, then re-run; there is no migration step.
+* `--author-to-complete readme|document|off` is the only hand-off spelling. The
+  `--with-author-to-complete-in-readme` / `--with-author-to-complete` /
+  `--without-author-to-complete` aliases and the legacy `on` value are removed.
+* `--non-strict-artifacts` is removed; use `--strict-artifacts off`.
+* the boolean `strict_artifacts` / `strict_dispositions` config keys are no
+  longer read; the current key is the three-valued `artifact_policy`.
+* `set-revision-mode none` is removed; the mode is `continue`.
+* a root without `judge_salt` is refused when a judge token is needed; there is
+  no unsalted fallback.
+* `paper_pipeline.py` and `paper_docx_format.py` are now thin loaders over
+  `paper_pipeline_parts/` and `paper_docx_format_parts/`. `setup` and
+  `sync-code` copy both directories; any external script that copied only the
+  loader must copy the parts directory too (the `.paper_test/bundle_source_lib.py`
+  helper is the in-repo example).
+
 ## Quick start
 
 ```bash
@@ -201,7 +224,8 @@ evidence pack.
 | `set-venue` / `set-journal` / `set-article-type` | change the rule set / target journal / content type |
 | `add-venue ID` | an agent writes/updates the venue profile + README row and downloads OA exemplars; the code then derives the pinned structure-only template pack |
 | `build-venue-templates --venue ID` | re-derive that pack from the exemplars (`<venue-id>.manuscripts/`) without an agent |
-| `set-revision-mode continue\|init\|transfer\|resubmit\|major\|minor` | switch the revision mode (`none` still accepted as the pre-rename spelling of `continue`) |
+| `set-revision-mode continue\|init\|transfer\|resubmit\|major\|minor` | switch the revision mode |
+| `set-champion-select judge\|revise\|integrate` | how a future round's champion is chosen: the panel (default), or the no-judge auto-promotion of the revised / integrated revised submission (PROVISIONAL; see the champion-selection section) |
 | `set-tiebreak-defect-floor N` / `set-dedup-mode off\|location` | calibration of the selection key |
 | `set-submit-code off\|on` | whether `code/` is part of the submission (`off`, the default: revision content the stages revise and the judges evaluate, but stripped from `journal_submission/` like `raw_data/`, and not citeable by the response letter; `on`: the submission carries it and the letter may cite it) |
 | `retry --run ID` / `retry --runs SELECTION` / `prune --keep-latest N` | reset one session, or the same subset `run --only` would drive / reclaim disk from old sandboxes |
@@ -402,7 +426,7 @@ panel never reads a machine path.
 Every evidence area is hash-pinned, and any stage write into it is restored and
 reported.
 
-### Hand-off items: `--with-author-to-complete-in-readme` / `--with-author-to-complete` / `--without-author-to-complete`
+### Hand-off items: `--author-to-complete readme|document|off`
 
 The revision stages are forbidden to invent content, so a missing mandatory item
 (a statement, an accession, an unreadable field, a whole required file) is
@@ -414,23 +438,22 @@ handed to the author. **Where** that note lives is the operator's choice:
 # cover letter and main text; the README is never submitted (README*.md is
 # dropped from journal_submission/), and a marker that still ships is a defect
 python paper_pipeline.py setup --source ./submission --root ./paper_rounds \
-    --with-author-to-complete-in-readme
+    --author-to-complete readme
 
-# document (the old default): the marker convention -- a missing item is
+# document: the marker convention -- a missing item is
 # scaffolded with the literal "[AUTHOR TO COMPLETE: ...]" token and listed for
 # the author; the marker itself is a legitimate hand-off
 python paper_pipeline.py setup --source ./submission --root ./paper_rounds \
-    --with-author-to-complete
+    --author-to-complete document
 
 # off: no file may carry the token. The item is left out of the document (a
 # whole missing file is NOT scaffolded as a document of instructions) and
 # recorded in the package's own MANUAL_STEPS.md / CHANGELOG.md; a marker that
 # still reaches a delivered package is a DEFECT, not a neutral hand-off
 python paper_pipeline.py setup --source ./submission --root ./paper_rounds \
-    --without-author-to-complete
+    --author-to-complete off
 
 python paper_pipeline.py set-author-to-complete --root ./paper_rounds readme   # flip later
-# legacy `on` is accepted as an alias for `document`
 ```
 
 The switch rewrites the rule in EVERY prompt -- including the master-prompt
@@ -941,7 +964,7 @@ with a note, when it does not).
 `--strict-venue` (accepted by every subcommand that works on a root: `setup`,
 `run`, `run-decide`, `decide`, `status`, `agents`, `set-venue`, `set-journal`,
 `set-article-type`, `set-dedup-mode`, `set-revision-mode`,
-`set-tiebreak-defect-floor`, `set-submit-code`, `add-venue`,
+`set-tiebreak-defect-floor`, `set-dedup-mode`, `set-champion-select`, `set-submit-code`, `add-venue`,
 `build-venue-templates`, `conform`,
 `conflicts`, `retry`, `prune`, `redline`, `track`, `trend`) makes a missing
 journal, a journal/venue mismatch, a config/snapshot disagreement and an
@@ -1190,7 +1213,7 @@ Its deliverables used to be existence-checked at best — a session could leave 
 three-line `new_sweeps.md` (or no `review/round2/` at all, which was a warning)
 and the review still passed. The pipeline now reads the whole D0–D5 deliverable
 set and, under the review's `--strict-artifacts` policy (fail by default, warn
-under `--non-strict-artifacts`, and recorded for `decide --residual-gate`),
+under `--strict-artifacts off`, and recorded for `decide --residual-gate`),
 REFUSES a review whose discovery round is not real work:
 
 * `known_index.md` names the frozen class range (M1 … J5);
@@ -1536,23 +1559,11 @@ Every corpus the pipeline handles carries one pristine input area and two
 | `human_review_feedback/` (inside each corpus) | the REAL editors'/reviewers' comments from the previous submission (decision letters, referee reports), plus any previous response-to-reviewers as context; its child `original_submission/`, when present, is the manuscript version those reviewers actually saw | read-only and NOT submission content like raw_data; the journal modes build the concern ledger and the response letter from it, and a judge may read it (under `evidence/human_review_feedback/` in its view) to score how well a version ADDRESSES the human-raised concerns; `original_submission/` is evidence for resolving a concern and checking whether the current `base/` already answers it — never the submission, a sweep surface or a source of text |
 | `llm_review_feedback/` (inside each corpus, optional) | a machine-generated review of the previous submission whose false positives were filtered out upstream (any file types); every remaining finding is a real concern with the same standing as a human reviewer's point | read-only and NOT submission content like the other evidence areas; the journal modes stage it under `feedback/llm/` and enumerate its findings into the concern ledger (origin kept in `source`/`author`; a row closed `not-applicable`/`disagree` needs the recorded rationale), and a judge may read it under `evidence/llm_review_feedback/` in its view to score how well a version ADDRESSES those findings |
 
-The first two names are this repo's snake_case spellings of older ones —
-`non-revised/` and `raw_figs/` — and **both spellings of each name stay
-resolved**: a sandbox area is found under either spelling (`area_dir`,
-`pristine_dirname`, `raw_data_dirname`) and the raw-data manifest keys are
-normalised, so renaming one of the directories never reads as a modification of
-the corpus.
-
-Nothing in the pipeline MOVES an existing directory: a root or a corpus set up
-under the older spellings keeps them (`runs` and `pinned/` keep their recorded
-manifests either way, and `ctx.pristine` resolves whichever spelling is on
-disk). Only a root created by `setup` gets the canonical names. Inside a
-package, the raw-data directory is materialized under its canonical name: a
-corpus whose directory is still `raw_figs/` appears in the package as
-`raw_data/`, with every reference to it (`\input{raw_figs/...}`,
-`\includegraphics{raw_figs/...}`, build scripts) repointed — the directory's
-file names and bytes are untouched. Rename an existing root by hand if you want
-the new spelling there too; every check accepts either.
+The names are CANONICAL and strict: the pipeline has one name per input area,
+and the removed legacy spellings (`non-revised/`, `raw_figs/`) are neither
+resolved nor migrated. `setup` refuses a `--source` that carries them, and
+every command refuses a root that does; rename the directory once, deliberately,
+and re-run. Nothing moves a directory behind the operator's back.
 
 The evidence-area rule is enforced, not merely requested:
 
@@ -1619,7 +1630,7 @@ human letter should drive the revision.
 
 | option | mode | what it is | response to reviewers | rewrites | edits |
 |---|---|---|---|---|---|
-| — | `continue` | the pipeline's own review/revise rounds (the default; the pre-rename spelling was `none`) | **not written** | allowed | the round's full review |
+| — | `continue` | the pipeline's own review/revise rounds (the default) | **not written** | allowed | the round's full review |
 | — | `init` | start a **new submission**: conform to the venue's template (or its guidelines → academic convention when no template ships) first, then the default rounds | **not written** | allowed | the round's full review |
 | option 1 | `transfer` | revise for a **new journal** (e.g. read iScience, submit to Frontiers in Immunology) | **not written** | allowed | the round's full review + the decision letter's concerns |
 | option 2 | `resubmit` | new submission to the **same journal** | **required** | allowed | the round's full review + the concerns |
@@ -1685,9 +1696,8 @@ How each mode runs:
 
 With no `--revision-mode` the default is `continue` and nothing above runs: the
 historical workflow is byte-for-byte unchanged (no journal stages in the round
-plan, no journal block in any prompt, no new files). The pre-rename spelling
-`none` is still accepted (config files, `setup` and `set-revision-mode`) and
-normalises to `continue`.
+plan, no journal block in any prompt, no new files). The removed `none`
+spelling is not accepted; the mode is always `continue`.
 
 ```bash
 # option 1: iScience -> Frontiers in Immunology, no response letter
@@ -1948,6 +1958,55 @@ addressed by the mask and is refused at setup. Like `--rewrites`/`--revises`,
 all four are `setup` parameters recorded in `pipeline_config.json` (and mirrored
 into `state.json`); edit the file to change a not-yet-finished round's plan, and
 note that a round already decided keeps the plan it was decided with.
+
+## Choosing the champion without a judge panel: `--champion-select`
+
+By default (`--champion-select judge`) every round runs the relative-judgment
+panel and the deterministic ranking crowns the champion. Two operator override
+modes skip the panel entirely and promote a named submission version:
+
+* `--champion-select revise` — NO judge panel and NO integration arm: the
+  round's single review-audit-revised candidate (`a2`, the review → audit →
+  revise output) is pinned and published as the round's winner. Use
+  `--no-audit` (or `setup --audit off`) when the review should flow straight to
+  the reviser without the auditor.
+* `--champion-select integrate` — NO judge panel: the integration arm of that
+  revised candidate is promoted (`i<M+2>` in the pool `[a1, w1..wM, a2]`, so
+  `i2` when M=0 and `i4` with the default two round-1 rewrites). If
+  `--integrators` was not given, `setup` enables exactly that arm; an explicit
+  mask that omits it is refused at setup.
+
+Both modes require exactly ONE revise arm (`--revises 1`) in every round they
+promote: with N>1 there is no single "review-audit-revised submission version",
+and guessing would make the winner depend on an undocumented tie-break.
+
+```bash
+# the default: score the field and rank it
+python paper_pipeline.py run --root ./paper_rounds
+
+# promote the revised submission (a2), without judging
+python paper_pipeline.py run --root ./paper_rounds --champion-select revise
+
+# promote the integrated revised submission (i<M+2>), without judging
+python paper_pipeline.py setup --source ./submission --root ./paper_rounds \
+    --revises 1 --integrators 0xFFFFFFFF --champion-select integrate
+python paper_pipeline.py run --root ./paper_rounds
+```
+
+The mode can be set at `setup` (persisted in `pipeline_config.json`) or passed to
+`run` / `run-decide` / `decide` (an invocation override). Each round records the
+mode it actually used in `plan.champion_select`, so a later invocation cannot
+relabel an auto-promoted round as judged.
+
+**It is not a certified panel result.** An auto-promoted round has no panel
+scores, no defect census and no anti-regression comparison; the decision reads
+`provisional: true`, `certified: false`, carries the auto-promoted round in
+`certification.auto_promoted`, and its label is `AUTO-PROMOTED — PROVISIONAL
+(NOT JUDGED)`. The pin/winner chain still works (both are content-addressed and
+digest-verified), and `final_clean_version_<root name>/` is still published — but
+the package is a provisional hand-off, never a signed panel verdict.
+`--package-winner` still works once every configured round is complete; it says
+plainly that it is packaging an unjudged champion.
 
 ## Style/formatting checks and repairs
 
@@ -2985,9 +3044,11 @@ its four integration runs never started.
 
 | path | purpose |
 |---|---|
-| `paper_pipeline.py` | the orchestrator (setup / run / run-decide / decide / retry / status / selfcheck / prune / redline / track) |
+| `paper_pipeline.py` | thin loader for the orchestrator; it executes the ordered `paper_pipeline_parts/` in its own globals (setup / run / run-decide / decide / retry / status / selfcheck / prune / redline / track) |
+| `paper_pipeline_parts/` | the orchestrator's implementation, split by domain (prelude, venues, journal modes, prompts, utilities, state/corpus, postchecks, stage quality, selection/driver, setup, reports, audits, conflicts/decide, redlines, tracking, PDF, retry, CLI) — every file is under 10,000 lines |
 | `pairwise_scores.py` | builds a per-round directed score workbook from `reports/round*_raw_scores.csv`; uses each judge's `own` frame and never invents the opposite direction from the derived `received` row |
-| `paper_docx_format.py` | OOXML style/formatting scanner, fixer and blank-page checker |
+| `paper_docx_format.py` | thin loader for the OOXML style/formatting scanner, fixer and blank-page checker |
+| `paper_docx_format_parts/` | the formatter's implementation (core XML/field primitives, text rules, layout/edit rules, report + CLI) — every file is under 10,000 lines |
 | `paper_redlines_adapter.py` | tracked-changes bridge (`python-redlines[docxodus]`) |
 | `AGENTS.md` | the agent-facing contract (rules the sessions and reviewers are held to) |
 | `revision_history/` | the dated working records — audit findings, revision plans, validation ledgers and the history log; repository bookkeeping, never submitted |
@@ -3006,7 +3067,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 145 suites (a few
+any failure. They are independent, so run them in parallel — 147 suites (a few
 minutes at the default 24 parallel sessions; tens of minutes sequentially):
 
 ```bash

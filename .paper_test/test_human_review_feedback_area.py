@@ -106,7 +106,7 @@ def main() -> int:
           == ["cover_letter_to_editor.txt", "manuscript.txt"])
     check("HF2 the evidence-area detection is shared",
           nb.is_evidence_rel("human_review_feedback/x.txt")
-          and nb.is_evidence_rel("raw_data/x.tsv") and nb.is_evidence_rel("raw_figs/x.png")
+          and nb.is_evidence_rel("raw_data/x.tsv") and nb.is_evidence_rel("raw_data/x.png")
           and not nb.is_evidence_rel("manuscript.txt"))
 
     print()

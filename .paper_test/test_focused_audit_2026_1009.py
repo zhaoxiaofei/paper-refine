@@ -55,6 +55,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+from bundle_source_lib import bundle_tree, source_text
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
 SCRIPT_DIR = WS / "paper-skills" / "paper-review" / "scripts"
 NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -583,7 +584,7 @@ def test_pdf_blank_page_row_is_manual():
     print("\n== D15 a PDF blank-page row is never marketed as mechanical ==")
     rows = FMT._fix_kind("FMT-S2", dict(FMT.POLICY_DEFAULTS))
     check("D15 _fix_kind classes FMT-S2 as manual", rows == "manual", rows)
-    src = (WS / "paper_docx_format.py").read_text(encoding="utf-8", errors="replace")
+    src = source_text(WS / "paper_docx_format.py", encoding="utf-8", errors="replace")
     block = src[src.index("blank page in the rendered document"):][:400]
     check("D15b the emitted row says manual too",
           '"fix": "manual"' in block, block[:200])

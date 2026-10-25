@@ -192,11 +192,11 @@ def completed_round_root(tmp: Path) -> Path:
     root = tmp / "root"
     write(root / "pipeline_config.json",
           json.dumps({"rounds": 1, "judges": 1, "source": str(tmp / "src")}))
-    write(root / "non-revised" / "manuscript.md", "# v0\n")
+    write(root / "non_revised" / "manuscript.md", "# v0\n")
     write(root / "round1_winner" / "manuscript.md", "# v0\n")
     state = {"version": np.STATE_VERSION, "runs": {}, "log": [], "pinned": [],
              "source": str(tmp / "src"),
-             "source_manifest": np.hash_manifest(root / "non-revised"),
+             "source_manifest": np.hash_manifest(root / "non_revised"),
              "rounds": {"1": {"round": 1, "status": "done", "winner_dir": "round1_winner",
                               "winner_id": "a2", "champion": "a2"}}}
     write(root / "state.json", json.dumps(np._json_safe(state)))

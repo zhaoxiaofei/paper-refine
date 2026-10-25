@@ -42,6 +42,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from bundle_source_lib import copy_bundle
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
 spec = importlib.util.spec_from_file_location("paper_venue", str(WS / "paper_pipeline.py"))
 nb = importlib.util.module_from_spec(spec)
@@ -122,7 +123,7 @@ def _bare_checkout(tmp: Path, profile_text: str) -> Path:
     """A temp copy of the script + the shipped profile JSONs (no corpora)."""
     bare = tmp / "bare"
     (bare / "venue_profiles").mkdir(parents=True)
-    shutil.copy2(WS / "paper_pipeline.py", bare / "paper_pipeline.py")
+    copy_bundle(WS, bare)
     for p in sorted((WS / "venue_profiles").glob("*.json")):
         shutil.copy2(p, bare / "venue_profiles" / p.name)
     (bare / "venue_profiles" / "nature-biotechnology.json").write_text(

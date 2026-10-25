@@ -93,8 +93,8 @@ def make_source(tmp: Path, by_products: bool = False) -> Path:
     old = time.time() - 500 * 86400
     write(src / "manuscript-b.md", "# Title\n\nFigure 1 | A caption.\n", mtime=old)
     write(src / "refs-b.bib", "@article{x}\n", mtime=old)
-    write(src / "raw_figs" / "Fig1.png", b"\x89PNG-fake", mtime=old)
-    write(src / "raw_figs" / "data.tsv", "a\tb\n", mtime=old)
+    write(src / "raw_data" / "Fig1.png", b"\x89PNG-fake", mtime=old)
+    write(src / "raw_data" / "data.tsv", "a\tb\n", mtime=old)
     write(src / "code" / "analysis.py", "print('x')\n", mode=0o755, mtime=old)
     if by_products:
         # a real source/derived pair: the .bib ships, so its compiled .bbl does
@@ -120,8 +120,8 @@ def build_round_root(tmp: Path, rewrites=1, revises=1, judges=1, by_products=Fal
     root = tmp / "root"
     (root / "runs").mkdir(parents=True)
     (root / "reports").mkdir()
-    shutil.copytree(src, root / "non-revised")
-    pristine = root / "non-revised"
+    shutil.copytree(src, root / "non_revised")
+    pristine = root / "non_revised"
     ctx = nb.Ctx(root)
     ctx.cfg = {"rounds": 1, "judges": judges, "rewrites": [rewrites], "revises": [revises],
                "source": str(src)}
@@ -255,7 +255,11 @@ def test_judge_views_are_anonymous():
     corpus = nb.corpus_files_for_view(ctx, 1, "a1")
     original_names = {Path(rel).name for rel, _p in corpus}
     original_stems = {Path(rel).stem for rel, _p in corpus}
-    original_dirs = {Path(rel).parent.as_posix() for rel, _p in corpus} - {"."}
+    # The EVIDENCE areas keep a STABLE, LABELED directory in every view (see
+    # build_judge_view), so their canonical names are not provenance leaks.
+    evidence_labels = {"raw_data", "human_review_feedback", "llm_review_feedback"}
+    original_dirs = ({Path(rel).parent.as_posix() for rel, _p in corpus}
+                     - {"."} - evidence_labels)
     view_paths = {}
     for area in ("target", "field"):
         for p in sorted((sb / area).rglob("*")):
@@ -538,7 +542,7 @@ def test_non_judged_copies_preserve_metadata():
           kept.is_file() and stat.S_IMODE(kept.stat().st_mode) == 0o600,
           f"{kept} {oct(stat.S_IMODE(kept.stat().st_mode))}")
     # the pristine copy made by `setup` preserves the source metadata
-    check("the pristine non-revised/ copy preserves the source mtime",
+    check("the pristine non_revised/ copy preserves the source mtime",
           round((ctx.pristine / "manuscript-b.md").stat().st_mtime)
           == round((src / "manuscript-b.md").stat().st_mtime))
     check("the pristine copy preserves the source executable bit",

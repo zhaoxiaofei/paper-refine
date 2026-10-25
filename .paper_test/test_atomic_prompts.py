@@ -26,6 +26,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from bundle_source_lib import bundle_tree, source_text
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
 spec = importlib.util.spec_from_file_location("paper_atomic_prompts",
                                               str(WS / "paper_pipeline.py"))
@@ -101,7 +102,7 @@ def main() -> int:
         shutil.rmtree(root, ignore_errors=True)
 
     # ---- 2. the structural rule in the pipeline ----------------------------
-    tree = ast.parse((WS / "paper_pipeline.py").read_text(encoding="utf-8"))
+    tree = bundle_tree(WS / "paper_pipeline.py")
     bad = guarded_plain_writes(tree)
     check("no non-atomic write hides behind an if-not-exists guard",
           not bad, bad)

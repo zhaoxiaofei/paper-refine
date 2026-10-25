@@ -19,6 +19,7 @@ import re
 import sys
 from pathlib import Path
 
+from bundle_source_lib import source_text
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
 spec = importlib.util.spec_from_file_location("paper_contradictions", str(WS / "paper_pipeline.py"))
 pp = importlib.util.module_from_spec(spec)
@@ -35,7 +36,10 @@ def check(name, cond, detail=""):
 
 
 def read(rel):
-    return (WS / rel).read_text(encoding="utf-8")
+    p = WS / rel
+    if rel in ("paper_pipeline.py", "paper_docx_format.py"):
+        return source_text(p, encoding="utf-8")
+    return p.read_text(encoding="utf-8")
 
 
 def flat(text):

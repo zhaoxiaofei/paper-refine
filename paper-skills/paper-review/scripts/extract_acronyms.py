@@ -10,7 +10,7 @@ acronym-like token, and builds the ACRONYM INVENTORY artifact:
   OUT/artifacts/M1_acronyms.json  — machine-readable copy for findings.json
 
 The submission corpus NEVER contains the raw-data evidence area (`raw_data/`,
-legacy `raw_figs/`): convert_corpus.py writes its text to WORK/evidence/. Any
+the canonical directory): convert_corpus.py writes its text to WORK/evidence/. Any
 file that still looks like raw-data evidence, or like editors'/reviewers'
 feedback, is skipped explicitly here and named in the artifact header — a data
 table, a reviewer's sentence or an editor's decision letter is not the authors'
@@ -67,7 +67,7 @@ import re
 import sys
 from collections import defaultdict
 
-RAW_DATA_DIRNAMES = ("raw_data", "raw_figs")
+RAW_DATA_DIRNAMES = ("raw_data",)
 HUMAN_FEEDBACK_DIR = "human_review_feedback"
 LLM_FEEDBACK_DIR = "llm_review_feedback"
 EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR)

@@ -41,6 +41,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from bundle_source_lib import bundle_tree, source_text
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
 
 
@@ -215,7 +216,7 @@ def test_document_set_both_directions():
           got2["missing"] == [] and got2.get("added") == [], str(got2))
     check("the stage warning names the added document",
           "NEW document(s) not present in the base" in
-          Path(WS / "paper_pipeline.py").read_text(encoding="utf-8"))
+          source_text(WS / "paper_pipeline.py", encoding="utf-8"))
 
 
 # ---------------------------------------------------------------------------

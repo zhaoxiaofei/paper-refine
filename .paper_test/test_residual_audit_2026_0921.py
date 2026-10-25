@@ -515,7 +515,7 @@ def test_stub_round_with_audit():
     cfg = json.loads((root / "pipeline_config.json").read_text(encoding="utf-8"))
     check("setup persists audit + placeholder lookup + the strict default",
           cfg.get("audit") == "on" and cfg.get("placeholder_lookup") == "off"
-          and cfg.get("strict_artifacts") is True, json.dumps(cfg)[:200])
+          and cfg.get("artifact_policy") == "on", json.dumps(cfg)[:200])
     r = cli("run", "--root", str(root), "--only", "review",
             "--agent-cmd", json.dumps([sys.executable, str(STUB)]), "--retries", "0")
     state = json.loads((root / "state.json").read_text(encoding="utf-8"))

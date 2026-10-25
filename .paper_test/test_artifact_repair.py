@@ -10,7 +10,7 @@ do, because the layer it repairs exists precisely because an LLM once closed 96
 rows with one sentence:
 
   A. policy      `--strict-artifacts [on|fix|off]` (+ `--fix-artifacts` /
-                 `--non-strict-artifacts`), the legacy boolean in an old root's
+                 `--strict-artifacts off`), the legacy boolean in an old root's
                  config, and `strict_dispositions`/`artifact_repair_enabled`.
   B. scope       ONLY a review whose every postcheck error is an artifact-quality
                  message is repairable; one other error, the wrong policy, the
@@ -97,15 +97,15 @@ check("A2 `fix` is its own policy and implies strict dispositions",
 check("A3 `off` is advisory for the gate and never repairs",
       not nb.strict_dispositions(fake_ctx("off"))
       and not nb.artifact_repair_enabled(fake_ctx("off")))
-for raw, want in (("fail", "on"), ("strict", "on"), ("repair", "fix"), ("auto", "fix"),
-                  ("warn", "off"), ("advisory", "off")):
-    check(f"A4 the alias {raw!r} resolves to {want!r}",
-          nb.artifact_policy_of(fake_ctx(raw)) == want)
+for raw in ("fail", "strict", "repair", "auto", "warn", "advisory"):
+    check(f"A4 the removed alias {raw!r} falls back to the default policy",
+          nb.artifact_policy_of(fake_ctx(raw)) == nb.DEFAULT_ARTIFACT_POLICY)
 legacy_on = nb.Ctx(Path("/tmp/x")); legacy_on.cfg = {"strict_artifacts": True}
 legacy_off = nb.Ctx(Path("/tmp/x")); legacy_off.cfg = {"strict_dispositions": False}
 empty = nb.Ctx(Path("/tmp/x")); empty.cfg = {}
-check("A5 an old root's boolean config is read as on/off",
-      nb.artifact_policy_of(legacy_on) == "on" and nb.artifact_policy_of(legacy_off) == "off"
+check("A5 the removed boolean config keys are ignored (default policy applies)",
+      nb.artifact_policy_of(legacy_on) == nb.DEFAULT_ARTIFACT_POLICY
+      and nb.artifact_policy_of(legacy_off) == nb.DEFAULT_ARTIFACT_POLICY
       and nb.artifact_policy_of(empty) == "on")
 
 
@@ -113,9 +113,9 @@ def setup_root(tmp: Path, policy: str = None, *, rounds: int = 1, judges: str = 
                rewrites: str = "1", revises: str = "1", audit: str = None,
                integrators: str = None) -> Path:
     source = tmp / "source"
-    (source / "raw_figs").mkdir(parents=True)
+    (source / "raw_data").mkdir(parents=True)
     write(source / "manuscript-b.md", "title\n")
-    write(source / "raw_figs" / "data.tsv", "a\tb\n")
+    write(source / "raw_data" / "data.tsv", "a\tb\n")
     root = tmp / "root"
     cmd = [sys.executable, str(WS / "paper_pipeline.py"), "setup", "--source", str(source),
            "--root", str(root), "--rounds", str(rounds), "--judges", str(judges),
@@ -132,13 +132,13 @@ def setup_root(tmp: Path, policy: str = None, *, rounds: int = 1, judges: str = 
 
 cfg_root = setup_root(scratch("paper_rep_cfg_"), "fix")
 cfg = json.loads((cfg_root / "pipeline_config.json").read_text(encoding="utf-8"))
-check("A6 `setup --strict-artifacts fix` records the policy AND the legacy boolean",
-      cfg.get("artifact_policy") == "fix" and cfg.get("strict_artifacts") is True,
+check("A6 `setup --strict-artifacts fix` records the policy and no legacy boolean",
+      cfg.get("artifact_policy") == "fix" and "strict_artifacts" not in cfg,
       json.dumps({k: cfg.get(k) for k in ("artifact_policy", "strict_artifacts")}))
 cfg_off = json.loads((setup_root(scratch("paper_rep_cfg2_"), "off") / "pipeline_config.json")
                      .read_text(encoding="utf-8"))
-check("A7 `--strict-artifacts off` records off/false",
-      cfg_off.get("artifact_policy") == "off" and cfg_off.get("strict_artifacts") is False)
+check("A7 `--strict-artifacts off` records off",
+      cfg_off.get("artifact_policy") == "off" and "strict_artifacts" not in cfg_off)
 cfg_bare = json.loads((setup_root(scratch("paper_rep_cfg3_")) / "pipeline_config.json")
                       .read_text(encoding="utf-8"))
 check("A8 a bare `--strict-artifacts` (and the default) means on",

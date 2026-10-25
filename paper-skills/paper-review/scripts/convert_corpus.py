@@ -9,8 +9,8 @@ plain text under WORK/corpus/, and writes:
   WORK/corpus/<rel>.txt — converted plain text (structure-aware)
   WORK/evidence/<rel>.txt — converted text of the raw-data EVIDENCE area
 
-The EVIDENCE areas are NOT part of the submission: `raw_data/` (legacy spelling
-`raw_figs/`) carries data tables, figure/table sources and the analysis
+The EVIDENCE areas are NOT part of the submission: `raw_data/` carries data
+tables, figure/table sources and the analysis
 snapshot — and an older corpus may also keep the editors'/reviewers' feedback
 there; `human_review_feedback/` (sibling of raw_data/) carries the real
 editors'/reviewers' comments from the previous submission (and any previous
@@ -51,7 +51,7 @@ stdlib-only by design (docx/xlsx read via zipfile + XML) so it runs in any
 Python 3.8+ environment, including sandboxed Codex sandboxes.
 
 Usage:
-  python convert_corpus.py --submission ./non-revised --work ./review/work
+  python convert_corpus.py --submission ./non_revised --work ./review/work
 """
 import argparse
 import hashlib
@@ -98,7 +98,7 @@ COVER_LETTER_ROLE_RE = re.compile(
     r"(?:[Cc]over|COVER|(?i:coverletter|plainletter))(?![a-z])"
     r"|(?i:letter_to_editor|tocover)")
 
-RAW_DATA_DIRNAMES = ("raw_data", "raw_figs")
+RAW_DATA_DIRNAMES = ("raw_data",)
 HUMAN_FEEDBACK_DIR = "human_review_feedback"
 LLM_FEEDBACK_DIR = "llm_review_feedback"
 # The manuscript version the PREVIOUS journal's editors/reviewers actually saw,

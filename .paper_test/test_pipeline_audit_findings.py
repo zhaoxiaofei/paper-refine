@@ -140,7 +140,7 @@ def main() -> int:
         # materialize_judges() requires the full fresh field: register a1 too.
         a1sb = ctx1.root / "runs" / "r1_a1" / "base"
         a1sb.mkdir(parents=True)
-        shutil.copy2(ctx1.pristine / "raw_figs" / "entire_pipeline.git-snapshot.txt",
+        shutil.copy2(ctx1.pristine / "raw_data" / "entire_pipeline.git-snapshot.txt",
                      a1sb / "manuscript-p.docx")
         a1rec = ctx1.register("r1_a1", "a1", 1, "runs/r1_a1", source_id="orig")
         a1rec["status"] = "done"

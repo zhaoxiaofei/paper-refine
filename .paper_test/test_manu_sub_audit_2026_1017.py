@@ -37,6 +37,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+from bundle_source_lib import copy_bundle
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
 FAILS = []
 TMPDIRS = []
@@ -393,7 +394,7 @@ def test_author_to_complete_policy():
         refused = e.code == 2
     check("a foreign running pipeline is refused before mutating the root", refused)
     matching = scratch("atc_matching_")
-    shutil.copy2(WS / "paper_pipeline.py", matching / "paper_pipeline.py")
+    copy_bundle(WS, matching)
     (matching / "state.json").write_text(json.dumps(
         {"version": 3, "runs": {}, "rounds": {}, "pinned": [],
          "pipeline": {"path": str(WS / "paper_pipeline.py"), "sha256": "deadbeef",
@@ -465,20 +466,20 @@ def test_author_to_complete_cli():
     check("setup defaults to author_to_complete: readme",
           r.returncode == 0 and cfg.get("author_to_complete") == "readme",
           r.stderr[-300:])
-    root_r, r_r, cfg_r = setup_with("--with-author-to-complete-in-readme")
-    check("setup accepts --with-author-to-complete-in-readme",
+    root_r, r_r, cfg_r = setup_with("--author-to-complete readme")
+    check("setup accepts --author-to-complete readme",
           r_r.returncode == 0 and cfg_r.get("author_to_complete") == "readme",
           r_r.stderr[-300:])
-    root_d, r_d, cfg_d = setup_with("--with-author-to-complete")
-    check("setup records --with-author-to-complete as document",
+    root_d, r_d, cfg_d = setup_with("--author-to-complete document")
+    check("setup records --author-to-complete document",
           r_d.returncode == 0 and cfg_d.get("author_to_complete") == "document",
           r_d.stderr[-300:])
     _root_legacy, r_l, cfg_l = setup_with("--author-to-complete on")
-    check("setup accepts the legacy --author-to-complete on as document",
-          r_l.returncode == 0 and cfg_l.get("author_to_complete") == "document",
+    check("the removed legacy --author-to-complete on is rejected",
+          r_l.returncode != 0 and "invalid choice" in (r_l.stderr or "").lower(),
           r_l.stderr[-300:])
-    root_o, r_o, cfg_o = setup_with("--without-author-to-complete")
-    check("setup accepts --without-author-to-complete",
+    root_o, r_o, cfg_o = setup_with("--author-to-complete off")
+    check("setup accepts --author-to-complete off",
           r_o.returncode == 0 and cfg_o.get("author_to_complete") == "off",
           r_o.stderr[-300:])
     for mode in ("document", "off", "readme"):
@@ -490,9 +491,8 @@ def test_author_to_complete_cli():
               r2.stderr[-200:])
     r3 = run([sys.executable, str(WS / "paper_pipeline.py"), "set-author-to-complete",
               "--root", str(root_o), "on"], capture_output=True, text=True, timeout=120)
-    cfg = json.loads((root_o / "pipeline_config.json").read_text())
-    check("legacy `set-author-to-complete on` is accepted as document",
-          r3.returncode == 0 and cfg.get("author_to_complete") == "document",
+    check("the removed legacy `set-author-to-complete on` is rejected",
+          r3.returncode != 0 and "invalid choice" in (r3.stderr or "").lower(),
           r3.stderr[-200:])
     r4 = run([sys.executable, str(WS / "paper_pipeline.py"), "set-author-to-complete",
               "--root", str(root_o), "bogus"], capture_output=True, text=True, timeout=120)

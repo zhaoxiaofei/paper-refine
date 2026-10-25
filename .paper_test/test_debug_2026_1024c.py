@@ -348,20 +348,24 @@ def test_upstream_deps_journal():
 # ---------------------------------------------------------------------------
 def test_raw_data_repoint_scope():
     print()
-    print("== M2: canonicalize repoints references OUTSIDE the read-only area only ==")
+    print("== M2: there is no legacy-name migration; the canonical area is untouched ==")
     d = tmpdir("m2")
+    (d / "raw_data").mkdir()
+    (d / "raw_data" / "counts.tsv").write_text("a\n", encoding="utf-8")
+    (d / "raw_data" / "run.py").write_text("open('raw_data/counts.tsv')\n", encoding="utf-8")
+    (d / "ms.tex").write_text("\\input{raw_data/counts.tsv}\n", encoding="utf-8")
+    check("the removed canonicalizer is gone",
+          not hasattr(pp, "canonicalize_raw_data_dir"))
+    check("a canonical package reports no legacy-area problem",
+          pp.legacy_input_area_problems(d) == [])
     (d / "raw_figs").mkdir()
-    (d / "raw_figs" / "counts.tsv").write_text("a\n", encoding="utf-8")
-    (d / "raw_figs" / "run.py").write_text("open('raw_figs/counts.tsv')\n", encoding="utf-8")
-    (d / "ms.tex").write_text("\\input{raw_figs/counts.tsv}\n", encoding="utf-8")
-    warns = []
-    res = pp.canonicalize_raw_data_dir(d, warns)
-    check("the directory is renamed and the outside reference repointed",
-          res["renamed"] and (d / "ms.tex").read_text(encoding="utf-8")
-          == "\\input{raw_data/counts.tsv}\n", str(res))
-    check("a file INSIDE the raw-data area is byte-identical",
+    (d / "raw_figs" / "old.tsv").write_text("b\n", encoding="utf-8")
+    probs = pp.legacy_input_area_problems(d)
+    check("a legacy raw_figs/ is a hard problem, never silently renamed",
+          bool(probs) and "raw_figs/" in probs[0] and (d / "raw_figs").is_dir(), str(probs))
+    check("the canonical area's bytes are unchanged",
           (d / "raw_data" / "run.py").read_text(encoding="utf-8")
-          == "open('raw_figs/counts.tsv')\n", (d / "raw_data" / "run.py").read_text())
+          == "open('raw_data/counts.tsv')\n")
 
 
 # ---------------------------------------------------------------------------

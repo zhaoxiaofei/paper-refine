@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """The two renamed INPUT areas, and the READ-ONLY raw-data rule.
 
-  * `non-revised/` -> `non_revised/` (the root's pristine copy of --source) and
-    `raw_figs/` -> `raw_data/` (the corpus's raw-data directory). Only the
-    canonical spellings are created; the legacy ones stay resolved, so a root or
-    a corpus set up before the rename keeps working and a plain rename is
-    invisible to every hash comparison.
+  * `non_revised/` (the root's pristine copy of --source) and `raw_data/` (the
+    corpus's raw-data directory) are the ONLY accepted spellings. The removed
+    legacy names are refused by setup and by every command that loads a root;
+    there is no migration and no alias resolution.
   * The raw-data directory is an INPUT: a package carries it byte-for-byte. A
     stage that edited, added or dropped a file inside it gets the original's copy
-    back (recorded as a warning), and the package's own references to the
-    directory are repointed when the legacy spelling is renamed.
+    back (recorded as a warning).
 
 Run:  python3 .paper_test/test_input_area_names.py
 """
@@ -19,6 +17,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import zipfile
@@ -61,40 +60,40 @@ def make_docx(path: Path, text: str) -> None:
 
 
 SUPP_TEX = ("\\documentclass{article}\n"
-            "\\includegraphics{raw_figs/Fig1.png}\n"
-            "\\input{raw_figs/stats.tex}\n")
+            "\\includegraphics{raw_data/Fig1.png}\n"
+            "\\input{raw_data/stats.tex}\n")
 
 
 def build_root(tmp: Path):
-    """A root set up by the PREVIOUS pipeline: `non-revised/` + `raw_figs/`."""
+    """A root set up by the PREVIOUS pipeline: `non_revised/` + `raw_data/`."""
     root = tmp / "root"
     src = tmp / "source"
-    (src / "raw_figs").mkdir(parents=True)
+    (src / "raw_data").mkdir(parents=True)
     make_docx(src / "cnb01A-1-coverLetter-b.docx", "cover letter v b")
     (src / "cnb01A-3-suppAll-b.tex").write_text(SUPP_TEX, encoding="utf-8")
-    (src / "raw_figs" / "Fig1.png").write_bytes(b"\x89PNG-fig1")
-    (src / "raw_figs" / "dataset_summary.tsv").write_text("sample\tcells\n", encoding="utf-8")
-    (src / "raw_figs" / "stats.tex").write_text("% stats\n", encoding="utf-8")
+    (src / "raw_data" / "Fig1.png").write_bytes(b"\x89PNG-fig1")
+    (src / "raw_data" / "dataset_summary.tsv").write_text("sample\tcells\n", encoding="utf-8")
+    (src / "raw_data" / "stats.tex").write_text("% stats\n", encoding="utf-8")
     (src / "cnb01A-3-suppAll-b.aux").write_text("\\relax\n", encoding="utf-8")
 
     root.mkdir(parents=True)
-    shutil.copytree(src, root / "non-revised")
+    shutil.copytree(src, root / "non_revised")
     (root / "pipeline_config.json").write_text(json.dumps(
         {"rounds": 1, "judges": 1, "source": str(src)}), encoding="utf-8")
     ctx = nb.Ctx(root)
     ctx.state = {"version": nb.STATE_VERSION, "runs": {}, "rounds": {}, "pinned": [],
-                 "log": [], "source_manifest": nb.hash_manifest(root / "non-revised"),
+                 "log": [], "source_manifest": nb.hash_manifest(root / "non_revised"),
                  "original_digest": "x", "judge_salt": "testsalt"}
     ctx.cfg = {"rounds": 1, "judges": 1, "source": str(src), "caption_limit": 0}
     return ctx
 
 
-def build_revise_sandbox(ctx, tamper=True, legacy_sandbox=False, drop=()):
+def build_revise_sandbox(ctx, tamper=True, drop=()):
     """Materialize an r1_a2_revise sandbox; `tamper` writes into raw data."""
     rid = "r1_a2_revise"
     sb = ctx.runs_dir / rid
     sb.mkdir(parents=True)
-    pris_name = "non-revised" if legacy_sandbox else nb.PRISTINE_DIR
+    pris_name = nb.PRISTINE_DIR
     shutil.copytree(ctx.pristine, sb / "base")
     shutil.copytree(ctx.pristine, sb / pris_name)
     (sb / "review").mkdir()
@@ -119,11 +118,11 @@ def build_revise_sandbox(ctx, tamper=True, legacy_sandbox=False, drop=()):
         # exactly what the 2026-09-22 round-1 revise arm did to the real corpus:
         # a column added to a data table, a figure source edited, one asset gone
         # and one brand-new file inside the read-only directory.
-        (rev / "raw_figs" / "dataset_summary.tsv").write_text(
+        (rev / "raw_data" / "dataset_summary.tsv").write_text(
             "sample\tcells\tsource_accession\n", encoding="utf-8")
-        (rev / "raw_figs" / "stats.tex").write_text("% stats, reworded\n", encoding="utf-8")
-        (rev / "raw_figs" / "Fig1.png").unlink()
-        (rev / "raw_figs" / "scratch_notes.csv").write_text("a,b\n", encoding="utf-8")
+        (rev / "raw_data" / "stats.tex").write_text("% stats, reworded\n", encoding="utf-8")
+        (rev / "raw_data" / "Fig1.png").unlink()
+        (rev / "raw_data" / "scratch_notes.csv").write_text("a,b\n", encoding="utf-8")
     xf.write_language_pass(rev)
     (rev / "revision_report.json").write_text(json.dumps(
         [{"id": "F-001", "verdict": "fixed", "rationale": "done"}]), encoding="utf-8")
@@ -146,29 +145,55 @@ def build_revise_sandbox(ctx, tamper=True, legacy_sandbox=False, drop=()):
 
 def test_names_and_resolution():
     print()
-    print("== the renamed input areas: both spellings resolve, nothing is moved ==")
+    print("== the input areas use ONE canonical name each; the legacy spellings are gone ==")
     tmp = scratch("paper_areas_names_")
     ctx = build_root(tmp)
-    check("a root set up by the older pipeline keeps its `non-revised/` name",
-          (ctx.root / "non-revised").is_dir() and not (ctx.root / "non_revised").exists())
-    check("the legacy spellings are resolved",
-          nb.raw_data_dirname(ctx.pristine) == "raw_figs"
-          and nb.pristine_dirname(ctx.root) == "non-revised")
+    check("a root uses the canonical `non_revised/` name",
+          (ctx.root / "non_revised").is_dir() and not (ctx.root / "non-revised").exists())
+    check("the directory-name helpers return the canonical names",
+          nb.raw_data_dirname(ctx.pristine) == "raw_data"
+          and nb.pristine_dirname(ctx.root) == "non_revised")
     ok_before, detail_before = nb.pristine_integrity(ctx)
-    check("the pristine copy verifies under the legacy name", ok_before, detail_before)
-    check("NOTHING renames the directories: there is no migration step at all",
+    check("the pristine copy verifies", ok_before, detail_before)
+    check("there is no legacy-name resolution or migration helper",
           not hasattr(nb, "migrate_legacy_dir_names")
-          and (ctx.root / "non-revised").is_dir()
-          and (ctx.pristine / "raw_figs").is_dir() and ctx.pristine.name == "non-revised")
+          and not hasattr(nb, "existing_dirname")
+          and not hasattr(nb, "canonicalize_raw_data_dir")
+          and not hasattr(nb, "PRISTINE_DIR_LEGACY")
+          and not hasattr(nb, "RAW_DATA_DIR_LEGACY"))
     check("a NEW root is created under the canonical names (setup's own rule)",
           nb.pristine_dirname(tmp / "no-root-here") == nb.PRISTINE_DIR
           and nb.raw_data_dirname(tmp / "no-root-here") == nb.RAW_DATA_DIR)
-    check("a manifest keyed with either spelling compares equal",
-          nb.manifests_equal({"files": {"raw_figs/x.tsv": "d"}, "count": 1},
-                             {"files": {"raw_data/x.tsv": "d"}, "count": 1}))
-    check("the raw-data predicate covers both spellings",
-          nb.is_raw_data_rel("raw_figs/a/b.tsv") and nb.is_raw_data_rel("raw_data/a.tsv")
-          and not nb.is_raw_data_rel("raw_figs.tsv") and not nb.is_raw_data_rel("code/a.py"))
+    check("a manifest keyed with a legacy spelling does NOT compare equal",
+          not nb.manifests_equal({"files": {"raw_figs/x.tsv": "d"}, "count": 1},
+                                  {"files": {"raw_data/x.tsv": "d"}, "count": 1}))
+    check("the raw-data predicate accepts only raw_data/",
+          nb.is_raw_data_rel("raw_data/a/b.tsv") and nb.is_raw_data_rel("raw_data/a.tsv")
+          and not nb.is_raw_data_rel("raw_figs/a/b.tsv")
+          and not nb.is_raw_data_rel("raw_data.tsv") and not nb.is_raw_data_rel("code/a.py"))
+    # setup refuses a source that still uses a removed spelling.
+    legacy_src = tmp / "legacy-source"
+    (legacy_src / "raw_figs").mkdir(parents=True)
+    (legacy_src / "raw_figs" / "x.tsv").write_text("a,b\n", encoding="utf-8")
+    (legacy_src / "m.md").write_text("# T\n\nbody\n", encoding="utf-8")
+    r = subprocess.run([sys.executable, str(WS / "paper_pipeline.py"), "setup",
+                        "--source", str(legacy_src), "--root", str(tmp / "legacy-root")],
+                       capture_output=True, text=True, timeout=120)
+    check("setup refuses a --source with the removed legacy input-area name",
+          r.returncode != 0 and "removed legacy spelling" in (r.stdout + r.stderr),
+          (r.stdout + r.stderr)[-300:])
+    # A stage-created legacy directory is never treated as ordinary submission
+    # content: the package check names it and the postcheck fails the attempt.
+    pkg = tmp / "pkg"
+    shutil.copytree(ctx.pristine / "raw_data", pkg / "raw_data")
+    (pkg / "raw_figs").mkdir()
+    (pkg / "raw_figs" / "old.tsv").write_text("a,b\n", encoding="utf-8")
+    warns = []
+    info = nb.verify_readonly_raw_data(ctx, pkg, warns)
+    check("a package carrying a legacy input-area name is flagged",
+          bool(info.get("legacy_input_areas"))
+          and any("REMOVED input-area spelling" in w for w in warns),
+          f"{info.get('legacy_input_areas')} {warns[-2:]}")
 
 
 def test_readonly_enforcement():
@@ -176,15 +201,15 @@ def test_readonly_enforcement():
     print("== a stage that writes inside the read-only raw-data directory ==")
     tmp = scratch("paper_areas_ro_")
     ctx = build_root(tmp)
-    pris_tsv = (ctx.pristine / "raw_figs" / "dataset_summary.tsv").read_bytes()
-    pris_png = (ctx.pristine / "raw_figs" / "Fig1.png").read_bytes()
-    rec, sb = build_revise_sandbox(ctx, tamper=True, legacy_sandbox=True)
+    pris_tsv = (ctx.pristine / "raw_data" / "dataset_summary.tsv").read_bytes()
+    pris_png = (ctx.pristine / "raw_data" / "Fig1.png").read_bytes()
+    rec, sb = build_revise_sandbox(ctx, tamper=True)
     ok = nb.postcheck(ctx, rec)
     pc = rec["postcheck"]
     rev = sb / "revised"
     check("the attempt PASSES: the read-only directory is repaired, not punished",
           ok, str(pc.get("errors"))[:200])
-    check("the legacy directory name was canonicalised in the package",
+    check("the package carries the canonical raw-data directory",
           (rev / "raw_data").is_dir() and not (rev / "raw_figs").exists())
     check("the edited data table was restored to the original bytes",
           (rev / "raw_data" / "dataset_summary.tsv").read_bytes() == pris_tsv)
@@ -192,7 +217,7 @@ def test_readonly_enforcement():
           (rev / "raw_data" / "Fig1.png").read_bytes() == pris_png)
     check("the file the original does not have was removed",
           not (rev / "raw_data" / "scratch_notes.csv").exists())
-    check("the template's own reference was repointed to the canonical name",
+    check("the template's own reference names raw_data/ and not the removed spelling",
           "raw_data/Fig1.png" in (rev / "cnb01A-3-suppAll-b.tex").read_text(encoding="utf-8")
           and "raw_figs/" not in (rev / "cnb01A-3-suppAll-b.tex").read_text(encoding="utf-8"))
     # Fig1.png is NOT in `restored`: the document-recovery layer already brought
@@ -207,8 +232,8 @@ def test_readonly_enforcement():
           "READ-ONLY raw data" in warns and "dataset_summary.tsv" in warns
           and "scratch_notes.csv" in warns, warns[-260:])
     check("the frozen original itself is untouched",
-          (ctx.pristine / "raw_figs" / "dataset_summary.tsv").read_bytes() == pris_tsv
-          and (ctx.pristine / "raw_figs" / "stats.tex").read_text(encoding="utf-8")
+          (ctx.pristine / "raw_data" / "dataset_summary.tsv").read_bytes() == pris_tsv
+          and (ctx.pristine / "raw_data" / "stats.tex").read_text(encoding="utf-8")
           == "% stats\n")
     ok_pristine, detail = nb.pristine_integrity(ctx)
     check("the pristine manifest still verifies", ok_pristine, detail)
@@ -219,19 +244,19 @@ def test_clean_package_is_a_no_op():
     print("== a package that left the raw data alone ==")
     tmp = scratch("paper_areas_clean_")
     ctx = build_root(tmp)
-    rec, sb = build_revise_sandbox(ctx, tamper=False, legacy_sandbox=True)
+    rec, sb = build_revise_sandbox(ctx, tamper=False)
     warns = []
     info = nb.verify_readonly_raw_data(ctx, sb / "revised", warns)
     rev = sb / "revised"
-    check("the directory is canonicalised once",
+    check("the canonical directory is present and nothing is migrated",
           (rev / "raw_data").is_dir() and not (rev / "raw_figs").exists()
-          and info["renamed"], json.dumps(info)[:160])
+          and "renamed" not in info, json.dumps(info)[:160])
     check("nothing inside it is restored or dropped",
           info["restored"] == [] and info["dropped"] == [], json.dumps(info)[:160])
-    check("exactly one warning (the rename) is recorded", len(warns) == 1, str(warns)[:200])
+    check("no rename/migration warning is recorded", warns == [], str(warns)[:200])
     check("every raw-data file still has the original bytes",
           all((rev / "raw_data" / p.name).read_bytes() == p.read_bytes()
-              for p in (ctx.pristine / "raw_figs").rglob("*") if p.is_file()))
+              for p in (ctx.pristine / "raw_data").rglob("*") if p.is_file()))
 
 
 def main() -> int:

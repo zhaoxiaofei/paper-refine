@@ -310,9 +310,9 @@ def test_second_pass():
     tmp = Path(tempfile.mkdtemp(prefix="paper_v3_stop_"))
     TMPDIRS.append(tmp)
     source = tmp / "source"
-    (source / "raw_figs").mkdir(parents=True)
+    (source / "raw_data").mkdir(parents=True)
     (source / "manuscript-b.md").write_text("title\n", encoding="utf-8")
-    (source / "raw_figs" / "data.tsv").write_text("a\tb\n", encoding="utf-8")
+    (source / "raw_data" / "data.tsv").write_text("a\tb\n", encoding="utf-8")
     root = tmp / "root"
     stub = Path(__file__).resolve().parent / "stub_agent.py"
     setup = subprocess.run([sys.executable, str(WS / "paper_pipeline.py"), "setup",

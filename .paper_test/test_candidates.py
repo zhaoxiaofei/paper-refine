@@ -365,7 +365,7 @@ def build_round_root(tmp: Path) -> Path:
     root = tmp / "root"
     write(root / "pipeline_config.json",
           json.dumps({"rounds": 1, "judges": 1, "source": str(tmp / "src")}))
-    write(root / "non-revised" / "manuscript-o.docx", "A")
+    write(root / "non_revised" / "manuscript-o.docx", "A")
     write(root / "round1_winner" / "manuscript-o.docx", "A")
     sandboxes = {
         "r1_a2_review": ("review", {"base": "base/manuscript-o.docx"}),
@@ -462,7 +462,7 @@ def test_c2b_interrupted_setup_can_be_restarted():
     src, root = tmp / "src", tmp / "root"
     write(src / "manuscript-o.md", "# pristine\n")
     # simulate the interrupted run: the partial copy plus setup's own marker
-    write(root / "non-revised" / "junk.md", "half-written copy\n")
+    write(root / "non_revised" / "junk.md", "half-written copy\n")
     write(root / "paper_pipeline.py", "# copied\n")
     write(root / np.SETUP_MARKER, "setup started 2026-09-20 21:04:18\n")
     proc = subprocess.run([sys.executable, str(NP_PATH), "setup", "--source", str(src),

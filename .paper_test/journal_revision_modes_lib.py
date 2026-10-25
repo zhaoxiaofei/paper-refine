@@ -442,7 +442,7 @@ def test_j1_narrative():
           "manuscript.txt" in files and "RESPONSE_TO_REVIEWERS.md" in files
           and "response_map.json" in files, str(files))
     check("J1 the submission excludes the raw-data evidence area",
-          not any(f.startswith(("raw_data/", "raw_figs/", "human_review_feedback/",
+          not any(f.startswith(("raw_data/", "raw_data/", "human_review_feedback/",
                                 "llm_review_feedback/"))
                   for f in files))
     check("J1 the submission excludes pipeline bookkeeping",
@@ -642,22 +642,24 @@ def test_j6_narrative():
     r = run_cli("set-revision-mode", "--root", str(root))
     check("J6 set-revision-mode --show prints the current mode",
           r.returncode == 0 and "mode: continue" in r.stdout, r.stdout[-200:])
-    # the pre-rename spelling is accepted everywhere and normalizes to `continue`
+    # The old `none` spelling is GONE (no backward compatibility): it must be
+    # rejected, not silently normalized to `continue`.
     legacy = dict(cfg)
     legacy["revision_mode"] = "none"
     (root / "pipeline_config.json").write_text(json.dumps(legacy), encoding="utf-8")
     ctx_legacy = nb.Ctx(root)
     ctx_legacy.load()
-    check("J6 a config recording the pre-rename 'none' normalizes to 'continue'",
-          nb.journal_mode_of(ctx_legacy) == "continue"
-          and not nb.journal_has_feedback(ctx_legacy))
+    try:
+        nb.journal_mode_of(ctx_legacy)
+        rejected = False
+    except SystemExit as e:
+        rejected = e.code not in (None, 0)
+    check("J6 a config recording the removed 'none' spelling is rejected", rejected)
     (root / "pipeline_config.json").write_text(json.dumps(cfg), encoding="utf-8")
     r = run_cli("set-revision-mode", "none", "--root", str(root))
-    check("J6 set-revision-mode none is accepted as the pre-rename alias",
-          r.returncode == 0 and "pre-rename spelling" in r.stdout, r.stdout[-200:])
-    check("J6 the alias records the canonical mode",
-          json.loads((root / "pipeline_config.json").read_text(encoding="utf-8"))
-          .get("revision_mode") == "continue")
+    check("J6 set-revision-mode none is rejected",
+          r.returncode != 0 and "needs one of" in (r.stdout + r.stderr),
+          (r.stdout + r.stderr)[-200:])
     r = run_cli("set-revision-mode", "major", "--root", str(root))
     check("J6 switching the default root to a journal mode succeeds",
           r.returncode == 0, (r.stdout + r.stderr)[-200:])
@@ -674,7 +676,7 @@ def test_j6_narrative():
     check("J6 the switched root plans the scoped journal stages",
           {"concerns", "revise", "response"} <= kinds
           and "review" not in kinds and "rewrite" not in kinds, str(sorted(kinds)))
-    # `continue` is the default; the pre-rename `none` is accepted by setup too
+    # `continue` is the default; the removed `none` spelling is refused by setup.
     tmp2 = scratch("paper_jr_continue_")
     root2 = tmp2 / "root"
     r = run_cli("setup", "--source", str(build_source(tmp2)), "--root", str(root2),
@@ -688,10 +690,8 @@ def test_j6_narrative():
     root3 = tmp3 / "root"
     r = run_cli("setup", "--source", str(build_source(tmp3)), "--root", str(root3),
                 "--rounds", "1", "--revision-mode", "none")
-    check("J6 setup --revision-mode none is accepted as the pre-rename alias",
-          r.returncode == 0 and "pre-rename spelling" in r.stdout
-          and "revision_mode" not in json.loads(
-              (root3 / "pipeline_config.json").read_text(encoding="utf-8")),
+    check("J6 setup --revision-mode none is rejected",
+          r.returncode != 0 and "must be one of" in (r.stdout + r.stderr),
           (r.stdout + r.stderr)[-200:])
 
     print()

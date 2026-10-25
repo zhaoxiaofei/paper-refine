@@ -92,7 +92,7 @@ folder:
 - "Review the manuscript package in ./submission before we submit to Nature
   Biotechnology. Do not modify anything."
 - "Run the pre-submission diagnostic review on ./submission."
-- "identify_issues on ./non-revised" (legacy name)
+- "identify_issues on ./non_revised"
 - "…discover mode" — re-runs ONLY the discovery round against existing
   findings (hunts issue classes the checklist itself misses)
 

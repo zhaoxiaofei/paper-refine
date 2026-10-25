@@ -192,7 +192,7 @@ def test_c05_c06_revision_token():
 def test_c07_empty_ledger():
     tmp = scratch("paper_audit_ledger_")
     root = tmp / "root"
-    pristine = root / "non-revised"
+    pristine = root / "non_revised"
     write(pristine / "manuscript-b.md", "text\n")
     (root / "reports").mkdir(parents=True)
     ctx = nb.Ctx(root)
@@ -204,7 +204,7 @@ def test_c07_empty_ledger():
     sb = ctx.runs_dir / rid
     sb.mkdir(parents=True)
     shutil.copytree(pristine, sb / "base")
-    shutil.copytree(pristine, sb / "non-revised")
+    shutil.copytree(pristine, sb / "non_revised")
     write(sb / "review" / "findings.json",
           json.dumps({"submission_dir": "./base", "findings": [], "artifacts": {},
                       "coverage": []}))
@@ -222,7 +222,7 @@ def test_c07_empty_ledger():
     rec = ctx.register(rid, "revise", 1, f"runs/{rid}", upstream_run_id="r1_a2_review",
                        source_id="a1")
     rec["inputs_manifest"] = {"base": nb.hash_manifest(sb / "base"),
-                              "non-revised": nb.hash_manifest(sb / "non-revised"),
+                              "non_revised": nb.hash_manifest(sb / "non_revised"),
                               "review": nb.hash_manifest(sb / "review")}
     ok, errs, warns, _extra = (list(nb.postcheck_revise(ctx, rec)) + [None])[:4]
     check("C07 a zero-finding review with an empty ledger is accepted",

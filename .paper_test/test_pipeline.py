@@ -132,7 +132,7 @@ def test_prompts():
               "Judge it GENERICALLY" in flat_lp
               and "MECHANICAL SEPARATOR" in flat_lp
               and "macro argument is NOT a prerequisite" in flat_lp)
-    check("revise prompt overrides 'copy unchanged from non-revised/'",
+    check("revise prompt overrides 'copy unchanged from non_revised/'",
           "never from\n     non_revised/" in rev and "REVERT" in rev)
     # parser default
     parser = np.build_parser()

@@ -260,11 +260,10 @@ def main() -> int:
     # B1: base document replaced by a symlink to the base copy (a plausible
     # "save space" trick or a bad `cp -s`) -> repaired, run proceeds
     tmp, ctx, rec, sb = new_case()
-    # the package is materialized under the corpus's own spelling (`raw_figs/`);
-    # the postcheck canonicalises it to `raw_data/`, which is where the check
-    # looks afterwards.
-    doc = sb / "revised" / "raw_figs" / "entire_pipeline.git-snapshot.txt"
-    tgt = sb / "base" / "raw_figs" / "entire_pipeline.git-snapshot.txt"
+    # the package carries the canonical `raw_data/`; the postcheck verifies it
+    # byte-for-byte against the pristine copy.
+    doc = sb / "revised" / "raw_data" / "entire_pipeline.git-snapshot.txt"
+    tgt = sb / "base" / "raw_data" / "entire_pipeline.git-snapshot.txt"
     doc.unlink()
     doc.symlink_to(tgt)
     ok, errs, warns, crash = run_postcheck(ctx, rec)
@@ -278,7 +277,7 @@ def main() -> int:
 
     # B2: base document replaced by a BROKEN symlink (exists() is False for it)
     tmp, ctx, rec, sb = new_case()
-    doc = sb / "revised" / "raw_figs" / "entire_pipeline.git-snapshot.txt"
+    doc = sb / "revised" / "raw_data" / "entire_pipeline.git-snapshot.txt"
     doc.unlink()
     doc.symlink_to("/nonexistent/target")
     ok, errs, warns, crash = run_postcheck(ctx, rec)
@@ -291,7 +290,7 @@ def main() -> int:
 
     # B3: base document replaced by an EMPTY directory -> repaired
     tmp, ctx, rec, sb = new_case()
-    doc = sb / "revised" / "raw_figs" / "entire_pipeline.git-snapshot.txt"
+    doc = sb / "revised" / "raw_data" / "entire_pipeline.git-snapshot.txt"
     doc.unlink()
     doc.mkdir()
     ok, errs, warns, crash = run_postcheck(ctx, rec)
@@ -305,11 +304,11 @@ def main() -> int:
 
     # B4: base document replaced by a NON-EMPTY directory (real work at the wrong
     # path) -> refused with an error, never silently deleted
-    doc_rel = "raw_figs/entire_pipeline.git-snapshot.txt"
+    doc_rel = "raw_data/entire_pipeline.git-snapshot.txt"
     tmp = Path(tempfile.mkdtemp(prefix="paper_stoch_"))
     ctx = build_root(tmp)
     rec, sb = build_revise_sandbox(ctx, drop=(doc_rel,))
-    doc = sb / "revised" / "raw_figs" / "entire_pipeline.git-snapshot.txt"
+    doc = sb / "revised" / "raw_data" / "entire_pipeline.git-snapshot.txt"
     doc.mkdir()
     (doc / "notes.md").write_text("agent scratch that must not be deleted\n")
     ok, errs, warns, crash = run_postcheck(ctx, rec)
@@ -330,7 +329,7 @@ def main() -> int:
         skip("C1 unreadable candidate file is restored", "running as root: chmod is not enforced")
     else:
         tmp, ctx, rec, sb = new_case()
-        doc = sb / "revised" / "raw_figs" / "entire_pipeline.git-snapshot.txt"
+        doc = sb / "revised" / "raw_data" / "entire_pipeline.git-snapshot.txt"
         forced_chmod(doc, 0o000)
         ok, errs, warns, crash = run_postcheck(ctx, rec)
         check("C1 unreadable candidate file does not crash", crash is None, str(crash))
@@ -345,7 +344,7 @@ def main() -> int:
         skip("C2 unreadable directory fails cleanly", "running as root: chmod is not enforced")
     else:
         tmp, ctx, rec, sb = new_case()
-        d = sb / "revised" / "raw_figs"
+        d = sb / "revised" / "raw_data"
         forced_chmod(d, 0o000)
         ok, errs, warns, crash = run_postcheck(ctx, rec)
         check("C2 unreadable candidate directory does not crash the orchestrator",
@@ -367,7 +366,7 @@ def main() -> int:
         a1sb.mkdir(parents=True, exist_ok=True)
         shutil.copytree(ctx.pristine, a1sb / "base", dirs_exist_ok=True)
         a1["inputs_manifest"] = {"base": nb.hash_manifest(a1sb / "base")}
-        forced_chmod(a1sb / "base" / "raw_figs" / "entire_pipeline.git-snapshot.txt", 0o000)
+        forced_chmod(a1sb / "base" / "raw_data" / "entire_pipeline.git-snapshot.txt", 0o000)
         ok, errs, warns, crash = run_postcheck(ctx, a1)
         check("C3 unreadable frozen input does not crash", crash is None, str(crash))
         check("C3 the attempt fails cleanly instead", ok is False and rec is not None, f"ok={ok}")
@@ -472,7 +471,7 @@ def main() -> int:
         sb = ctx.runs_dir / rid
         sb.mkdir(parents=True)
         shutil.copytree(ctx.pristine, sb / "base")
-        shutil.copytree(ctx.pristine, sb / "non-revised")
+        shutil.copytree(ctx.pristine, sb / "non_revised")
         (sb / "review").mkdir()
         (sb / "review" / "findings.json").write_text(json.dumps(
             {"submission_dir": "./base", "guidelines_source": "t",
@@ -484,7 +483,7 @@ def main() -> int:
         mutate(sb)
         rec = ctx.register(rid, "review", 1, "runs/" + rid, source_id="a1")
         rec["inputs_manifest"] = {"base": nb.hash_manifest(sb / "base"),
-                                  "non-revised": nb.hash_manifest(sb / "non-revised")}
+                                  "non_revised": nb.hash_manifest(sb / "non_revised")}
         result = run_postcheck(ctx, rec)
         return tmp, rec, result
 

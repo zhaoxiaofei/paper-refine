@@ -31,6 +31,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from bundle_source_lib import bundle_tree, source_text
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
 spec = importlib.util.spec_from_file_location("paperp", WS / "paper_pipeline.py")
 np = importlib.util.module_from_spec(spec)
@@ -619,7 +620,7 @@ doc_sources = {
         encoding="utf-8"),
     "ledger.md": (WS / "paper-skills/paper-revise/references/ledger.md").read_text(
         encoding="utf-8"),
-    "paper_pipeline.py": (WS / "paper_pipeline.py").read_text(encoding="utf-8"),
+    "paper_pipeline.py": source_text(WS / "paper_pipeline.py", encoding="utf-8"),
 }
 for name, text in doc_sources.items():
     flat = " ".join(text.split())

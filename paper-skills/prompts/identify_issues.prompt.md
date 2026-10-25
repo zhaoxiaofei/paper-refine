@@ -15,10 +15,10 @@ target journal's own author guide and say which source you used.
 
 ## Paths
 
-- `SUBMISSION_DIR` = `./non-revised` (override: any explicit path or argument from the user)
+- `SUBMISSION_DIR` = `./non_revised` (override: any explicit path or argument from the user)
 - `OUT` = `./review` — create it; ALL outputs land here
 - `WORK` = `./review/work` — corpus, scripts, state
-- `raw_data/` (legacy spelling `raw_figs/`) — when SUBMISSION_DIR carries it: the **evidence
+- `raw_data/` (the raw-data area) — when SUBMISSION_DIR carries it: the **evidence
   area**, not submission content (see below)
 - `ZOTERO_SKILL` = `/mnt/d/software/plugins/plugins/zotero/skills/zotero/scripts/zotero.py` (override if the user provides one; if absent → fall back to manual-verification)
 - `ZOT_CLI` = `zot` (pyzotero-cli) and the `$zotero-use` skill — the reference route for resolving citations read-only (`zot --local ... items list|get|citation|bib`, `zot fulltext get`). This review never edits a citation field and never writes to the Zotero library.
@@ -30,8 +30,8 @@ artifacts into the package being reviewed. If the user's SUBMISSION_DIR is the
 working directory (or contains it), put `OUT`/`WORK` in a sibling directory and
 say where they went.
 
-**The EVIDENCE areas are not the submission.** A corpus carries `raw_data/`
-(an older corpus spells it `raw_figs/`) with the data tables, figure/table
+**The EVIDENCE areas are not the submission.** A corpus carries `raw_data/` with
+the data tables, figure/table
 sources and the analysis snapshot, and `human_review_feedback/` (its sibling)
 with the REAL editors'/reviewers' comments from the previous submission (plus
 any previous response as context). Both are the authors' INPUT and the review's
@@ -168,7 +168,7 @@ stable).
 says the corpus, it means the SUBMISSION corpus (the converted text under
 `WORK/corpus/`: manuscript, cover letter, title page, supplementary documents,
 figure/table sources of the submission itself). A corpus carries `raw_data/`
-(legacy spelling `raw_figs/`) with data tables, figure sources and the analysis
+(the raw-data area) with data tables, figure sources and the analysis
 snapshot, and `human_review_feedback/` with the REAL editors'/reviewers'
 comments from the previous submission (and any previous response as context),
 and — when the operator supplies one — `llm_review_feedback/` with a
@@ -1559,8 +1559,8 @@ without the other is an unfilled artifact.
 
 ## M30 — Source-hierarchy reconciliation (submission ↔ code ↔ raw data)
 
-**Purpose.** The hierarchy — **github code > data in raw_data/ (an older
-corpus spells that directory raw_figs/) > main figures > supplementary figures >
+**Purpose.** The hierarchy — **github code > data in raw_data/ > main figures >
+supplementary figures >
 main tables > supplementary tables > main text > supplementary text** — is
 stated as a RESOLUTION rule: it decides which side wins once two sources
 already disagree. Its DETECTION side had no enumerating check, so a written
@@ -1887,7 +1887,7 @@ sweeps that improve the next checklist run. Run it only AFTER the standard
 Phase 2 sweeps.
 
 **Inputs:**
-- `SUBMISSION_DIR` = the reviewed directory (default `./non-revised`)
+- `SUBMISSION_DIR` = the reviewed directory (default `./non_revised`)
 - `PRIOR` = `./review/findings.json` (canonical prior findings; also `./review/findings.md`)
 - `WORK` = `./review/work` — converted corpus from the prior run; REUSE it (reconvert only missing files)
 - `OUT2` = `./review/round2` (create it; ALL outputs here)
@@ -2032,7 +2032,7 @@ Statement of what this round could NOT check (honest limits).
 ## The orchestrator's contract (what is verified)
 
 The pipeline reads the D0–D5 deliverables and REFUSES the review (under the
-default `--strict-artifacts on`; a warning under `--non-strict-artifacts`, and
+default `--strict-artifacts on`; a warning under `--strict-artifacts off`, and
 a gating residual for `decide --residual-gate`) when any of the following is
 missing or unfulfilled. Everything below is structural — the truth of a
 disposition stays the auditor's and the revisers' job:

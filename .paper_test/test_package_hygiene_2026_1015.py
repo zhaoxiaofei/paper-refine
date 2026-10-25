@@ -44,6 +44,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from bundle_source_lib import copy_bundle
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
 spec = importlib.util.spec_from_file_location("paper_hyg", str(WS / "paper_pipeline.py"))
 pp = importlib.util.module_from_spec(spec)
@@ -241,7 +242,7 @@ def test_patterns_do_not_overfire():
 
 def test_staleness_report():
     root = tmpdir("stale")
-    shutil.copy2(WS / "paper_pipeline.py", root / "paper_pipeline.py")
+    copy_bundle(WS, root)
     (root / "state.json").write_text("{}", encoding="utf-8")
 
     class Ctx:

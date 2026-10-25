@@ -187,7 +187,7 @@ def test_dangling_reference_report():
     (pkg / "url.md").write_text(
         "See https://github.com/team/repo/tree/main/code/analysis.py for context.\n",
         encoding="utf-8")
-    rows = nb.non_submitted_reference_rows(pkg, ("code", "raw_data", "raw_figs"))
+    rows = nb.non_submitted_reference_rows(pkg, ("code", "raw_data", "raw_data"))
     lib.check("SC4 the scan reports the plain code/ path",
               any(r["file"] == "manuscript.md" and r["reference"] == "code/analysis.py"
                   for r in rows), str(rows)[:300])

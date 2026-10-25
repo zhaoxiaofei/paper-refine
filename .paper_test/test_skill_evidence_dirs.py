@@ -2,7 +2,7 @@
 """The skill scripts' EVIDENCE-area sets are the pipeline's set.
 
 `paper_pipeline.EVIDENCE_DIRNAMES` names the READ-ONLY input areas
-(`raw_data/`, legacy `raw_figs/`, `human_review_feedback/` and, since the LLM
+(`raw_data/`, legacy `raw_data/`, `human_review_feedback/` and, since the LLM
 review mode, `llm_review_feedback/`). The bundled skill scripts carry their own
 copies of that set, and several of them say so in a comment ("keep in step with
 paper_pipeline.EVIDENCE_DIRNAMES") -- but the copies were not extended when

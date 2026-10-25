@@ -585,7 +585,7 @@ def is_cover_letter(text: str, name: str = "") -> bool:
     return False
 
 
-RAW_DATA_DIRNAMES = ("raw_data", "raw_figs")
+RAW_DATA_DIRNAMES = ("raw_data",)
 HUMAN_FEEDBACK_DIR = "human_review_feedback"
 LLM_FEEDBACK_DIR = "llm_review_feedback"
 EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR)
@@ -612,7 +612,7 @@ _COVER_WORD_RE = re.compile(
 def is_evidence_path(path: str) -> bool:
     """True when the given file is raw-data EVIDENCE, not a submission document.
 
-    A file under `raw_data/` (legacy `raw_figs/`), or an editors'/reviewers'
+    A file under `raw_data/`, or an editors'/reviewers'
     feedback file, is never counted against a submission's abstract/main-text/
     cover-letter limits, whatever its name suggests.
     """

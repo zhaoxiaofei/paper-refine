@@ -37,6 +37,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+from bundle_source_lib import copy_bundle
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
 HERE = Path(__file__).resolve().parent
 
@@ -648,7 +649,7 @@ def test_setup_snapshot_guard():
     tmp = scratch("paper_snapshot_")
     old_root = tmp / "old-root"
     old_root.mkdir()
-    shutil.copy(WS / "paper_pipeline.py", old_root / "paper_pipeline.py")
+    copy_bundle(WS, old_root)
     write(old_root / "state.json", json.dumps({
         "version": pp.STATE_VERSION, "runs": {}, "rounds": {}, "log": [], "pinned": [],
         "pipeline": {"path": str(WS / "paper_pipeline.py"), "sha256": "0" * 64,
