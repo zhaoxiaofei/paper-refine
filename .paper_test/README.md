@@ -9,7 +9,7 @@ Create the reproducible environment with:
 
 ```bash
 bash scripts/create-test-env.sh
-conda run -n paper-refine-test python .paper_test/run_all.py --engine python -j 8
+conda run -n paper-refine-test python .paper_test/run_all.py --engine python -j 32
 ```
 
 Every other suite uses only the standard library. `pytest` is NOT required: the two pytest-style suites
@@ -34,7 +34,7 @@ The suites are independent (each builds its own root under `tempfile.mkdtemp`,
 and the fixed `/tmp` paths are per-suite), so run them in parallel:
 
 ```bash
-python3 .paper_test/run_all.py             # GNU parallel, 24 jobs by default
+python3 .paper_test/run_all.py             # GNU parallel, 32 jobs by default
                                            # (capped only by the suite count)
 python3 .paper_test/run_all.py -j 4        # cap the parallelism
 python3 .paper_test/run_all.py -j 1        # exactly the old sequential loop
@@ -58,7 +58,7 @@ parallel directly, and every suite still runs standalone with `python3
 ```bash
 mkdir -p /tmp/paper-logs && export PAPER_TEST_RUNDIR=/tmp/paper-logs
 ls .paper_test/test_*.py | sed 's|.*/||' \
-  | parallel -j 8 --joblog /tmp/paper-logs/joblog '.paper_test/run_one.sh {}'
+  | parallel -j 32 --joblog /tmp/paper-logs/joblog '.paper_test/run_one.sh {}'
 ```
 
 | Suite | Covers |

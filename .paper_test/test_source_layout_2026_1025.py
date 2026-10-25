@@ -159,12 +159,35 @@ def test_fact_preservation_prompts():
           "Do NOT invent a structural requirement" in pp.PROBE_DIRECTIVES)
 
 
+def test_operational_contract():
+    print("\n== runner default, AGENTS binding and the frozen-root rule ==")
+    run_all = load("layout_run_all", WS / ".paper_test" / "run_all.py")
+    check("run_all.py defaults to 32 jobs", getattr(run_all, "DEFAULT_JOBS", None) == 32,
+          str(getattr(run_all, "DEFAULT_JOBS", None)))
+    readme = (WS / "README.md").read_text(encoding="utf-8")
+    flat_readme = " ".join(readme.split())
+    check("README documents the 32-job default",
+          "32 jobs by default" in flat_readme, flat_readme[:200])
+    check("README says AGENTS.md is binding and a violation is a bug",
+          "is binding" in flat_readme and "must be respected" in flat_readme
+          and "violation of any such rule is a" in flat_readme
+          and "bug" in flat_readme)
+    agents = (WS / "AGENTS.md").read_text(encoding="utf-8")
+    flat_agents = " ".join(agents.split())
+    check("AGENTS.md says a rule violation is a bug",
+          "violation of any rule is a bug" in flat_agents)
+    check("AGENTS.md requires setup to freeze every runtime file into --root",
+          "A root runs a frozen copy" in flat_agents
+          and "must copy every file the running project executes or reads by path" in flat_agents)
+
+
 def main() -> int:
     test_line_limit()
     test_loaders_and_parts()
     test_removed_compatibility()
     test_champion_select_cli()
     test_fact_preservation_prompts()
+    test_operational_contract()
     print()
     if FAILS:
         print(f"{len(FAILS)} FAILURE(S): " + "; ".join(FAILS))

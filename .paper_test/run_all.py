@@ -7,7 +7,7 @@ sleeps); with the default parallelism it finishes in a few minutes. They are
 independent (each builds its own root under `tempfile.mkdtemp`, and the fixed
 paths they use are per-suite), so they can run at once:
 
-    python3 .paper_test/run_all.py                 # GNU parallel, 24 jobs by default
+    python3 .paper_test/run_all.py                 # GNU parallel, 32 jobs by default
     python3 .paper_test/run_all.py -j 4            # cap the parallelism
     python3 .paper_test/run_all.py -j 1            # exactly the old sequential loop
     python3 .paper_test/run_all.py --only test_pipeline.py test_docx_format_1_scan_fix.py
@@ -56,13 +56,13 @@ CHECK_LINE_RE = re.compile(r"(?im)^\s*(?:\[(?:ok |fail|skip)\]|ok\b|fail\b|skip\
 # `[FAIL]` (attempt-history does), and counting that as a failure hides a real
 # pass while the zero-exit guard is doing its job.
 FAIL_CHECK_RE = re.compile(r"(?im)^\s*\[FAIL\]")
-# The operator's standing request for this box: use 24 parallel sessions by
-# default (`-j 24`). The effective default is capped only by the number of
+# The operator's standing request for this box: use 32 parallel sessions by
+# default (`-j 32`). The effective default is capped only by the number of
 # suites to run; `-j N` caps it on a smaller box, `-j 1` is the old sequential
 # loop. The suites mostly WAIT (stub agents, LibreOffice, pdflatex, sleeps), so
 # more sessions than cores is the point -- and a suite that only trips over the
 # contention is re-run alone and reported as `flaky`, never as a false failure.
-DEFAULT_JOBS = 24
+DEFAULT_JOBS = 32
 
 
 def suites() -> list:
@@ -194,7 +194,7 @@ def main() -> int:
         engine = "parallel" if parallel_available() else "python"
     if engine == "parallel" and not parallel_available():
         sys.exit("--engine parallel was asked for, but `parallel` is not on PATH")
-    # The operator asked for 24 parallel sessions by default (`-j 24`); the
+    # The operator asked for 32 parallel sessions by default (`-j 32`); the
     # default is capped only by the number of suites, so the box is never
     # oversubscribed beyond what there is to run. `-j N` caps it on a smaller
     # box, `-j 1` is the old sequential loop.

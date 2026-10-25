@@ -124,7 +124,7 @@ def submitted_spans(root: Path, ids) -> dict:
     `last_attempt_started` is written by the parent process immediately before
     `subprocess.Popen`, so it dates when the SCHEDULER submitted the session --
     the stub log's own `start` additionally carries the child's boot time, which
-    grows by seconds (26 s measured) when `run_all.py -j 24` hammers a 20-core
+    grows by seconds (26 s measured) when `run_all.py -j 32` hammers a 20-core
     box. The parallelism assertions below accept either signal, so a loaded box
     cannot turn a launched-together wave into "not parallel"; a real barrier
     still fails BOTH (the submission of the second session then happens after

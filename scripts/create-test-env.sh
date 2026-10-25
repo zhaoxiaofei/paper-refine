@@ -96,9 +96,9 @@ cat <<EOF
 Environment ready: ${ENV_LABEL}
 
 Run the full regression suite with:
-  ${RUN[*]} python .paper_test/run_all.py --engine python -j 8
+  ${RUN[*]} python .paper_test/run_all.py --engine python -j 32
 
 Or activate it first:
   ${ACTIVATE}
-  python .paper_test/run_all.py --engine python -j 8
+  python .paper_test/run_all.py --engine python -j 32
 EOF

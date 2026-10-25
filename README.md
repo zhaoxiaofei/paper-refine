@@ -11,6 +11,13 @@ them blindly against each other, pins the champion by content digest, and feeds
 that champion into the next round. `decide` publishes the final decision report
 and a clean, ready-to-use package.
 
+**`AGENTS.md` is binding.** Every rule in [AGENTS.md](AGENTS.md) must be respected by
+the code, prompts, tests, documentation and operator-facing behavior. Any violation of any
+such rule is a **bug**, not an acceptable trade-off. In particular, `setup` freezes the
+pipeline, its parts, companion modules, venue profiles and every other relevant runtime asset
+into the `--root` tree; after that, changing the maintained checkout must not change what the
+root executes or reads.
+
 **At a glance**
 
 * **You give it** a pristine submission directory — the manuscript files, plus
@@ -3092,7 +3099,7 @@ workbook check). The reproducible environment script creates them:
 
 ```bash
 bash scripts/create-test-env.sh
-conda run -n paper-refine-test python .paper_test/run_all.py --engine python -j 8
+conda run -n paper-refine-test python .paper_test/run_all.py --engine python -j 32
 ```
 
 If conda cannot write its normal cache directories (for example inside a file
@@ -3101,15 +3108,15 @@ sandbox), use a prefix environment; the script keeps the conda/pip caches under
 
 ```bash
 PAPER_REFINE_TEST_PREFIX="$PWD/tmp/paper-refine-test" bash scripts/create-test-env.sh
-conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine python -j 8
+conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine python -j 32
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
 any failure. They are independent, so run them in parallel — 148 suites (a few
-minutes at the default 24 parallel sessions; tens of minutes sequentially):
+minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash
-python3 .paper_test/run_all.py          # GNU parallel (24 jobs by default, capped only by
+python3 .paper_test/run_all.py          # GNU parallel (32 jobs by default, capped only by
                                       # the suite count); falls back to a
                                       # thread pool when `parallel` is missing
 python3 .paper_test/run_all.py -j 4     # cap the parallelism on a smaller box
@@ -3125,7 +3132,7 @@ directly (`mkdir -p /tmp/paper-logs && export PAPER_TEST_RUNDIR=/tmp/paper-logs`
 
 ```bash
 ls .paper_test/test_*.py | sed 's|.*/||' \
-  | parallel -j 8 --joblog /tmp/paper-logs/joblog '.paper_test/run_one.sh {}'
+  | parallel -j 32 --joblog /tmp/paper-logs/joblog '.paper_test/run_one.sh {}'
 ```
 
 Highlights: `test_pipeline.py` (prompts, gates, ranking),
