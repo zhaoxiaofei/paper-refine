@@ -100,10 +100,28 @@ def compile_latex_pdf(pkg: Path, rel: str, out_pdf: Path,
                     shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True,
                                     symlinks=False)
         argv = [exe, "-pdf", "-interaction=nonstopmode", "-halt-on-error", Path(rel).name]
-        proc = subprocess.run(argv, cwd=str((work / rel).parent), capture_output=True,
-                              timeout=timeout)
-        out = (proc.stdout or b"").decode("utf-8", "replace") \
-            + (proc.stderr or b"").decode("utf-8", "replace")
+        # latexmk spawns pdflatex/bibtex children. Starting it in its own
+        # process group and killing the GROUP on timeout stops those children
+        # from writing into the build tree while `finally` removes it (a bare
+        # `subprocess.run(timeout=...)` kills only latexmk itself).
+        proc = subprocess.Popen(argv, cwd=str((work / rel).parent),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                start_new_session=True)
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            import signal as _signal
+            try:
+                os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
+            except (AttributeError, OSError):
+                proc.kill()
+            try:
+                proc.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                pass
+            raise
+        out = (stdout or b"").decode("utf-8", "replace") \
+            + (stderr or b"").decode("utf-8", "replace")
         pdf = (work / rel).with_suffix(".pdf")
         ok = bool(proc.returncode == 0 and pdf.is_file() and pdf.stat().st_size > 0)
         if ok:

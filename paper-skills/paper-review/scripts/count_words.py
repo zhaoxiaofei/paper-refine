@@ -594,14 +594,24 @@ HUMAN_FEEDBACK_DIR = "human_review_feedback"
 LLM_FEEDBACK_DIR = "llm_review_feedback"
 EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR)
 EXTERNAL_FEEDBACK_RE = re.compile(
-    r"feedback"
+    r"(?<![a-z])feedback(?![a-z])"
     r"|referees?[_ \-]*(?:report|comment)"
     r"|reviewers?[_ \-]*(?:comment|report|critique)"
     r"|editor(?:s|ial)?[_ \-]*(?:comment|decision|report)"
     r"|decision[_ \-]*letter",
     re.I)
 AUTHORED_REPLY_RE = re.compile(
-    r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
+    r"(?<![a-z])(?:response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)(?![a-z])",
+    re.I)
+# A scientific compound that merely ENDS in a role word is not a reply or a
+# feedback file: `dose_response.txt` / `immune_response.md` / `biofeedback_results.txt`
+# are real manuscripts and must reach the M19 count.
+_SCIENCE_ROLE_COMPOUND_RE = re.compile(
+    r"(?<![a-z])(?:dose|immune|stress|apoptotic|inflammatory|transcriptional|"
+    r"pharmacodynamic)[-_ ]?response"
+    r"|(?<![a-z])response[-_ ]?(?:time|rate|curve|latency|element|surface|variable)"
+    r"|(?<![a-z])feedback[-_ ]?(?:loop|control|gain|signal)"
+    r"|(?<![a-z])(?:bio|neuro|video|audio)[-_ ]?feedback", re.I)
 # The WORD "cover" (and the camelCase "coverLetter"/"plainLetter"), not the
 # substring: a bare `"cover" in name` also named `discovery.md`,
 # `coverage_table.txt` and `recovered_samples.md` the cover letter (forcing them
@@ -636,8 +646,9 @@ def is_evidence_path(path: str) -> bool:
     # letter never reached the M19 length sweep.
     if _COVER_WORD_RE.search(parts[-1]):
         return False
-    return bool(EXTERNAL_FEEDBACK_RE.search(parts[-1])
-                or AUTHORED_REPLY_RE.search(parts[-1]))
+    cleaned = _SCIENCE_ROLE_COMPOUND_RE.sub(" ", parts[-1])
+    return bool(EXTERNAL_FEEDBACK_RE.search(cleaned)
+                or AUTHORED_REPLY_RE.search(cleaned))
 
 
 def cover_letter_words(text: str) -> int:

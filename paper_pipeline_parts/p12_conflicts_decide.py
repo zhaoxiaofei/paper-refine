@@ -3689,6 +3689,13 @@ CITATION_LABEL_WORDS = frozenset({
 def _numbered_reference_titles(paras: list) -> dict:
     """{number: entry text} from a numbered reference list (docx paragraphs)."""
     out, current = {}, None
+    # A one-line "43. Nurk, S. ... Science 372, 984 (2021)." entry is the most
+    # common non-Zotero layout and matched NEITHER old pattern, so the PKG-23
+    # citation check silently inspected zero references. The entry text must
+    # still LOOK like a reference; a numbered body list ("1. Do X.") stays out.
+    entry_like = re.compile(
+        r"(?i)(?:\b(?:19|20)\d{2}\b|\bdoi\b|https?://|\bet al\b"
+        r"|^[A-Z][A-Za-z'’.-]+,\s+[A-Z]\.)")
     for p in paras:
         text = p or ""
         # The number and its entry share one paragraph in a Zotero bibliography
@@ -3701,6 +3708,11 @@ def _numbered_reference_titles(paras: list) -> dict:
             out[current] = rest.strip()
             if rest.strip():
                 current = None
+            continue
+        m1 = re.match(r"^\s*(\d{1,4})\.\s+(\S.*)$", text, re.S)
+        if m1 and entry_like.search(m1.group(2).strip()):
+            out[int(m1.group(1))] = m1.group(2).strip()
+            current = None
             continue
         if current is not None and text.strip():
             out[current] = (out[current] + " " + text.strip()).strip()
@@ -6054,6 +6066,46 @@ def write_final_clean_zip(dirp: Path, zip_path: Path) -> dict:
     return {"path": str(zip_path), "files": n_files, "bytes": zip_path.stat().st_size}
 
 
+def _stage_dangling_report(ctx: Ctx, final: dict):
+    """The PKG-2 record the STAGE that wrote the champion left behind, or None.
+
+    Publication preserves the judged bytes, so it never removes a dangling
+    reference itself: the removal ran in the candidate stage BEFORE the pin.
+    Reading that stage's own `PKG2_<run>.json` makes the readme/readiness/
+    console surfaces report a repair that really happened (the old stub made
+    all three blocks dead and named an artifact that is never written).
+    """
+    stored = (final or {}).get("stored") or {}
+    rnd = stored.get("round") or (final or {}).get("round")
+    champ = str(stored.get("champion") or "")
+    if rnd and champ:
+        try:
+            rid = rid_for_fresh(int(rnd), champ)
+        except (KeyError, TypeError, ValueError):
+            rid = ""
+        rec = ctx.run(rid) if rid else None
+        if rec is not None:
+            p = ctx.sandbox_of(rec) / f"PKG2_{rec.get('id') or rid}.json"
+            if p.is_file():
+                rep = read_json(p, revive=False, lenient=True)
+                if isinstance(rep, dict):
+                    try:
+                        rep = dict(rep, artifact=p.relative_to(ctx.root).as_posix())
+                    except ValueError:                        # pragma: no cover -- inside root
+                        rep = dict(rep, artifact=str(p))
+                    return rep
+    p = ctx.reports_dir / "PKG2_journal_submission.json"
+    if p.is_file():
+        rep = read_json(p, revive=False, lenient=True)
+        if isinstance(rep, dict):
+            try:
+                rep = dict(rep, artifact=p.relative_to(ctx.root).as_posix())
+            except ValueError:                                # pragma: no cover -- inside root
+                rep = dict(rep, artifact=str(p))
+            return rep
+    return None
+
+
 def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = "",
                         flatten_zotero: bool = False, residuals: dict = None) -> dict:
     """Publish <root>/final_clean_version_<root dir name>/: the champion corpus
@@ -6162,12 +6214,15 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     # Publication is a byte-for-byte handoff of the pin. Formatting, Zotero
     # flattening and dangling-reference removal happen in the stage that writes
     # a candidate, before it is judged; doing them here would silently replace
-    # the artifact the panel selected.
+    # the artifact the panel selected. Report the STAGE's own repair record
+    # (which described these very bytes when the candidate was pinned), not a
+    # record publication can never produce.
     pub_policy, flatten_zotero = publication_format_policy(
         ctx, format_policy_of(ctx), cli_flatten=bool(flatten_zotero))
-    hygiene["removed_dangling_references"] = {
-        "skipped": "publication preserves the judged bytes; see the publication scans"
-    }
+    hygiene["removed_dangling_references"] = (_stage_dangling_report(ctx, final) or {
+        "skipped": "publication preserves the judged bytes; the stage that wrote the champion "
+                   "reports any removal it made before the pin"
+    })
     _fmt_z = _format_module()
     zot_before = {}
     if _fmt_z is not None and hasattr(_fmt_z, "zotero_report_for_docx"):
@@ -6542,16 +6597,16 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
     ref_strip = hygiene.get("removed_dangling_references") or {}
     if ref_strip.get("removed"):
         L.append("")
+        _strip_artifact = str(ref_strip.get("artifact") or "").strip()
         L.append(f"Dangling references: {ref_strip['removed']} sentence(s) that pointed at "
                  f"content this submission does not carry (the analysis code, the raw data, "
                  f"the review feedback, a README) were REMOVED from the to-be-submitted "
                  f"document(s) -- a submitted file may not refer to what it does not ship. "
-                 f"A champion that came from a revision stage was already repaired before it "
-                 f"was pinned; a champion that IS the base/original reached this copy with the "
-                 f"pointer still in it (the pin keeps the bytes that were scored). The removed "
-                 f"sentences are recorded verbatim in "
-                 f"`reports/decision.json` (`final_clean.hygiene.removed_dangling_references`) "
-                 f"and in `reports/{'PKG2_' + final_clean_dirname(ctx.root) + '.json'}`:")
+                 f"The removal ran in the stage that wrote the champion, BEFORE it was pinned: "
+                 f"the published bytes already carry the repair (publication itself preserves "
+                 f"the judged bytes). The removed sentences are recorded verbatim in "
+                 f"`reports/decision.json` (`final_clean.hygiene.removed_dangling_references`)"
+                 + (f" and in `{_strip_artifact}`" if _strip_artifact else "") + ":")
         for f in (ref_strip.get("files") or [])[:12]:
             for s in (f.get("removed") or [])[:4]:
                 L.append(f"  - `{f.get('file')}`: {str(s)[:200]}")

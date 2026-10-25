@@ -2435,8 +2435,11 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
     for i, (src, prefix, excluded) in enumerate(sources):
         if not src.is_dir():
             continue
-        for p in sorted(src.rglob("*")):
-            if not p.is_file() or _is_aux_doc(p.name) or is_bookkeeping_name(p.name) \
+        for p in _iter_tree_files(src):
+            # `_iter_tree_files` is the corpus walker: a file symlink is not
+            # package content (copy_into refuses it), so a scan that followed
+            # one verified a corpus the materializer never produced.
+            if _is_aux_doc(p.name) or is_bookkeeping_name(p.name) \
                     or is_non_submitted_readme_name(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
@@ -3112,9 +3115,7 @@ def scan_format_in_sources(sources: list, policy=None) -> dict:
         ocr_on = policy.get("figure_ocr", True)
         images = []
         try:
-            for q in sorted(src.rglob("*")):
-                if not q.is_file():
-                    continue
+            for q in _iter_tree_files(src):
                 if q.suffix.lower() not in (".png", ".jpg", ".jpeg", ".tif", ".tiff"):
                     continue
                 rel = q.relative_to(src).as_posix()
@@ -5935,11 +5936,11 @@ def data_table_texts(sources: list, limit: int = 40) -> list:
     for i, (src, prefix, excluded) in enumerate(sources or []):
         if not src.is_dir():
             continue
-        for p in sorted(src.rglob("*")):
+        for p in _iter_tree_files(src):
             if len(out) >= limit:
                 return out
             try:
-                if not p.is_file() or is_bookkeeping_name(p.name) or _is_aux_doc(p.name):
+                if is_bookkeeping_name(p.name) or _is_aux_doc(p.name):
                     continue
             except OSError:
                 continue
@@ -7122,8 +7123,8 @@ def scan_placeholders_in_sources(sources: list) -> dict:
     for i, (src, prefix, excluded) in enumerate(sources):
         if not src.is_dir():
             continue
-        for p in sorted(src.rglob("*")):
-            if not p.is_file() or is_non_document_name(p.name):
+        for p in _iter_tree_files(src):
+            if is_non_document_name(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
             if excluded and rel.split("/", 1)[0] in excluded:
@@ -7247,8 +7248,8 @@ def collect_documents(sources: list) -> dict:
     for i, (src, prefix, excluded) in enumerate(sources):
         if not src.is_dir():
             continue
-        for p in sorted(src.rglob("*")):
-            if not p.is_file() or _is_aux_doc(p.name):
+        for p in _iter_tree_files(src):
+            if _is_aux_doc(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
             if excluded and rel.split("/", 1)[0] in excluded:

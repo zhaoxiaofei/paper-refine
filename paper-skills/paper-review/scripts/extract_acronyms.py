@@ -72,14 +72,24 @@ HUMAN_FEEDBACK_DIR = "human_review_feedback"
 LLM_FEEDBACK_DIR = "llm_review_feedback"
 EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR)
 EXTERNAL_FEEDBACK_RE = re.compile(
-    r"feedback"
+    r"(?<![a-z])feedback(?![a-z])"
     r"|referees?[_ \-]*(?:report|comment)"
     r"|reviewers?[_ \-]*(?:comment|report|critique)"
     r"|editor(?:s|ial)?[_ \-]*(?:comment|decision|report)"
     r"|decision[_ \-]*letter",
     re.I)
 AUTHORED_REPLY_RE = re.compile(
-    r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
+    r"(?<![a-z])(?:response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)(?![a-z])",
+    re.I)
+# A scientific compound that merely ENDS in a role word is not a reply or a
+# feedback file: `dose_response.txt` / `immune_response.md` / `biofeedback_results.txt`
+# are real manuscripts and must reach M1/M1b.
+_SCIENCE_ROLE_COMPOUND_RE = re.compile(
+    r"(?<![a-z])(?:dose|immune|stress|apoptotic|inflammatory|transcriptional|"
+    r"pharmacodynamic)[-_ ]?response"
+    r"|(?<![a-z])response[-_ ]?(?:time|rate|curve|latency|element|surface|variable)"
+    r"|(?<![a-z])feedback[-_ ]?(?:loop|control|gain|signal)"
+    r"|(?<![a-z])(?:bio|neuro|video|audio)[-_ ]?feedback", re.I)
 # The WORD "cover" (and the camelCase "coverLetter"), not the substring: a bare
 # `"cover" in name` also named `discovery.md`, `coverage_table.txt` and
 # `recovered_samples.md` a cover letter (forcing them into the submission runs)
@@ -116,7 +126,8 @@ def is_evidence_name(fname: str) -> bool:
         return False
     # A previous response-to-reviewers (the authors' own document) is not
     # manuscript prose either: it never produces an M1/M1b row.
-    return bool(EXTERNAL_FEEDBACK_RE.search(base) or AUTHORED_REPLY_RE.search(base))
+    cleaned = _SCIENCE_ROLE_COMPOUND_RE.sub(" ", base)
+    return bool(EXTERNAL_FEEDBACK_RE.search(cleaned) or AUTHORED_REPLY_RE.search(cleaned))
 
 
 # Universal abbreviations exempt from redefinition anywhere

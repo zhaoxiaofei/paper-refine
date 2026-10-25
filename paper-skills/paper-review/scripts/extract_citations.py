@@ -39,10 +39,29 @@ import sys
 from collections import Counter, defaultdict
 
 EVIDENCE_DIRNAMES = ("raw_data", "human_review_feedback", "llm_review_feedback")
+# Role words are NAME TOKENS, not substrings: a manuscript named
+# `immune_response.md` or `biofeedback_results.txt` is real prose, while a role
+# word preceded by a role qualifier (`reviewer_response`, `author_feedback`)
+# still names the authors' reply / the editors' letter.
 _NON_MANUSCRIPT_RE = re.compile(
-    r"feedback|referee|reviewers?|editors?|editorial|decision[_ \-]*(?:letter|notice|email)"
-    r"|response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
-_REPLY_RE = re.compile(r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
+    r"(?<![a-z])(?:feedback|referee|reviewers?|editors?|editorial|"
+    r"decision[_ \-]*(?:letter|notice|email))(?![a-z])", re.I)
+_REPLY_RE = re.compile(
+    r"(?<![a-z])(?:response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)(?![a-z])",
+    re.I)
+# A scientific compound that merely ENDS in a role word is not a reply: these
+# were silently dropped from every manuscript sweep (M1/M2/M4/M19).
+_SCIENCE_ROLE_COMPOUND_RE = re.compile(
+    r"(?<![a-z])(?:dose|immune|stress|apoptotic|inflammatory|transcriptional|"
+    r"pharmacodynamic)[-_ ]?response"
+    r"|(?<![a-z])response[-_ ]?(?:time|rate|curve|latency|element|surface|variable)"
+    r"|(?<![a-z])feedback[-_ ]?(?:loop|control|gain|signal)"
+    r"|(?<![a-z])(?:bio|neuro|video|audio)[-_ ]?feedback", re.I)
+# A venue ARTICLE TYPE is the authors' manuscript, not the editors' letter:
+# `letter_to_the_editor.docx` / `Editorial.docx` must reach M1/M2/M4/M19.
+_ARTICLE_TYPE_MANUSCRIPT_RE = re.compile(
+    r"^(?:letter[\s_-]+(?:to|for)[\s_-]+the[\s_-]+editor|editorial)"
+    r"(?:[\s_-]+(?:v|rev|version|revision|draft)?[\s_-]*\d{1,3})?$", re.I)
 # The WORD "cover" (and the camelCase "coverLetter"), not the substring: a bare
 # `"cover" in name` also named `discovery.md`, `coverage_table.txt` and
 # `recovered_samples.md` a cover letter (forcing them into the submission runs)
@@ -78,9 +97,12 @@ def is_non_manuscript(name: str) -> bool:
         # the M19 length sweep) treats a letter as the authors' own submission
         # text.
         return False
-    if _REPLY_RE.search(base):
+    if _ARTICLE_TYPE_MANUSCRIPT_RE.match(re.sub(r"\.[A-Za-z0-9]{1,6}$", "", base)):
+        return False            # the authors' article-type manuscript, not a letter
+    cleaned = _SCIENCE_ROLE_COMPOUND_RE.sub(" ", base)
+    if _REPLY_RE.search(cleaned):
         return True
-    return bool(_NON_MANUSCRIPT_RE.search(base))
+    return bool(_NON_MANUSCRIPT_RE.search(cleaned))
 
 
 NUM_CIT_RE = re.compile(r"\[(\d{1,4}(?:\s*[,;–-]\s*\d{1,4})*)\]")

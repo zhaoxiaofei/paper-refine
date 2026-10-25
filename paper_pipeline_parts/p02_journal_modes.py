@@ -2322,18 +2322,33 @@ def standing_exemptions_text(profile=None) -> str:
 
 # Inserted (with the limit substituted) into every prompt that produces or
 # judges content, next to the standing exemptions.
-def caption_rule_template(profile=None) -> str:
-    """The M18 caption rule, with @@CAPTION_LIMIT@@ left for the caller to fill."""
+def caption_rule_template(profile=None, limit=None) -> str:
+    """The M18 caption rule, with @@CAPTION_LIMIT@@ left for the caller to fill.
+
+    `limit` is the EFFECTIVE cap the caller is about to substitute. It is what
+    distinguishes the venue's own published number from an operator override:
+    with `--caption-limit 300` on a venue publishing 250, the old renderer still
+    called 300 "the venue's own limit" (Rule 3).
+    """
     prof = _as_profile(profile)
     captions = prof.captions
     published = captions.get("published_limit")
-    if published:
+    operator_override = bool(published is not None and limit is not None
+                             and int(limit) != int(published))
+    if published and not operator_override:
         origin = (f"Origin, stated honestly: {prof.label} publishes a figure-legend limit of "
                   f"{published} words ({captions.get('source') or 'venue profile'}). "
                   f"@@CAPTION_LIMIT@@ words is therefore the venue's own limit as carried by this "
                   f"pipeline's profile; the master prompt and both skills do not state a number. "
                   f"Apply it exactly as written here and never claim the venue set a number it "
                   f"did not.")
+    elif published:
+        origin = (f"Origin, stated honestly: {prof.label} publishes a figure-legend limit of "
+                  f"{published} words ({captions.get('source') or 'venue profile'}). "
+                  f"@@CAPTION_LIMIT@@ words is NOT that number: it is the OPERATOR's proxy "
+                  f"(`--caption-limit N`), chosen for this run and presented as a pipeline "
+                  f"suggestion only. Never call it the venue's limit; the venue states "
+                  f"{published} words.")
     else:
         origin = (f"Origin, stated honestly: {captions.get('source') or 'this venue profile states no figure-legend length rule'}. "
                   f"@@CAPTION_LIMIT@@ words is therefore the ORCHESTRATION PIPELINE's proxy\n"
@@ -2386,14 +2401,29 @@ def caption_report_text(profile=None) -> str:
     """The no-cap M18 rule: enumerate every legend, compress and score none."""
     prof = _as_profile(profile)
     captions = prof.captions
-    origin = (captions.get("source")
+    published = captions.get("published_limit")
+    source = (captions.get("source")
               or "this venue profile states no figure-legend length rule")
+    if published:
+        # A disabled cap on a PUBLISHING venue is not "the venue publishes no
+        # limit": the venue's number is known and the operator switched the
+        # proxy off for this run. Say exactly that.
+        origin = (f"{source}. {prof.label} publishes a figure-legend limit of {published} "
+                  f"words, but the OPERATOR DISABLED the proxy cap for this run "
+                  f"(`--caption-limit 0`), so the pipeline applies no number; the author "
+                  f"compares each recorded legend with the venue's {published}-word limit")
+        disposition = (f"recorded — the operator disabled the cap this run; {prof.label} "
+                       f"publishes {published} words and the author compares it in Word")
+    else:
+        origin = (f"{source}, and no proxy cap is\n"
+                  f"    configured (`--caption-limit 0`)")
+        disposition = ("recorded — the venue's per-type limit is not published; the author "
+                       "compares it in Word")
     return f"""FIGURE-LEGEND LENGTH — ENUMERATED, NO CAP CONFIGURED (check id M18):
-  * {origin}, and no proxy cap is
-    configured (`--caption-limit 0`). Therefore: COUNT every legend's words and
+  * {origin}. Therefore: COUNT every legend's words and
     record them in your own artifact (`judge_review/artifacts/M18_caption_words.md` for a judge
     session), with the disposition
-    "recorded — the venue's per-type limit is not published; the author compares it in Word".
+    "{disposition}".
     A legend whose length is obviously inconsistent with its display-item budget still gets a
     normal clarity/formatting finding if it is otherwise defective, but its WORD COUNT alone is
     not a defect here.
@@ -4854,6 +4884,35 @@ ZOTERO_FIELD_CONTINUITY_RULE = """  * FIELD CONTINUITY (code-enforced): your ver
       python3 <zotero-use>/scripts/validate_zotero_docx.py <your.docx> --baseline <base.docx> \\
         --preserve-baseline-citations
     A check that fails is an attempt that fails; restore the field, never ship the unlinked copy."""
+# The REWRITE stage edits FORM, not content: it must preserve fields, but it may
+# not add/edit/delete a citation. Passing the producer rule there authorized an
+# edit the same prompt forbids elsewhere.
+ZOTERO_FIELD_CONTINUITY_RULE_REWRITE = """  * FIELD CONTINUITY (code-enforced): your version carries the base version's live fields forward.
+    Your stage REWRITES FORM, not content: you may NOT add, edit or delete a citation field --
+    every live field survives with the same citationID, itemData and item URIs, and its whole
+    begin -> instrText -> separate -> result -> end sequence. A field left malformed (an
+    unterminated begin, a missing separate or end, a stray fldChar/instrText, unparseable
+    citation JSON, a missing or duplicate citationID), or replaced by its visible text, FAILS the
+    attempt.
+  * Rebuilding a paragraph from its `w:t` text alone (python-docx, a re-serialization, any regex
+    that keeps only text runs) destroys every fldChar/instrText run inside it: use a
+    field-preserving edit, or RE-CREATE the field from the base package's own field data (its
+    citationID, itemData and item URIs, the same visible text) and never leave the plain text in
+    place of a field.
+  * PROVE IT before you finish, against the package you started from:
+      python3 <zotero-use>/scripts/validate_zotero_docx.py <your.docx> --baseline <base.docx> \\
+        --preserve-baseline-citations
+    A check that fails is an attempt that fails; restore the field, never ship the unlinked copy."""
+# Review and judge sessions are READ-ONLY: the producer rule told them to add,
+# edit or delete fields and to prove it against a `base.docx` their sandbox does
+# not carry. A missing/malformed field is a finding there, never a repair.
+ZOTERO_FIELD_CONTINUITY_RULE_READONLY = """  * FIELD CONTINUITY (code-enforced): this session is READ-ONLY. You never add, edit, delete or
+    re-create a field, and you never write or save a manuscript file. A live field that is
+    missing, malformed (an unterminated begin, a missing separate or end, a stray
+    fldChar/instrText, unparseable citation JSON, a missing or duplicate citationID), or replaced
+    by its visible text is a FINDING -- a preservation defect with its exact location -- and you
+    report it; you never repair it. The producer-side validation command belongs to the stages
+    that write a document and does not apply here."""
 
 ZOTERO_LIBRARY_READ = """the library is READ-ONLY for this run. Every `zot` call must be a read; never
     run create/update/delete/add-tags/add-doi or a collection-mutating subcommand. A library record
@@ -4910,10 +4969,15 @@ ZOTERO_CLI_RULE_OFF = """ZOTERO TOOLING — SWITCHED OFF for this run:
     manual-verification list / MANUAL_STEPS.md, never into a guess and never into an edit. This
     overrides any earlier sentence in this prompt that mentions the `$zotero-use` skill or the
     `zot` CLI as available tooling."""
+ZOTERO_CLI_RULE_OFF_BASE = ZOTERO_CLI_RULE_OFF
 ZOTERO_CLI_RULE_OFF += ("\n(The field-continuity rules below stay in force with the CLI switched "
                         "off: the bundled validate_zotero_docx.py is an offline, read-only DOCX "
                         "checker -- it does not use the `zot` CLI or the network.)\n"
                         + ZOTERO_FIELD_CONTINUITY_RULE)
+ZOTERO_CLI_RULE_OFF_NOTE = ("\n(The field-continuity rules below stay in force with the CLI "
+                            "switched off: the bundled validate_zotero_docx.py is an offline, "
+                            "read-only DOCX checker -- it does not use the `zot` CLI or the "
+                            "network.)\n")
 
 
 def m18_blocks(limit: int) -> dict:

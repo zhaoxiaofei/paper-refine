@@ -2014,13 +2014,14 @@ run_id/target_id do not match, or whose scores fall outside -4..+4, is discarded
 def caption_rule_text(limit: int, profile=None) -> str:
     """The legend-length block for a prompt (no-cap report variant when limit <= 0).
 
-    The venue enters through the profile: its legend policy is what the block
-    states, and a profile that publishes its own legend limit says so instead of
-    calling the configured cap the pipeline's proxy.
+    The venue enters through the profile: the block calls the cap the venue's
+    own limit only when it IS that number, and names an operator override as the
+    operator's proxy even on a venue that publishes one.
     """
     if int(limit) <= 0:
         return caption_report_text(profile)
-    return caption_rule_template(profile).replace("@@CAPTION_LIMIT@@", str(int(limit)))
+    return caption_rule_template(profile, int(limit)).replace(
+        "@@CAPTION_LIMIT@@", str(int(limit)))
 
 
 def apply_m18(text: str, limit: int) -> str:
@@ -2445,8 +2446,17 @@ def zotero_cli_block(role: str, mode: str = DEFAULT_ZOTERO_MODE,
     """
     if mode not in ZOTERO_MODES:
         mode = DEFAULT_ZOTERO_MODE
+    # The FIELD CONTINUITY rule is role-specific: only the edit roles may add,
+    # edit or delete a citation; rewrite preserves form but edits no content;
+    # review/judge are read-only and report a bad field instead of repairing it.
+    if role == "edit":
+        field_rule = ZOTERO_FIELD_CONTINUITY_RULE
+    elif role == "rewrite":
+        field_rule = ZOTERO_FIELD_CONTINUITY_RULE_REWRITE
+    else:
+        field_rule = ZOTERO_FIELD_CONTINUITY_RULE_READONLY
     if mode == "off":
-        return ZOTERO_CLI_RULE_OFF
+        return ZOTERO_CLI_RULE_OFF_BASE + ZOTERO_CLI_RULE_OFF_NOTE + field_rule
     if role == "edit":
         stage_key = "edit" if mode in ("edit", "apply") else "edit_disabled"
         library = ZOTERO_LIBRARY_CLAUSES[mode]
@@ -2465,7 +2475,7 @@ def zotero_cli_block(role: str, mode: str = DEFAULT_ZOTERO_MODE,
             .replace("@@ZOTERO_LIBRARY@@", library)
             .replace("@@ZOTERO_LEDGER@@", ledger)
             .replace("@@ZOTERO_STAGE@@", ZOTERO_STAGE_CLAUSES[stage_key])
-            .replace("@@ZOTERO_FIELD_CONTINUITY@@", ZOTERO_FIELD_CONTINUITY_RULE))
+            .replace("@@ZOTERO_FIELD_CONTINUITY@@", field_rule))
 
 
 VISUAL_ARTIFACT_REVIEW = "review/artifacts/VIS_visual.md"

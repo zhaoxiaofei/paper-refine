@@ -1363,6 +1363,21 @@ def _normalized_article_type_names(profile) -> list:
     return _normalized_type_spellings((profile.article_type_id, label))
 
 
+def _all_article_type_names(profile) -> list:
+    """EVERY article type's name spellings (normalized), or [].
+
+    A venue-level template resolver (the pack builder) has no selected run
+    type: a template named for ANY of the venue's own article types is a
+    manuscript template, never a cover letter.
+    """
+    if profile is None:
+        return []
+    out = []
+    for tid, label, _carries in profile.article_types():
+        out.extend(_normalized_type_spellings((tid, label)))
+    return list(dict.fromkeys(out))
+
+
 def article_type_manuscript_names(ctx=None) -> list:
     """The run's selected article type as DOCX-name spellings ([] when unset)."""
     prof = venue_profile_of(ctx, required=False)
@@ -1445,11 +1460,29 @@ def docx_document_role(name, manuscript_names=()) -> str:
     return "main"
 
 
-def official_template_files(venue_id, root=None, profiles_dir=None) -> dict:
+def _profile_for_template_names(venue_id, root=None, profiles_dir=None):
+    """The venue profile used to derive template-role names, or None."""
+    vid = str(venue_id or "").strip().lower()
+    if profiles_dir:
+        p = Path(profiles_dir) / f"{vid}{VENUE_PROFILE_SUFFIX}"
+        if p.is_file():
+            try:
+                return VenueProfile(json.loads(p.read_text(encoding="utf-8")),
+                                    origin=str(p), path=p)
+            except (OSError, ValueError, VenueProfileError):
+                return None
+    try:
+        return load_venue_profile(vid, root=root)
+    except VenueProfileError:
+        return None
+
+
+def official_template_files(venue_id, root=None, profiles_dir=None,
+                            manuscript_names=None) -> dict:
     """The venue's OWN deliverable templates, resolved per format.
 
     Returns `{"official_dir", "word": {"main", "supplementary", "cover"},
-    "latex": {"sample", "cls": [...], "bst": [...]}, "sha256": {path: digest}}`;
+    "latex": {"sample", "cover", "cls": [...], "bst": [...]}, "sha256": {path: digest}}`;
     an empty dict when the venue ships no `.official` corpus. The ROOT's copy
     wins (setup copies the whole venue_profiles/ tree into the root), so a
     root-local update is what runs.
@@ -1457,10 +1490,16 @@ def official_template_files(venue_id, root=None, profiles_dir=None) -> dict:
     Roles are resolved from the file names the journals use (a Word template
     with "template" in its name, a supplementary sibling, and -- when a journal
     publishes one -- a cover-letter template such as `Cover_Letter.docx`; a
-    LaTeX sample `.tex` plus the `.cls`/`.bst` it needs). Nothing outside
-    `.official` is consulted, and the files are never modified.
+    LaTeX sample `.tex` plus the `.cls`/`.bst` it needs). `manuscript_names` is
+    the run's OWN selected article-type spellings: a template named for that
+    type is a MANUSCRIPT template, not a cover letter, exactly as the package
+    verifier reads it. Nothing outside `.official` is consulted, and the files
+    are never modified.
     """
     vid = str(venue_id or "").strip().lower()
+    if manuscript_names is None:
+        _prof = _profile_for_template_names(vid, root, profiles_dir)
+        manuscript_names = _normalized_article_type_names(_prof)
     dirs = venue_official_dirs(vid, root, profiles_dir)
     if not dirs:
         return {}
@@ -1471,7 +1510,7 @@ def official_template_files(venue_id, root=None, profiles_dir=None) -> dict:
             continue
         low = p.name.lower()
         if p.suffix.lower() in (".docx", ".dotx"):
-            role = docx_document_role(p.name)
+            role = docx_document_role(p.name, manuscript_names)
             if role == "cover":
                 word.setdefault("cover", p)
             elif role == "supp":
@@ -1479,10 +1518,17 @@ def official_template_files(venue_id, root=None, profiles_dir=None) -> dict:
             else:
                 word.setdefault("main", p)
         elif p.suffix.lower() in (".tex", ".ltx"):
-            if docx_document_role(p.name) != "supp" and "sample" not in latex:
+            # The .tex branch must read the SAME role as the .docx branch: a
+            # Cover_Letter.tex used to become the manuscript's LaTeX sample
+            # (sorted() put it first) and its letter boilerplate entered the
+            # venue's authoritative statements table.
+            role = docx_document_role(p.name, manuscript_names)
+            if role == "supp":
+                latex.setdefault("supplementary", p)
+            elif role == "cover":
+                latex.setdefault("cover", p)
+            elif "sample" not in latex:
                 latex["sample"] = p
-            elif docx_document_role(p.name) == "supp" and "supplementary" not in latex:
-                latex["supplementary"] = p
         elif p.suffix.lower() == ".cls":
             latex.setdefault("cls", []).append(p)
         elif p.suffix.lower() == ".bst":
@@ -1492,7 +1538,7 @@ def official_template_files(venue_id, root=None, profiles_dir=None) -> dict:
         cands = [p for p in sorted(d.rglob("*"))
                  if p.is_file() and p.suffix.lower() in (".docx", ".dotx")
                  and "template" in p.name.lower()
-                 and docx_document_role(p.name) == "main"]
+                 and docx_document_role(p.name, manuscript_names) == "main"]
         if cands:
             word["main"] = cands[0]
     files = {}
@@ -1513,7 +1559,8 @@ def stage_venue_template(ctx: "Ctx", sb: Path) -> dict:
     ships one. Returns the staged manifest (empty when there is nothing to
     stage), and is idempotent.
     """
-    res = official_template_files(venue_id_of(ctx), ctx.root)
+    res = official_template_files(venue_id_of(ctx), ctx.root,
+                                  manuscript_names=article_type_manuscript_names(ctx))
     if not res or not venue_templates_enabled():
         return {}
     dst = sb / "venue_template"
@@ -2306,9 +2353,13 @@ def build_venue_templates(venue_id, root=None, profiles_dir=None, exemplar_dir=N
         off_files.extend(_exemplar_files(d))
         off_archives.extend(p for p in sorted(d.rglob("*.zip")) if p.is_file())
     off_records, off_skipped = [], []
+    _tmpl_names = _all_article_type_names(
+        _profile_for_template_names(vid, root, profiles_dir))
     for p in off_files:
-        if p.suffix.lower() in VENUE_EXEMPLAR_DOCX_SUFFIXES \
-                and docx_document_role(p.name) == "cover":
+        # EVERY suffix, not only .docx: a Cover_Letter.tex is a deliverable too,
+        # and its letter boilerplate used to enter the venue's authoritative
+        # statements table as manuscript structure.
+        if docx_document_role(p.name, _tmpl_names) == "cover":
             # A cover-letter template is a deliverable, not a manuscript
             # skeleton: parsing its salutation/recipient lines as "mandatory
             # sections" would corrupt the venue's requirements.
@@ -2483,7 +2534,8 @@ VENUE_TRANSFER_RULES = """
     upstream), never noise to dismiss."""
 
 
-def venue_norm_block(venue_id, root=None, transfer: bool = False) -> str:
+def venue_norm_block(venue_id, root=None, transfer: bool = False,
+                     manuscript_names=None) -> str:
     """The template/norm prompt block for one venue, or "" when it has no pack."""
     pack = venue_pack_dir(venue_id, root)
     if pack is None:
@@ -2495,7 +2547,8 @@ def venue_norm_block(venue_id, root=None, transfer: bool = False) -> str:
     digest = sha256_file(pack / VENUE_NORM_FILE)
     text = (VENUE_NORM_RULES.replace("@@NORM@@", summary)
             .replace("@@TRANSFER@@", VENUE_TRANSFER_RULES if transfer else ""))
-    files = official_template_files(venue_id, root) if venue_templates_enabled() else {}
+    files = (official_template_files(venue_id, root, manuscript_names=manuscript_names)
+             if venue_templates_enabled() else {})
     word = files.get("word") or {}
     latex = files.get("latex") or {}
     if word or latex:
@@ -2564,7 +2617,8 @@ def venue_norm_for(ctx: "Ctx") -> str:
     if getattr(ctx, "root", None) is None:
         return ""                      # a stub/partial context carries no root-local profiles
     return venue_norm_block(venue_id_of(ctx), ctx.root,
-                            transfer=(journal_mode_of(ctx) == JOURNAL_MODE_TRANSFER))
+                            transfer=(journal_mode_of(ctx) == JOURNAL_MODE_TRANSFER),
+                            manuscript_names=article_type_manuscript_names(ctx))
 
 
 def venue_word_templates(ctx: "Ctx") -> dict:
@@ -2582,7 +2636,8 @@ def venue_word_templates(ctx: "Ctx") -> dict:
         return {}                      # a stub/partial context carries no root-local profiles
     if not venue_templates_enabled():
         return {}                      # operator opt-out (PAPER_VENUE_TEMPLATES=0)
-    res = official_template_files(venue_id_of(ctx), root)
+    res = official_template_files(venue_id_of(ctx), root,
+                                  manuscript_names=article_type_manuscript_names(ctx))
     word = res.get("word") or {}
     out = {}
     for key in ("main", "supplementary", "cover"):
@@ -2712,6 +2767,26 @@ def _snapshot_profile(cfg: dict, venue_id: str, root=None):
     return prof if prof.id == venue_id else None
 
 
+def venue_profile_base(ctx=None):
+    """(profile, load error) for the root's venue, WITHOUT the recorded type.
+
+    The article type is applied by `venue_profile_of` on top. An UNKNOWN
+    recorded type must not make the venue itself look broken: the status/
+    findings surfaces need the base profile so they can print the
+    `set-article-type` remedy instead of "select another venue".
+    """
+    cfg = _ctx_cfg(ctx)
+    venue_id = venue_id_of(ctx)
+    root = getattr(ctx, "root", None)
+    prof = _snapshot_profile(cfg, venue_id, root=root)
+    if prof is not None:
+        return prof, None
+    try:
+        return load_venue_profile(venue_id, root=root), None
+    except VenueProfileError as e:
+        return None, e
+
+
 def venue_profile_of(ctx=None, required: bool = True):
     """The root's venue profile.
 
@@ -2726,17 +2801,12 @@ def venue_profile_of(ctx=None, required: bool = True):
     not the Article ones. A root that records none keeps the profile's default
     type (the pre-article-type behaviour).
     """
-    cfg = _ctx_cfg(ctx)
-    venue_id = venue_id_of(ctx)
-    root = getattr(ctx, "root", None)
-    prof = _snapshot_profile(cfg, venue_id, root=root)
+    prof, load_err = venue_profile_base(ctx)
     if prof is None:
-        try:
-            prof = load_venue_profile(venue_id, root=root)
-        except VenueProfileError:
-            if required:
-                raise
-            return None
+        if required:
+            raise load_err
+        return None
+    cfg = _ctx_cfg(ctx)
     wanted = str(cfg.get("article_type") or "").strip().lower()
     if not wanted or wanted == prof.article_type_id:
         return prof
@@ -2763,6 +2833,10 @@ def journal_of(ctx=None) -> str:
     if name:
         return name
     prof = venue_profile_of(ctx, required=False)
+    if prof is None:
+        # The venue may be fine while only the recorded ARTICLE TYPE is bad:
+        # the profile's default journal is still the configured one.
+        prof, _err = venue_profile_base(ctx)
     return prof.default_journal if prof is not None else ""
 
 
@@ -2772,6 +2846,11 @@ def venue_summary(ctx) -> str:
     venue = venue_id_of(ctx)
     journal = journal_of(ctx) or "(not set)"
     if prof is None:
+        base, _err = venue_profile_base(ctx)
+        if base is not None:
+            return (f"venue={base.id} (\"{base.label}\", {base.describe_origin()}) -- the "
+                    f"recorded article type is INVALID (run `set-article-type <id>`), "
+                    f"journal={journal}")
         return (f"venue={venue or '(missing)'} (UNRESOLVED), "
                 f"journal={journal}")
     return (f"venue={prof.id} (\"{prof.label}\", {prof.describe_origin()}), "
@@ -2781,7 +2860,7 @@ def venue_summary(ctx) -> str:
 
 def venue_status_lines(ctx) -> list:
     """The venue/journal lines `status`, `setup` and the decision report print."""
-    prof = venue_profile_of(ctx, required=False)
+    prof, load_err = venue_profile_base(ctx)
     venue = venue_id_of(ctx)
     journal = journal_of(ctx)
     lines = []
@@ -2789,9 +2868,22 @@ def venue_status_lines(ctx) -> list:
         lines.append(f"venue:         {venue or '(missing)'}  -- UNRESOLVED "
                      f"(run `set-venue <id>`; `set-venue --list` shows the ids)")
     else:
+        type_error = None
+        wanted = str(_ctx_cfg(ctx).get("article_type") or "").strip().lower()
+        if wanted and wanted != prof.article_type_id:
+            try:
+                prof = prof.with_article_type(wanted)
+            except VenueProfileError as e:
+                type_error = e
         lines.append(f"venue:         {prof.id} (\"{prof.label}\", {prof.describe_origin()})")
-        lines.append(f"article type:  {prof.article_type} (`{prof.article_type_id}`"
-                     + ("" if prof.carries_article_numbers()
+        if type_error is not None:
+            lines.append(f"article type:  {wanted!r}  -- UNRESOLVED ({type_error}); "
+                         f"run `set-article-type <id>` (`set-article-type --list` shows the "
+                         f"labels). The lines below describe the profile's default type "
+                         f"{prof.article_type!r} until it is repaired.")
+        else:
+            lines.append(f"article type:  {prof.article_type} (`{prof.article_type_id}`"
+                         + ("" if prof.carries_article_numbers()
                         else "; the profile carries no word limits for it, so the stages "
                              "count and name the venue's own numbers")
                      + ")")
@@ -2863,24 +2955,29 @@ def venue_config_findings(ctx) -> tuple:
         notes.append(f"no venue recorded in {Path(getattr(ctx, 'cfg_path', 'pipeline_config.json')).name}: "
                      f"using the default venue {DEFAULT_VENUE!r} (the pipeline's pre-venue "
                      f"behaviour). Run `set-venue <venue>` to make it explicit.")
-    prof = venue_profile_of(ctx, required=False)
+    prof, load_err = venue_profile_base(ctx)
     if prof is None:
         # Distinguish "no profile by that name" from "the file is there but it
         # cannot be used": the operator's next step is different.
-        try:
-            venue_profile_of(ctx, required=True)
-        except VenueProfileError as e:
-            if e.unknown:
-                problems.append(unknown_venue_message(recorded or DEFAULT_VENUE,
-                                                      getattr(ctx, "root", None)))
-            else:
-                problems.append(f"the venue profile selected by this root cannot be used: {e}\n"
-                                f"       Fix the file, or select another venue with "
-                                f"`set-venue <id>` (`set-venue --list` shows the ids).")
-        else:                           # pragma: no cover -- prof is None above
+        if load_err is not None and load_err.unknown:
+            problems.append(unknown_venue_message(recorded or DEFAULT_VENUE,
+                                                  getattr(ctx, "root", None)))
+        elif load_err is not None:
+            problems.append(f"the venue profile selected by this root cannot be used: "
+                            f"{load_err}\n"
+                            f"       Fix the file, or select another venue with "
+                            f"`set-venue <id>` (`set-venue --list` shows the ids).")
+        else:                               # pragma: no cover -- base returned a profile
             problems.append(unknown_venue_message(recorded or DEFAULT_VENUE,
                                                   getattr(ctx, "root", None)))
         return notes, problems
+    # Apply the recorded article type only when it is VALID. An unknown type is
+    # not a broken venue: the article-type block below names the
+    # `set-article-type` remedy, while a profile that does not need that type
+    # still supplies every other rule.
+    _recorded_type = str(cfg.get("article_type") or "").strip().lower()
+    if _recorded_type and _recorded_type in prof.article_type_ids():
+        prof = prof.with_article_type(_recorded_type)
     snapshot = cfg.get("venue_profile")
     if isinstance(snapshot, dict) and str(snapshot.get("id") or "").strip().lower() != prof.id:
         problems.append(f"the recorded profile snapshot names venue "

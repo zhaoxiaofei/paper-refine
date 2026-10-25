@@ -891,6 +891,238 @@ def test_review_regressions():
           "paper-skills" in st["recorded_module_diffs"], str(st["recorded_module_diffs"]))
 
 
+def test_step2_findings():
+    print("\n== step-2 confirmed findings ==")
+    # F031: an unknown article type must not make the VENUE look broken.
+    vroot = scratch("stage_f031_")
+    (vroot / "venue_profiles").mkdir()
+    shutil.copy2(WS / "venue_profiles/generic.json",
+                 vroot / "venue_profiles/generic.json")
+
+    class VenueCtx:
+        pass
+
+    vctx = VenueCtx()
+    vctx.root = vroot
+    vctx.cfg = {"venue": "generic", "article_type": "typo"}
+    vctx.state = {}
+    _notes, probs = pp.venue_config_findings(vctx)
+    check("an unknown article type names the set-article-type remedy",
+          any("set-article-type" in p for p in probs)
+          and not any("select another venue" in p for p in probs), str(probs))
+    lines = pp.venue_status_lines(vctx)
+    check("status keeps the venue resolved and names set-article-type",
+          lines and "UNRESOLVED" not in lines[0] and any("set-article-type" in ln for ln in lines),
+          str(lines[:2]))
+    check("venue_summary points at set-article-type",
+          "set-article-type" in pp.venue_summary(vctx))
+
+    # F049: the common one-line numbered entry is a reference; a numbered body
+    # list is not.
+    refs = pp._numbered_reference_titles(
+        ["43. Nurk, S. et al. The complete sequence. Science 372, 984 (2021)."])
+    check("a one-line numbered reference entry is read", refs.get(43, "").startswith("Nurk, S."),
+          str(refs))
+    check("a numbered body list is not read as a bibliography",
+          pp._numbered_reference_titles(["1. Do the first thing carefully."]) == {})
+
+    # F051: publication reports the stage's own PKG-2 record (it never removes
+    # a reference itself), and cites the artifact that really exists.
+    froot = scratch("stage_f051_")
+    fsb = froot / "runs" / "r1_a2_revise"
+    fsb.mkdir(parents=True)
+    strip = {"label": "r1_a2_revise", "removed": 2, "removed_links": 1,
+             "files": [{"file": "main.md", "removed": ["the code/ pointer"]}],
+             "remaining": [{"rule": "PKG-2", "file": "notes.json", "line": 1,
+                            "reference": "code/a.py"}]}
+    (fsb / "PKG2_r1_a2_revise.json").write_text(json.dumps(strip), encoding="utf-8")
+
+    class ReportCtx:
+        def __init__(self):
+            self.root = froot
+            self.reports_dir = froot / "reports"
+            self.reports_dir.mkdir()
+
+        def run(self, rid):
+            return ({"id": "r1_a2_revise", "status": "done"}
+                    if rid == pp.rid_for_fresh(1, "a2") else None)
+
+        def sandbox_of(self, rec):
+            return fsb
+
+    got = pp._stage_dangling_report(ReportCtx(), {"stored": {"champion": "a2", "round": 1}})
+    check("the champion stage's PKG-2 record is found",
+          got and got.get("removed") == 2
+          and str(got.get("artifact", "")).endswith("PKG2_r1_a2_revise.json"), str(got))
+    rctx = pp.Ctx(froot)
+    rctx.cfg = {}
+    readme = pp.final_clean_readme_text(
+        rctx, {"certified": True, "exit_code": 0},
+        {"pin": {"id": "r1_a2", "digest": "0" * 64},
+         "stored": {"champion": "a2", "round": 1}},
+        {"hygiene": {"removed_dangling_references": got}, "files": 3,
+         "digest": "1" * 64})
+    check("the readme cites the real stage artifact, not a never-written PKG2 name",
+          "PKG2_r1_a2_revise.json" in readme and "PKG2_final_clean" not in readme,
+          readme[-500:])
+
+    # F066: read-only roles never get the producer's add/edit/delete contract.
+    for role in ("review", "judge"):
+        block = pp.zotero_cli_block(role, "read")
+        check(f"{role} does not authorize citation-field edits",
+              "You may ADD" not in block and "this session is READ-ONLY" in block)
+    rw = pp.zotero_cli_block("rewrite", "read")
+    check("rewrite preserves fields without authorizing edits",
+          "You may ADD" not in rw and "REWRITES FORM, not content" in rw)
+    check("the edit stage keeps the producer field rule",
+          "You may ADD" in pp.zotero_cli_block("edit", "edit"))
+
+    # F067/F068: a letter-type template is a MANUSCRIPT template; a cover .tex
+    # is a cover, never the LaTeX sample.
+    tdir = scratch("stage_678_")
+    vid = "testvenue"
+    (tdir / f"{vid}.json").write_text(json.dumps({"id": vid, "label": "Test Venue"}),
+                                      encoding="utf-8")
+    off = tdir / f"{vid}.official"
+    off.mkdir()
+    for name in ("Main_Template.docx", "Letter_to_the_Editor.docx"):
+        (off / name).write_bytes(b"PK\x03\x04")
+    (off / "Cover_Letter.tex").write_text("\\section{Dear editor}\n", encoding="utf-8")
+    (off / "Letter_to_the_Editor.tex").write_text(
+        "\\documentclass{article}\n\\section{Introduction}\n", encoding="utf-8")
+    tres = pp.official_template_files(vid, profiles_dir=tdir,
+                                      manuscript_names=["letter to the editor"])
+    check("a letter-type template is the manuscript main, not a cover",
+          Path(tres["word"].get("main", "")).name == "Main_Template.docx"
+          and not tres["word"].get("cover"),
+          str({k: v.name for k, v in tres["word"].items()}))
+    check("a cover-letter .tex is its own role, not the LaTeX sample",
+          Path(tres["latex"].get("cover", "")).name == "Cover_Letter.tex"
+          and Path(tres["latex"].get("sample", "")).name == "Letter_to_the_Editor.tex",
+          str({k: (v.name if isinstance(v, Path) else v) for k, v in tres["latex"].items()}))
+    pack = pp.build_venue_templates(vid, profiles_dir=tdir)
+    check("the pack builder skips a .tex cover-letter template",
+          any(s.get("file") == "Cover_Letter.tex" for s in pack.get("skipped") or []),
+          str(pack.get("skipped"))[:300])
+
+    # F076: every manuscript scan uses the no-symlink corpus walker.
+    sdir = scratch("stage_076_")
+    (sdir / "main.md").write_text("# Introduction\n\nWe used 12 samples.\n", encoding="utf-8")
+    (sdir / "other.md").write_text(
+        "# Introduction\n\nWe used 99 samples. [AUTHOR TO COMPLETE: x]\n", encoding="utf-8")
+    (sdir / "main.tsv").write_text("method\tn\nx\t1\n", encoding="utf-8")
+    (sdir / "other.tsv").write_text("method\tn\ny\t2\n", encoding="utf-8")
+    (sdir / "linked.md").symlink_to(sdir / "other.md")
+    (sdir / "linked.tsv").symlink_to(sdir / "other.tsv")
+    docs = pp.collect_documents([(sdir, "", ())])
+    check("collect_documents refuses a file symlink", "linked.md" not in docs, str(sorted(docs)))
+    lengths = pp.scan_lengths_in_sources([(sdir, "", ())])
+    check("the M19 scan refuses a file symlink",
+          "linked.md" not in (lengths.get("documents") or []),
+          str(lengths.get("documents") or []))
+    tables = [rel for rel, _text in pp.data_table_texts([(sdir, "", ())])]
+    check("data_table_texts refuses a file symlink", "linked.tsv" not in tables, str(tables))
+    ph = pp.scan_placeholders_in_sources([(sdir, "", ())])
+    check("the M6 placeholder scan refuses a file symlink",
+          ph.get("files") == ["other.md"], str(ph.get("files")))
+
+    # F077: stale-lock reclaim also works on a no-hardlink filesystem.
+    lroot = scratch("stage_077_")
+    lctx = pp.Ctx(lroot)
+    lock = lroot / "paper_pipeline.lock"
+    staged = lroot / "stage.tmp"
+    new_info = {"pid": os.getpid(), "what": "test", "since": "now"}
+    staged.write_text(json.dumps(new_info), encoding="utf-8")
+    lock.write_text(json.dumps({"pid": 99999999, "what": "dead", "since": "then"}),
+                    encoding="utf-8")
+    real_link = pp.os.link
+
+    def no_hardlink(*_a, **_k):
+        raise OSError(1, "no hardlinks")
+
+    try:
+        pp.os.link = no_hardlink
+        got_lock = lctx._claim_lock(lock, staged, new_info, "test")
+    finally:
+        pp.os.link = real_link
+    check("a stale lock is reclaimed on a no-hardlink filesystem",
+          got_lock and json.loads(lock.read_text())["what"] == "test", str(got_lock))
+
+    # F078: the operator's proxy cap is never called the venue's own limit.
+    example = pp.load_venue_profile("example-journal")
+    check("the venue's own published cap keeps the venue wording",
+          "venue's own limit" in pp.caption_rule_text(250, example))
+    over = pp.caption_rule_text(300, example)
+    check("an operator override is named as the operator's proxy",
+          "venue's own limit" not in over and "OPERATOR" in over and "250" in over,
+          over[:300])
+    disabled = pp.caption_rule_text(0, example)
+    check("a disabled cap on a publishing venue says DISABLED, not unpublished",
+          "DISABLED" in disabled and "is not published" not in disabled
+          and "250" in disabled, disabled[:300])
+
+    # F083: a latexmk timeout kills the whole compiler process group.
+    ldir = scratch("stage_083_")
+    bindir = ldir / "bin"
+    bindir.mkdir()
+    fake = bindir / "latexmk"
+    fake.write_text("#!/bin/sh\necho $$ > \"$FAKE_PIDS\"\nsleep 60 &\n"
+                    "echo $! >> \"$FAKE_PIDS\"\nsleep 60\n", encoding="utf-8")
+    fake.chmod(0o755)
+    lpkg = ldir / "pkg"
+    lpkg.mkdir()
+    (lpkg / "main.tex").write_text("\\documentclass{article}\n", encoding="utf-8")
+    pids_file = ldir / "pids.txt"
+    old_path = os.environ.get("PATH", "")
+    os.environ["PATH"] = str(bindir) + os.pathsep + old_path
+    os.environ["FAKE_PIDS"] = str(pids_file)
+    try:
+        res = pp.compile_latex_pdf(lpkg, "main.tex", ldir / "out.pdf", timeout=1)
+    finally:
+        os.environ["PATH"] = old_path
+        os.environ.pop("FAKE_PIDS", None)
+    timeout_pids = []
+    if pids_file.is_file():
+        timeout_pids = [int(x) for x in pids_file.read_text().split()]
+    alive = []
+    for pid in timeout_pids:
+        try:
+            os.kill(pid, 0)
+            alive.append(pid)
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            pass
+    check("a latexmk timeout returns a structured error", res.get("ok") is False, str(res)[:200])
+    check("a latexmk timeout kills the compiler child too",
+          len(timeout_pids) >= 2 and not alive, f"pids={timeout_pids} alive={alive}")
+
+    # F109: role-word filters are not substrings.
+    scripts = {
+        "extract_numbers": (lambda m, p: m.is_non_manuscript(p)),
+        "extract_citations": (lambda m, p: m.is_non_manuscript(p)),
+        "extract_occurrences": (lambda m, p: m.is_non_manuscript(p)),
+        "enumerate_conventions": (lambda m, p: m._non_manuscript(p)),
+        "extract_acronyms": (lambda m, p: m.is_evidence_name(p)),
+        "count_words": (lambda m, p: m.is_evidence_path(p)),
+    }
+    manuscripts = ["dose_response.txt", "immune_response.md.txt",
+                   "biofeedback_results.txt", "feedback_loop.md",
+                   "response_surface.md", "letter_to_the_editor.docx"]
+    replies = ["response_to_reviewers.docx", "reviewer_feedback.txt",
+               "editor_decision.pdf"]
+    for name, pred in scripts.items():
+        mod = load(f"stage_f109_{name}",
+                   WS / "paper-skills" / "paper-review" / "scripts" / f"{name}.py")
+        check(f"{name} keeps real manuscripts named like a role word",
+              not any(pred(mod, p) for p in manuscripts),
+              str([p for p in manuscripts if pred(mod, p)]))
+        check(f"{name} still drops a real response/feedback file",
+              all(pred(mod, p) for p in replies),
+              str([p for p in replies if not pred(mod, p)]))
+
+
 def main() -> int:
     try:
         test_f001_view_layout_collision()
@@ -903,6 +1135,7 @@ def main() -> int:
         test_node_keys()
         test_more_fixes()
         test_review_regressions()
+        test_step2_findings()
     finally:
         cleanup()
     print()

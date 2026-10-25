@@ -371,9 +371,21 @@ def test_prompt_contract():
         unresolved = sorted(set(re.findall(r"@@[A-Z0-9_]+@@", text)))
         check(f"ZC5 {name} has no unresolved @@TOKEN@@", not unresolved, str(unresolved))
         check(f"ZC5 {name} states the field-continuity contract",
-              "FIELD CONTINUITY (code-enforced)" in text
-              and "--preserve-baseline-citations" in text
-              and "RE-CREATE the field" in text)
+              "FIELD CONTINUITY (code-enforced)" in text)
+    # The WRITE stages get the producer contract (they may add/edit/delete a
+    # field and prove it against the base); the rewrite stage preserves fields
+    # without authorizing a content edit.
+    for name in ("rewrite", "revise", "integrate", "zotero-off"):
+        check(f"ZC5 {name} carries the field-preservation proof",
+              "--preserve-baseline-citations" in prompts[name]
+              and "RE-CREATE the field" in prompts[name])
+    # Review and judge are READ-ONLY: they must NOT receive the producer's
+    # add/edit/delete authorization or the base.docx validation command.
+    for name in ("review", "judge"):
+        check(f"ZC5 {name} is read-only about live fields",
+              "this session is READ-ONLY" in prompts[name]
+              and "You may ADD" not in prompts[name]
+              and "--preserve-baseline-citations" not in prompts[name])
     check("ZC5 rewrite tells the agent a text rebuild destroys fields",
           "destroys every fldChar/instrText run" in prompts["rewrite"])
     check("ZC5 review files a field-less citation as a defect",

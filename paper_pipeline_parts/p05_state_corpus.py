@@ -714,6 +714,69 @@ class Ctx:
             except OSError:
                 pass
 
+    def _reclaim_stale_lock(self, lock_path: Path, holder: dict, what: str) -> bool:
+        """Reclaim ONE stale lock; True means retry the create.
+
+        A LIVE owner dies with the actionable message. The reclaim moves the
+        stale file aside with an atomic rename: of two processes reclaiming the
+        same lock exactly one rename succeeds, so the loser can never unlink a
+        lock the winner has just created. This is deliberately shared by the
+        hardlink path and the O_EXCL fallback: on a no-hardlink filesystem
+        (drvfs) `os.link` raises plain OSError, and the old placement inside
+        the `FileExistsError` branch made every later command die "remove the
+        lock by hand" after a crash.
+        """
+        pid = holder.get("pid")
+        if pid is None:
+            # A lock written by a creator that is not (yet) atomic: give it a
+            # moment to finish writing before calling it stale.
+            for _ in range(20):
+                time.sleep(0.05)
+                holder = read_json(lock_path, revive=False) or {}
+                if holder.get("pid") is not None:
+                    break
+            pid = holder.get("pid")
+        if isinstance(pid, int) and pid_alive(pid):
+            die(f"another pipeline process is already working on this root "
+                f"(pid {pid}, {holder.get('what')!r} since {holder.get('since')}).\n"
+                f"       Refusing to run {what!r} concurrently: two writers would "
+                f"double-execute agent sessions and overwrite each other's state.json.\n"
+                f"       Wait for it to finish, or -- if you are sure it is gone -- delete "
+                f"{lock_path} and re-run.")
+        print(f"[warn] reclaiming a STALE pipeline lock {lock_path} "
+              f"(owner pid {pid!r} is not running)")
+        stale = lock_path.with_name(f"{LOCK_FILE}.stale.{os.getpid()}")
+        try:
+            os.rename(lock_path, stale)
+        except FileNotFoundError:
+            return True               # another process reclaimed it first
+        except OSError:
+            return True
+        captured = read_json(stale, revive=False) or {}
+        if captured != holder:
+            # The file changed between our read and the rename: another process
+            # had already reclaimed the stale lock and created its own. Put the
+            # live lock back (link never clobbers a newer one) and refuse
+            # instead of running beside it.
+            restored = False
+            try:
+                os.link(stale, lock_path)
+                restored = True
+            except OSError:
+                pass
+            if restored:
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+            die(f"the pipeline lock {lock_path} was reclaimed by another process while "
+                f"this command was starting; re-run it (moved copy: {stale})")
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+        return True
+
     def _claim_lock(self, lock_path: Path, staged: Path, info: dict, what: str) -> bool:
         """Create the lock from `staged`, reclaiming a stale one at most once.
 
@@ -727,64 +790,20 @@ class Ctx:
             try:
                 os.link(staged, lock_path)
             except FileExistsError:
-                holder = read_json(lock_path, revive=False) or {}
-                pid = holder.get("pid")
-                if pid is None:
-                    # A lock written by a creator that is not (yet) atomic: give
-                    # it a moment to finish writing before calling it stale.
-                    for _ in range(20):
-                        time.sleep(0.05)
-                        holder = read_json(lock_path, revive=False) or {}
-                        if holder.get("pid") is not None:
-                            break
-                    pid = holder.get("pid")
-                if isinstance(pid, int) and pid_alive(pid):
-                    die(f"another pipeline process is already working on this root "
-                        f"(pid {pid}, {holder.get('what')!r} since {holder.get('since')}).\n"
-                        f"       Refusing to run {what!r} concurrently: two writers would "
-                        f"double-execute agent sessions and overwrite each other's state.json.\n"
-                       f"       Wait for it to finish, or -- if you are sure it is gone -- delete "
-                       f"{lock_path} and re-run.")
-                print(f"[warn] reclaiming a STALE pipeline lock {lock_path} "
-                      f"(owner pid {pid!r} is not running)")
-                stale = lock_path.with_name(f"{LOCK_FILE}.stale.{os.getpid()}")
-                try:
-                    os.rename(lock_path, stale)
-                except FileNotFoundError:
-                    continue          # another process reclaimed it first
-                except OSError:
-                    continue
-                captured = read_json(stale, revive=False) or {}
-                if captured != holder:
-                    # The file changed between our read and the rename: another
-                    # process had already reclaimed the stale lock and created
-                    # its own. Put the live lock back (link never clobbers a
-                    # newer one) and refuse instead of running beside it.
-                    restored = False
-                    try:
-                        os.link(stale, lock_path)
-                        restored = True
-                    except OSError:
-                        pass
-                    if restored:
-                        try:
-                            stale.unlink()
-                        except OSError:
-                            pass
-                    die(f"the pipeline lock {lock_path} was reclaimed by another process while "
-                        f"this command was starting; re-run it (moved copy: {stale})")
-                try:
-                    stale.unlink()
-                except OSError:
-                    pass
+                self._reclaim_stale_lock(lock_path,
+                                         read_json(lock_path, revive=False) or {}, what)
                 continue
             except OSError:
                 # No hardlink support on this filesystem: fall back to the
                 # exclusive create (the content window returns, but the lock
-                # still excludes).
+                # still excludes). The fallback reclaims a stale lock too --
+                # otherwise crash recovery is dead code on exactly the
+                # filesystems that need it.
                 try:
                     fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
                 except FileExistsError:
+                    self._reclaim_stale_lock(lock_path,
+                                             read_json(lock_path, revive=False) or {}, what)
                     continue
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     json.dump(info, f, indent=2)
