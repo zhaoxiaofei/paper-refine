@@ -2462,12 +2462,14 @@ M18_REVIEW_SWEEP_ON = """3. The PIPELINE-MANDATED caption sweep M18 (see the cap
 M18_REVIEW_SWEEP_REPORT = """3. The PIPELINE-MANDATED legend-length sweep M18 (see the legend rule below; NO cap is
    configured this run): enumerate EVERY figure legend in the corpus into
    review/artifacts/M18_caption_words.md, one row per legend with its document, legend id and
-   word count, and the disposition "recorded — the venue profile publishes no per-type legend
-   limit; author to compare" (or a finding id when the legend is defective for an independent reason,
-   for example it explains methods or is unclear). Give M18 its own coverage row, exactly like
-   the skill's sweeps. This check is mandatory in every run (the skill's references/sweeps.md
-   defines the same sweep), and it never makes a version ineligible: with no cap configured the
-   word count alone is not a defect, is never scored and is never "fixed" by cutting text.
+   word count, and the disposition "recorded — no proxy cap is applied this run; the author
+   compares the count with the venue's per-type legend limit (the caption rule above states
+   whether the venue publishes one)" (or a finding id when the legend is defective for an
+   independent reason, for example it explains methods or is unclear). Give M18 its own coverage
+   row, exactly like the skill's sweeps. This check is mandatory in every run (the skill's
+   references/sweeps.md defines the same sweep), and it never makes a version ineligible: with no
+   cap configured the word count alone is not a defect, is never scored and is never "fixed" by
+   cutting text.
    M18 is RESERVED by this pipeline for the legend sweep: if your discovery round proposes new
    sweeps, number them from M37 upwards in review/round2/new_sweeps.md (M18, M19 and M20
    are reserved, and M21-M36 are adopted), and say so there so the operator can renumber when
@@ -4800,7 +4802,16 @@ ZOTERO_CLI_RULE = """ZOTERO REFERENCE TOOLING — the `zot` CLI (pyzotero-cli; t
     backs. A citation that cannot be resolved (missing key, no matching item, library unreachable)
     is recorded as unresolved for manual verification; when a claim depends on it, the claim's fix
     is a manual item too.
-  * LIVE-FIELD DOCX SEMANTICS: before touching a citation field, read the $zotero-use skill's
+@@ZOTERO_EDIT_GUIDANCE@@
+@@ZOTERO_FIELD_CONTINUITY@@
+  * THE ZOTERO LIBRARY ITSELF: @@ZOTERO_LIBRARY@@
+  * LEDGER: @@ZOTERO_LEDGER@@ @@ZOTERO_STAGE@@"""
+
+# The edit-oriented half of the Zotero block. Only a stage that may change a
+# citation receives it; review/judge are read-only and rewrite edits form only,
+# so the producer instructions ("before touching a citation field", "PROVE THE
+# EDIT") must not be pasted into their prompts.
+ZOTERO_EDIT_GUIDANCE_EDIT = """  * LIVE-FIELD DOCX SEMANTICS: before touching a citation field, read the $zotero-use skill's
     `references/word-docx-citations.md`, and validate the saved result with its bundled read-only
     validator (`scripts/validate_zotero_docx.py`). Use the URI namespace of the item's OWN library
     (never copy a document-wide namespace onto a new key); give every insertion location a unique
@@ -4818,14 +4829,30 @@ ZOTERO_CLI_RULE = """ZOTERO REFERENCE TOOLING — the `zot` CLI (pyzotero-cli; t
     survived and the intended insertions/deletions are exactly the ones you made. When the check
     fails, restore the snapshot and write a manual step instead of shipping a possibly corrupted
     field.
-@@ZOTERO_FIELD_CONTINUITY@@
   * EVIDENCE CHAIN: a citation may be edited only when the cited item's own abstract/full text
     (`zot items get`, `zot fulltext get`, or its PDF) supports the sentence it is attached to. A
     sentence that contradicts its cited work may be reworded while the manuscript's own claim,
     numbers, limitations and conclusions stay unchanged; a fix that would change any of those is a
-    scientific judgement call -- record it for the author, never make it.
-  * THE ZOTERO LIBRARY ITSELF: @@ZOTERO_LIBRARY@@
-  * LEDGER: @@ZOTERO_LEDGER@@ @@ZOTERO_STAGE@@"""
+    scientific judgement call -- record it for the author, never make it."""
+
+ZOTERO_EDIT_GUIDANCE_REWRITE = """  * LIVE-FIELD DOCX SEMANTICS: before reading a candidate's citation field, read the
+    $zotero-use skill's `references/word-docx-citations.md`; the visible citation text is
+    provisional (a later Zotero Refresh replaces it), so verify a citation against the item's own
+    metadata/full text, never the rendered string. A field you cannot fully read or parse (a
+    foreign namespace, missing itemData, unreadable XML) stays untouched and is surfaced in
+    REWRITE_REPORT.md -- never re-type what you cannot read.
+  * EVIDENCE CHAIN: a citation may be judged only when the cited item's own abstract/full text
+    supports the sentence it is attached to. A contradiction is surfaced in REWRITE_REPORT.md as
+    a problem; the rewrite never changes a citation, a field or the library."""
+
+ZOTERO_EDIT_GUIDANCE_READONLY = """  * READING A LIVE FIELD: the visible citation text is provisional (a later Zotero Refresh
+    replaces it), so verify a citation against the item's own metadata/full text, never the
+    rendered string. A field you cannot fully read or parse (a foreign namespace, missing
+    itemData, unreadable XML) is UNVERIFIED evidence for your reasoning and a
+    manual-verification item -- never a guess and never an automatic defect.
+  * EVIDENCE CHAIN: a citation can be checked only when the cited item's own abstract/full text
+    supports the sentence; a contradiction is a finding for the authors to resolve. You never
+    edit the manuscript, the field or the library."""
 
 ZOTERO_STAGE_EDIT = """CITATION EDITS IN YOUR REVISED COPY are part of this stage's job (targeted and
     ledgered like every other edit): insert a citation to a resolved library item where the revised

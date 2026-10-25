@@ -72,14 +72,14 @@ HUMAN_FEEDBACK_DIR = "human_review_feedback"
 LLM_FEEDBACK_DIR = "llm_review_feedback"
 EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR)
 EXTERNAL_FEEDBACK_RE = re.compile(
-    r"(?<![a-z])feedback(?![a-z])"
+    r"(?<![a-z])feedbacks?(?:[-_ ]?(?:form|report|letter|comments?|summary|to[-_ ]?authors))?(?![a-z])"
     r"|referees?[_ \-]*(?:report|comment)"
     r"|reviewers?[_ \-]*(?:comment|report|critique)"
     r"|editor(?:s|ial)?[_ \-]*(?:comment|decision|report)"
     r"|decision[_ \-]*letter",
     re.I)
 AUTHORED_REPLY_RE = re.compile(
-    r"(?<![a-z])(?:response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)(?![a-z])",
+    r"(?<![a-z])(?:responses?|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)(?![a-z])",
     re.I)
 # A scientific compound that merely ENDS in a role word is not a reply or a
 # feedback file: `dose_response.txt` / `immune_response.md` / `biofeedback_results.txt`

@@ -385,6 +385,8 @@ def test_prompt_contract():
         check(f"ZC5 {name} is read-only about live fields",
               "this session is READ-ONLY" in prompts[name]
               and "You may ADD" not in prompts[name]
+              and "before touching a citation field" not in prompts[name]
+              and "SNAPSHOT FIRST, PROVE THE EDIT" not in prompts[name]
               and "--preserve-baseline-citations" not in prompts[name])
     check("ZC5 rewrite tells the agent a text rebuild destroys fields",
           "destroys every fldChar/instrText run" in prompts["rewrite"])

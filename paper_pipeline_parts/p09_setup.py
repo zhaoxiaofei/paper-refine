@@ -927,6 +927,17 @@ def _print_venue_list(root, as_json: bool) -> None:
 
 def _print_venue_show(ctx, as_json: bool, notes=()) -> None:
     prof = venue_profile_of(ctx, required=False)
+    if prof is None:
+        # The venue may be healthy while only the recorded ARTICLE TYPE is not:
+        # show the base profile and name the type remedy instead of calling the
+        # whole venue unresolved.
+        base, _load_err = venue_profile_base(ctx)
+        if base is not None:
+            prof = base
+            notes = list(notes) + [
+                f"the recorded article type {str(ctx.cfg.get('article_type') or '')!r} is "
+                f"invalid for venue {base.id!r}; the values below describe its default type "
+                f"{base.article_type!r}. Run `set-article-type <id>`."]
     data = {"root": str(ctx.root),
             "notes": [str(n) for n in notes] + list(getattr(ctx, "venue_notes", []) or []),
             "venue": venue_id_of(ctx),
@@ -1187,12 +1198,22 @@ def cmd_set_article_type(args) -> None:
     with contextlib.redirect_stdout(captured):
         ctx.load()
     notes = [ln for ln in captured.getvalue().splitlines() if ln.strip()]
-    profile = venue_profile_of(ctx, required=False)
+    # The ARTICLE TYPE may be the only broken part of the configuration: an
+    # unknown recorded type made `venue_profile_of` return None, so this very
+    # command died with "fix the venue first" -- the dead end F031 removed from
+    # `status`. Load the venue without applying the recorded type, then apply it
+    # only when it is one the profile carries.
+    profile, load_err = venue_profile_base(ctx)
     if profile is None:
         for note in notes:
             print(note)
-        die("this root's venue does not resolve, so its article types cannot be listed: fix the "
-            "venue first (`set-venue <id> --list`).")
+        if load_err is not None and load_err.unknown:
+            die(unknown_venue_message(venue_id_of(ctx), ctx.root))
+        die(f"the venue profile selected by this root cannot be used: {load_err}\n"
+            f"       Fix the file (`set-venue --list` shows the profiles), then retry.")
+    _recorded_type = str(ctx.cfg.get("article_type") or "").strip().lower()
+    if _recorded_type and _recorded_type in profile.article_type_ids():
+        profile = profile.with_article_type(_recorded_type)
     wanted = str(getattr(args, "article_type", None) or "").strip().lower()
     if getattr(args, "list", False) or (getattr(args, "show", False) and not wanted):
         if getattr(args, "json", False):

@@ -3692,11 +3692,19 @@ def _numbered_reference_titles(paras: list) -> dict:
     # A one-line "43. Nurk, S. ... Science 372, 984 (2021)." entry is the most
     # common non-Zotero layout and matched NEITHER old pattern, so the PKG-23
     # citation check silently inspected zero references. The entry text must
-    # still LOOK like a reference; a numbered body list ("1. Do X.") stays out.
+    # still LOOK like a reference, and the one-line form is only read INSIDE a
+    # references section: the same shape is a numbered body list, and a body
+    # item could otherwise overwrite a genuine entry. The Zotero two-line form
+    # is distinctive enough to keep working without a heading.
     entry_like = re.compile(
         r"(?i)(?:\b(?:19|20)\d{2}\b|\bdoi\b|https?://|\bet al\b"
         r"|^[A-Z][A-Za-z'’.-]+,\s+[A-Z]\.)")
-    for p in paras:
+    ref_start = None
+    for i, p in enumerate(paras):
+        if re.match(r"^\s*(?:references?|bibliography|works\s+cited|"
+                    r"literature\s+cited)\s*:?\s*$", p or "", re.I):
+            ref_start = i + 1
+    for idx, p in enumerate(paras):
         text = p or ""
         # The number and its entry share one paragraph in a Zotero bibliography
         # field ("43.\nNurk, S. ...") and are separate paragraphs elsewhere.
@@ -3709,11 +3717,14 @@ def _numbered_reference_titles(paras: list) -> dict:
             if rest.strip():
                 current = None
             continue
-        m1 = re.match(r"^\s*(\d{1,4})\.\s+(\S.*)$", text, re.S)
-        if m1 and entry_like.search(m1.group(2).strip()):
-            out[int(m1.group(1))] = m1.group(2).strip()
-            current = None
-            continue
+        if ref_start is not None and idx >= ref_start:
+            m1 = re.match(r"^\s*(\d{1,4})\.\s+(\S.*)$", text, re.S)
+            if m1 and entry_like.search(m1.group(2).strip()):
+                # `setdefault`: a genuine two-line entry already recorded for
+                # this number wins over a later same-number line.
+                out.setdefault(int(m1.group(1)), m1.group(2).strip())
+                current = None
+                continue
         if current is not None and text.strip():
             out[current] = (out[current] + " " + text.strip()).strip()
             current = None
@@ -6094,15 +6105,11 @@ def _stage_dangling_report(ctx: Ctx, final: dict):
                     except ValueError:                        # pragma: no cover -- inside root
                         rep = dict(rep, artifact=str(p))
                     return rep
-    p = ctx.reports_dir / "PKG2_journal_submission.json"
-    if p.is_file():
-        rep = read_json(p, revive=False, lenient=True)
-        if isinstance(rep, dict):
-            try:
-                rep = dict(rep, artifact=p.relative_to(ctx.root).as_posix())
-            except ValueError:                                # pragma: no cover -- inside root
-                rep = dict(rep, artifact=str(p))
-            return rep
+    # NO fallback to reports/PKG2_journal_submission.json: that record is
+    # written by the POST-PIN journal-submission assembly, so it describes a
+    # derived copy, not the champion's published bytes. Reporting it as the
+    # champion's own repair would claim a removal the published package does
+    # not carry; the publication-time scan reports those pointers instead.
     return None
 
 

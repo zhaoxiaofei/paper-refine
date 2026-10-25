@@ -161,10 +161,11 @@ EVIDENCE_DIRNAMES = ("raw_data", "human_review_feedback", "llm_review_feedback")
 # word preceded by a role qualifier (`reviewer_response`, `author_feedback`)
 # still names the authors' reply / the editors' letter.
 _NON_MANUSCRIPT_RE = re.compile(
-    r"(?<![a-z])(?:feedback|referee|reviewers?|editors?|editorial|"
+    r"(?<![a-z])(?:feedbacks?(?:[-_ ]?(?:form|report|letter|comments?|summary|"
+    r"to[-_ ]?authors))?|referees?|reviewers?|editors?|editorial|"
     r"decision[_ \-]*(?:letter|notice|email))(?![a-z])", re.I)
 _REPLY_RE = re.compile(
-    r"(?<![a-z])(?:response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)(?![a-z])",
+    r"(?<![a-z])(?:responses?|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)(?![a-z])",
     re.I)
 # A scientific compound that merely ENDS in a role word is not a reply: these
 # were silently dropped from every manuscript sweep (M1/M2/M4/M19).
@@ -198,7 +199,7 @@ def _non_manuscript(name: str) -> bool:
         return True
     if _COVER_WORD_RE.search(base):
         return False            # a cover letter IS a submission document
-    if _ARTICLE_TYPE_MANUSCRIPT_RE.match(re.sub(r"\.[A-Za-z0-9]{1,6}$", "", base)):
+    if _ARTICLE_TYPE_MANUSCRIPT_RE.match(re.sub(r"(?:\.[A-Za-z0-9]{1,6}){1,2}$", "", base)):
         return False            # the authors' article-type manuscript, not a letter
     cleaned = _SCIENCE_ROLE_COMPOUND_RE.sub(" ", base)
     if _REPLY_RE.search(cleaned):

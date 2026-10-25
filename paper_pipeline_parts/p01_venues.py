@@ -1363,21 +1363,6 @@ def _normalized_article_type_names(profile) -> list:
     return _normalized_type_spellings((profile.article_type_id, label))
 
 
-def _all_article_type_names(profile) -> list:
-    """EVERY article type's name spellings (normalized), or [].
-
-    A venue-level template resolver (the pack builder) has no selected run
-    type: a template named for ANY of the venue's own article types is a
-    manuscript template, never a cover letter.
-    """
-    if profile is None:
-        return []
-    out = []
-    for tid, label, _carries in profile.article_types():
-        out.extend(_normalized_type_spellings((tid, label)))
-    return list(dict.fromkeys(out))
-
-
 def article_type_manuscript_names(ctx=None) -> list:
     """The run's selected article type as DOCX-name spellings ([] when unset)."""
     prof = venue_profile_of(ctx, required=False)
@@ -2353,7 +2338,12 @@ def build_venue_templates(venue_id, root=None, profiles_dir=None, exemplar_dir=N
         off_files.extend(_exemplar_files(d))
         off_archives.extend(p for p in sorted(d.rglob("*.zip")) if p.is_file())
     off_records, off_skipped = [], []
-    _tmpl_names = _all_article_type_names(
+    # The pack builder has no selected run type: use the profile's DEFAULT type
+    # names. Feeding EVERY type in made a second article-type template
+    # (a Letter to the Editor) a manuscript sample, which emptied the venue's
+    # mandatory-section set and re-admitted its boilerplate as venue-wide
+    # statements -- the very defect F067/F068 removed.
+    _tmpl_names = _normalized_article_type_names(
         _profile_for_template_names(vid, root, profiles_dir))
     for p in off_files:
         # EVERY suffix, not only .docx: a Cover_Letter.tex is a deliverable too,

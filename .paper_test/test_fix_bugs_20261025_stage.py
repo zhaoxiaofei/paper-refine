@@ -916,15 +916,43 @@ def test_step2_findings():
           str(lines[:2]))
     check("venue_summary points at set-article-type",
           "set-article-type" in pp.venue_summary(vctx))
+    # ... and the advertised remedy must actually run on that same root.
+    (vroot / "pipeline_config.json").write_text(
+        json.dumps({"venue": "generic", "article_type": "typo"}), encoding="utf-8")
+    (vroot / "state.json").write_text(json.dumps({
+        "version": 3, "runs": {}, "rounds": {}, "pinned": [], "log": [],
+        "source_manifest": {},
+        "config": {"venue": "generic", "article_type": "typo"}}), encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, str(WS / "paper_pipeline.py"), "set-article-type",
+         "--root", str(vroot), "--list"],
+        cwd=str(WS), text=True, capture_output=True)
+    check("the advertised set-article-type remedy runs on the broken-type root",
+          proc.returncode == 0 and "Article types" in (proc.stdout + proc.stderr),
+          f"rc={proc.returncode} out={(proc.stdout + proc.stderr)[-400:]!r}")
 
     # F049: the common one-line numbered entry is a reference; a numbered body
-    # list is not.
+    # list is not, and a body item must not overwrite a genuine entry.
     refs = pp._numbered_reference_titles(
-        ["43. Nurk, S. et al. The complete sequence. Science 372, 984 (2021)."])
+        ["References",
+         "43. Nurk, S. et al. The complete sequence. Science 372, 984 (2021)."])
     check("a one-line numbered reference entry is read", refs.get(43, "").startswith("Nurk, S."),
           str(refs))
     check("a numbered body list is not read as a bibliography",
           pp._numbered_reference_titles(["1. Do the first thing carefully."]) == {})
+    check("a one-line entry outside a references section is not a reference",
+          pp._numbered_reference_titles(
+              ["43. Nurk, S. et al. Science 372, 984 (2021)."]) == {})
+    check("a body list item cannot overwrite the real entry",
+          pp._numbered_reference_titles(
+              ["1. Cells were cultured at 37 C (2022).", "References",
+               "1. Nurk, S. et al. Science 372, 984 (2021).",
+               "1. Genome assembly was performed with Flye (2023)."]).get(1, "")
+          .startswith("Nurk, S."),
+          str(pp._numbered_reference_titles(
+              ["1. Cells were cultured at 37 C (2022).", "References",
+               "1. Nurk, S. et al. Science 372, 984 (2021).",
+               "1. Genome assembly was performed with Flye (2023)."])))
 
     # F051: publication reports the stage's own PKG-2 record (it never removes
     # a reference itself), and cites the artifact that really exists.
@@ -965,6 +993,26 @@ def test_step2_findings():
     check("the readme cites the real stage artifact, not a never-written PKG2 name",
           "PKG2_r1_a2_revise.json" in readme and "PKG2_final_clean" not in readme,
           readme[-500:])
+    # A post-pin journal-submission report describes a DERIVED copy, never the
+    # champion's published bytes: it must not be reported as the stage repair.
+    (froot / "reports" / "PKG2_journal_submission.json").write_text(
+        json.dumps({"label": "journal submission", "removed": 3, "files": []}),
+        encoding="utf-8")
+
+    class BaseChampionCtx:
+        def __init__(self):
+            self.root = froot
+            self.reports_dir = froot / "reports"
+
+        def run(self, rid):
+            return {"id": "r1_a1", "status": "done"} if rid == pp.rid_a1(1) else None
+
+        def sandbox_of(self, rec):
+            return froot / "runs" / "r1_a1"
+
+    check("a post-pin journal record is not the champion's repair",
+          pp._stage_dangling_report(BaseChampionCtx(),
+                                    {"stored": {"champion": "a1", "round": 1}}) is None)
 
     # F066: read-only roles never get the producer's add/edit/delete contract.
     for role in ("review", "judge"):
@@ -981,8 +1029,12 @@ def test_step2_findings():
     # is a cover, never the LaTeX sample.
     tdir = scratch("stage_678_")
     vid = "testvenue"
-    (tdir / f"{vid}.json").write_text(json.dumps({"id": vid, "label": "Test Venue"}),
-                                      encoding="utf-8")
+    (tdir / f"{vid}.json").write_text(json.dumps({
+        "id": vid, "label": "Test Venue",
+        "default_article_type": "article",
+        "article_types": [{"id": "article", "label": "Article"},
+                          {"id": "letter-to-the-editor",
+                           "label": "Letter to the Editor"}]}), encoding="utf-8")
     off = tdir / f"{vid}.official"
     off.mkdir()
     for name in ("Main_Template.docx", "Letter_to_the_Editor.docx"):
@@ -1004,6 +1056,11 @@ def test_step2_findings():
     check("the pack builder skips a .tex cover-letter template",
           any(s.get("file") == "Cover_Letter.tex" for s in pack.get("skipped") or []),
           str(pack.get("skipped"))[:300])
+    check("a letter-type template is not parsed into the venue-wide skeleton",
+          any(s.get("file") == "Letter_to_the_Editor.docx"
+              and "cover-letter template" in str(s.get("why") or "")
+              for s in pack.get("skipped") or []),
+          str(pack.get("skipped"))[:400])
 
     # F076: every manuscript scan uses the no-symlink corpus walker.
     sdir = scratch("stage_076_")
@@ -1060,6 +1117,15 @@ def test_step2_findings():
     check("a disabled cap on a publishing venue says DISABLED, not unpublished",
           "DISABLED" in disabled and "is not published" not in disabled
           and "250" in disabled, disabled[:300])
+    # The ASSEMBLED review prompt must agree with the caption rule: the M18
+    # directive may not claim the venue publishes no limit while the venue's
+    # published number is in the same prompt.
+    rprompt = pp.review_prompt(scratch("stage_m18prompt_"), "r1_review", 1,
+                               caption_limit=0, venue=example)
+    check("the assembled M18 directive does not call a published limit unpublished",
+          "publishes no per-type legend limit" not in rprompt
+          and "publishes a figure-legend limit of 250 words" in rprompt,
+          rprompt[:400])
 
     # F083: a latexmk timeout kills the whole compiler process group.
     ldir = scratch("stage_083_")
@@ -1109,9 +1175,11 @@ def test_step2_findings():
     }
     manuscripts = ["dose_response.txt", "immune_response.md.txt",
                    "biofeedback_results.txt", "feedback_loop.md",
-                   "response_surface.md", "letter_to_the_editor.docx"]
-    replies = ["response_to_reviewers.docx", "reviewer_feedback.txt",
-               "editor_decision.pdf"]
+                   "response_surface.md", "letter_to_the_editor.docx",
+                   "letter_to_the_editor.docx.txt", "editorial.tex.txt"]
+    replies = ["response_to_reviewers.docx", "responses_to_reviewers.txt",
+               "reviewer_feedback.txt", "FeedbackForm.docx", "feedbackreport.docx",
+               "referees_report.docx.txt", "editor_decision.pdf"]
     for name, pred in scripts.items():
         mod = load(f"stage_f109_{name}",
                    WS / "paper-skills" / "paper-review" / "scripts" / f"{name}.py")

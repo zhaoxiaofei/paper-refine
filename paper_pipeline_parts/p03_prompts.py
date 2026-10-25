@@ -2451,10 +2451,13 @@ def zotero_cli_block(role: str, mode: str = DEFAULT_ZOTERO_MODE,
     # review/judge are read-only and report a bad field instead of repairing it.
     if role == "edit":
         field_rule = ZOTERO_FIELD_CONTINUITY_RULE
+        edit_guidance = ZOTERO_EDIT_GUIDANCE_EDIT
     elif role == "rewrite":
         field_rule = ZOTERO_FIELD_CONTINUITY_RULE_REWRITE
+        edit_guidance = ZOTERO_EDIT_GUIDANCE_REWRITE
     else:
         field_rule = ZOTERO_FIELD_CONTINUITY_RULE_READONLY
+        edit_guidance = ZOTERO_EDIT_GUIDANCE_READONLY
     if mode == "off":
         return ZOTERO_CLI_RULE_OFF_BASE + ZOTERO_CLI_RULE_OFF_NOTE + field_rule
     if role == "edit":
@@ -2475,6 +2478,7 @@ def zotero_cli_block(role: str, mode: str = DEFAULT_ZOTERO_MODE,
             .replace("@@ZOTERO_LIBRARY@@", library)
             .replace("@@ZOTERO_LEDGER@@", ledger)
             .replace("@@ZOTERO_STAGE@@", ZOTERO_STAGE_CLAUSES[stage_key])
+            .replace("@@ZOTERO_EDIT_GUIDANCE@@", edit_guidance)
             .replace("@@ZOTERO_FIELD_CONTINUITY@@", field_rule))
 
 
