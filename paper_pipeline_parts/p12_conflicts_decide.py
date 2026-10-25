@@ -4606,13 +4606,32 @@ def is_structural_reference_line(before: str) -> bool:
     return False
 
 
-def _drop_reference_sentences_text(text: str, spans: list) -> tuple:
-    """(new_text, removed, structural): the prose SENTENCES of a text document.
+_FACT_LABEL_RE = re.compile(
+    r"\b(?:fig(?:ure)?|table|section|eq(?:uation)?|appendix|supp(?:lementary)?|"
+    r"data|code)\.?\s*[A-Za-z]?\d+[A-Za-z0-9.-]*", re.I)
 
-    `drop_sentences` with one text-document rule: a heading line the reference
+
+def sentence_carries_scientific_fact(text: str) -> bool:
+    """True when a sentence carries a number outside a figure/table/section label.
+
+    The PKG-2 mechanical removal is a packaging repair, not a finding
+    resolution: a sentence that carries a measured value, count, p-value or
+    other numeric fact must be rewritten by the revision, not silently deleted.
+    A bare label (`Figure S3`, `Table 2`) is not a fact.
+    """
+    stripped = _FACT_LABEL_RE.sub(" ", str(text or ""))
+    return bool(re.search(r"\d", stripped))
+
+
+def _drop_reference_sentences_text(text: str, spans: list) -> tuple:
+    """(new_text, removed, structural, held): the prose SENTENCES of a text document.
+
+    `drop_sentences` with two text-document rules: a heading line the reference
     does not touch is never swallowed (a heading is not part of the sentence
     under it), so `Methods\\nWe ran code/analysis.py ...` loses only its second
-    line. A reference that is a document INCLUDE rather than prose
+    line; and a sentence carrying a numeric fact is KEPT (returned in `held`)
+    so the caller can report it for a prose rewrite instead of deleting the
+    fact. A reference that is a document INCLUDE rather than prose
     (`\\includegraphics{...}`, a Markdown link target) is left alone entirely:
     it comes back in `structural` so the caller reports it
     (`is_structural_reference_line`). Everything else is the shared sentence
@@ -4620,7 +4639,7 @@ def _drop_reference_sentences_text(text: str, spans: list) -> tuple:
     """
     mod = _format_module()
     text = text or ""
-    prose, structural = [], []
+    prose, structural, held = [], [], []
     for s, e in sorted(tuple(x) for x in (spans or ())):
         line_start = text.rfind("\n", 0, s) + 1
         (structural if is_structural_reference_line(text[line_start:s])
@@ -4661,16 +4680,23 @@ def _drop_reference_sentences_text(text: str, spans: list) -> tuple:
         while a > 0 and text[a - 1] in " \t":
             a -= 1
         if b > a:
-            windows.append((a, b))
+            if sentence_carries_scientific_fact(text[a:b]):
+                # Keep the fact and report the pointer; a mechanical deletion
+                # must not turn a data statement into a clean-looking package.
+                held.append((a, b))
+            else:
+                windows.append((a, b))
     if not windows:
-        return text, [], [text[s:e] for s, e in structural]
+        return (text, [], [text[s:e] for s, e in structural],
+                [text[s:e] for s, e in held])
     out, removed, pos = [], [], 0
     for a, b in windows:
         out.append(text[pos:a])
         removed.append(text[a:b].strip())
         pos = b
     out.append(text[pos:])
-    return "".join(out), removed, [text[s:e] for s, e in structural]
+    return ("".join(out), removed, [text[s:e] for s, e in structural],
+            [text[s:e] for s, e in held])
 
 
 def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
@@ -4683,8 +4709,9 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
     "skipped": [reason, ...]}], "removed": n, "skipped": n, "remaining": [row, ...],
     "ok": bool}. `remaining` is the re-scan of the repaired tree: a non-empty list
     means something the mechanical layer may not touch is still dangling (a
-    structural file, a sentence carrying a live citation field), and the caller
-    reports it as an author action.
+    structural file, a sentence carrying a live citation field, or a sentence
+    carrying a numeric fact held for a prose rewrite), and the caller reports
+    it as an author action.
 
     The orchestrator's own artifact (`artifacts_dir`) receives the FULL record --
     the removed sentences verbatim -- because a top-level JSON inside the package
@@ -4810,7 +4837,7 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
                 if text is not None and mod is not None and hasattr(mod, "sentence_windows"):
                     spans = pkg2_reference_spans(text, patterns, index, exempt=_exempt_ref)
                     if spans:
-                        new_text, removed, structural = _drop_reference_sentences_text(
+                        new_text, removed, structural, held = _drop_reference_sentences_text(
                             text, spans)
                         if removed:
                             after_spans = pkg2_reference_spans(new_text, patterns, index,
@@ -4824,6 +4851,11 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
                                 entry["skipped"].append(
                                     "the edit would not reduce the reference count; left to "
                                     "the author")
+                        for ref in held:
+                            entry["skipped"].append(
+                                f"{ref!r} carries a numeric fact and a dangling reference: "
+                                f"the fact was KEPT and the pointer must be rewritten in "
+                                f"prose")
                         for ref in structural:
                             entry["skipped"].append(
                                 f"{ref!r} is a document INCLUDE (a command argument or a "
@@ -4849,7 +4881,8 @@ def strip_dangling_references_in_dir(dirp: Path, areas, label: str,
         report["skipped"] += len(entry["skipped"])
     # `remaining` keeps the PKG-2 meaning: a pointer at material the package
     # HOLDS but the submission does not carry, which the mechanical removal could
-    # not take out (a structural file, a sentence carrying a live citation field).
+    # not take out (a structural file, a sentence carrying a live citation
+    # field, or a numeric fact held for a prose rewrite).
     # The rows this scan also reports for a name the package carries NOWHERE
     # (`PKG-3`: a script named in Methods that no file in the package matches) are
     # NOT removals the pipeline may attempt, and they must not make this repair

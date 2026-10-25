@@ -104,6 +104,12 @@ their coverage is still enumerated.
 
 ## D4 — New findings (outputs: `OUT2/findings_extra.md` + `findings_extra.json`)
 
+A discovery finding is still a defect under the corpus's recorded rules, not a preference:
+do not invent a structural requirement. A sentence that reports a fact, number, definition,
+method or limitation is content; it is not an orphan merely because it has no subheading or
+reads like a table row. A genuine cohesion/placement finding must name the reader-facing break
+and propose a CONNECT or RELOCATE fix -- never deletion of the fact (shared rule D8).
+
 Every new issue found gets an `X-001`… ID (separate namespace from `F-*`, so
 paper-revise can merge both without collisions), formatted exactly like a
 standard finding (location, category, check = the gap-row class label,

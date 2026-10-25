@@ -473,6 +473,9 @@ priority.
 - accession number inconsistent, malformed, or missing where data availability requires it
 - software version inconsistent between Methods and supplementary/code
 - percentages that do not sum to ~100 where they logically must
+- a range or interval whose lower bound is greater than its upper bound -- include unit-bearing
+  physical ranges (elevation, depth, time, concentration), not only confidence intervals; the
+  ordered pair is the defect, and a decimal-only reading misses it
 - numbers in figures that contradict text numbers (if figure is readable; else `unresolvable`)
 
 ## M5 — Mandatory-items sweep (script-assisted: inventory + manual)

@@ -614,6 +614,9 @@ priority.
 - accession number inconsistent, malformed, or missing where data availability requires it
 - software version inconsistent between Methods and supplementary/code
 - percentages that do not sum to ~100 where they logically must
+- a range or interval whose lower bound is greater than its upper bound -- include unit-bearing
+  physical ranges (elevation, depth, time, concentration), not only confidence intervals; the
+  ordered pair is the defect, and a decimal-only reading misses it
 - numbers in figures that contradict text numbers (if figure is readable; else `unresolvable`)
 
 ## M5 — Mandatory-items sweep (script-assisted: inventory + manual)
@@ -1980,6 +1983,12 @@ records "no anomalies — checked: <locations>". Probes are judgment work, but
 their coverage is still enumerated.
 
 ## D4 — New findings (outputs: `OUT2/findings_extra.md` + `findings_extra.json`)
+
+A discovery finding is still a defect under the corpus's recorded rules, not a preference:
+do not invent a structural requirement. A sentence that reports a fact, number, definition,
+method or limitation is content; it is not an orphan merely because it has no subheading or
+reads like a table row. A genuine cohesion/placement finding must name the reader-facing break
+and propose a CONNECT or RELOCATE fix -- never deletion of the fact (shared rule D8).
 
 Every new issue found gets an `X-001`… ID (separate namespace from `F-*`, so
 paper-revise can merge both without collisions), formatted exactly like a

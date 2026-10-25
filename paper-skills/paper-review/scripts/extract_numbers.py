@@ -8,7 +8,9 @@ results vs figure legend vs supplementary).
 
 Same-label, different-value conflicts (e.g. a p-value given as 0.021 in one
 place and 0.031 in another for the same test) are the classic long-range miss;
-the artifact makes them enumerable.
+the artifact makes them enumerable. A separate triage section lists every
+same-unit lower/upper pair printed high-to-low, because a physical range is
+ordered like a CI and a decimal-only reading misses integer unit ranges.
 
 Contexts are derived from in-file section headings ("Abstract", "Results",
 "Methods", "Figure legends", "Table 12", ...) with the filename role as
@@ -77,6 +79,24 @@ LABEL_PATTERNS = [
     ("R2", re.compile(r"\bR(?:\^?2|²)\s*[:=]\s*(0?\.\d+|\d\.\d+)\b", re.I)),
     ("fold", re.compile(r"\b(\d+\.?\d*)[- ]?fold\b", re.I)),
 ]
+# A lower/upper range printed in reverse order. The M4 label checks same-metric
+# conflicts, but a unit-bearing physical range (an elevation, depth, time or
+# concentration range) is an ordered interval too and was previously left to
+# attention. This is a TRIAGE row, not an automatic finding: a directional
+# sequence can legitimately run backwards, so the reviewer disposes each row.
+# The unit class omits the sentence period, so `30 m.` still yields unit `m`.
+_RANGE_UNIT = r"(?:%|°C|[A-Za-zµμ][A-Za-z0-9/·^-]*)"
+_RANGE_UNITS = {
+    "m", "km", "cm", "mm", "nm", "um", "µm", "μm", "kg", "g", "mg", "µg", "ug",
+    "s", "ms", "min", "h", "hr", "d", "day", "days", "week", "weeks", "yr",
+    "year", "years", "%", "°c", "pa", "kpa", "mpa", "hz", "khz", "mhz", "ghz",
+    "l", "ml", "µl", "ul", "mol", "mmol", "m/s", "km/h", "ha", "db", "fold",
+}
+RANGE_RE = re.compile(
+    r"\b(?:from\s+)?(?P<low>-?\d+(?:\.\d+)?)\s*(?P<u1>" + _RANGE_UNIT + r")"
+    r"\s+(?:to|through)\s+"
+    r"(?P<high>-?\d+(?:\.\d+)?)\s*(?P<u2>" + _RANGE_UNIT + r")\b"
+)
 ACCESSION_RE = re.compile(r"\b(GSE\d+|PRJNA\d+|SR[APRX]\d+|E-MTAB-\d+|zenodo\.\d+)\b", re.I)
 VERSION_RE = re.compile(r"\b(?:v(?:er(?:sion)?)?\.?\s?)(\d+(?:\.\d+)+)\b", re.I)
 # The reference-role file names: "ref", "refs", "references", "ref-list" --
@@ -262,6 +282,7 @@ def main():
     metrics = defaultdict(list)     # (label, value) -> occurrences
     accessions = defaultdict(list)
     versions = defaultdict(list)
+    descending_ranges = []
     reference_notes = []
 
     for fname in sorted(os.listdir(corpus)):
@@ -308,6 +329,19 @@ def main():
             for m in VERSION_RE.finditer(raw):
                 versions[m.group(1)].append({"file": fname, "line": li,
                                              "excerpt": raw.strip()[:120]})
+            for m in RANGE_RE.finditer(raw):
+                u1, u2 = m.group("u1").casefold(), m.group("u2").casefold()
+                if u1 != u2 or u1 not in _RANGE_UNITS:
+                    continue
+                try:
+                    low, high = float(m.group("low")), float(m.group("high"))
+                except ValueError:
+                    continue
+                if low > high:
+                    descending_ranges.append({
+                        "file": fname, "line": li, "unit": m.group("u1"),
+                        "low": m.group("low"), "high": m.group("high"),
+                        "context": ctx, "excerpt": raw.strip()[:200]})
 
     # conflicts: same label, different values, in different contexts/files
     by_label = defaultdict(lambda: defaultdict(list))
@@ -371,6 +405,14 @@ def main():
                 "%s: [%s]" % (ctx, ", ".join(vs)) for ctx, vs in c["values_by_context"].items())))
     else:
         md.append("- none.")
+    md += ["", "## Descending numeric ranges (audit each: interval vs directional sequence)", ""]
+    if descending_ranges:
+        for r in descending_ranges:
+            md.append("- %s:%d (%s): %s %s to %s %s — %s" % (
+                r["file"], r["line"], r["context"], r["low"], r["unit"],
+                r["high"], r["unit"], r["excerpt"].replace("|", "\\|")))
+    else:
+        md.append("- none.")
 
     with open(os.path.join(art_dir, "M4_numbers.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(md) + "\n")
@@ -379,9 +421,11 @@ def main():
                                for k, v in sorted(metrics.items())],
                    "accessions": dict(accessions), "versions": dict(versions),
                    "auto_conflicts": conflicts,
-                   "cross_context_divergences": candidates}, f, indent=2)
-    print("M4 artifact: %d metric values, %d accessions, %d versions, %d conflicts, %d cross-context divergence candidates." % (
-        len(metrics), len(accessions), len(versions), len(conflicts), len(candidates)))
+                   "cross_context_divergences": candidates,
+                   "descending_ranges": descending_ranges}, f, indent=2)
+    print("M4 artifact: %d metric values, %d accessions, %d versions, %d conflicts, %d cross-context divergence candidates, %d descending ranges." % (
+        len(metrics), len(accessions), len(versions), len(conflicts), len(candidates),
+        len(descending_ranges)))
 
 
 if __name__ == "__main__":

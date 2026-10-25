@@ -384,6 +384,10 @@ of its references first (references/sweeps.md, references/discovery.md), then ex
    blind to provenance and is never handed your list: it re-derives its own discovery findings
    over every side, so keep every id stable and every evidence quote exactly locatable in case a
    judge's own pass re-finds the same defect.
+   Discovery findings obey shared rule D8: do not invent a structural requirement (a sentence
+   that reports a fact is not an orphan merely because it lacks its own subheading or reads like
+   a table row). A genuine cohesion/placement finding must name the reader-facing break and
+   propose a CONNECT or RELOCATE fix, never deletion of the fact.
 5. The skill's verification pass and acceptance checks before finalizing.
 
 @@PRIOR_ROUND@@
@@ -690,6 +694,19 @@ Explicit requirements that override skill defaults where they conflict:
   9. @@M19_REVISE_RULE@@
   10. @@M20_REVISE_RULE@@
   11. @@EVIDENCE_PACK_RULE@@
+  12. FACT-PRESERVING REPAIR (shared rule D8). A finding about a wrong value, number, unit, name,
+     definition, p-value, significance word or claim is resolved by writing the CORRECT fact, never
+     by removing the sentence, paragraph, table row, glossary entry, figure legend or passage that
+     carries it. A finding that a factual statement is orphaned, disconnected, misplaced, unused,
+     redundant or structurally unwanted is resolved by relocating, merging, or connecting the
+     statement; it is not authority to delete the fact. A separate "unused", "redundant", length,
+     packaging or style finding never cancels a correction another finding requires. An acronym
+     definition or glossary entry is a fact: correct a wrong expansion and KEEP the definition
+     (mark a genuinely unused one manual-required if it should go); do not delete it. If the only
+     available remedy would remove a fact, leave the fact in the package and mark the finding
+     manual-required -- do not trade the fact for a green finding. When a value is corrected,
+     propagate the correction to every occurrence of the same quantity in every document; a
+     single-site fix is incomplete.
 
 @@REWRITE_PARITY@@
 
@@ -822,9 +839,17 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
      * `drop`     — the finding is NOT real, and you say exactly why, with evidence: the quoted
                     text does not exist in base/ (quote the nearest real text), the finding
                     misreads the sentence, it duplicates another finding (name the id it
-                    duplicates), or it depends on a guideline/version fact you can show is not
-                    current. A drop is a DISPOSITION the revisers will honor, so it needs the
-                    strongest evidence you can produce — never "I disagree".
+                    duplicates), it invents a requirement the corpus's recorded rules do not
+                    state, or it depends on a guideline/version fact you can show is not current.
+                    A drop is a DISPOSITION the revisers will honor, so it needs the strongest
+                    evidence you can produce — never "I disagree".
+   A finding that a factual sentence merely lacks a section home, a subheading, a table, or a
+   "structural" place is a preference, not a defect, unless the corpus's recorded rules require
+   that structure. A quote being present proves the phenomenon, not that it violates a bar. And
+   no confirmed finding may be resolved by deleting the fact it quotes: if the finding's only
+   remedy would remove a factual claim, number, definition, limitation or conclusion, drop it or
+   confirm only the reader-facing cohesion defect with a remedy that relocates or connects the
+   fact (shared rule D8). This applies to X-* exactly like F-*.
    SILENCE IS NOT ALLOWED: every frozen id appears exactly once in audit.json, as confirm or drop.
    A finding you cannot decide from the corpus is `confirm` with a note (the reviser sees it) —
    dropping on "cannot tell" is forbidden. This applies to the X-* discovery ids exactly like the
@@ -1139,7 +1164,10 @@ integrated/CHANGELOG.md, because downstream judges and the human gate receive on
      present, resolved or not applicable -- the reconciliation your ledger must carry.
   3. Confirm explicitly that nothing in integrated/ is worse than non_revised/ (no deleted claims,
      softened limitations, or broken cross-references), and that EVERY donor directory was opened
-     and read (list them in the ledger).
+     and read (list them in the ledger). A fact is corrected, never removed: when an X-* or donor
+     finding calls a factual sentence orphaned, unused, redundant or structurally unwanted,
+     relocate, merge or connect that sentence; do not delete it to clear the finding (shared rule
+     D8). Correct every occurrence of a corrected value, not only the donor's copy.
 
 @@DEFECT_CLASS_RULE@@
 
@@ -2689,6 +2717,10 @@ Layout (paths relative to the sandbox root):
      * a shipped source artifact that cannot be used as shipped (degenerate values, rows from a
        run the text says did not happen, a stale sidecar, a file that contradicts its own note);
      * anything else you can show.
+   Do NOT invent a structural requirement. A standalone sentence that reports a fact is content,
+   not an orphan, merely because it lacks its own subheading or reads like a table row; if the
+   reader genuinely cannot connect it, file a writing/coherence finding that names the break and
+   requires a CONNECT or RELOCATE fix, never a deletion (shared rule D8).
    For every AREA you examine, `coverage.md` states how many candidates you considered and how
    many findings came out of it. A candidate that turns out clean is a one-line disposition, not
    a finding.

@@ -32,7 +32,7 @@ The review's **rewrite-parity findings (M25–M29)**, **source-hierarchy finding
 ## Hard rules
 
 1. **Originals read-only.** Record sha256 of EVERY original file BEFORE any edit (`WORK/checksums_before.txt`); never modify anything outside `REVISED/` and `code/`; re-verify byte-identity at the end (V4) and confirm it in the final report.
-2. **Never invent.** No fabricated content, citations, data, results, or accession numbers. Missing mandatory items are scaffolded only with clearly marked `[AUTHOR TO COMPLETE: ...]` placeholders, every one listed in the final report. Scientific claims, interpretations, and the strength of conclusions are never altered on your own initiative (rule E6).
+2. **Never invent, and never repair by deletion.** No fabricated content, citations, data, results, or accession numbers. Missing mandatory items are scaffolded only with clearly marked `[AUTHOR TO COMPLETE: ...]` placeholders, every one listed in the final report. Scientific claims, interpretations, and the strength of conclusions are never altered on your own initiative (rule E6). An error is corrected, not removed: a wrong value, number, unit, definition, p-value or significance word gets the correct fact; a sentence called orphaned, misplaced, unused, redundant or structurally awkward is relocated, merged or connected. A structural/packaging/style/length finding never authorizes deleting the fact it quotes, and a true duplicate may go only when the finding names it and one copy survives. If no non-destructive repair exists, use `manual-required` and leave the fact in the package.
 3. **No silent skip.** EVERY finding ID — `F-*` from findings.json and `X-*` from findings_extra.json (kept as separate ID namespaces) — appears exactly once in the REVISION LEDGER with a final status. "Not addressed" is not an allowed status. Every mechanical step must produce its artifact in `WORK/`; a step without its artifact is not done.
 4. **One edit per finding instance.** Never aggregate edits. Every edit maps to a finding ID, or to a rescan ID `R-xxx` for issues introduced or discovered during revision.
 5. **ENUMERATE → ARTIFACT → APPLY → VERIFY for every mechanical step.** Script-enumerate all affected occurrences (the review skill's `extract_occurrences.py` is bundled for this — copy it into `WORK/`), record every occurrence as a row (including rows later judged OK), act row by row, then verify row by row. Propagation by attention alone is forbidden.
@@ -788,9 +788,11 @@ PROVES a value (a column sum/min/max, or a single cell — e.g. `45,365` = the s
 of `n_cells_total`). A row whose source is still empty is yours: find the
 analysis output, the cited value or the Methods parameter, or record why it
 cannot be sourced. A number in the abstract, a legend or the cover letter may
-not stay unsourced — it is proved, cited, a declared parameter, or removed as
-decoration (never silently, and never by changing a scientific claim). Removing
-a number is a `preservation`-tier change: record it in CHANGELOG.md.
+not stay unsourced — it is proved, cited, or a declared parameter. A number that
+a finding identifies as a factual claim is CORRECTED, never removed; only a
+genuinely decorative number with no claim or data behind it may be removed, and
+removing it is a `preservation`-tier change recorded in CHANGELOG.md. Never
+delete a number to make a finding disappear.
 
 ## E13 — A to-be-submitted document may not point at what the submission does not carry
 
@@ -800,8 +802,11 @@ explicitly submits); everything else in the corpus — the analysis code under `
 left out, so a pointer at one of them is a reference no reader, editor or reviewer can resolve.
 The orchestrator seeds the rows (`work/EVIDENCE_PACK.md`, "Submission-surface references",
 PKG-2: an area-prefixed path AND a plain file name the package carries only outside the
-submission) and REMOVES the sentence mechanically if it is still there when the package is
-published — so a pointer left in place costs whatever the sentence said. REWRITE it instead:
+submission) and REMOVES a POINTER-ONLY sentence mechanically if it is still there when the
+package is published — a sentence carrying a numeric fact is held and reported, never deleted.
+That removal is a last-resort packaging repair, never a finding resolution: REWRITE the sentence
+so it keeps the fact (shared rule D8), or carry it to `MANUAL_STEPS.md` when no honest rewrite
+exists.
 
 * name where the material really is — a shipped supplementary file, a public repository with a
   pinned commit, a statement the Data availability block already carries — or carry the fact
@@ -816,6 +821,6 @@ published — so a pointer left in place costs whatever the sentence said. REWRI
   is not removed mechanically: record it in `MANUAL_STEPS.md` with the sentence quoted, or, when
   the file is prose and your own edit can carry it, rewrite it in the revision.
 
-Removing the pointing sentence is a `preservation`-tier change when it carries a scientific
-fact: prefer the rewrite, and record what left the text in CHANGELOG.md when deletion is the
-only honest option.
+Removing a pointing sentence that carries a scientific fact is a preservation defect, not an
+acceptable repair: keep the fact and rewrite the pointer; if no honest rewrite exists, carry the
+sentence to `MANUAL_STEPS.md`. Record any pointer-only deletion in CHANGELOG.md.

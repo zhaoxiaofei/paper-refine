@@ -268,7 +268,11 @@ from pathlib import Path
 #   (each file under 10,000 lines), and the backward-compatibility aliases
 #   (legacy input-area spellings, the ATC shorthand flags, `--non-strict-
 #   artifacts`, the boolean artifact-policy keys, the `none` revision-mode
-#   alias and unsalted judge tokens) are removed.
+#   alias and unsalted judge tokens) are removed. Facts are not a removal
+#   surface: a wrong value is corrected, a misplaced/unused/structural fact is
+#   relocated or connected, acronym definitions are kept, PKG-2 holds a
+#   numeric fact instead of deleting its sentence, and M4 enumerates descending
+#   unit-bearing ranges (not only decimal CIs).
 # 3.8.0 -- THE PROBE REVIEW (`setup --probe-review`, default on; `--no-probe-review`
 #   or `set-probe-review off` is the off switch). One extra INDEPENDENT session
 #   per full-scope round, launched IN PARALLEL with the checklist review and

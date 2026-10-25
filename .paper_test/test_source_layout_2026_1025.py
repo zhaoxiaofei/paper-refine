@@ -141,11 +141,30 @@ def test_champion_select_cli():
     check("decide accepts the judge override", ns.champion_select == "judge")
 
 
+def test_fact_preservation_prompts():
+    print("\n== every role is told that a fact is not a removal surface ==")
+    pp = load("layout_pipeline_facts", WS / "paper_pipeline.py")
+    check("the shared decision block carries rule D8",
+          "A FACT IS NOT A REMOVAL SURFACE" in pp.SHARED_DECISION_BLOCK)
+    revise_flat = " ".join(pp.REVISE_DIRECTIVES.split())
+    check("the revise directives name the fact-preserving repair",
+          "FACT-PRESERVING REPAIR" in revise_flat
+          and "never by removing the sentence" in revise_flat)
+    check("the audit may drop an invented requirement and a delete-the-fact remedy",
+          "invents a requirement the corpus's recorded rules do not" in pp.AUDIT_DIRECTIVES
+          and "no confirmed finding may be resolved by deleting the fact" in pp.AUDIT_DIRECTIVES)
+    check("the review discovery prompt forbids invented structural findings",
+          "Discovery findings obey shared rule D8" in pp.REVIEW_DIRECTIVES)
+    check("the probe prompt forbids inventing a structural requirement",
+          "Do NOT invent a structural requirement" in pp.PROBE_DIRECTIVES)
+
+
 def main() -> int:
     test_line_limit()
     test_loaders_and_parts()
     test_removed_compatibility()
     test_champion_select_cli()
+    test_fact_preservation_prompts()
     print()
     if FAILS:
         print(f"{len(FAILS)} FAILURE(S): " + "; ".join(FAILS))

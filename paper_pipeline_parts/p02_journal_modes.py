@@ -3220,8 +3220,9 @@ EVIDENCE_INTEGRITY_REVIEW = """3f. The EVIDENCE-INTEGRITY sweeps M31-M36 (defini
      DOCUMENT that names a file the submission does not carry -- a script under `code/`, the
      `raw_data/` archive, one of the author's README files -- promises the reader something
      nobody can deliver. Such a sentence is REWRITTEN (name where the material really is, or
-     carry the fact itself); the orchestrator REMOVES the sentence mechanically at publication
-     when the pointer is still there, and the science it carried is then lost;
+     carry the fact itself); the orchestrator REMOVES a pointer-only sentence mechanically at
+     publication when the pointer is still there, but a sentence carrying a numeric fact is held
+     and reported, never deleted to make the package look clean;
      a `PKG-3` row is the same table's other shape -- a file name the package carries NOWHERE --
      which the mechanical layer never removes: rewrite the sentence to ship the file, to name a
      locator the submission carries, or to drop the pointer;
@@ -3278,8 +3279,9 @@ EVIDENCE_INTEGRITY_REVISE = """15. EVIDENCE-INTEGRITY findings (M31-M36) - resol
       a to-be-submitted document that points at what the submission does not carry (the
       code-side PKG-2 seed in `work/EVIDENCE_PACK.md`) is REWRITTEN so it names shipped content
       or carries the fact itself -- never left as a promise, and never "fixed" by deleting the
-      fact with the pointer (the orchestrator removes the whole sentence if the pointer is
-      still there when the package is published);
+      fact with the pointer (the orchestrator removes only a pointer-only sentence if the
+      pointer is still there when the package is published; a numeric fact is held and
+      reported);
     * M34: align the editable legend/Methods count or the stated selection rule with the source
       data; a regenerated figure/table or a stale source-data row is manual-required with the
       file named;
@@ -3308,8 +3310,9 @@ EVIDENCE_INTEGRITY_GENERIC = """EVIDENCE-INTEGRITY (check ids M31-M36, review-si
    under `code/`, the `raw_data/` archive, one of the author's README files) is REWRITTEN so it
    names shipped content or carries the fact itself; the orchestrator's own PKG-2 rows (the
    "Submission-surface references" table in `work/EVIDENCE_PACK.md`) list them, and the
-   orchestrator REMOVES the sentence mechanically when the pointer is still there at
-   publication -- whatever fact the pointer carried is then gone."""
+   orchestrator REMOVES a pointer-only sentence mechanically when the pointer is still there at
+   publication; a sentence carrying a numeric fact is held and reported, because a packaging
+   repair must not delete the fact."""
 
 
 def apply_evidence_integrity(text: str, where: str) -> str:
@@ -4076,7 +4079,17 @@ D6. ONE reading of the evidence. The orchestrator's code-side measurements (lege
 D7. ONE exception, and only one: a COMPARISON session gets the same vocabulary, the same bars and
     the same evidence definitions as every other session, but never provenance -- nothing that
     says which session produced which package, when, or in what order. Blindness to provenance is
-    the only asymmetry this pipeline allows."""
+    the only asymmetry this pipeline allows.
+D8. A FACT IS NOT A REMOVAL SURFACE. Never resolve a finding by deleting the sentence, paragraph,
+    table row, glossary entry, figure legend, or passage that carries a factual claim, number,
+    unit, sample size, definition, method, limitation, result, or conclusion. A wrong value is
+    resolved by carrying the correct value; a fact that looks misplaced, orphaned, awkwardly
+    introduced, unused or redundant is resolved by relocating, merging, or connecting it. Deletion
+    is allowed only for a true duplicate the finding itself names, and only when one copy of the
+    same fact survives; record the survivor. When the only apparent remedy would remove a fact,
+    the finding is not resolvable by deletion: dispose it as not-a-defect if it invents a rule,
+    otherwise carry it to the manual list. This rule outranks a structural, packaging, length,
+    style, or "unused item" finding whenever the two conflict, and it binds every role."""
 
 ADOPTED_SWEEPS_BLOCK = """
 
@@ -4084,7 +4097,10 @@ ADOPTED_SWEEPS_BLOCK = """
   M1-M17  mechanical sweeps: acronyms, citations, display items, numbers/metrics, mandatory
           items, hygiene, cross-references, terminology, file hygiene, reference format, SI
           formatting, authors, reporting summary, cross-document metadata, numeric totals,
-          abstract traceability, anomaly tokens.
+          abstract traceability, anomaly tokens. M4 includes the RANGE direction: a lower/upper
+          pair printed high-to-low is a correctness candidate for any unit-bearing physical
+          range, not only a CI; the M4 artifact lists every descending same-unit pair for
+          disposition.
   M18     figure-legend word counts (recorded; a proxy cap is optional).
   M19     abstract/main-text length against the journal's relaxed caps, plus the cover-letter
           preference.

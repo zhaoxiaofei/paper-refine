@@ -78,6 +78,26 @@ an older command line or root can hit:
   loader must copy the parts directory too (the `.paper_test/bundle_source_lib.py`
   helper is the in-repo example).
 
+## Fact-preserving repairs
+
+A finding authorizes a correction, not the removal of the fact it quotes. A wrong value,
+number, unit, definition, p-value or significance word is replaced with the correct fact; a
+sentence that is orphaned, misplaced, unused, redundant-sounding or structurally awkward is
+relocated, merged or connected. A separate "unused", length, packaging or style finding never
+turns a correction into a deletion, and an acronym definition or glossary entry that carries a
+wrong expansion is corrected rather than removed. A true duplicate may be deleted only when the
+finding names it and one copy of the same fact survives.
+
+The same rule binds the packaging repair: a dangling pointer at a non-shipped area is rewritten
+to name shipped content or to carry the fact, and the mechanical PKG-2 layer removes only a
+pointer-only sentence -- a sentence carrying a numeric fact is held and reported for a prose
+rewrite. If no honest rewrite exists, the item goes to the manual list; the pipeline does not
+trade a fact for a clean-looking package.
+
+The M4 numbers artifact also enumerates lower/upper ranges printed in descending order,
+including unit-bearing physical ranges (elevation, depth, time, concentration), so a reversed
+range is not left to a decimal-only reading of CIs.
+
 ## Quick start
 
 ```bash
@@ -3067,7 +3087,7 @@ its four integration runs never started.
 ## Tests
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 147 suites (a few
+any failure. They are independent, so run them in parallel — 148 suites (a few
 minutes at the default 24 parallel sessions; tens of minutes sequentially):
 
 ```bash

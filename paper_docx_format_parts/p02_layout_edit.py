@@ -345,6 +345,21 @@ def _xml_span_for_text_range(frag: str, a: int, b: int):
     return (lo, hi) if lo <= hi else None
 
 
+_FACT_LABEL_RE = re.compile(
+    r"\b(?:fig(?:ure)?|table|section|eq(?:uation)?|appendix|supp(?:lementary)?|"
+    r"data|code)\.?\s*[A-Za-z]?\d+[A-Za-z0-9.-]*", re.I)
+
+
+def sentence_carries_scientific_fact(text: str) -> bool:
+    """True when a sentence carries a number outside a figure/table/section label.
+
+    PKG-2 may remove a pointer-only sentence; it must not remove a data value,
+    count or p-value. Such a sentence stays and is reported for rewriting.
+    """
+    stripped = _FACT_LABEL_RE.sub(" ", str(text or ""))
+    return bool(re.search(r"\d", stripped))
+
+
 def strip_reference_sentences(src: Path, out: Path, finder) -> dict:
     """Remove every SENTENCE of `src` that `finder` names as a dangling pointer.
 
@@ -356,8 +371,10 @@ def strip_reference_sentences(src: Path, out: Path, finder) -> dict:
     A sentence that carries a live citation FIELD is NOT removed: dropping a
     field would renumber the bibliography and break the base-to-candidate
     field-continuity gate, so the pointer stays and the caller reports it (the
-    author or the next revision session fixes that one in prose). The same
-    refusal covers a text range the OOXML cannot address as plain text.
+    author or the next revision session fixes that one in prose). A sentence
+    carrying a numeric fact is held for the same reason -- a packaging repair
+    must not delete a data value. The same refusal covers a text range the
+    OOXML cannot address as plain text.
 
     Returns {"source", "output", "ok", "removed": [{"paragraph", "sentence",
     "references"}], "skipped": [reason], "verified": {...}, "error"} -- the
@@ -425,6 +442,12 @@ def strip_reference_sentences(src: Path, out: Path, finder) -> dict:
                     f"paragraph {index}: the sentence carrying a dangling reference also "
                     f"carries a live citation field ({text[a:b].strip()[:80]!r}); dropping it "
                     f"would renumber the bibliography -- fix it in prose")
+                continue
+            if sentence_carries_scientific_fact(text[a:b]):
+                res["skipped"].append(
+                    f"paragraph {index}: the sentence carrying a dangling reference also "
+                    f"carries a numeric fact ({text[a:b].strip()[:80]!r}); a packaging repair "
+                    f"must not delete it -- rewrite the pointer in prose")
                 continue
             keep.append((a, b))
         if not keep:

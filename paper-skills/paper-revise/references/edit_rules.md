@@ -574,9 +574,11 @@ PROVES a value (a column sum/min/max, or a single cell — e.g. `45,365` = the s
 of `n_cells_total`). A row whose source is still empty is yours: find the
 analysis output, the cited value or the Methods parameter, or record why it
 cannot be sourced. A number in the abstract, a legend or the cover letter may
-not stay unsourced — it is proved, cited, a declared parameter, or removed as
-decoration (never silently, and never by changing a scientific claim). Removing
-a number is a `preservation`-tier change: record it in CHANGELOG.md.
+not stay unsourced — it is proved, cited, or a declared parameter. A number that
+a finding identifies as a factual claim is CORRECTED, never removed; only a
+genuinely decorative number with no claim or data behind it may be removed, and
+removing it is a `preservation`-tier change recorded in CHANGELOG.md. Never
+delete a number to make a finding disappear.
 
 ## E13 — A to-be-submitted document may not point at what the submission does not carry
 
@@ -586,8 +588,11 @@ explicitly submits); everything else in the corpus — the analysis code under `
 left out, so a pointer at one of them is a reference no reader, editor or reviewer can resolve.
 The orchestrator seeds the rows (`work/EVIDENCE_PACK.md`, "Submission-surface references",
 PKG-2: an area-prefixed path AND a plain file name the package carries only outside the
-submission) and REMOVES the sentence mechanically if it is still there when the package is
-published — so a pointer left in place costs whatever the sentence said. REWRITE it instead:
+submission) and REMOVES a POINTER-ONLY sentence mechanically if it is still there when the
+package is published — a sentence carrying a numeric fact is held and reported, never deleted.
+That removal is a last-resort packaging repair, never a finding resolution: REWRITE the sentence
+so it keeps the fact (shared rule D8), or carry it to `MANUAL_STEPS.md` when no honest rewrite
+exists.
 
 * name where the material really is — a shipped supplementary file, a public repository with a
   pinned commit, a statement the Data availability block already carries — or carry the fact
@@ -602,6 +607,6 @@ published — so a pointer left in place costs whatever the sentence said. REWRI
   is not removed mechanically: record it in `MANUAL_STEPS.md` with the sentence quoted, or, when
   the file is prose and your own edit can carry it, rewrite it in the revision.
 
-Removing the pointing sentence is a `preservation`-tier change when it carries a scientific
-fact: prefer the rewrite, and record what left the text in CHANGELOG.md when deletion is the
-only honest option.
+Removing a pointing sentence that carries a scientific fact is a preservation defect, not an
+acceptable repair: keep the fact and rewrite the pointer; if no honest rewrite exists, carry the
+sentence to `MANUAL_STEPS.md`. Record any pointer-only deletion in CHANGELOG.md.

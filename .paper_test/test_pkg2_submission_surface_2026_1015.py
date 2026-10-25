@@ -533,6 +533,29 @@ def test_end_to_end_publish():
           f"dangling={dangling[:1]} readme={text[-500:]}")
 
 
+def test_fact_bearing_pointer_is_held():
+    print()
+    print("== K4b a numeric fact is never deleted by the packaging repair ==")
+    tmp = _pkg("pkg2_fact_")
+    write(tmp / "facts.md",
+          "Methods\n"
+          "We measured 37 seedlings with code/jf_supplement_analysis.py for Figure S3.\n"
+          "The next sentence is untouched.\n")
+    res = pp.strip_dangling_references_in_dir(tmp, AREAS, "k4b-test")
+    text = (tmp / "facts.md").read_text(encoding="utf-8")
+    check("K4b the sentence carrying the fact and pointer survives verbatim",
+          "37 seedlings" in text and "jf_supplement_analysis.py" in text, repr(text[:200]))
+    check("K4b the next sentence also survives",
+          "The next sentence is untouched." in text, repr(text[:200]))
+    check("K4b the fact is reported as held, not removed",
+          res["removed"] == 0 and any("numeric fact" in s for f in res["files"]
+                                      for s in f["skipped"]),
+          json.dumps(res["files"])[:400])
+    check("K4b the held pointer is a remaining readiness row",
+          any(r["file"] == "facts.md" for r in res["remaining"]) and not res["ok"],
+          str(res["remaining"])[:300])
+
+
 def _ctx(root: Path):
     ctx = pp.Ctx(root)
     ctx.load()
@@ -547,6 +570,7 @@ def main() -> int:
         test_text_removal_keeps_headings()
         test_structural_files_are_reported_not_edited()
         test_document_includes_are_not_deleted()
+        test_fact_bearing_pointer_is_held()
         test_local_path_links()
         test_reporting_surfaces()
         test_end_to_end_publish()
