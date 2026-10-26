@@ -2600,9 +2600,8 @@ AUDIT_NO_NEW_FINDINGS = """OVERRIDE — THIS AUDIT ADDS NO FINDINGS (paper-refin
 
 You dispose the FROZEN findings and nothing else. `audit/audit.json`'s `adds` MUST be `[]`: do not
 create `AU-*` rows and do not promote a new defect into the finding list. If you notice a defect
-outside the frozen list, record it in `audit/UNRESOLVED.md` with its location, the tier and severity
-it would carry on the shared scale, and its evidence; leave it for the next review. It is an
-observation, not a finding, and no reviser acts on it. In
+outside the frozen list, record it in `audit/UNRESOLVED.md` with its location and evidence and
+leave it for the next review; it is an observation, not a finding, and no reviser acts on it. In
 `audit/PROBE_AUDIT.md` the only verdicts are `stands` and `needs-evidence`: a closure that hides a
 real probe defect goes to `audit/UNRESOLVED.md` as an observation, never `promoted to AU-xxx` (there
 is no AU-* row for it to name). The rest of this prompt describes the disposition record you write;
@@ -3213,8 +3212,9 @@ Write inside this sandbox: `revised/` and your own `revised/REPAIR_LEDGER.*`; ne
 `review/`, `audit/`, `revision_audit/`, `raw_data/` or `code/`.
 
 WHAT THIS STAGE IS. The revision auditor wrote `revision_audit/REPAIR_PLAN.json` with @@ROWS@@
-confirmed row(s). You apply that plan to `revised/` and produce the FINAL REVISED VERSION of this
-round. You do not re-review the submission, do not run a discovery hunt, and do not re-audit.
+confirmed row(s). You apply that plan to `revised/` and produce the arm's revised version, final
+for the arm before integration. You do not re-review the submission, do not run a discovery hunt,
+and do not re-audit.
 
 RE-VALIDATE EVERY PLANNED REPAIR BEFORE YOU APPLY IT. The plan is a set of CLAIMS, not instructions.
 For each row: re-read the cited location in `revised/`, compare it with `base/` and the source

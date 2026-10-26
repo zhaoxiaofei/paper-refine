@@ -2887,6 +2887,13 @@ THE FINDING LIST (the revision session consumes it):
       explanation what the revision must change (or why it is manual)
       status      "resolvable" (to-fix) | "unresolvable" (manual)
       concern     the concern id
+  * When the corpus carries the false-positive-filtered LLM review
+    (`feedback/llm/`), add one `coverage` row for the upstream pre-filter: name
+    it and state that the classes it dropped are a named gap, never a clean
+    result.
+  * The scoped review covers ONLY the admitted concerns: add one `coverage` row
+    naming that scope and stating that every class outside the ledger is a
+    named gap, not a clean result.
   * review/artifacts/JF_concerns.md — the ledger as a markdown table.
   * review/findings.md — the findings in the review's markdown shape.
   * Do NOT edit base/ or the feedback; do not write revised/ here.

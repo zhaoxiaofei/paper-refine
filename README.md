@@ -161,16 +161,18 @@ Everything lives under the root you passed to `setup`:
 | `tracking/` | one difference-tracking copy per baseline (`*.tracking-original.*`, `*.tracking-a1.*`, `*.tracking-w<k>.*`, `*.tracking-winner<r>.*`, or the matching `*.logging-*` fallback when a tool failed), mirrored from the version packages and published winners |
 | `pdfs/` | the compiled/converted PDFs per version (LaTeX via `latexmk`, DOCX via Word/MCP) -- persistent: `prune` never touches them |
 
-The selection rule is one incumbent guard plus one ordered default key: an
-exact (median, mean, IQR) tie keeps the incumbent base. Otherwise the default
-key is the round's reported **defect prefix** (fewer defects wins) → **median** →
-**mean** → **IQR** → content **digest**. The prefix comes from the blind panel's
-own issue ledger; the panel statistics sit below it. See *How a round is decided*
-below for the rationale and the gates.
+The selection rule is one incumbent guard plus one ordered default key. The
+default key is the round's reported **defect prefix** (fewer defects wins) →
+**median** → **mean** → **IQR** → content **digest**. If the key's leader is not
+the incumbent and that leader ties the incumbent exactly on (median, mean, IQR),
+the incumbent is kept; otherwise the key's leader wins. The prefix comes from the
+blind panel's own issue ledger; the panel statistics sit below it. See *How a
+round is decided* below for the rationale and the gates.
 
 The run's member table prints its columns in exactly that order — `member` (the
-id, the last key) is the row label, then `defects@K`, median, mean, IQR and the
-digest; every column after the digest is reported only and never ranked. Every
+id, a deterministic sort fallback) is the row label, then `defects@K`, median,
+mean, IQR and the digest; every column after the digest is reported only and
+never ranked. Every
 member carries its own numbers, including the ones the ranking never admits: the
 pristine original and an unadmitted arm show their panel census defect count and
 severity totals, and `writing*` falls back to the frozen review that examined
@@ -182,8 +184,8 @@ the base's from this round's review) or to the arm's own marker. A `-` now means
 (and `DECISION_REPORT.md` prints the same verdict):
 
 * `certified: true` — every gate passed (complete panel, the champion
-  re-derives, evidence unchanged, the enabled gates clean) and the answer is
-  final;
+  re-derives from the sheets, the digests, and the incumbent base's digest,
+  evidence unchanged, the enabled gates clean) and the answer is final;
 * `provisional: true` — only some rounds are complete; the champion is the last
   completed round's. `decide --require-complete` makes that an exit 4;
 * a `blockers` entry — the champion is **NOT certified**; `decide` exits 5.
@@ -1072,10 +1074,9 @@ revisers. It never edits a package; its product is the decision record
 * it **attacks the reviewer's dispositions**: every finding-tier row the
   reviewer closed as `OK` is re-checked against its own bar. This build's
   AUDIT role files no new findings: a real defect the closure hid is recorded
-  in `audit/UNRESOLVED.md` with its location, the tier and severity it would
-  carry on the shared scale, and evidence, as an observation for the next
-  review, so the frozen list the revisers see is never silently extended and
-  the observation still travels classified;
+  in `audit/UNRESOLVED.md` with its location and evidence, as an observation
+  for the next review (no tier until that review files it on the shared
+  scale), so the frozen list the revisers see is never silently extended;
 * the revisers consume the **audited** list (frozen − drops) and the drops stay
   visible to the human in `audit/audit.json`, so a drop is always re-checkable
   and reversible;
@@ -1108,8 +1109,9 @@ the changelog/report/manual items. The audited bytes are preserved as
 there is exactly one repair pass (a defect the post-repair verification still
 finds is recorded for the round's decision, never repaired in a loop). The
 chain is on by default; `--revision-audit off` (setup) or
-`PAPER_REVISION_AUDIT=off` (an existing root) records the skip and leaves the
-revised version final. It does not run in a concern-scoped major/minor revision
+`PAPER_REVISION_AUDIT=off` (an existing root) records the skip and leaves that
+arm's revised version final for the arm before integration. It does not run in a
+concern-scoped major/minor revision
 (those edits are confined to the admitted concerns) or for a round that is
 already decided.
 
@@ -1201,8 +1203,8 @@ The review/audit/revise path now carries them explicitly:
   ("it is a proper name", "the artwork is read-only", a convention closed per
   document, an unfilled architecture table); the attack files no new finding in
   this build, so a real defect the closure hid is recorded in
-  `audit/UNRESOLVED.md` with its location, the tier and severity it would
-  carry, and evidence for the next review;
+  `audit/UNRESOLVED.md` with its location and evidence for the next review
+  (no tier until that review files it);
 * the reviser resolves M25–M29 by aligning the EDITABLE surface corpus-wide
   (rule E11), and J5 licenses **scoped restructuring** inside the finding's
   declared scope under a content freeze, a numbering check and one
@@ -1308,9 +1310,9 @@ discovery round's probe dispositions like the reviewer's other decision rows:
 when the frozen review carries probe rows, `audit/PROBE_AUDIT.md` must dispose
 each probe (`stands` / `needs-evidence`); this build's auditor files no `AU-*`
 rows, so a real anomalous value or label a probe closure hid is recorded in
-`audit/UNRESOLVED.md` (with the closure, the tier and severity it would carry
-on the shared scale, and its evidence) as an observation for the next review
-instead of being promoted into the frozen list.
+`audit/UNRESOLVED.md` (with the closure and its evidence; no tier until the
+next review files it) as an observation for the next review instead of being
+promoted into the frozen list.
 
 **The discovery class reaches its two missing consumers — the integrator by
 list, the judges by their own pass.** The X-* findings were once visible only to
@@ -1604,7 +1606,7 @@ boxes.
 | `probe` | `r<r>_probe` | **on by default** (`setup --probe-review off` / `--no-probe-review` / `set-probe-review off` disables): an INDEPENDENT, cold-context discovery session launched IN PARALLEL with the review and given the corpus only (no review, no finding list). It is GENERIC — any defect class may be filed — and wherever a defect can be shown by a computation the finding declares a re-runnable verifier; the orchestrator re-runs every declared verifier (a non-reproducing computation FAILS the attempt) and the findings ride in the frozen discovery list as `X-9xx` rows (reviser resolves, auditor disposes, integrator reconciles) |
 | `audit` | `r<r>_audit` | **on by default** (`setup --audit off` / `--no-audit` disables): an INDEPENDENT AUDITOR between the reviewer and the revisers — it disposes every frozen finding (confirm, or drop WITH evidence), attacks the reviewer's boilerplate `OK` closures without filing new findings (an observation goes to `audit/UNRESOLVED.md`), and hands the AUDITED list to the revision arms |
 | `revise` | `r<r>_a2…a{1+N}` | reviewed-and-revised versions that consume the frozen review (or the audited list, when the auditor ran). **After its postcheck**, an independent REVISION AUDITOR writes `revision_audit/REPAIR_PLAN.json` (no edits), and a non-empty plan runs ONE bounded-repair session that re-validates and applies only confirmed rows, records `revised/REPAIR_LEDGER.json`, and re-passes the revise postcheck (`--revision-audit off` / `PAPER_REVISION_AUDIT=off` records the skip; it does not run in a concern-scoped major/minor revision) |
-| `integrate` | `r<r>_i1…iK` | "merge from the other versions": every pool member SELECTED by the round's `--integrators` mask reworked with the WHOLE pool as donors (the default mask 0xFFFFFFFF selects all K = 1+M+N members) |
+| `integrate` | `r<r>_i1…iK` | "merge from the other versions": every pool member SELECTED by the round's `--integrators` mask reworked with the WHOLE pool as donors (the default mask 0xFFFFFFFF selects all K = 1+M+N members). It reconciles every frozen X-* id in its difference ledger — a dropped id is accounted for, never applied |
 | `judge` | `judge_t…_j…` | blind pairwise panels over the round's field (the id is an opaque token: it carries no round and no arm) |
 
 Each run keeps its sandbox under `runs/<id>/` (`base/`, `review/`, the stage's
@@ -1703,7 +1705,7 @@ human letter should drive the revision.
 | option 4 | `minor` | as 3, for a **minor revision** | **required** | forbidden | concern-scoped only |
 | option 5 | `llm` | revise against the pre-filtered `llm_review_feedback/` area only (explicit selection only; an unconfigured root remains on `continue`) | **not written** | allowed | the round's full review + the LLM review's concerns |
 
-**The pre-filtered `llm` area supplements the normal full review; it never replaces it.** Options 3–4 are concern-scoped major/minor modes: their edits are confined to the admitted human concerns, and their base is the previously reviewed submission — the round itself stages no general review, no audit and no judge panel.
+**The pre-filtered `llm` area supplements the normal full review; it never replaces it.** Options 3–4 are concern-scoped major/minor modes: their edits are confined to the admitted human concerns, and their base is the previously reviewed submission — the round itself stages no general review, no audit and no judge panel. Where a mode replaces the general review, every class the external pre-filter dropped and every class the concern ledger does not cover is recorded as a named gap, never treated as clean.
 
 How each mode runs:
 
@@ -2665,10 +2667,10 @@ configured floor -- default 10, `setup --tiebreak-defect-floor N` /
 count at that prefix LEADS the ranking -- the number of defects the panel
 attributed to a version is the most direct improvement signal, while the flat
 median is coarse on a -4..+4 integer scale), then `-median`, then `-mean`, `IQR`,
-the provenance-free content digest and only after that the run id. An exact
-(median, mean, IQR) tie keeps the incumbent base: that guard applies before the
-default key, so a challenger that leads on the prefix but ties the incumbent on
-the three panel statistics does not retire it. No cross-session deduplication is applied by default
+the provenance-free content digest; the run id is only a deterministic sort
+fallback, never a champion input. If the key's leader is not the incumbent and
+that leader ties the incumbent exactly on (median, mean, IQR), the incumbent is
+kept and the prefix and digest do not retire it; otherwise the key's leader wins. No cross-session deduplication is applied by default
 (`dedup_mode` `off`): the counts are the mentions each judge sheet filed (a
 repeated row inside one sheet counts once), and the peer/own split plus the
 exposure-normalized rates stay in the census for inspection. The OPT-IN

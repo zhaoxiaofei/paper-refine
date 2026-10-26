@@ -8,7 +8,7 @@ The general round is:
   → revise (re-validating every finding) → revised version
   → revision audit (no new revisions; it writes a bounded-repair plan only)
   → bounded repair (only when the plan is non-empty; re-validating every row)
-  → the final revised version of the round → integration / judge / decision.
+  → each arm's pre-integration revised version → integration / judge / decision.
 
 The two auditors are optional: `--audit off` skips the review audit, and
 `PAPER_REVISION_AUDIT=off` skips the revision audit (the revised version is then
@@ -98,7 +98,6 @@ def test_prompts():
     check("the review audit adds no findings", "THIS AUDIT ADDS NO FINDINGS" in audit)
     check("the review audit requires adds=[]", "`adds` MUST be `[]`" in audit)
     check("unresolved observations have their own file", "audit/UNRESOLVED.md" in audit)
-    check("unresolved observations carry the shared scale", "tier and severity" in audit)
     revise = pp.revise_prompt(sb, "r1_a2_revise", 1)
     check("the reviser re-validates every finding", "RE-VALIDATE IT" in revise)
     check("a rejected finding is recorded, not applied",
