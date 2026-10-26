@@ -3441,6 +3441,19 @@ PLACEHOLDER_RULE = """PIPELINE HAND-OFF PLACEHOLDERS — the literal token "[AUT
         off`): leave the marker and put the failed query in MANUAL_STEPS.md;
       - `author-only` facts (funding, consent, a decision, an identity you cannot confirm) keep the
         marker and go to MANUAL_STEPS.md.
+      - INFERABLE TYPOS ARE CORRECTED, NOT DEFERRED: a
+        typographical error whose correct form is determinable from publicly available
+        information or from manuscript-associated data (the printed author list and
+        affiliations, `raw_data/`, the deposited tables, the reference list, a DOI
+        resolver, a standard email domain) is NOT `author-only`. In a revision stage,
+        correct it in the document, record the basis in CHANGELOG.md, and add ONE
+        `priority=low` re-verification item to MANUAL_STEPS.md naming the corrected
+        value and its basis. A review or audit stage reports the typo and its basis and
+        does not edit. Low priority asks the authors to re-verify; it never blocks and
+        never replaces the correction. High priority is a `[AUTHOR TO COMPLETE: ...]`
+        placeholder. Grammar, punctuation and style errors are corrected in text and
+        are NEVER listed in MANUAL_STEPS.md. If no basis exists, keep the
+        `author-only` treatment.
     A `searchable` marker whose lookup verdict is `found` or `absent` and is still present in a
     delivered package is a FAILED run (the postcheck points at the exact lookup row).
   * PLACEHOLDER FILES. A corpus file can stand in for data it does not contain (a haplotype,
@@ -3879,6 +3892,19 @@ anywhere in a file you write:
         off`): leave the item out of the document and put the failed query in MANUAL_STEPS.md;
       - `author-only` facts (funding, consent, a decision, an identity you cannot confirm) go to
         MANUAL_STEPS.md.
+      - INFERABLE TYPOS ARE CORRECTED, NOT DEFERRED: a
+        typographical error whose correct form is determinable from publicly available
+        information or from manuscript-associated data (the printed author list and
+        affiliations, `raw_data/`, the deposited tables, the reference list, a DOI
+        resolver, a standard email domain) is NOT `author-only`. In a revision stage,
+        correct it in the document, record the basis in CHANGELOG.md, and add ONE
+        `priority=low` re-verification item to MANUAL_STEPS.md naming the corrected
+        value and its basis. A review or audit stage reports the typo and its basis and
+        does not edit. Low priority asks the authors to re-verify; it never blocks and
+        never replaces the correction. High priority is a `[AUTHOR TO COMPLETE: ...]`
+        placeholder. Grammar, punctuation and style errors are corrected in text and
+        are NEVER listed in MANUAL_STEPS.md. If no basis exists, keep the
+        `author-only` treatment.
   * The rule binds every file you write, including a scaffold you create for a mandatory item and
     any report that ships beside the documents.
   * PLACEHOLDER FILES. A corpus file can stand in for data it does not contain (a haplotype,
@@ -3928,6 +3954,19 @@ MUST NOT APPEAR in any document or in the hand-off README:
         off`): leave the item out of the document and put the failed query in the README;
       - `author-only` facts (funding, consent, a decision, an identity you cannot confirm) go to
         the README.
+      - INFERABLE TYPOS ARE CORRECTED, NOT DEFERRED: a
+        typographical error whose correct form is determinable from publicly available
+        information or from manuscript-associated data (the printed author list and
+        affiliations, `raw_data/`, the deposited tables, the reference list, a DOI
+        resolver, a standard email domain) is NOT `author-only`. In a revision stage,
+        correct it in the document, record the basis in CHANGELOG.md, and add ONE
+        `priority=low` re-verification item to MANUAL_STEPS.md naming the corrected
+        value and its basis. A review or audit stage reports the typo and its basis and
+        does not edit. Low priority asks the authors to re-verify; it never blocks and
+        never replaces the correction. High priority is a `[AUTHOR TO COMPLETE: ...]`
+        placeholder. Grammar, punctuation and style errors are corrected in text and
+        are NEVER listed in MANUAL_STEPS.md. If no basis exists, keep the
+        `author-only` treatment.
   * The rule binds every file you write, including a scaffold you create for a mandatory item and
     any report that ships beside the documents.
   * PLACEHOLDER FILES. A corpus file can stand in for data it does not contain (a haplotype,

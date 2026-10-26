@@ -59,7 +59,7 @@ Artifacts A1–A9 column specifications and status vocabularies: `references/led
 ## Final outputs (write incrementally throughout)
 
 - `REVISED/CHANGELOG.md` — for every finding ID: document, exact before → after text, status. Generated from A1 + A7.
-- `REVISED/MANUAL_STEPS.md` — for every manual-required finding: which file, which section/paragraph/field, what to check, exact tool steps (e.g., verifying a citation field in Word via the Zotero plugin; applying a proposed Zotero library correction with item key, field, current value and proposed value), and follow-ups (e.g., regenerate a figure from code/ and update every dependent number).
+- `REVISED/MANUAL_STEPS.md` — for every manual-required finding: which file, which section/paragraph/field, what to check, exact tool steps (e.g., verifying a citation field in Word via the Zotero plugin; applying a proposed Zotero library correction with item key, field, current value and proposed value), and follow-ups (e.g., regenerate a figure from code/ and update every dependent number). Low-priority items are corrections already applied in `REVISED/` that the authors must re-verify: list them under `## Low-priority re-verification (corrected in text)` with one row per correction (`priority=low | file/location | before -> after | basis | what to re-verify`). High priority is a `[AUTHOR TO COMPLETE: ...]` placeholder. Grammar, punctuation and style edits are not manual items and are never listed.
 - `REVISED/REVISION_REPORT.md` + `REVISED/revision_report.json` — the ledger, the coverage table (one row per finding ID — F-* and X-* — plus each R-xxx: id | final status | edit IDs | evidence of completion (diff hunk / artifact row); a finding ID without a coverage row, or a row without evidence, means the task is not finished), counts by status, the placeholder list, pending scientific-judgement decisions with proposed alternative wordings, the checksum confirmation, and guideline-version uncertainties to re-check against the current author guide.
 
 ## Execution discipline
@@ -527,6 +527,17 @@ Dispose every row:
   and put the failed query in `MANUAL_STEPS.md`.
 * **`author-only`** (funding, consent, a decision the author owns, an identity
   you cannot confirm) → keep the marker and the manual step.
+  - INFERABLE TYPOS ARE CORRECTED, NOT DEFERRED: a typographical
+    error whose correct form is determinable from publicly available information or
+    from manuscript-associated data (the printed author list and affiliations,
+    `raw_data/`, the deposited tables, the reference list, a DOI resolver, a standard
+    email domain) is NOT `author-only`. Correct it, record the basis in CHANGELOG.md,
+    and add ONE `priority=low` re-verification item to MANUAL_STEPS.md naming the
+    corrected value and its basis. Low priority asks the authors to re-verify; it
+    never blocks and never replaces the correction. High priority is a
+    `[AUTHOR TO COMPLETE: ...]` placeholder. Grammar, punctuation and style errors are
+    corrected in text and are NEVER listed in MANUAL_STEPS.md. If no basis exists,
+    keep the `author-only` treatment.
 
 Never fill a marker from your own knowledge, and never invent an identifier:
 `absent` + the search record is the answer when nothing exists.

@@ -313,6 +313,17 @@ Dispose every row:
   and put the failed query in `MANUAL_STEPS.md`.
 * **`author-only`** (funding, consent, a decision the author owns, an identity
   you cannot confirm) → keep the marker and the manual step.
+  - INFERABLE TYPOS ARE CORRECTED, NOT DEFERRED: a typographical
+    error whose correct form is determinable from publicly available information or
+    from manuscript-associated data (the printed author list and affiliations,
+    `raw_data/`, the deposited tables, the reference list, a DOI resolver, a standard
+    email domain) is NOT `author-only`. Correct it, record the basis in CHANGELOG.md,
+    and add ONE `priority=low` re-verification item to MANUAL_STEPS.md naming the
+    corrected value and its basis. Low priority asks the authors to re-verify; it
+    never blocks and never replaces the correction. High priority is a
+    `[AUTHOR TO COMPLETE: ...]` placeholder. Grammar, punctuation and style errors are
+    corrected in text and are NEVER listed in MANUAL_STEPS.md. If no basis exists,
+    keep the `author-only` treatment.
 
 Never fill a marker from your own knowledge, and never invent an identifier:
 `absent` + the search record is the answer when nothing exists.
