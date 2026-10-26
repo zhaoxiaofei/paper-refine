@@ -405,7 +405,10 @@ def audit_artifact_problems(audit, frozen_ids) -> list:
         problems.append(f"{len(missing)} frozen finding id(s) are neither confirmed nor dropped "
                         f"(silence is not a disposition): {', '.join(missing[:6])}"
                         + (" ..." if len(missing) > 6 else ""))
-    unknown = [i for i in seen if frozen and i not in frozen]
+    # An EMPTY frozen list is a legitimate review result, and any disposition id
+    # is then fabricated: the old `frozen and ...` guard disabled this check
+    # exactly when it mattered most.
+    unknown = [i for i in seen if i not in frozen]
     if unknown:
         problems.append(f"dispositions name {len(unknown)} id(s) that are not in the frozen "
                         f"review: {', '.join(unknown[:6])}")
@@ -713,7 +716,14 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     # (the audit may still find the residue).
     try:
         _rr = read_json(rev / "revision_report.json", revive=False, lenient=True) or {}
-        _rows = _rr.get("ledger") or _rr.get("findings") or _rr.get("coverage") or []
+        # The ledger contract accepts a BARE LIST of rows as well as a mapping:
+        # calling .get on the list degraded this whole check to a warning.
+        if isinstance(_rr, list):
+            _rows = _rr
+        elif isinstance(_rr, dict):
+            _rows = _rr.get("ledger") or _rr.get("findings") or _rr.get("coverage") or []
+        else:
+            _rows = []
         _fixed = [str(r.get("id")) for r in _rows if isinstance(r, dict)
                   and str(r.get("final_status") or r.get("status") or "") in
                   ("fixed", "fixed-with-caveat")]
@@ -865,7 +875,7 @@ def postcheck_revise(ctx: Ctx, rec: dict):
         # it.
         _pipe_files = [f.get("file") for f in
                        ((rec.get("reference_strip") or {}).get("files") or [])
-                       if f.get("removed")]
+                       if f.get("removed") or f.get("removed_links")]
         if _pipe_files:
             warns.append("the orchestrator removed a dangling reference (PKG-2) from "
                          + ", ".join(f"`{f}`" for f in _pipe_files[:4])
@@ -2600,6 +2610,7 @@ def materialize_response(ctx: Ctx, r: int, target: Path = None,
     rebuilds the same sandbox.
     """
     rid = rid_response(r)
+    package_rid = None
     sb = ctx.runs_dir / rid
     sb.mkdir(parents=True, exist_ok=True)
     src_sb = _journal_concern_source(ctx, r)
@@ -2619,6 +2630,7 @@ def materialize_response(ctx: Ctx, r: int, target: Path = None,
                 die(f"the response stage cannot be materialized: the scoped revision run "
                     f"{rid_for_fresh(r, revise_vid(1))} does not exist yet. Run the revision "
                     f"stage first (`run`).")
+            package_rid = rev_rec["id"]
             target = ctx.sandbox_of(rev_rec) / REVISED_DIR
     if target is None or not target.is_dir():
         die(f"the response stage has no final package to describe (run {rid}). "
@@ -2639,6 +2651,7 @@ def materialize_response(ctx: Ctx, r: int, target: Path = None,
                                           ledger) + note + shared_blocks())
     ledger_rid = rid_concerns(r) if journal_is_scoped(ctx) else rid_feedback(r)
     rec = ctx.register(rid, "response", r, f"runs/{rid}", upstream_run_id=ledger_rid,
+                       package_run_id=package_rid,
                        target_dir=target.relative_to(ctx.root).as_posix()
                        if is_within(target, ctx.root) else str(target))
     rec["inputs_manifest"] = {"target": hash_manifest(sb / "target"),
@@ -3278,7 +3291,8 @@ def postcheck_concerns(ctx: Ctx, rec: dict):
                 errs.append(f"finding {f.get('id')!r} names no concern id")
             elif concern in by_concern:
                 errs.append(f"concern {concern!r} has more than one finding")
-            by_concern[concern] = f
+            if concern:
+                by_concern[concern] = f
             if not str(f.get("evidence") or "").strip():
                 errs.append(f"finding {f.get('id')!r} has no evidence (quote the reviewer)")
             if not str(f.get("location") or "").strip():
@@ -3387,6 +3401,9 @@ def postcheck_response(ctx: Ctx, rec: dict):
                             f"README*.txt file, which is never submitted (the author's own "
                             f"documentation): cite a submission document, or describe the change "
                             f"in the response text instead")
+            elif Path(f).is_absolute() or ".." in Path(f).parts:
+                errs.append(f"response row {cid!r}: change file {f!r} is not a package-relative "
+                            f"path (absolute and parent-relative paths can leave the package)")
             elif not (target / f).exists():
                 errs.append(f"response row {cid!r}: change file {f!r} does not exist in the "
                             f"package -- the letter must not cite a file the revision does not "
@@ -3406,6 +3423,10 @@ def postcheck_response(ctx: Ctx, rec: dict):
                             f"README*.txt file, which is never submitted (the author's own "
                             f"documentation): cite a submission document, or describe the change "
                             f"in the response text instead")
+            elif Path(f).is_absolute() or ".." in Path(f).parts:
+                errs.append(f"response row {cid!r}: new-data file {f!r} is not a "
+                            f"package-relative path (absolute and parent-relative paths can "
+                            f"leave the package)")
             elif not (target / f).exists():
                 errs.append(f"response row {cid!r}: new-data file {f!r} does not exist in the "
                             f"package")
@@ -3516,6 +3537,11 @@ def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=()) ->
         errs.append(f"scoped revision added {rel!r}: a major/minor revision may not add a "
                     f"document (the reviewers asked for no new file)")
     for rel in dropped:
+        if rel in pipeline_changed:
+            # The orchestrator's own submission-surface strip removed it (the
+            # attached-template link, platform junk, ...): the session could not
+            # name it in its ledger.
+            continue
         if is_author_to_complete_readme_name(Path(rel).name):
             # Items resolved: the README is deleted, and that is the goal.
             continue
@@ -3529,7 +3555,9 @@ def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=()) ->
             continue
         if rel in pipeline_changed:
             continue
-        if rel not in ledger_text and Path(rel).name not in ledger_text:
+        _base = re.escape(Path(rel).name)
+        if rel not in ledger_text and not re.search(
+                r"(?<![\w./-])" + _base + r"(?![\w.-])", ledger_text):
             errs.append(f"scoped revision changed {rel!r} but the ledger names neither the file "
                         f"nor its basename: every edit must trace to a reviewer concern")
     return errs

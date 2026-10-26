@@ -228,7 +228,8 @@ def marker_root_rule(out_dir: str = "") -> str:
     """
     inside = f" (not inside `{out_dir}/`, and not anywhere else)" if out_dir else ""
     return (f"LOCATION, and it is part of the contract: `{MARKER_FILE}` goes in the SANDBOX ROOT "
-            f"-- the directory that holds `PROMPT.md` and `base/`{inside}.")
+            f"-- the directory that holds `PROMPT.md` (and `base/` for the stages that have "
+            f"one){inside}.")
 
 
 def selfcheck_block(kind: str, run_id: str, r: int) -> str:
@@ -886,7 +887,7 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
    journal's styles" is the pipeline's rule, not the journal's. Attack such a closure and add
    an `AU-` finding (check `M20`) naming the rule id and the letter.
 3. CHECK THE COVERAGE GAPS the reviewer cannot see: a row whose disposition cell is EMPTY; a
-   `searchable` hand-off marker that was carried forward although work/PLACEHOLDER_LOOKUP.json
+   `searchable` hand-off marker that was carried forward although work/PLACEHOLDER_LOOKUP.md
    answers it (verdict found/absent) or work/IDENTIFIERS.md verifies/refutes the locator; a number
    in the abstract or a legend whose `source` cell is empty in work/NUMBERS_LEDGER.md while the
    shipped data files prove it; a term family competing for one concept (work/M24_concepts.md).
@@ -925,7 +926,7 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
    * `audit/PROBE_AUDIT.md` — when the frozen review carries review/round2/probe_results.md,
      one row per probe (probe id | reviewer's disposition | your verdict
      `stands`/`promoted to AU-xxx`/`needs-evidence` | evidence).
-5. State in `audit.json` → `notes` how many finding-tier rows you examined and how many you
+6. State in `audit.json` → `notes` how many finding-tier rows you examined and how many you
    promoted. A run that examined none must say so explicitly (that is a legitimate, auditable
    outcome when the reviewer's reasons are specific).
 
@@ -2449,9 +2450,14 @@ def zotero_cli_block(role: str, mode: str = DEFAULT_ZOTERO_MODE,
     # The FIELD CONTINUITY rule is role-specific: only the edit roles may add,
     # edit or delete a citation; rewrite preserves form but edits no content;
     # review/judge are read-only and report a bad field instead of repairing it.
-    if role == "edit":
+    if role == "edit" and mode in ("edit", "apply"):
         field_rule = ZOTERO_FIELD_CONTINUITY_RULE
         edit_guidance = ZOTERO_EDIT_GUIDANCE_EDIT
+    elif role == "edit":
+        # `--zotero read`: edits are forbidden by the stage policy, so the
+        # prompt must not also grant add/edit/delete and claim it is enforced.
+        field_rule = ZOTERO_FIELD_CONTINUITY_RULE_READONLY
+        edit_guidance = ZOTERO_EDIT_GUIDANCE_READONLY
     elif role == "rewrite":
         field_rule = ZOTERO_FIELD_CONTINUITY_RULE_REWRITE
         edit_guidance = ZOTERO_EDIT_GUIDANCE_REWRITE

@@ -1438,8 +1438,9 @@ def docx_document_role(name, manuscript_names=()) -> str:
     # sample). The prefix test covers every `supplement*` compound; `support`
     # does not start with `supplement` and stays `main` (see the role tests).
     if "supp" in tokens or "suppl" in tokens \
-            or any(t.startswith("supplement") for t in tokens) \
-            or any(re.fullmatch(r"supp(?:l(?:ement\w*)?)?\d*", t) for t in tokens):
+            or any(re.fullmatch(
+                r"supp(?:l(?:ement(?:s|al|ary|arymaterial|almaterial)?)?)?\d*", t)
+                for t in tokens):
         # The last form is the concatenated `Supp1`/`Suppl2` spelling: the
         # tokenizer keeps the digit, so the exact-token tests missed it and a
         # supplementary document was counted as the MAIN manuscript.
@@ -2710,6 +2711,17 @@ def _inherited_display_rules(venue_id: str, root, missing: tuple) -> dict:
         if "leftover_phrases" in missing and (fresh.data.get("leftover_phrases") or ()):
             inherited["leftover_phrases"] = copy.deepcopy(
                 list(fresh.data["leftover_phrases"]))
+        # The raster-text and image-DPI floors and the foreign-heading list were
+        # added after the first snapshots: a pre-schema root kept FMT-IM6 and
+        # FMT-IM4 (and the foreign-heading scan) switched off forever.
+        if "figure_text" in missing and (fresh.data.get("figure_text") or {}):
+            inherited["figure_text"] = copy.deepcopy(fresh.data["figure_text"])
+        if "image_dpi" in missing and (fresh.data.get("image_dpi") or {}):
+            inherited["image_dpi"] = copy.deepcopy(fresh.data["image_dpi"])
+        if "foreign_container_headings" in missing and (
+                fresh.data.get("foreign_container_headings") or ()):
+            inherited["foreign_container_headings"] = copy.deepcopy(
+                list(fresh.data["foreign_container_headings"]))
         # The M19 counting convention is the same kind of field: a snapshot
         # recorded before it existed would count every venue with the NBT
         # Article convention, including a Frontiers root (which counts Methods).
@@ -2746,7 +2758,9 @@ def _snapshot_profile(cfg: dict, venue_id: str, root=None):
     if not isinstance(snapshot, dict):
         return None
     missing = tuple(k for k in ("tables", "figures", "references", "numbering",
-                                "leftover_phrases", "counting") if k not in snapshot)
+                                "leftover_phrases", "counting", "figure_text",
+                                "image_dpi", "foreign_container_headings")
+                    if k not in snapshot)
     if missing:
         inherited = _inherited_display_rules(venue_id, root, missing)
         if inherited:
@@ -2893,8 +2907,14 @@ def venue_status_lines(ctx) -> list:
             lines.append("limits (M19):  no abstract/main-text cap in this venue profile "
                          "(counts are recorded; the target journal's own guidelines are the bar)")
         else:
-            lines.append(f"limits (M19):  abstract <= {limits['abstract'].get('cap')}, "
-                         f"main text <= {limits['main text'].get('cap')} "
+            # A venue may configure only ONE of the two caps (Frontiers does):
+            # interpolating the raw None printed "abstract <= None" as if it
+            # were a limit.
+            _caps = {k: ("no cap" if limits[k].get("cap") is None
+                         else str(limits[k].get("cap")))
+                     for k in ("abstract", "main text")}
+            lines.append(f"limits (M19):  abstract <= {_caps['abstract']}, "
+                         f"main text <= {_caps['main text']} "
                          f"({prof.length_limits_source})")
         for key, label, rules in (("tables", "tables", "FMT-TB"), ("figures", "figures",
                                                                    "FMT-FG")):

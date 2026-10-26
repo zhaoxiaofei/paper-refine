@@ -1204,7 +1204,10 @@ def _json_from_text(text: str, lenient: bool):
     if not lenient:
         try:
             return json.loads(text)
-        except ValueError:
+        except (ValueError, RecursionError):
+            # A deeply nested but valid JSON document raises RecursionError,
+            # not ValueError: it is malformed AGENT OUTPUT for this pipeline's
+            # purposes and must take the retry path, not crash the postcheck.
             return None
     decoder = json.JSONDecoder()
     total = len(text)
@@ -1252,7 +1255,7 @@ def _json_from_text(text: str, lenient: bool):
     for i, _end in starts:
         try:
             obj, end = decoder.raw_decode(text, i)
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
         found.append((i, end, obj))
     if not found:
@@ -1460,7 +1463,11 @@ def _strip_latex(text: str) -> str:
     # pattern is lookbehind-guarded, so `\$5 to \$6` no longer swallows `5 to $`.
     text = re.sub(r"\\(?:cite[a-zA-Z]*|[a-zA-Z]*ref|label|url|href)\s*"
                   r"(?:\[[^\[\]]*\]\s*)*\{[^{}]*\}", " ", text)
-    text = re.sub(r"(?<!\\)\$\$[\s\S]*?\$\$|(?<!\\)\$[^$]*\$|\\\[[\s\S]*?\\\]|"
+    # `(?:\\\\)*` consumes an EVEN run of backslashes before the math: after a
+    # LaTeX line break (`\\$x$`) the dollar is still math, while `\$5` (one
+    # backslash) is an escaped literal and stays prose.
+    text = re.sub(r"(?<!\\)(?:\\\\)*\$\$[\s\S]*?\$\$"
+                  r"|(?<!\\)(?:\\\\)*\$[^$]*\$|\\\[[\s\S]*?\\\]|"
                   r"\\\([\s\S]*?\\\)", " ",
                   text)
     text = re.sub(r"\\[a-zA-Z@]+\*?", " ", text)
@@ -1525,7 +1532,11 @@ def _tex_captions(text: str) -> list:
     """
     out = []
     # \*? -- \caption*{...} is the unnumbered form of the same caption.
-    for m in re.finditer(r"\\caption(?:of)?\*?\s*(?:\{[^{}]*\}\s*)?(?:\[[^\]]*\]\s*)?\{", text):
+    # The type argument exists ONLY on \captionof: treating it as optional on
+    # \caption let `\caption{Alpha} {gamma}` capture the trailing body brace.
+    for m in re.finditer(
+            r"\\(?:captionof\*?\s*\{[^{}]*\}\s*(?:\[[^\]]*\]\s*)?"
+            r"|caption\*?\s*(?:\[[^\]]*\]\s*)?)\{", text):
         i, depth, j, esc = m.end() - 1, 1, m.end(), False
         while j < len(text):
             ch = text[j]
@@ -1950,7 +1961,8 @@ LENGTH_COVER_DISCLOSURE_RE = re.compile(
 
 
 TEX_CAPTION_TOKEN_RE = re.compile(
-    r"\\caption(?:of)?\*?\s*(?:\{[^{}]*\}\s*)?(?:\[[^\]]*\]\s*)?\{")
+    r"\\(?:captionof\*?\s*\{[^{}]*\}\s*(?:\[[^\]]*\]\s*)?"
+    r"|caption\*?\s*(?:\[[^\]]*\]\s*)?)\{")
 # LaTeX scaffolding the length scan must not count as prose: environment tokens
 # (\begin{document}, \end{figure}) and the arguments of setup/graphics commands
 # used to leak literal words ("document", "article", "fig1.pdf") into the
@@ -5719,6 +5731,7 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
                 is_ref = [r[1] for r in rows]
                 headings = [r[2] for r in rows]
                 prose = [t for i, t in enumerate(paras) if not is_ref[i]]
+                prose_doc_idx = [i for i in range(len(paras)) if not is_ref[i]]
                 prose_kinds = mod.section_kinds(
                     prose, [h for i, h in enumerate(headings) if not is_ref[i]])
                 for r in mod.number_ledger(prose):
@@ -5727,6 +5740,11 @@ def code_side_evidence(ctx: Ctx, corpus_dir: Path, label: str, sources: list = N
                     # same rule the claim-strength ledger uses.
                     idx = int(r.get("document_paragraph") or 0)
                     kind = prose_kinds[idx] if idx < len(prose_kinds) else "body"
+                    # number_ledger enumerates the PROSE list; the evidence
+                    # must print the DOCUMENT paragraph number (a bibliography
+                    # before the body offset every row).
+                    if idx < len(prose_doc_idx):
+                        r["document_paragraph"] = prose_doc_idx[idx]
                     numbers.append(dict(r, document=name, kind=kind))
                 # J3's two-sided claim-strength ledger: the OVER direction
                 # (maximal claims) and the UNDER direction (hedges) are
@@ -5866,7 +5884,8 @@ def placeholder_lookup_rows(ctx: Ctx, queries: list, timeout: int = 30) -> list:
     """Online lookup for searchable placeholders (opt-in via --placeholder-lookup).
 
     Every query is run against Europe PMC and OpenAlex by the public module; the
-    result is written to `reports/PLACEHOLDER_LOOKUP.json` and the agent disposes
+    result is seeded as `work/PLACEHOLDER_LOOKUP.md` (and the review's artifact
+    copy) and the agent disposes
     each row (fill with the found DOI, or with "not posted" + this evidence when
     the search is clean).
     """
@@ -6674,7 +6693,7 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
                     "resolution": ""} for r in (phl.get("rows") or [])]
         _seed_write(art / "PLACEHOLDERS.md", "# PLACEHOLDERS — hand-off markers, classified\n\n"
             "`searchable` rows ask for a findable fact (preprint, DOI, accession, database ID, "
-            "version): search for it (or use reports/PLACEHOLDER_LOOKUP.json when the "
+            "version): search for it (or use work/PLACEHOLDER_LOOKUP.md when the "
             "operator enabled the lookup) and fill the placeholder with the answer, or with "
             "the negative plus the search evidence; an `author-only` row stays for the author. "
             "Record what you did in `resolution`.\n\n"

@@ -206,9 +206,18 @@ rows4, md4, _d4, _p4 = sweep(
                 "Fig. 2 | copy-number gains across cells.\n"},
     "legend")
 fig4 = m1b_rows(md4)
-check("B2 per-context first use is exempt, the next mention in that context is a row",
-      len(fig4) == 1 and fig4[0][0] == "CN" and fig4[0][1] == "figure legend",
-      f"rows={fig4}")
+check("B2 every figure legend is its own context (each first use is exempt)",
+      fig4 == [], f"rows={fig4}")
+
+rows4b, md4b, _d4b, _p4b = sweep(
+    {"01_abstract.md": "Abstract\n\nCopy-number (CN) alterations are common.\n",
+     "figs.md": "Fig. 1 | copy-number heatmap of the cohort.\n"
+                "Fig. 2 | copy-number gains; the copy-number profile was called.\n"},
+    "legend2")
+fig4b = m1b_rows(md4b)
+check("B2b a second mention inside one legend is a row for THAT legend",
+      len(fig4b) == 1 and fig4b[0][0] == "CN" and fig4b[0][1] == "figure legend 2",
+      f"rows={fig4b}")
 
 rows5, md5, _d5, _p5 = sweep(
     {"abstract.md": "Abstract\n\nCopy-number (CN) alterations are common.\n",

@@ -65,7 +65,13 @@ if ! env_exists; then
       export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$PWD/tmp/pip-cache}"
       mkdir -p "${CONDA_PKGS_DIRS}" "${CONDA_ENVS_PATH}" "${PIP_CACHE_DIR}"         "$(dirname "${ENV_PREFIX}")"
       echo "named environment creation failed; using local prefix ${ENV_PREFIX}" >&2
-      "${CONDA}" create -y -p "${ENV_PREFIX}" "python=${PYTHON_VERSION}"
+      if [[ -d "${ENV_PREFIX}" ]]; then
+        # A previous run left the prefix behind; `conda create -p` on an
+        # existing prefix fails under `set -e`, so a re-run could never repair it.
+        echo "local prefix already exists; reusing ${ENV_PREFIX}" >&2
+      else
+        "${CONDA}" create -y -p "${ENV_PREFIX}" "python=${PYTHON_VERSION}"
+      fi
     fi
   fi
 else
@@ -82,12 +88,12 @@ print(f"python-docx {docx.__version__}; openpyxl {openpyxl.__version__}; lxml {l
 PY
 
 if [[ -n "${ENV_PREFIX}" ]]; then
-  RUN=(conda run -p "${ENV_PREFIX}")
-  ACTIVATE="conda activate ${ENV_PREFIX}"
+  RUN=("${CONDA}" run -p "${ENV_PREFIX}")
+  ACTIVATE="${CONDA} activate ${ENV_PREFIX}"
   ENV_LABEL="${ENV_PREFIX}"
 else
-  RUN=(conda run -n "${ENV_NAME}")
-  ACTIVATE="conda activate ${ENV_NAME}"
+  RUN=("${CONDA}" run -n "${ENV_NAME}")
+  ACTIVATE="${CONDA} activate ${ENV_NAME}"
   ENV_LABEL="${ENV_NAME}"
 fi
 

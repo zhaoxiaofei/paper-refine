@@ -259,14 +259,17 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
         }
         if not stats[vid]["complete"]:
             diags["incomplete_sheets"].append(
-                f"{vid}: {len(flat)} of {expected} directed scores collected")
+                f"{vid}: {len(flat)} of {expected_for.get(vid, expected)} directed "
+                f"scores collected")
     # Missing-sheet diagnostics, driven by the RECORDED sessions (a recomputed
     # token would miss legacy/unsalted ids and misreport whole panels as absent).
     for vid in field_ids:
         recs = [rec for rec in ctx.runs(kind="judge", round_no=r)
                 if rec.get("target_id") == vid]
         done = {rec.get("judge_index") for rec in recs if rec.get("status") == "done"}
-        for j in range(1, judges + 1):
+        enabled = (sorted(k for v, k in selection if str(v) == str(vid))
+                   if selection else list(range(1, judges + 1)))
+        for j in enabled:
             if j not in done:
                 diags["incomplete_sheets"].append(
                     f"{vid}: judge session j{j} has no completed sheet")
@@ -357,7 +360,9 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
                                          dedup=dedup_mode_of(ctx),
                                          dedup_threshold=DEDUP_FUZZY_THRESHOLD)
     return {"round": int(r), "field": field_ids, "field_size": k,
-            "scores_per_version": expected, "stats": stats, "diagnostics": diags,
+            "scores_per_version": expected,
+            "scores_per_version_by_version": dict(expected_for),
+            "stats": stats, "diagnostics": diags,
             "score_rows": score_rows, "issue_census": census,
             "issue_rows": issue_rows,
             "base_id": A1_ID, "base_rep": base_rep,

@@ -99,8 +99,23 @@ JOURNAL_MODES = {
     },
 }
 
+# The boundary assertions are CASE-SENSITIVE even though the words they
+# surround are matched case-insensitively: a lower->UPPER camelCase junction is
+# a word boundary (`ReviewersComments.docx`), while a following lowercase
+# letter is not (`biofeedback`).
+_FB_WORD_START = r"(?-i:(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z])))"
+_FB_WORD_END = r"(?-i:(?:(?![A-Za-z])|(?<=[a-z])(?=[A-Z])))"
+
 JOURNAL_FEEDBACK_NAME_RE = re.compile(
-    r"feedback|referee|reviewers?|editors?|editorial|decision[_ \-]*(?:letter|notice|email)",
+    # WORD-anchored: `biofeedback`, `genome_editor` and `base_editor_results`
+    # are not the journal's letter. An `editor(s)` name must carry a document
+    # role (`editor_comments`, `EditorComments`, `editor_decision`, ...).
+    _FB_WORD_START + r"(?:feedback|referees?|reviewers?)" + _FB_WORD_END
+    + r"|" + _FB_WORD_START + r"editors?(?:[-_ ]|(?-i:(?=[A-Z])))"
+    r"(?:comments?|decisions?|reports?|letters?|notices?|emails?|critiques?|forms?)"
+    + _FB_WORD_END
+    + r"|" + _FB_WORD_START + r"editorial" + _FB_WORD_END
+    + r"|" + _FB_WORD_START + r"decision[_ \-]*(?:letter|notice|email)" + _FB_WORD_END,
     re.I)
 # ... but the venue's OWN article-type vocabulary collides with those words: the
 # shipped example profile's `letter-to-the-editor` and the Frontiers profile's
@@ -120,7 +135,16 @@ def is_journal_feedback_name(name) -> bool:
     editors' letter, wherever it sits.
     """
     base = str(name or "").replace("\\", "/").rsplit("/", 1)[-1]
-    if ARTICLE_TYPE_MANUSCRIPT_NAME_RE.match(Path(base).stem):
+    # Strip ALL extension layers: `letter_to_the_editor.docx.txt` is the same
+    # article-type manuscript as `letter_to_the_editor.docx`.
+    stem = Path(base).stem
+    while True:
+        _stripped = re.sub(r"\.(?:txt|docx?|md|tex|pdf|rtf|csv|tsv|bak|final|tar|gz|zip)$",
+                           "", stem, flags=re.I)
+        if _stripped == stem:
+            break
+        stem = _stripped
+    if ARTICLE_TYPE_MANUSCRIPT_NAME_RE.match(stem):
         return False
     return bool(JOURNAL_FEEDBACK_NAME_RE.search(base))
 
@@ -466,8 +490,12 @@ def journal_previous_responses(ctx: Ctx) -> list:
     """
     if not ctx.pristine.is_dir():
         return []
+    # `_COVER_WORD_RE` is the module's already-correct word matcher; a local
+    # copy compiled with re.I made its camel-case lookarounds match ANY letter
+    # pair, so `uncover_response.docx` was mistaken for a cover letter.
     return [(p, label) for p, label in human_feedback_files_in(ctx.pristine)
-            if JOURNAL_AUTHORED_REPLY_RE.search(p.name)]
+            if JOURNAL_AUTHORED_REPLY_RE.search(p.name)
+            and not _COVER_WORD_RE.search(p.name)]
 
 
 def feedback_text_of(path: Path) -> tuple:
@@ -693,10 +721,12 @@ ARTIFACT_POLICY_FIX = "fix"
 ARTIFACT_POLICIES = ("on", ARTIFACT_POLICY_FIX, "off")
 DEFAULT_ARTIFACT_POLICY = "on"
 DEFAULT_RESIDUAL_GATE = True
-# How many identifier lookups one stage may spend. Each is a single request to a
-# public API with a 20-second cap, cached for LOOKUP_CACHE_TTL_DAYS across the
-# root's sandboxes; `off`/an unreachable network degrades to recorded `error`
-# rows, never to a failed stage. The cap is spent in the reserved order below,
+# How many identifier lookups one stage may spend. Each lookup is one or more
+# requests (a DOI asks Crossref, then DataCite, then the handle registry) with a
+# 10-second timeout per request -- worst case about 30 seconds -- cached for
+# LOOKUP_CACHE_TTL_DAYS across the root's sandboxes; `off`/an unreachable network
+# degrades to recorded `error` rows, never to a failed stage. The cap is spent in
+# the reserved order below,
 # and the reference-list DOIs now sit first in that order: a manuscript's
 # reference list is the largest class by far (one entry each) and the only place
 # a one-character DOI corruption can be caught at all -- no format check and no
@@ -809,15 +839,17 @@ def is_bookkeeping_name(name: str) -> bool:
 
 
 # Caption start patterns: "Figure 1 |", "Fig. 2.", "Supplementary Figure 3:", ...
-_CAPTION_LABEL_RE = (r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?fig(?:ure)?s?\.?\s*"
-                     r"\|?\s*")
+_CAPTION_LABEL_RE = (r"^\s*(?:(?:supplementary|extended\s+data|supp\.?)\s+)?"
+                     r"fig(?:ure)?s?\.?\s*\|?\s*")
 _CAPTION_NUM_RE = r"(S?\d+[A-Za-z]?|(?-i:[IVXLCDM]+))"
 # The panel group "(a)", "(a,b)" or "(a-b)" sits between the number and the
 # separator: "Figure 2(a) |" is a caption, "Figure 2 is a schematic" is not.
 _CAPTION_PANEL_RE = r"(?:\s*\([A-Za-z0-9][A-Za-z0-9,.\u2013\-]*\))?"
 CAPTION_START_RE = re.compile(
     _CAPTION_LABEL_RE + _CAPTION_NUM_RE + _CAPTION_PANEL_RE +
-    r"\s*(?:\||:|\u2014|\u2013|-|\.)\s*",
+    # A dash followed by a letter is a PANEL RANGE in running prose
+    # ("Figure 2a-b shows ..."), not the caption separator.
+    r"\s*(?:(?:\||:|\u2014|\u2013|-)(?![A-Za-z])|\.)\s*",
     re.IGNORECASE)
 # Caption-LOOKING lines the strict pattern above does not recognise (a bare
 # "Figure 3" line, a text-box label, an unusual separator). They are reported as
@@ -1967,7 +1999,10 @@ def _indefinite(noun: str) -> str:
     text = str(noun or "venue").strip()
     # An initialism takes the article its SPOKEN letters start with ("an NBT",
     # "an F1000", but "a GET"), a word takes the ordinary vowel test.
-    initialism = len(text) > 1 and text[0].isupper() and text[1:].isupper()
+    # A leading capital followed by capitals OR digits is read as letters
+    # ("NBT", "F1000"): "1000".isupper() is False, which made F1000 take "a".
+    initialism = (len(text) > 1 and text[0].isupper()
+                  and (text[1:].isupper() or text[1:2].isdigit()))
     vowel = (text[0] in "AEFHILMNORSX") if initialism else (text[:1].lower() in "aeiou")
     return ("an " if vowel else "a ") + text
 
@@ -1977,7 +2012,7 @@ def _article_phrase(profile: VenueProfile) -> str:
     prof = _as_profile(profile)
     art = str(prof.article_type or "Article").strip()
     label = prof.label
-    return f"{'an' if label[:1].lower() in 'aeiou' else 'a'} {label} {art}"
+    return f"{_indefinite(label)} {art}"
 
 
 def _caps_clause(profile: VenueProfile, *, article: bool = False) -> str:
@@ -2307,11 +2342,12 @@ def standing_exemptions_text(profile=None) -> str:
 {cover_bullet}
   * FIGURE-LEGEND LENGTH (check id M18) is ALWAYS enumerated: {caption_source}.
     Every stage therefore counts every legend's words;
-    when the operator configured a cap (`--caption-limit N`) that cap is used as
-    the pipeline's proxy for the venue's limit and an over-cap legend is a
-    reportable formatting item; without a cap the counts are recorded and the
-    comparison with the venue's limit is handed to the author as a manual
-    item. Nothing is ever made ineligible, ranked down, failed or rejected
+    when a cap IS configured -- the operator's `--caption-limit N` override, or
+    the venue profile's own published default -- that cap is used as the
+    pipeline's proxy for the venue's limit and an over-cap legend is a
+    reportable formatting item; only when neither is present are the counts
+    recorded and the comparison with the venue's limit handed to the author as
+    a manual item. Nothing is ever made ineligible, ranked down, failed or rejected
     because of a legend's word count, and length is never "fixed" by deleting
     scientific content.
   * Speculative "possible AI-generated" content may be flagged ONLY with
@@ -3074,7 +3110,7 @@ REWRITE_PARITY_AUDIT = """4. ATTACK THE REWRITE-PARITY RECORD - the classes a re
    The reviewer's M25-M29/J5 FINDINGS are disposed like every other frozen id (confirm, or drop
    with evidence)."""
 
-REWRITE_PARITY_REVISE = """12. REWRITE-PARITY findings (M25-M29) - resolve them the way a rewrite would: one
+REWRITE_PARITY_REVISE = """13. REWRITE-PARITY findings (M25-M29) - resolve them the way a rewrite would: one
     edit per finding instance, applied to EVERY occurrence of the convention, not only the
     quoted one (rule E11 in the revision skill's edit_rules.md):
       * M25 (artwork/text parity): align the editable main text / caption / SI legend with the

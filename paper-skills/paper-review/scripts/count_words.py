@@ -253,7 +253,10 @@ def _strip_latex(text: str) -> str:
     # Inline and single-line display math (`$p<0.05$`, `\(x\)`, `\[x\]`) is not
     # prose; only the command names used to be stripped, so the body's tokens
     # were counted.
-    text = re.sub(r"(?<!\\)\$\$[\s\S]*?\$\$|(?<!\\)\$[^$]*\$|\\\[[\s\S]*?\\\]|"
+    # An even run of backslashes before the math is a line break, not an
+    # escape: `\\$x$` is still math, `\$5` is a literal dollar.
+    text = re.sub(r"(?<!\\)(?:\\\\)*\$\$[\s\S]*?\$\$"
+                  r"|(?<!\\)(?:\\\\)*\$[^$]*\$|\\\[[\s\S]*?\\\]|"
                   r"\\\([\s\S]*?\\\)", " ",
                   text)
     text = re.sub(r"\\[a-zA-Z@]+\*?", " ", text)
@@ -332,6 +335,35 @@ def tex_lines(text: str):
     """
     lines, captions, abstract_end = [], [], None
     raw_lines = blank_math_environments(text or "").splitlines()
+    # A verbatim/listing environment is code, not prose. It was stripped of
+    # its command tokens but its BODY stayed, so a code listing inflated the
+    # venue's word count (the citation sweep already treats the same text as
+    # non-manuscript). Handles an inline begin/end pair on one line too.
+    _clean, _in_verb = [], None
+    for _raw in raw_lines:
+        _line = _raw
+        if _in_verb is not None:
+            _end = re.search(r"\\end\{" + re.escape(_in_verb) + r"\}", _line)
+            if not _end:
+                _clean.append("")
+                continue
+            _line = _line[_end.end():]
+            _in_verb = None
+        while True:
+            _b = re.search(r"\\begin\{(verbatim|lstlisting|minted|Verbatim)\}",
+                           _line)
+            if not _b:
+                break
+            _e = re.search(r"\\end\{" + re.escape(_b.group(1)) + r"\}",
+                           _line[_b.end():])
+            if _e:
+                _line = _line[:_b.start()] + _line[_b.end() + _e.end():]
+            else:
+                _in_verb = _b.group(1)
+                _line = _line[:_b.start()]
+                break
+        _clean.append(_line)
+    raw_lines = _clean
     i, n = 0, len(raw_lines)
     while i < n:
         raw = raw_lines[i]
@@ -539,13 +571,26 @@ def sections(text: str, abstract_end=None, caption_lines=None, excludes=None) ->
     included = [False] * n
     excluded_now = False
     end_found = False
+    in_keyword_block = False
     for i in range(start, n):
         stripped = _heading_text(lines[i])
         if KEYWORDS.match(stripped):
             # A Keywords line is not a section kind: the old generic branch
             # resumed the count after it, putting the keyword list and any
-            # Methods prose after it back into the main text.
+            # Methods prose after it back into the main text. The following
+            # continuation lines of the keyword block are not prose either.
+            in_keyword_block = True
+            excluded_now = True
             continue
+        if in_keyword_block and not stripped:
+            in_keyword_block = False
+            excluded_now = False
+            continue
+        if in_keyword_block and not (SECTION_BOUND.match(stripped)
+                                     or MAIN_START.match(stripped)):
+            continue
+        if SECTION_BOUND.match(stripped) or MAIN_START.match(stripped):
+            in_keyword_block = False
         if SECTION_BOUND.match(stripped) or MAIN_START.match(stripped):
             kind = section_kind(stripped)
             if kind and kind in excludes:
@@ -564,7 +609,8 @@ def sections(text: str, abstract_end=None, caption_lines=None, excludes=None) ->
         else:
             cap_ranges = [(i, i + 1) for i in sorted(set(caption_lines))]
     captions = sum(
-        count_words(" ".join(lines[max(a, start):min(b, n)]))
+        count_words(" ".join(lines[j] for j in range(max(a, start), min(b, n))
+                            if included[j]))
         for a, b in cap_ranges
         if any(included[i] for i in range(max(a, start), min(b, n)))
     )

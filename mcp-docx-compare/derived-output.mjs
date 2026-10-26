@@ -6,6 +6,7 @@
 // share a basename write the same redline concurrently.
 import { realpathSync } from 'node:fs';
 import * as path from 'node:path';
+import { realOrResolved } from './containment.mjs';
 
 function realOrSelf(p) {
   try {
@@ -30,7 +31,11 @@ export function derivedOutput(original, revised) {
 
 // The in-flight serialization key. It is the path the comparer writes, folded
 // to lower case because the destination is commonly a case-insensitive
-// Windows/drvfs path (`Report.docx` and `report.docx` are one file).
+// Windows/drvfs path (`Report.docx` and `report.docx` are one file). The output
+// path is resolved through its deepest existing ancestor first: `path.resolve`
+// keeps a symlinked directory in the string, so two spellings of one
+// destination (`/allowed/out.docx`, `/allowed/link->allowed/out.docx`) got two
+// keys and their stale-output cleanup could delete each other's redline.
 export function inFlightKey(original, revised, outputPath) {
-  return (outputPath || derivedOutput(original, revised)).toLowerCase();
+  return realOrResolved(outputPath || derivedOutput(original, revised)).toLowerCase();
 }

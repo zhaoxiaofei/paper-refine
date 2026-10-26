@@ -422,7 +422,10 @@ also prints the union view). Author-year call-outs matched by the script are
 `Smith & Jones, 2019` and `(Smith, 2019)`; a bare `In 2020` is NOT a call-out.
 Bracketed numbers directly after a measurement word (interval, range, threshold,
 score, value, level, age, dose, time, size, …) are recorded as
-`suspect_brackets` and never counted as citations. Unnumbered lists are
+`suspect_brackets`; an interval shape (`[2, 5]`, `[1.2-3.4]`) is never counted
+as a citation, while a SINGLE number is COUNTED and flagged `suspect` for manual
+verification (dropping it fabricated "listed but never cited" findings).
+Unnumbered lists are
 enumerated entry by entry (wrapped continuations are merged), so "listed but
 never cited" is auditable for author-year styles too; the artifact prints the
 reference-list region it read, with the boundary reason. LaTeX call-outs are

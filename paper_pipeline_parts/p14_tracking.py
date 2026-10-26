@@ -1315,6 +1315,8 @@ def _cmd_track_locked(ctx: Ctx, args) -> None:
             die("--redline-cmd must be a JSON argv list")
         if not isinstance(cmd_template, list) or not cmd_template:
             die("--redline-cmd must be a non-empty JSON argv list with {base}/{revised}/{out}")
+    if args.round is not None and int(args.round) < 1:
+        die(f"--round takes a 1-based round number, got {args.round!r}")
     rounds = [int(args.round)] if args.round else None
     versions = (None if args.version == "all"
                 else [v.strip() for v in str(args.version).split(",") if v.strip()])

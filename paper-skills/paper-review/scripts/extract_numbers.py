@@ -113,19 +113,30 @@ LABEL_PATTERNS = [
     # them from the M4 inventory, so an abstract/results conflict on such a
     # p-value was never compared.
     ("p-value", re.compile(
-        r"\b[pP](?:\s*[-_]?\s*[vV]alues?)?\s*(?:<=|>=|[=<>≤≥]|\bof\b)\s*"
-        r"((?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)")),
+        # "p-value of 0.03" is a real p-value, but a bare "p of 12 patients" is
+        # not: the `of` separator is licensed only after the word "value".
+        r"\b[pP](?:(?:\s*[-_]?\s*[vV]alues?)\s*(?:<=|>=|[=<>≤≥]|\bof\b)"
+        r"|\s*(?:<=|>=|[=<>≤≥]))\s*"
+        r"((?:\d+\.?\d*|\.\d+)(?:[eE][+\-\u2212]?\d+)?)")),
     # `n = 1,234` is one count and `n = 12.5` is not a count at all; the old
     # `(\d+)\b` read them as 1 and 12, inventing a conflict with `n = 1234`.
-    ("n", re.compile(r"\b[nN]\s*=\s*(\d{1,3}(?:,\d{3})+|\d+)\b(?![.,]\d)")),
+    ("n", re.compile(
+        r"\b[nN]\s*=\s*(\d{1,3}(?:[,\u00a0\u202f ]\d{3})+|\d+)\b"
+        r"(?![.,]\d)(?![\u00a0\u202f ]\d{3}\b)")),
     ("AUC", re.compile(
-        r"\bAU(?:C|ROC)\s*(?:was|is|of|=|:|approximately)?\s*"
-        r"((?:0?\.\d+|1(?:\.0+)?|0(?:\.0+)?))\b", re.I)),
-    ("percentage", re.compile(r"\b(\d{1,3}(?:\.\d+)?)\s*%")),
-    ("CI", re.compile(r"\bCI\s*[:=,]?\s*(\d+\.?\d*)\s*(?:[–-]|to)\s*(\d+\.?\d*)", re.I)),
+        r"\bAU(?:C|ROC)\s*(?:(?:was|is|of|approximately|approx\.?|about)\s*)*"
+        r"(?:[:=]\s*)?((?:0?\.\d+|1(?:\.0+)?))(?!\d|\.)", re.I)),
+    ("percentage", re.compile(
+        r"(?<![\w.])((?:\.\d+|\d{1,3}(?:\.\d+)?))\s*%")),
+    ("CI", re.compile(
+        r"\bCI\s*(?:[:=,]\s*)?(?:\[\s*)?"
+        r"([+\-\u2212]?\d+(?:\.\d+)?)\s*(?:[–—−-]|to|,)\s*"
+        r"([+\-\u2212]?\d+(?:\.\d+)?)\s*\]?", re.I)),
     # The exponent is mandatory: without it a plain Pearson "r = 0.8" was
     # inventoried as R², and the M4 label was simply wrong.
-    ("R2", re.compile(r"\bR(?:\^?2|²)\s*[:=]\s*(0?\.\d+|\d\.\d+)\b", re.I)),
+    ("R2", re.compile(
+        r"\bR(?:\^?2|²)\s*(?:[:=]|\bwas\b|\bis\b|\bof\b)\s*"
+        r"(0?\.\d+|\d\.\d+)\b", re.I)),
     ("fold", re.compile(r"\b(\d+\.?\d*)[- ]?fold\b", re.I)),
 ]
 
@@ -137,7 +148,7 @@ def _metric_key(label: str, val) -> str:
     `1.0` are the same perfect AUC); the raw capture is kept in the occurrence
     excerpt, but the comparison key is numeric.
     """
-    text = str(val)
+    text = str(val).replace("\u2212", "-")
     if label == "CI":
         parts = text.split("-")
         if len(parts) == 2:
@@ -148,7 +159,9 @@ def _metric_key(label: str, val) -> str:
         return text
     if label in ("p-value", "AUC", "R2", "n", "percentage", "fold"):
         try:
-            return format(float(text.replace(",", "")), ".15g")
+            return format(float(text.replace(",", "").replace("\u2212", "-")
+                               .replace("\u00a0", "").replace("\u202f", "")
+                               .replace(" ", "")), ".15g")
         except ValueError:
             return text
     return text
@@ -212,12 +225,27 @@ ENTRY_HINT_RE = re.compile(
 AUTHOR_START_RE = re.compile(r"^\s*[A-Z][A-Za-z'\-]+,\s*(?:[A-Z]\.|[A-Z][a-z]+)")
 
 
+# A reference entry's author block: "Smith J.", "Smith JA,", "Smith, J.".
+# A bare capitalised word is not enough -- "In 2020 ..." starts a sentence too.
+_ENTRY_AUTHOR_RE = re.compile(
+    r"^\s*[A-Z][A-Za-z'\-]+(?:\s+[A-Z]{1,3}[,.]|\s+[A-Z]\.|\s*,\s*(?:[A-Z]\.|[A-Z][a-z]+))")
+
+
 def looks_like_reference_entry(s):
     if NUM_ENTRY_RE.match(s) or BULLET_ENTRY_RE.match(s):
         return True
-    if YEAR_RE.search(s) or ENTRY_HINT_RE.search(s):
+    # A year or "et al." alone is ordinary prose ("In 2020 we reanalysed ...",
+    # "Smith et al. showed ..."). A reference entry also has an author-name
+    # start, a volume:page marker, a DOI, or an organisation-author shape.
+    if _ENTRY_AUTHOR_RE.match(s) or AUTHOR_START_RE.match(s):
         return True
-    return bool(AUTHOR_START_RE.match(s))
+    if re.search(r"\bdoi\b|https?://", s, re.I):
+        return True
+    if YEAR_RE.search(s) and re.search(r"\b\d+\s*[:(]\s*\d+", s):
+        return True
+    if re.match(r"^\s*(?:[A-Z][\w'’\-&.]+\s+){2,}\(?(?:19|20)\d{2}\)?\s*[.;:,)]", s):
+        return True
+    return False
 
 SECTION_PATTERNS = [
     ("cover letter", re.compile(r"^(?:cover letter|dear editor)\b", re.I)),
@@ -253,8 +281,12 @@ def find_reference_region(lines):
     start = None
     for i, ln in enumerate(lines):
         if REF_HEAD_RE.match(ln.strip()):
+            # The LAST heading is the real list. A document can carry an early
+            # "References" line (a table of contents, or a first list that a
+            # later list supersedes); latching the first one scanned the real
+            # list as body text. p12's `_numbered_reference_titles` already
+            # uses the last heading.
             start = i + 1
-            break
     if start is None:
         return None
     end = len(lines)
@@ -291,7 +323,8 @@ def classify_context(fname):
     # letter and a "reply" name that merely contains "cover" was masked (see
     # `_COVER_WORD_RE`, which `is_evidence_name` already uses).
     if _COVER_WORD_RE.search(f): return "cover letter"
-    if "title" in f: return "title page"
+    toks = set(re.findall(r"[a-z0-9]+", f))
+    if "title" in toks: return "title page"
     # A bibliography is a bibliography even when it belongs to the supplement:
     # "suppAll-d.bib" matched the "supp" heuristic below and was swept as
     # supplementary text, so cited papers' percentages and p-values entered the
@@ -302,12 +335,13 @@ def classify_context(fname):
     # were swept as cited works' numbers instead of the authors' own.
     if REF_ROLE_RE.search(f) or "bibliograph" in f or re.search(r"\.bib(\.|$)", raw):
         return "references"
-    if "abstract" in f: return "abstract"
+    if "abstract" in toks or "abstracts" in toks: return "abstract"
     if SUPP_ROLE_RE.search(f): return "supplementary"
-    if "method" in f or "m&m" in f: return "Methods"
-    if "fig" in f or "legend" in f: return "figure legend"
-    if "table" in f: return "table"
-    if "reporting" in f or "summary" in f: return "reporting summary"
+    if "m&m" in f or any(t.startswith("method") for t in toks): return "Methods"
+    if any(t.startswith(("fig", "legend")) for t in toks): return "figure legend"
+    if any(t.startswith("table") for t in toks): return "table"
+    if any(t.startswith(("reporting", "summary")) for t in toks):
+        return "reporting summary"
     return "main text"
 
 
@@ -396,13 +430,15 @@ def main():
             for label, pat in LABEL_PATTERNS:
                 for m in pat.finditer(raw):
                     val = m.group(1) if m.lastindex else m.group(0)
-                    if label == "percentage" and re.match(
-                            r"\s*(?:CI|confidence)\b", raw[m.end():], re.I):
-                        continue  # "95% CI" is a confidence level, not a metric
+                    if label == "percentage" and (
+                            re.match(r"\s*(?:CI|confidence)\b", raw[m.end():], re.I)
+                            or re.search(r"(?:CI|confidence)\s*$", raw[:m.start()], re.I)):
+                        continue  # "95% CI" / "CI 95%" is a level, not a metric
                     if label == "CI" and m.lastindex and m.group(2):
                         val = "%s-%s" % (m.group(1), m.group(2))
                         try:
-                            _lo, _hi = float(m.group(1)), float(m.group(2))
+                            _lo = float(m.group(1).replace("\u2212", "-"))
+                            _hi = float(m.group(2).replace("\u2212", "-"))
                         except ValueError:
                             _lo = _hi = None
                         if _lo is not None and _lo > _hi:

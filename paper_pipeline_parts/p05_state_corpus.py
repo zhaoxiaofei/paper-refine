@@ -239,6 +239,11 @@ def upstream_deps(rec: dict, ctx=None) -> list:
         return deps
     if kind == "review":
         deps = [rid_a1(r)]
+        if rec.get("id") == rid_review_b(r):
+            # A split part B consumes part A's review/ (merge_review_parts
+            # freezes A's findings into B's review/findings.json), so an A
+            # retry must defer B instead of rebuilding it from stale output.
+            deps.append(rid_review(r))
         # `materialize_review` now stages the concern ledger for EVERY feedback
         # mode that is not scoped -- transfer/resubmit AND `llm` -- because the
         # llm review reconciles that ledger too. List it here as well, or a
@@ -272,10 +277,15 @@ def upstream_deps(rec: dict, ctx=None) -> list:
     if kind in ("feedback", "concerns"):
         return [rid_a1(r)]
     if kind == "response":
-        # The response letter consumes the concern ledger (feedback/concerns)
-        # and the final package the caller recorded; the package may be a pin
-        # (no run) or the scoped revision run (recorded as upstream_run_id).
-        return [rec["upstream_run_id"]] if rec.get("upstream_run_id") else []
+        # The response letter consumes BOTH the concern ledger and the final
+        # package: the ledger run is upstream_run_id, the scoped revision run is
+        # package_run_id (a pin needs no dependency).
+        deps = []
+        if rec.get("upstream_run_id"):
+            deps.append(rec["upstream_run_id"])
+        if rec.get("package_run_id"):
+            deps.append(rec["package_run_id"])
+        return deps
     if kind == "integrate":
         # every pool member is a donor, so EVERY pool run must be done first
         pool = list(rec.get("pool_ids") or [])
@@ -736,7 +746,11 @@ class Ctx:
                 if holder.get("pid") is not None:
                     break
             pid = holder.get("pid")
-        if isinstance(pid, int) and pid_alive(pid):
+        try:
+            _pid_n = int(pid) if pid is not None else None
+        except (TypeError, ValueError):
+            _pid_n = None
+        if _pid_n is not None and pid_alive(_pid_n):
             die(f"another pipeline process is already working on this root "
                 f"(pid {pid}, {holder.get('what')!r} since {holder.get('since')}).\n"
                 f"       Refusing to run {what!r} concurrently: two writers would "
@@ -796,6 +810,7 @@ class Ctx:
         lock the winner has just created (the old unlink-then-create sequence
         let both processes believe they held it).
         """
+        acquired = False
         for attempt in (1, 2):
             try:
                 os.link(staged, lock_path)
@@ -1621,6 +1636,7 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
     new_dir = posixpath.dirname(new_rel) or "."
     subs = {}
     stems = {}
+    stems_source = {}
     stems_target = {}
     dir_map = {}
 
@@ -1641,6 +1657,12 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
         if suffix in (VIEW_LATEX_TARGET_EXTS + VIEW_LATEX_SOURCE_EXTS):
             add(stems, _latex_stem(o_rel), _latex_stem(n_rel))
             add(stems, _latex_stem(o_base), _latex_stem(n_base))
+        if suffix in VIEW_LATEX_SOURCE_EXTS:
+            # `\input{fig1}` means the SOURCE `fig1.tex`, never the image
+            # `fig1.png` that shares the stem; mixing both in one table let a
+            # shuffled directory order rewrite the input to an image.
+            add(stems_source, _latex_stem(o_rel), _latex_stem(n_rel))
+            add(stems_source, _latex_stem(o_base), _latex_stem(n_base))
         o_dir, n_dir = posixpath.dirname(o), posixpath.dirname(n)
         if o_dir:
             add(dir_map, posixpath.relpath(o_dir, old_dir), posixpath.relpath(n_dir, new_dir))
@@ -1662,7 +1684,8 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
             # \includegraphics{plot} means the PLOTTED file (`plot.pdf`), never
             # the standalone source (`plot.tex`) that happens to share its stem:
             # a source and a target of one stem must not compete for one key.
-            table = stems_target if m.group("cmd") == "includegraphics" else stems
+            table = (stems_target if m.group("cmd") == "includegraphics"
+                     else (stems_source or stems))
             mapped = [table.get(piece.strip(), piece) for piece in pieces]
             if mapped == pieces:
                 return m.group(0)
@@ -1672,6 +1695,7 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
     if dir_map:
         def one(mm):
             d = mm.group(1).rstrip("/")
+            d = re.sub(r"^\./", "", d)       # `./figures` and `figures` are one key
             return "{" + (dir_map.get(d, d) or ".") + "/}"
 
         # `\graphicspath{{figures/}}` has TWO brace levels. The old non-greedy
@@ -1984,10 +2008,20 @@ def _sanitize_pdf_bytes(data: bytes) -> tuple:
     """(bytes, notes): blank PDF Info/XMP/ID values in place (equal length)."""
     notes = []
     changed = 0
-    m = re.search(rb"trailer\b.*?/Info\s+(\d+)\s+0\s+R", data, re.S)
-    if m:
-        om = re.search(rb"(?m)^\s*" + m.group(1) + rb"\s+0\s+obj.*?endobj", data, re.S)
-        if om:
+    # A linearized PDF carries a trailer at the HEAD and the real /Info in the
+    # FINAL trailer: `re.search` blanked only the first, leaving the author and
+    # title visible in the judge view.
+    _info_ids = []
+    for m in re.finditer(rb"trailer\b.*?/Info\s+(\d+)\s+0\s+R", data, re.S):
+        if m.group(1) not in _info_ids:
+            _info_ids.append(m.group(1))
+    if _info_ids:
+        for _iid in _info_ids:
+            om = re.search(rb"(?m)^\s*" + _iid + rb"\s+0\s+obj.*?endobj", data, re.S)
+            if not om:
+                notes.append("PDF /Info object is compressed/unparsable; its metadata was "
+                             "left as is")
+                continue
             obj = om.group(0)
             new_obj = obj
             for key in (b"Author", b"Creator", b"Producer", b"Title", b"Subject", b"Keywords",
@@ -1997,8 +2031,6 @@ def _sanitize_pdf_bytes(data: bytes) -> tuple:
             if new_obj != obj:
                 data = data[:om.start()] + new_obj + data[om.end():]
                 changed += 1
-        else:
-            notes.append("PDF /Info object is compressed/unparsable; its metadata was left as is")
     else:
         notes.append("no uncompressed PDF /Info dictionary found; metadata was left as is")
     # /ID is in the trailer/xref at the END of the file, but a LINEARIZED PDF
@@ -3119,8 +3151,12 @@ def _probe_value_equal(declared, produced) -> bool:
     if not a or not b:
         return False
     try:
-        return float(a) == float(b)
-    except (TypeError, ValueError):
+        # float() collapses 9007199254740993 to 9007199254740992 and turns
+        # 1e999 into inf: a one-ulp error would be "reproduced". Decimal keeps
+        # the written value exact.
+        from decimal import Decimal, InvalidOperation
+        return Decimal(a) == Decimal(b)
+    except (TypeError, ValueError, InvalidOperation):
         return False
 
 
@@ -3277,15 +3313,15 @@ def probe_reproduction(sb: Path, findings: list) -> dict:
             results.append(entry)
             continue
         try:
-            with tempfile.TemporaryFile("w+b") as out:
-                proc = subprocess.run(
-                    [sys.executable, str(target)], cwd=str(sb), stdin=subprocess.DEVNULL,
-                    stdout=out, stderr=subprocess.DEVNULL, timeout=PROBE_REPRO_TIMEOUT)
-                out.seek(0, os.SEEK_END)
-                size = out.tell()
-                out.seek(max(0, size - 8192))
-                tail = out.read().decode("utf-8", "replace")
-            lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
+            # The WHOLE stdout, not its final 8192 bytes: a correct last line
+            # longer than that failed, and a long line whose suffix happened to
+            # float-equal the claim passed.
+            proc = subprocess.run(
+                [sys.executable, str(target)], cwd=str(sb), stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                timeout=PROBE_REPRO_TIMEOUT)
+            text = (proc.stdout or b"").decode("utf-8", "replace")
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
             produced = lines[-1] if lines else ""
             entry["produced"] = " ".join(produced.split())[:200]
             if proc.returncode != 0:
@@ -3398,11 +3434,14 @@ def probe_findings_rows(ctx: Ctx, r: int) -> list:
         return []
     rec = ctx.run(rid_probe(r))
     if rec is not None and str(rec.get("status") or "") == "done":
-        doc = read_json(ctx.sandbox_of(rec) / PROBE_FINDINGS_REL,
-                        revive=False, lenient=True)
-        found = doc.get("findings") if isinstance(doc, dict) else []
-        return [f for f in (found or ()) if isinstance(f, dict)
-                and str(f.get("id") or "").strip()]
+        live = ctx.sandbox_of(rec) / PROBE_FINDINGS_REL
+        if live.is_file():
+            doc = read_json(live, revive=False, lenient=True)
+            found = doc.get("findings") if isinstance(doc, dict) else []
+            return [f for f in (found or ()) if isinstance(f, dict)
+                    and str(f.get("id") or "").strip()]
+        # The sandbox was pruned: a DONE record must read the archive, not
+        # silently return an empty discovery list.
     # The ARCHIVED round keeps the probe findings MERGED into its
     # findings_extra.json (see archive_review_outputs): they are already part of
     # the archived discovery list, so re-adding them here would double-seed the
@@ -4115,7 +4154,8 @@ def _review_copy_mismatch(ctx: Ctx, r: int, sb: Path, upstream_dir: Path):
     the point), and a probe run that is not done means the copy is out of date.
     """
     prec = ctx.run(rid_probe(r))
-    if prec is not None and str(prec.get("status") or "") != "done":
+    if probe_review_of(ctx) != "off" and prec is not None \
+            and str(prec.get("status") or "") != "done":
         return (f"the probe run {rid_probe(r)} is not done: the findings this round's auditor "
                 f"and revisers consume will change")
     cur = hash_manifest(sb / REVIEW_DIR).get("files") or {}

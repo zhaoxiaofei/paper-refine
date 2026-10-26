@@ -677,7 +677,9 @@ function main() {
 
   if (opts.remove) {
     const next = mergePatch(original, '');
-    if (next === original) {
+    // mergePatch normalizes a trailing newline; a config that already has no
+    // managed block (`[]` with no newline) must stay a strict no-op.
+    if (next === original || next.trimEnd() === original.trimEnd()) {
       note('no managed block found; nothing to remove');
       return;
     }

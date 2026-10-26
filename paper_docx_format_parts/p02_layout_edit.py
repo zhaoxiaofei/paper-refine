@@ -909,7 +909,7 @@ FIGURES_HEADING_RE = re.compile(
 # patterns below are the same rule for "Figure 2 |", "Fig. 2.", "Figure S1",
 # "Extended Data Figure 3 |", "Supplementary Fig. 4:".
 _CAPTION_LABEL_RE = (r"(?:supplementary\s+|extended\s+data\s+|supp\s+)?%s\.?\s*")
-DISPLAY_CAPTION_NUM_RE = r"(?:S?\d+[A-Za-z]?|[IVXLC]+)"
+DISPLAY_CAPTION_NUM_RE = r"(?:S?\d+[A-Za-z]?|[IVXLC]{2,})"
 TABLE_CAPTION_RE = re.compile(
     r"^\s*" + (_CAPTION_LABEL_RE % "tables?") + DISPLAY_CAPTION_NUM_RE
     + r"\s*(?:\||:|\u2014|\u2013|-|\.)(?=\s|$)", re.I)
@@ -1515,18 +1515,35 @@ def display_item_rows(xml: str, policy: dict, doc: str, kind: str) -> tuple:
             j -= 1
         return ""
 
+    used_captions = set()
+    caption_cache = {}
+
     def caption_adjacent(i):
         """(block index, text, side) of the item's caption paragraph, or Nones."""
+        if i in caption_cache:
+            return caption_cache[i]
         own = texts.get(i, "")
         if display_caption_text(own, kind):
             # An image and its legend can share one paragraph in Word ("self"):
             # the caption is then neither before nor after, but it IS there.
-            return i, own, "self"
+            used_captions.add(i)
+            caption_cache[i] = (i, own, "self")
+            return caption_cache[i]
         for step, side in ((-1, "before"), (+1, "after")):
             j, t = attach(i, step)
+            if j is None or j in used_captions:
+                continue
             if display_caption_text(t, kind):
-                return j, t, side
-        return None, "", ""
+                # ONE caption belongs to ONE item: `[captionless table][caption]
+                # [table]` made the caption the AFTER caption of the first table
+                # and the BEFORE caption of the second, so its fix could move a
+                # sibling's legend. Cache the answer because the item's inventory
+                # and rule passes both ask the same question.
+                used_captions.add(j)
+                caption_cache[i] = (j, t, side)
+                return caption_cache[i]
+        caption_cache[i] = (None, "", "")
+        return caption_cache[i]
 
     # The ITEMS: a table block for a table; an image paragraph and every
     # COLLECTED legend (a caption paragraph not attached to an image) for a
@@ -3374,7 +3391,7 @@ def reference_entry_rows(paras: list, is_ref: list, policy: dict = None,
 # from the caption blocks), profile-gated by `"numbering": "citation"`.
 # --------------------------------------------------------------------------
 
-_DISPLAY_ITEM_TOKEN = r"(?:S?\d{1,3}[A-Za-z]?(?!\d)|[IVXLC]+)"
+_DISPLAY_ITEM_TOKEN = r"(?:S?\d{1,3}[A-Za-z]?(?!\d)|[IVXLC]{2,})"
 # The tokens a CONJUNCTION/range list may continue with: the digit form only.
 # A trailing English word that happens to be roman-numeral letters must not
 # date a phantom item -- "Figure 1 and C. elegans ..." is not a call-out of
@@ -3600,7 +3617,17 @@ EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 # `m.start()`, which `EMAIL_RE`'s greedy local part makes impossible (they are
 # absorbed into the match), so the branch was dead code.
 _EMAIL_ROLE_PREFIXES = ("correspondence", "correspondingauthor", "affiliations",
-                        "affiliation", "keywords", "contact", "orcid", "email")
+                        "affiliation", "keywords", "contact", "orcid")
+# `email` is NOT a role prefix: `emailaddress@journal.com` and `emailupdates@...`
+# are healthy addresses whose local part merely begins with the word. `contact`
+# IS a role word only in the documented front-matter shape "lead contact<name>@";
+# otherwise `contactjohn@university.edu` is a healthy address too. Both shapes
+# are structurally identical to the glue, so the mechanical cut requires the
+# "lead" context and every ambiguous address is left alone (the FMT-X2 row is
+# still reported for the editing arms when the address touches text).
+_EMAIL_ROLE_PREFIX_CONTEXT = {
+    "contact": re.compile(r"(?:^|\s)lead\s+$", re.I),
+}
 # The residue after a role word is a PERSONAL NAME in the glued shipped shape
 # (`contactzhenxie@`), not a routine mailbox word. `emailupdates@list.edu` is a
 # healthy address whose local part merely begins with a role word; the old cut
@@ -3631,6 +3658,11 @@ def _email_glue_cut(text: str, m) -> tuple:
     local, host = token.split("@", 1)
     low = local.lower()
     for word in _EMAIL_ROLE_PREFIXES:
+        context = _EMAIL_ROLE_PREFIX_CONTEXT.get(word)
+        if context is not None and not context.search(text[:m.start()]):
+            # `contactjohn@` is a healthy address; only the documented
+            # "lead contact<name>@" front-matter glue has the context.
+            continue
         if low.startswith(word) and len(local) - len(word) >= 3 \
                 and low[len(word)].isalpha():
             residue = low[len(word):]
@@ -4557,13 +4589,18 @@ def _zotero_cluster_for_ranks(ranks, original_cluster: str) -> str:
         dash_raw = dash_vis = "-"
     else:
         dash_raw, dash_vis = "\\uc0\\u8211{}", "\u2013"
+    # Only an ORIGINAL range stays a range: a cluster written `1,2,3` must not
+    # be rebuilt `1-3` (refresh parity for styles with collapse disabled).
+    _orig_range = bool(re.search(
+        r"\d\s*(?:\\uc0\\u8211\{\}|\\u8211\{\}|\u2013|\u2014|-)\s*\d",
+        original_cluster or ""))
     raw_parts, vis_parts = [], []
     i = 0
     while i < len(ranks):
         j = i
         while j + 1 < len(ranks) and ranks[j + 1] == ranks[j] + 1:
             j += 1
-        if j - i >= 2:                       # >= 3 contiguous: a range
+        if j - i >= 2 and _orig_range:       # a printed range stays a range
             raw_parts.append(f"{ranks[i]}{dash_raw}{ranks[j]}")
             vis_parts.append(f"{ranks[i]}{dash_vis}{ranks[j]}")
         else:
@@ -4700,12 +4737,31 @@ def _zotero_entry_match_score(entry_text: str, item: dict) -> int:
     if year and year != "None" and f"({year})" in re.sub(r"\s+", " ", entry_text):
         score += 1
     title = str(item.get("title") or "")
-    for t in re.sub(r"[^a-z0-9 ]+", " ", title.lower()).split():
-        if len(t) > 4 and t not in ZOTERO_TOKEN_STOPWORDS and _zotero_word_in(hay, t):
+    for t in _zotero_title_tokens(title):
+        if _zotero_word_in(hay, t):
             score += 1
             if score >= 8:
                 break
     return score
+
+
+def _zotero_title_tokens(title: str) -> list:
+    """Distinctive title tokens, shortest useful length included.
+
+    The old >4 filter dropped four-letter scientific nouns ("data", "cell",
+    "gene", "CNV"): two same-author entries then tied on the shared title word
+    ("notes"), and the greedy assignment handed the earlier rank to the wrong
+    entry. Four-letter tokens are exactly what distinguishes such titles.
+    """
+    return [t for t in re.sub(r"[^a-z0-9 ]+", " ", str(title or "").lower()).split()
+            if len(t) >= 4 and t not in ZOTERO_TOKEN_STOPWORDS]
+
+
+def _zotero_title_overlap(entry_text: str, item: dict) -> int:
+    hay = re.sub(r"[^a-z0-9 ]+", " ", unicodedata.normalize(
+        "NFKD", str(entry_text or "")).lower())
+    return sum(1 for t in _zotero_title_tokens(item.get("title") or "")
+               if _zotero_word_in(hay, t))
 
 
 def zotero_bibliography_state(xml: str, frame: dict):
@@ -4821,10 +4877,17 @@ def _zotero_bibliography_plan(xml: str, frame: dict, items_by_rank: dict):
         for rank, item in items_by_rank.items():
             score = _zotero_entry_match_score(text, item)
             if score:
-                candidates.append((score, idx, rank))
-    candidates.sort(key=lambda t: (-t[0], t[1], t[2]))
+                # The SCORE alone ties for same-author, near-title entries
+                # ("Notes on data" / "Notes on cell"): both match the family
+                # and the shared word "notes". Title overlap is the
+                # discriminating evidence and must break the tie BEFORE the
+                # earlier entry index does -- the old key kept the first free
+                # pair and assigned the swapped bibliography backwards.
+                candidates.append((score, idx, rank,
+                                   _zotero_title_overlap(text, item)))
+    candidates.sort(key=lambda t: (-t[0], -t[3], t[1], t[2]))
     taken_entry, taken_rank, assignment = set(), set(), {}
-    for score, idx, rank in candidates:
+    for score, idx, rank, _overlap in candidates:
         if score < 4:
             break
         if idx in taken_entry or rank in taken_rank:
@@ -5108,6 +5171,19 @@ def zotero_style_reconcile(parts: dict, preferred: str = "") -> dict:
     return out
 
 
+def _part_has_zotero_item_field(raw) -> bool:
+    """True when a part's WORD FIELD INSTRUCTIONS carry a Zotero item field.
+
+    The checker joins `w:instrText` pieces across runs and matches
+    case-insensitively; a raw byte containment test missed an instruction Word
+    split into two runs (`ADDIN ` + `ZOTERO_ITEM`) or spelled lowercase.
+    """
+    text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw or "")
+    instr = "".join(re.findall(r"<w:instrText\b[^>]*>(.*?)</w:instrText>",
+                               text, re.S | re.I))
+    return "ADDIN ZOTERO_ITEM" in re.sub(r"\s+", " ", instr).upper()
+
+
 def refresh_zotero_parts(parts: dict, policy: dict = None) -> dict:
     """The local refresh + style reconcile over one package's parts (in memory).
 
@@ -5137,7 +5213,7 @@ def refresh_zotero_parts(parts: dict, policy: dict = None) -> dict:
                          if (n in ZOTERO_FIELD_PARTS
                              or ZOTERO_FIELD_AUX_PARTS_RE.search(n))
                          and n != "word/document.xml"
-                         and b"ADDIN ZOTERO_ITEM" in parts[n]]
+                         and _part_has_zotero_item_field(parts[n])]
     style_info = zotero_style_reconcile(style_parts,
                                         str(policy.get("zotero_style") or ""))
     new_parts = dict(parts)

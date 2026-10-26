@@ -745,8 +745,10 @@ def cmd_setup(args) -> None:
         print(f"[setup] length limits (M19):     none configured by this venue profile -- the "
               f"counts are recorded and compared with the target journal's own guidelines")
     else:
-        print(f"[setup] length limits (M19):     abstract <= {_lim['abstract'].get('cap')}, "
-              f"main text <= {_lim['main text'].get('cap')} "
+        _a = "no cap" if _lim["abstract"].get("cap") is None else _lim["abstract"]["cap"]
+        _m = "no cap" if _lim["main text"].get("cap") is None else _lim["main text"]["cap"]
+        print(f"[setup] length limits (M19):     abstract <= {_a}, "
+              f"main text <= {_m} "
               f"({venue_profile.length_limits_source})")
     print(f"[setup] rounds:                 {rounds} (FIXED length; the round-{rounds} champion "
           f"is the final answer)")
@@ -1200,8 +1202,10 @@ def cmd_set_venue(args) -> None:
         print("[set-venue] limits:  this venue profile sets no abstract/main-text cap; the "
               "stages record the counts and compare them with the target journal's guidelines.")
     else:
-        print(f"[set-venue] limits:  abstract <= {limits['abstract'].get('cap')}, main text <= "
-              f"{limits['main text'].get('cap')} ({profile.length_limits_source})")
+        _a = "no cap" if limits["abstract"].get("cap") is None else limits["abstract"]["cap"]
+        _m = "no cap" if limits["main text"].get("cap") is None else limits["main text"]["cap"]
+        print(f"[set-venue] limits:  abstract <= {_a}, main text <= {_m} "
+              f"({profile.length_limits_source})")
     print(f"[set-venue] next:    python {Path(__file__).name} run --root {ctx.root}  "
           f"(existing roots keep their completed rounds; `retry`/`run` re-stage the rest)")
 
@@ -1212,8 +1216,11 @@ def _article_type_list_lines(profile) -> list:
     for tid, label, has_limits in profile.article_types():
         limits = profile.with_article_type(tid).length_limits()
         if has_limits:
-            caps = (f"abstract <= {limits['abstract']['cap']}, main text <= "
-                    f"{limits['main text']['cap']}")
+            _a = ("no cap" if limits["abstract"].get("cap") is None
+                  else limits["abstract"]["cap"])
+            _m = ("no cap" if limits["main text"].get("cap") is None
+                  else limits["main text"]["cap"])
+            caps = f"abstract <= {_a}, main text <= {_m}"
         else:
             caps = "no numbers carried: the stages count and name the venue's own limit"
         marker = " (default)" if tid == profile.data["default_article_type"] else ""
@@ -1311,8 +1318,10 @@ def cmd_set_article_type(args) -> None:
               "stages count and name the venue's own limit (see "
               "`venue_profiles/README.md` to add the numbers to a copy of the profile).")
     else:
-        print(f"[set-article-type] M19 caps: abstract <= {limits['abstract']['cap']}, main text "
-              f"<= {limits['main text']['cap']} ({chosen.length_limits_source[:120]})")
+        _a = "no cap" if limits["abstract"].get("cap") is None else limits["abstract"]["cap"]
+        _m = "no cap" if limits["main text"].get("cap") is None else limits["main text"]["cap"]
+        print(f"[set-article-type] M19 caps: abstract <= {_a}, main text "
+              f"<= {_m} ({chosen.length_limits_source[:120]})")
     other = [tid for tid, _label, _has in profile.article_types() if tid != wanted][:4]
     if other:
         print(f"[set-article-type] others: {', '.join(other)}  (`set-article-type --list`)")
@@ -1609,7 +1618,12 @@ def latest_add_venue_sandbox(dest: Path, vid: str):
     base = Path(dest) / ".add-venue"
     if not base.is_dir():
         return None
-    cands = sorted((p for p in base.iterdir() if p.is_dir() and p.name.startswith(vid + "-")),
+    # Match the EXACT `<vid>-<stamp>` segment, not a name prefix: for
+    # vid="nature", `nature-biotechnology-2026...` also startswith "nature-"
+    # and sorted after the operator's own `nature-...` sandbox, so
+    # `--publish-only` opened another venue's staging.
+    pat = re.compile(r"^" + re.escape(vid) + r"-\d{8}T\d{6}(?:\d{6})?Z(?:-[0-9a-f]+)?$")
+    cands = sorted((p for p in base.iterdir() if p.is_dir() and pat.match(p.name)),
                    key=lambda p: p.name)
     return cands[-1] if cands else None
 
@@ -2098,7 +2112,11 @@ def cmd_add_venue(args) -> None:
                 f"{dest / '.add-venue'} for {vid!r}; pass --from-sandbox DIR")
         print(f"[add-venue] publish-only: staging sandbox {sb}")
     else:
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        # Microseconds plus a short random suffix: a second-resolution stamp let
+        # two add-venue sessions for one id in the same second share (and
+        # overwrite) one staging directory.
+        stamp = (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+                 + "-" + os.urandom(3).hex())
         sb = dest / ".add-venue" / f"{vid}-{stamp}"
         sb.mkdir(parents=True, exist_ok=True)
         prompt = add_venue_prompt(vid, dest, journal=str(getattr(args, "journal", None) or ""),

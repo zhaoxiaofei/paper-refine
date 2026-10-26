@@ -9,7 +9,7 @@
 import { lstatSync, realpathSync } from 'node:fs';
 import * as path from 'node:path';
 
-function realOrResolved(p) {
+export function realOrResolved(p) {
   // A path that does not exist yet (the redline OUTPUT, above all) must still
   // be resolved through its deepest EXISTING ancestor: `realpathSync` alone
   // fails on it and the lexical fallback would let a symlinked directory inside

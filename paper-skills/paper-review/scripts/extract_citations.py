@@ -128,11 +128,12 @@ def is_non_manuscript(name: str) -> bool:
 
 NUM_CIT_RE = re.compile(r"\[(\d{1,4}(?:\s*[,;–-]\s*\d{1,4})*)\]")
 AY_CIT_RE = re.compile(
-    r"(?P<a1>[A-Z][A-Za-z'\-]+)\s+et al\.?\s*,?\s*\(?(?P<y1>(?:19|20)\d{2}[a-z]?)\)?"
+    r"(?P<a1>[A-Z][A-Za-z'\-]+)\s+et al\.?\s*,?\s*\(?(?P<y1>(?:1[5-9]|20)\d{2}[a-z]?)\)?"
     r"|(?P<a2>[A-Z][A-Za-z'\-]+)\s+(?:and|&)\s+(?P<a2b>[A-Z][A-Za-z'\-]+)\s*,?\s*"
-    r"\(?(?P<y2>(?:19|20)\d{2}[a-z]?)\)?"
+    r"\(?(?P<y2>(?:1[5-9]|20)\d{2}[a-z]?)\)?"
     r"|\((?P<a3>[A-Z][A-Za-z'\-]+)(?:\s+(?:et al\.?|and|&)\s+[A-Z][A-Za-z'\-]+)?\s*,\s*"
-    r"(?P<y3>(?:19|20)\d{2}[a-z]?)\)")
+    r"(?P<y3>(?:1[5-9]|20)\d{2}[a-z]?)\)"
+    r"|(?P<a4>[A-Z][A-Za-z'\-]+)\s+\((?P<y4>(?:1[5-9]|20)\d{2}[a-z]?)\)")
 # a bracketed number right after these words is a measurement interval, not a citation
 SUSPECT_PRECEDERS = re.compile(
     r"(?:interval|range|between|cut-?off|threshold|score|coordinate|temperature|"
@@ -181,8 +182,16 @@ def latex_source_text(text: str) -> str:
             continue
         m = TEX_BEGIN_VERBATIM_RE.search(line)
         if m:
-            in_verbatim = m.group("env")
-            kept.append(line[: m.start()])
+            # A one-line `\begin{verbatim}...\end{verbatim}` closes on the
+            # SAME line; leaving the scanner in verbatim mode dropped every
+            # citation after it until a later end marker.
+            end = re.search(r"\\end\{" + re.escape(m.group("env")) + r"\}",
+                            line[m.end():])
+            if end:
+                kept.append(line[: m.start()] + line[m.end() + end.end():])
+            else:
+                in_verbatim = m.group("env")
+                kept.append(line[: m.start()])
             continue
         out, i = [], 0
         while i < len(line):
@@ -217,7 +226,7 @@ TABLE_CAPTION_RE = re.compile(
     r"(?:s\d+|\d+[a-z]?)\s*" + CAP_SEP, re.I)
 NUM_ENTRY_RE = re.compile(r"^\s*(?:\[?\d{1,3}[\].)]|\d{1,3}[.)])\s+")
 BULLET_ENTRY_RE = re.compile(r"^\s*[-*•]\s+\S")
-YEAR_RE = re.compile(r"\b(?:19|20)\d{2}[a-z]?\b")
+YEAR_RE = re.compile(r"\b(?:1[5-9]|20)\d{2}[a-z]?\b")
 ENTRY_HINT_RE = re.compile(
     r"(\bdoi\b|https?://|arxiv|biorxiv|medrxiv|preprint|\bet al\.?\b|\bpp?\.\s*\d+)", re.I)
 AUTHOR_START_RE = re.compile(r"^\s*[A-Z][A-Za-z'\-]+,\s*(?:[A-Z]\.|[A-Z][a-z]+)")
@@ -225,12 +234,27 @@ AUTHOR_START_RE = re.compile(r"^\s*[A-Z][A-Za-z'\-]+,\s*(?:[A-Z]\.|[A-Z][a-z]+)"
 JOURNAL_TAIL_RE = re.compile(r"^[A-Z][A-Za-z&.\s]{2,40}[.,;:]?\s*\(?(?:19|20)\d{2}\b")
 
 
+# A reference entry's author block: "Smith J.", "Smith JA,", "Smith, J.".
+# A bare capitalised word is not enough -- "In 2020 ..." starts a sentence too.
+_ENTRY_AUTHOR_RE = re.compile(
+    r"^\s*[A-Z][A-Za-z'\-]+(?:\s+[A-Z]{1,3}[,.]|\s+[A-Z]\.|\s*,\s*(?:[A-Z]\.|[A-Z][a-z]+))")
+
+
 def looks_like_reference_entry(s):
     if NUM_ENTRY_RE.match(s) or BULLET_ENTRY_RE.match(s):
         return True
-    if YEAR_RE.search(s) or ENTRY_HINT_RE.search(s):
+    # A year or "et al." alone is ordinary prose ("In 2020 we reanalysed ...",
+    # "Smith et al. showed ..."). A reference entry also has an author-name
+    # start, a volume:page marker, a DOI, or an organisation-author shape.
+    if _ENTRY_AUTHOR_RE.match(s) or AUTHOR_START_RE.match(s):
         return True
-    return bool(AUTHOR_START_RE.match(s))
+    if re.search(r"\bdoi\b|https?://", s, re.I):
+        return True
+    if YEAR_RE.search(s) and re.search(r"\b\d+\s*[:(]\s*\d+", s):
+        return True
+    if re.match(r"^\s*(?:[A-Z][\w'’\-&.]+\s+){2,}\(?(?:19|20)\d{2}\)?\s*[.;:,)]", s):
+        return True
+    return False
 
 
 def classify_context(fname):
@@ -243,7 +267,8 @@ def classify_context(fname):
     # letter and a "reply" name that merely contains "cover" was masked (see
     # `_COVER_WORD_RE`, which `is_evidence_name` already uses).
     if _COVER_WORD_RE.search(f): return "cover letter"
-    if "title" in f: return "title page"
+    toks = set(re.findall(r"[a-z0-9]+", f))
+    if "title" in toks: return "title page"
     # "ref"/"refs"/"references"/"ref-list" name a bibliography; a word that
     # merely STARTS with those letters does not. `(^|[^a-z])ref` matched
     # "refined_draft.txt" and "refresh_log.txt", and a "references"-role file
@@ -252,12 +277,13 @@ def classify_context(fname):
     # entries.
     if REF_ROLE_RE.search(f) or "bibliograph" in f or re.search(r"\.bib(\.|$)", raw):
         return "references"
-    if "abstract" in f: return "abstract"
+    if "abstract" in toks or "abstracts" in toks: return "abstract"
     if SUPP_ROLE_RE.search(f): return "supplementary"
-    if "method" in f or "m&m" in f: return "Methods"
-    if "fig" in f or "legend" in f: return "figure legend"
-    if "table" in f: return "table"
-    if "reporting" in f or "summary" in f: return "reporting summary"
+    if "m&m" in f or any(t.startswith("method") for t in toks): return "Methods"
+    if any(t.startswith(("fig", "legend")) for t in toks): return "figure legend"
+    if any(t.startswith("table") for t in toks): return "table"
+    if any(t.startswith(("reporting", "summary")) for t in toks):
+        return "reporting summary"
     return "main text"
 
 
@@ -272,8 +298,10 @@ def find_reference_region(lines):
     start = None
     for i, ln in enumerate(lines):
         if REF_HEAD_RE.match(ln.strip()):
+            # The LAST heading is the real list: an early "References" line
+            # (table of contents, or a superseded first list) must not latch
+            # the sweep onto the wrong section.
             start = i + 1
-            break
     if start is None:
         return None
     end = len(lines)
@@ -310,15 +338,30 @@ MONTH_NAMES = frozenset((
     "jan feb mar apr jun jul aug sep sept oct nov dec").split())
 
 
+_NON_AUTHOR_WORDS = frozenset((
+    "results discussion methods introduction background conclusion conclusions "
+    "table tables figure figures supplementary appendix section chapter see "
+    "this these those the a an in on at by for from with and or").split())
+
+
 def is_date_prose(m) -> bool:
-    """True when an author-year match is a calendar-date phrase, not a call-out."""
-    if m.group("a1") or m.group("a3"):
+    """True when an author-year match is prose, not a real call-out."""
+    if m.group("a1") or m.group("a3") or m.group("a4"):
         # The "X et al., YYYY" and "(X, YYYY)" branches carry their own anchors; a
         # month CAN be a surname there ("(May, 2019)").
         return False
     names = [m.group("a2"), m.group("a2b")]
-    return bool(names[0] and names[1]
-                and names[0].lower() in MONTH_NAMES and names[1].lower() in MONTH_NAMES)
+    if not (names[0] and names[1]):
+        return True
+    if names[0].lower() in MONTH_NAMES and names[1].lower() in MONTH_NAMES:
+        return True
+    # "See Results and Discussion 2020" / "DNA and RNA 2020" have the same
+    # capitalised-pair shape as "Smith and Jones 2020" but are not call-outs.
+    if any(n.lower() in _NON_AUTHOR_WORDS for n in names):
+        return True
+    if all(len(n) > 1 and n.isupper() for n in names):
+        return True
+    return False
 
 
 def ay_callout(m):
@@ -327,6 +370,8 @@ def ay_callout(m):
         return m.group(0), m.group("a1"), m.group("y1")
     if m.group("y2"):
         return m.group(0), "%s and %s" % (m.group("a2"), m.group("a2b")), m.group("y2")
+    if m.group("y4"):
+        return m.group(0), m.group("a4"), m.group("y4")
     return m.group(0), m.group("a3"), m.group("y3")
 
 

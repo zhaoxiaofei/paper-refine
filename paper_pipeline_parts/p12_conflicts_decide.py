@@ -1642,7 +1642,9 @@ PKG2_NAME_EXTS = (
     "md", "markdown", "rst", "tex", "ltx", "bib", "bbl", "docx", "doc",
     "pdf", "png", "jpg", "jpeg", "tif", "tiff", "eps", "svg",
     "h5", "hdf5", "npz", "npy", "pkl", "pth", "joblib", "rds",
-    "fa", "fasta", "fq", "fastq", "fq.gz", "bam", "vcf", "bed", "gff", "gtf",
+    "fa", "fasta", "fq", "fastq", "fq.gz", "fastq.gz", "fa.gz", "fasta.gz",
+    "csv.gz", "tsv.gz", "tar.gz", "tgz", "bed.gz", "vcf.gz", "bam.gz",
+    "bam", "vcf", "bed", "gff", "gtf",
     "out", "log", "lst",
 )
 
@@ -2858,10 +2860,17 @@ def _latex_command_bodies(text: str, command: str) -> list:
         # `\captionof{table}{...}`: skip the first brace group, keep the second.
         groups, pos = [], k
         for _ in range(2):
-            while pos < len(text) and text[pos] != "{":
-                if text[pos] not in " \t\n":
-                    break
+            while pos < len(text) and text[pos] in " \t\n":
                 pos += 1
+            # \caption[short]{long}: the optional short title sits between the
+            # command and the body; requiring `{` here read no body at all.
+            if pos < len(text) and text[pos] == "[":
+                close = text.find("]", pos + 1)
+                if close < 0:
+                    break
+                pos = close + 1
+                while pos < len(text) and text[pos] in " \t\n":
+                    pos += 1
             if pos >= len(text) or text[pos] != "{":
                 break
             depth, start = 0, pos
@@ -3601,8 +3610,18 @@ def scan_cited_note_negations(root: Path, texts=None, limit: int = 8) -> list:
              if docx_document_role(Path(rel).name) == "main"]
     # "si" alone would match any file whose name contains it ("analysis.md"):
     # only the supplement's own documents are note surfaces.
+    # `supp`/`note` as WORDS, never substrings: notebook.md, support.docx,
+    # endnote_library.txt and keynote.pptx are not supplementary notes.
+    _note_rel = re.compile(
+        # `suppNote`/`supp_caption` are note surfaces; `support` and `notebook`
+        # are not. A camel-case boundary after `supp` is a word boundary here,
+        # and that lookahead must stay case-SENSITIVE even under re.I: `[A-Z]`
+        # with IGNORECASE matched the `o` in `support` and the `o` in
+        # `notebook`, re-admitting exactly the substrings this rule removes.
+        r"(?:^|[/_.\-\s])(?:supp(?:l(?:ement(?:ary|al)?)?)?|notes?)"
+        r"(?=[/_.\-\s]|(?-i:[A-Z])|$)", re.I)
     notes = [(rel, text) for rel, _p, text in docs
-             if any(k in rel.lower() for k in ("supp", "note"))]
+             if _note_rel.search(rel)]
     if not mains or not notes:
         return []
     note_rows = []
@@ -3672,7 +3691,7 @@ INLINE_CITATION_RE = re.compile(
     r"(?<![A-Za-z])((?!(?:grch|chm|python|hg|mm)\d)[A-Za-z][A-Za-z\-]{1,}[A-Za-z])"
     # A citation glued to the sentence period ("omics43.") is the usual form;
     # reject only a digit or a decimal continuation, not the full stop.
-    r"(\d{1,2})(?!\d|\.\d)",
+    r"(\d{1,4})(?!\d|\.\d)",
     re.I,
 )
 SINGLE_CELL_RE = re.compile(r"(?i)\bsingle[- ]cell\b")
@@ -3686,45 +3705,79 @@ CITATION_LABEL_WORDS = frozenset({
 })
 
 
+REF_HEADING_RE = re.compile(
+    r"^\s*(?:references|refs|bibliography|works\s+cited|literature\s+cited|"
+    r"reference\s+list)(?:\s*\([^)]*\))?\s*[:.]?\s*$", re.I)
+REF_END_RE = re.compile(
+    r"^\s*(?:methods?|materials\s+and\s+methods|results?|discussion|conclusions?|"
+    r"introduction|acknowledge?ments?|author\s+contributions?|funding|"
+    r"figure\s+legends?|tables?|supplementary(?:\s+\w+)?|extended\s+data)\s*:?\s*$",
+    re.I)
+# A year alone is ordinary prose ("In 2021 we repeated ..."); a reference
+# entry prints it parenthesised or as a terminal field.
+_ENTRY_LIKE_RE = re.compile(
+    r"(?:\bdoi\b|https?://|\bet al\b|\((?:1[5-9]|20)\d{2}[a-z]?\)"
+    r"|\b(?:1[5-9]|20)\d{2}[a-z]?[;:,.])", re.I)
+_NON_SURNAME = frozenset((
+    "however therefore thus moreover furthermore in the this these those we our "
+    "results discussion methods introduction conclusion conclusions table figure "
+    "see note data").split())
+
+
+def _entry_author_like(text: str) -> bool:
+    """`Surname, I.` at the start, case-sensitive, and not a sentence word."""
+    m = re.match(r"^\s*([A-Z][A-Za-z'’.-]+),\s+[A-Z]\.", text or "")
+    return bool(m and m.group(1).lower() not in _NON_SURNAME)
+
+
 def _numbered_reference_titles(paras: list) -> dict:
     """{number: entry text} from a numbered reference list (docx paragraphs)."""
     out, current = {}, None
     # A one-line "43. Nurk, S. ... Science 372, 984 (2021)." entry is the most
     # common non-Zotero layout and matched NEITHER old pattern, so the PKG-23
-    # citation check silently inspected zero references. The entry text must
-    # still LOOK like a reference, and the one-line form is only read INSIDE a
-    # references section: the same shape is a numbered body list, and a body
-    # item could otherwise overwrite a genuine entry. The Zotero two-line form
-    # is distinctive enough to keep working without a heading.
-    entry_like = re.compile(
-        r"(?i)(?:\b(?:19|20)\d{2}\b|\bdoi\b|https?://|\bet al\b"
-        r"|^[A-Z][A-Za-z'’.-]+,\s+[A-Z]\.)")
+    # citation check silently inspected zero references. Bracket and
+    # parenthesis numbering (`[1] ...`, `1) ...`) are the same entry shape.
+    # The one-line form is only read INSIDE a references section: the same
+    # shape is a numbered body list, and a body item could overwrite a genuine
+    # entry. The Zotero two-line form is read only inside the section too.
     ref_start = None
     for i, p in enumerate(paras):
-        if re.match(r"^\s*(?:references?|bibliography|works\s+cited|"
-                    r"literature\s+cited)\s*:?\s*$", p or "", re.I):
+        if REF_HEADING_RE.match(p or ""):
             ref_start = i + 1
     for idx, p in enumerate(paras):
         text = p or ""
-        # The number and its entry share one paragraph in a Zotero bibliography
-        # field ("43.\nNurk, S. ...") and are separate paragraphs elsewhere.
-        m = re.match(r"^\s*(\d{1,3})\.\s*$", text) or re.match(
-            r"^\s*(\d{1,3})\.\s*\n\s*(\S.*)$", text, re.S)
-        if m:
-            current = int(m.group(1))
-            rest = (m.group(2) if m.lastindex and m.lastindex >= 2 else "") or ""
-            out[current] = rest.strip()
-            if rest.strip():
-                current = None
+        if ref_start is not None and idx >= ref_start and REF_END_RE.match(text):
+            # No end boundary made every body paragraph after the list an
+            # entry (and let its number overwrite the real one).
+            break
+        in_refs = ref_start is not None and idx >= ref_start
+        two = re.match(r"^\s*(\d{1,4})\.\s*\n\s*(\S.*)$", text, re.S)
+        if two:
+            num, rest = int(two.group(1)), two.group(2).strip()
+            # A two-line entry OUTSIDE a section is the heading-less Zotero
+            # form only; when the document HAS a references heading, a body
+            # "1." + following sentence must not become entry 1.
+            if in_refs or (ref_start is None and (
+                    _ENTRY_LIKE_RE.search(rest) or _entry_author_like(rest))):
+                out.setdefault(num, rest)
+            current = None
             continue
-        if ref_start is not None and idx >= ref_start:
-            m1 = re.match(r"^\s*(\d{1,4})\.\s+(\S.*)$", text, re.S)
-            if m1 and entry_like.search(m1.group(2).strip()):
-                # `setdefault`: a genuine two-line entry already recorded for
-                # this number wins over a later same-number line.
-                out.setdefault(int(m1.group(1)), m1.group(2).strip())
-                current = None
-                continue
+        bare = re.match(r"^\s*(\d{1,4})\.\s*$", text)
+        if bare:
+            current = int(bare.group(1)) if in_refs else None
+            if current is not None:
+                out.setdefault(current, "")
+            continue
+        one = re.match(r"^\s*(?:\[(\d{1,4})\]|(\d{1,4})[.)])\s+(\S.*)$",
+                       text, re.S)
+        if one:
+            num = int(one.group(1) or one.group(2))
+            rest = one.group(3).strip()
+            if in_refs and (_ENTRY_LIKE_RE.search(rest) or _entry_author_like(rest)
+                            or re.match(r"^[A-Z][A-Za-z'’.-]+,?\s", rest)):
+                out.setdefault(num, rest)
+            current = None
+            continue
         if current is not None and text.strip():
             out[current] = (out[current] + " " + text.strip()).strip()
             current = None
@@ -4336,6 +4389,14 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
                     continue
                 text = p.read_text("utf-8", "replace")
             except OSError:
+                continue
+            lines = text.splitlines()
+        elif ext == ".pdf":
+            # The journal reads the shipped PDF; PKG-6..9 already open it with
+            # the same pdftotext reader, but PKG-2..5 never did -- a dangling
+            # raw_data/ pointer in a PDF main text was invisible.
+            text = _pkg_text_of_doc(p)
+            if not text.strip():
                 continue
             lines = text.splitlines()
         else:
@@ -5176,7 +5237,10 @@ def _pkg_text_of_doc(p: Path) -> str:
         except (OSError, subprocess.SubprocessError):                  # noqa: BLE001
             return ""
         return proc.stdout or ""
-    if low.endswith(PKG2_EDITABLE_TEXT_EXTS):
+    if low.endswith(PKG2_EDITABLE_TEXT_EXTS + (".bib",)):
+        # `.bib` was in package_document_texts' accept-list but not in this
+        # reader's dispatch, so bibliography text never reached PKG-6/7/8/9 --
+        # exactly where a two-lengths identifier is most likely to hide.
         try:
             if p.stat().st_size > 8_000_000:
                 return ""
@@ -5646,9 +5710,8 @@ def _pkg4_cited_labels(expr: str, plural: bool = True) -> list:
             if lo <= hi and hi - lo <= 50:
                 out.extend(f"{(m.group(1) or '').lower()}{n}" for n in range(lo, hi + 1))
                 continue
-        out.extend(lab.lower() for lab in (
-            m.group(1) for m in re.finditer(
-                r"(?i)(S?\d+)(?!(?:st|nd|rd|th)\b)[a-z]?", token)))
+        out.extend((m.group(1) + (m.group(2) or "")).lower() for m in re.finditer(
+            r"(?i)(S?\d+)(?!(?:st|nd|rd|th)\b)([a-z]?)", token))
     return list(dict.fromkeys(out))
 PKG4_FIGURE_FILE_RE = re.compile(r"(?i)(?:^|[^a-z0-9])(?:supp(?:lementary)?[ _-]?)?"
                                  r"(?:fig(?:ure)?\.?[ _-]?)(S?\d+[a-z]?)(?![0-9])")
@@ -6183,10 +6246,15 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
         rmtree_force(tmp, ignore_errors=True)
         return dict(_meta, skipped="the champion corpus is empty")
     digest = manifest_digest(manifest)
-    if pin.get("digest") and digest != pin["digest"]:
+    pin_digest = pin.get("digest")
+    if pin_digest and digest != pin_digest:
         rmtree_force(tmp, ignore_errors=True)
         return dict(_meta, skipped=f"the clean copy hashes to {digest[:12]} but the pin "
                                    f"recorded {str(pin.get('digest'))[:12]}")
+    if not pin_digest:
+        # There was no pin digest to compare against; returning the COPY's own
+        # digest as `pin_digest` made the report claim an unverified identity.
+        pin_digest = None
     # The delivered tree is the judged tree. Everything below SCANS that tree;
     # none of the scans is allowed to rewrite it. A delivery cleanup here would
     # make final_clean_version/ (and the next round's --source) a cousin of the
@@ -6440,7 +6508,7 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     # differing content both republish.
     if dst.is_dir() and corpus_dir_manifest(dst) == manifest:
         rmtree_force(tmp, ignore_errors=True)
-        return dict(_meta, path=str(dst), digest=final_digest, pin_digest=digest,
+        return dict(_meta, path=str(dst), digest=final_digest, pin_digest=pin_digest,
                     files=manifest["count"], renamed=counter["renamed"],
                     raw_data_untouched=hygiene["raw_data_untouched"],
                     modes_cleared=len(chmod_plan),
@@ -6462,7 +6530,7 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
         aside.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(dst), str(aside))
     os.replace(tmp, dst)
-    return dict(_meta, path=str(dst), digest=final_digest, pin_digest=digest,
+    return dict(_meta, path=str(dst), digest=final_digest, pin_digest=pin_digest,
                 files=manifest["count"], renamed=counter["renamed"],
                 raw_data_untouched=hygiene["raw_data_untouched"],
                 modes_cleared=len(chmod_plan),
@@ -6559,11 +6627,20 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
                  + ", ".join(f"`{n}`" for n in bytecode[:8])
                  + (" …" if len(bytecode) > 8 else ""))
     dangling = hygiene.get("non_submitted_references") or []
-    if dangling:
-        L.append(f"- **{len(dangling)} dangling reference(s) (PKG-2) remain in the judged "
+    _pkg2 = [r for r in dangling if str(r.get("rule") or "PKG-2") != "PKG-3"]
+    _pkg3 = [r for r in dangling if str(r.get("rule") or "") == "PKG-3"]
+    if _pkg2:
+        L.append(f"- **{len(_pkg2)} dangling reference(s) (PKG-2) remain in the judged "
                  f"bytes** -- publication preserves the scored digest, so the author must "
                  f"repair these before upload:")
-        for _row in dangling[:12]:
+        for _row in _pkg2[:12]:
+            L.append(f"  - `{_row.get('file')}` line {_row.get('line')}: "
+                     f"`{_row.get('reference')}` -- {_row.get('detail')}")
+    if _pkg3:
+        L.append(f"- {len(_pkg3)} name(s) the package carries nowhere (PKG-3, advisory): "
+                 f"confirm the locator or drop the pointer -- this is not a must-repair "
+                 f"PKG-2 row:")
+        for _row in _pkg3[:12]:
             L.append(f"  - `{_row.get('file')}` line {_row.get('line')}: "
                      f"`{_row.get('reference')}` -- {_row.get('detail')}")
     held_readmes = hygiene.get("held_internal_readme_notes") or []
@@ -7461,10 +7538,14 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
              f"one is digest-verified against its pin by `run`/`decide`.")
     L.append("")
     if final_clean and final_clean.get("path"):
+        _pin_digest = final_clean.get("pin_digest")
+        _identity = (f"the copy is byte-identical to the pin `{str(_pin_digest)[:16]}…`"
+                     if _pin_digest else
+                     "the pin record carries no digest, so byte-identity to a pin was NOT "
+                     "verified")
         L.append(f"**Clean version for a new round:** `{final_clean['path']}` "
                  f"({final_clean['files']} file(s), digest `{str(final_clean['digest'])[:16]}…`; "
-                 f"the copy is byte-identical to the pin `"
-                 f"{str(final_clean.get('pin_digest') or '')[:16]}…`). "
+                 f"{_identity}). "
                  f"It is the champion corpus with no scratch, no auxiliaries and no self-written "
                  f"reports, so it can seed the next pipeline run directly. Its certification "
                  f"status and provenance are in the SIBLING `{FINAL_CLEAN_README_NAME}` "
@@ -8762,9 +8843,11 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         print(f"[decide] note: {e}")
     panel_gaps = {}
     auto_rounds = []
+    incomplete_rounds = []
     for r in range(1, R + 1):
         rrec = ctx.round_get(r)
         if rrec.get("status") != "done":
+            incomplete_rounds.append(r)
             problems.append(f"round {r}: status={rrec.get('status')!r} (not complete)")
             continue
         _plan_mode = str((rrec.get("plan") or {}).get("champion_select") or "").lower()
@@ -8863,9 +8946,12 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
                 if not (agg["stats"].get(vid) or {}).get("complete")]
         if gaps:
             panel_gaps[r] = gaps
+            _need = (agg.get("scores_per_version_by_version") or {})
+            _need = ", ".join(f"{v}: {_need.get(v, agg['scores_per_version'])}"
+                              for v in gaps)
             problems.append(
                 f"round {r}: JUDGE PANEL INCOMPLETE for {', '.join(gaps)} "
-                f"({agg['scores_per_version']} directed scores per version are required); "
+                f"({_need} directed scores are required); "
                 f"the round is NOT certified -- repair the failing judge session(s) with "
                 f"`retry --run <ID>` and re-run the round")
             write_json_atomic(ctx.reports_dir / f"round{int(r)}_panel_gaps.json",
@@ -9043,6 +9129,14 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
                                   lengths=published_lengths)
     gate_problems.extend(readiness_gate_problems(readiness,
                                                  bool(getattr(args, "require_ready", False))))
+    if incomplete_rounds and not (ctx.state.get("stopped_early") or {}):
+        # `problems` carried this but `decide_certification` did not read it:
+        # a later completed round could still be labelled CERTIFIED. A
+        # PRE-REGISTERED stop is a deliberate end: the rounds after it are
+        # supposed to be incomplete.
+        gate_problems.append(
+            "round(s) " + ", ".join(str(r) for r in incomplete_rounds)
+            + " are not complete")
     _clean_reason = final_clean_reason(final, rounds_data, R, final_regression, chain_ok,
                                        provisional, panel_gaps, gate_problems,
                                        auto_promoted=auto_rounds)
@@ -9350,7 +9444,11 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
                 "the champion is not signed).")
         sys.exit(5)
     if certification["exit_code"] == 4:
-        print(f"[decide] exit 4: only round {final['round']} of {R} is complete and "
+        # The record's own notes carry the true reason (auto-promotion without a
+        # panel is one); the old console branch asserted an incomplete round even
+        # when all R rounds were complete.
+        _reason = "; ".join(certification.get("notes") or [])
+        print(f"[decide] exit 4: {_reason or 'the answer is provisional'} and "
               f"--require-complete was given; the answer is PROVISIONAL.")
         sys.exit(4)
     if args.require_clean_captions and not cap_ok:

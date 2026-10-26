@@ -187,15 +187,55 @@ def _argv_from_template(template: list, base: Path, revised: Path, out: Path) ->
     return argv
 
 
+def _redline_popen_kwargs() -> dict:
+    """Run a backend in its OWN process group so a timeout can kill its helpers.
+
+    Word/PowerShell wrappers spawn grandchildren that keep the output file open
+    after the direct child is killed; `subprocess.run(timeout=...)` kills only
+    the direct child.
+    """
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    return {"start_new_session": True}
+
+
+def _kill_redline_tree(proc) -> None:
+    """Kill the timed-out backend AND every process it spawned."""
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):           # noqa: PERF203
+            pass
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):   # noqa: PERF203
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
 def _run_redline_cmd(argv: list, out: Path, timeout: int = 900) -> dict:
     try:
-        proc = subprocess.run([str(a) for a in argv], capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=timeout)
-        rc, err, so = proc.returncode, (proc.stderr or "").strip(), (proc.stdout or "").strip()
+        proc = subprocess.Popen(
+            [str(a) for a in argv], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", **_redline_popen_kwargs())
+        try:
+            so, err = proc.communicate(timeout=timeout)
+            rc = proc.returncode
+            err, so = (err or "").strip(), (so or "").strip()
+        except subprocess.TimeoutExpired:
+            _kill_redline_tree(proc)
+            try:
+                proc.communicate(timeout=30)      # reap; never leave a zombie
+            except subprocess.TimeoutExpired:
+                pass
+            rc, err, so = None, f"timeout after {timeout}s", ""
     except FileNotFoundError as e:                              # noqa: BLE001
         rc, err, so = None, f"not found: {e}", ""
-    except subprocess.TimeoutExpired:
-        rc, err, so = None, f"timeout after {timeout}s", ""
     except OSError as e:                                        # noqa: BLE001
         rc, err, so = None, f"exec error: {e}", ""
     ok = bool(rc == 0 and out.is_file() and out.stat().st_size > 0)
@@ -972,9 +1012,11 @@ def redline_readme(manifest: dict) -> str:
          "|---|---|---|---|---|---|---|"]
     for v in manifest["versions"]:
         for c in v["comparisons"]:
+            _result = ("skipped (tool=none)" if c.get("skipped")
+                       else ("ok" if c["ok"] else "FAILED"))
             L.append(f"| {v['round']} | {v['version']} | {c['source']} | `{c['base_rel']}` -> "
                      f"`{c['revised_rel']}` | {c['basis']} | {c['tool'] or '-'} | "
-                     f"{'ok' if c['ok'] else 'FAILED'} |")
+                     f"{_result} |")
     L += ["", "`ok` means the backend exited 0 AND the file it wrote is a readable OOXML package "
               "(a zip whose `word/document.xml` parses) -- a text dump, a truncated zip or a "
               "marker file is reported as FAILED.", ""]
@@ -1141,6 +1183,8 @@ def _cmd_redline_locked(ctx: Ctx, args) -> None:
             die("--redline-cmd must be a JSON argv list")
         if not isinstance(cmd_template, list) or not cmd_template:
             die("--redline-cmd must be a non-empty JSON argv list with {base}/{revised}/{out}")
+    if args.round is not None and int(args.round) < 1:
+        die(f"--round takes a 1-based round number, got {args.round!r}")
     rounds = [int(args.round)] if args.round else None
     versions = (None if args.version == "all"
                 else [v.strip() for v in str(args.version).split(",") if v.strip()])

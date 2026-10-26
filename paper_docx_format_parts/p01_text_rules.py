@@ -80,6 +80,36 @@ HYPHEN_NOUN_FOLLOWERS = ("of", "the", "a", "an", "and", "or", "in", "on", "at",
                          "could", "may", "might", "must", "should", "would", "will",
                          "per")
 
+# Finite verbs that make the preceding compound the SUBJECT ("Each single cell
+# expressed ...", "The copy number increased ..."), i.e. the documented noun
+# use. Every regular -ed form is caught by the suffix rule below; this list
+# carries the common irregular and third-person forms that a mechanical
+# rewrite used to hyphenate ("single cell shows ..." -> "single-cell shows").
+HYPHEN_VERB_FOLLOWERS = frozenset({
+    "shows", "remains", "varies", "differs", "depends", "contains", "comprises",
+    "includes", "requires", "provides", "yields", "produces", "allows", "enables",
+    "affects", "drives", "causes", "predicts", "reflects", "occurs", "exists",
+    "appears", "rose", "fell", "grew", "grows", "led", "leads", "made", "makes",
+    "took", "takes", "gave", "gives", "found", "finds", "drove", "held", "kept",
+    "left", "met", "ran", "runs", "came", "comes", "went", "goes", "stood", "stands",
+})
+
+
+def hyphen_attributive_re(split: str):
+    """The open form hyphenates only when a NOUN follows it.
+
+    A following function word or finite verb opens the compound's noun use, so
+    the mechanical fixer leaves it alone; the same pattern drives the scanner's
+    FMT-T8e count and the fixer's rewrite (parity: the fixer must never edit an
+    occurrence the scanner does not report). `-ed` covers the regular past
+    forms ("expressed", "increased") without a verb lexicon.
+    """
+    followers = "|".join(re.escape(w) for w in
+                         tuple(HYPHEN_NOUN_FOLLOWERS) + tuple(sorted(HYPHEN_VERB_FOLLOWERS)))
+    return re.compile(
+        rf"\b{re.escape(split)}(?=\s+(?!(?:(?:{followers})\b|[A-Za-z]+ed\b))[A-Za-z])")
+
+
 # Words that make a repeated phrase part of the document scaffolding rather than
 # a distinctive name ("Supplementary Table S1 three times in a paragraph").
 REPETITION_STOPWORDS = {"supplementary", "note", "figure", "table", "section", "extended",
@@ -120,8 +150,15 @@ NUMBER_RE = re.compile(
     # Thin/NBSP separators are thousands separators too (`12 000` with U+2009
     # must be one number, not 12 and 000). The exponent sign may be the
     # typographic minus Word/journals emit, or `1.2e−4` splits into 1 and 4.
-    r"(?<![\w.])(\d[\d,\u2009\u202f\u00a0]*(?:\.\d+)?"
-    r"(?:[eE][+\-\u2212]?\d+)?)(?![\w])")
+    # A LEADING sign is part of the value (`-80` is not `80`), but a hyphen
+    # BETWEEN two digits is a range separator: the lookbehind sits before the
+    # sign, so `10-20` is 10 then 20, while ` -80`/`(-80)` keep the minus.
+    # The decimal alternative allows a glued unit (`7.5mg`) and does NOT let
+    # the engine backtrack the fraction away to record the integer 7.
+    r"(?<![\w.])((?:[-\u2212]?\d[\d,\u2009\u202f\u00a0]*\.\d+"
+    r"(?:[eE][+\-\u2212]?\d+)?)(?![\d]|\.\d)"
+    r"|(?:[-\u2212]?\d[\d,\u2009\u202f\u00a0]*"
+    r"(?:[eE][+\-\u2212]?\d+)?)(?![\w]|\.\d))")
 
 # --------------------------------------------------------------------------
 # Spelled-out numbers as NUMERIC artifacts (2026-10-17).
@@ -726,7 +763,9 @@ def number_format_rows(paras: list) -> list:
     rows = []
     nums = []
     for text in paras:
-        nums += NUMBER_RE.findall(text)
+        # NUMBER_RE has two alternatives (decimal / integer); `findall` would
+        # return a tuple of their group captures, so take group(1) explicitly.
+        nums += [m.group(1) for m in NUMBER_RE.finditer(text)]
     # 4-digit years and list-position numbers are not quantities: only numbers
     # with 5+ digits (or a 4+-digit number that already carries a separator)
     # take part in the convention check.
@@ -1110,7 +1149,11 @@ def emphasis_consistency(styles: dict, doc_paras: list) -> tuple:
                                         "ital": [], "roman": []})
             for ri in overlap:
                 state = "ital" if run_is_italic(styles, style, ri[4]) else "roman"
-                rec[state].append((idx, [(ri[2], ri[3])]))
+                # Only the part of the run that lies INSIDE the parenthetical
+                # label is the fix span. Recording the whole run restyled text
+                # the row never reported ("… label; zhenxie@host) and tail").
+                local = (max(start, ri[0]) - ri[0], min(end, ri[1]) - ri[0])
+                rec[state].append((idx, ri[2], ri[3], local))
         for r0, r1, run in runs(para):
             rtext = text_of(run)
             if len(rtext.strip()) < 4:
@@ -1124,14 +1167,14 @@ def emphasis_consistency(styles: dict, doc_paras: list) -> tuple:
                 rec = seen.setdefault(m.group(0).lower(),
                                       {"phrase": m.group(0), "label": False,
                                        "ital": [], "roman": []})
-                rec["ital" if ital else "roman"].append((idx, [(r0, r1)]))
+                rec["ital" if ital else "roman"].append((idx, r0, r1, None))
     rows, fixes = [], []
     for key, rec in sorted(seen.items()):
         if not (rec["ital"] and rec["roman"]):
             continue
         n_i, n_r = len(rec["ital"]), len(rec["roman"])
-        where_i = ", ".join(f"p{i}" for i, _runs in rec["ital"][:3])
-        where_r = ", ".join(f"p{i}" for i, _runs in rec["roman"][:3])
+        where_i = ", ".join(f"p{idx}" for idx, _r0, _r1, _loc in rec["ital"][:3])
+        where_r = ", ".join(f"p{idx}" for idx, _r0, _r1, _loc in rec["roman"][:3])
         rows.append({"rule": "FMT-T9a", "severity": "medium",
                      "evidence": f"{rec['phrase']!r} is italic in {n_i} place(s) "
                                  f"({where_i}) and roman in {n_r} ({where_r})",
@@ -1141,9 +1184,8 @@ def emphasis_consistency(styles: dict, doc_paras: list) -> tuple:
         if rec["label"] and not any(re.search(r"\d", p) for p in [rec["phrase"]]) \
                 and len(rec["phrase"].split()) <= 5:
             want = n_i > n_r                      # majority; a tie -> roman
-            for idx, run_offsets in (rec["roman"] if want else rec["ital"]):
-                for r0, r1 in run_offsets:
-                    fixes.append((idx, r0, r1, want))
+            for idx, r0, r1, local in (rec["roman"] if want else rec["ital"]):
+                fixes.append((idx, r0, r1, want, local))
     return rows, fixes
 
 
@@ -1528,6 +1570,10 @@ def _split_reference_entries(text: str, allow_paragraphs: bool) -> list:
     # and handed the reviewer the row's text starting at the SECOND author.
     starts = []
     for s in cands:
+        # A candidate preceded by "and"/"&" is the SECOND author of the entry
+        # being read, not a new entry ("Smith, A. and Doe, B. (2019)").
+        if re.search(r"(?:\band|&)\s+$", text[max(0, s - 12):s], re.I):
+            continue
         if not starts or REFERENCE_AY_YEAR_RE.search(text[starts[-1]:s]):
             starts.append(s)
     if len(starts) >= 2:
@@ -2018,6 +2064,13 @@ def placeholder_lookup_plan(ph_rows: list, docs=None) -> list:
 def _num_candidates(value: float) -> set:
     out = set()
     for dec in (0, 1, 2, 3):
+        # A whole-number spelling must EQUAL the value: dec-0 formatting turns
+        # 6.6 into "7", and the reconciliation then "proved" a written 7 from a
+        # 6.6 cell. Two-or-more-decimal rounding stays: 1.773 -> 1.77 is the
+        # documented "value in a table proves the rounded written form".
+        # Zero-padding (7 -> 7.0) is always a valid spelling.
+        if dec < 2 and abs(round(float(value), dec) - float(value)) > 1e-9:
+            continue
         s = f"{value:,.{dec}f}"
         out.add(s)
         out.add(s.replace(",", ""))
@@ -2587,7 +2640,7 @@ def reconcile_number_rows(rows: list, tables: list) -> dict:
         num = str(r.get("number") or "").strip()
         if not num:
             continue
-        key = num.replace(",", "").rstrip(".")
+        key = re.sub(r"[,\u2009\u202f\u00a0\s]", "", num).rstrip(".")
         hit = index.get(num) or index.get(key)
         if hit:
             r["source"] = f"recomputed: {hit}"
@@ -2626,7 +2679,7 @@ def citation_mentions(paras: list) -> list:
     return out
 
 
-def citation_format_row(paras: list) -> dict | None:
+def citation_format_row(paras: list, field_spans: list = None) -> dict | None:
     """One row when a document mixes citation formats (None when consistent)."""
     mentions = [m for m in citation_mentions(paras) if m[1] != "other"
                 or journal_matches(m[2])]
@@ -2635,7 +2688,10 @@ def citation_format_row(paras: list) -> dict | None:
         return None
     counts = Counter(m[1] for m in mentions)
     example = "; ".join(sorted({m[2] for m in mentions if m[1] != "year-only"})[:3])
-    unfixable = [m for m in mentions if not m[3]]
+    # A citation inside a live field RESULT is regenerated by Word: the fixer
+    # refuses it, so the row must be field-held or the whole repair is rejected.
+    held = {i for i, ranges in enumerate(field_spans or []) if ranges}
+    unfixable = [m for m in mentions if not m[3] or m[0] in held]
     return {"rule": "FMT-T8a", "severity": "medium",
             "evidence": f"citations mix {len(shapes)} formats: "
                         + ", ".join(f"{s} x{c}" for s, c in sorted(counts.items()))
@@ -2720,7 +2776,7 @@ def term_repetition_rows(paras: list, is_ref: list) -> list:
                 if any(w in REPETITION_STOPWORDS for w in gram.split()):
                     continue
                 hits[gram] = hits.get(gram, 0) + 1
-        for w in set(low):
+        for w in sorted(set(low)):
             if len(w) >= 8 and w not in REPETITION_STOPWORDS:
                 hits[w] = low.count(w)
         for term, count in sorted(hits.items(), key=lambda kv: (-kv[1], -len(kv[0])))[:3]:
@@ -2781,17 +2837,13 @@ def variant_rows(paras: list, is_ref: list, field_spans: list = None) -> list:
                          "detail": "one spelling per submission (policy "
                                    "term_spelling='dominant' normalizes the minority form "
                                    "outside the reference list)", "protected": held})
-    hy_noun_follow = "|".join(re.escape(w) for w in HYPHEN_NOUN_FOLLOWERS)
     for hy, split in HYPHEN_COMPOUNDS:
-        # Count only ATTRIBUTIVE uses. "the copy number of a locus" is the
-        # documented noun use and must not make the scanner demand a fix the
-        # fixer (correctly) refuses to apply.
-        split_re = re.compile(
-            rf"\b{re.escape(split)}(?=\s+(?!(?:{hy_noun_follow})\b)[A-Za-z])")
+        # Count only ATTRIBUTIVE uses. "the copy number of a locus" and "each
+        # single cell expressed" are the documented noun uses and must not make
+        # the scanner demand a fix the fixer (correctly) refuses to apply.
+        split_re = hyphen_attributive_re(split)
         attr_split = sum(len(split_re.findall(t)) for _i, t in prose)
-        attr_hy = sum(len(re.findall(
-            rf"\b{re.escape(hy)}(?=\s+(?!(?:{hy_noun_follow})\b)[A-Za-z])", t))
-            for _i, t in prose)
+        attr_hy = sum(len(hyphen_attributive_re(hy).findall(t)) for _i, t in prose)
         if attr_split and attr_hy:
             # The fixer rewrites the open form; an open-form occurrence it must
             # leave inside a field result keeps this rule alive, so the row is
@@ -2822,7 +2874,7 @@ def text_style_rows(paras: list, is_ref: list = None, headings: list = None,
     is_ref = list(is_ref or [False] * len(paras))
     prose = [t for i, t in enumerate(paras) if not (i < len(is_ref) and is_ref[i])]
     rows = []
-    cit = citation_format_row(paras)
+    cit = citation_format_row(paras, field_spans=field_spans)
     if cit:
         rows.append(cit)
     rows += nested_parentheses_rows(paras)

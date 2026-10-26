@@ -77,6 +77,11 @@ def _signal_names_this_run(data, rec: dict, name: str) -> bool:
     if not isinstance(data, dict):
         return False
     if name == SCORES_FILE:
+        # The judge's sheet carries an OPAQUE target token while the run record
+        # holds the raw version id: comparing the two id spaces rejected every
+        # modern stray sheet. A sheet that names THIS run is this run's signal.
+        if data.get("run_id") == rec.get("id"):
+            return True
         if rec.get("target_id") and data.get("target_id") not in (None, rec["target_id"]):
             return False
     elif data.get("stage") != rec.get("kind"):
@@ -380,6 +385,18 @@ def _marker_checks(rec: dict, marker, stage: str, errs: list, warns: list,
     summ = marker.get("summary")
     if isinstance(summ, dict):
         rec["summary"] = summ
+    elif stage in ("audit", "probe") and any(
+            isinstance(marker.get(k), int)
+            for k in ("findings_total", "confirmed", "dropped", "added",
+                      "finding_tier_rows_examined", "promoted", "findings",
+                      "verified", "areas")):
+        # The audit and probe prompts specify FLAT counters (and p07 reads
+        # them from the marker itself); warning "no summary object" on a
+        # marker that exactly follows its own prompt was noise on every run.
+        rec["summary"] = {k: marker[k] for k in
+                          ("findings_total", "confirmed", "dropped", "added",
+                           "finding_tier_rows_examined", "promoted", "findings",
+                           "verified", "areas") if k in marker}
     else:
         warns.append("marker carries no summary object")
 
@@ -1049,7 +1066,10 @@ def render_evidence_files(render_roots) -> list:
             if not root.is_dir():
                 continue
             for p in sorted(root.rglob("*")):
-                if not p.is_file() or p.suffix.lower() not in RENDER_EVIDENCE_EXTS:
+                # is_file() follows symlinks: a `work/fig1.png -> figures/fig1.png`
+                # link is NOT a rendered page (the visual pass produced nothing).
+                if (not p.is_file() or p.is_symlink()
+                        or p.suffix.lower() not in RENDER_EVIDENCE_EXTS):
                     continue
                 try:
                     parts = p.relative_to(root).parts
@@ -1513,9 +1533,12 @@ def _page_png_names(out_dir: Path, stem: str) -> list:
     def key(name: str):
         m = re.search(r"-(\d+)\.png$", name)
         return (int(m.group(1)) if m else 10 ** 9, name)
+    # EXACT `stem-<page>.png`: the old prefix test also kept another document's
+    # pages when `main.tex` and `main.docx` shared an output directory
+    # (`main-docx-1.png`), mixing two documents into one visual pass.
+    pat = re.compile(r"^" + re.escape(stem) + r"-\d+\.png$", re.I)
     return sorted((p.name for p in Path(out_dir).iterdir()
-                   if p.is_file() and p.name.startswith(stem + "-")
-                   and p.suffix.lower() == ".png"), key=key)
+                   if p.is_file() and pat.match(p.name)), key=key)
 
 
 def render_docx_visual(docx: Path, out_dir: Path, renderer=None,
@@ -1815,14 +1838,21 @@ def cover_letter_row_survival_problems(ctx: Ctx, sb: Path) -> list:
         return [f"{REVIEW_DIR}/artifacts/M20_formatting.md is missing: the code-side scan "
                 f"proves {len(want)} FMT-CL1 cover-letter row(s) "
                 f"({', '.join(sorted(want)[:3])}) the review must dispose"]
-    n_rows = sum(1 for ln in text.splitlines()
-                 if ln.strip().startswith("|") and "FMT-CL1" in ln.upper())
-    if n_rows >= len(want):
+    # Rows are per DOCUMENT, not per mention: three rows about one letter do not
+    # dispose the other two letters.
+    rows_cl = [ln for ln in text.splitlines()
+               if ln.strip().startswith("|") and "FMT-CL1" in ln.upper()]
+    named = {w for w in want if any(w.lower() in ln.lower() for ln in rows_cl)}
+    if named == want or (len(want) == 1 and rows_cl):
+        # With one code-proven letter a single FMT-CL1 row disposes it, even
+        # when the table's own document column carries the name implicitly.
         return []
-    return [f"{REVIEW_DIR}/artifacts/M20_formatting.md carries {n_rows} FMT-CL1 row(s) for "
-            f"the {len(want)} the code-side scan proves ({', '.join(sorted(want)[:3])}): a "
-            f"seeded row cannot be deleted -- dispose every cover letter the scan flags (an "
-            f"M20 finding, or OK with the journal's own quoted override)"]
+    missing = sorted(want - named)
+    return [f"{REVIEW_DIR}/artifacts/M20_formatting.md carries FMT-CL1 row(s) for "
+            f"{len(named)} of the {len(want)} cover letter(s) the code-side scan proves "
+            f"({', '.join(missing[:3])} missing): a seeded row cannot be deleted -- dispose "
+            f"every cover letter the scan flags (an M20 finding, or OK with the journal's own "
+            f"quoted override)"]
 
 
 # =====================================================================
@@ -1951,7 +1981,15 @@ def prior_proposal_dispositioned(pid: str, probe_blob: str, note_blob: str) -> b
     that says the word `prior` beside it (the
     "prior proposal <id>: no instances in base/" disposition).
     """
-    if not re.search(r"(?<![A-Za-z0-9])" + re.escape(pid) + r"(?![A-Za-z0-9])", probe_blob):
+    _pid_re = re.compile(r"(?<![A-Za-z0-9])" + re.escape(pid) + r"(?![A-Za-z0-9])")
+    _probe_hit = None
+    for _m in _pid_re.finditer(probe_blob):
+        _window = probe_blob[max(0, _m.start() - 80):_m.end() + 80].lower()
+        if re.search(r"\b(?:not|never|no|without)\b", _window):
+            continue          # "we did not re-probe M37" is not a re-probe
+        _probe_hit = _m
+        break
+    if _probe_hit is None:
         for m in re.finditer(r"(?<![A-Za-z0-9])" + re.escape(pid) + r"(?![A-Za-z0-9])",
                              note_blob):
             window = note_blob[max(0, m.start() - 90):m.end() + 90].lower()
@@ -2090,12 +2128,13 @@ def discovery_contract_problems(sb: Path) -> tuple:
         for token, rest in statuses:
             if token == "unable" and not _unable_reason_present(rest):
                 unable_short.append(pid)
-        if "unable" not in tokens and "unable" in low:
-            if not _unable_reason_present(low.split("unable", 1)[1]):
-                unable_short.append(pid)
+        # Only a real `unable` STATUS CELL needs a reason. Free prose such as
+        # "the previous round was unable." is not an unable disposition.
         if re.search(r"\bno anomalies?\b", low):
-            tail = re.split(r"\bchecked\b", low, maxsplit=1)
-            if len(tail) < 2 or len(re.findall(r"[0-9a-z]", tail[1])) < 3:
+            tail = re.split(r"\bno anomalies?\b", low, maxsplit=1)[1]
+            # The closure is exactly `no anomalies -- checked: <locations>`;
+            # a question that happens to contain "checked" is not that closure.
+            if not re.match(r"\s*(?:[-\u2013\u2014]|:)\s*checked\s*:\s*\S", tail):
                 no_checked.append(pid)
         if len(re.findall(r"[A-Za-z0-9]+", text)) < 6:
             result_problems.append(f"{pid} records no usable disposition")
@@ -2592,6 +2631,12 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
     want_parity_artifacts = (split_mode == "off"
                              or (split_mode == "phases" and not part_b)
                              or (split_mode == "aspects" and part_b))
+    if split_mode == "aspects":
+        # Aspects puts M2 (reference integrity) in session A and the packaging
+        # checks in B. Demanding M2 from B made B fail on a table its prompt
+        # told it not to duplicate, while nobody checked A's M2 disposal.
+        parity = {k: v for k, v in parity.items()
+                  if (k == "M2_references.md") != part_b}
     want_architecture = (split_mode == "off" or part_b)
     if want_parity_artifacts and art_dir.is_dir():
         for fname, (cid, kind_phrase) in parity.items():
@@ -3995,8 +4040,21 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
                     errors.append(f"{rel}: {e}")
                     continue
             if dig in cand_digests:
-                survived_other_name.append(rel)
-                continue                  # bytes survive under another name: a rename
+                # Same bytes can come from a DIFFERENT base file that still has
+                # its exact-name survivor (fig1.png + fig1_copy.png share bytes;
+                # deleting only the copy is not a rename). Only a digest with no
+                # surviving exact-name sibling can stand in for this file.
+                _sibling_survives = False
+                for _other, _odig in base_digs.items():
+                    if _other == rel or _odig != dig:
+                        continue
+                    _odest = _candidate_dest(sb, _other, out_dir)
+                    if _odest is not None and _odest.is_file():
+                        _sibling_survives = True
+                        break
+                if not _sibling_survives:
+                    survived_other_name.append(rel)
+                    continue              # bytes survive under another name: a rename
             if p.suffix.lower() in EDITABLE_DOC_EXTS:
                 fam = _doc_key(rel)
                 if cand_free_keys.get(fam, 0) > 0:

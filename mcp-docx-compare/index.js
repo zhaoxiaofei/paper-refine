@@ -16,7 +16,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import * as z from 'zod/v4';
-import { allowedRoots, containsPath } from './containment.mjs';
+import { allowedRoots, containsPath, realOrResolved } from './containment.mjs';
 import { inFlightKey } from './derived-output.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -90,7 +90,11 @@ serveStdio(() => {
       }
       const absOriginal = path.resolve(originalPath);
       const absRevised = path.resolve(revisedPath);
-      const absOutput = outputPath ? path.resolve(outputPath) : '';
+      // The comparer writes through a symlinked directory to the file's real
+      // location; resolve the output through its deepest existing ancestor so
+      // the argv, the equality check and the in-flight key all name that one
+      // file (`/allowed/out.docx` and `/allowed/link->allowed/out.docx`).
+      const absOutput = outputPath ? realOrResolved(outputPath) : '';
       // The existence check is made on the RESOLVED path -- the one execFile
       // opens. `existsSync` on the raw string follows symlinks and `..` through
       // the KERNEL, so `<dir>/link/../../x.docx` can name an existing file
@@ -125,9 +129,12 @@ serveStdio(() => {
       }
       // An output that IS an input would be deleted by the script's
       // stale-output cleanup before Word reads it; refuse it here too, so the
-      // caller gets a clear reason instead of a mysterious COM failure.
+      // caller gets a clear reason instead of a mysterious COM failure. The
+      // comparison is made on the REAL paths: a symlinked alias of the input
+      // names the same file the cleanup would delete.
       const lc = (s) => s.toLowerCase();
-      if (absOutput && (lc(absOutput) === lc(absOriginal) || lc(absOutput) === lc(absRevised))) {
+      const realInputs = [absOriginal, absRevised].map((p) => realOrResolved(p));
+      if (absOutput && realInputs.some((p) => lc(absOutput) === lc(p))) {
         return {
           content: [{ type: 'text', text: `refused: outputPath must not be an input file: `
                                           + `${outputPath}` }],

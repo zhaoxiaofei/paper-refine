@@ -253,12 +253,27 @@ ENTRY_HINT_RE = re.compile(
 AUTHOR_START_RE = re.compile(r"^\s*[A-Z][A-Za-z'\-]+,\s*(?:[A-Z]\.|[A-Z][a-z]+)")
 
 
+# A reference entry's author block: "Smith J.", "Smith JA,", "Smith, J.".
+# A bare capitalised word is not enough -- "In 2020 ..." starts a sentence too.
+_ENTRY_AUTHOR_RE = re.compile(
+    r"^\s*[A-Z][A-Za-z'\-]+(?:\s+[A-Z]{1,3}[,.]|\s+[A-Z]\.|\s*,\s*(?:[A-Z]\.|[A-Z][a-z]+))")
+
+
 def looks_like_reference_entry(s):
     if NUM_ENTRY_RE.match(s) or BULLET_ENTRY_RE.match(s):
         return True
-    if YEAR_RE.search(s) or ENTRY_HINT_RE.search(s):
+    # A year or "et al." alone is ordinary prose ("In 2020 we reanalysed ...",
+    # "Smith et al. showed ..."). A reference entry also has an author-name
+    # start, a volume:page marker, a DOI, or an organisation-author shape.
+    if _ENTRY_AUTHOR_RE.match(s) or AUTHOR_START_RE.match(s):
         return True
-    return bool(AUTHOR_START_RE.match(s))
+    if re.search(r"\bdoi\b|https?://", s, re.I):
+        return True
+    if YEAR_RE.search(s) and re.search(r"\b\d+\s*[:(]\s*\d+", s):
+        return True
+    if re.match(r"^\s*(?:[A-Z][\w'’\-&.]+\s+){2,}\(?(?:19|20)\d{2}\)?\s*[.;:,)]", s):
+        return True
+    return False
 
 SECTION_PATTERNS = [
     ("cover letter", re.compile(r"^(?:cover letter|dear editor)\b", re.I)),
@@ -292,10 +307,15 @@ CONTEXT_RANK = {"title page": 5, "abstract": 10, "introduction": 15, "main text"
                 "supplementary": 60, "acknowledgements": 70, "author contributions": 71,
                 "competing interests": 72, "data availability": 73, "cover letter": 90,
                 "references": 95, "footnotes": 96, "endnotes": 97, "header": 98, "footer": 99}
+# "figure legend 3" is the third legend's own M1b context; its rank is the
+# parent context's.
+_BASE_CONTEXT_RE = re.compile(r"\s+\d+$")
 
 
 def rank(ctx):
-    return CONTEXT_RANK.get(ctx, 25)
+    # A per-legend context carries its own legend number ("figure legend 2");
+    # it ranks exactly like the shared "figure legend" context.
+    return CONTEXT_RANK.get(ctx, CONTEXT_RANK.get(_BASE_CONTEXT_RE.sub("", ctx or ""), 25))
 
 
 def find_reference_region(lines):
@@ -309,8 +329,10 @@ def find_reference_region(lines):
     start = None
     for i, ln in enumerate(lines):
         if REF_HEADING_RE.match(ln.strip()):
+            # The LAST heading is the real list: an early "References" line
+            # (table of contents, or a superseded first list) must not latch
+            # the sweep onto the wrong section.
             start = i + 1
-            break
     if start is None:
         return None
     end = len(lines)
@@ -347,7 +369,8 @@ def classify_context(fname):
     # letter and a "reply" name that merely contains "cover" was masked (see
     # `_COVER_WORD_RE`, which `is_evidence_name` already uses).
     if _COVER_WORD_RE.search(f): return "cover letter"
-    if "title" in f: return "title page"
+    toks = set(re.findall(r"[a-z0-9]+", f))
+    if "title" in toks: return "title page"
     # A bibliography is a bibliography even when it belongs to the supplement:
     # "suppAll-d.bib" matched the "supp" heuristic below and was swept as
     # supplementary text, so reference entries (their titles and abstracts)
@@ -356,24 +379,49 @@ def classify_context(fname):
     # these files exactly like it applies to a "References" section.
     if REF_ROLE_RE.search(f) or "bibliograph" in f or re.search(r"\.bib(\.|$)", raw):
         return "references"
-    if "abstract" in f: return "abstract"
+    if "abstract" in toks or "abstracts" in toks: return "abstract"
     if SUPP_ROLE_RE.search(f): return "supplementary"
-    if "method" in f or "m&m" in f: return "Methods"
-    if "fig" in f or "legend" in f: return "figure legend"
-    if "table" in f: return "table"
-    if "reporting" in f or "summary" in f: return "reporting summary"
+    if "m&m" in f or any(t.startswith("method") for t in toks): return "Methods"
+    if any(t.startswith(("fig", "legend")) for t in toks): return "figure legend"
+    if any(t.startswith("table") for t in toks): return "table"
+    if any(t.startswith(("reporting", "summary")) for t in toks):
+        return "reporting summary"
     return "main text"
+
+
+_CAPTION_BODY_PRONOUN_RE = re.compile(r"^(?:we|i|our|here)\b", re.I)
+
+
+def _caption_line(raw, pattern):
+    """True for a display-item caption, not a body sentence that opens like one.
+
+    `section_label` used to apply its 60-character HEADING cap to captions as
+    well, so a real legend longer than 60 characters was never its own context
+    (and a body sentence "Figure 1. We next tested..." was). The caption's own
+    label/separator decides; only a following FIRST-PERSON continuation marks
+    the body sentence whose "Figure 1." is a citation, not a caption ("This
+    figure shows..." stays a legitimate caption opening).
+    """
+    m = pattern.match(raw)
+    if not m:
+        return False
+    head = raw[:m.end()]
+    cut = max(head.rfind(ch) for ch in ".:|\u2014\u2013,")
+    rest = raw[cut + 1:].strip()
+    return not _CAPTION_BODY_PRONOUN_RE.match(rest)
 
 
 def section_label(raw):
     """In-file section heading or display-item caption, else None."""
     s = raw.strip()
-    if not s or len(s) > 60:
+    if not s:
         return None
-    if FIG_CAPTION_RE.match(raw):
+    if _caption_line(raw, FIG_CAPTION_RE):
         return "figure legend"
-    if TABLE_CAPTION_RE.match(raw):
+    if _caption_line(raw, TABLE_CAPTION_RE):
         return "table"
+    if len(s) > 60:
+        return None
     s = re.sub(r"^#{1,6}\s*", "", s).rstrip(":.").strip()
     for label, pat in SECTION_PATTERNS:
         if pat.match(s):
@@ -381,9 +429,17 @@ def section_label(raw):
     return None
 
 
+TEX_CMD_ARG_RE = re.compile(
+    r"\\(?:[A-Za-z]*cite[A-Za-z]*|ref|eqref|autoref|pageref|label|bibitem)"
+    r"\*?(?:\s*\[[^\]]*\]){0,3}\s*\{[^{}]*\}")
+
+
 def mask_nonprose(line):
     """Blank out URLs, DOIs, accession numbers, file paths and filenames."""
-    for pat in (URL_RE, DOI_RE, ACCESSION_RE, PATH_RE, FILE_RE):
+    # A LaTeX citation/reference KEY is not prose: `\cite{smith2019}` and
+    # `\ref{cnAtlas}` were tokenized as acronyms and reported as "never
+    # defined anywhere" on every LaTeX submission.
+    for pat in (TEX_CMD_ARG_RE, URL_RE, DOI_RE, ACCESSION_RE, PATH_RE, FILE_RE):
         line = pat.sub(lambda m: " " * len(m.group(0)), line)
     return line
 
@@ -874,6 +930,7 @@ def main():
             reference_notes.append("%s lines %d-%d (%s)" % (
                 fname, region[0] + 1, region[1], region[2]))
         current_section = role
+        legend_no = 0
         seen_here = set()
         for li, raw in enumerate(lines, 1):
             if region and region[0] <= li - 1 < region[1]:
@@ -881,7 +938,14 @@ def main():
             label = section_label(raw)
             if label == "references":
                 continue  # heading line; the region covers the list itself
-            if label:
+            if label == "figure legend" and _caption_line(raw, FIG_CAPTION_RE):
+                # M1b grants EACH legend its own first use (sweeps.md: "each
+                # figure legend / each table footnote"): the captions were
+                # collapsed into one "figure legend" context per file, so the
+                # second legend's legitimate first use became a residue row.
+                legend_no += 1
+                current_section = "figure legend %d" % legend_no
+            elif label:
                 current_section = label
             elif current_section == "references":
                 current_section = role  # never stay stuck on the reference section

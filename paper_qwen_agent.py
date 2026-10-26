@@ -203,10 +203,14 @@ def ensure_tunnel(cfg: dict, log=None) -> str:
             print(msg, file=sys.stderr)
     global _TUNNEL, _TUNNEL_STDERR
     ok, ids, err = probe_endpoint(cfg)
-    if ok:
+    mode = str(cfg.get("tunnel") or "auto").strip().lower()
+    if ok and mode != "require":
         log(f"[qwen] endpoint reachable: {cfg['base_url']} (models: "
             f"{', '.join(ids) or '(none)'})")
         return ""
+    if ok and mode == "require":
+        log("[qwen] --tunnel require: the endpoint is directly reachable, but this "
+            "mode still requires the ssh tunnel")
     if cfg["tunnel"] in ("off", "0", "false", "no"):
         return (f"qwen endpoint {cfg['base_url']} is not reachable and "
                 f"PAPER_QWEN_TUNNEL=off: {err}")
@@ -487,6 +491,10 @@ def main(argv=None) -> int:
         print(f"qwen: unknown harness {cfg['harness']!r}; use codex, dsh or chat",
               file=sys.stderr)
         return 2
+    if args.probe:
+        # Diagnostics must run BEFORE the reachability gate: otherwise the
+        # `endpoint: UNREACHABLE` / `model: NOT SERVED` report could never print.
+        return _print_probe(cfg)
     err = ensure_tunnel(cfg)
     if err:
         print(f"qwen: {err}", file=sys.stderr)
@@ -500,8 +508,6 @@ def main(argv=None) -> int:
         print(f"qwen: model {cfg['model']!r} is not served (available: "
               f"{', '.join(ids) or '(none)'})", file=sys.stderr)
         return 2
-    if args.probe:
-        return _print_probe(cfg)
     if args.check_tools:
         supported, detail = check_tools(cfg)
         print(f"qwen tools: {'accepted' if supported else 'NOT accepted'} ({detail})")
@@ -574,8 +580,24 @@ def main(argv=None) -> int:
             if out:
                 sys.stdout.write(out)
                 sys.stdout.flush()
-            if (re.search(r'"type"\s*:\s*"turn_end"', out)
-                    and re.search(r'"kind"\s*:\s*"error"', out)):
+            # Read the TERMINAL turn_end event, not two independent searches
+            # over all stdout: an earlier tool error must not fail a successful
+            # turn, and a failing turn_end need not carry `kind: error`.
+            turn_failed = None
+            for line in out.splitlines():
+                line = line.strip()
+                if not line.startswith("{"):
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(event, dict) and event.get("type") == "turn_end":
+                    status = str(event.get("status") or "").lower()
+                    kind = str(event.get("kind") or "").lower()
+                    turn_failed = (status in ("error", "failed")
+                                   or kind in ("error", "failed"))
+            if turn_failed:
                 print("qwen: dsh ended the turn with an error (see the JSON event "
                       "stream above)", file=sys.stderr)
                 return int(proc.returncode or 0) or 2

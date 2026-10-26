@@ -734,8 +734,14 @@ def format_note(info) -> str:
     if not rows:
         return "OOXML formatting: clean (no structural/typographic findings)"
     top = ", ".join(f"{k} x{v}" for k, v in sorted((info.get("by_rule") or {}).items())[:5])
-    return (f"OOXML formatting: {len(rows)} finding(s) [{info.get('high', 0)} high, "
-            f"{info.get('medium', 0)} medium, {info.get('low', 0)} low]: {top}")
+    # A caller that passes only {"rows": ...} (the figure scan) has no severity
+    # counters: derive them from the rows instead of printing zeros.
+    def _count(level):
+        if level in info:
+            return info[level]
+        return sum(1 for r in rows if str(r.get("severity") or "") == level)
+    return (f"OOXML formatting: {len(rows)} finding(s) [{_count('high')} high, "
+            f"{_count('medium')} medium, {_count('low')} low]: {top}")
 
 
 # --------------------------------------------------------------------------
@@ -857,8 +863,14 @@ def fix_document(xml: str, styles: dict, policy: dict,
         nxt = next((j for j in range(idx + 1, len(plist)) if j not in in_table), None)
         if nxt is not None:
             np0, np1, npara = plist[nxt]
-            edits.append((np0, np1, insert_into_ppr(npara, "<w:pageBreakBefore/>")))
-            changes.append(f"moved the page break onto the following paragraph (was the empty p{idx})")
+            if child_elem(ppr_of(npara), "pageBreakBefore"):
+                # The target already carries the property: a second
+                # <w:pageBreakBefore/> is schema-invalid.
+                changes.append(f"removed the empty page-break paragraph p{idx} "
+                               f"(the following paragraph already has pageBreakBefore)")
+            else:
+                edits.append((np0, np1, insert_into_ppr(npara, "<w:pageBreakBefore/>")))
+                changes.append(f"moved the page break onto the following paragraph (was the empty p{idx})")
         else:
             changes.append(f"removed the trailing break-only paragraph p{idx}")
         xml = apply_edits(xml, edits)
@@ -1043,7 +1055,12 @@ def fix_document(xml: str, styles: dict, policy: dict,
                 xml = apply_edits(xml, [(s.start(), s.end(), head + "<w:titlePg/></w:sectPr>")])
             else:
                 at = s.start() + body.find("</w:sectPr>")
-                for tag in ("docGrid", "printerSettings"):
+                # CT_SectPr's ordered tail after titlePg: textDirection,
+                # bidi, rtlGutter, docGrid, printerSettings. Looking only for
+                # the last two put titlePg after textDirection/bidi/rtlGutter,
+                # where Word reads the section as schema-invalid.
+                for tag in ("textDirection", "bidi", "rtlGutter", "docGrid",
+                            "printerSettings"):
                     t = body.find(f"<w:{tag}")
                     if t != -1:
                         at = min(at, s.start() + t)
@@ -1152,21 +1169,20 @@ def fix_document(xml: str, styles: dict, policy: dict,
     if t9a_fixes:
         plist = paragraphs(xml)
         edits, flipped = [], 0
-        for idx, r0, r1, want in t9a_fixes:
+        for idx, r0, r1, want, local in t9a_fixes:
             p0 = plist[idx][0]
             run = plist[idx][2][r0:r1]
-            if run_is_italic(styles, elem_val(ppr_of(plist[idx][2]), "pStyle"), run) == want:
+            if local is None and \
+                    run_is_italic(styles, elem_val(ppr_of(plist[idx][2]), "pStyle"), run) == want:
                 continue
-            rpr = rpr_of(run)
-            new_rpr, changed = _rpr_set_emphasis(rpr, want)
-            new_run = run
-            if rpr is None:
-                open_tag = re.match(r"<w:r(?=[\s/>])[^>]*>", new_run)
-                if open_tag is None:
+            if local is None:
+                new_run = _emphasis_run(run, want)
+            else:
+                pieces = split_run_text_span(run, local[0], local[1])
+                if pieces is None:
                     continue
-                new_run = new_run[:open_tag.end()] + new_rpr + new_run[open_tag.end():]
-            elif changed:
-                new_run = new_run.replace(rpr, new_rpr, 1)
+                head, middle, tail = pieces
+                new_run = head + _emphasis_run(middle, want) + tail
             if new_run != run:
                 edits.append((p0 + r0, p0 + r1, new_run))
                 flipped += 1
@@ -1273,9 +1289,13 @@ def fix_document(xml: str, styles: dict, policy: dict,
             return "".join(pieces)
 
         pieces, pos = [], 0
-        for pm in re.finditer(r"<w:p(?=[\s/>])[\s\S]*?</w:p>", xml):
-            pieces.append(_paragraph(xml[pos:pm.end()]))
-            pos = pm.end()
+        # `paragraphs()` is nesting-aware: the non-greedy regex ended the outer
+        # paragraph at a text box's INNER `</w:p>`, resetting the quote state
+        # and turning the outer closing quote into a second opening quote.
+        for p0, p1, para in paragraphs(xml):
+            pieces.append(xml[pos:p0])
+            pieces.append(_paragraph(para))
+            pos = p1
         pieces.append(_paragraph(xml[pos:]))
         new = "".join(pieces)
         if new != xml:
@@ -1331,15 +1351,14 @@ def fix_document(xml: str, styles: dict, policy: dict,
     spell_target = (spelling_minority_targets([b[4] for b in bodies])
                     if want_spell else {})
     hy_target = set()
-    # Only an attributive use takes the hyphen. A following function word
-    # ("the copy number of a locus") starts the noun use, which the rule
-    # documents as correct without one. The scanner applies the same exclusion;
-    # arming on a noun use made the fixer edit text no FMT-T8e row reported.
-    hy_noun_follow = "|".join(re.escape(w) for w in HYPHEN_NOUN_FOLLOWERS)
+    # Only an attributive use takes the hyphen. A following function word or
+    # finite verb ("the copy number of a locus", "each single cell expressed")
+    # starts the noun use, which the rule documents as correct without one. The
+    # scanner applies the same exclusion; arming on a noun use made the fixer
+    # edit text no FMT-T8e row reported.
     if want_hy:
         for hy, split in HYPHEN_COMPOUNDS:
-            if re.search(rf"\b{re.escape(hy)}(?=\s+(?!(?:{hy_noun_follow})\b)[A-Za-z])",
-                         blob):
+            if hyphen_attributive_re(hy).search(blob):
                 hy_target.add((hy, split))
     edits = []
     for idx, p0, p1, para, text in bodies:
@@ -1371,14 +1390,17 @@ def fix_document(xml: str, styles: dict, policy: dict,
                 for m in re.finditer(rf"\b{re.escape(minority)}\b", text, re.I):
                     if in_field_result(protected, m.start(), m.end()):
                         continue
-                    rep = (majority.capitalize()
-                           if m.group(0)[:1].isupper() else majority)
+                    _seen = m.group(0)
+                    if len(_seen) > 1 and _seen.isupper():
+                        rep = majority.upper()      # TUMOUR stays an all-caps form
+                    elif _seen[:1].isupper():
+                        rep = majority.capitalize()
+                    else:
+                        rep = majority
                     spans.append((m.start(), m.end(), rep))
         if want_hy:
             for hy, split in hy_target:
-                for m in re.finditer(
-                        rf"\b{re.escape(split)}(?=\s+(?!(?:{hy_noun_follow})\b)[A-Za-z])",
-                        text):
+                for m in hyphen_attributive_re(split).finditer(text):
                     if in_field_result(protected, m.start(), m.end()):
                         continue
                     spans.append((m.start(), m.end(), hy))
@@ -1749,7 +1771,10 @@ def validate_docx_parts(path: Path) -> dict:
     if schema_ok is False:
         errs.append(f"schema check failed: {schema_detail}")
     return {"file": str(path), "kind": "docx", "ok": not errs, "errors": errs,
-            "schema_ok": schema_ok, "detail": schema_detail if schema_ok is None else "valid"}
+            "schema_ok": schema_ok,
+            "detail": (schema_detail if schema_ok is None
+                       else ("valid" if schema_ok else
+                             f"schema check failed: {schema_detail}"))}
 
 
 # --------------------------------------------------------------------------

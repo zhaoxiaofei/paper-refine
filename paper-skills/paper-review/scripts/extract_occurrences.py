@@ -141,7 +141,13 @@ def variant_pattern(term, mode):
                 pats.append(re.escape(num[1:]) + "0*")
         try:
             v = float(num)
-            sci = "%.1e" % v
+            # One decimal of mantissa is NOT the value: for 1234.5 it produced
+            # "1.2e+03" (1200) and for 0.0215 "2.1e-02" (0.021). Derive the
+            # precision from the target's own significant digits (trailing
+            # zeros are not significant) so the scientific spelling is exactly
+            # the same number, no rounding in either direction.
+            _digits = re.sub(r"[^0-9]", "", num).lstrip("0").rstrip("0") or "0"
+            sci = "%.*e" % (len(_digits) - 1, v)
             mant, exp = sci.split("e")
             pats.append(re.escape(mant + "e" + exp))
             # "%.1e" always pads the exponent to two digits (3.1e-02) while

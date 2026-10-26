@@ -159,7 +159,8 @@ BREAK_TOKENS = re.compile(r"<w:(?:br|cr|tab)(?=[\s/>])[^>]*/?>")
 # piece at once (the text writer splices a fragment's new text at its own
 # offset, so a break counts as one character exactly like `text_of` says).
 _FRAG_OR_BREAK_RE = re.compile(r"<w:t(?:\s[^>]*)?>.*?</w:t>"
-                               r"|<w:(?:br|cr|tab)(?=[\s/>])[^>]*/?>", re.S)
+                               r"|<w:(?:br|cr|tab|noBreakHyphen|sym)(?=[\s/>])[^>]*/?>",
+                               re.S)
 RUN_RE = re.compile(r"<w:r(?=[\s/>]).*?</w:r>|<w:r(?=[\s/>])[^>]*/>", re.S)
 FIELD_CHAR_RE = re.compile(r"<w:fldChar[^>]*w:fldCharType=\"(\w+)\"[^>]*/?>")
 INSTR_RE = re.compile(r"<w:instrText(?:\s[^>]*)?>.*?</w:instrText>", re.S)
@@ -183,10 +184,12 @@ PAGEBREAK_RE = re.compile(r"<w:br[^>]*w:type=\"page\"[^>]*/?>")
 # "Figure S1.", "Supplementary Fig. 4:", "Extended Data Figure 3 |". The old
 # `\d+`-only pattern never saw "Figure S1.", so a supplementary legend kept the
 # body style's spacing while its siblings were normalized (the 2026-10-14
-# packages) and stayed invisible to the section/word model as well.
+# packages) and stayed invisible to the section/word model as well. A roman
+# label needs at least TWO numeral characters: a single capital after "Figure"
+# ("Figure C.", "Fig. I.") is a body sentence/panel, not figure 100.
 LEGEND_RE = re.compile(
     r"^\s*(?:supplementary\s+|supp\.?\s+|extended\s+data\s+)?fig(?:ure)?s?\.?\s*"
-    r"(?:S?\d+[A-Za-z]?|[IVXLC]+)\s*[|:.\u2014\u2013-]", re.I)
+    r"(?:S?\d+[A-Za-z]?|[IVXLC]{2,})\s*[|:.\u2014\u2013-]", re.I)
 STRAIGHT_RE = re.compile(r"[\"']")
 CURLY_RE = re.compile("[\u2018\u2019\u201c\u201d]")
 EM, EN = "\u2014", "\u2013"
@@ -340,6 +343,14 @@ def text_of(frag: str) -> str:
         tok = m.group(0)
         if BREAK_TOKENS.fullmatch(tok):
             parts.append("\n")
+        elif tok.startswith("<w:noBreakHyphen"):
+            # A non-breaking hyphen is a hyphen, not nothing: dropping it fused
+            # `ten<w:noBreakHyphen/>year` into "tenyear".
+            parts.append("-")
+        elif tok.startswith("<w:sym"):
+            # A symbol glyph has no portable character; keep ONE placeholder so
+            # the surrounding words do not fuse.
+            parts.append("\ufffd")
         else:
             parts.append(unesc(tok[tok.find(">") + 1:tok.rfind("<")]))
     return "".join(parts)
@@ -1457,10 +1468,19 @@ def _rpr_set_emphasis(rpr: str | None, on: bool) -> tuple:
     if rpr is None:
         rpr = "<w:rPr></w:rPr>"
     before = rpr
-    rpr = re.sub(r"<w:i(?=[\s/>])[^>]*/>", "", rpr)
-    rpr = re.sub(r"<w:iCs(?=[\s/>])[^>]*/>", "", rpr)
-    rpr = re.sub(r"<w:i(?=[\s/>])[^>]*>.*?</w:i>", "", rpr, flags=re.S)
-    rpr = re.sub(r"<w:iCs(?=[\s/>])[^>]*>.*?</w:iCs>", "", rpr, flags=re.S)
+    # `w:rPrChange` holds the OLD formatting record of a tracked change. It is
+    # not the live run formatting: deleting/inserting `w:i` there corrupts the
+    # revision record while the run itself keeps its emphasis. Edit only the
+    # live segments and leave every revision subtree byte-identical.
+    _segs = re.split(r"(<w:rPrChange\b.*?</w:rPrChange>)", rpr, flags=re.S)
+    for _i in range(0, len(_segs), 2):
+        _seg = _segs[_i]
+        _seg = re.sub(r"<w:i(?=[\s/>])[^>]*/>", "", _seg)
+        _seg = re.sub(r"<w:iCs(?=[\s/>])[^>]*/>", "", _seg)
+        _seg = re.sub(r"<w:i(?=[\s/>])[^>]*>.*?</w:i>", "", _seg, flags=re.S)
+        _seg = re.sub(r"<w:iCs(?=[\s/>])[^>]*>.*?</w:iCs>", "", _seg, flags=re.S)
+        _segs[_i] = _seg
+    rpr = "".join(_segs)
     insert = "<w:i/>" if on else '<w:i w:val="0"/><w:iCs w:val="0"/>'
     if re.fullmatch(r"<w:rPr(?=[\s/>])[^>]*/>", rpr, re.S):
         # A self-closing properties element has no `</w:rPr>` tail to anchor
@@ -1483,6 +1503,67 @@ def _rpr_set_emphasis(rpr: str | None, on: bool) -> tuple:
             at = min(at, m.start())
     rpr = rpr[:at] + insert + rpr[at:]
     return rpr, rpr != before
+
+
+def _emphasis_run(run: str, want: bool) -> str:
+    """`run` with an explicit italic ON/OFF override (unchanged if already so)."""
+    rpr = rpr_of(run)
+    new_rpr, changed = _rpr_set_emphasis(rpr, want)
+    if rpr is None:
+        open_tag = re.match(r"<w:r(?=[\s/>])[^>]*>", run)
+        if open_tag is None:
+            return run
+        return run[:open_tag.end()] + new_rpr + run[open_tag.end():]
+    if changed:
+        return run.replace(rpr, new_rpr, 1)
+    return run
+
+
+def split_run_text_span(run: str, start: int, end: int):
+    """`(head, middle, tail)` runs, split at DECODED character offsets.
+
+    `start`/`end` are offsets into `text_of(run)`. A parenthetical label can
+    share a run with a prefix/suffix that is NOT part of the label; recording
+    the whole run as the fix span used to restyle that neighbouring text too.
+    The caller applies the emphasis to `middle` only, so every character
+    outside the reported span keeps its own formatting.
+
+    Returns None when the span cannot be mapped onto exactly one `w:t` (a run
+    carrying a break, a symbol, several text nodes, or a middle that is empty):
+    the caller then reports the row without a mechanical edit, rather than
+    restyling bytes it cannot address.
+    """
+    tm = re.search(r"(<w:t(?=[\s>])[^>]*>)([\s\S]*?)(</w:t>)", run)
+    if tm is None or len(re.findall(r"<w:t(?=[\s>])", run)) != 1:
+        return None
+    # A run may also carry a footnote/comment reference, a drawing or another
+    # run-level child. Returning three copies of the run would replicate that
+    # child (a labelled run with one footnote became three footnotes), so only
+    # a run whose remaining content is its `w:rPr` is safe to split.
+    if re.fullmatch(
+            r"\s*<w:r(?=[\s/>])[^>]*>\s*"
+            r"(?:<w:rPr(?=[\s/>])[^>]*/>|<w:rPr(?=[\s/>])[\s\S]*?</w:rPr>)?\s*"
+            r"</w:r>\s*", run[:tm.start()] + run[tm.end():]) is None:
+        return None
+    text = unesc(tm.group(2))
+    if text != text_of(run):
+        return None
+    start = max(0, min(int(start), len(text)))
+    end = max(0, min(int(end), len(text)))
+    if end <= start:
+        return None
+    def piece(txt: str) -> str:
+        if not txt:
+            return ""
+        open_tag = tm.group(1)
+        # A split can turn an internal space into a leading/trailing one; Word
+        # strips an edge space from a w:t without xml:space="preserve".
+        if (txt[:1].isspace() or txt[-1:].isspace()) \
+                and "xml:space" not in open_tag:
+            open_tag = open_tag[:-1] + ' xml:space="preserve">'
+        return run[:tm.start()] + open_tag + xml_escape(txt) + tm.group(3) + run[tm.end():]
+
+    return piece(text[:start]), piece(text[start:end]), piece(text[end:])
 
 
 def style_sz(styles: dict, sid: str | None) -> str | None:
