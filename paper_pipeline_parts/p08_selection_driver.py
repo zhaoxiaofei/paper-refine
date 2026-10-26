@@ -2120,6 +2120,101 @@ def round_run_plan(ctx: Ctx, r: int) -> list:
     return entries
 
 
+REVISION_AUDIT_DIRNAME = "revision_audit"
+REVISION_AUDIT_PROMPT_FILE = "REVISION_AUDIT_PROMPT.md"
+REVISION_REPAIR_PROMPT_FILE = "REVISION_REPAIR_PROMPT.md"
+
+
+def revision_audit_of(ctx) -> str:
+    """`on` unless the root or the operator turned the revision audit off."""
+    raw = str(os.environ.get("PAPER_REVISION_AUDIT")
+              or (getattr(ctx, "cfg", None) or {}).get("revision_audit")
+              or "on").strip().lower()
+    return "off" if raw in {"off", "0", "no", "false", "none"} else "on"
+
+
+def _revision_plan_rows(sb: Path):
+    """The audit's repair rows, or None when no valid plan was written."""
+    path = sb / REVISION_AUDIT_DIRNAME / "REPAIR_PLAN.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    rows = data.get("rows") if isinstance(data, dict) else data
+    if not isinstance(rows, list):
+        return None
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
+    """Revision audit -> (non-empty plan) -> one bounded repair pass.
+
+    Runs after the revise stage's own postcheck has passed, in the SAME sandbox:
+    the audit reads `base/` and `revised/` and writes only
+    `revision_audit/REPAIR_PLAN.json`; the repair session re-validates every row,
+    edits `revised/` only, and the stage's own postcheck is re-run on the final
+    package. A skipped (`--revision-audit off`) or empty plan leaves `revised/`
+    as the final revised version.
+    """
+    if rec.get("kind") != "revise" or rec.get("revision_audit"):
+        return
+    if revision_audit_of(ctx) != "on":
+        rec["revision_audit"] = {"status": "skipped", "rows": 0,
+                                 "reason": "revision audit off"}
+        ctx.save_state()
+        print(f"  [revision-audit] {rec['id']}: skipped (revision audit off); the revised "
+              f"version is final")
+        return
+    sb = ctx.sandbox_of(rec)
+    r = int(rec.get("round") or 0)
+    (sb / REVISION_AUDIT_PROMPT_FILE).write_text(
+        revision_audit_prompt(sb, rec["id"], r), encoding="utf-8")
+    print(f"  [revision-audit] {rec['id']}: auditing the revised package")
+    res = _execute_attempt_in(sb, rec, cmd, timeout, REVISION_AUDIT_PROMPT_FILE,
+                              "_revision_audit.log", False)
+    (sb / REVISION_AUDIT_PROMPT_FILE).unlink(missing_ok=True)
+    rows = _revision_plan_rows(sb)
+    audit_rec = {"status": "failed", "rows": 0,
+                 "duration": round(res.get("dur") or 0.0, 1),
+                 "error": str(res.get("error") or "")}
+    if res.get("error") or res.get("rc") not in (0,):
+        audit_rec["error"] = audit_rec["error"] or f"audit session exited rc={res.get('rc')}"
+    elif rows is None:
+        audit_rec["error"] = "no valid revision_audit/REPAIR_PLAN.json"
+    else:
+        audit_rec["status"] = "done"
+        audit_rec["rows"] = len(rows)
+    rec["revision_audit"] = audit_rec
+    ctx.save_state()
+    if audit_rec["status"] != "done":
+        print(f"  [revision-audit] {rec['id']}: FAILED — {audit_rec['error'][:240]}")
+        return
+    print(f"  [revision-audit] {rec['id']}: {len(rows)} confirmed repair row(s)")
+    if not rows:
+        return
+    # Preserve the audited bytes: the repair produces the final revised version.
+    pre = sb / "revised_prerepair"
+    if not pre.exists():
+        shutil.copytree(sb / REVISED_DIR, pre)
+    (sb / REVISION_REPAIR_PROMPT_FILE).write_text(
+        revision_repair_prompt(sb, rec["id"], r, len(rows)), encoding="utf-8")
+    print(f"  [revision-repair] {rec['id']}: one bounded repair pass")
+    res2 = _execute_attempt_in(sb, rec, cmd, timeout, REVISION_REPAIR_PROMPT_FILE,
+                               "_revision_repair.log", False)
+    (sb / REVISION_REPAIR_PROMPT_FILE).unlink(missing_ok=True)
+    repair_rec = {"status": "failed", "rows": len(rows),
+                  "duration": round(res2.get("dur") or 0.0, 1),
+                  "error": str(res2.get("error") or "")}
+    if res2.get("error") or res2.get("rc") not in (0,):
+        repair_rec["error"] = repair_rec["error"] or f"repair session exited rc={res2.get('rc')}"
+    else:
+        repair_rec["status"] = "done"
+    rec["revision_repair"] = repair_rec
+    ctx.save_state()
+    # The SAME postcheck decides the final revised version.
+    postcheck(ctx, rec, source="revision-audit")
+
+
 def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
                    manual: bool, nowait: bool, poll: int, label: str,
                    retry_backoff: int = 0, retry_backoff_max: int = 0,
@@ -2387,6 +2482,13 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                 apply_results(ctx, {rid: res})
                 rec = ctx.run(rid)
                 if rec["status"] == "done":
+                    if rec.get("kind") == "revise" and not rec.get("revision_audit"):
+                        # The chain records its own skip when the audit is off,
+                        # so the decision is visible in the run record.
+                        run_revision_chain(ctx, rec, cmd, timeout)
+                        rec = ctx.run(rid)
+                        if rec["status"] != "done":
+                            register_failure(rid, rec)
                     continue
                 # a process-level failure with VALID artifacts is re-verified first
                 if rec["status"] == "failed" and not (rec.get("postcheck") or {}).get("errors") \

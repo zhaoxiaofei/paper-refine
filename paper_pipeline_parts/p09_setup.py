@@ -601,6 +601,11 @@ def cmd_setup(args) -> None:
                "stop_after_no_progress": int(getattr(args, "stop_after_no_progress", 0) or 0),
                "review_split": str(getattr(args, "review_split", "off") or "off"),
                "audit": str(getattr(args, "audit", DEFAULT_AUDIT) or DEFAULT_AUDIT),
+               # The REVISION AUDIT's recorded policy: "on" (default) audits the
+               # revised package and runs one bounded repair when the plan is
+               # non-empty; "off" leaves the revised version final. The env
+               # override PAPER_REVISION_AUDIT works on an existing root.
+               "revision_audit": str(getattr(args, "revision_audit", "on") or "on").lower(),
                # The PROBE REVIEW's recorded policy: "on" (default) plans one
                # extra independent session per full-scope round; "off" is the
                # documented off switch (`set-probe-review` flips it on an

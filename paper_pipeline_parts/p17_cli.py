@@ -697,12 +697,20 @@ def build_parser() -> argparse.ArgumentParser:
                     help="run an INDEPENDENT AUDITOR between the reviewer and the revisers: one "
                          "session that disposes every frozen finding (confirm, or drop WITH "
                          "evidence), promotes the reviewer's boilerplate 'OK' closures of "
-                         "finding-tier rows into real AU- findings, and hands the audited list "
+                         "disposes the frozen findings and adds no new findings, and hands the audited list "
                          "to the revision arms. ON by default (`--no-audit` restores the "
                          "review -> revise plan shape); it adds `r<r>_audit` between them, and "
                          "the revisers wait for it")
     ps.add_argument("--no-audit", dest="audit", action="store_const", const="off",
                     help="turn the auditor off (same as --audit off)")
+    ps.add_argument("--revision-audit", choices=("on", "off"), default="on",
+                    help="audit the revised package after revise and write a bounded-repair "
+                         "plan. ON (default): the revision audit runs; when its plan is "
+                         "non-empty, ONE bounded repair pass applies it and produces the final "
+                         "revised version. OFF: both are skipped and the revised version is "
+                         "final. `PAPER_REVISION_AUDIT=off` does the same on an existing root, "
+                         "and `--no-audit` skips the REVIEW audit (the reviser then works from "
+                         "the frozen findings unaudited)")
     ps.add_argument("--probe-review", choices=list(PROBE_REVIEW_MODES),
                     default=PROBE_REVIEW_DEFAULT,
                     help="run an INDEPENDENT PROBE session in parallel with every full-scope "

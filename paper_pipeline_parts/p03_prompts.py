@@ -2582,6 +2582,31 @@ the surface, and the revisers may not change a claim here."""
     return text
 
 
+REVALIDATION_RULE = """BEFORE YOU APPLY EACH FINDING — RE-VALIDATE IT (paper-refine policy):
+
+The finding list you receive is a set of CLAIMS, not instructions. For every finding, before any
+edit: re-read the cited location in `base/` and check the claim against the source hierarchy
+(rule 2: code, raw data, figures, tables, main text, supplementary text). Record one ledger row
+per finding with `revalidated: confirmed` or `revalidated: rejected` and, for a rejection, the
+exact evidence that contradicts the finding. Apply ONLY confirmed findings. A rejected finding is
+carried as `unable — <reason>` in the ledger and is never silently skipped; a finding you cannot
+check is recorded with the check that is missing. Do not inherit a reviewer's or auditor's
+disposition as proof: the audit report is evidence to re-check, not a substitute for re-reading
+the text.
+
+"""
+
+AUDIT_NO_NEW_FINDINGS = """OVERRIDE — THIS AUDIT ADDS NO FINDINGS (paper-refine policy):
+
+You dispose the FROZEN findings and nothing else. `audit/audit.json`'s `adds` MUST be `[]`: do not
+create `AU-*` rows and do not promote a new defect into the finding list. If you notice a defect
+outside the frozen list, record it in `audit/UNRESOLVED.md` with its location and evidence and
+leave it for the next review; it is an observation, not a finding, and no reviser acts on it. The
+rest of this prompt describes the disposition record you write; where it mentions adding findings,
+this override wins.
+
+"""
+
 def revise_prompt(sandbox: Path, run_id: str, r: int,
                   index: int = 1, total: int = 1,
                   caption_limit: int = DEFAULT_CAPTION_LIMIT,
@@ -2594,10 +2619,11 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
     audit_block = ("""
   audit/        — the AUDITOR's record for this round (present because the operator enabled
                   `--audit on`): audit/audit.json disposes every frozen finding (confirm, or drop
-                  WITH its evidence) and lists the `AU-*` findings it added, and audit/AUDIT.md is
-                  the human-readable form. Act on the AUDITED list: a dropped finding is NOT yours
-                  to re-litigate (re-opening one requires new evidence, and you state it in your
-                  ledger row); every `AU-*` finding is a normal finding you must resolve.
+                  WITH its evidence) and adds no new findings; audit/AUDIT.md is the human-readable
+                  form. Act on the AUDITED list: a dropped finding is NOT yours to re-litigate
+                  (re-opening one requires new evidence, and you state it in your ledger row). A
+                  note under audit/UNRESOLVED.md is an observation for the next review, not a
+                  finding you must resolve.
 """ if audit else "")
     text = (REVISE_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
@@ -2633,7 +2659,7 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
     text = apply_author_to_complete_prompt(
         text + shared_blocks() + attached_head(prof) + "\n" + ATTACHED_PHASE2
         + REVISE_TAIL + journal_block + venue_norm, author_to_complete)
-    return text
+    return REVALIDATION_RULE + text
 
 
 
@@ -2671,8 +2697,8 @@ def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
     text = render_venue_tokens(text, prof)
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule("audit"))
     text = text.replace("@@SELFCHECK@@", selfcheck_block("audit", run_id, r))
-    return apply_author_to_complete_prompt(text + shared_blocks() + AUDIT_TAIL + venue_norm,
-                                           author_to_complete)
+    return AUDIT_NO_NEW_FINDINGS + apply_author_to_complete_prompt(
+        text + shared_blocks() + AUDIT_TAIL + venue_norm, author_to_complete)
 
 
 PROBE_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
@@ -3093,3 +3119,117 @@ REWRITE_PROMPT = rewrite_prompt
 REVISE_PROMPT = revise_prompt
 INTEGRATE_PROMPT = integrate_prompt
 JUDGE_PROMPT = judge_prompt
+
+
+# =====================================================================
+# REVISION AUDIT + BOUNDED REPAIR (after revise, before integrate/judge)
+# =====================================================================
+
+REVISION_AUDIT_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
+
+You are the REVISION AUDITOR — run @@RUN_ID@@, round @@ROUND@@ — inside an orchestrated
+manuscript-revision pipeline. Your sandbox is:
+  @@SANDBOX@@
+Write ONLY inside this sandbox, and only under `revision_audit/`. Keep your working directory at
+the sandbox root. Nothing else is required: what follows is the whole task.
+
+WHAT THIS STAGE IS — AND IS NOT. You audit the REVISION that the reviser just wrote. You are not
+the reviewer, not the review auditor, and not the reviser:
+  * you do NOT re-review the submission and you run no discovery hunt over it;
+  * you do NOT edit the manuscript, the package, the ledger, MANUAL_STEPS.md or any other file;
+  * you do NOT write a revised version and you do not propose a rewrite: your only product is the
+    BOUNDED-REPAIR PLAN (data), one row per defect you confirm IN THE REVISION.
+
+Inputs (paths relative to the sandbox root):
+  base/                    the round's base (read-only)
+  revised/                 the revision under audit (read-only to you)
+  review/findings.json     the frozen review findings (plus review/round2/findings_extra.json when
+                           the discovery round ran)
+  probe_review/findings_probe.json   the probe's independent findings, when present
+  audit/audit.json, audit/AUDIT.md   the review auditor's dispositions, when present
+  revised/CHANGELOG.md, revised/REVISION_REPORT.md, revised/MANUAL_STEPS.md
+  raw_data/, code/         the read-only sources the hierarchy names
+
+WHAT TO AUDIT — one row per CONFIRMED defect in the revision:
+  1. CORRECTION MISSING: an audited finding with no edit and no genuinely non-inferable manual item.
+  2. FACT REMOVED: a sentence carrying a fact, number, definition or significance claim was deleted
+     (or a pointer carrying a fact was removed) where the correct repair was to correct/relocate it.
+  3. WRONG VALUE: the revision states a value the source hierarchy contradicts, including a value
+     that was not propagated to every occurrence after it was corrected.
+  4. NON-INFERABLE MANUAL: a `manual-required`/`author-only` item whose correct form is actually
+     determinable from the manuscript or its public record (the printed author list/affiliations,
+     raw_data, deposited tables, the reference list, a DOI resolver, a standard domain). A typo that
+     the revision refused to correct for that reason is a defect.
+  5. LOW-PRIORITY LEDGER: a corrected inferable typo with no `priority=low` re-verification row in
+     revised/MANUAL_STEPS.md, or a grammar/punctuation/style edit wrongly listed as a manual item.
+  6. NEW DEFECT: a contradiction, wrong number/unit, broken citation or dangling reference the
+     revision introduced.
+
+For every row you must give a LOCATION, the WRONG text or value, the CORRECT value, and the BASIS
+(the exact file/line/table/identifier that decides it, re-runnable by another session). If you
+cannot decide a candidate row, do not guess: put it in `revision_audit/NEEDS_EVIDENCE.md` with what
+is missing. A confirmation with no quotable basis is not a confirmation.
+
+Write `revision_audit/REPAIR_PLAN.json` (and a readable `revision_audit/REPAIR_PLAN.md`):
+  {"rows": [{"id": "RP-001", "finding": "F-012|X-900|none", "file": "manuscript.md",
+             "location": "Results, paragraph 3", "wrong": "...", "correct": "...",
+             "basis": "...", "edit": "...", "evidence": "..."}]}
+An empty plan is `{"rows": []}` — that is a valid, complete audit. Do NOT put a row in the plan that
+you have not confirmed; a false row makes the bounded repair write a new error.
+
+Write only under `revision_audit/`. Never touch `base/`, `revised/`, `review/`, `audit/`, `raw_data/`
+or `code/`.
+"""
+
+
+def revision_audit_prompt(sandbox: Path, run_id: str, r: int) -> str:
+    """The REVISION AUDITOR prompt: audit the revision, write the repair plan only."""
+    return (REVISION_AUDIT_DIRECTIVES
+            .replace("@@RUN_ID@@", run_id)
+            .replace("@@SANDBOX@@", str(sandbox.resolve()))
+            .replace("@@ROUND@@", str(int(r))))
+
+
+REVISION_REPAIR_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
+
+You are the BOUNDED REPAIR session — run @@RUN_ID@@, round @@ROUND@@ — a REVISE-class session inside
+an orchestrated manuscript-revision pipeline. Your sandbox is:
+  @@SANDBOX@@
+Write inside this sandbox: `revised/` and your own `revised/REPAIR_LEDGER.*`; never touch `base/`,
+`review/`, `audit/`, `revision_audit/`, `raw_data/` or `code/`.
+
+WHAT THIS STAGE IS. The revision auditor wrote `revision_audit/REPAIR_PLAN.json` with @@ROWS@@
+confirmed row(s). You apply that plan to `revised/` and produce the FINAL REVISED VERSION of this
+round. You do not re-review the submission, do not run a discovery hunt, and do not re-audit.
+
+RE-VALIDATE EVERY PLANNED REPAIR BEFORE YOU APPLY IT. The plan is a set of CLAIMS, not instructions.
+For each row: re-read the cited location in `revised/`, compare it with `base/` and the source
+hierarchy the row names, and record in `revised/REPAIR_LEDGER.json` (and `.md`):
+  {"id": "RP-001", "verdict": "confirmed|rejected", "reason": "...", "before": "...",
+   "after": "...", "files": ["..."], "basis": "..."}
+Apply only `confirmed` rows. A rejected row gets its exact contradicting evidence in `reason`; do not
+apply it, and do not invent a different repair. A row you cannot check is `rejected` with the missing
+check named. Never accept a plan row merely because the auditor wrote it.
+
+Then: update `revised/CHANGELOG.md`, `revised/REVISION_REPORT.md` and `revised/MANUAL_STEPS.md` so the
+change, the replaced value and the manual item (if any) are recorded consistently. This is ONE pass:
+do not repair anything the plan does not name, and do not add new findings. If a confirmed repair
+cannot be made honestly, write `unable — <what the author must check>` in the ledger and leave the
+text as it is.
+
+Finish by writing the pipeline's completion marker at the sandbox root, exactly as the revise stage
+does, and keep your final message short: which rows were confirmed, which were rejected, and the
+files changed.
+"""
+
+
+def revision_repair_prompt(sandbox: Path, run_id: str, r: int, rows: int) -> str:
+    """The BOUNDED REPAIR prompt: re-validate the plan, apply only confirmed rows."""
+    return (REVISION_REPAIR_DIRECTIVES
+            .replace("@@RUN_ID@@", run_id)
+            .replace("@@SANDBOX@@", str(sandbox.resolve()))
+            .replace("@@ROUND@@", str(int(r)))
+            .replace("@@ROWS@@", str(int(rows))))
+
+REVISION_AUDIT_PROMPT = revision_audit_prompt
+REVISION_REPAIR_PROMPT_FN = revision_repair_prompt

@@ -954,9 +954,59 @@ def do_judge(sb: Path, name: str, round_no: int, prompt: str) -> int:
     return 0
 
 
+
+def _revision_audit_stub(sb: Path) -> int:
+    """Write the audit's repair plan: empty by default, one stub row on request."""
+    out = sb / "revision_audit"
+    out.mkdir(parents=True, exist_ok=True)
+    rows = []
+    if os.environ.get("PAPER_STUB_REVISION_AUDIT_ROWS"):
+        targets = [p for p in sorted((sb / "revised").rglob("*.md"))
+                   if p.name.lower() not in ("changelog.md", "manual_steps.md",
+                                             "revision_report.md", "visual_check.md")]
+        if targets:
+            rel = targets[0].relative_to(sb / "revised").as_posix()
+            rows = [{"id": "RP-001", "finding": "none", "file": rel,
+                     "location": "stub", "wrong": "", "correct": "",
+                     "basis": "stub", "edit": "append the stub repair marker",
+                     "evidence": "stub"}]
+    write_json(out / "REPAIR_PLAN.json", {"rows": rows})
+    (out / "REPAIR_PLAN.md").write_text(
+        "# repair plan (stub)\n\n" + ("1 row\n" if rows else "No rows.\n"),
+        encoding="utf-8")
+    return 0
+
+
+def _revision_repair_stub(sb: Path) -> int:
+    """Apply the stub plan: append a marker and record the re-validation ledger."""
+    plan = json.loads((sb / "revision_audit" / "REPAIR_PLAN.json").read_text(encoding="utf-8"))
+    ledger = []
+    for row in plan.get("rows") or []:
+        target = sb / "revised" / str(row.get("file") or "")
+        if not target.is_file():
+            ledger.append({"id": row.get("id"), "verdict": "rejected",
+                           "reason": "file not found", "files": []})
+            continue
+        target.write_text(target.read_text(encoding="utf-8")
+                          + "\n<!-- stub bounded repair -->\n", encoding="utf-8")
+        ledger.append({"id": row.get("id"), "verdict": "confirmed", "reason": "stub",
+                       "before": "", "after": "", "files": [str(row.get("file"))],
+                       "basis": "stub"})
+    write_json(sb / "revised" / "REPAIR_LEDGER.json", {"rows": ledger})
+    return 0
+
+
 def main() -> int:
     sb = Path.cwd()
-    prompt = (sb / "PROMPT.md").read_text(encoding="utf-8")
+    try:
+        prompt_text = sys.stdin.read()
+    except Exception:  # noqa: BLE001
+        prompt_text = ""
+    if "REVISION AUDITOR" in prompt_text:
+        return _revision_audit_stub(sb)
+    if "BOUNDED REPAIR" in prompt_text:
+        return _revision_repair_stub(sb)
+    prompt = prompt_text or (sb / "PROMPT.md").read_text(encoding="utf-8")
     name = sb.name
     m = re.search(r"r(\d+)_", name)
     round_no = int(m.group(1)) if m else 1
