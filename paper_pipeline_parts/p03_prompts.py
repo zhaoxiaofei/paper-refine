@@ -2600,8 +2600,9 @@ AUDIT_NO_NEW_FINDINGS = """OVERRIDE — THIS AUDIT ADDS NO FINDINGS (paper-refin
 
 You dispose the FROZEN findings and nothing else. `audit/audit.json`'s `adds` MUST be `[]`: do not
 create `AU-*` rows and do not promote a new defect into the finding list. If you notice a defect
-outside the frozen list, record it in `audit/UNRESOLVED.md` with its location and evidence and
-leave it for the next review; it is an observation, not a finding, and no reviser acts on it. In
+outside the frozen list, record it in `audit/UNRESOLVED.md` with its location, the tier and severity
+it would carry on the shared scale, and its evidence; leave it for the next review. It is an
+observation, not a finding, and no reviser acts on it. In
 `audit/PROBE_AUDIT.md` the only verdicts are `stands` and `needs-evidence`: a closure that hides a
 real probe defect goes to `audit/UNRESOLVED.md` as an observation, never `promoted to AU-xxx` (there
 is no AU-* row for it to name). The rest of this prompt describes the disposition record you write;

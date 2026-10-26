@@ -98,6 +98,7 @@ def test_prompts():
     check("the review audit adds no findings", "THIS AUDIT ADDS NO FINDINGS" in audit)
     check("the review audit requires adds=[]", "`adds` MUST be `[]`" in audit)
     check("unresolved observations have their own file", "audit/UNRESOLVED.md" in audit)
+    check("unresolved observations carry the shared scale", "tier and severity" in audit)
     revise = pp.revise_prompt(sb, "r1_a2_revise", 1)
     check("the reviser re-validates every finding", "RE-VALIDATE IT" in revise)
     check("a rejected finding is recorded, not applied",

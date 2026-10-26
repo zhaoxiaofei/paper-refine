@@ -161,11 +161,12 @@ Everything lives under the root you passed to `setup`:
 | `tracking/` | one difference-tracking copy per baseline (`*.tracking-original.*`, `*.tracking-a1.*`, `*.tracking-w<k>.*`, `*.tracking-winner<r>.*`, or the matching `*.logging-*` fallback when a tool failed), mirrored from the version packages and published winners |
 | `pdfs/` | the compiled/converted PDFs per version (LaTeX via `latexmk`, DOCX via Word/MCP) -- persistent: `prune` never touches them |
 
-The selection key is one ordered line: the round's reported **defect prefix**
-(fewer defects wins) → **median** → **mean** → **IQR** → content **digest**. The
-prefix comes from the blind panel's own issue ledger; the panel statistics sit
-below it, and an exact (median, mean, IQR) tie keeps the incumbent base. See
-*How a round is decided* below for the rationale and the gates.
+The selection rule is one incumbent guard plus one ordered default key: an
+exact (median, mean, IQR) tie keeps the incumbent base. Otherwise the default
+key is the round's reported **defect prefix** (fewer defects wins) → **median** →
+**mean** → **IQR** → content **digest**. The prefix comes from the blind panel's
+own issue ledger; the panel statistics sit below it. See *How a round is decided*
+below for the rationale and the gates.
 
 The run's member table prints its columns in exactly that order — `member` (the
 id, the last key) is the row label, then `defects@K`, median, mean, IQR and the
@@ -1071,9 +1072,10 @@ revisers. It never edits a package; its product is the decision record
 * it **attacks the reviewer's dispositions**: every finding-tier row the
   reviewer closed as `OK` is re-checked against its own bar. This build's
   AUDIT role files no new findings: a real defect the closure hid is recorded
-  in `audit/UNRESOLVED.md` with its location and evidence as an observation for
-  the next review, so the frozen list the revisers see is never silently
-  extended;
+  in `audit/UNRESOLVED.md` with its location, the tier and severity it would
+  carry on the shared scale, and evidence, as an observation for the next
+  review, so the frozen list the revisers see is never silently extended and
+  the observation still travels classified;
 * the revisers consume the **audited** list (frozen − drops) and the drops stay
   visible to the human in `audit/audit.json`, so a drop is always re-checkable
   and reversible;
@@ -1199,7 +1201,8 @@ The review/audit/revise path now carries them explicitly:
   ("it is a proper name", "the artwork is read-only", a convention closed per
   document, an unfilled architecture table); the attack files no new finding in
   this build, so a real defect the closure hid is recorded in
-  `audit/UNRESOLVED.md` with its location and evidence for the next review;
+  `audit/UNRESOLVED.md` with its location, the tier and severity it would
+  carry, and evidence for the next review;
 * the reviser resolves M25–M29 by aligning the EDITABLE surface corpus-wide
   (rule E11), and J5 licenses **scoped restructuring** inside the finding's
   declared scope under a content freeze, a numbering check and one
@@ -1305,8 +1308,9 @@ discovery round's probe dispositions like the reviewer's other decision rows:
 when the frozen review carries probe rows, `audit/PROBE_AUDIT.md` must dispose
 each probe (`stands` / `needs-evidence`); this build's auditor files no `AU-*`
 rows, so a real anomalous value or label a probe closure hid is recorded in
-`audit/UNRESOLVED.md` (with the closure and its evidence) as an observation for
-the next review instead of being promoted into the frozen list.
+`audit/UNRESOLVED.md` (with the closure, the tier and severity it would carry
+on the shared scale, and its evidence) as an observation for the next review
+instead of being promoted into the frozen list.
 
 **The discovery class reaches its two missing consumers — the integrator by
 list, the judges by their own pass.** The X-* findings were once visible only to
@@ -1698,6 +1702,8 @@ human letter should drive the revision.
 | option 3 | `major` | complete a **major revision** at the same journal | **required** | forbidden | **concern-scoped only** — no general review, no audit, no judge panel |
 | option 4 | `minor` | as 3, for a **minor revision** | **required** | forbidden | concern-scoped only |
 | option 5 | `llm` | revise against the pre-filtered `llm_review_feedback/` area only (explicit selection only; an unconfigured root remains on `continue`) | **not written** | allowed | the round's full review + the LLM review's concerns |
+
+**The pre-filtered `llm` area supplements the normal full review; it never replaces it.** Options 3–4 are concern-scoped major/minor modes: their edits are confined to the admitted human concerns, and their base is the previously reviewed submission — the round itself stages no general review, no audit and no judge panel.
 
 How each mode runs:
 
@@ -2660,8 +2666,9 @@ count at that prefix LEADS the ranking -- the number of defects the panel
 attributed to a version is the most direct improvement signal, while the flat
 median is coarse on a -4..+4 integer scale), then `-median`, then `-mean`, `IQR`,
 the provenance-free content digest and only after that the run id. An exact
-(median, mean, IQR) tie still keeps the incumbent base -- that rule overrides
-the prefix. No cross-session deduplication is applied by default
+(median, mean, IQR) tie keeps the incumbent base: that guard applies before the
+default key, so a challenger that leads on the prefix but ties the incumbent on
+the three panel statistics does not retire it. No cross-session deduplication is applied by default
 (`dedup_mode` `off`): the counts are the mentions each judge sheet filed (a
 repeated row inside one sheet counts once), and the peer/own split plus the
 exposure-normalized rates stay in the census for inspection. The OPT-IN
