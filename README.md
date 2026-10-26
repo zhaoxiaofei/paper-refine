@@ -1033,7 +1033,10 @@ schedule: `2 3` = two rounds following the schedule's rounds 2 and 3, `3`/`-1`
 `--no-conflict-agent` select the two optional LLM audits (the defect audit is
 on by default with an agent backend; the conflict LLM pass is off by default).
 Setup-time policy flags:
-`--audit {off,on}` (the auditor stage), `--probe-review {on,off}`
+`--audit {off,on}` (the auditor stage), `--revision-audit {on,off}`
+(after every revise run: an independent revision audit writes a bounded-repair
+plan, and ONE bounded repair pass applies it; ON by default, `PAPER_REVISION_AUDIT=off`
+turns an existing root off), `--probe-review {on,off}`
 (the independent discovery session; ON by default, `--no-probe-review` turns it off,
 `set-probe-review off` flips an existing root), `--submit-code {off,on}`
 (whether the analysis-code area `code/` is part of the submission; OFF by
@@ -1066,11 +1069,14 @@ revisers. It never edits a package; its product is the decision record
   Silence about an id is a failed attempt — an undecidable finding must be
   confirmed, because dropping it would hide it from the reviser;
 * it **attacks the reviewer's dispositions**: every finding-tier row the
-  reviewer closed as `OK` is re-checked against its own bar, and a real defect
-  becomes a new `AU-*` finding;
-* the revisers consume the **audited** list (frozen − drops + `AU-*` adds) and
-  the drops stay visible to the human in `audit/audit.json`, so a drop is always
-  re-checkable and reversible;
+  reviewer closed as `OK` is re-checked against its own bar. This build's
+  AUDIT role files no new findings: a real defect the closure hid is recorded
+  in `audit/UNRESOLVED.md` with its location and evidence as an observation for
+  the next review, so the frozen list the revisers see is never silently
+  extended;
+* the revisers consume the **audited** list (frozen − drops) and the drops stay
+  visible to the human in `audit/audit.json`, so a drop is always re-checkable
+  and reversible;
 * the auditor's own artifacts pass the same disposition-quality detectors as the
   reviewer's (see below).
 
@@ -1079,6 +1085,31 @@ pipeline's single largest source of shipped leftovers, and one extra session per
 than a second round. `setup --audit off` (or `--no-audit`) restores the two-step review → revise
 plan and keeps an existing root's recorded policy; it costs one session per round, not per
 candidate.
+
+## The revision audit (`--revision-audit on`): revise → **revision audit** → bounded repair
+
+After the revise stage's own postcheck passes, one independent
+**REVISION AUDITOR** session re-reads `base/` and `revised/` against the frozen
+findings, the review audit's dispositions and the revision ledger. It edits
+nothing and writes ONE product, `revision_audit/REPAIR_PLAN.json` (plus a
+readable `REPAIR_PLAN.md`): one row per defect it confirms IN THE REVISION
+(a correction missing, a fact removed, a wrong value, a non-inferable manual
+item, a missing low-priority re-verification row, or a defect the revision
+introduced). Every row carries the location, the wrong and correct text, and a
+basis another session can re-run; an empty plan is a valid, complete audit.
+
+When the plan is non-empty, ONE **BOUNDED REPAIR** session re-validates every
+row against `revised/`, `base/` and the source hierarchy, applies only the rows
+it confirms, records its verdicts in `revised/REPAIR_LEDGER.json`, and updates
+the changelog/report/manual items. The audited bytes are preserved as
+`revised_prerepair/`, and the revise postcheck runs again on the final package;
+there is exactly one repair pass (a defect the post-repair verification still
+finds is recorded for the round's decision, never repaired in a loop). The
+chain is on by default; `--revision-audit off` (setup) or
+`PAPER_REVISION_AUDIT=off` (an existing root) records the skip and leaves the
+revised version final. It does not run in a concern-scoped major/minor revision
+(those edits are confined to the admitted concerns) or for a round that is
+already decided.
 
 ## The probe review (`setup --probe-review on`): a second, independent discovery pass
 
@@ -1166,8 +1197,9 @@ The review/audit/revise path now carries them explicitly:
   one legal non-instance finding);
 * the auditor attacks the dispositions that used to close these classes
   ("it is a proper name", "the artwork is read-only", a convention closed per
-  document, an unfilled architecture table) and promotes them to `AU-*`
-  findings;
+  document, an unfilled architecture table); the attack files no new finding in
+  this build, so a real defect the closure hid is recorded in
+  `audit/UNRESOLVED.md` with its location and evidence for the next review;
 * the reviser resolves M25–M29 by aligning the EDITABLE surface corpus-wide
   (rule E11), and J5 licenses **scoped restructuring** inside the finding's
   declared scope under a content freeze, a numbering check and one
@@ -1271,8 +1303,10 @@ them with `--yes` and re-syncs the standalone review prompt's appendix
 (`validate_skill.py`'s D10 sync check). And the auditor now attacks the
 discovery round's probe dispositions like the reviewer's other decision rows:
 when the frozen review carries probe rows, `audit/PROBE_AUDIT.md` must dispose
-each probe (`stands` / `promoted to AU-xxx` / `needs-evidence`), and a
-promotion must name a real `AU-*` finding.
+each probe (`stands` / `needs-evidence`); this build's auditor files no `AU-*`
+rows, so a real anomalous value or label a probe closure hid is recorded in
+`audit/UNRESOLVED.md` (with the closure and its evidence) as an observation for
+the next review instead of being promoted into the frozen list.
 
 **The discovery class reaches its two missing consumers — the integrator by
 list, the judges by their own pass.** The X-* findings were once visible only to
@@ -1564,8 +1598,8 @@ boxes.
 | `rewrite` | `r<r>_w1…wM` | full alternative versions with a **declared level**: odd arms are `structural` (organization-level, reported in `## ORGANIZATION MAP`), even arms are `sentence` (same organization, prose-level). With M≥2 the round therefore carries BOTH kinds of difference for the integration stage to weigh |
 | `review` | `r<r>_review` | ONE frozen identification pass (`$paper-review`) that feeds every revise session |
 | `probe` | `r<r>_probe` | **on by default** (`setup --probe-review off` / `--no-probe-review` / `set-probe-review off` disables): an INDEPENDENT, cold-context discovery session launched IN PARALLEL with the review and given the corpus only (no review, no finding list). It is GENERIC — any defect class may be filed — and wherever a defect can be shown by a computation the finding declares a re-runnable verifier; the orchestrator re-runs every declared verifier (a non-reproducing computation FAILS the attempt) and the findings ride in the frozen discovery list as `X-9xx` rows (reviser resolves, auditor disposes, integrator reconciles) |
-| `audit` | `r<r>_audit` | **on by default** (`setup --audit off` / `--no-audit` disables): an INDEPENDENT AUDITOR between the reviewer and the revisers — it disposes every frozen finding (confirm, or drop WITH evidence), promotes the reviewer's boilerplate `OK` closures of finding-tier rows into real `AU-*` findings, and hands the AUDITED list to the revision arms |
-| `revise` | `r<r>_a2…a{1+N}` | reviewed-and-revised versions that consume the frozen review (or the audited list, when the auditor ran) |
+| `audit` | `r<r>_audit` | **on by default** (`setup --audit off` / `--no-audit` disables): an INDEPENDENT AUDITOR between the reviewer and the revisers — it disposes every frozen finding (confirm, or drop WITH evidence), attacks the reviewer's boilerplate `OK` closures without filing new findings (an observation goes to `audit/UNRESOLVED.md`), and hands the AUDITED list to the revision arms |
+| `revise` | `r<r>_a2…a{1+N}` | reviewed-and-revised versions that consume the frozen review (or the audited list, when the auditor ran). **After its postcheck**, an independent REVISION AUDITOR writes `revision_audit/REPAIR_PLAN.json` (no edits), and a non-empty plan runs ONE bounded-repair session that re-validates and applies only confirmed rows, records `revised/REPAIR_LEDGER.json`, and re-passes the revise postcheck (`--revision-audit off` / `PAPER_REVISION_AUDIT=off` records the skip; it does not run in a concern-scoped major/minor revision) |
 | `integrate` | `r<r>_i1…iK` | "merge from the other versions": every pool member SELECTED by the round's `--integrators` mask reworked with the WHOLE pool as donors (the default mask 0xFFFFFFFF selects all K = 1+M+N members) |
 | `judge` | `judge_t…_j…` | blind pairwise panels over the round's field (the id is an opaque token: it carries no round and no arm) |
 
@@ -1994,9 +2028,10 @@ modes skip the panel entirely and promote a named submission version:
 
 * `--champion-select revise` — NO judge panel and NO integration arm: the
   round's single review-audit-revised candidate (`a2`, the review → audit →
-  revise output) is pinned and published as the round's winner. Use
-  `--no-audit` (or `setup --audit off`) when the review should flow straight to
-  the reviser without the auditor.
+  revise → revision-audit output) is pinned and published as the round's
+  winner. Use `--no-audit` (or `setup --audit off`) when the review should flow
+  straight to the reviser without the review auditor; use
+  `--revision-audit off` to skip the post-revise audit/repair chain.
 * `--champion-select integrate` — NO judge panel: the integration arm of that
   revised candidate is promoted (`i<M+2>` in the pool `[a1, w1..wM, a2]`, so
   `i2` when M=0 and `i4` with the default two round-1 rewrites). If
@@ -3112,7 +3147,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 152 suites (a few
+any failure. They are independent, so run them in parallel — 154 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

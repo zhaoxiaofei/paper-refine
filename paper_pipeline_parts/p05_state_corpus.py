@@ -4071,6 +4071,12 @@ def rebuild_sandbox(ctx: Ctx, rec: dict) -> None:
             f"until it is fixed; the attempt's sandbox is preserved under "
             f"runs/{rec.get('id')}_try<N>_failed/")
     handler(ctx, rec)
+    # The sandbox this record's post-revise chain described is GONE (it was
+    # renamed to the attempt archive and a fresh tree materialized). Keeping
+    # the audit/repair records would make the next accepted revision look
+    # audited and suppress the chain on bytes that were never audited.
+    rec.pop("revision_audit", None)
+    rec.pop("revision_repair", None)
     rec["postcheck"] = None
     rec["last_error"] = None
 
@@ -4108,6 +4114,12 @@ def reset_run_record(rec: dict) -> None:
     for k in ("stale_reason", "corpus_digest", "content_fingerprint", "captions",
               "document_set", "placeholders", "critical_findings_input",
               "target_digest", "field_digests",
+              # The post-revise chain's records describe the package the
+              # previous attempt produced. Every caller of this reset replaces
+              # that package (a rebuilt sandbox, a revalidation reset), so the
+              # chain must run again on the new one -- inheriting these keys
+              # made a retried revise run look audited when it was not.
+              "revision_audit", "revision_repair",
               # The CLI session id names the attempt whose transcript is in THIS
               # sandbox (see capture_agent_session_id) -- and every caller of this
               # reset replaces that sandbox: `rebuild_sandbox` moves the old one

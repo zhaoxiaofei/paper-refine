@@ -107,10 +107,66 @@ def test_prompts():
           "BOUNDED-REPAIR PLAN" in ra)
     check("the revision audit never edits", "you do NOT edit the manuscript" in ra)
     check("the plan schema is named", "RP-001" in ra and "REPAIR_PLAN.json" in ra)
+    check("the revision audit reads the merged probe list, not a missing directory",
+          "probe_review/" not in ra and "review/round2/findings_extra.json" in ra)
     rr = pp.revision_repair_prompt(sb, "r1_a2_revise", 1, 2)
     check("the repair re-validates every row", "RE-VALIDATE EVERY PLANNED REPAIR" in rr)
     check("the repair applies only confirmed rows", "Apply only `confirmed` rows" in rr)
     check("the repair is one pass", "ONE pass" in rr)
+    check("the repair names the readme-mode hand-off destination",
+          "README-AUTHOR-TO-COMPLETE.md" in rr)
+
+
+def test_chain_guards():
+    print("\n== the chain's guards (plan shape, ledger, bookkeeping) ==")
+    pp = load("rev_audit_guards", WS / "paper_pipeline.py")
+    sb = scratch("rev_audit_guards_") / "sb"
+    (sb / "revised").mkdir(parents=True)
+    plan_dir = sb / "revision_audit"
+    plan_dir.mkdir()
+
+    def write_plan(rows):
+        (plan_dir / "REPAIR_PLAN.json").write_text(json.dumps({"rows": rows}), encoding="utf-8")
+
+    write_plan([{"id": "RP-001", "file": "manuscript.md"}])
+    rows = pp._revision_plan_rows(sb)
+    check("a well-formed plan is accepted", rows and rows[0]["id"] == "RP-001", str(rows))
+    write_plan([{"id": "RP-001", "file": "manuscript.md"},
+                {"id": "RP-001", "file": "other.md"}])
+    check("a duplicate plan id invalidates the plan", pp._revision_plan_rows(sb) is None)
+    write_plan([{"id": "RP-001", "file": "../base/manuscript.md"}])
+    check("a plan row outside the package invalidates the plan",
+          pp._revision_plan_rows(sb) is None)
+    write_plan([{"id": "RP-001"}])
+    check("a plan row without a file invalidates the plan",
+          pp._revision_plan_rows(sb) is None)
+    write_plan(["not-an-object"])
+    check("a non-object plan row invalidates the plan (never '0 rows')",
+          pp._revision_plan_rows(sb) is None)
+
+    plan_rows = [{"id": "RP-001", "file": "manuscript.md"},
+                 {"id": "RP-002", "file": "manuscript.md"}]
+    (sb / "revised" / "REPAIR_LEDGER.json").write_text(json.dumps({"rows": [
+        {"id": "RP-001", "verdict": "confirmed", "reason": "stub"},
+        {"id": "RP-002", "verdict": "rejected", "reason": "the base agrees with the revision"},
+    ]}), encoding="utf-8")
+    problem, counts = pp._revision_repair_ledger(sb, plan_rows)
+    check("a complete re-validation ledger is accepted",
+          not problem and counts == {"confirmed": 1, "rejected": 1},
+          f"{problem!r} {counts!r}")
+    (sb / "revised" / "REPAIR_LEDGER.json").write_text(json.dumps({"rows": [
+        {"id": "RP-001", "verdict": "confirmed", "reason": "stub"},
+    ]}), encoding="utf-8")
+    problem, _counts = pp._revision_repair_ledger(sb, plan_rows)
+    check("a ledger that omits a planned row is detected", bool(problem), problem)
+    (sb / "revised" / "REPAIR_LEDGER.json").write_text(json.dumps({"rows": [
+        {"id": "RP-001", "verdict": "maybe", "reason": "stub"},
+    ]}), encoding="utf-8")
+    problem, _counts = pp._revision_repair_ledger(sb, plan_rows)
+    check("a ledger verdict outside confirmed|rejected is detected", bool(problem), problem)
+    check("the repair ledger is pipeline bookkeeping (never judged/pinned/shipped)",
+          pp.is_bookkeeping_name("REPAIR_LEDGER.json")
+          and pp.is_bookkeeping_name("REPAIR_LEDGER.md"))
 
 
 def test_skip():
@@ -167,6 +223,7 @@ def cleanup():
 def main() -> int:
     try:
         test_prompts()
+        test_chain_guards()
         test_skip()
         test_empty_plan()
         test_one_row_repair()

@@ -696,8 +696,9 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--audit", choices=list(AUDIT_MODES), default=DEFAULT_AUDIT,
                     help="run an INDEPENDENT AUDITOR between the reviewer and the revisers: one "
                          "session that disposes every frozen finding (confirm, or drop WITH "
-                         "evidence), promotes the reviewer's boilerplate 'OK' closures of "
-                         "disposes the frozen findings and adds no new findings, and hands the audited list "
+                         "evidence), attacks the reviewer's boilerplate 'OK' closures WITHOUT "
+                         "filing new findings (a newly noticed defect goes to "
+                         "audit/UNRESOLVED.md for the next review), and hands the audited list "
                          "to the revision arms. ON by default (`--no-audit` restores the "
                          "review -> revise plan shape); it adds `r<r>_audit` between them, and "
                          "the revisers wait for it")

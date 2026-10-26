@@ -501,6 +501,11 @@ def main() -> int:
     sb = Path.cwd()
     name = sb.name
     prompt = sys.stdin.read()
+    # The revision audit and bounded repair are auxiliary sessions inside a
+    # revise run: delegate their prompt UNCHANGED (the plain stub knows them)
+    # and never break the stage's bookkeeping from an auxiliary session.
+    if stub.revision_aux_session(prompt):
+        return stub.main(prompt)
     if "ARTIFACT REPAIR" in prompt[:2000]:
         stage = stage_of(name)
         # The review-only structural fixtures (they prove the guard's row rules)
@@ -529,7 +534,7 @@ def main() -> int:
             note += "; " + go_out_of_scope(sb, name)
         print(f"stub repair ({stage or 'unknown stage'}): {note}")
         return 0
-    rc = stub.main()
+    rc = stub.main(prompt)
     bad = os.environ.get("PAPER_REPAIR_STUB_BAD") or ""
     if bad and bad in name:
         note = break_stage(sb, stage_of(name))

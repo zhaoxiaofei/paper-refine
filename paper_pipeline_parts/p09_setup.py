@@ -220,6 +220,14 @@ def cmd_setup(args) -> None:
             if getattr(args, "audit", DEFAULT_AUDIT) not in (None, "", "off"):
                 forced.append("audit off (the general review audits do not run in this mode)")
             args.audit = "off"
+            # The post-revise chain consumes the general review's frozen list
+            # and may change any file of the package; a concern-scoped revision
+            # has neither a general review nor that freedom, so it stays off
+            # (the run records the skip if an old root still carries it on).
+            if str(getattr(args, "revision_audit", "on") or "on").lower() != "off":
+                forced.append("revision audit off (there is no general review to audit against "
+                              "and edits stay inside the admitted concerns)")
+            args.revision_audit = "off"
             # The scoped review is formatting/writing only: a full discovery
             # probe would freeze X-9xx rows the reviser is asked to resolve,
             # although they are not traceable to a reviewer concern.
@@ -2771,6 +2779,9 @@ def cmd_set_revision_mode(args) -> None:
                 forced.append("champion_select=revise (a scoped revision has no integration arm)")
             ctx.cfg["audit"] = "off"
             forced.append("audit=off")
+            ctx.cfg["revision_audit"] = "off"
+            forced.append("revision_audit=off (concern-scoped edits have no general review "
+                          "to audit against)")
         elif _prev_mode in (JOURNAL_MODE_MAJOR, JOURNAL_MODE_MINOR):
             # Leaving a scoped mode restores the historical plan the mode
             # replaced. Without this the root kept `rounds=1`, `rewrites=[0]`,
@@ -2783,6 +2794,8 @@ def cmd_set_revision_mode(args) -> None:
                 forced.append(f"{_key}={ctx.cfg[_key]} (the default plan)")
             ctx.cfg["audit"] = DEFAULT_AUDIT
             forced.append(f"audit={DEFAULT_AUDIT} (the default)")
+            ctx.cfg["revision_audit"] = "on"
+            forced.append("revision_audit=on (the default)")
         ctx.state["config"] = ctx.cfg
         write_json_atomic(ctx.cfg_path, ctx.cfg)
         ctx.log("set-revision-mode", detail=mode_arg)

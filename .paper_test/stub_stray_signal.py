@@ -74,7 +74,14 @@ def main() -> int:
     stub = importlib.util.module_from_spec(spec)
     sys.modules["stub_agent"] = stub
     spec.loader.exec_module(stub)
-    rc = stub.main()
+    prompt = sys.stdin.read()
+    # The revision audit and bounded repair run in the SAME revise sandbox after
+    # its postcheck. Their prompt must be delegated unchanged, and the stray
+    # fixtures below are STAGE faults: applying them again from the auxiliary
+    # session would move the already-adopted marker/ledger back out of place.
+    if stub.revision_aux_session(prompt):
+        return stub.main(prompt)
+    rc = stub.main(prompt)
     if rc != 0:
         return rc
     out = stage_dir(name)

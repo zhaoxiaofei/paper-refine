@@ -5919,6 +5919,12 @@ def prepare_repair_session(ctx: Ctx, rec: dict, problems: list):
     sb = ctx.sandbox_of(rec)
     if not sb.is_dir():
         return None
+    # A fresh session may change the accepted revise package: the post-revise
+    # chain's record describes the OLD bytes, so it must not suppress the chain
+    # on the next acceptance.
+    if rec.get("kind") == "revise":
+        rec.pop("revision_audit", None)
+        rec.pop("revision_repair", None)
     n = next_attempt_number(rec)
     (sb / REPAIR_PROMPT_FILE).write_text(repair_prompt(ctx, rec, problems), encoding="utf-8")
     guard = snapshot_repair_guard(sb, rec)
@@ -5980,6 +5986,11 @@ def prepare_resume_session(ctx: Ctx, rec: dict, argv: list, key: str, reason: st
     sb = ctx.sandbox_of(rec)
     if not sb.is_dir():
         return None
+    if rec.get("kind") == "revise":
+        # The continuation edits the same package: the chain record describes
+        # the bytes before it, so the chain must run again after acceptance.
+        rec.pop("revision_audit", None)
+        rec.pop("revision_repair", None)
     used = int((rec.get("resume_attempts") or {}).get(key) or 0)
     problems = list((rec.get("postcheck") or {}).get("errors") or [])
     (sb / RESUME_PROMPT_FILE).write_text(resume_prompt(rec, problems, reason, used),

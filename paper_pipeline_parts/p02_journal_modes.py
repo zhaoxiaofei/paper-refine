@@ -786,6 +786,15 @@ CAPTION_UNPARSED_EXTS = (".doc", ".pdf", ".ppt", ".pptx")
 BOOKKEEPING_FILES = ("changelog.md", "manual_steps.md", "revision_report.md",
                      "revision_report.json", "diff_ledger.md", "rewrite_report.md",
                      "visual_check.md",
+                     # The BOUNDED REPAIR's re-validation ledger (see
+                     # REVISION_REPAIR_DIRECTIVES): the repair session writes it
+                     # beside the package's other reports, and it names the
+                     # audit plan's row ids and the base/review evidence -- so it
+                     # is pipeline bookkeeping, never manuscript content. Without
+                     # this entry it travelled into the judged corpus, the pin
+                     # and the published package (and a judge would read the
+                     # provenance it records).
+                     "repair_ledger.md", "repair_ledger.json",
                      # The pipeline's own completion signals. They belong at the
                      # sandbox ROOT (see SIGNAL_ALT_DIRS); this list is the second
                      # fence: a signal that ends up INSIDE a package directory
@@ -819,7 +828,7 @@ CORPORA_STRIP_BOOKKEEPING = BOOKKEEPING_FILES
 # without a token, so the strip/fingerprint/bookkeeping paths all agree.
 BOOKKEEPING_NAME_RE = re.compile(
     r"^(?:replacement_ledger|diff_ledger|revision_report|rewrite_report|manual_steps|"
-    r"visual_check|changelog|agent_log|worklog)"
+    r"repair_ledger|visual_check|changelog|agent_log|worklog)"
     r"(?:[-_.][A-Za-z0-9._\-]+)?\.(?:md|txt|json)$"
     # The pipeline's own MEASUREMENT artifacts (written next to a run, never
     # into a delivered package): a scan/repair report, the code-side evidence
@@ -3449,10 +3458,12 @@ PLACEHOLDER_RULE = """PIPELINE HAND-OFF PLACEHOLDERS — the literal token "[AUT
         correct it in the document, record the basis in CHANGELOG.md, and add ONE
         `priority=low` re-verification item to MANUAL_STEPS.md naming the corrected
         value and its basis. A review or audit stage reports the typo and its basis and
-        does not edit. Low priority asks the authors to re-verify; it never blocks and
-        never replaces the correction. High priority is a `[AUTHOR TO COMPLETE: ...]`
-        placeholder. Grammar, punctuation and style errors are corrected in text and
-        are NEVER listed in MANUAL_STEPS.md. If no basis exists, keep the
+        does not edit; a probe reports it the same way. Low priority asks the authors to
+        re-verify; it never blocks and never replaces the correction. High priority
+        is a `[AUTHOR TO COMPLETE: ...]` placeholder.
+        Grammar, punctuation and style errors are corrected in text in a revision stage and
+        are NEVER listed in MANUAL_STEPS.md; a review, audit or probe stage reports them and
+        does not edit. If no basis exists, keep the
         `author-only` treatment.
     A `searchable` marker whose lookup verdict is `found` or `absent` and is still present in a
     delivered package is a FAILED run (the postcheck points at the exact lookup row).
@@ -3900,10 +3911,12 @@ anywhere in a file you write:
         correct it in the document, record the basis in CHANGELOG.md, and add ONE
         `priority=low` re-verification item to MANUAL_STEPS.md naming the corrected
         value and its basis. A review or audit stage reports the typo and its basis and
-        does not edit. Low priority asks the authors to re-verify; it never blocks and
-        never replaces the correction. High priority is a `[AUTHOR TO COMPLETE: ...]`
-        placeholder. Grammar, punctuation and style errors are corrected in text and
-        are NEVER listed in MANUAL_STEPS.md. If no basis exists, keep the
+        does not edit; a probe reports it the same way. Low priority asks the authors to
+        re-verify; it never blocks and never replaces the correction. High priority is a
+        MANUAL_STEPS.md item, never a `[AUTHOR TO COMPLETE: ...]` placeholder (this mode
+        forbids the token). Grammar, punctuation and style errors are corrected in text in
+        a revision stage and are NEVER listed in MANUAL_STEPS.md; a review, audit or probe
+        stage reports them and does not edit. If no basis exists, keep the
         `author-only` treatment.
   * The rule binds every file you write, including a scaffold you create for a mandatory item and
     any report that ships beside the documents.
@@ -3960,12 +3973,15 @@ MUST NOT APPEAR in any document or in the hand-off README:
         affiliations, `raw_data/`, the deposited tables, the reference list, a DOI
         resolver, a standard email domain) is NOT `author-only`. In a revision stage,
         correct it in the document, record the basis in CHANGELOG.md, and add ONE
-        `priority=low` re-verification item to MANUAL_STEPS.md naming the corrected
-        value and its basis. A review or audit stage reports the typo and its basis and
-        does not edit. Low priority asks the authors to re-verify; it never blocks and
-        never replaces the correction. High priority is a `[AUTHOR TO COMPLETE: ...]`
-        placeholder. Grammar, punctuation and style errors are corrected in text and
-        are NEVER listed in MANUAL_STEPS.md. If no basis exists, keep the
+        `priority=low` re-verification item to `README-AUTHOR-TO-COMPLETE.md` naming the
+        corrected value and its basis. A review or audit stage reports the typo and its
+        basis and does not edit; a probe reports it the same way. Low priority asks the
+        authors to re-verify; it never blocks and never replaces the correction. High
+        priority is a row in `README-AUTHOR-TO-COMPLETE.md`; the
+        `[AUTHOR TO COMPLETE: ...]` token may not appear in a document or in that
+        README. Grammar, punctuation and style errors are corrected in text in a revision
+        stage and are NEVER listed as a hand-off item; a review, audit or probe stage
+        reports them and does not edit. If no basis exists, keep the
         `author-only` treatment.
   * The rule binds every file you write, including a scaffold you create for a mandatory item and
     any report that ships beside the documents.

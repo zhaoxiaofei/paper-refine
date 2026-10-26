@@ -996,15 +996,35 @@ def _revision_repair_stub(sb: Path) -> int:
     return 0
 
 
-def main() -> int:
+def revision_aux_session(prompt_text: str) -> str:
+    """Which post-revise auxiliary session a prompt asks for ('' = a stage).
+
+    The REVISION AUDIT and the BOUNDED REPAIR run as extra sessions inside the
+    revise run's sandbox, with their own prompt on stdin (see
+    `run_revision_chain`). Wrappers that read the prompt themselves (the timed,
+    stray-signal and artifact-repair stubs) use this to delegate the auxiliary
+    prompt UNCHANGED and skip the stage-level side effects their environment
+    variables otherwise trigger for the same run id -- otherwise the audit
+    session would re-run the revise stage or move the stage's marker again.
+    """
+    if "REVISION AUDITOR" in (prompt_text or ""):
+        return "revision_audit"
+    if "BOUNDED REPAIR" in (prompt_text or ""):
+        return "revision_repair"
+    return ""
+
+
+def main(prompt_text: str = None) -> int:
     sb = Path.cwd()
-    try:
-        prompt_text = sys.stdin.read()
-    except Exception:  # noqa: BLE001
-        prompt_text = ""
-    if "REVISION AUDITOR" in prompt_text:
+    if prompt_text is None:
+        try:
+            prompt_text = sys.stdin.read()
+        except Exception:  # noqa: BLE001
+            prompt_text = ""
+    aux = revision_aux_session(prompt_text)
+    if aux == "revision_audit":
         return _revision_audit_stub(sb)
-    if "BOUNDED REPAIR" in prompt_text:
+    if aux == "revision_repair":
         return _revision_repair_stub(sb)
     prompt = prompt_text or (sb / "PROMPT.md").read_text(encoding="utf-8")
     name = sb.name

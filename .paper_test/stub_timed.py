@@ -103,6 +103,17 @@ def write_bad_marker(name: str) -> bool:
 def main() -> int:
     sb = Path.cwd()
     name = sb.name
+    spec = importlib.util.spec_from_file_location("stub_agent", HERE / "stub_agent.py")
+    stub = importlib.util.module_from_spec(spec)
+    sys.modules["stub_agent"] = stub
+    spec.loader.exec_module(stub)
+    prompt = sys.stdin.read()
+    # The revision audit and bounded repair are auxiliary sessions inside the
+    # revise run, not stage sessions: delegate their prompt unchanged and keep
+    # them out of the per-stage timing log / intentional-failure fixtures (they
+    # share the revise run id, so those fixtures would otherwise fire again).
+    if stub.revision_aux_session(prompt):
+        return stub.main(prompt)
     kind = kind_of(name)
     sleep_s = float(os.environ.get(f"PAPER_TIMING_SLEEP_{kind}",
                                    os.environ.get("PAPER_TIMING_SLEEP", "0")) or 0)
@@ -115,11 +126,7 @@ def main() -> int:
         return 0
     if sleep_s > 0:
         time.sleep(sleep_s)
-    spec = importlib.util.spec_from_file_location("stub_agent", HERE / "stub_agent.py")
-    stub = importlib.util.module_from_spec(spec)
-    sys.modules["stub_agent"] = stub
-    spec.loader.exec_module(stub)
-    rc = stub.main()
+    rc = stub.main(prompt)
     append_log("end", name)
     return rc
 

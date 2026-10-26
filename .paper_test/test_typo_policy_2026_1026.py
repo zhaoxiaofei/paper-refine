@@ -142,6 +142,27 @@ def test_manual_counter():
     check("both the high and the low item are counted", count == 2, f"count={count}")
 
 
+def test_mode_destinations():
+    print("\n== each author-to-complete mode keeps its own hand-off destination ==")
+    pp = load("typo_policy_modes", WS / "paper_pipeline.py")
+    doc = pp.placeholder_rule_text("document")
+    readme = pp.placeholder_rule_text("readme")
+    off = pp.placeholder_rule_text("off")
+    check("document mode keeps the marker as the high-priority hand-off",
+          "High priority is a `[AUTHOR TO COMPLETE: ...]` placeholder"
+          in " ".join(doc.split()))
+    check("off mode never offers the forbidden marker as the high-priority hand-off",
+          "never a `[AUTHOR TO COMPLETE: ...]` placeholder" in off)
+    check("readme mode sends the low-priority item to the hand-off README",
+          "priority is a row in `README-AUTHOR-TO-COMPLETE.md`" in readme
+          and "`priority=low` re-verification item to `README-AUTHOR-TO-COMPLETE.md`"
+          in readme
+          and "MANUAL_STEPS.md" not in readme)
+    check("the typo rule keeps a high-priority hand-off in every mode",
+          "High priority" in doc and "High priority" in off
+          and "priority is a row in `README-AUTHOR-TO-COMPLETE.md`" in readme)
+
+
 def cleanup():
     for d in TMPDIRS:
         shutil.rmtree(d, ignore_errors=True)
@@ -152,6 +173,7 @@ def main() -> int:
         test_static()
         test_generated_prompts()
         test_manual_counter()
+        test_mode_destinations()
     finally:
         cleanup()
     print()

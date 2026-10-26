@@ -2601,9 +2601,11 @@ AUDIT_NO_NEW_FINDINGS = """OVERRIDE — THIS AUDIT ADDS NO FINDINGS (paper-refin
 You dispose the FROZEN findings and nothing else. `audit/audit.json`'s `adds` MUST be `[]`: do not
 create `AU-*` rows and do not promote a new defect into the finding list. If you notice a defect
 outside the frozen list, record it in `audit/UNRESOLVED.md` with its location and evidence and
-leave it for the next review; it is an observation, not a finding, and no reviser acts on it. The
-rest of this prompt describes the disposition record you write; where it mentions adding findings,
-this override wins.
+leave it for the next review; it is an observation, not a finding, and no reviser acts on it. In
+`audit/PROBE_AUDIT.md` the only verdicts are `stands` and `needs-evidence`: a closure that hides a
+real probe defect goes to `audit/UNRESOLVED.md` as an observation, never `promoted to AU-xxx` (there
+is no AU-* row for it to name). The rest of this prompt describes the disposition record you write;
+where it mentions adding findings, this override wins.
 
 """
 
@@ -2670,9 +2672,11 @@ def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
 
     The auditor consumes the round's FROZEN review (read-only) and produces the
     audited list the revisers act on: every frozen finding is confirmed or
-    dropped WITH evidence, and the reviewer's boilerplate closures of
-    finding-tier rows are promoted to real `AU-` findings. It never edits a
-    package, so its only product is the decision record.
+    dropped WITH evidence. This build prepends the NO-NEW-FINDINGS override
+    (`adds` must be `[]`; a newly noticed defect goes to `audit/UNRESOLVED.md`
+    for the next review), so the auditor attacks the reviewer's boilerplate
+    closures without filing an `AU-*` row. It never edits a package, so its only
+    product is the disposition record.
     """
     prof = _as_profile(venue)
     text = (AUDIT_DIRECTIVES
@@ -3144,14 +3148,16 @@ Inputs (paths relative to the sandbox root):
   base/                    the round's base (read-only)
   revised/                 the revision under audit (read-only to you)
   review/findings.json     the frozen review findings (plus review/round2/findings_extra.json when
-                           the discovery round ran)
-  probe_review/findings_probe.json   the probe's independent findings, when present
+                           the discovery round ran; the probe's X-9xx rows are merged there too)
   audit/audit.json, audit/AUDIT.md   the review auditor's dispositions, when present
   revised/CHANGELOG.md, revised/REVISION_REPORT.md, revised/MANUAL_STEPS.md
+  revised/README-AUTHOR-TO-COMPLETE.md   when the readme hand-off policy is in force, the manual
+                           items live there instead of revised/MANUAL_STEPS.md
   raw_data/, code/         the read-only sources the hierarchy names
 
 WHAT TO AUDIT — one row per CONFIRMED defect in the revision:
-  1. CORRECTION MISSING: an audited finding with no edit and no genuinely non-inferable manual item.
+  1. CORRECTION MISSING: a frozen/audited finding with no edit and no genuinely non-inferable
+     manual item.
   2. FACT REMOVED: a sentence carrying a fact, number, definition or significance claim was deleted
      (or a pointer carrying a fact was removed) where the correct repair was to correct/relocate it.
   3. WRONG VALUE: the revision states a value the source hierarchy contradicts, including a value
@@ -3161,7 +3167,8 @@ WHAT TO AUDIT — one row per CONFIRMED defect in the revision:
      raw_data, deposited tables, the reference list, a DOI resolver, a standard domain). A typo that
      the revision refused to correct for that reason is a defect.
   5. LOW-PRIORITY LEDGER: a corrected inferable typo with no `priority=low` re-verification row in
-     revised/MANUAL_STEPS.md, or a grammar/punctuation/style edit wrongly listed as a manual item.
+     the stage's hand-off report (revised/MANUAL_STEPS.md, or revised/README-AUTHOR-TO-COMPLETE.md
+     under the readme policy), or a grammar/punctuation/style edit wrongly listed as a manual item.
   6. NEW DEFECT: a contradiction, wrong number/unit, broken citation or dangling reference the
      revision introduced.
 
@@ -3211,11 +3218,13 @@ Apply only `confirmed` rows. A rejected row gets its exact contradicting evidenc
 apply it, and do not invent a different repair. A row you cannot check is `rejected` with the missing
 check named. Never accept a plan row merely because the auditor wrote it.
 
-Then: update `revised/CHANGELOG.md`, `revised/REVISION_REPORT.md` and `revised/MANUAL_STEPS.md` so the
+Then: update `revised/CHANGELOG.md`, `revised/REVISION_REPORT.md`, the stage's hand-off report
+(`revised/MANUAL_STEPS.md`, or `revised/README-AUTHOR-TO-COMPLETE.md` under the readme policy) and
+keep `revised/revision_report.json` valid (it must still name every frozen finding id), so the
 change, the replaced value and the manual item (if any) are recorded consistently. This is ONE pass:
 do not repair anything the plan does not name, and do not add new findings. If a confirmed repair
-cannot be made honestly, write `unable — <what the author must check>` in the ledger and leave the
-text as it is.
+cannot be made honestly, record that row as `rejected` with reason `unable — <what the author must
+check>` and leave the text as it is.
 
 Finish by writing the pipeline's completion marker at the sandbox root, exactly as the revise stage
 does, and keep your final message short: which rows were confirmed, which were rejected, and the

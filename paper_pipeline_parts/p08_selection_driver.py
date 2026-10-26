@@ -1248,6 +1248,11 @@ def invalidate_from_round(ctx: Ctx, r: int, reason: str) -> list:
                 run_rec["status"] = "stale"
                 run_rec["last_error"] = f"stale: {reason}"
                 run_rec["stale_reason"] = reason
+                # The accepted package may be rebuilt; its post-revise chain
+                # record describes the old bytes and must not suppress the
+                # chain on the next acceptance.
+                run_rec.pop("revision_audit", None)
+                run_rec.pop("revision_repair", None)
     ctx.state["pinned"] = [p for p in (ctx.state.get("pinned") or [])
                            if int(p.get("round") or 0) < int(r)]
     ctx.log("invalidated-from-round", detail=f"round {r}: {reason}")
@@ -1278,6 +1283,8 @@ def reconcile_inputs(ctx: Ctx) -> tuple:
             rec["status"] = "stale"
             rec["last_error"] = f"stale: {detail}"
             rec["stale_reason"] = detail
+            rec.pop("revision_audit", None)
+            rec.pop("revision_repair", None)
             stale.append(rec["id"])
     if stale:
         ctx.log("stale-marked", detail=", ".join(stale))
@@ -2134,7 +2141,13 @@ def revision_audit_of(ctx) -> str:
 
 
 def _revision_plan_rows(sb: Path):
-    """The audit's repair rows, or None when no valid plan was written."""
+    """The audit's repair rows, or None when no valid plan was written.
+
+    Every row must be an object the repair session can locate and account for.
+    A malformed row is NOT an empty plan: filtering it out would report "0
+    rows" and silently drop a defect the auditor found (and make `id`/`file`
+    collisions invisible to the repair ledger).
+    """
     path = sb / REVISION_AUDIT_DIRNAME / "REPAIR_PLAN.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -2143,7 +2156,94 @@ def _revision_plan_rows(sb: Path):
     rows = data.get("rows") if isinstance(data, dict) else data
     if not isinstance(rows, list):
         return None
-    return [row for row in rows if isinstance(row, dict)]
+    out, seen = [], set()
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        rid = str(row.get("id") or "").strip()
+        rel = str(row.get("file") or "").strip()
+        if not rid or rid in seen or not rel:
+            return None
+        if _unsafe_package_rel(rel):
+            return None
+        seen.add(rid)
+        out.append(dict(row, id=rid, file=rel))
+    return out
+
+
+def _unsafe_package_rel(rel: str) -> bool:
+    """True when a plan row's `file` is not a path inside the revised package."""
+    return bool(rel.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", rel)
+                or ".." in Path(rel).parts)
+
+
+def _revision_repair_ledger(sb: Path, rows: list):
+    """(problem, counts) for the bounded repair's re-validation ledger.
+
+    The repair session's product is the verdict it reached for EVERY planned
+    row; a missing, malformed or incomplete ledger leaves the plan unaccounted
+    for, so it is recorded as a failed repair (the stage postcheck still decides
+    whether the final package itself is valid).
+    """
+    path = sb / REVISED_DIR / "REPAIR_LEDGER.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as e:
+        return f"no revised/REPAIR_LEDGER.json ({e})", {}
+    except ValueError as e:
+        return f"revised/REPAIR_LEDGER.json is not valid JSON ({e})", {}
+    ledger = data.get("rows") if isinstance(data, dict) else data
+    if not isinstance(ledger, list):
+        return "revised/REPAIR_LEDGER.json carries no rows list", {}
+    plan_ids = [row["id"] for row in rows]
+    seen = set()
+    counts = {"confirmed": 0, "rejected": 0}
+    for row in ledger:
+        if not isinstance(row, dict):
+            return "a REPAIR_LEDGER row is not an object", {}
+        rid = str(row.get("id") or "").strip()
+        verdict = str(row.get("verdict") or "").strip().lower()
+        if not rid or rid in seen or rid not in plan_ids:
+            return (f"REPAIR_LEDGER row id {rid!r} is missing, duplicated or not in the "
+                    f"audit's plan"), {}
+        if verdict not in counts:
+            return (f"REPAIR_LEDGER row {rid} has verdict {verdict!r} "
+                    f"(expected confirmed|rejected)"), {}
+        if not str(row.get("reason") or "").strip():
+            return f"REPAIR_LEDGER row {rid} carries no reason", {}
+        seen.add(rid)
+        counts[verdict] += 1
+    missing = [rid for rid in plan_ids if rid not in seen]
+    if missing:
+        return (f"REPAIR_LEDGER does not re-validate planned row(s) "
+                f"{', '.join(missing[:6])}"), {}
+    return "", counts
+
+
+def record_revision_chain_skip(ctx, rec: dict, reason: str) -> None:
+    """Record that the post-revise chain did not run, and why (never silent)."""
+    if rec.get("kind") != "revise" or rec.get("revision_audit"):
+        return
+    rec["revision_audit"] = {"status": "skipped", "rows": 0, "reason": reason}
+    ctx.save_state()
+    print(f"  [revision-audit] {rec['id']}: skipped ({reason})")
+
+
+def _run_aux_session(sb: Path, rec: dict, cmd: list, timeout: int,
+                     prompt_file: str, log_name: str) -> dict:
+    """Run one audit/repair session WITHOUT changing the stage attempt's clock.
+
+    `_execute_attempt_in` records `last_attempt_started`; the auxiliary sessions
+    are part of the accepted revise attempt, so the attempt's start (and the
+    history row `postcheck` later writes) must keep the revise session's own
+    values, and the audit/repair durations live in their own records.
+    """
+    started = rec.get("last_attempt_started")
+    try:
+        return _execute_attempt_in(sb, rec, cmd, timeout, prompt_file, log_name, False)
+    finally:
+        if started is not None:
+            rec["last_attempt_started"] = started
 
 
 def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
@@ -2153,25 +2253,38 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     the audit reads `base/` and `revised/` and writes only
     `revision_audit/REPAIR_PLAN.json`; the repair session re-validates every row,
     edits `revised/` only, and the stage's own postcheck is re-run on the final
-    package. A skipped (`--revision-audit off`) or empty plan leaves `revised/`
-    as the final revised version.
+    package. A skipped (`--revision-audit off`), empty or inapplicable plan
+    leaves `revised/` as the final revised version and says why.
+
+    Two guards keep the chain off a judged artifact: a round that is already
+    decided is never audited/repaired (its champion and pin are that digest's
+    bytes, rule 5), and a concern-scoped (major/minor) revision has no general
+    review/audit to consume -- its edits are limited to the admitted concerns.
     """
     if rec.get("kind") != "revise" or rec.get("revision_audit"):
         return
+    r = int(rec.get("round") or 0)
+    if r and round_is_done(ctx, r):
+        record_revision_chain_skip(
+            ctx, rec, "the round is already decided; a judged candidate is never changed")
+        return
+    if journal_is_scoped(ctx):
+        record_revision_chain_skip(
+            ctx, rec, "concern-scoped revision mode: the general revision audit is not staged")
+        return
     if revision_audit_of(ctx) != "on":
-        rec["revision_audit"] = {"status": "skipped", "rows": 0,
-                                 "reason": "revision audit off"}
-        ctx.save_state()
-        print(f"  [revision-audit] {rec['id']}: skipped (revision audit off); the revised "
-              f"version is final")
+        record_revision_chain_skip(ctx, rec, "revision audit off")
         return
     sb = ctx.sandbox_of(rec)
-    r = int(rec.get("round") or 0)
+    if not sb.is_dir() or not (sb / REVISED_DIR).is_dir():
+        record_revision_chain_skip(
+            ctx, rec, "the revise sandbox (or revised/) is no longer on disk; nothing to audit")
+        return
     (sb / REVISION_AUDIT_PROMPT_FILE).write_text(
         revision_audit_prompt(sb, rec["id"], r), encoding="utf-8")
     print(f"  [revision-audit] {rec['id']}: auditing the revised package")
-    res = _execute_attempt_in(sb, rec, cmd, timeout, REVISION_AUDIT_PROMPT_FILE,
-                              "_revision_audit.log", False)
+    res = _run_aux_session(sb, rec, cmd, timeout, REVISION_AUDIT_PROMPT_FILE,
+                           "_revision_audit.log")
     (sb / REVISION_AUDIT_PROMPT_FILE).unlink(missing_ok=True)
     rows = _revision_plan_rows(sb)
     audit_rec = {"status": "failed", "rows": 0,
@@ -2180,7 +2293,8 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     if res.get("error") or res.get("rc") not in (0,):
         audit_rec["error"] = audit_rec["error"] or f"audit session exited rc={res.get('rc')}"
     elif rows is None:
-        audit_rec["error"] = "no valid revision_audit/REPAIR_PLAN.json"
+        audit_rec["error"] = ("no valid revision_audit/REPAIR_PLAN.json (every row needs a "
+                              "unique id and a package-relative file)")
     else:
         audit_rec["status"] = "done"
         audit_rec["rows"] = len(rows)
@@ -2199,8 +2313,8 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     (sb / REVISION_REPAIR_PROMPT_FILE).write_text(
         revision_repair_prompt(sb, rec["id"], r, len(rows)), encoding="utf-8")
     print(f"  [revision-repair] {rec['id']}: one bounded repair pass")
-    res2 = _execute_attempt_in(sb, rec, cmd, timeout, REVISION_REPAIR_PROMPT_FILE,
-                               "_revision_repair.log", False)
+    res2 = _run_aux_session(sb, rec, cmd, timeout, REVISION_REPAIR_PROMPT_FILE,
+                            "_revision_repair.log")
     (sb / REVISION_REPAIR_PROMPT_FILE).unlink(missing_ok=True)
     repair_rec = {"status": "failed", "rows": len(rows),
                   "duration": round(res2.get("dur") or 0.0, 1),
@@ -2209,10 +2323,19 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
         repair_rec["error"] = repair_rec["error"] or f"repair session exited rc={res2.get('rc')}"
     else:
         repair_rec["status"] = "done"
+        problem, counts = _revision_repair_ledger(sb, rows)
+        if problem:
+            repair_rec["status"] = "failed"
+            repair_rec["error"] = problem
+        else:
+            repair_rec["ledger"] = counts
     rec["revision_repair"] = repair_rec
     ctx.save_state()
+    if repair_rec["status"] != "done":
+        print(f"  [revision-repair] {rec['id']}: FAILED — {str(repair_rec['error'])[:240]}")
     # The SAME postcheck decides the final revised version.
     postcheck(ctx, rec, source="revision-audit")
+    ctx.save_state()
 
 
 def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
@@ -2305,6 +2428,11 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
         for e in plan:
             state = prepare(e)
             if state == "done":
+                rec = ctx.run(e["id"])
+                if rec and rec.get("kind") == "revise" and not rec.get("revision_audit"):
+                    record_revision_chain_skip(
+                        ctx, rec, "manual mode: the post-revise audit/repair sessions are "
+                                  "automated; re-run that round with an agent command")
                 continue
             if state == "blocked":
                 continue
@@ -2313,6 +2441,12 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                 bump_attempt(signal_rec)
                 postcheck(ctx, signal_rec, source="recheck (marker already on disk)")
                 ctx.save_state()
+                if signal_rec.get("status") == "done" \
+                        and signal_rec.get("kind") == "revise" \
+                        and not signal_rec.get("revision_audit"):
+                    record_revision_chain_skip(
+                        ctx, signal_rec, "manual mode: the post-revise audit/repair sessions "
+                                          "are automated; re-run that round with an agent command")
                 continue
             if state == "dirty":
                 print(f"  [manual] {e['id']}: this sandbox already contains work without a "
@@ -2328,6 +2462,12 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                   f"signal; paste {sb / 'PROMPT.md'} with cwd = {sb.resolve()}")
             manual_run_one(ctx, ctx.run(e["id"]), poll, timeout)
             ctx.save_state()
+            rec = ctx.run(e["id"])
+            if rec and rec.get("status") == "done" and rec.get("kind") == "revise" \
+                    and not rec.get("revision_audit"):
+                record_revision_chain_skip(
+                    ctx, rec, "manual mode: the post-revise audit/repair sessions are "
+                              "automated; re-run that round with an agent command")
         if nowait and any(not is_done(e["id"]) for e in plan):
             return False, True
         remaining = [e["id"] for e in plan if not is_done(e["id"])]
@@ -2393,7 +2533,20 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
             # 1. materialize whatever became ready, then submit up to `jobs`
             for e in plan:
                 rid = e["id"]
-                if rid in running.values() or is_done(rid) or rid in failed_hard:
+                if rid in running.values() or rid in failed_hard:
+                    continue
+                if is_done(rid):
+                    # A revise run accepted in an earlier invocation (or before
+                    # the chain ran) still owes the post-revise chain. It is NOT
+                    # launched again, so the plan's `is_done` short-circuit is
+                    # the only place that can finish it.
+                    if e.get("kind") == "revise":
+                        rec = ctx.run(rid)
+                        if rec and not rec.get("revision_audit"):
+                            run_revision_chain(ctx, rec, cmd, timeout)
+                            rec = ctx.run(rid)
+                            if rec["status"] != "done":
+                                register_failure(rid, rec)
                     continue
                 if now < not_before[rid]:
                     continue
@@ -2405,6 +2558,10 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                     bump_attempt(rec)
                     postcheck(ctx, rec, source="recheck (marker already on disk)")
                     ctx.save_state()
+                    if rec["status"] == "done" and rec.get("kind") == "revise" \
+                            and not rec.get("revision_audit"):
+                        run_revision_chain(ctx, rec, cmd, timeout)
+                        rec = ctx.run(rid)
                     if rec["status"] != "done":
                         problems = repairable_artifact_failure(ctx, rec)
                         if problems and len(running) < max(1, int(jobs)) \
@@ -2467,6 +2624,10 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                     # attempt, exactly like one the agent produced itself.
                     finish_repair_session(ctx, ctx.run(rid), repair, res)
                     rec = ctx.run(rid)
+                    if rec["status"] == "done" and rec.get("kind") == "revise" \
+                            and not rec.get("revision_audit"):
+                        run_revision_chain(ctx, rec, cmd, timeout)
+                        rec = ctx.run(rid)
                     if rec["status"] != "done":
                         register_failure(rid, rec)
                     continue
@@ -2476,19 +2637,23 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                     # attempt like any other, and the retry policy decides next.
                     finish_resume_session(ctx, ctx.run(rid), resume, res)
                     rec = ctx.run(rid)
+                    if rec["status"] == "done" and rec.get("kind") == "revise" \
+                            and not rec.get("revision_audit"):
+                        run_revision_chain(ctx, rec, cmd, timeout)
+                        rec = ctx.run(rid)
                     if rec["status"] != "done":
                         register_failure(rid, rec)
                     continue
                 apply_results(ctx, {rid: res})
                 rec = ctx.run(rid)
+                if rec["status"] == "done" and rec.get("kind") == "revise" \
+                        and not rec.get("revision_audit"):
+                    # The chain records its own skip when the audit is off (or
+                    # the round is already decided), so the decision is visible
+                    # in the run record.
+                    run_revision_chain(ctx, rec, cmd, timeout)
+                    rec = ctx.run(rid)
                 if rec["status"] == "done":
-                    if rec.get("kind") == "revise" and not rec.get("revision_audit"):
-                        # The chain records its own skip when the audit is off,
-                        # so the decision is visible in the run record.
-                        run_revision_chain(ctx, rec, cmd, timeout)
-                        rec = ctx.run(rid)
-                        if rec["status"] != "done":
-                            register_failure(rid, rec)
                     continue
                 # a process-level failure with VALID artifacts is re-verified first
                 if rec["status"] == "failed" and not (rec.get("postcheck") or {}).get("errors") \
@@ -2498,7 +2663,11 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                     ctx.save_state()
                     if rec["status"] == "done":
                         print(f"  [ok]   {rid} re-verified after a process-level failure")
-                        continue
+                        if rec.get("kind") == "revise" and not rec.get("revision_audit"):
+                            run_revision_chain(ctx, rec, cmd, timeout)
+                            rec = ctx.run(rid)
+                        if rec["status"] == "done":
+                            continue
                 # ... then a repairable artifact-quality failure before the retry
                 # burns the attempt and rebuilds the sandbox it would repair.
                 argv, key, why = resume_gate(ctx, rec, cmd)
