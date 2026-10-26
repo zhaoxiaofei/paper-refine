@@ -415,8 +415,24 @@ def chat_text(cfg: dict, prompt: str, system: str = "") -> tuple:
     if err or status != 200 or not isinstance(body, dict):
         return "", err or f"HTTP {status}: {str(body)[:400]}"
     try:
-        return str(body["choices"][0]["message"]["content"]), ""
-    except (KeyError, IndexError, TypeError):
+        message = body["choices"][0]["message"]
+        content = message.get("content")
+        if isinstance(content, list):
+            # The chat API may return content parts; `str(list)` used to ship a
+            # Python repr as the answer.
+            content = "".join(str(part.get("text") or "")
+                              for part in content
+                              if isinstance(part, dict) and part.get("type") == "text")
+        if not isinstance(content, str) or not content.strip():
+            # Qwen3 reasoning responses can carry the text in `reasoning_content`
+            # and leave `content` null. `str(None)` made the wrapper report the
+            # four characters "None" and exit 0.
+            reasoning = message.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning.strip():
+                return reasoning, ""
+            return "", f"empty chat content: {json.dumps(body)[:400]}"
+        return content, ""
+    except (KeyError, IndexError, TypeError, AttributeError):
         return "", f"unexpected chat response: {json.dumps(body)[:400]}"
 
 

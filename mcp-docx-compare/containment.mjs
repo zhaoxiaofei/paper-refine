@@ -6,7 +6,7 @@
 // while `execFile` opens the target outside the root. Both sides are therefore
 // resolved with `realpath` before the comparison. Kept dependency-free (node:
 // core only) so the rule is unit-testable without the MCP SDK installed.
-import { realpathSync } from 'node:fs';
+import { lstatSync, realpathSync } from 'node:fs';
 import * as path from 'node:path';
 
 function realOrResolved(p) {
@@ -39,9 +39,35 @@ export function allowedRoots(value) {
     .map((r) => realOrResolved(r));
 }
 
+function hasDanglingSymlink(p) {
+  // `realOrResolved` falls back to the lexical path when a component cannot be
+  // resolved. For a DANGLING symlink that fallback is exactly the bypass: the
+  // path looks inside the root, but the first write follows the link outside
+  // it. Walk the existing components and refuse the path when a link on it has
+  // no target.
+  const abs = path.resolve(p);
+  let cur = path.sep;
+  for (const part of abs.split(path.sep).filter(Boolean)) {
+    cur = path.join(cur, part);
+    try {
+      if (lstatSync(cur).isSymbolicLink()) {
+        try {
+          realpathSync(cur);
+        } catch {
+          return true;
+        }
+      }
+    } catch {
+      return false;             // a component that does not exist yet
+    }
+  }
+  return false;
+}
+
 /** True when `target` is under one of `roots` (an empty list allows anything). */
 export function containsPath(target, roots) {
   if (!roots || !roots.length) return true;
+  if (hasDanglingSymlink(target)) return false;
   const abs = realOrResolved(target);
   // A root that already ENDS with the separator is the filesystem root: adding
   // another one turned "/" into "//", which no absolute path starts with, so

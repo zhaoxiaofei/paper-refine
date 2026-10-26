@@ -62,10 +62,11 @@ MAIN_START = re.compile(
     re.I)
 SECTION_BOUND = re.compile(
     r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:abstract|summary|keywords?|introduction|background|"
-    r"results?|discussion|conclusions?|materials and methods|online methods?|methods?|"
+    r"results?|discussion|conclusions?|materials (?:and|&) methods|online methods?|methods?|"
     r"star methods|experimental procedures|"
-    r"references?|bibliography|figure legends?|acknowledg\w*|author contributions?|"
-    r"data availability|competing interests?|conflict of interest|funding|"
+    r"references?|bibliography|(?:literature|works) cited|figure legends?|acknowledg\w*|"
+    r"author contributions?|"
+    r"(?:data|code) availability|competing interests?|conflicts? of interest|funding|"
     r"supplementary (?:information|materials?|methods|figures|tables|notes?))"
     r"\s*[:.\u2014\u2013-]?\s*$", re.I)
 # The venue's main-text counting convention (check id M19): the section kinds a
@@ -84,10 +85,11 @@ DEFAULT_MAIN_TEXT_EXCLUDES = tuple(
     kind for kind in MAIN_TEXT_SECTION_KINDS if kind != "table-captions")
 SECTION_KIND_RES = (
     ("methods", re.compile(
-        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:materials and methods|online methods?|methods?|"
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:materials (?:and|&) methods|online methods?|methods?|"
         r"star methods|experimental procedures)\s*(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
     ("references", re.compile(
-        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:references?|bibliography)\s*"
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:references?|bibliography|"
+        r"(?:literature|works) cited)\s*"
         r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
     ("figure-legends", re.compile(
         r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?figure legends?\s*"
@@ -99,10 +101,10 @@ SECTION_KIND_RES = (
         r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?author contributions?\s*"
         r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
     ("data-availability", re.compile(
-        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?data availability\s*"
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:data|code) availability\s*"
         r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
     ("competing-interests", re.compile(
-        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:competing interests?|conflict of interest)\s*"
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:competing interests?|conflicts? of interest)\s*"
         r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
     ("funding", re.compile(
         r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?funding\s*(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
@@ -113,16 +115,29 @@ SECTION_KIND_RES = (
 )
 
 
+def _heading_text(line: str) -> str:
+    """A heading line with a Markdown ATX prefix removed.
+
+    The pipeline's own length scan strips `#{1,6}` (`_length_heading_text`);
+    without the same step here `## Methods` was body text to this counter and
+    a heading to the gate, so a .md manuscript got one `whole file` row and
+    skipped the M19 cap check.
+    """
+    return re.sub(r"^\s*#{1,6}\s+", "", (line or "").strip())
+
+
 def section_kind(line: str) -> str:
     """The M19 counting-convention kind of a boundary heading ("" when not one)."""
-    text = (line or "").strip()
+    text = _heading_text(line)
     if not text:
         return ""
     for kind, pattern in SECTION_KIND_RES:
         if pattern.match(text):
             return kind
     return ""
-KEYWORDS = re.compile(r"^\s*(?:key\s?words?)\s*(?:[:.\u2014\u2013-]|$)", re.I)
+KEYWORDS = re.compile(
+    r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:key\s?words?)\s*"
+    r"(?:[:.\u2014\u2013-]|$)", re.I)
 # A caption line starts with the label, the number AND its separator ("Figure 2
 # | ...", "Fig. 1: ...", "Figure 3. ..."). Without the separator guard a BODY
 # sentence that merely opens with a figure reference ("Figure 2A shows that p53
@@ -397,7 +412,9 @@ def _abstract_end(lines, start):
     first_blank = None
     while j < len(lines):
         line = lines[j].strip()
-        if SECTION_BOUND.match(line) or MAIN_START.match(line) or KEYWORDS.match(line):
+        heading = _heading_text(line)
+        if SECTION_BOUND.match(heading) or MAIN_START.match(heading) \
+                or KEYWORDS.match(heading):
             return j
         if not line:
             if seen_text and first_blank is None:
@@ -479,7 +496,7 @@ def sections(text: str, abstract_end=None, caption_lines=None, excludes=None) ->
     n = len(lines)
     abs_start = abs_end = None
     for i, raw in enumerate(lines):
-        inline = INLINE_ABSTRACT_HEAD.match(raw.strip())
+        inline = INLINE_ABSTRACT_HEAD.match(_heading_text(raw))
         if inline:
             # Keep the remainder as the abstract's first paragraph; the heading
             # itself is not counted.
@@ -488,14 +505,14 @@ def sections(text: str, abstract_end=None, caption_lines=None, excludes=None) ->
             abs_end = (max(abs_start, min(int(abstract_end), n)) if abstract_end is not None
                        else _abstract_end(lines, abs_start))
             break
-        if ABSTRACT_HEAD.match(raw.strip()):
+        if ABSTRACT_HEAD.match(_heading_text(raw)):
             abs_start = i + 1
             abs_end = (max(abs_start, min(int(abstract_end), n)) if abstract_end is not None
                        else _abstract_end(lines, abs_start))
             break
     main_start = None
     for i, raw in enumerate(lines):
-        if MAIN_START.match(raw.strip()):
+        if MAIN_START.match(_heading_text(raw)):
             main_start = i + 1
             break
     if abs_start is None and main_start is None and not include_abstract:
@@ -523,7 +540,7 @@ def sections(text: str, abstract_end=None, caption_lines=None, excludes=None) ->
     excluded_now = False
     end_found = False
     for i in range(start, n):
-        stripped = lines[i].strip()
+        stripped = _heading_text(lines[i])
         if KEYWORDS.match(stripped):
             # A Keywords line is not a section kind: the old generic branch
             # resumed the count after it, putting the keyword list and any
@@ -593,12 +610,21 @@ RAW_DATA_DIRNAMES = ("raw_data",)
 HUMAN_FEEDBACK_DIR = "human_review_feedback"
 LLM_FEEDBACK_DIR = "llm_review_feedback"
 EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR)
+# A venue ARTICLE TYPE is the authors' manuscript, not the editors' letter:
+# `letter_to_the_editor.docx` / `Editorial.docx` must reach M1/M2/M4/M19.
+_ARTICLE_TYPE_MANUSCRIPT_RE = re.compile(
+    r"^(?:(?:the[.\s_-]+)?editorial(?:[.\s_-]+board)?|"
+    r"letters?[.\s_-]+(?:to|for)[.\s_-]+(?:the[.\s_-]+)?editor)"
+    r"(?:[.\s_-]+(?:v|rev|version|revision|draft)?[.\s_-]*\d{1,3})?$", re.I)
+# `.reply`/`.review`/`.notes` name the DOCUMENT kind, not another extension.
+_SEMANTIC_SUFFIX_RE = re.compile(
+    r"\.(?:reply|response|rebuttal|review|notes?|comments?)\.[A-Za-z0-9]+$", re.I)
 EXTERNAL_FEEDBACK_RE = re.compile(
-    r"(?<![a-z])feedbacks?(?:[-_ ]?(?:form|report|letter|comments?|summary|to[-_ ]?authors))?(?![a-z])"
-    r"|referees?[_ \-]*(?:report|comment)"
-    r"|reviewers?[_ \-]*(?:comment|report|critique)"
-    r"|editor(?:s|ial)?[_ \-]*(?:comment|decision|report)"
-    r"|decision[_ \-]*letter",
+    r"(?<![a-z])(?:feedbacks?(?:[-_ ]?(?:form|report|letter|comments?|summary|"
+    r"to[-_ ]?authors))*|"
+    r"(?:referees?|reviewers?)(?:[-_ ]?(?:comments?|reports?|critiques?|forms?))*|"
+    r"(?<![a-z_])editors?(?:[-_ ]?(?:comments?|decisions?|reports?|letters?))*|"
+    r"editorial|decision[_ \-]*(?:letter|notice|email))(?![a-z])",
     re.I)
 AUTHORED_REPLY_RE = re.compile(
     r"(?<![a-z])(?:responses?|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)(?![a-z])",
@@ -646,7 +672,20 @@ def is_evidence_path(path: str) -> bool:
     # letter never reached the M19 length sweep.
     if _COVER_WORD_RE.search(parts[-1]):
         return False
-    cleaned = _SCIENCE_ROLE_COMPOUND_RE.sub(" ", parts[-1])
+    base = parts[-1]
+    if _SEMANTIC_SUFFIX_RE.search(base):
+        return True             # a reply/review/notes DOCUMENT, never author prose
+    stem = base
+    while True:
+        _stripped = re.sub(
+            r"\.(?:txt|docx?|md|tex|pdf|rtf|bib|csv|tsv|bak|final|tar|gz|zip)$",
+            "", stem, flags=re.I)
+        if _stripped == stem:
+            break
+        stem = _stripped
+    if _ARTICLE_TYPE_MANUSCRIPT_RE.match(stem):
+        return False            # the authors' article-type manuscript, not a letter
+    cleaned = _SCIENCE_ROLE_COMPOUND_RE.sub(" ", base)
     return bool(EXTERNAL_FEEDBACK_RE.search(cleaned)
                 or AUTHORED_REPLY_RE.search(cleaned))
 
@@ -834,12 +873,26 @@ def main(argv=None) -> int:
                     cover = ((candidate.get("length_limits") or {}).get("cover_letter")
                              or cover)
                     break
-        cover_min = cover.get("min", cover_min)
-        cover_max = cover.get("max", cover_max)
+        def _profile_number(value, key):
+            """A profile's numeric limit, or None (with a warning) when malformed."""
+            if value is None:
+                return None
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                print(f"warning: venue profile {args.venue_profile!r} has a "
+                      f"non-numeric {key!r} cover-letter limit; reporting no "
+                      f"cap", file=sys.stderr)
+                return None
+            return int(number) if number.is_integer() else number
+
+        cover_min = _profile_number(cover.get("min", cover_min), "cover_letter.min")
+        cover_max = _profile_number(cover.get("max", cover_max), "cover_letter.max")
         # A profile is authoritative: an absent total_max MEANS "no TOTAL cap"
         # (the pipeline's rule). The no-profile path has no built-in cap either,
         # so the total count is reported without one.
-        cover_total_max = cover.get("total_max") if args.venue_profile else None
+        cover_total_max = (_profile_number(cover.get("total_max"), "cover_letter.total_max")
+                           if args.venue_profile else None)
         if not limits:
             print(f"note: {args.venue_profile} carries no numbers for "
                   f"{type_id or 'its default type'}; reporting counts with no cap",

@@ -9,9 +9,9 @@ set -euo pipefail
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 skills_dir="$HOME/.codex/skills"
 backup_dir="$HOME/.codex/backup"
-# Where the two MCP servers are deployed for the Codex config to reach (the
-# operator's default; override with MCP_TOOLS_DIR on another machine).
-tools_dir="${MCP_TOOLS_DIR:-/mnt/c/Users/zhaoxiaofei/Documents/my-nutstore/zxf-cnv-paper-postgrad}"
+# Where the two MCP servers are deployed for the Codex config to reach.
+# `$HOME/.codex/mcp-tools` is the portable default; override with MCP_TOOLS_DIR.
+tools_dir="${MCP_TOOLS_DIR:-$HOME/.codex/mcp-tools}"
 mkdir -p -- "$skills_dir" "$backup_dir"
 
 # The commit suffix is informational: outside a git checkout (or in a shallow

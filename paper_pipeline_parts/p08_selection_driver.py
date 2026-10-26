@@ -1235,7 +1235,7 @@ def invalidate_from_round(ctx: Ctx, r: int, reason: str) -> list:
                   "field", "field_entries", "field_dropped", "stats", "selection", "diagnostics",
                   "completed", "winner_dir", "winner_digest", "tiebreak_inputs", "panel_gaps",
                   "base_id", "base_rep", "plan", "pipeline_version",
-                  "auto_promoted", "judged", "certified"):
+                  "judges_enabled", "auto_promoted", "judged", "certified"):
             rec.pop(k, None)
         for run_rec in ctx.runs(round_no=rr):
             touched.append(run_rec["id"])
@@ -2528,6 +2528,26 @@ def round_tracking(ctx: Ctx, r: int, enabled: bool,
         print(f"[run] round {r} WARNING: PDF rendering failed: {e}")
 
 
+def _apply_judge_selection(rrec: dict, only, judge_step: bool, r: int, ctx: Ctx) -> None:
+    """Drop or record the round's remembered judge-session selection.
+
+    Asking for the WHOLE judge step (a bare `judge`, a round in full, `all`,
+    or a plain `run` -- `only is None`) must drop a selection remembered from
+    an earlier invocation. The pop used to live inside `if only is not None`,
+    so a plain `run` kept the stale list and decided the round on a shrunken
+    (or empty) panel.
+    """
+    if judge_step:
+        if rrec.pop("judges_enabled", None) is not None:
+            print(f"[run] r{r}: this invocation asks for the WHOLE judge step; dropping the "
+                  f"judge-session selection remembered from an earlier invocation (the "
+                  f"round's panel is the configured {round_judges(ctx, r)} per version)")
+    elif only is not None:
+        _sel = only.judge_spec_for(r)
+        if _sel:
+            rrec["judges_enabled"] = _sel
+
+
 def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
                 manual: bool, nowait: bool, poll: int,
                 judge_cmd=None, judge_manual: bool = None, judge_timeout=None,
@@ -2577,15 +2597,7 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
     # remembered from an earlier invocation, because then the round's panel is the
     # CONFIGURED panel -- a session list never redefines it, it only says what to
     # start now.
-    if only is not None:
-        _sel = only.judge_spec_for(r)
-        if judge_step:
-            if rrec.pop("judges_enabled", None) is not None:
-                print(f"[run] r{r}: this invocation asks for the WHOLE judge step; dropping the "
-                      f"judge-session selection remembered from an earlier invocation (the "
-                      f"round's panel is the configured {round_judges(ctx, r)} per version)")
-        elif _sel:
-            rrec["judges_enabled"] = _sel
+    _apply_judge_selection(rrec, only, judge_step, r, ctx)
     ctx.save_state()
     ph = {"cmd": cmd, "timeout": timeout, "jobs": jobs, "retries": retries,
           "manual": manual, "nowait": nowait, "poll": poll,

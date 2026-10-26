@@ -71,12 +71,21 @@ RAW_DATA_DIRNAMES = ("raw_data",)
 HUMAN_FEEDBACK_DIR = "human_review_feedback"
 LLM_FEEDBACK_DIR = "llm_review_feedback"
 EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR)
+# A venue ARTICLE TYPE is the authors' manuscript, not the editors' letter:
+# `letter_to_the_editor.docx` / `Editorial.docx` must reach M1/M2/M4/M19.
+_ARTICLE_TYPE_MANUSCRIPT_RE = re.compile(
+    r"^(?:(?:the[.\s_-]+)?editorial(?:[.\s_-]+board)?|"
+    r"letters?[.\s_-]+(?:to|for)[.\s_-]+(?:the[.\s_-]+)?editor)"
+    r"(?:[.\s_-]+(?:v|rev|version|revision|draft)?[.\s_-]*\d{1,3})?$", re.I)
+# `.reply`/`.review`/`.notes` name the DOCUMENT kind, not another extension.
+_SEMANTIC_SUFFIX_RE = re.compile(
+    r"\.(?:reply|response|rebuttal|review|notes?|comments?)\.[A-Za-z0-9]+$", re.I)
 EXTERNAL_FEEDBACK_RE = re.compile(
-    r"(?<![a-z])feedbacks?(?:[-_ ]?(?:form|report|letter|comments?|summary|to[-_ ]?authors))?(?![a-z])"
-    r"|referees?[_ \-]*(?:report|comment)"
-    r"|reviewers?[_ \-]*(?:comment|report|critique)"
-    r"|editor(?:s|ial)?[_ \-]*(?:comment|decision|report)"
-    r"|decision[_ \-]*letter",
+    r"(?<![a-z])(?:feedbacks?(?:[-_ ]?(?:form|report|letter|comments?|summary|"
+    r"to[-_ ]?authors))*|"
+    r"(?:referees?|reviewers?)(?:[-_ ]?(?:comments?|reports?|critiques?|forms?))*|"
+    r"(?<![a-z_])editors?(?:[-_ ]?(?:comments?|decisions?|reports?|letters?))*|"
+    r"editorial|decision[_ \-]*(?:letter|notice|email))(?![a-z])",
     re.I)
 AUTHORED_REPLY_RE = re.compile(
     r"(?<![a-z])(?:responses?|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)(?![a-z])",
@@ -124,6 +133,18 @@ def is_evidence_name(fname: str) -> bool:
     # letter's own text never reached M1/M1b.
     if _COVER_WORD_RE.search(base):
         return False
+    if _SEMANTIC_SUFFIX_RE.search(base):
+        return True             # a reply/review/notes DOCUMENT, never author prose
+    stem = base
+    while True:
+        _stripped = re.sub(
+            r"\.(?:txt|docx?|md|tex|pdf|rtf|bib|csv|tsv|bak|final|tar|gz|zip)$",
+            "", stem, flags=re.I)
+        if _stripped == stem:
+            break
+        stem = _stripped
+    if _ARTICLE_TYPE_MANUSCRIPT_RE.match(stem):
+        return False            # the authors' article-type manuscript, not a letter
     # A previous response-to-reviewers (the authors' own document) is not
     # manuscript prose either: it never produces an M1/M1b row.
     cleaned = _SCIENCE_ROLE_COMPOUND_RE.sub(" ", base)

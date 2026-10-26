@@ -2208,7 +2208,11 @@ _TEXT_EDGE_TOKENS = re.compile(
 # mechanical rule must never rewrite it.
 _DOUBLED_WORDS = ("the", "a", "an", "of", "and", "or", "but", "for", "with", "at",
                   "by", "on", "to", "is", "are", "was", "were", "it")
-_DOUBLED_WORD_RE = re.compile(r"\b(" + "|".join(_DOUBLED_WORDS) + r")\s+\1\b", re.I)
+# The SECOND token must not start uppercase. The case-insensitive pattern is
+# needed for a sentence-initial "The the" typo, but it also matched the real
+# tokens in "a A-to-I" and "NOR or OR" and the fixer deleted one.
+_DOUBLED_WORD_RE = re.compile(
+    r"\b(" + "|".join(_DOUBLED_WORDS) + r")\s+(?!(?-i:[A-Z]))\1\b", re.I)
 _DOUBLE_SPACE_RE = re.compile(r"(?<=\S) {2,}(?=\S)")
 _SPACE_BEFORE_PUNCT_RE = re.compile(r" +(?=[,.;:!?])")
 _SPACE_AFTER_OPEN_RE = re.compile(r"(?<=[([])[ \t]+")
@@ -4839,9 +4843,13 @@ def _zotero_bibliography_plan(xml: str, frame: dict, items_by_rank: dict):
         if span is None:
             return {"needed": True, "xml": None, "skip": "a bibliography entry lost its number"}
         run = st["contents"][idx][span[0]:span[1]]
-        new_run = re.sub(r"(<w:t(?:\s[^>]*)?>)(\d+)([\.\)]?)(\s*)(</w:t>)",
-                         lambda m: m.group(1) + str(rank) + m.group(3) + m.group(4)
-                         + m.group(5), run, count=1)
+        # Word can split the number run as `" 12."` (a leading space or tab
+        # inside the same w:t). The old pattern required the digit immediately
+        # after the tag, so the run matched by `_zotero_entry_span_of_run` was
+        # never rewritten and the report still claimed a renumber.
+        new_run = re.sub(r"(<w:t(?:\s[^>]*)?>)(\s*)(\d+)([\.\)]?)(\s*)(</w:t>)",
+                         lambda m: m.group(1) + m.group(2) + str(rank) + m.group(4)
+                         + m.group(5) + m.group(6), run, count=1)
         contents_by_rank[rank] = (st["contents"][idx][:span[0]] + new_run
                                   + st["contents"][idx][span[1]:])
     reordered = any(rank != idx + 1 for idx, rank in assignment.items())

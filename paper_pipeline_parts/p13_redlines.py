@@ -491,13 +491,18 @@ def _replace_para(bp, rp, counter: list, ts: str):
     if base_text != _para_text(bp) or rev_text != _para_text(rp):
         return _whole_paragraph_change(bp, rp, counter, ts)
 
-    base_words = re.findall(r"\S+\s*", base_text)
-    rev_words = re.findall(r"\S+\s*", rev_text)
-    base_off, rev_off = [0], [0]
-    for w in base_words:
-        base_off.append(base_off[-1] + len(w))
-    for w in rev_words:
-        rev_off.append(rev_off[-1] + len(w))
+    # Token offsets must be the offsets in the FULL paragraph. `\S+\s*`
+    # drops a paragraph's leading whitespace, so the cumulative-length offsets
+    # below started at 0 and every later slice was shifted by that prefix:
+    # accepting "  Hello world" -> "  Hello there" produced "  Hello the".
+    base_tok = [(m.start(), m.end(), m.group(0))
+                for m in re.finditer(r"\S+\s*", base_text)]
+    rev_tok = [(m.start(), m.end(), m.group(0))
+               for m in re.finditer(r"\S+\s*", rev_text)]
+    base_words = [t[2] for t in base_tok]
+    rev_words = [t[2] for t in rev_tok]
+    base_off = ([0] + [t[0] for t in base_tok[1:]] + [len(base_text)])
+    rev_off = ([0] + [t[0] for t in rev_tok[1:]] + [len(rev_text)])
 
     out = []
     try:

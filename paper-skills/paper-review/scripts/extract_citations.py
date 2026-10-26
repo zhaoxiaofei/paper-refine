@@ -45,8 +45,10 @@ EVIDENCE_DIRNAMES = ("raw_data", "human_review_feedback", "llm_review_feedback")
 # still names the authors' reply / the editors' letter.
 _NON_MANUSCRIPT_RE = re.compile(
     r"(?<![a-z])(?:feedbacks?(?:[-_ ]?(?:form|report|letter|comments?|summary|"
-    r"to[-_ ]?authors))?|referees?|reviewers?|editors?|editorial|"
-    r"decision[_ \-]*(?:letter|notice|email))(?![a-z])", re.I)
+    r"to[-_ ]?authors))*|"
+    r"(?:referees?|reviewers?)(?:[-_ ]?(?:comments?|reports?|critiques?|forms?))*|"
+    r"(?<![a-z_])editors?(?:[-_ ]?(?:comments?|decisions?|reports?|letters?))*|"
+    r"editorial|decision[_ \-]*(?:letter|notice|email))(?![a-z])", re.I)
 _REPLY_RE = re.compile(
     r"(?<![a-z])(?:responses?|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)(?![a-z])",
     re.I)
@@ -61,8 +63,14 @@ _SCIENCE_ROLE_COMPOUND_RE = re.compile(
 # A venue ARTICLE TYPE is the authors' manuscript, not the editors' letter:
 # `letter_to_the_editor.docx` / `Editorial.docx` must reach M1/M2/M4/M19.
 _ARTICLE_TYPE_MANUSCRIPT_RE = re.compile(
-    r"^(?:letter[\s_-]+(?:to|for)[\s_-]+the[\s_-]+editor|editorial)"
-    r"(?:[\s_-]+(?:v|rev|version|revision|draft)?[\s_-]*\d{1,3})?$", re.I)
+    r"^(?:(?:the[.\s_-]+)?editorial(?:[.\s_-]+board)?|"
+    r"letters?[.\s_-]+(?:to|for)[.\s_-]+(?:the[.\s_-]+)?editor)"
+    r"(?:[.\s_-]+(?:v|rev|version|revision|draft)?[.\s_-]*\d{1,3})?$", re.I)
+# A semantic suffix (`paper.reply.txt`, `editorial.review.txt`) names the
+# DOCUMENT KIND, not an arbitrary extension: test it before stripping
+# extensions, or `.reply`/`.review`/`.notes` disappear into the base name.
+_SEMANTIC_SUFFIX_RE = re.compile(
+    r"\.(?:reply|response|rebuttal|review|notes?|comments?)\.[A-Za-z0-9]+$", re.I)
 # The WORD "cover" (and the camelCase "coverLetter"), not the substring: a bare
 # `"cover" in name` also named `discovery.md`, `coverage_table.txt` and
 # `recovered_samples.md` a cover letter (forcing them into the submission runs)
@@ -98,7 +106,19 @@ def is_non_manuscript(name: str) -> bool:
         # the M19 length sweep) treats a letter as the authors' own submission
         # text.
         return False
-    if _ARTICLE_TYPE_MANUSCRIPT_RE.match(re.sub(r"(?:\.[A-Za-z0-9]{1,6}){1,2}$", "", base)):
+    if _SEMANTIC_SUFFIX_RE.search(base):
+        return True             # a reply/review/notes DOCUMENT, never author prose
+    # Strip ALL extension layers: `letter_to_the_editor.final.docx.txt` and
+    # `letter_to_the_editor.tar.gz.txt` are still the article-type manuscript.
+    stem = base
+    while True:
+        _stripped = re.sub(
+            r"\.(?:txt|docx?|md|tex|pdf|rtf|bib|csv|tsv|bak|final|tar|gz|zip)$",
+            "", stem, flags=re.I)
+        if _stripped == stem:
+            break
+        stem = _stripped
+    if _ARTICLE_TYPE_MANUSCRIPT_RE.match(stem):
         return False            # the authors' article-type manuscript, not a letter
     cleaned = _SCIENCE_ROLE_COMPOUND_RE.sub(" ", base)
     if _REPLY_RE.search(cleaned):

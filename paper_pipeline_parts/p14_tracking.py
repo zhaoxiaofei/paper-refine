@@ -326,28 +326,41 @@ def write_docx_logging_fallback(base: Path, cand: Path, out: Path, baseline: str
         base_body = _docx_root(base)[1].find(_w("body"))
         base_texts = ([_para_text(p) for p in base_body.findall(_w("p"))]
                       if base_body is not None else [])
-        cand_paras = list(body.findall(_w("p")))
+        cand_children = list(body)
+        cand_paras = [c for c in cand_children if c.tag == _w("p")]
         new_body = ET.Element(_w("body"))
         new_body.append(copy.deepcopy(_note_para(note)))
         sm = difflib.SequenceMatcher(None, base_texts,
                                      [_para_text(p) for p in cand_paras], autojunk=False)
-        cursor, emitted = 0, 0
+        # Build the rewritten paragraph stream by INDEX so the body's other
+        # children (a mid-document table, a sectPr) keep their original slots.
+        # Appending every non-paragraph child at the end moved an inline table
+        # to the bottom of the document.
+        before, out_para, emitted = {}, {}, 0
         for tag, i1, i2, j1, j2 in sm.get_opcodes():
             if tag == "equal":
-                for p in cand_paras[j1:j2]:
-                    new_body.append(copy.deepcopy(p))
-                cursor = j2
+                for j in range(j1, j2):
+                    out_para[j] = copy.deepcopy(cand_paras[j])
                 continue
-            for t in base_texts[i1:i2]:
-                if t.strip():
-                    new_body.append(copy.deepcopy(_note_para(f"[BEFORE: {t}]")))
-                    emitted += 1
-            for p in cand_paras[j1:j2]:
-                new_body.append(copy.deepcopy(_note_para(f"[AFTER: {_para_text(p)}]")))
+            notes = [copy.deepcopy(_note_para(f"[BEFORE: {t}]"))
+                     for t in base_texts[i1:i2] if t.strip()]
+            if notes:
+                before.setdefault(j1, []).extend(notes)
+                emitted += len(notes)
+            for j in range(j1, j2):
+                out_para[j] = copy.deepcopy(_note_para(f"[AFTER: {_para_text(cand_paras[j])}]"))
                 emitted += 1
-            cursor = j2
-        for p in cand_paras[cursor:]:
-            new_body.append(copy.deepcopy(p))
+        para_no = 0
+        for child in cand_children:
+            if child.tag == _w("p"):
+                for extra in before.pop(para_no, []):
+                    new_body.append(extra)
+                new_body.append(out_para[para_no])
+                para_no += 1
+            else:
+                new_body.append(copy.deepcopy(child))
+        for extra in before.pop(para_no, []):
+            new_body.append(extra)
         if not emitted:
             # The body paragraphs are identical; the difference may still be
             # inside a table or another non-paragraph object, which is copied
@@ -363,11 +376,6 @@ def write_docx_logging_fallback(base: Path, cand: Path, out: Path, baseline: str
             else:
                 new_body.append(copy.deepcopy(_note_para(
                     "[no textual difference found between the two documents]")))
-        # Keep any trailing non-paragraph body content (a sectPr) so the copy
-        # stays a complete Word document.
-        for child in list(body):
-            if child.tag != _w("p"):
-                new_body.append(copy.deepcopy(child))
         body.clear()
         for child in list(new_body):
             body.append(child)

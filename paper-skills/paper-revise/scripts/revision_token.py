@@ -108,7 +108,10 @@ HEX7_RE = re.compile(r"[0-9a-f]{7}")
 
 def is_payload(p: Path, root: Path) -> bool:
     rel = p.relative_to(root)
-    if rel.parts and rel.parts[0] == "work":
+    if any(part == "work" for part in rel.parts[:-1]):
+        # `work/` at ANY depth is stage scratch. The top-level-only check let
+        # `supp/work/render.png` change this token while the pipeline twin
+        # excluded it, so `--verify` reported an edit that never happened.
         return False
     name = p.name.lower().strip()
     if name in REPORTS or BOOKKEEPING_NAME_RE.match(name) or AUX_NAME_RE.search(name):
@@ -143,7 +146,10 @@ def tree_files(root: Path) -> list:
                 if key is None or key in ancestors:
                     continue
                 walk(p, ancestors | {key})
-            elif p.is_file():
+            elif p.is_file() and not p.is_symlink():
+                # A FILE symlink is not package content (the pipeline twin's
+                # _iter_tree_files refuses it for the same reason): hashing its
+                # target made the two tokens disagree.
                 out.append(p)
 
     # Seed the ancestor set with the ROOT's own inode, exactly like

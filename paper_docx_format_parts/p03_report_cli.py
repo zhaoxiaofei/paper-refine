@@ -103,7 +103,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
             what = f"{b['kind']} caption {text_of(para).strip()[:40]!r}"
         else:
             what = f"legend {text_of(para).strip()[:40]!r}"
-        sp = elem(ppr_of(para), "spacing")
+        sp = child_elem(ppr_of(para), "spacing")
         line, before, after = attr(sp, "line"), attr(sp, "before"), attr(sp, "after")
         if line != str(policy["caption_line"]):
             row("FMT-T2a", "medium", f"p{i}",
@@ -453,7 +453,13 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
                          "location": r["location"], "evidence": r["evidence"],
                          "detail": r["detail"], "fix": _fix_kind(r["rule"], policy),
                          "protected": False, "tier": tier_of(r["rule"])})
-    for r in text_style_rows(para_texts, para_is_ref, para_is_head,
+    # The FMT-T8d/T8e prose must use the SAME reference definition as the
+    # fixer: a template-restyled package leaves the list without the literal
+    # `Bibliography` style, and the numbered-entry fallback above is what step 9
+    # uses to skip those titles. With the raw style list, the scanner demanded a
+    # spelling/hyphenation edit the fixer correctly refused, and `fix` rejected
+    # its own output.
+    for r in text_style_rows(para_texts, para_is_ref_rows, para_is_head,
                              in_container=para_in_container,
                              in_area=para_in_area,
                              field_spans=field_result_text):
@@ -837,7 +843,11 @@ def fix_document(xml: str, styles: dict, policy: dict,
             if idx in in_table:
                 continue
             if PAGEBREAK_RE.search(para) and not text_of(para).strip() \
-                    and not has_drawing(para) and not has_field(para):
+                    and not has_drawing(para) and not has_field(para) \
+                    and "<w:sectPr" not in para:
+                # A paragraph that carries a section-break property IS the
+                # section boundary: deleting it destroys the section (the
+                # following page settings and header/footer references go).
                 target = (idx, p0, p1, para)
                 break
         if target is None:
@@ -957,8 +967,8 @@ def fix_document(xml: str, styles: dict, policy: dict,
     for i in sorted(targets):
         p0, p1, para = plist[i]
         ppr = ppr_of(para)
-        if ppr and elem(ppr, "spacing"):
-            old = elem(ppr, "spacing")
+        if ppr and child_elem(ppr, "spacing"):
+            old = child_elem(ppr, "spacing")
             already = (attr(old, "line") == str(policy["caption_line"])
                        and attr(old, "before") == str(policy["caption_space"])
                        and attr(old, "after") == str(policy["caption_space"]))
@@ -988,7 +998,12 @@ def fix_document(xml: str, styles: dict, policy: dict,
             continue
         new_para = para
         if policy["heading_keep_with_next"] and not (ppr and "<w:keepNext" in ppr):
-            new_para = insert_into_ppr(new_para, "<w:keepNext/><w:keepLines/>")
+            # `keepNext` precedes `keepLines` in CT_PPr; inserting both after an
+            # existing `keepLines` put the pair out of order and duplicated the
+            # element. When keepLines is already there, add only keepNext.
+            element = ("<w:keepNext/>" if ppr and "<w:keepLines" in ppr
+                       else "<w:keepNext/><w:keepLines/>")
+            new_para = insert_into_ppr(new_para, element, after=("pStyle",))
             kept += 1
         if policy["align_heading_sizes"]:
             want = style_sz(styles, style)
@@ -1096,7 +1111,17 @@ def fix_document(xml: str, styles: dict, policy: dict,
                             for r0, r1, run, _names in analysis["italic"]]
                 targets += [(r0, r1, run, False)
                             for r0, r1, run, _extra, _name in analysis["continuation"]]
+            # An italic run that also continues the same emphasis is recorded in
+            # BOTH `analysis["italic"]` and `analysis["continuation"]` with the
+            # same byte span. Two edits on one span were applied twice: the first
+            # lengthened `<w:i/>` into `<w:i w:val="0"/><w:iCs w:val="0"/>`, the
+            # second spliced at the stale offsets, the XML no longer parsed and
+            # every other repair in the file was lost. One edit per span.
+            seen_spans = set()
             for r0, r1, run, want in targets:
+                if (r0, r1) in seen_spans:
+                    continue
+                seen_spans.add((r0, r1))
                 if run_is_italic(styles, style, run) == want:
                     continue
                 if in_field(franges, p0 + r0):
@@ -4203,7 +4228,10 @@ def page_field_rows(aux_parts: list, doc: str) -> list:
                        + (". A field inside a floating text box cannot be removed by "
                           "paragraph surgery: delete that text box (or its field) in "
                           "Word, or accept the single remaining field" if boxed else "")),
-            "fix": "manual" if boxed else "mechanical",
+            # The row is mechanical only when the fixer can actually repair
+            # this shape: two fields in one paragraph, non-numeric furniture in
+            # a duplicate paragraph and any text box all make it refuse.
+            "fix": "mechanical" if page_field_fixes(xml or "") else "manual",
             "protected": False, "tier": tier_of("FMT-S10"),
             "_part": name})
     return rows
@@ -5013,8 +5041,13 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
         else:
             report["error"] = "table repair would change visible text; refused"
             return report
+    referenced_aux = referenced_header_footer_parts(data, doc_xml)
     for name in names:
         if not re.match(r"word/(?:header|footer)[A-Za-z0-9_\-]*\.xml$", name):
+            continue
+        if name not in referenced_aux:
+            # An orphan part is not printed; repairing it contradicts the
+            # referenced-only policy the scanner and `fix` already follow.
             continue
         part = data[name].decode("utf-8")
         part_edits = page_field_fixes(part)
@@ -5034,8 +5067,10 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
         except OSError as exc:
             report["error"] = f"could not write the repaired copy: {exc}"
             return report
-        report["ok"] = True
         report["remaining"] = rows
+        # `ok` is the command's verified-clean signal: a mechanical row the
+        # repair could not fix (no edits produced) must not report success.
+        report["ok"] = not rows
         return report
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_suffix(out.suffix + ".tmp")

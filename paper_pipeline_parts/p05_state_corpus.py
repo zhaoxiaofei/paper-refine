@@ -763,7 +763,17 @@ class Ctx:
                 os.link(stale, lock_path)
                 restored = True
             except OSError:
-                pass
+                # No hardlink support (drvfs): restore with an exclusive
+                # create and a byte copy, never `os.replace` (which would
+                # clobber a newer live lock).
+                try:
+                    fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                except OSError:
+                    pass
+                else:
+                    with os.fdopen(fd, "wb") as f:
+                        f.write(stale.read_bytes())
+                    restored = True
             if restored:
                 try:
                     stale.unlink()
@@ -3249,7 +3259,20 @@ def probe_reproduction(sb: Path, findings: list) -> dict:
                  "declared": " ".join(str(verifier.get("computed") or "").split()),
                  "produced": "", "status": "", "detail": ""}
         target = sb / script if script else None
-        if target is None or not target.is_file() or not is_within(target, sb / PROBE_DIR):
+        # The verifier must live under `probe_review/scripts/`, by REAL path:
+        # `is_within(target, sb / PROBE_DIR)` resolved both sides, so replacing
+        # `probe_review` with a symlink to /tmp/outside made the outside script
+        # and the anchor agree and the orchestrator executed it.
+        try:
+            root = sb.resolve() / PROBE_SCRIPT_PREFIX
+            scripts_dir = sb / PROBE_DIR / "scripts"
+            safe = (target is not None and not (sb / PROBE_DIR).is_symlink()
+                    and not scripts_dir.is_symlink()
+                    and target.is_file()
+                    and target.resolve().is_relative_to(root))
+        except OSError:
+            safe = False
+        if not safe:
             entry.update(status="missing")
             results.append(entry)
             continue

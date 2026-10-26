@@ -38,7 +38,7 @@ def cmd_setup(args) -> None:
         except VenueProfileError as e:
             die(f"--venue-profile {venue_profile_file!r} is not a valid venue profile: {e}",
                 code=2)
-        if venue_arg and venue_arg != venue_profile.id:
+        if venue_arg and venue_arg.lower() != venue_profile.id.lower():
             die(f"--venue {venue_arg!r} does not match the id {venue_profile.id!r} declared by "
                 f"--venue-profile {venue_profile_file!r} (drop one of the two, or fix the id)",
                 code=2)
@@ -220,6 +220,12 @@ def cmd_setup(args) -> None:
             if getattr(args, "audit", DEFAULT_AUDIT) not in (None, "", "off"):
                 forced.append("audit off (the general review audits do not run in this mode)")
             args.audit = "off"
+            # The scoped review is formatting/writing only: a full discovery
+            # probe would freeze X-9xx rows the reviser is asked to resolve,
+            # although they are not traceable to a reviewer concern.
+            if str(getattr(args, "probe_review", PROBE_REVIEW_DEFAULT)).lower() != "off":
+                forced.append("probe review off (scoped edits are driven by the concerns)")
+            args.probe_review = "off"
             print(f"[setup] revision mode {revision_mode} (option {info['option']}): "
                   f"{info['label']}")
             for f in forced:
@@ -306,6 +312,7 @@ def cmd_setup(args) -> None:
         # created: a journal mode with no feedback file would run the scoped
         # stages against nothing.
         if revision_mode != JOURNAL_MODE_LLM:
+            _resolved_feedback = []
             for item in journal_feedback:
                 q = Path(item)
                 if not q.is_absolute():
@@ -313,6 +320,10 @@ def cmd_setup(args) -> None:
                     q = root_rel if root_rel.exists() else (Path.cwd() / q)
                 if not q.is_file():
                     die(f"--journal-feedback {item!r} does not exist (looked for {q}).")
+                _resolved_feedback.append(str(q.resolve()))
+            # Store the RESOLVED paths: the later runtime lookup is root-then-cwd,
+            # so a relative spelling could silently read a same-named cwd file.
+            journal_feedback = _resolved_feedback
         llm_dir = source / LLM_FEEDBACK_DIR
         llm_hits = [p for p in sorted(llm_dir.rglob("*")) if p.is_file()] \
             if llm_dir.is_dir() else []
@@ -455,6 +466,16 @@ def cmd_setup(args) -> None:
         return out
 
     shutil.copytree(source, ctx.pristine, ignore=_ignore_symlinks)
+    _mapped_feedback = []
+    for _item in journal_feedback:
+        _q = Path(_item)
+        try:
+            _rel = _q.resolve().relative_to(_source_root)
+        except (OSError, ValueError):
+            _mapped_feedback.append(str(_q))
+        else:
+            _mapped_feedback.append((ctx.pristine / _rel).relative_to(root).as_posix())
+    journal_feedback = _mapped_feedback
     if _skipped_links:
         print(f"[setup] WARNING: skipped {len(_skipped_links)} symlink(s) in --source "
               f"(a link is not package content and its target may be outside the package): "
@@ -875,6 +896,12 @@ def cmd_setup(args) -> None:
           f"prompt appears only after its review marker)")
 
 
+def _timeout_seconds(args, default: int) -> int:
+    """The operator's `--timeout`, keeping an explicit 0 as "no timeout"."""
+    value = getattr(args, "timeout", None)
+    return int(default if value is None else value)
+
+
 def _venue_command_root(args, cmd: str) -> Path:
     """The root a `set-venue` / `set-journal` invocation may write to.
 
@@ -938,8 +965,12 @@ def _print_venue_show(ctx, as_json: bool, notes=()) -> None:
                 f"the recorded article type {str(ctx.cfg.get('article_type') or '')!r} is "
                 f"invalid for venue {base.id!r}; the values below describe its default type "
                 f"{base.article_type!r}. Run `set-article-type <id>`."]
+    all_notes = []
+    for note in [str(n) for n in notes] + list(getattr(ctx, "venue_notes", []) or []):
+        if note and note not in all_notes:
+            all_notes.append(note)
     data = {"root": str(ctx.root),
-            "notes": [str(n) for n in notes] + list(getattr(ctx, "venue_notes", []) or []),
+            "notes": all_notes,
             "venue": venue_id_of(ctx),
             "venue_label": prof.label if prof else None,
             "venue_origin": prof.describe_origin() if prof else None,
@@ -957,6 +988,10 @@ def _print_venue_show(ctx, as_json: bool, notes=()) -> None:
     if as_json:
         print_raw(json.dumps(data, indent=2, sort_keys=False))
         return
+    for note in data["notes"]:
+        # The load-time venue warnings were captured (and reached JSON) but
+        # never printed in text mode.
+        print(f"note:    {note}")
     print(f"root:    {ctx.root}")
     print(f"venue:   {venue_id_of(ctx)}" + (f" (\"{prof.label}\", {prof.describe_origin()})"
                                             if prof else "  -- UNRESOLVED"))
@@ -997,6 +1032,7 @@ def cmd_set_venue(args) -> None:
         return
     venue_arg = str(getattr(args, "venue", None) or "").strip()
     profile_file = str(getattr(args, "profile", None) or "").strip()
+    article_arg = str(getattr(args, "article_type", None) or "").strip().lower()
     show = bool(getattr(args, "show", False))
     if show and not venue_arg:
         ctx = Ctx(_venue_command_root(args, "set-venue"),
@@ -1010,17 +1046,22 @@ def cmd_set_venue(args) -> None:
     ctx = Ctx(_venue_command_root(args, "set-venue"),
               strict_venue=bool(getattr(args, "strict_venue", False)))
     ctx.load()
-    begin_run_log("set-venue", ctx.root, sys.argv)
     if not venue_arg:
         if getattr(args, "journal", None) is not None:
-            # `set-venue --journal NAME` (no venue id) changes only the journal:
-            # the same operation as `set-journal NAME`, so the documented
-            # one-liner works instead of dying on a missing positional.
+            # `set-venue --journal NAME` (no venue id) is the documented
+            # `set-journal NAME` one-liner. It cannot honour the venue-scoped
+            # options, so refuse them rather than silently dropping them; the
+            # delegated command opens its own run log (no second log here).
+            if article_arg or profile_file:
+                die("`set-venue --journal NAME` (without a venue id) changes only the "
+                    "journal; pass the venue id to apply --article-type/--profile.",
+                    code=2)
             return cmd_set_journal(args)
         die("set-venue needs a venue id, e.g. `set-venue generic` "
             "(see `set-venue --list`), or `set-venue --show` to print the current one.\n"
             "       To install a profile of your own: `set-venue <id> --profile FILE`.",
             code=2)
+    begin_run_log("set-venue", ctx.root, sys.argv)
     if not VENUE_ID_RE.match(venue_arg.lower()):
         die(f"invalid venue id {venue_arg!r}: letters, digits, '.', '_', '+', '-' only", code=2)
     venue_arg = venue_arg.lower()
@@ -1299,6 +1340,16 @@ def cmd_set_journal(args) -> None:
     begin_run_log("set-journal", ctx.root, sys.argv)
     journal = _validate_journal_name(name)
     profile = venue_profile_of(ctx, required=False)
+    mismatch = None
+    if profile is not None and not profile.journal_matches(journal):
+        mismatch = (f"{journal!r} is not one of the journals venue profile {profile.id!r} "
+                    f"describes ({', '.join(profile.known_journals())}); the venue's rules "
+                    f"still apply. Use `set-venue <id>` for another rule set.")
+        if getattr(args, "strict_venue", False):
+            # `setup --strict-venue` refuses exactly this mismatch BEFORE it
+            # writes anything. Refusing after the write left the mismatched
+            # journal in the config even though the command exited non-zero.
+            die("--strict-venue: " + mismatch)
     if ctx.state.get("runs") and not getattr(args, "force", False):
         die(f"this root already has {len(ctx.state['runs'])} run record(s): every prompt names "
             f"the journal it was written for.\n"
@@ -1311,12 +1362,8 @@ def cmd_set_journal(args) -> None:
         ctx.log("set-journal", detail=journal)
         ctx.save_state()
     print(f"[set-journal] journal: {journal} (venue {venue_id_of(ctx)})")
-    if profile is not None and not profile.journal_matches(journal):
-        print(f"[set-journal] warning: {journal!r} is not one of the journals venue profile "
-              f"{profile.id!r} describes ({', '.join(profile.known_journals())}); the venue's "
-              f"rules still apply. Use `set-venue <id>` for another rule set." + (
-                  "" if not getattr(args, "strict_venue", False) else
-                  " (--strict-venue requested: re-run with the flag to make this an error.)"))
+    if mismatch:
+        print(f"[set-journal] warning: {mismatch}")
 
 
 ADD_VENUE_PROMPT = """\
@@ -1750,7 +1797,7 @@ def _ensure_template_stage_for_run(ctx: Ctx, args) -> None:
     cmd = resolve_agent_cmd(agent, getattr(args, "agent_cmd", None))
     rec = {"id": TEMPLATE_REWRITE_DIRNAME, "kind": "template-rewrite", "status": "running",
            "sandbox": str(sb), "round": 0}
-    timeout = int(getattr(args, "timeout", DEFAULTS.get("timeout", 14400)) or 14400)
+    timeout = _timeout_seconds(args, DEFAULTS.get("timeout", 14400))
     res = _execute_attempt_in(sb, rec, cmd, timeout)
     print(f"[run] template-first stage: agent {agent} rc={res.get('rc')} in "
           f"{res.get('dur', 0):.0f}s (log: {res.get('log')})")
@@ -1898,7 +1945,7 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
     rec = {"id": TEMPLATE_REWRITE_DIRNAME, "kind": "template-rewrite", "status": "running",
            "sandbox": str(sb), "round": 0}
     res = _execute_attempt_in(sb, rec, cmd,
-                              int(getattr(args, "timeout", DEFAULTS.get("timeout", 14400)) or 14400))
+                              _timeout_seconds(args, DEFAULTS.get("timeout", 14400)))
     print(f"[conform] agent: {agent} rc={res.get('rc')} in {res.get('dur', 0):.0f}s "
           f"(log: {res.get('log')})")
     if res.get("error"):
@@ -2036,7 +2083,8 @@ def cmd_add_venue(args) -> None:
     if not VENUE_ID_RE.match(vid or ""):
         die(f"add-venue needs a slug venue id (letters, digits, '.', '_', '+', '-'): "
             f"got {vid!r}", code=2)
-    dest = Path(getattr(args, "profiles_dir", None) or venue_profiles_write_dir()).resolve()
+    dest = Path(getattr(args, "profiles_dir", None)
+                or venue_profiles_write_dir(getattr(args, "root", None))).resolve()
     dest.mkdir(parents=True, exist_ok=True)
     print(f"[add-venue] venue: {vid}")
     print(f"[add-venue] store: {dest}")
@@ -2072,7 +2120,7 @@ def cmd_add_venue(args) -> None:
         cmd = resolve_agent_cmd(agent, getattr(args, "agent_cmd", None))
         rec = {"id": f"add-venue_{vid}", "kind": "add-venue", "status": "running",
                "sandbox": str(sb), "round": 0}
-        res = _execute_attempt_in(sb, rec, cmd, int(getattr(args, "timeout", 3600) or 3600))
+        res = _execute_attempt_in(sb, rec, cmd, _timeout_seconds(args, 3600))
         print(f"[add-venue] agent rc={res.get('rc')} in {res.get('dur', 0):.0f}s "
               f"(log: {res.get('log')})")
         if res.get("error"):

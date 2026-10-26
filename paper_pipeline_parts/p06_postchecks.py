@@ -1772,7 +1772,7 @@ def check_visual_artifact(path: Path, label: str, errs: list, warns: list,
                     if name and name not in text:
                         missing.append(name)
                     elif pages and not re.search(
-                            rf"\b{re.escape(pages)}\s*page\b", text, re.I):
+                            rf"\b{re.escape(pages)}[\s-]+pages?\b", text, re.I):
                         missing.append(f"{name} ({pages} page(s))")
                 if "template" not in text:
                     missing.append("a template-comparison section")
@@ -3363,7 +3363,20 @@ def _entries_in(area: Path, base: Path) -> dict:
         files = _iter_tree_files(area, follow_dir_links=True)
     except OSError:
         return out                      # an unreadable tree is reported by the caller
+    # The walk follows DIRECTORY symlinks (a sandbox links its evidence areas),
+    # but a nested link may point outside the area. Its lexical path still
+    # looks local, so `copyfile`/`unlink` below would write through it. Only
+    # files whose real path stays inside the area are part of the evidence.
+    try:
+        area_real = area.resolve()
+    except OSError:
+        return out
     for p in files:
+        try:
+            if not p.resolve().is_relative_to(area_real):
+                continue
+        except (OSError, RuntimeError):
+            continue
         rel = p.relative_to(base).as_posix()
         try:
             out[rel] = (rel, sha256_file(p))
@@ -3550,9 +3563,15 @@ def feedback_area_entries(dirp: Path, area_name: str) -> dict:
         return out
     try:
         files = _iter_tree_files(area, follow_dir_links=True)
+        area_real = area.resolve()
     except OSError:
         return out
     for p in files:
+        try:
+            if not p.resolve().is_relative_to(area_real):
+                continue
+        except (OSError, RuntimeError):
+            continue
         rel = p.relative_to(Path(dirp)).as_posix()
         try:
             out[rel] = sha256_file(p)
@@ -5208,7 +5227,13 @@ def repair_missing_deliverable(ctx: Ctx, rec: dict, problems: list) -> str:
     for err in problems:
         if not REPAIR_MISSING_RE.search(str(err)):
             continue
-        cands = REPAIR_FILE_RE.findall(str(err))
+        # The missing-marker message ends by telling the operator to write the
+        # marker "next to PROMPT.md". The prompt is seeded into every sandbox,
+        # so treating it as a deliverable made `any(...is_file())` true and the
+        # genuinely absent marker was never reported (and the doomed scoped
+        # repair was scheduled instead of the resume path).
+        cands = [c for c in REPAIR_FILE_RE.findall(str(err))
+                 if Path(c).name not in ("PROMPT.md", REPAIR_PROMPT_FILE)]
         if not cands:
             # a content-level "… is missing" (a marker FIELD, say): the file
             # itself exists, so its content stays the repair's business

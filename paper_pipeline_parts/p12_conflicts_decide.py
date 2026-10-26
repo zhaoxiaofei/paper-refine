@@ -5243,8 +5243,7 @@ AI_NONUSE_SCOPE_RE = re.compile(
     # `without AI assistance` directly followed by WHAT the assistance was not
     # used for ("... for the figures", ": the figures", "in the figures").
     r"|\b(?:figures?|tables?|panels?|plots?|images?|statistical\s+analysis)\b"
-    r"[^.;\n]{0,24}\b(?:were|was|are|is)\b"
-    r"|\b(?:generated|prepared|produced|made|created)\s+without\b")
+    r"[^.;\n]{0,24}\b(?:were|was|are|is)\b")
 # An ARTIFACT-scoped denial: the AI was not used for one DRAFT/VERSION of the
 # work ("the initial draft was prepared without generative AI", "an earlier
 # version ... hand-written"). The naive reading took any denial as a claim

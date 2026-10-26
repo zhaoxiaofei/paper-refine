@@ -96,7 +96,8 @@ ROLE_PATTERNS = [
 COVER_LETTER_ROLE_RE = re.compile(
     r"(?:(?<![A-Za-z])|(?<=[a-z])(?=[A-Z]))"
     r"(?:[Cc]over|COVER|(?i:coverletter|plainletter))(?![a-z])"
-    r"|(?i:letter_to_editor|tocover)")
+    r"|(?i:(?<![a-z])letter[_\-. ]+to[_\-. ]+editor(?![a-z]))"
+    r"|(?i:(?<![a-z])tocover(?![a-z]))")
 
 RAW_DATA_DIRNAMES = ("raw_data",)
 HUMAN_FEEDBACK_DIR = "human_review_feedback"
@@ -110,8 +111,17 @@ EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR)
 # readable evidence -- the documented off-switch for `llm_review_feedback/`.
 DISABLED_EVIDENCE_SUFFIXES = ("disabled", "off")
 EVIDENCE_DIRNAME = "evidence"
-FEEDBACK_NAME_RE = re.compile(r"feedback|referee|reviewers?|editors?|editorial|decision", re.I)
-REPLY_NAME_RE = re.compile(r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
+FEEDBACK_NAME_RE = re.compile(
+    r"(?<![a-z])(?:feedbacks?(?:[-_ ]?(?:form|report|letter|comments?|summary|"
+    r"to[-_ ]?authors))*|"
+    r"(?:referees?|reviewers?)(?:[-_ ]?(?:comments?|reports?|critiques?|forms?))*|"
+    r"(?<![a-z_])editors?(?:[-_ ]?(?:comments?|decisions?|reports?|letters?))*|"
+    r"editorial|(?<![a-z_])decision(?:[-_ ]?(?:letter|notice|email)))(?![a-z])",
+    re.I)
+REPLY_NAME_RE = re.compile(
+    r"(?<![a-z_])(?:responses?|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)"
+    r"(?![a-z])"
+    r"|(?i:(?:author|reviewer|referee|editor)[_-]+(?:responses?|repl(?:y|ies)))")
 
 
 def guess_role(rel_path: str) -> str:
@@ -424,7 +434,13 @@ def xlsx_to_text(path: str) -> tuple:
 # ------------------------------------------------------------------- generic
 
 def plain_copy(path: str) -> tuple:
-    raw = open(path, "rb").read()
+    try:
+        raw = open(path, "rb").read()
+    except OSError as e:
+        # Every other converter records a failed conversion; this path (all
+        # .md/.txt/.tex/.bib/.csv sources) used to propagate the error out of
+        # main() before any inventory or corpus was written.
+        return "", ["unreadable — %s" % e]
     # A BOM is authoritative: Word/Notepad exports a .txt as UTF-16 on Windows,
     # and reading it as UTF-8 "succeeded" with NUL-separated mojibake that then
     # fed the corpus sweeps as if it were text. The UTF-8 BOM matters too: left

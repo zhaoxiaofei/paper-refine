@@ -349,7 +349,9 @@ review-audit-revise-and-judge round 3 (full review, no rewrite, no integration)
     ./paper_rounds/final/                with --package-winner
 
 integrity verification and --skip-hash:
-  every command accepts --skip-hash. It skips the integrity VERIFICATION
+  every root-verifying command (status/run/decide/...; `selfcheck` and
+  `adopt-sweep` are not root-verifying and do not accept it) accepts
+  --skip-hash. It skips the integrity VERIFICATION
   passes for THIS invocation -- the pristine copy, the pinned champions, the
   published winners, every completed run's frozen inputs, the judge-view
   digests and the a1 base digest -- which are usually the bulk of a big root's

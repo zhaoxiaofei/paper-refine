@@ -222,43 +222,43 @@ def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
                        "sha256": digest, "ok": bool(res.get("ok")), "tool": res.get("tool"),
                        "pages": res.get("pages") or 0, "error": res.get("error")}
             docs.append(rec)
-        for f in list_track_files(sources, exts=(".docx",)):
-            if f["rel"].split("/", 1)[0] == CODE_DIR:
-                continue
-            docx = f["path"]
-            rel = f["rel"]
-            out_dir = out_root / Path(rel).parent
-            out_pdf = _docx_pdf_target(out_dir, docx.stem, latex_targets,
-                                       docx_defaults, chosen)
-            chosen.add(out_pdf.resolve())
-            rec = _reuse_pdf_record(previous, label, rel, f["digest"], out_pdf, "docx")
-            if rec is None:
-                if out_pdf.name == docx.stem + ".pdf":
-                    res = convert_docx_to_pdf_persistent(docx, out_dir)
-                else:
-                    # The renderer always writes `<out_dir>/<stem>.pdf`, so give
-                    # the colliding DOCX its own directory and move the result
-                    # to the distinct name; the LaTeX render is never touched.
-                    # `out_dir` exists only when the LaTeX compile above
-                    # succeeded (or the caller pre-created it), so create it
-                    # before mkdtemp: a failed LaTeX render must still leave the
-                    # DOCX attempt recorded, never raise out of render_pdf_set.
-                    out_dir.mkdir(parents=True, exist_ok=True)
-                    _tmp = Path(tempfile.mkdtemp(prefix=".docx-pdf-", dir=str(out_dir)))
-                    try:
-                        res = convert_docx_to_pdf_persistent(docx, _tmp)
-                        _made = _tmp / (docx.stem + ".pdf")
-                        if res.get("ok") and _made.is_file():
-                            out_dir.mkdir(parents=True, exist_ok=True)
-                            shutil.move(str(_made), str(out_pdf))
-                    finally:
-                        shutil.rmtree(_tmp, ignore_errors=True)
-                rec = {"rel": rel, "kind": "docx",
-                       "out": out_pdf.relative_to(ctx.root).as_posix(),
-                       "sha256": f["digest"], "ok": bool(res.get("ok")),
-                       "tool": res.get("tool"), "pages": res.get("pages") or 0,
-                       "error": res.get("error"), "fallbacks": res.get("fallbacks")}
-            docs.append(rec)
+    for f in list_track_files(sources, exts=(".docx",)):
+        if f["rel"].split("/", 1)[0] == CODE_DIR:
+            continue
+        docx = f["path"]
+        rel = f["rel"]
+        out_dir = out_root / Path(rel).parent
+        out_pdf = _docx_pdf_target(out_dir, docx.stem, latex_targets,
+                                   docx_defaults, chosen)
+        chosen.add(out_pdf.resolve())
+        rec = _reuse_pdf_record(previous, label, rel, f["digest"], out_pdf, "docx")
+        if rec is None:
+            if out_pdf.name == docx.stem + ".pdf":
+                res = convert_docx_to_pdf_persistent(docx, out_dir)
+            else:
+                # The renderer always writes `<out_dir>/<stem>.pdf`, so give
+                # the colliding DOCX its own directory and move the result
+                # to the distinct name; the LaTeX render is never touched.
+                # `out_dir` exists only when the LaTeX compile above
+                # succeeded (or the caller pre-created it), so create it
+                # before mkdtemp: a failed LaTeX render must still leave the
+                # DOCX attempt recorded, never raise out of render_pdf_set.
+                out_dir.mkdir(parents=True, exist_ok=True)
+                _tmp = Path(tempfile.mkdtemp(prefix=".docx-pdf-", dir=str(out_dir)))
+                try:
+                    res = convert_docx_to_pdf_persistent(docx, _tmp)
+                    _made = _tmp / (docx.stem + ".pdf")
+                    if res.get("ok") and _made.is_file():
+                        out_dir.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(_made), str(out_pdf))
+                finally:
+                    shutil.rmtree(_tmp, ignore_errors=True)
+            rec = {"rel": rel, "kind": "docx",
+                   "out": out_pdf.relative_to(ctx.root).as_posix(),
+                   "sha256": f["digest"], "ok": bool(res.get("ok")),
+                   "tool": res.get("tool"), "pages": res.get("pages") or 0,
+                   "error": res.get("error"), "fallbacks": res.get("fallbacks")}
+        docs.append(rec)
     return docs
 
 

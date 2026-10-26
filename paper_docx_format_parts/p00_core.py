@@ -425,6 +425,39 @@ def elem(frag: str | None, tag: str) -> str | None:
     return m.group(0) if m else None
 
 
+_CHILD_TAG_RE = re.compile(r"<(/?)([A-Za-z0-9:_.-]+)(?=[\s/>])([^>]*)>")
+
+
+def child_elem(frag: str | None, tag: str) -> str | None:
+    """The DIRECT child `<w:tag>` of `frag`, never a descendant.
+
+    `elem()` searches the whole fragment, so `elem(ppr, "spacing")` returned a
+    paragraph MARK's character spacing (`<w:pPr><w:rPr><w:spacing .../>`) as
+    if it were the paragraph's line spacing -- the scanner reported FMT-T2
+    rows that did not exist and the fixer wrote a paragraph-level element
+    inside `w:rPr`, which is invalid OOXML.
+    """
+    if not frag:
+        return None
+    depth = 0
+    start = None
+    for m in _CHILD_TAG_RE.finditer(frag):
+        closing, name, rest = m.group(1), m.group(2), m.group(3)
+        self_closing = bool(closing == "") and rest.rstrip().endswith("/")
+        if closing:
+            depth -= 1
+            if depth == 0 and start is not None and name.split(":")[-1] == tag:
+                return frag[start:m.end()]
+            continue
+        if depth == 1 and name.split(":")[-1] == tag:
+            if self_closing:
+                return m.group(0)
+            start = m.start()
+        if not self_closing:
+            depth += 1
+    return None
+
+
 def elem_val(frag: str | None, tag: str) -> str | None:
     el = elem(frag, tag)
     if el is None:
@@ -1054,8 +1087,10 @@ def _template_uses_even_odd(template: Path) -> bool:
     if "evenAndOddHeaders" in settings:
         return True
     sects = SECT_READ_RE.findall(doc)
-    return bool(re.search(r'<w:(?:header|footer)Reference w:type="even"',
-                          sects[-1] if sects else ""))
+    # Every section, not only the last, and any attribute order: Word writes
+    # `w:type` before or after `r:id` depending on the producer.
+    return any(re.search(r'<w:(?:header|footer)Reference\b[^>]*\bw:type="even"', sect)
+               for sect in sects)
 
 
 def docx_front_matter_report(path: Path, template: Path = None, containers=()) -> dict:

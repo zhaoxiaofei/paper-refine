@@ -161,6 +161,7 @@ FOREIGN_GUARD_COMMANDS = (
     "set-venue", "set-journal", "set-article-type", "set-revision-mode",
     "set-submit-code", "set-author-to-complete", "set-placeholder-file",
     "set-tiebreak-defect-floor", "set-dedup-mode", "set-probe-review",
+    "set-champion-select",
 )
 # The path of the invocation's run log (set by `main`, recorded by
 # `save_state`): a root accumulates the console of its invocations, so the
@@ -1860,10 +1861,11 @@ LENGTH_MAIN_START_RE = re.compile(
     re.I)
 LENGTH_SECTION_BOUND_RE = re.compile(
     r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:abstract|summary|keywords?|introduction|background|"
-    r"results?|discussion|conclusions?|materials and methods|online methods?|methods?|"
+    r"results?|discussion|conclusions?|materials (?:and|&) methods|online methods?|methods?|"
     r"star methods|experimental procedures|"
-    r"references?|bibliography|figure legends?|acknowledg\w*|author contributions?|"
-    r"data availability|competing interests?|conflict of interest|funding|"
+    r"references?|bibliography|(?:literature|works) cited|figure legends?|acknowledg\w*|"
+    r"author contributions?|"
+    r"(?:data|code) availability|competing interests?|conflicts? of interest|funding|"
     r"supplementary (?:information|materials?|methods|figures|tables|notes?))"
     r"\s*[:.\u2014\u2013-]?\s*$", re.I)
 # The SAME boundary headings, classified by the section kind that a profile's
@@ -1873,10 +1875,11 @@ LENGTH_SECTION_BOUND_RE = re.compile(
 # when the venue counts them.
 LENGTH_SECTION_KIND_RES = (
     ("methods", re.compile(
-        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:materials and methods|online methods?|methods?|"
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:materials (?:and|&) methods|online methods?|methods?|"
         r"star methods|experimental procedures)\s*(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
     ("references", re.compile(
-        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:references?|bibliography)\s*"
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:references?|bibliography|"
+        r"(?:literature|works) cited)\s*"
         r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
     ("figure-legends", re.compile(
         r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?figure legends?\s*"
@@ -1888,10 +1891,10 @@ LENGTH_SECTION_KIND_RES = (
         r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?author contributions?\s*"
         r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
     ("data-availability", re.compile(
-        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?data availability\s*"
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:data|code) availability\s*"
         r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
     ("competing-interests", re.compile(
-        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:competing interests?|conflict of interest)\s*"
+        r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:competing interests?|conflicts? of interest)\s*"
         r"(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
     ("funding", re.compile(
         r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?funding\s*(?:[:.\u2014\u2013-]\s*|\s*$)", re.I)),
@@ -2045,7 +2048,16 @@ def text_source_paragraphs(path: Path) -> list:
         raw = re.sub(r"\\(?:section|subsection|subsubsection|paragraph|chapter)\*?"
                      r"\s*\{[^{}]*\}", "\n\n", raw)
         raw = raw.replace("~", " ")          # LaTeX non-breaking space
-        raw = _strip_latex(raw)
+        # `_strip_latex` collapses ALL whitespace, including the blank lines
+        # the paragraph split depends on. Split first, then strip each chunk:
+        # the reverse order merged a whole .tex source into one paragraph and
+        # made every per-paragraph ledger see one row per file.
+        paras = []
+        for chunk in re.split(r"\n\s*\n", raw):
+            text = re.sub(r"\s+", " ", _strip_latex(chunk)).strip()
+            if text:
+                paras.append(text)
+        return paras
     paras = [re.sub(r"\s+", " ", x).strip() for x in re.split(r"\n\s*\n", raw)]
     return [p for p in paras if p]
 
@@ -3515,6 +3527,10 @@ def normalize_formatting_in_dir(dirp: Path, policy: dict, label: str,
         elif rep.get("error"):
             failed.append(rep)
     info_after = scan_format_in_sources([(dirp, "", ())], policy=policy)
+    # `name` was assigned only inside the artifacts branch below, but the
+    # caller-facing warning used it too: artifacts_dir=None + a non-empty warns
+    # list raised NameError while reporting a successful fix.
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "_", label) or "format"
     summary = {
         "label": label,
         "directory": str(dirp),
@@ -3535,7 +3551,6 @@ def normalize_formatting_in_dir(dirp: Path, policy: dict, label: str,
     }
     if artifacts_dir is not None:
         artifacts_dir.mkdir(parents=True, exist_ok=True)
-        name = re.sub(r"[^A-Za-z0-9_.-]+", "_", label) or "format"
         write_json_atomic(artifacts_dir / f"FORMAT_FIX_{name}.json", summary)
     if warns is not None and (applied or failed):
         msg = (f"FORMAT-FIX: {len(applied)} document(s) normalized "
@@ -6088,7 +6103,10 @@ def _lookup_batch(ctx: Ctx, targets: list, label: str) -> list:
             continue
         key = f"{str(t.get('kind') or '').strip().lower()}|{str(t.get('query') or '').strip()}"
         cached = cache.get(key)
-        if isinstance(cached, dict) and _lookup_cache_fresh(cached):
+        # A transient network/API error is not a fact about the identifier;
+        # serving it for the 14-day TTL made one failed lookup permanent.
+        if isinstance(cached, dict) and _lookup_cache_fresh(cached) \
+                and cached.get("verdict") != "error":
             row.update({"verdict": cached.get("verdict") or "error",
                         "hits": cached.get("hits") or [],
                         "errors": cached.get("errors") or [],
@@ -6104,7 +6122,8 @@ def _lookup_batch(ctx: Ctx, targets: list, label: str) -> list:
                     "hits": res.get("hits") or [],
                     "errors": res.get("errors") or [],
                     "checked_at": res.get("checked_at") or utcnow()})
-        cache[key] = {k: row.get(k) for k in ("verdict", "hits", "errors", "checked_at")}
+        if row.get("verdict") != "error":
+            cache[key] = {k: row.get(k) for k in ("verdict", "hits", "errors", "checked_at")}
         cache_dirty = True
         out.append(row)
     if cache_dirty:

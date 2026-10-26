@@ -1181,7 +1181,18 @@ def load_venue_profile(venue_id, root=None) -> VenueProfile:
     for d in venue_profile_search_dirs(root):
         path = Path(d) / f"{vid}{VENUE_PROFILE_SUFFIX}"
         if not path.is_file():
-            continue
+            # The listing lowercases the stem, so a file saved as `Nature.json`
+            # was listed under `nature` but could never resolve on a
+            # case-sensitive filesystem. Accept the unique case-insensitive
+            # spelling of the id.
+            try:
+                matches = [p for p in Path(d).glob(f"*{VENUE_PROFILE_SUFFIX}")
+                           if p.stem.lower() == vid]
+            except OSError:
+                matches = []
+            if len(matches) != 1:
+                continue
+            path = matches[0]
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
