@@ -618,7 +618,7 @@ def champion_sort_key(row: dict) -> tuple:
     """defect census at the adaptive prefix -> median -> mean -> IQR -> digest.
 
     The adaptive-prefix census LEADS the key: the per-cell counts, ordered
-    fatal, critical, major, minor within each tier, preserve the severity and
+    fatal, critical, major, minor, then by tier, preserve the severity and
     tier of every defect. The cumulative count alone would tie a fatal defect
     with a minor one; the census does not. The panel's median/mean/IQR and the
     digest are the tie-breaks below it. A difference in the leading term is not
