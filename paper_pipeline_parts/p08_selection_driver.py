@@ -615,15 +615,20 @@ def champion_issue_summary(vid, agg) -> dict:
 
 
 def champion_sort_key(row: dict) -> tuple:
-    """cumulative defect count at the adaptive prefix -> median -> mean -> IQR -> digest.
+    """defect census at the adaptive prefix -> median -> mean -> IQR -> digest.
 
-    The defect prefix LEADS the key: the number of defects the panel attributed
-    to a version is the most direct improvement signal, and the medians of a
-    small panel are coarse. The panel's median/mean/IQR and the digest are the
-    tie-breaks below it. A difference in the leading term is not a tie.
+    The adaptive-prefix census LEADS the key: the per-cell counts, ordered
+    fatal, critical, major, minor within each tier, preserve the severity and
+    tier of every defect. The cumulative count alone would tie a fatal defect
+    with a minor one; the census does not. The panel's median/mean/IQR and the
+    digest are the tie-breaks below it. A difference in the leading term is not
+    a tie.
     """
+    census = row.get("defect_prefix_census")
+    if census is None:
+        census = (int(row.get("defect_prefix_total") or 0),)
     med, mean, iqr = row.get("median"), row.get("mean"), row.get("iqr")
-    return ((int(row.get("defect_prefix_total") or 0),)
+    return (tuple(int(x) for x in census)
             + (-(med if med is not None else -99.0),)
             + (-(mean if mean is not None else -99.0),
                (iqr if iqr is not None else 99.0),
@@ -806,6 +811,10 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
     for t in rows:
         t["defect_prefix_total"] = (cumulative[str(t["rep"])][prefix_cells - 1]
                                     if prefix_cells else 0)
+        # The leading key is the ordered census at the same prefix, not just
+        # its length: the per-cell counts preserve the defect's tier/severity.
+        t["defect_prefix_census"] = tuple(
+            int(x) for x in (_matrix.get(str(t["rep"])) or [])[:prefix_cells])
         t["tiebreak_prefix_cells"] = prefix_cells
     # Ranking key, in order (2026-10-01, fourth calibration), with each
     # component's provenance:
