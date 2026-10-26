@@ -2806,6 +2806,21 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
                 shutil.copy2(prior / name, sb / "prior_round" / name)
     if (sb / "prior_round").is_dir():
         inputs["prior_round"] = hash_manifest(sb / "prior_round")
+    # The previous round's auditor leaves unresolved observations for the next
+    # review (AGENTS.md rule 1/8). Carry them as a separate, read-only input so
+    # the review can file the real ones without touching the prior-round
+    # finding list.
+    prior_audit_dir = sb / "prior_audit"
+    if prior_audit_dir.exists():
+        rmtree_force(prior_audit_dir, ignore_errors=True)
+    if r > 1:
+        audit_rec = ctx.run(rid_audit(r - 1))
+        if audit_rec is not None:
+            audit_obs = ctx.sandbox_of(audit_rec) / "audit" / "UNRESOLVED.md"
+            if audit_obs.is_file():
+                prior_audit_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(audit_obs, prior_audit_dir / "UNRESOLVED.md")
+                inputs["prior_audit"] = hash_manifest(prior_audit_dir)
     split_mode = review_split_of(ctx)
     if part == "b" and split_mode != "off":
         # The second session's scope is complementary; it does NOT merge (the
@@ -2832,6 +2847,7 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
                                                caption_limit=caption_limit_of(ctx),
                                                zotero=zotero_mode_of(ctx),
                                                prior_round=(sb / "prior_round").is_dir(),
+                                               prior_audit=(sb / "prior_audit").is_dir(),
                                                prior_failure=note,
                                                author_to_complete=author_to_complete_mode_of(ctx),
                                                journal_block=(journal_review_block(ctx, sb)
@@ -4286,6 +4302,20 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
                         if (prior / name).is_file()}
             if expected and hash_manifest(sb / "prior_round").get("files") != expected:
                 probs.append("prior_round/ no longer matches the archived prior review")
+        prior_audit_obs = None
+        if r > 1:
+            audit_rec = ctx.run(rid_audit(r - 1))
+            if audit_rec is not None:
+                cand = ctx.sandbox_of(audit_rec) / "audit" / "UNRESOLVED.md"
+                if cand.is_file():
+                    prior_audit_obs = cand
+        prior_audit_copy = sb / "prior_audit" / "UNRESOLVED.md"
+        if prior_audit_obs is not None:
+            if (not prior_audit_copy.is_file()
+                    or sha256_file(prior_audit_copy) != sha256_file(prior_audit_obs)):
+                probs.append("prior_audit/UNRESOLVED.md no longer matches the prior audit")
+        elif (sb / "prior_audit").is_dir():
+            probs.append("prior_audit/ is present but the prior audit no longer has observations")
         # Session B's frozen input is session A's review/ OUTPUT. Retrying A
         # changes it, but B's own review_a/ still matches the manifest B recorded
         # when it was built, so the old checks above never saw the drift. Compare

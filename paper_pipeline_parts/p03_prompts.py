@@ -2498,10 +2498,25 @@ ZOTERO_LEDGER_REVISED = "revised/work/ZOTERO_LIBRARY.md"
 ZOTERO_LEDGER_INTEGRATED = "integrated/work/ZOTERO_LIBRARY.md"
 
 
+PRIOR_AUDIT_RULE = """PRIOR-AUDIT OBSERVATIONS (read-only):
+  * `prior_audit/UNRESOLVED.md` is the previous round auditor's unresolved-observations record:
+    one line per observation, with its location and re-runnable evidence. It is NOT a scored
+    finding, it is not in `prior_round/findings.json`, and no reviser has acted on it.
+  * Read it before your sweeps. For each observation, check the cited location in the current
+    base/ corpus and give it exactly one disposition visible in your review artifacts:
+      - STILL A REAL DEFECT -> file it as a normal finding on this round's scale (rule 8), with
+        the observation's evidence and a note "from prior audit observation";
+      - NOT REPRODUCIBLE (fixed, or the quoted text/location is gone) -> record
+        "prior audit observation: not reproducible in base/" in the summary note of
+        findings.md.
+    Do not skip an observation because the auditor did not classify it; do not file it as a
+    finding without re-checking the evidence."""
+
+
 def review_prompt(sandbox: Path, run_id: str, r: int,
                   caption_limit: int = DEFAULT_CAPTION_LIMIT,
                   zotero: str = DEFAULT_ZOTERO_MODE,
-                  prior_round: bool = False, prior_failure: str = "",
+                  prior_round: bool = False, prior_audit: bool = False, prior_failure: str = "",
                   split: str = None, split_mode: str = "phases",
                   scope: str = "full", venue=None, journal_block: str = "",
                   venue_norm: str = "", author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE) -> str:
@@ -2509,6 +2524,8 @@ def review_prompt(sandbox: Path, run_id: str, r: int,
     prof = _as_profile(venue)
     prior = (PRIOR_ROUND_RULE.replace("@@ROUND@@", str(int(r)))
              .replace("@@PREV@@", str(int(r) - 1))) if prior_round else PRIOR_ROUND_RULE_NONE
+    if prior_audit:
+        prior += "\n\n" + PRIOR_AUDIT_RULE
     split_block = ""
     if split:
         scopes = REVIEW_SPLIT_SCOPES.get(split_mode, REVIEW_SPLIT_SCOPES["phases"])
