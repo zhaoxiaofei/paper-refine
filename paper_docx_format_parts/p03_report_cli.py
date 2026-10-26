@@ -796,30 +796,86 @@ def insert_into_ppr(para: str, element: str, after=("pStyle", "keepNext", "keepL
 
 
 def _unlink_fields(xml: str) -> tuple:
-    """Drop fldChar/instrText runs; keep field RESULT runs (Zotero unlinking)."""
-    # A `w:fldSimple` is a live field too, but it carries no fldChar/instrText
-    # runs: the old loop left the element (and therefore the field) in place.
-    # Removing only its tags keeps the RESULT runs as plain text.
-    simple_opens = re.findall(r"<w:fldSimple\b[^>]*>", xml)
-    if simple_opens:
-        xml = re.sub(r"<w:fldSimple\b[^>]*/>|<w:fldSimple\b[^>]*>|</w:fldSimple>", "", xml)
-    edits, depth, removed = [], 0, len(simple_opens)
-    for m in RUN_RE.finditer(xml):
-        run = m.group(0)
-        fld = FIELD_CHAR_RE.search(run)
-        is_instr = bool(INSTR_RE.search(run))
-        if fld:
-            kind = fld.group(1)
-            if kind == "begin":
-                depth += 1
-            elif kind == "end":
-                depth = max(0, depth - 1)
-            edits.append((m.start(), m.end(), ""))
-            removed += 1
-        elif is_instr and depth > 0:
-            edits.append((m.start(), m.end(), ""))
+    """Flatten ONLY Zotero fields; keep their RESULT runs as plain text.
+
+    A PAGE/SEQ/REF/TOC field is not a Zotero citation: the old walk removed
+    every fldChar begin/end and every instrText in any field, so
+    `--unlink-zotero-fields` also destroyed page numbers and cross-references.
+    `zotero_field_report()` already identifies the Zotero item/bibliography
+    fields (complex fldChar and `w:fldSimple` alike), so flatten exactly those
+    spans and leave every other field byte-identical.
+    """
+    report = zotero_field_report(xml)
+    edits, removed = [], 0
+    for f in report.get("fields") or []:
+        if f.get("kind") not in ("item", "bibliography"):
+            continue                       # PAGE/SEQ/REF/TOC and other live fields stay
+        s, e = f.get("begin"), f.get("end")
+        if not isinstance(s, int) or not isinstance(e, int) or e <= s:
+            continue
+        chunk = xml[s:e]
+        field_edits = []
+        for m in RUN_RE.finditer(chunk):
+            run = m.group(0)
+            if FIELD_CHAR_RE.search(run) or INSTR_RE.search(run):
+                field_edits.append((s + m.start(), s + m.end(), ""))
+        # `w:fldSimple` carries no fldChar/instrText runs: remove only its
+        # tags, so the result runs stay as plain text.
+        for m in re.finditer(r"<w:fldSimple\b[^>]*/>|<w:fldSimple\b[^>]*>|"
+                             r"</w:fldSimple>", chunk):
+            field_edits.append((s + m.start(), s + m.end(), ""))
+        if field_edits:
+            edits.extend(field_edits)
             removed += 1
     return apply_edits(xml, edits), removed
+
+
+def _romanize_continuation_run(run: str) -> str | None:
+    """Split a run-on journal emphasis so only the journal titles stay italic.
+
+    `journal_emphasis_runs` reports the WHOLE run as the continuation when the
+    title and the ordinary prose that wrongly continues it share one run.
+    Turning that whole run roman de-italicized the title too, and the post-scan
+    could not report it any more (the now-roman run is no longer `_title_only`).
+    Split at every journal-title boundary instead and de-emphasize only the
+    prose. `None` means the run cannot be split without dropping a non-text
+    child (a field, drawing or break); the caller then leaves the row to the
+    report instead of corrupting the run.
+    """
+    text = text_of(run)
+    # The same URL mask the analysis uses: a journal-like word inside a URL is
+    # not a title, and masking preserves the character offsets used below.
+    probe = URL_RE.sub(lambda m: " " * len(m.group(0)), text)
+    spans, pos = [], 0
+    for name in journal_matches(probe):
+        at = probe.find(name, pos)
+        if at < 0:
+            return None
+        spans.append((at, at + len(name)))
+        pos = at + len(name)
+    if not spans:
+        return _emphasis_run(run, False)
+    remaining, base, out = run, 0, []
+    for start, end in spans:
+        if start > base:
+            pieces = split_run_text_span(remaining, 0, start - base)
+            if pieces is None:
+                return None
+            head, middle, remaining = pieces
+            if head:
+                out.append(head)
+            out.append(_emphasis_run(middle, False))
+        pieces = split_run_text_span(remaining, 0, end - start)
+        if pieces is None:
+            return None
+        head, middle, remaining = pieces
+        if head:
+            out.append(head)
+        out.append(_emphasis_run(middle, True))
+        base = end
+    if remaining:
+        out.append(_emphasis_run(remaining, False))
+    return "".join(out)
 
 
 def fix_document(xml: str, styles: dict, policy: dict,
@@ -1117,12 +1173,14 @@ def fix_document(xml: str, styles: dict, policy: dict,
                 or (region == "prose" and policy_j == "everywhere")
             analysis = journal_emphasis_runs(styles, style, para)
             targets = []                      # (r0, r1, run, desired italic)
+            continuations = []
             if want_italic:
                 targets += [(r0, r1, run, True)
                             for r0, r1, run, names in analysis["roman"]
                             if all(_title_only(text_of(run), n) for n in names)]
-                targets += [(r0, r1, run, False)
-                            for r0, r1, run, _extra, _name in analysis["continuation"]]
+                # A continuation may share its run with the title itself. Whole-run
+                # de-emphasis made the title roman too; split those runs below.
+                continuations = analysis["continuation"]
             else:
                 targets += [(r0, r1, run, False)
                             for r0, r1, run, _names in analysis["italic"]]
@@ -1156,6 +1214,17 @@ def fix_document(xml: str, styles: dict, policy: dict,
                 if new_run != run:
                     edits.append((p0 + r0, p0 + r1, new_run))
                     flipped += 1
+            for r0, r1, run, _extra, _name in continuations:
+                if (r0, r1) in seen_spans:
+                    continue
+                seen_spans.add((r0, r1))
+                if in_field(franges, p0 + r0):
+                    continue                  # field-protected: reported, never silently edited
+                new_run = _romanize_continuation_run(run)
+                if new_run is None or new_run == run:
+                    continue
+                edits.append((p0 + r0, p0 + r1, new_run))
+                flipped += 1
         if edits:
             xml = apply_edits(xml, edits)
             changes.append(f"normalized journal emphasis on {flipped} run(s) "
@@ -1386,8 +1455,11 @@ def fix_document(xml: str, styles: dict, policy: dict,
                 if not in_field_result(protected, m.end(1), m.end(2)):
                     spans.append((m.end(1), m.end(2), ""))
         if want_spell:
+            # Decide and edit on PROSE only: a URL/e-mail/code span keeps its
+            # own spelling (the shared mask keeps offsets aligned).
+            spell_text = spelling_nonprose_mask(text)
             for minority, majority in spell_target.items():
-                for m in re.finditer(rf"\b{re.escape(minority)}\b", text, re.I):
+                for m in re.finditer(rf"\b{re.escape(minority)}\b", spell_text, re.I):
                     if in_field_result(protected, m.start(), m.end()):
                         continue
                     _seen = m.group(0)
@@ -1603,6 +1675,21 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
         if _pf:
             changes.append(f"removed {len(_pf)} duplicate PAGE field paragraph(s) from "
                            f"{posixpath.basename(name)}")
+    if policy.get("unlink_zotero_fields"):
+        # `fix_document` sees only word/document.xml. A note-style manuscript
+        # keeps its Zotero citations in footnotes/endnotes (and a header/footer
+        # can carry a bibliography field): flatten every Zotero field part, not
+        # just the body, or the command claims a field-free copy that is not.
+        for _name in sorted(parts_new):
+            if not (_name in ZOTERO_FIELD_PARTS
+                    or ZOTERO_FIELD_AUX_PARTS_RE.search(_name)):
+                continue
+            _txt = parts_new[_name].decode("utf-8", "replace")
+            _new, _removed = _unlink_fields(_txt)
+            if _removed:
+                parts_new[_name] = _new.encode("utf-8")
+                changes.append(f"unlinked {_removed} Zotero field(s) in "
+                               f"{posixpath.basename(_name)}")
     try:
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
             for name, data in parts_new.items():
@@ -5092,10 +5179,23 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
         except OSError as exc:
             report["error"] = f"could not write the repaired copy: {exc}"
             return report
-        report["remaining"] = rows
+        # A no-change run must still VERIFY every rule the command owns: a
+        # referenced header/footer with duplicate PAGE fields is a manual
+        # FMT-S10 row, and returning only the table rows reported "verified"
+        # with that defect intact.
+        remaining_page = []
+        for name in names:
+            if not re.match(r"word/(?:header|footer)[A-Za-z0-9_\-]*\.xml$", name):
+                continue
+            if name not in referenced_aux:
+                continue
+            remaining_page += [r for r in page_field_rows(
+                [(name, data[name].decode("utf-8", "replace"))], out.name)
+                if r.get("rule") == "FMT-S10"]
+        report["remaining"] = list(rows) + remaining_page
         # `ok` is the command's verified-clean signal: a mechanical row the
         # repair could not fix (no edits produced) must not report success.
-        report["ok"] = not rows
+        report["ok"] = not report["remaining"]
         return report
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_suffix(out.suffix + ".tmp")

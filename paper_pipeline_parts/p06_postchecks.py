@@ -1541,6 +1541,42 @@ def _page_png_names(out_dir: Path, stem: str) -> list:
                    if p.is_file() and pat.match(p.name)), key=key)
 
 
+def _render_popen_kwargs() -> dict:
+    """Run the renderer in its own process group (timeout must kill the tree)."""
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    return {"start_new_session": True}
+
+
+def _kill_render_tree(proc) -> None:
+    """Kill a timed-out Word/LibreOffice renderer AND its grandchildren."""
+    if os.name == "nt":
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=30)
+    else:
+        with contextlib.suppress(OSError, ProcessLookupError, PermissionError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    with contextlib.suppress(OSError):
+        proc.kill()
+
+
+def _run_render_subprocess(argv, timeout, cwd=None):
+    """`subprocess.run` with a timeout that kills the renderer's whole tree."""
+    proc = subprocess.Popen(
+        [str(a) for a in argv], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace", cwd=cwd,
+        **_render_popen_kwargs())
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_render_tree(proc)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.communicate(timeout=30)          # reap; never leave a zombie
+        raise
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
 def render_docx_visual(docx: Path, out_dir: Path, renderer=None,
                        timeout: float = 900, page_images: bool = True) -> dict:
     """Render ONE DOCX to PDF + page PNGs under `out_dir`.
@@ -1588,15 +1624,16 @@ def render_docx_visual(docx: Path, out_dir: Path, renderer=None,
                 return {"ok": False, "renderer": name, "error": conv.get("error")}
             pdf = Path(conv["pdf"])
         elif name == "word":
-            proc = subprocess.run([str(exe), str(src)], capture_output=True,
-                                  timeout=timeout, cwd=str(tmp))
+            proc = _run_render_subprocess([str(exe), str(src)], timeout=timeout,
+                                          cwd=str(tmp))
             pdf = src.with_suffix(".pdf")
         else:
             profile = tmp / "lo_profile"
-            proc = subprocess.run([str(exe), "--headless",
-                                   f"-env:UserInstallation=file://{profile}",
-                                   "--convert-to", "pdf", "--outdir", str(tmp), str(src)],
-                                  capture_output=True, timeout=timeout)
+            proc = _run_render_subprocess(
+                [str(exe), "--headless",
+                 f"-env:UserInstallation=file://{profile}",
+                 "--convert-to", "pdf", "--outdir", str(tmp), str(src)],
+                timeout=timeout)
             pdf = tmp / (src.stem + ".pdf")
         if not pdf.is_file() or pdf.stat().st_size == 0:
             detail = (_child_output(getattr(proc, "stderr", None))
@@ -3855,6 +3892,10 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
       * a Word OWNER (lock) file (`~$<name>`): it is not a document, and a
         candidate that drops it loses no content -- restoring one only puts a
         162-byte Word by-product back into the corpus (2026-10-15);
+      * non-shippable residue (`is_non_shippable_name`: OS junk such as
+        .DS_Store/:Zone.Identifier, bytecode caches, Word owners): the stage's
+        strip removed it from the package identity, so recovery must not put it
+        back into the pinned corpus;
       * the pipeline's own bookkeeping files (the agent regenerates them);
       * revised/work/ scratch.
     Skip-conditions, so recovery never duplicates content:
@@ -3957,7 +3998,8 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
         if not src_dir.is_dir():
             continue
         for p in sorted(src_dir.rglob("*")):
-            if not p.is_file() or _is_aux_doc(p.name) or is_word_owner_name(p.name):
+            if not p.is_file() or _is_aux_doc(p.name) or is_word_owner_name(p.name) \
+                    or is_non_shippable_name(p.name):
                 continue
             rel_in = p.relative_to(src_dir).as_posix()
             if excluded and rel_in.split("/", 1)[0] in excluded:
@@ -4633,7 +4675,7 @@ DECISION_ARTIFACTS = ("artifacts/M20_formatting.md", "artifacts/M18_caption_word
                       "artifacts/M2_references.md")
 
 
-def artifact_quality_report(review_dir: Path) -> dict:
+def artifact_quality_report(review_dir: Path, require_files: bool = False) -> dict:
     """{artifact: [problems]} for every decision table under review/.
 
     EVERY table block of the artifact is checked, each against its own header:
@@ -4642,7 +4684,17 @@ def artifact_quality_report(review_dir: Path) -> dict:
     """
     report = {}
     for rel in DECISION_ARTIFACTS:
-        for block in parse_markdown_blocks(review_dir / rel):
+        path = review_dir / rel
+        if require_files and not path.is_file():
+            report.setdefault(rel, []).append(
+                f"{rel} is missing: the seeded decision table was deleted")
+            continue
+        blocks = list(parse_markdown_blocks(path))
+        if require_files and not blocks:
+            report.setdefault(rel, []).append(
+                f"{rel} carries no decision table (the seeded table was emptied)")
+            continue
+        for block in blocks:
             rows = block["rows"]
             if not rows:
                 continue
@@ -4751,7 +4803,7 @@ def artifact_quality_notes(review_dir: Path) -> dict:
 
 def check_artifact_quality(ctx: Ctx, rec: dict, sb: Path, errs: list, warns: list) -> dict:
     """Record (and optionally fail) the review's decision-artifact quality."""
-    report = artifact_quality_report(sb / REVIEW_DIR)
+    report = artifact_quality_report(sb / REVIEW_DIR, require_files=True)
     rec["artifact_quality"] = report
     for rel, problems in sorted(report.items()):
         for p in problems:
@@ -5925,6 +5977,7 @@ def prepare_repair_session(ctx: Ctx, rec: dict, problems: list):
     if rec.get("kind") == "revise":
         rec.pop("revision_audit", None)
         rec.pop("revision_repair", None)
+        rec.pop("revision_chain", None)
     n = next_attempt_number(rec)
     (sb / REPAIR_PROMPT_FILE).write_text(repair_prompt(ctx, rec, problems), encoding="utf-8")
     guard = snapshot_repair_guard(sb, rec)
@@ -5991,6 +6044,7 @@ def prepare_resume_session(ctx: Ctx, rec: dict, argv: list, key: str, reason: st
         # the bytes before it, so the chain must run again after acceptance.
         rec.pop("revision_audit", None)
         rec.pop("revision_repair", None)
+        rec.pop("revision_chain", None)
     used = int((rec.get("resume_attempts") or {}).get(key) or 0)
     problems = list((rec.get("postcheck") or {}).get("errors") or [])
     (sb / RESUME_PROMPT_FILE).write_text(resume_prompt(rec, problems, reason, used),

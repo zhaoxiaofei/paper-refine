@@ -115,8 +115,10 @@ def variant_pattern(term, mode):
     """Build a regex matching the term plus common typographic variants."""
     esc = re.escape(term)
     if mode == "value":
-        # 0.031 ~ .031 ~ 0.0310 ~ 3.1e-2
-        num = term.replace(",", ".")
+        # 0.031 ~ .031 ~ 0.0310 ~ 3.1e-2. A COMMA is a thousands separator,
+        # never a decimal point: reading "1,234" as 1.234 generated an
+        # alternative spelling for a different magnitude.
+        num = term
         # The LITERAL spelling is always one of the forms: with a thousands
         # separator (`1,234`) the decimal-normalised `num` is "1.234", which
         # never matches the text that carries the number, so the sweep reported
@@ -183,8 +185,10 @@ def variant_pattern(term, mode):
         # A trailing comma or period is only a separator when no digit follows:
         # without the ",digit" guard the value 5 also matched inside "5,000",
         # and without the ".digit" one the value 12 matched inside the DIFFERENT
-        # value "12.5" (the leading guard only covers "X.y" -> y).
-        return re.compile(r"(?<![\w.])(" + "|".join(sorted(set(pats), key=len, reverse=True))
+        # value "12.5" (the leading guard only covers "X.y" -> y). A SIGN or a
+        # preceding thousands separator changes the value just as much: `--value
+        # 5` must not match "-5" and `--value 234` must not match "1,234".
+        return re.compile(r"(?<![\w.,+\-\u2212])(" + "|".join(sorted(set(pats), key=len, reverse=True))
                           + r")(?![\w]|,\d|\.\d)")
     # term mode: allow hyphen/space interchange, case-insensitive, optional 's'.
     # EVERY inter-word separator in the given term becomes the same class, so a

@@ -169,6 +169,18 @@ def test_payload_exclusions():
     check("RT3b the signal is not counted as a payload file",
           nb.revision_token_for_dir(tmp)["files"] == 4,
           str(nb.revision_token_for_dir(tmp)))
+    # RT3c: the bounded repair writes REPAIR_LEDGER.{json,md} into revised/.
+    # They are bookkeeping, never payload; both implementations must agree.
+    (tmp / "REPAIR_LEDGER.json").write_text('{"rows": []}\n', encoding="utf-8")
+    (tmp / "REPAIR_LEDGER-v2.md").write_text("# re-validation ledger\n", encoding="utf-8")
+    check("RT3c a package carrying the repair ledger keeps its token",
+          script_token(tmp) == tok and nb.revision_token_for_dir(tmp)["token"] == tok,
+          f"{script_token(tmp)} vs {nb.revision_token_for_dir(tmp)['token']}")
+    check("RT3c both implementations agree with a repair ledger inside",
+          script_token(tmp) == nb.revision_token_for_dir(tmp)["token"])
+    check("RT3c the repair ledger is not counted as a payload file",
+          nb.revision_token_for_dir(tmp)["files"] == 4,
+          str(nb.revision_token_for_dir(tmp)))
 
 
 def test_matching_and_recording():

@@ -419,10 +419,12 @@ def test_audit_contract():
          "reason": "the quoted text does not exist in base/ under any spelling",
          "evidence": "base/cnb-12-2-mainText.docx: the paragraph reads '...' (no 'X' token)"},
         {"id": "F-003", "verdict": "confirm", "reason": "real", "evidence": "quote"}],
-        "adds": [{"id": "AU-001", "location": "cover letter p7", "category": 2, "check": "M20",
-                  "severity": "Minor", "evidence": "'Nature Biotechnology' 5x in one letter",
-                  "problem": "The journal name is repeated five times in a short passage; the "
-                             "reviewer closed the row as 'no journal rule'."}]}
+        "adds": []}
+    good_with_add = dict(good, adds=[
+        {"id": "AU-001", "location": "cover letter p7", "category": 2, "check": "M20",
+         "severity": "Minor", "evidence": "'Nature Biotechnology' 5x in one letter",
+         "problem": "The journal name is repeated five times in a short passage; the "
+                    "reviewer closed the row as 'no journal rule'."}])
     check("a well-formed audit record is accepted",
           not nb.audit_artifact_problems(good, frozen), str(nb.audit_artifact_problems(good, frozen)))
     missing = dict(good, dispositions=good["dispositions"][:2])
@@ -444,7 +446,7 @@ def test_audit_contract():
           any("not AU-" in p for p in aprobs) and any("severity" in p for p in aprobs),
           str(aprobs)[:200])
     split = nb.apply_audit_to_findings(
-        [{"id": i, "severity": "Minor", "category": 2} for i in frozen], good)
+        [{"id": i, "severity": "Minor", "category": 2} for i in frozen], good_with_add)
     check("the drop/add split keeps the rest and adds the AU- finding",
           [f["id"] for f in split["kept"]] == ["F-001", "F-003"]
           and [f["id"] for f in split["dropped"]] == ["F-002"]

@@ -43,7 +43,7 @@ root executes or reads.
   submission directory and run; the pipeline rewrites, reviews, revises,
   integrates and judges its own candidate rounds, pinning a champion after
   every round. No external material is required. (The mode was spelled `none`
-  before; that spelling is still accepted as an alias.)
+  before; that spelling is REMOVED and the mode is `continue`.)
 * **Start a new submission (`init`).** `setup --revision-mode init` conforms the
   submission to the venue's rules BEFORE round 1: inside the venue's own Word
   template when one ships, else to the journal's own author guidelines and then
@@ -132,7 +132,7 @@ python paper_pipeline.py run-decide --root ./paper_rounds
 #   ./paper_rounds/reports/DECISION_REPORT.md
 #   ./paper_rounds/reports/decision.json
 #   ./paper_rounds/round<r>_winner/          the champion of each round
-#   ./paper_rounds/final_clean_version_paper_rounds/   the champion, renamed for the next run
+#   ./paper_rounds/final_clean_version_paper_rounds/   the champion, judged names preserved
 #   ./paper_rounds/final_clean_version_paper_rounds.zip  the same package, zipped beside it
 #   ./paper_rounds/final_clean_version.readme.md   its certification status
 ```
@@ -155,7 +155,7 @@ Everything lives under the root you passed to `setup`:
 | `reports/round<r>_judge_conflicts.md` (+ `.json`) | the round's cross-judge conflicts (opposite scores, a claim one judge files as `resolved` and another as `introduced`, different numbers for the same fact, clean-vs-findings check dispositions), each a REQUIRED MANUAL CHECK; the cumulative `reports/JUDGE_CONFLICTS_TODO.md` collects every round's open items |
 | `reports/round<r>_review_findings.csv` | the round's review findings (id, check, category, severity, location, evidence, explanation), one row each |
 | `round<r>_winner/` | the champion of each round (content-addressed: identical content is never re-run) |
-| `final_clean_version_<root name>/` | the champion corpus, renamed for the next run's `--source`; ALWAYS built, certified or not |
+| `final_clean_version_<root name>/` | the champion corpus, byte-identical to the judged tree (names preserved) and ready as the next run's `--source`; ALWAYS built, certified or not |
 | `final_clean_version.readme.md` | the package's status document (sibling of the directory): certification verdict, blockers/notes, champion + digests, the M19 LENGTH status against the relaxed caps (with the numbers), and the reuse hint |
 | `redlines/` | the pipeline's tracked-changes `.docx` per candidate and source pair (`from-base/`, `from-original/`, `from-setup-source/`) |
 | `tracking/` | one difference-tracking copy per baseline (`*.tracking-original.*`, `*.tracking-a1.*`, `*.tracking-w<k>.*`, `*.tracking-winner<r>.*`, or the matching `*.logging-*` fallback when a tool failed), mirrored from the version packages and published winners |
@@ -1668,7 +1668,7 @@ pipeline's own review rounds. `setup --revision-mode <mode>` (or
 `set-revision-mode <mode>` on an existing root) selects one of the workflows
 below. Two of them read no feedback at all: **`continue`** (the default; the
 pipeline's own review/revise rounds — the mode was spelled `none` before, and
-that spelling is still accepted as an alias) and **`init`** (start a NEW
+that spelling is REMOVED) and **`init`** (start a NEW
 submission: the `conform` stage runs BEFORE round 1 — inside the venue's own
 Word template when one ships, else to the journal's own author guidelines and
 then to established academic convention — and everything after it is the
@@ -3147,7 +3147,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 154 suites (a few
+any failure. They are independent, so run them in parallel — 156 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

@@ -43,7 +43,16 @@ def cmd_prune(args) -> None:
 
 def _cmd_prune_locked(ctx: Ctx, args) -> None:
     R = ctx.rounds_count()
-    keep_from = max(1, R - max(0, int(args.keep_latest)) + 1)
+    try:
+        keep_latest = int(args.keep_latest)
+    except (TypeError, ValueError):
+        die(f"prune: --keep-latest must be an integer, got {args.keep_latest!r}")
+    if keep_latest < 0:
+        # A negative value used to be clamped to 0, which means "keep no
+        # completed round". A typo (`-1`) therefore deleted EVERY round's
+        # sandboxes and attempt archives without warning.
+        die(f"prune: --keep-latest must be 0 or greater, got {keep_latest}")
+    keep_from = max(1, R - keep_latest + 1)
     # The journal-facing runs (the feedback/concerns ledger, the response
     # letter, and the scoped revision whose published winner they describe) are
     # what a later `run` re-reads to rebuild `journal_submission/`; they are
@@ -108,24 +117,41 @@ def _cmd_prune_locked(ctx: Ctx, args) -> None:
               "history stays readable from state.json's attempts_log.)")
         return
     freed = 0
+    failed = []
+    removed_sandboxes = 0
     for rid, _r, sb, size in targets:
-        freed += size
-        rmtree_force(sb, ignore_errors=True)
-        print(f"[prune] removed {sb} ({rid})")
+        if rmtree_force(sb, ignore_errors=True):
+            freed += size
+            removed_sandboxes += 1
+            print(f"[prune] removed {sb} ({rid})")
+        else:
+            failed.append(str(sb))
+            print(f"[prune] FAILED to remove {sb} ({rid}); it still exists")
+    archive_seen, archive_failed = set(), set()
     for rid, _r, arch, size in archives:
-        freed += size
-        rmtree_force(arch, ignore_errors=True)
-        print(f"[prune] removed {arch} ({rid}, attempt archives)")
-    pruned_runs = {rid for rid, _r, _arch, _size in archives}
+        archive_seen.add(rid)
+        if rmtree_force(arch, ignore_errors=True):
+            freed += size
+            print(f"[prune] removed {arch} ({rid}, attempt archives)")
+        else:
+            archive_failed.add(rid)
+            failed.append(str(arch))
+            print(f"[prune] FAILED to remove {arch} ({rid}, attempt archives); it still exists")
+    # Only a run whose archives are ALL gone may claim its attempts were pruned.
+    pruned_runs = archive_seen - archive_failed
     for rec in ctx.runs():
         if rec.get("id") not in pruned_runs:
             continue
         for entry in rec.get("attempts_log") or []:
             if entry.get("archived"):
                 entry["archive_pruned"] = True
-    ctx.log("pruned", detail=f"{len(targets)} sandbox(es), {freed / 1e9:.2f} GB")
+    ctx.log("pruned", detail=f"{removed_sandboxes} sandbox(es), {freed / 1e9:.2f} GB")
     ctx.save_state()
     print(f"[prune] reclaimed ~{freed / 1e9:.2f} GB")
+    if failed:
+        print(f"[prune] {len(failed)} target(s) could NOT be removed; the reclaimed total "
+              f"counts only successful deletions", file=sys.stderr)
+        sys.exit(1)
 
 
 # `retry --runs`: the SAME selection grammar as `run --only`.

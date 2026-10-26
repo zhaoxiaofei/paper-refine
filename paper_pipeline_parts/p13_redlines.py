@@ -604,12 +604,15 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
     """Write a tracked-changes .docx using the standard library only.
 
     Paragraph- and word-level w:ins/w:del built from the BASE package, so the
-    surrounding document survives. Unchanged paragraphs are copied verbatim;
-    a changed paragraph is rebuilt from its own runs, and each run's `rPr`
-    (character formatting) is carried into the w:del/w:ins copy, so only the
-    changed paragraph's text is re-derived. This backend is still last in the
-    chain and is named as such in the manifest: it cannot represent edits
-    inside tables/content controls (see below).
+    surrounding document survives. Byte-identical paragraphs are copied
+    verbatim; a paragraph whose text is equal but whose XML differs (a soft line
+    break, tab, drawing, field or formatting-only run changed) is marked as a
+    whole-paragraph change, so accepting it yields the revised paragraph and
+    rejecting it yields the base; a changed paragraph is rebuilt from its own
+    runs, and each run's `rPr` (character formatting) is carried into the
+    w:del/w:ins copy, so only the changed paragraph's text is re-derived. This
+    backend is still last in the chain and is named as such in the manifest: it
+    cannot represent edits inside tables/content controls (see below).
 
     What it canNOT represent: non-paragraph body content. Tables, content
     controls (w:sdt) and section properties are copied verbatim from the base, so
@@ -657,12 +660,34 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
         if base_index is not None:
             flush_anchored(base_index)
 
+    def same_para_xml(a, b) -> bool:
+        """Paragraph CONTENT equality: the tail (inter-paragraph whitespace)
+        is not part of the paragraph, and a different pretty-print must not
+        turn every equal paragraph into a whole-paragraph change."""
+        def body(el):
+            cp = copy.deepcopy(el)
+            cp.tail = None
+            return ET.tostring(cp)
+        return body(a) == body(b)
+
     flush_anchored(-1)
     for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
             None, base_texts, rev_texts, autojunk=False).get_opcodes():
         if tag == "equal":
             for k in range(i1, i2):
-                emit(copy.deepcopy(base_paras[k]), k)
+                bp, rp = base_paras[k], rev_paras[j1 + (k - i1)]
+                if same_para_xml(bp, rp):
+                    emit(copy.deepcopy(bp), k)
+                else:
+                    # The text is equal, but the paragraph XML is not: a soft
+                    # line break, tab, drawing, field char or formatting-only run
+                    # changed. Copying the base paragraph (the old branch) lost
+                    # that edit from the redline entirely. Whole-paragraph
+                    # markup keeps both contracts: accept-all yields the revised
+                    # paragraph, reject-all yields the base.
+                    emit(_whole_paragraph_change(bp, rp, counter, ts), k)
+                    n_del += 1
+                    n_ins += 1
         elif tag == "delete":
             for k in range(i1, i2):
                 emit(_wrap_para(base_paras[k], "del", True, counter, ts), k)
@@ -1061,8 +1086,10 @@ def run_redlines(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
     source_sources, source_note = None, None
     if src_setup.is_dir():
         try:
-            if ctx.source_manifest and manifests_equal(hash_manifest(src_setup),
-                                                       ctx.source_manifest):
+            setup_manifest = (ctx.state.get("source_manifest_raw")
+                              or ctx.source_manifest)
+            if setup_manifest and manifests_equal(hash_manifest(src_setup),
+                                                  setup_manifest):
                 source_sources = [(src_setup, "", ())]
             else:
                 source_note = (f"the setup --source directory {str(src_setup)!r} no longer "

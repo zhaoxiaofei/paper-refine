@@ -155,6 +155,11 @@ TEXT_RE = re.compile(r"<w:t(?:\s[^>]*)?>.*?</w:t>", re.S)
 # space a line edge carries. Dropping it made a three-line correspondence block
 # read as one glued token (FMT-X2, 2026-10-15b).
 BREAK_TOKENS = re.compile(r"<w:(?:br|cr|tab)(?=[\s/>])[^>]*/?>")
+# Verbatim, non-text OOXML tokens: a non-breaking hyphen and a symbol glyph are
+# glyphs, not characters of `text_of`, and must be copied through unchanged. A
+# text writer that treated one as a `<w:t>` fragment emitted `<w:t><w:sym/>`
+# with no closing tag and corrupted the whole document.
+NON_TEXT_TOKENS = re.compile(r"<w:(?:noBreakHyphen|sym)(?=[\s/>])[^>]*/?>")
 # The same walk, in DOCUMENT ORDER, for the callers that need both kinds of
 # piece at once (the text writer splices a fragment's new text at its own
 # offset, so a break counts as one character exactly like `text_of` says).
@@ -164,6 +169,12 @@ _FRAG_OR_BREAK_RE = re.compile(r"<w:t(?:\s[^>]*)?>.*?</w:t>"
 RUN_RE = re.compile(r"<w:r(?=[\s/>]).*?</w:r>|<w:r(?=[\s/>])[^>]*/>", re.S)
 FIELD_CHAR_RE = re.compile(r"<w:fldChar[^>]*w:fldCharType=\"(\w+)\"[^>]*/?>")
 INSTR_RE = re.compile(r"<w:instrText(?:\s[^>]*)?>.*?</w:instrText>", re.S)
+# A paragraph can carry no text and still hold an anchor a reader needs: a
+# footnote/endnote/comment reference, a bookmark, a simple field or a content
+# control. Deleting that "empty" paragraph loses the target/structure.
+ANCHOR_RE = re.compile(
+    r"<w:(?:footnoteReference|endnoteReference|commentReference|"
+    r"bookmarkStart|bookmarkEnd|fldSimple|sdt)(?=[\s/>])")
 # Reading a DOCUMENT's sections: a legal self-closing `<w:sectPr .../>` (an
 # empty section) must match as the element it is, never run to the NEXT
 # section's closing tag -- that reported the wrong section's page-1 furniture.
@@ -371,7 +382,13 @@ def has_field(frag: str) -> bool:
     next heading -- exactly the shape the stray-empty-paragraph rule used to
     delete, leaving the bibliography field unterminated.
     """
-    return bool(FIELD_CHAR_RE.search(frag) or INSTR_RE.search(frag))
+    return bool(FIELD_CHAR_RE.search(frag) or INSTR_RE.search(frag)
+                or re.search(r"<w:fldSimple(?=[\s/>])", frag))
+
+
+def has_anchor(frag: str) -> bool:
+    """True when a no-text paragraph still carries a footnote/comment/bookmark."""
+    return bool(ANCHOR_RE.search(frag))
 
 
 def _property_element(frag: str, tag: str) -> str | None:
@@ -534,6 +551,17 @@ def _field_result_spans(xml: str) -> list:
             frame = stack.pop()
             if frame["sep"] is not None:
                 out.append((frame["sep"], m.start()))
+    # `w:fldSimple` is the other live-field serialization: its result is the
+    # element's own content, not a fldChar separate region. The spelling fixer
+    # rewrote those results because this walk only knew complex fields.
+    simple_stack = []
+    for m in re.finditer(r"<w:fldSimple\b[^>]*>|</w:fldSimple>", xml):
+        tag = m.group(0)
+        if tag.startswith("</"):
+            if simple_stack:
+                out.append((simple_stack.pop(), m.start()))
+        elif not tag.rstrip().endswith("/>"):
+            simple_stack.append(m.end())
     return out
 
 
@@ -785,6 +813,7 @@ def zotero_field_signature(report: dict) -> list:
             continue
         sig.append((f["kind"], f.get("citationID") or "",
                     " ".join((f.get("instr") or "").split()),
+                    f.get("visible_text") or "",
                     bool(f["complete"]), bool(f.get("has_separate"))))
     return sorted(sig)
 
@@ -1263,6 +1292,17 @@ def style_chain(styles: dict, sid: str | None) -> list:
     return list(reversed(chain))
 
 
+def live_rpr(rpr: str | None) -> str:
+    """The LIVE direct rPr: the revision history in `w:rPrChange` removed.
+
+    `w:rPrChange` records the formatting the run had BEFORE a tracked change;
+    it is not live formatting. Reading `<w:i>` anywhere inside the rPr reported
+    a roman run as italic and made the mechanical fixer unable to clear its own
+    row (it must not edit the change record).
+    """
+    return re.sub(r"<w:rPrChange\b.*?</w:rPrChange>", "", rpr or "", flags=re.S)
+
+
 def effective_emphasis(styles: dict, para_style: str | None, run_style: str | None,
                        direct_rpr: str | None) -> bool:
     """Is this run effectively italic (by direct formatting, character style,
@@ -1273,6 +1313,7 @@ def effective_emphasis(styles: dict, para_style: str | None, run_style: str | No
     level can set `w:i` and/or `w:iCs` (complex script) to on or explicitly off;
     the effective run is italic when either ends up on.
     """
+    direct_rpr = live_rpr(direct_rpr)
     i_val, ics_val = None, None
     defaults = styles.get("@docDefaults") or {}
     i_val = defaults.get("i") if i_val is None else i_val
@@ -1305,7 +1346,7 @@ def effective_emphasis(styles: dict, para_style: str | None, run_style: str | No
 
 def run_is_italic(styles: dict, para_style: str | None, run: str) -> bool:
     """effective_emphasis() for one run fragment."""
-    rpr = rpr_of(run)
+    rpr = live_rpr(rpr_of(run))
     return effective_emphasis(styles, para_style, elem_val(rpr, "rStyle"), rpr)
 
 def run_is_bold(styles: dict, para_style: str | None, run: str) -> bool:
@@ -1313,7 +1354,7 @@ def run_is_bold(styles: dict, para_style: str | None, run: str) -> bool:
 
     The same precedence as `effective_emphasis`, for the `w:b`/`w:bCs` pair.
     """
-    rpr = rpr_of(run) or ""
+    rpr = live_rpr(rpr_of(run))
     b_val = bcs_val = None
     defaults = styles.get("@docDefaults") or {}
     b_val = defaults.get("b") if b_val is None else b_val
@@ -1368,8 +1409,14 @@ def _has_lowercase_word(text: str) -> bool:
 
 
 def _title_only(text: str, name: str) -> bool:
-    """True when the run carries the journal title and nothing else."""
-    norm = lambda s: re.sub(r"[^A-Za-z]", "", s).lower()
+    """True when the run carries the journal title and nothing else.
+
+    Only case, whitespace and trailing sentence punctuation may differ: the old
+    letters-only normalization made "Nature Methods 11, 1-2 (2024)" equal to
+    "Nature Methods", so the fixer italicized the volume, pages and year too.
+    """
+    def norm(s: str) -> str:
+        return re.sub(r"\s+", " ", str(s or "")).strip().strip(".,;:").casefold()
     return norm(text) == norm(name)
 
 

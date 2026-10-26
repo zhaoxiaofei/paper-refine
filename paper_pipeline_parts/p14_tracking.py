@@ -731,7 +731,10 @@ def tracking_entry_is_fresh(ctx: Ctx, entry: dict, baselines: list, srcs: list) 
                 if fallback:
                     # The in-package fallback carries the `logging-<token>`
                     # suffix (the recorded `in_package` path names the real
-                    # copy's name), so it is derived, never assumed.
+                    # copy's name), so it is derived, never assumed. A stale
+                    # REAL copy beside it means the fallback is not fresh.
+                    if (ctx.root / str(in_pkg)).is_file():
+                        return False
                     sib = (ctx.root / str(in_pkg)).parent / (
                         Path(str(c.get("revised_rel"))).stem
                         + tracking_aux_suffix(str(c.get("baseline")), str(c.get("ext")),
@@ -1201,6 +1204,13 @@ def track_one_pair(ctx: Ctx, r: int, vid: str, token: str, ext: str, pair: dict,
             reason = str(a["detail"])[:200]
             break
     reason = reason or "the difference tool produced no output"
+    # A failed re-track must not leave the PREVIOUS real tracking copy beside
+    # the new document: its name says "tracked copy of this version", and the
+    # fallback branch of the freshness gate only looked at the logging sibling.
+    for _stale in (persist_out, in_pkg_out):
+        if _stale is not None:
+            with contextlib.suppress(OSError):
+                Path(_stale).unlink(missing_ok=True)
     if ext == ".docx":
         fb = write_docx_logging_fallback(base, cand, persist_fallback, token, reason)
     else:

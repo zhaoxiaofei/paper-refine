@@ -59,6 +59,10 @@ from pathlib import Path
 REPORTS = {"changelog.md", "manual_steps.md", "revision_report.md",
            "revision_report.json", "diff_ledger.md", "rewrite_report.md",
            "visual_check.md",
+           # The BOUNDED REPAIR's re-validation ledger: pipeline bookkeeping,
+           # never manuscript payload (keep in step with
+           # paper_pipeline.BOOKKEEPING_FILES).
+           "repair_ledger.md", "repair_ledger.json",
            # The author's hand-off checklist (`author_to_complete: readme` in
            # the orchestrator). It is not a manuscript payload document: it is
            # created/updated/deleted as the author disposes items, and including
@@ -80,7 +84,7 @@ REPORTS = {"changelog.md", "manual_steps.md", "revision_report.md",
 # agree.
 BOOKKEEPING_NAME_RE = re.compile(
     r"^(?:replacement_ledger|diff_ledger|revision_report|rewrite_report|manual_steps|"
-    r"visual_check|changelog|agent_log|worklog)"
+    r"repair_ledger|visual_check|changelog|agent_log|worklog)"
     r"(?:[-_.][A-Za-z0-9._\-]+)?\.(?:md|txt|json)$"
     # The pipeline's own MEASUREMENT artifacts (`code_scans/`, `format_scan/`,
     # `format_fix/`, `pkg2`): written next to a run, never into a delivered

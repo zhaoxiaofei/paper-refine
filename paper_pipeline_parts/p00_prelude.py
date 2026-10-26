@@ -80,9 +80,9 @@ from pathlib import Path
 #   * the file rename is `paper_pipeline.py` (was paper_round_pipeline.py), with a
 #     new `run-decide` command (run, then decide, in series);
 #   * `decide` publishes <root>/final_clean_version/: the champion corpus with
-#     no scratch/auxiliaries/reports, the generation counter in the filenames
-#     incremented by one (int(name.split("-")[1]) + 1, guarded) and the
-#     references repointed, ready as the next run's --source;
+#     no scratch/auxiliaries/reports, byte-identical to the judged tree and
+#     ready as the next run's --source (AGENTS.md rule 5: the file names are
+#     PRESERVED; the early 3.4.0 generation-counter increment was removed);
 #   * revision packages carry ONE 7-character content-hash version token
 #     (paper-revise/scripts/revision_token.py) instead of letter/digit
 #     increments; the orchestrator records it and reports the winner's token;

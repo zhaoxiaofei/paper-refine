@@ -4935,7 +4935,7 @@ def _stage_source_package(srcdir: Path, src: Path) -> None:
 
 def rebuild_package_from_templates(templates: dict, src: Path, dest: Path,
                                    force: bool = False, containers=(),
-                                   manuscript_names=()) -> dict:
+                                   manuscript_names=(), protected=()) -> dict:
     """Rebuild a WHOLE submission package inside the venue's own Word templates.
 
     Every package DOCX is restyled into the journal's template by
@@ -4956,6 +4956,11 @@ def rebuild_package_from_templates(templates: dict, src: Path, dest: Path,
 
     `manuscript_names` is `article_type_manuscript_names(ctx)`: the selected
     article type's own document name is its manuscript, not a letter.
+
+    `protected` names trees `--force` must never delete. The caller passes the
+    pipeline root: a non-empty root usually carries a `.docx` somewhere (its
+    source corpus, a winner, a published clean version), so a `.docx`-presence
+    test alone cannot tell a package directory from the root itself.
     """
     mod = _format_module()
     if mod is None:
@@ -4965,6 +4970,15 @@ def rebuild_package_from_templates(templates: dict, src: Path, dest: Path,
     src, dest = Path(src), Path(dest)
     if not src.is_dir():
         return {"ok": False, "error": f"the source package {src} is not a directory"}
+    for guard in protected or ():
+        guard = Path(guard)
+        if is_within(dest, guard) or is_within(guard, dest):
+            # Equal, inside or an ancestor: `--force` would replace the
+            # pipeline's own tree (the confirmed `--dest <root> --force` repro).
+            return {"ok": False,
+                    "error": f"{dest} overlaps the pipeline tree {guard}; refusing to replace "
+                             f"it (a --force destination must be a package directory outside "
+                             f"the root, or <root>/{TEMPLATE_PACKAGE_DIRNAME})"}
     if is_within(dest, src) or is_within(src, dest):
         return {"ok": False, "error": "the source and the destination must not be nested"}
     if dest.exists() and not dest.is_dir():
@@ -4973,6 +4987,15 @@ def rebuild_package_from_templates(templates: dict, src: Path, dest: Path,
         if not any(dest.iterdir()):
             pass
         elif force:
+            # `--force` deletes the destination tree. Refuse to do that to a
+            # directory that is plainly NOT a submission package: a mistyped
+            # `--dest` must never recursively remove an arbitrary directory.
+            if not any(p.is_file() and p.suffix.lower() == ".docx"
+                       for p in dest.rglob("*")):
+                return {"ok": False,
+                        "error": f"{dest} is not empty and carries no .docx package document; "
+                                 f"refusing to delete it (--force only replaces a built "
+                                 f"submission package)"}
             rmtree_force(dest)
         else:
             return {"ok": False, "error": f"{dest} exists and is not empty (use --force)"}
@@ -6465,7 +6488,13 @@ def seed_format_policy_file(ctx: Ctx, sb: Path) -> Path:
             "numbering": policy.get("numbering") or "",
             "references": copy.deepcopy(policy.get("references") or {}),
             "leftover_phrases": copy.deepcopy(policy.get("leftover_phrases") or []),
-            "image_aspect_tolerance": policy.get("image_aspect_tolerance", 0.02)}
+            "image_aspect_tolerance": policy.get("image_aspect_tolerance", 0.02),
+            # Venue image rules (FMT-IM4/FMT-IM6): the session's own scan must
+            # gate the same DPI/figure-text rules the postcheck does.
+            "figure_text": copy.deepcopy(policy.get("figure_text") or {}),
+            "image_dpi": copy.deepcopy(policy.get("image_dpi") or {}),
+            "min_image_dpi": policy.get("min_image_dpi", 0),
+            "min_figure_text_pt": policy.get("min_figure_text_pt", 0)}
     # tmp + rename, NOT write_json_atomic's extra fsync: this file is a pure
     # INPUT every session reads, and the pipeline seeds one per session
     # materialization. On this box each fsync costs ~0.08 s (measured: the
@@ -8718,6 +8747,16 @@ def parse_only_spec(raw, flag: str = "--only", probe_with_review: bool = True) -
         if sel:
             _add_judge_selector(spec, int(sel.group(1)), f"j{int(sel.group(2))}", part, flag)
             continue
+        # `r2_r1_w2` / `r2_r1_w2_j1`: a PIN id as the version of one round's
+        # judge panel (the inherited base of round 2). `judge_item_parts()`
+        # already reads this spelling; the parser used to reject it as an
+        # unknown stage, so the documented selector could not reach a run.
+        sel = re.fullmatch(r"r(\d+)\s*[_:/.-]\s*(r\d+[_:/.-](?:w\d+|a\d+|i\d+))"
+                           r"((?:[_:/.-]j\d+)?)", token)
+        if sel:
+            _add_judge_selector(spec, int(sel.group(1)), sel.group(2) + sel.group(3),
+                                part, flag)
+            continue
         # `r1_w2` / `r1_a2` / `r1_i1` / `r1_review` / `r1_review_b` / `r1_audit`:
         # ONE session of one round. A `_j<k>` tail makes it a judge session
         # (`r1_w2_j1`), the same selection as `r1_judge_w2_j1`.
@@ -8951,6 +8990,10 @@ def _judge_selector_token(raw: str, part: str, flag: str = "--only") -> str:
             vid = f"i{idx}"
         return vid + (f"_j{j}" if j else "")
     if re.fullmatch(r"orig(?:[_:/.-]j\d+)?", tok):
+        return tok
+    if re.fullmatch(r"r\d+[_:/.-](?:w\d+|a\d+|i\d+)(?:[_:/.-]j\d+)?", tok):
+        # A PIN id (`r1_w2`) is a legal judge-field version: it names the
+        # inherited base of a later round.
         return tok
     die(f"{flag}: {part!r} is not a judge session this pipeline knows (use `judge` for the whole "
         f"stage, or a session such as `r1_judge_w2_j1`, `w2_j1`, `integrator2_j1` or `judge1`)")

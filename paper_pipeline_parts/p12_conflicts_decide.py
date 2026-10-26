@@ -1508,7 +1508,7 @@ def certification_label(certification) -> str:
 
 def final_clean_reason(final: dict, rounds_data: list, rounds_total: int, final_regression,
                        chain_ok: bool, provisional: bool, panel_gaps: dict,
-                       gate_problems: list, auto_promoted=None) -> str:
+                       gate_problems: list, auto_promoted=None, skipped=None) -> str:
     """The note the final_clean_version sibling readme carries ("" = none).
 
     Mirrors decide_certification's blockers: ANY round whose stored champion
@@ -1517,6 +1517,8 @@ def final_clean_reason(final: dict, rounds_data: list, rounds_total: int, final_
     `final_clean_version.certified: true` beside `certification.certified:
     false` when an earlier round mismatched.
     """
+    if skipped:
+        return f"the final_clean_version package was not published: {skipped}"
     if any(rd.get("mismatch") for rd in rounds_data):
         return "a stored champion failed recomputation"
     if final_regression:
@@ -6825,7 +6827,13 @@ def final_clean_readme_text(ctx: Ctx, certification: dict, final: dict,
         if len(_advisory) > 10:
             L.append(f"  - … and {len(_advisory) - 10} more")
     L.append("")
-    if cert.get("certified"):
+    if not (final_clean or {}).get("files"):
+        L.append("> **final_clean_version/ was NOT published.** "
+                 + (f"The reason: {final_clean.get('skipped')}. " if final_clean and
+                    final_clean.get("skipped") else "")
+                 + "There is no champion directory to start the next run from; the decision "
+                   "and its blockers above are the record of this run.")
+    elif cert.get("certified"):
         if cert.get("submission_ready") is False:
             L.append("This directory is the champion corpus. The panel completed and signed "
                      "the comparison; the readiness findings above still block upload. "
@@ -7647,6 +7655,12 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
             L.append(f"- {p}")
     L.append("")
     _stop = ctx.state.get("stopped_early") or {}
+    if _stop and rounds_data and (
+            int(_stop.get("after_round") or -1) != int(rounds_data[-1]["round"])
+            or int(_stop.get("planned_rounds") or -1) != int(ctx.rounds_count())):
+        # A stop record from an earlier invocation is stale once a later round
+        # was decided; it must not describe this run's round model.
+        _stop = {}
     if _stop:
         L.append(f"The round model ran {_stop.get('after_round')} of "
                  f"{_stop.get('planned_rounds')} planned rounds and then STOPPED EARLY under "
@@ -8844,6 +8858,7 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     panel_gaps = {}
     auto_rounds = []
     incomplete_rounds = []
+    _panel_gaps_dirty = False
     for r in range(1, R + 1):
         rrec = ctx.round_get(r)
         if rrec.get("status") != "done":
@@ -8958,6 +8973,19 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
                               {"round": int(r), "gaps": gaps,
                                "diagnostics": agg.get("diagnostics") or {},
                                "checked": utcnow()})
+            # `run` records the gap on the round record; `decide` used to write
+            # only the report file, so `status` (which reads the record) hid
+            # exactly the blocker that made the decision uncertified.
+            rrec["panel_gaps"] = {"round": int(r), "gaps": gaps,
+                                  "checked": utcnow()}
+            _panel_gaps_dirty = True
+        else:
+            if rrec.pop("panel_gaps", None) is not None:
+                _panel_gaps_dirty = True
+            _stale_gaps = ctx.reports_dir / f"round{int(r)}_panel_gaps.json"
+            if _stale_gaps.exists():
+                with contextlib.suppress(OSError):
+                    _stale_gaps.unlink()
         sel = select_champion(ctx, r, agg)
         mismatch = None
         if sel["champion"] != rrec.get("champion"):
@@ -8981,6 +9009,8 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
               f"{_cfp.relative_to(ctx.root).as_posix()}")
     except OSError as e:
         print(f"[decide] WARNING: could not write the judge-conflict TODO list: {e}")
+    if _panel_gaps_dirty:
+        ctx.save_state()
     if not rounds_data:
         print("No completed rounds yet; nothing to decide.")
         for p in problems:
@@ -9005,8 +9035,16 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     # A pre-registered early stop (--stop-after-no-progress) is a deliberate end
     # of the run, not an unfinished one: the answer is final, and the stop is
     # recorded in decision.json / the report.
-    _stopped = ctx.state.get("stopped_early") or {}
-    partial_run = final["round"] < R and not _stopped
+    _stopped_raw = ctx.state.get("stopped_early") or {}
+    # A stop record only explains the run when it stopped at the FINAL decided
+    # round of THIS configured run. A record from an earlier invocation that
+    # later resumed and drove more rounds is stale and must not exempt the
+    # still-incomplete configured rounds from certification.
+    _stop_applies = bool(_stopped_raw) \
+        and int(_stopped_raw.get("after_round") or -1) == int(final["round"]) \
+        and int(_stopped_raw.get("planned_rounds") or -1) == int(R)
+    _stopped = _stopped_raw if _stop_applies else {}
+    partial_run = final["round"] < R and not _stop_applies
     provisional = partial_run or bool(auto_rounds)
     win_dir = ctx.root / (final["stored"].get("winner_dir") or "")
     win_captions = (scan_captions_in_sources([(win_dir, "", ())], limit=caption_limit_of(ctx))
@@ -9129,7 +9167,7 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
                                   lengths=published_lengths)
     gate_problems.extend(readiness_gate_problems(readiness,
                                                  bool(getattr(args, "require_ready", False))))
-    if incomplete_rounds and not (ctx.state.get("stopped_early") or {}):
+    if incomplete_rounds and not _stop_applies:
         # `problems` carried this but `decide_certification` did not read it:
         # a later completed round could still be labelled CERTIFIED. A
         # PRE-REGISTERED stop is a deliberate end: the rounds after it are
@@ -9137,9 +9175,16 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         gate_problems.append(
             "round(s) " + ", ".join(str(r) for r in incomplete_rounds)
             + " are not complete")
+    if final_clean.get("skipped"):
+        # The published package is part of the answer (AGENTS.md rule 10): a
+        # decision that could not build `final_clean_version/` is not certified,
+        # and its readme must say the directory does not exist.
+        gate_problems.append("the final_clean_version package was not published: "
+                             + str(final_clean.get("skipped")))
     _clean_reason = final_clean_reason(final, rounds_data, R, final_regression, chain_ok,
                                        provisional, panel_gaps, gate_problems,
-                                       auto_promoted=auto_rounds)
+                                       auto_promoted=auto_rounds,
+                                       skipped=final_clean.get("skipped"))
     final_clean["certified"] = not _clean_reason
     final_clean["certification_note"] = _clean_reason or None
     # `action` (created/unchanged) describes THIS invocation, not the decision:

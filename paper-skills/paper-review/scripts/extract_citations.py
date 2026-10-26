@@ -157,11 +157,30 @@ BIB_ENTRY_RE = re.compile(r"@\w+\s*\{\s*([^,]+),")
 # the list entry is a `\bibitem[...]{key}`. Without these, a .tex submission
 # reported zero call-outs and a clean "orphans: none" for a document that cites
 # every sentence.
+# Only real citation macros. A bare `*cite*` name also matched `\citestyle`
+# and `\citetext`, inventing call-outs whose key was a style name or text.
 TEX_CITE_RE = re.compile(
-    r"\\(?P<macro>[A-Za-z]*cite[A-Za-z]*)\*?"
+    r"\\(?P<macro>(?i:cite|citep|citet|citealt|citealp|citeauthor|citeyear|"
+    r"citeyearpar|citenum|citeurl|nocite|textcite|parencite|autocite|"
+    r"footcite|footfullcite|smartcite|supercite|fullcite|notecite|citeA|citeN))\*?"
     r"(?:\s*\[[^\]]*\]){0,3}\s*\{(?P<keys>[^{}]*)\}")
 TEX_BIBITEM_RE = re.compile(r"\\bibitem\s*(?:\[[^\]]*\])?\s*\{(?P<key>[^{}]+)\}")
 TEX_BEGIN_VERBATIM_RE = re.compile(r"\\begin\{(?P<env>verbatim|lstlisting|minted|Verbatim)\}")
+
+
+def strip_tex_comment(line: str) -> str:
+    """`line` up to its first unescaped `%` (the escape pair kept)."""
+    out, i = [], 0
+    while i < len(line):
+        if line[i] == "\\" and i + 1 < len(line):
+            out.append(line[i:i + 2])
+            i += 2
+            continue
+        if line[i] == "%":
+            break
+        out.append(line[i])
+        i += 1
+    return "".join(out)
 
 
 def latex_source_text(text: str) -> str:
@@ -180,6 +199,9 @@ def latex_source_text(text: str) -> str:
                 in_verbatim = None
             kept.append("")
             continue
+        # Strip the comment BEFORE looking for the environment fence: a
+        # commented-out `% \begin{verbatim}` used to blank the rest of the file.
+        line = strip_tex_comment(line)
         m = TEX_BEGIN_VERBATIM_RE.search(line)
         if m:
             # A one-line `\begin{verbatim}...\end{verbatim}` closes on the
@@ -193,23 +215,15 @@ def latex_source_text(text: str) -> str:
                 in_verbatim = m.group("env")
                 kept.append(line[: m.start()])
             continue
-        out, i = [], 0
-        while i < len(line):
-            if line[i] == "\\" and i + 1 < len(line):
-                out.append(line[i:i + 2])
-                i += 2
-                continue
-            if line[i] == "%":
-                break
-            out.append(line[i])
-            i += 1
-        kept.append("".join(out))
+        kept.append(line)
     return "\n".join(kept)
 
 REF_HEAD_RE = re.compile(
-    r"^\s*(?:#{1,6}\s*)?(?:references?|bibliography|reference\s+list|literature\s+cited)\s*:?\s*$", re.I)
+    r"^\s*(?:#{1,6}\s*)?(?:\d+(?:\.\d+)*[.)]?\s*)?"
+    r"(?:references?|bibliography|reference\s+list|literature\s+cited)\s*:?\s*$", re.I)
 STOP_SECTION_RE = re.compile(
-    r"^\s*(?:#{1,6}\s+)?(?:figure\s+legends?|figures?|table\s+legends?|tables?|"
+    r"^\s*(?:#{1,6}\s+)?(?:\d+(?:\.\d+)*[.)]?\s*)?"
+    r"(?:figure\s+legends?|figures?|table\s+legends?|tables?|"
     r"supplementary(?:\s+\w+)?|extended\s+data(?:\s+\w+)?|methods?|materials\s+and\s+methods|"
     r"experimental\s+procedures|results?|discussion|conclusions?|introduction|background|"
     r"abstract|acknowledge?ments?|author\s+contributions?|competing\s+interests?|"

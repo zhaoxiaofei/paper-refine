@@ -128,6 +128,14 @@ def review_sandbox(tmp, submission_dir="./base", coverage=None, artifacts=True,
             encoding="utf-8")
         if vis:
             (sb / "review/artifacts/VIS_visual.md").write_text("# vis\n", encoding="utf-8")
+        # Every seeded decision artifact is part of the review contract: a
+        # deleted/emptied one must fail the postcheck (the session may leave its
+        # table header-only when it has no rows).
+        for rel in np.DECISION_ARTIFACTS:
+            p = sb / "review" / rel
+            if not p.is_file():
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text("| row | disposition |\n|---|---|\n", encoding="utf-8")
     np.write_json_atomic(sb / np.MARKER_FILE, {"stage": "review", "run_id": "r1_a2_review",
                                                "round": 1, "status": "complete"})
     return sb

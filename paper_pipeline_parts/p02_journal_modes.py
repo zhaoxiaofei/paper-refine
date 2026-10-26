@@ -995,6 +995,11 @@ def _is_view_excluded_file(name: str, siblings=()) -> bool:
     only copy of the reference list.
     """
     low = name.strip().lower()
+    # The author's README files are never submission content (the journal copy
+    # drops them) and OS/bytecode/Word-owner junk is never a deliverable: a
+    # judge must not see either in a view.
+    if is_non_submitted_readme_name(name) or is_non_shippable_name(name):
+        return True
     if is_author_to_complete_readme_name(name):
         # The hand-off README is the author's checklist, never submission
         # content. Its PRESENCE differs between a candidate that still owes the

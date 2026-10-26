@@ -39,6 +39,13 @@ def rewrite_text_spans(para: str, edits: list) -> tuple:
         tok = m.group(0)
         if BREAK_TOKENS.fullmatch(tok):
             frags.append((m.start(), m.end(), "\n", None))
+        elif NON_TEXT_TOKENS.fullmatch(tok):
+            # `text_of` renders these as ONE placeholder character (a hyphen or
+            # U+FFFD), and that character keeps the offsets aligned. Emit the
+            # token itself, never a `<w:t>` wrapper around it.
+            frags.append((m.start(), m.end(),
+                          "-" if tok.startswith("<w:noBreakHyphen") else "\ufffd",
+                          tok))
         else:
             frags.append((m.start(), m.end(),
                           unesc(tok[tok.find(">") + 1:tok.rfind("<")]), tok))
@@ -150,6 +157,18 @@ def rewrite_text_spans(para: str, edits: list) -> tuple:
                     pieces.append('<w:t xml:space="preserve">' + esc(repl) + "</w:t>")
             else:
                 pieces.append(para[start_at:end_at])
+            continue
+        if NON_TEXT_TOKENS.fullmatch(raw):
+            # The one placeholder character is part of the paragraph text; an
+            # edit that covers it consumes it, otherwise the glyph survives.
+            cover = next(((s, e, r) for s, e, r, is_edit in keep
+                          if is_edit and s <= local < e), None)
+            if cover is None:
+                pieces.append(raw)
+            else:
+                s, _e, repl = cover
+                if repl and s == local:
+                    pieces.append('<w:t xml:space="preserve">' + esc(repl) + "</w:t>")
             continue
         new_text = carry(local, old_text)
         open_tag = raw[:raw.find(">") + 1]
@@ -340,6 +359,8 @@ def _xml_span_for_text_range(frag: str, a: int, b: int):
         tok = m.group(0)
         if BREAK_TOKENS.fullmatch(tok):
             length = 1
+        elif NON_TEXT_TOKENS.fullmatch(tok):
+            length = 1                          # the hyphen/U+FFFD placeholder
         else:
             length = len(unesc(tok[tok.find(">") + 1:tok.rfind("<")]))
         if pos + length > a and lo is None:
@@ -2149,6 +2170,7 @@ def stray_empty_paragraph_groups(paras: list, policy: dict, xml: str = None) -> 
     is_empty = [not texts[i] and i not in in_table
                 and not has_drawing(paras[i][2])
                 and not has_field(paras[i][2])                # a field run is content
+                and not has_anchor(paras[i][2])                # footnote/comment/bookmark
                 and not PAGEBREAK_RE.search(paras[i][2])       # FMT-S1 owns breaks
                 and "<w:sectPr" not in paras[i][2]             # a section break is layout
                 for i in range(len(paras))]
@@ -5007,7 +5029,12 @@ def zotero_refresh_document(xml: str, para_texts: list = None,
                            f"numbers ({len(current)}) than it cites items ({len(ranks)}); the "
                            f"cluster cannot be rebuilt safely")
             return out
-        if sorted(current) == sorted(ranks):
+        # The MARKER is not the rendered text: a field whose formattedCitation
+        # is "1" can still display "2". Compare the result runs too, or the
+        # refresh reports `nothing_to_do` while `zotero-check` files FMT-Z4.
+        _visible = "".join(text_of(run) for _s, _e, run in region[2])
+        _visible_nums = _marker_numbers(_visible)
+        if sorted(current) == sorted(ranks) and sorted(_visible_nums) == sorted(ranks):
             continue                      # consistent: nothing to rewrite
         new_cluster_raw, new_cluster = _zotero_cluster_for_ranks(ranks, cluster[2])
         new_marker = marker[:cluster[0]] + new_cluster_raw + marker[cluster[1]:]
@@ -5099,9 +5126,21 @@ def zotero_refresh_document(xml: str, para_texts: list = None,
     new_paras = [text_of(p[2]) for p in paragraphs(refreshed)]
     rows_before = zotero_parity_rows(xml, para_texts, style_ids)
     rows_after = zotero_parity_rows(refreshed, new_paras, style_ids)
-    high_before = sum(1 for r in rows_before if r["rule"] in ("FMT-Z1", "FMT-Z2", "FMT-Z4"))
-    high_after = sum(1 for r in rows_after if r["rule"] in ("FMT-Z1", "FMT-Z2", "FMT-Z4"))
-    if high_after > high_before or (high_after and not high_before):
+    def _high_key(r):
+        # Location is an OFFSET-bearing label and may move with the edit; the
+        # rule + evidence signature is the stable identity of the row.
+        return (r.get("rule"), str(r.get("evidence") or ""))
+
+    high_rules = ("FMT-Z1", "FMT-Z2", "FMT-Z4")
+    high_before_rows = [r for r in rows_before if r["rule"] in high_rules]
+    high_after_rows = [r for r in rows_after if r["rule"] in high_rules]
+    high_before = len(high_before_rows)
+    high_after = len(high_after_rows)
+    # Equal COUNTS can still hide a NEW row (one fixed, one introduced). A
+    # refresh may only retire high rows, never add one.
+    new_high = [r for r in high_after_rows
+                if _high_key(r) not in {_high_key(b) for b in high_before_rows}]
+    if high_after > high_before or new_high or (high_after and not high_before):
         out["skip"] = (f"the refreshed document still carries {high_after} high-severity "
                        f"parity row(s); nothing was written")
         return out
@@ -5240,9 +5279,17 @@ def refresh_zotero_parts(parts: dict, policy: dict = None) -> dict:
         elif zot.get("skip"):
             rep["skip"] = zot["skip"]
             rep["nothing_to_do"] = bool(zot.get("nothing_to_do"))
-    rep["changed"] = bool(rep["changes"])
-    if rep["changed"]:
-        rep["parts"] = new_parts
+    if rep["skip"] and not rep["nothing_to_do"]:
+        # A REFUSAL is write-free: the style reconcile that ran before the
+        # refusal was detected must not be returned as a change, or the caller
+        # rewrites the DOCX even though the numbering operation was refused.
+        rep["changed"] = False
+        rep["parts"] = None
+        rep["changes"] = []
+    else:
+        rep["changed"] = bool(rep["changes"])
+        if rep["changed"]:
+            rep["parts"] = new_parts
     return rep
 
 

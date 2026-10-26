@@ -177,6 +177,11 @@ def cmd_setup(args) -> None:
             f"(same journal, letter), 3=major revision (scoped edits, letter), 4=minor "
             f"revision (scoped edits, letter), 5=llm (the false-positive-filtered "
             f"{LLM_FEEDBACK_DIR}/ review only; no journal letter, no response letter).")
+    # A scoped (major/minor) mode overrides three operator policies. Remember
+    # what the operator actually chose so `set-revision-mode` can restore it
+    # when the root leaves the scoped mode instead of silently turning the
+    # revision audit (and the probe) back on.
+    scoped_mode_restore = None
     journal_feedback = [str(x) for x in (getattr(args, "journal_feedback", None) or [])
                         if str(x).strip()]
     journal_feedback_from = str(getattr(args, "journal_feedback_from", None) or "").strip()
@@ -217,6 +222,12 @@ def cmd_setup(args) -> None:
             if integrators != [0] * rounds:
                 integrators = [0] * rounds
                 forced.append("integrators=0 (nothing to integrate without rewrite arms)")
+            scoped_mode_restore = {
+                "audit": str(getattr(args, "audit", DEFAULT_AUDIT) or DEFAULT_AUDIT),
+                "revision_audit": str(getattr(args, "revision_audit", "on") or "on").lower(),
+                "probe_review": str(getattr(args, "probe_review", PROBE_REVIEW_DEFAULT)
+                                    or PROBE_REVIEW_DEFAULT).lower(),
+            }
             if getattr(args, "audit", DEFAULT_AUDIT) not in (None, "", "off"):
                 forced.append("audit off (the general review audits do not run in this mode)")
             args.audit = "off"
@@ -480,7 +491,9 @@ def cmd_setup(args) -> None:
         try:
             _rel = _q.resolve().relative_to(_source_root)
         except (OSError, ValueError):
-            _mapped_feedback.append(str(_q))
+            # The letter is outside --source: freeze it into the root instead of
+            # storing an absolute path that can change/delete the input later.
+            _mapped_feedback.append(_freeze_journal_feedback(root, _q))
         else:
             _mapped_feedback.append((ctx.pristine / _rel).relative_to(root).as_posix())
     journal_feedback = _mapped_feedback
@@ -661,9 +674,18 @@ def cmd_setup(args) -> None:
         # historical workflow is byte-compatible down to pipeline_config.json.
         # The feedback keys belong to the modes that actually read a letter.
         ctx.cfg["revision_mode"] = revision_mode
+    if scoped_mode_restore is not None:
+        # Recorded, not inferred: leaving the scoped mode must restore what the
+        # operator passed here, not the built-in defaults.
+        ctx.cfg["scoped_mode_restore"] = scoped_mode_restore
     if JOURNAL_MODES[revision_mode]["feedback"]:
         ctx.cfg.update({"journal_feedback": journal_feedback,
                         "journal_feedback_from": journal_feedback_from})
+    # The operator's --source as it was at setup time, BEFORE the formatter
+    # normalizes the working copy. `from-setup-source` compares against THIS;
+    # `source_manifest` (recorded below) describes the normalized pristine copy
+    # and would make every source look "changed on disk".
+    source_manifest_raw = hash_manifest(ctx.pristine)
     format_fix_report = None
     if format_fix != "off":
         setup_warns = []
@@ -682,6 +704,7 @@ def cmd_setup(args) -> None:
     # `source_manifest` above stays the byte-level guard of the pristine copy.
     ctx.state = {"version": STATE_VERSION, "runs": {}, "rounds": {}, "pinned": [], "log": [],
                  "source_manifest": hash_manifest(ctx.pristine),
+                 "source_manifest_raw": source_manifest_raw,
                  "original_digest":
                      manifest_digest(manifest_for_sources([(ctx.pristine, "", ())])),
                  "original_content_fingerprint":
@@ -2043,9 +2066,16 @@ def cmd_apply_template(args) -> None:
         _template_rewrite_session(ctx, args, src, templates)
         return
     dest = Path(args.dest).expanduser() if args.dest else ctx.root / TEMPLATE_PACKAGE_DIRNAME
+    # `--force` recursively deletes THE DESTINATION. Protect the pipeline root:
+    # the only destination inside it that may be replaced is the default
+    # `<root>/template_package/`; an explicit `--dest <root>` (the confirmed
+    # repro) or any other root-owned directory is refused before the deletion.
+    protect = () if dest.resolve() == (ctx.root / TEMPLATE_PACKAGE_DIRNAME).resolve() \
+        else (ctx.root,)
     report = rebuild_package_from_templates(templates, src, dest, force=bool(args.force),
                                             containers=venue_containers(ctx),
-                                            manuscript_names=article_type_manuscript_names(ctx))
+                                            manuscript_names=article_type_manuscript_names(ctx),
+                                            protected=protect)
     if not report.get("ok"):
         if report.get("error"):
             die(report["error"])
@@ -2679,6 +2709,29 @@ def cmd_adopt_sweep(args) -> None:
           "will report any inconsistency.")
 
 
+def _freeze_journal_feedback(root: Path, src: Path) -> str:
+    """Freeze one journal-feedback file INSIDE `root`; return a root-relative path.
+
+    AGENTS.md rule 11: a root may read only files it carries. An operator-named
+    letter outside `--source` used to be stored as an absolute path in
+    pipeline_config.json, so editing/moving/deleting it later silently changed
+    what the root consumed. A file already under the root keeps its path; an
+    external one is copied to `<root>/frozen_feedback/` under a content-stable
+    name and the stored path points there.
+    """
+    root = root.resolve()
+    src = Path(src).resolve()
+    if is_within(src, root):
+        return src.relative_to(root).as_posix()
+    dest_dir = root / "frozen_feedback"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    tag = hashlib.sha1(str(src).encode("utf-8")).hexdigest()[:8]
+    dest = dest_dir / f"{src.stem}-{tag}{src.suffix}"
+    if not dest.is_file() or sha256_file(dest) != sha256_file(src):
+        shutil.copy2(src, dest)
+    return dest.relative_to(root).as_posix()
+
+
 def cmd_set_revision_mode(args) -> None:
     """Set (or show) the journal revision mode of an existing root.
 
@@ -2735,6 +2788,8 @@ def cmd_set_revision_mode(args) -> None:
             f"decides which stages those runs were built for.\n"
             f"       Re-run `set-revision-mode {mode_arg} --force` if the change is intended.")
     named = [str(x) for x in (getattr(args, "journal_feedback", None) or []) if str(x).strip()]
+    info = JOURNAL_MODES[mode_arg]
+    _named_resolved = []
     for item in named:
         q = Path(item)
         if not q.is_absolute():
@@ -2742,7 +2797,13 @@ def cmd_set_revision_mode(args) -> None:
             q = root_rel if root_rel.exists() else (Path.cwd() / q)
         if not q.is_file():
             die(f"--journal-feedback {item!r} does not exist (looked for {q}).")
-    info = JOURNAL_MODES[mode_arg]
+        if info["feedback"] and mode_arg != JOURNAL_MODE_LLM:
+            # Freeze an external letter into the root and store it root-relative;
+            # the root must not read a mutable path outside itself (rule 11).
+            _named_resolved.append(_freeze_journal_feedback(ctx.root, q))
+        else:
+            _named_resolved.append(str(q))
+    named = _named_resolved
     if named and not info["feedback"]:
         print(f"[set-revision-mode] note: mode {mode_arg!r} reads no journal feedback; "
               f"--journal-feedback/--journal-feedback-from are ignored")
@@ -2759,6 +2820,16 @@ def cmd_set_revision_mode(args) -> None:
             ctx.cfg["journal_feedback_from"] = str(args.journal_feedback_from).strip()
         forced = []
         if info["scoped"]:
+            if _prev_mode not in (JOURNAL_MODE_MAJOR, JOURNAL_MODE_MINOR):
+                # Remember the operator's own policies before the scoped mode
+                # overrides them. A root that entered via `setup` already
+                # carries this record.
+                ctx.cfg.setdefault("scoped_mode_restore", {
+                    "audit": str(ctx.cfg.get("audit", DEFAULT_AUDIT) or DEFAULT_AUDIT),
+                    "revision_audit": str(ctx.cfg.get("revision_audit", "on") or "on").lower(),
+                    "probe_review": str(ctx.cfg.get("probe_review", PROBE_REVIEW_DEFAULT)
+                                        or PROBE_REVIEW_DEFAULT).lower(),
+                })
             rounds = int(ctx.cfg.get("rounds") or 1)
             if rounds != 1:
                 ctx.cfg["rounds"] = 1
@@ -2782,6 +2853,9 @@ def cmd_set_revision_mode(args) -> None:
             ctx.cfg["revision_audit"] = "off"
             forced.append("revision_audit=off (concern-scoped edits have no general review "
                           "to audit against)")
+            if str(ctx.cfg.get("probe_review", PROBE_REVIEW_DEFAULT)).lower() != "off":
+                ctx.cfg["probe_review"] = "off"
+                forced.append("probe_review=off (scoped edits are driven by the concerns)")
         elif _prev_mode in (JOURNAL_MODE_MAJOR, JOURNAL_MODE_MINOR):
             # Leaving a scoped mode restores the historical plan the mode
             # replaced. Without this the root kept `rounds=1`, `rewrites=[0]`,
@@ -2792,10 +2866,14 @@ def cmd_set_revision_mode(args) -> None:
                 _default = DEFAULTS[_key]
                 ctx.cfg[_key] = list(_default) if isinstance(_default, list) else _default
                 forced.append(f"{_key}={ctx.cfg[_key]} (the default plan)")
-            ctx.cfg["audit"] = DEFAULT_AUDIT
-            forced.append(f"audit={DEFAULT_AUDIT} (the default)")
-            ctx.cfg["revision_audit"] = "on"
-            forced.append("revision_audit=on (the default)")
+            saved = ctx.cfg.pop("scoped_mode_restore", None) or {}
+            ctx.cfg["audit"] = str(saved.get("audit") or DEFAULT_AUDIT)
+            forced.append(f"audit={ctx.cfg['audit']} (restored)")
+            ctx.cfg["revision_audit"] = str(saved.get("revision_audit") or "on").lower()
+            forced.append(f"revision_audit={ctx.cfg['revision_audit']} (restored)")
+            ctx.cfg["probe_review"] = str(
+                saved.get("probe_review") or PROBE_REVIEW_DEFAULT).lower()
+            forced.append(f"probe_review={ctx.cfg['probe_review']} (restored)")
         ctx.state["config"] = ctx.cfg
         write_json_atomic(ctx.cfg_path, ctx.cfg)
         ctx.log("set-revision-mode", detail=mode_arg)

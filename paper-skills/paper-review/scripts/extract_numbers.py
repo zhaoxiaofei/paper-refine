@@ -29,6 +29,22 @@ import re
 import sys
 from collections import defaultdict
 
+
+def strip_tex_comment(line: str) -> str:
+    """`line` up to its first unescaped `%` (the LaTeX comment marker)."""
+    out, i = [], 0
+    while i < len(line):
+        if line[i] == "\\" and i + 1 < len(line):
+            out.append(line[i:i + 2])
+            i += 2
+            continue
+        if line[i] == "%":
+            break
+        out.append(line[i])
+        i += 1
+    return "".join(out)
+
+
 EVIDENCE_DIRNAMES = ("raw_data", "human_review_feedback", "llm_review_feedback")
 # Role words are NAME TOKENS, not substrings: a manuscript named
 # `immune_response.md` or `biofeedback_results.txt` is real prose, while a role
@@ -125,7 +141,7 @@ LABEL_PATTERNS = [
         r"(?![.,]\d)(?![\u00a0\u202f ]\d{3}\b)")),
     ("AUC", re.compile(
         r"\bAU(?:C|ROC)\s*(?:(?:was|is|of|approximately|approx\.?|about)\s*)*"
-        r"(?:[:=]\s*)?((?:0?\.\d+|1(?:\.0+)?))(?!\d|\.)", re.I)),
+        r"(?:[:=]\s*)?((?:0?\.\d+|1(?:\.0+)?))(?!\d|\.\d)", re.I)),
     ("percentage", re.compile(
         r"(?<![\w.])((?:\.\d+|\d{1,3}(?:\.\d+)?))\s*%")),
     ("CI", re.compile(
@@ -200,9 +216,11 @@ VERSION_RE = re.compile(r"\b(?:v(?:er(?:sion)?)?\.?\s?)(\d+(?:\.\d+)+)\b", re.I)
 REF_ROLE_RE = re.compile(r"\brefs?\b|\breferences?\b")
 
 REF_HEAD_RE = re.compile(
-    r"^\s*(?:#{1,6}\s*)?(?:references?|bibliography|reference\s+list|literature\s+cited)\s*:?\s*$", re.I)
+    r"^\s*(?:#{1,6}\s*)?(?:\d+(?:\.\d+)*[.)]?\s*)?"
+    r"(?:references?|bibliography|reference\s+list|literature\s+cited)\s*:?\s*$", re.I)
 STOP_SECTION_RE = re.compile(
-    r"^\s*(?:#{1,6}\s+)?(?:figure\s+legends?|figures?|table\s+legends?|tables?|"
+    r"^\s*(?:#{1,6}\s+)?(?:\d+(?:\.\d+)*[.)]?\s*)?"
+    r"(?:figure\s+legends?|figures?|table\s+legends?|tables?|"
     r"supplementary(?:\s+\w+)?|extended\s+data(?:\s+\w+)?|methods?|materials\s+and\s+methods|"
     r"experimental\s+procedures|results?|discussion|conclusions?|introduction|background|"
     r"abstract|acknowledge?ments?|author\s+contributions?|competing\s+interests?|"
@@ -409,6 +427,10 @@ def main():
         if role == "references":
             continue  # a reference list is not the authors' own metric source
         lines = open(os.path.join(corpus, fname), encoding="utf-8", errors="replace").read().split("\n")
+        if fname.endswith((".tex.txt", ".ltx.txt")):
+            # A LaTeX comment is not manuscript prose: a commented-out
+            # `% p = 0.001` must not become an M4 divergence candidate.
+            lines = [strip_tex_comment(ln) for ln in lines]
         region = find_reference_region(lines)
         if region:
             reference_notes.append("%s lines %d-%d (%s)" % (

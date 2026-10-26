@@ -32,6 +32,17 @@ SPELLING_PAIRS = (("tumour", "tumor"), ("tumours", "tumors"), ("tumoural", "tumo
                   ("catalogue", "catalog"), ("acknowledgement", "acknowledgment"))
 
 
+def spelling_nonprose_mask(text: str) -> str:
+    """`text` with URLs/e-mails and inline code spans blanked, same length.
+
+    A spelling rule is a rule about prose. Rewriting the minority spelling
+    inside `https://example.org/colour-chart` (or a code literal) corrupts the
+    link while making the finding look cleared.
+    """
+    out = URL_RE.sub(lambda m: " " * len(m.group(0)), text or "")
+    return re.sub(r"`[^`]*`", lambda m: " " * len(m.group(0)), out)
+
+
 def spelling_minority_targets(prose_texts: list) -> dict:
     """{minority_form: target_form} for every mixed US/UK spelling pair.
 
@@ -41,7 +52,7 @@ def spelling_minority_targets(prose_texts: list) -> dict:
     row the fixer cannot clear (that tie made the whole file's repairs fail
     their self-verification and the original was kept).
     """
-    blob = "\n".join(prose_texts)
+    blob = "\n".join(spelling_nonprose_mask(t) for t in prose_texts)
     out = {}
     for a, b in SPELLING_PAIRS:
         ca = len(re.findall(rf"\b{re.escape(a)}\b", blob, re.I))

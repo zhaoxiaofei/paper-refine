@@ -3150,7 +3150,8 @@ Inputs (paths relative to the sandbox root):
   review/findings.json     the frozen review findings (plus review/round2/findings_extra.json when
                            the discovery round ran; the probe's X-9xx rows are merged there too)
   audit/audit.json, audit/AUDIT.md   the review auditor's dispositions, when present
-  revised/CHANGELOG.md, revised/REVISION_REPORT.md, revised/MANUAL_STEPS.md
+  revised/CHANGELOG.md, revised/REVISION_REPORT.md, revised/revision_report.json,
+  revised/MANUAL_STEPS.md
   revised/README-AUTHOR-TO-COMPLETE.md   when the readme hand-off policy is in force, the manual
                            items live there instead of revised/MANUAL_STEPS.md
   raw_data/, code/         the read-only sources the hierarchy names
@@ -3191,10 +3192,15 @@ or `code/`.
 
 def revision_audit_prompt(sandbox: Path, run_id: str, r: int) -> str:
     """The REVISION AUDITOR prompt: audit the revision, write the repair plan only."""
-    return (REVISION_AUDIT_DIRECTIVES
+    text = (REVISION_AUDIT_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
             .replace("@@SANDBOX@@", str(sandbox.resolve()))
             .replace("@@ROUND@@", str(int(r))))
+    # The audit is a full session like the review/revise ones: it gets the
+    # shared decision rules, the source hierarchy and the context-budget rule.
+    text = apply_hierarchy_reconcile(text + shared_blocks(), "revise")
+    text = with_context_budget(text)
+    return apply_author_to_complete_prompt(text)
 
 
 REVISION_REPAIR_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
@@ -3234,11 +3240,14 @@ files changed.
 
 def revision_repair_prompt(sandbox: Path, run_id: str, r: int, rows: int) -> str:
     """The BOUNDED REPAIR prompt: re-validate the plan, apply only confirmed rows."""
-    return (REVISION_REPAIR_DIRECTIVES
+    text = (REVISION_REPAIR_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
             .replace("@@SANDBOX@@", str(sandbox.resolve()))
             .replace("@@ROUND@@", str(int(r)))
             .replace("@@ROWS@@", str(int(rows))))
+    text = apply_hierarchy_reconcile(text + shared_blocks(), "revise")
+    text = with_context_budget(text)
+    return apply_author_to_complete_prompt(text)
 
 REVISION_AUDIT_PROMPT = revision_audit_prompt
 REVISION_REPAIR_PROMPT_FN = revision_repair_prompt

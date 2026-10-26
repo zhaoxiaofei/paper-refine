@@ -209,8 +209,12 @@ def render_pdf_set(ctx: Ctx, label: str, sources: list, out_root: Path,
         if not src.is_dir():
             continue
         # LaTeX roots first (they carry the pages), then the .docx documents.
+        # The cache must key on EVERY compile input, not just the root .tex:
+        # an unchanged root with a changed \input, .bib, figure or .sty was
+        # served a stale PDF as "this version's render".
+        _latex_digest = manifest_digest(hash_manifest(src, follow_dir_links=True))
         for rel in latex_root_documents(src):
-            digest = sha256_file(src / rel)
+            digest = _latex_digest
             out_pdf = out_root / Path(rel).with_suffix(".pdf")
             rec = _reuse_pdf_record(previous, label, rel, digest, out_pdf, "latex")
             if rec is None:

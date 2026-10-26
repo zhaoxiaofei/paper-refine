@@ -167,6 +167,29 @@ def test_chain_guards():
     check("the repair ledger is pipeline bookkeeping (never judged/pinned/shipped)",
           pp.is_bookkeeping_name("REPAIR_LEDGER.json")
           and pp.is_bookkeeping_name("REPAIR_LEDGER.md"))
+    # F07: a crash AFTER the audit record was stored must not suppress the
+    # unfinished repair/post-repair postcheck. The scheduler used to re-enter the
+    # chain only when `revision_audit` was absent, which made the guard inside
+    # run_revision_chain unreachable in exactly this state.
+    rec = {"kind": "revise", "status": "done"}
+    check("F07 no audit record yet is pending", pp.revision_chain_pending(rec))
+    rec["revision_audit"] = {"status": "failed", "error": "bad plan"}
+    check("F07 a failed audit is retried", pp.revision_chain_pending(rec))
+    rec["revision_audit"] = {"status": "skipped", "reason": "revision audit off"}
+    check("F07 a terminal skip is not re-entered", not pp.revision_chain_pending(rec))
+    rec["revision_audit"] = {"status": "skipped", "reason": "manual mode: re-run that round"}
+    check("F07 a manual-mode skip resumes on an automated run",
+          pp.revision_chain_pending(rec))
+    rec["revision_audit"] = {"status": "done", "rows": 0}
+    check("F07 an empty plan is complete", not pp.revision_chain_pending(rec))
+    rec["revision_audit"] = {"status": "done", "rows": 2}
+    check("F07 a non-empty plan with no repair record is pending",
+          pp.revision_chain_pending(rec))
+    rec["revision_repair"] = {"status": "done"}
+    check("F07 a finished repair whose postcheck never ran is pending",
+          pp.revision_chain_pending(rec))
+    rec["revision_chain"] = "complete"
+    check("F07 a completed chain is not re-entered", not pp.revision_chain_pending(rec))
 
 
 def test_skip():
@@ -215,6 +238,89 @@ def test_one_row_repair():
           str(run_rec.get("status")))
 
 
+def test_crash_after_audit_resumes():
+    print("\n== a crash after the audit record resumes the repair (F07) ==")
+    tmp = scratch("rev_audit_resume_")
+    src = make_source(tmp)
+    root = tmp / "root"
+    r = run(["setup", "--source", str(src), "--root", str(root), "--rounds", "1",
+             "--rewrites", "0", "--revises", "1", "--integrators", "0", "--judges", "1"])
+    check("the resume root is created", r.returncode == 0, (r.stderr or r.stdout)[-300:])
+    only = ["run", "--root", str(root), "--only", "review,audit,revise", "--retries", "0",
+            "--agent-cmd", json.dumps([sys.executable, str(STUB)])]
+    r = run(only)
+    check("the first invocation stops before the judge wave", r.returncode == 3,
+          (r.stdout or r.stderr)[-300:])
+    run_rec = revive(root / "runs" / "r1_a2_revise")
+    check("the first chain used the empty plan",
+          (run_rec.get("revision_audit") or {}).get("rows") == 0, str(run_rec.get("revision_audit")))
+    # Simulate the crash: the audit stored a ONE-ROW plan, then the process died
+    # before the repair ran. This is exactly the state the old call-site guard
+    # (`not rec.get("revision_audit")`) refused to resume.
+    state_path = root / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    rec = state["runs"]["r1_a2_revise"]
+    rec["revision_audit"] = {"status": "done", "rows": 1, "duration": 0.1, "error": ""}
+    rec.pop("revision_repair", None)
+    rec.pop("revision_chain", None)
+    sb = root / rec["sandbox"]
+    for rel in ("revised/REPAIR_LEDGER.json", "revised/REPAIR_LEDGER.md",
+                "revision_audit/REPAIR_PLAN.json", "revision_audit/REPAIR_PLAN.md"):
+        (sb / rel).unlink(missing_ok=True)
+    shutil.rmtree(sb / "revised_prerepair", ignore_errors=True)
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    r = run(only, env={"PAPER_STUB_REVISION_AUDIT_ROWS": "1"})
+    check("the resumed invocation reaches the chain again", r.returncode == 3,
+          (r.stdout or r.stderr)[-300:])
+    run_rec = revive(sb)
+    check("the resumed audit found the one-row plan",
+          (run_rec.get("revision_audit") or {}).get("rows") == 1,
+          str(run_rec.get("revision_audit")))
+    check("the bounded repair ran on the resume",
+          (run_rec.get("revision_repair") or {}).get("status") == "done",
+          str(run_rec.get("revision_repair")))
+    check("the chain recorded its post-repair postcheck as complete",
+          run_rec.get("revision_chain") == "complete", str(run_rec.get("revision_chain")))
+    check("the revise stayed done after the resumed postcheck",
+          run_rec.get("status") == "done", str(run_rec.get("status")))
+
+
+def test_failed_repair_is_not_fatal():
+    print("\n== a failed bounded repair is recorded, and the postcheck decides ==")
+    # The verification ledger rejected making a failed bounded repair fatal
+    # (F02 is NOT_A_BUG): the repository documents the stage postcheck as the
+    # authority. The wrapper lets the stub write a VALID package, then exits 1
+    # so the repair record is `failed`; the revision must still be accepted.
+    tmp = scratch("rev_audit_repair_fail_")
+    src = make_source(tmp)
+    root = tmp / "root"
+    wrapper = tmp / "stub_fail_repair.py"
+    wrapper.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(WS / '.paper_test')!r})\n"
+        "import stub_agent\n"
+        "prompt = sys.stdin.read()\n"
+        "rc = stub_agent.main(prompt)\n"
+        "sys.exit(1 if 'BOUNDED REPAIR' in prompt else rc)\n", encoding="utf-8")
+    r = run(["setup", "--source", str(src), "--root", str(root), "--rounds", "1",
+             "--rewrites", "0", "--revises", "1", "--integrators", "0", "--judges", "1"])
+    check("the failed-repair root is created", r.returncode == 0, (r.stderr or r.stdout)[-300:])
+    r = run(["run", "--root", str(root), "--retries", "0",
+             "--agent-cmd", json.dumps([sys.executable, str(wrapper)])],
+            env={"PAPER_STUB_REVISION_AUDIT_ROWS": "1"})
+    check("the round still completes after the failed repair", r.returncode == 0,
+          (r.stdout or r.stderr)[-400:])
+    run_rec = revive(root / "runs" / "r1_a2_revise")
+    check("the repair failure is recorded",
+          (run_rec.get("revision_repair") or {}).get("status") == "failed",
+          str(run_rec.get("revision_repair")))
+    check("the failed repair does not fail the accepted revision",
+          run_rec.get("status") == "done", str(run_rec.get("status")))
+    check("the post-repair postcheck ran and completed the chain",
+          run_rec.get("revision_chain") == "complete", str(run_rec.get("revision_chain")))
+
+
 def cleanup():
     for d in TMPDIRS:
         shutil.rmtree(d, ignore_errors=True)
@@ -227,6 +333,8 @@ def main() -> int:
         test_skip()
         test_empty_plan()
         test_one_row_repair()
+        test_crash_after_audit_resumes()
+        test_failed_repair_is_not_fatal()
     finally:
         cleanup()
     print()

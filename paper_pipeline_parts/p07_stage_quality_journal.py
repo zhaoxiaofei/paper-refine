@@ -418,6 +418,14 @@ def audit_artifact_problems(audit, frozen_ids) -> list:
     if not isinstance(adds, list):
         problems.append("audit/audit.json 'adds' is not a list")
         adds = []
+    if adds:
+        # AGENTS Rule 1: the AUDIT disposes the frozen findings and GENERATES
+        # NO NEW FINDINGS. An observation the auditor cannot dispose belongs in
+        # audit/UNRESOLVED.md, not in an AU-* row the revisers would act on.
+        problems.append(
+            f"the review auditor generated {len(adds)} new finding(s) (AU-*); the audit "
+            "contract is disposition-only -- record unresolved observations in "
+            "audit/UNRESOLVED.md instead")
     seen_add = set()
     for i, row in enumerate(adds):
         if not isinstance(row, dict):
@@ -694,7 +702,11 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     errs.extend(structured_output_problems(ctx, rec))
     warns.extend(inherited_structured_output_notes(ctx, rec))
     rev = sb / REVISED_DIR
-    _format_fix_stage_package(ctx, rec, rev, warns, errs)
+    ff = _format_fix_stage_package(ctx, rec, rev, warns, errs)
+    if (ff or {}).get("skipped") == "symlinked package root":
+        # Everything after this point repairs the package by writing into it; a
+        # symlinked root would carry every recovery copy outside the sandbox.
+        return False, errs, warns, None
     if not (rev.is_dir() and any(rev.iterdir())):
         errs.append("revised/ is missing or empty (a non-empty revised/ is required, though it is "
                     "not by itself a completion signal)")
@@ -996,7 +1008,9 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
     errs.extend(structured_output_problems(ctx, rec))
     warns.extend(inherited_structured_output_notes(ctx, rec))
     out = sb / INTEGRATED_DIR
-    _format_fix_stage_package(ctx, rec, out, warns, errs)
+    ff = _format_fix_stage_package(ctx, rec, out, warns, errs)
+    if (ff or {}).get("skipped") == "symlinked package root":
+        return False, errs, warns, None
     if not (out.is_dir() and any(out.iterdir())):
         errs.append(f"{INTEGRATED_DIR}/ is missing or empty (the integrated package is this "
                     f"stage's deliverable)")
@@ -1136,7 +1150,9 @@ def postcheck_rewrite(ctx: Ctx, rec: dict):
     errs.extend(structured_output_problems(ctx, rec))
     warns.extend(inherited_structured_output_notes(ctx, rec))
     out = sb / REWRITTEN_DIR
-    _format_fix_stage_package(ctx, rec, out, warns, errs)
+    ff = _format_fix_stage_package(ctx, rec, out, warns, errs)
+    if (ff or {}).get("skipped") == "symlinked package root":
+        return False, errs, warns, None
     if not (out.is_dir() and any(out.iterdir())):
         errs.append(f"{REWRITTEN_DIR}/ is missing or empty (the full rewritten candidate is this "
                     f"stage's deliverable; a non-empty {REWRITTEN_DIR}/ is required, though it is "
@@ -2557,7 +2573,9 @@ def materialize_feedback(ctx: Ctx, r: int) -> dict:
                           feedback_prompt(ctx, sb, r, seed) + note + shared_blocks())
     rec = ctx.register(rid, "feedback", r, f"runs/{rid}", produces=rid)
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
-                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True)}
+                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True),
+                              "feedback": hash_manifest(sb / "feedback",
+                                                        follow_dir_links=True)}
     rec["feedback_files"] = [label for _p, label in journal_feedback_files(ctx)]
     rec["llm_feedback_files"] = [label for _p, label in journal_llm_feedback_files(ctx)]
     rec["original_submission"] = (read_json(sb / "feedback" / "CONCERN_SEED.json",
@@ -2584,7 +2602,9 @@ def materialize_concerns(ctx: Ctx, r: int) -> dict:
                           concerns_prompt(ctx, sb, r, seed) + note + shared_blocks())
     rec = ctx.register(rid, "concerns", r, f"runs/{rid}", produces=rid)
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
-                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True)}
+                              PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True),
+                              "feedback": hash_manifest(sb / "feedback",
+                                                        follow_dir_links=True)}
     rec["feedback_files"] = [label for _p, label in journal_feedback_files(ctx)]
     rec["llm_feedback_files"] = [label for _p, label in journal_llm_feedback_files(ctx)]
     rec["original_submission"] = (read_json(sb / "feedback" / "CONCERN_SEED.json",
@@ -2656,6 +2676,9 @@ def materialize_response(ctx: Ctx, r: int, target: Path = None,
                        if is_within(target, ctx.root) else str(target))
     rec["inputs_manifest"] = {"target": hash_manifest(sb / "target"),
                               "concerns": hash_manifest(sb / "concerns")}
+    if (sb / "feedback").is_dir():
+        rec["inputs_manifest"]["feedback"] = hash_manifest(sb / "feedback",
+                                                          follow_dir_links=True)
     return rec
 
 

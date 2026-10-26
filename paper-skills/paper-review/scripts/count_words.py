@@ -349,6 +349,9 @@ def tex_lines(text: str):
                 continue
             _line = _line[_end.end():]
             _in_verb = None
+        # A comment is not source: `% \begin{verbatim}` must not open the
+        # environment, or the rest of the document is blanked as code.
+        _line = strip_tex_comment(_line)
         while True:
             _b = re.search(r"\\begin\{(verbatim|lstlisting|minted|Verbatim)\}",
                            _line)
@@ -843,25 +846,26 @@ def main(argv=None) -> int:
             # applied to the submission (110/1875 where the profile meant
             # 150/3000) with no hint in the output.
             first = next((c for c in types
-                          if isinstance(c, dict) and str(c.get("id") or "").strip()), None)
+                          if isinstance(c, dict) and _article_type_id(c)), None)
             if first is not None:
-                type_id = str(first["id"]).strip().lower()
+                type_id = _article_type_id(first)
         entry = None
         if types:
             for candidate in types:
                 if not isinstance(candidate, dict):
                     continue
-                cid = str(candidate.get("id") or "").strip().lower()
+                cid = _article_type_id(candidate)
                 if cid and (not type_id or cid == type_id):
                     entry = candidate
                     if cid == type_id:
                         break
             if entry is None:
-                known = ", ".join(str(c.get("id")) for c in types if isinstance(c, dict))
+                known = ", ".join(_article_type_id(c) for c in types
+                                  if isinstance(c, dict))
                 print(f"error: --article-type {args.article_type!r} is not one of this venue "
                       f"profile's types ({known})", file=sys.stderr)
                 return 2
-            type_id = str(entry.get("id") or type_id or "default").strip().lower()
+            type_id = _article_type_id(entry) or type_id or "default"
         venue = str((profile or {}).get("id") or args.venue_profile)
         if types:
             venue += f" [{entry.get('label') or type_id}]"

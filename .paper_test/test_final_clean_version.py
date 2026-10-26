@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """`decide` publishes <root>/final_clean_version_<root name>/ (plus a sibling
-zip) with the generation counter +1.
+zip) byte-identical to the judged champion.
 
 Run:  python3 .paper_test/test_final_clean_version.py
 
-The user's naming convention carries a generation counter in the second
-dash-separated filename field (cnb-11-2-mainText-b.docx -> field "11"). The
-clean version published by `decide`/`run-decide` must increment that counter by
-one (guarded: a missing or non-numeric field keeps the name), repoint the
-references inside the text files to the new names, stay byte-stable across a
-second `decide`, and be usable directly as the next run's --source.
+AGENTS.md rule 5 makes the published package the bytes the panel scored: the
+generation counter in the user's file names (cnb-11-2-mainText-b.docx -> field
+"11") is PRESERVED, not incremented, and the references inside the text files
+still name the judged files. The publication must stay byte-stable across a
+second `decide` and be usable directly as the next run's --source.
 
 `PAPER_WS` retargets the suite at another copy of the tree.
 """

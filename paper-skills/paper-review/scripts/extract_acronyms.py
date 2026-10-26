@@ -67,6 +67,22 @@ import re
 import sys
 from collections import defaultdict
 
+
+def strip_tex_comment(line: str) -> str:
+    """`line` up to its first unescaped `%` (the LaTeX comment marker)."""
+    out, i = [], 0
+    while i < len(line):
+        if line[i] == "\\" and i + 1 < len(line):
+            out.append(line[i:i + 2])
+            i += 2
+            continue
+        if line[i] == "%":
+            break
+        out.append(line[i])
+        i += 1
+    return "".join(out)
+
+
 RAW_DATA_DIRNAMES = ("raw_data",)
 HUMAN_FEEDBACK_DIR = "human_review_feedback"
 LLM_FEEDBACK_DIR = "llm_review_feedback"
@@ -221,14 +237,16 @@ FILE_RE = re.compile(
     r"bib|tex|zip|gz|json|ya?ml|sh|xls|pptx|xml|rels|fa|fq|fastq|bam|h5ad|rds|loom)\b", re.I)
 
 REF_HEADING_RE = re.compile(
-    r"^\s*(?:#{1,6}\s*)?(?:references?|bibliography|reference\s+list|literature\s+cited)\s*:?\s*$", re.I)
+    r"^\s*(?:#{1,6}\s*)?(?:\d+(?:\.\d+)*[.)]?\s*)?"
+    r"(?:references?|bibliography|reference\s+list|literature\s+cited)\s*:?\s*$", re.I)
 # The reference-role file names: "ref", "refs", "references", "ref-list" --
 # the SAME word-boundary rule convert_corpus.py's role guesser uses.
 # Deliberately not a bare "ref" PREFIX: "refined_draft.txt" is not a
 # bibliography, and treating it as one dropped its prose from the M1 inventory.
 REF_ROLE_RE = re.compile(r"\brefs?\b|\breferences?\b")
 STOP_SECTION_RE = re.compile(
-    r"^\s*(?:#{1,6}\s+)?(?:figure\s+legends?|figures?|table\s+legends?|tables?|"
+    r"^\s*(?:#{1,6}\s+)?(?:\d+(?:\.\d+)*[.)]?\s*)?"
+    r"(?:figure\s+legends?|figures?|table\s+legends?|tables?|"
     r"supplementary(?:\s+\w+)?|extended\s+data(?:\s+\w+)?|methods?|materials\s+and\s+methods|"
     r"experimental\s+procedures|results?|discussion|conclusions?|introduction|background|"
     r"abstract|acknowledge?ments?|author\s+contributions?|competing\s+interests?|"
@@ -925,6 +943,10 @@ def main():
             continue  # reference list excluded per spec
         text = open(os.path.join(corpus, fname), encoding="utf-8", errors="replace").read()
         lines = text.split("\n")
+        if fname.endswith((".tex.txt", ".ltx.txt")):
+            # A commented-out sentence is not the authors' prose and must not
+            # produce an M1 token (`% Old text mentioned FACS`).
+            lines = [strip_tex_comment(ln) for ln in lines]
         region = find_reference_region(lines)
         if region:
             reference_notes.append("%s lines %d-%d (%s)" % (

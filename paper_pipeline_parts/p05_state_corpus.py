@@ -872,7 +872,19 @@ class Ctx:
         return recs
 
     def sandbox_of(self, rec: dict) -> Path:
-        return self.root / rec["sandbox"]
+        raw = Path(rec["sandbox"])
+        root = self.root.resolve()
+        # An absolute spelling is tolerated only when it points INSIDE this root
+        # (a legacy/hand-edited record); `Path.__truediv__` would otherwise
+        # silently discard the root and let `prune` delete an outside tree.
+        full = (raw if raw.is_absolute() else self.root / raw).resolve()
+        try:
+            full.relative_to(root)
+        except ValueError:
+            die(f"state.json is damaged: run record {rec.get('id')!r} points OUTSIDE the root "
+                f"({raw} -> {full}).\n       {self.state_path}\n"
+                f"       A sandbox must stay below {root}; refusing to use it.")
+        return full
 
     def round_rec(self, r: int) -> dict:
         key = str(int(r))
@@ -2712,13 +2724,16 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
     sb.mkdir(parents=True, exist_ok=True)
     ensure_copy(ctx.sandbox_of(a1) / "base", sb / "base")
     ensure_pristine_input(ctx, sb / PRISTINE_DIR)
+    extra_inputs = {}
     if journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_RESUBMIT):
         # A rewrite for a real submission attempt must answer the decision
         # letter: the concern ledger travels beside the corpus.
         fb = _journal_concern_source(ctx, r)
         ensure_copy(fb / "concerns", sb / "concerns")
+        extra_inputs["concerns"] = hash_manifest(sb / "concerns")
         if (fb / "feedback").is_dir():
             ensure_copy(fb / "feedback", sb / "feedback")
+            extra_inputs["feedback"] = hash_manifest(sb / "feedback", follow_dir_links=True)
     (sb / REWRITTEN_DIR).mkdir(exist_ok=True)
     stage_venue_template(ctx, sb)
     seed_template_visuals(ctx, sb)
@@ -2747,6 +2762,7 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
     rec["rewrite_level"] = rewrite_level_of(k, m)
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True)}
+    rec["inputs_manifest"].update(extra_inputs)
     return rec
 
 
@@ -2772,6 +2788,10 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
     prior = prior_review_dir(ctx, r)
     inputs = {"base": hash_manifest(sb / "base"),
               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True)}
+    if (sb / "feedback").is_dir():
+        inputs["feedback"] = hash_manifest(sb / "feedback", follow_dir_links=True)
+    if (sb / "concerns").is_dir():
+        inputs["concerns"] = hash_manifest(sb / "concerns")
     if prior is not None:
         want_prior = {name: sha256_file(prior / name) for name in PRIOR_ROUND_FILES
                       if (prior / name).is_file()}
@@ -2886,6 +2906,11 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True),
                               "review": hash_manifest(sb / REVIEW_DIR)}
+    if (sb / "feedback").is_dir():
+        rec["inputs_manifest"]["feedback"] = hash_manifest(sb / "feedback",
+                                                          follow_dir_links=True)
+    if (sb / "concerns").is_dir():
+        rec["inputs_manifest"]["concerns"] = hash_manifest(sb / "concerns")
     return rec
 
 
@@ -3680,6 +3705,11 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True),
                               "review": hash_manifest(sb / REVIEW_DIR)}
+    if (sb / "feedback").is_dir():
+        rec["inputs_manifest"]["feedback"] = hash_manifest(sb / "feedback",
+                                                          follow_dir_links=True)
+    if (sb / "concerns").is_dir():
+        rec["inputs_manifest"]["concerns"] = hash_manifest(sb / "concerns")
     if aud_manifest is not None:
         rec["inputs_manifest"]["audit"] = aud_manifest
     return rec
@@ -4077,6 +4107,7 @@ def rebuild_sandbox(ctx: Ctx, rec: dict) -> None:
     # audited and suppress the chain on bytes that were never audited.
     rec.pop("revision_audit", None)
     rec.pop("revision_repair", None)
+    rec.pop("revision_chain", None)
     rec["postcheck"] = None
     rec["last_error"] = None
 
@@ -4119,7 +4150,7 @@ def reset_run_record(rec: dict) -> None:
               # that package (a rebuilt sandbox, a revalidation reset), so the
               # chain must run again on the new one -- inheriting these keys
               # made a retried revise run look audited when it was not.
-              "revision_audit", "revision_repair",
+              "revision_audit", "revision_repair", "revision_chain",
               # The CLI session id names the attempt whose transcript is in THIS
               # sandbox (see capture_agent_session_id) -- and every caller of this
               # reset replaces that sandbox: `rebuild_sandbox` moves the old one
@@ -4189,6 +4220,33 @@ def _review_copy_mismatch(ctx: Ctx, r: int, sb: Path, upstream_dir: Path):
     return None
 
 
+def _journal_staged_freshness_problems(ctx: Ctx, r: int, sb: Path) -> list:
+    """Drift of a sandbox's `feedback/` and `concerns/` copies.
+
+    Those areas are read-only evidence copied from the feedback/concerns run.
+    A feedback retry re-stages them from the canonical source, but a downstream
+    sandbox keeps the copy it was born with and its own recorded manifest still
+    matches that stale copy -- so nothing marked it stale. Compare the areas
+    against the CURRENT ledger run, exactly like the review/base checks above.
+    """
+    try:
+        src_sb = _journal_concern_source(ctx, r)
+    except RuntimeError:
+        return ["the journal feedback/concerns run is not done"]
+    probs = []
+    for area in ("feedback", "concerns"):
+        src = src_sb / area
+        if not src.is_dir():
+            continue
+        dst = sb / area
+        if not dst.is_dir():
+            probs.append(f"{area}/ is missing (the feedback/concerns run carries it)")
+        elif not manifests_equal(hash_manifest(dst, follow_dir_links=True),
+                                  hash_manifest(src, follow_dir_links=True)):
+            probs.append(f"{area}/ no longer matches the current feedback/concerns ledger")
+    return probs
+
+
 def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
     """Input-area drift for ONE run, measured against its CURRENT upstream."""
     kind, r = rec["kind"], int(rec["round"])
@@ -4207,6 +4265,11 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
 
     a1 = ctx.run(rid_a1(r))
     probs = []
+    # A session that carries the staged feedback/ledger must see the CURRENT
+    # letter, not the copy frozen before a feedback retry.
+    if (journal_has_feedback(ctx) and kind not in ("feedback", "concerns")
+            and ((sb / "feedback").is_dir() or (sb / "concerns").is_dir())):
+        probs.extend(_journal_staged_freshness_problems(ctx, r, sb))
     if kind == "rewrite":
         if a1 is not None and a1.get("status") == "done":
             probs.append(mismatch("base", hash_manifest(ctx.sandbox_of(a1) / "base")))
@@ -4223,6 +4286,19 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
                         if (prior / name).is_file()}
             if expected and hash_manifest(sb / "prior_round").get("files") != expected:
                 probs.append("prior_round/ no longer matches the archived prior review")
+        # Session B's frozen input is session A's review/ OUTPUT. Retrying A
+        # changes it, but B's own review_a/ still matches the manifest B recorded
+        # when it was built, so the old checks above never saw the drift. Compare
+        # the copy against A's CURRENT review/ (the audit and every reviser
+        # consume B's merged list, so a stale copy would silently freeze an old
+        # finding set).
+        if review_split_of(ctx) != "off" and rec.get("id") == rid_review_b(r):
+            a_rec = ctx.run(rid_review(r))
+            if a_rec is None or a_rec.get("status") != "done":
+                probs.append("upstream review session A is not done")
+            elif not manifests_equal(hash_manifest(sb / "review_a"),
+                                     hash_manifest(ctx.sandbox_of(a_rec) / REVIEW_DIR)):
+                probs.append("review_a/ no longer matches session A's current review")
     elif kind == "revise":
         if a1 is not None and a1.get("status") == "done":
             probs.append(mismatch("base", hash_manifest(ctx.sandbox_of(a1) / "base")))
