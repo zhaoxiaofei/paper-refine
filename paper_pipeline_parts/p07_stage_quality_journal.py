@@ -268,7 +268,23 @@ def display_rule_errors(info: dict, label: str) -> list:
 # The columns that MAKE a table the integration ledger (rather than the session's
 # own orientation/summary table, which is welcome documentation but carries none
 # of the per-difference fields the postcheck has to read).
-INTEGRATION_LEDGER_COLUMNS = ("donor", "artifact", "size", "finding effect", "verdict")
+INTEGRATION_LEDGER_COLUMNS = ("donor", "artifact", "size", "finding effect", "verdict",
+                              "revalidated")
+
+
+def _ledger_header_key(cell) -> str:
+    """A ledger header without its prompt's parenthetical explanation."""
+    text = str(cell or "").strip().lower()
+    text = re.sub(r"\s*\(.*\)\s*$", "", text).strip()
+    return text
+
+
+def _ledger_block_rows(block: dict) -> list:
+    """Rows of one block keyed by normalized ledger header."""
+    head = list(block.get("header") or [])
+    keys = [_ledger_header_key(c) for c in head]
+    return [{key: row.get(raw, "") for raw, key in zip(head, keys)}
+            for row in block.get("rows") or []]
 
 
 def integration_ledger_rows(path: Path) -> list:
@@ -288,20 +304,25 @@ def integration_ledger_rows(path: Path) -> list:
     if not blocks:
         return []
     def score(block) -> int:
-        head = [str(c).strip().lower() for c in (block.get("header") or [])]
+        head = [_ledger_header_key(c) for c in (block.get("header") or [])]
         return sum(1 for c in INTEGRATION_LEDGER_COLUMNS if c in head)
     best = max(range(len(blocks)), key=lambda i: score(blocks[i]))
     if score(blocks[best]) >= 2:
         head = blocks[best]["header"]
-        return [row for b in blocks if b["header"] == head for row in b["rows"]]
+        return [row for b in blocks if b["header"] == head
+                for row in _ledger_block_rows(b)]
     head = blocks[0]["header"]
-    return [row for b in blocks if b["header"] == head for row in b["rows"]]
+    return [row for b in blocks if b["header"] == head
+            for row in _ledger_block_rows(b)]
 
 
 def integration_ledger_report(out: Path, donors: list, expect_both_levels: bool) -> dict:
-    """Parse integrated/DIFF_LEDGER.md: size classes, artifacts, finding effects."""
+    """Parse integrated/DIFF_LEDGER.md: size classes, artifacts, finding effects,
+    and the Rule 1B re-verification verdict."""
     rows = integration_ledger_rows(out / "DIFF_LEDGER.md")
     sizes, missing_artifact, missing_finding, undoes, seen_donors = Counter(), [], [], [], set()
+    missing_revalidated, invalid_ports = [], []
+    has_revalidated_column = any("revalidated" in r for r in rows)
     for r in rows:
         size = str(r.get("size") or "").strip().lower()
         sizes[size] += 1
@@ -318,9 +339,19 @@ def integration_ledger_report(out: Path, donors: list, expect_both_levels: bool)
             # Keep the id's own case in the message ("undoes F-002"): the
             # warning goes to a human and to the change log.
             undoes.append(f"{donor or '?'}: {fe_raw}")
+        reval = str(r.get("revalidated") or r.get("re_validation") or "").strip().lower()
+        verdict = str(r.get("verdict") or "").strip().lower()
+        edits = verdict.startswith("port") or verdict.startswith("synth")
+        if not reval and not edits:
+            missing_revalidated.append(donor or "?")
+        if has_revalidated_column and edits and reval != "confirmed":
+            invalid_ports.append(f"{donor or '?'}: verdict={verdict or '?'}, "
+                                 f"revalidated={reval or 'missing'}")
     absent = [d for d in donors if d and not any(d in s for s in seen_donors)]
     return {"rows": len(rows), "sizes": dict(sizes), "missing_artifact": missing_artifact,
             "missing_finding": missing_finding, "undoes": undoes, "donors_absent": absent,
+            "missing_revalidated": missing_revalidated, "invalid_ports": invalid_ports,
+            "legacy_no_revalidated": bool(rows) and not has_revalidated_column,
             "both_levels": bool(sizes.get("small") and sizes.get("large")),
             "expect_both_levels": bool(expect_both_levels)}
 
@@ -1152,6 +1183,16 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
         if led["missing_finding"]:
             warns.append(f"integrate: {len(led['missing_finding'])} ledger row(s) do not state "
                          f"their `finding effect` (preserves/undoes <id> or none)")
+        if led["invalid_ports"]:
+            errs.append(f"integrate: {len(led['invalid_ports'])} port/synthesize row(s) lack "
+                        f"`revalidated: confirmed` -- Rule 1B forbids editing an unverified "
+                        f"item: " + "; ".join(led["invalid_ports"][:4]))
+        if led["legacy_no_revalidated"]:
+            warns.append("integrate: legacy DIFF_LEDGER.md has no `revalidated` column; "
+                         "new runs must record one (this legacy ledger is not treated as a port)")
+        elif led["missing_revalidated"]:
+            errs.append(f"integrate: {len(led['missing_revalidated'])} ledger row(s) carry no "
+                        f"`revalidated` verdict (Rule 1B requires confirmed/rejected per item)")
         for undo in led["undoes"][:4]:
             warns.append(f"integrate: a ported difference would UNDO a resolved finding "
                          f"({undo}) -- keep the self wording unless the author decided otherwise")

@@ -16,7 +16,7 @@ exactly as they did in the single-file source. Every part is a real Python file
 | `p04_utils.py` | hashing, atomic JSON/CSV/text writers, state helpers, hashes, permissions |
 | `p05_state_corpus.py` | `Ctx`, integrity, version corpora, judge views, sandbox materialization |
 | `p06_postchecks.py` | completion signals, postchecks, discovery contract, raw-data/artifact checks, opaque-identifier evidence gates |
-| `p07_stage_quality_journal.py` | language/integration quality, journal stages, self-check |
+| `p07_stage_quality_journal.py` | language/integration quality, journal stages, self-check, the integration `revalidated`/Rule 1B ledger gate |
 | `p08_selection_driver.py` | aggregation, champion selection, pin/winner publication, round driver |
 | `p09_setup.py` | `setup` and the `set-*` commands |
 | `p10_reports.py` | raw scores, issue census, defect list writers |

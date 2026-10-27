@@ -119,9 +119,10 @@ def test_diff_ledger_rule_and_report():
     print()
     print("== every difference row needs its own artifact and a finding effect ==")
     rule = nb.DIFF_LEDGER_RULE
-    check("the rule names the two new columns",
+    check("the rule names the artifact, finding-effect and revalidation columns",
           "artifact (a path under integrated/work/)" in rule
-          and "finding effect (preserves <id> / undoes <id> / none)" in rule)
+          and "finding effect (preserves <id> / undoes <id> / none)" in rule
+          and "revalidated (confirmed / rejected)" in rule)
     check("the rule requires an artifact per row and both size classes",
           "EVERY row carries an ARTIFACT" in rule
           and "BOTH `size` classes" in rule)
@@ -130,13 +131,13 @@ def test_diff_ledger_rule_and_report():
     (out / "work" / "diffs").mkdir(parents=True)
     (out / "work" / "diffs" / "D-001.md").write_text("before/after", encoding="utf-8")
     (out / "DIFF_LEDGER.md").write_text(
-        "| id | donor | location | size | donor says | self says | verdict | why | effect | "
-        "artifact | finding effect |\n"
-        "|---|---|---|---|---|---|---|---|---|---|---|\n"
-        "| D-001 | w1 | p3 | large | x | y | port | better flow | none | "
+        "| id | donor | location | size | donor says | self says | verdict | "
+        "revalidated | why | effect | artifact | finding effect |\n"
+        "|---|---|---|---|---|---|---|---|---|---|---|---|\n"
+        "| D-001 | w1 | p3 | large | x | y | port | confirmed | better flow | none | "
         "integrated/work/diffs/D-001.md | preserves F-002 |\n"
-        "| D-002 | w2 | p9 | small | a | b | keep-self | self is precise | none |  | "
-        " |\n", encoding="utf-8")
+        "| D-002 | w2 | p9 | small | a | b | keep-self | rejected | self is precise | "
+        "none |  |  |\n", encoding="utf-8")
     rep = nb.integration_ledger_report(out, ["w1", "w2"], expect_both_levels=True)
     check("both size classes are seen", rep["both_levels"] is True, str(rep))
     check("the row without an artifact is reported",
@@ -144,6 +145,15 @@ def test_diff_ledger_rule_and_report():
     check("the row without a finding effect is reported",
           rep["missing_finding"] == ["w2"], str(rep["missing_finding"]))
     check("a `preserves` row is not an undo", not rep["undoes"], str(rep["undoes"]))
+    check("every row's Rule 1B revalidation verdict is read",
+          rep["missing_revalidated"] == [] and rep["invalid_ports"] == [], str(rep))
+    (out / "DIFF_LEDGER.md").write_text(
+        (out / "DIFF_LEDGER.md").read_text(encoding="utf-8").replace(
+            "| port | confirmed |", "| port | rejected |"), encoding="utf-8")
+    bad = nb.integration_ledger_report(out, ["w1", "w2"], expect_both_levels=True)
+    check("a port without `revalidated: confirmed` is an invalid port",
+          len(bad["invalid_ports"]) == 1 and "revalidated=rejected" in bad["invalid_ports"][0],
+          str(bad["invalid_ports"]))
     (out / "DIFF_LEDGER.md").write_text(
         (out / "DIFF_LEDGER.md").read_text(encoding="utf-8").replace("preserves F-002",
                                                                      "undoes F-002"),

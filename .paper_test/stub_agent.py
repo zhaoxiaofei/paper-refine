@@ -843,21 +843,21 @@ def do_integration(sb: Path, name: str, round_no: int) -> int:
                     "- shipped: (stub sentence)\n"),
             encoding="utf-8")
         rows.append(f"| D-{i:03d} | {d} | (e) | {size} | stub: donor wording | "
-                    f"stub: self wording | keep-self | stub: no ported difference | "
-                    f"none | {art} | none |")
+                    f"stub: self wording | keep-self | rejected | "
+                    f"stub: no ported difference | none | {art} | none |")
     # Contract v5: the round's frozen discovery list is reconciled BY ID (the
     # revise arm resolved it; the integrated package must not lose a fix). One
     # row per X id, with its `finding effect`.
     for cid in discovery_ids(sb):
         rows.append(f"| {cid} | (discovery) | frozen_discovery/findings_extra.json | small | "
-                    f"— | — | keep-self | stub: discovery reconciliation (no donor carries a "
-                    f"differing fix) | none | integrated/work/diffs/D-000.md | "
+                    f"— | — | keep-self | rejected | stub: discovery reconciliation (no donor "
+                    f"carries a differing fix) | none | integrated/work/diffs/D-000.md | "
                     f"preserves {cid} |")
     (out / "DIFF_LEDGER.md").write_text(
         "# diff ledger (stub integration)\n\n"
-        "| id | donor | location | size | donor says | self says | verdict | why | "
-        "effect | artifact | finding effect |\n"
-        "|---|---|---|---|---|---|---|---|---|---|---|\n"
+        "| id | donor | location | size | donor says | self says | verdict | "
+        "revalidated | why | effect | artifact | finding effect |\n"
+        "|---|---|---|---|---|---|---|---|---|---|---|---|\n"
         + "\n".join(rows) + "\n", encoding="utf-8")
     language_pass_artifact(out, "integrated documents")
     (out / "MANUAL_STEPS.md").write_text(

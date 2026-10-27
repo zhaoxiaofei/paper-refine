@@ -179,6 +179,17 @@ def test_operational_contract():
     check("AGENTS.md requires setup to freeze every runtime file into --root",
           "A root runs a frozen copy" in flat_agents
           and "must copy every file the running project executes or reads by path" in flat_agents)
+    check("AGENTS.md separates finding generation from finding-consuming repair",
+          "Rule 1A. **Detection and repair are separate.**" in agents
+          and "Rule 1B. **Every finding-consuming session independently re-verifies" in agents
+          and "finding-generating" in agents and "finding-consuming" in agents)
+    check("AGENTS.md names the integrator's donor set as a caller-supplied candidate source",
+          "caller-supplied candidate source" in agents
+          and "generates no new finding" in agents
+          and "invents no third reading" in agents)
+    check("AGENTS.md limits the language/format exception to the role's own candidate",
+          "in-role mechanical language/format pass" in agents
+          and "may not change a claim, fact" in agents)
 
 
 def main() -> int:

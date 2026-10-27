@@ -1028,6 +1028,8 @@ to catch. Read the documents, the figure/table assets, the legends, and the code
 
 @@HIERARCHY_RECONCILE@@
 
+@@INTEGRATION_REVALIDATION_RULE@@
+
 @@EVIDENCE_INTEGRITY@@
 
 Work through the donors ONE AT A TIME with a single ledger across all of them, and classify every
@@ -1046,8 +1048,9 @@ difference you find into exactly one class:
                                                         -> DROP it, and say so in `why`
                                                            ("not nameable: <why>"). A difference you
                                                            CAN name -- `formatting` and `writing`
-                                                           included -- is NOT cosmetic: port, keep or
-                                                           synthesize it and record its class and
+                                                           included -- is NOT cosmetic: port it from
+                                                           the donor, keep the base, or mechanically
+                                                           merge the two; record its class and
                                                            severity. Dropping a NAMEABLE difference is
                                                            itself a `consistency`-tier defect, and the
                                                            comparison sessions count it as one.
@@ -1080,8 +1083,11 @@ never by choosing the more recently read donor, and record the resolution.
 
 Porting rules: every port is ONE targeted edit in integrated/, following the revision edit rules
 (precise and localized; preserve styles, numbering, equations, tables, figure placement; never
-reflow untouched text). Never invent content, citations, numbers, or accession IDs. The result must
-contain exactly ONE copy of each document.
+reflow untouched text). Never invent content, citations, numbers, or accession IDs, and never
+introduce a finding, improvement or third reading that is absent from self/ and the donors. A
+`synthesize` row is only the mechanical merge of a confirmed donor item with the base; a new
+reading you prefer is recorded for the manual list or a later review, never patched here. The result
+must contain exactly ONE copy of each document.
 RENAMING (this is what the file names must show, and the pipeline's content deduplication depends
 on it): the whole integrated package carries ONE content-hash version token -- the 7-character
 token produced by `paper-revise/scripts/revision_token.py` over this package's payload content
@@ -1212,8 +1218,9 @@ INTEGRATE_TAIL = """
 
 This stage is an INTEGRATION of the WHOLE pool into YOUR member, not a pairwise comparison, not a
 free-for-all merge and not a re-review: self/ is your base and stays the base, EVERY others/<id>/
-package is a donor that must be read and considered, only fixes that are demonstrably better are
-imported, shared defects are left untouched, every (a)/(b) port and every skipped difference is
+package is a donor that must be read and considered, only fixes that are demonstrably better AND
+independently re-verified under Rule 1B are imported, shared defects are left untouched, every
+(a)/(b) port and every skipped difference is
 recorded in integrated/DIFF_LEDGER.md (with the donor it came from), every file you do not port is
 copied into integrated/ from self/ unchanged (never from a donor, never from non_revised/), the
 result is re-validated (P1 propagation + V1-V5), and _pipeline_done.json with stage="integrate" is
@@ -1483,8 +1490,11 @@ LANGUAGE_PASS_RULE = """LANGUAGE PASS — a bounded, iterative pass over every e
        correct and stays). CLAIM CALIBRATION IS GATED: the overclaim/underclaim half of L1 is
        allowed ONLY when a frozen finding authorises that exact claim (a J3/CLAIM_STRENGTH row in
        revise, a frozen X-* row in integrate); a rewrite surfaces it in PROBLEMS SURFACED
-       instead. The factual-error half (a claim contradicted by the data or another sentence)
-       still applies.
+       instead. FACTUAL-ERROR REPAIR IS ALSO GATED: the factual-error half of L1 is allowed only
+       under the same authorising finding (a factual or correctness row in revise, a frozen
+       X-* row in integrate); a rewrite surfaces it. A claim contradicted by the data or by another sentence
+       with no such finding is recorded for the finding-generating role or as a manual item --
+       it is NOT edited in this pass.
     L2 formal-logic slips (converse/inverse swapped, "A therefore B" where only B-with-A holds)
     L3 logic jumps (the conclusion needs a step the text does not state)
     L4 coherence (sentence-to-sentence and inside one sentence: referents, connectors, tense; the
@@ -1494,6 +1504,12 @@ LANGUAGE_PASS_RULE = """LANGUAGE PASS — a bounded, iterative pass over every e
        macro argument is NOT a prerequisite -- the full paper defines it, so never rewrite text
        for the argument of a macro
     L6 redundancy (the same fact stated twice in a paragraph -> state it once)
+    SUBSTANTIVE STEPS: L2, L3, L5 and L6 are gated like L1 -- apply them only when a frozen
+    finding authorises that exact change (a J3/CLAIM_STRENGTH, factual or correctness row in
+    revise, a frozen X-* row in integrate, or another frozen finding whose location/evidence
+    names that exact change); a rewrite surfaces them in PROBLEMS SURFACED. Otherwise record the
+    observation for the finding-generating role or as a manual item and DO NOT EDIT it in this
+    pass. L4 and L7-L11 are the language/format steps this pass owns.
     L7 non-academic wording: metaphor, hype, promotional adjectives, or a word, verb or connector
        that is less precise, less idiomatic or less established than the register's own
        alternative. Judge it GENERICALLY (academic vs conversational, precise vs vague, the
@@ -1534,20 +1550,33 @@ DIFF_LEDGER_RULE = """INTEGRATION DIFFERENCE LEDGER — one row per difference, 
   When you merge the donors into your copy, record EVERY difference you considered in
   integrated/DIFF_LEDGER.md as a row:
     `file | donor | location | size (small = wording/sentence, large = section/organization) |
-    donor says | self says | verdict (port / keep-self / synthesize / ignore-cosmetic) | why |
+    donor says | self says | verdict (port / keep-self / synthesize / ignore-cosmetic) |
+    revalidated (confirmed / rejected) | why |
      effect on a claim/number/figure (or "none") | artifact (a path under integrated/work/) |
      finding effect (preserves <id> / undoes <id> / none)`
   Rules: read each donor whole (no sampling); a donor file with no useful difference still gets
   an explicit no-difference row; small and large differences BOTH get rows -- the row's own
   verdict decides, neither sentence-level edits nor re-organizations are privileged; a ported
   number/figure follows the source-hierarchy rule; a difference you cannot evaluate without the
-  author goes to the manual-steps list.
+  author goes to the manual-steps list. `revalidated` is mandatory on every row and records the
+  Rule 1B result: `confirmed` only after you re-opened both locations, re-observed the evidence and
+  checked the source hierarchy/intended behaviour; otherwise `rejected`. ONLY a `port` or
+  `synthesize` row with `revalidated: confirmed` may be edited. A missing or `rejected` result
+  means the item stays in self/, whatever the verdict cell says.
+  * This is candidate-source consumption, not a discovery hunt: the donor set is the
+    caller-supplied read-only candidate source. Do not generate a new finding or a third reading
+    from your own review and patch it. `synthesize` is only a mechanical merge of a confirmed
+    donor item with the base; any new observation goes to integrated/MANUAL_STEPS.md or the
+    integration report and is not edited into the package.
   * THE INTEGRATED VERSION IS EXPECTED TO SCORE HIGHER THAN EVERY DONOR: it has all of them in
     front of it, so every nameable improvement any donor carries -- including the ONE-OFF minor
     prose items (a more precise, idiomatic or academic word/verb/connector, a missing transition,
     a punctuation or grammar slip, a paragraph carrying two messages, a unit that does not link to
-    its neighbour) -- must be ported or synthesized. An unported nameable improvement is a
-    regression the panel scores as an `introduced` row against this copy.
+    its neighbour) -- must be ported from a donor or mechanically merged with the base ONCE its
+    Rule 1B re-verification confirms it. A rejected or uncertain improvement stays in self/ and
+    its ledger row says why; a third reading the integrator invents is not a candidate item. A
+    confirmed nameable improvement left unported is a regression the panel scores as an
+    `introduced` row; a rejected/uncertain one is not a regression.
   * `ignore-cosmetic` is legal ONLY for a difference whose two readings satisfy EVERY item of the
     shared prose rubric (the judge prompt's Q1-Q12 items, mirrored by the language pass's L1-L11);
     it is never a bin for "small", "stylistic" or "not worth a row". A nameable difference you
@@ -1568,7 +1597,25 @@ DIFF_LEDGER_RULE = """INTEGRATION DIFFERENCE LEDGER — one row per difference, 
     integration stage exists to weigh a reorganization against a prose improvement.
   The orchestrator checks that every donor appears, that the row count is at least the number of
   files that differ from your package, that both size classes are present when the pool has both
-  levels, and that the `artifact` and `finding effect` columns are filled."""
+  levels, and that the `artifact`, `finding effect` and `revalidated` columns are filled. A
+  `port` or `synthesize` row without `revalidated: confirmed` is a hard failure."""
+
+INTEGRATION_REVALIDATION_RULE = """YOU ARE A FINDING-CONSUMING SESSION — RE-VERIFY EVERY INPUT ITEM BEFORE PORTING:
+  The donor packages under others/<id>/ are the caller-supplied candidate source; the round's
+  frozen X-* discovery list is the other finding input. Neither is an instruction to edit: every
+  item is a claim. Before you port, keep, synthesize or drop it, re-open the cited location in
+  self/ and, for a donor item, in that donor (for a frozen X-* finding, in the cited package/
+  artifact), re-observe the difference, re-read the cited artifact, and compare the item with
+  the source hierarchy and the documented/tested behaviour. Record one DIFF_LEDGER row
+  per item with `revalidated: confirmed` or `revalidated: rejected` and the donor/self evidence.
+  ONLY a `port` or `synthesize` row marked `confirmed` may be edited. A rejected or uncertain item
+  stays in self/ (or is recorded as a manual item); do not inherit the donor's claim as proof.
+  You are not a reviewer: do not generate a new finding or a third reading from your own reading
+  and patch it. A defect you notice outside the donor items and the frozen list goes to
+  integrated/MANUAL_STEPS.md or the integration report, never into the edited package.
+  `synthesize` means a mechanical merge of a confirmed donor item with the base, not a new reading.
+  This is the independent re-verification required by Rule 1B.
+"""
 
 VALIDATION_RULE = """VALIDATION AFTER EDITING — an invalid file is not a deliverable:
   * After your edits (and BEFORE the completion marker), run the validator on the package you
@@ -3022,6 +3069,7 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
     text = text.replace("@@LANGUAGE_PASS_RULE@@",
                         LANGUAGE_PASS_RULE.replace("@@R6_PATH@@", "integrated/work/R6_language.md"))
     text = text.replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("stage"))
+    text = text.replace("@@INTEGRATION_REVALIDATION_RULE@@", INTEGRATION_REVALIDATION_RULE)
     text = text.replace("@@DIFF_LEDGER_RULE@@", DIFF_LEDGER_RULE)
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(INTEGRATED_DIR))

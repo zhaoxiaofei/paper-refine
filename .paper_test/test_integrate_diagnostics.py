@@ -75,13 +75,16 @@ def test_ledger_table_selection():
         "| others/a1/ | 38 | 7 | 127 |\n"
         "| others/w2/ | 30 | 7 | 119 |\n\n"
         "## 1. The ledger\n\n"
-        "| id | donor | location | size | donor says | self says | verdict | why | effect | "
-        "artifact | finding effect |\n"
-        "|---|---|---|---|---|---|---|---|---|---|---|\n"
+        "| id | donor | location | size (small = wording/sentence, large = section) | "
+        "donor says | self says | verdict (port / keep-self / synthesize / ignore-cosmetic) | "
+        "revalidated (confirmed / rejected) | why | effect on a claim/number/figure (or none) | "
+        "artifact (a path under integrated/work/) | finding effect (preserves / undoes / none) |\n"
+        "|---|---|---|---|---|---|---|---|---|---|---|---|\n"
         "| L-001 | a1 | cover letter p5 | small | the donor's sentence | the base's sentence | "
-        "keep-self | base wins | none | `integrated/work/diffs/L-001.md` | none |\n"
+        "keep-self | rejected | base wins | none | `integrated/work/diffs/L-001.md` | none |\n"
         "| L-002 | w2 | main text headings | large | a different tree | the base tree | "
-        "keep-self | no M20 row attaches to it | none | `integrated/work/diffs/L-001.md` | none |\n",
+        "keep-self | rejected | no M20 row attaches to it | none | "
+        "`integrated/work/diffs/L-001.md` | none |\n",
         encoding="utf-8")
     rep = nb.integration_ledger_report(out, ["a1", "w2"], True)
     check("the 3-row orientation table is NOT read as the ledger",
@@ -92,6 +95,33 @@ def test_ledger_table_selection():
     check("both donors and both size classes are read from the LEDGER",
           rep["donors_absent"] == [] and rep["both_levels"] is True,
           f"absent={rep['donors_absent']} sizes={rep['sizes']}")
+    out3 = scratch("paper_int_led3_") / "integrated"
+    out3.mkdir(parents=True)
+    (out3 / "DIFF_LEDGER.md").write_text(
+        "| donor | location | size (small = wording) | donor says | self says | "
+        "verdict (port / keep-self / synthesize / ignore-cosmetic) | "
+        "revalidated (confirmed / rejected) | why | effect on a claim/number/figure (or none) | "
+        "artifact (a path under integrated/work/) | finding effect (preserves / undoes / none) |\n"
+        "|---|---|---|---|---|---|---|---|---|---|---|\n"
+        "| a1 | p3 | small | x | y | port | rejected | not checked | none | "
+        "integrated/work/diffs/x.md | none |\n", encoding="utf-8")
+    rep3 = nb.integration_ledger_report(out3, ["a1"], False)
+    check("a parenthetical-header port rejected by Rule 1B is an invalid port",
+          len(rep3["invalid_ports"]) == 1 and "revalidated=rejected" in rep3["invalid_ports"][0],
+          str(rep3["invalid_ports"]))
+
+    out4 = scratch("paper_int_led4_") / "integrated"
+    out4.mkdir(parents=True)
+    (out4 / "DIFF_LEDGER.md").write_text(
+        "| donor | artifact | size | finding effect | verdict | revalidated |\n"
+        "|---|---|---|---|---|---|\n"
+        "| a1 | integrated/work/diffs/x.md | small | none | keep-self |  |\n",
+        encoding="utf-8")
+    rep4 = nb.integration_ledger_report(out4, ["a1"], False)
+    check("a new ledger row with no Rule 1B verdict is reported",
+          rep4["legacy_no_revalidated"] is False
+          and rep4["missing_revalidated"] == ["a1"], str(rep4))
+
     # A file that really has no ledger table still reports the rows it does have.
     out2 = scratch("paper_int_led2_") / "integrated"
     out2.mkdir(parents=True)
@@ -102,6 +132,9 @@ def test_ledger_table_selection():
     check("a file with no ledger columns keeps the old (failing) reading",
           rep2["rows"] == 2 and len(rep2["missing_artifact"]) == 2,
           f"rows={rep2['rows']} missing={rep2['missing_artifact']}")
+    check("a legacy ledger without `revalidated` is named as legacy, not silently accepted",
+          rep2["legacy_no_revalidated"] is True and len(rep2["missing_revalidated"]) == 2,
+          f"legacy={rep2['legacy_no_revalidated']} missing={rep2['missing_revalidated']}")
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +180,11 @@ def test_integrate_prompt_reads_the_corpora():
           "Do NOT rely on a shell `diff`" in flat and "a diff-driven port silently drops" in flat)
     check("the ledger rule asks for the whole donor, not a sampled one",
           "read each donor whole (no sampling)" in flat)
+    check("the prompt is a finding-consuming session that re-verifies every donor item",
+          "RE-VERIFY EVERY INPUT ITEM BEFORE PORTING" in flat
+          and "revalidated (confirmed / rejected)" in flat
+          and "do not generate a new finding" in flat
+          and "third reading" in flat)
     check("no trace of the (reverted) difference index is left in the prompt",
           "DIFF_MATRIX" not in p and "difference index" not in flat.lower()
           and "donor_diff" not in p)

@@ -18,6 +18,15 @@ pipeline, its parts, companion modules, venue profiles and every other relevant 
 into the `--root` tree; after that, changing the maintained checkout must not change what the
 root executes or reads.
 
+**Finding generation and repair are separate.** The reviewer, probe, review auditor,
+revision auditor, judge and journal concern sessions identify or dispose findings and do not
+edit the target; the reviser, bounded repair and integrator consume findings (and, for an
+integration, the caller-supplied read-only donor candidate source) and must re-verify every
+input item, record a `confirmed`/`rejected` verdict with its evidence, and edit only the
+confirmed items. An integration's `DIFF_LEDGER.md` carries a `revalidated` column; a
+`port`/`synthesize` row without `revalidated: confirmed` fails the stage. See AGENTS.md
+Rules 1A and 1B.
+
 **At a glance**
 
 * **You give it** a pristine submission directory — the manuscript files, plus
@@ -1362,13 +1371,18 @@ need different treatment:
   stage weighs a reorganization against a prose improvement instead of a taste
   contest. `postcheck_rewrite` records the level and rejects a report that
   declares the wrong one.
-* **The integration difference ledger needs an artifact per row.**
-  `integrated/DIFF_LEDGER.md` rows carry `size` (small = wording, large =
-  organization), `artifact` (a before/after pair under `integrated/work/diffs/`
-  for a small row, the outline diff for a large row) and `finding effect`
-  (`preserves F-00x` / `undoes F-00x` / `none`). The postcheck reports rows
-  without an artifact, missing size classes when the pool has both levels,
-  donors missing from the table, and any port that would undo a resolved
+* **The integration difference ledger needs an artifact and a re-validation
+  verdict per row.** `integrated/DIFF_LEDGER.md` rows carry `size` (small =
+  wording, large = organization), `artifact` (a before/after pair under
+  `integrated/work/diffs/` for a small row, the outline diff for a large row),
+  `verdict` (port / keep-self / synthesize / ignore-cosmetic), `revalidated`
+  (`confirmed` / `rejected`) and `finding effect` (`preserves F-00x` /
+  `undoes F-00x` / `none`). Only a `port`/`synthesize` row with
+  `revalidated: confirmed` may be edited; the postcheck hard-fails a port/
+  synthesize without it and a new ledger row missing the verdict. It reports
+  rows without an artifact, missing size classes when the pool
+  has both levels, donors missing from the table, and any port that would undo
+  a resolved
   finding.
 * **No stage may introduce a NEW class of defect.** Every package-producing stage
   is re-scanned against the package it started from, per finding-tier family: a
@@ -1408,7 +1422,11 @@ need different treatment:
   revise, integrate), not only in the revision arm: one row per change plus one
   coverage row per step in `work/R6_language.md`, and a code-side re-scan of the
   package after each step. A missing artifact or an uncovered step is recorded
-  (and fails the attempt under `--strict-artifacts`).
+  (and fails the attempt under `--strict-artifacts`). The substantive steps
+  L1, L2, L3, L5 and L6 are finding-gated: a write session may not use the
+  language pass to repair a claim, factual statement, logic jump, prerequisite
+  or redundancy without a frozen finding authorising that exact change; it
+  records the observation for the finding-generating role or as a manual item.
 * **The judge scores prose against a named rubric.** The `writing` tier's rows
   cite one of twelve checks (Q1–Q12: premise, logic slip, logic jump, coherence,
   unexplained prerequisite, redundancy, non-academic wording, register, stiff

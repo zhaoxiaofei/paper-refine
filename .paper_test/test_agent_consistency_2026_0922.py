@@ -467,6 +467,54 @@ def test_residual_gating_split():
           and "not proved by any shipped data table" not in gating)
 
 
+def test_detection_repair_separation():
+    print()
+    print("== detection and repair are separate; consumers re-verify before editing ==")
+    agents = (WS / "AGENTS.md").read_text(encoding="utf-8")
+    for phrase in ("Rule 1A", "Rule 1B", "finding-generating", "finding-consuming",
+                   "caller-supplied candidate source", "independently re-verifies"):
+        check(f"AGENTS.md carries {phrase!r}", phrase in agents)
+    P = prompts()
+    probe = nb.probe_prompt(Path("/tmp/x"), "r1_probe", 1)
+    repair = nb.revision_repair_prompt(Path("/tmp/x"), "r1_repair", 1, 1)
+    check("the integrator consumes a caller-supplied candidate source and re-verifies it",
+          "RE-VERIFY EVERY INPUT ITEM BEFORE PORTING" in P["integrate"]
+          and "caller-supplied candidate source" in P["integrate"]
+          and "revalidated (confirmed / rejected)" in P["integrate"]
+          and "do not generate a new finding" in P["integrate"]
+          and "third reading" in P["integrate"])
+    check("the reviser independently re-validates every finding",
+          "BEFORE YOU APPLY EACH FINDING" in P["revise"]
+          and "revalidated: confirmed" in P["revise"]
+          and "revalidated: rejected" in P["revise"])
+    check("the bounded repair independently re-validates every planned row",
+          "RE-VALIDATE EVERY PLANNED REPAIR" in repair
+          and "Apply only `confirmed` rows" in repair)
+    check("the review and probe remain identification-only",
+          "identification only" in P["review"] and "identification only" in probe)
+    check("the audit writes dispositions and no new finding",
+          "THIS AUDIT ADDS NO FINDINGS" in P["audit"]
+          and "UNRESOLVED.md" in P["audit"])
+    rev_audit = nb.revision_audit_prompt(Path("/tmp/x"), "r1_revision_audit", 1)
+    check("the revision audit writes only its repair plan, never a package",
+          "Write only under `revision_audit/`" in rev_audit
+          and "REPAIR_PLAN.json" in rev_audit
+          and "Never touch `base/`, `revised/`" in rev_audit)
+    check("the judge reads a read-only target and does not apply findings",
+          "READ-ONLY" in P["judge"] and "revalidated: confirmed" not in P["judge"])
+    check("the rewrite does not apply a finding list",
+          "revalidated: confirmed" not in P["rewrite"])
+    check("the in-role language pass gates factual-error repairs too",
+          all("FACTUAL-ERROR REPAIR IS ALSO GATED" in P[r]
+              for r in ("rewrite", "revise", "integrate"))
+          and "NOT edited in this pass" in P["revise"])
+    flat_revise = " ".join(P["revise"].split())
+    check("the language pass gates its substantive L2/L3/L5/L6 steps",
+          all("SUBSTANTIVE STEPS: L2, L3, L5 and L6 are gated" in " ".join(P[r].split())
+              for r in ("rewrite", "revise", "integrate"))
+          and "DO NOT EDIT it in this pass" in flat_revise)
+
+
 def main() -> int:
     try:
         test_shared_blocks_everywhere()
@@ -477,6 +525,7 @@ def main() -> int:
         test_judge_blind_exception()
         test_defaults_and_flags()
         test_residual_gating_split()
+        test_detection_repair_separation()
     finally:
         cleanup()
     print()

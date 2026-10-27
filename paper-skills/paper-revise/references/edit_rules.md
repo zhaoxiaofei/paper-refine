@@ -431,6 +431,13 @@ L3 logic jumps · L4 coherence · L5 unexplained prerequisites · L6 redundancy 
 L7 non-academic wording · L8 non-written register · L9 stiff/translated phrasing ·
 L10 grammar · L11 typos/punctuation. Iterate at most twice, then stop and report.
 
+GATED SUBSTANTIVE STEPS: L1, L2, L3, L5 and L6 are not self-authorising. Apply one only when a
+frozen finding authorises that EXACT change (a J3/CLAIM_STRENGTH, factual or correctness row in
+revise; a frozen X-* row in integrate; or another frozen finding whose location/evidence names
+that exact change). A rewrite surfaces the observation in PROBLEMS SURFACED; any other stage
+records it for the finding-generating role or as a manual item and does not edit it in this pass.
+L4 and L7-L11 are the language/format steps this pass owns.
+
 PARAGRAPH AND SECTION SHAPE — the same rule at two levels of the outline: a container that
   divides at all divides into more than one part. A narrative paragraph carries a claim plus its
   support, so a paragraph built from ONE sentence reads as an accident (FMT-T9k, finding-tier):

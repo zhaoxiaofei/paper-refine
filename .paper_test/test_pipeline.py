@@ -104,9 +104,11 @@ def test_prompts():
           and "it is not worse than the alternative on any shared prose criterion"
           in " ".join(aud.split())
           and "Do not drop it for being minor" in aud)
+    flat_integrate = " ".join(builders["integrate"].split())
     check("the integration prompt expects the integrated version to outrank every donor",
           "IS EXPECTED TO SCORE HIGHER THAN EVERY DONOR" in builders["integrate"]
-          and "unported nameable improvement is a" in builders["integrate"])
+          and "A confirmed nameable improvement left unported is a regression" in flat_integrate
+          and "rejected/uncertain one is not a regression" in flat_integrate)
     check("`ignore-cosmetic` is restricted to differences that satisfy every rubric item",
           "`ignore-cosmetic` is legal ONLY for a difference whose two readings satisfy EVERY item"
           in " ".join(builders["integrate"].split()))

@@ -302,8 +302,8 @@ def break_stage(sb: Path, stage: str) -> str:
         for line in (led.read_text(encoding="utf-8").splitlines() if led.is_file() else []):
             if line.startswith("| D-"):
                 cells = line.split("|")
-                if len(cells) > 11 and cells[10].strip():
-                    cells[10] = " "
+                if len(cells) > 12 and cells[11].strip():
+                    cells[11] = " "
                     blanked += 1
                 line = "|".join(cells)
             lines.append(line)
@@ -417,18 +417,19 @@ def repair_integrate(sb: Path) -> str:
     rows = []
     for i, donor in enumerate(donors, 1):
         rows.append(f"| R-{i:03d} | {donor} | (whole package) | small | (not read by the repair) "
-                    f"| self wording | keep-self | the repair session may not read a donor's "
-                    f"judgement | no ported difference | self/(unchanged) | none |")
+                    f"| self wording | keep-self | rejected | the repair session may not read a "
+                    f"donor's judgement | no ported difference | self/(unchanged) | none |")
     (pkg / "DIFF_LEDGER.md").write_text(
         "# diff ledger (repaired by the scoped session)\n\n"
         "Every donor of this run's pool gets one explicit row. The repair session may not port a "
         "difference (that would edit the package), so each row records that the donors were left "
         "unread by this session and the self package stands.\n\n"
-        "| id | donor | location | size | donor says | self says | verdict | why | effect | "
-        "artifact | finding effect |\n"
-        "|---|---|---|---|---|---|---|---|---|---|---|\n"
+        "| id | donor | location | size | donor says | self says | verdict | revalidated | "
+        "why | effect | artifact | finding effect |\n"
+        "|---|---|---|---|---|---|---|---|---|---|---|---|\n"
         + ("\n".join(rows) if rows else "| R-000 | (no donor) | - | small | - | - | keep-self | "
-                                        "`others/` carries no donor | none | self/(unchanged) | none |")
+                                        "rejected | `others/` carries no donor | none | "
+                                        "self/(unchanged) | none |")
         + "\n", encoding="utf-8")
     return f"wrote integrated/DIFF_LEDGER.md with {len(rows)} donor row(s)"
 
