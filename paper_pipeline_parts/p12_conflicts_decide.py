@@ -8298,11 +8298,12 @@ def cmd_sync_code(args) -> None:
                 continue
             copy_asset_dirs(src, root, names=(name,))
             changed.append(name + "/")
-        # The skills pack is frozen and manifest-recorded too (F132). A trimmed
-        # checkout may legitimately omit it (module_manifest records None), so a
-        # missing maintained pack is not a partial bundle; a root that lacks it
-        # when the maintained tree has it is brought up to date.
-        for name in PIPELINE_SKILL_ASSET_DIRS:
+        # The skills pack and the venue profiles are frozen and manifest-recorded
+        # too. A trimmed checkout may legitimately omit either (module_manifest
+        # records None), so a missing maintained directory is not a partial
+        # bundle; a root that lacks one when the maintained tree has it is
+        # brought up to date.
+        for name in PIPELINE_SKILL_ASSET_DIRS + PIPELINE_VENUE_ASSET_DIRS:
             s = src / name
             if not s.is_dir():
                 continue
@@ -8327,12 +8328,11 @@ def cmd_sync_code(args) -> None:
     print(f"[sync-code] recorded module manifest: "
           f"{', '.join(f'{k}={str(v)[:12]}' for k, v in ident['modules'].items())}")
     if (root / VENUE_PROFILES_DIRNAME).is_dir():
-        print(f"[sync-code] note: {root / VENUE_PROFILES_DIRNAME} is a ROOT-LOCAL copy and "
-              f"was NOT replaced. If it predates a venue rule the maintained tree now "
-              f"carries (e.g. figure_text/image_dpi), refresh it with "
-              f"`{Path(__file__).name} set-venue <id> --profile "
-              f"{Path(__file__).resolve().parent / VENUE_PROFILES_DIRNAME}/<id>.json` "
-              f"or recreate the root from the maintained tree.")
+        print(f"[sync-code] note: {root / VENUE_PROFILES_DIRNAME} is part of the frozen "
+              f"asset manifest and was brought up to date with the maintained tree above. "
+              f"A root-specific profile installed with `{Path(__file__).name} "
+              f"set-venue <id> --profile <file>` is recorded by that command; copy it again "
+              f"after a sync only if you want to keep overriding the shipped profile.")
     if (root / "pipeline_config.json").is_file():
         print("[sync-code] note: pipeline_config.json's recorded `format_policy` snapshot is "
               "NOT rewritten either. A rule added to the maintained formatter that depends on "

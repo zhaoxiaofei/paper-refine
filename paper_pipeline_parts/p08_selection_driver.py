@@ -1678,10 +1678,10 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
         out, err = _coerce_text(out), _coerce_text(err)
     dur = time.time() - t0
     try:
-        with open(logf, "a", encoding="utf-8") as f:
-            f.write(f"\n===== attempt {next_attempt_number(rec)} start {started_at} =====\n")
-            f.write(f"cmd: {' '.join(cmd)}\n--- stdout ---\n{out}\n--- stderr ---\n{err}\n")
-            f.write(f"===== rc={rc} dur={dur:.1f}s error={exc} =====\n")
+        append_text_no_follow(logf,
+                              f"\n===== attempt {next_attempt_number(rec)} start {started_at} =====\n"
+                              f"cmd: {' '.join(cmd)}\n--- stdout ---\n{out}\n--- stderr ---\n{err}\n"
+                              f"===== rc={rc} dur={dur:.1f}s error={exc} =====\n")
     except OSError:
         pass
     failure_kind = ""
@@ -2203,47 +2203,94 @@ def _unsafe_package_rel(rel: str) -> bool:
                 or ".." in Path(rel).parts)
 
 
-def _revision_repair_ledger(sb: Path, rows: list):
-    """(problem, counts) for the bounded repair's re-validation ledger.
+def _revision_repair_ledger(sb: Path, rows: list, with_ids: bool = False):
+    """(problem, counts[, confirmed_ids]) for the bounded repair's ledger.
+
+    `with_ids=True` additionally returns the ids the session confirmed (the
+    application audit needs them); the historical two-tuple stays the default so
+    existing callers and the guard tests are unchanged.
 
     The repair session's product is the verdict it reached for EVERY planned
     row; a missing, malformed or incomplete ledger leaves the plan unaccounted
     for, so it is recorded as a failed repair (the stage postcheck still decides
     whether the final package itself is valid).
     """
+    def _done(problem: str, counts: dict, ids: set):
+        return (problem, counts, ids) if with_ids else (problem, counts)
+
     path = sb / REVISED_DIR / "REPAIR_LEDGER.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except OSError as e:
-        return f"no revised/REPAIR_LEDGER.json ({e})", {}
+        return _done(f"no revised/REPAIR_LEDGER.json ({e})", {}, set())
     except ValueError as e:
-        return f"revised/REPAIR_LEDGER.json is not valid JSON ({e})", {}
+        return _done(f"revised/REPAIR_LEDGER.json is not valid JSON ({e})", {}, set())
     ledger = data.get("rows") if isinstance(data, dict) else data
     if not isinstance(ledger, list):
-        return "revised/REPAIR_LEDGER.json carries no rows list", {}
+        return _done("revised/REPAIR_LEDGER.json carries no rows list", {}, set())
     plan_ids = [row["id"] for row in rows]
     seen = set()
     counts = {"confirmed": 0, "rejected": 0}
+    confirmed_ids = set()
     for row in ledger:
         if not isinstance(row, dict):
-            return "a REPAIR_LEDGER row is not an object", {}
+            return _done("a REPAIR_LEDGER row is not an object", {}, set())
         rid = str(row.get("id") or "").strip()
         verdict = str(row.get("verdict") or "").strip().lower()
         if not rid or rid in seen or rid not in plan_ids:
-            return (f"REPAIR_LEDGER row id {rid!r} is missing, duplicated or not in the "
-                    f"audit's plan"), {}
+            return _done(f"REPAIR_LEDGER row id {rid!r} is missing, duplicated or not in the "
+                         f"audit's plan", {}, set())
         if verdict not in counts:
-            return (f"REPAIR_LEDGER row {rid} has verdict {verdict!r} "
-                    f"(expected confirmed|rejected)"), {}
+            return _done(f"REPAIR_LEDGER row {rid} has verdict {verdict!r} "
+                         f"(expected confirmed|rejected)", {}, set())
         if not str(row.get("reason") or "").strip():
-            return f"REPAIR_LEDGER row {rid} carries no reason", {}
+            return _done(f"REPAIR_LEDGER row {rid} carries no reason", {}, set())
         seen.add(rid)
         counts[verdict] += 1
+        if verdict == "confirmed":
+            confirmed_ids.add(rid)
     missing = [rid for rid in plan_ids if rid not in seen]
     if missing:
-        return (f"REPAIR_LEDGER does not re-validate planned row(s) "
-                f"{', '.join(missing[:6])}"), {}
-    return "", counts
+        return _done(f"REPAIR_LEDGER does not re-validate planned row(s) "
+                     f"{', '.join(missing[:6])}", {}, set())
+    return _done("", counts, confirmed_ids)
+
+
+# The bounded repair is documented to update its own ledger/report/changelog as
+# it applies the plan; those files are bookkeeping, not unplanned manuscript
+# edits, so the application audit below allows them. The hand-off report is
+# MANUAL_STEPS.md, or AUTHOR_TO_COMPLETE_README under the readme policy.
+REPAIR_BOOKKEEPING = {"REPAIR_LEDGER.json", "REPAIR_LEDGER.md", "CHANGELOG.md",
+                      "REVISION_REPORT.md", "revision_report.json", "MANUAL_STEPS.md",
+                      AUTHOR_TO_COMPLETE_README}
+
+
+def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: set) -> list:
+    """Files changed by the bounded repair that no CONFIRMED plan row covers.
+
+    `revised_prerepair` is snapshotted just before the repair session, so the
+    run can prove the documented guarantee ("applies only the confirmed rows").
+    Before this check, a repair could rewrite any file under revised/ (or reject
+    every row) and the postcheck re-hashed and accepted the result.
+    """
+    allowed = set()
+    for row in rows:
+        if row["id"] in confirmed_ids:
+            rel = str(row.get("file") or "").replace("\\", "/").lstrip("./")
+            if rel:
+                allowed.add(rel)
+    before = (hash_manifest(pre, on_error="<unreadable>") or {}).get("files") or {}
+    after = (hash_manifest(cur, on_error="<unreadable>") or {}).get("files") or {}
+    bad = []
+    for rel in sorted(set(before) | set(after)):
+        if before.get(rel) == after.get(rel):
+            continue
+        if rel in REPAIR_BOOKKEEPING:
+            continue
+        if any(rel == a or rel.startswith(a.rstrip("/") + "/") for a in allowed):
+            continue
+        bad.append(rel)
+    return bad
 
 
 def record_revision_chain_skip(ctx, rec: dict, reason: str) -> None:
@@ -2403,8 +2450,8 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
                  "revised/REPAIR_LEDGER.json", "revised/REPAIR_LEDGER.md"):
         (sb / _rel).unlink(missing_ok=True)
     shutil.rmtree(sb / "revised_prerepair", ignore_errors=True)
-    (sb / REVISION_AUDIT_PROMPT_FILE).write_text(
-        revision_audit_prompt(sb, rec["id"], r), encoding="utf-8")
+    write_text_atomic(sb / REVISION_AUDIT_PROMPT_FILE,
+                      revision_audit_prompt(sb, rec["id"], r))
     # The revision audit is documented READ-ONLY on every input its prompt
     # names -- base/, revised/, review/, audit/, raw_data/ and code/ -- and may
     # write only revision_audit/REPAIR_PLAN.json. Snapshot each area so a
@@ -2461,8 +2508,8 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     pre = sb / "revised_prerepair"
     if not pre.exists():
         shutil.copytree(sb / REVISED_DIR, pre)
-    (sb / REVISION_REPAIR_PROMPT_FILE).write_text(
-        revision_repair_prompt(sb, rec["id"], r, len(rows)), encoding="utf-8")
+    write_text_atomic(sb / REVISION_REPAIR_PROMPT_FILE,
+                      revision_repair_prompt(sb, rec["id"], r, len(rows)))
     print(f"  [revision-repair] {rec['id']}: one bounded repair pass")
     res2 = _run_aux_session(sb, rec, cmd, timeout, REVISION_REPAIR_PROMPT_FILE,
                             "_revision_repair.log")
@@ -2474,12 +2521,31 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
         repair_rec["error"] = repair_rec["error"] or f"repair session exited rc={res2.get('rc')}"
     else:
         repair_rec["status"] = "done"
-        problem, counts = _revision_repair_ledger(sb, rows)
+        problem, counts, confirmed_ids = _revision_repair_ledger(sb, rows, with_ids=True)
         if problem:
             repair_rec["status"] = "failed"
             repair_rec["error"] = problem
         else:
-            repair_rec["ledger"] = counts
+            # The documented guarantee is "applies only the confirmed rows".
+            # The ledger only says what the session CLAIMED; compare the audited
+            # snapshot with the repaired package so an unplanned edit (or a
+            # rejected row that was applied anyway) fails the repair instead of
+            # being re-hashed and accepted by the postcheck.
+            pre = sb / "revised_prerepair"
+            if not pre.is_dir():
+                repair_rec["status"] = "failed"
+                repair_rec["error"] = ("the pre-repair snapshot revised_prerepair/ is missing; "
+                                       "the repair cannot be proven to touch only its plan")
+            else:
+                unplanned = _revised_repair_violations(pre, sb / REVISED_DIR, rows,
+                                                       confirmed_ids)
+                if unplanned:
+                    repair_rec["status"] = "failed"
+                    repair_rec["error"] = (
+                        "the bounded repair changed file(s) no CONFIRMED plan row covers: "
+                        + ", ".join(unplanned[:6]))
+                else:
+                    repair_rec["ledger"] = counts
     rec["revision_repair"] = repair_rec
     ctx.save_state()
     if repair_rec["status"] != "done":
@@ -3089,8 +3155,19 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
     if journal_is_scoped(ctx):
         # A major/minor revision has no judge panel and no champion choice: the
         # single concern-scoped revision IS the answer, and the response letter
-        # (mode 2-4) was produced by the same plan. The round is closed here.
+        # (mode 2-4) was produced by the same plan. The round is closed here --
+        # but ONLY when every run the plan names is done: `run_round_runs` filters
+        # by `--only` and returns ok as soon as the selected subset is done, so
+        # checking a2 alone closed a round that still owed its response session
+        # (and concerns run).
         a2 = revise_vid(1)
+        plan_missing = [e["id"] for e in round_run_plan(ctx, r)
+                        if (ctx.run(e["id"]) or {}).get("status") != "done"]
+        if plan_missing:
+            print(f"[run] r{r}: {len(plan_missing)} planned run(s) are not done "
+                  f"({', '.join(plan_missing[:4])}{' ...' if len(plan_missing) > 4 else ''}); "
+                  f"the round stays incomplete until they run")
+            return False, False
         rec2 = ctx.run(rid_for_fresh(r, a2)) or {}
         if rec2.get("status") != "done":
             print(f"[run] r{r}: the scoped revision run is not done "

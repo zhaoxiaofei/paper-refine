@@ -330,8 +330,28 @@ def cmd_setup(args) -> None:
         die("--source uses a removed input-area spelling:\n  - " + "\n  - ".join(_legacy)
             + "\n       Rename the directory once, then run setup again; the pipeline does not "
               "resolve legacy aliases.")
-    files = [p for p in source.rglob("*") if p.is_file()]
+    # Count only what the copy actually carries: `_ignore_symlinks` skips every
+    # symlink (except a canonical evidence link), but `p.is_file()` followed the
+    # link, so a source made only of symlinked documents passed this check and
+    # produced a root with an EMPTY pristine corpus.
+    def _copyable(p: Path) -> bool:
+        if not p.is_file():
+            return False
+        if not p.is_symlink():
+            return True
+        try:
+            return is_canonical_evidence_link(p, args.root)
+        except (OSError, RuntimeError):
+            return False
+
+    files = [p for p in source.rglob("*") if _copyable(p)]
     if not files:
+        _links = [str(p) for p in source.rglob("*") if p.is_symlink()]
+        if _links:
+            die(f"--source contains only symlink(s), which setup never copies: "
+                f"{', '.join(_links[:5])}{' ...' if len(_links) > 5 else ''}\n"
+                f"       Point --source at the real files (or at the canonical "
+                f"<root>/non_revised/<area> evidence links).")
         die(f"--source directory is empty: {source}")
     if JOURNAL_MODES[revision_mode]["feedback"]:
         # The evidence the whole mode rests on must exist BEFORE a root is
@@ -567,20 +587,15 @@ def cmd_setup(args) -> None:
         _shim = script.with_name(_shim_name)
         if _shim.is_file():
             shutil.copy2(_shim, root / _shim_name)
-    # The venue profiles travel with the root too: the root stays
-    # self-contained, `set-venue --profile` has a directory to install into,
-    # and a root-local edit overrides the shipped copy. The config's snapshot is
-    # what the pipeline actually enforces; the files are what `--list` shows.
-    _venue_dir = script.with_name(VENUE_PROFILES_DIRNAME)
-    if _venue_dir.is_dir():
-        try:
-            shutil.copytree(_venue_dir, root / VENUE_PROFILES_DIRNAME)
-            print(f"[setup] venue profiles:          copied {VENUE_PROFILES_DIRNAME}/ "
-                  f"({len(list((root / VENUE_PROFILES_DIRNAME).glob('*.json')))} profile(s)) "
-                  f"into the root")
-        except OSError as e:
-            print(f"[setup] venue profiles:          could not copy {VENUE_PROFILES_DIRNAME}/ "
-                  f"({e}); the profile recorded in pipeline_config.json is still authoritative")
+    # The venue profiles travelled with `copy_asset_dirs` above: they are a
+    # frozen runtime asset in the module/asset manifest (Rule 11), so setup fails
+    # on a copy error instead of warning and shipping a root whose `--list` and
+    # profile precedence read a missing directory.
+    _venue_root = root / VENUE_PROFILES_DIRNAME
+    if _venue_root.is_dir():
+        print(f"[setup] venue profiles:          frozen {VENUE_PROFILES_DIRNAME}/ "
+              f"({len(list(_venue_root.glob('*.json')))} profile(s)) into the root and "
+              f"recorded in the module manifest")
     if venue_profile_file:
         try:
             _dest = root / VENUE_PROFILES_DIRNAME / f"{venue_profile.id}{VENUE_PROFILE_SUFFIX}"
@@ -1531,21 +1546,42 @@ def add_venue_prompt(venue_id: str, dest: Path, journal: str = "",
 
 
 def _merge_tree(src: Path, dst: Path) -> int:
-    """Copy every file under `src` into `dst` (creating paths); count writes."""
+    """Copy every file under `src` into `dst` (creating paths); count writes.
+
+    Every symlink -- a source entry the staged agent planted, or a destination
+    already carrying one -- is refused/replaced instead of followed: `rglob` +
+    `is_file()` followed a source link (copying a host file into the shared
+    venue store) and `copy2` followed a destination link (overwriting its
+    external target).
+    """
     written = 0
     for p in sorted(src.rglob("*")):
-        if not p.is_file():
+        if p.is_symlink() or not p.is_file():
             continue
         rel = p.relative_to(src)
         target = dst / rel
+        cur = dst
+        for part in rel.parts[:-1]:
+            cur = cur / part
+            if cur.is_symlink():
+                raise OSError(f"refusing to publish through symlinked directory {cur}")
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.is_file():
+        if target.is_symlink():
+            target.unlink()
+        elif target.is_file():
             try:
                 if sha256_file(target) == sha256_file(p):
                     continue
             except OSError:
                 pass
-        shutil.copy2(p, target)
+        tmp = target.with_name(f".{target.name}.merge-{os.getpid()}-{time.time_ns()}")
+        try:
+            shutil.copy2(p, tmp)
+            os.replace(tmp, target)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            raise
         written += 1
     return written
 
@@ -1629,9 +1665,23 @@ def publish_add_venue_staging(sb: Path, dest: Path, vid: str) -> dict:
            "manuscript_files": 0, "sandbox": str(sb), "notes": []}
     profile = next((r / f"{vid}{VENUE_PROFILE_SUFFIX}" for r in roots
                     if (r / f"{vid}{VENUE_PROFILE_SUFFIX}").is_file()), None)
+    if profile is not None and profile.is_symlink():
+        # A staged link would copy its external target into the shared store.
+        out["notes"].append("profile: refused a symlinked staged profile")
+        profile = None
     if profile is not None:
-        shutil.copy2(profile, dest / f"{vid}{VENUE_PROFILE_SUFFIX}")
-        out["profile"] = str(dest / f"{vid}{VENUE_PROFILE_SUFFIX}")
+        target = dest / f"{vid}{VENUE_PROFILE_SUFFIX}"
+        if target.is_symlink():
+            target.unlink()
+        tmp = target.with_name(f".{target.name}.merge-{os.getpid()}-{time.time_ns()}")
+        try:
+            shutil.copy2(profile, tmp)
+            os.replace(tmp, target)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            raise
+        out["profile"] = str(target)
     staged_readme = next((r / "README.md" for r in roots if (r / "README.md").is_file()), None)
     staged_profile = None
     if profile is not None:
@@ -1665,9 +1715,17 @@ def latest_add_venue_sandbox(dest: Path, vid: str):
     # vid="nature", `nature-biotechnology-2026...` also startswith "nature-"
     # and sorted after the operator's own `nature-...` sandbox, so
     # `--publish-only` opened another venue's staging.
-    pat = re.compile(r"^" + re.escape(vid) + r"-\d{8}T\d{6}(?:\d{6})?Z(?:-[0-9a-f]+)?$")
+    pat = re.compile(r"^" + re.escape(vid) +
+                     r"-(\d{8}T\d{6})(\d{6})?Z(?:-[0-9a-f]+)?$")
+
+    def _stamp_key(p: Path):
+        # Sort by the PARSED stamp, not by the name: for the same second `...Z`
+        # sorts after `...123456Z-...`, so the older whole-second sandbox won.
+        m = pat.match(p.name)
+        return (m.group(1), m.group(2) or "", p.name)
+
     cands = sorted((p for p in base.iterdir() if p.is_dir() and pat.match(p.name)),
-                   key=lambda p: p.name)
+                   key=_stamp_key)
     return cands[-1] if cands else None
 
 

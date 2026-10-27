@@ -389,7 +389,12 @@ def load_state_file(path: Path) -> tuple:
     except OSError as e:                                          # noqa: BLE001
         return None, f"could not be read ({type(e).__name__}: {e})"
     try:
-        return json.loads(text), ""
+        # state.json is written by write_json_atomic, which serialises the inf/NaN
+        # sentinels as strings and NUL-escapes legitimate "Infinity"/"NaN"
+        # strings. Reading it with raw json.loads made a save/load cycle lose both
+        # (inf became a string, a real string gained a NUL); read_json() is the
+        # matching reader and every other pipeline-written JSON already uses it.
+        return _json_revive(json.loads(text)), ""
     except ValueError as e:                                       # noqa: BLE001
         return None, f"is not valid JSON ({e})"
 
@@ -511,10 +516,12 @@ class Ctx:
             # every version's expected directed-score count is 0, so the panel
             # gate called an UNJUDGED round "complete" and `decide` certified
             # it with 0 scores/version and no judge session at all.
-            try:
-                _rounds = max(1, int(cfg.get("rounds") or 1))
-            except (TypeError, ValueError):
-                _rounds = 1
+            # `rounds: 0` (or a missing key) means the DEFAULT round count,
+            # which is what config_rounds() and every consumer use. Validating
+            # against `max(1, rounds or 1)` truncated the judges list to one
+            # entry, so judges [2,0] passed while rounds 2..3 had NO judge --
+            # and expected_for=0 made an unjudged round "complete".
+            _rounds = config_rounds(cfg=cfg)
             _judges = parse_round_counts(
                 cfg.get("judges") if cfg.get("judges") is not None else DEFAULTS["judges"],
                 _rounds, "--judges")
@@ -562,6 +569,25 @@ class Ctx:
                     f"paper_orchestrator.py or a pre-3.0 round model with pairwise cross-pollination "
                     f"arms). Point --root at a root created by this script's `setup`, or start a "
                     f"fresh --root; existing sandboxes are never adopted.")
+            # The registry's other two containers are validated BEFORE the run
+            # loop: inside it, a root with `runs: {}` (a fresh/damaged registry)
+            # skipped the shape check entirely, and every later command crashed
+            # with AttributeError/TypeError/KeyError instead of this message.
+            if not isinstance(st.get("rounds"), dict) or \
+                    not isinstance(st.get("pinned"), list):
+                die(f"state.json is damaged: 'rounds' must be an object and 'pinned' a list.\n"
+                    f"       {self.state_path}")
+            for rk, rr in st["rounds"].items():
+                if not isinstance(rr, dict):
+                    die(f"state.json is damaged: round record {rk!r} is not an object.\n"
+                        f"       {self.state_path}")
+            for i, pin in enumerate(st["pinned"]):
+                if not isinstance(pin, dict) or \
+                        not isinstance(pin.get("id"), str) or not pin["id"].strip():
+                    die(f"state.json is damaged: pinned entry {i} carries no 'id'.\n"
+                        f"       {self.state_path}\n"
+                        f"       Restore state.json from a backup; the pipeline never adopts "
+                        f"a partial pin chain automatically.")
             for rid, rec in st["runs"].items():
                 if not isinstance(rec, dict) or "kind" not in rec or "round" not in rec:
                     die(f"state.json is not a round-pipeline registry: run record {rid!r} "
@@ -582,10 +608,6 @@ class Ctx:
                 except (TypeError, ValueError):
                     die(f"state.json is damaged: run record {rid!r} has a non-numeric 'round' "
                         f"({rec['round']!r}).\n       {self.state_path}")
-                if not isinstance(st.get("rounds"), dict) or \
-                        not isinstance(st.get("pinned"), list):
-                    die(f"state.json is damaged: 'rounds' must be an object and 'pinned' a list.\n"
-                        f"       {self.state_path}")
             st.setdefault("rounds", {})
             st.setdefault("pinned", [])
             st.setdefault("log", [])
@@ -948,7 +970,9 @@ def pristine_integrity(ctx: Ctx) -> tuple:
         return False, "no setup-time manifest recorded in state.json"
     if not ctx.pristine.is_dir():
         return False, f"pristine copy missing: {ctx.pristine}"
-    cur = hash_manifest(ctx.pristine)
+    # An unreadable pristine file is a changed/corrupt pristine, not a
+    # PermissionError traceback out of status/run/decide.
+    cur = hash_manifest(ctx.pristine, on_error="<unreadable>")
     if manifests_equal(cur, stored):
         return True, f"{cur['count']} file(s) match the setup-time manifest"
     a, b = cur.get("files", {}), stored.get("files", {})

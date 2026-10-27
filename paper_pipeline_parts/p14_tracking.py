@@ -672,15 +672,38 @@ def tracking_force_writable(path) -> None:
     (`shutil.copy2`), and a template-first package is staged read-only -- so a
     re-run would otherwise fail with PermissionError on its own mirror file.
     Only our own auxiliary path is ever passed here; a missing file is a no-op.
+
+    A destination the agent replaced with a symlink is REMOVED, never chmodded
+    through: `p.chmod(p.stat().st_mode ...)` changed the mode of the external
+    target the link named.
     """
     if not path:
         return
     try:
         p = Path(path)
+        if p.is_symlink():
+            p.unlink()
+            return
         if p.exists():
             p.chmod(p.stat().st_mode | stat.S_IWUSR)
     except OSError:
         pass
+
+
+def _tracking_write_copy(src, dest) -> None:
+    """Atomically replace `dest` with a copy of `src`, never through a symlink."""
+    dest = Path(dest)
+    if dest.is_symlink():
+        dest.unlink()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f".{dest.name}.track-{os.getpid()}-{time.time_ns()}")
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dest)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def tracking_summary_line(entry: dict, where: str = "") -> str:
@@ -1153,7 +1176,7 @@ def track_one_pair(ctx: Ctx, r: int, vid: str, token: str, ext: str, pair: dict,
                                           f"{memo[key]}; the copy is byte-identical"}]
             if in_pkg_out is not None:
                 try:
-                    shutil.copy2(persist_out, in_pkg_out)
+                    _tracking_write_copy(persist_out, in_pkg_out)
                 except OSError as e:                            # noqa: BLE001
                     rec["warning"] = f"the in-package copy failed: {e}"
             return rec
@@ -1192,7 +1215,7 @@ def track_one_pair(ctx: Ctx, r: int, vid: str, token: str, ext: str, pair: dict,
             memo.setdefault(key, rec["out"])
         if in_pkg_out is not None:
             try:
-                shutil.copy2(persist_out, in_pkg_out)
+                _tracking_write_copy(persist_out, in_pkg_out)
             except OSError as e:                                # noqa: BLE001
                 rec["warning"] = ((rec.get("warning") or "")
                                   + f"; the in-package copy failed: {e}").strip("; ")
@@ -1227,7 +1250,7 @@ def track_one_pair(ctx: Ctx, r: int, vid: str, token: str, ext: str, pair: dict,
             in_pkg_fb = in_pkg_out.parent / f"{cand.stem}{fb_suffix}"
             tracking_force_writable(in_pkg_fb)
             try:
-                shutil.copy2(persist_fallback, in_pkg_fb)
+                _tracking_write_copy(persist_fallback, in_pkg_fb)
             except OSError as e:                                # noqa: BLE001
                 rec["warning"] += f"; the in-package fallback failed: {e}"
     else:

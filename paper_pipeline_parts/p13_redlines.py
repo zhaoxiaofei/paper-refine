@@ -984,13 +984,21 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
     if winner is None and best is not None:
         # No backend stayed inside the fidelity bar: keep the least-marked one
         # (the last backend's output is already at OUT; restore when needed).
-        with contextlib.suppress(OSError):
+        try:
             shutil.copyfile(best[1], out)
-        winner = best[2]
-        winner["fidelity_selected"] = True
-        winner["detail"] = (f"{winner.get('detail') or ''} -- kept as the least-marked of "
-                            f"{len(attempts)} over-marking attempt(s) ({best[0]} word(s))"
-                            ).strip()
+        except OSError as exc:
+            # The restore failed: OUT is still the LAST backend's (wrong) file.
+            # Setting `winner` here made ok=True and the manifest attribute that
+            # file to the least-marked backend. Record the failure and leave
+            # `winner` unset so the pair is reported as failed.
+            attempts.append({"backend": best[2].get("backend", tool), "ok": False,
+                             "detail": f"the least-marked candidate could not be restored: {exc}"})
+        else:
+            winner = best[2]
+            winner["fidelity_selected"] = True
+            winner["detail"] = (f"{winner.get('detail') or ''} -- kept as the least-marked of "
+                                f"{len(attempts)} over-marking attempt(s) ({best[0]} word(s))"
+                                ).strip()
     if best is not None:
         with contextlib.suppress(OSError):
             best[1].unlink()

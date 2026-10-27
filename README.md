@@ -3156,7 +3156,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 157 suites (a few
+any failure. They are independent, so run them in parallel — 158 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash
@@ -3219,7 +3219,8 @@ own/peer scrutiny split, per-session counting, the run-concatenable
 `reports/round<r>_issue_census.csv` plus the severity_tier_category matrix and
 prefix-sum files, and the fixed `direction_flips` rule),
 `test_anonymized_judging.py`, `test_zotero_integration.py`. See
-`.paper_test/README.md` for the full table.
+`.paper_test/README.md` for a table of the main suites (it is not an
+exhaustive index of every debug/fix-stage file beside it).
 `test_raw_data_readonly.py` covers the read-only `raw_data/` contract
 (a `chmod -R a-w` corpus still sets up, runs, decides, retries and prunes,
 and never needs — or loses — a mode inside raw_data).

@@ -178,7 +178,24 @@ def rewrite_text_spans(para: str, edits: list) -> tuple:
         tag = "<w:t" + keep_space + ">"
         pieces.append(tag + esc(new_text) + close_tag if new_text else tag + close_tag)
     pieces.append(para[cursor:])
+    # A zero-length insertion anchored at the FINAL text offset has no following
+    # `w:t` fragment to reach it: a trailing break/tab/noBreakHyphen/sym leaves
+    # `carry()` uncalled for that offset, so the insertion was reported in
+    # `applied` but never written. Emit it as a run at the end of the paragraph.
+    _tail_zero = []
+    for i, (a, b, new_piece, is_edit) in enumerate(keep):
+        if is_edit and a == b == here and i not in emitted_zero:
+            emitted_zero.add(i)
+            _tail_zero.append(new_piece)
     new_para = "".join(pieces)
+    if _tail_zero:
+        _ins = ('<w:r><w:t xml:space="preserve">' + esc("".join(_tail_zero))
+                + "</w:t></w:r>")
+        _close = new_para.rfind("</w:p>")
+        if _close != -1 and not new_para[_close + len("</w:p>"):].strip():
+            new_para = new_para[:_close] + _ins + new_para[_close:]
+        else:
+            new_para += _ins
 
     def _drop_empty_runs(mm):
         body = mm.group(0)
@@ -5338,7 +5355,10 @@ def refresh_zotero_package(src, out=None, policy: dict = None) -> dict:
             if "word/document.xml" not in names:
                 return dict(rep, ok=False, skip="no word/document.xml")
             parts = {n: pkg.read(n) for n in names}
-    except (OSError, zipfile.BadZipFile) as e:
+    except (OSError, zipfile.BadZipFile, ET.ParseError, RuntimeError,
+            NotImplementedError, UnicodeDecodeError) as e:
+        # An unsupported compression method or a malformed part is an unreadable
+        # package like any other, never a traceback out of a documented command.
         return dict(rep, ok=False, skip=f"unreadable DOCX ({type(e).__name__}: {e})")
     inner = refresh_zotero_parts(parts, policy)
     rep["changes"] = list(inner.get("changes") or [])

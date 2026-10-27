@@ -969,6 +969,20 @@ def revision_ledger_problems(pkg: Path, frozen_ids: list, frozen_total, rel: str
                 + " -- the ledger is one row per finding id (the deliverable that proves no "
                   "finding was silently dropped); an id must appear as structured data (a row's "
                   "id field, a mapping key or an id list), not only in prose")
+        # Naming an id is not disposing it: the A1 contract is one row per finding
+        # with a verdict (and its rationale). `{"F-001": "", "F-002": "fixed"}`
+        # named every id and passed with no verdict on any of them.
+        disposed = ledger_disposed_ids(ledger, frozen_ids)
+        undisposed = [i for i in frozen_ids if i in named and i not in disposed]
+        if undisposed:
+            errs.append(
+                f"{pkg_rel} names {len(undisposed)} finding id(s) without a VERDICT: "
+                f"{', '.join(undisposed[:6])}"
+                + (" ..." if len(undisposed) > 6 else "")
+                + " -- naming an id (a bare mapping value, an id list or an id-only row) is "
+                  "not a disposal; every row must carry its verdict (`confirmed` / "
+                  "`false-positive` / `clarification` / `manual-required` / "
+                  "`not-found-in-source`) and a rationale")
     return errs, warns
 
 
@@ -1024,6 +1038,67 @@ def ledger_named_ids(ledger, wanted=()) -> set:
 
     visit(ledger, 0)
     return named
+
+
+# The row's own verdict/final-status field. One is required; the A1 contract's
+# exact vocabulary is in paper-revise/references/ledger.md, but accepting a
+# non-empty verdict here keeps the gate about "a row, not an id" without
+# hard-coding a synonym set the sessions legitimately vary.
+LEDGER_VERDICT_FIELDS = ("verdict", "final_status", "status", "disposition")
+
+
+def _ledger_row_verdict(row) -> str:
+    for key in LEDGER_VERDICT_FIELDS:
+        val = str((row or {}).get(key) or "").strip()
+        if val:
+            return val
+    return ""
+
+
+def ledger_disposed_ids(ledger, wanted=()) -> set:
+    """Finding ids a ledger disposes with a ROW that carries a verdict.
+
+    `ledger_named_ids()` answers "does the payload mention the id?" -- a bare
+    mapping value, an id list or an id-only row all passed, so a ledger
+    `{"F-001": "", "F-002": null}` satisfied the contract with no verdict at
+    all. This reader accepts only a structured row: an object whose id field
+    equals the frozen id, or a mapping entry `{"F-001": {...verdict...}}`.
+    """
+    want = {str(w).strip() for w in (wanted or ()) if str(w).strip()}
+    out = set()
+
+    def row_id(row: dict):
+        for key in ("id", "finding", "finding_id", "frozen_id"):
+            val = row.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        return ""
+
+    def visit(node, depth: int, keyed_id: str = ""):
+        if depth > LEDGER_SCAN_DEPTH:
+            return
+        if isinstance(node, dict):
+            rid = row_id(node) or keyed_id
+            if (not want or rid in want) and _ledger_row_verdict(node):
+                out.add(rid)
+            for key, value in node.items():
+                if isinstance(value, (dict, list, tuple)):
+                    visit(value, depth + 1, key.strip() if isinstance(key, str) else "")
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                if isinstance(item, (dict, list, tuple)):
+                    visit(item, depth + 1)
+                elif isinstance(item, str) and (not want or item.strip() in want):
+                    # A plain ID LIST is the documented "naming" shape (the row
+                    # container's name is not pinned); it proves no id was
+                    # dropped even though it carries no per-row verdict. The
+                    # unsupported shape this gate REJECTS is a mapping key whose
+                    # value is a bare string/null (`{"F-001": ""}`): that reads
+                    # as a row and records no verdict.
+                    out.add(item.strip())
+
+    visit(ledger, 0)
+    return out
 
 
 # ---------------------------------------------------------------------
@@ -1600,7 +1675,11 @@ def render_docx_visual(docx: Path, out_dir: Path, renderer=None,
                              "docx2pdf.sh or LibreOffice)"}
         failures = []
         for cand in choices:
-            res = render_docx_visual(docx, out_dir, cand)
+            # The fallback loop must carry the caller's policy: dropping them
+            # here silently restored the 900 s default and re-enabled the page
+            # PNGs that `page_images=False` exists to skip.
+            res = render_docx_visual(docx, out_dir, cand, timeout=timeout,
+                                     page_images=page_images)
             if res.get("ok"):
                 if failures:
                     res["fallbacks"] = failures
@@ -2695,6 +2774,12 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                 errs.append(f"{ARTIFACTS_REL}/{fname} carries no `disposition` column: every "
                             f"{cid} row must end in a finding id / OK - <reason> / "
                             f"unable - <reason>")
+            else:
+                # A header line and a separator is not a disposed artifact: the
+                # old substring test accepted `| disposition |\n|---|` with no
+                # data row at all. Parse the table and require a disposed row.
+                for problem in _disposition_table_problems(p):
+                    errs.append(f"{ARTIFACTS_REL}/{fname}: {problem}")
     arch = sb / REVIEW_DIR / "ARCHITECTURE.md"
     if want_architecture and not arch.is_file():
         errs.append(f"{REVIEW_DIR}/ARCHITECTURE.md is missing: the J5 architecture pass must "
@@ -2711,6 +2796,11 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
             elif "disposition" not in body.lower():
                 errs.append(f"{REVIEW_DIR}/ARCHITECTURE.md carries no `disposition` column: "
                             f"every scope row must be disposed against its own reading-order bar")
+            else:
+                # `| scope | disposition |\n|---|` used to satisfy the substring
+                # test without one disposed scope row.
+                for problem in _disposition_table_problems(arch):
+                    errs.append(f"{REVIEW_DIR}/ARCHITECTURE.md: {problem}")
         except OSError as e:                                        # noqa: BLE001
             errs.append(f"{REVIEW_DIR}/ARCHITECTURE.md could not be read ({e})")
     # 4. finding ids must be unique and stable.
@@ -2796,14 +2886,15 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                            if isinstance(f, dict)
                            and str(f.get("check") or "").strip().upper() == "M1"]
             m1_row_text = coverage_row_text(seen_rows.get("M1"))
-            if not m1_findings and "m1b" not in m1_row_text \
+            if not m1_findings and not _m1b_coverage_reason(m1_row_text) \
                     and not m1b_rows_disposed(m1_md):
                 errs.append(
                     f"{ARTIFACTS_REL}/M1_acronyms.md lists {n_m1b} M1b long-form row(s) "
                     f"(un-abbreviated long forms used again after the acronym's first use), "
                     f"but {FINDINGS_REL} raises no M1 finding, the M1 coverage row (its "
-                    f"disposition and its detail cell) neither mentions M1b nor disposes those "
-                    f"rows, and the table's own rows carry no recorded reason. Every M1b row is "
+                    f"disposition and its detail cell) does not give a recorded REASON for those "
+                    f"rows (a bare `M1b` mention is not a disposition), and the table's own rows "
+                    f"carry no recorded reason. Every M1b row is "
                     f"either an M1(k) finding (one per instance) or a row disposed OK with a "
                     f"recorded reason -- in the row's own `disposition` cell and/or in the M1 "
                     f"coverage row, which then names M1b and says why -- the defect must not "
@@ -2941,6 +3032,32 @@ def m1b_rows_disposed(m1_md: str) -> bool:
         if not _is_recorded_reason(cells[key] if key < len(cells) else ""):
             return False
     return True
+
+
+# A coverage-row note is a REASON, not a bare token: it must say why the M1b
+# rows are not findings. "M1b long forms were reviewed" mentions the token and
+# says nothing about the rows; the gate used to accept it (any `m1b` substring
+# short-circuited the check), so a review with an M1b table and no disposition
+# passed. The prompt names the acceptable grounds (a quoted title, a genuinely
+# different term of art, a generated rendering), so those markers are what the
+# coverage row has to name.
+_M1B_REASON_RE = re.compile(
+    r"(?i)\b(?:because|since|reason|different|distinct|quoted|title|titles|expansion|"
+    r"expanded|expansion|defining|defined|acronym|abbreviation|legitimate|bibliograph|"
+    r"reference|references|not\s+a\s+finding|no\s+finding|ok\b|clean|disposed|"
+    r"intentional|verbatim|species|gene|proper\s+name|rendering)\b")
+
+
+def _m1b_coverage_reason(text: str) -> bool:
+    """Does the M1 coverage row NAME M1b and give a reason (not just the token)?"""
+    text = str(text or "")
+    i = text.lower().find("m1b")
+    if i < 0:
+        return False
+    clause = text[i + 3:]
+    if len(clause.strip()) < 12 or not re.search(r"[A-Za-z]{3}", clause):
+        return False
+    return bool(_M1B_REASON_RE.search(clause))
 
 
 def coverage_row_text(row) -> str:
@@ -3518,6 +3635,40 @@ def raw_data_pairs(want: dict, got: dict) -> tuple:
 # .docx, a .pdf, an image) is left byte-identical: a compressed container cannot
 # be string-substituted safely, and the prompts ask the session for the docx
 # side.
+def _safe_restore_copy(src: Path, dest: Path, root: Path) -> None:
+    """Copy `src` to `dest` WITHOUT following a planted symlink.
+
+    `dest` lives in the agent-controlled package (`root`). A package can make a
+    file or a parent directory a symlink to any writable path outside the
+    sandbox; `shutil.copyfile` would then overwrite that target while the
+    restore reports the package file as repaired. Refuse a symlinked parent,
+    replace a symlinked final entry, and write through a temp + os.replace so the
+    final open never follows a link.
+    """
+    root = Path(root)
+    try:
+        rel = Path(dest).relative_to(root)
+    except ValueError as exc:
+        raise OSError(f"destination {dest} is outside {root}") from exc
+    cur = root
+    for part in rel.parts[:-1]:
+        cur = cur / part
+        if cur.is_symlink():
+            raise OSError(f"refusing to write through symlinked directory {cur}")
+    dest = root / rel
+    if dest.is_symlink():
+        dest.unlink()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f".{dest.name}.restore-{os.getpid()}-{time.time_ns()}")
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dest)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
 def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
     """Put a package's raw-data directory back to the untouched original.
 
@@ -3580,8 +3731,7 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
                 continue                # squatted: reported as a warning below
             dest = cand_dir / dest_rel
             try:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(ctx.pristine / rel, dest)
+                _safe_restore_copy(ctx.pristine / rel, dest, cand_dir)
                 # The pristine copy's own mode is the honest one for a file the
                 # package did not have (a read-only source stays read-only); the
                 # finally below then restores the modes of everything that was
@@ -3725,8 +3875,7 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
             if dest.is_dir():
                 continue                # squatted: reported below, never deleted
             try:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(ctx.pristine / rel, dest)
+                _safe_restore_copy(ctx.pristine / rel, dest, cand_dir)
                 with contextlib.suppress(OSError):
                     shutil.copymode(ctx.pristine / rel, dest)
             except OSError as e:
@@ -4031,7 +4180,7 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
                         dest.rmdir()
                     else:
                         dest.unlink()
-                    shutil.copy2(p, dest)
+                    _safe_restore_copy(p, dest, sb)
                     restored.append(rel)
                     warns.append(f"RECOVERY: {rel} existed in the candidate as a "
                                  f"{wrong_kind} instead of "
@@ -4048,7 +4197,7 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
                             dest.chmod(0o644)     # a read-only 0-byte file blocks copy2
                         except OSError:
                             pass
-                        shutil.copy2(p, dest)
+                        _safe_restore_copy(p, dest, sb)
                         restored.append(rel)
                         warns.append(f"RECOVERY: {rel} existed in the candidate as an EMPTY "
                                      f"(0-byte) file -- restored non-empty from the base "
@@ -4066,7 +4215,7 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
                                 dest.chmod(0o644)     # clear a mode that blocks the rewrite
                             except OSError:
                                 pass
-                            shutil.copy2(p, dest)
+                            _safe_restore_copy(p, dest, sb)
                             restored.append(rel)
                             warns.append(f"RECOVERY: {rel} was NOT READABLE in the candidate "
                                          f"(permissions/lock) -- restored from the base copy so the "
@@ -4116,8 +4265,7 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
                         except OSError:
                             pass
             try:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(p, dest)
+                _safe_restore_copy(p, dest, sb)
                 restored.append(rel)
             except OSError as e:                                          # noqa: BLE001
                 errors.append(f"{rel}: {e}")
@@ -4394,6 +4542,40 @@ def _table_row(header: list, cells: list) -> tuple:
         cells = cells[:n]
         note = "ragged"
     return {h: v for h, v in zip(header, cells)}, note
+
+
+def _disposition_table_problems(path: Path) -> list:
+    """A parity/architecture artifact must have a DISPOSED data row.
+
+    The contract is a table whose rows end in a disposition; a file whose whole
+    content is `| disposition |` + the separator has a header, no rows, and used
+    to pass the old substring test. Every block that carries a disposition-like
+    column must have at least one row and no empty disposition cell.
+    """
+    blocks = parse_markdown_blocks(path)
+    keyed = []
+    for block in blocks:
+        key = next((h for h in block["header"]
+                    if "disposition" in h or h in ("resolution", "verdict")), None)
+        if key:
+            keyed.append((block, key))
+    if not keyed:
+        return ["carries no table with a `disposition` column"]
+    data = [(b, k) for b, k in keyed if b["rows"]]
+    if not data:
+        return ["carries a `disposition` header but NO data row: a header alone disposes "
+                "nothing (every row must record its own verdict/reason)"]
+    problems = []
+    for block, key in data:
+        empty = sum(1 for row in block["rows"]
+                    if not str(row.get(key) or "").strip())
+        if empty:
+            problems.append(f"{empty} of {len(block['rows'])} row(s) have an EMPTY "
+                            f"`{key}` cell")
+        if key in DISPOSITION_COLUMNS:
+            problems += disposition_artifact_problems(block["rows"], block.get("widths"),
+                                                      len(block["header"]))
+    return problems
 
 
 def parse_markdown_blocks(path: Path) -> list:
@@ -5979,7 +6161,7 @@ def prepare_repair_session(ctx: Ctx, rec: dict, problems: list):
         rec.pop("revision_repair", None)
         rec.pop("revision_chain", None)
     n = next_attempt_number(rec)
-    (sb / REPAIR_PROMPT_FILE).write_text(repair_prompt(ctx, rec, problems), encoding="utf-8")
+    write_text_atomic(sb / REPAIR_PROMPT_FILE, repair_prompt(ctx, rec, problems))
     guard = snapshot_repair_guard(sb, rec)
     rec["repair_attempts"] = list(rec.get("repair_attempts") or []) + [n]
     rec["artifact_repair"] = {"attempt": n, "problems": list(problems), "status": "running",
@@ -6047,8 +6229,7 @@ def prepare_resume_session(ctx: Ctx, rec: dict, argv: list, key: str, reason: st
         rec.pop("revision_chain", None)
     used = int((rec.get("resume_attempts") or {}).get(key) or 0)
     problems = list((rec.get("postcheck") or {}).get("errors") or [])
-    (sb / RESUME_PROMPT_FILE).write_text(resume_prompt(rec, problems, reason, used),
-                                         encoding="utf-8")
+    write_text_atomic(sb / RESUME_PROMPT_FILE, resume_prompt(rec, problems, reason, used))
     # Charge the budget NOW: a continuation that dies half-way must not be
     # restarted forever by a later invocation.
     rec["resume_attempts"] = dict(rec.get("resume_attempts") or {}, **{key: used + 1})

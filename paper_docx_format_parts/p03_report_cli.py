@@ -44,15 +44,18 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
         # touch one (moving its page break would unbalance the field), so a row
         # the scan still filed `mechanical` could never be repaired and made the
         # whole fix verify as failed. The two sides read the same definition.
-        empty = not text.strip() and not has_drawing(para) and not has_field(para)
+        empty = not text.strip() and not has_drawing(para) and not has_field(para) \
+            and not has_anchor(para)
         if PAGEBREAK_RE.search(para) and empty:
             # In a table cell the fixer cannot move/delete the paragraph (that
             # would leave an empty `<w:tc>`); report the defect as manual rather
-            # than filing a mechanical row the fixer refuses by design.
+            # than filing a mechanical row the fixer refuses by design. A
+            # section-ending paragraph is likewise the boundary itself: deleting
+            # it destroys the section, so it is manual too (the fixer skips it).
             row("FMT-S1", "high", f"p{idx}", "empty paragraph holding a page break",
                 "break-only paragraphs render as a blank page (or a stray empty line); delete it "
                 "and put w:pageBreakBefore on the paragraph that should start the page",
-                fix=("manual" if idx in in_table else None))
+                fix=("manual" if idx in in_table or "<w:sectPr" in para else None))
         ppr = ppr_of(para)
         style = ppr_style(ppr)
         if style and style.startswith("Heading"):
@@ -518,6 +521,11 @@ def analyse_package(path: Path, policy: dict) -> dict:
         with zipfile.ZipFile(path) as pkg:
             styles = parse_styles(pkg)
             xml = pkg.read("word/document.xml").decode("utf-8")
+            # The body must PARSE, not merely decode: the regex rules below
+            # tolerate malformed XML, so without this fence `scan` reported a
+            # broken document "clean" while `validate`/`fix` rejected it. The
+            # FMT-X1 handler below already covers ParseError.
+            ET.fromstring(xml)
             # Embedded-image geometry: the image parts' own pixels, resolved
             # through each part's relationship file (document + header/footer,
             # where the logo lives).
@@ -819,10 +827,37 @@ def _unlink_fields(xml: str) -> tuple:
             continue
         chunk = xml[s:e]
         field_edits = []
-        for m in RUN_RE.finditer(chunk):
+        # The field REPORT's offsets point at the fldChar elements INSIDE their
+        # runs. Slicing xml[s:e] therefore starts/ends mid-run and RUN_RE cannot
+        # match the enclosing begin/end run, so those runs (and a single-run
+        # field) survived a reported unlink. Walk the WHOLE run spans that
+        # overlap the field instead: drop the fldChar/instrText elements, and
+        # remove a run only when nothing but properties is left in it (a result
+        # run keeps its text, exactly like the w:fldSimple branch below).
+        for m in RUN_RE.finditer(xml):
+            r0, r1 = m.start(), m.end()
+            if r1 <= s or r0 >= e:
+                continue
             run = m.group(0)
-            if FIELD_CHAR_RE.search(run) or INSTR_RE.search(run):
-                field_edits.append((s + m.start(), s + m.end(), ""))
+            elems = [(r0 + em.start(), r0 + em.end(), "")
+                     for em in re.finditer(
+                         r"<w:fldChar(?=[\s/>])[^>]*/>|<w:fldChar(?=[\s/>])[^>]*>.*?</w:fldChar>"
+                         r"|<w:instrText(?=[\s/>])[^>]*>.*?</w:instrText>"
+                         r"|<w:instrText(?=[\s/>])[^>]*/>",
+                         run, re.S)]
+            if not elems:
+                continue
+            remain = run
+            for a, b, _r in sorted(elems, key=lambda x: -x[0]):
+                remain = remain[:a - r0] + remain[b - r0:]
+            has_content = re.search(
+                r"<w:t(?:\s[^>]*)?>[^<]|<w:(?:drawing|pict|object|br|cr|tab|ptab|"
+                r"noBreakHyphen|sym|commentReference|footnoteReference|"
+                r"endnoteReference|delText|softHyphen)(?=[\s/>])", remain)
+            if has_content:
+                field_edits.extend(elems)
+            else:
+                field_edits.append((r0, r1, ""))
         # `w:fldSimple` carries no fldChar/instrText runs: remove only its
         # tags, so the result runs stay as plain text.
         for m in re.finditer(r"<w:fldSimple\b[^>]*/>|<w:fldSimple\b[^>]*>|"
@@ -831,7 +866,9 @@ def _unlink_fields(xml: str) -> tuple:
         if field_edits:
             edits.extend(field_edits)
             removed += 1
-    return apply_edits(xml, edits), removed
+    # A run that carries two adjacent fields was visited once per field; apply
+    # each byte range once (a duplicated splice would delete a second span).
+    return apply_edits(xml, sorted(set(edits))), removed
 
 
 def _romanize_continuation_run(run: str) -> str | None:
@@ -910,6 +947,7 @@ def fix_document(xml: str, styles: dict, policy: dict,
                 continue
             if PAGEBREAK_RE.search(para) and not text_of(para).strip() \
                     and not has_drawing(para) and not has_field(para) \
+                    and not has_anchor(para) \
                     and "<w:sectPr" not in para:
                 # A paragraph that carries a section-break property IS the
                 # section boundary: deleting it destroys the section (the
@@ -1247,20 +1285,44 @@ def fix_document(xml: str, styles: dict, policy: dict,
     if t9a_fixes:
         plist = paragraphs(xml)
         edits, flipped = [], 0
+
+        def _span_list(run: str, items: list) -> str:
+            # Several labels can share ONE run: applying each as a separate
+            # full-run replacement put both edits at the same (start, end), so
+            # only the last survived while the log counted all of them. Work
+            # from the END backwards and recurse into the head, so every span is
+            # rewritten once, in its own (offset-preserving) piece.
+            items = sorted(items, key=lambda it: (it[0], it[1]))
+            if not items:
+                return run
+            a, b, w = items[-1]
+            pieces = split_run_text_span(run, a, b)
+            if pieces is None:
+                return _span_list(run, items[:-1])
+            head, middle, tail = pieces
+            return _span_list(head, items[:-1]) + _emphasis_run(middle, w) + tail
+
+        # Group by the run span: one edit per (idx, r0, r1).
+        groups, order = {}, []
         for idx, r0, r1, want, local in t9a_fixes:
+            key = (idx, r0, r1)
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append((want, local))
+        for key in order:
+            idx, r0, r1 = key
             p0 = plist[idx][0]
             run = plist[idx][2][r0:r1]
-            if local is None and \
-                    run_is_italic(styles, para_style(plist[idx][2]), run) == want:
-                continue
-            if local is None:
+            items = groups[key]
+            if any(local is None for _w, local in items):
+                want = next(w for w, local in items if local is None)
+                if run_is_italic(styles, para_style(plist[idx][2]), run) == want:
+                    continue
                 new_run = _emphasis_run(run, want)
             else:
-                pieces = split_run_text_span(run, local[0], local[1])
-                if pieces is None:
-                    continue
-                head, middle, tail = pieces
-                new_run = head + _emphasis_run(middle, want) + tail
+                new_run = _span_list(run, [(local[0], local[1], want)
+                                           for want, local in items])
             if new_run != run:
                 edits.append((p0 + r0, p0 + r1, new_run))
                 flipped += 1
@@ -1757,9 +1819,12 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
                                    sizes=sizes, rels=doc_rels)["rows"]
     after_rows = analyse_document(xml_after, styles_after, policy, src.name,
                                   sizes=sizes, rels=doc_rels)["rows"]
-    mech_before = {r["rule"] for r in before_rows if r["rule"] in MECHANICAL_RULES and r["fix"] == "mechanical"}
+    # EVERY mechanical finding still present in the output, not just the rules
+    # that happened to be present before the fix: the intersection hid a repair
+    # that INTRODUCED a new mechanical defect, so the fixer self-verified clean
+    # while the new rule survived.
     mech_after = {r["rule"] for r in after_rows if r["fix"] == "mechanical"}
-    remaining = sorted(mech_before & mech_after)
+    remaining = sorted(mech_after)
     # The body-only analyse_document() call above cannot see a header/footer
     # part. Re-read every REFERENCED aux part the fixer touched (orphan parts are
     # ignored by the scanner and must not fail the fence here).
@@ -2886,9 +2951,19 @@ def _apply_front_refs(doc_xml: str, front: dict) -> tuple:
             body = (body[:body.rfind("/>")].rstrip() + ">"
                     + (refs_all if idx == 0 else refs_body) + "</w:sectPr>")
         if idx == 0 and "<w:titlePg" not in body:
-            body = (body.replace("<w:docGrid", "<w:titlePg/><w:docGrid", 1)
-                    if "<w:docGrid" in body else
-                    body.replace("</w:sectPr>", "<w:titlePg/></w:sectPr>", 1))
+            # CT_SectPr's ordered tail after titlePg is textDirection, bidi,
+            # rtlGutter, docGrid, printerSettings. Anchoring only on docGrid or
+            # the closing tag put titlePg AFTER textDirection/bidi/rtlGutter,
+            # where Word reads the section as schema-invalid.
+            at = body.find("</w:sectPr>")
+            for tag in ("textDirection", "bidi", "rtlGutter", "docGrid",
+                        "printerSettings"):
+                t = body.find(f"<w:{tag}")
+                if t != -1 and (at == -1 or t < at):
+                    at = t
+            if at == -1:
+                at = body.rfind("/>")
+            body = body[:at] + "<w:titlePg/>" + body[at:]
         out = out[:m.start()] + body + out[m.end():]
     if refs_all:
         root = re.search(r"<w:document\b[^>]*>", out)
@@ -3823,6 +3898,36 @@ def _pdf_carries_an_image(path: Path) -> bool:
     return False
 
 
+def _pdf_image_pages(path: Path):
+    """`{page: {image signature}}` from `pdfimages -list`, or None.
+
+    A figure-only page has no text layer, so the text-based blankness verdict
+    cannot tell it from a blank page. This is the per-page fact that can. The
+    signature (type, pixel dimensions, encoded size, ratio) additionally lets the
+    caller recognise the SAME image repeated page after page -- a running-head or
+    footer logo, which is furniture, not body content.
+    """
+    exe = shutil.which("pdfimages")
+    if not exe:
+        return None
+    try:
+        proc = subprocess.run([exe, "-list", str(path)], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    pages = {}
+    for line in (proc.stdout or "").splitlines():
+        parts = line.split()
+        # page num type width height color comp bpc enc interp object-id x-ppi y-ppi size ratio
+        if len(parts) < 6 or not (parts[0].isdigit() and parts[1].isdigit()):
+            continue
+        sig = (parts[2], parts[3], parts[4], parts[-2], parts[-1])
+        pages.setdefault(int(parts[0]), set()).add(sig)
+    return pages
+
+
 def pdf_artifact_rows(path: Path, text: str = None, pages=None) -> list:
     """FMT-PDF1..6 for one PDF (empty list = nothing proven wrong)."""
     rows = []
@@ -4025,6 +4130,24 @@ def check_pdf(path: Path, policy: dict) -> dict:
     txt = proc.stdout
     res = blank_pages_in_text(txt)
     blank = res["blank_pages"]
+    if blank:
+        # A page carrying only an embedded image has no text layer; it is not a
+        # blank page (a figure-only page is a valid deliverable). But a running
+        # header/footer logo is an image too, drawn on every page, so an image
+        # alone does not prove the BODY has content: exclude only an image that
+        # is not repeated across the document, the same test
+        # blank_pages_in_text() applies to repeated text lines.
+        image_pages = _pdf_image_pages(path)
+        if image_pages is None:
+            image_pages = set(blank) if (res["pages"] == 1
+                                        and _pdf_carries_an_image(path)) else set()
+        else:
+            freq = Counter(sig for sigs in image_pages.values() for sig in sigs)
+            furniture = {sig for sig, count in freq.items()
+                         if count >= max(2, int(0.6 * res["pages"]))}
+            image_pages = {page for page, sigs in image_pages.items()
+                           if any(sig not in furniture for sig in sigs)}
+        blank = [i for i in blank if i not in image_pages]
     rows = [{"rule": "FMT-S2", "severity": "high", "document": path.name,
              "location": f"page {i}", "evidence": "page carries no body text",
              "detail": "blank page in the rendered document (header/footer only)",
@@ -5175,7 +5298,10 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
             names = z.namelist()
             data = {n: z.read(n) for n in names}
             styles = parse_styles(z)
-    except (OSError, zipfile.BadZipFile) as exc:
+    except (OSError, zipfile.BadZipFile, ET.ParseError, RuntimeError,
+            NotImplementedError, UnicodeDecodeError) as exc:
+        # An unsupported compression method or a malformed part is an unreadable
+        # package like any other, never a traceback out of a documented command.
         report["error"] = f"unreadable DOCX package: {exc}"
         return report
     if "word/document.xml" not in data:
@@ -5186,6 +5312,14 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
         return "\n".join(text_of(p[2]) for p in paragraphs(xml_text))
 
     doc_xml = data["word/document.xml"].decode("utf-8")
+    # A malformed main part is an unreadable package (the scanner/validator
+    # likewise report FMT-X1): the regex rules below tolerate broken XML and
+    # would otherwise "repair" a document Word cannot open.
+    try:
+        ET.fromstring(doc_xml)
+    except ET.ParseError as exc:
+        report["error"] = f"unreadable DOCX package: {exc}"
+        return report
     before_text = visible(doc_xml)
     rows = table_layout_rows(doc_xml, styles, src.name, policy)
     edits = table_layout_fixes(doc_xml, rows)
@@ -5576,7 +5710,20 @@ def cmd_zotero_refresh(args) -> int:
         if args.json:
             write_json(args.json, rep)
         return 0
-    res = refresh_zotero_package(Path(args.file), args.out, policy)
+    res = None
+    try:
+        res = refresh_zotero_package(Path(args.file), args.out, policy)
+    except (OSError, zipfile.BadZipFile, ET.ParseError, RuntimeError,
+            NotImplementedError, UnicodeDecodeError, ValueError) as e:
+        # `scan`/`fix` report the same unreadable package as FMT-X1 instead of a
+        # traceback; the refresh CLI is a documented command and must do the same
+        # (an unsupported compression method or a malformed part used to escape).
+        print(f"  no change: unreadable DOCX ({type(e).__name__}: {e})")
+        if args.json:
+            write_json(args.json, {"source": str(Path(args.file)), "ok": False,
+                                   "error": f"unreadable DOCX ({type(e).__name__}: {e})",
+                                   "changes": []})
+        return 1
     for line in res.get("changes") or []:
         print(f"  [refresh] {line}")
     zot = res.get("zotero") or {}

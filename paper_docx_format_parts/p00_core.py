@@ -148,7 +148,11 @@ RUN_TOKENS = re.compile(r"<w:r(?=[\s/>])|</w:r>")
 BODY_BLOCK_TOKENS = re.compile(r"<w:(p|tbl)(?=[\s/>])")
 ROW_TOKENS = re.compile(r"<w:tr(?=[\s/>])|</w:tr>")
 CELL_TOKENS = re.compile(r"<w:tc(?=[\s/>])|</w:tc>")
-TEXT_RE = re.compile(r"<w:t(?:\s[^>]*)?>.*?</w:t>", re.S)
+# The opening arm must NOT match a self-closing `<w:t .../>`: without the
+# `(?<!/)` guard the tag was read as an opening one and the lazy body ran to the
+# NEXT run's `</w:t>`, so `text_of` returned literal markup and the writer
+# escaped it into the first run, deleting the following run wrapper.
+TEXT_RE = re.compile(r"<w:t(?:\s[^>]*)?(?<!/)>.*?</w:t>", re.S)
 # A soft break/tab inside a paragraph (`<w:br/>`, `<w:cr/>`, `<w:tab/>`).
 # `text_of` renders each as a NEWLINE: it is a delimiter, not content, so every
 # text comparison still sees the same words AND the line-edge rules see the
@@ -163,7 +167,7 @@ NON_TEXT_TOKENS = re.compile(r"<w:(?:noBreakHyphen|sym)(?=[\s/>])[^>]*/?>")
 # The same walk, in DOCUMENT ORDER, for the callers that need both kinds of
 # piece at once (the text writer splices a fragment's new text at its own
 # offset, so a break counts as one character exactly like `text_of` says).
-_FRAG_OR_BREAK_RE = re.compile(r"<w:t(?:\s[^>]*)?>.*?</w:t>"
+_FRAG_OR_BREAK_RE = re.compile(r"<w:t(?:\s[^>]*)?(?<!/)>.*?</w:t>"
                                r"|<w:(?:br|cr|tab|noBreakHyphen|sym)(?=[\s/>])[^>]*/?>",
                                re.S)
 RUN_RE = re.compile(r"<w:r(?=[\s/>]).*?</w:r>|<w:r(?=[\s/>])[^>]*/>", re.S)
@@ -256,7 +260,12 @@ def unesc(text: str) -> str:
             cp = int(m.group(1) or m.group(2), 16 if m.group(1) else 10)
         except (ValueError, OverflowError):
             return m.group(0)
-        if 0 <= cp <= 0x10FFFF and not (0xD800 <= cp <= 0xDFFF):
+        # XML 1.0's Char production: a reference to NUL, a C0 control other
+        # than tab/LF/CR, or a non-character such as U+FFFE is NOT a legal
+        # character. Decoding it made `esc()` emit the raw byte and the fixed
+        # document could not be parsed at all; the reference stays literal.
+        if (cp in (0x9, 0xA, 0xD) or 0x20 <= cp <= 0xD7FF
+                or 0xE000 <= cp <= 0xFFFD or 0x10000 <= cp <= 0x10FFFF):
             return chr(cp)
         return m.group(0)
 
@@ -406,7 +415,7 @@ def _property_element(frag: str, tag: str) -> str | None:
         return None
     s, e = element_span(frag, m.start(), tag)
     block = frag[s:e]
-    if block.endswith("/>") or block.endswith(f"</w:{tag}>"):
+    if block.endswith("/>") or re.search(rf"</w:{tag}\s*>$", block):
         return block
     return None
 
@@ -1560,7 +1569,10 @@ def _rpr_set_emphasis(rpr: str | None, on: bool) -> tuple:
                   "spacing", "w", "kern", "position", "sz", "szCs", "highlight", "u",
                   "effect", "bdr", "shd", "fitText", "vertAlign", "rtl", "cs", "em",
                   "lang", "eastAsianLayout", "specVanish", "oMath")
-    at = len(rpr) - len("</w:rPr>")
+    # The closing tag may carry whitespace before `>` (`</w:rPr >`, legal XML);
+    # anchoring on the exact spelling spliced INTO the tag. Find the real end.
+    _close = re.search(r"</w:rPr\s*>\s*$", rpr)
+    at = _close.start() if _close else len(rpr)
     # `w:rPrChange` is the LAST child of a live rPr. Its own (old) rPr may
     # carry a schema-successor tag such as w:color even when the live rPr has
     # none; scanning the whole string would then splice the explicit override

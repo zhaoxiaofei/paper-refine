@@ -2151,9 +2151,12 @@ def mcp_server_unusable_reason(name: str) -> str:
     except OSError:
         return f"{name!r} is not configured in {cfg}"
     quoted = re.escape(name)
+    # A legal trailing comment (`[mcp_servers.x] # note`) does not unconfigure
+    # the server; `mcp_server_spec` accepts it, so this probe must too or the two
+    # probes contradict each other on the same config.
     header = re.compile(
         r"^\s*\[\s*mcp_servers\s*\.\s*(?:\"" + quoted + r"\"|'" + quoted + r"'|" + quoted +
-        r")\s*\]\s*$", re.MULTILINE)
+        r")\s*\]\s*(?:#.*)?$", re.MULTILINE)
     m = header.search(text)
     if not m:
         return f"{name!r} is not configured in {cfg}"
@@ -2164,12 +2167,20 @@ def mcp_server_unusable_reason(name: str) -> str:
     # exists says nothing about the command the entry would run.
     cm = re.search(r"^\s*command\s*=\s*[\"']([^\"']+)[\"']", body, re.MULTILINE)
     if cm:
-        exe = os.path.expanduser(cm.group(1).split()[0]) if cm.group(1).strip() else ""
+        # An ABSOLUTE command value is the full path and may legitimately carry
+        # spaces (`/mnt/c/Program Files/node.exe`); splitting it truncated the
+        # path and reported an installed server as missing. A bare command keeps
+        # the old first-token reading, so `command = "node server.js"` still
+        # probes `node` on PATH.
+        raw = cm.group(1).strip()
+        exe = os.path.expanduser(raw) if raw else ""
         if exe.startswith(("/", "~")):
             if not Path(exe).exists():
                 return f"the command it names is not installed: {exe}"
-        elif exe and not shutil.which(exe):
-            return f"the command it names is not on PATH: {exe}"
+        elif exe:
+            first = exe.split()[0]
+            if first and not shutil.which(first):
+                return f"the command it names is not on PATH: {first}"
     candidates = [c for c in re.findall(r"[\"']([^\"']+)[\"']", body)
                   if c.startswith(("/", "~"))]
     if not candidates:

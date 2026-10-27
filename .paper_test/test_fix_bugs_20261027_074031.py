@@ -937,6 +937,10 @@ def test_f64_backup_collision():
 def test_f65_env_home_expansion():
     print()
     print("== F65: env-provided DSH_HOME/CODEX_HOME expand '~' ==")
+    if shutil.which("node") is None:
+        print("[skip] node is not installed; the documented test environment does not "
+              "include it, so this Node-only check is skipped")
+        return
     tmp = scratch("f65_")
     env = dict(os.environ, DSH_HOME="~/.dsh", CODEX_HOME="~/.codex")
     proc = subprocess.run(["node", str(WS / "scripts/install-codex-mcp.mjs"), "--dry-run"],
@@ -1123,6 +1127,10 @@ def test_f63_failed_npm_keeps_live_tool():
 # ---------------------------------------------------------------- F40
 def test_f40_mcp_timeout_kills_group():
     print()
+    if shutil.which("node") is None:
+        print("[skip] node is not installed; the documented test environment does not "
+              "include it, so this Node-only check is skipped")
+        return
     print("== F40: an MCP timeout kills the PowerShell/Word process group ==")
     tmp = scratch("f40_")
     parent = tmp / "parent.sh"

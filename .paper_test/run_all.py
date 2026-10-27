@@ -35,6 +35,7 @@ import argparse
 import concurrent.futures as futures
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -79,8 +80,15 @@ def run_dir_under(path: str = None) -> Path:
     """A fresh directory for logs/status/tmp (or the one the operator named)."""
     if path:
         p = Path(path).resolve()
-        if p.exists() and any(p.iterdir()):
-            usage_error(f"--logs {p} is not empty; choose a fresh directory")
+        if p.exists() and not p.is_dir():
+            usage_error(f"--logs {p} is not a directory; choose a fresh directory")
+        if p.exists():
+            try:
+                empty = not any(p.iterdir())
+            except OSError as e:
+                usage_error(f"--logs {p} cannot be read ({e}); choose a fresh directory")
+            if not empty:
+                usage_error(f"--logs {p} is not empty; choose a fresh directory")
         p.mkdir(parents=True, exist_ok=True)
         return p
     return Path(tempfile.mkdtemp(prefix="paper-tests-"))
@@ -115,7 +123,7 @@ def engine_parallel(todo: list, jobs: int, rundir: Path, python: str) -> None:
                PAPER_TEST_RUNDIR=str(rundir), PAPER_TEST_WS=str(WS), PAPER_TEST_PYTHON=python)
     proc = subprocess.run(["parallel", "--jobs", str(jobs), "--no-notice",
                            "--joblog", str(rundir / "joblog"),
-                           f"{RUN_ONE} {{}}"],
+                           f"{shlex.quote(str(RUN_ONE))} {{}}"],
                           input="\n".join(todo) + "\n", text=True, env=env, check=False)
     if proc.returncode not in (0,) and not any(
             (rundir / "status" / f"{s}.rc").is_file() for s in todo):

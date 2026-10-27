@@ -304,7 +304,8 @@ def module_manifest(base_dir: Path) -> dict:
             out[name] = sha256_file(q) if q.is_file() else None
         except OSError:
             out[name] = None
-    for name in PIPELINE_ASSET_DIRS + PIPELINE_SKILL_ASSET_DIRS:
+    for name in (PIPELINE_ASSET_DIRS + PIPELINE_VENUE_ASSET_DIRS
+                 + PIPELINE_SKILL_ASSET_DIRS):
         out[name] = asset_dir_digest(base_dir, name)
     return out
 
@@ -318,7 +319,8 @@ def copy_asset_dirs(src_dir, dst_dir, names=None) -> list:
     bundle is incomplete instead of silently executing a loader with no parts.
     """
     copied = []
-    wanted = (PIPELINE_ASSET_DIRS + PIPELINE_SKILL_ASSET_DIRS
+    wanted = (PIPELINE_ASSET_DIRS + PIPELINE_VENUE_ASSET_DIRS
+              + PIPELINE_SKILL_ASSET_DIRS
               if names is None else names)
     for name in wanted:
         src = Path(src_dir) / name
@@ -522,7 +524,8 @@ def root_pipeline_staleness(ctx: Ctx) -> dict:
     # root run. Record that local drift separately: it is a different repair
     # from "the maintained tree has moved on".
     out["recorded_module_diffs"] = []
-    for name in PIPELINE_MODULE_FILES + PIPELINE_ASSET_DIRS + PIPELINE_SKILL_ASSET_DIRS:
+    for name in (PIPELINE_MODULE_FILES + PIPELINE_ASSET_DIRS
+                 + PIPELINE_VENUE_ASSET_DIRS + PIPELINE_SKILL_ASSET_DIRS):
         if name == "paper_pipeline.py":
             continue
         recorded_hash = out["recorded_modules"].get(name)
@@ -536,7 +539,8 @@ def root_pipeline_staleness(ctx: Ctx) -> dict:
     # copies and records it), so a stale skills copy must be visible here.
     if out.get("maintained_path"):
         out["maintained_modules"] = module_manifest(Path(out["maintained_path"]).parent)
-        for name in PIPELINE_MODULE_FILES + PIPELINE_ASSET_DIRS + PIPELINE_SKILL_ASSET_DIRS:
+        for name in (PIPELINE_MODULE_FILES + PIPELINE_ASSET_DIRS
+                     + PIPELINE_VENUE_ASSET_DIRS + PIPELINE_SKILL_ASSET_DIRS):
             # The driver has its own, stronger check (`running_pipeline_mismatch`
             # / `frozen_differs`): including it here made a foreign driver die
             # with the generic "stale sibling module" message instead of the
@@ -654,11 +658,21 @@ def running_pipeline_mismatch(ctx: Ctx) -> dict:
     ident = pipeline_identity()
     frozen = str(st.get("frozen_sha256") or "")
     running = str(ident.get("sha256") or "")
+    recorded = str(st.get("recorded_sha256") or "")
     return {"mismatch": bool(frozen and running and frozen != running),
-            "unverifiable": bool((st.get("frozen") and not frozen) or not running),
+            # A frozen copy EDITED after setup hashes to whatever the running
+            # script is (frozen == running) but no longer to the digest the root
+            # recorded. The old expression only compared frozen with running, so
+            # `frozen_differs` was computed and never consulted and the mutation
+            # proceeded with a NOTE.
+            "frozen_differs": bool(frozen and recorded and frozen != recorded),
+            # A DELETED frozen copy has frozen_sha256 == ""; the old
+            # `st.get("frozen") and not frozen` was then falsy (the path key was
+            # cleared too), so a root without its frozen driver was mutated.
+            "unverifiable": bool((recorded and not frozen) or not running),
             "frozen": st.get("frozen"), "frozen_sha256": frozen or None,
             "running": ident.get("path"), "running_sha256": running or None,
-            "recorded": st.get("recorded_sha256")}
+            "recorded": recorded or None}
 
 
 def refuse_foreign_pipeline(ctx: Ctx, command: str) -> None:
@@ -674,10 +688,21 @@ def refuse_foreign_pipeline(ctx: Ctx, command: str) -> None:
     their digests), not an environment variable.
     """
     st = root_pipeline_staleness(ctx)
-    if st.get("recorded_modules") and st.get("recorded_module_diffs"):
+
+    def _strict_diffs(names) -> list:
+        # venue_profiles/ is root-local BY CONTRACT (`set-venue --profile` and a
+        # hand-added file are documented custom routes), so its drift is reported
+        # by `status` (pipeline_snapshot_note) but must not refuse the very
+        # `set-venue --list` that follows the install. The other frozen modules
+        # are never legitimately edited in place.
+        return [n for n in (names or []) if n not in PIPELINE_VENUE_ASSET_DIRS]
+
+    recorded_diffs = _strict_diffs(st.get("recorded_module_diffs"))
+    maintained_diffs = _strict_diffs(st.get("module_diffs"))
+    if st.get("recorded_modules") and recorded_diffs:
         die(
             f"{command} would run this root with sibling module(s) that do NOT match its "
-            f"state.json manifest: {', '.join(st['recorded_module_diffs'])}.\n"
+            f"state.json manifest: {', '.join(recorded_diffs)}.\n"
             f"    frozen     : {ctx.root}\n"
             f"The frozen copy was edited or deleted after setup; every stage prompt, scan and "
             f"postcheck would come from code the root's own record does not describe. "
@@ -685,10 +710,10 @@ def refuse_foreign_pipeline(ctx: Ctx, command: str) -> None:
             f"tree:\n"
             f"    {_sync_code_hint(ctx.root, st.get('maintained_path'))}\n"
             f"then retry.", code=2)
-    if st.get("recorded_modules") and st.get("module_diffs"):
+    if st.get("recorded_modules") and maintained_diffs:
         die(
             f"{command} would run this root with STALE sibling module(s): "
-            f"{', '.join(st['module_diffs'])}.\n"
+            f"{', '.join(maintained_diffs)}.\n"
             f"    frozen     : {ctx.root}\n"
             f"    maintained : {st.get('maintained_path')}\n"
             f"The root's state.json records a module manifest; the maintained tree's "
@@ -698,6 +723,19 @@ def refuse_foreign_pipeline(ctx: Ctx, command: str) -> None:
             f"to copy the maintained modules into the root and record the new digests, "
             f"then retry.", code=2)
     mm = running_pipeline_mismatch(ctx)
+    if mm["frozen_differs"] and not mm["mismatch"]:
+        # The running script IS the frozen one (frozen == running) but that file
+        # is no longer the digest setup recorded: the local-edit bypass. When the
+        # running script is a DIFFERENT copy too, the message below is the more
+        # actionable one (the operator is not driving the frozen copy at all).
+        die(
+            f"{command} would run a FROZEN paper_pipeline.py that was EDITED after setup:\n"
+            f"    frozen copy : {mm.get('frozen')} (sha256 {str(mm.get('frozen_sha256'))[:16]}...)\n"
+            f"    recorded at : setup (sha256 {str(mm.get('recorded'))[:16]}...)\n"
+            f"Running this copy makes the root's records describe code its own setup never "
+            f"recorded (the fence exists to stop exactly that). Restore the recorded copy, or "
+            f"deliberately replace it from the maintained tree with `sync-code`, then retry.",
+            code=2)
     if not mm["mismatch"] and not mm["unverifiable"]:
         return
     if mm["unverifiable"]:
@@ -930,17 +968,20 @@ def sha256_files(paths, on_error=None) -> list:
 
 
 def _iter_tree_files(root: Path, follow_dir_links: bool = False) -> list:
-    """Every file under `root`; optionally descend into symlinked directories.
+    """Every file under `root`; optionally descend into EVIDENCE-area links.
 
     `pathlib.rglob` does NOT follow directory symlinks -- and the read-only
     evidence areas of a sandbox ARE symlinks to the root's canonical copy (see
     ensure_pristine_input). Every walk that defines a corpus, a judge view or an
     INPUT manifest must therefore ask for the followed variant explicitly, or a
     linked `raw_data/` would be invisible to the identity it is supposed to
-    contribute to. The walk is recursive instead of one `rglob` per link: a
-    directory symlink nested INSIDE a linked area (`raw_data/linked_dir`)
-    used to be invisible, so a sandbox's manifest quietly disagreed with the
-    canonical tree's. An ancestor-inode set keeps a link cycle finite.
+    contribute to.
+
+    `follow_dir_links=True` follows ONLY a TOP-LEVEL link whose name is an
+    evidence area (`_followable_evidence_dir`): a nested link, or a package's
+    `sub -> /outside`, is skipped, because following it put outside files in
+    blinded judge views and content manifests. An ancestor-inode set keeps a
+    link cycle finite.
     """
     if not root.is_dir():
         return []
@@ -953,10 +994,27 @@ def _iter_tree_files(root: Path, follow_dir_links: bool = False) -> list:
             return None
         return (st.st_dev, st.st_ino)
 
+    def _followable_evidence_dir(p: Path, top_level: bool) -> bool:
+        """True for a TOP-LEVEL link named like an evidence area.
+
+        `follow_dir_links=True` used to follow EVERY directory symlink, so a
+        package's nested `sub -> /outside` put outside files in a blinded judge
+        view and in the content manifest. Only the corpus-level
+        `<sandbox>/<raw_data|...>` link is legitimate (ensure_pristine_input);
+        a nested link, or a top-level link under any other name, is not package
+        content.
+        """
+        if not p.is_symlink() or not top_level or not is_evidence_rel(p.name):
+            return False
+        try:
+            return p.resolve(strict=True).is_dir()
+        except (OSError, RuntimeError):
+            return False
+
     def walk(d: Path, ancestors: frozenset) -> None:
         for p in sorted(d.iterdir()):
             if p.is_symlink() and p.is_dir():
-                if not follow_dir_links:
+                if not follow_dir_links or not _followable_evidence_dir(p, d == root):
                     continue
                 key = dir_key(p)
                 if key is None or key in ancestors:
@@ -982,8 +1040,14 @@ def _iter_tree_files(root: Path, follow_dir_links: bool = False) -> list:
     return sorted(out)
 
 
-def hash_manifest(dirp: Path, follow_dir_links: bool = False, exclude_top=()) -> dict:
-    """SHA-256 manifest of every file under dirp (relative posix paths)."""
+def hash_manifest(dirp: Path, follow_dir_links: bool = False, exclude_top=(),
+                  on_error=None) -> dict:
+    """SHA-256 manifest of every file under dirp (relative posix paths).
+
+    `on_error` is passed through to sha256_files; an integrity caller uses a
+    sentinel so one unreadable file is REPORTED as changed instead of raising
+    PermissionError out of every command that checks the pristine/pinned chain.
+    """
     if not dirp.is_dir():
         return {"files": {}, "count": 0}
     paths = _iter_tree_files(dirp, follow_dir_links=follow_dir_links)
@@ -992,7 +1056,7 @@ def hash_manifest(dirp: Path, follow_dir_links: bool = False, exclude_top=()) ->
         paths = [p for p in paths
                  if p.relative_to(dirp).parts[:1] and
                  p.relative_to(dirp).parts[0] not in blocked]
-    digs = sha256_files(paths)
+    digs = sha256_files(paths, on_error=on_error)
     files = {p.relative_to(dirp).as_posix(): d for p, d in zip(paths, digs)}
     return {"files": files, "count": len(files)}
 
@@ -1184,6 +1248,30 @@ def write_json_atomic(path: Path, obj) -> None:
     _atomic_write_bytes(tmp, path, do)
 
 
+def write_text_atomic(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """Write `text` atomically; an existing entry (including a symlink) is
+    replaced, never written through. Prompt files live in agent-writable
+    sandboxes, so a planted link must not receive the orchestrator's bytes."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = tmp_path_for(path)
+
+    def do(p: Path) -> None:
+        with open(p, "w", encoding=encoding) as f:
+            f.write(text)
+
+    _atomic_write_bytes(tmp, path, do)
+
+
+def append_text_no_follow(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """Append to a log without following a symlink planted at its path."""
+    path = Path(path)
+    if path.is_symlink():
+        path.unlink()
+    with open(path, "a", encoding=encoding) as f:
+        f.write(text)
+
+
 def write_csv_atomic(path, fields, rows) -> Path:
     """Write a DictWriter CSV atomically (header + rows, unique temp sibling).
 
@@ -1335,8 +1423,13 @@ def read_json(path: Path, revive: bool = True, lenient: bool = False):
         return None
     try:
         with open(path, "r", encoding="utf-8-sig") as f:
-            text = f.read()
+            # Cap the bytes ACTUALLY read: a FIFO/`/dev/zero` has st_size 0, so
+            # the stat check says nothing and an unbounded read blocked the
+            # orchestrator forever on an agent-planted deliverable.
+            text = f.read(MAX_JSON_BYTES + 1)
     except OSError:
+        return None
+    if len(text) > MAX_JSON_BYTES:
         return None
     obj = _json_from_text(text, lenient)
     if obj is None:
@@ -1353,11 +1446,20 @@ MAX_JSON_BYTES = 64 * 1024 * 1024
 
 
 def json_file_too_big(path: Path) -> bool:
-    """True when `path` exists and is larger than MAX_JSON_BYTES."""
+    """True when `path` is not a regular file or is larger than MAX_JSON_BYTES.
+
+    `lstat` (not `stat`) and `S_ISREG`: a FIFO reports st_size 0, so the old
+    check passed it to `open()`/`read()`, which blocks forever -- an agent could
+    hang the orchestrator by replacing findings.json with a FIFO. A symlink is
+    refused for the same reason (its target can be a special file).
+    """
     try:
-        return path.stat().st_size > MAX_JSON_BYTES
+        st = path.lstat()
     except OSError:
         return False
+    if not stat.S_ISREG(st.st_mode):
+        return True
+    return st.st_size > MAX_JSON_BYTES
 
 
 def fmt_dur(sec) -> str:
@@ -3423,6 +3525,19 @@ def fix_docx_in_place(path: Path, policy: dict, template: Path = None,
             tmp.unlink()
         return {"file": path.name, "changes": [], "applied": False,
                 "error": str(rep.get("error")),
+                "verified": rep.get("verified")}
+    if rep.get("ok") is False:
+        # A fixer that wrote no change and raised no error but failed its own
+        # verification (a mechanical rule it could not repair) reached the
+        # `base == path and not changes` branch below and was reported "already
+        # clean", dropping the failed verdict. Any ok=False is a failure.
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        remaining = ", ".join(
+            str(r) for r in (rep.get("verified") or {}).get("remaining_mechanical_rules") or [])
+        return {"file": path.name, "changes": [], "applied": False,
+                "error": "self-verification failed (the original file was kept)"
+                         + (f"; remaining: {remaining}" if remaining else ""),
                 "verified": rep.get("verified")}
     base = tmp if rep.get("changes") else path
     changes = list(rep.get("changes") or [])
@@ -8274,6 +8389,15 @@ def copy_into(src: Path, dst: Path, exclude_top=(), skip_aux: bool = False,
     """
     dst.mkdir(parents=True, exist_ok=True)
     skipped = []
+    # A symlinked SOURCE ROOT was followed even though every entry inside it is
+    # checked individually: `src.iterdir()` traversed the link and copied the
+    # target tree (agent-writable run output is passed as `src`). Refuse it
+    # unless it is this root's canonical evidence store.
+    if src.is_symlink() and not (root is not None and is_canonical_evidence_link(src, root)):
+        print(f"warning: skipped symlinked source directory {src} while copying -> {dst} "
+              f"(a link is not package content; its target may be outside the package)",
+              file=sys.stderr)
+        return
 
     def _ignore(dirpath, names):
         out = set(_corpus_ignore(skip_aux, strip_bookkeeping)(dirpath, names) or ())

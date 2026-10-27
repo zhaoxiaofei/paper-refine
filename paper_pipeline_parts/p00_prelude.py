@@ -322,6 +322,12 @@ PIPELINE_MODULE_FILES = ("paper_pipeline.py", "paper_docx_format.py",
 # module manifest records each directory as ONE digest (name + sha256 of every
 # file), so a partial or stale bundle is visible to `status`/`sync-code`.
 PIPELINE_ASSET_DIRS = ("paper_pipeline_parts", "paper_docx_format_parts")
+# venue_profiles/ is a RUNTIME asset too (load_precedence reads the root's copy
+# before the maintained one), but a trimmed checkout may legitimately omit it
+# (the config snapshot is then authoritative). It is frozen and manifested when
+# present -- recorded as None when absent -- exactly like the skills pack, so a
+# root cannot silently diverge from the profiles its record claims.
+PIPELINE_VENUE_ASSET_DIRS = ("venue_profiles",)
 # Skills are read from beside the running driver too (adopt-sweep's default
 # sweeps.md and the review/revise prompt assets), so a root freezes them; a
 # trimmed checkout without the skills pack still creates a root (the copy is
