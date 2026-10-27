@@ -352,6 +352,42 @@ def add_stage_quality_checks(ctx: Ctx, rec: dict, before_sources: list, after_so
                                              fixer_reclassified=reclassified)
     errs.extend(rerrs)
     warns.extend(rwarns)
+    # E-MAIL CONTACT FACTS: a package may not infer/replace an address. The
+    # input corpus (the pristine base, raw data and the other read-only inputs)
+    # is the in-corpus evidence; a web-search correction needs the package's own
+    # work/EMAIL_VERIFICATION.json row. The same gate runs for rewrite, revise
+    # and integrate, so no package-producing arm can slip a guessed domain into
+    # the pool. `code/` in the run sandbox is EDITABLE revision content, so it
+    # is deliberately not an evidence source here: the pristine `base/` copy is.
+    # An integration may also carry a donor's address: every donor passed this
+    # same gate before it entered the pool.
+    evidence_sources = []
+    try:
+        sb = ctx.sandbox_of(rec)
+    except Exception:                                              # noqa: BLE001
+        sb = None
+    if sb is not None:
+        for area in ("non_revised", "raw_data", "base"):
+            d = Path(sb) / area
+            if d.exists():
+                evidence_sources.append((d, "", ()))
+        if rec.get("kind") == "integrate":
+            d = Path(sb) / "others"
+            if d.exists():
+                evidence_sources.append((d, "", ()))
+    email_errs, email_warns = email_address_change_problems(
+        before_sources, after_sources, pkg, label,
+        evidence_sources=evidence_sources)
+    errs.extend(email_errs)
+    warns.extend(email_warns)
+    fact_errs, fact_warns = fact_token_change_problems(
+        before_sources, after_sources, pkg, label,
+        evidence_sources=evidence_sources)
+    errs.extend(fact_errs)
+    warns.extend(fact_warns)
+    todo_errs, todo_warns = manual_todo_gate(pkg)
+    errs.extend(todo_errs)
+    warns.extend(todo_warns)
 AUDIT_VERDICTS = ("confirm", "drop")
 AUDIT_SEVERITIES = ("critical", "major", "minor", "fatal")
 

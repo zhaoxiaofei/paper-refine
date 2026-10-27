@@ -783,7 +783,7 @@ CAPTION_UNPARSED_EXTS = (".doc", ".pdf", ".ppt", ".pptx")
 # different name, is never judged as manuscript text. They are excluded from the
 # corpus DIGEST (hash/pin/next-round base) -- and from the materialized pin and
 # judge target -- by this same name rule, so the two sides remain byte-identical.
-BOOKKEEPING_FILES = ("changelog.md", "manual_steps.md", "revision_report.md",
+BOOKKEEPING_FILES = ("changelog.md", "manual_steps.md", "manual_todo.csv", "revision_report.md",
                      "revision_report.json", "diff_ledger.md", "rewrite_report.md",
                      "visual_check.md",
                      # The BOUNDED REPAIR's re-validation ledger (see
@@ -830,6 +830,7 @@ BOOKKEEPING_NAME_RE = re.compile(
     r"^(?:replacement_ledger|diff_ledger|revision_report|rewrite_report|manual_steps|"
     r"repair_ledger|visual_check|changelog|agent_log|worklog)"
     r"(?:[-_.][A-Za-z0-9._\-]+)?\.(?:md|txt|json)$"
+    r"|^manual_todo(?:[-_.][A-Za-z0-9._\-]+)?\.csv$"
     # The pipeline's own MEASUREMENT artifacts (written next to a run, never
     # into a delivered package): a scan/repair report, the code-side evidence
     # pack, the PKG-2 record. They are skipped by every corpus walk AND by the
@@ -3423,6 +3424,102 @@ def apply_evidence_integrity(text: str, where: str) -> str:
 PLACEHOLDER_TOKEN = "[AUTHOR TO COMPLETE"
 PLACEHOLDER_RE = re.compile(r"\[\s*AUTHOR\s+TO\s+COMPLETE\b", re.IGNORECASE)
 
+# The ONE policy for an author contact address. It is a FACT, not an inferable
+# typo: the observed failure was `mart.ksk@ut.ee` -> `mart.kask@helsinki.fi`,
+# where the reviewer inferred the domain from the affiliation and the reviser
+# applied the guess. An address is now correctable only to a string the
+# input corpus already carries, or to one a recorded web-search result
+# verifies; anything else is a high-priority author query. The orchestrator's
+# e-mail-address gate (`email_address_change_problems`, run by every
+# package-producing stage postcheck) enforces the same rule on the package.
+EMAIL_ADDRESS_RULE = """
+      - E-MAIL ADDRESSES ARE NOT INFERABLE TYPOS. An e-mail address is an author's CONTACT FACT,
+        not prose, and it is never completed, normalized, guessed or reconstructed:
+        * the DOMAIN is not inferable from an affiliation, a printed name, a journal, a DOI, a
+          reference list or a plausible institutional pattern;
+        * an address may be corrected ONLY (a) to an address the input corpus already
+          carries VERBATIM (another submission document, `raw_data/`, the base's analysis
+          code), which is reconciliation to a fact, not invention; or (b) to the exact
+          address a WEB-SEARCH RESULT
+          for that author shows. For (b), record the query, the source URL (a real page, not a
+          reserved/example host), the checked date and
+          the verbatim evidence in `work/EMAIL_VERIFICATION.json` in the package you write:
+          {"verifications": [{"before": "old@example.org", "after": "new@example.org",
+          "query": "<search string>", "source_url": "https://...", "checked_at": "YYYY-MM-DD",
+          "evidence": "<the source line that contains the address>"}]}
+          The `after` string must match the corrected address exactly, and the evidence must
+          contain it. A case-only change is not an address correction;
+        * otherwise keep the address BYTE-IDENTICAL, report the mismatch as a HIGH-PRIORITY author
+          query (what was checked and why it is not inferable) WITH the suggested reading, if any,
+          as `suggested: <address> (unverified)` in that manual item, and never replace it with a
+          plausible guess. Never DELETE a real address (a reserved/example placeholder is not a
+          real contact and may be removed), and reconcile every occurrence to the SAME
+          verified string;
+        * a review, probe or audit stage reports the mismatch and the query, and never proposes a
+          replacement address or domain (identification only); only a package-producing stage may
+          apply a correction, and only under (a) or (b).
+        The orchestrator enforces this: an address that appears in the delivered package but not
+        in the input corpus, and has no matching `work/EMAIL_VERIFICATION.json` row,
+        FAILS the stage. Grammar/punctuation-style edits that leave the address byte-identical are
+        not address corrections.
+"""
+
+# The same evidence rule for every other externally-assigned identifier. An
+# identifier is a FACT: a name, a pattern, an edit-distance guess, a plausible
+# repository or a "standard" number format is not evidence. A pure ADDITION for
+# new content (a new reference's DOI) is not a correction; a replacement,
+# shortening or renumbering of an existing one is.
+SENSITIVE_FACT_RULE = """
+      - OPAQUE IDENTIFIERS AND EXTERNALLY-ASSIGNED FACTS ARE NOT INFERRED EITHER. A DOI,
+        accession (GEO/SRA/BioProject/BioSample/...), ORCID, UUID/UID, git commit hash,
+        funding/grant number, registry/protocol/version ID, reagent/cell-line/strain/domain-specific
+        identifier, or any other externally-assigned value is a FACT, not prose. It may change ONLY
+        to a value the input corpus already carries VERBATIM (another submission
+        document, `raw_data/`, the base's analysis code) or an independent record verifies
+        (a web-search result, a public registry page, a Crossref/DataCite/ORCID response,
+        a repository commit
+        page): record `kind`, `before` (when there is one), `after`, the `query`, the http(s)
+        `source_url`, `checked_at` and a verbatim quote containing the exact `after` value in
+        `work/FACT_VERIFICATION.json` in the package you write:
+        {"verifications": [{"kind": "doi", "before": "10.1000/old", "after": "10.1000/new",
+        "query": "<search string>", "source_url": "https://...", "checked_at": "YYYY-MM-DD",
+        "evidence": "<the line that contains the identifier>"}]}
+        A name/affiliation/pattern/edit-distance guess, a plausible repository, a "standard" number
+        format or an inferred version is NOT evidence. If no independent evidence exists, DO NOT
+        EDIT: keep the value byte-identical and write the SUGGESTED correction in the HIGH-PRIORITY
+        manual TODO / hand-off list with the location, the current value,
+        `suggested: <value> (unverified)`, why it is suspected and the exact check to run. Never
+        ship an unverified identifier, and never delete a real identifier to resolve a finding. A
+        pure ADDITION of a new identifier for new content (a new reference's DOI) is not a
+        correction and is allowed;
+        a replacement, shortening or renumbering of an existing identifier is gated.
+        The orchestrator enforces this: an identifier the delivered package changes without an
+        exact in-corpus value or a matching `work/FACT_VERIFICATION.json` row FAILS the stage.
+"""
+
+MANUAL_TODO_RULE = """
+      - THE MANUAL TODO INVENTORY IS ONE CLASSIFIED TABLE. Every action item the author must
+        handle gets exactly ONE row in the package's manual-list file (the file this mode names
+        above) with these four columns, in this order:
+        | TODO item ID | importance | author action | description |
+        | T-001 | minor | CONFIRM/REJECT correction made by LLMs | <one line; escape any literal pipe> |
+        `importance` is exactly one of: fatal, critical, major, minor.
+        `author action` is exactly one of:
+          CONFIRM/REJECT correction made by LLMs
+          MANUALLY DO/DO_NOT correct with LLMs-recommended corrections provided
+          MANUALLY DO/DO_NOT correct without any LLMs-recommended corrections
+        Use action 1 when a correction was already applied in the package (the author confirms or
+        rejects it); action 2 when the LLM has a recommended correction but did not apply it; action
+        3 when no reliable recommendation exists. The description must make the location, the
+        current value, the suggested value (marked `suggested: <value> (unverified)` when action 2
+        or 3) and the exact check clear. Use `T-001`, `T-002`, ... as unique ids. Every manual or
+        hand-off item -- including a legacy `priority=low` re-verification detail -- must have a
+        table row; a prose-only item is not classified. The orchestrator writes `MANUAL_TODO.csv`
+        from this table (four columns, same values) and fails a malformed table; do not hand-write
+        a different CSV. A list that carries actionable items without this table is reported as a
+        named gap (no classification is invented, and no CSV is written until the table exists).
+"""
+
 PLACEHOLDER_RULE = """PIPELINE HAND-OFF PLACEHOLDERS — the literal token "[AUTHOR TO COMPLETE: ...]":
   * The revision stages of this pipeline are forbidden to invent content, so an item that is missing
     from the submission and cannot be reconstructed (a whole mandatory file such as the cover letter
@@ -3459,17 +3556,24 @@ PLACEHOLDER_RULE = """PIPELINE HAND-OFF PLACEHOLDERS — the literal token "[AUT
         typographical error whose correct form is determinable from publicly available
         information or from manuscript-associated data (the printed author list and
         affiliations, `raw_data/`, the deposited tables, the reference list, a DOI
-        resolver, a standard email domain) is NOT `author-only`. In a revision stage,
+        resolver) is NOT `author-only` -- EXCEPT an e-mail address, which the next
+        bullet governs. In a revision stage,
         correct it in the document, record the basis in CHANGELOG.md, and add ONE
         `priority=low` re-verification item to MANUAL_STEPS.md naming the corrected
         value and its basis. A review or audit stage reports the typo and its basis and
         does not edit; a probe reports it the same way. Low priority asks the authors to
-        re-verify; it never blocks and never replaces the correction. High priority
+        re-verify; it never blocks and never replaces the correction. That correction
+        ALSO gets one row in the classified TODO table (importance minor or the defect's
+        rung; author action `CONFIRM/REJECT correction made by LLMs`); the
+        `priority=low` line is detail only. High priority
         is a `[AUTHOR TO COMPLETE: ...]` placeholder.
         Grammar, punctuation and style errors are corrected in text in a revision stage and
         are NEVER listed in MANUAL_STEPS.md; a review, audit or probe stage reports them and
         does not edit. If no basis exists, keep the
         `author-only` treatment.
+@@EMAIL_ADDRESS_RULE@@
+@@SENSITIVE_FACT_RULE@@
+@@MANUAL_TODO_RULE@@
     A `searchable` marker whose lookup verdict is `found` or `absent` and is still present in a
     delivered package is a FAILED run (the postcheck points at the exact lookup row).
   * PLACEHOLDER FILES. A corpus file can stand in for data it does not contain (a haplotype,
@@ -3564,6 +3668,11 @@ def _handoff_items_from_manual_steps(text: str) -> list:
         line = raw.strip()
         if not line or not _HANDOFF_MARKER_RE.search(line):
             continue
+        # A classified TODO row is already an inventory row, not a marker-form
+        # bullet to be moved into the README as prose. Moving it would turn
+        # `| T-001 | ... |` into a bullet and lose its columns.
+        if line.startswith("|") or line.count("|") >= 2:
+            continue
         line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", line)
         cleaned = _HANDOFF_MARKER_RE.sub(lambda m: m.group(1).strip(), line)
         cleaned = re.sub(r"\s+", " ", cleaned).strip(" .;:")
@@ -3636,6 +3745,301 @@ def ensure_handoff_readme(ctx: Ctx, pkg_dir: Path, warns: list = None,
                                  "items": len(new), "generated_from": "MANUAL_STEPS.md"}
     return {"path": str(target), "items": len(new),
             "generated_from": "MANUAL_STEPS.md"}
+
+
+# ---------------------------------------------------------------------
+# THE CLASSIFIED MANUAL TODO INVENTORY
+#
+# The user-facing manual list is one table with four columns (TODO item ID,
+# importance, author action, description). The markdown table is the source;
+# `MANUAL_TODO.csv` is DERIVED from it by the orchestrator after every
+# package-producing stage (and before publication), so the two can never
+# disagree. The old prose/low-priority sections remain detail, never the
+# inventory: every actionable item must have one row here.
+# ---------------------------------------------------------------------
+MANUAL_TODO_CSV_NAME = "MANUAL_TODO.csv"
+MANUAL_TODO_COLUMNS = ("TODO item ID", "importance", "author_action", "description")
+MANUAL_TODO_MAX_BYTES = 8 * 1024 * 1024
+MANUAL_IMPORTANCES = ("fatal", "critical", "major", "minor")
+MANUAL_ACTIONS = (
+    "CONFIRM/REJECT correction made by LLMs",
+    "MANUALLY DO/DO_NOT correct with LLMs-recommended corrections provided",
+    "MANUALLY DO/DO_NOT correct without any LLMs-recommended corrections",
+)
+MANUAL_TODO_FILES = ("MANUAL_STEPS.md", AUTHOR_TO_COMPLETE_README)
+
+
+def _manual_md_cells(line: str) -> list:
+    """Split one Markdown table row; an escaped `\\|` stays inside its cell."""
+    text = str(line or "").strip()
+    if text.startswith("|"):
+        text = text[1:]
+    if text.endswith("|") and not text.endswith("\\|"):
+        text = text[:-1]
+    cells, cur, i = [], [], 0
+    while i < len(text):
+        if text[i] == "\\" and i + 1 < len(text) and text[i + 1] == "|":
+            cur.append("|")
+            i += 2
+            continue
+        if text[i] == "|":
+            cells.append("".join(cur).strip())
+            cur = []
+            i += 1
+            continue
+        cur.append(text[i])
+        i += 1
+    cells.append("".join(cur).strip())
+    return cells
+
+
+def _manual_md_separator(line: str) -> bool:
+    text = str(line or "").strip()
+    if "|" not in text:
+        return False
+    body = text.strip("|").strip()
+    return bool(re.fullmatch(r"[\s:|\-]+", body)) and "-" in body
+
+
+def _manual_header_columns(cells: list) -> dict:
+    """{id, importance, action, description} column indexes, or {}."""
+    norm = [re.sub(r"[^a-z0-9]+", " ", str(c).lower()).strip() for c in cells]
+    idx = {}
+    for i, name in enumerate(norm):
+        if name in ("todo item id", "todo id") and "id" not in idx:
+            idx["id"] = i
+        elif name == "importance" and "importance" not in idx:
+            idx["importance"] = i
+        elif name == "author action" and "action" not in idx:
+            idx["action"] = i
+        elif name == "description" and "description" not in idx:
+            idx["description"] = i
+    return idx if all(k in idx for k in ("id", "importance", "action", "description")) else {}
+
+
+def _manual_importance(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip()).lower()
+    return text if text in MANUAL_IMPORTANCES else ""
+
+
+def _manual_action(value: str) -> str:
+    text = re.sub(r"[^a-z0-9/]+", " ", str(value or "").lower()).strip()
+    text = re.sub(r"\s+", " ", text)
+    if text.startswith("confirm/reject") and "correction" in text:
+        return MANUAL_ACTIONS[0]
+    if "manually do/do not" not in text or "correct" not in text:
+        return ""
+    if "without" in text and "llm" in text:
+        return MANUAL_ACTIONS[2]
+    if "with" in text and "llm" in text:
+        return MANUAL_ACTIONS[1]
+    return ""
+
+
+def manual_todo_rows_from_text(text: str) -> tuple:
+    """(rows, problems) from every classified TODO table in one markdown text.
+
+    A row is an object with id/importance/action/description/source. A legacy
+    manual list with no classified table returns no rows and a problem only when
+    the caller supplies the fallback (see `manual_todo_rows`).
+    """
+    lines = str(text or "").splitlines()
+    rows, problems = [], []
+    seen_ids = set()
+    i = 0
+    while i + 1 < len(lines):
+        header = _manual_md_cells(lines[i]) if "|" in lines[i] else []
+        idx = _manual_header_columns(header) if header else {}
+        if not idx:
+            i += 1
+            continue
+        if not _manual_md_separator(lines[i + 1]):
+            problems.append("classified TODO table has a header but no |---| separator")
+            i += 1
+            continue
+        j = i + 2
+        row_no = 0
+        while j < len(lines) and "|" in lines[j]:
+            if _manual_md_separator(lines[j]):
+                j += 1
+                continue
+            cells = _manual_md_cells(lines[j])
+            row_no += 1
+            need = max(idx.values()) + 1
+            if len(cells) != need:
+                problems.append(f"row {row_no}: {len(cells)} cells, expected {need} "
+                                f"(escape a literal pipe as \\|)")
+                j += 1
+                continue
+            ident = cells[idx["id"]].strip()
+            importance = _manual_importance(cells[idx["importance"]])
+            action = _manual_action(cells[idx["action"]])
+            description = cells[idx["description"]].strip()
+            bad = []
+            if not ident:
+                bad.append("empty TODO item ID")
+            if not importance:
+                bad.append("importance must be one of " + ", ".join(MANUAL_IMPORTANCES))
+            if not action:
+                bad.append("author action must be one of: " + " | ".join(MANUAL_ACTIONS))
+            if not description:
+                bad.append("empty description")
+            if bad:
+                problems.append(f"row {row_no} ({ident or '?'}): " + "; ".join(bad))
+            elif ident in seen_ids:
+                problems.append(f"row {row_no}: duplicate TODO item ID {ident!r}")
+            else:
+                seen_ids.add(ident)
+                rows.append({"id": ident, "importance": importance, "action": action,
+                             "description": description})
+            j += 1
+        i = max(j, i + 1)
+    return rows, problems
+
+
+def _manual_has_table(text: str) -> bool:
+    """True when the text carries a canonical classified-TODO header + rule."""
+    lines = str(text or "").splitlines()
+    for i in range(max(0, len(lines) - 1)):
+        if "|" not in lines[i] or not _manual_header_columns(_manual_md_cells(lines[i])):
+            continue
+        if _manual_md_separator(lines[i + 1]):
+            return True
+    return False
+
+
+def manual_todo_rows(pkg_dir: Path) -> tuple:
+    """(rows, problems, sources) from the package's manual-list markdown files."""
+    pkg = Path(pkg_dir)
+    rows, problems, sources = [], [], []
+    seen = set()
+    for name in MANUAL_TODO_FILES:
+        path = pkg / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text("utf-8", "replace")
+        except OSError as e:
+            problems.append(f"{name}: unreadable ({type(e).__name__}: {e})")
+            continue
+        file_rows, file_problems = manual_todo_rows_from_text(text)
+        if file_rows or _manual_has_table(text) or any("classified TODO" in p for p in file_problems):
+            sources.append(name)
+        problems.extend(f"{name}: {p}" for p in file_problems)
+        for row in file_rows:
+            if row["id"] in seen:
+                problems.append(f"{name}: duplicate TODO item ID {row['id']!r}")
+                continue
+            seen.add(row["id"])
+            row = dict(row)
+            row["source"] = name
+            rows.append(row)
+    return rows, problems, sources
+
+
+def _manual_todo_csv_rows(rows: list) -> list:
+    return [{MANUAL_TODO_COLUMNS[0]: r["id"],
+             MANUAL_TODO_COLUMNS[1]: r["importance"],
+             MANUAL_TODO_COLUMNS[2]: r["action"],
+             MANUAL_TODO_COLUMNS[3]: r["description"]} for r in rows]
+
+
+def _manual_csv_matches(path: Path, rows: list) -> bool:
+    expected = [list(MANUAL_TODO_COLUMNS)] + [
+        [r[c] for c in MANUAL_TODO_COLUMNS] for r in _manual_todo_csv_rows(rows)]
+    try:
+        if path.stat().st_size > MANUAL_TODO_MAX_BYTES:
+            return False
+        with open(path, "r", encoding="utf-8-sig", newline="") as f:
+            got = list(csv.reader(f))
+    except (OSError, csv.Error):
+        return False
+    return got == expected
+
+
+def manual_todo_gate(pkg_dir: Path) -> tuple:
+    """(errors, warnings): write/refresh MANUAL_TODO.csv from the classified table.
+
+    The markdown is authoritative. A classified table with invalid rows is a
+    hard bookkeeping error; a legacy manual list with items but no table is a
+    NAMED warning (the author still has work to do; the stage should add the
+    table). The CSV is written next to the manual list and is bookkeeping, so it
+    never enters the corpus, judge view, pin or published directory.
+    """
+    pkg = Path(pkg_dir)
+    files = [pkg / n for n in MANUAL_TODO_FILES if (pkg / n).is_file()]
+    csv_path = pkg / MANUAL_TODO_CSV_NAME
+    if not files:
+        if csv_path.is_file():
+            try:
+                csv_path.unlink()
+                note = f"removed {MANUAL_TODO_CSV_NAME}; it had no manual-list markdown as its source"
+            except OSError as e:
+                note = (f"{MANUAL_TODO_CSV_NAME} has no manual-list markdown as its source and "
+                        f"could not be removed ({type(e).__name__}: {e})")
+            return [], [f"{pkg.name}: {note}"]
+        return [], []
+    rows, problems, sources = manual_todo_rows(pkg)
+    counts = sum(int(count_manual_steps(p) or 0) for p in files)
+    errs, warns = [], []
+    if problems:
+        return problems, warns
+    if not sources:
+        if counts:
+            warns.append(
+                f"{pkg.name}: the manual list has {counts} actionable item(s) but no classified "
+                f"TODO table; add one table with columns TODO item ID | importance | author "
+                f"action | description (T-001, fatal/critical/major/minor, one of the three "
+                f"author-action labels) -- MANUAL_TODO.csv is not generated until then")
+        if csv_path.is_file():
+            try:
+                csv_path.unlink()
+                removed = "; the stale CSV was removed"
+            except OSError:
+                removed = ""
+            warns.append(f"{pkg.name}: {MANUAL_TODO_CSV_NAME} exists without a classified "
+                         f"markdown TODO table; the markdown is the source and must carry the "
+                         f"same four columns{removed}")
+        return errs, warns
+    rows_by_source = Counter(r.get("source") for r in rows)
+    for path in files:
+        n = int(count_manual_steps(path) or 0)
+        table_n = rows_by_source.get(path.name, 0)
+        if n > table_n:
+            warns.append(
+                f"{path.name}: {n - table_n} manual item(s) are only prose/legacy; add one "
+                f"classified TODO table row per item (TODO item ID | importance | author action "
+                f"| description)")
+    expected = _manual_todo_csv_rows(rows)
+    if csv_path.is_file() and not _manual_csv_matches(csv_path, rows):
+        warns.append(f"{pkg.name}: {MANUAL_TODO_CSV_NAME} did not match the markdown TODO "
+                     f"table; it was regenerated from the markdown")
+    try:
+        write_csv_atomic(csv_path, list(MANUAL_TODO_COLUMNS), expected)
+    except OSError as e:
+        errs.append(f"{pkg.name}: could not write {MANUAL_TODO_CSV_NAME} "
+                    f"({type(e).__name__}: {e})")
+    return errs, warns
+
+
+def manual_todo_row_dicts(rows: list) -> list:
+    """Public 4-column CSV rows for a caller that already parsed a table."""
+    return _manual_todo_csv_rows(rows)
+
+
+def manual_todo_markdown_table(rows: list) -> str:
+    """Render rows as the four-column Markdown table (escaped pipes)."""
+    out = ["| TODO item ID | importance | author action | description |",
+           "|---|---|---|---|"]
+    for row in rows or []:
+        if MANUAL_TODO_COLUMNS[0] in row:
+            values = [row.get(c, "") for c in MANUAL_TODO_COLUMNS]
+        else:
+            values = [row.get("id", ""), row.get("importance", ""),
+                      row.get("action", ""), row.get("description", "")]
+        cells = [str(v).replace("|", "\\|").replace("\n", " ") for v in values]
+        out.append("| " + " | ".join(cells) + " |")
+    return "\n".join(out) + "\n"
 
 
 def _clean_handoff_row(value) -> str:
@@ -3889,7 +4293,9 @@ anywhere in a file you write:
     unreadable field) is NEVER marked inside a document. Leave the item out of the document -- and,
     for a whole missing file, do not create a file that carries nothing but instructions -- and
     record it in the package's own MANUAL_STEPS.md / CHANGELOG.md / REVISION_REPORT.md with the
-    precise step the author must take (which file, which section or field, what to supply).
+    precise step the author must take (which file, which section or field, what to supply), and give
+    it ONE row in the classified TODO table (TODO item ID | importance | author action |
+    description).
   * Existing markers are yours to clear in the same spirit: fill one ONLY when the missing content
     is verifiably present elsewhere in the corpus (that is a normal edit and the marker goes away);
     otherwise REMOVE the marker text from the document (keeping whatever surrounding content is
@@ -3912,17 +4318,24 @@ anywhere in a file you write:
         typographical error whose correct form is determinable from publicly available
         information or from manuscript-associated data (the printed author list and
         affiliations, `raw_data/`, the deposited tables, the reference list, a DOI
-        resolver, a standard email domain) is NOT `author-only`. In a revision stage,
+        resolver) is NOT `author-only` -- EXCEPT an e-mail address, which the next
+        bullet governs. In a revision stage,
         correct it in the document, record the basis in CHANGELOG.md, and add ONE
         `priority=low` re-verification item to MANUAL_STEPS.md naming the corrected
         value and its basis. A review or audit stage reports the typo and its basis and
         does not edit; a probe reports it the same way. Low priority asks the authors to
-        re-verify; it never blocks and never replaces the correction. High priority is a
+        re-verify; it never blocks and never replaces the correction. That correction
+        ALSO gets one row in the classified TODO table (importance minor or the defect's
+        rung; author action `CONFIRM/REJECT correction made by LLMs`); the
+        `priority=low` line is detail only. High priority is a
         MANUAL_STEPS.md item, never a `[AUTHOR TO COMPLETE: ...]` placeholder (this mode
         forbids the token). Grammar, punctuation and style errors are corrected in text in
         a revision stage and are NEVER listed in MANUAL_STEPS.md; a review, audit or probe
         stage reports them and does not edit. If no basis exists, keep the
         `author-only` treatment.
+@@EMAIL_ADDRESS_RULE@@
+@@SENSITIVE_FACT_RULE@@
+@@MANUAL_TODO_RULE@@
   * The rule binds every file you write, including a scaffold you create for a mandatory item and
     any report that ships beside the documents.
   * PLACEHOLDER FILES. A corpus file can stand in for data it does not contain (a haplotype,
@@ -3945,10 +4358,11 @@ MUST NOT APPEAR in any document or in the hand-off README:
     unreadable field) is NEVER written into a document. Leave the item out of the document -- and,
     for a whole missing file, do not create a file that carries nothing but instructions -- and
     record it in ONE file in the package root, `README-AUTHOR-TO-COMPLETE.md`, beside the cover
-    letter and main text. Give each item its own row: the document and section (or field), what is
-    missing, and the precise step the author must take (what to supply, where). Create the README
-    only when there is at least one item; update it as items are resolved and delete it when none
-    remain.
+    letter and main text. Give each item ONE row in the classified TODO table (TODO item ID |
+    importance | author action | description), and put the document and section (or field), what is
+    missing, and the precise step the author must take (what to supply, where) in that row's
+    description or a detail line below the table. Create the README only when there is at least one
+    item; update it as items are resolved and delete it when none remain.
   * The README is the author's checklist, never submission content: a submitted document may not
     depend on it, and the submission copy drops it (it matches README*.md). Do not put prose,
     citations or data in it.
@@ -3976,18 +4390,25 @@ MUST NOT APPEAR in any document or in the hand-off README:
         typographical error whose correct form is determinable from publicly available
         information or from manuscript-associated data (the printed author list and
         affiliations, `raw_data/`, the deposited tables, the reference list, a DOI
-        resolver, a standard email domain) is NOT `author-only`. In a revision stage,
+        resolver) is NOT `author-only` -- EXCEPT an e-mail address, which the next
+        bullet governs. In a revision stage,
         correct it in the document, record the basis in CHANGELOG.md, and add ONE
         `priority=low` re-verification item to `README-AUTHOR-TO-COMPLETE.md` naming the
         corrected value and its basis. A review or audit stage reports the typo and its
         basis and does not edit; a probe reports it the same way. Low priority asks the
-        authors to re-verify; it never blocks and never replaces the correction. High
+        authors to re-verify; it never blocks and never replaces the correction. That
+        correction ALSO gets one row in the classified TODO table (importance minor or
+        the defect's rung; author action `CONFIRM/REJECT correction made by LLMs`); the
+        `priority=low` line is detail only. High
         priority is a row in `README-AUTHOR-TO-COMPLETE.md`; the
         `[AUTHOR TO COMPLETE: ...]` token may not appear in a document or in that
         README. Grammar, punctuation and style errors are corrected in text in a revision
         stage and are NEVER listed as a hand-off item; a review, audit or probe stage
         reports them and does not edit. If no basis exists, keep the
         `author-only` treatment.
+@@EMAIL_ADDRESS_RULE@@
+@@SENSITIVE_FACT_RULE@@
+@@MANUAL_TODO_RULE@@
   * The rule binds every file you write, including a scaffold you create for a mandatory item and
     any report that ships beside the documents.
   * PLACEHOLDER FILES. A corpus file can stand in for data it does not contain (a haplotype,
@@ -4049,10 +4470,15 @@ def placeholder_rule_text(mode=None) -> str:
     """The hand-off rule the working sessions receive for `mode`."""
     mode = _atc_mode(mode)
     if mode == "document":
-        return PLACEHOLDER_RULE
-    if mode == "readme":
-        return PLACEHOLDER_RULE_README
-    return PLACEHOLDER_RULE_OFF
+        text = PLACEHOLDER_RULE
+    elif mode == "readme":
+        text = PLACEHOLDER_RULE_README
+    else:
+        text = PLACEHOLDER_RULE_OFF
+    return (text
+            .replace("@@EMAIL_ADDRESS_RULE@@", EMAIL_ADDRESS_RULE)
+            .replace("@@SENSITIVE_FACT_RULE@@", SENSITIVE_FACT_RULE)
+            .replace("@@MANUAL_TODO_RULE@@", MANUAL_TODO_RULE))
 
 
 def placeholder_rule_judge_text(mode=None) -> str:
@@ -4220,7 +4646,27 @@ D8. A FACT IS NOT A REMOVAL SURFACE. Never resolve a finding by deleting the sen
     same fact survives; record the survivor. When the only apparent remedy would remove a fact,
     the finding is not resolvable by deletion: dispose it as not-a-defect if it invents a rule,
     otherwise carry it to the manual list. This rule outranks a structural, packaging, length,
-    style, or "unused item" finding whenever the two conflict, and it binds every role."""
+    style, or "unused item" finding whenever the two conflict, and it binds every role.
+D9. AN E-MAIL ADDRESS IS A CONTACT FACT, NOT AN INFERABLE TYPO. Its domain is not inferable from an
+    affiliation, a printed name, a journal, a DOI, a reference list or an institutional pattern.
+    An address may change ONLY to a string the input corpus already carries verbatim, or to one a
+    recorded web-search result verifies (query, source URL, checked date and a verbatim quote in
+    the package's own verification record); otherwise it stays byte-identical and the mismatch is
+    a HIGH-PRIORITY author query. Never delete a real address to resolve a finding (a
+    reserved/example placeholder is not a real contact and may be removed). A comparison
+    session treats an unverified address change as a preservation/correctness defect, never as an
+    improvement.
+D10. AN OPAQUE IDENTIFIER OR EXTERNALLY-ASSIGNED FACT IS NOT AN EDITABLE SURFACE. DOI, accession,
+    ORCID, UUID/UID, git commit hash, funding/grant number, registry/protocol/version ID,
+    reagent/cell-line/strain/domain-specific identifier and any other externally-assigned value
+    may change ONLY to a value the input corpus carries verbatim or an independent record verifies
+    (query, source URL, checked date and a verbatim quote in the package's fact-verification
+    record). A name, pattern, edit-distance, plausible repository or "standard" format guess is
+    NOT evidence. When unverified, keep the value byte-identical and put the SUGGESTED correction
+    in the HIGH-PRIORITY manual TODO (location, current value, suggested value marked unverified,
+    why suspected, exact check). A pure ADDITION for new content is not a correction; a
+    replacement, shortening or renumbering is. A comparison session treats an unverified
+    identifier change as a preservation/correctness defect, never as an improvement."""
 
 ADOPTED_SWEEPS_BLOCK = """
 

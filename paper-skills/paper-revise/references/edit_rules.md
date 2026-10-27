@@ -316,17 +316,79 @@ Dispose every row:
   - INFERABLE TYPOS ARE CORRECTED, NOT DEFERRED: a typographical
     error whose correct form is determinable from publicly available information or
     from manuscript-associated data (the printed author list and affiliations,
-    `raw_data/`, the deposited tables, the reference list, a DOI resolver, a standard
-    email domain) is NOT `author-only`. Correct it, record the basis in CHANGELOG.md,
+    `raw_data/`, the deposited tables, the reference list, a DOI resolver) is NOT
+    `author-only` -- EXCEPT an e-mail address, which the next bullet governs.
+    Correct it, record the basis in CHANGELOG.md,
     and add ONE `priority=low` re-verification item to MANUAL_STEPS.md naming the
     corrected value and its basis. Low priority asks the authors to re-verify; it
-    never blocks and never replaces the correction. High priority is a
+    never blocks and never replaces the correction. That correction ALSO gets one
+    row in the classified TODO table (importance minor or the defect's rung; author
+    action `CONFIRM/REJECT correction made by LLMs`); the `priority=low` line is
+    detail only. High priority is a
     `[AUTHOR TO COMPLETE: ...]` placeholder. Grammar, punctuation and style errors are
     corrected in text and are NEVER listed in MANUAL_STEPS.md. If no basis exists,
     keep the `author-only` treatment.
+  - E-MAIL ADDRESSES ARE NOT INFERABLE TYPOS: an address is a contact FACT, not
+    prose. Its domain is not inferable from an affiliation, a printed name, a
+    journal, a DOI or a reference list. Correct an address ONLY to a string the
+    input corpus already carries verbatim (another submission document,
+    `raw_data/`, the analysis code), or to the exact address a recorded web-search
+    result verifies: write the query, a real source URL (not a reserved/example
+    host), the checked date and a verbatim quote to `work/EMAIL_VERIFICATION.json`
+    in the package, with `after` matching the corrected address exactly. Otherwise
+    keep it byte-identical and add a HIGH-PRIORITY manual query; never replace it
+    with a plausible domain, never delete a real address (a reserved/example
+    placeholder may be removed), and never propose a replacement address in a
+    review/audit/probe finding. The orchestrator fails a package that adds an
+    address with neither an in-corpus match nor a matching verification row.
+  - OPAQUE IDENTIFIERS AND EXTERNALLY-ASSIGNED FACTS FOLLOW THE SAME RULE: a DOI,
+    accession (GEO/SRA/BioProject/BioSample/...), ORCID, UUID/UID, git commit
+    hash, funding/grant number, registry/protocol/version ID, reagent/cell-line/
+    strain/domain-specific identifier, or any other externally-assigned value is a
+    FACT. Do not infer a correction from a name, pattern, edit distance, plausible
+    repository or "standard" format. Correct only to a value the input
+    corpus already carries verbatim (another submission document, `raw_data/`, the
+    analysis code) or an independent record verifies (a web-search result, a public
+    registry, Crossref/DataCite/ORCID, a repository commit page): write `kind`,
+    `before`, `after`, `query`, a real `source_url`, `checked_at` and a verbatim
+    quote containing the exact `after` value to `work/FACT_VERIFICATION.json` in
+    the package. Otherwise keep the value byte-identical and add a HIGH-PRIORITY
+    manual TODO row with the location, current value,
+    `suggested: <value> (unverified)`, why it is suspected and the exact check.
+    A pure ADDITION for new content (a new reference's DOI) is not a correction;
+    a replacement, shortening or renumbering is. The orchestrator fails an
+    unverified identifier change.
 
 Never fill a marker from your own knowledge, and never invent an identifier:
 `absent` + the search record is the answer when nothing exists.
+
+## E3b — The classified manual TODO table
+
+Every actionable item the author must handle is ONE row in the classified TODO
+table in the manual list (`MANUAL_STEPS.md`, or `README-AUTHOR-TO-COMPLETE.md`
+under the readme hand-off mode), with these four columns in order:
+
+| TODO item ID | importance | author action | description |
+|---|---|---|---|
+| T-001 | minor | CONFIRM/REJECT correction made by LLMs | one line, escape a literal pipe |
+
+`importance` is exactly `fatal`, `critical`, `major` or `minor`.
+`author action` is exactly one of:
+
+- `CONFIRM/REJECT correction made by LLMs` — a correction was already applied;
+  the author confirms or rejects it;
+- `MANUALLY DO/DO_NOT correct with LLMs-recommended corrections provided` — the
+  LLM has a recommended correction but did not apply it;
+- `MANUALLY DO/DO_NOT correct without any LLMs-recommended corrections` — no
+  reliable recommendation exists.
+
+Use unique `T-001`, `T-002`, … ids; put the location, current value, the
+`suggested: <value> (unverified)` when action 2 or 3, and the exact check in the
+description or a detail line below the table. Every legacy `priority=low`
+re-verification detail must also have a table row; prose-only items are not
+classified. The orchestrator writes `MANUAL_TODO.csv` from the table (four
+columns, same values) — the markdown is the source; do not hand-write a different
+CSV.
 
 ## E7 — Acting on the auditor's dispositions (`--audit on`)
 

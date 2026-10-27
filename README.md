@@ -226,7 +226,19 @@ Purely advisory rows are listed but never gate;
 stage's own hand-off list is copied beside the published directory as
 `final_clean_version.manual_steps.md` (a SIBLING — anything inside the directory
 would become manuscript content in the next run), so the author never has to read
-a path inside `runs/<id>/`.
+a path inside `runs/<id>/`. The same hand-off list carries a four-column
+**classified TODO table** (`TODO item ID | importance | author action |
+description`): importance is `fatal`/`critical`/`major`/`minor`, and author
+action is one of:
+
+- `CONFIRM/REJECT correction made by LLMs`
+- `MANUALLY DO/DO_NOT correct with LLMs-recommended corrections provided`
+- `MANUALLY DO/DO_NOT correct without any LLMs-recommended corrections`
+
+The orchestrator derives `MANUAL_TODO.csv` from that table in the package (four
+columns, same values) and publishes the sibling
+`final_clean_version.manual_todo.csv`; a prose-only manual item is not
+classified.
 
 **What the submission actually carries is the package's own declaration.** Many
 packages ship the operator's `README*.md` stating the submitted set as a glob
@@ -1364,6 +1376,34 @@ need different treatment:
   new nested parenthesis, a new value+unit outside siunitx, a new abstract
   sentence past its bar) FAILS the attempt with the offending rule named; growth
   inside a family that was already present is a warning.
+* **An e-mail address is a contact fact, never an inferable typo.** A reviewer
+  may report a domain/affiliation mismatch, but neither the review nor the
+  revision may infer a replacement domain: the observed over-correction was
+  `mart.ksk@ut.ee` → `mart.kask@helsinki.fi`, where the reviewer could not verify
+  the real address yet the reviser applied the guess. Every package-producing
+  stage now runs a code-side gate: a NEW address must either already appear
+  verbatim in the input corpus (another submission document,
+  `raw_data/`, the base's analysis code) or be verified by a row in the package's
+  `work/EMAIL_VERIFICATION.json` recording the web-search query, the http(s)
+  source URL, the checked date and a verbatim quote that contains the exact
+  corrected address; otherwise the stage FAILS. A removed non-placeholder address
+  is recorded (a contact fact is not a deletion surface), and a case-only rewrite
+  is not an address change. The same rule is in the shared decision block (D9),
+  all stage prompts, the review's M12/M14 sweeps and the revise skill.
+* **Every externally-assigned identifier follows the same evidence rule (D10).**
+  A DOI, accession (GEO/SRA/BioProject/BioSample/...), ORCID, UUID/UID, git
+  commit hash, funding/grant number, registry/protocol/version ID or a
+  reagent/cell-line/strain/domain-specific identifier is a fact, not a pattern.
+  A replacement, shortening or renumbering of an existing value FAILS unless the
+  exact value is already in the input corpus or a package record
+  (`work/FACT_VERIFICATION.json`) carries `kind`, `before`, `after`, the query, a
+  real `http(s)` source URL, the checked date and a verbatim quote containing the
+  value — a web search, Crossref/DataCite/ORCID, a public registry or a
+  repository page all qualify as independent evidence. A pure addition for new
+  content (a new reference's DOI) is not a correction and is allowed. When no
+  evidence exists the value stays byte-identical and the suggested value
+  (`suggested: <value> (unverified)`) goes in the high-priority manual TODO with
+  the location and exact check.
 * **The L1–L11 language pass runs in every package-producing stage** (rewrite,
   revise, integrate), not only in the revision arm: one row per change plus one
   coverage row per step in `work/R6_language.md`, and a code-side re-scan of the

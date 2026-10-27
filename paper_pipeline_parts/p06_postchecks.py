@@ -3438,6 +3438,441 @@ def inherited_structured_output_notes(ctx: Ctx, rec: dict) -> list:
     return _structured_output_scan(ctx, rec)[1]
 
 
+# =====================================================================
+# OPAQUE IDENTIFIER / EXTERNALLY-ASSIGNED FACT EVIDENCE GATE
+#
+# E-mail addresses are only one member of a larger class. A DOI, accession,
+# ORCID, UUID/UID, git commit, funding/grant number, registry/protocol/version
+# id or a reagent/cell-line/domain-specific identifier is a FACT: a name, a
+# pattern, an edit-distance guess or a "standard" format is not evidence. The
+# email gate (p04 `email_address_change_problems`) keeps its own contact-specific
+# behaviour; this gate covers the rest and lets any INDEPENDENT record stand as
+# evidence (another occurrence in the input corpus, raw_data, the base's analysis
+# code, a public registry, Crossref/DataCite/ORCID, a repository page), not only
+# a web search.
+#
+# Pure ADDITIONS for new content (a new reference's DOI) are not corrections and
+# are allowed. A replacement, shortening or renumbering of an existing value needs
+# evidence; without it the package stays byte-identical and the suggested
+# correction belongs in the high-priority manual TODO, never in the manuscript.
+# =====================================================================
+
+FACT_VERIFICATION_JSON_REL = "work/FACT_VERIFICATION.json"
+FACT_CLASSES = ("doi", "orcid", "uuid", "accession", "commit", "grant", "uid", "domain")
+FACT_CLASS_LABELS = {
+    "doi": "DOI", "orcid": "ORCID", "uuid": "UUID", "accession": "ACCESSION",
+    "commit": "GIT COMMIT / HASH", "grant": "FUNDING/GRANT NUMBER", "uid": "UID",
+    "domain": "DOMAIN-SPECIFIC ID",
+}
+
+
+def _fact_label(cls: str) -> str:
+    return FACT_CLASS_LABELS.get(cls, str(cls).upper())
+
+
+FACT_DOC_SUFFIXES = EMAIL_DOC_SUFFIXES + (".bib",)
+FACT_MAX_FILE_BYTES = EMAIL_MAX_FILE_BYTES
+FACT_DOI_RE = re.compile(r"\b10\.\d{4,9}/[^\s\"'<>]+", re.I)
+FACT_ORCID_RE = re.compile(r"\b\d{4}-\d{4}-\d{4}-\d{3}[\dXx]\b")
+FACT_UUID_RE = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+FACT_ACCESSION_RE = re.compile(
+    r"\b(?:GSE|GSM|SRP|SRR|PRJNA|PRJEB|PRJDB|SAMN|SAMD|ERP|ERS|ERR|EZID)\d{3,}\b",
+    re.I)
+FACT_COMMIT40_RE = re.compile(r"\b(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\b")
+FACT_COMMIT_CONTEXT_RE = re.compile(
+    r"(?i)\b(?:commit|sha(?:-?1)?|git|revision|hash)\b[^\n]{0,40}?"
+    r"\b([0-9a-f]{7,39})\b")
+FACT_COMMIT_URL_RE = re.compile(
+    r"(?i)github\.com/[^/\s]+/[^/\s]+/commit/([0-9a-f]{7,40})")
+FACT_GRANT_CODE_RE = re.compile(
+    r"\b\d?(?:R|K|F|T|P|U|M)\d{2}\s*[-\s]?\s*[A-Z]{2}\s*[-\s]?\s*\d{5,}\b")
+FACT_GRANT_CONTEXT_RE = re.compile(
+    r"(?i)\b(?:grant|funding|award|contract)\b[^\n]{0,30}?"
+    r"(?:no\.?|number|id|code|#)?\s*[:=]?\s*"
+    r"(?=[A-Z0-9\-/.%]*\d)([A-Z0-9][A-Z0-9\-/.%]{4,})\b")
+FACT_RS_RE = re.compile(r"\brs\d{3,}\b", re.I)
+FACT_DOMAIN_ID_RE = re.compile(
+    r"\b(?:(?:ENSG|ENST|ENSP)\d{11}|(?:NM|NP|NR|XM|XP)_\d+|"
+    r"(?:CVCL|ATCC)_[A-Za-z0-9]+|(?:EMD|EMDB)-\d+)\b", re.I)
+FACT_DOMAIN_RE = re.compile(
+    r"(?i)\b(?:RRID|Cellosaurus|ATCC|cat(?:alog)?\.?\s*(?:no\.?|number|#)|lot|batch|"
+    r"strain|plasmid|primer|antibody|reagent|protocol|registry|dbSNP|UniProt|PDB|EMDB|"
+    r"GenBank|RefSeq|Ensembl|ClinVar|COSMIC|cell\s+line|clone)\b[^\n]{0,25}?"
+    r"[:=#]?\s*([A-Za-z0-9][A-Za-z0-9._/-]{2,})\b")
+FACT_UID_RE = re.compile(
+    r"(?i)\b(?:UID|ID|identifier|accession|protocol|registry|trial\s+registration|"
+    r"IRB|ethics(?:\s+(?:approval|number|id))?)\b[^\n]{0,20}?"
+    r"[:=#]?\s*([A-Za-z0-9][A-Za-z0-9._/-]{3,})\b")
+FACT_KIND_ALIASES = {
+    "doi": "doi", "orcid": "orcid", "uuid": "uuid", "uid": "uid", "id": "uid",
+    "identifier": "uid", "accession": "accession", "accession_id": "accession",
+    "commit": "commit", "git": "commit", "sha": "commit", "grant": "grant",
+    "grant_number": "grant", "funding": "grant", "award": "grant", "domain": "domain",
+    "reagent": "domain", "cell_line": "domain", "registry": "uid", "protocol": "uid",
+    "version": "uid", "email": "email",
+}
+_FACT_COMMON_WORDS = frozenset({
+    "number", "identifier", "protocol", "registry", "approval", "standard", "version",
+    "release", "model", "strain", "clone", "batch", "lot", "sample", "table", "figure",
+    "section", "supplementary", "accession", "grant", "funding", "award", "contract",
+})
+
+
+def _clean_fact_token(raw: str) -> str:
+    return str(raw or "").strip().strip(".,;:)]}>'\"")
+
+
+def _fact_token_looks_opaque(cls: str, token: str) -> bool:
+    token = str(token or "").strip()
+    if cls in ("doi", "orcid", "uuid", "accession", "commit"):
+        return bool(token)
+    if len(token) < 4:
+        return False
+    if re.fullmatch(r"\d{4}(?:-\d{4})?", token):
+        return False
+    if cls == "grant":
+        return bool(re.search(r"\d", token)) and (
+            bool(re.search(r"[A-Za-z]", token)) or len(token) >= 5)
+    if token.lower() in _FACT_COMMON_WORDS:
+        return False
+    if token.isdigit() and len(token) <= 4:
+        return False
+    return bool(re.search(r"\d", token) or any(c.isupper() for c in token)
+                or any(c in token for c in "-_/."))
+
+
+def _canonical_fact_token(cls: str, token: str) -> str:
+    if cls == "doi":
+        return token.lower()
+    if cls in ("orcid", "accession"):
+        return token.upper()
+    if cls in ("uuid", "commit"):
+        return token.lower()
+    if cls == "grant":
+        return re.sub(r"[\s\-]", "", token).upper()
+    return token.casefold()
+
+
+def _fact_token_kind(token: str) -> str:
+    token = _clean_fact_token(token)
+    if not token:
+        return ""
+    for cls, rx in (("doi", FACT_DOI_RE), ("orcid", FACT_ORCID_RE),
+                    ("uuid", FACT_UUID_RE), ("accession", FACT_ACCESSION_RE),
+                    ("commit", re.compile(r"[0-9a-fA-F]{7,64}")),
+                    ("grant", FACT_GRANT_CODE_RE), ("domain", FACT_DOMAIN_ID_RE),
+                    ("domain", FACT_RS_RE)):
+        if rx.fullmatch(token):
+            return cls
+    return ""
+
+
+def _fact_token_map(text: str) -> dict:
+    """{class: {canonical: display}} for one text chunk, no overlapping tokens."""
+    found = {cls: {} for cls in FACT_CLASSES}
+    claimed = []
+
+    def overlaps(start: int, end: int) -> bool:
+        return any(start < b and end > a for a, b in claimed)
+
+    def add(cls: str, raw: str, start: int, end: int) -> None:
+        token = _clean_fact_token(raw)
+        if not token or overlaps(start, end) or not _fact_token_looks_opaque(cls, token):
+            return
+        key = _canonical_fact_token(cls, token)
+        if key:
+            found[cls].setdefault(key, token)
+            claimed.append((start, end))
+
+    for m in FACT_DOI_RE.finditer(text or ""):
+        add("doi", m.group(0), m.start(), m.end())
+    for m in FACT_ORCID_RE.finditer(text or ""):
+        add("orcid", m.group(0), m.start(), m.end())
+    for m in FACT_UUID_RE.finditer(text or ""):
+        add("uuid", m.group(0), m.start(), m.end())
+    for m in FACT_ACCESSION_RE.finditer(text or ""):
+        add("accession", m.group(0), m.start(), m.end())
+    for m in FACT_COMMIT40_RE.finditer(text or ""):
+        add("commit", m.group(0), m.start(), m.end())
+    for m in FACT_COMMIT_URL_RE.finditer(text or ""):
+        add("commit", m.group(1), m.start(1), m.end(1))
+    for m in FACT_COMMIT_CONTEXT_RE.finditer(text or ""):
+        add("commit", m.group(1), m.start(1), m.end(1))
+    for m in FACT_GRANT_CODE_RE.finditer(text or ""):
+        add("grant", m.group(0), m.start(), m.end())
+    for m in FACT_GRANT_CONTEXT_RE.finditer(text or ""):
+        add("grant", m.group(1), m.start(1), m.end(1))
+    for m in FACT_RS_RE.finditer(text or ""):
+        add("domain", m.group(0), m.start(), m.end())
+    for m in FACT_DOMAIN_ID_RE.finditer(text or ""):
+        add("domain", m.group(0), m.start(), m.end())
+    for m in FACT_DOMAIN_RE.finditer(text or ""):
+        add("domain", m.group(1), m.start(1), m.end(1))
+    for m in FACT_UID_RE.finditer(text or ""):
+        add("uid", m.group(1), m.start(1), m.end(1))
+    return found
+
+
+def _fact_tokens_in_sources(sources, evidence: bool = False) -> tuple:
+    """({class: {canonical: display}}, coverage gaps) over document sources."""
+    found = {cls: {} for cls in FACT_CLASSES}
+    gaps = []
+    suffixes = EMAIL_EVIDENCE_SUFFIXES if evidence else FACT_DOC_SUFFIXES
+
+    def skipped(rel: str, name: str, excluded) -> bool:
+        parts = rel.split("/")
+        if excluded and parts and parts[0] in excluded:
+            return True
+        if "work" in parts[:-1] or name.startswith("~$"):
+            return True
+        if (is_bookkeeping_name(name) or is_non_submitted_readme_name(name)
+                or is_non_document_name(name)):
+            return True
+        if evidence:
+            area = evidence_area_of(rel)
+            if area in (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR):
+                return True
+            return bool(is_journal_feedback_name(name)
+                        or AUTHORED_REPLY_NAME_RE.search(name))
+        return bool(is_non_manuscript_rel(rel) or parts[0] == CODE_DIR)
+
+    for src, prefix, excluded in sources or []:
+        try:
+            src = Path(src)
+        except TypeError:
+            continue
+        if not src.is_dir():
+            continue
+        for path in _files_under_ci(src, suffixes):
+            try:
+                rel = path.relative_to(src).as_posix()
+            except ValueError:                                     # pragma: no cover
+                continue
+            if skipped(rel, path.name, excluded):
+                continue
+            try:
+                if path.stat().st_size > FACT_MAX_FILE_BYTES:
+                    gaps.append(f"{prefix + rel}: larger than "
+                                f"{FACT_MAX_FILE_BYTES // (1024 * 1024)} MB; not scanned "
+                                f"for identifiers")
+                    continue
+            except OSError as e:
+                gaps.append(f"{prefix + rel}: stat failed ({type(e).__name__}: {e})")
+                continue
+            texts, gap = _email_texts_in_file(path)
+            if gap:
+                gaps.append(f"{prefix + rel}: {gap}; not scanned for identifiers")
+                continue
+            for text in texts:
+                for cls, values in _fact_token_map(text).items():
+                    for key, display in values.items():
+                        found[cls].setdefault(key, display)
+        for path in _files_under_ci(src, EMAIL_UNSCANNED_SUFFIXES):
+            try:
+                rel = path.relative_to(src).as_posix()
+            except ValueError:                                     # pragma: no cover
+                continue
+            if skipped(rel, path.name, excluded):
+                continue
+            gaps.append(f"{prefix + rel}: unsupported editable format "
+                        f"({path.suffix.lower()}); not scanned for identifiers")
+    return found, gaps
+
+
+def _fact_verification_rows(pkg: Path) -> tuple:
+    """(valid independent-record rows, problems) from work/FACT_VERIFICATION.json."""
+    path = Path(pkg) / FACT_VERIFICATION_JSON_REL
+    if not path.is_file():
+        return [], []
+    data = read_json(path, revive=False, lenient=True)
+    if data is None:
+        return [], [f"{FACT_VERIFICATION_JSON_REL}: not readable as JSON"]
+    if isinstance(data, dict):
+        rows_raw = None
+        for key in ("verifications", "verified", "rows", "records"):
+            value = data.get(key)
+            if isinstance(value, list):
+                rows_raw = value
+                break
+        if rows_raw is None:
+            rows_raw = [data] if data else []
+    elif isinstance(data, list):
+        rows_raw = data
+    else:
+        return [], [f"{FACT_VERIFICATION_JSON_REL}: expected a list or an object"]
+    records, problems = [], []
+
+    def pick(row: dict, *keys) -> str:
+        for key in keys:
+            value = row.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        return ""
+
+    for i, row in enumerate(rows_raw):
+        where = f"{FACT_VERIFICATION_JSON_REL}[{i}]"
+        if not isinstance(row, dict):
+            problems.append(f"{where}: not an object")
+            continue
+        raw_kind = pick(row, "kind", "type", "class", "identifier_kind")
+        kind = FACT_KIND_ALIASES.get(raw_kind.strip().lower().replace(" ", "_")
+                                     .replace("-", "_"), "")
+        after = _clean_fact_token(pick(row, "after", "value", "corrected", "new"))
+        if not kind and after:
+            kind = _fact_token_kind(after) or "uid"
+        if kind == "email":
+            continue                       # the contact gate owns addresses
+        if not kind:
+            problems.append(f"{where}: no `kind` (doi/orcid/uuid/accession/commit/"
+                            f"grant/uid/domain)")
+            continue
+        before = _clean_fact_token(pick(row, "before", "original", "old"))
+        source_url = pick(row, "source_url", "url", "source", "lookup_url")
+        query = pick(row, "query", "search", "search_query", "lookup")
+        checked_at = pick(row, "checked_at", "date", "verified_at", "checked")
+        evidence = pick(row, "evidence", "quote", "excerpt", "finding")
+        bad = []
+        if not after:
+            bad.append("no `after` value")
+        elif kind in ("doi", "orcid", "uuid", "accession", "commit"):
+            if _fact_token_kind(after) != kind and not (
+                    kind == "commit" and re.fullmatch(r"[0-9a-fA-F]{7,64}", after)):
+                bad.append(f"`after` does not match the declared kind {kind!r}")
+        elif not _fact_token_looks_opaque(kind, after):
+            bad.append(f"`after` does not look like a {kind}")
+        if before and not _fact_token_looks_opaque(kind, before):
+            bad.append("`before` does not look like the declared kind")
+        if not re.match(r"https?://", source_url, re.I):
+            bad.append("`source_url` must be an http(s) URL")
+        else:
+            host = _email_url_host(source_url)
+            if not host:
+                bad.append("`source_url` has no host")
+            elif _is_placeholder_email("x@" + host):
+                bad.append("`source_url` uses a reserved/example host, not a real page")
+        if len(query) < 3:
+            bad.append("`query` is missing (the search/lookup string)")
+        if not re.match(r"\d{4}-\d{2}-\d{2}\b", checked_at):
+            bad.append("`checked_at` must be YYYY-MM-DD")
+        if len(evidence) < 10 or (after and after.casefold() not in evidence.casefold()):
+            bad.append("`evidence` must be a verbatim quote that contains the corrected value")
+        if bad:
+            problems.append(f"{where}: " + "; ".join(bad))
+            continue
+        records.append({
+            "kind": kind, "after": after,
+            "after_key": _canonical_fact_token(kind, after),
+            "before": before,
+            "before_key": _canonical_fact_token(kind, before) if before else "",
+            "source_url": source_url, "query": query,
+            "checked_at": checked_at, "evidence": evidence,
+        })
+    return records, problems
+
+
+def _fact_similar(cls: str, a: str, b: str) -> bool:
+    """A heuristic for a possible same-field correction, never a gate by itself."""
+    if not a or not b or a == b:
+        return False
+    if cls == "doi":
+        # A one/two-character DOI correction is a possible same-entry edit; a
+        # new reference's DOI normally differs by more. This is a WARNING, not
+        # a gate: new content is still allowed.
+        return (len(a) == len(b)
+                and sum(x != y for x, y in zip(a, b)) <= 2)
+    if len(a) >= 7 and len(b) >= 7 and (a.startswith(b) or b.startswith(a)):
+        return True
+    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.85
+
+
+def fact_token_change_problems(before_sources, after_sources, pkg: Path,
+                               label: str, evidence_sources=()) -> tuple:
+    """(errors, warnings): an unverified identifier correction fails the stage.
+
+    A replacement is caught when an old value of the class disappears and a new
+    one appears (or the class count does not grow). A pure addition for new
+    content is allowed; a similar added value is reported as a possible
+    correction, so it can be verified or moved to the manual TODO.
+    """
+    before, before_gaps = _fact_tokens_in_sources(before_sources)
+    after, after_gaps = _fact_tokens_in_sources(after_sources)
+    evidence, evidence_gaps = _fact_tokens_in_sources(
+        list(evidence_sources or ()), evidence=True)
+    records, record_problems = _fact_verification_rows(Path(pkg))
+    errs = list(record_problems)
+    warns = [f"{label}: identifier coverage gap -- {g}"
+             for g in (before_gaps + after_gaps + evidence_gaps)]
+    for cls in FACT_CLASSES:
+        bmap, amap = before.get(cls, {}), after.get(cls, {})
+        added = set(amap) - set(bmap)
+        removed = set(bmap) - set(amap)
+        if not added:
+            for key in sorted(removed):
+                warns.append(
+                    f"{label}: the delivered package no longer carries {_fact_label(cls)} "
+                    f"{bmap[key]!r}. An externally-assigned identifier is not a deletion "
+                    f"surface: restore it, or record the author query/evidence; do not delete "
+                    f"it to resolve a finding")
+            continue
+        suspicious = bool(removed) or len(amap) <= len(bmap)
+        if not suspicious:
+            # New content is not a correction. Only flag a NEW value that is
+            # close enough to an existing one to be a possible same-field edit.
+            for key in sorted(added):
+                for old_key in sorted(bmap):
+                    if _fact_similar(cls, key, old_key):
+                        warns.append(
+                            f"{label}: a new {_fact_label(cls)} value {amap[key]!r} resembles the "
+                            f"existing {bmap[old_key]!r}; if it is a correction, record "
+                            f"independent evidence in {FACT_VERIFICATION_JSON_REL}, otherwise "
+                            f"confirm it is new content")
+                        break
+            continue
+        verified_after = {r["after_key"] for r in records if r["kind"] == cls}
+        verified_before = {r["before_key"] for r in records
+                           if r["kind"] == cls and r["before_key"]
+                           and r["after_key"] in amap}
+        allowed = set()
+        old_display = bmap[sorted(removed)[0]] if removed else next(iter(bmap.values()), "?")
+        for key in sorted(added):
+            value = amap[key]
+            if key in evidence.get(cls, {}) or key in verified_after:
+                allowed.add(key)
+                continue
+            errs.append(
+                f"{label}: the delivered package changes {_fact_label(cls)} value "
+                f"{old_display!r} -> {value!r} without independent evidence. An "
+                f"externally-assigned identifier is a FACT, not an inferable typo: a name, "
+                f"pattern, edit-distance guess, plausible repository or 'standard' format is "
+                f"not evidence. Restore the original; if a web search, a public registry, "
+                f"Crossref/DataCite/ORCID or a repository page verifies {value!r}, record it in "
+                f"{FACT_VERIFICATION_JSON_REL} (kind {cls!r}, before, after, query, a real "
+                f"http(s) source_url, checked_at and a verbatim evidence quote containing "
+                f"{value!r}); if you cannot verify it, keep the original byte-identical and put "
+                f"`suggested: {value!r} (unverified)` in the high-priority manual TODO with the "
+                f"location, current value and exact check")
+        if removed and not (added <= allowed):
+            for key in sorted(removed):
+                if key in verified_before:
+                    continue
+                warns.append(
+                    f"{label}: the delivered package no longer carries {_fact_label(cls)} "
+                    f"{bmap[key]!r}; if the replacement is not independently verified, restore "
+                    f"the original and put the suggested value in the manual TODO")
+        for r in records:
+            if (r["kind"] == cls and r["before_key"]
+                    and r["before_key"] != r["after_key"]
+                    and r["before_key"] in amap):
+                warns.append(
+                    f"{label}: the recorded correction {r['before']!r} -> {r['after']!r} left "
+                    f"the superseded {_fact_label(cls)} value in the package; reconcile every "
+                    f"occurrence to the SAME verified value, or record why they differ")
+    return errs, warns
+
+
+
 def structured_output_signature(ctx: Ctx, rec: dict) -> tuple:
     """(rel, size, mtime) of the run's structured outputs -- stability probe for
     manual mode, where a still-running agent may be mid-write."""

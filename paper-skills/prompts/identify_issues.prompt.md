@@ -817,6 +817,30 @@ placeholder-domain?
 - journal name differs or is missing where addressed
 - author list/order differs; ORCID present in one file but absent where required
 
+**E-mail-address rule (M12/M14):** an address is a contact FACT, never an inferable
+typo. Report a mismatch or a reserved/placeholder domain, but never propose a
+replacement address and never infer a domain from the affiliation, the author's name
+or the journal. A review/probe/audit session files the mismatch and the query only
+(identification); a revision may change the address only to one the input corpus
+already carries verbatim, or to one a recorded web-search result verifies in
+`work/EMAIL_VERIFICATION.json` (query, source URL, checked date, verbatim quote).
+Otherwise the address stays byte-identical and the fix is a high-priority author
+query. The orchestrator fails a package that adds an address with neither an
+in-corpus match nor a matching verification row.
+
+**Opaque-identifier rule (M12/M14/M22):** a DOI, accession
+(GEO/SRA/BioProject/BioSample/...), ORCID, UUID/UID, git commit, funding/grant
+number, registry/protocol/version ID, reagent/cell-line/strain or other
+domain-specific identifier is a FACT, not a pattern. Report a mismatch or a
+suspicious value, but never propose a replacement from a name, pattern, edit
+distance, plausible repository or "standard" format. A revision may change an
+existing value only to one the input corpus already carries verbatim or an
+independent record verifies in `work/FACT_VERIFICATION.json` (kind, before,
+after, query, real source URL, checked date, verbatim quote containing the
+value). Otherwise keep it byte-identical and write the suggested value in the
+high-priority manual TODO; a pure add for new content is not a correction. The
+orchestrator fails an unverified replacement/shortening/renumbering.
+
 Validation: iteration-1 instances X-001 (cover-letter title mismatch — caught
 only by the discovery probe) and F-035 (email mismatch + example.edu domain).
 
@@ -1325,6 +1349,11 @@ SHORT of it (an underclaim: a supported result or an obvious strength of the
 work the letter undersells or leaves out -- the letter is read against the
 manuscript's evidence in BOTH directions, and the same result may not be an
 overclaim in one run and unexamined silence in the next).
+
+**Contact-fact rule.** Never CONSTRUCT a suggested reviewer's e-mail address from
+the name and institution; a missing address is a gap (`unable — no address in
+the corpus`) for the author, not a guess. The M12/M14 contact-fact rule applies
+to every address in the letter, not only the corresponding author's.
 
 ## M22 — Data/code-availability integrity sweep
 

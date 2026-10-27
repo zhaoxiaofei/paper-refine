@@ -5,8 +5,11 @@ Run:  python3 .paper_test/test_typo_policy_2026_1026.py
 
 A typographical error whose correct form is determinable from the manuscript or
 its public record (the printed author list and affiliations, raw data, the
-deposited tables, the reference list, a DOI resolver, a standard email domain)
-is a correctable error, not an `author-only` fact to defer:
+deposited tables, the reference list, a DOI resolver) is a correctable error,
+not an `author-only` fact to defer. An e-mail address is the documented
+EXCEPTION: it is a contact fact, never an inferable typo; it is corrected only
+to an address the input corpus already carries verbatim or to one a recorded
+web-search result verifies:
 
 * the revision corrects it and records the basis in CHANGELOG.md;
 * MANUAL_STEPS.md carries ONE `priority=low` re-verification item naming the
@@ -33,6 +36,7 @@ from pathlib import Path
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
 STUB = WS / ".paper_test" / "stub_agent.py"
 MARKER = "INFERABLE TYPOS ARE CORRECTED, NOT DEFERRED"
+EMAIL_RULE = "E-MAIL ADDRESSES ARE NOT INFERABLE TYPOS"
 FAILS: list[str] = []
 TMPDIRS: list[Path] = []
 
@@ -83,6 +87,12 @@ def test_static():
     check("grammar/punctuation/style are excluded",
           "Grammar, punctuation and style errors" in p02 and "NEVER listed" in p02)
     check("an unfounded typo keeps author-only", "keep the\n        `author-only` treatment" in p02)
+    check("the templates no longer call a standard e-mail domain a basis",
+          "standard email domain" not in p02)
+    check("the three modes carry the e-mail-contact rule",
+          p02.count("\n@@EMAIL_ADDRESS_RULE@@\n") == 3 and EMAIL_RULE in p02)
+    check("the e-mail rule states the web-search record",
+          "work/EMAIL_VERIFICATION.json" in p02 and "WEB-SEARCH" in p02)
 
     prompt = (WS / "paper-skills" / "prompts" / "adress_issues.prompt.md").read_text(encoding="utf-8")
     rules = (WS / "paper-skills" / "paper-revise" / "references" / "edit_rules.md").read_text(encoding="utf-8")
@@ -93,6 +103,13 @@ def test_static():
         check(f"{name}: low priority is defined", "priority=low" in text)
         check(f"{name}: high priority is the placeholder", "[AUTHOR TO COMPLETE: ...]" in text)
         check(f"{name}: low items ask for re-verification", "re-verify" in text)
+    check("the revise prompt drops the standard-domain inference",
+          "standard email domain" not in prompt)
+    check("the edit rules drop the standard-domain inference",
+          "standard email domain" not in rules)
+    check("the revise prompt carries the e-mail rule", EMAIL_RULE in prompt)
+    check("the edit rules carry the e-mail rule", EMAIL_RULE in rules)
+    check("the revise skill carries the e-mail rule", EMAIL_RULE in skill)
     check("low priority never blocks", "never blocks" in prompt)
     check("the low-priority section convention is documented",
           "Low-priority re-verification (corrected in text)" in prompt)
@@ -120,9 +137,16 @@ def test_generated_prompts():
     check("generated revise prompt scopes the edit", "In a revision stage" in revise)
     check("generated revise prompt defines the priority split",
           "priority=low" in revise and "[AUTHOR TO COMPLETE: ...]" in revise)
+    check("generated revise prompt carries the e-mail-contact rule and its record",
+          EMAIL_RULE in revise and "work/EMAIL_VERIFICATION.json" in revise)
+    check("generated revise prompt forbids the inferred domain",
+          "DOMAIN is not inferable from an affiliation" in revise)
     review = (root / "runs" / "r1_review" / "PROMPT.md").read_text(encoding="utf-8")
     check("generated review prompt reports rather than edits",
           "A review or audit stage reports the typo" in review)
+    check("generated review prompt carries the e-mail-contact rule",
+          EMAIL_RULE in review
+          and "replacement address or domain" in " ".join(review.split()))
 
 
 def test_manual_counter():
@@ -136,7 +160,7 @@ def test_manual_counter():
         "## Low-priority re-verification (corrected in text)\n\n"
         "| priority=low | file/location | before -> after | basis | what to re-verify |\n"
         "|---|---|---|---|---|\n"
-        "| low | paper.md line 3 | mit.eud -> mit.edu | author list + standard domain | confirm |\n",
+        "| low | paper.md line 3 | mit.eud -> mit.edu | author list + DOI resolver | confirm |\n",
         encoding="utf-8")
     count = pp.count_manual_steps(path)
     check("both the high and the low item are counted", count == 2, f"count={count}")

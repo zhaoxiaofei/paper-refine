@@ -109,7 +109,9 @@ def test_shared_blocks_everywhere():
     check("the rule text is byte-identical across all six sessions",
           len(set(rules.values())) == 1, str({k: len(v) for k, v in rules.items()}))
     for key in ("D1. ONE vocabulary", "D2. FOUR dispositions", "D3. NOTHING NAMEABLE",
-                "D4. ONE bar", "D5. ONE manual list", "D6. ONE reading", "D7. ONE exception"):
+                "D4. ONE bar", "D5. ONE manual list", "D6. ONE reading", "D7. ONE exception",
+                "D8. A FACT IS NOT A REMOVAL SURFACE", "D9. AN E-MAIL ADDRESS IS A CONTACT FACT",
+                "D10. AN OPAQUE IDENTIFIER OR EXTERNALLY-ASSIGNED FACT"):
         check(f"the shared rules carry {key!r}",
               all(key in t for t in P.values()))
 

@@ -128,7 +128,7 @@ Outputs land in `./revised/` (originals untouched, sha256-verified):
 |---|---|
 | revised copies of your files | same basenames as the originals (never mutated) |
 | `CHANGELOG.md` | per finding ID: exact before → after text |
-| `MANUAL_STEPS.md` | everything that needs the author: unverifiable refs, figures to regenerate, scientific-judgement wordings |
+| `MANUAL_STEPS.md` | everything that needs the author: unverifiable refs, figures to regenerate, scientific-judgement wordings — each item is one row in the classified TODO table (TODO item ID, importance, author action, description); the orchestrator derives `MANUAL_TODO.csv` from it |
 | `REVISION_REPORT.md` + `revision_report.json` | ledger, coverage table with evidence, placeholder list, checksum confirmation |
 | `*.tracking-<baseline>.<ext>` | auxiliary difference copy for every edited document, tracking it against the version named by `<baseline>`: real Word tracked changes for `.docx` (the `docxcompare.sh` script / `docx-compare` MCP tool is the first choice), a `latexdiff` copy for `.tex`/`.bib`; when the real copy cannot be produced, the fallback is `<name>.logging-<baseline>.<ext>` with bracketed `[BEFORE:]`/`[AFTER:]` markers (a first-paragraph note in the .docx) — never a marker file under the `.tracking-` name. `<baseline>` is `a1` (the round base) for a rewrite/revision arm, your `self/<version-id>` member's id (`w1`, `a2`, …) for an integration, and `original` for the copies the orchestrator writes itself against the pristine submission |
 | `work/` | A1–A9 artifacts (ledger, edit plan, propagation map, diff log, rescan) |

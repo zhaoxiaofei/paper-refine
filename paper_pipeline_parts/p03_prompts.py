@@ -3193,13 +3193,31 @@ WHAT TO AUDIT — one row per CONFIRMED defect in the revision:
      that was not propagated to every occurrence after it was corrected.
   4. NON-INFERABLE MANUAL: a `manual-required`/`author-only` item whose correct form is actually
      determinable from the manuscript or its public record (the printed author list/affiliations,
-     raw_data, deposited tables, the reference list, a DOI resolver, a standard domain). A typo that
-     the revision refused to correct for that reason is a defect.
-  5. LOW-PRIORITY LEDGER: a corrected inferable typo with no `priority=low` re-verification row in
-     the stage's hand-off report (revised/MANUAL_STEPS.md, or revised/README-AUTHOR-TO-COMPLETE.md
-     under the readme policy), or a grammar/punctuation/style edit wrongly listed as a manual item.
+     raw_data, deposited tables, the reference list, a DOI resolver). A typo that
+     the revision refused to correct for that reason is a defect. An E-MAIL ADDRESS is NOT on
+     this list: it is a contact fact, its domain is never inferable from an affiliation or a
+     name, and a correction is valid only to an exact address the input corpus already
+     carries or to one a `work/EMAIL_VERIFICATION.json` row verifies; otherwise the address
+     stays byte-identical and the item is a high-priority author query with the suggested reading
+     marked unverified. The same rule applies to a DOI, accession, ORCID, UUID/UID, git commit,
+     funding/grant number, registry/protocol/version ID or domain-specific identifier: an
+     unverified replacement belongs in the manual TODO, never in the manuscript.
+  5. MANUAL TODO TABLE: a corrected inferable typo, a verified e-mail/identifier correction or any
+     other author action with no row in the stage's classified TODO table (revised/MANUAL_STEPS.md,
+     or revised/README-AUTHOR-TO-COMPLETE.md under the readme policy; columns TODO item ID |
+     importance | author action | description), or a grammar/punctuation/style edit wrongly listed
+     as a manual item. A correction already applied needs importance + author action
+     `CONFIRM/REJECT correction made by LLMs`; a suggestion not applied needs
+     `MANUALLY DO/DO_NOT correct with LLMs-recommended corrections provided`; an item with no
+     reliable suggestion needs `... without any ...`. The legacy `priority=low` row is detail only.
+     An UNVERIFIED identifier edit is item 6 (a defect); its suggested value still gets its
+     high-priority manual-TODO row.
   6. NEW DEFECT: a contradiction, wrong number/unit, broken citation or dangling reference the
-     revision introduced.
+     revision introduced, or an existing e-mail address / DOI / accession / ORCID / UUID / commit
+     / funding / registry / domain identifier replaced or changed without an in-corpus match or the
+     matching verification row (`work/EMAIL_VERIFICATION.json` for an address,
+     `work/FACT_VERIFICATION.json` for an identifier; a newly ADDED identifier for new content is
+     not a correction, but its own lookup still governs it).
 
 For every row you must give a LOCATION, the WRONG text or value, the CORRECT value, and the BASIS
 (the exact file/line/table/identifier that decides it, re-runnable by another session). If you
@@ -3260,6 +3278,18 @@ change, the replaced value and the manual item (if any) are recorded consistentl
 do not repair anything the plan does not name, and do not add new findings. If a confirmed repair
 cannot be made honestly, record that row as `rejected` with reason `unable — <what the author must
 check>` and leave the text as it is.
+E-MAIL ADDRESSES AND OTHER EXTERNALLY-ASSIGNED IDENTIFIERS ARE FACTS (D9/D10): a plan row that
+changes an e-mail, DOI, accession, ORCID, UUID/UID, git commit, funding/grant number,
+registry/protocol/version ID or domain-specific identifier is applicable only when the exact
+corrected value is already carried verbatim by the input corpus, or when the package
+records the independent lookup (query, real http(s) source URL, checked date and a verbatim quote
+containing that exact value) in `revised/work/EMAIL_VERIFICATION.json` for an address, or in
+`revised/work/FACT_VERIFICATION.json` for the other identifier classes. Otherwise reject the row,
+keep the original byte-identical and record a high-priority manual TODO row with
+`suggested: <value> (unverified)`, the exact
+location/current value/check, and the matching author action in the classified TODO table; the
+orchestrator's package gate fails an unverified identifier change and regenerates
+`MANUAL_TODO.csv` from that table.
 
 Finish by writing the pipeline's completion marker at the sandbox root, exactly as the revise stage
 does, and keep your final message short: which rows were confirmed, which were rejected, and the

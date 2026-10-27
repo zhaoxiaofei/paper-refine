@@ -6903,6 +6903,7 @@ def write_final_clean_readme(ctx: Ctx, certification: dict, final: dict,
 OPEN_ITEM_STATUSES = ("manual-required", "fixed-with-caveat", "unresolved")
 STAGE_REPORT_NAMES = ("revision_report.json", "integration_report.json")
 FINAL_CLEAN_STEPS_NAME = "final_clean_version.manual_steps.md"
+FINAL_CLEAN_TODO_CSV_NAME = "final_clean_version.manual_todo.csv"
 # `# MANUAL_STEPS — what the author must do (7 hand-off items, grouped ...)`
 MANUAL_STEPS_COUNT_RE = re.compile(r"\((\d+)\s+hand-off items?")
 
@@ -6975,7 +6976,8 @@ def collect_open_review_items(ctx: Ctx, final: dict) -> dict:
     own item (REV-2) instead of vanishing with the sandbox.
     """
     info = {"run": None, "kind": None, "statuses": {}, "items": [], "discarded": [],
-            "manual_steps": None, "manual_steps_text": None, "manual_steps_items": 0}
+            "manual_steps": None, "manual_steps_text": None, "manual_steps_items": 0,
+            "manual_todo_csv": None}
     rec = champion_producing_run(ctx, final)
     rid = rec.get("id")
     if not rid:
@@ -7038,6 +7040,12 @@ def collect_open_review_items(ctx: Ctx, final: dict) -> dict:
                 # count_manual_steps(): a plain bullet is one hand-off item,
                 # not zero.
                 info["manual_steps_items"] = int(count_manual_steps(steps) or 0)
+    csvp = outdir / MANUAL_TODO_CSV_NAME
+    if csvp.is_file():
+        try:
+            info["manual_todo_csv"] = csvp.relative_to(ctx.root).as_posix()
+        except ValueError:
+            info["manual_todo_csv"] = str(csvp)
     return info
 
 
@@ -7071,18 +7079,66 @@ def write_open_items_sibling(ctx: Ctx, open_items: dict) -> dict:
     INSIDE the published directory would become manuscript content in the next
     run. When the producing stage left no `MANUAL_STEPS.md`, the ledger's own
     open rows are written instead, so the item list is never empty-by-omission.
+    The four-column classified TODO table and its CSV index are carried the same
+    way; the package's generated `MANUAL_TODO.csv` is preferred because it
+    merges the manual list and the readme-mode hand-off table.
     """
     oi = open_items or {}
-    # The ledger rows and the card's own MANUAL_STEPS count are two views of
-    # the same hand-off list: a plain-bullet file carries items even when the
-    # structured rows are empty, so the header/return must agree with the file.
-    n_items = len(oi.get("items") or []) or int(oi.get("manual_steps_items") or 0)
     body = open_items_text(oi)
+    # The package CSV is the merged inventory (manual list + hand-off README).
+    # Fall back to the table inside the carried manual-steps text.
+    csv_rows = []
+    if oi.get("manual_todo_csv"):
+        src = ctx.root / str(oi.get("manual_todo_csv"))
+        try:
+            if src.stat().st_size > MANUAL_TODO_MAX_BYTES:
+                raise csv.Error("MANUAL_TODO.csv is too large")
+            with open(src, "r", encoding="utf-8-sig", newline="") as f:
+                table = [r for r in csv.reader(f) if r]
+            if table and table[0] == list(MANUAL_TODO_COLUMNS):
+                csv_rows = [dict(zip(MANUAL_TODO_COLUMNS, r)) for r in table[1:]
+                            if len(r) == len(MANUAL_TODO_COLUMNS)]
+                ids = [r.get(MANUAL_TODO_COLUMNS[0]) for r in csv_rows]
+                if not all(r.get(MANUAL_TODO_COLUMNS[0])
+                           and r.get("importance") in MANUAL_IMPORTANCES
+                           and r.get("author_action") in MANUAL_ACTIONS
+                           and str(r.get("description") or "").strip()
+                           for r in csv_rows) or len(set(ids)) != len(ids):
+                    csv_rows = []
+        except (OSError, csv.Error):
+            csv_rows = []
+    body_rows, _problems = manual_todo_rows_from_text(body)
+    # Union: the package CSV may carry the hand-off README rows while the
+    # carried text carries MANUAL_STEPS.md; on a shared id the markdown wins.
+    body_dicts = manual_todo_row_dicts(body_rows) if body_rows else []
+    merged = {r.get(MANUAL_TODO_COLUMNS[0]): r for r in csv_rows}
+    for row in body_dicts:
+        merged[row.get(MANUAL_TODO_COLUMNS[0])] = row
+    csv_rows = list(merged.values())
+    body_ids = {r.get(MANUAL_TODO_COLUMNS[0]) for r in body_dicts}
+    extra_rows = [r for r in csv_rows if r.get(MANUAL_TODO_COLUMNS[0]) not in body_ids]
+    if extra_rows:
+        # The carried text may hold only MANUAL_STEPS.md while the package CSV
+        # also holds the hand-off README table. Keep the detail and append only
+        # the rows the carried text does not already show, without duplicating
+        # the table.
+        heading = ("## Classified TODO table" if not body_ids
+                   else "## Additional classified TODO rows")
+        body = (body.rstrip() + f"\n\n{heading}\n\n"
+                + manual_todo_markdown_table(extra_rows)).strip() + "\n"
     if not body.strip():
         p = ctx.root / FINAL_CLEAN_STEPS_NAME
         if p.is_file():
             p.unlink()
-        return {"path": None, "items": 0}
+        c = ctx.root / FINAL_CLEAN_TODO_CSV_NAME
+        if c.is_file():
+            c.unlink()
+        return {"path": None, "items": 0, "todo_csv": None}
+    # The ledger rows, the MANUAL_STEPS count and the classified table are three
+    # views of the same hand-off list; the header must not say 0 when the table
+    # carries rows.
+    n_items = max(len(oi.get("items") or []),
+                  int(oi.get("manual_steps_items") or 0), len(csv_rows))
     head = [f"# Open items handed to the author — {ctx.root.name}",
             "",
             f"Generated: {utcnow()}  |  pipeline root: `{ctx.root}`  |  "
@@ -7096,13 +7152,30 @@ def write_open_items_sibling(ctx: Ctx, open_items: dict) -> dict:
             f"Open item(s): {n_items}"
             + (f"; unsupported discard(s): {len(oi.get('discarded') or [])}"
                if oi.get("discarded") else ""),
+            f"Classified TODO row(s): {len(csv_rows)}"
+            + (f"; {n_items - len(csv_rows)} open item(s) have no classified TODO row -- add "
+               f"them to the table/MANUAL_TODO.csv" if n_items > len(csv_rows) else ""),
             "",
             "This file is a SIBLING of the published directory on purpose: the directory must "
             "stay byte-clean manuscript corpus.",
             ""]
     p = ctx.root / FINAL_CLEAN_STEPS_NAME
     write_text_atomic(p, "\n".join(head) + body)
-    return {"path": str(p), "items": n_items}
+    c = ctx.root / FINAL_CLEAN_TODO_CSV_NAME
+    if csv_rows:
+        write_csv_atomic(c, list(MANUAL_TODO_COLUMNS), csv_rows)
+        todo_csv = str(c)
+        try:
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(f"\nThe classified 4-column TODO index is the sibling "
+                        f"`{FINAL_CLEAN_TODO_CSV_NAME}` (derived from the table above).\n")
+        except OSError:
+            pass
+    else:
+        if c.is_file():
+            c.unlink()
+        todo_csv = None
+    return {"path": str(p), "items": n_items, "todo_csv": todo_csv}
 
 
 def _handoff_readme_items(final_clean: dict) -> dict:

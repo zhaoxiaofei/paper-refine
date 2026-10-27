@@ -4275,6 +4275,337 @@ def _docx_paragraph_texts(path: Path) -> list:
     return out
 
 
+# ---------------------------------------------------------------------
+# E-MAIL ADDRESSES ARE CONTACT FACTS, NOT INFERABLE TYPOS
+#
+# The observed failure: a review finding inferred `helsinki.fi` from the
+# printed affiliation and replaced the valid `mart.ksk@ut.ee` / `elea.ross@
+# stir.ac.uk` domains. The reviewer could not verify the real address (its own
+# note said so), but the reviser applied the guess and the judge read the
+# change as an improvement. The prompt rule now forbids the inference; this
+# code-side gate makes the rule enforceable on the PACKAGE:
+#
+#   * an address may be ADDED only when the input corpus already
+#     carries it verbatim (reconciliation, not invention) or when the package
+#     records a web-search verification for the exact string in
+#     `work/EMAIL_VERIFICATION.json`;
+#   * an address may not be DELETED to resolve a finding (a warning is
+#     recorded; a duplicate or a placeholder domain is not a reason to guess);
+#   * a case-only rewrite is not a change (address comparison is case-folded).
+#
+# The gate reads manuscript documents only: evidence areas (`raw_data/`,
+# review feedback), `code/`, `work/` and the package's own bookkeeping are not
+# submission prose. They ARE read as evidence for an in-corpus address.
+# ---------------------------------------------------------------------
+
+EMAIL_VERIFICATION_JSON_REL = "work/EMAIL_VERIFICATION.json"
+EMAIL_DOC_SUFFIXES = (".docx", ".tex", ".ltx", ".md", ".txt", ".rtf", ".html", ".htm")
+EMAIL_UNSCANNED_SUFFIXES = (".doc", ".odt")        # editable, no text reader here
+EMAIL_EVIDENCE_SUFFIXES = EMAIL_DOC_SUFFIXES + (
+    ".csv", ".tsv", ".bib", ".json", ".yaml", ".yml", ".py", ".r", ".ipynb",
+    ".sh", ".c", ".h", ".cpp", ".java", ".js", ".ts", ".sql", ".toml", ".ini",
+    ".cfg",
+)
+EMAIL_MAX_FILE_BYTES = 8 * 1024 * 1024
+EMAIL_ADDRESS_RE = re.compile(
+    r"(?<![A-Za-z0-9._%+\-])"
+    r"([A-Za-z0-9][A-Za-z0-9._%+\-]*@"
+    r"[A-Za-z0-9](?:[A-Za-z0-9.\-]*[A-Za-z0-9])?\.[A-Za-z]{2,})"
+    r"(?![A-Za-z0-9.\-])")
+EMAIL_FULL_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._%+\-]*@"
+    r"[A-Za-z0-9](?:[A-Za-z0-9.\-]*[A-Za-z0-9])?\.[A-Za-z]{2,}")
+_EMAIL_RESERVED_DOMAINS = ("example.com", "example.edu", "example.org",
+                           "example.net", "example.info", "example.biz")
+
+
+def _clean_email_address(raw: str) -> str:
+    """One address, without the punctuation a sentence puts around it."""
+    return str(raw or "").strip().strip(".,;:)]}>'\"")
+
+
+def _email_domain(addr: str) -> str:
+    return str(addr or "").rsplit("@", 1)[-1].strip().strip(".").lower()
+
+
+def _is_placeholder_email(addr: str) -> bool:
+    """A reserved/example domain (never a real contact address)."""
+    domain = _email_domain(addr)
+    if not domain:
+        return False
+    if any(domain == d or domain.endswith("." + d) for d in _EMAIL_RESERVED_DOMAINS):
+        return True
+    return (domain == "localhost" or domain.endswith(".test")
+            or domain.endswith(".invalid") or domain.endswith(".example"))
+
+
+def _email_texts_in_file(path: Path) -> tuple:
+    """(texts, gap): the text of one scannable file, or why it was not read."""
+    suffix = path.suffix.lower()
+    if suffix == ".docx":
+        try:
+            with zipfile.ZipFile(path) as z:
+                # Body + foot/endnotes: a contact address belongs to the
+                # manuscript text. Header/footer parts are layout furniture a
+                # journal template legitimately supplies (a journal contact
+                # e-mail there is not the author's), so they are not part of
+                # this comparison.
+                names = [n for n in z.namelist()
+                         if re.match(r"word/(?:document|footnotes|endnotes)\.xml$", n)]
+                if "word/document.xml" not in names:
+                    return [], "unreadable DOCX (no word/document.xml)"
+                parts = [(n, z.read(n).decode("utf-8", "replace")) for n in names]
+        except (OSError, zipfile.BadZipFile, KeyError, RuntimeError,
+                NotImplementedError) as e:
+            return [], f"unreadable DOCX ({type(e).__name__}: {e})"
+        mod = _format_module()
+
+        def part_texts(xml: str) -> list:
+            if mod is not None:
+                try:
+                    return [mod.text_of(frag) for _a, _b, frag in mod.paragraphs(xml)]
+                except Exception:                                  # noqa: BLE001
+                    pass
+            try:
+                root = ET.fromstring(xml)
+            except ET.ParseError:
+                return [re.sub(r"<[^>]+>", " ", xml)]
+            return ["\n".join(node.itertext()) for node in root.iter()
+                    if isinstance(node.tag, str)
+                    and node.tag.rsplit("}", 1)[-1] == "p"]
+
+        texts = []
+        for _name, xml in parts:
+            texts.extend(part_texts(xml))
+        return texts, ""
+    try:
+        return [path.read_text("utf-8", "replace")], ""
+    except OSError as e:
+        return [], f"unreadable ({type(e).__name__}: {e})"
+
+
+def _email_addresses_in_sources(sources, evidence: bool = False) -> tuple:
+    """({case-folded address: display string}, coverage gaps) over sources.
+
+    `sources` is the `[(dir, prefix, excluded_top)]` shape every scan uses.
+    `evidence=True` reads the evidence/code areas and machine-readable tables;
+    the manuscript scan skips them. Every unreadable/oversize file is returned
+    as a NAMED gap, never silently skipped.
+    """
+    found, gaps = {}, []
+    suffixes = EMAIL_EVIDENCE_SUFFIXES if evidence else EMAIL_DOC_SUFFIXES
+
+    def skipped(rel: str, name: str, excluded) -> bool:
+        parts = rel.split("/")
+        if excluded and parts and parts[0] in excluded:
+            return True
+        if "work" in parts[:-1] or name.startswith("~$"):
+            return True
+        if (is_bookkeeping_name(name)
+                or is_non_submitted_readme_name(name)
+                or is_non_document_name(name)):
+            return True
+        if evidence:
+            area = evidence_area_of(rel)
+            if area in (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR):
+                return True
+            return bool(is_journal_feedback_name(name)
+                        or AUTHORED_REPLY_NAME_RE.search(name))
+        return bool(is_non_manuscript_rel(rel) or parts[0] == CODE_DIR)
+
+    for src, prefix, excluded in sources or []:
+        try:
+            src = Path(src)
+        except TypeError:
+            continue
+        if not src.is_dir():
+            continue
+        for path in _files_under_ci(src, suffixes):
+            try:
+                rel = path.relative_to(src).as_posix()
+            except ValueError:                                     # pragma: no cover
+                continue
+            if skipped(rel, path.name, excluded):
+                continue
+            try:
+                if path.stat().st_size > EMAIL_MAX_FILE_BYTES:
+                    gaps.append(f"{prefix + rel}: larger than "
+                                f"{EMAIL_MAX_FILE_BYTES // (1024 * 1024)} MB; not scanned "
+                                f"for e-mail addresses")
+                    continue
+            except OSError as e:
+                gaps.append(f"{prefix + rel}: stat failed ({type(e).__name__}: {e})")
+                continue
+            texts, gap = _email_texts_in_file(path)
+            if gap:
+                gaps.append(f"{prefix + rel}: {gap}; not scanned for e-mail addresses")
+                continue
+            for text in texts:
+                for m in EMAIL_ADDRESS_RE.finditer(text or ""):
+                    addr = _clean_email_address(m.group(1))
+                    if addr:
+                        found.setdefault(addr.casefold(), addr)
+        # `--revision-mode` also accepts a legacy `.doc`, and LibreOffice/Word
+        # can open an `.odt`; neither has a text reader here. The coverage gap
+        # is NAMED for that file instead of pretending its addresses were seen.
+        for path in _files_under_ci(src, EMAIL_UNSCANNED_SUFFIXES):
+            try:
+                rel = path.relative_to(src).as_posix()
+            except ValueError:                                     # pragma: no cover
+                continue
+            if skipped(rel, path.name, excluded):
+                continue
+            gaps.append(f"{prefix + rel}: unsupported editable format "
+                        f"({path.suffix.lower()}); not scanned for e-mail addresses")
+    return found, gaps
+
+
+def _email_url_host(url: str) -> str:
+    """The host of a verification URL, or '' (no scheme / no host)."""
+    text = re.sub(r"^https?://", "", str(url or "").strip(), flags=re.I)
+    return text.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0] \
+        .split(":", 1)[0].strip().lower()
+
+
+def _email_verification_rows(pkg: Path) -> tuple:
+    """(valid web-search rows, problems) from the package's own record.
+
+    The record is package bookkeeping under `work/` (never submitted). A row is
+    usable only when it names the exact corrected address, an http(s) source
+    URL, the search query, the checked date and a verbatim quote that CONTAINS
+    the address. The gate cannot re-run the search, but it can reject a guess
+    dressed as a record.
+    """
+    path = Path(pkg) / EMAIL_VERIFICATION_JSON_REL
+    if not path.is_file():
+        return [], []
+    data = read_json(path, revive=False, lenient=True)
+    if data is None:
+        return [], [f"{EMAIL_VERIFICATION_JSON_REL}: not readable as JSON"]
+    if isinstance(data, dict):
+        rows_raw = None
+        for key in ("verifications", "verified", "rows", "records"):
+            value = data.get(key)
+            if isinstance(value, list):
+                rows_raw = value
+                break
+        if rows_raw is None:
+            rows_raw = [data] if data else []
+    elif isinstance(data, list):
+        rows_raw = data
+    else:
+        return [], [f"{EMAIL_VERIFICATION_JSON_REL}: expected a list or an object"]
+    records, problems = [], []
+
+    def pick(row: dict, *keys) -> str:
+        for key in keys:
+            value = row.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        return ""
+
+    for i, row in enumerate(rows_raw):
+        where = f"{EMAIL_VERIFICATION_JSON_REL}[{i}]"
+        if not isinstance(row, dict):
+            problems.append(f"{where}: not an object")
+            continue
+        after = _clean_email_address(
+            pick(row, "after", "address", "verified_address", "corrected"))
+        before = _clean_email_address(pick(row, "before", "original", "old"))
+        source_url = pick(row, "source_url", "url", "source", "lookup_url")
+        query = pick(row, "query", "search", "search_query", "lookup")
+        checked_at = pick(row, "checked_at", "date", "verified_at", "checked")
+        evidence = pick(row, "evidence", "quote", "excerpt", "finding")
+        verdict = pick(row, "verdict", "status", "result").lower()
+        bad = []
+        if not after or not EMAIL_FULL_RE.fullmatch(after):
+            bad.append("no valid `after` address")
+        if before and not EMAIL_FULL_RE.fullmatch(before):
+            bad.append("`before` is not a valid address")
+        if not re.match(r"https?://", source_url, re.I):
+            bad.append("`source_url` must be an http(s) URL")
+        else:
+            host = _email_url_host(source_url)
+            if not host:
+                bad.append("`source_url` has no host")
+            elif _is_placeholder_email("x@" + host):
+                bad.append("`source_url` uses a reserved/example host, not a real page")
+        if len(query) < 3:
+            bad.append("`query` is missing (the search string)")
+        if not re.match(r"\d{4}-\d{2}-\d{2}\b", checked_at):
+            bad.append("`checked_at` must be YYYY-MM-DD")
+        if len(evidence) < 10 or (after and after.casefold() not in evidence.casefold()):
+            bad.append("`evidence` must be a verbatim quote that contains the corrected "
+                       "address")
+        if verdict and verdict not in ("verified", "confirmed", "found", "ok",
+                                       "correct", "corrected"):
+            bad.append(f"`verdict` is {verdict!r}, not a verification")
+        if bad:
+            problems.append(f"{where}: " + "; ".join(bad))
+            continue
+        records.append({
+            "after": after, "after_key": after.casefold(),
+            "before": before, "before_key": before.casefold() if before else "",
+            "source_url": source_url, "query": query,
+            "checked_at": checked_at, "evidence": evidence,
+        })
+    return records, problems
+
+
+def email_address_change_problems(before_sources, after_sources, pkg: Path,
+                                  label: str, evidence_sources=()) -> tuple:
+    """(errors, warnings): the package may not fabricate an e-mail address.
+
+    A NEW address is allowed only when the input corpus already
+    carries it verbatim or `work/EMAIL_VERIFICATION.json` verifies the exact
+    string. A removed address is a recorded warning (a contact fact is not a
+    deletion surface); a replacement trips both checks, so an inferred domain
+    cannot pass. The caller feeds the result into the stage postcheck, making
+    this a hard gate for revise/rewrite/integrate and the template rewrite.
+    """
+    before, before_gaps = _email_addresses_in_sources(before_sources)
+    after, after_gaps = _email_addresses_in_sources(after_sources)
+    evidence, evidence_gaps = _email_addresses_in_sources(
+        list(evidence_sources or ()), evidence=True)
+    records, record_problems = _email_verification_rows(Path(pkg))
+    errs = list(record_problems)
+    warns = [f"{label}: e-mail address coverage gap -- {g}"
+             for g in (before_gaps + after_gaps + evidence_gaps)]
+    verified_after = {r["after_key"] for r in records}
+    verified_before = {r["before_key"] for r in records
+                       if r["before_key"] and r["after_key"] in after}
+    added = set(after) - set(before)
+    removed = set(before) - set(after)
+    for key in sorted(added):
+        addr = after[key]
+        if key in evidence or key in verified_after:
+            continue
+        errs.append(
+            f"{label}: the delivered package introduces e-mail address {addr!r}, which is "
+            f"not in the input corpus and has no matching row in "
+            f"{EMAIL_VERIFICATION_JSON_REL}. An e-mail address is a CONTACT FACT, not an "
+            f"inferable typo: its domain cannot be inferred from an affiliation, a name or a "
+            f"journal. Restore the input address, carry the exact address the corpus already "
+            f"contains, or record a web-search result (query, source_url, checked_at and a "
+            f"verbatim `evidence` quote containing {addr!r}) before changing it")
+    for key in sorted(removed):
+        addr = before[key]
+        if _is_placeholder_email(addr) or key in verified_before:
+            continue
+        warns.append(
+            f"{label}: the delivered package no longer carries e-mail address {addr!r}. An "
+            f"address is a contact fact and is not a deletion surface: restore it, or record "
+            f"the author query in the manual list; never remove it to resolve a finding")
+    for r in records:
+        if (r["before_key"] and r["before_key"] != r["after_key"]
+                and r["before_key"] in after):
+            warns.append(
+                f"{label}: the recorded correction {r['before']!r} -> {r['after']!r} left the "
+                f"superseded address in the package; reconcile every occurrence to the SAME "
+                f"verified string (or record why the two addresses belong to different people)")
+    return errs, warns
+
+
 def _docx_hf_signature(path: Path) -> dict:
     """What header/footer furniture one DOCX actually carries.
 
@@ -5057,6 +5388,24 @@ def template_rewrite_postcheck(sb: Path, src: Path, templates: dict,
         errs.extend(display_rule_errors(
             scan_format_in_sources([(out, "", ())], policy=policy),
             "template-first stage"))
+    # CONTACT FACTS: re-housing a package into a template may not infer or
+    # replace an author e-mail address. The source package is the in-corpus
+    # evidence; a correction outside it needs the output's own
+    # work/EMAIL_VERIFICATION.json row.
+    if Path(src).is_dir():
+        email_errs, email_warns = email_address_change_problems(
+            [(Path(src), "", ())], [(out, "", ())], out, "template-first stage",
+            evidence_sources=[(Path(src), "", ())])
+        errs.extend(email_errs)
+        warns.extend(email_warns)
+        fact_errs, fact_warns = fact_token_change_problems(
+            [(Path(src), "", ())], [(out, "", ())], out, "template-first stage",
+            evidence_sources=[(Path(src), "", ())])
+        errs.extend(fact_errs)
+        warns.extend(fact_warns)
+        todo_errs, todo_warns = manual_todo_gate(out)
+        errs.extend(todo_errs)
+        warns.extend(todo_warns)
     return {"ok": not errs, "errors": errs, "warnings": warns,
             "zotero_fields": zotero_rep,
             "coverage": {"mode": "exact-multiset", "checked": checked, "covered": covered,
