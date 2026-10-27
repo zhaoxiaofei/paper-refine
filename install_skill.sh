@@ -27,7 +27,15 @@ for p in "${previous[@]}"; do
     name=$(basename -- "$p")
     target="$backup_dir/$name"
     if [ -e "$target" ]; then
-        target="$backup_dir/$name.$(date +%Y%m%d%H%M%S)"
+        # A same-second re-run (or a pre-existing backup) must not make `mv`
+        # move the package INSIDE an existing directory: find a free name.
+        stamp="$(date +%Y%m%d%H%M%S)"
+        target="$backup_dir/$name.$stamp"
+        suffix=0
+        while [ -e "$target" ]; do
+            suffix=$((suffix + 1))
+            target="$backup_dir/$name.$stamp.$suffix"
+        done
     fi
     mv -- "$p" "$target"
     echo "backed up: $p -> $target"
@@ -46,16 +54,25 @@ for docx_tool in converter compare; do
         compare) companion="docxcompare.sh" ;;
         converter) companion="docx2pdf.sh" ;;
     esac
-    # Copy the SOURCE only: node_modules/ is installed at the destination below
-    # (copying it over the Windows mount is slow, and a stale copy fails the
-    # same silent way this script exists to prevent).
-    rm -rf -- "$tool_path"
-    mkdir -p -- "$tool_path"
-    (cd -- "$repo_dir/${tool_name}" && tar cf - --exclude=./node_modules .) | (cd -- "$tool_path" && tar xf -)
-    # A same-day re-run names the SAME snapshot directory. `cp -r SRC DST` with
-    # DST already present copies SRC INTO it, so the snapshot's top level kept
-    # the previous run's bytes and the fresh copy sat one level down; remove the
-    # stale snapshot first (the version name identifies ONE install).
+    # Stage the SOURCE only and run npm ci THERE: removing the live install
+    # first meant a failed/timed-out install left a working converter broken
+    # and aborted before the compare server was touched. `node_modules/` is
+    # never vendored (copying it over a Windows mount is slow, and a stale copy
+    # fails silently).
+    staging="${tool_path}.stage.$$"
+    rm -rf -- "$staging"
+    mkdir -p -- "$staging"
+    (cd -- "$repo_dir/${tool_name}" && tar cf - --exclude=./node_modules .) | (cd -- "$staging" && tar xf -)
+    npm ci --prefix "$staging" --no-audit --no-fund
+    # The staging tree is complete: swap it in, keeping the old tree until the
+    # move has succeeded. A same-day re-run names the SAME snapshot directory;
+    # remove the stale snapshot first (the version name identifies ONE install).
+    old_path="${tool_path}.old.$$"
+    if [ -e "$tool_path" ]; then
+        mv -- "$tool_path" "$old_path"
+    fi
+    mv -- "$staging" "$tool_path"
+    rm -rf -- "$old_path"
     rm -rf -- "${tool_path}-${new_version}"
     cp -r -- "$tool_path" "${tool_path}-${new_version}"
     echo "installed mcp-tool: ${tool_path}"
@@ -64,9 +81,5 @@ for docx_tool in converter compare; do
     # they resolve it: ../<script>, then ./<script>, then PATH.
     install -m 0755 -- "$repo_dir/$companion" "$(dirname -- "$tool_path")/$companion"
     echo "installed companion: $(dirname -- "$tool_path")/$companion"
-    # `node_modules/` is never vendored: a server started without it exits with
-    # `ERR_MODULE_NOT_FOUND` before it reads stdin, which the caller sees as
-    # "the MCP server did not answer initialize()".
-    npm ci --prefix "$tool_path" --no-audit --no-fund
 done
 

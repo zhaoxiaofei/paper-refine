@@ -10,16 +10,14 @@
 // OOXML writer.
 import { McpServer } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
-import { execFile } from 'node:child_process';
 import { accessSync, constants, existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
 import * as z from 'zod/v4';
 import { allowedRoots, containsPath, realOrResolved } from './containment.mjs';
 import { inFlightKey } from './derived-output.mjs';
 
-const execFileAsync = promisify(execFile);
+import { runFile } from './run-child.mjs';
 
 // The comparer script is NOT welded to one machine: an explicit env override
 // wins, then the repo-relative copy, then a sibling copy, then PATH. A
@@ -147,8 +145,8 @@ serveStdio(() => {
       // own 900s); a smaller server-side cap would kill a slow-but-valid Word
       // comparison before the caller's own timeout and silently downgrade the
       // redline to a lower-fidelity fallback.
-      const run = () => execFileAsync(COMPARER, argv,
-                                      { timeout: 900_000, maxBuffer: 4 * 1024 * 1024 });
+      const run = () => runFile(COMPARER, argv,
+                                  { timeout: 900_000, maxBuffer: 4 * 1024 * 1024 });
       // Key on the path the comparer will actually write, not the input pair:
       // two revised files that share a basename derive the same redline path.
       // `inFlightKey` also case-folds it (a case-insensitive destination).

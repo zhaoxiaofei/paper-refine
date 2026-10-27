@@ -782,7 +782,7 @@ def postcheck_revise(ctx: Ctx, rec: dict):
                          f"diff hunk ids, preservation check)")
         else:
             missing_notes = [fid for fid in j5_ids
-                             if not any(fid in p.name for p in notes)]
+                             if not any(_finding_id_mentioned(fid, p.name) for p in notes)]
             if missing_notes:
                 warns.append(f"J5 finding(s) {missing_notes} have no RESTRUCTURE_<id>.md note "
                              f"under revised/work/: every restructuring must be re-checkable")

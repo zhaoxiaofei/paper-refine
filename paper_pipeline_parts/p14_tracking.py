@@ -544,7 +544,8 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
     it; the explicit `track` command leaves it off so an operator can always
     force a refresh.
     """
-    rounds = [int(r) for r in (rounds or range(1, ctx.rounds_count() + 1))]
+    rounds = [int(r) for r in (rounds if rounds is not None
+                               else range(1, ctx.rounds_count() + 1))]
     versions = list(versions) if versions else None
     out_root = ctx.root / TRACKING_DIRNAME
     out_root.mkdir(parents=True, exist_ok=True)

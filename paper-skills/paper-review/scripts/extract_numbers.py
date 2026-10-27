@@ -426,7 +426,12 @@ def main():
         role = classify_context(fname)
         if role == "references":
             continue  # a reference list is not the authors' own metric source
-        lines = open(os.path.join(corpus, fname), encoding="utf-8", errors="replace").read().split("\n")
+        try:
+            lines = open(os.path.join(corpus, fname), encoding="utf-8",
+                         errors="replace").read().split("\n")
+        except OSError as e:
+            print("WARNING: file-unreadable: %s: %s" % (fname, e), file=sys.stderr)
+            continue
         if fname.endswith((".tex.txt", ".ltx.txt")):
             # A LaTeX comment is not manuscript prose: a commented-out
             # `% p = 0.001` must not become an M4 divergence candidate.

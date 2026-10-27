@@ -281,7 +281,10 @@ def _reuse_pdf_record(previous: dict, label: str, rel: str, digest: str,
 def run_pdf_conversion(ctx: Ctx, rounds=None, versions=None, include_original: bool = True,
                        quiet: bool = False) -> dict:
     """Compile/convert every requested version (and the original) into <root>/pdfs/."""
-    rounds = [int(r) for r in (rounds or range(1, ctx.rounds_count() + 1))]
+    # An explicit empty list means "no rounds", not "every round": `or` would
+    # collapse it and render the whole run.
+    rounds = [int(r) for r in (rounds if rounds is not None
+                               else range(1, ctx.rounds_count() + 1))]
     versions = list(versions) if versions else None
     out_root = ctx.root / PDF_DIRNAME
     out_root.mkdir(parents=True, exist_ok=True)

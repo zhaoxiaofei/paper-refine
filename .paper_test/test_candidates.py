@@ -85,7 +85,7 @@ if dump:
     open(dump, "w", encoding="utf-8").write(script)
 fake = os.environ.get("PS_FAKE_PDF")
 if fake:
-    open(fake, "wb").write(b"%PDF-1.4\n% fake render\n" + b"x" * 2048)
+    open(fake, "wb").write(b"%PDF-1.4\n% fake render\n" + b"x" * 2048 + b"\n%%EOF\n")
 sys.exit(int(os.environ.get("PS_RC", "0")))
 '''
 

@@ -272,8 +272,10 @@ def fake_powershell(tmp: Path, mode: str) -> Path:
         "if not path.startswith('/'):\n"
         "    sys.stderr.write('refusing a non-absolute output path: %s\\n' % path); sys.exit(3)\n"
         "if mode == 'write':\n"
-        "    with open(path, 'wb') as fh:\n"
-        "        fh.write(b'PK\\x03\\x04stub')\n"
+        "    import zipfile\n"
+        "    with zipfile.ZipFile(path, 'w') as zf:\n"
+        "        zf.writestr('[Content_Types].xml', '<Types/>')\n"
+        "        zf.writestr('word/document.xml', '<w:document/>')\n"
         "print(path)\n",
         encoding="utf-8")
     exe = tmp / "powershell.exe"

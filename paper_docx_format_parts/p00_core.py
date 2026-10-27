@@ -469,21 +469,41 @@ def child_elem(frag: str | None, tag: str) -> str | None:
         return None
     depth = 0
     start = None
+    start_depth = None
     for m in _CHILD_TAG_RE.finditer(frag):
         closing, name, rest = m.group(1), m.group(2), m.group(3)
         self_closing = bool(closing == "") and rest.rstrip().endswith("/")
         if closing:
             depth -= 1
-            if depth == 0 and start is not None and name.split(":")[-1] == tag:
+            if (start is not None and depth == start_depth
+                    and name.split(":")[-1] == tag):
                 return frag[start:m.end()]
             continue
         if depth == 1 and name.split(":")[-1] == tag:
             if self_closing:
                 return m.group(0)
             start = m.start()
+            start_depth = depth
         if not self_closing:
             depth += 1
     return None
+
+
+def ppr_style(ppr: str | None) -> str | None:
+    """The LIVE paragraph style (`pStyle` direct child of pPr).
+
+    `elem()` searches descendants, so a tracked-formatting record
+    (`w:pPrChange/w:pPr/w:pStyle`) was read as the paragraph's style: the
+    scanner called a Normal paragraph a Heading and the fixer spliced
+    keepNext/keepLines inside the revision record.
+    """
+    el = child_elem(ppr, "pStyle")
+    return (attr(el, "val") or "1") if el is not None else None
+
+
+def para_style(para: str) -> str | None:
+    """The LIVE paragraph style of one `<w:p>` fragment."""
+    return ppr_style(ppr_of(para))
 
 
 def elem_val(frag: str | None, tag: str) -> str | None:
@@ -580,11 +600,11 @@ def field_result_text_ranges(para: str, doc_spans=None, para_start: int = 0) -> 
     runs, pos = [], 0
     for m in _FRAG_OR_BREAK_RE.finditer(para):
         tok = m.group(0)
-        if BREAK_TOKENS.fullmatch(tok):
-            # `text_of` renders each break/tab as one character. Advancing only
-            # over `<w:t>` shifted every later protected range by one per
-            # preceding tab/break, so a hygiene edit could land inside a live
-            # Zotero field result.
+        if BREAK_TOKENS.fullmatch(tok) or NON_TEXT_TOKENS.fullmatch(tok):
+            # `text_of` renders each break/tab as one character and a
+            # noBreakHyphen/sym as ONE glyph character too. Advancing only over
+            # `<w:t>` shifted every later protected range, so a hygiene edit
+            # could land inside a live Zotero field result.
             pos += 1
             continue
         text = unesc(tok[tok.find(">") + 1:tok.rfind("<")])
@@ -1185,7 +1205,7 @@ def docx_front_matter_report(path: Path, template: Path = None, containers=()) -
         t = text_of(p[2]).strip()
         if t:
             texts.append(t)
-            styles.append(elem_val(ppr_of(p[2]), "pStyle") or "")
+            styles.append(para_style(p[2]) or "")
     corr = next((p[2] for p in paragraphs(doc)
                  if _CORRESP_RE.match(text_of(p[2]).strip())), "")
     title_style = styles[0] if styles else ""
@@ -1541,6 +1561,13 @@ def _rpr_set_emphasis(rpr: str | None, on: bool) -> tuple:
                   "effect", "bdr", "shd", "fitText", "vertAlign", "rtl", "cs", "em",
                   "lang", "eastAsianLayout", "specVanish", "oMath")
     at = len(rpr) - len("</w:rPr>")
+    # `w:rPrChange` is the LAST child of a live rPr. Its own (old) rPr may
+    # carry a schema-successor tag such as w:color even when the live rPr has
+    # none; scanning the whole string would then splice the explicit override
+    # INTO the revision record. Never insert past the start of the record.
+    _change_at = rpr.find("<w:rPrChange")
+    if _change_at != -1:
+        at = min(at, _change_at)
     for tag in after_tags:
         m = re.search(rf"<w:{tag}(?=[\s/>])", rpr)
         if m:

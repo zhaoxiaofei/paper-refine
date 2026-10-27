@@ -1578,7 +1578,7 @@ def _view_layout(files: list, r: int, vid: str, view_seed: str) -> tuple:
     normal_dirs = [d for d in dirs if not evidence_area_of(d)]
     shuffled = normal_dirs[:]
     rng.shuffle(shuffled)
-    dir_names = {d: f"d{i:02d}" for i, d in enumerate(shuffled)}
+    dir_names = {d: f"d{i:02d}" for i, d in enumerate(shuffled, 1)}
     # A same-depth sibling must not get the same anonymous name: two evidence
     # subdirectories otherwise collapse to one view directory, and their files
     # (numbered per parent) overwrite each other. Index each anonymous segment

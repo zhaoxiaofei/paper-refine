@@ -58,6 +58,19 @@ if ! REVISED_REAL="$(realpath -- "$REVISED" 2>/dev/null)"; then
     exit 1
 fi
 
+# The extension check above ran on the ARGUMENT; a link named `alias.docx`
+# whose target is a PDF would reach Word/COM as a PDF. Re-check the RESOLVED
+# paths, like docx2pdf.sh does.
+for f in "$ORIG_REAL" "$REVISED_REAL"; do
+    case "${f,,}" in
+        *.docx) ;;
+        *)
+            echo "Error: input resolves to a non-.docx file: $f" >&2
+            exit 2
+            ;;
+    esac
+done
+
 # Derive a default output name from the resolved original path.
 if [[ -z "$OUTPUT" ]]; then
     ORIG_DIR="$(dirname -- "$ORIG_REAL")"
@@ -168,6 +181,14 @@ powershell.exe -NoProfile -NonInteractive -EncodedCommand "$ENCODED"
 
 if [[ ! -s "$OUTPUT" ]]; then
     echo "Error: no comparison document was written: $OUTPUT" >&2
+    exit 1
+fi
+# A non-empty file is not a Word redline: require a readable OOXML package
+# carrying the main document part before reporting success.
+if ! python3 -c 'import sys, zipfile
+z = zipfile.ZipFile(sys.argv[1]); names = set(z.namelist())
+raise SystemExit(0 if "[Content_Types].xml" in names and "word/document.xml" in names else 1)'         "$OUTPUT" 2>/dev/null; then
+    echo "Error: the comparison document is not a readable DOCX package: $OUTPUT" >&2
     exit 1
 fi
 

@@ -525,7 +525,7 @@ def test_cmd_fix_removes_rejected_output():
     finally:
         fmt.fix_package = real
     check("P14 cmd_fix still reports the failure", rc == 1, str(rc))
-    check("P14 the rejected output was removed", not out.exists(), str(out.exists()))
+    check("P14 a pre-existing output survives a rejected fix", out.exists(), str(out.exists()))
 
 
 def test_json_from_text_picks_the_document():

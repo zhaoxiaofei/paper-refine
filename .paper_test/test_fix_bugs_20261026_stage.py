@@ -289,9 +289,12 @@ def test_f021_section_break_paragraph():
     sect = ('<w:p><w:pPr><w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>'
             '</w:pPr><w:r><w:br w:type="page"/></w:r></w:p>')
     pkg = mini_docx(d / "sect.docx", sect + p("After"))
-    fmt.fix_package(pkg, d / "sect.out.docx", fmt.load_policy(None))
-    with zipfile.ZipFile(d / "sect.out.docx") as z:
-        xml = z.read("word/document.xml").decode()
+    # Exercise the document fixer directly: a rejected package is no longer
+    # written to --out (F41), and this fixture's FMT-S1 row keeps the package
+    # unverified while the structural property under test is still checkable.
+    with zipfile.ZipFile(pkg) as z:
+        before = z.read("word/document.xml").decode()
+    xml, _changes, _meta = fmt.fix_document(before, {}, fmt.load_policy(None))
     check("the mid-document section survives",
           xml.count("<w:sectPr") == 2 and "pgSz" in xml, xml[:400])
 

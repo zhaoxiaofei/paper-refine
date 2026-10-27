@@ -133,3 +133,13 @@ if [[ ! -s "$PDF" ]]; then
     echo "Error: no PDF was written: $PDF" >&2
     exit 1
 fi
+# A non-empty file is not a render: a converter that writes one garbage byte
+# and exits 0 must not pass a PDF into the visual/PDF stages.
+if ! head -c 1024 -- "$PDF" | grep -aq '%PDF-'; then
+    echo "Error: the converter wrote no PDF header: $PDF" >&2
+    exit 1
+fi
+if ! grep -aq '%%EOF' -- "$PDF"; then
+    echo "Error: the converter wrote no PDF trailer (%%EOF): $PDF" >&2
+    exit 1
+fi

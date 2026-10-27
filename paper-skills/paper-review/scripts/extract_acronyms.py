@@ -941,7 +941,12 @@ def main():
         role = classify_context(fname)
         if role == "references":
             continue  # reference list excluded per spec
-        text = open(os.path.join(corpus, fname), encoding="utf-8", errors="replace").read()
+        try:
+            text = open(os.path.join(corpus, fname), encoding="utf-8",
+                        errors="replace").read()
+        except OSError as e:
+            print("WARNING: file-unreadable: %s: %s" % (fname, e), file=sys.stderr)
+            continue
         lines = text.split("\n")
         if fname.endswith((".tex.txt", ".ltx.txt")):
             # A commented-out sentence is not the authors' prose and must not

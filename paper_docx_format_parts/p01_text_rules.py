@@ -1137,7 +1137,7 @@ def emphasis_consistency(styles: dict, doc_paras: list) -> tuple:
     """
     seen = {}
     for idx, (p0, p1, para) in enumerate(doc_paras):
-        style = elem_val(ppr_of(para), "pStyle")
+        style = para_style(para)
         runs_info, text = [], ""
         for r0, r1, run in runs(para):
             rtext = text_of(run)
@@ -2829,8 +2829,13 @@ def variant_rows(paras: list, is_ref: list, field_spans: list = None) -> list:
 
     targets = spelling_minority_targets([t for _i, t in prose])
     for a, b in SPELLING_PAIRS:
-        ca = sum(len(re.findall(rf"\b{re.escape(a)}\b", t, re.I)) for _i, t in prose)
-        cb = sum(len(re.findall(rf"\b{re.escape(b)}\b", t, re.I)) for _i, t in prose)
+        # Count on the SAME prose the target set and the fixer read: a URL or
+        # code span keeps its own spelling, so its occurrence must not make the
+        # pair look mixed and file a mechanical row the fixer cannot repair.
+        ca = sum(len(re.findall(rf"\b{re.escape(a)}\b", spelling_nonprose_mask(t), re.I))
+                 for _i, t in prose)
+        cb = sum(len(re.findall(rf"\b{re.escape(b)}\b", spelling_nonprose_mask(t), re.I))
+                 for _i, t in prose)
         if ca and cb:
             target = targets.get(a) or targets.get(b) or ""
             minority = (a if target == b else b) if target else ""

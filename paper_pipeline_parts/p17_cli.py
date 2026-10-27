@@ -646,9 +646,10 @@ def build_parser() -> argparse.ArgumentParser:
                          f"tier in the scoring priority order, peer before own) accumulating "
                          f"each version's reported defect counts, and STOP at the first "
                          f"prefix where the version with the FEWEST defects reaches N (or when "
-                         f"every cell is used). The cumulative count at that prefix LEADS the "
-                         f"ranking; the panel median (then mean, IQR, digest) is the tie-break "
-                         f"below it. 0 stops at the first cell (the median/mean/IQR/digest decide); "
+                         f"every cell is used). The ORDERED per-cell census at that prefix LEADS "
+                         f"the ranking (each cell is a separate lexicographic rung); the panel "
+                         f"median (then mean, IQR, digest) is the tie-break below it. 0 uses the "
+                         f"EMPTY prefix (no census cell leads; the median/mean/IQR/digest decide); "
                          f"a value no prefix can reach (e.g. 999999) uses every cell")
     ps.add_argument("--stop-after-no-progress", type=int, default=0, metavar="K",
                     help="adaptive stop (default 0 = off): once K CONSECUTIVE rounds pin the "
@@ -1190,8 +1191,9 @@ def build_parser() -> argparse.ArgumentParser:
     ptf.add_argument("floor", nargs="?", type=int, default=None, metavar="N",
                      help=f"the number of defects the CLEANEST ranked version must reach before "
                           f"the severity_tier_category walk stops (default "
-                          f"{DEFAULT_TIEBREAK_DEFECT_FLOOR}; 0 = stop at the first cell, a value "
-                          f"no prefix can reach, e.g. 999999, = use every cell). Omit, or pass "
+                          f"{DEFAULT_TIEBREAK_DEFECT_FLOOR}; 0 = the EMPTY prefix (no census "
+                          f"cell leads), a value no prefix can reach, e.g. 999999, = use every "
+                          f"cell). Omit, or pass "
                           f"--show, to print the current value")
     ptf.add_argument("--show", action="store_true",
                      help="print the root's current floor and exit")

@@ -346,7 +346,7 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list) -> dict:
     diags["panel_quality"] = pq
     # The issue census: how many issues of each tier and severity the panel
     # attributed to each version. It is the selection's LEADING ranking input:
-    # the cumulative defect count over the adaptive severity_tier_category
+    # the ORDERED per-cell census over the adaptive severity_tier_category
     # prefix, rung by rung (the four severities, tier order, peer before own).
     census = build_issue_census(census_obs, field_ids,
                                 sessions_expected=sum(per_judges.values()),
@@ -456,20 +456,20 @@ def _valid_count(v):
 #     panel attributed to a version is the most direct improvement signal, and
 #     the panel median is coarse on a small integer scale;
 #   * the median, the mean and the IQR are the panel statistics BELOW it;
-#   * the defect counts come from the round's issue census and compare the
-#     TOTAL number of defects over the leading `severity_tier_category` cells
-#     (a single tiny cell fluctuates too much to rank on): the walk grows the
-#     prefix until the cleanest ranked version carries `tiebreak_defect_floor`
-#     defects or every cell is included. The cumulative count at that prefix is
-#     a TOTAL, not a rate -- every ranked version's opportunities are the same
-#     in a complete panel, so the exposure normalization (own/peer) is already
-#     carried by the cell ORDER (peer before own) rather than by dividing;
+#   * the defect counts come from the round's issue census and are compared
+#     CELL BY CELL in canonical `severity_tier_category` order (the walk grows
+#     the prefix until the cleanest ranked version carries
+#     `tiebreak_defect_floor` defects or every cell is included): each cell is
+#     its own lexicographic rung, so a fatal defect never ties a minor one.
+#     The cells are counts, not rates -- every ranked version's opportunities
+#     are the same in a complete panel, so the exposure normalization
+#     (own/peer) is carried by the cell ORDER (peer before own);
 #   * the counts are the mentions each judge sheet filed (collapsed only per
 #     session+version, never matched across sheets by default), with the opt-in
 #     `dedup_mode` "location" available when the operator wants the
 #     structured-key merge;
-#   * the mean breaks a tie ONLY when those cumulative totals are equal
-#     (a total count is more reliable than the mean of small integer scores);
+#   * the median, then the mean, break a tie ONLY when the whole ordered census
+#     is equal (the panel statistics are coarse on small integer scores);
 #     IQR/digest stay below it as the deterministic fallbacks, and the
 #     incumbent-retention rule (an exact median/mean/IQR tie keeps the base)
 #     is unchanged.
@@ -484,9 +484,10 @@ def _valid_count(v):
 #     the walk STOPS at the first prefix where the version with the FEWEST
 #     defects already carries `tiebreak_defect_floor` of them (default 10, a
 #     CLI/config parameter), or when every cell is included;
-#   * the version's cumulative count at that prefix is the tie-break for a
-#     median tie (fewer defects is better). The arithmetic mean is consulted
-#     ONLY when those cumulative counts are equal, then IQR, digest and id.
+#   * the version's ordered per-cell census at that prefix is the leading key
+#     (fewer defects, and a worse severity earlier, is worse). The median is
+#     consulted ONLY when the whole census is equal, then the mean, IQR, digest
+#     and id.
 # Rationale: a per-cell count is tiny and fluctuates; accumulating cells in the
 # order the scoring semantics prioritises grows the evidence until the cleanest
 # candidate has enough counts (or there is nothing left to add), and the single
@@ -565,12 +566,15 @@ def issue_matrix_and_cumulative(census, versions) -> tuple:
 
 
 def tiebreak_prefix_cells(cumulative: dict, versions, floor: int) -> int:
-    """How many leading cells the tie-break uses (>= 1 unless there are no cells).
+    """How many leading cells the tie-break uses (0 for an empty prefix).
 
     The first prefix at which the version with the FEWEST defects reaches the
-    floor wins; if no prefix reaches it, every cell is used.
+    floor wins; if no prefix reaches it, every cell is used. A floor <= 0 is
+    reached by the EMPTY prefix, so no census cell leads (Rule 6).
     """
     if not cumulative or not versions:
+        return 0
+    if floor <= 0:
         return 0
     n_cells = len(next(iter(cumulative.values())))
     for i in range(n_cells):
@@ -801,8 +805,9 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
     # canonical severity_tier_category order, accumulate the reported counts for
     # every ranked version, and stop at the first prefix where the version with
     # the FEWEST defects reaches the configured floor (or when every cell is
-    # used). The cumulative count at that prefix leads the sort key; the median
-    # (then the mean, IQR, digest and id) is the tie-break below it.
+    # used). The ordered per-cell census at that prefix leads the sort key (each
+    # cell a separate rung); the median (then the mean, IQR, digest and id) is
+    # the tie-break below it.
     floor = tiebreak_defect_floor_of(ctx)
     rep_ids = sorted({str(t["rep"]) for t in rows})
     cell_names, _matrix, cumulative = issue_matrix_and_cumulative(
@@ -865,12 +870,12 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
         trace.append(f"{champ_row['id']} and the base tie exactly on (median, mean, IQR) -> "
                      f"the incumbent base is retained; a challenger must be measurably better")
         champ_row = base_row
-    trace.append(f"ranking key: (the cumulative defect count over the first "
+    trace.append(f"ranking key: (the ordered per-cell defect census over the first "
                  f"{prefix_cells} cell(s) of the canonical severity_tier_category order "
-                 f"(fatal->critical->major->minor, tier order, peer before own; the walk stops "
-                 f"when the cleanest ranked version reaches the floor {floor} or all "
-                 f"{len(cell_names)} cells are used) -- then -median, -mean, IQR, digest, id); "
-                 "the cumulative counts come from the panel's own "
+                 f"(fatal->critical->major->minor, tier order, peer before own; each cell is a "
+                 f"separate lexicographic rung; the walk stops when the cleanest ranked version "
+                 f"reaches the floor {floor} or all {len(cell_names)} cells are used) -- then "
+                 "-median, -mean, IQR, digest, id); the per-cell counts come from the panel's own "
                  "census (the self-reported critical_remaining/writing_remaining values are "
                  "reported but no longer rank), median/mean/IQR are the field-wide panel "
                  "statistics below it, and the content digest is the provenance-free tie-break "
@@ -1243,7 +1248,8 @@ def invalidate_from_round(ctx: Ctx, r: int, reason: str) -> list:
         rec = ctx.round_rec(rr)
         # A round that is being rebuilt must not leave a stale "winner" sitting
         # under --root: archive the published copy (and its record) instead.
-        published = ctx.root / (rec.get("winner_dir") or WINNER_DIR_FMT.format(r=int(rr)))
+        published = contained_under(
+            ctx.root, rec.get("winner_dir") or WINNER_DIR_FMT.format(r=int(rr)))
         wjson = ctx.reports_dir / f"round{int(rr)}_winner.json"
         if published.is_dir() or wjson.exists():
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -2399,12 +2405,19 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     shutil.rmtree(sb / "revised_prerepair", ignore_errors=True)
     (sb / REVISION_AUDIT_PROMPT_FILE).write_text(
         revision_audit_prompt(sb, rec["id"], r), encoding="utf-8")
-    # The revision audit is documented READ-ONLY on revised/: it writes only
-    # revision_audit/REPAIR_PLAN.json. Snapshot the bytes it must not touch so
-    # a session that edits the manuscript anyway is caught instead of being
-    # silently accepted as the audited version.
-    revised_before = manifest_digest(hash_manifest(sb / REVISED_DIR,
-                                                   follow_dir_links=True))
+    # The revision audit is documented READ-ONLY on every input its prompt
+    # names -- base/, revised/, review/, audit/, raw_data/ and code/ -- and may
+    # write only revision_audit/REPAIR_PLAN.json. Snapshot each area so a
+    # session that edits the manuscript (or the frozen findings/base it audits
+    # against) is caught instead of being silently accepted.
+    _guarded_dirs = ("base", "review", "audit", "raw_data", "code", REVISED_DIR)
+
+    def _readonly_snapshot() -> dict:
+        return {name: (manifest_digest(hash_manifest(sb / name, follow_dir_links=True))
+                       if (sb / name).exists() else None)
+                for name in _guarded_dirs}
+
+    readonly_before = _readonly_snapshot()
     print(f"  [revision-audit] {rec['id']}: auditing the revised package")
     res = _run_aux_session(sb, rec, cmd, timeout, REVISION_AUDIT_PROMPT_FILE,
                            "_revision_audit.log")
@@ -2421,11 +2434,14 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     else:
         audit_rec["status"] = "done"
         audit_rec["rows"] = len(rows)
-    if audit_rec["status"] == "done" and manifest_digest(
-            hash_manifest(sb / REVISED_DIR, follow_dir_links=True)) != revised_before:
+    _changed_areas = ([name for name in _guarded_dirs
+                       if _readonly_snapshot().get(name) != readonly_before.get(name)]
+                      if audit_rec["status"] == "done" else [])
+    if _changed_areas:
         audit_rec["status"] = "failed"
-        audit_rec["error"] = ("the revision audit modified revised/ although it is "
-                             "read-only (it may write only revision_audit/REPAIR_PLAN.json)")
+        audit_rec["error"] = ("the revision audit modified read-only area(s) "
+                             + ", ".join(_changed_areas)
+                             + "/ although it may write only revision_audit/REPAIR_PLAN.json")
     rec["revision_audit"] = audit_rec
     ctx.save_state()
     if audit_rec["status"] != "done":
@@ -3382,7 +3398,7 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
         except Exception as e:                                       # noqa: BLE001
             print(f"[run] r{r} WARNING: could not print the audited member table: {e}")
     _tb = (sel or {}).get("tiebreak") or {}
-    print(f"[run] ranking key: the cumulative defect count over the "
+    print(f"[run] ranking key: the ordered per-cell defect census over the "
           f"adaptive severity_tier_category prefix (fatal->critical->major->minor, tier order, "
           f"peer before own; used {_tb.get('cells_used', '?')} of {_tb.get('cells_total', '?')} "
           f"cells at floor {_tb.get('floor', '?')}) -> median -> mean -> IQR -> digest. "

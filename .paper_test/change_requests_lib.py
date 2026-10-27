@@ -488,9 +488,10 @@ def test_field_and_selection():
     check("CR1d the ranking key keeps every arm on the same terms (the panel-derived adaptive "
           "severity_tier_category defect prefix LEADS, then median/mean/IQR/digest/id; "
           "the self-reported counts no longer rank)",
-          "ranking key: (the cumulative defect count over the first" in
+          "ranking key: (the ordered per-cell defect census over the first" in
           " ".join(sel["trace"])
           and "severity_tier_category order" in " ".join(sel["trace"])
+          and "each cell is a separate lexicographic rung" in " ".join(sel["trace"])
           and "then -median, -mean, IQR, digest, id" in " ".join(sel["trace"]))
 
 

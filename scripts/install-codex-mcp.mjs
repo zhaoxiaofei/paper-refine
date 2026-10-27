@@ -91,8 +91,8 @@ function expandHome(p) {
 function parseArgs(argv) {
   const opts = {
     profile: process.env.DSH_PROFILE || 'headless',
-    dshHome: process.env.DSH_HOME || path.join(os.homedir(), '.dsh'),
-    codexHome: process.env.CODEX_HOME || path.join(os.homedir(), '.codex'),
+    dshHome: expandHome(process.env.DSH_HOME || path.join(os.homedir(), '.dsh')),
+    codexHome: expandHome(process.env.CODEX_HOME || path.join(os.homedir(), '.codex')),
     config: null,
     serversJson: null,
     prefix: '',

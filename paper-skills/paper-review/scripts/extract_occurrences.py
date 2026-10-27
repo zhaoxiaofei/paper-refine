@@ -28,6 +28,7 @@ stdlib-only. Usage:
 """
 import argparse
 import hashlib
+from decimal import Decimal, InvalidOperation
 import json
 import os
 import re
@@ -148,10 +149,28 @@ def variant_pattern(term, mode):
             # precision from the target's own significant digits (trailing
             # zeros are not significant) so the scientific spelling is exactly
             # the same number, no rounding in either direction.
-            _digits = re.sub(r"[^0-9]", "", num).lstrip("0").rstrip("0") or "0"
+            # The exponent's digits are part of the SPELLING, not the
+            # mantissa: "1e-3" must yield 1e-03 (0.001), not 1.3e-03.
+            _mantissa = re.split(r"[eE]", str(num), 1)[0]
+            _digits = re.sub(r"[^0-9]", "", _mantissa).lstrip("0").rstrip("0") or "0"
             sci = "%.*e" % (len(_digits) - 1, v)
             mant, exp = sci.split("e")
             pats.append(re.escape(mant + "e" + exp))
+            # The same value written in plain decimal is an equivalent
+            # notation ("1e-3" ~ "0.001"), and the mode promises to
+            # enumerate equivalents. Decimal(str(num)) keeps the written
+            # value exact (no float formatting noise).
+            if "e" in str(num).lower():
+                try:
+                    dec = format(Decimal(str(num)), "f")
+                except InvalidOperation:
+                    dec = ""
+                if dec and dec not in ("0", "0.0"):
+                    pats.append(re.escape(dec))
+                    if "." in dec:
+                        short = dec.rstrip("0").rstrip(".")
+                        if short and short != dec:
+                            pats.append(re.escape(short))
             # "%.1e" always pads the exponent to two digits (3.1e-02) while
             # manuscripts usually write 3.1e-2 -- the short form (and the
             # uppercase E) must be enumerated too, or those occurrences of the
@@ -286,8 +305,12 @@ def main():
                     continue
                 if is_non_manuscript(fname):
                     continue  # occurrences are counted in the manuscript only
-                lines = open(os.path.join(corpus, fname), encoding="utf-8",
-                             errors="replace").read().split("\n")
+                try:
+                    lines = open(os.path.join(corpus, fname), encoding="utf-8",
+                                 errors="replace").read().split("\n")
+                except OSError as e:
+                    print("WARNING: file-unreadable: %s: %s" % (fname, e), file=sys.stderr)
+                    continue
                 for li, raw in enumerate(lines, 1):
                     for m in pat.finditer(raw):
                         results.append({"file": fname, "line": li,

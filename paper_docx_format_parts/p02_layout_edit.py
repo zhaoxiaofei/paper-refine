@@ -755,7 +755,7 @@ def style_survey(xml: str, styles: dict) -> dict:
     it_direct = it_char = it_para = 0
     runs_n = no_font = 0
     for _p0, _p1, para in paragraphs(xml):
-        style = elem_val(ppr_of(para), "pStyle") or "Normal"
+        style = para_style(para) or "Normal"
         pstyles[style] += 1
         p_italic = effective_emphasis(styles, style, None, None)
         for _r0, _r1, run in runs(para):
@@ -1185,12 +1185,25 @@ def _style_flag(styles: dict, sid: str | None, key: str):
 
 
 def _effective_run_flag(styles: dict, para_style: str, run: str, key: str):
-    """The run's effective bold/italic: its own direct rPr, else the style."""
+    """The run's effective bold/italic: direct rPr > character style > paragraph
+    style (Word's precedence). `w:rPrChange` holds the OLD formatting and is
+    never read; a character style such as Emphasis must outrank the paragraph
+    style, or pinning the paragraph-style difference turns its italics off."""
     node = {"b": "b", "i": "i"}[key]
-    rpr = rpr_of(run)
-    direct = _tri_state(_find_elem(rpr, node))
-    if direct is not None:
-        return direct
+    rpr = live_rpr(rpr_of(run))
+    direct_el = elem(rpr, node)
+    if direct_el is not None:
+        val = attr(direct_el, "val")
+        return True if val is None else str(val).strip().lower() not in ("0", "false", "off")
+    run_style = elem_val(rpr, "rStyle")
+    if run_style:
+        val = None
+        for sid in style_chain(styles, run_style):
+            st = styles.get(sid) or {}
+            if st.get(key) is not None:
+                val = st[key]
+        if val is not None:
+            return bool(val)
     return _style_flag(styles, para_style, key)
 
 
@@ -1512,7 +1525,7 @@ def display_item_rows(xml: str, policy: dict, doc: str, kind: str) -> tuple:
         if tag != "p":
             continue
         t = " ".join(text_of(frag).split())
-        styles[i] = elem_val(ppr_of(frag), "pStyle") or ""
+        styles[i] = para_style(frag) or ""
         if t:
             texts[i] = t
 
@@ -1765,7 +1778,7 @@ def paragraph_first_line_indent(frag: str) -> int:
 
 def layout_consistency_rows(xml: str, paras: list, title_block_end, doc: str) -> list:
     """FMT-T8f: sibling paragraphs and captions must share one indent convention."""
-    styles_of = [elem_val(ppr_of(p), "pStyle") or "" for (_a, _b, p) in paras]
+    styles_of = [para_style(p) or "" for (_a, _b, p) in paras]
     # The front matter (title block, abstract, keywords) is its own layout family:
     # abstracts are conventionally flush while body paragraphs are first-line
     # indented, so never count the abstract as a body-paragraph outlier. The
@@ -1774,7 +1787,11 @@ def layout_consistency_rows(xml: str, paras: list, title_block_end, doc: str) ->
                  if KEYWORDS_RE.match(text_of(p).strip())), None)
     heading_after_kw = next((i for i in range((kw_i + 1) if kw_i is not None else 0, len(paras))
                              if styles_of[i].startswith("Heading")), None)
-    front_end = heading_after_kw if heading_after_kw is not None else 0
+    # A directly formatted Introduction carries no Heading style. The front
+    # matter still ends after the Keywords line; falling back to 0 counted the
+    # flush abstract as a body paragraph and named it the indentation minority.
+    front_end = (heading_after_kw if heading_after_kw is not None
+                 else (kw_i + 1 if kw_i is not None else 0))
     cats = {"caption": [], "body": []}
     for i, (_p0, _p1, p) in enumerate(paras):
         if i < front_end:
@@ -1782,7 +1799,7 @@ def layout_consistency_rows(xml: str, paras: list, title_block_end, doc: str) ->
         text = text_of(p).strip()
         if not text:
             continue
-        style = elem_val(ppr_of(p), "pStyle") or ""
+        style = para_style(p) or ""
         if style.startswith("Heading") or style == "Bibliography":
             continue
         if title_block_end is not None and i < title_block_end:
@@ -2028,7 +2045,7 @@ _HEADING_STYLE_RE = re.compile(r"heading[\s_-]*([1-9])\b", re.I)
 
 
 def _para_style(para: str) -> str:
-    return elem_val(ppr_of(para), "pStyle") or ""
+    return para_style(para) or ""
 
 
 def _style_kind(style: str) -> str:
@@ -2240,7 +2257,8 @@ def stray_empty_paragraph_rows(paras: list, policy: dict, doc: str, xml: str = N
 
 _TEXT_EDGE_TOKENS = re.compile(
     r"<w:t(?:\s[^>]*)?>.*?</w:t>|<w:br(?=[\s/>])[^>]*/>|<w:cr(?=[\s/>])[^>]*/>|"
-    r"<w:tab(?=[\s/>])[^>]*/>", re.S)
+    r"<w:tab(?=[\s/>])[^>]*/>|<w:noBreakHyphen(?=[\s/>])[^>]*/>|"
+    r"<w:sym(?=[\s/>])[^>]*/>", re.S)
 
 # Articles and prepositions where a doubled word is a typo. "in" is deliberately
 # absent: "studies in in vitro systems" is a valid construction, and a
@@ -2251,7 +2269,8 @@ _DOUBLED_WORDS = ("the", "a", "an", "of", "and", "or", "but", "for", "with", "at
 # needed for a sentence-initial "The the" typo, but it also matched the real
 # tokens in "a A-to-I" and "NOR or OR" and the fixer deleted one.
 _DOUBLED_WORD_RE = re.compile(
-    r"\b(" + "|".join(_DOUBLED_WORDS) + r")\s+(?!(?-i:[A-Z]))\1\b", re.I)
+    r"\b(" + "|".join(_DOUBLED_WORDS) + r")\s+(?!(?-i:[A-Z]))\1\b"
+    r"(?:\s+(?!(?-i:[A-Z]))\1\b)*", re.I)   # consume every consecutive repeat
 _DOUBLE_SPACE_RE = re.compile(r"(?<=\S) {2,}(?=\S)")
 _SPACE_BEFORE_PUNCT_RE = re.compile(r" +(?=[,.;:!?])")
 _SPACE_AFTER_OPEN_RE = re.compile(r"(?<=[([])[ \t]+")
@@ -2343,6 +2362,11 @@ def visual_text_lines(para: str) -> list:
         # split the line, and every line-edge span after it was mispositioned.
         if re.match(r"<w:t(?=[\s>])", tok):
             offset += len(unesc(tok[tok.find(">") + 1:tok.rfind("<")]))
+        elif NON_TEXT_TOKENS.fullmatch(tok):
+            # `text_of` renders noBreakHyphen/sym as ONE character but they do
+            # not start a new visual line; advancing zero shifted every later
+            # span and could make a whitespace-only "line" cover a real break.
+            offset += 1
         else:
             lines.append((start, offset))
             offset += 1                      # the break's own newline in text space
@@ -2462,11 +2486,15 @@ def hygiene_spans(para: str) -> list:
         sep = text[m.end(1):second_start]
         start, end, repl = m.start(), m.end(), m.group(1)
         if "\n" in sep or "\r" in sep:
-            # Delete the second word only; the whitespace after the break is
-            # FMT-P4's span. Starting at the space made both spans share a
-            # start, and the overlap policy (narrower wins) then dropped G1
-            # while the summary still claimed the duplicate was cleaned.
-            start = second_start
+            # Delete the repeats after the LAST break, keeping the break itself
+            # (FMT-P4 owns the whitespace at the line edge). Starting at the
+            # space made both spans share a start, and the overlap policy
+            # (narrower wins) then dropped G1 while the summary still claimed
+            # the duplicate was cleaned. A tripled word deletes every repeat,
+            # not just the last one.
+            start = m.end(1) + max(sep.rfind("\n"), sep.rfind("\r")) + 1
+            while start < len(text) and text[start] in " \t":
+                start += 1              # FMT-P4 owns the line-edge space
             end = m.end()
             while end < len(text) and text[end] in " \t":
                 end += 1              # the space after the deleted duplicate
@@ -2837,7 +2865,7 @@ def part_rels(pkg: zipfile.ZipFile, part: str) -> dict:
         return {}
     out = {}
     xml = pkg.read(relname).decode("utf-8", "replace")
-    for m in re.finditer(r"<Relationship(?=[\s/>])[^>]*/>", xml):
+    for m in _REL_ENTRY_RE.finditer(xml):
         attrs = dict(re.findall(r'([A-Za-z]+)="([^"]*)"', m.group(0)))
         if attrs.get("Id") and attrs.get("Type", "").endswith("/image"):
             out[attrs["Id"]] = attrs.get("Target", "").lstrip("/").replace("\\", "/")

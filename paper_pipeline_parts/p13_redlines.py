@@ -1074,7 +1074,8 @@ def run_redlines(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
     integrations) -- the set depends on the per-round plan, so it is resolved
     per round rather than from a fixed list.
     """
-    rounds = [int(r) for r in (rounds or range(1, ctx.rounds_count() + 1))]
+    rounds = [int(r) for r in (rounds if rounds is not None
+                               else range(1, ctx.rounds_count() + 1))]
     versions = list(versions) if versions else None
     out_root = ctx.root / REDLINE_DIRNAME
     out_root.mkdir(parents=True, exist_ok=True)

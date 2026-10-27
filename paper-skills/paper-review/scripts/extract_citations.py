@@ -449,7 +449,12 @@ def main():
             continue
         if is_non_manuscript(fname):
             continue  # a letter or a data table carries no manuscript citations
-        text = open(os.path.join(corpus, fname), encoding="utf-8", errors="replace").read()
+        try:
+            text = open(os.path.join(corpus, fname), encoding="utf-8",
+                        errors="replace").read()
+        except OSError as e:
+            print("WARNING: file-unreadable: %s: %s" % (fname, e), file=sys.stderr)
+            continue
         lines = text.split("\n")
         # Call-outs are read from the compilable text (LaTeX comments and
         # verbatim bodies removed) while reference-list entries keep the

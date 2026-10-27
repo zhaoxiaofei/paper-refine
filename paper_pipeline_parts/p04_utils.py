@@ -325,15 +325,33 @@ def copy_asset_dirs(src_dir, dst_dir, names=None) -> list:
         if not src.is_dir():
             continue
         dst = Path(dst_dir) / name
-        tmp = dst.with_name(dst.name + ".copy-tmp")
-        if tmp.exists():
-            rmtree_force(tmp)
-        shutil.copytree(src, tmp,
-                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"))
-        if dst.exists():
-            rmtree_force(dst)
-        os.replace(tmp, dst)
-        copied.append(name)
+        # A per-process unique staging name: two concurrent syncs must never
+        # share (and one must never delete) the other's half-built tree.
+        tmp = dst.with_name(f"{dst.name}.copy-tmp-{os.getpid()}-{time.time_ns()}")
+        backup = None
+        try:
+            shutil.copytree(src, tmp,
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"))
+            if dst.exists() or dst.is_symlink():
+                # Move the live bundle aside instead of deleting it: a failed
+                # replace can then put the old tree back, so an interrupted
+                # setup/sync-code never leaves the root with no parts directory.
+                backup = dst.with_name(f"{dst.name}.copy-old-{os.getpid()}-{time.time_ns()}")
+                os.replace(dst, backup)
+            try:
+                os.replace(tmp, dst)
+            except BaseException:
+                if backup is not None and backup.exists():
+                    os.replace(backup, dst)
+                    backup = None
+                raise
+            if backup is not None:
+                rmtree_force(backup)
+            copied.append(name)
+        except BaseException:
+            if tmp.exists():
+                rmtree_force(tmp)
+            raise
     return copied
 
 
@@ -1867,6 +1885,12 @@ LENGTH_RENDERED_EXTS = (".pdf", ".ppt", ".pptx")
 
 LENGTH_ABSTRACT_HEAD_RE = re.compile(
     r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:abstract|summary)\s*[:.\u2014\u2013-]?\s*$", re.I)
+# The common inline layout: "Abstract: We studied ..." on one line. The heading
+# must be recognised or the abstract is left inside the main text; the rest of
+# the line is its first paragraph (count_words.py has the same branch).
+LENGTH_ABSTRACT_INLINE_RE = re.compile(
+    r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:abstract|summary)\s*[:.\u2014\u2013-]\s*(\S.*)$",
+    re.I)
 LENGTH_MAIN_START_RE = re.compile(
     r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:introduction|main text|background)\s*[:.\u2014\u2013-]?\s*$",
     re.I)
@@ -2192,37 +2216,48 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
         return (s or "").strip()
 
     abs_start = abs_end = None
+    inline_abs = False
     for i in range(n):
-        if LENGTH_ABSTRACT_HEAD_RE.match(_length_heading_text(lines[i])):
-            if abstract_end is not None:
-                j = max(i + 1, min(int(abstract_end), n))
-            else:
-                j = i + 1
-                seen_text = False
-                first_blank = None
-                boundary = False
-                while j < n:
-                    line = clean(lines[j])
-                    heading = _length_heading_text(line)
-                    if LENGTH_SECTION_BOUND_RE.match(heading) or \
-                            LENGTH_MAIN_START_RE.match(heading) or LENGTH_KEYWORDS_RE.match(heading):
-                        boundary = True
-                        break
-                    if not line:
-                        if seen_text and first_blank is None:
-                            first_blank = j
-                        j += 1              # leading blanks right after the heading
-                        continue
-                    seen_text = True
-                    j += 1
-                # A multi-paragraph abstract is legitimate; only a document
-                # with no section boundary at all falls back to its first
-                # blank line, so the later paragraphs are not charged to the
-                # main text.
-                if not boundary and first_blank is not None:
-                    j = first_blank
-            abs_start, abs_end = i + 1, j
+        heading = _length_heading_text(lines[i])
+        inline = LENGTH_ABSTRACT_INLINE_RE.match(heading)
+        if inline:
+            # Keep the remainder as the abstract's first paragraph; the
+            # heading itself is not text.
+            lines[i] = inline.group(1)
+            abs_start, inline_abs = i, True
             break
+        if LENGTH_ABSTRACT_HEAD_RE.match(heading):
+            abs_start = i + 1
+            break
+    if abs_start is not None:
+        if abstract_end is not None:
+            abs_end = max(abs_start, min(int(abstract_end), n))
+        else:
+            j = abs_start
+            seen_text = inline_abs
+            first_blank = None
+            boundary = False
+            while j < n:
+                line = clean(lines[j])
+                heading = _length_heading_text(line)
+                if LENGTH_SECTION_BOUND_RE.match(heading) or \
+                        LENGTH_MAIN_START_RE.match(heading) or LENGTH_KEYWORDS_RE.match(heading):
+                    boundary = True
+                    break
+                if not line:
+                    if seen_text and first_blank is None:
+                        first_blank = j
+                    j += 1              # leading blanks right after the heading
+                    continue
+                seen_text = True
+                j += 1
+            # A multi-paragraph abstract is legitimate; only a document
+            # with no section boundary at all falls back to its first
+            # blank line, so the later paragraphs are not charged to the
+            # main text.
+            if not boundary and first_blank is not None:
+                j = first_blank
+            abs_end = j
     main_start = None
     for i in range(n):
         if LENGTH_MAIN_START_RE.match(_length_heading_text(lines[i])):
@@ -2284,6 +2319,7 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
     included = [False] * n
     excluded_now = False
     end_found = False
+    in_keyword_block = False
     for i in range(span_start, n):
         line = clean(lines[i])
         heading = _length_heading_text(line)
@@ -2293,9 +2329,19 @@ def _length_rows_for_lines(lines: list, doc: str, caption_spans=None,
             # list (and any Methods prose after it) back into the main-text
             # count. count_words.py's M19 counter already keeps the state; this
             # is the same rule for the deterministic scan.
+            in_keyword_block = True
+            excluded_now = True
+            continue
+        if in_keyword_block and not heading:
+            in_keyword_block = False
+            excluded_now = False
+            continue
+        if in_keyword_block and not (LENGTH_SECTION_BOUND_RE.match(heading)
+                                     or LENGTH_MAIN_START_RE.match(heading)):
             continue
         if LENGTH_SECTION_BOUND_RE.match(heading) or \
                 LENGTH_MAIN_START_RE.match(heading):
+            in_keyword_block = False
             kind = _length_section_kind(heading)
             if kind and kind in excludes:
                 excluded_now = True
@@ -7465,8 +7511,32 @@ def is_within(child: Path, parent: Path) -> bool:
     try:
         child.resolve().relative_to(parent.resolve())
         return True
-    except (ValueError, OSError):
+    except (ValueError, OSError, RuntimeError):
+        # RuntimeError is what Path.resolve raises on a symlink loop
+        # (ELOOP); a path that cannot be resolved is not contained.
         return False
+
+
+def contained_under(root, rel) -> Path:
+    """Resolve a recorded root-relative path and REFUSE one that escapes.
+
+    State records (`winner_dir`, ...) are data, not trusted path fragments: an
+    absolute path or `../outside` must never make a destructive move or a
+    publication read outside the pipeline root.
+    """
+    base = Path(root).resolve()
+    raw = Path(str(rel or ""))
+    target = raw if raw.is_absolute() else base / raw
+    try:
+        resolved = target.resolve()
+    except (OSError, RuntimeError) as e:
+        die(f"the recorded path {rel!r} cannot be resolved under {base}: {e}")
+    try:
+        resolved.relative_to(base)
+    except ValueError:
+        die(f"the recorded path {rel!r} escapes the pipeline root {base}; refusing to "
+            f"touch it (repair state.json)")
+    return resolved
 
 
 def _aux_ignore(_dir, names):
@@ -7966,10 +8036,12 @@ def _rmtree_retry(func, path, _exc=None) -> None:
     """shutil.rmtree error hook: clear the blocking mode and retry the call."""
     if os.path.islink(path):
         # Never chmod THROUGH a link: the shared evidence store must keep its
-        # modes. rmtree unlinks a symlink without descending, so this is a guard
-        # for the odd entry that reaches here as a link.
+        # modes. On Python 3.12 shutil.rmtree raises for a link and calls this
+        # hook with func=os.path.islink; calling that func again is a no-op and
+        # suppresses the error, so the link used to survive while rmtree
+        # reported success. Unlink it for real.
         with contextlib.suppress(OSError):
-            func(path)
+            os.unlink(path)
         return
     with contextlib.suppress(OSError):
         os.chmod(path, 0o700)
@@ -7989,6 +8061,16 @@ def rmtree_force(path: Path, ignore_errors: bool = False) -> bool:
     p = Path(path)
     if not p.exists() and not p.is_symlink():
         return True
+    if p.is_symlink():
+        # rmtree never descends a link; remove the LINK itself (the target is
+        # not ours to delete and must survive).
+        try:
+            p.unlink()
+            return True
+        except OSError:
+            if ignore_errors:
+                return False
+            raise
     try:
         shutil.rmtree(p)
         return True

@@ -223,8 +223,8 @@ check("B2 the census prefix decides before the median/mean/IQR/digest",
       sel_b2b["champion"] == "i1",
       f"champion={sel_b2b['champion']} "
       f"ranking={[(r['id'], r.get('issues', {}).get('minor')) for r in sel_b2b['ranking']]}")
-check("B2 the trace names the cumulative-defect key",
-      any("cumulative defect count" in ln and "ranking key" in ln
+check("B2 the trace names the ordered per-cell census key",
+      any("per-cell defect census" in ln and "ranking key" in ln
           for ln in sel_b2b["trace"]),
       str([ln for ln in sel_b2b["trace"] if "ranking key" in ln])[:220])
 check("B2 the ranking rows carry the prefix total and the cell count",
@@ -251,7 +251,7 @@ _cum = {"A": [1, 5, 12], "B": [0, 4, 11]}
 check("B2 the prefix stops when the cleanest version reaches the floor",
       np.tiebreak_prefix_cells(_cum, ["A", "B"], 10) == 3
       and np.tiebreak_prefix_cells(_cum, ["A", "B"], 30) == 3
-      and np.tiebreak_prefix_cells(_cum, ["A", "B"], 0) == 1,
+      and np.tiebreak_prefix_cells(_cum, ["A", "B"], 0) == 0,
       f"{np.tiebreak_prefix_cells(_cum, ['A','B'], 10)}/"
       f"{np.tiebreak_prefix_cells(_cum, ['A','B'], 30)}/"
       f"{np.tiebreak_prefix_cells(_cum, ['A','B'], 0)}")
@@ -285,14 +285,14 @@ row_mean_worse = {"median": 1.0, "mean": 1.0, "iqr": 0.0, "digest": "a", "id": "
                   "defect_prefix_total": 1}
 check("B2 equal cumulative totals are broken by the mean",
       np.champion_sort_key(row_mean_better) < np.champion_sort_key(row_mean_worse))
-# The configured floor changes the stop: floor 0 stops at the FIRST cell (all
-# zero there), so the defect key cannot separate the versions and the digest
-# decides; the default floor 10 keeps accumulating to the cell that carries the
-# only defect (minor_formatting_own) and i1 wins.
+# The configured floor changes the stop: floor 0 is the EMPTY prefix (Rule 6),
+# so no census cell leads and the panel statistics/digest decide; the default
+# floor 10 keeps accumulating to the cell that carries the only defect
+# (minor_formatting_own) and i1 wins.
 ctx.cfg["tiebreak_defect_floor"] = 0
 sel_floor0 = np.select_champion(ctx, 2, agg_b2b)
-check("B2 a floor of 0 stops at the first cell and falls through to the digest",
-      sel_floor0["champion"] == "w1" and sel_floor0["tiebreak"]["cells_used"] == 1,
+check("B2 a floor of 0 uses the empty prefix and falls through to the digest",
+      sel_floor0["champion"] == "w1" and sel_floor0["tiebreak"]["cells_used"] == 0,
       f"champion={sel_floor0['champion']} used={sel_floor0['tiebreak']['cells_used']}")
 ctx.cfg.pop("tiebreak_defect_floor", None)
 
@@ -493,7 +493,8 @@ sm = (getattr(np, "score_model_doc", lambda: {})() or {})
 check("D4 the score model documents the contract, the rules and the tie-breaks",
       sm.get("judge_contract") == CONTRACT
       and sm.get("tiebreaks") == [
-          "cumulative defect count over the adaptive severity_tier_category prefix "
+          "ordered per-cell defect census over the adaptive severity_tier_category prefix "
+          "at the walk's stopping point, each cell a separate lexicographic rung "
           "(fatal->critical->major->minor, tier order, peer then own; the walk stops "
           "when the cleanest ranked version reaches `tiebreak_defect_floor` or every "
           "cell is used), ascending",

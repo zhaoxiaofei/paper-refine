@@ -1,16 +1,14 @@
 // ~/mcp-docx-converter/index.js
 import { McpServer } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
-import { execFile } from 'node:child_process';
 import { accessSync, constants, existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
 import * as z from 'zod/v4';
 import { allowedRoots, containsPath } from './containment.mjs';
 import { pdfKey } from './in-flight.mjs';
 
-const execFileAsync = promisify(execFile);
+import { runFile } from './run-child.mjs';
 
 // The converter script is NOT welded to one machine: an explicit env override
 // wins, then the repo-relative copy, then a sibling copy, then PATH. A
@@ -95,8 +93,8 @@ serveStdio(() => {
       // cap would kill a slow-but-valid Word conversion before the caller's
       // own timeout and silently downgrade the render to a lower-fidelity
       // fallback.
-      const run = () => execFileAsync(CONVERTER, [abs],
-                                      { timeout: 900_000, maxBuffer: 4 * 1024 * 1024 });
+      const run = () => runFile(CONVERTER, [abs],
+                                  { timeout: 900_000, maxBuffer: 4 * 1024 * 1024 });
       const previous = inFlight.get(key) ?? Promise.resolve();
       const next = previous.catch(() => {}).then(run);
       inFlight.set(key, next);

@@ -264,6 +264,13 @@ def cmd_setup(args) -> None:
     review_scope = review_scope[:rounds]
     if round_indices:
         review_scope = [ROUND_SCHEDULE[i - 1]["review_scope"] for i in round_indices]
+    if scoped_mode_restore is not None:
+        # The plan this mode replaces: save the operator's champion-select and
+        # review scope alongside the three audit policies, so leaving the mode
+        # restores them instead of silently falling back to the defaults (F09).
+        scoped_mode_restore["champion_select"] = str(
+            getattr(args, "champion_select", None) or DEFAULT_CHAMPION_SELECT)
+        scoped_mode_restore["review_scope"] = list(review_scope)
     bad_scope = [x for x in review_scope if x not in REVIEW_SCOPE_VALUES]
     if bad_scope:
         die(f"--review-scope entries must be one of {'|'.join(REVIEW_SCOPE_VALUES)}, "
@@ -1556,7 +1563,7 @@ def _merge_readme_row(staged: Path, dest: Path, vid: str,
     staged_lines = []
     if staged is not None:
         try:
-            staged_lines = staged.read_text(encoding="utf-8").splitlines()
+            staged_lines = staged.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             staged_lines = []
     rows = [ln for ln in staged_lines if ln.startswith("|") and f"`{vid}`" in ln]
@@ -2035,63 +2042,64 @@ def cmd_apply_template(args) -> None:
     """Rebuild a whole submission package inside the venue's Word templates."""
     ctx = Ctx(Path(args.root))
     ctx.load()
-    templates = venue_word_templates(ctx)
-    agent_mode = bool(str(getattr(args, "agent", None) or "").strip())
-    if not templates and not agent_mode:
-        die(f"the venue {venue_id_of(ctx)!r} ships no official Word template, so there is "
-            f"nothing to rebuild from: put the journal's .docx (main + supplementary) under "
-            f"{ctx.root}/venue_profiles/{venue_id_of(ctx)}{VENUE_OFFICIAL_SUFFIX}/ and re-run "
-            f"`build-venue-templates`/`setup`")
-    if not templates:
-        print(f"[conform] note: the venue {venue_id_of(ctx)!r} ships no official Word template; "
-              f"the agent session follows the journal's own author guidelines, then academic "
-              f"convention")
-    src = Path(args.source).expanduser() if args.source else default_template_package_source(ctx)
-    if src is None:
-        # A staged transfer/init session is checked against its OWN read-only
-        # `source/` copy: `conform --root ... --agent manual` (the check the run
-        # banner names) had no package to resolve on a root that has not
-        # finished a round yet, so the advertised check could never run.
-        staged = ctx.root / TEMPLATE_REWRITE_DIRNAME / "source"
-        if staged.is_dir() and any(staged.iterdir()):
-            src = staged
-    if src is None:
-        die("no package to rebuild: the root has no final_clean_version_<root name>/ and no "
-            "completed round's round<r>_winner/ -- name one with --source <dir>")
-    prof = venue_profile_of(ctx, required=False)
-    journal = journal_of(ctx) or (prof.default_journal if prof is not None else "")
-    print(f"[conform] venue: {venue_id_of(ctx)}"
-          + (f" ({journal})" if journal else " (no journal configured)"))
-    if str(getattr(args, "agent", None) or "").strip():
-        _template_rewrite_session(ctx, args, src, templates)
-        return
-    dest = Path(args.dest).expanduser() if args.dest else ctx.root / TEMPLATE_PACKAGE_DIRNAME
-    # `--force` recursively deletes THE DESTINATION. Protect the pipeline root:
-    # the only destination inside it that may be replaced is the default
-    # `<root>/template_package/`; an explicit `--dest <root>` (the confirmed
-    # repro) or any other root-owned directory is refused before the deletion.
-    protect = () if dest.resolve() == (ctx.root / TEMPLATE_PACKAGE_DIRNAME).resolve() \
-        else (ctx.root,)
-    report = rebuild_package_from_templates(templates, src, dest, force=bool(args.force),
-                                            containers=venue_containers(ctx),
-                                            manuscript_names=article_type_manuscript_names(ctx),
-                                            protected=protect)
-    if not report.get("ok"):
-        if report.get("error"):
-            die(report["error"])
-        die("the rebuild left files un-restyled: " + ", ".join(report.get("failed") or []))
-    print(f"[conform] rebuilt {report['documents_rebuilt']} document(s) and copied "
-          f"{report['files_copied']} other file(s):")
-    for f in report["files"]:
-        if f["kind"] == "docx-rebuilt":
-            print(f"  [docx] {f['file']}  (template: {Path(str(f.get('template') or '')).name}, "
-                  f"text preserved={f.get('text_unchanged')}, "
-                  f"headings retagged={len(f.get('headings_retagged') or [])})")
-    print(f"[conform] package: {report['dest']}")
-    print(f"[conform] report:  {report['dest']}.template_report.md "
-          f"(+ .json; written BESIDE the package, never inside it)")
-    print(f"[conform] the source package is untouched; every rebuilt document's text is "
-          f"proven byte-identical to its source ({DOCX_FORMAT_MODULE} self-verification)")
+    with ctx.lock("conform"):
+        templates = venue_word_templates(ctx)
+        agent_mode = bool(str(getattr(args, "agent", None) or "").strip())
+        if not templates and not agent_mode:
+            die(f"the venue {venue_id_of(ctx)!r} ships no official Word template, so there is "
+                f"nothing to rebuild from: put the journal's .docx (main + supplementary) under "
+                f"{ctx.root}/venue_profiles/{venue_id_of(ctx)}{VENUE_OFFICIAL_SUFFIX}/ and re-run "
+                f"`build-venue-templates`/`setup`")
+        if not templates:
+            print(f"[conform] note: the venue {venue_id_of(ctx)!r} ships no official Word template; "
+                  f"the agent session follows the journal's own author guidelines, then academic "
+                  f"convention")
+        src = Path(args.source).expanduser() if args.source else default_template_package_source(ctx)
+        if src is None:
+            # A staged transfer/init session is checked against its OWN read-only
+            # `source/` copy: `conform --root ... --agent manual` (the check the run
+            # banner names) had no package to resolve on a root that has not
+            # finished a round yet, so the advertised check could never run.
+            staged = ctx.root / TEMPLATE_REWRITE_DIRNAME / "source"
+            if staged.is_dir() and any(staged.iterdir()):
+                src = staged
+        if src is None:
+            die("no package to rebuild: the root has no final_clean_version_<root name>/ and no "
+                "completed round's round<r>_winner/ -- name one with --source <dir>")
+        prof = venue_profile_of(ctx, required=False)
+        journal = journal_of(ctx) or (prof.default_journal if prof is not None else "")
+        print(f"[conform] venue: {venue_id_of(ctx)}"
+              + (f" ({journal})" if journal else " (no journal configured)"))
+        if str(getattr(args, "agent", None) or "").strip():
+            _template_rewrite_session(ctx, args, src, templates)
+            return
+        dest = Path(args.dest).expanduser() if args.dest else ctx.root / TEMPLATE_PACKAGE_DIRNAME
+        # `--force` recursively deletes THE DESTINATION. Protect the pipeline root:
+        # the only destination inside it that may be replaced is the default
+        # `<root>/template_package/`; an explicit `--dest <root>` (the confirmed
+        # repro) or any other root-owned directory is refused before the deletion.
+        protect = () if dest.resolve() == (ctx.root / TEMPLATE_PACKAGE_DIRNAME).resolve() \
+            else (ctx.root,)
+        report = rebuild_package_from_templates(templates, src, dest, force=bool(args.force),
+                                                containers=venue_containers(ctx),
+                                                manuscript_names=article_type_manuscript_names(ctx),
+                                                protected=protect)
+        if not report.get("ok"):
+            if report.get("error"):
+                die(report["error"])
+            die("the rebuild left files un-restyled: " + ", ".join(report.get("failed") or []))
+        print(f"[conform] rebuilt {report['documents_rebuilt']} document(s) and copied "
+              f"{report['files_copied']} other file(s):")
+        for f in report["files"]:
+            if f["kind"] == "docx-rebuilt":
+                print(f"  [docx] {f['file']}  (template: {Path(str(f.get('template') or '')).name}, "
+                      f"text preserved={f.get('text_unchanged')}, "
+                      f"headings retagged={len(f.get('headings_retagged') or [])})")
+        print(f"[conform] package: {report['dest']}")
+        print(f"[conform] report:  {report['dest']}.template_report.md "
+              f"(+ .json; written BESIDE the package, never inside it)")
+        print(f"[conform] the source package is untouched; every rebuilt document's text is "
+              f"proven byte-identical to its source ({DOCX_FORMAT_MODULE} self-verification)")
 
 
 def cmd_build_venue_templates(args) -> None:
@@ -2280,8 +2288,8 @@ def cmd_set_tiebreak_defect_floor(args) -> None:
     show = bool(getattr(args, "show", False)) or value is None
     if show:
         print(f"[set-tiebreak-defect-floor] floor: {tiebreak_defect_floor_of(ctx)} "
-              f"(default {DEFAULT_TIEBREAK_DEFECT_FLOOR}; 0 = stop at the first "
-              f"severity_tier_category cell, so the mean/IQR/digest decide; a huge value such "
+              f"(default {DEFAULT_TIEBREAK_DEFECT_FLOOR}; 0 = the EMPTY prefix (no "
+              f"census cell leads), so the median/mean/IQR/digest decide; a huge value such "
               f"as 999999 uses every cell)")
         return
     try:
@@ -2829,6 +2837,13 @@ def cmd_set_revision_mode(args) -> None:
                     "revision_audit": str(ctx.cfg.get("revision_audit", "on") or "on").lower(),
                     "probe_review": str(ctx.cfg.get("probe_review", PROBE_REVIEW_DEFAULT)
                                         or PROBE_REVIEW_DEFAULT).lower(),
+                    # The scoped mode also forces champion_select=revise and may
+                    # run with a scoped review_scope; leaving the mode must put
+                    # the operator's own values back (F09).
+                    "champion_select": str(ctx.cfg.get("champion_select")
+                                           or DEFAULT_CHAMPION_SELECT),
+                    "review_scope": list(ctx.cfg.get("review_scope")
+                                         or DEFAULTS["review_scope"]),
                 })
             rounds = int(ctx.cfg.get("rounds") or 1)
             if rounds != 1:
@@ -2867,6 +2882,12 @@ def cmd_set_revision_mode(args) -> None:
                 ctx.cfg[_key] = list(_default) if isinstance(_default, list) else _default
                 forced.append(f"{_key}={ctx.cfg[_key]} (the default plan)")
             saved = ctx.cfg.pop("scoped_mode_restore", None) or {}
+            if saved.get("champion_select"):
+                ctx.cfg["champion_select"] = str(saved["champion_select"])
+                forced.append(f"champion_select={ctx.cfg['champion_select']} (restored)")
+            if isinstance(saved.get("review_scope"), list) and saved["review_scope"]:
+                ctx.cfg["review_scope"] = [str(x) for x in saved["review_scope"]]
+                forced.append(f"review_scope={ctx.cfg['review_scope']} (restored)")
             ctx.cfg["audit"] = str(saved.get("audit") or DEFAULT_AUDIT)
             forced.append(f"audit={ctx.cfg['audit']} (restored)")
             ctx.cfg["revision_audit"] = str(saved.get("revision_audit") or "on").lower()

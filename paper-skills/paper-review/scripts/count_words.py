@@ -149,11 +149,11 @@ KEYWORDS = re.compile(
 # captions there and were counted as main text here, and the counter's whole
 # contract is that it reads a document the way the M19 row the venue gate uses
 # reads it.
-CAPTION = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?fig(?:ure)?s?\.?\s*"
+CAPTION = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp\.?)\s+)?fig(?:ure)?s?\.?\s*"
                      r"\|?\s*"
                      r"(?:S?\d+[A-Za-z]?|(?-i:[IVXLCDM]+))"
                      r"(?:\s*\([A-Za-z0-9][A-Za-z0-9,.\u2013\-]*\))?"
-                     r"\s*(?:\||:|\u2014|\u2013|-|\.)\s*", re.I)
+                     r"\s*(?:(?:\||:|\u2014|\u2013|-)(?![A-Za-z])|\.)\s*", re.I)
 # A caption-LOOKING line the strict pattern does NOT recognise: a bare label on a
 # line of its own ("Fig. S3", "Figure 3"), which two-column and PDF-extracted
 # text produce. The pipeline reports these as suspected captions and ENDS the
@@ -645,8 +645,33 @@ def sections(text: str, abstract_end=None, caption_lines=None, excludes=None) ->
     return rows
 
 
-def is_cover_letter(text: str, name: str = "") -> bool:
-    """A cover letter, by filename or opening salutation."""
+def _name_is_type_manuscript(name: str, type_names=()) -> bool:
+    """True when a filename IS one of the selected article type's spellings."""
+    stem = Path(str(name or "")).stem
+    norm = re.sub(r"[^a-z0-9]+", " ", stem.lower()).strip()
+    if not norm:
+        return False
+    for t in type_names:
+        t = re.sub(r"[^a-z0-9]+", " ", str(t or "").lower()).strip()
+        if not t:
+            continue
+        if norm == t:
+            return True
+        if norm.startswith(t + " ") and re.fullmatch(
+                r"(?:v|rev|version|revision|draft)? ?\d{1,3}", norm[len(t) + 1:]):
+            return True
+    return False
+
+
+def is_cover_letter(text: str, name: str = "", type_names=()) -> bool:
+    """A cover letter, by filename or opening salutation.
+
+    The selected article type's own manuscript name outranks the salutation:
+    a Letter-to-the-Editor manuscript opens "Dear Editor," too. Same order as
+    the pipeline's `_is_cover_letter_lines()`.
+    """
+    if _name_is_type_manuscript(name, type_names):
+        return False
     if _COVER_WORD_RE.search(name or ""):
         return True
     for line in (text or "").splitlines()[:12]:
@@ -770,10 +795,14 @@ def _venue_profile_path(value: str) -> Path:
         return p
     raw = str(value).strip()
     if raw and not raw.lower().endswith(".json") and "/" not in raw and "\\" not in raw:
-        for base in (Path(__file__).resolve().parents[3], Path.cwd()):
-            candidate = base / "venue_profiles" / f"{raw}.json"
-            if candidate.is_file():
-                return candidate
+        # The pipeline lowercases a bare id and resolves it case-insensitively;
+        # `--venue-profile NATURE-BIOTECHNOLOGY` must not fail while
+        # `load_venue_profile` accepts it.
+        for stem in dict.fromkeys((raw, raw.lower())):
+            for base in (Path(__file__).resolve().parents[3], Path.cwd()):
+                candidate = base / "venue_profiles" / f"{stem}.json"
+                if candidate.is_file():
+                    return candidate
     return p
 
 
@@ -822,6 +851,7 @@ def main(argv=None) -> int:
     cover_min, cover_max = COVER_LETTER_MIN, COVER_LETTER_MAX
     cover_total_max = COVER_LETTER_TOTAL_MAX
     counting_excludes = None
+    manuscript_type_names = []
     venue = "(no venue profile: counts only, no cap)"
     if args.venue_profile:
         profile_path = _venue_profile_path(args.venue_profile)
@@ -869,11 +899,18 @@ def main(argv=None) -> int:
         venue = str((profile or {}).get("id") or args.venue_profile)
         if types:
             venue += f" [{entry.get('label') or type_id}]"
+        manuscript_type_names = [x for x in
+                                 ((entry or {}).get("label"), type_id) if x]
         limits = ((entry or {}).get("length_limits")
                   if types else (profile or {}).get("length_limits")) or {}
 
         def _limit(key, default_base, default_relaxation):
             spec = limits.get(key)
+            if isinstance(spec, (int, float)) and not isinstance(spec, bool):
+                # The profile loader's bare-number shorthand: a number means
+                # base=N with relaxation=1.0. Reading only dicts reported no cap
+                # for a legal profile the pipeline enforced.
+                return float(spec), 1.0
             if not isinstance(spec, dict) or "base" not in spec or "relaxation" not in spec:
                 # The profile was loaded and this type states no USABLE number
                 # for the section (absent, null, an empty block, or an unpaired
@@ -1011,7 +1048,8 @@ def main(argv=None) -> int:
                       "the whole file (requested with --section whole)")]
                     if args.section == "whole"
                     else sections(text, excludes=counting_excludes))
-        if (args.section in ("auto", "cover-letter")) and is_cover_letter(text, p.name):
+        if (args.section in ("auto", "cover-letter")) and is_cover_letter(
+                text, p.name, manuscript_type_names):
             rows = [("cover letter", cover_letter_words(text),
                      cover_pref_note),
                     ("cover letter total", count_words(text), cover_total_note)]

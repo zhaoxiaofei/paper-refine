@@ -1249,13 +1249,14 @@ def score_model_doc(ctx=None) -> dict:
             "legacy_policy": "sheets from sandboxes materialized before the contract are "
                              "accepted with a warning and counted as uncalibrated; they are "
                              "never silently mixed into a calibrated panel"},
-        "ranking": "the cumulative reported defect count over the adaptive "
-                   "severity_tier_category prefix LEADS (fewer defects is better; the cells are "
-                   "fatal -> critical -> major -> minor, tier by tier in the scoring priority "
-                   "order, peer before own -- the SAME four severity rungs the census, the "
-                   "judge contract and the score model use; the walk stops when the "
-                   "cleanest ranked version reaches the `tiebreak_defect_floor` or every cell "
-                   "is used), then the median of the flat directed-score list, then the "
+        "ranking": "the ORDERED per-cell reported defect census over the adaptive "
+                   "severity_tier_category prefix LEADS (each cell is its own lexicographic "
+                   "rung, ascending; the cells are fatal -> critical -> major -> minor, tier by "
+                   "tier in the scoring priority order, peer before own -- the SAME four "
+                   "severity rungs the census, the judge contract and the score model use; the "
+                   "walk stops when the cleanest ranked version reaches the "
+                   "`tiebreak_defect_floor` or every cell is used), then the median of the "
+                   "flat directed-score list, then the "
                    "arithmetic mean, the IQR and the content digest; an exact "
                    "(median, mean, IQR) tie still keeps the incumbent base",
         "cross_round_comparability": "per-round champion statistics come from different panels "
@@ -1270,10 +1271,11 @@ def score_model_doc(ctx=None) -> dict:
                                 f"well-powered, and every row reports its wins/losses/ties and p",
         "tiebreak_defect_floor": tiebreak_defect_floor_of(ctx),
         "dedup_mode": dedup_mode_of(ctx),
-        "tiebreaks": ["cumulative defect count over the adaptive severity_tier_category prefix "
-                      "(fatal->critical->major->minor, tier order, peer then own; the walk stops "
-                      "when the cleanest ranked version reaches `tiebreak_defect_floor` or every "
-                      "cell is used), ascending",
+        "tiebreaks": ["ordered per-cell defect census over the adaptive "
+                      "severity_tier_category prefix at the walk's stopping point, each cell a "
+                      "separate lexicographic rung (fatal->critical->major->minor, tier order, "
+                      "peer then own; the walk stops when the cleanest ranked version reaches "
+                      "`tiebreak_defect_floor` or every cell is used), ascending",
                       "-median", "-mean", "IQR", "digest", "id",
                       "the incumbent rule overrides on an exact (median, mean, IQR) tie"],
         "tiebreak_notes": "median/mean/IQR are PANEL statistics (verifiable); the cumulative "
@@ -1287,9 +1289,10 @@ def score_model_doc(ctx=None) -> dict:
                           "issue_cumulative.csv), and the walk stops at the first prefix where "
                           "the version with the FEWEST defects has "
                           "`tiebreak_defect_floor` of them (default 10) -- or when every cell is "
-                          "included; the cumulative count at that prefix LEADS the ranking (the "
-                          "median, then the mean, the IQR and the digest are the fallbacks), "
-                          "and a small per-cell count is deliberately never a rung of its own; "
+                          "included; the ORDERED per-cell census at that prefix LEADS the "
+                          "ranking -- each cell is compared in turn (the median, then the mean, "
+                          "the IQR and the digest are the fallbacks below it), so a fatal "
+                          "defect never ties the same total of minor ones; "
                           "`dedup_mode` off (the default) performs NO cross-sheet matching (a "
                           "judge sheet that repeats a row in the same sheet counts it once, a row "
                           "two sheets both filed counts twice); the opt-in `dedup_mode` location "
@@ -6121,24 +6124,36 @@ def write_final_clean_zip(dirp: Path, zip_path: Path) -> dict:
     """
     ztmp = zip_path.with_name(zip_path.name + ".tmp")
     n_files = 0
-    with zipfile.ZipFile(ztmp, "w", zipfile.ZIP_DEFLATED) as zf:
-        for q in sorted(dirp.rglob("*")):
-            rel = f"{dirp.name}/{q.relative_to(dirp).as_posix()}"
-            info = zipfile.ZipInfo(rel + "/" if q.is_dir() else rel,
-                                   date_time=(1980, 1, 1, 0, 0, 0))
-            info.compress_type = zipfile.ZIP_DEFLATED
-            info.external_attr = (0o755 if q.is_dir() else 0o644) << 16
-            if q.is_dir():
-                zf.writestr(info, b"")
-                continue
-            n_files += 1
-            with open(q, "rb") as fsrc, zf.open(info, "w") as fdst:
-                shutil.copyfileobj(fsrc, fdst, 1 << 20)
-    if zip_path.is_file() and sha256_file(zip_path) == sha256_file(ztmp):
-        ztmp.unlink()
-    else:
-        os.replace(ztmp, zip_path)
-    return {"path": str(zip_path), "files": n_files, "bytes": zip_path.stat().st_size}
+    try:
+        with zipfile.ZipFile(ztmp, "w", zipfile.ZIP_DEFLATED) as zf:
+            for q in sorted(dirp.rglob("*")):
+                rel = f"{dirp.name}/{q.relative_to(dirp).as_posix()}"
+                info = zipfile.ZipInfo(rel + "/" if q.is_dir() else rel,
+                                       date_time=(1980, 1, 1, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = (0o755 if q.is_dir() else 0o644) << 16
+                if q.is_dir():
+                    zf.writestr(info, b"")
+                    continue
+                n_files += 1
+                with open(q, "rb") as fsrc, zf.open(info, "w") as fdst:
+                    shutil.copyfileobj(fsrc, fdst, 1 << 20)
+        if zip_path.is_file() and sha256_file(zip_path) == sha256_file(ztmp):
+            ztmp.unlink()
+        else:
+            os.replace(ztmp, zip_path)
+    except (OSError, RuntimeError) as e:
+        # Never leave a partial archive beside the package, and record the
+        # failure in the publication dict instead of aborting `decide`.
+        try:
+            ztmp.unlink()
+        except OSError:
+            pass
+        return {"path": str(zip_path), "files": 0, "bytes": 0,
+                "error": f"could not write the package archive: {type(e).__name__}: {e}",
+                "ok": False}
+    return {"path": str(zip_path), "files": n_files, "bytes": zip_path.stat().st_size,
+            "ok": True}
 
 
 def _stage_dangling_report(ctx: Ctx, final: dict):
@@ -6215,8 +6230,8 @@ def publish_final_clean(ctx: Ctx, final: dict, certified: bool, reason: str = ""
     pin = final.get("pin") or {}
     src = None
     winner = final["stored"].get("winner_dir")
-    if winner and (ctx.root / winner).is_dir():
-        src = ctx.root / winner
+    if winner and contained_under(ctx.root, winner).is_dir():
+        src = contained_under(ctx.root, winner)
     elif pin:
         d = pinned_docs_dir(ctx, pin)
         if d.is_dir():
@@ -6905,6 +6920,46 @@ def champion_producing_run(ctx: Ctx, final: dict) -> dict:
     return run or {}
 
 
+def _open_item_rows(value) -> list:
+    """Row dicts from ANY revision-ledger shape the contract accepts.
+
+    A bare list of rows, rows under a synonym key (`coverage`, `rows`,
+    `findings`, `ledger`, ...) and a mapping keyed by finding id are all legal;
+    `revision_ledger_problems()` accepts them, so this reader must too.
+    """
+    rows = []
+
+    def take(v) -> None:
+        if isinstance(v, list):
+            rows.extend(r for r in v if isinstance(r, dict))
+        elif isinstance(v, dict):
+            if any(k in v for k in ("id", "check", "verdict", "final_status", "status")):
+                rows.append(v)
+            else:
+                for key, item in v.items():
+                    if isinstance(item, dict):
+                        row = dict(item)
+                        row.setdefault("id", key)
+                        rows.append(row)
+
+    if isinstance(value, list):
+        take(value)
+    elif isinstance(value, dict):
+        # ONE row container is the ledger: `coverage` is the status table and
+        # `findings` is metadata for the same ids. Merging both made the
+        # metadata rows overwrite the status rows (every item then looked
+        # un-statused), so stop at the first container that yields rows.
+        for key in ("coverage", "rows", "findings", "ledger", "coverage_table",
+                    "items", "results"):
+            if key in value:
+                take(value[key])
+                if rows:
+                    break
+        if not rows:
+            take(value)
+    return [r for r in rows if str(r.get("id") or "").strip()]
+
+
 def collect_open_review_items(ctx: Ctx, final: dict) -> dict:
     """The champion's open review items + its own hand-off list.
 
@@ -6934,18 +6989,20 @@ def collect_open_review_items(ctx: Ctx, final: dict) -> dict:
             if report:
                 break
     report = report or {}
-    info["statuses"] = {str(k): int(v) for k, v in
-                        (report.get("counts_by_status") or report.get("counts") or {}).items()
-                        if is_int(v)}
-    coverage = {str(r.get("id")): r for r in (report.get("coverage") or [])
-                if isinstance(r, dict) and r.get("id")}
-    findings = {str(f.get("id")): f for f in (report.get("findings") or [])
-                if isinstance(f, dict) and f.get("id")}
+    raw_counts = ((report.get("counts_by_status") or report.get("counts") or {})
+                  if isinstance(report, dict) else {})
+    info["statuses"] = {str(k): int(v) for k, v in raw_counts.items() if is_int(v)}
+    coverage = {str(r.get("id")): r for r in _open_item_rows(report)}
+    findings = {str(f.get("id")): f
+                for f in _open_item_rows(report.get("findings") if isinstance(report, dict) else [])}
     audit = read_json(sb / "audit" / "audit.json") or {}
     verdicts = {str(r.get("id")): str(r.get("verdict") or "").lower()
                 for r in (audit.get("dispositions") or []) if isinstance(r, dict)}
     for fid, row in sorted(coverage.items()):
-        status = str(row.get("final_status") or "")
+        # A documented ledger row carries `verdict` (confirmed/manual-required)
+        # where a coverage table carries `final_status`; read both.
+        status = str(row.get("final_status") or row.get("status")
+                     or row.get("verdict") or "")
         f = findings.get(fid) or {}
         item = {"id": fid, "status": status,
                 "check": f.get("check") or row.get("check"),
@@ -6974,7 +7031,10 @@ def collect_open_review_items(ctx: Ctx, final: dict) -> dict:
             if m:
                 info["manual_steps_items"] = int(m.group(1))
             else:
-                info["manual_steps_items"] = len(re.findall(r"(?m)^\*\*?[A-Z]{1,2}\d+", text))
+                # The sibling count must agree with the pipeline's own
+                # count_manual_steps(): a plain bullet is one hand-off item,
+                # not zero.
+                info["manual_steps_items"] = int(count_manual_steps(steps) or 0)
     return info
 
 
@@ -7010,6 +7070,10 @@ def write_open_items_sibling(ctx: Ctx, open_items: dict) -> dict:
     open rows are written instead, so the item list is never empty-by-omission.
     """
     oi = open_items or {}
+    # The ledger rows and the card's own MANUAL_STEPS count are two views of
+    # the same hand-off list: a plain-bullet file carries items even when the
+    # structured rows are empty, so the header/return must agree with the file.
+    n_items = len(oi.get("items") or []) or int(oi.get("manual_steps_items") or 0)
     body = open_items_text(oi)
     if not body.strip():
         p = ctx.root / FINAL_CLEAN_STEPS_NAME
@@ -7026,7 +7090,7 @@ def write_open_items_sibling(ctx: Ctx, open_items: dict) -> dict:
              f"These items are NOT fixed by the pipeline; every one of them changes a "
              f"delivered document (or a read-only artifact the author owns), so the pipeline "
              f"reports them instead of inventing content."),
-            f"Open item(s): {len(oi.get('items') or [])}"
+            f"Open item(s): {n_items}"
             + (f"; unsupported discard(s): {len(oi.get('discarded') or [])}"
                if oi.get("discarded") else ""),
             "",
@@ -7035,7 +7099,7 @@ def write_open_items_sibling(ctx: Ctx, open_items: dict) -> dict:
             ""]
     p = ctx.root / FINAL_CLEAN_STEPS_NAME
     write_text_atomic(p, "\n".join(head) + body)
-    return {"path": str(p), "items": len(oi.get("items") or [])}
+    return {"path": str(p), "items": n_items}
 
 
 def _handoff_readme_items(final_clean: dict) -> dict:
@@ -7517,9 +7581,9 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
         L.append(f"- orchestrator RECOVERY: {len(integrity['recovery'])} run(s) dropped base "
                  f"file(s) that were restored mechanically (advisory; the judged package is "
                  f"complete, and this never changes a score)")
-        for r in integrity["recovery"][:8]:
-            L.append(f"  - {r['run']} ({r['version']}): {r['count']} restored file(s)"
-                     + (f", e.g. {', '.join(r['files'][:3])}" if r.get("files") else ""))
+        for rec in integrity["recovery"][:8]:
+            L.append(f"  - {rec['run']} ({rec['version']}): {rec['count']} restored file(s)"
+                     + (f", e.g. {', '.join(rec['files'][:3])}" if rec.get("files") else ""))
     if integrity.get("visual_not_verified"):
         L.append(f"- visual verification INCOMPLETE in {len(integrity['visual_not_verified'])} "
                  f"run(s) (a renderer was unavailable or the agent recorded 'not visually "
@@ -7787,8 +7851,10 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
                      "rows and columns). The selection accumulates the cells in that order "
                      "and stops at the first prefix where the cleanest ranked version reaches "
                      f"the configured floor (default {DEFAULT_TIEBREAK_DEFECT_FLOOR}), or when "
-                     "every cell is used; the cumulative count at that prefix breaks a median "
-                     f"tie. The long-form table is `reports/round{r}_issue_census.csv` (one "
+                     "every cell is used; the ORDERED per-cell counts at that prefix LEAD the "
+                     "ranking (each cell a separate lexicographic rung), and the panel "
+                     f"median/mean/IQR/digest break an exact census tie. The long-form table is "
+                     f"`reports/round{r}_issue_census.csv` (one "
                      "row per version/tier/severity) for concatenation across runs, and "
                      f"`reports/round{r}_dedup_audit.json` records every cross-sheet merge the "
                      "opt-in `dedup_mode` location made (zero merges when it is off).")
@@ -7940,7 +8006,7 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
              f"absent (weights are arbitrary and the tier order IS the aggregation: "
              f"correctness > preservation > completeness > consistency > writing > formatting).")
     L.append("")
-    L.append("**Ranking key.** The selection key is `cumulative-defect-prefix -> median -> "
+    L.append("**Ranking key.** The selection key is `defect-prefix-census -> median -> "
              "mean -> IQR -> digest`: the round's OWN ISSUE CENSUS leads -- how many defects "
              "the panel attributed to the version is the most direct improvement signal, while "
              "the flat median is coarse on a -4..+4 integer scale. The prefix is read from the "
@@ -7951,12 +8017,13 @@ def build_decision_report(ctx: Ctx, rounds_data: list, integrity: dict,
              f"prefix where the version with the FEWEST defects reaches the configured floor "
              f"(default {DEFAULT_TIEBREAK_DEFECT_FLOOR} defects, "
              f"`setup --tiebreak-defect-floor N` / `set-tiebreak-defect-floor N`), or when every "
-             "cell is included; the cumulative count at that prefix LEADS the ranking (fewer is "
-             "better), and `median(flat score list)` (with the arithmetic mean and the IQR over "
-             "the same flat list) is the first tie-break below it. A per-cell count is never a "
-             "rung of its own: with small counts its fluctuation is larger than the signal, "
-             "which is why the prefix keeps accumulating until the cleanest candidate carries "
-             "enough evidence. Counts are the mentions each judge sheet filed (collapsed only "
+             "cell is included. The ORDERED per-cell counts at that prefix LEAD the ranking, "
+             "each cell its own lexicographic rung (a fatal defect never ties a minor one with "
+             "the same total), and `median(flat score list)` (with the arithmetic mean and the "
+             "IQR over the same flat list) is the first tie-break below it. The prefix keeps "
+             "accumulating until the cleanest candidate carries enough evidence, so the walk "
+             "stops where the total actually discriminates rather than on one tiny cell. "
+             "Counts are the mentions each judge sheet filed (collapsed only "
              "per session+version; no cross-session matching). The median and the mean are the "
              "panel statistics below the prefix; the IQR and the content digest are the "
              "deterministic fallbacks. The incumbent-retention rule still fires on an exact "
@@ -8197,60 +8264,61 @@ def cmd_sync_code(args) -> None:
     if holder:
         die(f"sync-code: {root} is locked by pid {holder[0]} ({holder[1]}); stop the live "
             f"run before replacing the code it is executing.")
-    changed, unchanged = [], []
-    for name in PIPELINE_MODULE_FILES:
-        s, d = src / name, root / name
-        if not s.is_file():
-            die(f"sync-code: the maintained tree has no {name}; refusing a partial bundle")
-        try:
-            same = d.is_file() and sha256_file(s) == sha256_file(d)
-        except OSError:
-            same = False
-        if same:
-            unchanged.append(name)
-            continue
-        # Replace atomically: a `run` that starts while the bundle is being
-        # synced must read a whole module, never a half-written one.
-        tmp = d.with_name(d.name + ".sync-tmp")
-        shutil.copy2(s, tmp)
-        os.replace(tmp, d)
-        changed.append(name)
-    # The loaders are thin: sync the ordered implementation parts too, again
-    # atomically, and record their directory digests in the manifest.
-    for name in PIPELINE_ASSET_DIRS:
-        s = src / name
-        if not s.is_dir():
-            die(f"sync-code: the maintained tree has no {name}/; refusing a partial bundle")
-        try:
-            same = asset_dir_digest(src, name) == asset_dir_digest(root, name)
-        except OSError:
-            same = False
-        if same:
-            unchanged.append(name + "/")
-            continue
-        copy_asset_dirs(src, root, names=(name,))
-        changed.append(name + "/")
-    # The skills pack is frozen and manifest-recorded too (F132). A trimmed
-    # checkout may legitimately omit it (module_manifest records None), so a
-    # missing maintained pack is not a partial bundle; a root that lacks it
-    # when the maintained tree has it is brought up to date.
-    for name in PIPELINE_SKILL_ASSET_DIRS:
-        s = src / name
-        if not s.is_dir():
-            continue
-        try:
-            same = asset_dir_digest(src, name) == asset_dir_digest(root, name)
-        except OSError:
-            same = False
-        if same:
-            unchanged.append(name + "/")
-            continue
-        copy_asset_dirs(src, root, names=(name,))
-        changed.append(name + "/")
-    ident = pipeline_identity()
-    ident["synced_at"] = utcnow()
-    ctx.state["pipeline"] = ident
-    ctx.save_state()
+    with ctx.lock("sync-code"):
+        changed, unchanged = [], []
+        for name in PIPELINE_MODULE_FILES:
+            s, d = src / name, root / name
+            if not s.is_file():
+                die(f"sync-code: the maintained tree has no {name}; refusing a partial bundle")
+            try:
+                same = d.is_file() and sha256_file(s) == sha256_file(d)
+            except OSError:
+                same = False
+            if same:
+                unchanged.append(name)
+                continue
+            # Replace atomically: a `run` that starts while the bundle is being
+            # synced must read a whole module, never a half-written one.
+            tmp = d.with_name(d.name + ".sync-tmp")
+            shutil.copy2(s, tmp)
+            os.replace(tmp, d)
+            changed.append(name)
+        # The loaders are thin: sync the ordered implementation parts too, again
+        # atomically, and record their directory digests in the manifest.
+        for name in PIPELINE_ASSET_DIRS:
+            s = src / name
+            if not s.is_dir():
+                die(f"sync-code: the maintained tree has no {name}/; refusing a partial bundle")
+            try:
+                same = asset_dir_digest(src, name) == asset_dir_digest(root, name)
+            except OSError:
+                same = False
+            if same:
+                unchanged.append(name + "/")
+                continue
+            copy_asset_dirs(src, root, names=(name,))
+            changed.append(name + "/")
+        # The skills pack is frozen and manifest-recorded too (F132). A trimmed
+        # checkout may legitimately omit it (module_manifest records None), so a
+        # missing maintained pack is not a partial bundle; a root that lacks it
+        # when the maintained tree has it is brought up to date.
+        for name in PIPELINE_SKILL_ASSET_DIRS:
+            s = src / name
+            if not s.is_dir():
+                continue
+            try:
+                same = asset_dir_digest(src, name) == asset_dir_digest(root, name)
+            except OSError:
+                same = False
+            if same:
+                unchanged.append(name + "/")
+                continue
+            copy_asset_dirs(src, root, names=(name,))
+            changed.append(name + "/")
+        ident = pipeline_identity()
+        ident["synced_at"] = utcnow()
+        ctx.state["pipeline"] = ident
+        ctx.save_state()
     print(f"[sync-code] root: {root}")
     print(f"[sync-code] source tree: {src}")
     print(f"[sync-code] copied: {', '.join(changed) if changed else '(nothing changed)'}")
@@ -9046,16 +9114,17 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
     _stopped = _stopped_raw if _stop_applies else {}
     partial_run = final["round"] < R and not _stop_applies
     provisional = partial_run or bool(auto_rounds)
-    win_dir = ctx.root / (final["stored"].get("winner_dir") or "")
+    win_dir = (contained_under(ctx.root, final["stored"]["winner_dir"])
+               if final["stored"].get("winner_dir") else None)
+    _win_ok = bool(final["stored"].get("winner_dir") and win_dir and win_dir.is_dir())
     win_captions = (scan_captions_in_sources([(win_dir, "", ())], limit=caption_limit_of(ctx))
-                    if final["stored"].get("winner_dir") and win_dir.is_dir() else None)
+                    if _win_ok else None)
     win_lengths = (scan_lengths_in_sources([(win_dir, "", ())],
                                            profile=venue_profile_of(ctx, required=False))
-                   if final["stored"].get("winner_dir") and win_dir.is_dir() else None)
+                   if _win_ok else None)
     win_format = (scan_format_in_sources([(win_dir, "", ())], policy=format_policy_of(ctx))
-                  if final["stored"].get("winner_dir") and win_dir.is_dir() else None)
-    win_token = (revision_token_for_dir(win_dir)
-                 if final["stored"].get("winner_dir") and win_dir.is_dir() else None)
+                  if _win_ok else None)
+    win_token = (revision_token_for_dir(win_dir) if _win_ok else None)
     cap_ok, cap_note = caption_gate(win_captions)
     caption_warnings = []
     if win_captions and win_captions.get("over_limit"):
@@ -9335,8 +9404,8 @@ def _cmd_decide_locked(ctx: Ctx, args) -> None:
         pin = final["pin"]
         # Prefer the published winner directory (it is the copy the operator
         # reads); fall back to the pin. Both are verified to be identical.
-        wsrc = ctx.root / final["stored"]["winner_dir"] \
-            if final["stored"].get("winner_dir") else None
+        wsrc = (contained_under(ctx.root, final["stored"]["winner_dir"])
+                if final["stored"].get("winner_dir") else None)
         src = wsrc if (wsrc and wsrc.is_dir()) else (pinned_docs_dir(ctx, pin) if pin else None)
         if final["mismatch"]:
             print("[decide] --package-winner skipped: the stored champion failed recomputation.")

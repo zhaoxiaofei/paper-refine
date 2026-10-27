@@ -225,8 +225,10 @@ def collect(inputs: list[Path], how: str, pool_rounds: bool, own_only: bool):
         file_round = round_from_filename(path)
         try:
             rows = read_rows(path, inline)
-        except OSError as exc:
-            raise SystemExit(f"could not read {path}: {exc}") from exc
+        except (OSError, UnicodeDecodeError, csv.Error) as exc:
+            # A non-UTF-8 byte or an over-limit field is a bad INPUT, not a
+            # traceback: name the file and stop with the tool's own exit path.
+            raise SystemExit(f"could not read {path}: {type(exc).__name__}: {exc}") from exc
         data_rows = 0
         for row in rows:
             member = (row.get("member") or "").strip()

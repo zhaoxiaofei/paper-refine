@@ -54,7 +54,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
                 "and put w:pageBreakBefore on the paragraph that should start the page",
                 fix=("manual" if idx in in_table else None))
         ppr = ppr_of(para)
-        style = elem_val(ppr, "pStyle")
+        style = ppr_style(ppr)
         if style and style.startswith("Heading"):
             if policy["heading_keep_with_next"] and not (ppr and "<w:keepNext" in ppr):
                 row("FMT-T3a", "medium", f"p{idx}", f"heading {text[:40]!r} has no keepNext",
@@ -166,7 +166,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     journal_regions = defaultdict(lambda: defaultdict(lambda: {True: [], False: []}))
     for idx, (p0, p1, para) in enumerate(paras):
         text = text_of(para)
-        style = elem_val(ppr_of(para), "pStyle")
+        style = para_style(para)
         analysis = journal_emphasis_runs(styles, style, para)
         region = "refs" if style == "Bibliography" else "prose"
         for r0, r1, run in runs(para):
@@ -238,7 +238,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
                     protected=any_field)
 
     for i, (p0, p1, p) in enumerate(paras):
-        if elem_val(ppr_of(p), "pStyle") != "Bibliography":
+        if para_style(p) != "Bibliography":
             continue
         text = text_of(p)
         ital = [text_of(r[2]) for r in runs(p)
@@ -310,7 +310,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # FMT-P3 (doubled spaces, bracket spacing, zero-width marks), FMT-G2
     # (possible lowercase sentence start) and FMT-G3 (missing space after
     # punctuation) are reported for the editing arms.
-    is_ref_para = [elem_val(ppr_of(p[2]), "pStyle") == "Bibliography" for p in paras]
+    is_ref_para = [para_style(p[2]) == "Bibliography" for p in paras]
     doc_field_results = _field_result_spans(xml)
     field_result_text = [field_result_text_ranges(p[2], doc_field_results, p[0])
                          for p in paras]
@@ -367,7 +367,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # are document-TEXT problems: they are read from the paragraph text so the same
     # rules can also run over the LaTeX/markdown sources (paper_pipeline scans those).
     para_texts = [text_of(p[2]) for p in paras]
-    para_is_ref = [elem_val(ppr_of(p[2]), "pStyle") == "Bibliography" for p in paras]
+    para_is_ref = [para_style(p[2]) == "Bibliography" for p in paras]
     # The reference-SHAPE rules must survive a venue template that remaps style
     # ids by NAME (apply_word_template rewrites them): a package restyled that
     # way carries its reference list under another style id and every FMT-R
@@ -383,7 +383,7 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
                                     and bool(re.match(r"^\s*\d+\s*[\.\)]\s*\S",
                                                       str(para_texts[i] or ""))))
                                 for i in range(len(para_is_ref))]
-    para_is_head = [bool((elem_val(ppr_of(p[2]), "pStyle") or "").startswith("Heading"))
+    para_is_head = [bool((para_style(p[2]) or "").startswith("Heading"))
                     for p in paras]
     # A caption/legend paragraph is not a display-item CALL-OUT: the ordering
     # rule below (FMT-O1) reads the prose, so the caption blocks are excluded the
@@ -665,7 +665,9 @@ def docx_files_under(dirp: Path) -> list:
     itself copies any file, so the document was in the package but never
     checked). The set dedupes on case-insensitive filesystems.
     """
-    return sorted(set(dirp.rglob("*.docx")) | set(dirp.rglob("*.DOCX")))
+    # Match the suffix case-insensitively on every entry: rglob("*.docx") and
+    # rglob("*.DOCX") both miss `Main.Docx` on a case-sensitive filesystem.
+    return sorted({p for p in dirp.rglob("*") if p.suffix.lower() == ".docx"})
 
 
 def scan_paths(paths: list, policy: dict) -> dict:
@@ -779,9 +781,11 @@ def insert_into_ppr(para: str, element: str, after=("pStyle", "keepNext", "keepL
         return head + "<w:pPr>" + element + "</w:pPr>" + tail
     pos = 0
     for tag in after:
-        m = re.search(rf"<w:{tag}(?=[\s/>])[^>]*/>|<w:{tag}(?=[\s/>])[^>]*>.*?</w:{tag}>", ppr, re.S)
-        if m:
-            pos = max(pos, m.end())
+        # Only a DIRECT child may anchor the insert: a pStyle inside
+        # w:pPrChange is revision history, not live formatting.
+        el = child_elem(ppr, tag)
+        if el:
+            pos = max(pos, ppr.find(el) + len(el))
     if pos == 0:
         # Anchor at the END of the `w:pPr` open tag, not at a fixed offset: Word
         # writes attributes on it (`<w:pPr w:rsidR="...">`), and splicing a child
@@ -970,7 +974,7 @@ def fix_document(xml: str, styles: dict, policy: dict,
             para = plist[i][2]
             if _para_style(para) == majority:
                 continue
-            pstyle = elem(ppr_of(para), "pStyle")
+            pstyle = child_elem(ppr_of(para), "pStyle")
             if pstyle is None:
                 # The scanner reports an unstyled minority caption as
                 # mechanical, so the fixer must give it a style (or drop the
@@ -1061,7 +1065,7 @@ def fix_document(xml: str, styles: dict, policy: dict,
     edits, kept, aligned = [], 0, 0
     for idx, (p0, p1, para) in enumerate(paragraphs(xml)):
         ppr = ppr_of(para)
-        style = elem_val(ppr, "pStyle")
+        style = ppr_style(ppr)
         if not style or not style.startswith("Heading"):
             continue
         new_para = para
@@ -1134,7 +1138,7 @@ def fix_document(xml: str, styles: dict, policy: dict,
     edits, n = [], 0
     for idx, (p0, p1, para) in enumerate(plist):
         text = text_of(para)
-        style = elem_val(ppr_of(para), "pStyle")
+        style = para_style(para)
         block = (title_end is not None and idx < title_end
                  and re.search(r"@|Correspondence|ORCID", text, re.I))
         for r0, r1, run in runs(para):
@@ -1142,16 +1146,21 @@ def fix_document(xml: str, styles: dict, policy: dict,
             if not rtext.strip():
                 continue
             rpr = rpr_of(run)
-            if not (is_on(rpr, "i") or is_on(rpr, "iCs")):
+            # Revision history is not live formatting: an rPrChange that holds
+            # <w:i/> must not make a roman run enter the repair branch.
+            if not (is_on(live_rpr(rpr), "i") or is_on(live_rpr(rpr), "iCs")):
                 continue
             in_field_run = bool(in_field(franges, p0 + r0))
             if in_field_run and not policy["unlink_zotero_fields"]:
                 continue                      # reported as style-field, never silently "fixed"
             if block or (style == "Bibliography" and re.search(r"\bet\s+al\.", rtext)):
                 if rpr:
-                    edits.append((p0 + r0, p0 + r1, run.replace(
-                        rpr, re.sub(r"<w:i(?:Cs)?(?=[\s/>])[^>]*/>", "", rpr), 1)))
-                    n += 1
+                    # Clear the emphasis on the LIVE rPr only; the revision
+                    # record stays byte-identical (the helper splits rPrChange).
+                    new_rpr, changed = _rpr_set_emphasis(rpr, False)
+                    if changed:
+                        edits.append((p0 + r0, p0 + r1, run.replace(rpr, new_rpr, 1)))
+                        n += 1
     if edits:
         xml = apply_edits(xml, edits)
         changes.append(f"removed {n} unintended italic run(s) (title/correspondence block, "
@@ -1167,7 +1176,7 @@ def fix_document(xml: str, styles: dict, policy: dict,
         edits, flipped = [], 0
         franges = field_ranges(xml)
         for idx, (p0, p1, para) in enumerate(paragraphs(xml)):
-            style = elem_val(ppr_of(para), "pStyle")
+            style = para_style(para)
             region = "refs" if style == "Bibliography" else "prose"
             want_italic = (region == "refs" and policy_j in ("refs-only", "everywhere")) \
                 or (region == "prose" and policy_j == "everywhere")
@@ -1242,7 +1251,7 @@ def fix_document(xml: str, styles: dict, policy: dict,
             p0 = plist[idx][0]
             run = plist[idx][2][r0:r1]
             if local is None and \
-                    run_is_italic(styles, elem_val(ppr_of(plist[idx][2]), "pStyle"), run) == want:
+                    run_is_italic(styles, para_style(plist[idx][2]), run) == want:
                 continue
             if local is None:
                 new_run = _emphasis_run(run, want)
@@ -1283,10 +1292,16 @@ def fix_document(xml: str, styles: dict, policy: dict,
                 rpr = rpr_of(run)
                 if not rpr:
                     continue
-                stripped = rpr
-                for tag in ("rStyle", "color", "u", "i", "iCs"):
-                    stripped = re.sub(rf"<w:{tag}(?=[\s/>])[^>]*/>", "", stripped)
-                    stripped = re.sub(rf"<w:{tag}(?=[\s/>])[^>]*>.*?</w:{tag}>", "", stripped)
+                # Strip only the LIVE segments: rPrChange is the tracked
+                # change's history and must stay byte-identical.
+                _segs = re.split(r"(<w:rPrChange\b.*?</w:rPrChange>)", rpr, flags=re.S)
+                for _si in range(0, len(_segs), 2):
+                    for tag in ("rStyle", "color", "u", "i", "iCs"):
+                        _segs[_si] = re.sub(rf"<w:{tag}(?=[\s/>])[^>]*/>", "", _segs[_si])
+                        _segs[_si] = re.sub(
+                            rf"<w:{tag}(?=[\s/>])[^>]*>.*?</w:{tag}>", "", _segs[_si],
+                            flags=re.S)
+                stripped = "".join(_segs)
                 if stripped != rpr:
                     edits.append((p0 + r0, p0 + r1, run.replace(rpr, stripped, 1)))
                     n2 += 1
@@ -1396,7 +1411,7 @@ def fix_document(xml: str, styles: dict, policy: dict,
     bodies = []
     step9_paras = paragraphs(xml)
     step9_texts = [text_of(p[2]) for p in step9_paras]
-    step9_is_ref = [elem_val(ppr_of(p[2]), "pStyle") == "Bibliography"
+    step9_is_ref = [para_style(p[2]) == "Bibliography"
                     for p in step9_paras]
     if not any(step9_is_ref):
         # A template-restyled package carries its reference list under another
@@ -1690,11 +1705,19 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
                 parts_new[_name] = _new.encode("utf-8")
                 changes.append(f"unlinked {_removed} Zotero field(s) in "
                                f"{posixpath.basename(_name)}")
+    # Write to a sibling temp and publish only after verification: a failed
+    # write/verify must leave a pre-existing --out untouched (and never expose
+    # a partial package at the requested path).
+    tmp_out = out.with_name(f".{out.name}.tmp-{os.getpid()}-{os.urandom(4).hex()}")
     try:
-        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        with zipfile.ZipFile(tmp_out, "w", zipfile.ZIP_DEFLATED) as z:
             for name, data in parts_new.items():
                 z.writestr(name, data)
     except (OSError, RuntimeError, NotImplementedError) as e:
+        try:
+            tmp_out.unlink()
+        except OSError:
+            pass
         return {"source": str(src), "output": str(out), "changes": [], "verified": {},
                 "error": f"could not write the fixed DOCX: {type(e).__name__}: {e}",
                 "ok": False}
@@ -1727,7 +1750,7 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
             t = t[:s] + repl + t[e:]
         expected_paras[idx] = t
     text_expected = "\n".join(t for t in expected_paras if t.strip())
-    with zipfile.ZipFile(out) as pkg:
+    with zipfile.ZipFile(tmp_out) as pkg:
         same_parts = all(pkg.read(n) == d for n, d in parts_new.items())
         styles_after = parse_styles(pkg)
     before_rows = analyse_document(xml_before, styles, policy, src.name,
@@ -1753,7 +1776,7 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
         aux_remaining += [r["rule"] for r in page_field_rows([(name, fixed)], src.name)
                           if r.get("fix") == "mechanical"]
     remaining = sorted(set(remaining) | set(aux_remaining))
-    schema = validate_package(out)
+    schema = validate_package(tmp_out)
     verified = {
         "zip_readable": True,
         "parts_intact": same_parts,
@@ -1784,6 +1807,23 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
               and xml_wellformed
               and schema[0] is not False
               and not field_errors)
+    if ok:
+        try:
+            os.replace(tmp_out, out)
+        except OSError as e:
+            try:
+                tmp_out.unlink()
+            except OSError:
+                pass
+            return {"source": str(src), "output": str(out), "changes": changes,
+                    "verified": verified,
+                    "error": f"could not publish the fixed DOCX: {type(e).__name__}: {e}",
+                    "ok": False}
+    else:
+        try:
+            tmp_out.unlink()
+        except OSError:
+            pass
     return {"source": str(src), "output": str(out), "changes": changes, "verified": verified,
             "zotero_refresh": zotero_refresh, "reference_repair": reference_repair, "ok": ok}
 
@@ -2061,12 +2101,17 @@ def _template_front_parts(tpkg: zipfile.ZipFile, parts: dict, tnames: set) -> di
     rel_map = {e["id"]: (e["type"], e["target"]) for e in _rels_entries(trels)}
     refs = {"header": {}, "footer": {}}
     sect = _SECT_RE.findall(tdoc)
-    ref_re = r'<w:(header|footer)Reference w:type="(\w+)" r:id="([^"]+)"'
+    ref_re = re.compile(r"<w:(header|footer)Reference\b[^>]*>")
 
     def harvest(xml: str, roles: tuple) -> None:
-        for m in re.finditer(ref_re, xml):
-            if m.group(2) in roles and m.group(2) not in refs[m.group(1)]:
-                refs[m.group(1)][m.group(2)] = m.group(3)
+        # Word writes `w:type` before or after `r:id` depending on the
+        # producer; an order-sensitive pattern silently copied no furniture.
+        for m in ref_re.finditer(xml):
+            attrs = dict(re.findall(r'([A-Za-z:]+)="([^"]*)"', m.group(0)))
+            rtype = attrs.get("w:type") or attrs.get("type") or ""
+            rid = attrs.get("r:id") or attrs.get("id") or ""
+            if rtype in roles and rtype not in refs[m.group(1)] and rid:
+                refs[m.group(1)][rtype] = rid
 
     # Page 1 is governed by the FIRST section (`_apply_front_refs` writes the
     # "first" role there), while the running head/footer belong to the
@@ -2375,7 +2420,7 @@ def heading_like_paragraphs(doc_xml: str, containers=()) -> list:
         if low.startswith(_HEADING_SKIP_PREFIXES) \
                 or low in {c.lower() for c in (containers or _FOREIGN_CONTAINERS_DEFAULT)}:
             continue
-        pstyle = elem_val(ppr_of(frag), "pStyle")
+        pstyle = para_style(frag)
         if pstyle and pstyle != "Normal":
             continue
         if "<w:numPr" in frag:
@@ -2462,7 +2507,7 @@ def _template_front_layout(tpl_doc: str) -> dict:
         extra = _ppr_extra(ppr)
         if not text:
             continue
-        style = elem_val(ppr, "pStyle")
+        style = ppr_style(ppr)
         if _CORRESP_RE.match(text):
             out.setdefault("correspondence", extra)
         elif style == "AuthorList" and text.lower().startswith("keywords"):
@@ -2749,7 +2794,7 @@ def _front_matter_styles(doc_xml: str, roles: dict, tpl_doc: str = "") -> tuple:
                     edits.append((p0, p1, new))
     deep = {sid: level for level, sid in headings.items() if level > depth}
     for idx, p in enumerate(paras):
-        pstyle = elem_val(ppr_of(p[2]), "pStyle")
+        pstyle = para_style(p[2])
         if pstyle in deep:
             level = deep[pstyle]
             target = headings.get(level - 1) or headings.get(depth)
@@ -2761,9 +2806,9 @@ def _front_matter_styles(doc_xml: str, roles: dict, tpl_doc: str = "") -> tuple:
     styled = {sid for sid in (title_id, author_id, roles.get("caption"),
                               *headings.values()) if sid}
     for idx, p in enumerate(paras):
-        if elem_val(ppr_of(p[2]), "pStyle") in styled:
+        if para_style(p[2]) in styled:
             p0, p1, frag = p
-            new = _strip_direct_props(frag, strip_num=(elem_val(ppr_of(frag), "pStyle") ==
+            new = _strip_direct_props(frag, strip_num=(para_style(frag) ==
                                                        "AuthorList"))
             if new != frag:
                 edits.append((p0, p1, new))
@@ -3151,7 +3196,7 @@ def apply_word_template(src: Path, out: Path, template: Path, containers=()) -> 
                 # style: drop the direct geometry/typography that would hide it.
                 edits = []
                 for p0, p1, para in paragraphs(new_xml):
-                    pstyle = elem_val(ppr_of(para), "pStyle")
+                    pstyle = para_style(para)
                     # The reference was already rewritten to the TEMPLATE id, so
                     # test against the mapped ids, not the manuscript's old ids.
                     # An UNSTYLED paragraph also follows the template's default
@@ -4087,7 +4132,7 @@ def _token_width_twips(token: str, font_pt: float) -> int:
 
 def _cell_font_pt(styles: dict, cell: str) -> float:
     """The largest run size in a cell, else its paragraph style's, else 10 pt."""
-    sizes = [int(x) / 2.0 for x in re.findall(r'<w:sz[^>]*w:val="(\d+)"', cell)]
+    sizes = [int(x) / 2.0 for x in re.findall(r'<w:sz(?=[\s/>])[^>]*w:val="(\d+)"', cell)]
     if sizes:
         return max(sizes)
     st = re.search(r'<w:pStyle[^>]*w:val="([^"]+)"', cell)
@@ -4648,7 +4693,7 @@ def reference_bold_rows(xml: str, styles: dict, doc: str) -> list:
     """FMT-T6h: a bibliography bold run covers a year or a page range."""
     rows = []
     for idx, (_p0, _p1, para) in enumerate(paragraphs(xml or "")):
-        if elem_val(ppr_of(para), "pStyle") != "Bibliography":
+        if para_style(para) != "Bibliography":
             continue
         for r in runs(para):
             text = text_of(r[2]).strip()
@@ -5342,15 +5387,9 @@ def cmd_fix(args) -> int:
     if not rep["ok"]:
         print(f"  the repaired file was NOT accepted: "
               f"{rep.get('error') or 'a verification check failed -- see the JSON report'}")
-        # The rejected artifact must not sit at the requested --out path where a
-        # caller (a script that ignores the exit code, a later run) reads it as a
-        # good file: the fixer already wrote it there, so it is removed again.
-        # The JSON report keeps the verification detail.
-        try:
-            out.unlink()
-            print(f"  removed the rejected output {out.name}")
-        except OSError as e:
-            log(f"warning: could not remove the rejected output {out}: {e}")
+        # fix_package publishes OUT only after verification, so a rejected fix
+        # leaves a pre-existing good file (if any) untouched. There is no
+        # rejected artifact to remove here.
     for c in rep["changes"]:
         print(f"  - {c}")
     if args.json:
