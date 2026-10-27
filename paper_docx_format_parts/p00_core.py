@@ -134,8 +134,9 @@ JOURNAL_RE = re.compile(
     r"Genome\s+(?:Biology|Medicine|Research)|Nucleic\s+Acids\s+Research|Bioinformatics|"
     r"Brief(?:\.|ings)?\s+Bioinform(?:atics|\.)|Nat(?:\.|ure)\s+Methods|Genome\s+Biol\.|"
     r"PLOS\s+Comput\.\s+Biol\.|Annu\.\s+Rev\.\s+Genomics\s+Hum\.\s+Genet\.|Cell\s+Syst\.|"
-    r"eLife|PNAS|BMC\s+Genomics|Front\.\s+Genet\.|Nat\.\s+Biotechnol\.|Lancet(?:\s+\w+)?|"
-    r"EMBO\s+\w+|Scientific\s+Reports|Mol(?:\.|ecular)\s+Cell)\b")
+    r"eLife|PNAS|BMC\s+Genomics|Front\.\s+Genet\.|Nat\.\s+Biotechnol\.|"
+    r"Lancet(?:\s+[A-Z][A-Za-z]*)?|"
+    r"EMBO\s+[A-Z][A-Za-z]*|Scientific\s+Reports|Mol(?:\.|ecular)\s+Cell)\b")
 URL_RE = re.compile(
     r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
     r"|https?://[^\s<>\"]+|www\.[^\s<>\"]+|\bdoi:[^\s]+", re.I)
@@ -346,6 +347,24 @@ def runs(frag: str) -> list:
     return _spans(frag, RUN_TOKENS)
 
 
+_MC_ALTERNATE_RE = re.compile(r"<mc:AlternateContent\b.*?</mc:AlternateContent>", re.S)
+_MC_CHOICE_RE = re.compile(r"<mc:Choice\b.*?</mc:Choice>", re.S)
+_MC_FALLBACK_RE = re.compile(r"<mc:Fallback\b.*?</mc:Fallback>", re.S)
+
+
+def _mc_visible_branch(m) -> str:
+    """The ONE branch Word renders: Choice when present, else Fallback.
+
+    `mc:AlternateContent` carries the same content twice (a modern Choice and a
+    Fallback for older readers). Reading both doubled the text ("HelloHello")
+    and inflated every count; reading only Choice keeps the shape Word shows in
+    the document this pipeline targets.
+    """
+    block = m.group(0)
+    branch = _MC_CHOICE_RE.search(block) or _MC_FALLBACK_RE.search(block)
+    return branch.group(0) if branch else ""
+
+
 def text_of(frag: str) -> str:
     """The text of `frag`, with each soft break/tab rendered as a NEWLINE.
 
@@ -354,6 +373,9 @@ def text_of(frag: str) -> str:
     reader sees is the text these scans compare (a line break starts a new line
     for FMT-P4).
     """
+    # Word renders ONE AlternateContent branch; walking the raw fragment read
+    # both and doubled every text box / DrawingML fallback.
+    frag = _MC_ALTERNATE_RE.sub(_mc_visible_branch, frag)
     # DOCUMENT ORDER: a break sits BETWEEN two `<w:t>` parts (and can also sit
     # inside a run), so ONE walk over both kinds of token yields text and
     # delimiters as it meets them -- emitting the markup that lies between two
@@ -455,9 +477,18 @@ def attr(frag: str | None, name: str) -> str | None:
 
 
 def elem(frag: str | None, tag: str) -> str | None:
-    """The raw `<w:tag .../>` or `<w:tag ...>…</w:tag>` element, if present."""
+    """The LIVE `<w:tag .../>` or `<w:tag ...>…</w:tag>` element, if present.
+
+    Revision records (`w:pPrChange`/`w:rPrChange`) preserve the property as it
+    was BEFORE the edit. They are history, never live formatting: reading a
+    `w:ind` from inside one reported a flush paragraph as indented and a
+    `w:rFonts` from one entered the style survey. `child_elem` already takes
+    the direct live child; this helper removes the change records before the
+    descendant search so every `elem()` caller reads live formatting.
+    """
     if not frag:
         return None
+    frag = re.sub(r"<w:(pPrChange|rPrChange)\b[^>]*>.*?</w:\1>", "", frag, flags=re.S)
     m = re.search(rf"<w:{tag}(?=[\s/>])[^>]*/>|<w:{tag}(?=[\s/>])[^>]*>.*?</w:{tag}>", frag, re.S)
     return m.group(0) if m else None
 
@@ -652,9 +683,16 @@ ZOTERO_FIELD_PARTS = ("word/document.xml", "word/footnotes.xml", "word/endnotes.
 ZOTERO_FIELD_AUX_PARTS_RE = re.compile(r"word/(?:header|footer)\d*\.xml$|word/comments\.xml$")
 ZOTERO_FIELD_TOKEN_RE = re.compile(
     r"<w:fldChar\b[^>]*?w:fldCharType=\"(begin|separate|end)\"[^>]*?/?>"
-    r"|<w:instrText\b[^>]*>(.*?)</w:instrText>"
-    r"|<w:t\b[^>]*>(.*?)</w:t>"
-    r"|<w:fldSimple\b([^>]*)>(.*?)</w:fldSimple>",
+    # A self-closing `<w:t/>`/`<w:instrText/>` is an EMPTY element, never an
+    # opening tag: without the `(?<!/)` guard the lazy body ran to the next
+    # run's closing tag and fed markup into the field result.
+    r"|<w:instrText\b[^>]*?(?<!/)>(.*?)</w:instrText>"
+    r"|<w:t\b[^>]*?(?<!/)>(.*?)</w:t>"
+    r"|<w:fldSimple\b([^>]*)>(.*?)</w:fldSimple>"
+    # A soft break/tab is a text delimiter in a field result too: `text_of()`
+    # renders it as a newline, so the inventory must not join the words it
+    # separates ("Smith\n2020" is not "Smith2020").
+    r"|<w:(?:br|cr|tab)\b[^>]*/?>",
     re.S)
 
 
@@ -779,6 +817,9 @@ def zotero_field_report(xml: str) -> dict:
             elif "ADDIN ZOTERO_" in text.upper():
                 fail("zotero-instr-outside-field",
                      f"a Zotero field instruction at byte {m.start()} is not inside a field")
+        elif raw.startswith(("<w:br", "<w:cr", "<w:tab")):
+            if stack and stack[-1]["separate"] is not None:
+                stack[-1]["result"].append("\n")
         elif stack and stack[-1]["separate"] is not None:
             stack[-1]["result"].append(unesc(m.group(3)))
     for frame in stack:
@@ -1153,7 +1194,7 @@ def _template_uses_even_odd(template: Path) -> bool:
                 if "word/document.xml" in names else ""
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return False
-    if "evenAndOddHeaders" in settings:
+    if is_on(settings, "evenAndOddHeaders"):
         return True
     sects = SECT_READ_RE.findall(doc)
     # Every section, not only the last, and any attribute order: Word writes
@@ -1238,7 +1279,7 @@ def docx_front_matter_report(path: Path, template: Path = None, containers=()) -
            "correspondence": bool(corr),
            "correspondence_bold": bool(corr and _label_is_bold(corr)),
            "correspondence_lines": (corr.count("<w:br") if corr else None),
-           "even_odd": "evenAndOddHeaders" in settings,
+           "even_odd": is_on(settings, "evenAndOddHeaders"),
            "deep_headings": deep,
            "heading3": sum(1 for s in styles if heading_level_of.get(s) == 3),
            "container_headings": container_rows}
@@ -1464,8 +1505,21 @@ def journal_matches(text: str) -> list:
     for m in JOURNAL_RE.finditer(text):
         before = text[m.start() - 1] if m.start() else " "
         after = text[m.end()] if m.end() < len(text) else " "
-        if before in _J_BEFORE and after in _J_AFTER:
-            out.append(m.group(0))
+        if before not in _J_BEFORE or after not in _J_AFTER:
+            continue
+        # A possessive is ordinary prose, not a journal title ("Cell's
+        # membrane"); the quote boundary still accepts a quoted title.
+        if after == "'" and text[m.end():m.end() + 2].lower() == "'s":
+            continue
+        # "The Lancet published ..." / "EMBO today announced ...": a journal
+        # name is a title, so a bare Lancet/EMBO followed by a lowercase word
+        # is prose. A title-case continuation (Lancet Oncology, EMBO Journal)
+        # is part of the title; the word after it is ordinary sentence prose.
+        head = m.group(0).split()[0].lower()
+        if (head in ("lancet", "embo") and len(m.group(0).split()) == 1
+                and re.match(r"\s+[a-z]", text[m.end():])):
+            continue
+        out.append(m.group(0))
     return out
 
 

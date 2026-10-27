@@ -40,6 +40,10 @@ def spelling_nonprose_mask(text: str) -> str:
     link while making the finding look cleared.
     """
     out = URL_RE.sub(lambda m: " " * len(m.group(0)), text or "")
+    # A scheme-less DOI path is a URL too: the spelling rule must never rewrite
+    # a minority spelling inside `doi.org/10.1000/colour-map`.
+    out = re.sub(r"\b(?:dx\.)?doi\.org/[^\s<>\"']+|\b10\.\d{4,9}/[^\s<>\"']+",
+                 lambda m: " " * len(m.group(0)), out)
     return re.sub(r"`[^`]*`", lambda m: " " * len(m.group(0)), out)
 
 
@@ -168,7 +172,7 @@ NUMBER_RE = re.compile(
     # the engine backtrack the fraction away to record the integer 7.
     r"(?<![\w.])((?:[-\u2212]?\d[\d,\u2009\u202f\u00a0]*\.\d+"
     r"(?:[eE][+\-\u2212]?\d+)?)(?![\d]|\.\d)"
-    r"|(?:[-\u2212]?\d[\d,\u2009\u202f\u00a0]*"
+    r"|(?:[-\u2212]?\d[\d\u2009\u202f\u00a0]*(?:,\d{3})*"
     r"(?:[eE][+\-\u2212]?\d+)?)(?![\w]|\.\d))")
 
 # --------------------------------------------------------------------------
@@ -243,11 +247,19 @@ COUNT_ADJECTIVES = (
 )
 
 
+_WORD_NUMBER_SCALES = frozenset({"hundred", "thousand", "million", "billion"})
+
+
 def _word_number_value(words: str):
     """The integer a spelled-out number denotes, or None when unparsable."""
     total, current = 0, 0
-    for tok in re.split(r"[-\s]+", str(words or "").lower()):
+    toks = [t for t in re.split(r"[-\s]+", str(words or "").lower()) if t]
+    for idx, tok in enumerate(toks):
         if tok == "and":
+            # "one hundred and five" is one number; "three and five" is a list
+            # of two. `and` joins digits only after a scale word.
+            if idx == 0 or toks[idx - 1] not in _WORD_NUMBER_SCALES:
+                return None
             continue
         if tok == "hundred":
             current = (current or 1) * 100
@@ -339,7 +351,30 @@ def word_number_rows(text: str) -> list:
     """[{start, end, number, written}] for spelled-out COUNT artifacts."""
     out = []
     for m in NUMBER_WORD_RE.finditer(str(text or "")):
-        written = m.group(1).strip()
+        raw = m.group(1)
+        written = raw.strip()
+        # A conjunctive list ("three and five patients") is not one number: the
+        # regex consumes it as a phrase, so split at an `and` that does not
+        # follow a scale word and record each member's own count.
+        parts = re.split(r"(\s+and\s+)", raw)
+        conjunctive = any(
+            part.lower().strip() == "and" for part in parts) and (
+                _word_number_value(written) is None)
+        if conjunctive:
+            pos = m.start(1)
+            for part in parts:
+                if re.fullmatch(r"\s+and\s+", part):
+                    pos += len(part)
+                    continue
+                piece = part.strip()
+                lead = len(part) - len(part.lstrip())
+                start, end = pos + lead, pos + lead + len(piece)
+                value = _word_number_value(piece)
+                if value is not None and _word_number_is_count(text, start, end, piece):
+                    out.append({"start": start, "end": end,
+                                "number": str(value), "written": piece})
+                pos += len(part)
+            continue
         value = _word_number_value(written)
         if value is None:
             continue
@@ -520,13 +555,17 @@ def _table_row_like(text: str) -> bool:
     return t.count("\t") >= 2
 
 ABSTRACT_HEAD_RE = re.compile(r"^\s*(?:abstract|summary)\s*:?\s*$", re.I)
-KEYWORDS_HEAD_RE = re.compile(r"^\s*(?:key\s?words?|keywords)\b", re.I)
+# End-anchored to the label's own punctuation: a prose sentence that happens to
+# begin "Keywords are ..." is not a keywords heading (and must not switch the
+# rest of the document to body mode).
+KEYWORDS_HEAD_RE = re.compile(r"^\s*(?:key\s?words?|keywords)\s*(?::|$)", re.I)
 METHODS_HEAD_RE = re.compile(
     r"^\s*(?:\d+[.)]?\s*)?(?:materials\s*(?:&|and)\s*methods|online methods|methods)"
     r"\s*$", re.I)
 BODY_HEAD_RE = re.compile(
     r"^\s*(?:\d+[.)]?\s*)?(?:introduction|results|discussion|conclusions?|background|"
-    r"related work)\s*:?\s*$", re.I)
+    r"related work|results\s*(?:&|and)\s*discussion|"
+    r"discussion\s*(?:&|and)\s*conclusions?)\s*:?\s*$", re.I)
 
 
 def section_kinds(paras: list, headings: list = None) -> list:
@@ -544,7 +583,11 @@ def section_kinds(paras: list, headings: list = None) -> list:
         if LEGEND_RE.match(t):
             kinds.append("legend")
             continue
-        if ABSTRACT_HEAD_RE.match(t):
+        if ABSTRACT_HEAD_RE.match(t) and (
+                mode == "front" or re.match(r"^\s*abstract\b", t, re.I)):
+            # A bare "Summary" heading later in the document is a section
+            # heading, not a second abstract: letting it reset mode put every
+            # following body paragraph under the abstract's sentence bar.
             mode, kinds = "abstract", kinds + ["heading"]
             continue
         if KEYWORDS_HEAD_RE.match(t):
@@ -571,7 +614,10 @@ def section_kinds(paras: list, headings: list = None) -> list:
 # never see.
 CONCEPT_FAMILIES = (
     ("copy-number STATE (CN) vs copy-number VARIATION (CNV/CNA)",
-     (r"\bCN\b", r"\bCNs\b", r"\bcopy[-\s]number\b"),
+     (r"\bCN\b", r"\bCNs\b",
+      # The bare prefix of family B's "copy-number variation" is not a family-A
+      # hit: one CNV-only paragraph was counted in both families.
+      r"\bcopy[-\s]number\b(?!\s*(?:variations?|alterations?))"),
      (r"\bCNVs?\b", r"\bCNAs?\b", r"\bcopy[-\s]number variations?\b",
       r"\bcopy[-\s]number alterations?\b")),
     ("simulation (a model generates the data) vs emulation (real data behaves "
@@ -788,11 +834,17 @@ def number_format_rows(paras: list) -> list:
         # separator case exactly as it was before the exponent was accepted.
         if not re.fullmatch(r"\d[\d,]*(?:\.\d+)?", n):
             return False
+        # A comma is a THOUSANDS separator only when it groups three digits:
+        # the token "1," (from "1, 2") is not a separated quantity.
+        if "," in n and not re.fullmatch(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?", n):
+            return False
         digits = n.replace(",", "")
-        if len(digits) <= 4:
-            return "," in n
+        # The 4-digit year test must run BEFORE the <=4 return, which otherwise
+        # made it unreachable ("2,019" was read as a separated quantity).
         if len(digits) == 4 and digits[:2] in ("19", "20"):
             return False
+        if len(digits) <= 4:
+            return "," in n
         return True
     big = [n for n in nums if _is_quantity(n)]
     sep = [n for n in big if "," in n]
@@ -1268,7 +1320,16 @@ def lookup_preprint(query: str, timeout: int = 30) -> dict:
     return out
 
 
-DOI_RE = re.compile(r"\b10\.\d{4,9}/[^\s,;)\]}>\"']+")
+# A DOI suffix is not bracket-free: a legacy Wiley SICI DOI carries balanced
+# parentheses AND angle-bracketed volume/page text AND a `;` before its check
+# characters ("10.1002/(SICI)1097-0258(19980215)19:8<1001::AID-SIM743>3.0.CO;2-5").
+# A `)`/`>`/`;` continues the identifier only when an identifier character
+# follows; a closing bracket or a citation separator ends it.
+DOI_RE = re.compile(
+    r"\b10\.\d{4,9}/(?:[^\s,;)\]}>\"']"
+    r"|[)](?=[A-Za-z0-9<])"
+    r"|[>](?=[A-Za-z0-9<])"
+    r"|[;](?=\d))+")
 ACCESSION_RE = re.compile(r"\b(?:SRP|SRR|PRJNA|GSE|GSM|ERP|ERS|ERR|SAMN|SAMD)\d{3,}\b")
 ORCID_RE = re.compile(r"\b\d{4}-\d{4}-\d{4}-\d{3}[\dX]\b")
 GITHUB_RE = re.compile(r"https?://github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+"
@@ -1482,11 +1543,17 @@ def _entry_year(body: str) -> str:
     years = list(REFERENCE_YEAR_RE.finditer(body))
     if not years:
         return ""
+    # A year followed by the volume separator `;` is in the bibliographic
+    # slot even when the title also carries a parenthesized year: checking
+    # parentheses first read "A reply (2014). Nature 2016; ..." as 2014.
+    for m in years:
+        if body[m.end():m.end() + 1] == ";":
+            return m.group(1)
     for m in years:
         if m.start() and body[m.start() - 1] in "([":
             return m.group(1)
     for m in years:
-        if body[m.end():m.end() + 1] in ("", ";", ",", ".", ")", "]"):
+        if body[m.end():m.end() + 1] in ("", ",", ".", ")", "]"):
             return m.group(1)
     return years[0].group(1)
 
@@ -1942,19 +2009,24 @@ def lookup_kind(kind: str, query: str, timeout: int = 30) -> dict:
                 else:
                     out["errors"].append(f"pinned commit {sha} does not resolve")
         elif kind in ("archive", "deposit"):
-            d = json.loads(fetch("https://zenodo.org/api/records?size=5&q=" + q))
-            hits = (d.get("hits") or {}).get("hits") or []
             # A SEARCH always returns something: keep only records that actually
             # name the thing being looked for (a distinctive token of the query
             # in the record's title/description), or "found" would mean "the API
-            # answered", not "the deposit exists".
+            # answered", not "the deposit exists". Derive the token BEFORE the
+            # request: with none, the lookup cannot be answered.
             toks = [t for t in re.findall(r"[A-Za-z][A-Za-z0-9\-]{5,}", str(query))
                     if t.lower() not in ("github", "https", "zenodo", "figshare",
                                          "research", "science", "single", "whole")]
             toks = sorted(toks, key=len, reverse=True)[:2]
+            if not toks:
+                out["errors"].append(
+                    "the archive query carries no distinctive token (>= 6 "
+                    "characters): relevance cannot be checked")
+                return out
+            d = json.loads(fetch("https://zenodo.org/api/records?size=5&q=" + q))
+            hits = (d.get("hits") or {}).get("hits") or []
+
             def _relevant(h) -> bool:
-                if not toks:
-                    return True
                 blob = " ".join(str(x or "") for x in (
                     (h.get("metadata") or {}).get("title"),
                     (h.get("metadata") or {}).get("description"),
@@ -2065,15 +2137,35 @@ def placeholder_lookup_plan(ph_rows: list, docs=None) -> list:
         else:                                   # ORCID / author identity
             queries = []
         for q in dict.fromkeys(queries):
+            # The lookup kind follows the QUERY's own class: a GitHub URL or a
+            # title handed to `lookup_kind("doi", ...)` was answered as a DOI
+            # and could report a false verified-negative. A DOI placeholder
+            # gets DOI-shaped queries only; repository URLs keep the
+            # repository kind and the title the preprint/title kind.
+            qkind = kind
+            if DOI_RE.fullmatch(str(q).strip()):
+                qkind = "doi"
+            elif GITHUB_RE.fullmatch(str(q).strip()):
+                qkind = "repository"
+            elif q in repos:
+                qkind = "repository"
+            elif q in dois:
+                qkind = "doi"
+            elif kind in ("doi", "archive", "deposit", "repository", "repo",
+                          "commit"):
+                qkind = "title"
             plan.append({"document": r.get("document"),
                          "paragraph": r.get("document_paragraph"),
-                         "kind": kind, "query": q,
+                         "kind": qkind, "query": q,
                          "payload": (r.get("payload") or "")[:120]})
     return plan
 
 
 def _num_candidates(value: float) -> set:
     out = set()
+    # A rounded spelling that is ZERO for a nonzero cell proves the wrong
+    # number ("0.00" from 4e-7); keep the documented 1.773 -> 1.77 rounding,
+    # but never emit a zero-only rounding of a nonzero value.
     for dec in (0, 1, 2, 3):
         # A whole-number spelling must EQUAL the value: dec-0 formatting turns
         # 6.6 into "7", and the reconciliation then "proved" a written 7 from a
@@ -2082,9 +2174,33 @@ def _num_candidates(value: float) -> set:
         # Zero-padding (7 -> 7.0) is always a valid spelling.
         if dec < 2 and abs(round(float(value), dec) - float(value)) > 1e-9:
             continue
+        if dec >= 2 and float(value) != 0 and round(float(value), dec) == 0:
+            continue
         s = f"{value:,.{dec}f}"
         out.add(s)
         out.add(s.replace(",", ""))
+    # The cell's own exact spelling, scientific notation and the typographic
+    # minus are the same value; without them a written 0.00012 / 1.2e-4 / −80
+    # was never proved by its own source cell.
+    for fmt_s in (f"{float(value):.15g}", f"{float(value):.6e}"):
+        out.add(fmt_s)
+        mant, _, exp = fmt_s.partition("e")
+        if exp:
+            try:
+                out.add(f"{mant}e{int(exp)}")
+                out.add(f"{mant}E{int(exp)}")
+            except ValueError:
+                pass
+    try:
+        from decimal import Decimal
+        exact = format(Decimal(str(float(value))), "f")
+        if exact not in ("0", "0.0"):
+            out.add(exact)
+    except Exception:                                            # noqa: BLE001
+        pass
+    for cand in list(out):
+        if cand.startswith("-"):
+            out.add("\u2212" + cand[1:])
     return out
 
 
@@ -2118,7 +2234,10 @@ def table_value_index(tables: list) -> dict:
                         if label else f"value in column {header[c]!r} in {name}")
             if len(vals) < 3:
                 continue
-            for cand in _num_candidates(float(len(vals))):
+            # The row count is every data row, not only the rows with a
+            # numeric cell in this column (sparse columns reported 3 for a
+            # 10-row table, contradicting table_column_stats()).
+            for cand in _num_candidates(float(len(body))):
                 index.setdefault(cand, f"number of data rows in {name}")
             for kind, val in (("sum", sum(vals)), ("min", min(vals)), ("max", max(vals))):
                 for cand in _num_candidates(val):
@@ -2241,6 +2360,10 @@ def _cell_number(cell: str):
 
 def _fmt_number(value: float) -> str:
     """A human number: thousands separators, no trailing zeros."""
+    if value and abs(value) < 5e-7:
+        # Six decimals rounded every real p-value below 5e-7 to "0" (and a
+        # negative one to "-0"): keep the magnitude in scientific notation.
+        return f"{value:.6g}"
     out = f"{value:,.6f}".rstrip("0").rstrip(".")
     return out or "0"
 
@@ -2624,7 +2747,11 @@ def hierarchy_seed_rows(number_rows: list, tables: list, limit: int = 200) -> li
                 col_values = set()
                 for v in s["values"]:
                     col_values |= _num_candidates(v)
-                if num in col_values or num.replace(",", "") in col_values:
+                # The same separator normalization reconcile_number_rows()
+                # uses: a thin/NBSP/space-grouped written value is the same
+                # number as the plain cell.
+                key = re.sub(r"[,\u2009\u202f\u00a0\s]", "", num).rstrip(".")
+                if num in col_values or key in col_values:
                     check = (f"the value matches a cell in column {s['column']!r} -- record why "
                              f"the ledger has no source, or cite this column")
                 else:
@@ -2725,7 +2852,10 @@ def balanced_paren_groups(text: str) -> list:
             stack.append(i)
         elif ch == ")" and stack:
             start = stack.pop()
-            out.append((start, i, len(stack), text[start + 1:i]))
+            # `end` is EXCLUSIVE: both consumers slice text[start:end] and map
+            # fixes with a half-open span, so returning the closing ')' index
+            # dropped it from the evidence and from the restyled span.
+            out.append((start, i + 1, len(stack), text[start + 1:i]))
     return out
 
 

@@ -159,14 +159,14 @@ CAPTION = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp\.?)\s+)?fig(
 # text produce. The pipeline reports these as suspected captions and ENDS the
 # legend at them; merging one in subtracted the NEXT figure's legend from the
 # main text and reported fewer words than the pipeline's own row.
-CAPTION_SUSPECT = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?fig(?:ure)?s?\.?\s*\|?\s*"
+CAPTION_SUSPECT = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp\.?)\s+)?fig(?:ure)?s?\.?\s*\|?\s*"
                              r"(?:S?\d+[A-Za-z]?|(?-i:[IVXLCDM]+))"
                              r"\s*(?:\([^)]*\)|$|[|:\u2014\u2013\-])", re.I)
 # Table captions are a display-caption span only for a profile whose
 # `counting.main_text.excludes` names `table-captions` (Frontiers groups
 # "figure and table captions" in its main-body rule). They are never read as
 # figure legends for the M18 scan.
-TABLE_CAPTION = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?tables?\.?\s*"
+TABLE_CAPTION = re.compile(r"^\s*(?:(?:supplementary|extended\s+data|supp\.?)\s+)?tables?\.?\s*"
                            r"(S?\d+[A-Za-z]?|(?-i:[IVXLCDM]+))"
                            r"\s*(?:\||:|\u2014|\u2013|-|\.)\s*", re.I)
 COVER_SALUTATION = re.compile(r"^\s*(?:dear\b|to the (?:editor|editors)\b)", re.I)

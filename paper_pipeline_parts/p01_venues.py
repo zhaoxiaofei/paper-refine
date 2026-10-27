@@ -451,6 +451,9 @@ def _clean_length_limits(limits, prefix: str, problems: list):
     return clean
 
 
+_CAPTION_CAP_MISSING = object()
+
+
 def _clean_captions(captions, prefix: str, problems: list):
     """Validate one legend policy block; None means "inherit the venue's"."""
     if captions is None:
@@ -459,14 +462,19 @@ def _clean_captions(captions, prefix: str, problems: list):
         problems.append(f"{prefix} must be an object, or null to inherit the venue's legend "
                         f"policy (got {type(captions).__name__})")
         return None
+    raw_cap = captions.get("default_cap", _CAPTION_CAP_MISSING)
     clean = {
         "published_limit": _profile_int(captions.get("published_limit"),
                                         f"{prefix}.published_limit", problems, minimum=0),
-        "default_cap": _profile_int(captions.get("default_cap", 0), f"{prefix}.default_cap",
-                                    problems, minimum=0, allow_none=False) or 0,
+        "default_cap": _profile_int(
+            0 if raw_cap is _CAPTION_CAP_MISSING else raw_cap,
+            f"{prefix}.default_cap", problems, minimum=0, allow_none=False) or 0,
         "source": str(captions.get("source") or "").strip(),
     }
-    if clean["published_limit"] is not None and clean["default_cap"] == 0:
+    # An OMITTED key inherits the venue's published limit; an EXPLICIT 0 is
+    # the documented "counts only" choice and must survive unchanged.
+    if (clean["published_limit"] is not None
+            and raw_cap is _CAPTION_CAP_MISSING):
         clean["default_cap"] = clean["published_limit"]
     return clean
 
@@ -2496,7 +2504,7 @@ and statement placement; no prose was copied). Two tiers, with different authori
   * THE FIRST-PAGE BLOCK IS THE TEMPLATE'S OWN, IN ITS ORDER AND SPACING: one title line, ONE
     author-list line, the affiliation lines the template spaces with before=240/after=0, then ONE
     correspondence block -- the BOLD label "* Correspondence:" followed by a line break, the
-    corresponding author ("<Name>, lead contact" when the source marks a lead contact or a
+    corresponding author's name (when the source marks a lead contact or a
     corresponding author), another line break and the email -- then ONE "Keywords: ..." line and
     the unnumbered "Abstract" heading with its paragraph. Fold a separate "Lead contact" /
     "Corresponding author" line into that block instead of leaving it as its own paragraph, and

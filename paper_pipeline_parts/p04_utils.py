@@ -1610,6 +1610,50 @@ def count_caption_words(text: str) -> int:
     return count_words(_strip_latex(text or ""))
 
 
+def _docx_visible_nodes(el):
+    """Descendants of `el` as Word renders them: ONE AlternateContent branch.
+
+    `mc:AlternateContent` carries the same text in a Choice and a Fallback.
+    Walking every descendant read both, doubling the paragraph text and every
+    count derived from it. A nested `w:p` (a text box's own paragraph) is a
+    separate entry of the paragraph walk, so it is not folded into this one.
+    """
+    mc = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    for child in list(el):
+        if child.tag == mc + "AlternateContent":
+            branch = child.find(mc + "Choice")
+            if branch is None:
+                branch = child.find(mc + "Fallback")
+            if branch is not None:
+                yield from _docx_visible_nodes(branch)
+            continue
+        if child.tag == w + "p":
+            continue
+        yield child
+        yield from _docx_visible_nodes(child)
+
+
+def _docx_visible_paragraphs(el, ns: str, mc: str):
+    """The `w:p` elements Word renders, in document order.
+
+    Only ONE AlternateContent branch is walked, so the paragraphs inside an
+    `mc:Fallback` are never returned. Nested paragraphs (a text box's content)
+    are yielded after their containing paragraph, so each is its own entry.
+    """
+    for child in list(el):
+        if child.tag == mc + "AlternateContent":
+            branch = child.find(mc + "Choice")
+            if branch is None:
+                branch = child.find(mc + "Fallback")
+            if branch is not None:
+                yield from _docx_visible_paragraphs(branch, ns, mc)
+            continue
+        if child.tag == ns + "p":
+            yield child
+        yield from _docx_visible_paragraphs(child, ns, mc)
+
+
 def _docx_paragraphs(path: Path):
     """Paragraph texts of a .docx, or None when it cannot be parsed.
 
@@ -1622,6 +1666,7 @@ def _docx_paragraphs(path: Path):
     package, re-found by the operator's audit).
     """
     ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    mc = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
     try:
         with zipfile.ZipFile(path) as z:
             data = z.read("word/document.xml")
@@ -1630,9 +1675,9 @@ def _docx_paragraphs(path: Path):
             NotImplementedError):
         return None
     out = []
-    for para in root.iter(ns + "p"):
+    for para in _docx_visible_paragraphs(root, ns, mc):
         parts = []
-        for node in para.iter():
+        for node in _docx_visible_nodes(para):
             if node.tag in (ns + "br", ns + "cr", ns + "tab"):
                 parts.append("\n")
             elif node.tag == ns + "t":

@@ -175,9 +175,17 @@ def variant_pattern(term, mode):
             # manuscripts usually write 3.1e-2 -- the short form (and the
             # uppercase E) must be enumerated too, or those occurrences of the
             # value are invisible to the M4 number sweep.
-            pats.append(re.escape(mant + "E" + exp))
-            pats.append(re.escape(mant + "e" + str(int(exp))))
-            pats.append(re.escape(mant + "E" + str(int(exp))))
+            # `%.*e` pads a positive exponent ("+02") and drops a trailing zero
+            # from the mantissa; manuscripts write "e+2" and "3.10e+2". Both
+            # spellings (and uppercase E, and the padded exponent) are the same
+            # value and must be enumerated.
+            short = ("+" if exp.startswith("+") else "") + str(int(exp))
+            for e_char in ("e", "E"):
+                pats.append(re.escape(mant) + "0*" + re.escape(e_char + short))
+                # The UNSIGNED short form (`3.1e2`, `3.1E2`) is the same value
+                # as `3.1e+2`: adding the sign must not drop it.
+                pats.append(re.escape(mant) + "0*" + re.escape(e_char + str(int(exp))))
+                pats.append(re.escape(mant) + "0*" + re.escape(e_char + exp))
             pats.append(re.escape(mant + " × 10^" + str(int(exp))))
             # The multiplication sign is also written without the caret and
             # with a U+2212 minus ("3.1 × 10−2"); those occurrences were

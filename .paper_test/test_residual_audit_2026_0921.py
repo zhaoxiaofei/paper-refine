@@ -210,8 +210,9 @@ def test_placeholder_kinds_and_plan():
         queries.setdefault(p["kind"], []).append(p["query"])
     check("the preprint query is the manuscript title",
           any("CopyNumBench" in q for q in queries.get("preprint") or []), str(queries))
-    check("the archive query includes the repository URL",
-          any("github.com" in q for q in queries.get("archive") or []), str(queries))
+    check("the repository URL is queried with the repository kind, never as a DOI",
+          any("github.com" in q for q in queries.get("repository") or [])
+          and not any("github.com" in q for q in queries.get("doi") or []), str(queries))
     bad = fmt.lookup_kind("nonsense-kind", "x")
     check("an unknown kind degrades to verdict=error (never raises)",
           bad["verdict"] == "error" and bool(bad["errors"]))

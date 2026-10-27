@@ -143,7 +143,7 @@ LABEL_PATTERNS = [
         r"\bAU(?:C|ROC)\s*(?:(?:was|is|of|approximately|approx\.?|about)\s*)*"
         r"(?:[:=]\s*)?((?:0?\.\d+|1(?:\.0+)?))(?!\d|\.\d)", re.I)),
     ("percentage", re.compile(
-        r"(?<![\w.])((?:\.\d+|\d{1,3}(?:\.\d+)?))\s*%")),
+        r"(?<![\w.])((?:\.\d+|\d{1,4}(?:\.\d+)?))\s*%")),
     ("CI", re.compile(
         r"\bCI\s*(?:[:=,]\s*)?(?:\[\s*)?"
         r"([+\-\u2212]?\d+(?:\.\d+)?)\s*(?:[–—−-]|to|,)\s*"
@@ -166,10 +166,15 @@ def _metric_key(label: str, val) -> str:
     """
     text = str(val).replace("\u2212", "-")
     if label == "CI":
-        parts = text.split("-")
-        if len(parts) == 2:
+        # A CI is joined as "<lower>-<upper>"; a signed bound carries its own
+        # minus, so splitting on every hyphen turned "-0.5--0.1" into four
+        # fragments and fell through to the raw string.
+        m = re.fullmatch(r"\s*([+\-\u2212]?\d+(?:\.\d+)?)\s*-\s*"
+                         r"([+\-\u2212]?\d+(?:\.\d+)?)\s*", text)
+        if m:
             try:
-                return "-".join(format(float(p), ".15g") for p in parts)
+                return "-".join(format(float(p.replace("\u2212", "-")), ".15g")
+                                for p in m.groups())
             except ValueError:
                 return text
         return text

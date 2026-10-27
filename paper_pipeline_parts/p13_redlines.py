@@ -614,10 +614,11 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
     backend is still last in the chain and is named as such in the manifest: it
     cannot represent edits inside tables/content controls (see below).
 
-    What it canNOT represent: non-paragraph body content. Tables, content
-    controls (w:sdt) and section properties are copied verbatim from the base, so
-    an edit inside a table is invisible in this file. That is detected and
-    reported (``non_paragraph_changed``) rather than silently dropped; use a real
+    What it canNOT represent: edits INSIDE non-paragraph body content. Tables,
+    content controls (w:sdt) and section properties are taken from the revised
+    package at their revised positions, but no w:ins/w:del is written inside
+    them, so an edit inside a table is not marked. That is detected and reported
+    (``non_paragraph_changed``) rather than silently dropped; use a real
     tracked-changes backend when the diff touches tables.
     """
     base_raw, base_root = _docx_root(base_docx)
@@ -638,27 +639,51 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
     # position RELATIVE to the paragraphs around them. Appending them all after
     # the paragraph diff relocated every inline table to the end of the redline
     # -- silent layout corruption, and non_paragraph_changed stays False when the
-    # table bytes are identical in base and revised. Anchor each element to the
-    # number of base paragraphs preceding it and flush it back at that point.
-    anchored, seen = [], 0
+    # table bytes are identical in base and revised.
+    # Anchor the non-paragraph body children on BOTH sequences. The revised
+    # count keeps a table after an INSERTED paragraph (D-052); the base count
+    # keeps a table after a DELETED paragraph from jumping ahead of the w:del,
+    # so rejecting all changes reproduces the base order. A child is emitted
+    # only once the paragraphs before it in EACH body have been emitted.
+    base_extra_anchor, base_seen = [], 0
     for child in list(base_body):
         if child.tag == _w("p"):
-            seen += 1
+            base_seen += 1
         else:
-            anchored.append((seen - 1, child))      # -1 -> before the first paragraph
-    flushed = 0
+            base_extra_anchor.append(base_seen)
+    rev_anchored, rev_seen = [], 0
+    for child in list(rev_body):
+        if child.tag == _w("p"):
+            rev_seen += 1
+        else:
+            rev_anchored.append([rev_seen, 0, child])  # (rev paras before, base paras before)
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+            None, base_extra, rev_extra, autojunk=False).get_opcodes():
+        if tag in ("equal", "replace"):
+            # Pair each revised child with its base counterpart (a changed table
+            # is a replace: same slot, different bytes).
+            for off in range(min(i2 - i1, j2 - j1)):
+                rev_anchored[j1 + off][1] = base_extra_anchor[i1 + off]
+    emitted_base = emitted_rev = flushed = 0
 
-    def flush_anchored(upto: int) -> None:
+    def flush_anchored() -> None:
         nonlocal flushed
-        while flushed < len(anchored) and anchored[flushed][0] <= upto:
-            new_body.append(copy.deepcopy(anchored[flushed][1]))
+        while (flushed < len(rev_anchored)
+               and rev_anchored[flushed][0] <= emitted_rev
+               and rev_anchored[flushed][1] <= emitted_base):
+            new_body.append(copy.deepcopy(rev_anchored[flushed][2]))
             flushed += 1
 
-    def emit(element, base_index=None) -> None:
-        """Append one element; flush the body children anchored before it."""
+    def emit(element, base_after=None, rev_after=None) -> None:
+        """Append one element, then flush every anchored child whose base AND
+        revised paragraph prefixes have now been emitted."""
+        nonlocal emitted_base, emitted_rev
         new_body.append(element)
-        if base_index is not None:
-            flush_anchored(base_index)
+        if base_after is not None:
+            emitted_base = max(emitted_base, base_after)
+        if rev_after is not None:
+            emitted_rev = max(emitted_rev, rev_after)
+        flush_anchored()
 
     def same_para_xml(a, b) -> bool:
         """Paragraph CONTENT equality: the tail (inter-paragraph whitespace)
@@ -670,14 +695,15 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
             return ET.tostring(cp)
         return body(a) == body(b)
 
-    flush_anchored(-1)
+    flush_anchored()                                    # before the first revised para
     for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
             None, base_texts, rev_texts, autojunk=False).get_opcodes():
         if tag == "equal":
             for k in range(i1, i2):
-                bp, rp = base_paras[k], rev_paras[j1 + (k - i1)]
+                rp_index = j1 + (k - i1)
+                bp, rp = base_paras[k], rev_paras[rp_index]
                 if same_para_xml(bp, rp):
-                    emit(copy.deepcopy(bp), k)
+                    emit(copy.deepcopy(bp), base_after=k + 1, rev_after=rp_index + 1)
                 else:
                     # The text is equal, but the paragraph XML is not: a soft
                     # line break, tab, drawing, field char or formatting-only run
@@ -685,30 +711,36 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
                     # that edit from the redline entirely. Whole-paragraph
                     # markup keeps both contracts: accept-all yields the revised
                     # paragraph, reject-all yields the base.
-                    emit(_whole_paragraph_change(bp, rp, counter, ts), k)
+                    emit(_whole_paragraph_change(bp, rp, counter, ts),
+                         base_after=k + 1, rev_after=rp_index + 1)
                     n_del += 1
                     n_ins += 1
         elif tag == "delete":
             for k in range(i1, i2):
-                emit(_wrap_para(base_paras[k], "del", True, counter, ts), k)
+                emit(_wrap_para(base_paras[k], "del", True, counter, ts), base_after=k + 1)
                 n_del += 1
         elif tag == "insert":
-            for p in rev_paras[j1:j2]:
-                emit(_wrap_para(p, "ins", False, counter, ts))
+            for off, p in enumerate(rev_paras[j1:j2]):
+                emit(_wrap_para(p, "ins", False, counter, ts),
+                     base_after=i1, rev_after=j1 + off + 1)
                 n_ins += 1
         else:
             common = min(i2 - i1, j2 - j1)
             for k in range(common):
-                emit(_replace_para(base_paras[i1 + k], rev_paras[j1 + k], counter, ts), i1 + k)
+                emit(_replace_para(base_paras[i1 + k], rev_paras[j1 + k], counter, ts),
+                     base_after=i1 + k + 1, rev_after=j1 + k + 1)
                 n_del += 1
                 n_ins += 1
             for k in range(i1 + common, i2):
-                emit(_wrap_para(base_paras[k], "del", True, counter, ts), k)
+                emit(_wrap_para(base_paras[k], "del", True, counter, ts), base_after=k + 1)
                 n_del += 1
-            for p in rev_paras[j1 + common:j2]:
-                emit(_wrap_para(p, "ins", False, counter, ts))
+            for off, p in enumerate(rev_paras[j1 + common:j2]):
+                emit(_wrap_para(p, "ins", False, counter, ts),
+                     base_after=i2, rev_after=j1 + common + off + 1)
                 n_ins += 1
-    flush_anchored(len(base_paras) - 1)                 # remainder, incl. a trailing sectPr
+    emitted_base = max(emitted_base, len(base_paras))
+    emitted_rev = max(emitted_rev, len(rev_paras))
+    flush_anchored()                                    # remainder, incl. a trailing sectPr
     base_body.clear()
     for child in list(new_body):
         base_body.append(child)
@@ -728,8 +760,8 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
             "non_paragraph_changed": non_paragraph_changed}
     if non_paragraph_changed:
         info["warning"] = ("tables/content-controls/section properties differ between base and "
-                           "revised; the built-in writer copies them from the base and does NOT "
-                           "represent those changes -- inspect the diff with a real "
+                           "revised; the built-in writer keeps the revised ones in place but "
+                           "does NOT mark changes inside them -- inspect the diff with a real "
                            "tracked-changes backend")
     return info
 

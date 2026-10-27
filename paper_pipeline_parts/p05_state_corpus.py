@@ -1189,6 +1189,11 @@ def corpus_content_set_fingerprint(sources: list) -> str:
             rel = p.relative_to(src).as_posix()
             if excluded and rel.split("/", 1)[0] in excluded:
                 continue
+            if is_disabled_evidence_rel(rel):
+                # An inert `<evidence>.disabled/` area is not corpus content:
+                # manifest_for_sources() already skips it, and the fingerprint
+                # must describe the same files or a copy cannot reproduce it.
+                continue
             if (prefix + rel) in overrides[i]:
                 continue                      # a later source provides this path
             paths.append(p)
@@ -2749,9 +2754,11 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
     ensure_copy(ctx.sandbox_of(a1) / "base", sb / "base")
     ensure_pristine_input(ctx, sb / PRISTINE_DIR)
     extra_inputs = {}
-    if journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_RESUBMIT):
+    if journal_has_feedback(ctx) and not journal_is_scoped(ctx):
         # A rewrite for a real submission attempt must answer the decision
-        # letter: the concern ledger travels beside the corpus.
+        # letter (or the pre-filtered LLM review, in `llm` mode): the concern
+        # ledger travels beside the corpus for EVERY feedback mode, exactly as
+        # materialize_review() stages it.
         fb = _journal_concern_source(ctx, r)
         ensure_copy(fb / "concerns", sb / "concerns")
         extra_inputs["concerns"] = hash_manifest(sb / "concerns")
@@ -2916,7 +2923,10 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
     # The PROBE session is an independent producer of X-9xx rows: merge them
     # into THIS sandbox's frozen review copy (never into the source review), so
     # the auditor disposes them beside every other frozen id.
-    probe_merge = merge_probe_into_review_copy(ctx, r, sb)
+    # A concern-scoped revision has no probe session and must never absorb
+    # general X-9xx discovery rows: they are not reviewer concerns.
+    probe_merge = ({} if journal_is_scoped(ctx)
+                   else merge_probe_into_review_copy(ctx, r, sb))
     if journal_has_feedback(ctx):
         # The auditor disposes JF findings against the real letter, and a
         # concern the reviewers raised against the earlier version can only be
@@ -3565,6 +3575,13 @@ def probe_findings_for_merge(existing_ids, rows) -> tuple:
             k = PROBE_FINDING_ID_BASE + 1
             while f"X-{k:03d}" in used:
                 k += 1
+            if k > PROBE_FINDING_ID_BASE + 99:
+                # Fail closed: X-1000 is outside the reserved X-9xx block and
+                # no longer matches PROBE_ID_RE, so every downstream probe-id
+                # check would misclassify it.
+                raise RuntimeError(
+                    "the reserved probe id block X-901..X-999 is exhausted: "
+                    "refusing to emit an id outside the probe block")
             new = f"X-{k:03d}"
             remap[fid] = new
         used.add(new)
@@ -3687,7 +3704,10 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     # reviser must resolve: merge them into THIS sandbox's review copy (the
     # source review sandbox is never touched; every consumer gets the same
     # merged list -- see merge_probe_into_review_copy).
-    probe_merge = merge_probe_into_review_copy(ctx, r, sb)
+    # A concern-scoped revision has no probe session and must never absorb
+    # general X-9xx discovery rows: they are not reviewer concerns.
+    probe_merge = ({} if journal_is_scoped(ctx)
+                   else merge_probe_into_review_copy(ctx, r, sb))
     if journal_has_feedback(ctx):
         if (src_sb / "concerns").is_dir():
             ensure_copy(src_sb / "concerns", sb / "concerns")

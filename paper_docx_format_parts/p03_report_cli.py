@@ -617,7 +617,14 @@ def analyse_package(path: Path, policy: dict) -> dict:
     # The cover letter's two-page budget: a rendered PDF beside the .docx is
     # authoritative; without one, the cached Pages value is reported (and the
     # row says which source it came from -- the cache can be stale).
-    if re.search(r"cover[\s_-]?letter", path.name, re.I):
+    _cv = (policy or {}).get("cover_letter")
+    _cv_names = (_cv.get("manuscript_article_type_names") or ()
+                 if isinstance(_cv, dict) else ())
+    if is_cover_letter_doc(path.name, _cv_names):
+        # ONE name predicate with FMT-CL1 (including the run's own article-type
+        # spellings): the old local `cover...letter` substring missed a letter
+        # named `Letter.docx`/`plainLetter.docx` and false-matched
+        # `recover_letter.docx`.
         pages, src = None, ""
         pdf = path.with_suffix(".pdf")
         if pdf.is_file() and shutil.which("pdftotext"):
@@ -4130,6 +4137,7 @@ def check_pdf(path: Path, policy: dict) -> dict:
     txt = proc.stdout
     res = blank_pages_in_text(txt)
     blank = res["blank_pages"]
+    image_gap = None
     if blank:
         # A page carrying only an embedded image has no text layer; it is not a
         # blank page (a figure-only page is a valid deliverable). But a running
@@ -4139,8 +4147,20 @@ def check_pdf(path: Path, policy: dict) -> dict:
         # blank_pages_in_text() applies to repeated text lines.
         image_pages = _pdf_image_pages(path)
         if image_pages is None:
-            image_pages = set(blank) if (res["pages"] == 1
-                                        and _pdf_carries_an_image(path)) else set()
+            # Without pdfimages a figure-only page is indistinguishable from a
+            # blank page. Treating it as definitively blank (for any PDF that is
+            # not a single image page) filed false high-severity FMT-S2 rows;
+            # record the tool gap instead and give no blank-page verdict.
+            image_gap = {
+                "rule": "FMT-S2", "severity": "low", "document": path.name,
+                "location": "-",
+                "evidence": "pdfimages not available: figure-only pages cannot "
+                            "be distinguished from blank pages",
+                "detail": "the blank-page check is a named gap for this PDF "
+                          "(install pdfimages to complete it)",
+                "fix": "manual", "protected": False}
+            image_pages = set()
+            blank = []
         else:
             freq = Counter(sig for sigs in image_pages.values() for sig in sigs)
             furniture = {sig for sig, count in freq.items()
@@ -4156,12 +4176,16 @@ def check_pdf(path: Path, policy: dict) -> dict:
              # a repair no tool can perform on the artifact
              "fix": "manual", "protected": False}
             for i in blank if len(blank) > policy["blank_page_tolerance"]]
+    if image_gap is not None:
+        rows.append(image_gap)
     # The artifact checks (FMT-PDF1..3) run on the SAME extraction: a form shell
     # has one non-blank page and would otherwise pass as clean.
     rows.extend(pdf_artifact_rows(path, text=txt, pages=res["pages"]))
+    only_gap = bool(image_gap is not None and len(rows) == 1)
     return {"file": str(path), "pages": res["pages"], "blank_pages": blank,
             "furniture": res["furniture"][:5], "rows": rows,
-            "ok": not rows}
+            # A skipped tool is reported as skipped, never as a clean pass.
+            "ok": None if only_gap else not rows}
 
 
 # --------------------------------------------------------------------------
@@ -5311,7 +5335,13 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
     def visible(xml_text: str) -> str:
         return "\n".join(text_of(p[2]) for p in paragraphs(xml_text))
 
-    doc_xml = data["word/document.xml"].decode("utf-8")
+    try:
+        doc_xml = data["word/document.xml"].decode("utf-8")
+    except UnicodeDecodeError as exc:
+        # A non-UTF-8 main part is an unreadable package, not a traceback out
+        # of a documented `repair-layout` command.
+        report["error"] = f"unreadable DOCX package: {exc}"
+        return report
     # A malformed main part is an unreadable package (the scanner/validator
     # likewise report FMT-X1): the regex rules below tolerate broken XML and
     # would otherwise "repair" a document Word cannot open.
@@ -5340,7 +5370,7 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
             # An orphan part is not printed; repairing it contradicts the
             # referenced-only policy the scanner and `fix` already follow.
             continue
-        part = data[name].decode("utf-8")
+        part = data[name].decode("utf-8", "replace")
         part_edits = page_field_fixes(part)
         if part_edits:
             data[name] = apply_edits(part, part_edits).encode("utf-8")
@@ -5384,7 +5414,7 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
     os.replace(tmp, out)
     # Re-scan the written copy: only the fixed rows may be left.
     with zipfile.ZipFile(out) as z:
-        out_doc = z.read("word/document.xml").decode("utf-8")
+        out_doc = z.read("word/document.xml").decode("utf-8", "replace")
         out_styles = parse_styles(z)
         rels_name = "word/_rels/document.xml.rels"
         targets = {}
@@ -5397,7 +5427,7 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
                     tgt = attrs.get("Target", "").lstrip("/").replace("\\", "/")
                     targets[attrs["Id"]] = (tgt if tgt.startswith("word/") else "word/" + tgt)
         ref_ids = re.findall(r'<w:(?:header|footer)Reference[^>]*r:id="([^"]+)"', out_doc)
-        aux = [(targets[rid], z.read(targets[rid]).decode("utf-8"))
+        aux = [(targets[rid], z.read(targets[rid]).decode("utf-8", "replace"))
                for rid in ref_ids if rid in targets and targets[rid] in z.namelist()]
     left = [r for r in table_layout_rows(out_doc, out_styles, out.name, policy)
             if r.get("rule") in ("FMT-TB4", "FMT-TB5")]

@@ -872,7 +872,7 @@ CAPTION_SUSPECT_RE = re.compile(
 # and table captions" in its main-body rule). They are not figure legends: the
 # M18 legend scan keeps its figure-only patterns.
 TABLE_CAPTION_START_RE = re.compile(
-    r"^\s*(?:(?:supplementary|extended\s+data|supp)\s+)?tables?\.?\s*"
+    r"^\s*(?:(?:supplementary|extended\s+data|supp\.?)\s+)?tables?\.?\s*"
     r"(S?\d+[A-Za-z]?|(?-i:[IVXLCDM]+))"
     r"\s*(?:\||:|\u2014|\u2013|-|\.)\s*",
     re.IGNORECASE)

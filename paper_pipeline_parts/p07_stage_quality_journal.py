@@ -2888,12 +2888,12 @@ THE FINDING LIST (the revision session consumes it):
       status      "resolvable" (to-fix) | "unresolvable" (manual)
       concern     the concern id
   * When the corpus carries the false-positive-filtered LLM review
-    (`feedback/llm/`), add one `coverage` row for the upstream pre-filter: name
-    it and state that the classes it dropped are a named gap, never a clean
-    result.
+    (`feedback/llm/`), add one `coverage` row with `check`: "LLM-pre-filter" for
+    the upstream pre-filter: name it and state that the classes it dropped are a
+    named gap, never a clean result.
   * The scoped review covers ONLY the admitted concerns: add one `coverage` row
-    naming that scope and stating that every class outside the ledger is a
-    named gap, not a clean result.
+    with `check`: "scope" naming that scope and stating that every class outside
+    the ledger is a named gap, not a clean result.
   * review/artifacts/JF_concerns.md — the ledger as a markdown table.
   * review/findings.md — the findings in the review's markdown shape.
   * Do NOT edit base/ or the feedback; do not write revised/ here.
@@ -3289,6 +3289,45 @@ def journal_review_coverage_problems(ctx: Ctx, rec: dict, sb: Path, fj: dict) ->
     return errs
 
 
+def concern_coverage_problems(fj: dict, llm_feedback_present: bool) -> list:
+    """The Rule 8 named-gap rows the scoped concerns prompt requires.
+
+    One row (`check` = "scope") must name the admitted scope and say every class
+    outside the ledger is a named gap; when the corpus carries the pre-filtered
+    LLM review, a second row (`check` = "LLM-pre-filter") must name that
+    upstream pre-filter and its dropped classes. A row that does not name the
+    required thing, or that denies a gap, does not satisfy the gate.
+    """
+    rows = fj.get("coverage") if isinstance(fj, dict) else None
+    rows = [r for r in (rows or []) if isinstance(r, dict)] if isinstance(rows, list) else []
+
+    def name(row) -> str:
+        return str(row.get("check") or row.get("name") or "").strip().lower()
+
+    def text(row) -> str:
+        return " ".join(str(v) for v in row.values() if isinstance(v, str)).lower()
+
+    # "not a gap" / "no gap" is the opposite of the required statement; a bare
+    # substring test would accept it.
+    gap_denied = re.compile(r"\b(?:not|no|never|without)\s+(?:an?\s+)?(?:named\s+)?gaps?\b")
+
+    def states_gap(wanted) -> bool:
+        return any(wanted(name(r)) and "gap" in text(r)
+                   and not gap_denied.search(text(r)) for r in rows)
+
+    errs = []
+    if not states_gap(lambda n: n == "scope"):
+        errs.append(
+            "review/findings.json has no coverage row with check \"scope\" naming the admitted "
+            "scope and stating that every class outside the ledger is a named gap, not a clean "
+            "result")
+    if llm_feedback_present and not states_gap(lambda n: "llm" in n):
+        errs.append(
+            "review/findings.json has no coverage row with check \"LLM-pre-filter\" naming the "
+            "upstream LLM pre-filter and stating that its dropped classes are a named gap")
+    return errs
+
+
 def postcheck_concerns(ctx: Ctx, rec: dict):
     """Modes 3-4: the scoped ledger AND the finding list it produces."""
     sb = ctx.sandbox_of(rec)
@@ -3345,6 +3384,8 @@ def postcheck_concerns(ctx: Ctx, rec: dict):
                         f"{', '.join(extra[:6])}")
         if not (sb / REVIEW_DIR / "artifacts" / "JF_concerns.md").is_file():
             errs.append(f"{ARTIFACTS_REL}/JF_concerns.md is missing")
+        errs.extend(concern_coverage_problems(
+            fj, (sb / "feedback" / "llm").is_dir()))
         if not (sb / REVIEW_DIR / "findings.md").is_file():
             warns.append(f"{REVIEW_DIR}/findings.md is missing (the human-readable list)")
     if data:
@@ -3384,6 +3425,12 @@ def postcheck_response(ctx: Ctx, rec: dict):
                     f"deliverable of this mode")
     else:
         letter = md.read_text(encoding="utf-8", errors="replace")
+        if not letter.strip():
+            # A 0-byte file is present but not a letter: without this check the
+            # per-concern mention test was skipped (`if cid and letter`), so a
+            # mode whose deliverable IS the letter could be certified empty.
+            errs.append(f"{JOURNAL_RESPONSE_MD_REL} is EMPTY: the response to "
+                        f"reviewers must carry one block per concern")
     data = read_json(sb / JOURNAL_RESPONSE_MAP_REL, revive=False, lenient=True)
     if not isinstance(data, dict):
         errs.append(f"{JOURNAL_RESPONSE_MAP_REL} is missing/unparsable (the letter's "
@@ -3476,8 +3523,15 @@ def postcheck_response(ctx: Ctx, rec: dict):
                 and str(src_row.get("action") or "") == "new-experiment" and not new_data:
             errs.append(f"response row {cid!r}: the concern needs a new experiment; an "
                         f"'addressed' answer must cite the new data file(s)")
-        if cid and letter and not _finding_id_mentioned(str(cid), letter):
-            errs.append(f"response letter does not mention concern {cid!r}")
+        if cid and letter.strip():
+            mentions = _finding_id_occurrences(str(cid), letter)
+            if not mentions:
+                errs.append(f"response letter does not mention concern {cid!r}")
+            elif mentions > 1:
+                # The prompt requires one block per concern; a repeated section
+                # passed merely because the id was mentioned somewhere.
+                errs.append(f"response letter mentions concern {cid!r} {mentions} "
+                            f"times: exactly one block per concern is required")
     # Like every sibling postcheck: the response session must not rewrite the
     # read-only package copy its letter is verified against (target/), or the
     # change citations can "exist" in a package that was never checked.

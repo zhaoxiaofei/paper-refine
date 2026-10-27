@@ -946,7 +946,7 @@ FIGURES_HEADING_RE = re.compile(
 # (the separator right after the number is what tells them apart). The figure
 # patterns below are the same rule for "Figure 2 |", "Fig. 2.", "Figure S1",
 # "Extended Data Figure 3 |", "Supplementary Fig. 4:".
-_CAPTION_LABEL_RE = (r"(?:supplementary\s+|extended\s+data\s+|supp\s+)?%s\.?\s*")
+_CAPTION_LABEL_RE = (r"(?:supplementary\s+|extended\s+data\s+|supp\.?\s+)?%s\.?\s*")
 DISPLAY_CAPTION_NUM_RE = r"(?:S?\d+[A-Za-z]?|[IVXLC]{2,})"
 TABLE_CAPTION_RE = re.compile(
     r"^\s*" + (_CAPTION_LABEL_RE % "tables?") + DISPLAY_CAPTION_NUM_RE

@@ -42,7 +42,8 @@ _JUDGE_CONFLICT_STOPWORDS = {
     "when", "does", "did", "per", "vs", "any", "all",
 }
 _JUDGE_CONFLICT_TOKEN_RE = re.compile(r"[a-z][a-z0-9_.\-/]{2,}")
-_JUDGE_CONFLICT_NUMBER_RE = re.compile(r"(?<![\w.])(\d[\d,]*(?:\.\d+)?)")
+# The sign is part of the value: "-12" and "12" are a real contradiction.
+_JUDGE_CONFLICT_NUMBER_RE = re.compile(r"(?<![\w.])([-\u2212]?\d[\d,]*(?:\.\d+)?)")
 
 
 def _conflict_numbers(text, floor: float = 10.0) -> set:
@@ -59,7 +60,9 @@ def _conflict_numbers(text, floor: float = 10.0) -> set:
             v = float(tok)
         except ValueError:
             continue
-        if v >= float(floor):
+        # The floor is a MAGNITUDE floor: a negative disagreement of the same
+        # size is as reportable as its positive twin.
+        if abs(v) >= float(floor):
             out.add(v if v != int(v) else int(v))
     return out
 
@@ -8383,7 +8386,8 @@ def cmd_status(args) -> None:
     _jmode = journal_mode_of(ctx)
     print(f"ranking:       adaptive severity_tier_category defect prefix LEADS; floor "
           f"{tiebreak_defect_floor_of(ctx)} "
-          f"(`set-tiebreak-defect-floor N`; 0 = one cell only, 999999 = every cell)")
+          f"(`set-tiebreak-defect-floor N`; 0 = empty prefix (no census cells lead), "
+          f"999999 = every cell)")
     print(f"dedup mode:    {dedup_mode_of(ctx)} "
           f"(`set-dedup-mode off|location`; off counts every sheet's rows)")
     print(f"champion:      {champion_select_of(ctx)} "

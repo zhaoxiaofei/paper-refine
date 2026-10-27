@@ -75,8 +75,10 @@ def test_emphasis_span():
     check("F-082 the italic tail outside the label keeps its italics",
           tail is not None and "<w:i/>" in tail.group(0),
           tail.group(0)[:200] if tail else "tail run not found")
+    # The fixed span is the whole parenthetical label, closing ')' included
+    # (balanced_paren_groups returns an EXCLUSIVE end).
     label_run = re.search(r"<w:r\b[^>]*>(?:(?!</w:r>)[\s\S])*?"
-                          r"<w:t[^>]*>bob@example\.edu</w:t>(?:(?!</w:r>)[\s\S])*?</w:r>",
+                          r"<w:t[^>]*>bob@example\.edu\)?</w:t>(?:(?!</w:r>)[\s\S])*?</w:r>",
                           fixed)
     check("F-082 the label half itself is made roman",
           label_run is not None and "<w:i/>" not in label_run.group(0),

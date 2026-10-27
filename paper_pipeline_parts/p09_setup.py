@@ -2396,6 +2396,14 @@ def cmd_set_probe_review(args) -> None:
     if mode_arg not in PROBE_REVIEW_MODES:
         die(f"set-probe-review needs one of {', '.join(PROBE_REVIEW_MODES)} (got {mode_arg!r})",
             code=2)
+    if mode_arg == "on" and journal_is_scoped(ctx):
+        # A concern-scoped revision may edit only the admitted concerns: a
+        # general discovery probe would add X-9xx findings that are not
+        # reviewer concerns. Setup already forces the policy off; the setter
+        # must not reopen the hole.
+        die("probe_review is fixed off in a concern-scoped revision mode "
+            f"({journal_mode_of(ctx)}): the probe is a general discovery pass and "
+            "its findings are not reviewer concerns", code=2)
     begin_run_log("set-probe-review", ctx.root, sys.argv)
     if ctx.state.get("runs") and not getattr(args, "force", False):
         die(f"this root already has {len(ctx.state['runs'])} run record(s): the probe policy "
@@ -3044,6 +3052,29 @@ def validate_only_selectors(ctx: Ctx, only, flag: str = "--only") -> None:
             die(f"{flag}: {e}")
 
 
+def no_progress_measure(row: dict):
+    """The ordered progress key for `--stop-after-no-progress`.
+
+    The SAME lexicographic census `champion_sort_key()` ranks by (then
+    median/mean/IQR), never the census SUM: a version that removed a fatal
+    defect (census (0,5)) is progress over one that has one (1,0), although
+    its total is larger. The digest/id tie-break is deliberately absent: an
+    identity choice is not evidence of progress.
+    """
+    if not row:
+        return None
+    med, mean, iqr = row.get("median"), row.get("mean"), row.get("iqr")
+    census = row.get("defect_prefix_census")
+    if census is None:
+        census = (int(row.get("defect_prefix_total") or 0),)
+    return (
+        tuple(int(x) for x in census),
+        -(med if med is not None else -99.0),
+        -(mean if mean is not None else -99.0),
+        iqr if iqr is not None else 99.0,
+    )
+
+
 def cmd_run(args) -> None:
     """`run` entry point: take the root lock, then drive the rounds."""
     ctx = Ctx(Path(args.root).resolve(),
@@ -3473,15 +3504,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                 (row for row in ranking if row.get("id") == sel_rr.get("champion")), None)
 
             def measurable(row):
-                if not row:
-                    return None
-                med, mean, iqr = row.get("median"), row.get("mean"), row.get("iqr")
-                return (
-                    int(row.get("defect_prefix_total") or 0),
-                    -(med if med is not None else -99.0),
-                    -(mean if mean is not None else -99.0),
-                    iqr if iqr is not None else 99.0,
-                )
+                return no_progress_measure(row)
 
             # The content digest may select a challenger when every measurable
             # term ties. That is a deterministic identity choice, not evidence

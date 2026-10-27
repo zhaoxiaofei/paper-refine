@@ -126,7 +126,9 @@ def is_non_manuscript(name: str) -> bool:
     return bool(_NON_MANUSCRIPT_RE.search(cleaned))
 
 
-NUM_CIT_RE = re.compile(r"\[(\d{1,4}(?:\s*[,;–-]\s*\d{1,4})*)\]")
+# The OOXML marker parser accepts an en/em dash as a range separator; an em
+# dash citation was invisible to this sweep and fabricated orphan rows.
+NUM_CIT_RE = re.compile(r"\[(\d{1,4}(?:\s*[,;–—-]\s*\d{1,4})*)\]")
 AY_CIT_RE = re.compile(
     r"(?P<a1>[A-Z][A-Za-z'\-]+)\s+et al\.?\s*,?\s*\(?(?P<y1>(?:1[5-9]|20)\d{2}[a-z]?)\)?"
     r"|(?P<a2>[A-Z][A-Za-z'\-]+)\s+(?:and|&)\s+(?P<a2b>[A-Z][A-Za-z'\-]+)\s*,?\s*"

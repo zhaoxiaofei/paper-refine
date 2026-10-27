@@ -2110,7 +2110,8 @@ def round_run_plan(ctx: Ctx, r: int) -> list:
                             "deps": [rid_a1(r), rid_review(r)], "stage": "review",
                             "materialize": (lambda c: materialize_review(c, r, "b"))})
             review_deps.append(rid_review_b(r))
-        if probe_review_of(ctx) == "on" and round_review_scope(ctx, r) == "full":
+        if (probe_review_of(ctx) == "on" and not scoped
+                and round_review_scope(ctx, r) == "full"):
             # The PROBE REVIEW: an independent, cold-context DISCOVERY session
             # that runs IN PARALLEL with the checklist review (same base, no
             # dependency on it). It hunts any defect class and, where a

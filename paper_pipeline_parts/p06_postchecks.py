@@ -3076,6 +3076,12 @@ def coverage_row_text(row) -> str:
     return " ".join(parts).lower()
 
 
+def _finding_id_occurrences(pid: str, blob: str) -> int:
+    """How many whole-token times `pid` occurs in `blob` (0 when absent)."""
+    return len(re.findall(r"(?<![A-Za-z0-9])" + re.escape(pid) + r"(?![A-Za-z0-9])",
+                          str(blob or "")))
+
+
 def _finding_id_mentioned(pid: str, blob: str) -> bool:
     """Whole-token occurrence of a finding id inside `blob`.
 
@@ -3086,8 +3092,7 @@ def _finding_id_mentioned(pid: str, blob: str) -> bool:
     Anchoring on alphanumerics keeps hyphens usable inside prose ("the F-012
     related note") while rejecting any alphanumeric continuation.
     """
-    return re.search(r"(?<![A-Za-z0-9])" + re.escape(pid) + r"(?![A-Za-z0-9])",
-                     blob) is not None
+    return _finding_id_occurrences(pid, blob) > 0
 
 
 def archive_review_outputs(ctx: Ctx, r: int) -> Path:

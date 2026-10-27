@@ -492,9 +492,20 @@ def do_concerns(sb: Path, name: str, round_no: int) -> int:
                  "severity": "Major", "evidence": r["quote"],
                  "explanation": f"stub: answer concern {r['id']}",
                  "status": "resolvable", "concern": r["id"]} for r in rows]
+    coverage = [{
+        "check": "scope",
+        "disposition": ("the scoped review covers only the admitted concerns; every class "
+                        "outside this ledger is a named gap, not a clean result"),
+        "detail": "stub"}]
+    if (sb / "feedback" / "llm").is_dir():
+        coverage.append({
+            "check": "LLM-pre-filter",
+            "disposition": ("the upstream LLM pre-filter dropped classes are a named gap, "
+                            "never a clean result"),
+            "detail": "stub"})
     write_json(rev / "findings.json", {"submission_dir": "./base",
                                        "guidelines_source": "stub",
-                                       "findings": findings, "coverage": []})
+                                       "findings": findings, "coverage": coverage})
     (rev / "findings.md").write_text("# findings (stub journal)\n", encoding="utf-8")
     (rev / "artifacts" / "JF_concerns.md").write_text(
         "# JF_concerns (stub)\n", encoding="utf-8")

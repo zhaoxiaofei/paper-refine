@@ -143,9 +143,32 @@ def tree_files(root: Path) -> list:
             return None
         return (st.st_dev, st.st_ino)
 
+    def followable_evidence_dir(p: Path, top_level: bool) -> bool:
+        """A TOP-LEVEL link named as an evidence area, exactly like the twin.
+
+        The pipeline follows only the corpus-level
+        `<sandbox>/<raw_data|human_review_feedback|llm_review_feedback>` link
+        `ensure_pristine_input` creates; a nested or non-evidence link is not
+        package content. Following every directory link here made the two
+        tokens disagree on a package with a nested `sub -> /outside` link.
+        """
+        if not p.is_symlink() or not top_level or not is_evidence_rel(p.name):
+            return False
+        try:
+            return p.resolve(strict=True).is_dir()
+        except (OSError, RuntimeError):
+            return False
+
     def walk(d: Path, ancestors: frozenset) -> None:
         for p in sorted(d.iterdir()):
-            if p.is_dir():
+            if p.is_symlink() and p.is_dir():
+                if not followable_evidence_dir(p, d == root):
+                    continue
+                key = dir_key(p)
+                if key is None or key in ancestors:
+                    continue
+                walk(p, ancestors | {key})
+            elif p.is_dir():
                 key = dir_key(p)
                 if key is None or key in ancestors:
                     continue
