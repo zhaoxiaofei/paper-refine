@@ -33,6 +33,21 @@ RAW_DATA_DIRNAMES = ("raw_data",)
 HUMAN_FEEDBACK_DIR = "human_review_feedback"
 LLM_FEEDBACK_DIR = "llm_review_feedback"
 EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR)
+# `<evidence area>.disabled` / `.off` is the documented OFF-SWITCH: the
+# pipeline's `is_disabled_evidence_rel` treats the area as inert (not
+# submission content, not readable evidence). The formatter tested exact names
+# only, so a disabled area was still scanned, validated and repaired.
+DISABLED_EVIDENCE_SUFFIXES = ("disabled", "off")
+
+
+def is_evidence_part(part: str) -> bool:
+    """True for an evidence-area path part, including its disabled form."""
+    low = str(part or "").strip().lower()
+    if low in EVIDENCE_DIRNAMES:
+        return True
+    return any(low.startswith(area + ".")
+               and low[len(area) + 1:] in DISABLED_EVIDENCE_SUFFIXES
+               for area in EVIDENCE_DIRNAMES)
 
 POLICY_DEFAULTS = {
     # FMT-IM4: a raster placed below this effective resolution is reported
@@ -339,8 +354,31 @@ def _spans(xml: str, tokens: re.Pattern) -> list:
     return out
 
 
+def _mc_hidden_spans(xml: str) -> list:
+    """XML spans of the `mc:Fallback` branches Word does NOT render.
+
+    `text_of` already reads only the Choice branch, but the paragraph walker
+    returned both branches' `w:p` elements (and the text-offset walk counted
+    both branches' runs), duplicating text-box content and shifting every
+    later field span. Only a Fallback that has a Choice beside it is hidden.
+    """
+    out = []
+    for m in _MC_ALTERNATE_RE.finditer(xml):
+        block = m.group(0)
+        if _MC_CHOICE_RE.search(block) is None:
+            continue
+        fb = _MC_FALLBACK_RE.search(block)
+        if fb is not None:
+            out.append((m.start() + fb.start(), m.start() + fb.end()))
+    return out
+
+
 def paragraphs(xml: str) -> list:
-    return _spans(xml, PARA_TOKENS)
+    hidden = _mc_hidden_spans(xml)
+    spans = _spans(xml, PARA_TOKENS)
+    if not hidden:
+        return spans
+    return [sp for sp in spans if not any(a <= sp[0] < b for a, b in hidden)]
 
 
 def runs(frag: str) -> list:
@@ -638,8 +676,14 @@ def field_result_text_ranges(para: str, doc_spans=None, para_start: int = 0) -> 
     which the paragraph-scoped stack could not see.
     """
     runs, pos = [], 0
+    hidden = _mc_hidden_spans(para)
     for m in _FRAG_OR_BREAK_RE.finditer(para):
         tok = m.group(0)
+        if any(a <= m.start() < b for a, b in hidden):
+            # The raw walk used to count the Fallback branch's text, which
+            # `text_of` does not return: every protected range after an
+            # AlternateContent was shifted by the fallback's length.
+            continue
         if BREAK_TOKENS.fullmatch(tok) or NON_TEXT_TOKENS.fullmatch(tok):
             # `text_of` renders each break/tab as one character and a
             # noBreakHyphen/sym as ONE glyph character too. Advancing only over
@@ -1141,7 +1185,14 @@ def parse_styles(pkg: zipfile.ZipFile) -> dict:
     out = {}
     if "word/styles.xml" not in pkg.namelist():
         return out
-    root = ET.fromstring(pkg.read("word/styles.xml"))
+    raw = pkg.read("word/styles.xml")
+    # The same untrusted-DOCX rule as the pipeline reader: a part carrying an
+    # XML DTD/entity declaration is refused before ElementTree expands it.
+    text = raw.decode("utf-16", "ignore") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") \
+        else raw.decode("utf-8", "ignore")
+    if "<!DOCTYPE" in text or "<!ENTITY" in text:
+        return out
+    root = ET.fromstring(raw)
     defaults = root.find(f"{W}docDefaults/{W}rPrDefault/{W}rPr")
     if defaults is not None:
         out["@docDefaults"] = {"i": _tri_state(defaults.find(W + "i")),

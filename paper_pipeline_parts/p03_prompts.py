@@ -1595,10 +1595,11 @@ DIFF_LEDGER_RULE = """INTEGRATION DIFFERENCE LEDGER — one row per difference, 
   * This round's pool contains BOTH rewrite levels (a structural arm and a sentence-level arm, when
     more than one rewrite was staged), so the ledger must contain BOTH `size` classes: the
     integration stage exists to weigh a reorganization against a prose improvement.
-  The orchestrator checks that every donor appears, that the row count is at least the number of
-  files that differ from your package, that both size classes are present when the pool has both
-  levels, and that the `artifact`, `finding effect` and `revalidated` columns are filled. A
-  `port` or `synthesize` row without `revalidated: confirmed` is a hard failure."""
+  The orchestrator checks that the ledger is non-empty (a header-only table fails), that every
+  donor appears, that both size classes are present when the pool has both levels, and that the
+  `artifact`, `finding effect` and `revalidated` columns are filled. A `port` or `synthesize` row
+  without `revalidated: confirmed` is a hard failure; a `revalidated` cell other than
+  `confirmed`/`rejected` is a hard failure on any row."""
 
 INTEGRATION_REVALIDATION_RULE = """YOU ARE A FINDING-CONSUMING SESSION — RE-VERIFY EVERY INPUT ITEM BEFORE PORTING:
   The donor packages under others/<id>/ are the caller-supplied candidate source; the round's

@@ -332,12 +332,13 @@ def test_integration_postcheck():
     (out / "work" / "diffs" / "D1.md").write_text("outline diff\n", encoding="utf-8")
     (out / "work" / "diffs" / "D2.md").write_text("before/after\n", encoding="utf-8")
     write(out / "DIFF_LEDGER.md",
-          "| id | donor | location | size | donor says | self says | verdict | why | effect | "
-          "artifact | finding effect |\n|---|---|---|---|---|---|---|---|---|---|---|\n"
-          "| D1 | a1 | p1 | large | (e) | (e) | drop | not nameable: no defect | none | "
-          "integrated/work/diffs/D1.md | preserves F-001 |\n"
-          "| D2 | a2 | p3 | small | (a) | (a) | port | the donor fix is better | none | "
-          "integrated/work/diffs/D2.md | none |\n")
+          "| id | donor | location | size | donor says | self says | verdict | "
+          "revalidated | why | effect | artifact | finding effect |\n"
+          "|---|---|---|---|---|---|---|---|---|---|---|---|\n"
+          "| D1 | a1 | p1 | large | (e) | (e) | drop | rejected | not nameable: no defect | "
+          "none | integrated/work/diffs/D1.md | preserves F-001 |\n"
+          "| D2 | a2 | p3 | small | (a) | (a) | port | confirmed | the donor fix is better | "
+          "none | integrated/work/diffs/D2.md | none |\n")
     write(out / "MANUAL_STEPS.md", "- (none)\n")
     nb.write_json_atomic(sb / nb.MARKER_FILE,
                          {"stage": "integrate", "run_id": rec["id"], "round": 1,
@@ -349,7 +350,14 @@ def test_integration_postcheck():
     check("CR1b a complete integration run passes its postcheck", ok,
           str((rec.get("postcheck") or {}).get("errors")))
     # the ledger must mention every donor
-    write(out / "DIFF_LEDGER.md", "# ledger\n\n| D1 | a1 | (e) | IGNORED |\n")
+    # A VALID ledger table that simply omits donor a2: the donor-coverage
+    # warning is what this check pins (an empty/unparseable ledger is now a
+    # hard failure of its own -- F11).
+    write(out / "DIFF_LEDGER.md",
+          "| id | donor | location | size | verdict | revalidated | artifact | "
+          "finding effect |\n|---|---|---|---|---|---|---|---|\n"
+          "| D1 | a1 | p1 | large | keep-self | rejected | "
+          "integrated/work/diffs/D1.md | none |\n")
     nb.reset_run_record(rec)
     nb.write_json_atomic(sb / nb.MARKER_FILE,
                          {"stage": "integrate", "run_id": rec["id"], "round": 1,
@@ -492,7 +500,7 @@ def test_field_and_selection():
           " ".join(sel["trace"])
           and "severity_tier_category order" in " ".join(sel["trace"])
           and "each cell is a separate lexicographic rung" in " ".join(sel["trace"])
-          and "then -median, -mean, IQR, digest, id" in " ".join(sel["trace"]))
+          and "then -median, -mean, IQR, digest)" in " ".join(sel["trace"]))
 
 
 # =====================================================================

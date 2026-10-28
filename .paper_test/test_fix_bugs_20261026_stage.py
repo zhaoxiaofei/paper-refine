@@ -366,7 +366,9 @@ def test_name_gates():
         "prime_editor.txt": False,
         "genome_editor_assay.txt": False,
         "referees.docx.txt": True,
-        "editors.docx": True,
+        # bare "editors" carries no document role, so it is the authors' file
+        # (the pipeline rule); the four copies must agree on that too.
+        "editors.docx": False,
         "decision_email.docx.txt": True,
         "ReviewersComments.docx.txt": True,
         "reviewercomments.docx.txt": True,

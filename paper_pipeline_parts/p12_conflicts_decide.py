@@ -1267,7 +1267,8 @@ def score_model_doc(ctx=None) -> dict:
                                      "the vs_base margin of the final round is the only paired "
                                      "statement the decision supports",
         "anti_regression_tolerance": VS_ORIGINAL_TOLERANCE,
-        "anti_regression_rule": f"{VS_ORIGINAL_RULE} (setup --vs-original-rule median|sign); "
+        "anti_regression_rule": f"{vs_original_rule_of(ctx)} (setup --vs-original-rule "
+                                f"median|sign; the rule this root actually applies); "
                                 f"the sign rule fails only when the exact one-sided sign test "
                                 f"over the pair's 2*judges directed scores is significant at "
                                 f"{VS_ORIGINAL_ALPHA}; with so few scores NEITHER rule is "
@@ -1279,7 +1280,7 @@ def score_model_doc(ctx=None) -> dict:
                       "separate lexicographic rung (fatal->critical->major->minor, tier order, "
                       "peer then own; the walk stops when the cleanest ranked version reaches "
                       "`tiebreak_defect_floor` or every cell is used), ascending",
-                      "-median", "-mean", "IQR", "digest", "id",
+                      "-median", "-mean", "IQR", "digest",
                       "the incumbent rule overrides on an exact (median, mean, IQR) tie"],
         "tiebreak_notes": "median/mean/IQR are PANEL statistics (verifiable); the cumulative "
                           "counts come from the panel's own ledger rows: each cell is the "
@@ -2054,7 +2055,10 @@ def declared_submission_set(root: Path) -> dict:
     res = [_extglob_to_regex(p) for p in patterns]
     carried, declared = [], []
     for q in sorted(root.rglob("*")):
-        if not q.is_file():
+        # A FILE symlink is not package content: rglob does not follow directory
+        # links, but it does return a symlinked file, whose outside target would
+        # then be reported as a submitted document the package does not carry.
+        if not q.is_file() or q.is_symlink():
             continue
         rel = q.relative_to(root).as_posix()
         base = rel.rsplit("/", 1)[-1]
@@ -2478,16 +2482,13 @@ TABLE_EXTS = (".tsv", ".csv", ".tab", ".xlsx", ".xls", ".ods", ".parquet")
 
 
 def _tex_strip_comments(text: str) -> str:
-    """LaTeX source without its comments (a commented-out \\input is not an input)."""
-    out = []
-    for line in str(text or "").splitlines():
-        cut = None
-        for i, ch in enumerate(line):
-            if ch == "%" and (i == 0 or line[i - 1] != "\\"):
-                cut = i
-                break
-        out.append(line if cut is None else line[:cut])
-    return "\n".join(out)
+    """LaTeX source without its comments (a commented-out \\input is not an input).
+
+    Delegates to the parity-aware `strip_tex_comment` (p04): ``\\\\%`` is a
+    line break followed by a comment, while ``\\%`` is a literal percent. The
+    old one-backslash test kept a commented-out ``\\input`` live.
+    """
+    return strip_tex_comment(str(text or ""))
 
 
 def tex_input_targets(text: str) -> list:
@@ -5528,7 +5529,9 @@ def _docx_body(path: Path):
     """The `<w:body>` element of one DOCX, or None when it cannot be parsed."""
     try:
         with zipfile.ZipFile(path) as z:
-            data = z.read("word/document.xml")
+            data = _docx_xml_part(z, "word/document.xml")
+        if data is None:
+            return None
         root = ET.fromstring(data)
     except (OSError, KeyError, zipfile.BadZipFile, ET.ParseError, RuntimeError,
             NotImplementedError):
@@ -6933,11 +6936,26 @@ def _open_item_rows(value) -> list:
     """
     rows = []
 
+    row_keys = ("id", "check", "verdict", "final_status", "status")
+
+    def looks_like_row(v: dict) -> bool:
+        # A mapping keyed by finding id plus a top-level metadata key
+        # ({"status": "complete", "F-001": {...}}) carries row-key names but is
+        # a MAPPING: treating it as one row consumed the ledger and all F-* rows
+        # disappeared. An explicit id/check always makes it a row; otherwise a
+        # row key is trusted only when no value is itself a per-id row dict.
+        if "id" in v or "check" in v:
+            return True
+        if any(isinstance(item, dict) and str(key) not in row_keys
+               for key, item in v.items()):
+            return False
+        return any(k in v for k in row_keys)
+
     def take(v) -> None:
         if isinstance(v, list):
             rows.extend(r for r in v if isinstance(r, dict))
         elif isinstance(v, dict):
-            if any(k in v for k in ("id", "check", "verdict", "final_status", "status")):
+            if looks_like_row(v):
                 rows.append(v)
             else:
                 for key, item in v.items():

@@ -2602,7 +2602,7 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
     # coverage branch, so a findings.json that parses and holds a findings list
     # but no coverage table crashed the contract check with NameError instead
     # of reporting the missing table.
-    seen_ids, seen_rows, bad = {}, {}, []
+    seen_ids, seen_rows, bad, bad_out_of_scope = {}, {}, [], []
     # 1. the review must be about base/, not about non_revised/ or anything else.
     raw = fj.get("submission_dir")
     if isinstance(raw, str) and raw.strip():
@@ -2662,6 +2662,13 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                 seen_rows[cid] = row
             if cid and (not disp or disp.lower().startswith("not checked")):
                 bad.append(cid)
+            if cid and not in_scope and re.sub(r"\s+", " ", disp).lower().startswith("out of scope"):
+                # A FULL review's object is the whole package: only a genuinely
+                # scoped round may dispose a required check as out of scope.
+                # The old gate read the disposition for out-of-scope ids only,
+                # so a full review could mark every check "out of scope" and
+                # still satisfy the contract.
+                bad_out_of_scope.append(cid)
         if out_of_scope:
             # A scoped round must SAY that a check was left out; silence is still
             # a missing disposition.
@@ -2681,6 +2688,11 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
         if bad:
             errs.append(f"{FINDINGS_REL} coverage rows without a real disposition: {sorted(set(bad))}"
                         f" ('not checked' is not an allowed value)")
+        if bad_out_of_scope:
+            errs.append(f"{FINDINGS_REL} disposes in-scope check(s) {sorted(set(bad_out_of_scope))} "
+                        f"as 'out of scope', but this is a FULL review: every required check "
+                        f"must be applied and disposed on its result (only a genuinely scoped "
+                        f"round may leave a check out)")
     # 3. per-sweep artifacts must exist (the coverage evidence).
     art_dir = sb / ARTIFACTS_REL
     if not art_dir.is_dir():
@@ -2839,14 +2851,35 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
         prior_ids += [str(f.get("id") or "") for f in ((pj or {}).get("findings") or [])
                       if isinstance(f, dict) and f.get("id")]
     if prior_ids:
-        blob = json.dumps(fj)
+        # The id must be reconciled WHERE THE CONTRACT SAYS, not merely occur
+        # somewhere: a new finding's `explanation` carrying the exact marker
+        # "carried over from <prior-id>", or the marker "carried over from
+        # <prior-id>"/"prior <prior-id>: not reproducible in base/" in the
+        # summary note of findings.md. An unrelated "see F-999" in another
+        # finding's evidence used to satisfy the gate while the defect vanished.
+        md_text = ""
         md = sb / FINDINGS_MD_REL
         if md.is_file():
             try:
-                blob += "\n" + md.read_text(encoding="utf-8", errors="replace")
+                md_text = md.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 pass
-        missing = sorted({pid for pid in prior_ids if not _finding_id_mentioned(pid, blob)})
+        reconciled = set()
+        explanations = "\n".join(
+            str(f.get("explanation") or "") for f in (fj.get("findings") or [])
+            if isinstance(f, dict)) if isinstance(fj.get("findings"), list) else ""
+        for pid in prior_ids:
+            tok = re.escape(pid)
+            if re.search(r"carried over from\s+" + tok + r"(?![A-Za-z0-9])",
+                         explanations, re.I):
+                reconciled.add(pid)
+            elif re.search(r"carried over from\s+" + tok + r"(?![A-Za-z0-9])",
+                           md_text, re.I):
+                reconciled.add(pid)
+            elif re.search(r"prior\s+" + tok + r"\s*:\s*not reproducible in base/",
+                           md_text, re.I):
+                reconciled.add(pid)
+        missing = sorted(pid for pid in prior_ids if pid not in reconciled)
         if missing:
             errs.append(
                 f"{len(missing)} finding(s) from the previous round's review "
@@ -3377,7 +3410,10 @@ def _structured_problem_for(rel: str, p: Path):
                 json.loads(text.lstrip("\ufeff"))       # raise, for the message below
         elif p.suffix.lower() == ".docx":
             with zipfile.ZipFile(p) as z:
-                ET.fromstring(z.read("word/document.xml"))
+                data = _docx_xml_part(z, "word/document.xml")
+            if data is None:
+                raise ValueError("the DOCX part is over the size/entity budget")
+            ET.fromstring(data)
         else:
             ET.fromstring(text)
     except (ValueError, ET.ParseError, zipfile.BadZipFile, KeyError, RuntimeError,

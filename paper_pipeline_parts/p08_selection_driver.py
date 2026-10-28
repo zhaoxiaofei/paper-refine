@@ -636,7 +636,7 @@ def champion_sort_key(row: dict) -> tuple:
             + (-(med if med is not None else -99.0),)
             + (-(mean if mean is not None else -99.0),
                (iqr if iqr is not None else 99.0),
-               str(row.get("digest") or "~"), str(row.get("id") or "")))
+               str(row.get("digest") or "~")))
 
 
 def auto_round_payload(ctx: Ctx, r: int, vid: str = None, mode: str = None) -> tuple:
@@ -806,7 +806,7 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
     # every ranked version, and stop at the first prefix where the version with
     # the FEWEST defects reaches the configured floor (or when every cell is
     # used). The ordered per-cell census at that prefix leads the sort key (each
-    # cell a separate rung); the median (then the mean, IQR, digest and id) is
+    # cell a separate rung); the median (then the mean, IQR and digest) is
     # the tie-break below it.
     floor = tiebreak_defect_floor_of(ctx)
     rep_ids = sorted({str(t["rep"]) for t in rows})
@@ -836,10 +836,12 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
     #                         TIE-BREAK when two versions carry the same prefix.
     #   -mean                 consulted after the median (a total count is more
     #                         reliable than the mean of small integer scores).
-    #   IQR, digest, id       deterministic fallbacks (the CONTENT DIGEST comes
-    #                         before the id: a perfect tie must not be decided by
-    #                         the arm's NAME, because a2 < i1 < w1 would silently
-    #                         favour the revise arm on every such tie).
+    #   IQR, digest          deterministic fallbacks. The content digest is the
+    #                         LAST rung: a perfect tie is decided by the bytes,
+    #                         never by the arm's NAME (a2 < i1 < w1 would silently
+    #                         favour the revise arm), and Rule 6 names no id term.
+    #                         Content-identical candidates are one candidate
+    #                         (Rule 5), so equal digests are the same artifact.
     # The self-reported critical_remaining/writing_remaining values are still
     # REPORTED (and cross-checked against the frozen review) but no longer rank:
     # the census is panel-derived, while those two are agent-authored.
@@ -875,7 +877,7 @@ def select_champion(ctx: Ctx, r: int, agg: dict) -> dict:
                  f"(fatal->critical->major->minor, tier order, peer before own; each cell is a "
                  f"separate lexicographic rung; the walk stops when the cleanest ranked version "
                  f"reaches the floor {floor} or all {len(cell_names)} cells are used) -- then "
-                 "-median, -mean, IQR, digest, id); the per-cell counts come from the panel's own "
+                 "-median, -mean, IQR, digest); the per-cell counts come from the panel's own "
                  "census (the self-reported critical_remaining/writing_remaining values are "
                  "reported but no longer rank), median/mean/IQR are the field-wide panel "
                  "statistics below it, and the content digest is the provenance-free tie-break "
@@ -958,8 +960,9 @@ def round_member_table_rows(ctx: Ctx, r: int, field: list, agg: dict, sel: dict,
             # stands for (a1 -> orig in round 1, a1 -> the previous champion later)
             ranking_by_id.setdefault(str(row["rep"]), row)
     # Column order = the champion-selection key order (`champion_sort_key`):
-    # defect prefix -> median -> mean -> IQR -> digest -> id. The id is the row
-    # label; every column after the digest is REPORTED only and never ranked.
+    # defect prefix -> median -> mean -> IQR -> digest. The `member` column is
+    # the row label; every column after the digest is REPORTED only and never
+    # ranked.
     rows = [["member", "defects@K", "median", "mean", "IQR", "digest", "n/expected",
              "vs_orig", "vs_base", "severity totals f/c/maj/min", "writing*", "hand-off",
              "note"]]
@@ -2193,6 +2196,19 @@ def _revision_plan_rows(sb: Path):
             return None
         if _unsafe_package_rel(rel):
             return None
+        # A row names ONE FILE. A directory row ("figures") used to authorize
+        # every file under it at the application audit; even a row that names an
+        # existing directory is not a locatable file and invalidates the plan.
+        # The path may be absent from the snapshot (the plan is written before
+        # the repair), so only an entry that IS a symlink (dangling included) or
+        # EXISTS as a non-regular file is refused here; the audit below also
+        # matches exact file names only.
+        target = sb / REVISED_DIR / rel
+        try:
+            if target.is_symlink() or (target.exists() and not target.is_file()):
+                return None
+        except OSError:
+            return None
         seen.add(rid)
         out.append(dict(row, id=rid, file=rel))
     return out
@@ -2282,16 +2298,27 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
                 allowed.add(rel)
     before = (hash_manifest(pre, on_error="<unreadable>") or {}).get("files") or {}
     after = (hash_manifest(cur, on_error="<unreadable>") or {}).get("files") or {}
-    bad = []
+    bad = set()
     for rel in sorted(set(before) | set(after)):
         if before.get(rel) == after.get(rel):
             continue
         if rel in REPAIR_BOOKKEEPING:
             continue
-        if any(rel == a or rel.startswith(a.rstrip("/") + "/") for a in allowed):
+        # EXACT file match: a confirmed row names a file, never a directory.
+        # The old prefix match let one row ("figures") legitimize arbitrary
+        # edits across the whole subtree.
+        if rel in allowed:
             continue
-        bad.append(rel)
-    return bad
+        bad.add(rel)
+    # A confirmed row whose path is now a symlink is a write-through, not an
+    # edit: hash_manifest skips symlinks, so the pre/post manifests cannot see
+    # it. A plan row that was absent at audit time can be turned into a link
+    # during the repair; the bytes then land outside revised/. Never a covered
+    # change.
+    for rel in sorted(allowed):
+        if (cur / rel).is_symlink():
+            bad.add(rel)
+    return sorted(bad)
 
 
 def record_revision_chain_skip(ctx, rec: dict, reason: str) -> None:

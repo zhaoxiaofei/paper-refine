@@ -5370,11 +5370,19 @@ def refresh_zotero_package(src, out=None, policy: dict = None) -> dict:
     rep["changed"] = True
     parts = inner["parts"]
     dst = Path(out) if out is not None else src
-    tmp = dst.with_name(f".{dst.name}.zotrefresh{os.getpid()}.tmp")
+    # Random sibling, created exclusively: the old
+    # `.{name}.zotrefresh<pid>.tmp` was predictable, so a sandbox agent could
+    # pre-create a symlink there and receive the ZIP bytes through it (and
+    # os.replace then moved the link to the destination). Same rule as the
+    # other formatter temps.
+    tmp = dst.with_name(f".{dst.name}.zotrefresh{os.getpid()}.{os.urandom(6).hex()}.tmp")
     try:
-        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
-            for n in names:
-                z.writestr(n, parts[n])
+        fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                     | getattr(os, "O_NOFOLLOW", 0), 0o666)
+        with os.fdopen(fd, "wb") as f:
+            with zipfile.ZipFile(f, "w", zipfile.ZIP_DEFLATED) as z:
+                for n in names:
+                    z.writestr(n, parts[n])
         os.replace(tmp, dst)
     except OSError as e:
         with contextlib.suppress(OSError):

@@ -321,7 +321,8 @@ def integration_ledger_report(out: Path, donors: list, expect_both_levels: bool)
     and the Rule 1B re-verification verdict."""
     rows = integration_ledger_rows(out / "DIFF_LEDGER.md")
     sizes, missing_artifact, missing_finding, undoes, seen_donors = Counter(), [], [], [], set()
-    missing_revalidated, invalid_ports = [], []
+    missing_revalidated, invalid_ports, invalid_revalidated = [], [], []
+    edit_rows = 0
     has_revalidated_column = any("revalidated" in r for r in rows)
     for r in rows:
         size = str(r.get("size") or "").strip().lower()
@@ -342,16 +343,31 @@ def integration_ledger_report(out: Path, donors: list, expect_both_levels: bool)
         reval = str(r.get("revalidated") or r.get("re_validation") or "").strip().lower()
         verdict = str(r.get("verdict") or "").strip().lower()
         edits = verdict.startswith("port") or verdict.startswith("synth")
-        if not reval and not edits:
+        if edits:
+            edit_rows += 1
+        if not edits and not reval:
             missing_revalidated.append(donor or "?")
+        # The prompt: `revalidated` is mandatory on EVERY row and records the
+        # Rule 1B result, confirmed or rejected. A keep-self row carrying an
+        # uninterpretable value ("bogus") used to pass both checks: it is not
+        # a missing port verdict, but it is not a Rule 1B disposition either.
+        if has_revalidated_column and reval and reval not in ("confirmed", "rejected"):
+            invalid_revalidated.append(f"{donor or '?'}: verdict={verdict or '?'}, "
+                                       f"revalidated={reval}")
         if has_revalidated_column and edits and reval != "confirmed":
             invalid_ports.append(f"{donor or '?'}: verdict={verdict or '?'}, "
                                  f"revalidated={reval or 'missing'}")
     absent = [d for d in donors if d and not any(d in s for s in seen_donors)]
+    legacy = bool(rows) and not has_revalidated_column
     return {"rows": len(rows), "sizes": dict(sizes), "missing_artifact": missing_artifact,
             "missing_finding": missing_finding, "undoes": undoes, "donors_absent": absent,
             "missing_revalidated": missing_revalidated, "invalid_ports": invalid_ports,
-            "legacy_no_revalidated": bool(rows) and not has_revalidated_column,
+            "invalid_revalidated": invalid_revalidated,
+            "legacy_no_revalidated": legacy,
+            # A legacy (no `revalidated` column) table is tolerated only when it
+            # carries no edit row; a `port`/`synthesize` row there is an outright
+            # Rule 1B failure, not the "legacy ledger" warning.
+            "legacy_ports": legacy and edit_rows > 0,
             "both_levels": bool(sizes.get("small") and sizes.get("large")),
             "expect_both_levels": bool(expect_both_levels)}
 
@@ -1183,19 +1199,39 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
         if led["missing_finding"]:
             warns.append(f"integrate: {len(led['missing_finding'])} ledger row(s) do not state "
                          f"their `finding effect` (preserves/undoes <id> or none)")
-        if led["invalid_ports"]:
-            errs.append(f"integrate: {len(led['invalid_ports'])} port/synthesize row(s) lack "
-                        f"`revalidated: confirmed` -- Rule 1B forbids editing an unverified "
-                        f"item: " + "; ".join(led["invalid_ports"][:4]))
-        if led["legacy_no_revalidated"]:
+        if led["legacy_ports"]:
+            errs.append("integrate: DIFF_LEDGER.md has no `revalidated` column but carries "
+                        "port/synthesize row(s) -- Rule 1B forbids editing an unverified item, "
+                        "so a legacy ledger cannot legitimize a port; record the column and the "
+                        "confirmed/rejected verdict")
+        elif led["legacy_no_revalidated"]:
             warns.append("integrate: legacy DIFF_LEDGER.md has no `revalidated` column; "
                          "new runs must record one (this legacy ledger is not treated as a port)")
         elif led["missing_revalidated"]:
             errs.append(f"integrate: {len(led['missing_revalidated'])} ledger row(s) carry no "
                         f"`revalidated` verdict (Rule 1B requires confirmed/rejected per item)")
+        if led["invalid_revalidated"]:
+            errs.append(f"integrate: {len(led['invalid_revalidated'])} ledger row(s) carry a "
+                        f"`revalidated` value other than confirmed/rejected -- Rule 1B records "
+                        f"one verdict per item: " + "; ".join(led["invalid_revalidated"][:4]))
+        if led["invalid_ports"]:
+            errs.append(f"integrate: {len(led['invalid_ports'])} port/synthesize row(s) lack "
+                        f"`revalidated: confirmed` -- Rule 1B forbids editing an unverified "
+                        f"item: " + "; ".join(led["invalid_ports"][:4]))
         for undo in led["undoes"][:4]:
             warns.append(f"integrate: a ported difference would UNDO a resolved finding "
                          f"({undo}) -- keep the self wording unless the author decided otherwise")
+    elif (out / "DIFF_LEDGER.md").is_file():
+        # A header-only (or table-less) ledger satisfies every column check by
+        # vacuity, so it must be a failure, not a warning: the difference ledger
+        # is the only record that the donor set was read and disposed of. An
+        # ABSENT file keeps the missing-deliverable path instead (variant B: a
+        # repair completes bookkeeping, it never authors a deliverable), so this
+        # extra error does not mask the "NO repair" decision.
+        (errs if donors else warns).append(
+            "integrate: DIFF_LEDGER.md carries no ledger row (a header-only or unparseable "
+            "table cannot account for any difference; every donor needs at least its "
+            "no-difference row)")
     else:
         warns.append("integrate: DIFF_LEDGER.md could not be parsed as a table (the per-difference "
                      "artifacts, the size classes and the finding-effect column cannot be checked)")

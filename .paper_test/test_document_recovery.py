@@ -270,7 +270,11 @@ def main() -> int:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(p, dst)
     (rev17 / "raw_data" / "entire_pipeline.git-snapshot.txt").unlink()
-    (rev17 / "DIFF_LEDGER.md").write_text("| D1 | (a) | ported |\n")
+    (rev17 / "DIFF_LEDGER.md").write_text(
+        "| id | donor | location | size | verdict | revalidated | artifact | "
+        "finding effect |\n|---|---|---|---|---|---|---|---|\n"
+        "| D1 | a1 | (whole package) | small | keep-self | rejected | "
+        "self/(unchanged) | none |\n", encoding="utf-8")
     (rev17 / "CHANGELOG.md").write_text("# changelog\n")
     (sb17 / "_pipeline_done.json").write_text(json.dumps(
         {"stage": "integrate", "run_id": "r1_i1", "round": 1, "status": "complete",

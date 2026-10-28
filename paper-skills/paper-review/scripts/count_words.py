@@ -684,6 +684,18 @@ RAW_DATA_DIRNAMES = ("raw_data",)
 HUMAN_FEEDBACK_DIR = "human_review_feedback"
 LLM_FEEDBACK_DIR = "llm_review_feedback"
 EVIDENCE_DIRNAMES = RAW_DATA_DIRNAMES + (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR)
+# `<evidence area>.disabled` / `.off` is inert evidence (the pipeline's
+# `is_disabled_evidence_rel`); exact-name membership swept it as manuscript.
+DISABLED_EVIDENCE_SUFFIXES = ("disabled", "off")
+
+
+def _is_evidence_part(part: str) -> bool:
+    low = str(part or "").strip().lower()
+    if low in EVIDENCE_DIRNAMES:
+        return True
+    return any(low.startswith(area + ".")
+               and low[len(area) + 1:] in DISABLED_EVIDENCE_SUFFIXES
+               for area in EVIDENCE_DIRNAMES)
 # A venue ARTICLE TYPE is the authors' manuscript, not the editors' letter:
 # `letter_to_the_editor.docx` / `Editorial.docx` must reach M1/M2/M4/M19.
 _ARTICLE_TYPE_MANUSCRIPT_RE = re.compile(
@@ -697,11 +709,15 @@ EXTERNAL_FEEDBACK_RE = re.compile(
     r"(?<![a-z])(?:feedbacks?(?:[-_ ]?(?:form|report|letter|comments?|summary|"
     r"to[-_ ]?authors))*|"
     r"(?:referees?|reviewers?)(?:[-_ ]?(?:comments?|reports?|critiques?|forms?))*|"
-    r"(?<![a-z_])editors?(?:[-_ ]?(?:comments?|decisions?|reports?|letters?))*|"
+    r"(?<![a-z_])editors?(?:[-_ ]?(?:comments?|decisions?|reports?|letters?|"
+    r"notices?|emails?|critiques?|forms?))|"
     r"editorial|decision[_ \-]*(?:letter|notice|email))(?![a-z])",
     re.I)
+# The pipeline's `AUTHORED_REPLY_NAME_RE` is a bare role WORD, so
+# `ReviewerResponse.md` and `reviewerresponse.md` are the authors' reply there.
+# The science-compound carve-out below still protects `immune_response.md`.
 AUTHORED_REPLY_RE = re.compile(
-    r"(?<![a-z])(?:responses?|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)(?![a-z])",
+    r"(?:responses?|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)",
     re.I)
 # A scientific compound that merely ENDS in a role word is not a reply or a
 # feedback file: `dose_response.txt` / `immune_response.md` / `biofeedback_results.txt`
@@ -731,7 +747,7 @@ def is_evidence_path(path: str) -> bool:
     cover-letter limits, whatever its name suggests.
     """
     parts = str(path).replace("\\", "/").split("/")
-    if any(part in EVIDENCE_DIRNAMES for part in parts[:-1]):
+    if any(_is_evidence_part(part) for part in parts[:-1]):
         return True
     # The converter FLATTENS an evidence file's directory into its name
     # ("raw_data/table1.txt" -> "raw_data__table1.txt"); the two sibling

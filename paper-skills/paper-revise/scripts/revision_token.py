@@ -56,7 +56,7 @@ import re
 import sys
 from pathlib import Path
 
-REPORTS = {"changelog.md", "manual_steps.md", "revision_report.md",
+REPORTS = {"changelog.md", "manual_steps.md", "manual_todo.csv", "revision_report.md",
            "revision_report.json", "diff_ledger.md", "rewrite_report.md",
            "visual_check.md",
            # The BOUNDED REPAIR's re-validation ledger: pipeline bookkeeping,
@@ -91,6 +91,7 @@ BOOKKEEPING_NAME_RE = re.compile(
     # package, and skipped by the pipeline's twin (paper_pipeline.py). Without
     # them here the two implementations derived DIFFERENT tokens for the same
     # package -- a false "edited after the token was applied" alarm.
+    r"|^manual_todo(?:[-_.][A-Za-z0-9._\-]+)?\.csv$"
     r"|^(?:code_scans|format_scan|format_fix|pkg2)(?:[-_.][A-Za-z0-9._\-]+)?"
     r"\.(?:md|txt|json)$", re.IGNORECASE)
 # Keep in step with paper_pipeline.TRACKING_AUX_NAME_RE (the two implementations
@@ -144,20 +145,27 @@ def tree_files(root: Path) -> list:
         return (st.st_dev, st.st_ino)
 
     def followable_evidence_dir(p: Path, top_level: bool) -> bool:
-        """A TOP-LEVEL link named as an evidence area, exactly like the twin.
+        """A TOP-LEVEL link shaped like the canonical evidence area.
 
         The pipeline follows only the corpus-level
-        `<sandbox>/<raw_data|human_review_feedback|llm_review_feedback>` link
+        `<root>/<raw_data|human_review_feedback|llm_review_feedback>` link
         `ensure_pristine_input` creates; a nested or non-evidence link is not
         package content. Following every directory link here made the two
         tokens disagree on a package with a nested `sub -> /outside` link.
+
+        Like the pipeline twin, this is a TARGET-SHAPE test: this walker is not
+        handed the owning run root, so an outside tree that merely has the
+        `.../non_revised/<area>` shape is followed too. `is_canonical_evidence_link`
+        is the strict containment proof for the callers that do receive it.
         """
         if not p.is_symlink() or not top_level or not is_evidence_rel(p.name):
             return False
         try:
-            return p.resolve(strict=True).is_dir()
+            target = p.resolve(strict=True)
         except (OSError, RuntimeError):
             return False
+        return (target.is_dir() and target.name == p.name
+                and target.parent.name == "non_revised")
 
     def walk(d: Path, ancestors: frozenset) -> None:
         for p in sorted(d.iterdir()):

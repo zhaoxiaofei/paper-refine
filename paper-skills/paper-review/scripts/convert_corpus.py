@@ -115,7 +115,8 @@ FEEDBACK_NAME_RE = re.compile(
     r"(?<![a-z])(?:feedbacks?(?:[-_ ]?(?:form|report|letter|comments?|summary|"
     r"to[-_ ]?authors))*|"
     r"(?:referees?|reviewers?)(?:[-_ ]?(?:comments?|reports?|critiques?|forms?))*|"
-    r"(?<![a-z_])editors?(?:[-_ ]?(?:comments?|decisions?|reports?|letters?))*|"
+    r"(?<![a-z_])editors?(?:[-_ ]?(?:comments?|decisions?|reports?|letters?|"
+    r"notices?|emails?|critiques?|forms?))|"
     r"editorial|(?<![a-z_])decision(?:[-_ ]?(?:letter|notice|email)))(?![a-z])",
     re.I)
 REPLY_NAME_RE = re.compile(
@@ -191,15 +192,32 @@ def is_feedback_rel(rel_path: str) -> bool:
 
 TEXT_RUN_RE = re.compile(
     # Word stores a tab/soft break as its own element; extracting only w:t
-    # glued "Dose[tab]50" into "Dose50" and two lines into one word.
+    # glued "Dose[tab]50" into "Dose50" and two lines into one word. A
+    # non-breaking hyphen and a symbol glyph have no w:t either: `text_of`
+    # renders them as "-" and U+FFFD, and dropping them fused
+    # `ten<w:noBreakHyphen/>year` into "tenyear".
     r"<w:(instrText|t)(?:\s[^>]*)?>(.*?)</w:\1>"
-    r"|<w:(br|cr|tab)(?=[\s/>])[^>]*/?>", re.S)
+    r"|<w:(br|cr|tab|noBreakHyphen|sym)(?=[\s/>])[^>]*/?>", re.S)
+
+# `mc:AlternateContent` carries the same content twice (Choice + Fallback);
+# Word renders ONE of them. Splitting the raw XML read both and doubled every
+# text-box / DrawingML fallback in the review corpus. Substituting the visible
+# branch first is the same rule the pipeline's text_of applies.
+_MC_ALTERNATE_RE = re.compile(r"<mc:AlternateContent\b.*?</mc:AlternateContent>", re.S)
+_MC_CHOICE_RE = re.compile(r"<mc:Choice\b.*?</mc:Choice>", re.S)
+_MC_FALLBACK_RE = re.compile(r"<mc:Fallback\b.*?</mc:Fallback>", re.S)
+
+
+def _mc_visible_branch(m) -> str:
+    block = m.group(0)
+    branch = _MC_CHOICE_RE.search(block) or _MC_FALLBACK_RE.search(block)
+    return branch.group(0) if branch else ""
 
 
 def docx_part_to_lines(xml: str):
     """Paragraph lines + notes for one WordprocessingML part."""
     notes, out_lines = [], []
-    for para in re.split(r"</w:p>", xml):
+    for para in re.split(r"</w:p>", _MC_ALTERNATE_RE.sub(_mc_visible_branch, xml)):
         if "<w:ins " in para:
             notes.append("tracked-insertion present in a paragraph")
         if "<w:del " in para:
@@ -207,10 +225,14 @@ def docx_part_to_lines(xml: str):
         texts = []
         for m in TEXT_RUN_RE.finditer(para):
             if m.group(3):
-                # The pipeline's own `text_of` renders br/cr as a newline and a
-                # tab as a separator; the converter must agree or the sweeps
-                # read words the author never wrote glued together.
-                texts.append("\n" if m.group(3) in ("br", "cr") else " ")
+                # The pipeline's own `text_of` renders br/cr as a newline, a tab
+                # as a separator, a non-breaking hyphen as "-" and a symbol as
+                # one placeholder; the converter must agree or the sweeps read
+                # words the author never wrote.
+                tok = m.group(3)
+                texts.append("\n" if tok in ("br", "cr")
+                             else "-" if tok == "noBreakHyphen"
+                             else "\ufffd" if tok == "sym" else " ")
                 continue
             content = _html_unescape(m.group(2))
             # Test the TAG NAME, never a substring of the whole match: a visible

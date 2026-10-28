@@ -514,13 +514,50 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
             "figures": figure_inventory}
 
 
+# Untrusted DOCX input budget: the fixer/repair paths read EVERY part, so a
+# small compressed zip bomb could allocate gigabytes. The pipeline's other
+# untrusted readers (JSON, e-mail, facts) already cap their input; DOCX did not.
+MAX_DOCX_PART_BYTES = 64 * 1024 * 1024
+MAX_DOCX_TOTAL_BYTES = 256 * 1024 * 1024
+
+
+def _docx_zip_problem(pkg: zipfile.ZipFile) -> str:
+    """A one-line reason a DOCX archive is over the read budget ("" = ok)."""
+    total = 0
+    for info in pkg.infolist():
+        if info.file_size > MAX_DOCX_PART_BYTES:
+            return (f"part {info.filename!r} expands to {info.file_size} bytes "
+                    f"(limit {MAX_DOCX_PART_BYTES})")
+        total += int(info.file_size or 0)
+    if total > MAX_DOCX_TOTAL_BYTES:
+        return (f"the archive expands to {total} bytes "
+                f"(limit {MAX_DOCX_TOTAL_BYTES})")
+    return ""
+
+
+def _docx_entity_problem(data: bytes, name: str) -> str:
+    """A one-line reason an XML part carries a DTD/entity declaration."""
+    text = data.decode("utf-16", "ignore") if data[:2] in (b"\xff\xfe", b"\xfe\xff") \
+        else data.decode("utf-8", "ignore")
+    if "<!DOCTYPE" in text or "<!ENTITY" in text:
+        return f"part {name!r} carries an XML DTD/entity declaration"
+    return ""
+
+
 def analyse_package(path: Path, policy: dict) -> dict:
     app_pages = None
     sizes, doc_rels, aux_parts, aux_xml, part_targets = {}, {}, [], {}, {}
     try:
         with zipfile.ZipFile(path) as pkg:
+            problem = _docx_zip_problem(pkg)
+            if problem:
+                raise ValueError(problem)
+            raw = pkg.read("word/document.xml")
+            problem = _docx_entity_problem(raw, "word/document.xml")
+            if problem:
+                raise ValueError(problem)
             styles = parse_styles(pkg)
-            xml = pkg.read("word/document.xml").decode("utf-8")
+            xml = raw.decode("utf-8")
             # The body must PARSE, not merely decode: the regex rules below
             # tolerate malformed XML, so without this fence `scan` reported a
             # broken document "clean" while `validate`/`fix` rejected it. The
@@ -555,7 +592,7 @@ def analyse_package(path: Path, policy: dict) -> dict:
                 if m:
                     app_pages = int(m.group(1))
     except (zipfile.BadZipFile, KeyError, ET.ParseError, UnicodeDecodeError, OSError,
-            RuntimeError, NotImplementedError) as e:
+            RuntimeError, NotImplementedError, ValueError) as e:
         # RuntimeError is what `zipfile` raises for an ENCRYPTED entry (and
         # NotImplementedError for an unsupported compression method): a
         # password-protected .docx is unreadable like any other, not a crash.
@@ -682,7 +719,11 @@ def docx_files_under(dirp: Path) -> list:
     """
     # Match the suffix case-insensitively on every entry: rglob("*.docx") and
     # rglob("*.DOCX") both miss `Main.Docx` on a case-sensitive filesystem.
-    return sorted({p for p in dirp.rglob("*") if p.suffix.lower() == ".docx"})
+    # A FILE symlink is not package content (the corpus walker refuses one):
+    # following it made the formatter read and report on a document outside the
+    # package, whose target may be a private local file.
+    return sorted({p for p in dirp.rglob("*")
+                   if p.suffix.lower() == ".docx" and not p.is_symlink()})
 
 
 def scan_paths(paths: list, policy: dict) -> dict:
@@ -705,7 +746,7 @@ def scan_paths(paths: list, policy: dict) -> dict:
                 continue
             if any(part == "work" for part in f.parts[:-1]):
                 continue
-            if any(part in EVIDENCE_DIRNAMES for part in f.parts[:-1]):
+            if any(is_evidence_part(part) for part in f.parts[:-1]):
                 # The EVIDENCE areas are not submission content: a reviewer's
                 # .docx report or a data-source document is never a submission
                 # formatting finding.
@@ -727,10 +768,13 @@ def scan_paths(paths: list, policy: dict) -> dict:
             if not p.is_dir():
                 continue
             for q in sorted(p.rglob("*")):
-                if not q.is_file() or q.suffix.lower() not in (".png", ".jpg", ".jpeg",
-                                                              ".tif", ".tiff"):
+                if not q.is_file() or q.is_symlink() \
+                        or q.suffix.lower() not in (".png", ".jpg", ".jpeg",
+                                                    ".tif", ".tiff"):
+                    # A symlinked image's target is outside the package (and
+                    # may be sent to OCR); the corpus walker refuses one too.
                     continue
-                if any(part == "work" or part in EVIDENCE_DIRNAMES
+                if any(part == "work" or is_evidence_part(part)
                        for part in q.parts[:-1]):
                     continue
                 images.append(q)
@@ -1637,7 +1681,17 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
     sizes, doc_rels, aux = {}, {}, {}
     try:
         with zipfile.ZipFile(src) as pkg:
-            parts = {i.filename: pkg.read(i.filename) for i in pkg.infolist()}
+            problem = _docx_zip_problem(pkg)
+            if problem:
+                raise ValueError(problem)
+            parts = {}
+            for info in pkg.infolist():
+                data = pkg.read(info.filename)
+                if info.filename.lower().endswith((".xml", ".rels")):
+                    problem = _docx_entity_problem(data, info.filename)
+                    if problem:
+                        raise ValueError(problem)
+                parts[info.filename] = data
             styles = parse_styles(pkg)
             sizes = media_pixel_sizes(pkg)
             doc_rels = part_rels(pkg, "word/document.xml")
@@ -1647,7 +1701,7 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
                                  part_rels(pkg, name))
         xml_before = parts["word/document.xml"].decode("utf-8")
     except (zipfile.BadZipFile, KeyError, ET.ParseError, UnicodeDecodeError, OSError,
-            RuntimeError, NotImplementedError) as e:
+            RuntimeError, NotImplementedError, ValueError) as e:
         return {"source": str(src), "output": str(out), "changes": [], "verified": {},
                 "error": f"unreadable DOCX package: {type(e).__name__}: {e}", "ok": False}
     referenced_aux = referenced_header_footer_parts(parts, xml_before)
@@ -3445,10 +3499,10 @@ def validate_paths(paths: list, json_out: Path = None, timeout: int = 300) -> di
         if p.is_dir():
             files += [q for q in docx_files_under(p)
                       if not q.name.startswith("~$") and not _is_aux_name(q.name)
-                      and not any(part in EVIDENCE_DIRNAMES for part in q.parts[:-1])]
+                      and not any(is_evidence_part(part) for part in q.parts[:-1])]
             files += [q for q in sorted(p.rglob("*"))
                       if q.is_file() and q.suffix.lower() in (".tex", ".ltx")
-                      if not any(part in EVIDENCE_DIRNAMES for part in q.parts[:-1])
+                      if not any(is_evidence_part(part) for part in q.parts[:-1])
                       # A difference-tracking copy (a latexdiff file, or the
                       # commented-out logging fallback) is not a document of the
                       # package: compiling it would report the AUXILIARY as a
@@ -5319,11 +5373,21 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
               "ok": False}
     try:
         with zipfile.ZipFile(src) as z:
+            problem = _docx_zip_problem(z)
+            if problem:
+                raise ValueError(problem)
             names = z.namelist()
-            data = {n: z.read(n) for n in names}
+            data = {}
+            for n in names:
+                raw = z.read(n)
+                if n.lower().endswith((".xml", ".rels")):
+                    problem = _docx_entity_problem(raw, n)
+                    if problem:
+                        raise ValueError(problem)
+                data[n] = raw
             styles = parse_styles(z)
     except (OSError, zipfile.BadZipFile, ET.ParseError, RuntimeError,
-            NotImplementedError, UnicodeDecodeError) as exc:
+            NotImplementedError, UnicodeDecodeError, ValueError) as exc:
         # An unsupported compression method or a malformed part is an unreadable
         # package like any other, never a traceback out of a documented command.
         report["error"] = f"unreadable DOCX package: {exc}"
@@ -5407,7 +5471,9 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
         report["ok"] = not report["remaining"]
         return report
     out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_suffix(out.suffix + ".tmp")
+    # Random sibling, not `<out>.tmp`: a predictable name let a sandbox agent
+    # pre-create a symlink and receive the ZIP bytes through it.
+    tmp = out.with_name(f".{out.name}.{os.getpid()}.{os.urandom(6).hex()}.tmp")
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
         for name in names:
             z.writestr(name, data[name])
@@ -5564,10 +5630,14 @@ def cmd_fix(args) -> int:
 def cmd_check_pdf(args) -> int:
     policy = load_policy(args.policy)
     res = check_pdf(Path(args.pdf), policy)
-    if res["ok"] is None:
-        # A skipped check is not a measured pass (Rule 10). Do not print the
-        # 0-page clean summary; exit non-zero with the reason.
-        detail = ((res.get("rows") or [{}])[0].get("detail")
+    # `ok is None` is a skipped tool; `ok is False` with 0 pages is an
+    # unreadable/missing PDF whose empty text parses as 0 pages and 0 blank
+    # pages. Both must NOT print the clean summary (Rule 10: a skipped/failed
+    # integrity check is reported as skipped). A readable PDF with blank pages
+    # keeps its real summary below.
+    if res["ok"] is None or (res["ok"] is False and not res["pages"]):
+        row = (res.get("rows") or [{}])[0]
+        detail = (row.get("detail") or row.get("evidence")
                   or "the PDF could not be checked")
         print(f"{args.pdf}: NOT CHECKED: {detail}")
     else:
@@ -5713,7 +5783,7 @@ def cmd_zotero_refresh(args) -> int:
         # whenever the refresh could not make the numbering clean.
         src = Path(args.file)
         dst = Path(args.out) if args.out else src
-        tmp = dst.with_name(f".{dst.name}.zotunlink{os.getpid()}.tmp")
+        tmp = dst.with_name(f".{dst.name}.zotunlink{os.getpid()}.{os.urandom(6).hex()}.tmp")
         upolicy = dict(policy)
         upolicy["unlink_zotero_fields"] = True
         rep = fix_package(src, tmp, upolicy)

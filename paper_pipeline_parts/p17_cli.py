@@ -103,8 +103,8 @@ USAGE_EXAMPLES = """usage:
   run     --root <dir> [--jobs N] [--timeout S] [--retries 2]
           [--champion-select judge|revise|integrate]
           [--retry-backoff 30] [--retry-backoff-max 600]
-          [--agent codex|claude|dsh|manual] [--agent-cmd '<json argv>']
-          [--judge-agent codex|claude|dsh|manual] [--judge-agent-cmd '<json argv>']
+          [--agent codex|claude|dsh|qwen|manual] [--agent-cmd '<json argv>']
+          [--judge-agent codex|claude|dsh|qwen|manual] [--judge-agent-cmd '<json argv>']
           [--poll S] [--skip-hash]
           drive rounds 1..R as a DEPENDENCY GRAPH: every session starts as soon
           as its inputs exist (the M rewrites and the round's review start

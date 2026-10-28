@@ -3058,7 +3058,7 @@ def no_progress_measure(row: dict):
     The SAME lexicographic census `champion_sort_key()` ranks by (then
     median/mean/IQR), never the census SUM: a version that removed a fatal
     defect (census (0,5)) is progress over one that has one (1,0), although
-    its total is larger. The digest/id tie-break is deliberately absent: an
+    its total is larger. The digest tie-break is deliberately absent: an
     identity choice is not evidence of progress.
     """
     if not row:

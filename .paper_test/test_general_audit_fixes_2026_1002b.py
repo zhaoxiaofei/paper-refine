@@ -211,8 +211,9 @@ def test_skill_docs_cover_letter_invocation():
 
 def test_nested_dir_symlink_in_manifest():
     tmp = scratch("pr_symlink_probe_")
-    canon = tmp / "canonical"
-    canon.mkdir()
+    # The canonical-store shape the pipeline follows: <store>/non_revised/<area>.
+    canon = tmp / "store" / "non_revised" / "raw_data"
+    canon.mkdir(parents=True)
     (canon / "notes.txt").write_text("note", encoding="utf-8")
     external = tmp / "external"
     external.mkdir()

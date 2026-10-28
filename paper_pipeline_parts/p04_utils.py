@@ -995,21 +995,29 @@ def _iter_tree_files(root: Path, follow_dir_links: bool = False) -> list:
         return (st.st_dev, st.st_ino)
 
     def _followable_evidence_dir(p: Path, top_level: bool) -> bool:
-        """True for a TOP-LEVEL link named like an evidence area.
+        """True for a TOP-LEVEL link to a directory shaped like the evidence area.
 
         `follow_dir_links=True` used to follow EVERY directory symlink, so a
         package's nested `sub -> /outside` put outside files in a blinded judge
         view and in the content manifest. Only the corpus-level
-        `<sandbox>/<raw_data|...>` link is legitimate (ensure_pristine_input);
-        a nested link, or a top-level link under any other name, is not package
-        content.
+        `<root>/non_revised/<raw_data|...>` link is legitimate
+        (ensure_pristine_input); the name alone never authorizes the follow.
+
+        This walker is not handed the owning run root, so the test below is a
+        TARGET-SHAPE test, not a root-identity proof: an outside tree that
+        merely has the same `.../non_revised/<area>` shape is followed too. The
+        strict containment proof is `is_canonical_evidence_link`, which the
+        writers that DO receive the owning root (`copy_into`,
+        `ensure_pristine_input`) use before following or copying a link.
         """
         if not p.is_symlink() or not top_level or not is_evidence_rel(p.name):
             return False
         try:
-            return p.resolve(strict=True).is_dir()
+            target = p.resolve(strict=True)
         except (OSError, RuntimeError):
             return False
+        return (target.is_dir() and target.name == p.name
+                and target.parent.name == PRISTINE_DIR)
 
     def walk(d: Path, ancestors: frozenset) -> None:
         for p in sorted(d.iterdir()):
@@ -1205,16 +1213,32 @@ _TMP_SEQ = itertools.count(1)
 
 
 def tmp_path_for(path: Path) -> Path:
-    """A UNIQUE temporary sibling for `path` (same directory, same filesystem).
+    """A UNIQUE, exclusively-created temporary sibling for `path`.
 
     A fixed "<name>.tmp" is a cross-process hazard: two writers (a doubly
     started `run`, a `run` and a `retry`, a monitoring `decide`) shared the same
     temporary file, so one could rename the other's HALF-WRITTEN bytes into
     place -- or fail with FileNotFoundError because the other had already
-    renamed the shared temporary away. The pid + a process-local counter makes
-    every writer's temporary its own, which is what makes os.replace atomic.
+    renamed the shared temporary away. `pid` + a process-local counter was still
+    PREDICTABLE: an agent in a writable sandbox pre-created
+    `PROMPT.md.<pid>.<n>.tmp` symlinks to an outside file, and the writer
+    followed them. The name now carries random bits and the file is created
+    here with O_CREAT|O_EXCL|O_NOFOLLOW, so a link at that path can neither be
+    predicted nor followed.
     """
-    return path.with_name(f"{path.name}.{os.getpid()}.{next(_TMP_SEQ)}.tmp")
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(100):
+        tmp = path.with_name(
+            f".{path.name}.{os.getpid()}.{next(_TMP_SEQ)}.{os.urandom(6).hex()}.tmp")
+        try:
+            fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                          | getattr(os, "O_NOFOLLOW", 0), 0o666)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        return tmp
+    raise OSError(f"could not create a unique temporary for {path}")
 
 
 def _atomic_write_bytes(tmp: Path, dst: Path, write) -> None:
@@ -1654,6 +1678,29 @@ def _docx_visible_paragraphs(el, ns: str, mc: str):
         yield from _docx_visible_paragraphs(child, ns, mc)
 
 
+# Untrusted DOCX parts: cap the DECOMPRESSED size before reading, and refuse
+# an XML DTD outright. A 563-byte part with eight nested internal entities
+# expanded to 65,536 characters here, and a ZIP entry's declared size was never
+# checked at all (a small compressed entry can allocate gigabytes).
+MAX_DOCX_PART_BYTES = 64 * 1024 * 1024
+
+
+def _docx_xml_part(z: zipfile.ZipFile, name: str):
+    """Bytes of one DOCX XML part, or None over the size/DTD budget."""
+    try:
+        info = z.getinfo(name)
+    except KeyError:
+        return None
+    if info.file_size > MAX_DOCX_PART_BYTES:
+        return None
+    data = z.read(name)
+    text = data.decode("utf-16", "ignore") if data[:2] in (b"\xff\xfe", b"\xfe\xff") \
+        else data.decode("utf-8", "ignore")
+    if "<!DOCTYPE" in text or "<!ENTITY" in text:
+        return None
+    return data
+
+
 def _docx_paragraphs(path: Path):
     """Paragraph texts of a .docx, or None when it cannot be parsed.
 
@@ -1669,7 +1716,9 @@ def _docx_paragraphs(path: Path):
     mc = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
     try:
         with zipfile.ZipFile(path) as z:
-            data = z.read("word/document.xml")
+            data = _docx_xml_part(z, "word/document.xml")
+        if data is None:
+            return None
         root = ET.fromstring(data)
     except (OSError, KeyError, zipfile.BadZipFile, ET.ParseError, RuntimeError,
             NotImplementedError):
@@ -1680,6 +1729,13 @@ def _docx_paragraphs(path: Path):
         for node in _docx_visible_nodes(para):
             if node.tag in (ns + "br", ns + "cr", ns + "tab"):
                 parts.append("\n")
+            elif node.tag == ns + "noBreakHyphen":
+                # The formatter's `text_of` renders a hyphen here; dropping it
+                # fused `ten<w:noBreakHyphen/>year` into "tenyear", so the two
+                # extractors of the SAME module disagreed on the same DOCX.
+                parts.append("-")
+            elif node.tag == ns + "sym":
+                parts.append("\ufffd")
             elif node.tag == ns + "t":
                 parts.append(node.text or "")
         out.append("".join(parts))
@@ -2109,7 +2165,10 @@ def _length_section_kind(line: str) -> str:
 
 
 LENGTH_KEYWORDS_RE = re.compile(
-    r"^\s*(?:key\s?words?)\s*(?:[:.\u2014\u2013-]|$)", re.I)
+    # The optional section number is the one thing count_words.KEYWORDS accepts
+    # that this twin used to reject: "2 Keywords: ..." was body text here and a
+    # keyword boundary there, so the two M19 counters disagreed on the abstract.
+    r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:key\s?words?)\s*(?:[:.\u2014\u2013-]|$)", re.I)
 LENGTH_COVER_SALUTATION_RE = re.compile(
     r"^\s*(?:dear\b|to the (?:editor|editors)\b)", re.I)
 LENGTH_COVER_CLOSING_RE = re.compile(
@@ -2291,6 +2350,15 @@ def _tex_length_scan(text: str):
                 after = _tex_line_text(line[ends.end():])
                 if after:
                     out.append(after)
+            continue
+        if re.search(r"\\begin\s*\{thebibliography\}", line) \
+                or re.search(r"\\bibliography\s*\{", line):
+            # The reference list is not main text when the venue excludes
+            # references. `\begin{thebibliography}` is stripped as an environment
+            # token and `\bibliography{...}` as scaffold, so without this heading
+            # every entry stayed inside the main-text span (the count_words twin
+            # already inserted it).
+            out.append("References")
             continue
         m = re.match(r"\\(?:sub)*section\*?(?:\[[^\]]*\])?\{([^{}]*)\}", line)
         if m:
@@ -4264,7 +4332,10 @@ def _docx_paragraph_texts(path: Path) -> list:
         return []
     try:
         with zipfile.ZipFile(path) as z:
-            xml = z.read("word/document.xml").decode("utf-8", "replace")
+            data = _docx_xml_part(z, "word/document.xml")
+        if data is None:
+            return []
+        xml = data.decode("utf-8", "replace")
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return []
     out = []
@@ -4354,7 +4425,12 @@ def _email_texts_in_file(path: Path) -> tuple:
                          if re.match(r"word/(?:document|footnotes|endnotes)\.xml$", n)]
                 if "word/document.xml" not in names:
                     return [], "unreadable DOCX (no word/document.xml)"
-                parts = [(n, z.read(n).decode("utf-8", "replace")) for n in names]
+                parts = []
+                for n in names:
+                    data = _docx_xml_part(z, n)
+                    if data is None:
+                        return [], f"unreadable DOCX ({n} is over the size/entity budget)"
+                    parts.append((n, data.decode("utf-8", "replace")))
         except (OSError, zipfile.BadZipFile, KeyError, RuntimeError,
                 NotImplementedError) as e:
             return [], f"unreadable DOCX ({type(e).__name__}: {e})"
@@ -9035,8 +9111,8 @@ class OnlySpec:
         1-3          rounds 1..3 in full
         review       the review stage of every round
         2:review     round 2's review only  (`2.review`, `2/review` also work)
-        1,3:merge    the union of "round 1 in full", "round 3 in full" and
-                     "round 3's integrate"
+        1,3:merge    round 1 in full and round 3's integrate (a bare ordinal
+                     runs a whole round; `ROUND:STAGE` runs only that stage)
         all          everything (the default)
 
     Items on the right of a `:` are stage names (or `all`); items without a

@@ -188,9 +188,14 @@ for kind, files, expect_fail in (("revise", ["revision_report.json"], False),
     (sb / out_dir / "manuscript.md").write_text("x\n", encoding="utf-8")
     (sb / out_dir / "CHANGELOG.md").write_text("x\n", encoding="utf-8")
     (sb / "non_revised").mkdir()
+    ledger = ("| id | donor | location | size | verdict | revalidated | artifact | "
+              "finding effect |\n|---|---|---|---|---|---|---|---|\n"
+              "| D1 | a1 | (whole package) | small | keep-self | rejected | "
+              "self/(unchanged) | none |\n")
     for f in files:
-        (sb / out_dir / f).write_text(json.dumps({"ok": 1}) if f.endswith(".json") else "x",
-                                      encoding="utf-8")
+        (sb / out_dir / f).write_text(
+            json.dumps({"ok": 1}) if f.endswith(".json")
+            else ledger if f == "DIFF_LEDGER.md" else "x", encoding="utf-8")
     area = "self" if kind == "integrate" else "base"
     (sb / area).mkdir()
     (sb / area / "manuscript.md").write_text("x\n", encoding="utf-8")

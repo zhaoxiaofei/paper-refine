@@ -164,10 +164,15 @@ _NON_MANUSCRIPT_RE = re.compile(
     r"(?<![a-z])(?:feedbacks?(?:[-_ ]?(?:form|report|letter|comments?|summary|"
     r"to[-_ ]?authors))*|"
     r"(?:referees?|reviewers?)(?:[-_ ]?(?:comments?|reports?|critiques?|forms?))*|"
-    r"(?<![a-z_])editors?(?:[-_ ]?(?:comments?|decisions?|reports?|letters?))*|"
+    r"(?<![a-z_])editors?(?:[-_ ]?(?:comments?|decisions?|reports?|letters?|"
+    r"notices?|emails?|critiques?|forms?))|"
     r"editorial|decision[_ \-]*(?:letter|notice|email))(?![a-z])", re.I)
+# The pipeline's `AUTHORED_REPLY_NAME_RE` is a bare role WORD, so
+# `ReviewerResponse.md` and `reviewerresponse.md` are the authors' reply there.
+# The boundary form here missed both and swept reviewer prose as the manuscript.
+# The science-compound carve-out below still protects `immune_response.md`.
 _REPLY_RE = re.compile(
-    r"(?<![a-z])(?:responses?|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)(?![a-z])",
+    r"(?:responses?|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)",
     re.I)
 # A scientific compound that merely ENDS in a role word is not a reply: these
 # were silently dropped from every manuscript sweep (M1/M2/M4/M19).
@@ -197,10 +202,20 @@ _COVER_WORD_RE = re.compile(
     r"(?:[Cc]over|COVER|(?i:coverletter|plainletter))(?![a-z])")
 
 
+def _is_evidence_part(part: str) -> bool:
+    """True for an evidence area, including its inert `<area>.disabled` form."""
+    low = str(part or "").strip().lower()
+    if low in EVIDENCE_DIRNAMES:
+        return True
+    return any(low.startswith(area + ".")
+               and low[len(area) + 1:] in ("disabled", "off")
+               for area in EVIDENCE_DIRNAMES)
+
+
 def _non_manuscript(name: str) -> bool:
     """True for an evidence-area / feedback / response path (never manuscript text)."""
     parts = str(name).replace("\\", "/").split("/")
-    if any(part in EVIDENCE_DIRNAMES for part in parts[:-1]):
+    if any(_is_evidence_part(part) for part in parts[:-1]):
         return True
     base = parts[-1]
     if any(base.startswith(d + "__") for d in EVIDENCE_DIRNAMES):

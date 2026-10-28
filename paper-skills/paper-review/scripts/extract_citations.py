@@ -47,10 +47,15 @@ _NON_MANUSCRIPT_RE = re.compile(
     r"(?<![a-z])(?:feedbacks?(?:[-_ ]?(?:form|report|letter|comments?|summary|"
     r"to[-_ ]?authors))*|"
     r"(?:referees?|reviewers?)(?:[-_ ]?(?:comments?|reports?|critiques?|forms?))*|"
-    r"(?<![a-z_])editors?(?:[-_ ]?(?:comments?|decisions?|reports?|letters?))*|"
+    r"(?<![a-z_])editors?(?:[-_ ]?(?:comments?|decisions?|reports?|letters?|"
+    r"notices?|emails?|critiques?|forms?))|"
     r"editorial|decision[_ \-]*(?:letter|notice|email))(?![a-z])", re.I)
+# The pipeline's `AUTHORED_REPLY_NAME_RE` is a bare role WORD, so
+# `ReviewerResponse.md` and `reviewerresponse.md` are the authors' reply there.
+# The boundary form here missed both and swept reviewer prose as the manuscript.
+# The science-compound carve-out below still protects `immune_response.md`.
 _REPLY_RE = re.compile(
-    r"(?<![a-z])(?:responses?|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)(?![a-z])",
+    r"(?:responses?|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point)",
     re.I)
 # A scientific compound that merely ENDS in a role word is not a reply: these
 # were silently dropped from every manuscript sweep (M1/M2/M4/M19).
@@ -91,10 +96,25 @@ SUPP_ROLE_RE = re.compile(
 REF_ROLE_RE = re.compile(r"\brefs?\b|\breferences?\b")
 
 
+def _is_evidence_part(part: str) -> bool:
+    """True for an evidence area, including its inert `<area>.disabled` form.
+
+    The pipeline's `is_disabled_evidence_rel` treats `llm_review_feedback.disabled/`
+    and `.off/` as inert evidence: not submission content, not readable evidence.
+    Testing exact membership here swept that area as the authors' manuscript.
+    """
+    low = str(part or "").strip().lower()
+    if low in EVIDENCE_DIRNAMES:
+        return True
+    return any(low.startswith(area + ".")
+               and low[len(area) + 1:] in ("disabled", "off")
+               for area in EVIDENCE_DIRNAMES)
+
+
 def is_non_manuscript(name: str) -> bool:
     """True for an evidence-area / feedback / response file (never author prose)."""
     parts = str(name).replace("\\", "/").split("/")
-    if any(part in EVIDENCE_DIRNAMES for part in parts[:-1]):
+    if any(_is_evidence_part(part) for part in parts[:-1]):
         return True
     base = parts[-1]
     if any(base.startswith(d + "__") for d in EVIDENCE_DIRNAMES):
@@ -395,7 +415,10 @@ def parse_nums(inner):
     nums = []
     for part in re.split(r"[,;]", inner):
         part = part.strip()
-        rm = re.match(r"(\d+)\s*[–-]\s*(\d+)$", part)
+        # The formatter's `_marker_range_numbers` accepts en dash, EM dash and
+        # hyphen. Omitting the em dash made "[12—14]" fall through to int(),
+        # store the raw string, and report 12-14 as listed-but-never-cited.
+        rm = re.match(r"(\d+)\s*[\u2013\u2014-]\s*(\d+)$", part)
         if rm:
             a, b = int(rm.group(1)), int(rm.group(2))
             # The cap is the OOXML twin's own constant

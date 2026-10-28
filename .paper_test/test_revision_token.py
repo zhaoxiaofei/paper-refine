@@ -238,7 +238,12 @@ def test_evidence_area_names_are_not_naming_evidence():
     # sandbox package really has (see ensure_pristine_input): the pipeline's
     # payload walk follows it, so the shipped tool must follow it too, or the
     # token it prints for a real sandbox package diverges from the pipeline's.
-    real = tmp.parent / (tmp.name + "_raw_data_real")     # outside the package
+    # The canonical store layout (`<root>/non_revised/<area>`), which is what
+    # ensure_pristine_input links to in a real sandbox: the pipeline follows the
+    # link only when its target has that shape.
+    store = tmp.parent / (tmp.name + "_store") / "non_revised"
+    store.mkdir(parents=True)
+    real = store / "raw_data"
     (tmp / "raw_data").rename(real)
     os.symlink(os.path.relpath(real, tmp), tmp / "raw_data")
     linked_script = json.loads(run_script(tmp, "--json").stdout)

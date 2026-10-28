@@ -248,7 +248,7 @@ def test_field_wide_ranking_and_reported_margin():
     check("the trace documents the field-wide key and the reported-only margin",
           any("ranking key: (the ordered per-cell defect census over the first" in ln
               and "severity_tier_category order" in ln
-              and "then -median, -mean, IQR, digest, id" in ln for ln in sel2["trace"])
+              and "then -median, -mean, IQR, digest)" in ln for ln in sel2["trace"])
           and any("vs_base is reported but NOT a ranking key" in ln for ln in sel2["trace"]),
           str(sel2["trace"][-1:])[:200])
 
