@@ -171,6 +171,30 @@ _COVER_WORD_RE = re.compile(
 # manuscript prose.
 AUTHORED_REPLY_NAME_RE = re.compile(
     r"response|repl(?:y|ies)|rebuttal|point[-_ ]?by[-_ ]?point", re.I)
+# A scientific compound that merely ENDS in a role word is not a reply:
+# `dose_response.txt`, `immune_response.md` and `response_time.tex` are real
+# manuscripts. The skill extractors have always carried this carve-out; the
+# pipeline's bare substring test did not, so it dropped those files from every
+# written-surface scan (F34).
+SCIENCE_ROLE_COMPOUND_RE = re.compile(
+    r"(?<![a-z])(?:dose|immune|stress|apoptotic|inflammatory|transcriptional|"
+    r"pharmacodynamic)[-_ ]?response"
+    r"|(?<![a-z])response[-_ ]?(?:time|rate|curve|latency|element|surface|variable)"
+    r"|(?<![a-z])feedback[-_ ]?(?:loop|control|gain|signal)"
+    r"|(?<![a-z])(?:bio|neuro|video|audio)[-_ ]?feedback", re.I)
+
+
+def authored_reply_name(name: str) -> bool:
+    """True when a file NAME says it is an authors' reply, not a manuscript.
+
+    Science compounds are removed before the role-word test, exactly as the
+    skill extractors do: `ReviewerResponse.md` is a reply, `dose_response.txt`
+    is not.
+    """
+    cleaned = SCIENCE_ROLE_COMPOUND_RE.sub(" ", str(name or ""))
+    return bool(AUTHORED_REPLY_NAME_RE.search(cleaned))
+
+
 JOURNAL_CONCERN_ACTIONS = ("text", "analysis", "new-experiment", "clarification",
                            "formatting", "policy", "disagree")
 JOURNAL_CONCERN_DISPOSITIONS = ("to-fix", "already-addressed", "manual", "not-applicable")
@@ -514,12 +538,15 @@ def feedback_text_of(path: Path) -> tuple:
     if ext == ".pdf":
         if shutil.which("pdftotext"):
             try:
-                proc = subprocess.run(["pdftotext", "-layout", str(path), "-"],
-                                      capture_output=True, timeout=60)
-                text = proc.stdout.decode("utf-8", errors="replace")
-                if text.strip():
+                # Bounded child output: a compressed PDF can expand to
+                # gigabytes of text, and stdin is closed by the runner (F26).
+                rc, out, _err = run_bounded(["pdftotext", "-layout", str(path), "-"],
+                                            timeout=60)
+                text = out.decode("utf-8", errors="replace")
+                if rc == 0 and text.strip():
                     return text, ""
-                return "", "pdftotext produced no text (scanned/image PDF?)"
+                return "", ("pdftotext produced no text (scanned/image PDF?)" if rc == 0
+                            else f"pdftotext failed: exit {rc}")
             except Exception as e:                                   # noqa: BLE001
                 return "", f"pdftotext failed: {e}"
         return "", "pdf-unconvertible: pdftotext not available"

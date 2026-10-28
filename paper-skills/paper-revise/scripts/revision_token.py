@@ -56,6 +56,10 @@ import re
 import sys
 from pathlib import Path
 
+# The pipeline twin (paper_pipeline.MAX_PAYLOAD_BYTES) refuses a payload file
+# larger than this: hashing a multi-gigabyte data file whole is unbounded (F10).
+MAX_PAYLOAD_BYTES = 64 * 1024 * 1024
+
 REPORTS = {"changelog.md", "manual_steps.md", "manual_todo.csv", "revision_report.md",
            "revision_report.json", "diff_ledger.md", "rewrite_report.md",
            "visual_check.md",
@@ -133,7 +137,10 @@ def tree_files(root: Path) -> list:
     ensure_pristine_input), and the payload must see the same files whether the
     area is linked or copied. An ancestor-inode set keeps a link cycle finite.
     """
-    if not root.is_dir():
+    if not root.is_dir() or root.is_symlink():
+        # A package ROOT that is a link is not package content: walking it
+        # certified outside files as this package's payload (F11). Nested
+        # evidence links below a real root are still followed.
         return []
     out = []
 
@@ -269,6 +276,10 @@ def revision_token(root: Path) -> dict:
     skipped = []
     for p in files:
         try:
+            if p.stat().st_size > MAX_PAYLOAD_BYTES:
+                skipped.append(f"{p.name}: over the {MAX_PAYLOAD_BYTES // (1024 * 1024)} MiB "
+                               f"payload budget")
+                continue
             data = p.read_bytes()
         except OSError as e:                                  # noqa: BLE001
             # The pipeline twin (revision_token_for_dir) skips an unreadable

@@ -320,13 +320,15 @@ def _slugify_article_type(label: str) -> str:
 MAIN_TEXT_SECTION_KINDS = ("abstract", "methods", "references", "figure-legends",
                           "acknowledgements", "author-contributions",
                           "data-availability", "competing-interests", "funding",
-                          "supplementary", "table-captions")
+                          "supplementary", "table-captions", "table-contents")
 # Table captions are a caption KIND, not a section heading: a venue states them
 # only when it groups them with figure legends (Frontiers' "figure and table
 # captions"). The historical default excluded figure legends only, so the new
-# kind is opt-in and never changes a profile that does not name it.
+# kind is opt-in and never changes a profile that does not name it. The same is
+# true of `table-contents`: Frontiers' source excludes the CONTENTS of tables
+# and boxes, and a profile that does not name it keeps counting cell text (F08).
 DEFAULT_MAIN_TEXT_EXCLUDES = tuple(
-    kind for kind in MAIN_TEXT_SECTION_KINDS if kind != "table-captions")
+    kind for kind in MAIN_TEXT_SECTION_KINDS if kind not in ("table-captions", "table-contents"))
 
 
 def _clean_counting(counting, prefix: str, problems: list):
@@ -683,6 +685,14 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
         problems.append(f"submission.pdf_accepted must be true, false or null (got "
                         f"{pdf_accepted!r})")
         pdf_accepted = None
+    # `accepts_any_journal` is a boolean too: `bool("false")` is True, so a
+    # hand-written/custom profile with the string "false" silently accepted ANY
+    # journal (F58). A missing value keeps its historical false default.
+    accepts_any_journal = out.get("accepts_any_journal", False)
+    if not isinstance(accepts_any_journal, bool):
+        problems.append(f"accepts_any_journal must be true or false (got "
+                        f"{accepts_any_journal!r})")
+        accepts_any_journal = False
     # Validate `formats` BEFORE the single raise below: this call appends its
     # problems, and after the raise nothing it appends would ever be seen (an
     # invalid string silently became an empty list instead of failing).
@@ -800,7 +810,7 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
         "journals": journals,
         "journal_aliases": aliases,
         "journal_patterns": patterns,
-        "accepts_any_journal": bool(out.get("accepts_any_journal")),
+        "accepts_any_journal": accepts_any_journal,
         "default_journal": str(out.get("default_journal") or "").strip(),
         "length_limits": clean_limits,
         "counting": clean_counting,
@@ -1660,6 +1670,11 @@ def official_skeleton(records: list, explicit_requirements: dict = None) -> dict
     positions, spellings, counts = {}, {}, {}
     st_positions, st_spellings = {}, {}
     for rec in records:
+        # A section is present in a SAMPLE at most once: counting every heading
+        # occurrence made a template that repeats "Results" look like two
+        # samples carrying it, and `present` then satisfied the every-sample
+        # mandatory test (F40).
+        seen_in_record = set()
         for i, sec in enumerate(rec.get("sections") or []):
             if int(sec.get("level") or 0) != 1:
                 continue
@@ -1675,6 +1690,9 @@ def official_skeleton(records: list, explicit_requirements: dict = None) -> dict
                 st_spellings[key][sec["title"].strip()] = \
                     st_spellings[key].get(sec["title"].strip(), 0) + 1
                 continue
+            if key in seen_in_record:
+                continue
+            seen_in_record.add(key)
             counts[key] = counts.get(key, 0) + 1
             positions.setdefault(key, []).append(i)
             spellings.setdefault(key, {})
@@ -1810,6 +1828,8 @@ def scan_template_conformance(sources: list, requirements: dict,
         order_index.setdefault(_heading_key(t), i)
 
     have_class, texts, docs = "", [], set()
+    tex_classes = {}            # doc -> documentclass declared in that file
+    unparsed = []               # sources read_text_bounded refused (over budget/symlink)
     doc_headings = []           # (doc, title) in document order
     caption_rows = []           # (doc, is_table, number)
     docx_paths = {}             # doc -> Path
@@ -1855,9 +1875,9 @@ def scan_template_conformance(sources: list, requirements: dict,
                         caption_rows.append((doc, m.group(1).lower().startswith("tab"),
                                              int(m.group(2))))
             elif ext in LENGTH_TEX_EXTS:
-                try:
-                    text = p.read_text(encoding="utf-8", errors="replace")
-                except OSError:
+                text = read_text_bounded(p)
+                if text is None:
+                    unparsed.append(doc)
                     continue
                 texts.append(text)
                 docs.add(doc)
@@ -1873,12 +1893,12 @@ def scan_template_conformance(sources: list, requirements: dict,
                         caption_rows.append((doc, m.group(1).lower().startswith("tab"),
                                              int(m.group(2))))
                 m = TEX_DOCCLASS_RE.search(text)
-                if m and not have_class:
-                    have_class = m.group(1).strip()
+                if m:
+                    tex_classes.setdefault(doc, m.group(1).strip())
             elif ext in LENGTH_TEXT_EXTS:
-                try:
-                    text = p.read_text(encoding="utf-8", errors="replace")
-                except OSError:
+                text = read_text_bounded(p)
+                if text is None:
+                    unparsed.append(doc)
                     continue
                 texts.append(text)
                 docs.add(doc)
@@ -1893,6 +1913,14 @@ def scan_template_conformance(sources: list, requirements: dict,
                     if m:
                         caption_rows.append((doc, m.group(1).lower().startswith("tab"),
                                              int(m.group(2))))
+    # The required documentclass is the MAIN manuscript's declaration, not the
+    # first .tex in sorted order: a supplementary .tex with its own class used
+    # to decide the verdict for the whole package (F33). Fall back to the first
+    # declaring document only when no main-role document declares one.
+    if tex_classes:
+        mains = [doc for doc in tex_classes
+                 if docx_document_role(Path(doc).name, manuscript_names) == "main"]
+        have_class = tex_classes[(mains or list(tex_classes))[0]]
     blob = "\n".join(texts)
     low = blob.lower()
     # A required section must be a SECTION: its label may not be satisfied by
@@ -1985,6 +2013,7 @@ def scan_template_conformance(sources: list, requirements: dict,
                                                 "mandatory_sections": mandatory,
                                                 "statements": statements},
             "found": {"documentclass": have_class, "documents": sorted(docs)},
+            "unparsed": sorted(unparsed),
             "missing_sections": missing_sections, "missing_statements": missing_statements,
             "class_ok": class_ok, "order_basis": order_basis,
             "order_rows": order_rows, "label_rows": label_rows,

@@ -1072,6 +1072,12 @@ def hash_manifest(dirp: Path, follow_dir_links: bool = False, exclude_top=(),
     """
     if not dirp.is_dir():
         return {"files": {}, "count": 0}
+    if dirp.is_symlink() and not follow_dir_links:
+        # A directory that is ITSELF a link is not the package the caller named:
+        # hash it as empty rather than certifying the link target's files
+        # (F11). Callers that legitimately materialize an evidence link pass
+        # follow_dir_links=True (the containment proof applies there).
+        return {"files": {}, "count": 0}
     paths = _iter_tree_files(dirp, follow_dir_links=follow_dir_links)
     if exclude_top:
         blocked = set(exclude_top)
@@ -1435,7 +1441,10 @@ def _json_from_text(text: str, lenient: bool):
             elif stack:
                 # Mismatched prose brackets: no value can start here.
                 stack.clear()
-    starts = top_starts or nested_starts
+    # Try BOTH candidate lists, in document order: an earlier `{}` in prose is
+    # a complete top-level value, and it must not hide a later complete
+    # document that closes while that prose opener is still unmatched.
+    starts = sorted(set(top_starts) | set(nested_starts))
     found = []                       # (start, end, value)
     for i, _end in starts:
         try:
@@ -1470,7 +1479,7 @@ def _json_from_text(text: str, lenient: bool):
     # prose counted here is the text outside this value that is not another
     # candidate's own JSON, so a document carrying a nested object or a second
     # value is not penalized for either.
-    best, best_len = None, -1
+    best, best_key = None, None
     for i, end, obj in found:
         json_len = end - i
         tail = text[end:].strip()
@@ -1478,8 +1487,11 @@ def _json_from_text(text: str, lenient: bool):
         prose = outside_prose(i, end)
         if not fenced and prose > 2 * json_len:
             continue
-        if json_len > best_len:
-            best, best_len = obj, json_len
+        # A value that runs to the end of the text is the document even when an
+        # earlier top-level value is the same length: prefer it on a tie.
+        key = (json_len, 1 if fenced else 0)
+        if best_key is None or key > best_key:
+            best, best_key = obj, key
     return best
 
 
@@ -1500,20 +1512,51 @@ def read_json(path: Path, revive: bool = True, lenient: bool = False):
     """
     if json_file_too_big(path):
         return None
+    # Open ONCE with O_NOFOLLOW and check the DESCRIPTOR actually read: the
+    # lstat check above is advisory, and reopening by name let an agent swap a
+    # regular file for a symlink/FIFO between the two calls (F15). The byte cap
+    # is applied to os.read, not to st_size, so a FIFO cannot block the read.
+    fd = None
     try:
-        with open(path, "r", encoding="utf-8-sig") as f:
-            # Cap the bytes ACTUALLY read: a FIFO/`/dev/zero` has st_size 0, so
-            # the stat check says nothing and an unbounded read blocked the
-            # orchestrator forever on an agent-planted deliverable.
-            text = f.read(MAX_JSON_BYTES + 1)
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0))
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_JSON_BYTES:
+            return None
+        chunks, remaining = [], MAX_JSON_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 1 << 20))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
     except OSError:
         return None
-    if len(text) > MAX_JSON_BYTES:
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    if len(raw) > MAX_JSON_BYTES:
+        return None
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        # An invalid byte makes this an unreadable/malformed agent deliverable,
+        # not a crash out of every command that reads it (F12).
         return None
     obj = _json_from_text(text, lenient)
     if obj is None:
         return None
-    return _json_revive(obj) if revive else obj
+    try:
+        return _json_revive(obj) if revive else obj
+    except RecursionError:
+        # Valid-but-deep JSON parses, then `_json_revive` recurses once per
+        # level: report it as malformed instead of letting RecursionError out
+        # (F13).
+        return None
 
 
 def read_text_bounded(path: Path, errors: str = "replace"):
@@ -1550,31 +1593,6 @@ def read_text_bounded(path: Path, errors: str = "replace"):
     if len(raw) > MAX_JSON_BYTES:
         return None
     return raw.decode("utf-8", errors)
-
-
-# Agent-written JSON is untrusted input of unbounded size: a runaway agent can
-# write a multi-gigabyte findings.json/scores.json, and json.loads() would either
-# exhaust memory (crashing the orchestrator, which is never acceptable) or spend
-# minutes on prose scanning in the lenient path. Anything above this cap is
-# treated as a malformed agent deliverable, which the retry policy handles.
-MAX_JSON_BYTES = 64 * 1024 * 1024
-
-
-def json_file_too_big(path: Path) -> bool:
-    """True when `path` is not a regular file or is larger than MAX_JSON_BYTES.
-
-    `lstat` (not `stat`) and `S_ISREG`: a FIFO reports st_size 0, so the old
-    check passed it to `open()`/`read()`, which blocks forever -- an agent could
-    hang the orchestrator by replacing findings.json with a FIFO. A symlink is
-    refused for the same reason (its target can be a special file).
-    """
-    try:
-        st = path.lstat()
-    except OSError:
-        return False
-    if not stat.S_ISREG(st.st_mode):
-        return True
-    return st.st_size > MAX_JSON_BYTES
 
 
 def fmt_dur(sec) -> str:
@@ -1773,70 +1791,6 @@ def _docx_visible_paragraphs(el, ns: str, mc: str):
         yield from _docx_visible_paragraphs(child, ns, mc)
 
 
-# Untrusted DOCX parts: cap the DECOMPRESSED size before reading, and refuse
-# an XML DTD outright. A 563-byte part with eight nested internal entities
-# expanded to 65,536 characters here, and a ZIP entry's declared size was never
-# checked at all (a small compressed entry can allocate gigabytes).
-MAX_DOCX_PART_BYTES = 64 * 1024 * 1024
-
-
-def _docx_xml_part(z: zipfile.ZipFile, name: str):
-    """Bytes of one DOCX XML part, or None over the size/DTD budget."""
-    try:
-        info = z.getinfo(name)
-    except KeyError:
-        return None
-    if info.file_size > MAX_DOCX_PART_BYTES:
-        return None
-    data = z.read(name)
-    text = data.decode("utf-16", "ignore") if data[:2] in (b"\xff\xfe", b"\xfe\xff") \
-        else data.decode("utf-8", "ignore")
-    if "<!DOCTYPE" in text or "<!ENTITY" in text:
-        return None
-    return data
-
-
-def _docx_paragraphs(path: Path):
-    """Paragraph texts of a .docx, or None when it cannot be parsed.
-
-    A `w:br`/`w:cr` (a soft line break) and a `w:tab` render as a NEWLINE: the
-    text is the text a READER sees, and a caller that compares two written
-    forms (FMT-X2's correspondence block) must be able to tell a line break
-    from a missing space. Dropping the break made the shipped three-line
-    `* Correspondence: / Zhen Xie / zhenxie@…` read as one glued token and
-    FMT-X2 reported a line that renders perfectly (the 2026-10-15b neohet
-    package, re-found by the operator's audit).
-    """
-    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-    mc = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
-    try:
-        with zipfile.ZipFile(path) as z:
-            data = _docx_xml_part(z, "word/document.xml")
-        if data is None:
-            return None
-        root = ET.fromstring(data)
-    except (OSError, KeyError, zipfile.BadZipFile, ET.ParseError, RuntimeError,
-            NotImplementedError):
-        return None
-    out = []
-    for para in _docx_visible_paragraphs(root, ns, mc):
-        parts = []
-        for node in _docx_visible_nodes(para):
-            if node.tag in (ns + "br", ns + "cr", ns + "tab"):
-                parts.append("\n")
-            elif node.tag == ns + "noBreakHyphen":
-                # The formatter's `text_of` renders a hyphen here; dropping it
-                # fused `ten<w:noBreakHyphen/>year` into "tenyear", so the two
-                # extractors of the SAME module disagreed on the same DOCX.
-                parts.append("-")
-            elif node.tag == ns + "sym":
-                parts.append("\ufffd")
-            elif node.tag == ns + "t":
-                parts.append(node.text or "")
-        out.append("".join(parts))
-    return out
-
-
 def _tex_captions(text: str) -> list:
     """Texts of \\caption / \\captionof with brace balancing.
 
@@ -1846,31 +1800,7 @@ def _tex_captions(text: str) -> list:
     Missing the bracketed argument was a real false negative: a LaTeX caption the
     scan never saw was reported as "within the suggested length".
     """
-    out = []
-    # \*? -- \caption*{...} is the unnumbered form of the same caption.
-    # The type argument exists ONLY on \captionof: treating it as optional on
-    # \caption let `\caption{Alpha} {gamma}` capture the trailing body brace.
-    for m in re.finditer(
-            r"\\(?:captionof\*?\s*\{[^{}]*\}\s*(?:\[[^\]]*\]\s*)?"
-            r"|caption\*?\s*(?:\[[^\]]*\]\s*)?)\{", text):
-        i, depth, j, esc = m.end() - 1, 1, m.end(), False
-        while j < len(text):
-            ch = text[j]
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    break
-            j += 1
-        if depth:                      # unbalanced: never swallow the rest of the file
-            continue
-        out.append(text[i + 1:j])
-    return out
+    return [cap for _kind, cap in _tex_caption_units(text)]
 
 
 def _caption_match(line: str, kinds=("figure",)):
@@ -2046,21 +1976,29 @@ def scan_captions_in_sources(sources: list, limit=None) -> dict:
                 if paras:
                     suspects.extend(_caption_suspects(paras))
             elif ext in CAPTION_TEX_EXTS:
-                try:
-                    text = p.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    text = ""
+                text = read_text_bounded(p)
+                if text is None:
+                    # A symlinked/oversize/unreadable source is a NAMED gap, not
+                    # an empty document counted as clean (F07).
+                    unparsed.append(doc)
+                    continue
                 units = []
-                for idx, cap in enumerate(_tex_captions(text), 1):
+                fig_idx = 0
+                for kind, cap in _tex_caption_units(text):
+                    if kind == "table":
+                        # M18 is the FIGURE-legend inventory: a table caption is
+                        # not a figure legend (F09).
+                        continue
+                    fig_idx += 1
                     m = CAPTION_START_RE.match(cap.strip())
-                    units.append((f"Figure {m.group(1)}" if m else f"caption {idx}", cap))
+                    units.append((f"Figure {m.group(1)}" if m else f"caption {fig_idx}", cap))
                 # a \caption the strict pattern did not recognise must stay visible
                 suspects.extend(_caption_suspects(text.splitlines()))
             elif ext in CAPTION_TEXT_EXTS:
-                try:
-                    text = p.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    text = ""
+                text = read_text_bounded(p)
+                if text is None:
+                    unparsed.append(doc)
+                    continue
                 lines = text.splitlines()
                 units = _caption_units_from_lines(lines)
                 suspects.extend(_caption_suspects(lines))
@@ -2411,9 +2349,11 @@ def text_source_paragraphs(path: Path) -> list:
     split on blank lines and sectioning commands; a source written as one huge
     paragraph simply becomes one long paragraph (the repetition rule skips those).
     """
-    try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    raw = read_text_bounded(path)
+    if raw is None:
+        # Unreadable, symlinked or over the package-text budget: the caller
+        # treats it as a source with no reportable prose, never as an empty
+        # manuscript that passed every style rule.
         return []
     if path.suffix.lower() in (".tex", ".ltx"):
         raw = strip_tex_comment(raw)
@@ -2934,7 +2874,10 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
                 continue
             lines, caption_spans, abstract_end = None, [], None
             if ext in LENGTH_DOCX_EXTS:
-                paras = _docx_paragraphs(p)
+                # Frontiers' counting source excludes the CONTENTS of tables and
+                # boxes; a profile that says so must not count cell paragraphs
+                # as main text (F08).
+                paras = _docx_paragraphs(p, include_tables="table-contents" not in _excludes)
                 if paras is None:
                     unparsed.append(doc)
                     continue
@@ -2958,10 +2901,12 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
                     unparsed.append(f"{doc}: unresolved include {inc.group(1)}")
                 lines, caption_spans, abstract_end = _tex_length_scan(expanded)
             elif ext in LENGTH_TEXT_EXTS:
-                try:
-                    text = p.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    text = ""
+                text = read_text_bounded(p)
+                if text is None:
+                    # An unreadable manuscript source is a NAMED gap, not an
+                    # empty rendering (F65).
+                    unparsed.append(doc)
+                    continue
                 lines = text.splitlines()
                 caption_spans = [(a, b) for _, _, a, b
                                  in _caption_units_from_lines(lines, with_spans=True,
@@ -4694,7 +4639,7 @@ def _email_addresses_in_sources(sources, evidence: bool = False) -> tuple:
             if area in (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR):
                 return True
             return bool(is_journal_feedback_name(name)
-                        or AUTHORED_REPLY_NAME_RE.search(name))
+                        or authored_reply_name(name))
         return bool(is_non_manuscript_rel(rel) or parts[0] == CODE_DIR)
 
     for src, prefix, excluded in sources or []:
@@ -6752,9 +6697,8 @@ def corpus_text_documents(sources: list, raw_text: bool = False,
             if "work" in rel.split("/")[:-1]:
                 continue
             if raw_text:
-                try:
-                    raw = p.read_text(encoding="utf-8", errors="replace")
-                except OSError:
+                raw = read_text_bounded(p)
+                if raw is None:
                     continue
                 out.append((prefix + rel, [(raw, False, False)]))
                 continue
@@ -7799,14 +7743,21 @@ def seed_evidence_pack(ctx: Ctx, sb: Path, corpus_dir: Path, where: str) -> dict
                   "file for leaves the reader nothing to look at. Ship the figure, embed it in "
                   "the document that legends it, or drop the citation -- say which in the "
                   "package, and say where the figure now lives.", ""]
-        if dis_rows:
+        gap_rows = [r for r in dis_rows if r.get("gap")]
+        item_rows = [r for r in dis_rows if not r.get("gap")]
+        if gap_rows:
+            # A coverage gap, not a clean scan: PKG-4 could not compare any
+            # citation with a figure name (F90).
+            for r in gap_rows:
+                lines.append(f"- **gap**: {r.get('detail')}")
+        if item_rows:
             lines += ["| file | line | item | the package holds it only as |",
                       "|---|---|---|---|"]
-            for r in dis_rows[:20]:
+            for r in item_rows[:20]:
                 lines.append(f"| {r.get('file')} | {r.get('line')} | `{r.get('reference')}` | "
                              + (", ".join(f"`{x}`" for x in (r.get("resolves_to") or [])) or "—")
                              + " |")
-        else:
+        elif not gap_rows:
             lines.append(f"(the check could not run: {dis.get('error')})")
     gap = ev.get("front_matter_gaps") or {}
     gap_rows = gap.get("rows") or []
@@ -8757,17 +8708,24 @@ def is_llm_feedback_rel(rel: str) -> bool:
 def is_non_manuscript_rel(rel: str) -> bool:
     """True when a corpus path is NOT the authors' manuscript prose.
 
-    Either it lives in an EVIDENCE area, or its name says it is a feedback or
-    response-to-reviewers document wherever it sits. Used by the written-surface
-    scans (captions, lengths, formatting, numbers, placeholders): such text is
-    never the manuscript, even when the operator kept it beside the documents
-    instead of in `human_review_feedback/`. A COVER LETTER is not excluded here
-    -- it is a submission document and M19 counts it as one.
+    Either it lives in an EVIDENCE area, its name says it is a feedback or
+    response-to-reviewers document wherever it sits, or it is the authors' own
+    `README*.md`/`.txt` documentation (AGENTS.md rule 9: never submitted). Used
+    by the written-surface scans (captions, lengths, formatting, numbers,
+    placeholders): such text is never the manuscript, even when the operator
+    kept it beside the documents instead of in `human_review_feedback/`. A
+    COVER LETTER is not excluded here -- it is a submission document and M19
+    counts it as one.
     """
     if is_evidence_rel(rel):
         return True
     base = str(rel or "").replace("\\", "/").rsplit("/", 1)[-1]
-    if AUTHORED_REPLY_NAME_RE.search(base):
+    if is_non_submitted_readme_name(base):
+        # An author README is documentation, not a submission document: its
+        # headings and "Figure 1" prose must not satisfy a template requirement
+        # or add a caption (F32).
+        return True
+    if authored_reply_name(base):
         return True
     # A COVER LETTER is a submission document (M19 counts it as one) even when
     # its name says "to_editor"; only its "cover" spelling protects it here.
@@ -8988,16 +8946,27 @@ def make_tree_readonly(root: Path, skip_top=()) -> int:
 
 
 def evidence_areas_of(dirp: Path) -> list:
-    """The top-level evidence area names present in one corpus directory."""
+    """The top-level ENABLED evidence area names present in one corpus directory.
+
+    A `<area>.disabled` / `<area>.off` directory is INERT (README): it is never
+    read as feedback or evidence, never part of the submission and never shown
+    to a judge. It is therefore not an evidence area, and listing it here made
+    every sandbox symlink it (F35).
+    """
     out = []
     for name in EVIDENCE_DIRNAMES:
         p = Path(dirp) / name
         if p.is_dir() or p.is_symlink():
             out.append(name)
+    return out
+
+
+def inert_evidence_names(dirp: Path) -> list:
+    """The top-level `<area>.disabled`/`.off` names under one corpus directory."""
+    out = []
     try:
         for child in sorted(Path(dirp).iterdir()):
-            if is_disabled_evidence_name(child.name) \
-                    and (child.is_dir() or child.is_symlink()):
+            if is_disabled_evidence_name(child.name):
                 out.append(child.name)
     except OSError:
         pass
@@ -9018,6 +8987,11 @@ def ensure_pristine_input(ctx: Ctx, dst: Path) -> dict:
     {"rebuilt", "linked": [...], "copied": [...], "fallback_reason"}.
     """
     areas = evidence_areas_of(ctx.pristine)
+    # An inert `<area>.disabled/` is neither linked nor copied into a sandbox
+    # (copy_into skips it unconditionally); exclude it from the manifests too,
+    # or every rebuild would see a permanently mismatching expected tree.
+    inert = inert_evidence_names(ctx.pristine)
+    excluded = set(areas) | set(inert)
     want = {name: ctx.pristine / name for name in areas}
     info = {"rebuilt": False, "linked": [], "copied": [], "fallback_reason": None}
     for name in areas:
@@ -9028,9 +9002,9 @@ def ensure_pristine_input(ctx: Ctx, dst: Path) -> dict:
     if ok:
         # The non-evidence part must match the pristine corpus exactly, and every
         # evidence area must be a link to the canonical copy.
-        if (hash_manifest(ctx.pristine, exclude_top=set(areas)).get("files")
+        if (hash_manifest(ctx.pristine, exclude_top=excluded).get("files")
                 != hash_manifest(dst, follow_dir_links=True,
-                                 exclude_top=set(areas)).get("files")):
+                                 exclude_top=excluded).get("files")):
             ok = False
         for name in areas:
             link = dst / name

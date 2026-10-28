@@ -153,9 +153,10 @@ def _tex_expand_includes(text: str, base: Path, seen=None, source: Path = None,
     The scan iterated each .tex file independently: the master's
     `\\input{intro}` was stripped as scaffolding, so the master had no body,
     while `intro.tex` had no Abstract/Introduction heading and was skipped. A
-    multi-file manuscript was reported as 0 body words (F36). Includes expand
-    once (cycle-safe); comments are stripped first; an unresolved include is
-    named as a gap by the caller.
+    multi-file manuscript was reported as 0 body words (F36). Every occurrence
+    of an include expands (the reader sees that text twice); a true cycle is
+    broken by the ancestry set; comments are stripped first; an unresolved
+    include is named as a gap by the caller.
 
     `source` is the file `text` was read from. It is seeded into `seen`: an
     a -> b -> a cycle returns to the ROOT, which is not a child and so was
@@ -164,7 +165,10 @@ def _tex_expand_includes(text: str, base: Path, seen=None, source: Path = None,
     even a direct caller that does not know the root's path still stops a cycle
     when the same source text is re-entered.
     """
-    seen = set() if seen is None else seen
+    # A COPY: siblings on one frame are not ancestors of each other, so the
+    # second `\input{body}` must expand again; `child` is discarded after the
+    # recursive call (F03).
+    seen = set() if seen is None else set(seen)
     if source is not None:
         try:
             seen.add(Path(source).resolve())
@@ -185,10 +189,161 @@ def _tex_expand_includes(text: str, base: Path, seen=None, source: Path = None,
             return match.group(0)
         if child_text in stack:
             return match.group(0)       # the same source text is already open
-        return _tex_expand_includes(child_text, base, seen, source=child,
-                                    _stack=stack)
+        try:
+            return _tex_expand_includes(child_text, base, seen, source=child,
+                                        _stack=stack)
+        finally:
+            seen.discard(child)
 
     try:
         return TEX_INCLUDE_RE.sub(repl, body)
     finally:
         stack.pop()
+
+
+
+def _tex_caption_units(text: str) -> list:
+    """(float kind, caption text) for \\caption / \\captionof, in file order.
+
+    The kind is `figure`/`table` so M18's figure-legend inventory does not file
+    a table caption as a figure legend (F09). `\\captionof{table}{...}` states
+    the kind itself; a bare `\\caption` takes the enclosing float environment.
+    """
+    out = []
+    # \*? -- \caption*{...} is the unnumbered form of the same caption.
+    # The type argument exists ONLY on \captionof: treating it as optional on
+    # \caption let `\caption{Alpha} {gamma}` capture the trailing body brace.
+    for m in re.finditer(
+            r"\\(?:captionof\*?\s*\{[^{}]*\}\s*(?:\[[^\]]*\]\s*)?"
+            r"|caption\*?\s*(?:\[[^\]]*\]\s*)?)\{", text):
+        i, depth, j, esc = m.end() - 1, 1, m.end(), False
+        while j < len(text):
+            ch = text[j]
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        if depth:                      # unbalanced: never swallow the rest of the file
+            continue
+        kind = None
+        of = re.match(r"\\captionof\*?\s*\{([^{}]*)\}", text[m.start():])
+        if of:
+            kind = of.group(1).strip().lower()
+        else:
+            kind = _tex_float_env_after(text[:m.start()], None)
+        out.append((kind or "figure", text[i + 1:j]))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Bounded readers and the DOCX part reader (moved from p04_utils.py to keep
+# that part under the repository's 10,000-line cap; the loader executes every
+# part in one module namespace, so the lower-numbered parts call these at
+# runtime exactly as before).
+# ---------------------------------------------------------------------------
+# Agent-written JSON is untrusted input of unbounded size: a runaway agent can
+# write a multi-gigabyte findings.json/scores.json, and json.loads() would either
+# exhaust memory (crashing the orchestrator, which is never acceptable) or spend
+# minutes on prose scanning in the lenient path. Anything above this cap is
+# treated as a malformed agent deliverable, which the retry policy handles.
+MAX_JSON_BYTES = 64 * 1024 * 1024
+
+
+def json_file_too_big(path: Path) -> bool:
+    """True when `path` is not a regular file or is larger than MAX_JSON_BYTES.
+
+    `lstat` (not `stat`) and `S_ISREG`: a FIFO reports st_size 0, so the old
+    check passed it to `open()`/`read()`, which blocks forever -- an agent could
+    hang the orchestrator by replacing findings.json with a FIFO. A symlink is
+    refused for the same reason (its target can be a special file).
+    """
+    try:
+        st = path.lstat()
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        return True
+    return st.st_size > MAX_JSON_BYTES
+
+
+# Untrusted DOCX parts: cap the DECOMPRESSED size before reading, and refuse
+# an XML DTD outright. A 563-byte part with eight nested internal entities
+# expanded to 65,536 characters here, and a ZIP entry's declared size was never
+# checked at all (a small compressed entry can allocate gigabytes).
+MAX_DOCX_PART_BYTES = 64 * 1024 * 1024
+
+
+def _docx_xml_part(z: zipfile.ZipFile, name: str):
+    """Bytes of one DOCX XML part, or None over the size/DTD budget."""
+    try:
+        info = z.getinfo(name)
+    except KeyError:
+        return None
+    if info.file_size > MAX_DOCX_PART_BYTES:
+        return None
+    data = z.read(name)
+    text = data.decode("utf-16", "ignore") if data[:2] in (b"\xff\xfe", b"\xfe\xff") \
+        else data.decode("utf-8", "ignore")
+    if "<!DOCTYPE" in text or "<!ENTITY" in text:
+        return None
+    return data
+
+
+def _docx_paragraphs(path: Path, include_tables: bool = True):
+    """Paragraph texts of a .docx, or None when it cannot be parsed.
+
+    `include_tables=False` leaves out every paragraph inside a `w:tbl`: a venue
+    whose counting source excludes the CONTENTS of tables (Frontiers) must not
+    charge table-cell text to the main-text cap (F08).
+
+    A `w:br`/`w:cr` (a soft line break) and a `w:tab` render as a NEWLINE: the
+    text is the text a READER sees, and a caller that compares two written
+    forms (FMT-X2's correspondence block) must be able to tell a line break
+    from a missing space. Dropping the break made the shipped three-line
+    `* Correspondence: / Zhen Xie / zhenxie@…` read as one glued token and
+    FMT-X2 reported a line that renders perfectly (the 2026-10-15b neohet
+    package, re-found by the operator's audit).
+    """
+    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    mc = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
+    try:
+        with zipfile.ZipFile(path) as z:
+            data = _docx_xml_part(z, "word/document.xml")
+        if data is None:
+            return None
+        root = ET.fromstring(data)
+    except (OSError, KeyError, zipfile.BadZipFile, ET.ParseError, RuntimeError,
+            NotImplementedError):
+        return None
+    table_paras = set()
+    if not include_tables:
+        # Namespace-agnostic: every w:p under any w:tbl is table CONTENT.
+        for tbl in root.iter(ns + "tbl"):
+            for para in tbl.iter(ns + "p"):
+                table_paras.add(id(para))
+    out = []
+    for para in _docx_visible_paragraphs(root, ns, mc):
+        if not include_tables and id(para) in table_paras:
+            continue
+        parts = []
+        for node in _docx_visible_nodes(para):
+            if node.tag in (ns + "br", ns + "cr", ns + "tab"):
+                parts.append("\n")
+            elif node.tag == ns + "noBreakHyphen":
+                # The formatter's `text_of` renders a hyphen here; dropping it
+                # fused `ten<w:noBreakHyphen/>year` into "tenyear", so the two
+                # extractors of the SAME module disagreed on the same DOCX.
+                parts.append("-")
+            elif node.tag == ns + "sym":
+                parts.append("\ufffd")
+            elif node.tag == ns + "t":
+                parts.append(node.text or "")
+        out.append("".join(parts))
+    return out

@@ -1295,6 +1295,86 @@ def _toml_array_values(raw: str):
     return out
 
 
+def _toml_inline_table_at(text: str, start: int):
+    """The balanced `{...}` starting at `start`, or None (quoted braces kept)."""
+    i = start
+    while i < len(text) and text[i] in " \t":
+        i += 1
+    if i >= len(text) or text[i] != "{":
+        return None
+    j, depth, quote = i, 0, None
+    while j < len(text):
+        ch = text[j]
+        if quote:
+            if quote == '"' and ch == "\\":
+                j += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#":
+            nl = text.find("\n", j)
+            if nl < 0:
+                return None
+            j = nl
+            continue
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[i:j + 1]
+        j += 1
+    return None
+
+
+def _toml_inline_table_values(raw: str):
+    """{key: value} of a TOML inline table, or None when unreadable."""
+    body = (raw or "").strip()
+    if len(body) < 2 or body[0] != "{" or body[-1] != "}":
+        return None
+    inner, out, i, n = body[1:-1], {}, 0, len(body) - 2
+    while i < n:
+        ch = inner[i]
+        if ch in " \t\r\n,":
+            i += 1
+            continue
+        if ch == "#":
+            nl = inner.find("\n", i)
+            i = n if nl < 0 else nl + 1
+            continue
+        if ch in "\"'":
+            got = _toml_string_at(inner, i)
+            if got is None:
+                return None
+            key, i = got
+        else:
+            m = re.match(r"[A-Za-z0-9_.-]+", inner[i:])
+            if not m:
+                return None
+            key, i = m.group(0), i + len(m.group(0))
+        while i < n and inner[i] in " \t":
+            i += 1
+        if i >= n or inner[i] != "=":
+            return None
+        i += 1
+        while i < n and inner[i] in " \t":
+            i += 1
+        if i < n and inner[i] in "\"'":
+            got = _toml_string_at(inner, i)
+            if got is None:
+                return None
+            value, i = got
+        else:
+            m = re.match(r"[^\s,]+", inner[i:])
+            if not m:
+                return None
+            value, i = m.group(0), i + len(m.group(0))
+        out[str(key)] = str(value)
+    return out
+
+
 def mcp_server_spec(name: str) -> dict:
     """{command, args} for one configured MCP server, {} when unreadable.
 
@@ -1346,7 +1426,65 @@ def mcp_server_spec(name: str) -> dict:
             # report the entry instead of using it half-read.
             return {}
         args = values
-    return {"command": command, "args": args}
+    spec = {"command": command, "args": args}
+    # `scripts/README-codex-mcp.md` lists command,args,env,cwd as the SAME
+    # fields in a Codex MCP entry. Dropping env/cwd launched the orchestrator's
+    # server with the pipeline's environment and working directory instead of
+    # the operator's configured one (F28).
+    wm = re.search(r"^[ \t]*cwd[ \t]*=[ \t]*", body, re.MULTILINE)
+    if wm:
+        cwd_got = _toml_string_at(body, wm.end())
+        if cwd_got is None:
+            return {}
+        spec["cwd"] = os.path.expanduser(cwd_got[0])
+    em = re.search(r"^[ \t]*env[ \t]*=[ \t]*", body, re.MULTILINE)
+    if em:
+        raw_env = _toml_inline_table_at(body, em.end())
+        env_values = _toml_inline_table_values(raw_env) if raw_env is not None else None
+        if env_values is None:
+            return {}                   # a malformed env block: unreadable entry
+        spec["env"] = env_values
+    if "env" not in spec:
+        # TOML also allows a subtable form: `[mcp_servers.<name>.env]` followed
+        # by `KEY = "value"` lines. It configures the same field, so ignoring it
+        # would keep launching with the pipeline's environment.
+        env_header = re.compile(
+            r"^\s*\[\s*mcp_servers\s*\.\s*(?:\"" + quoted + r"\"|'"
+            + quoted + r"'|" + quoted + r")\s*\.\s*env\s*\]\s*(?:#.*)?$",
+            re.MULTILINE)
+        eh = env_header.search(text)
+        if eh:
+            rest_env = text[eh.end():]
+            next_hdr = re.search(r"^\s*\[", rest_env, re.MULTILINE)
+            env_body = rest_env[:next_hdr.start()] if next_hdr else rest_env
+            values = {}
+            for raw_line in env_body.splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    return {}
+                key_part, value_part = line.split("=", 1)
+                key_part, value_part = key_part.strip(), value_part.strip()
+                if key_part[:1] in "\"'":
+                    key_got = _toml_string_at(key_part, 0)
+                    if key_got is None or key_got[1] != len(key_part):
+                        return {}
+                    key = key_got[0]
+                elif re.fullmatch(r"[A-Za-z0-9_.\-]+", key_part):
+                    key = key_part
+                else:
+                    return {}
+                if value_part[:1] in "\"'":
+                    val_got = _toml_string_at(value_part, 0)
+                    if val_got is None:
+                        return {}
+                    value = val_got[0]
+                else:
+                    value = value_part.split("#", 1)[0].strip()
+                values[key] = value
+            spec["env"] = values
+    return spec
 
 
 def mcp_stdio_tool_call(spec: dict, tool: str, arguments: dict,
@@ -1363,10 +1501,18 @@ def mcp_stdio_tool_call(spec: dict, tool: str, arguments: dict,
     argv = [str(spec.get("command") or ""), *[str(a) for a in spec.get("args") or []]]
     if not argv[0]:
         return {"ok": False, "error": "the MCP server entry names no command"}
+    launch_env = None
+    if spec.get("env"):
+        launch_env = dict(os.environ, **{str(k): str(v) for k, v in spec["env"].items()})
+    launch_cwd = spec.get("cwd") or None
     try:
+        # Its OWN process group: a timeout must kill the whole chain
+        # (bash -> PowerShell -> Word), not only the node wrapper (F29).
         proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, bufsize=1,
-                                encoding="utf-8", errors="replace")
+                                encoding="utf-8", errors="replace",
+                                env=launch_env, cwd=launch_cwd,
+                                **_render_popen_kwargs())
     except OSError as e:
         return {"ok": False, "error": f"the MCP server would not start: {e}"}
     # A misbehaving MCP server must not grow memory without bound: queue only a
@@ -1424,6 +1570,23 @@ def mcp_stdio_tool_call(spec: dict, tool: str, arguments: dict,
     threading.Thread(target=pump, args=(proc.stdout,), daemon=True).start()
     threading.Thread(target=pump_err, args=(proc.stderr,), daemon=True).start()
 
+    def stop_tree() -> None:
+        """Kill the server AND its grandchildren (F29)."""
+        if os.name == "nt":
+            if proc.poll() is None:
+                with contextlib.suppress(OSError, subprocess.SubprocessError):
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                                   capture_output=True, timeout=30)
+                with contextlib.suppress(OSError):
+                    proc.kill()
+        else:
+            # killpg by the WRAPPER's pid works even after the wrapper exited:
+            # start_new_session made that pid the group id.
+            with contextlib.suppress(OSError, ProcessLookupError, PermissionError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            with contextlib.suppress(OSError):
+                proc.kill()
+
     def failure(prefix: str) -> dict:
         """`prefix` plus what the SERVER itself said, when saying nothing.
 
@@ -1433,6 +1596,10 @@ def mcp_stdio_tool_call(spec: dict, tool: str, arguments: dict,
         answer initialize()". One bounded wait drains the pipe, and the tail
         travels into the manifest, so the operator sees the real error.
         """
+        # Stop the tree BEFORE the 2-second drain: waiting first let a
+        # grandchild (bash -> PowerShell -> Word) keep running and writing for
+        # the whole diagnostic window (F29).
+        stop_tree()
         with contextlib.suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=2)
         time.sleep(0.05)
@@ -1507,8 +1674,7 @@ def mcp_stdio_tool_call(spec: dict, tool: str, arguments: dict,
     finally:
         with contextlib.suppress(OSError):
             proc.stdin.close()
-        if proc.poll() is None:
-            proc.terminate()
+        stop_tree()
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -1683,18 +1849,34 @@ def _kill_render_tree(proc) -> None:
 
 
 def _run_render_subprocess(argv, timeout, cwd=None):
-    """`subprocess.run` with a timeout that kills the renderer's whole tree."""
-    proc = subprocess.Popen(
-        [str(a) for a in argv], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, encoding="utf-8", errors="replace", cwd=cwd,
-        **_render_popen_kwargs())
-    try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _kill_render_tree(proc)
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.communicate(timeout=30)          # reap; never leave a zombie
-        raise
+    """`subprocess.run` with a timeout that kills the renderer's whole tree.
+
+    stdout/stderr go to TEMPORARY FILES and are read back only up to
+    MAX_TOOL_OUTPUT_BYTES: the renderer is driven by an untrusted package, so a
+    flood must fail the render instead of allocating without bound (F25).
+    """
+    with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
+        proc = subprocess.Popen(
+            [str(a) for a in argv], stdout=out_f, stderr=err_f, stdin=subprocess.DEVNULL,
+            cwd=cwd, **_render_popen_kwargs())
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_render_tree(proc)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=30)              # reap; never leave a zombie
+            raise
+        out_f.seek(0, os.SEEK_END)
+        err_f.seek(0, os.SEEK_END)
+        out_size, err_size = out_f.tell(), err_f.tell()
+        if out_size > MAX_TOOL_OUTPUT_BYTES or err_size > MAX_TOOL_OUTPUT_BYTES:
+            raise ToolOutputOverBudget(
+                f"renderer output over {MAX_TOOL_OUTPUT_BYTES} bytes "
+                f"(stdout={out_size}, stderr={err_size})")
+        out_f.seek(0)
+        err_f.seek(0)
+        out = out_f.read(MAX_TOOL_OUTPUT_BYTES + 1).decode("utf-8", "replace")
+        err = err_f.read(MAX_TOOL_OUTPUT_BYTES + 1).decode("utf-8", "replace")
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 
@@ -1749,16 +1931,22 @@ def render_docx_visual(docx: Path, out_dir: Path, renderer=None,
                 return {"ok": False, "renderer": name, "error": conv.get("error")}
             pdf = Path(conv["pdf"])
         elif name == "word":
-            proc = _run_render_subprocess([str(exe), str(src)], timeout=timeout,
-                                          cwd=str(tmp))
+            try:
+                proc = _run_render_subprocess([str(exe), str(src)], timeout=timeout,
+                                              cwd=str(tmp))
+            except ToolOutputOverBudget as exc:
+                return {"ok": False, "renderer": name, "error": str(exc)}
             pdf = src.with_suffix(".pdf")
         else:
             profile = tmp / "lo_profile"
-            proc = _run_render_subprocess(
-                [str(exe), "--headless",
-                 f"-env:UserInstallation=file://{profile}",
-                 "--convert-to", "pdf", "--outdir", str(tmp), str(src)],
-                timeout=timeout)
+            try:
+                proc = _run_render_subprocess(
+                    [str(exe), "--headless",
+                     f"-env:UserInstallation=file://{profile}",
+                     "--convert-to", "pdf", "--outdir", str(tmp), str(src)],
+                    timeout=timeout)
+            except ToolOutputOverBudget as exc:
+                return {"ok": False, "renderer": name, "error": str(exc)}
             pdf = tmp / (src.stem + ".pdf")
         if not pdf.is_file() or pdf.stat().st_size == 0:
             detail = (_child_output(getattr(proc, "stderr", None))
@@ -2704,6 +2892,13 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
             cid = str(row.get("check") or "").strip()
             disp = str(row.get("disposition") or "").strip()
             if cid:
+                if cid in seen_ids:
+                    # One row per check id: a second, possibly contradictory,
+                    # row used to silently overwrite the first (last one won),
+                    # so two mutually exclusive dispositions both passed (F61).
+                    errs.append(f"{FINDINGS_REL} coverage table lists check {cid!r} more than "
+                                f"once: every check id must have exactly ONE disposition row")
+                    continue
                 seen_ids[cid] = disp
                 seen_rows[cid] = row
             if cid and (not disp or disp.lower().startswith("not checked")):
@@ -2820,15 +3015,18 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
     if want_parity_artifacts and art_dir.is_dir():
         for fname, (cid, kind_phrase) in parity.items():
             p = art_dir / fname
-            if not p.is_file():
-                errs.append(f"{ARTIFACTS_REL}/{fname} is missing: {kind_phrase} {cid} enumerates "
-                            f"one of the classes a from-scratch rewrite fixes as it goes; a "
-                            f"zero-finding sweep is valid ONLY with a disposed artifact")
+            if p.is_symlink() or not p.is_file():
+                errs.append(f"{ARTIFACTS_REL}/{fname} is missing or a symlink: {kind_phrase} "
+                            f"{cid} enumerates one of the classes a from-scratch rewrite fixes "
+                            f"as it goes; a zero-finding sweep is valid ONLY with a disposed, "
+                            f"package-local artifact")
                 continue
-            try:
-                body = p.read_text(encoding="utf-8", errors="replace")
-            except OSError as e:                                    # noqa: BLE001
-                errs.append(f"{ARTIFACTS_REL}/{fname} could not be read ({e})")
+            # Agent-written artifact: shared regular-file/no-follow/byte-budget
+            # reader, never a whole-file read of an arbitrary target (F37).
+            body = read_text_bounded(p)
+            if body is None:
+                errs.append(f"{ARTIFACTS_REL}/{fname} could not be read (it is a symlink/"
+                            f"non-regular file or over the byte budget)")
                 continue
             if not body.strip():
                 errs.append(f"{ARTIFACTS_REL}/{fname} is EMPTY: {cid} must enumerate its rows "
@@ -2911,10 +3109,7 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
         md_text = ""
         md = sb / FINDINGS_MD_REL
         if md.is_file():
-            try:
-                md_text = md.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                pass
+            md_text = read_text_bounded(md) or ""
         reconciled = set()
         explanations = "\n".join(
             str(f.get("explanation") or "") for f in (fj.get("findings") or [])
@@ -3441,15 +3636,20 @@ def structured_output_files(sb: Path, rec: dict) -> list:
 
 def _structured_problem_for(rel: str, p: Path):
     """One parse problem string for a structured-output file, or None."""
+    if p.is_symlink():
+        # A symlink is not agent-written structured output: name it as such
+        # instead of reporting the target's size/contents (F38).
+        return f"{rel} is a symlink; structured output must be a regular file"
     if json_file_too_big(p):
         return (f"{rel} is {p.stat().st_size} bytes (over the "
                 f"{MAX_JSON_BYTES // (1024 * 1024)} MiB agent-output limit): refusing to parse "
                 f"it -- a runaway/looping agent must be retried, never allowed to exhaust this "
                 f"machine's memory")
-    try:
-        text = p.read_text(encoding="utf-8", errors="replace")
-    except OSError as e:                                      # noqa: BLE001
-        return f"{rel} could not be read ({e})"
+    # Shared regular-file/no-follow/byte-budget reader: a planted symlink is a
+    # named problem, not a whole-file read of its target (F38).
+    text = read_text_bounded(p)
+    if text is None:
+        return f"{rel} could not be read (it is a symlink/non-regular file or over the byte budget)"
     if not text.strip():
         return f"{rel} is EMPTY/unfinished (structured output)"
     try:
@@ -3722,7 +3922,7 @@ def _fact_tokens_in_sources(sources, evidence: bool = False) -> tuple:
             if area in (HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR):
                 return True
             return bool(is_journal_feedback_name(name)
-                        or AUTHORED_REPLY_NAME_RE.search(name))
+                        or authored_reply_name(name))
         return bool(is_non_manuscript_rel(rel) or parts[0] == CODE_DIR)
 
     for src, prefix, excluded in sources or []:
@@ -5826,11 +6026,10 @@ def capture_agent_session_id(ctx: Ctx, rec: dict) -> str:
     except Exception:                                            # noqa: BLE001
         return ""
     log = sb / "_agent.log"
-    try:
-        if not log.is_file() or log.stat().st_size > 64 * 1024 * 1024:
-            return ""
-        text = log.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    # The transcript is agent-written: the shared reader refuses a symlink and
+    # applies the byte budget (F38).
+    text = read_text_bounded(log)
+    if not text:
         return ""
     hits = [(m.start(), m.group(1))
             for pattern in (SESSION_ID_RE, DSH_SESSION_ID_RE)
@@ -6284,11 +6483,14 @@ def _repair_guard_files(sb: Path, kind: str) -> dict:
 
 
 def _repair_read_json(path: Path):
-    if not path.is_file():
+    # Agent-written audit/repair JSON: shared regular-file/no-follow/byte-budget
+    # reader (F38).
+    text = read_text_bounded(path)
+    if text is None:
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, ValueError):
+        return json.loads(text)
+    except ValueError:
         return None
 
 

@@ -1989,6 +1989,10 @@ def validate_package(path: Path):
     return proc.returncode == 0, (lines[-1] if lines else f"rc={proc.returncode}")
 
 
+# A footer's page number: bare "2", "Page 2", "Page 2 of 10", "2/10" (F44).
+_PAGE_NUMBER_RE = re.compile(r"(?:page\s*)?\d+(?:\s*(?:of|/)\s*\d+)?", re.I)
+
+
 def blank_pages_in_text(text: str) -> dict:
     """Pages whose body is empty once running head/footer/page numbers are ignored."""
     pages = text.split("\f")
@@ -1999,7 +2003,8 @@ def blank_pages_in_text(text: str) -> dict:
     freq = Counter(ln for page in stripped for ln in page)
     furniture = {ln for ln, c in freq.items() if n and c >= max(2, int(0.6 * n))}
     blank = [i for i, page in enumerate(stripped, 1)
-             if not [ln for ln in page if ln not in furniture and not re.fullmatch(r"\d+", ln)]]
+             if not [ln for ln in page if ln not in furniture
+                     and not _PAGE_NUMBER_RE.fullmatch(ln)]]
     return {"pages": n, "blank_pages": blank, "furniture": sorted(furniture)}
 
 
@@ -5547,31 +5552,43 @@ def repair_layout_package(src: Path, out: Path, policy: dict = None) -> dict:
         # repair could not fix (no edits produced) must not report success.
         report["ok"] = not report["remaining"]
         return report
-    out.parent.mkdir(parents=True, exist_ok=True)
-    # Random sibling, not `<out>.tmp`: a predictable name let a sandbox agent
-    # pre-create a symlink and receive the ZIP bytes through it.
+    # The documented contract is a report with ok:false on a write failure, not
+    # a traceback out of `repair-layout` (F46). The random sibling makes the
+    # temp name unpredictable; it is removed on every failure path.
     tmp = out.with_name(f".{out.name}.{os.getpid()}.{os.urandom(6).hex()}.tmp")
-    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
-        for name in names:
-            z.writestr(name, data[name])
-    os.replace(tmp, out)
-    # Re-scan the written copy: only the fixed rows may be left.
-    with zipfile.ZipFile(out) as z:
-        out_doc = z.read("word/document.xml").decode("utf-8", "replace")
-        out_styles = parse_styles(z)
-        rels_name = "word/_rels/document.xml.rels"
-        targets = {}
-        if rels_name in z.namelist():
-            rels_xml = z.read(rels_name).decode("utf-8", "replace")
-            for m in re.finditer(r"<Relationship(?=[\s/>])[^>]*/>", rels_xml):
-                attrs = dict(re.findall(r'([A-Za-z]+)="([^"]*)"', m.group(0)))
-                typ = attrs.get("Type", "")
-                if attrs.get("Id") and (typ.endswith("/header") or typ.endswith("/footer")):
-                    tgt = attrs.get("Target", "").lstrip("/").replace("\\", "/")
-                    targets[attrs["Id"]] = (tgt if tgt.startswith("word/") else "word/" + tgt)
-        ref_ids = re.findall(r'<w:(?:header|footer)Reference[^>]*r:id="([^"]+)"', out_doc)
-        aux = [(targets[rid], z.read(targets[rid]).decode("utf-8", "replace"))
-               for rid in ref_ids if rid in targets and targets[rid] in z.namelist()]
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+            for name in names:
+                z.writestr(name, data[name])
+        os.replace(tmp, out)
+        # Re-scan the written copy: only the fixed rows may be left.
+        with zipfile.ZipFile(out) as z:
+            out_doc = z.read("word/document.xml").decode("utf-8", "replace")
+            out_styles = parse_styles(z)
+            rels_name = "word/_rels/document.xml.rels"
+            targets = {}
+            if rels_name in z.namelist():
+                rels_xml = z.read(rels_name).decode("utf-8", "replace")
+                for m in re.finditer(r"<Relationship(?=[\s/>])[^>]*/>", rels_xml):
+                    attrs = dict(re.findall(r'([A-Za-z]+)="([^"]*)"', m.group(0)))
+                    typ = attrs.get("Type", "")
+                    if attrs.get("Id") and (typ.endswith("/header") or typ.endswith("/footer")):
+                        tgt = attrs.get("Target", "").lstrip("/").replace("\\", "/")
+                        targets[attrs["Id"]] = (tgt if tgt.startswith("word/")
+                                                else "word/" + tgt)
+            ref_ids = re.findall(r'<w:(?:header|footer)Reference[^>]*r:id="([^"]+)"', out_doc)
+            aux = [(targets[rid], z.read(targets[rid]).decode("utf-8", "replace"))
+                   for rid in ref_ids if rid in targets and targets[rid] in z.namelist()]
+    except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError) as exc:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+        report["error"] = f"could not write/verify the repaired package: {exc}"
+        report["ok"] = False
+        return report
     left = [r for r in table_layout_rows(out_doc, out_styles, out.name, policy)
             if r.get("rule") in ("FMT-TB4", "FMT-TB5")]
     left += [r for r in page_field_rows(aux, out.name) if r.get("rule") == "FMT-S10"]
@@ -5599,9 +5616,12 @@ def cmd_scan_figures(args) -> int:
     for p in args.paths:
         p = Path(p)
         if p.is_dir():
+            # A symlinked image inside a package directory is not package
+            # artwork: reading it supplied outside labels/vocabulary (F49).
             paths += [q for q in sorted(p.rglob("*"))
-                      if q.is_file() and q.suffix.lower() in (".png", ".jpg", ".jpeg",
-                                                              ".tif", ".tiff")]
+                      if q.is_file() and not q.is_symlink()
+                      and q.suffix.lower() in (".png", ".jpg", ".jpeg",
+                                               ".tif", ".tiff")]
         elif p.is_file():
             paths.append(p)
         else:

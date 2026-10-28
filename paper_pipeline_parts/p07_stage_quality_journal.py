@@ -3510,6 +3510,27 @@ def postcheck_concerns(ctx: Ctx, rec: dict):
     return (not errs), errs, warns, None
 
 
+def response_comment_quotes(letter: str) -> dict:
+    """{concern id: the verbatim `**Comment:**` quotation in that block}.
+
+    The response letter is agent-written prose; one `## <id>` block per concern
+    carries a `**Comment:** "..."` line (the prompt's shape). A block with no
+    Comment line has no entry, so the postcheck can demand one (F60).
+    """
+    out = {}
+    for part in re.split(r"(?m)^##\s+", letter or "")[1:]:
+        m = re.match(r"([A-Za-z0-9_.\-]+)", part)
+        if not m:
+            continue
+        cm = re.search(r"(?m)^\s*\*\*Comment:\*\*\s*(.+)$", part)
+        if not cm:
+            continue
+        quote = cm.group(1).strip().strip("\"'“”‘’").strip()
+        if quote:
+            out[m.group(1)] = quote
+    return out
+
+
 def postcheck_response(ctx: Ctx, rec: dict):
     """Modes 2-4: the letter covers every concern and cites the package truthfully."""
     sb = ctx.sandbox_of(rec)
@@ -3550,6 +3571,7 @@ def postcheck_response(ctx: Ctx, rec: dict):
             # mode whose deliverable IS the letter could be certified empty.
             errs.append(f"{JOURNAL_RESPONSE_MD_REL} is EMPTY: the response to "
                         f"reviewers must carry one block per concern")
+    comment_quotes = response_comment_quotes(letter)
     data = read_json(sb / JOURNAL_RESPONSE_MAP_REL, revive=False, lenient=True)
     if not isinstance(data, dict):
         errs.append(f"{JOURNAL_RESPONSE_MAP_REL} is missing/unparsable (the letter's "
@@ -3576,6 +3598,25 @@ def postcheck_response(ctx: Ctx, rec: dict):
                         f"partially-addressed/already-addressed/planned/not-applicable")
         if not response:
             errs.append(f"response row {cid!r}: the response sentence is empty")
+        # The prompt requires a VERBATIM `**Comment:** "<reviewer quote>"`
+        # block per concern. Nothing used to check it, so an invented or
+        # paraphrased quote passed (F60). The concern ledger's own `quote` was
+        # itself verified against the feedback when the ledger was written, so
+        # it is the authority here.
+        concern_quote = " ".join(str((ledger_rows.get(cid) or {}).get("quote") or "").split())
+        comment = comment_quotes.get(cid)
+        if concern_quote and not comment:
+            errs.append(f"response {cid!r}: no **Comment:** line carries the reviewer's "
+                        f"verbatim quotation")
+        elif concern_quote and comment:
+            c_norm = " ".join(comment.split()).lower()
+            q_norm = concern_quote.lower()
+            if len(re.findall(r"\S+", c_norm)) < 4:
+                errs.append(f"response {cid!r}: the Comment quotation is shorter than 4 words "
+                            f"({comment!r}); quote the reviewer's own wording, not a label")
+            elif c_norm not in q_norm and q_norm not in c_norm:
+                errs.append(f"response {cid!r}: the Comment quotation is not verbatim from the "
+                            f"reviewer feedback (the concern ledger's quote is {concern_quote!r})")
         changes = [c for c in (row.get("changes") or []) if isinstance(c, dict)]
         new_data = [str(x) for x in (row.get("new_data") or []) if str(x).strip()]
         for c in changes:
@@ -3706,13 +3747,46 @@ def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=()) ->
     if not base.is_dir() or not rev.is_dir():
         return errs
     want, got = _scope_tree_files(base), _scope_tree_files(rev)
+    # Authorisation comes from STRUCTURED ledger fields only: a `file`/`files`/
+    # `path` field (or a change/edit row's `file`) that names the changed file.
+    # Searching the serialized JSON for the basename let a quoted sentence in
+    # `evidence` ("the reviewer said main.docx is unclear") authorise an edit
+    # to main.docx (F88).
+    authorized = set()
     ledger_text = ""
     lp = rev / "revision_report.json"
     if lp.is_file():
+        ledger_text = read_text_bounded(lp) or ""
         try:
-            ledger_text = lp.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            ledger_text = ""
+            ledger_data = json.loads(ledger_text) if ledger_text.strip() else None
+        except ValueError:
+            ledger_data = None
+        if isinstance(ledger_data, list):
+            ledger_rows = ledger_data
+        elif isinstance(ledger_data, dict):
+            ledger_rows = (ledger_data.get("ledger") or ledger_data.get("findings")
+                           or ledger_data.get("coverage") or [])
+        else:
+            ledger_rows = []
+        for row in ledger_rows:
+            if not isinstance(row, dict):
+                continue
+            for key in ("file", "files", "path", "paths", "changed_files"):
+                value = row.get(key)
+                values = value if isinstance(value, (list, tuple)) else [value]
+                for item in values:
+                    if isinstance(item, str) and item.strip():
+                        authorized.add(item.strip())
+            for key in ("changes", "edits"):
+                for change in row.get(key) or []:
+                    if not isinstance(change, dict):
+                        continue
+                    for name in ("file", "path"):
+                        item = change.get(name)
+                        if isinstance(item, str) and item.strip():
+                            authorized.add(item.strip())
+    authorized_names = {Path(p.replace("\\", "/")).name for p in authorized}
+    # `ledger_text` is kept only for the diagnostics below.
     added = sorted(set(got) - set(want))
     dropped = sorted(set(want) - set(got))
     # A version-token rename (`main-4f3a9c1.docx` -> `main-9b2c7e4.docx`) is
@@ -3745,6 +3819,15 @@ def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=()) ->
             # attached-template link, platform junk, ...): the session could not
             # name it in its ledger.
             continue
+        if is_non_shippable_name(Path(rel).name):
+            # The orchestrator's PKG-1 strip deleted an OS stub / bytecode /
+            # Word-owner file before the guard ran; it is not a document (F36).
+            continue
+        if is_non_submitted_readme_name(Path(rel).name):
+            # README*.md/.txt is never submitted (AGENTS.md rule 9), and
+            # hold_internal_readme_notes moves an internal note out of the
+            # package; neither removal is a scoped-revision document drop.
+            continue
         if is_author_to_complete_readme_name(Path(rel).name):
             # Items resolved: the README is deleted, and that is the goal.
             continue
@@ -3758,11 +3841,10 @@ def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=()) ->
             continue
         if rel in pipeline_changed:
             continue
-        _base = re.escape(Path(rel).name)
-        if rel not in ledger_text and not re.search(
-                r"(?<![\w./-])" + _base + r"(?![\w.-])", ledger_text):
-            errs.append(f"scoped revision changed {rel!r} but the ledger names neither the file "
-                        f"nor its basename: every edit must trace to a reviewer concern")
+        if rel not in authorized and Path(rel).name not in authorized_names:
+            errs.append(f"scoped revision changed {rel!r} but the ledger carries no structured "
+                        f"row naming the file (a `file`/`files`/`path` field): every edit must "
+                        f"trace to a reviewer concern")
     return errs
 
 

@@ -1219,7 +1219,8 @@ def parse_styles(pkg: zipfile.ZipFile) -> dict:
     if defaults is not None:
         out["@docDefaults"] = {"i": _tri_state(defaults.find(W + "i")),
                                "iCs": _tri_state(defaults.find(W + "iCs")),
-                               "b": _tri_state(defaults.find(W + "b"))}
+                               "b": _tri_state(defaults.find(W + "b")),
+                               "bCs": _tri_state(defaults.find(W + "bCs"))}
     for st in root.iter(W + "style"):
         sid = st.get(W + "styleId") or ""
         rpr, ppr = st.find(W + "rPr"), st.find(W + "pPr")
@@ -1230,6 +1231,7 @@ def parse_styles(pkg: zipfile.ZipFile) -> dict:
             "i": _tri_state(rpr.find(W + "i")) if rpr is not None else None,
             "iCs": _tri_state(rpr.find(W + "iCs")) if rpr is not None else None,
             "b": (_tri_state(rpr.find(W + "b")) if rpr is not None else None),
+            "bCs": (_tri_state(rpr.find(W + "bCs")) if rpr is not None else None),
             "basedOn": base.get(W + "val") if base is not None else None,
             "type": st.get(W + "type") or "",
             "spacing": (ppr.find(W + "spacing") if ppr is not None else None),
@@ -1501,14 +1503,19 @@ def run_is_bold(styles: dict, para_style: str | None, run: str) -> bool:
     b_val = bcs_val = None
     defaults = styles.get("@docDefaults") or {}
     b_val = defaults.get("b") if b_val is None else b_val
+    bcs_val = defaults.get("bCs") if bcs_val is None else bcs_val
     for sid in style_chain(styles, para_style or "Normal"):
         st = styles.get(sid) or {}
         if st.get("b") is not None:
             b_val = st["b"]
+        if st.get("bCs") is not None:
+            bcs_val = st["bCs"]
     for sid in style_chain(styles, elem_val(rpr, "rStyle")):
         st = styles.get(sid) or {}
         if st.get("b") is not None:
             b_val = st["b"]
+        if st.get("bCs") is not None:
+            bcs_val = st["bCs"]
     for node, key in ((r"<w:b(?=[\s/>])[^>]*/?>", "b"),
                       (r"<w:bCs(?=[\s/>])[^>]*/?>", "bCs")):
         m = re.search(node, rpr)

@@ -47,6 +47,8 @@ import json
 import math
 import re
 import sys
+import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ABSTRACT_HEAD = re.compile(
@@ -78,11 +80,14 @@ SECTION_BOUND = re.compile(
 MAIN_TEXT_SECTION_KINDS = ("abstract", "methods", "references", "figure-legends",
                            "acknowledgements", "author-contributions",
                            "data-availability", "competing-interests", "funding",
-                           "supplementary", "table-captions")
+                           "supplementary", "table-captions", "table-contents")
 # Table captions are opt-in profile data (Frontiers groups "figure and table
 # captions"); the historical default excludes figure legends only.
+# `table-contents` is opt-in too: it excludes the CONTENTS of tables, which the
+# DOCX reader must skip before counting (F08).
 DEFAULT_MAIN_TEXT_EXCLUDES = tuple(
-    kind for kind in MAIN_TEXT_SECTION_KINDS if kind != "table-captions")
+    kind for kind in MAIN_TEXT_SECTION_KINDS
+    if kind not in ("table-captions", "table-contents"))
 SECTION_KIND_RES = (
     ("methods", re.compile(
         r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?(?:materials (?:and|&) methods|online methods?|methods?|"
@@ -269,6 +274,48 @@ def _tex_include_path(base: Path, arg: str):
     return resolved if resolved.is_file() else None
 
 
+_DOCX_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+# A binary format this counter cannot read as text. Counting its ZIP bytes with
+# errors="replace" produced a meaningless number (a small DOCX reported 1359
+# words, F06), so an unsupported binary is refused with a real error instead.
+BINARY_DOCUMENT_EXTS = {".pdf", ".doc", ".xls", ".xlsx", ".ppt", ".pptx",
+                        ".zip", ".gz", ".tar", ".rar", ".7z"}
+
+
+def docx_paragraph_text(path: Path, include_tables: bool = True):
+    """The paragraphs of a .docx as text, or None when it cannot be parsed.
+
+    The count is the text a reader sees: `w:t` runs in document order, with a
+    soft break/tab rendered as a newline. Stdlib-only (zipfile + ElementTree),
+    like the rest of this script; table-cell paragraphs are included because
+    they are visible text, unless the venue's counting rule excludes table
+    contents (`table-contents`, F08).
+    """
+    try:
+        with zipfile.ZipFile(path) as z:
+            data = z.read("word/document.xml")
+        root = ET.fromstring(data)
+    except (OSError, KeyError, zipfile.BadZipFile, ET.ParseError):
+        return None
+    table_paras = set()
+    if not include_tables:
+        for tbl in root.iter(_DOCX_W + "tbl"):
+            for para in tbl.iter(_DOCX_W + "p"):
+                table_paras.add(id(para))
+    out = []
+    for para in root.iter(_DOCX_W + "p"):
+        if id(para) in table_paras:
+            continue
+        parts = []
+        for node in para.iter():
+            if node.tag == _DOCX_W + "t":
+                parts.append(node.text or "")
+            elif node.tag in (_DOCX_W + "br", _DOCX_W + "cr", _DOCX_W + "tab"):
+                parts.append("\n")
+        out.append("".join(parts))
+    return "\n".join(out)
+
+
 def _tex_expand_includes(text: str, base: Path, seen=None, source: Path = None,
                          _stack=None):
     """Inline \\input/\\include/\\subfile children so a multi-file paper counts.
@@ -276,11 +323,14 @@ def _tex_expand_includes(text: str, base: Path, seen=None, source: Path = None,
     The pipeline's M19 scan expands includes; this counter only stripped the
     command, so a master `main.tex` that inputs its sections was reported as
     one body word (or as a whole-file count) while the orchestrator counted the
-    expanded text (the 2026-10-28 audit's F06). Includes expand once
-    (cycle-safe), comments are stripped first, and `source`/`_stack` stop an
-    a -> b -> a cycle from re-entering the master.
+    expanded text (the 2026-10-28 audit's F06). Every occurrence of an include
+    expands (the reader sees that text twice); `seen`/`_stack` carry only the
+    ANCESTORS of the frame being expanded, so a true cycle is still broken.
     """
-    seen = set() if seen is None else seen
+    # A COPY: an include that is a sibling of this one is not on the current
+    # path, so it must expand again; discarding `child` after the recursive
+    # call is what makes the set an ancestry set (F03).
+    seen = set() if seen is None else set(seen)
     if source is not None:
         try:
             seen.add(Path(source).resolve())
@@ -301,8 +351,11 @@ def _tex_expand_includes(text: str, base: Path, seen=None, source: Path = None,
             return match.group(0)
         if child_text in stack:
             return match.group(0)
-        return _tex_expand_includes(child_text, base, seen, source=child,
-                                    _stack=stack)
+        try:
+            return _tex_expand_includes(child_text, base, seen, source=child,
+                                        _stack=stack)
+        finally:
+            seen.discard(child)
 
     try:
         return TEX_INCLUDE.sub(repl, body)
@@ -421,17 +474,30 @@ def _line_text(line: str) -> str:
     return _strip_latex(TEX_SCAFFOLD.sub(" ", TEX_ENV_TOKEN.sub(" ", line)))
 
 
+def _tex_float_env_after(line: str, state):
+    """The figure/table float environment state after one source line."""
+    for tok in re.finditer(r"\\(begin|end)\{(table\*?|figure\*?)\}", line or ""):
+        kind = "table" if tok.group(2).startswith("table") else "figure"
+        if tok.group(1) == "begin":
+            state = kind
+        elif state == kind:
+            state = None
+    return state
+
+
 def tex_lines(text: str):
     """(lines, abstract_end, caption_lines) for a LaTeX source.
 
     `lines` are heading/paragraph lines; `abstract_end` is the line index the
     abstract's text stops at (`\\end{abstract}`, so paragraph breaks inside the
-    environment stay inside the abstract); `caption_lines` are the indices of
-    the single lines holding a `\\caption`/`\\captionof` text (each such group
-    becomes its own line, so subtracting that line removes exactly the legend's
-    words), which the main-text count subtracts.
+    environment stay inside the abstract); `caption_lines` are `(line index,
+    kind)` entries for the single lines holding a `\\caption`/`\\captionof`
+    text (each such group becomes its own line, so subtracting that line
+    removes exactly the legend's words). The kind is `figure`/`table`, so the
+    caller subtracts only the caption kinds its venue excludes (F04).
     """
     lines, captions, abstract_end = [], [], None
+    env_kind = None
     raw_lines = blank_math_environments(text or "").splitlines()
     # A verbatim/listing environment is code, not prose. It was stripped of
     # its command tokens but its BODY stayed, so a code listing inflated the
@@ -470,7 +536,12 @@ def tex_lines(text: str):
         raw = raw_lines[i]
         i += 1
         line = strip_tex_comment(raw).strip()
-        begins = re.match(r"\\begin\{abstract\}", line)
+        env_at_start = env_kind
+        env_kind = _tex_float_env_after(line, env_kind)
+        # `re.search`, not `re.match`: a legal one-line abstract preceded by
+        # title text on the same source line is still an abstract environment,
+        # exactly as the pipeline's scan treats it (F05).
+        begins = re.search(r"\\begin\{abstract\}", line)
         ends = re.search(r"\\end\{abstract\}", line)
         if begins or ends:
             # Both tokens may sit ANYWHERE on the line (`\begin{abstract} ...
@@ -520,7 +591,11 @@ def tex_lines(text: str):
                 group = f"{group}\n{nxt}"
                 depth += _brace_delta(nxt)
             cap_text, after = _split_group(group)
-            captions.append(len(lines))
+            cap_kind = _tex_float_env_after(line[:cap.start()], env_at_start)
+            of = re.match(r"\\captionof\*?\s*\{([^{}]*)\}", line[cap.start():])
+            if of:
+                cap_kind = of.group(1).strip().lower()
+            captions.append((len(lines), cap_kind))
             lines.append(_strip_latex(cap_text))
             after = _line_text(after)
             if after:
@@ -722,7 +797,20 @@ def sections(text: str, abstract_end=None, caption_lines=None, excludes=None) ->
             cap_ranges = [(offset + a, offset + b)
                           for a, b in caption_ranges(lines[offset:], kinds=caption_kinds)]
         else:
-            cap_ranges = [(i, i + 1) for i in sorted(set(caption_lines))]
+            # `caption_lines` from tex_lines() carries (index, kind): subtract
+            # only the caption kinds the venue excludes. A flat integer list is
+            # a legacy caller that has no kind information, so it is subtracted
+            # when any caption kind is excluded (its old behaviour).
+            keep = []
+            for entry in caption_lines:
+                if isinstance(entry, (tuple, list)):
+                    idx, kind = entry[0], str(entry[1] or "").strip().lower()
+                    if kind and kind not in caption_kinds:
+                        continue
+                else:
+                    idx = entry
+                keep.append(int(idx))
+            cap_ranges = [(i, i + 1) for i in sorted(set(keep))]
     captions = sum(
         count_words(" ".join(lines[j] for j in range(max(a, start), min(b, n))
                             if included[j]))
@@ -1163,16 +1251,35 @@ def main(argv=None) -> int:
                   f"abstract/main-text/cover-letter limit", file=sys.stderr)
             failed = True
             continue
-        try:
-            # utf-8-sig: a Windows-authored manuscript can start with a UTF-8
-            # BOM; read as plain utf-8 it turns the first line into
-            # "\ufeffAbstract" and the abstract heading is never seen.
-            text = p.read_text(encoding="utf-8-sig", errors="replace")
-        except OSError as e:
-            print(f"error: cannot read {name}: {e}", file=sys.stderr)
+        ext = p.suffix.lower()
+        if ext == ".docx":
+            # A DOCX is a ZIP: reading it as UTF-8 text counted replacement
+            # characters as words (F06). Extract the visible paragraphs, and
+            # refuse an unparseable package rather than inventing a count. A
+            # venue that excludes table CONTENTS must not see cell paragraphs.
+            text = docx_paragraph_text(
+                p, include_tables=not counting_excludes
+                or "table-contents" not in counting_excludes)
+            if text is None:
+                print(f"error: cannot parse {name} as a DOCX package", file=sys.stderr)
+                failed = True
+                continue
+        elif ext in BINARY_DOCUMENT_EXTS:
+            print(f"error: {name} is a binary document ({ext}); convert it to text "
+                  f"or DOCX first -- counting its bytes is meaningless", file=sys.stderr)
             failed = True
             continue
-        if p.suffix.lower() in TEX_EXTS:
+        else:
+            try:
+                # utf-8-sig: a Windows-authored manuscript can start with a UTF-8
+                # BOM; read as plain utf-8 it turns the first line into
+                # "\ufeffAbstract" and the abstract heading is never seen.
+                text = p.read_text(encoding="utf-8-sig", errors="replace")
+            except OSError as e:
+                print(f"error: cannot read {name}: {e}", file=sys.stderr)
+                failed = True
+                continue
+        if ext in TEX_EXTS:
             # A multi-file manuscript's body lives in the children; counting
             # the master alone reported 1-2 words (F06).
             text = _tex_expand_includes(text, p.parent, source=p)

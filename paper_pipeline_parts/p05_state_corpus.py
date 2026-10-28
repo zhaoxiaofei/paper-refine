@@ -734,7 +734,10 @@ class Ctx:
             logs = self.state.setdefault("run_logs", [])
             if rel not in logs:
                 logs.append(rel)
-                del logs[:-20]
+            # Trim UNCONDITIONALLY: a registry that already carries more than
+            # 20 logs and records a log it already has never entered the old
+            # append-only branch, so it grew forever (F68).
+            del logs[:-20]
         # COMPACT before writing: the fields `compact_state` drops are copies of
         # files that live on disk anyway, and keeping them here is what turned
         # the 2026-09-24 registry into 78 MiB (and then into a refused root).
@@ -747,14 +750,28 @@ class Ctx:
                            f"the path of the full file"})
         # Keep the PREVIOUS registry as a hard link before the atomic replace: a
         # pointer, not a copy, so an 80 MB state costs no extra bytes and no I/O.
+        # The link is made at a UNIQUE temporary name and renamed onto `.prev`:
+        # unlink-then-link left no previous registry at all if the process died
+        # between the two calls, exactly when the operator needs it (F20).
         prev = state_prev_path(self.state_path)
+        tmp_prev = prev.with_name(
+            f".{prev.name}.{os.getpid()}.{os.urandom(6).hex()}.tmp")
         try:
             if self.state_path.is_file():
-                if prev.exists():
-                    prev.unlink()
-                os.link(self.state_path, prev)
+                try:
+                    os.link(self.state_path, tmp_prev)
+                except OSError:
+                    # Hardlinks unavailable (drvfs) or a concurrent save: fall
+                    # back to a copy, never to a missing backup.
+                    shutil.copy2(self.state_path, tmp_prev)
+                os.replace(tmp_prev, prev)
         except OSError:
-            pass                        # no hardlinks (drvfs) or a concurrent save: best effort
+            pass                        # best effort; the new state is written below
+        finally:
+            try:
+                tmp_prev.unlink()
+            except OSError:
+                pass
         write_json_atomic(self.state_path, self.state)
         try:
             size = self.state_path.stat().st_size
@@ -1233,7 +1250,9 @@ def manifest_for_sources(sources: list, owner_root: Path = None) -> dict:
             if is_disabled_evidence_rel(rel):
                 continue
             entries.append((prefix + rel, p))
-    digs = sha256_files([p for _k, p in entries])
+    # One unreadable file (chmod 000) must not abort pin/decide: it is REPORTED
+    # as changed via the sentinel instead of raising PermissionError (F22).
+    digs = sha256_files([p for _k, p in entries], on_error="<unreadable>")
     files = {k: d for (k, _p), d in zip(entries, digs)}
     return {"files": files, "count": len(files)}
 
@@ -1292,7 +1311,7 @@ def corpus_content_set_fingerprint(sources: list, owner_root: Path = None) -> st
         # recorded integrity digest instead of treating every missing corpus as
         # the same empty-content member.
         return ""
-    digs = sha256_files(paths)
+    digs = sha256_files(paths, on_error="<unreadable>")
     return hashlib.sha256("\n".join(sorted(digs)).encode("utf-8")).hexdigest()
 
 
@@ -1318,12 +1337,20 @@ def corpus_content_fingerprint(ctx: Ctx, r: int, vid: str) -> str:
 # shipped to the agents as paper-revise/scripts/revision_token.py, and the test
 # suite asserts the two implementations agree.
 # ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# A payload file larger than this is skipped by BOTH token implementations
+# (paper-revise/scripts/revision_token.py carries the same constant): a package
+# may contain data files, and hashing one whole into memory was unbounded (F10).
+MAX_PAYLOAD_BYTES = 64 * 1024 * 1024
+
 DOCHASH_HEX7_RE = re.compile(r"^[0-9a-f]{7}$")
 
 
 def _payload_files_of_dir(dirp: Path) -> list:
     out = []
-    if not dirp.is_dir():
+    if not dirp.is_dir() or dirp.is_symlink():
+        # A package DIRECTORY that is a symlink is not package content: walking
+        # it certified outside files as this package's payload (F11).
         return out
     for p in _iter_tree_files(dirp, follow_dir_links=True):
         if not p.is_file():
@@ -1391,6 +1418,12 @@ def revision_token_for_dir(dirp: Path) -> dict:
     unreadable = []
     for p in files:
         try:
+            if p.stat().st_size > MAX_PAYLOAD_BYTES:
+                # A multi-gigabyte payload file must fail cheaply, not be read
+                # whole (twice) by the hash/normalizer (F10).
+                unreadable.append(f"{p.relative_to(dirp).as_posix()}: over the "
+                                  f"{MAX_PAYLOAD_BYTES // (1024 * 1024)} MiB payload budget")
+                continue
             digs.append(hashlib.sha256(_normalize_version_refs(p.read_bytes(), tokens)).hexdigest())
         except OSError as e:
             unreadable.append(f"{p.relative_to(dirp).as_posix()}: {e.strerror or e}")

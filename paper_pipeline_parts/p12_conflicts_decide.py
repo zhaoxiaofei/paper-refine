@@ -2028,9 +2028,8 @@ def declared_submission_set(root: Path) -> dict:
     patterns = []
     hint_readmes = []
     for p in candidates:
-        try:
-            candidate_text = p.read_text("utf-8", "replace")
-        except OSError:
+        candidate_text = read_text_bounded(p)
+        if candidate_text is None:
             continue
         if SUBMISSION_DECLARATION_HINT_RE.search(candidate_text):
             hint_readmes.append(p)
@@ -2247,9 +2246,8 @@ def declared_placeholder_paths(root: Path, extra=()) -> dict:
     except OSError:
         candidates = []
     for p in candidates:
-        try:
-            text = p.read_text("utf-8", "replace")
-        except OSError:
+        text = read_text_bounded(p)
+        if text is None:
             continue
         found = False
         for m in PLACEHOLDER_DECL_LINE_RE.finditer(text):
@@ -4263,16 +4261,17 @@ def _pdf_text_info(path: Path) -> tuple:
     if not exe:
         return "", "pdftotext is not installed"
     try:
-        proc = subprocess.run([exe, "-layout", str(path), "-"], capture_output=True,
-                              timeout=120)
+        rc, out, err = run_bounded([exe, "-layout", str(path), "-"], timeout=120)
     except subprocess.TimeoutExpired:
         return "", "timed out after 120s"
+    except ToolOutputOverBudget as e:
+        return "", f"pdftotext output over budget: {e}"
     except (OSError, subprocess.SubprocessError) as e:
         return "", f"{type(e).__name__}: {e}"
-    if proc.returncode == 0:
-        return proc.stdout.decode("utf-8", "replace"), ""
-    detail = proc.stderr.decode("utf-8", "replace").strip().splitlines()
-    msg = f"exit {proc.returncode}"
+    if rc == 0:
+        return out.decode("utf-8", "replace"), ""
+    detail = err.decode("utf-8", "replace").strip().splitlines()
+    msg = f"exit {rc}"
     if detail:
         msg += f": {detail[-1][:200]}"
     return "", msg
@@ -4351,7 +4350,9 @@ def non_submitted_reference_rows(root: Path, areas, limit: int = 40) -> list:
         return out
 
     for p in sorted(root.rglob("*")):
-        if not p.is_file():
+        if not p.is_file() or p.is_symlink():
+            # A FILE symlink is not package content: reading it attributed
+            # outside prose to the package (F31).
             continue
         rel = p.relative_to(root).as_posix()
         if not is_submitted(rel):
@@ -5110,7 +5111,7 @@ def internal_artifact_rows(root: Path, limit: int = 40) -> list:
     if not root.is_dir():
         return rows
     for p in sorted(root.rglob("*")):
-        if not p.is_file():
+        if not p.is_file() or p.is_symlink():
             continue
         rel = p.relative_to(root).as_posix()
         if is_evidence_rel(rel):
@@ -5261,12 +5262,10 @@ def _pkg_text_of_doc(p: Path) -> str:
         if not shutil.which("pdftotext"):
             return ""
         try:
-            proc = subprocess.run(["pdftotext", "-layout", str(p), "-"],
-                                  capture_output=True, text=True, encoding="utf-8",
-                                  errors="replace", timeout=180)
-        except (OSError, subprocess.SubprocessError):                  # noqa: BLE001
+            rc, out, _err = run_bounded(["pdftotext", "-layout", str(p), "-"], timeout=180)
+        except (OSError, subprocess.SubprocessError, ToolOutputOverBudget):  # noqa: BLE001
             return ""
-        return proc.stdout or ""
+        return out.decode("utf-8", "replace") if rc == 0 else ""
     if low.endswith(PKG2_EDITABLE_TEXT_EXTS + (".bib",)):
         # `.bib` was in package_document_texts' accept-list but not in this
         # reader's dispatch, so bibliography text never reached PKG-6/7/8/9 --
@@ -5686,14 +5685,25 @@ def affinity_definition_rows(root: Path, limit: int = 8) -> list:
 
 
 def package_contradiction_rows(root: Path, texts=None, limit: int = 20) -> list:
-    """PKG-6..9 over one package: statements that contradict each other."""
+    """PKG-6..9 over one package: statements that contradict each other.
+
+    The global cap is filled FAIRLY across the four detectors (round-robin),
+    not by truncating their concatenation: one detector that filled the limit
+    used to hide every later PKG class completely (F89).
+    """
     if texts is None:
         texts = package_document_texts(Path(root))
-    rows = (ai_disclosure_contradiction_rows(texts, limit=limit)
-            + truncated_identifier_rows(texts, limit=limit)
-            + unit_of_analysis_rows(texts, limit=limit)
-            + affinity_definition_rows(Path(root), limit=limit))
-    return rows[:limit]
+    classes = [ai_disclosure_contradiction_rows(texts, limit=limit),
+               truncated_identifier_rows(texts, limit=limit),
+               unit_of_analysis_rows(texts, limit=limit),
+               affinity_definition_rows(Path(root), limit=limit)]
+    rows, index = [], 0
+    while len(rows) < limit and any(index < len(group) for group in classes):
+        for group in classes:
+            if index < len(group) and len(rows) < limit:
+                rows.append(group[index])
+        index += 1
+    return rows
 
 
 # PKG-4 (2026-10-15): a display item the submission CITES (and often legends)
@@ -5773,7 +5783,8 @@ def package_display_item_rows(root: Path, areas=None, limit: int = 20) -> list:
     _decl, is_submitted = declared_submission_filter(root)
     carried_labels, absent_labels = set(), {}
     for p in sorted(root.rglob("*")):
-        if not p.is_file() or is_non_document_name(p.name):
+        if not p.is_file() or p.is_symlink() or is_non_document_name(p.name):
+            # A symlinked figure file is not package-carried artwork (F31).
             continue
         if p.suffix.lower() not in PKG4_FIGURE_EXTS:
             continue
@@ -5797,8 +5808,18 @@ def package_display_item_rows(root: Path, areas=None, limit: int = 20) -> list:
         # No figure FILE carries a label: this package embeds its artwork in the
         # documents themselves (the CopyNumBench main text carries five images
         # and no `Figure*.png`), so a name-based check has nothing to compare
-        # against -- every citation would read as missing. Reported as a gap in
-        # the decision.json `readiness` note, never as a row per citation.
+        # against -- every citation would read as missing. This is a COVERAGE
+        # GAP, never a clean scan: one advisory row says PKG-4 was not
+        # evaluated, so an empty row list cannot read as "no missing figure"
+        # (F90).
+        rows.append({
+            "rule": "PKG-4", "file": "", "line": 0, "reference": "",
+            "gap": True, "advisory": True,
+            "detail": ("PKG-4 was NOT evaluated: the package carries no figure FILE with a "
+                       "name label, so there is nothing to compare the documents' citations "
+                       "against. Artwork embedded in the documents is not covered by this "
+                       "name-based inventory -- open the package and check the cited display "
+                       "items by hand")})
         return rows
     cited = {}
     for p in sorted(root.rglob("*")):
@@ -6002,7 +6023,7 @@ def display_provenance_rows(root: Path, areas=None, limit: int = 20) -> list:
     claims, producers = {}, {}
     docs = []
     for p in sorted(root.rglob("*")):
-        if not p.is_file() or is_non_document_name(p.name):
+        if not p.is_file() or p.is_symlink() or is_non_document_name(p.name):
             continue
         rel = p.relative_to(root).as_posix()
         if rel.split("/", 1)[0].lower() in areas or is_evidence_rel(rel):
@@ -6124,11 +6145,10 @@ def package_pdf_rows(root: Path, limit: int = 40) -> list:
             # every rendered page with a form feed.
             text = pages = None
             if shutil.which("pdftotext"):
-                proc = subprocess.run(["pdftotext", "-layout", str(p), "-"],
-                                      capture_output=True, text=True, encoding="utf-8",
-                                      errors="replace", timeout=60)
-                if proc.returncode == 0:
-                    text = proc.stdout or ""
+                rc, out, _err = run_bounded(["pdftotext", "-layout", str(p), "-"],
+                                            timeout=60)
+                if rc == 0:
+                    text = out.decode("utf-8", "replace")
                     pages = text.count("\f")
             found = mod.pdf_artifact_rows(p, text=text, pages=pages)
         except Exception as e:                                        # noqa: BLE001
@@ -7436,8 +7456,9 @@ def package_readiness(final_clean: dict, residuals: dict = None,
         # in the submission").
         findings.append({"rule": r.get("rule") or "PKG-4", "document": r.get("file"),
                          "advisory": True, "item": r.get("reference"),
-                         "detail": f"line {r.get('line')}: {r.get('reference')} -- "
-                                   f"{r.get('detail')}"})
+                         "detail": (str(r.get("detail") or "") if r.get("gap") else
+                                    f"line {r.get('line')}: {r.get('reference')} -- "
+                                    f"{r.get('detail')}")})
     for r in hyg.get("display_provenance") or []:
         # PKG-5 is BLOCKING, not advisory: the two shipped surfaces contradict
         # each other about a fact, and the author is the only one who can say

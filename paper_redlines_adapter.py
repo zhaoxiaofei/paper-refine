@@ -152,13 +152,33 @@ def main(argv):
         # redline, and a working backend would overwrite it anyway.
         if os.path.exists(out) and os.path.samefile(out, path):
             fail("refusing to use an input file as OUT: %s" % path, 2)
-    clear_out(out)
+    # Stage the backend's output beside OUT and rename it onto OUT only after a
+    # backend actually WROTE a result: clearing OUT before the import/probe
+    # destroyed a valid previous redline when no engine could run (F47).
+    parent = os.path.dirname(os.path.abspath(out)) or "."
+    try:
+        fd, stage_name = tempfile.mkstemp(prefix=".paper-redlines-stage-",
+                                          suffix=".docx", dir=parent)
+        os.close(fd)
+        os.unlink(stage_name)                 # a backend must create it fresh
+    except OSError as exc:                                          # noqa: BLE001
+        fail("cannot write output %s: cannot stage a temporary beside it: %s" % (out, exc), 6)
+    stage = stage_name
+
+    def commit_stage():
+        """Rename the staged redline onto OUT; every success path calls this."""
+        try:
+            os.replace(stage, out)
+        except OSError as exc:                                      # noqa: BLE001
+            fail("cannot write output %s: %s" % (out, exc), 6)
+
     real = None
     try:
         import python_redlines as real          # the published package's name
     except ImportError:
         real = None
-    if real is not None and try_engine_api(real, base, revised, out):
+    if real is not None and try_engine_api(real, base, revised, stage):
+        commit_stage()
         return 0
     # Keep probing the historical `redlines` module name too: an operator may
     # supply their own shim (or the unrelated text-diff package may be present),
@@ -223,7 +243,7 @@ def main(argv):
             if not callable(fn):
                 continue
             try:
-                fn(out)
+                fn(stage)
             except SystemExit as exc:
                 # SystemExit is a BaseException, so the `except Exception` below
                 # never saw it: a backend CLASS whose output method truncated OUT
@@ -233,14 +253,15 @@ def main(argv):
                 if exc.code not in (0, None):
                     print("redlines.%s.%s exited %s" % (cls_name, meth, exc.code),
                           file=sys.stderr)
-                    drop_partial(out, "redlines.%s.%s" % (cls_name, meth))
+                    drop_partial(stage, "redlines.%s.%s" % (cls_name, meth))
                     continue
             except Exception as exc:                           # noqa: BLE001
                 print("redlines.%s.%s failed: %s" % (cls_name, meth, exc), file=sys.stderr)
-                drop_partial(out, "redlines.%s.%s" % (cls_name, meth))
+                drop_partial(stage, "redlines.%s.%s" % (cls_name, meth))
                 continue
-            if wrote(out):
+            if wrote(stage):
                 print("python-redlines:%s.%s" % (cls_name, meth))
+                commit_stage()
                 return 0
 
     # 2) module-level docx helpers.
@@ -249,7 +270,7 @@ def main(argv):
         fn = getattr(redlines, fn_name, None)
         if not callable(fn):
             continue
-        for args in ((base, revised, out), (base, revised)):
+        for args in ((base, revised, stage), (base, revised)):
             # A helper that exits 0/None is a CLEAN exit, not a result: the
             # `wrote` check below decides (it may have written OUT and exited).
             # Leaving `res` unbound for that path raised UnboundLocalError
@@ -262,22 +283,23 @@ def main(argv):
                 # helper that exits non-zero has FAILED, whatever it wrote.
                 if exc.code not in (0, None):
                     print("redlines.%s exited %s" % (fn_name, exc.code), file=sys.stderr)
-                    drop_partial(out, "redlines.%s" % fn_name)
+                    drop_partial(stage, "redlines.%s" % fn_name)
                     continue
             except Exception:                                  # noqa: BLE001
-                drop_partial(out, "redlines.%s" % fn_name)
+                drop_partial(stage, "redlines.%s" % fn_name)
                 continue
             if isinstance(res, (bytes, bytearray)):
-                write_out(out, res)
-            if wrote(out):
+                write_out(stage, res)
+            if wrote(stage):
                 print("python-redlines:%s" % fn_name)
+                commit_stage()
                 return 0
 
     # 3) a CLI entry point inside the module.
     entry = getattr(redlines, "main", None)
     if callable(entry):
         try:
-            entry(["redlines", base, revised, out])   # argv[0] for argparse-shaped mains
+            entry(["redlines", base, revised, stage])   # argv[0] for argparse-shaped mains
         except SystemExit as exc:
             # A backend that exits NON-ZERO is a failed probe, whatever it left
             # behind: `wrote()` only asks whether a non-empty OUT exists, so a
@@ -288,15 +310,21 @@ def main(argv):
             code = exc.code
             if code not in (0, None):
                 print("redlines.main exited %s" % (code,), file=sys.stderr)
-                drop_partial(out, "redlines.main")
+                drop_partial(stage, "redlines.main")
         except Exception as exc:                               # noqa: BLE001
             print("redlines.main failed: %s" % exc, file=sys.stderr)
-            drop_partial(out, "redlines.main")
-        if wrote(out):
+            drop_partial(stage, "redlines.main")
+        if wrote(stage):
             print("python-redlines:main")
+            commit_stage()
             return 0
 
     names = ", ".join(sorted(n for n in dir(redlines) if not n.startswith("_")))
+    try:
+        if os.path.lexists(stage):
+            os.unlink(stage)
+    except OSError:
+        pass
     fail("python-redlines is installed but no supported docx redline interface was found.\n"
          "Available names: %s\n"
          "Use `redline --redline-cmd '<json argv with {base} {revised} {out}>'` to wire your "

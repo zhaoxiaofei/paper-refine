@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import contextlib
 import json
 import os
 import re
@@ -463,6 +464,75 @@ def _print_probe(cfg: dict) -> int:
     return 0
 
 
+MAX_DSH_LINE_BYTES = 1 << 20      # one JSON event line larger than this is discarded
+
+
+def _echo_stdout(data: bytes) -> None:
+    """Forward child bytes to our stdout, text-mode or buffer."""
+    buf = getattr(sys.stdout, "buffer", None)
+    if buf is not None:
+        buf.write(data)
+        buf.flush()
+    else:
+        sys.stdout.write(data.decode("utf-8", "replace"))
+        sys.stdout.flush()
+
+
+def _dsh_turn_failed(line: bytes):
+    """True/False for a `turn_end` event line, None for every other line."""
+    s = line.strip()
+    if not s.startswith(b"{"):
+        return None
+    try:
+        event = json.loads(s)
+    except ValueError:
+        return None
+    if not isinstance(event, dict) or event.get("type") != "turn_end":
+        return None
+    status = str(event.get("status") or "").lower()
+    kind = str(event.get("kind") or "").lower()
+    return status in ("error", "failed") or kind in ("error", "failed")
+
+
+def run_dsh_streaming(cmd: list, env: dict) -> tuple:
+    """(returncode, turn_failed) with the harness's stdout ECHOED, not buffered.
+
+    `subprocess.run(stdout=PIPE)` accumulated the whole JSON event stream before
+    parsing it: a verbose harness could exhaust memory (F27). The stream is read
+    in bounded chunks, echoed immediately, and only complete lines are parsed;
+    the retained diagnostic prefix is bounded too.
+    """
+    proc = subprocess.Popen(cmd, stdin=sys.stdin, stdout=subprocess.PIPE,
+                            stderr=sys.stderr, env=env)
+    turn_failed = None
+    carry = b""
+    try:
+        while True:
+            chunk = proc.stdout.read(1 << 20)
+            if not chunk:
+                break
+            _echo_stdout(chunk)
+            carry += chunk
+            *lines, carry = carry.split(b"\n")
+            for line in lines:
+                failed = _dsh_turn_failed(line)
+                if failed is not None:
+                    turn_failed = failed
+            if len(carry) > MAX_DSH_LINE_BYTES:
+                carry = b""           # a single event line over budget: unusable
+        if carry:
+            failed = _dsh_turn_failed(carry)
+            if failed is not None:
+                turn_failed = failed
+        proc.wait()
+    finally:
+        if proc.poll() is None:
+            with contextlib.suppress(OSError):
+                proc.kill()
+            proc.wait()
+    return int(proc.returncode or 0), turn_failed
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -579,34 +649,13 @@ def main(argv=None) -> int:
         if cfg["harness"] == "dsh":
             # `dsh --json` can end a turn with a provider error and still exit
             # 0; the wrapper must surface that to the pipeline as a failure.
-            proc = subprocess.run(cmd, stdin=sys.stdin, stdout=subprocess.PIPE,
-                                  stderr=sys.stderr, env=env)
-            out = proc.stdout.decode("utf-8", "replace") if proc.stdout else ""
-            if out:
-                sys.stdout.write(out)
-                sys.stdout.flush()
-            # Read the TERMINAL turn_end event, not two independent searches
-            # over all stdout: an earlier tool error must not fail a successful
-            # turn, and a failing turn_end need not carry `kind: error`.
-            turn_failed = None
-            for line in out.splitlines():
-                line = line.strip()
-                if not line.startswith("{"):
-                    continue
-                try:
-                    event = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(event, dict) and event.get("type") == "turn_end":
-                    status = str(event.get("status") or "").lower()
-                    kind = str(event.get("kind") or "").lower()
-                    turn_failed = (status in ("error", "failed")
-                                   or kind in ("error", "failed"))
+            # The stream is echoed as it arrives and never buffered whole (F27).
+            rc, turn_failed = run_dsh_streaming(cmd, env)
             if turn_failed:
                 print("qwen: dsh ended the turn with an error (see the JSON event "
                       "stream above)", file=sys.stderr)
-                return int(proc.returncode or 0) or 2
-            return int(proc.returncode or 0)
+                return int(rc or 0) or 2
+            return int(rc or 0)
         proc = subprocess.run(cmd, stdin=sys.stdin, stdout=sys.stdout,
                               stderr=sys.stderr, env=env)
     except FileNotFoundError:

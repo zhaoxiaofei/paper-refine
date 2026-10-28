@@ -1068,7 +1068,17 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
         fd, saved_name = tempfile.mkstemp(prefix="paper-redline-", suffix=".docx")
         os.close(fd)
         saved = Path(saved_name)
-        shutil.copyfile(out, saved)
+        try:
+            shutil.copyfile(out, saved)
+        except OSError as exc:
+            # The backend reported success but OUT is gone/unreadable: this
+            # function's documented contract is an attempt log, never a raise
+            # (F45). Record the failure and leave `winner` unset.
+            with contextlib.suppress(OSError):
+                saved.unlink()
+            attempts.append({"backend": last.get("backend", tool), "ok": False,
+                             "detail": f"the over-marked candidate could not be saved: {exc}"})
+            continue
         if best is None or fidelity["marked_words"] < best[0]:
             if best is not None:
                 with contextlib.suppress(OSError):

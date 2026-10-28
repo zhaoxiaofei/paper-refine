@@ -251,11 +251,13 @@ def test_publish_carries_open_items():
     # from the same open items, so AUTH-2 is a blocking readiness row too.
     check("readiness is NOT ready, names the items and keeps the gap advisory",
           readiness["submission_ready"] is False
-          and [r for r in rules if r not in ("FMT-TP1", "AUTH-2")]
+          and [r for r in rules if r not in ("FMT-TP1", "AUTH-2", "PKG-4")]
           == ["REV-1", "REV-1", "REV-2"]
           and "AUTH-2" in rules
+          and "PKG-4" in rules
           and readiness["blocking_findings"] == 4
-          and all(f.get("advisory") for f in readiness["findings"] if f["rule"] == "FMT-TP1"),
+          and all(f.get("advisory") for f in readiness["findings"]
+                  if f["rule"] in ("FMT-TP1", "PKG-4")),
           json.dumps({"rules": rules,
                       "blocking": readiness["blocking_findings"],
                       "advisory": readiness["advisory_findings"]}))
@@ -330,8 +332,11 @@ def test_pkg4_missing_display_item():
           all(r["reference"] not in ("Figure 1", "Figure S1") for r in rows))
     embedded = scratch("paper_pkg4b_")
     make_docx(embedded / "cnb-2-mainText-6d29898.docx", ["Fig. 1 shows the design."])
-    check("a package that carries no figure FILES reports nothing (its artwork is embedded)",
-          pp.package_display_item_rows(embedded, ["code"]) == [])
+    embedded_rows = pp.package_display_item_rows(embedded, ["code"])
+    check("a package with embedded artwork reports a coverage GAP, not a clean scan",
+          len(embedded_rows) == 1 and embedded_rows[0].get("gap") is True
+          and "NOT evaluated" in embedded_rows[0].get("detail", ""),
+          str(embedded_rows))
 
 
 # --------------------------------------------------------------------------

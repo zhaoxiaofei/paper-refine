@@ -88,10 +88,10 @@ def cmd_setup(args) -> None:
         try:
             format_policy = json.loads(Path(args.format_policy).read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
-            die(f"--format-policy {args.format_policy!r} is not readable JSON: {e}")
+            die(f"--format-policy {args.format_policy!r} is not readable JSON: {e}", code=2)
         if not isinstance(format_policy, dict):
             die("--format-policy must be a JSON object of overrides, "
-                f"e.g. {{\"url_style\": \"plain\"}} (got {type(format_policy).__name__})")
+                f"e.g. {{\"url_style\": \"plain\"}} (got {type(format_policy).__name__})", code=2)
     format_fix = str(getattr(args, "format_fix", DEFAULT_FORMAT_FIX) or
                      DEFAULT_FORMAT_FIX).strip().lower()
     # `--strict-artifacts [on|fix|off]` (absent = the default policy). The config
@@ -100,12 +100,15 @@ def cmd_setup(args) -> None:
     artifact_policy = str(getattr(args, "artifact_policy", None) or DEFAULT_ARTIFACT_POLICY)
     if artifact_policy not in ARTIFACT_POLICIES:
         die(f"unknown --strict-artifacts value: {artifact_policy!r} "
-            f"(choose one of {', '.join(ARTIFACT_POLICIES)})")
+            f"(choose one of {', '.join(ARTIFACT_POLICIES)})", code=2)
     if format_fix not in FORMAT_FIX_MODES:
-        die(f"--format-fix must be one of {', '.join(FORMAT_FIX_MODES)} (got {format_fix!r})")
+        die(f"--format-fix must be one of {', '.join(FORMAT_FIX_MODES)} (got {format_fix!r})",
+            code=2)
     zotero = str(getattr(args, "zotero", DEFAULT_ZOTERO_MODE) or DEFAULT_ZOTERO_MODE).strip().lower()
     if rounds < 1:
-        die("--rounds must be >= 1")
+        # A post-parse USAGE error, like the argparse errors: the README's exit
+        # table says code 2 (F62).
+        die("--rounds must be >= 1", code=2)
     # ---- --round-indices: run a SUBSET of the built-in round schedule -------
     # `--round-indices 2 3` runs two rounds whose per-round plan follows the
     # built-in schedule's entries 2 and 3 (no rewrites); the pipeline's own
@@ -120,7 +123,7 @@ def cmd_setup(args) -> None:
             if getattr(args, attr.replace("-", "_"), None) is not None:
                 die(f"--round-indices selects the per-round {flag[2:]} values from the built-in "
                     f"round schedule; do not pass {flag} with it (pass --judges for the panel "
-                    f"size if you need to)")
+                    f"size if you need to)", code=2)
         if int(args.rounds) != len(round_indices):
             print(f"[setup] note: --round-indices implies --rounds {len(round_indices)} "
                   f"(was --rounds {args.rounds}); using {len(round_indices)}")
@@ -128,26 +131,27 @@ def cmd_setup(args) -> None:
     judges_list = parse_round_counts(getattr(args, "judges", None) or DEFAULTS["judges"],
                                      rounds, "--judges")
     if any(j < 1 for j in judges_list):
-        die(f"--judges must be >= 1 per round, got {judges_list}")
+        die(f"--judges must be >= 1 per round, got {judges_list}", code=2)
     integrators = ([ROUND_SCHEDULE[i - 1]["integrators"] for i in round_indices]
                    if round_indices else
                    parse_round_masks(getattr(args, "integrators", None) or
                                      DEFAULTS["integrators"], rounds, "--integrators"))
     if caption_limit < 0:
-        die("--caption-limit must be >= 0 (0 = no caption suggestion at all, the default)")
+        die("--caption-limit must be >= 0 (0 = no caption suggestion at all, the default)",
+            code=2)
     _floor_arg = getattr(args, "tiebreak_defect_floor", None)
     tiebreak_floor = int(_floor_arg if _floor_arg is not None
                          else DEFAULT_TIEBREAK_DEFECT_FLOOR)
     if tiebreak_floor < 0:
         die("--tiebreak-defect-floor must be >= 0 (it is the number of defects the cleanest "
             "ranked version must reach before the adaptive severity_tier_category prefix stops; "
-            "default 10)")
+            "default 10)", code=2)
     dedup_mode = str(getattr(args, "dedup_mode", None) or "off").strip().lower()
     if dedup_mode not in DEDUP_MODES:
         die(f"--dedup-mode must be one of {', '.join(DEDUP_MODES)} (got {dedup_mode!r}); "
-            f"the default 'off' performs no cross-sheet merging")
+            f"the default 'off' performs no cross-sheet merging", code=2)
     if zotero not in ZOTERO_MODES:
-        die(f"--zotero must be one of {', '.join(ZOTERO_MODES)} (got {zotero!r})")
+        die(f"--zotero must be one of {', '.join(ZOTERO_MODES)} (got {zotero!r})", code=2)
     rewrites = ([ROUND_SCHEDULE[i - 1]["rewrites"] for i in round_indices]
                 if round_indices else
                 parse_round_counts(getattr(args, "rewrites", None) or DEFAULTS["rewrites"],
@@ -176,7 +180,7 @@ def cmd_setup(args) -> None:
             f"no journal feedback, 1=transfer (new journal, no response letter), 2=resubmit "
             f"(same journal, letter), 3=major revision (scoped edits, letter), 4=minor "
             f"revision (scoped edits, letter), 5=llm (the false-positive-filtered "
-            f"{LLM_FEEDBACK_DIR}/ review only; no journal letter, no response letter).")
+            f"{LLM_FEEDBACK_DIR}/ review only; no journal letter, no response letter).", code=2)
     # A scoped (major/minor) mode overrides three operator policies. Remember
     # what the operator actually chose so `set-revision-mode` can restore it
     # when the root leaves the scoped mode instead of silently turning the
@@ -198,7 +202,7 @@ def cmd_setup(args) -> None:
             if round_indices:
                 die(f"--round-indices selects the pipeline's round schedule, but revision mode "
                     f"{revision_mode!r} forces its own single concern-scoped round; drop one of "
-                    f"the two")
+                    f"the two", code=2)
             # Major/minor revisions are concern-scoped by definition: no
             # rewrites, ONE revision arm, no integration and ONE round. The
             # values are normalised (not refused) and the normalisation is
@@ -274,7 +278,7 @@ def cmd_setup(args) -> None:
     bad_scope = [x for x in review_scope if x not in REVIEW_SCOPE_VALUES]
     if bad_scope:
         die(f"--review-scope entries must be one of {'|'.join(REVIEW_SCOPE_VALUES)}, "
-            f"got {bad_scope}")
+            f"got {bad_scope}", code=2)
     # The integrator mask addresses the pool with one bit per member; a pool that
     # outgrew the 32-bit mask cannot be expressed, and silently dropping the
     # higher members' integrations would change the field without saying so.
@@ -282,11 +286,11 @@ def cmd_setup(args) -> None:
         if len(round_pool_ids(m, n)) > INTEGRATOR_BITS:
             die(f"round {i} has {len(round_pool_ids(m, n))} pool member(s) (a1 + M={m} rewrites "
                 f"+ N={n} revisions), more than the {INTEGRATOR_BITS} bits of --integrators; "
-                f"lower --rewrites/--revises for that round")
+                f"lower --rewrites/--revises for that round", code=2)
     for i, (m, n) in enumerate(zip(rewrites, revises), 1):
         if m + n < 1:
             die(f"round {i} would have no candidate at all: --rewrites and --revises must not "
-                f"both be 0 for a round (round {i}: rewrites={m}, revises={n})")
+                f"both be 0 for a round (round {i}: rewrites={m}, revises={n})", code=2)
     # The no-judge modes promote ONE named version per round; validate the whole
     # plan at setup instead of discovering an impossible round after paying for
     # the earlier sessions.
@@ -295,14 +299,14 @@ def cmd_setup(args) -> None:
         if JOURNAL_MODES[revision_mode]["scoped"] and _csel == "integrate":
             die(f"--champion-select integrate has no meaning in revision mode "
                 f"{revision_mode!r}: a concern-scoped revision already promotes its single "
-                f"revised candidate and runs no integration arm")
+                f"revised candidate and runs no integration arm", code=2)
         _explicit_masks = getattr(args, "integrators", None) is not None
         _enabled_arms = []
         for _i, (_m, _n, _mask) in enumerate(
                 zip(rewrites, revises, integrators), 1):
             if _n != 1:
                 die(f"--champion-select {_csel} needs exactly ONE revise arm in every round, "
-                    f"but round {_i} plans N={_n}; use --revises 1")
+                    f"but round {_i} plans N={_n}; use --revises 1", code=2)
             if _csel == "integrate":
                 _arm = _m + 2
                 if not ((_mask >> (_arm - 1)) & 1):
@@ -310,7 +314,7 @@ def cmd_setup(args) -> None:
                         die(f"--champion-select integrate promotes '{integrate_vid(_arm)}' in "
                             f"round {_i} (the integration of a2), but its integrator mask "
                             f"0x{_mask:X} does not plan that arm. Set bit {_arm - 1} "
-                            f"(0x{1 << (_arm - 1):X}) for round {_i}")
+                            f"(0x{1 << (_arm - 1):X}) for round {_i}", code=2)
                     # No explicit mask: the mode's whole point is that integration
                     # arm, so enable exactly that bit (never a whole-pool
                     # rewrite of the operator's schedule) and say so.
